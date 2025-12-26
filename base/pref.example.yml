@@ -9,7 +9,7 @@ common:
   include_remarks: []
   enable_filter: false
   filter_script: ""
-  default_external_config: "" # config/example_external_config.yml
+  default_external_config: "https://testingcf.jsdelivr.net/gh/Aethersailor/Custom_OpenClash_Rules@refs/heads/main/cfg/Custom_Clash.ini"
   base_path: base
   clash_rule_base: base/all_base.tpl
   surge_rule_base: base/all_base.tpl

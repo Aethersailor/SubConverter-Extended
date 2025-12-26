@@ -36,8 +36,7 @@ enable_filter = false
 #}
 #'''
 
-# Setting an external config file as default when none is specified, supports local files/URL
-# default_external_config = "config/example_external_config.toml"
+default_external_config = "https://testingcf.jsdelivr.net/gh/Aethersailor/Custom_OpenClash_Rules@refs/heads/main/cfg/Custom_Clash.ini"
 
 # The file scope limit of the 'rule_base' options in external configs.
 base_path = "base"

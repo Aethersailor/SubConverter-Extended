@@ -459,14 +459,19 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
         ext.managed_config_prefix = global.managedConfigPrefix;
 
     /// load external configuration
+    std::string userProvidedConfig = getUrlArg(argument, "config");
+    bool configLoadSuccess = false;
+    
     if (argExternalConfig.empty())
         argExternalConfig = global.defaultExtConfig;
+    
     if (!argExternalConfig.empty()) {
         //std::cerr<<"External configuration file provided. Loading...\n";
         writeLog(0, "External configuration file provided. Loading...", LOG_LEVEL_INFO);
         ExternalConfig extconf;
         extconf.tpl_args = &tpl_args;
         if (loadExternalConfig(argExternalConfig, extconf) == 0) {
+            configLoadSuccess = true;
             if (!ext.nodelist) {
                 checkExternalBase(extconf.sssub_rule_base, lSSSubBase);
                 if (!lSimpleSubscription) {
@@ -497,8 +502,48 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
                 lExcludeRemarks = extconf.exclude;
             argAddEmoji.define(extconf.add_emoji);
             argRemoveEmoji.define(extconf.remove_old_emoji);
+        } else if (!userProvidedConfig.empty() && !global.defaultExtConfig.empty() && argExternalConfig != global.defaultExtConfig) {
+            // User provided config failed, fallback to default config
+            writeLog(0, "Failed to load user provided config, trying default config...", LOG_LEVEL_WARNING);
+            ExternalConfig extconf;
+            extconf.tpl_args = &tpl_args;
+            if (loadExternalConfig(global.defaultExtConfig, extconf) == 0) {
+                configLoadSuccess = true;
+                if (!ext.nodelist) {
+                    checkExternalBase(extconf.sssub_rule_base, lSSSubBase);
+                    if (!lSimpleSubscription) {
+                        checkExternalBase(extconf.clash_rule_base, lClashBase);
+                        checkExternalBase(extconf.surge_rule_base, lSurgeBase);
+                        checkExternalBase(extconf.surfboard_rule_base, lSurfboardBase);
+                        checkExternalBase(extconf.mellow_rule_base, lMellowBase);
+                        checkExternalBase(extconf.quan_rule_base, lQuanBase);
+                        checkExternalBase(extconf.quanx_rule_base, lQuanXBase);
+                        checkExternalBase(extconf.loon_rule_base, lLoonBase);
+                        checkExternalBase(extconf.singbox_rule_base, lSingBoxBase);
+
+                        if (!extconf.surge_ruleset.empty())
+                            lCustomRulesets = extconf.surge_ruleset;
+                        if (!extconf.custom_proxy_group.empty())
+                            lCustomProxyGroups = extconf.custom_proxy_group;
+                        ext.enable_rule_generator = extconf.enable_rule_generator;
+                        ext.overwrite_original_rules = extconf.overwrite_original_rules;
+                    }
+                }
+                if (!extconf.rename.empty())
+                    ext.rename_array = extconf.rename;
+                if (!extconf.emoji.empty())
+                    ext.emoji_array = extconf.emoji;
+                if (!extconf.include.empty())
+                    lIncludeRemarks = extconf.include;
+                if (!extconf.exclude.empty())
+                    lExcludeRemarks = extconf.exclude;
+                argAddEmoji.define(extconf.add_emoji);
+                argRemoveEmoji.define(extconf.remove_old_emoji);
+            }
         }
-    } else {
+    }
+    
+    if (!configLoadSuccess) {
         if (!lSimpleSubscription) {
             /// loading custom groups
             if (!argCustomGroups.empty() && !ext.nodelist) {
