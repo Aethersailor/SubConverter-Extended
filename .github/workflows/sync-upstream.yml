@@ -29,21 +29,95 @@ jobs:
           git fetch upstream --prune
 
       - name: Update upstream-master branch
+        id: update_upstream
         run: |
           git checkout upstream-master
-          git reset --hard upstream/master
-          git push origin upstream-master --force
+          
+          # Check if upstream has new commits
+          if git diff --quiet upstream-master upstream/master; then
+            echo "No updates from upstream, skipping sync."
+            echo "updated=false" >> $GITHUB_OUTPUT
+          else
+            echo "Upstream has updates, syncing..."
+            git reset --hard upstream/master
+            git push origin upstream-master --force
+            echo "updated=true" >> $GITHUB_OUTPUT
+          fi
 
-      - name: Rebase master onto upstream-master (replay your commits)
+      - name: Rebase master onto upstream-master (sync source code only)
+        if: steps.update_upstream.outputs.updated == 'true'
         run: |
           set -e
           git checkout master
+          
+          # Backup customized files that should not be synced from upstream
+          echo "Backing up customized files..."
+          mkdir -p .backup
+          cp -r .github .backup/.github
+          cp Dockerfile .backup/Dockerfile
+          
+          # Attempt to rebase
           if git rebase upstream-master; then
+            echo "Rebase successful. Applying patches..."
+            
+            # Apply all patches from .patches directory
+            if [ -d ".patches" ] && [ "$(ls -A .patches/*.patch 2>/dev/null)" ]; then
+              for patch_file in .patches/*.patch; do
+                echo "Applying patch: $(basename $patch_file)"
+                if git am "$patch_file"; then
+                  echo "✓ Patch applied successfully: $(basename $patch_file)"
+                else
+                  echo "✗ Failed to apply patch: $(basename $patch_file)"
+                  echo "Aborting patch application..."
+                  git am --abort || true
+                  
+                  # Restore files and abort rebase
+                  rm -rf .github Dockerfile
+                  mv .backup/.github .github
+                  mv .backup/Dockerfile Dockerfile
+                  rm -rf .backup
+                  
+                  git reset --hard HEAD
+                  git rebase --abort || true
+                  exit 1
+                fi
+              done
+            else
+              echo "No patches found in .patches directory, skipping patch application."
+            fi
+            
+            echo "Restoring customized configuration files..."
+            
+            # Restore customized files
+            rm -rf .github
+            mv .backup/.github .github
+            cp .backup/Dockerfile Dockerfile
+            
+            # Stage and amend the changes
+            git add .github Dockerfile
+            if git diff --cached --quiet; then
+              echo "No changes to customized files, pushing directly..."
+            else
+              echo "Committing restored customized files..."
+              git commit --amend --no-edit
+            fi
+            
+            # Push to remote
             git push origin master --force-with-lease
+            
+            # Cleanup
+            rm -rf .backup
           else
             echo "Rebase failed. Showing status and conflicts:"
             git status --porcelain || true
             git diff --name-only --diff-filter=U || true
+            
+            # Restore files and abort
+            rm -rf .github Dockerfile
+            mv .backup/.github .github
+            mv .backup/Dockerfile Dockerfile
+            rm -rf .backup
+            
             git rebase --abort || true
             exit 1
           fi
