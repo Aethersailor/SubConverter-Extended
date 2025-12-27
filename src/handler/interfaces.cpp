@@ -698,7 +698,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
                LOG_LEVEL_INFO);
 
       ProxyProvider provider;
-      provider.name = "provider_" + std::to_string(groupID);
+      provider.name = "provider_" + std::to_string(groupID + 1);
       provider.url = x;
       provider.interval = interval > 0 ? interval : 3600;
       provider.groupId = groupID;

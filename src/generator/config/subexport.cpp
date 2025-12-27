@@ -728,41 +728,6 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
     return;
   }
 
-  // 生成 proxy-providers 配置段
-  if (ext.use_proxy_provider && !ext.providers.empty()) {
-    YAML::Node provider_node;
-
-    for (const ProxyProvider &p : ext.providers) {
-      YAML::Node single_provider;
-      single_provider["type"] = "http";
-      single_provider["url"] = p.url;
-      single_provider["interval"] = p.interval;
-      single_provider["path"] = p.path;
-
-      // 添加过滤器
-      if (!p.filter.empty()) {
-        single_provider["filter"] = p.filter;
-      }
-      if (!p.exclude_filter.empty()) {
-        single_provider["exclude-filter"] = p.exclude_filter;
-      }
-
-      // 健康检查配置
-      single_provider["health-check"]["enable"] = true;
-      single_provider["health-check"]["url"] =
-          "http://www.gstatic.com/generate_204";
-      single_provider["health-check"]["interval"] = 300;
-
-      provider_node[p.name] = single_provider;
-    }
-
-    yamlnode["proxy-providers"] = provider_node;
-    writeLog(0,
-             "Generated " + std::to_string(ext.providers.size()) +
-                 " proxy providers.",
-             LOG_LEVEL_INFO);
-  }
-
   // 对于 proxy-provider 模式，proxies 段可以为空或只包含少量直连节点
   if (ext.use_proxy_provider && !ext.providers.empty() && nodes.empty()) {
     // 不生成 proxies 字段，或生成一个空数组
@@ -881,6 +846,42 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
   if (group_compact)
     original_groups.SetStyle(YAML::EmitterStyle::Flow);
 
+  // 先生成 proxy-providers 配置段（必须在 proxy-groups 之前）
+  if (ext.use_proxy_provider && !ext.providers.empty()) {
+    YAML::Node provider_node;
+
+    for (const ProxyProvider &p : ext.providers) {
+      YAML::Node single_provider;
+      single_provider["type"] = "http";
+      single_provider["url"] = p.url;
+      single_provider["interval"] = p.interval;
+      single_provider["path"] = p.path;
+
+      // 添加过滤器
+      if (!p.filter.empty()) {
+        single_provider["filter"] = p.filter;
+      }
+      if (!p.exclude_filter.empty()) {
+        single_provider["exclude-filter"] = p.exclude_filter;
+      }
+
+      // 健康检查配置
+      single_provider["health-check"]["enable"] = true;
+      single_provider["health-check"]["url"] =
+          "http://www.gstatic.com/generate_204";
+      single_provider["health-check"]["interval"] = 300;
+
+      provider_node[p.name] = single_provider;
+    }
+
+    yamlnode["proxy-providers"] = provider_node;
+    writeLog(0,
+             "Generated " + std::to_string(ext.providers.size()) +
+                 " proxy providers.",
+             LOG_LEVEL_INFO);
+  }
+
+  // 然后生成 proxy-groups 配置段
   if (ext.clash_new_field_name)
     yamlnode["proxy-groups"] = original_groups;
   else
