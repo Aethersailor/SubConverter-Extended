@@ -685,13 +685,13 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
     }
   }
   urls = split(argUrl, "|");
-  importItems(urls, true);
   groupID = 0;
 
   //  对于 Clash，使用 proxy-provider 模式
   if ((argTarget == "clash" || argTarget == "clashr") && !ext.nodelist) {
     writeLog(0, "Using proxy-provider mode for Clash configuration.",
              LOG_LEVEL_INFO);
+    // proxy-provider 模式下不需要 importItems，直接使用原始 URL
     for (std::string &x : urls) {
       x = regTrim(x);
       writeLog(0, "Adding proxy provider from url '" + x + "'.",
@@ -717,6 +717,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
     }
   } else {
     // 其他格式保持原有逻辑，完全展开节点
+    importItems(urls, true); // 只为非 proxy-provider 模式处理 import 语法
     for (std::string &x : urls) {
       x = regTrim(x);
       // std::cerr<<"Fetching node data from url '"<<x<<"'."<<std::endl;
