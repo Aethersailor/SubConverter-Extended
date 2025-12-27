@@ -742,7 +742,7 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
       yamlnode["Proxy"] = proxies;
   }
 
-  // 立即生成 proxy-providers 配置段（必须在 proxy-groups 之前）
+  // 立即生成 proxy-providers 配置段（在 proxy-groups 之前）
   if (ext.use_proxy_provider && !ext.providers.empty()) {
     YAML::Node provider_node;
 
@@ -968,90 +968,7 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
       rulesetToClashStr(yamlnode, ruleset_content_array,
                         ext.overwrite_original_rules, ext.clash_new_field_name);
 
-  // 提取 proxy-providers 和 rule-providers 并从 yamlnode
-  // 中移除，手动控制输出顺序
-  std::string proxy_providers_str;
-  std::string rule_providers_str;
-
-  // 提取 proxy-providers
-  if (yamlnode["proxy-providers"].IsDefined()) {
-    YAML::Node providers_node = yamlnode["proxy-providers"];
-    yamlnode.remove("proxy-providers");
-
-    std::string providers_dump = YAML::Dump(providers_node);
-    if (!providers_dump.empty()) {
-      size_t start_pos = 0;
-      if (providers_dump.find("---") == 0) {
-        size_t newline_pos = providers_dump.find('\n');
-        if (newline_pos != std::string::npos) {
-          start_pos = newline_pos + 1;
-        }
-      }
-
-      if (start_pos < providers_dump.length()) {
-        proxy_providers_str =
-            "proxy-providers:\n" + providers_dump.substr(start_pos);
-      }
-    }
-  }
-
-  // 提取 rule-providers
-  if (yamlnode["rule-providers"].IsDefined()) {
-    YAML::Node rule_providers_node = yamlnode["rule-providers"];
-    yamlnode.remove("rule-providers");
-
-    std::string rule_dump = YAML::Dump(rule_providers_node);
-    if (!rule_dump.empty()) {
-      size_t start_pos = 0;
-      if (rule_dump.find("---") == 0) {
-        size_t newline_pos = rule_dump.find('\n');
-        if (newline_pos != std::string::npos) {
-          start_pos = newline_pos + 1;
-        }
-      }
-
-      if (start_pos < rule_dump.length()) {
-        rule_providers_str = "rule-providers:\n" + rule_dump.substr(start_pos);
-      }
-    }
-  }
-
   std::string yamlnode_str = YAML::Dump(yamlnode);
-
-  // 手动控制顺序：proxy-groups 后插入 proxy-providers
-  if (!proxy_providers_str.empty()) {
-    std::string proxy_groups_key =
-        ext.clash_new_field_name ? "proxy-groups:" : "Proxy Group:";
-    size_t groups_pos = yamlnode_str.find(proxy_groups_key);
-
-    if (groups_pos != std::string::npos) {
-      size_t insert_pos = groups_pos + proxy_groups_key.length();
-      size_t next_section = yamlnode_str.find("\n", insert_pos);
-
-      // 查找proxy-groups结束位置
-      while (next_section != std::string::npos &&
-             next_section + 1 < yamlnode_str.length()) {
-        if (yamlnode_str[next_section + 1] != ' ') {
-          break;
-        }
-        next_section = yamlnode_str.find("\n", next_section + 1);
-      }
-
-      if (next_section != std::string::npos) {
-        yamlnode_str.insert(next_section + 1, proxy_providers_str);
-      } else {
-        yamlnode_str += proxy_providers_str;
-      }
-    } else {
-      yamlnode_str += proxy_providers_str;
-    }
-  }
-
-  // 追加 rule-providers（在 rules 之前）
-  if (!rule_providers_str.empty()) {
-    yamlnode_str += rule_providers_str;
-  }
-
   output_content.insert(0, yamlnode_str);
   replaceAll(output_content, "!<str> ", "");
   formatterShortId(output_content);
