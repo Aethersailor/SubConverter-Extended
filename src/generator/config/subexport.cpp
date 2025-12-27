@@ -936,8 +936,23 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
 
   proxyToClash(nodes, yamlnode, extra_proxy_group, clashR, ext);
 
-  if (ext.nodelist)
-    return YAML::Dump(yamlnode);
+  // 关键修复：在所有早期返回之前提取 proxy-providers
+  // 这样所有返回路径都会使用正确的顺序
+  std::string proxy_providers_yaml;
+  if (yamlnode["proxy-providers"].IsDefined()) {
+    YAML::Node providers_node = yamlnode["proxy-providers"];
+    proxy_providers_yaml = YAML::Dump(providers_node);
+    yamlnode.remove("proxy-providers"); // 从 yamlnode 中移除
+  }
+
+  if (ext.nodelist) {
+    std::string result = YAML::Dump(yamlnode);
+    if (!proxy_providers_yaml.empty()) {
+      insertProxyProvidersBeforeGroups(result, proxy_providers_yaml,
+                                       ext.clash_new_field_name);
+    }
+    return result;
+  }
 
   /*
   if(ext.enable_rule_generator)
@@ -946,8 +961,14 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
 
   return YAML::Dump(yamlnode);
   */
-  if (!ext.enable_rule_generator)
-    return YAML::Dump(yamlnode);
+  if (!ext.enable_rule_generator) {
+    std::string result = YAML::Dump(yamlnode);
+    if (!proxy_providers_yaml.empty()) {
+      insertProxyProvidersBeforeGroups(result, proxy_providers_yaml,
+                                       ext.clash_new_field_name);
+    }
+    return result;
+  }
 
   if (!ext.managed_config_prefix.empty() || ext.clash_script) {
     if (yamlnode["mode"].IsDefined()) {
@@ -961,7 +982,12 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
                       ext.managed_config_prefix, ext.clash_script,
                       ext.overwrite_original_rules,
                       ext.clash_classical_ruleset);
-    return YAML::Dump(yamlnode);
+    std::string result = YAML::Dump(yamlnode);
+    if (!proxy_providers_yaml.empty()) {
+      insertProxyProvidersBeforeGroups(result, proxy_providers_yaml,
+                                       ext.clash_new_field_name);
+    }
+    return result;
   }
 
   std::string output_content =
