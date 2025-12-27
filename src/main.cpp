@@ -167,23 +167,190 @@ int main(int argc, char *argv[]) {
   */
 
   webServer.append_response(
-      "GET", "/version", "text/plain",
+      "GET", "/version", "text/html; charset=utf-8",
       [](RESPONSE_CALLBACK_ARGS) -> std::string {
-        return "SubConverter-Extended\n"
-               "------------------------\n"
-               "An enhanced implementation of subconverter, aligned with the "
-               "current Mihomo configuration\n"
-               "Primarily intended for use alongside OpenClash\n"
-               "Derived as a companion backend for the Custom_OpenClash_Rules "
-               "project\n"
-               "------------------------\n"
-               "Version: " VERSION "\n"
-               "Build: " BUILD_ID "\n"
-               "------------------------\n"
-               "Originated from: subconverter v0.9.9\n"
-               "Modified and evolved by: Aethersailor\n"
-               "------------------------\n"
-               "License: GPL-3.0\n";
+        std::string build_id = BUILD_ID;
+        std::string commit_link =
+            build_id.empty()
+                ? ""
+                : "<a "
+                  "href=\"https://github.com/Aethersailor/"
+                  "SubConverter-Extended/commit/" +
+                      build_id + "\" target=\"_blank\">" + build_id + "</a>";
+
+        return R"(<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SubConverter-Extended</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+        }
+        
+        .container {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 40px;
+            max-width: 700px;
+            width: 100%;
+            box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            animation: fadeIn 0.6s ease-out;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        h1 {
+            color: #ffffff;
+            font-size: 2.5em;
+            margin-bottom: 20px;
+            font-weight: 700;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .divider {
+            height: 1px;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.5), transparent);
+            margin: 25px 0;
+        }
+        
+        .description {
+            color: rgba(255, 255, 255, 0.95);
+            font-size: 1.05em;
+            line-height: 1.8;
+            margin-bottom: 15px;
+        }
+        
+        .info-block {
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 12px;
+            padding: 20px;
+            margin: 25px 0;
+            border-left: 4px solid rgba(255,255,255,0.6);
+        }
+        
+        .info-row {
+            color: rgba(255, 255, 255, 0.95);
+            font-size: 1.1em;
+            margin: 10px 0;
+            display: flex;
+            align-items: center;
+        }
+        
+        .info-label {
+            font-weight: 600;
+            min-width: 90px;
+            color: rgba(255, 255, 255, 1);
+        }
+        
+        a {
+            color: #ffd700;
+            text-decoration: none;
+            position: relative;
+            transition: all 0.3s ease;
+            font-weight: 500;
+        }
+        
+        a::after {
+            content: '';
+            position: absolute;
+            bottom: -2px;
+            left: 0;
+            width: 0;
+            height: 2px;
+            background: #ffd700;
+            transition: width 0.3s ease;
+        }
+        
+        a:hover::after {
+            width: 100%;
+        }
+        
+        a:hover {
+            color: #ffed4e;
+            text-shadow: 0 0 8px rgba(255, 215, 0, 0.6);
+        }
+        
+        .footer {
+            margin-top: 25px;
+            padding-top: 20px;
+            text-align: center;
+            color: rgba(255, 255, 255, 0.8);
+            font-size: 0.9em;
+        }
+        
+        @media (max-width: 600px) {
+            .container { padding: 30px 20px; }
+            h1 { font-size: 2em; }
+            .info-row { flex-direction: column; align-items: flex-start; }
+            .info-label { margin-bottom: 5px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>SubConverter-Extended</h1>
+        <div class="divider"></div>
+        
+        <p class="description">
+            An enhanced implementation of subconverter, aligned with the current 
+            <a href="https://github.com/MetaCubeX/mihomo/tree/Meta" target="_blank">Mihomo</a> 
+            <a href="https://wiki.metacubex.one/config/" target="_blank">configuration</a>
+        </p>
+        
+        <p class="description">
+            Primarily intended for use alongside OpenClash
+        </p>
+        
+        <p class="description">
+            Derived as a companion backend for the 
+            <a href="https://github.com/Aethersailor/Custom_OpenClash_Rules" target="_blank">Custom_OpenClash_Rules project</a>
+        </p>
+        
+        <div class="info-block">
+            <div class="info-row">
+                <span class="info-label">Version:</span>
+                <span>)" VERSION R"(</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Build:</span>
+                <span>)" +
+               commit_link + R"(</span>
+            </div>
+        </div>
+        
+        <div class="divider"></div>
+        
+        <p class="description">
+            Originated from: 
+            <a href="https://github.com/asdlokj1qpi233/subconverter" target="_blank">subconverter v0.9.9</a>
+        </p>
+        
+        <p class="description">
+            Modified and evolved by: 
+            <a href="https://github.com/Aethersailor" target="_blank">Aethersailor</a>
+        </p>
+        
+        <div class="footer">
+            License: <a href="https://www.gnu.org/licenses/gpl-3.0.html" target="_blank">GPL-3.0</a>
+        </div>
+    </div>
+</body>
+</html>)";
       });
 
   webServer.append_response(
