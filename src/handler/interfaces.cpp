@@ -752,9 +752,19 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
                "Parsing " + std::to_string(node_urls.size()) +
                    " node links directly.",
                LOG_LEVEL_INFO);
-      ext.use_proxy_provider = false; // 临时禁用 proxy-provider 模式
+      // 如果没有订阅链接，只有节点链接，则完全禁用 proxy-provider 模式
+      if (subscription_urls.empty()) {
+        ext.use_proxy_provider = false;
+        writeLog(0,
+                 "No subscription URLs found, disabling proxy-provider mode.",
+                 LOG_LEVEL_INFO);
+      }
       importItems(node_urls, true);
-      ext.use_proxy_provider = !ext.providers.empty(); // 如果有 provider 则恢复
+    }
+
+    // 如果没有任何 provider，确保禁用 proxy-provider 模式
+    if (ext.providers.empty()) {
+      ext.use_proxy_provider = false;
     }
   } else {
     // 其他格式保持原有逻辑，完全展开节点
