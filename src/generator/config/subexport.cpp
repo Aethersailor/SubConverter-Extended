@@ -973,11 +973,24 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
   if (yamlnode["proxy-providers"].IsDefined()) {
     YAML::Node providers_node = yamlnode["proxy-providers"];
     yamlnode.remove("proxy-providers");
-    proxy_providers_str = "proxy-providers:\n" + YAML::Dump(providers_node);
-    // 移除第一行的 "---"（如果有）
-    if (proxy_providers_str.find("---") == 0) {
-      proxy_providers_str =
-          proxy_providers_str.substr(proxy_providers_str.find('\n') + 1);
+
+    // 生成 proxy-providers 字符串
+    std::string providers_dump = YAML::Dump(providers_node);
+    if (!providers_dump.empty()) {
+      // 移除开头的 "---" 标记（如果存在）
+      size_t start_pos = 0;
+      if (providers_dump.find("---") == 0) {
+        size_t newline_pos = providers_dump.find('\n');
+        if (newline_pos != std::string::npos) {
+          start_pos = newline_pos + 1;
+        }
+      }
+
+      // 只有在成功生成内容时才添加
+      if (start_pos < providers_dump.length()) {
+        proxy_providers_str =
+            "proxy-providers:\n" + providers_dump.substr(start_pos);
+      }
     }
   }
 
