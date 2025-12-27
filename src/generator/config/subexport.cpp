@@ -25,6 +25,27 @@
 
 extern string_array ss_ciphers, ssr_ciphers;
 
+// Helper function to insert proxy-providers before proxy-groups
+static void insertProxyProvidersBeforeGroups(std::string &yaml_str,
+                                             const std::string &providers_yaml,
+                                             bool new_field_name) {
+  std::string providers_content = providers_yaml;
+  if (providers_content.find("---") == 0) {
+    size_t newline_pos = providers_content.find('\n');
+    if (newline_pos != std::string::npos) {
+      providers_content = providers_content.substr(newline_pos + 1);
+    }
+  }
+
+  std::string providers_str = "proxy-providers:\n" + providers_content;
+  std::string groups_key = new_field_name ? "proxy-groups:" : "Proxy Group:";
+
+  size_t groups_pos = yaml_str.find(groups_key);
+  if (groups_pos != std::string::npos) {
+    yaml_str.insert(groups_pos, providers_str);
+  }
+}
+
 const string_array clashr_protocols = {"origin",          "auth_sha1_v4",
                                        "auth_aes128_md5", "auth_aes128_sha1",
                                        "auth_chain_a",    "auth_chain_b"};
