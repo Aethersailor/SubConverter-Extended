@@ -762,6 +762,23 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
                    " node links directly.",
                LOG_LEVEL_INFO);
       importItems(node_urls, true);
+      // 关键：实际添加节点到 nodes 列表
+      for (std::string &x : node_urls) {
+        writeLog(0, "Fetching node data from url '" + x + "'.", LOG_LEVEL_INFO);
+        if (addNodes(x, nodes, groupID, parse_set) == -1) {
+          if (global.skipFailedLinks)
+            writeLog(
+                0,
+                "The following link doesn't contain any valid node info: " + x,
+                LOG_LEVEL_WARNING);
+          else {
+            *status_code = 400;
+            return "The following link doesn't contain any valid node info: " +
+                   x;
+          }
+        }
+        groupID++;
+      }
     }
   } else {
     // 其他格式保持原有逻辑，完全展开节点
