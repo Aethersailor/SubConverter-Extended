@@ -968,7 +968,46 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
       rulesetToClashStr(yamlnode, ruleset_content_array,
                         ext.overwrite_original_rules, ext.clash_new_field_name);
 
+  // 提取 proxy-providers，手动控制输出顺序
+  std::string proxy_providers_str;
+  if (yamlnode["proxy-providers"].IsDefined()) {
+    YAML::Node providers_node = yamlnode["proxy-providers"];
+    yamlnode.remove("proxy-providers");
+
+    std::string providers_dump = YAML::Dump(providers_node);
+    if (!providers_dump.empty()) {
+      size_t start_pos = 0;
+      if (providers_dump.find("---") == 0) {
+        size_t newline_pos = providers_dump.find('\n');
+        if (newline_pos != std::string::npos) {
+          start_pos = newline_pos + 1;
+        }
+      }
+
+      if (start_pos < providers_dump.length()) {
+        proxy_providers_str =
+            "proxy-providers:\n" + providers_dump.substr(start_pos);
+      }
+    }
+  }
+
   std::string yamlnode_str = YAML::Dump(yamlnode);
+
+  // 在 proxy-groups 之前插入 proxy-providers
+  if (!proxy_providers_str.empty()) {
+    std::string proxy_groups_key =
+        ext.clash_new_field_name ? "proxy-groups:" : "Proxy Group:";
+    size_t groups_pos = yamlnode_str.find(proxy_groups_key);
+
+    if (groups_pos != std::string::npos) {
+      // 在 proxy-groups: 这一行之前插入
+      yamlnode_str.insert(groups_pos, proxy_providers_str);
+    } else {
+      // 如果找不到 proxy-groups，追加到末尾
+      yamlnode_str += proxy_providers_str;
+    }
+  }
+
   output_content.insert(0, yamlnode_str);
   replaceAll(output_content, "!<str> ", "");
   formatterShortId(output_content);
