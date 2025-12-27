@@ -971,10 +971,16 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
   // 提取 proxy-providers，手动控制输出顺序
   std::string proxy_providers_str;
   if (yamlnode["proxy-providers"].IsDefined()) {
+    writeLog(0, "proxy-providers node is defined, extracting...",
+             LOG_LEVEL_INFO);
     YAML::Node providers_node = yamlnode["proxy-providers"];
     yamlnode.remove("proxy-providers");
 
     std::string providers_dump = YAML::Dump(providers_node);
+    writeLog(
+        0, "providers_dump length: " + std::to_string(providers_dump.length()),
+        LOG_LEVEL_INFO);
+
     if (!providers_dump.empty()) {
       size_t start_pos = 0;
       if (providers_dump.find("---") == 0) {
@@ -987,25 +993,48 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
       if (start_pos < providers_dump.length()) {
         proxy_providers_str =
             "proxy-providers:\n" + providers_dump.substr(start_pos);
+        writeLog(0,
+                 "Extracted proxy-providers, final length: " +
+                     std::to_string(proxy_providers_str.length()),
+                 LOG_LEVEL_INFO);
       }
     }
+  } else {
+    writeLog(0, "WARNING: proxy-providers node is NOT defined in yamlnode!",
+             LOG_LEVEL_WARNING);
   }
 
   std::string yamlnode_str = YAML::Dump(yamlnode);
 
   // 在 proxy-groups 之前插入 proxy-providers
   if (!proxy_providers_str.empty()) {
+    writeLog(
+        0,
+        "Attempting to insert proxy-providers before proxy-groups, size: " +
+            std::to_string(proxy_providers_str.length()),
+        LOG_LEVEL_INFO);
+
     std::string proxy_groups_key =
         ext.clash_new_field_name ? "proxy-groups:" : "Proxy Group:";
     size_t groups_pos = yamlnode_str.find(proxy_groups_key);
 
     if (groups_pos != std::string::npos) {
+      writeLog(0,
+               "Found proxy-groups at position: " + std::to_string(groups_pos),
+               LOG_LEVEL_INFO);
       // 在 proxy-groups: 这一行之前插入
       yamlnode_str.insert(groups_pos, proxy_providers_str);
+      writeLog(0, "Successfully inserted proxy-providers before proxy-groups",
+               LOG_LEVEL_INFO);
     } else {
+      writeLog(0, "WARNING: proxy-groups not found! Appending to end",
+               LOG_LEVEL_WARNING);
       // 如果找不到 proxy-groups，尝试在文件末尾插入
       yamlnode_str += proxy_providers_str;
     }
+  } else {
+    writeLog(0, "proxy_providers_str is EMPTY, nothing to insert",
+             LOG_LEVEL_WARNING);
   }
 
   output_content.insert(0, yamlnode_str);
