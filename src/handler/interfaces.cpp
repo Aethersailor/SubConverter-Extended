@@ -3,7 +3,6 @@
 #include <numeric>
 #include <string>
 
-
 #include <inja.hpp>
 #include <yaml-cpp/yaml.h>
 
@@ -32,7 +31,6 @@
 #include "utils/urlencode.h"
 #include "utils/yamlcpp_extra.h"
 #include "webget.h"
-
 
 extern WebServer webServer;
 
@@ -737,7 +735,8 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
     }
   }
   // exit if found nothing
-  if (nodes.empty() && insert_nodes.empty()) {
+  // 对于 proxy-provider 模式，允许 nodes 为空（节点从 provider 获取）
+  if (nodes.empty() && insert_nodes.empty() && ext.providers.empty()) {
     *status_code = 400;
     return "No nodes were found!";
   }
