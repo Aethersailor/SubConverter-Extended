@@ -706,7 +706,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
           startsWith(x, "trojan://") || startsWith(x, "hysteria://") ||
           startsWith(x, "hysteria2://") || startsWith(x, "hy2://") ||
           startsWith(x, "tuic://") || startsWith(x, "snell://") ||
-          startsWith(x, "socks://") || startsWith(x, "http://") && !isLink(x);
+          startsWith(x, "socks5://") || startsWith(x, "socks://");
 
       if (isNodeLink) {
         writeLog(0, "Detected node link: '" + x + "', will parse directly.",

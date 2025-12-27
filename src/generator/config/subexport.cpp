@@ -1003,7 +1003,7 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
       // 在 proxy-groups: 这一行之前插入
       yamlnode_str.insert(groups_pos, proxy_providers_str);
     } else {
-      // 如果找不到 proxy-groups，追加到末尾
+      // 如果找不到 proxy-groups，尝试在文件末尾插入
       yamlnode_str += proxy_providers_str;
     }
   }
