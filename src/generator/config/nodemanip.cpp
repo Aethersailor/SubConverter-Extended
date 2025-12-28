@@ -140,26 +140,29 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
     return 0;
   }
 
+  bool isMihomoScheme = false;
+#ifdef USE_MIHOMO_PARSER
+  for (const auto &scheme : mihomo::SUPPORTED_SCHEMES) {
+    if (startsWith(link, scheme + "://")) {
+      isMihomoScheme = true;
+      break;
+    }
+  }
+#endif
+
   writeLog(LOG_TYPE_INFO, "Received Link.");
   if (startsWith(link, "https://t.me/socks") || startsWith(link, "tg://socks"))
     linkType = ConfType::SOCKS;
   else if (startsWith(link, "https://t.me/http") ||
            startsWith(link, "tg://http"))
     linkType = ConfType::HTTP;
-  else if (isLink(link) || startsWith(link, "surge:///install-config"))
+  else if (isLink(link) || startsWith(link, "surge:///install-config") ||
+           isMihomoScheme)
     linkType = ConfType::SUB;
-#ifdef USE_MIHOMO_PARSER
-  else {
-    for (const auto &scheme : mihomo::SUPPORTED_SCHEMES) {
-      if (startsWith(link, scheme + "://")) {
-        linkType = ConfType::SUB;
-        break;
-      }
-    }
-  }
-#endif
-  else if (startsWith(link, "Netch://")) linkType = ConfType::Netch;
-  else if (fileExist(link)) linkType = ConfType::Local;
+  else if (startsWith(link, "Netch://"))
+    linkType = ConfType::Netch;
+  else if (fileExist(link))
+    linkType = ConfType::Local;
 
   switch (linkType) {
   case ConfType::SUB: {
