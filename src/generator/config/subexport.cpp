@@ -1058,17 +1058,37 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
 
     // proxy_providers_yaml 已经是 YAML::Dump 的结果
     // 需要移除可能的文档分隔符 "---"
+    std::string content = proxy_providers_yaml;
     size_t start_pos = 0;
-    if (proxy_providers_yaml.find("---") == 0) {
-      size_t newline_pos = proxy_providers_yaml.find('\n');
+    if (content.find("---") == 0) {
+      size_t newline_pos = content.find('\n');
       if (newline_pos != std::string::npos) {
         start_pos = newline_pos + 1;
       }
     }
 
-    if (start_pos < proxy_providers_yaml.length()) {
-      proxy_providers_str =
-          "proxy-providers:\n" + proxy_providers_yaml.substr(start_pos);
+    if (start_pos < content.length()) {
+      content = content.substr(start_pos);
+
+      // 为每一行添加 2 个空格的缩进（YAML 格式要求）
+      std::string indented_content;
+      std::istringstream stream(content);
+      std::string line;
+      while (std::getline(stream, line)) {
+        if (!line.empty()) {
+          indented_content += "  " + line + "\n"; // 添加 2 个空格缩进
+        } else {
+          indented_content += "\n";
+        }
+      }
+
+      proxy_providers_str = "proxy-providers:\n" + indented_content;
+
+      // 确保末尾有换行符，避免与 proxy-groups 连在一起
+      if (!proxy_providers_str.empty() && proxy_providers_str.back() != '\n') {
+        proxy_providers_str += "\n";
+      }
+
       writeLog(0,
                "Prepared proxy-providers for insertion, length: " +
                    std::to_string(proxy_providers_str.length()),
