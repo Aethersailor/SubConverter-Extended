@@ -1,5 +1,5 @@
 # ========== GO BUILD STAGE ==========
-FROM golang:1.21-alpine AS go-builder
+FROM golang:1.22-alpine AS go-builder
 
 WORKDIR /build/bridge
 
