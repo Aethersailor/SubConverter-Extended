@@ -50,13 +50,24 @@ func main() {
 
 	// 1. Get mihomo source path
 	cmd := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", "github.com/metacubex/mihomo")
-	cmd.Dir = moduleRoot
+	cmd.Dir = moduleRoot // execute in correct directory
+
+	// Capture stderr for debugging
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+
 	output, err := cmd.Output()
 	if err != nil {
-		fmt.Printf("Error finding mihomo source: %v\n", err)
+		fmt.Printf("Error finding mihomo source: %v\nStderr: %s\n", err, stderr.String())
 		os.Exit(1)
 	}
+
 	mihomoPath := strings.TrimSpace(string(output))
+	if mihomoPath == "" {
+		fmt.Printf("Error: go list returned empty path!\nStderr: %s\n", stderr.String())
+		os.Exit(1)
+	}
+
 	targetFile := filepath.Join(mihomoPath, "common/convert/converter.go")
 
 	fmt.Printf("Analyzing %s...\n", targetFile)
