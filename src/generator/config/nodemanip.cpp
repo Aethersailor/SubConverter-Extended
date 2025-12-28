@@ -152,22 +152,48 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
 
   switch (linkType) {
   case ConfType::SUB:
-    writeLog(LOG_TYPE_INFO, "Downloading subscription data...");
-    if (startsWith(link, "surge:///install-config")) // surge config link
-      link = urlDecode(getUrlArg(link, "url"));
+    // 检测链接类型
+    bool isHttpUrl =
+        startsWith(link, "http://") || startsWith(link, "https://");
+    bool isNodeLink =
+        startsWith(link, "ss://") || startsWith(link, "ssr://") ||
+        startsWith(link, "vmess://") || startsWith(link, "vless://") ||
+        startsWith(link, "trojan://") || startsWith(link, "hysteria://") ||
+        startsWith(link, "hysteria2://") || startsWith(link, "tuic://") ||
+        startsWith(link, "socks://") || startsWith(link, "socks5://") ||
+        startsWith(link, "http://") && link.find("@") != link.npos;
 
-    // Replace browser UA with clash.meta
-    if (request_headers) {
-      auto ua_it = request_headers->find("User-Agent");
-      if (ua_it != request_headers->end() && isBrowserUA(ua_it->second)) {
-        writeLog(LOG_TYPE_INFO, "Browser UA detected, replacing with "
-                                "clash.meta UA to avoid blocking");
-        ua_it->second = "clash.meta";
-      }
+    // HTTP(S) 订阅 URL：不下载，不解析，直接跳过（交给 proxy-provider 处理）
+    if (isHttpUrl && !isNodeLink) {
+      writeLog(LOG_TYPE_INFO, "Subscription URL detected, skipping download "
+                              "(will be used as proxy-provider): " +
+                                  link);
+      return 0; // 返回成功，让后续逻辑将其写入 proxy-provider
     }
 
-    strSub = webGet(link, proxy, global.cacheSubscription, &extra_headers,
-                    request_headers);
+    // 节点链接：直接用 mihomo 解析（不需要 webGet）
+    if (isNodeLink) {
+      writeLog(LOG_TYPE_INFO, "Node link detected, parsing with mihomo...");
+      strSub = link; // 直接使用链接本身作为解析内容
+    } else {
+      // 其他情况（surge config link 等）：保持原有逻辑
+      writeLog(LOG_TYPE_INFO, "Downloading subscription data...");
+      if (startsWith(link, "surge:///install-config")) // surge config link
+        link = urlDecode(getUrlArg(link, "url"));
+
+      // Replace browser UA with clash.meta
+      if (request_headers) {
+        auto ua_it = request_headers->find("User-Agent");
+        if (ua_it != request_headers->end() && isBrowserUA(ua_it->second)) {
+          writeLog(LOG_TYPE_INFO, "Browser UA detected, replacing with "
+                                  "clash.meta UA to avoid blocking");
+          ua_it->second = "clash.meta";
+        }
+      }
+
+      strSub = webGet(link, proxy, global.cacheSubscription, &extra_headers,
+                      request_headers);
+    }
     /*
     if(strSub.size() == 0)
     {
