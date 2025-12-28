@@ -325,7 +325,7 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
       for (const auto &[key, value] : x.RawParams) {
         // Skip fields we already handled or want to override (e.g. name is
         // handled by Remark)
-        if (key == "name" || key == "server" || key == "port" || key == "type")
+        if (key == "name" || key == "server" || key == "port")
           continue;
 
         // Output all values as strings and let YAML parser/Clash handle type
@@ -334,10 +334,6 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
         // recognize: "123" -> int, "true" -> bool, "[\"h2\"]" -> array
         singleproxy[key] = value;
       }
-
-      // Ensure type IS set from the mapped type string
-      // (getProxyTypeName handles the enum -> string mapping we did in Phase 8)
-      singleproxy["type"] = type;
 
       // If we did pass-through, we can skip the specific switch-case logic
       // below to avoid double-setting or overwriting with empty defaults.

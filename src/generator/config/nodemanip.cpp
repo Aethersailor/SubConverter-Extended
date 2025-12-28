@@ -276,6 +276,11 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
             node.RawParams[key] = value;
           }
 
+          // CRITICAL: Preserve original type string from mihomo
+          // This ensures unknown protocols (e.g., linksb) output correctly as
+          // "type: linksb" instead of "type: Unknown" which would break Clash
+          node.RawParams["type"] = mnode.type;
+
           // Add more types as needed
 
           node.Hostname = mnode.server;
