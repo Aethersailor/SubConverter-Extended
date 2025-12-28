@@ -1,0 +1,50 @@
+name: Update Mihomo Core
+
+on:
+  schedule:
+    - cron: '0 2 * * *' # Run at 02:00 UTC daily
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  update-mihomo:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: dev # Update the dev branch
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Update Mihomo dependency
+        run: |
+          cd bridge
+          go get github.com/metacubex/mihomo@Meta
+          go mod tidy
+
+      - name: Check for changes
+        id: check_changes
+        run: |
+          if [[ -n $(git status --porcelain bridge/go.mod bridge/go.sum) ]]; then
+            echo "changes_detected=true" >> $GITHUB_OUTPUT
+            echo "Detected changes in go.mod/go.sum"
+          else
+            echo "changes_detected=false" >> $GITHUB_OUTPUT
+            echo "No changes detected"
+          fi
+
+      - name: Commit and Push changes
+        if: steps.check_changes.outputs.changes_detected == 'true'
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          
+          # Extract version for commit message
+          VERSION=$(grep "github.com/metacubex/mihomo" bridge/go.mod | awk '{print $2}')
+          
+          git add bridge/go.mod bridge/go.sum
+          git commit -m "chore: auto-update mihomo core to $VERSION"
+          git push origin dev
