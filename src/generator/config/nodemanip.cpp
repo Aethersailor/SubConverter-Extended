@@ -20,6 +20,7 @@
 #include "parser/mihomo_schemes.h"
 #endif
 #include "utils/regexp.h"
+#include "utils/string.h"
 #include "utils/urlencode.h"
 
 extern Settings global;
@@ -150,6 +151,17 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
   }
 #endif
 
+  // Handle pipe separated links recursively
+  if (link.find('|') != std::string::npos && (isLink(link) || isMihomoScheme)) {
+    std::vector<std::string> links = split(link, "|");
+    for (const auto &l : links) {
+      if (l.empty())
+        continue;
+      addNodes(l, allNodes, groupID, settings);
+    }
+    return 0;
+  }
+
   writeLog(LOG_TYPE_INFO, "Received Link.");
   if (startsWith(link, "https://t.me/socks") || startsWith(link, "tg://socks"))
     linkType = ConfType::SOCKS;
@@ -166,6 +178,20 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
 
   switch (linkType) {
   case ConfType::SUB: {
+    // Check for multiple links separated by pipe '|'
+    if (link.find('|') != std::string::npos) {
+      std::vector<std::string> links = split(link, "|");
+      for (const auto &l : links) {
+        if (l.empty())
+          continue;
+        // Recursive call or simplified processing for each link
+        // Since we are already inside addNodes, and we know these are likely
+        // links it's safest to treat them as individual subscriptions/nodes
+        addNodes(l, allNodes, groupID, settings);
+      }
+      return 0; // Handled
+    }
+
     // 检测链接类型
     bool isHttpUrl =
         startsWith(link, "http://") || startsWith(link, "https://");
@@ -264,6 +290,8 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
             node.Type = ProxyType::Hysteria;
           else if (mnode.type == "hysteria2")
             node.Type = ProxyType::Hysteria2;
+          else if (mnode.type == "tuic")
+            node.Type = ProxyType::TUIC;
           // Add more types as needed
 
           node.Hostname = mnode.server;
