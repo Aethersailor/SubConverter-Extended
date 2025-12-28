@@ -497,6 +497,9 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
     ext.clash_script = false;
 
   ext.nodelist = argGenNodeList;
+  // 强制 list=false，直接覆盖用户提供的任何值
+  // 确保始终使用 proxy-provider 模式，而不是读取订阅并形成节点列表
+  ext.nodelist = false;
   ext.surge_ssr_path = global.surgeSSRPath;
   ext.quanx_dev_id = !argDeviceID.empty() ? argDeviceID : global.quanXDevID;
   ext.enable_rule_generator = global.enableRuleGen;
