@@ -15,7 +15,8 @@ RUN go mod download
 # Copy Go source code
 COPY bridge/converter.go ./
 
-# Build static library
+# Build static library (enable CGO for Alpine)
+ENV CGO_ENABLED=1
 RUN go build \
     -buildmode=c-archive \
     -ldflags="-s -w" \
