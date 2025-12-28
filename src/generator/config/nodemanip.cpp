@@ -151,7 +151,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
     linkType = ConfType::Local;
 
   switch (linkType) {
-  case ConfType::SUB:
+  case ConfType::SUB: {
     // 检测链接类型
     bool isHttpUrl =
         startsWith(link, "http://") || startsWith(link, "https://");
@@ -161,7 +161,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
         startsWith(link, "trojan://") || startsWith(link, "hysteria://") ||
         startsWith(link, "hysteria2://") || startsWith(link, "tuic://") ||
         startsWith(link, "socks://") || startsWith(link, "socks5://") ||
-        startsWith(link, "http://") && link.find("@") != link.npos;
+        (startsWith(link, "http://") && link.find("@") != link.npos);
 
     // HTTP(S) 订阅 URL：不下载，不解析，直接跳过（交给 proxy-provider 处理）
     if (isHttpUrl && !isNodeLink) {
@@ -322,6 +322,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
       return -1;
     }
     break;
+  }
   case ConfType::Local:
     if (!authorized)
       return -1;
@@ -471,9 +472,9 @@ void filterNodes(std::vector<Proxy> &nodes, string_array &exclude_remarks,
       if(include_patterns.size() > 0)
           for(i = 0; i < include_patterns.size(); i++)
           {
-              rc = pcre2_match(include_patterns[i].get(), reinterpret_cast<const
-  unsigned char*>(iter->remarks.c_str()), iter->remarks.size(), 0, 0,
-  include_match_data[i].get(), NULL); if (rc < 0)
+              rc = pcre2_match(include_patterns[i].get(),
+  reinterpret_cast<const unsigned char*>(iter->remarks.c_str()),
+  iter->remarks.size(), 0, 0, include_match_data[i].get(), NULL); if (rc < 0)
               {
                   switch(rc)
                   {
@@ -490,12 +491,14 @@ void filterNodes(std::vector<Proxy> &nodes, string_array &exclude_remarks,
           included = true;
       if(excluded || !included)
       {
-          writeLog(LOG_TYPE_INFO, "Node  " + iter->group + " - " + iter->remarks
+          writeLog(LOG_TYPE_INFO, "Node  " + iter->group + " - " +
+  iter->remarks
   + "  has been ignored and will not be added."); nodes.erase(iter);
       }
       else
       {
-          writeLog(LOG_TYPE_INFO, "Node  " + iter->group + " - " + iter->remarks
+          writeLog(LOG_TYPE_INFO, "Node  " + iter->group + " - " +
+  iter->remarks
   + "  has been added."); iter->id = node_index; iter->groupID = groupID;
           ++node_index;
           ++iter;
