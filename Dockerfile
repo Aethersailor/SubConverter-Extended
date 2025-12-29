@@ -99,8 +99,6 @@ COPY --from=go-builder /build/bridge/param_compat.h /src/src/parser/param_compat
 
 RUN set -xe && \
     [ -n "${SHA}" ] && sed -i "s/#define BUILD_ID \"\"/#define BUILD_ID \"${SHA}\"/" src/version.h || true && \
-    python3 -m pip install --break-system-packages gitpython && \
-    python3 scripts/update_rules.py -c scripts/rules_config.conf && \
     # Copy Go library to bridge directory for CMake detection
     mkdir -p bridge && \
     cp /usr/lib/libmihomo.a bridge/ && \
