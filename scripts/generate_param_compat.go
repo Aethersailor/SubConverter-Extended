@@ -15,10 +15,11 @@ import (
 
 // ParamDef represents a parameter definition
 type ParamDef struct {
-	Name       string // YAML parameter name (e.g., "skip-cert-verify")
-	FieldType  string // Field type (bool/string/int/array/object)
-	IsOptional bool   // Whether the parameter is optional
-	Source     string // Source of parameter ("BasicOption" / protocol name)
+	Name        string // YAML parameter name (e.g., "skip-cert-verify")
+	FieldType   string // e.g., "bool", "string", "int", "array", "object"
+	IsOptional  bool   // Whether the parameter is optional
+	IsHardcoded bool   // true if Mihomo hardcodes this parameter in converter.go
+	Source      string // Protocol name or "BasicOption"
 }
 
 // ProtocolCompat represents protocol parameter compatibility
@@ -65,12 +66,26 @@ func main() {
 	aliasMap := extractProtocolAliases()
 	log.Printf("Auto-extracted %d protocol alias mappings\n", len(aliasMap))
 
+	// PHASE 3.5: Auto-detect hardcoded parameters in converter.go
+	// This identifies parameters that Mihomo hardcodes (e.g., trojan["udp"] = true)
+	hardcodedParams := detectHardcodedParams()
+	log.Printf("Auto-detected %d hardcoded parameter instances\n", countHardcodedInstances(hardcodedParams))
+
 	// PHASE 4: Parse each protocol's parameters using auto-discovered mapping
 	compatMap := make(map[string]*ProtocolCompat)
 	for _, proto := range protocols {
 		log.Printf("Processing protocol: %s\n", proto)
 		compat := parseProtocolParamsAuto(proto, protocolFileMap, aliasMap)
 		if compat != nil {
+			// Mark hardcoded parameters
+			if hardcoded, exists := hardcodedParams[proto]; exists {
+				for _, paramName := range hardcoded {
+					if param, ok := compat.Params[paramName]; ok {
+						param.IsHardcoded = true
+						log.Printf("  Marked '%s' as hardcoded for protocol '%s'\n", paramName, proto)
+					}
+				}
+			}
 			compatMap[proto] = compat
 		}
 	}
@@ -306,6 +321,72 @@ func extractProtocolAliases() map[string]string {
 	})
 
 	return aliasMap
+}
+
+// detectHardcodedParams scans converter.go for hardcoded parameter assignments
+// Returns map[protocol][]paramName
+func detectHardcodedParams() map[string][]string {
+	hardcoded := make(map[string][]string)
+	converterPath := filepath.Join(mihomoRoot, "common/convert/converter.go")
+
+	data, err := os.ReadFile(converterPath)
+	if err != nil {
+		log.Printf("Warning: cannot read converter.go: %v\n", err)
+		return hardcoded
+	}
+
+	content := string(data)
+
+	// Pattern to match: protocolName["param"] = value
+	// Examples: trojan["udp"] = true, tuic["udp"] = true
+	re := regexp.MustCompile(`(\w+)\["([^"]+)"\]\s*=\s*(.+)`)
+
+	lines := strings.Split(content, "\n")
+	currentProtocol := ""
+
+	for _, line := range lines {
+		// Detect case statement: case "protocol":
+		caseMatch := regexp.MustCompile(`case\s+"(\w+)"`).FindStringSubmatch(line)
+		if len(caseMatch) > 1 {
+			currentProtocol = caseMatch[1]
+			// Handle aliases: hysteria2/hy2 map to hysteria2
+			if currentProtocol == "hy2" {
+				currentProtocol = "hysteria2"
+			}
+			continue
+		}
+
+		// Detect hardcoded assignment
+		matches := re.FindStringSubmatch(line)
+		if len(matches) >= 4 {
+			paramName := matches[2]
+			value := strings.TrimSpace(matches[3])
+
+			// Check if assignment is a literal (true, false, number, "string")
+			isLiteral := regexp.MustCompile(`^(true|false|\d+|"[^"]*")$`).MatchString(value)
+
+			if isLiteral && currentProtocol != "" {
+				// Skip if it's from query params (not hardcoded)
+				if !strings.Contains(line, ".Get(") &&
+					!strings.Contains(line, ".Parse") &&
+					!strings.Contains(line, "strconv") {
+					hardcoded[currentProtocol] = append(hardcoded[currentProtocol], paramName)
+					log.Printf("Detected hardcoded: %s[\"%s\"] = %s\n", currentProtocol, paramName, value)
+				}
+			}
+		}
+	}
+
+	return hardcoded
+}
+
+// countHardcodedInstances counts total number of hardcoded parameter instances
+func countHardcodedInstances(hardcoded map[string][]string) int {
+	count := 0
+	for _, params := range hardcoded {
+		count += len(params)
+	}
+	return count
 }
 
 // parseProtocolParamsAuto uses auto-discovered file mapping and auto-extracted aliases
@@ -662,6 +743,7 @@ func generateCppHeader(compatMap map[string]*ProtocolCompat, outputPath string) 
 	sb.WriteString("struct ParamCompatInfo {\n")
 	sb.WriteString("    bool supported;\n")
 	sb.WriteString("    std::string type;\n")
+	sb.WriteString("    bool hardcoded;  // true if Mihomo hardcodes this parameter\n")
 	sb.WriteString("};\n\n")
 
 	// PARAM_COMPAT map
@@ -674,8 +756,16 @@ func generateCppHeader(compatMap map[string]*ProtocolCompat, outputPath string) 
 
 		for _, paramName := range getSortedParams(compat.Params) {
 			param := compat.Params[paramName]
-			sb.WriteString(fmt.Sprintf("        {\"%s\", {true, \"%s\"}},", paramName, param.FieldType))
-			sb.WriteString(fmt.Sprintf(" // %s\n", param.Source))
+			hardcodedStr := "false"
+			if param.IsHardcoded {
+				hardcodedStr = "true"
+			}
+			sb.WriteString(fmt.Sprintf("        {\"%s\", {true, \"%s\", %s}},", paramName, param.FieldType, hardcodedStr))
+			sb.WriteString(fmt.Sprintf(" // %s", param.Source))
+			if param.IsHardcoded {
+				sb.WriteString(" [HARDCODED]")
+			}
+			sb.WriteString("\n")
 		}
 
 		sb.WriteString("    }},\n")
@@ -690,6 +780,15 @@ func generateCppHeader(compatMap map[string]*ProtocolCompat, outputPath string) 
 	sb.WriteString("    if (proto_it == PARAM_COMPAT.end()) return false;\n")
 	sb.WriteString("    auto param_it = proto_it->second.find(param);\n")
 	sb.WriteString("    return param_it != proto_it->second.end() && param_it->second.supported;\n")
+	sb.WriteString("}\n\n")
+
+	sb.WriteString("// Check if a parameter is hardcoded by Mihomo for this protocol\n")
+	sb.WriteString("// Hardcoded parameters should NOT be overridden by global settings\n")
+	sb.WriteString("inline bool isParamHardcoded(const std::string& protocol, const std::string& param) {\n")
+	sb.WriteString("    auto proto_it = PARAM_COMPAT.find(protocol);\n")
+	sb.WriteString("    if (proto_it == PARAM_COMPAT.end()) return false;\n")
+	sb.WriteString("    auto param_it = proto_it->second.find(param);\n")
+	sb.WriteString("    return param_it != proto_it->second.end() && param_it->second.hardcoded;\n")
 	sb.WriteString("}\n\n")
 
 	sb.WriteString("} // namespace mihomo\n")

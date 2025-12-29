@@ -10,409 +10,410 @@ namespace mihomo {
 struct ParamCompatInfo {
     bool supported;
     std::string type;
+    bool hardcoded;  // true if Mihomo hardcodes this parameter
 };
 
 const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT = {
     // Protocol: anytls
     {"anytls", {
-        {"alpn", {true, "array"}}, // anytls
-        {"certificate", {true, "string"}}, // anytls
-        {"client-fingerprint", {true, "string"}}, // anytls
-        {"dialer-proxy", {true, "string"}}, // BasicOption
-        {"ech-opts", {true, "string"}}, // anytls
-        {"fingerprint", {true, "string"}}, // anytls
-        {"idle-session-check-interval", {true, "int"}}, // anytls
-        {"idle-session-timeout", {true, "int"}}, // anytls
-        {"interface-name", {true, "string"}}, // BasicOption
-        {"ip-version", {true, "string"}}, // BasicOption
-        {"min-idle-session", {true, "int"}}, // anytls
-        {"mptcp", {true, "bool"}}, // BasicOption
-        {"name", {true, "string"}}, // anytls
-        {"password", {true, "string"}}, // anytls
-        {"port", {true, "int"}}, // anytls
-        {"private-key", {true, "string"}}, // anytls
-        {"routing-mark", {true, "int"}}, // BasicOption
-        {"server", {true, "string"}}, // anytls
-        {"skip-cert-verify", {true, "bool"}}, // anytls
-        {"sni", {true, "string"}}, // anytls
-        {"tfo", {true, "bool"}}, // BasicOption
-        {"udp", {true, "bool"}}, // anytls
+        {"alpn", {true, "array", false}}, // anytls
+        {"certificate", {true, "string", false}}, // anytls
+        {"client-fingerprint", {true, "string", false}}, // anytls
+        {"dialer-proxy", {true, "string", false}}, // BasicOption
+        {"ech-opts", {true, "string", false}}, // anytls
+        {"fingerprint", {true, "string", false}}, // anytls
+        {"idle-session-check-interval", {true, "int", false}}, // anytls
+        {"idle-session-timeout", {true, "int", false}}, // anytls
+        {"interface-name", {true, "string", false}}, // BasicOption
+        {"ip-version", {true, "string", false}}, // BasicOption
+        {"min-idle-session", {true, "int", false}}, // anytls
+        {"mptcp", {true, "bool", false}}, // BasicOption
+        {"name", {true, "string", false}}, // anytls
+        {"password", {true, "string", false}}, // anytls
+        {"port", {true, "int", false}}, // anytls
+        {"private-key", {true, "string", false}}, // anytls
+        {"routing-mark", {true, "int", false}}, // BasicOption
+        {"server", {true, "string", false}}, // anytls
+        {"skip-cert-verify", {true, "bool", false}}, // anytls
+        {"sni", {true, "string", false}}, // anytls
+        {"tfo", {true, "bool", false}}, // BasicOption
+        {"udp", {true, "bool", true}}, // anytls [HARDCODED]
     }},
     // Protocol: http
     {"http", {
-        {"certificate", {true, "string"}}, // http
-        {"dialer-proxy", {true, "string"}}, // BasicOption
-        {"fingerprint", {true, "string"}}, // http
-        {"headers", {true, "object"}}, // http
-        {"interface-name", {true, "string"}}, // BasicOption
-        {"ip-version", {true, "string"}}, // BasicOption
-        {"mptcp", {true, "bool"}}, // BasicOption
-        {"name", {true, "string"}}, // http
-        {"password", {true, "string"}}, // http
-        {"port", {true, "int"}}, // http
-        {"private-key", {true, "string"}}, // http
-        {"routing-mark", {true, "int"}}, // BasicOption
-        {"server", {true, "string"}}, // http
-        {"skip-cert-verify", {true, "bool"}}, // http
-        {"sni", {true, "string"}}, // http
-        {"tfo", {true, "bool"}}, // BasicOption
-        {"tls", {true, "bool"}}, // http
-        {"username", {true, "string"}}, // http
+        {"certificate", {true, "string", false}}, // http
+        {"dialer-proxy", {true, "string", false}}, // BasicOption
+        {"fingerprint", {true, "string", false}}, // http
+        {"headers", {true, "object", false}}, // http
+        {"interface-name", {true, "string", false}}, // BasicOption
+        {"ip-version", {true, "string", false}}, // BasicOption
+        {"mptcp", {true, "bool", false}}, // BasicOption
+        {"name", {true, "string", false}}, // http
+        {"password", {true, "string", false}}, // http
+        {"port", {true, "int", false}}, // http
+        {"private-key", {true, "string", false}}, // http
+        {"routing-mark", {true, "int", false}}, // BasicOption
+        {"server", {true, "string", false}}, // http
+        {"skip-cert-verify", {true, "bool", true}}, // http [HARDCODED]
+        {"sni", {true, "string", false}}, // http
+        {"tfo", {true, "bool", false}}, // BasicOption
+        {"tls", {true, "bool", true}}, // http [HARDCODED]
+        {"username", {true, "string", false}}, // http
     }},
     // Protocol: https
     {"https", {
-        {"certificate", {true, "string"}}, // https
-        {"dialer-proxy", {true, "string"}}, // BasicOption
-        {"fingerprint", {true, "string"}}, // https
-        {"headers", {true, "object"}}, // https
-        {"interface-name", {true, "string"}}, // BasicOption
-        {"ip-version", {true, "string"}}, // BasicOption
-        {"mptcp", {true, "bool"}}, // BasicOption
-        {"name", {true, "string"}}, // https
-        {"password", {true, "string"}}, // https
-        {"port", {true, "int"}}, // https
-        {"private-key", {true, "string"}}, // https
-        {"routing-mark", {true, "int"}}, // BasicOption
-        {"server", {true, "string"}}, // https
-        {"skip-cert-verify", {true, "bool"}}, // https
-        {"sni", {true, "string"}}, // https
-        {"tfo", {true, "bool"}}, // BasicOption
-        {"tls", {true, "bool"}}, // https
-        {"username", {true, "string"}}, // https
+        {"certificate", {true, "string", false}}, // https
+        {"dialer-proxy", {true, "string", false}}, // BasicOption
+        {"fingerprint", {true, "string", false}}, // https
+        {"headers", {true, "object", false}}, // https
+        {"interface-name", {true, "string", false}}, // BasicOption
+        {"ip-version", {true, "string", false}}, // BasicOption
+        {"mptcp", {true, "bool", false}}, // BasicOption
+        {"name", {true, "string", false}}, // https
+        {"password", {true, "string", false}}, // https
+        {"port", {true, "int", false}}, // https
+        {"private-key", {true, "string", false}}, // https
+        {"routing-mark", {true, "int", false}}, // BasicOption
+        {"server", {true, "string", false}}, // https
+        {"skip-cert-verify", {true, "bool", false}}, // https
+        {"sni", {true, "string", false}}, // https
+        {"tfo", {true, "bool", false}}, // BasicOption
+        {"tls", {true, "bool", false}}, // https
+        {"username", {true, "string", false}}, // https
     }},
     // Protocol: hy2
     {"hy2", {
-        {"alpn", {true, "array"}}, // hy2
-        {"certificate", {true, "string"}}, // hy2
-        {"cwnd", {true, "int"}}, // hy2
-        {"dialer-proxy", {true, "string"}}, // BasicOption
-        {"down", {true, "string"}}, // hy2
-        {"ech-opts", {true, "string"}}, // hy2
-        {"fingerprint", {true, "string"}}, // hy2
-        {"hop-interval", {true, "int"}}, // hy2
-        {"initial-connection-receive-window", {true, "int"}}, // hy2
-        {"initial-stream-receive-window", {true, "int"}}, // hy2
-        {"interface-name", {true, "string"}}, // BasicOption
-        {"ip-version", {true, "string"}}, // BasicOption
-        {"max-connection-receive-window", {true, "int"}}, // hy2
-        {"max-stream-receive-window", {true, "int"}}, // hy2
-        {"mptcp", {true, "bool"}}, // BasicOption
-        {"name", {true, "string"}}, // hy2
-        {"obfs", {true, "string"}}, // hy2
-        {"obfs-password", {true, "string"}}, // hy2
-        {"password", {true, "string"}}, // hy2
-        {"port", {true, "int"}}, // hy2
-        {"ports", {true, "string"}}, // hy2
-        {"private-key", {true, "string"}}, // hy2
-        {"routing-mark", {true, "int"}}, // BasicOption
-        {"server", {true, "string"}}, // hy2
-        {"skip-cert-verify", {true, "bool"}}, // hy2
-        {"sni", {true, "string"}}, // hy2
-        {"tfo", {true, "bool"}}, // BasicOption
-        {"udp-mtu", {true, "int"}}, // hy2
-        {"up", {true, "string"}}, // hy2
+        {"alpn", {true, "array", false}}, // hy2
+        {"certificate", {true, "string", false}}, // hy2
+        {"cwnd", {true, "int", false}}, // hy2
+        {"dialer-proxy", {true, "string", false}}, // BasicOption
+        {"down", {true, "string", false}}, // hy2
+        {"ech-opts", {true, "string", false}}, // hy2
+        {"fingerprint", {true, "string", false}}, // hy2
+        {"hop-interval", {true, "int", false}}, // hy2
+        {"initial-connection-receive-window", {true, "int", false}}, // hy2
+        {"initial-stream-receive-window", {true, "int", false}}, // hy2
+        {"interface-name", {true, "string", false}}, // BasicOption
+        {"ip-version", {true, "string", false}}, // BasicOption
+        {"max-connection-receive-window", {true, "int", false}}, // hy2
+        {"max-stream-receive-window", {true, "int", false}}, // hy2
+        {"mptcp", {true, "bool", false}}, // BasicOption
+        {"name", {true, "string", false}}, // hy2
+        {"obfs", {true, "string", false}}, // hy2
+        {"obfs-password", {true, "string", false}}, // hy2
+        {"password", {true, "string", false}}, // hy2
+        {"port", {true, "int", false}}, // hy2
+        {"ports", {true, "string", false}}, // hy2
+        {"private-key", {true, "string", false}}, // hy2
+        {"routing-mark", {true, "int", false}}, // BasicOption
+        {"server", {true, "string", false}}, // hy2
+        {"skip-cert-verify", {true, "bool", false}}, // hy2
+        {"sni", {true, "string", false}}, // hy2
+        {"tfo", {true, "bool", false}}, // BasicOption
+        {"udp-mtu", {true, "int", false}}, // hy2
+        {"up", {true, "string", false}}, // hy2
     }},
     // Protocol: hysteria
     {"hysteria", {
-        {"alpn", {true, "array"}}, // hysteria
-        {"auth", {true, "string"}}, // hysteria
-        {"auth-str", {true, "string"}}, // hysteria
-        {"certificate", {true, "string"}}, // hysteria
-        {"dialer-proxy", {true, "string"}}, // BasicOption
-        {"disable-mtu-discovery", {true, "bool"}}, // hysteria
-        {"down", {true, "string"}}, // hysteria
-        {"down-speed", {true, "int"}}, // hysteria
-        {"ech-opts", {true, "string"}}, // hysteria
-        {"fast-open", {true, "bool"}}, // hysteria
-        {"fingerprint", {true, "string"}}, // hysteria
-        {"hop-interval", {true, "int"}}, // hysteria
-        {"interface-name", {true, "string"}}, // BasicOption
-        {"ip-version", {true, "string"}}, // BasicOption
-        {"mptcp", {true, "bool"}}, // BasicOption
-        {"name", {true, "string"}}, // hysteria
-        {"obfs", {true, "string"}}, // hysteria
-        {"obfs-protocol", {true, "string"}}, // hysteria
-        {"port", {true, "int"}}, // hysteria
-        {"ports", {true, "string"}}, // hysteria
-        {"private-key", {true, "string"}}, // hysteria
-        {"protocol", {true, "string"}}, // hysteria
-        {"recv-window", {true, "int"}}, // hysteria
-        {"recv-window-conn", {true, "int"}}, // hysteria
-        {"routing-mark", {true, "int"}}, // BasicOption
-        {"server", {true, "string"}}, // hysteria
-        {"skip-cert-verify", {true, "bool"}}, // hysteria
-        {"sni", {true, "string"}}, // hysteria
-        {"tfo", {true, "bool"}}, // BasicOption
-        {"up", {true, "string"}}, // hysteria
-        {"up-speed", {true, "int"}}, // hysteria
+        {"alpn", {true, "array", false}}, // hysteria
+        {"auth", {true, "string", false}}, // hysteria
+        {"auth-str", {true, "string", false}}, // hysteria
+        {"certificate", {true, "string", false}}, // hysteria
+        {"dialer-proxy", {true, "string", false}}, // BasicOption
+        {"disable-mtu-discovery", {true, "bool", false}}, // hysteria
+        {"down", {true, "string", false}}, // hysteria
+        {"down-speed", {true, "int", false}}, // hysteria
+        {"ech-opts", {true, "string", false}}, // hysteria
+        {"fast-open", {true, "bool", false}}, // hysteria
+        {"fingerprint", {true, "string", false}}, // hysteria
+        {"hop-interval", {true, "int", false}}, // hysteria
+        {"interface-name", {true, "string", false}}, // BasicOption
+        {"ip-version", {true, "string", false}}, // BasicOption
+        {"mptcp", {true, "bool", false}}, // BasicOption
+        {"name", {true, "string", false}}, // hysteria
+        {"obfs", {true, "string", false}}, // hysteria
+        {"obfs-protocol", {true, "string", false}}, // hysteria
+        {"port", {true, "int", false}}, // hysteria
+        {"ports", {true, "string", false}}, // hysteria
+        {"private-key", {true, "string", false}}, // hysteria
+        {"protocol", {true, "string", false}}, // hysteria
+        {"recv-window", {true, "int", false}}, // hysteria
+        {"recv-window-conn", {true, "int", false}}, // hysteria
+        {"routing-mark", {true, "int", false}}, // BasicOption
+        {"server", {true, "string", false}}, // hysteria
+        {"skip-cert-verify", {true, "bool", false}}, // hysteria
+        {"sni", {true, "string", false}}, // hysteria
+        {"tfo", {true, "bool", false}}, // BasicOption
+        {"up", {true, "string", false}}, // hysteria
+        {"up-speed", {true, "int", false}}, // hysteria
     }},
     // Protocol: hysteria2
     {"hysteria2", {
-        {"alpn", {true, "array"}}, // hysteria2
-        {"certificate", {true, "string"}}, // hysteria2
-        {"cwnd", {true, "int"}}, // hysteria2
-        {"dialer-proxy", {true, "string"}}, // BasicOption
-        {"down", {true, "string"}}, // hysteria2
-        {"ech-opts", {true, "string"}}, // hysteria2
-        {"fingerprint", {true, "string"}}, // hysteria2
-        {"hop-interval", {true, "int"}}, // hysteria2
-        {"initial-connection-receive-window", {true, "int"}}, // hysteria2
-        {"initial-stream-receive-window", {true, "int"}}, // hysteria2
-        {"interface-name", {true, "string"}}, // BasicOption
-        {"ip-version", {true, "string"}}, // BasicOption
-        {"max-connection-receive-window", {true, "int"}}, // hysteria2
-        {"max-stream-receive-window", {true, "int"}}, // hysteria2
-        {"mptcp", {true, "bool"}}, // BasicOption
-        {"name", {true, "string"}}, // hysteria2
-        {"obfs", {true, "string"}}, // hysteria2
-        {"obfs-password", {true, "string"}}, // hysteria2
-        {"password", {true, "string"}}, // hysteria2
-        {"port", {true, "int"}}, // hysteria2
-        {"ports", {true, "string"}}, // hysteria2
-        {"private-key", {true, "string"}}, // hysteria2
-        {"routing-mark", {true, "int"}}, // BasicOption
-        {"server", {true, "string"}}, // hysteria2
-        {"skip-cert-verify", {true, "bool"}}, // hysteria2
-        {"sni", {true, "string"}}, // hysteria2
-        {"tfo", {true, "bool"}}, // BasicOption
-        {"udp-mtu", {true, "int"}}, // hysteria2
-        {"up", {true, "string"}}, // hysteria2
+        {"alpn", {true, "array", false}}, // hysteria2
+        {"certificate", {true, "string", false}}, // hysteria2
+        {"cwnd", {true, "int", false}}, // hysteria2
+        {"dialer-proxy", {true, "string", false}}, // BasicOption
+        {"down", {true, "string", false}}, // hysteria2
+        {"ech-opts", {true, "string", false}}, // hysteria2
+        {"fingerprint", {true, "string", false}}, // hysteria2
+        {"hop-interval", {true, "int", false}}, // hysteria2
+        {"initial-connection-receive-window", {true, "int", false}}, // hysteria2
+        {"initial-stream-receive-window", {true, "int", false}}, // hysteria2
+        {"interface-name", {true, "string", false}}, // BasicOption
+        {"ip-version", {true, "string", false}}, // BasicOption
+        {"max-connection-receive-window", {true, "int", false}}, // hysteria2
+        {"max-stream-receive-window", {true, "int", false}}, // hysteria2
+        {"mptcp", {true, "bool", false}}, // BasicOption
+        {"name", {true, "string", false}}, // hysteria2
+        {"obfs", {true, "string", false}}, // hysteria2
+        {"obfs-password", {true, "string", false}}, // hysteria2
+        {"password", {true, "string", false}}, // hysteria2
+        {"port", {true, "int", true}}, // hysteria2 [HARDCODED]
+        {"ports", {true, "string", false}}, // hysteria2
+        {"private-key", {true, "string", false}}, // hysteria2
+        {"routing-mark", {true, "int", false}}, // BasicOption
+        {"server", {true, "string", false}}, // hysteria2
+        {"skip-cert-verify", {true, "bool", false}}, // hysteria2
+        {"sni", {true, "string", false}}, // hysteria2
+        {"tfo", {true, "bool", false}}, // BasicOption
+        {"udp-mtu", {true, "int", false}}, // hysteria2
+        {"up", {true, "string", false}}, // hysteria2
     }},
     // Protocol: socks
     {"socks", {
-        {"certificate", {true, "string"}}, // socks
-        {"dialer-proxy", {true, "string"}}, // BasicOption
-        {"fingerprint", {true, "string"}}, // socks
-        {"interface-name", {true, "string"}}, // BasicOption
-        {"ip-version", {true, "string"}}, // BasicOption
-        {"mptcp", {true, "bool"}}, // BasicOption
-        {"name", {true, "string"}}, // socks
-        {"password", {true, "string"}}, // socks
-        {"port", {true, "int"}}, // socks
-        {"private-key", {true, "string"}}, // socks
-        {"routing-mark", {true, "int"}}, // BasicOption
-        {"server", {true, "string"}}, // socks
-        {"skip-cert-verify", {true, "bool"}}, // socks
-        {"tfo", {true, "bool"}}, // BasicOption
-        {"tls", {true, "bool"}}, // socks
-        {"udp", {true, "bool"}}, // socks
-        {"username", {true, "string"}}, // socks
+        {"certificate", {true, "string", false}}, // socks
+        {"dialer-proxy", {true, "string", false}}, // BasicOption
+        {"fingerprint", {true, "string", false}}, // socks
+        {"interface-name", {true, "string", false}}, // BasicOption
+        {"ip-version", {true, "string", false}}, // BasicOption
+        {"mptcp", {true, "bool", false}}, // BasicOption
+        {"name", {true, "string", false}}, // socks
+        {"password", {true, "string", false}}, // socks
+        {"port", {true, "int", false}}, // socks
+        {"private-key", {true, "string", false}}, // socks
+        {"routing-mark", {true, "int", false}}, // BasicOption
+        {"server", {true, "string", false}}, // socks
+        {"skip-cert-verify", {true, "bool", false}}, // socks
+        {"tfo", {true, "bool", false}}, // BasicOption
+        {"tls", {true, "bool", false}}, // socks
+        {"udp", {true, "bool", false}}, // socks
+        {"username", {true, "string", false}}, // socks
     }},
     // Protocol: socks5
     {"socks5", {
-        {"certificate", {true, "string"}}, // socks5
-        {"dialer-proxy", {true, "string"}}, // BasicOption
-        {"fingerprint", {true, "string"}}, // socks5
-        {"interface-name", {true, "string"}}, // BasicOption
-        {"ip-version", {true, "string"}}, // BasicOption
-        {"mptcp", {true, "bool"}}, // BasicOption
-        {"name", {true, "string"}}, // socks5
-        {"password", {true, "string"}}, // socks5
-        {"port", {true, "int"}}, // socks5
-        {"private-key", {true, "string"}}, // socks5
-        {"routing-mark", {true, "int"}}, // BasicOption
-        {"server", {true, "string"}}, // socks5
-        {"skip-cert-verify", {true, "bool"}}, // socks5
-        {"tfo", {true, "bool"}}, // BasicOption
-        {"tls", {true, "bool"}}, // socks5
-        {"udp", {true, "bool"}}, // socks5
-        {"username", {true, "string"}}, // socks5
+        {"certificate", {true, "string", false}}, // socks5
+        {"dialer-proxy", {true, "string", false}}, // BasicOption
+        {"fingerprint", {true, "string", false}}, // socks5
+        {"interface-name", {true, "string", false}}, // BasicOption
+        {"ip-version", {true, "string", false}}, // BasicOption
+        {"mptcp", {true, "bool", false}}, // BasicOption
+        {"name", {true, "string", false}}, // socks5
+        {"password", {true, "string", false}}, // socks5
+        {"port", {true, "int", false}}, // socks5
+        {"private-key", {true, "string", false}}, // socks5
+        {"routing-mark", {true, "int", false}}, // BasicOption
+        {"server", {true, "string", false}}, // socks5
+        {"skip-cert-verify", {true, "bool", false}}, // socks5
+        {"tfo", {true, "bool", false}}, // BasicOption
+        {"tls", {true, "bool", false}}, // socks5
+        {"udp", {true, "bool", false}}, // socks5
+        {"username", {true, "string", false}}, // socks5
     }},
     // Protocol: socks5h
     {"socks5h", {
-        {"certificate", {true, "string"}}, // socks5h
-        {"dialer-proxy", {true, "string"}}, // BasicOption
-        {"fingerprint", {true, "string"}}, // socks5h
-        {"interface-name", {true, "string"}}, // BasicOption
-        {"ip-version", {true, "string"}}, // BasicOption
-        {"mptcp", {true, "bool"}}, // BasicOption
-        {"name", {true, "string"}}, // socks5h
-        {"password", {true, "string"}}, // socks5h
-        {"port", {true, "int"}}, // socks5h
-        {"private-key", {true, "string"}}, // socks5h
-        {"routing-mark", {true, "int"}}, // BasicOption
-        {"server", {true, "string"}}, // socks5h
-        {"skip-cert-verify", {true, "bool"}}, // socks5h
-        {"tfo", {true, "bool"}}, // BasicOption
-        {"tls", {true, "bool"}}, // socks5h
-        {"udp", {true, "bool"}}, // socks5h
-        {"username", {true, "string"}}, // socks5h
+        {"certificate", {true, "string", false}}, // socks5h
+        {"dialer-proxy", {true, "string", false}}, // BasicOption
+        {"fingerprint", {true, "string", false}}, // socks5h
+        {"interface-name", {true, "string", false}}, // BasicOption
+        {"ip-version", {true, "string", false}}, // BasicOption
+        {"mptcp", {true, "bool", false}}, // BasicOption
+        {"name", {true, "string", false}}, // socks5h
+        {"password", {true, "string", false}}, // socks5h
+        {"port", {true, "int", false}}, // socks5h
+        {"private-key", {true, "string", false}}, // socks5h
+        {"routing-mark", {true, "int", false}}, // BasicOption
+        {"server", {true, "string", false}}, // socks5h
+        {"skip-cert-verify", {true, "bool", false}}, // socks5h
+        {"tfo", {true, "bool", false}}, // BasicOption
+        {"tls", {true, "bool", false}}, // socks5h
+        {"udp", {true, "bool", false}}, // socks5h
+        {"username", {true, "string", false}}, // socks5h
     }},
     // Protocol: ss
     {"ss", {
-        {"cipher", {true, "string"}}, // ss
-        {"client-fingerprint", {true, "string"}}, // ss
-        {"dialer-proxy", {true, "string"}}, // BasicOption
-        {"interface-name", {true, "string"}}, // BasicOption
-        {"ip-version", {true, "string"}}, // BasicOption
-        {"mptcp", {true, "bool"}}, // BasicOption
-        {"name", {true, "string"}}, // ss
-        {"password", {true, "string"}}, // ss
-        {"plugin", {true, "string"}}, // ss
-        {"plugin-opts", {true, "object"}}, // ss
-        {"port", {true, "int"}}, // ss
-        {"routing-mark", {true, "int"}}, // BasicOption
-        {"server", {true, "string"}}, // ss
-        {"tfo", {true, "bool"}}, // BasicOption
-        {"udp", {true, "bool"}}, // ss
-        {"udp-over-tcp", {true, "bool"}}, // ss
-        {"udp-over-tcp-version", {true, "int"}}, // ss
+        {"cipher", {true, "string", false}}, // ss
+        {"client-fingerprint", {true, "string", false}}, // ss
+        {"dialer-proxy", {true, "string", false}}, // BasicOption
+        {"interface-name", {true, "string", false}}, // BasicOption
+        {"ip-version", {true, "string", false}}, // BasicOption
+        {"mptcp", {true, "bool", false}}, // BasicOption
+        {"name", {true, "string", false}}, // ss
+        {"password", {true, "string", false}}, // ss
+        {"plugin", {true, "string", true}}, // ss [HARDCODED]
+        {"plugin-opts", {true, "object", false}}, // ss
+        {"port", {true, "int", false}}, // ss
+        {"routing-mark", {true, "int", false}}, // BasicOption
+        {"server", {true, "string", false}}, // ss
+        {"tfo", {true, "bool", false}}, // BasicOption
+        {"udp", {true, "bool", true}}, // ss [HARDCODED]
+        {"udp-over-tcp", {true, "bool", true}}, // ss [HARDCODED]
+        {"udp-over-tcp-version", {true, "int", false}}, // ss
     }},
     // Protocol: ssr
     {"ssr", {
-        {"cipher", {true, "string"}}, // ssr
-        {"dialer-proxy", {true, "string"}}, // BasicOption
-        {"interface-name", {true, "string"}}, // BasicOption
-        {"ip-version", {true, "string"}}, // BasicOption
-        {"mptcp", {true, "bool"}}, // BasicOption
-        {"name", {true, "string"}}, // ssr
-        {"obfs", {true, "string"}}, // ssr
-        {"obfs-param", {true, "string"}}, // ssr
-        {"password", {true, "string"}}, // ssr
-        {"port", {true, "int"}}, // ssr
-        {"protocol", {true, "string"}}, // ssr
-        {"protocol-param", {true, "string"}}, // ssr
-        {"routing-mark", {true, "int"}}, // BasicOption
-        {"server", {true, "string"}}, // ssr
-        {"tfo", {true, "bool"}}, // BasicOption
-        {"udp", {true, "bool"}}, // ssr
+        {"cipher", {true, "string", false}}, // ssr
+        {"dialer-proxy", {true, "string", false}}, // BasicOption
+        {"interface-name", {true, "string", false}}, // BasicOption
+        {"ip-version", {true, "string", false}}, // BasicOption
+        {"mptcp", {true, "bool", false}}, // BasicOption
+        {"name", {true, "string", false}}, // ssr
+        {"obfs", {true, "string", false}}, // ssr
+        {"obfs-param", {true, "string", false}}, // ssr
+        {"password", {true, "string", false}}, // ssr
+        {"port", {true, "int", false}}, // ssr
+        {"protocol", {true, "string", false}}, // ssr
+        {"protocol-param", {true, "string", false}}, // ssr
+        {"routing-mark", {true, "int", false}}, // BasicOption
+        {"server", {true, "string", false}}, // ssr
+        {"tfo", {true, "bool", false}}, // BasicOption
+        {"udp", {true, "bool", true}}, // ssr [HARDCODED]
     }},
     // Protocol: trojan
     {"trojan", {
-        {"alpn", {true, "array"}}, // trojan
-        {"certificate", {true, "string"}}, // trojan
-        {"client-fingerprint", {true, "string"}}, // trojan
-        {"dialer-proxy", {true, "string"}}, // BasicOption
-        {"ech-opts", {true, "string"}}, // trojan
-        {"fingerprint", {true, "string"}}, // trojan
-        {"grpc-opts", {true, "string"}}, // trojan
-        {"interface-name", {true, "string"}}, // BasicOption
-        {"ip-version", {true, "string"}}, // BasicOption
-        {"mptcp", {true, "bool"}}, // BasicOption
-        {"name", {true, "string"}}, // trojan
-        {"network", {true, "string"}}, // trojan
-        {"password", {true, "string"}}, // trojan
-        {"port", {true, "int"}}, // trojan
-        {"private-key", {true, "string"}}, // trojan
-        {"reality-opts", {true, "string"}}, // trojan
-        {"routing-mark", {true, "int"}}, // BasicOption
-        {"server", {true, "string"}}, // trojan
-        {"skip-cert-verify", {true, "bool"}}, // trojan
-        {"sni", {true, "string"}}, // trojan
-        {"ss-opts", {true, "string"}}, // trojan
-        {"tfo", {true, "bool"}}, // BasicOption
-        {"udp", {true, "bool"}}, // trojan
-        {"ws-opts", {true, "string"}}, // trojan
+        {"alpn", {true, "array", false}}, // trojan
+        {"certificate", {true, "string", false}}, // trojan
+        {"client-fingerprint", {true, "string", false}}, // trojan
+        {"dialer-proxy", {true, "string", false}}, // BasicOption
+        {"ech-opts", {true, "string", false}}, // trojan
+        {"fingerprint", {true, "string", false}}, // trojan
+        {"grpc-opts", {true, "string", false}}, // trojan
+        {"interface-name", {true, "string", false}}, // BasicOption
+        {"ip-version", {true, "string", false}}, // BasicOption
+        {"mptcp", {true, "bool", false}}, // BasicOption
+        {"name", {true, "string", false}}, // trojan
+        {"network", {true, "string", false}}, // trojan
+        {"password", {true, "string", false}}, // trojan
+        {"port", {true, "int", false}}, // trojan
+        {"private-key", {true, "string", false}}, // trojan
+        {"reality-opts", {true, "string", false}}, // trojan
+        {"routing-mark", {true, "int", false}}, // BasicOption
+        {"server", {true, "string", false}}, // trojan
+        {"skip-cert-verify", {true, "bool", false}}, // trojan
+        {"sni", {true, "string", false}}, // trojan
+        {"ss-opts", {true, "string", false}}, // trojan
+        {"tfo", {true, "bool", false}}, // BasicOption
+        {"udp", {true, "bool", true}}, // trojan [HARDCODED]
+        {"ws-opts", {true, "string", false}}, // trojan
     }},
     // Protocol: tuic
     {"tuic", {
-        {"alpn", {true, "array"}}, // tuic
-        {"certificate", {true, "string"}}, // tuic
-        {"congestion-controller", {true, "string"}}, // tuic
-        {"cwnd", {true, "int"}}, // tuic
-        {"dialer-proxy", {true, "string"}}, // BasicOption
-        {"disable-mtu-discovery", {true, "bool"}}, // tuic
-        {"disable-sni", {true, "bool"}}, // tuic
-        {"ech-opts", {true, "string"}}, // tuic
-        {"fast-open", {true, "bool"}}, // tuic
-        {"fingerprint", {true, "string"}}, // tuic
-        {"heartbeat-interval", {true, "int"}}, // tuic
-        {"interface-name", {true, "string"}}, // BasicOption
-        {"ip", {true, "string"}}, // tuic
-        {"ip-version", {true, "string"}}, // BasicOption
-        {"max-datagram-frame-size", {true, "int"}}, // tuic
-        {"max-open-streams", {true, "int"}}, // tuic
-        {"max-udp-relay-packet-size", {true, "int"}}, // tuic
-        {"mptcp", {true, "bool"}}, // BasicOption
-        {"name", {true, "string"}}, // tuic
-        {"password", {true, "string"}}, // tuic
-        {"port", {true, "int"}}, // tuic
-        {"private-key", {true, "string"}}, // tuic
-        {"recv-window", {true, "int"}}, // tuic
-        {"recv-window-conn", {true, "int"}}, // tuic
-        {"reduce-rtt", {true, "bool"}}, // tuic
-        {"request-timeout", {true, "int"}}, // tuic
-        {"routing-mark", {true, "int"}}, // BasicOption
-        {"server", {true, "string"}}, // tuic
-        {"skip-cert-verify", {true, "bool"}}, // tuic
-        {"sni", {true, "string"}}, // tuic
-        {"tfo", {true, "bool"}}, // BasicOption
-        {"token", {true, "string"}}, // tuic
-        {"udp-over-stream", {true, "bool"}}, // tuic
-        {"udp-over-stream-version", {true, "int"}}, // tuic
-        {"udp-relay-mode", {true, "string"}}, // tuic
-        {"uuid", {true, "string"}}, // tuic
+        {"alpn", {true, "array", false}}, // tuic
+        {"certificate", {true, "string", false}}, // tuic
+        {"congestion-controller", {true, "string", false}}, // tuic
+        {"cwnd", {true, "int", false}}, // tuic
+        {"dialer-proxy", {true, "string", false}}, // BasicOption
+        {"disable-mtu-discovery", {true, "bool", false}}, // tuic
+        {"disable-sni", {true, "bool", true}}, // tuic [HARDCODED]
+        {"ech-opts", {true, "string", false}}, // tuic
+        {"fast-open", {true, "bool", false}}, // tuic
+        {"fingerprint", {true, "string", false}}, // tuic
+        {"heartbeat-interval", {true, "int", false}}, // tuic
+        {"interface-name", {true, "string", false}}, // BasicOption
+        {"ip", {true, "string", false}}, // tuic
+        {"ip-version", {true, "string", false}}, // BasicOption
+        {"max-datagram-frame-size", {true, "int", false}}, // tuic
+        {"max-open-streams", {true, "int", false}}, // tuic
+        {"max-udp-relay-packet-size", {true, "int", false}}, // tuic
+        {"mptcp", {true, "bool", false}}, // BasicOption
+        {"name", {true, "string", false}}, // tuic
+        {"password", {true, "string", false}}, // tuic
+        {"port", {true, "int", false}}, // tuic
+        {"private-key", {true, "string", false}}, // tuic
+        {"recv-window", {true, "int", false}}, // tuic
+        {"recv-window-conn", {true, "int", false}}, // tuic
+        {"reduce-rtt", {true, "bool", false}}, // tuic
+        {"request-timeout", {true, "int", false}}, // tuic
+        {"routing-mark", {true, "int", false}}, // BasicOption
+        {"server", {true, "string", false}}, // tuic
+        {"skip-cert-verify", {true, "bool", false}}, // tuic
+        {"sni", {true, "string", false}}, // tuic
+        {"tfo", {true, "bool", false}}, // BasicOption
+        {"token", {true, "string", false}}, // tuic
+        {"udp-over-stream", {true, "bool", false}}, // tuic
+        {"udp-over-stream-version", {true, "int", false}}, // tuic
+        {"udp-relay-mode", {true, "string", false}}, // tuic
+        {"uuid", {true, "string", false}}, // tuic
     }},
     // Protocol: vless
     {"vless", {
-        {"alpn", {true, "array"}}, // vless
-        {"certificate", {true, "string"}}, // vless
-        {"client-fingerprint", {true, "string"}}, // vless
-        {"dialer-proxy", {true, "string"}}, // BasicOption
-        {"ech-opts", {true, "string"}}, // vless
-        {"encryption", {true, "string"}}, // vless
-        {"fingerprint", {true, "string"}}, // vless
-        {"flow", {true, "string"}}, // vless
-        {"grpc-opts", {true, "string"}}, // vless
-        {"h2-opts", {true, "string"}}, // vless
-        {"http-opts", {true, "string"}}, // vless
-        {"interface-name", {true, "string"}}, // BasicOption
-        {"ip-version", {true, "string"}}, // BasicOption
-        {"mptcp", {true, "bool"}}, // BasicOption
-        {"name", {true, "string"}}, // vless
-        {"network", {true, "string"}}, // vless
-        {"packet-addr", {true, "bool"}}, // vless
-        {"packet-encoding", {true, "string"}}, // vless
-        {"port", {true, "int"}}, // vless
-        {"private-key", {true, "string"}}, // vless
-        {"reality-opts", {true, "string"}}, // vless
-        {"routing-mark", {true, "int"}}, // BasicOption
-        {"server", {true, "string"}}, // vless
-        {"servername", {true, "string"}}, // vless
-        {"skip-cert-verify", {true, "bool"}}, // vless
-        {"tfo", {true, "bool"}}, // BasicOption
-        {"tls", {true, "bool"}}, // vless
-        {"udp", {true, "bool"}}, // vless
-        {"uuid", {true, "string"}}, // vless
-        {"ws-headers", {true, "object"}}, // vless
-        {"ws-opts", {true, "string"}}, // vless
-        {"xudp", {true, "bool"}}, // vless
+        {"alpn", {true, "array", false}}, // vless
+        {"certificate", {true, "string", false}}, // vless
+        {"client-fingerprint", {true, "string", false}}, // vless
+        {"dialer-proxy", {true, "string", false}}, // BasicOption
+        {"ech-opts", {true, "string", false}}, // vless
+        {"encryption", {true, "string", false}}, // vless
+        {"fingerprint", {true, "string", false}}, // vless
+        {"flow", {true, "string", false}}, // vless
+        {"grpc-opts", {true, "string", false}}, // vless
+        {"h2-opts", {true, "string", false}}, // vless
+        {"http-opts", {true, "string", false}}, // vless
+        {"interface-name", {true, "string", false}}, // BasicOption
+        {"ip-version", {true, "string", false}}, // BasicOption
+        {"mptcp", {true, "bool", false}}, // BasicOption
+        {"name", {true, "string", false}}, // vless
+        {"network", {true, "string", false}}, // vless
+        {"packet-addr", {true, "bool", false}}, // vless
+        {"packet-encoding", {true, "string", false}}, // vless
+        {"port", {true, "int", false}}, // vless
+        {"private-key", {true, "string", false}}, // vless
+        {"reality-opts", {true, "string", false}}, // vless
+        {"routing-mark", {true, "int", false}}, // BasicOption
+        {"server", {true, "string", false}}, // vless
+        {"servername", {true, "string", false}}, // vless
+        {"skip-cert-verify", {true, "bool", false}}, // vless
+        {"tfo", {true, "bool", false}}, // BasicOption
+        {"tls", {true, "bool", false}}, // vless
+        {"udp", {true, "bool", false}}, // vless
+        {"uuid", {true, "string", false}}, // vless
+        {"ws-headers", {true, "object", false}}, // vless
+        {"ws-opts", {true, "string", false}}, // vless
+        {"xudp", {true, "bool", false}}, // vless
     }},
     // Protocol: vmess
     {"vmess", {
-        {"alpn", {true, "array"}}, // vmess
-        {"alterId", {true, "int"}}, // vmess
-        {"authenticated-length", {true, "bool"}}, // vmess
-        {"certificate", {true, "string"}}, // vmess
-        {"cipher", {true, "string"}}, // vmess
-        {"client-fingerprint", {true, "string"}}, // vmess
-        {"dialer-proxy", {true, "string"}}, // BasicOption
-        {"ech-opts", {true, "string"}}, // vmess
-        {"fingerprint", {true, "string"}}, // vmess
-        {"global-padding", {true, "bool"}}, // vmess
-        {"grpc-opts", {true, "string"}}, // vmess
-        {"h2-opts", {true, "string"}}, // vmess
-        {"http-opts", {true, "string"}}, // vmess
-        {"interface-name", {true, "string"}}, // BasicOption
-        {"ip-version", {true, "string"}}, // BasicOption
-        {"mptcp", {true, "bool"}}, // BasicOption
-        {"name", {true, "string"}}, // vmess
-        {"network", {true, "string"}}, // vmess
-        {"packet-addr", {true, "bool"}}, // vmess
-        {"packet-encoding", {true, "string"}}, // vmess
-        {"port", {true, "int"}}, // vmess
-        {"private-key", {true, "string"}}, // vmess
-        {"reality-opts", {true, "string"}}, // vmess
-        {"routing-mark", {true, "int"}}, // BasicOption
-        {"server", {true, "string"}}, // vmess
-        {"servername", {true, "string"}}, // vmess
-        {"skip-cert-verify", {true, "bool"}}, // vmess
-        {"tfo", {true, "bool"}}, // BasicOption
-        {"tls", {true, "bool"}}, // vmess
-        {"udp", {true, "bool"}}, // vmess
-        {"uuid", {true, "string"}}, // vmess
-        {"ws-opts", {true, "string"}}, // vmess
-        {"xudp", {true, "bool"}}, // vmess
+        {"alpn", {true, "array", false}}, // vmess
+        {"alterId", {true, "int", true}}, // vmess [HARDCODED]
+        {"authenticated-length", {true, "bool", false}}, // vmess
+        {"certificate", {true, "string", false}}, // vmess
+        {"cipher", {true, "string", true}}, // vmess [HARDCODED]
+        {"client-fingerprint", {true, "string", false}}, // vmess
+        {"dialer-proxy", {true, "string", false}}, // BasicOption
+        {"ech-opts", {true, "string", false}}, // vmess
+        {"fingerprint", {true, "string", false}}, // vmess
+        {"global-padding", {true, "bool", false}}, // vmess
+        {"grpc-opts", {true, "string", false}}, // vmess
+        {"h2-opts", {true, "string", false}}, // vmess
+        {"http-opts", {true, "string", false}}, // vmess
+        {"interface-name", {true, "string", false}}, // BasicOption
+        {"ip-version", {true, "string", false}}, // BasicOption
+        {"mptcp", {true, "bool", false}}, // BasicOption
+        {"name", {true, "string", false}}, // vmess
+        {"network", {true, "string", false}}, // vmess
+        {"packet-addr", {true, "bool", false}}, // vmess
+        {"packet-encoding", {true, "string", false}}, // vmess
+        {"port", {true, "int", false}}, // vmess
+        {"private-key", {true, "string", false}}, // vmess
+        {"reality-opts", {true, "string", false}}, // vmess
+        {"routing-mark", {true, "int", false}}, // BasicOption
+        {"server", {true, "string", false}}, // vmess
+        {"servername", {true, "string", false}}, // vmess
+        {"skip-cert-verify", {true, "bool", true}}, // vmess [HARDCODED]
+        {"tfo", {true, "bool", false}}, // BasicOption
+        {"tls", {true, "bool", true}}, // vmess [HARDCODED]
+        {"udp", {true, "bool", true}}, // vmess [HARDCODED]
+        {"uuid", {true, "string", false}}, // vmess
+        {"ws-opts", {true, "string", false}}, // vmess
+        {"xudp", {true, "bool", true}}, // vmess [HARDCODED]
     }},
 };
 
@@ -422,6 +423,15 @@ inline bool isParamSupported(const std::string& protocol, const std::string& par
     if (proto_it == PARAM_COMPAT.end()) return false;
     auto param_it = proto_it->second.find(param);
     return param_it != proto_it->second.end() && param_it->second.supported;
+}
+
+// Check if a parameter is hardcoded by Mihomo for this protocol
+// Hardcoded parameters should NOT be overridden by global settings
+inline bool isParamHardcoded(const std::string& protocol, const std::string& param) {
+    auto proto_it = PARAM_COMPAT.find(protocol);
+    if (proto_it == PARAM_COMPAT.end()) return false;
+    auto param_it = proto_it->second.find(param);
+    return param_it != proto_it->second.end() && param_it->second.hardcoded;
 }
 
 } // namespace mihomo

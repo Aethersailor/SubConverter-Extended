@@ -193,24 +193,74 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
       return 0; // Handled
     }
 
-    // 检测链接类型
-    bool isHttpUrl =
-        startsWith(link, "http://") || startsWith(link, "https://");
-    bool isNodeLink = false;
-#ifdef USE_MIHOMO_PARSER
-    for (const auto &scheme : mihomo::SUPPORTED_SCHEMES) {
-      if (startsWith(link, scheme + "://")) {
+    // ========== 智能订阅/节点链接分流逻辑 ==========
+    // 目标：准确区分订阅链接和节点链接，支持多种格式
+
+    bool isSubscription = false; // 订阅链接标志
+    bool isNodeLink = false;     // 节点链接标志
+
+    // 规则 1: HTTP(S) 开头的链接
+    if (startsWith(link, "http://") || startsWith(link, "https://")) {
+      size_t protocolEnd = link.find("://") + 3;
+      size_t pathStart = link.find("/", protocolEnd);
+      size_t queryStart = link.find("?", protocolEnd);
+
+      // 有查询参数 = 订阅（非常明确）
+      // 例如: https://api.com/sub?token=xxx
+      if (queryStart != link.npos) {
+        isSubscription = true;
+      }
+      // 有实际路径（不只是单个 /）= 订阅
+      // 例如: https://api.com/api/v1/sub
+      else if (pathStart != link.npos) {
+        std::string path = link.substr(pathStart);
+        if (path.length() > 1) { // 路径长度 > 1（不只是尾部 /）
+          isSubscription = true;
+        } else {
+          // 只有单个 "/" = 可能是 HTTP 代理节点
+          // 例如: http://proxy.com:8080/
+          isNodeLink = true;
+        }
+      }
+      // 无路径无参数 = HTTP 代理节点
+      // 例如: http://proxy.com:8080
+      else {
         isNodeLink = true;
-        break;
       }
     }
+    // 规则 2: 无协议头（无 ://）= 订阅
+    // 用户可能省略 http:// 或 https://
+    // 例如: api.com/sub, example.com/clash?token=xxx, sub.domain.com
+    else if (link.find("://") == link.npos) {
+      isSubscription = true;
+      writeLog(LOG_TYPE_INFO,
+               "Link without protocol detected, treating as subscription: " +
+                   link);
+    }
+    // 规则 3: 在 SUPPORTED_SCHEMES 中 = 节点链接
+    // 例如: trojan://..., vmess://..., hysteria2://...
+    else {
+#ifdef USE_MIHOMO_PARSER
+      for (const auto &scheme : mihomo::SUPPORTED_SCHEMES) {
+        if (startsWith(link, scheme + "://")) {
+          isNodeLink = true;
+          break;
+        }
+      }
 #endif
-    if (!isNodeLink) {
-      isNodeLink = (startsWith(link, "http://") && link.find("@") != link.npos);
+      // 规则 4: 其他未知协议 = 节点链接（喂给 Mihomo 尝试）
+      // 例如: newproto://..., unknown://...
+      // 让 Mihomo 的静默失败机制过滤无效链接
+      if (!isNodeLink) {
+        isNodeLink = true;
+        writeLog(LOG_TYPE_INFO,
+                 "Unknown protocol detected, feeding to Mihomo parser: " +
+                     link);
+      }
     }
 
-    // HTTP(S) 订阅 URL：不下载，不解析，直接跳过（交给 proxy-provider 处理）
-    if (isHttpUrl && !isNodeLink) {
+    // 处理订阅链接：跳过下载，交给 proxy-provider
+    if (isSubscription) {
       writeLog(LOG_TYPE_INFO, "Subscription URL detected, skipping download "
                               "(will be used as proxy-provider): " +
                                   link);
