@@ -372,6 +372,10 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
 
         writeLog(LOG_TYPE_INFO, "Mihomo parser successfully parsed " +
                                     std::to_string(nodes.size()) + " nodes.");
+        // Debug: Log first node name if available
+        if (!nodes.empty()) {
+          writeLog(LOG_TYPE_INFO, "First node: " + nodes[0].Remark);
+        }
       } catch (const std::exception &e) {
         writeLog(LOG_TYPE_ERROR,
                  "Mihomo parser error: " + std::string(e.what()) +
@@ -396,13 +400,22 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
         if (!getSubInfoFromHeader(extra_headers, subInfo))
           getSubInfoFromNodes(nodes, stream_rules, time_rules, subInfo);
       }
+      writeLog(LOG_TYPE_INFO,
+               "Nodes before filtering: " + std::to_string(nodes.size()));
       filterNodes(nodes, exclude_remarks, include_remarks, groupID);
+      writeLog(LOG_TYPE_INFO,
+               "Nodes after filtering: " + std::to_string(nodes.size()));
       for (Proxy &x : nodes) {
         x.GroupId = groupID;
         if (custom_group.size())
           x.Group = custom_group;
       }
+      writeLog(LOG_TYPE_INFO, "Copying " + std::to_string(nodes.size()) +
+                                  " nodes to allNodes");
       copyNodes(nodes, allNodes);
+      writeLog(LOG_TYPE_INFO, "allNodes now has " +
+                                  std::to_string(allNodes.size()) +
+                                  " total nodes");
     } else {
       writeLog(LOG_TYPE_ERROR, "Cannot download subscription data.");
       return -1;
