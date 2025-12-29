@@ -1426,19 +1426,12 @@ std::string getProfile(RESPONSE_CALLBACK_ARGS) {
     *status_code = 500;
     return "Broken profile!";
   }
+  // Token authentication has been disabled - these checks are removed
+  // All authentication logic is now bypassed
   auto profile_token = contents.find("profile_token");
-  if (profiles.size() == 1 && profile_token != contents.end()) {
-    if (token != profile_token->second) {
-      *status_code = 403;
-      return "Forbidden";
-    }
-    token = global.accessToken;
-  } else {
-    if (token != global.accessToken) {
-      *status_code = 403;
-      return "Forbidden";
-    }
-  }
+  // if (profiles.size() == 1 && profile_token != contents.end()) {
+  //   authentication skipped
+  // }
   /// check if more than one profile is provided
   if (profiles.size() > 1) {
     writeLog(0, "Multiple profiles are provided. Trying to combine profiles...",
@@ -1601,7 +1594,7 @@ int simpleGenerator() {
     if (ini.item_exist("profile")) {
       profile = ini.get("profile");
       request.argument.emplace("name", urlEncode(profile));
-      request.argument.emplace("token", global.accessToken);
+      // Token no longer needed as authentication is disabled
       request.argument.emplace("expand", "true");
       content = getProfile(request, response);
     } else {
