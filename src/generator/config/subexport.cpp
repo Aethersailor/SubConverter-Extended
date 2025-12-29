@@ -397,10 +397,8 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
       // below to avoid double-setting or overwriting with empty defaults.
 
       // CRITICAL: Add the node to output before continuing!
-      if (proxy_compact)
-        singleproxy.SetStyle(YAML::EmitterStyle::Flow);
-      else if (proxy_block)
-        singleproxy.SetStyle(YAML::EmitterStyle::Block);
+      // Force Flow style for consistent, compact output
+      singleproxy.SetStyle(YAML::EmitterStyle::Flow);
       proxies.push_back(singleproxy);
       nodelist.emplace_back(x);
 
