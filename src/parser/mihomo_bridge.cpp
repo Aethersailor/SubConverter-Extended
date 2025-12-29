@@ -3,7 +3,6 @@
 #include <sstream>
 #include <stdexcept>
 
-
 // Go library functions (generated from libconvert.h)
 extern "C" {
 char *ConvertSubscription(char *data);
@@ -53,7 +52,23 @@ std::vector<ProxyNode> parseSubscription(const std::string &subscription) {
       node.name = item.value("name", "");
       node.type = item.value("type", "");
       node.server = item.value("server", "");
-      node.port = item.value("port", 0);
+
+      // Port: handle both number and string
+      if (item.contains("port")) {
+        if (item["port"].is_number()) {
+          node.port = item["port"].get<int>();
+        } else if (item["port"].is_string()) {
+          try {
+            node.port = std::stoi(item["port"].get<std::string>());
+          } catch (...) {
+            node.port = 0;
+          }
+        } else {
+          node.port = 0;
+        }
+      } else {
+        node.port = 0;
+      }
 
       // Store all other fields in params
       for (auto it = item.begin(); it != item.end(); ++it) {
@@ -63,8 +78,10 @@ std::vector<ProxyNode> parseSubscription(const std::string &subscription) {
           std::string value;
           if (it->is_string()) {
             value = it->get<std::string>();
-          } else if (it->is_number()) {
+          } else if (it->is_number_integer()) {
             value = std::to_string(it->get<int>());
+          } else if (it->is_number_float()) {
+            value = std::to_string(it->get<double>());
           } else if (it->is_boolean()) {
             value = it->get<bool>() ? "true" : "false";
           } else {
