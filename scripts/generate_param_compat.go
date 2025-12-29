@@ -97,7 +97,21 @@ func main() {
 
 // findMihomoRoot locates the mihomo source directory
 func findMihomoRoot() string {
-	// Try several common locations relative to scripts directory
+	// Method 1: Check GOMODCACHE environment variable (Docker/CI)
+	goModCache := os.Getenv("GOMODCACHE")
+	if goModCache == "" {
+		goModCache = filepath.Join(os.Getenv("GOPATH"), "pkg", "mod")
+	}
+
+	if goModCache != "" && dirExists(goModCache) {
+		matches, err := filepath.Glob(filepath.Join(goModCache, "github.com", "metacubex", "mihomo@*"))
+		if err == nil && len(matches) > 0 {
+			log.Printf("Using mihomo from GOMODCACHE: %s\n", matches[0])
+			return matches[0]
+		}
+	}
+
+	// Method 2: Try several common locations relative to scripts directory
 	candidates := []string{
 		"../../mihomo",
 		"../mihomo",
