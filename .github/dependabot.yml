@@ -1,0 +1,46 @@
+version: 2
+updates:
+  # GitHub Actions 依赖
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule: 
+      interval: "daily"
+      time: "02:00"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 1
+    rebase-strategy: "auto"
+    labels: ["dependencies", "github-actions", "automerge"]
+    groups:
+      github-actions:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+  
+  # Docker 依赖
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule: 
+      interval: "daily"
+      time: "03:00"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 1
+    rebase-strategy: "auto"
+    labels: ["dependencies", "docker", "automerge"]
+    groups:
+      docker:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+  
+  # Go modules 依赖 (mihomo)
+  - package-ecosystem: "gomod"
+    directory: "/bridge"
+    schedule: 
+      interval: "daily"
+      time: "04:00"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 1
+    rebase-strategy: "auto"
+    labels: ["dependencies", "go", "automerge"]
+    groups:
+      go-dependencies:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
