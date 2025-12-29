@@ -1,5 +1,5 @@
 # ========== GO BUILD STAGE ==========
-FROM golang:1.22-bookworm AS go-builder
+FROM golang:1.25-bookworm AS go-builder
 
 WORKDIR /build/bridge
 
