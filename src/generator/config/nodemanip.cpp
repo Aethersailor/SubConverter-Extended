@@ -431,15 +431,48 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
     copyNodes(nodes, allNodes);
     break;
   default:
-    explode(link, node);
-    if (node.Type == ProxyType::Unknown) {
-      writeLog(LOG_TYPE_ERROR, "No valid link found.");
+    // 理论上不应该走到这里，因为：
+    // 1. 所有 Mihomo 协议都走 SUB case（由新分流逻辑处理）
+    // 2. HTTP(S)/SOCKS/Netch/Local 都有专门的 case
+    // 如果走到这里，说明有未处理的边缘情况
+    writeLog(LOG_TYPE_WARN,
+             "Unexpected link type, this should not happen: " + link);
+    writeLog(LOG_TYPE_INFO, "Attempting to parse with Mihomo as fallback...");
+
+    // 作为最后的 fallback，尝试喂给 Mihomo
+    strSub = link;
+    if (!strSub.empty()) {
+      writeLog(LOG_TYPE_INFO, "Parsing with mihomo parser (fallback)...");
+#ifdef USE_MIHOMO_PARSER
+      try {
+        auto mihomo_nodes = mihomo::parseSubscription(strSub);
+        for (const auto &mnode : mihomo_nodes) {
+          Proxy node;
+          node.Remark = mnode.name;
+          node.Type = getProxyTypeFromString(mnode.type);
+          for (const auto &[key, value] : mnode.params) {
+            node.RawParams[key] = value;
+          }
+          node.RawParams["_mihomo_type"] = mnode.type;
+          node.GroupId = groupID;
+          if (!custom_group.empty())
+            node.Group = custom_group;
+          allNodes.emplace_back(std::move(node));
+        }
+      } catch (const std::exception &e) {
+        writeLog(LOG_TYPE_ERROR,
+                 "Mihomo fallback parsing failed: " + std::string(e.what()));
+        return -1;
+      }
+#else
+      writeLog(LOG_TYPE_ERROR,
+               "Mihomo parser not available and no other handler matched.");
+      return -1;
+#endif
+    } else {
+      writeLog(LOG_TYPE_ERROR, "No valid link found in default case.");
       return -1;
     }
-    node.GroupId = groupID;
-    if (!custom_group.empty())
-      node.Group = custom_group;
-    allNodes.emplace_back(std::move(node));
   }
   return 0;
 }
