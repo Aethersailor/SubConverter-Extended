@@ -188,7 +188,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
         // Recursive call or simplified processing for each link
         // Since we are already inside addNodes, and we know these are likely
         // links it's safest to treat them as individual subscriptions/nodes
-        addNodes(l, allNodes, groupID, settings);
+        addNodes(l, allNodes, groupID, parse_set);
       }
       return 0; // Handled
     }
