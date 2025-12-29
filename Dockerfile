@@ -111,8 +111,8 @@ RUN set -xe && \
     export CCACHE_COMPILERCHECK=content && \
     # Use Ninja generator and enable ccache
     cmake -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache . && \
-    # Parallel build
-    ninja -j ${THREADS}
+    # Parallel build (reduced from ${THREADS} to avoid OOM in Docker)
+    ninja -j 4
 
 # ========== FINAL STAGE ==========
 FROM debian:bookworm-slim
