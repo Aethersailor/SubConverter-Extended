@@ -1,0 +1,39 @@
+version: 2
+updates:
+  # 1. Maintain dependencies for GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    target-branch: "dev"
+    schedule:
+      interval: "daily"
+    groups:
+      actions:
+        patterns:
+          - "*"
+    labels:
+      - "dependencies"
+      - "ci"
+
+  # 2. Maintain dependencies for Docker
+  - package-ecosystem: "docker"
+    directory: "/"
+    target-branch: "dev"
+    schedule:
+      interval: "daily"
+    labels:
+      - "dependencies"
+      - "docker"
+
+  # 3. Maintain dependencies for Go Modules (Bridge)
+  - package-ecosystem: "gomod"
+    directory: "/bridge"
+    target-branch: "dev"
+    schedule:
+      interval: "daily"
+    groups:
+      go-dependencies:
+        patterns:
+          - "*"
+    labels:
+      - "dependencies"
+      - "go"
