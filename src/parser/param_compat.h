@@ -14,34 +14,8 @@ struct ParamCompatInfo {
 };
 
 const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT = {
-    // Protocol: anytls
-    {"anytls", {
-        {"alpn", {true, "array", false}}, // anytls
-        {"certificate", {true, "string", false}}, // anytls
-        {"client-fingerprint", {true, "string", false}}, // anytls
-        {"dialer-proxy", {true, "string", false}}, // BasicOption
-        {"ech-opts", {true, "string", false}}, // anytls
-        {"fingerprint", {true, "string", false}}, // anytls
-        {"idle-session-check-interval", {true, "int", false}}, // anytls
-        {"idle-session-timeout", {true, "int", false}}, // anytls
-        {"interface-name", {true, "string", false}}, // BasicOption
-        {"ip-version", {true, "string", false}}, // BasicOption
-        {"min-idle-session", {true, "int", false}}, // anytls
-        {"mptcp", {true, "bool", false}}, // BasicOption
-        {"name", {true, "string", false}}, // anytls
-        {"password", {true, "string", false}}, // anytls
-        {"port", {true, "int", false}}, // anytls
-        {"private-key", {true, "string", false}}, // anytls
-        {"routing-mark", {true, "int", false}}, // BasicOption
-        {"server", {true, "string", false}}, // anytls
-        {"skip-cert-verify", {true, "bool", false}}, // anytls
-        {"sni", {true, "string", false}}, // anytls
-        {"tfo", {true, "bool", false}}, // BasicOption
-        {"udp", {true, "bool", true}}, // anytls [HARDCODED]
-    }},
     // Protocol: http
     {"http", {
-        {"certificate", {true, "string", false}}, // http
         {"dialer-proxy", {true, "string", false}}, // BasicOption
         {"fingerprint", {true, "string", false}}, // http
         {"headers", {true, "object", false}}, // http
@@ -51,52 +25,26 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"name", {true, "string", false}}, // http
         {"password", {true, "string", false}}, // http
         {"port", {true, "int", false}}, // http
-        {"private-key", {true, "string", false}}, // http
         {"routing-mark", {true, "int", false}}, // BasicOption
         {"server", {true, "string", false}}, // http
-        {"skip-cert-verify", {true, "bool", true}}, // http [HARDCODED]
+        {"skip-cert-verify", {true, "bool", false}}, // http
         {"sni", {true, "string", false}}, // http
         {"tfo", {true, "bool", false}}, // BasicOption
-        {"tls", {true, "bool", true}}, // http [HARDCODED]
+        {"tls", {true, "bool", false}}, // http
         {"username", {true, "string", false}}, // http
-    }},
-    // Protocol: https
-    {"https", {
-        {"certificate", {true, "string", false}}, // https
-        {"dialer-proxy", {true, "string", false}}, // BasicOption
-        {"fingerprint", {true, "string", false}}, // https
-        {"headers", {true, "object", false}}, // https
-        {"interface-name", {true, "string", false}}, // BasicOption
-        {"ip-version", {true, "string", false}}, // BasicOption
-        {"mptcp", {true, "bool", false}}, // BasicOption
-        {"name", {true, "string", false}}, // https
-        {"password", {true, "string", false}}, // https
-        {"port", {true, "int", false}}, // https
-        {"private-key", {true, "string", false}}, // https
-        {"routing-mark", {true, "int", false}}, // BasicOption
-        {"server", {true, "string", false}}, // https
-        {"skip-cert-verify", {true, "bool", false}}, // https
-        {"sni", {true, "string", false}}, // https
-        {"tfo", {true, "bool", false}}, // BasicOption
-        {"tls", {true, "bool", false}}, // https
-        {"username", {true, "string", false}}, // https
     }},
     // Protocol: hy2
     {"hy2", {
         {"alpn", {true, "array", false}}, // hy2
-        {"certificate", {true, "string", false}}, // hy2
+        {"ca", {true, "string", false}}, // hy2
+        {"ca-str", {true, "string", false}}, // hy2
         {"cwnd", {true, "int", false}}, // hy2
         {"dialer-proxy", {true, "string", false}}, // BasicOption
         {"down", {true, "string", false}}, // hy2
-        {"ech-opts", {true, "string", false}}, // hy2
         {"fingerprint", {true, "string", false}}, // hy2
         {"hop-interval", {true, "int", false}}, // hy2
-        {"initial-connection-receive-window", {true, "int", false}}, // hy2
-        {"initial-stream-receive-window", {true, "int", false}}, // hy2
         {"interface-name", {true, "string", false}}, // BasicOption
         {"ip-version", {true, "string", false}}, // BasicOption
-        {"max-connection-receive-window", {true, "int", false}}, // hy2
-        {"max-stream-receive-window", {true, "int", false}}, // hy2
         {"mptcp", {true, "bool", false}}, // BasicOption
         {"name", {true, "string", false}}, // hy2
         {"obfs", {true, "string", false}}, // hy2
@@ -104,7 +52,6 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"password", {true, "string", false}}, // hy2
         {"port", {true, "int", false}}, // hy2
         {"ports", {true, "string", false}}, // hy2
-        {"private-key", {true, "string", false}}, // hy2
         {"routing-mark", {true, "int", false}}, // BasicOption
         {"server", {true, "string", false}}, // hy2
         {"skip-cert-verify", {true, "bool", false}}, // hy2
@@ -118,12 +65,12 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"alpn", {true, "array", false}}, // hysteria
         {"auth", {true, "string", false}}, // hysteria
         {"auth-str", {true, "string", false}}, // hysteria
-        {"certificate", {true, "string", false}}, // hysteria
+        {"ca", {true, "string", false}}, // hysteria
+        {"ca-str", {true, "string", false}}, // hysteria
         {"dialer-proxy", {true, "string", false}}, // BasicOption
         {"disable-mtu-discovery", {true, "bool", false}}, // hysteria
         {"down", {true, "string", false}}, // hysteria
         {"down-speed", {true, "int", false}}, // hysteria
-        {"ech-opts", {true, "string", false}}, // hysteria
         {"fast-open", {true, "bool", false}}, // hysteria
         {"fingerprint", {true, "string", false}}, // hysteria
         {"hop-interval", {true, "int", false}}, // hysteria
@@ -135,7 +82,6 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"obfs-protocol", {true, "string", false}}, // hysteria
         {"port", {true, "int", false}}, // hysteria
         {"ports", {true, "string", false}}, // hysteria
-        {"private-key", {true, "string", false}}, // hysteria
         {"protocol", {true, "string", false}}, // hysteria
         {"recv-window", {true, "int", false}}, // hysteria
         {"recv-window-conn", {true, "int", false}}, // hysteria
@@ -150,19 +96,15 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
     // Protocol: hysteria2
     {"hysteria2", {
         {"alpn", {true, "array", false}}, // hysteria2
-        {"certificate", {true, "string", false}}, // hysteria2
+        {"ca", {true, "string", false}}, // hysteria2
+        {"ca-str", {true, "string", false}}, // hysteria2
         {"cwnd", {true, "int", false}}, // hysteria2
         {"dialer-proxy", {true, "string", false}}, // BasicOption
         {"down", {true, "string", false}}, // hysteria2
-        {"ech-opts", {true, "string", false}}, // hysteria2
         {"fingerprint", {true, "string", false}}, // hysteria2
         {"hop-interval", {true, "int", false}}, // hysteria2
-        {"initial-connection-receive-window", {true, "int", false}}, // hysteria2
-        {"initial-stream-receive-window", {true, "int", false}}, // hysteria2
         {"interface-name", {true, "string", false}}, // BasicOption
         {"ip-version", {true, "string", false}}, // BasicOption
-        {"max-connection-receive-window", {true, "int", false}}, // hysteria2
-        {"max-stream-receive-window", {true, "int", false}}, // hysteria2
         {"mptcp", {true, "bool", false}}, // BasicOption
         {"name", {true, "string", false}}, // hysteria2
         {"obfs", {true, "string", false}}, // hysteria2
@@ -170,7 +112,6 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"password", {true, "string", false}}, // hysteria2
         {"port", {true, "int", true}}, // hysteria2 [HARDCODED]
         {"ports", {true, "string", false}}, // hysteria2
-        {"private-key", {true, "string", false}}, // hysteria2
         {"routing-mark", {true, "int", false}}, // BasicOption
         {"server", {true, "string", false}}, // hysteria2
         {"skip-cert-verify", {true, "bool", false}}, // hysteria2
@@ -181,7 +122,6 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
     }},
     // Protocol: socks
     {"socks", {
-        {"certificate", {true, "string", false}}, // socks
         {"dialer-proxy", {true, "string", false}}, // BasicOption
         {"fingerprint", {true, "string", false}}, // socks
         {"interface-name", {true, "string", false}}, // BasicOption
@@ -190,7 +130,6 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"name", {true, "string", false}}, // socks
         {"password", {true, "string", false}}, // socks
         {"port", {true, "int", false}}, // socks
-        {"private-key", {true, "string", false}}, // socks
         {"routing-mark", {true, "int", false}}, // BasicOption
         {"server", {true, "string", false}}, // socks
         {"skip-cert-verify", {true, "bool", false}}, // socks
@@ -201,7 +140,6 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
     }},
     // Protocol: socks5
     {"socks5", {
-        {"certificate", {true, "string", false}}, // socks5
         {"dialer-proxy", {true, "string", false}}, // BasicOption
         {"fingerprint", {true, "string", false}}, // socks5
         {"interface-name", {true, "string", false}}, // BasicOption
@@ -210,7 +148,6 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"name", {true, "string", false}}, // socks5
         {"password", {true, "string", false}}, // socks5
         {"port", {true, "int", false}}, // socks5
-        {"private-key", {true, "string", false}}, // socks5
         {"routing-mark", {true, "int", false}}, // BasicOption
         {"server", {true, "string", false}}, // socks5
         {"skip-cert-verify", {true, "bool", false}}, // socks5
@@ -221,7 +158,6 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
     }},
     // Protocol: socks5h
     {"socks5h", {
-        {"certificate", {true, "string", false}}, // socks5h
         {"dialer-proxy", {true, "string", false}}, // BasicOption
         {"fingerprint", {true, "string", false}}, // socks5h
         {"interface-name", {true, "string", false}}, // BasicOption
@@ -230,7 +166,6 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"name", {true, "string", false}}, // socks5h
         {"password", {true, "string", false}}, // socks5h
         {"port", {true, "int", false}}, // socks5h
-        {"private-key", {true, "string", false}}, // socks5h
         {"routing-mark", {true, "int", false}}, // BasicOption
         {"server", {true, "string", false}}, // socks5h
         {"skip-cert-verify", {true, "bool", false}}, // socks5h
@@ -281,10 +216,8 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
     // Protocol: trojan
     {"trojan", {
         {"alpn", {true, "array", false}}, // trojan
-        {"certificate", {true, "string", false}}, // trojan
         {"client-fingerprint", {true, "string", false}}, // trojan
         {"dialer-proxy", {true, "string", false}}, // BasicOption
-        {"ech-opts", {true, "string", false}}, // trojan
         {"fingerprint", {true, "string", false}}, // trojan
         {"grpc-opts", {true, "string", false}}, // trojan
         {"interface-name", {true, "string", false}}, // BasicOption
@@ -294,7 +227,6 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"network", {true, "string", false}}, // trojan
         {"password", {true, "string", false}}, // trojan
         {"port", {true, "int", false}}, // trojan
-        {"private-key", {true, "string", false}}, // trojan
         {"reality-opts", {true, "string", false}}, // trojan
         {"routing-mark", {true, "int", false}}, // BasicOption
         {"server", {true, "string", false}}, // trojan
@@ -308,13 +240,13 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
     // Protocol: tuic
     {"tuic", {
         {"alpn", {true, "array", false}}, // tuic
-        {"certificate", {true, "string", false}}, // tuic
+        {"ca", {true, "string", false}}, // tuic
+        {"ca-str", {true, "string", false}}, // tuic
         {"congestion-controller", {true, "string", false}}, // tuic
         {"cwnd", {true, "int", false}}, // tuic
         {"dialer-proxy", {true, "string", false}}, // BasicOption
         {"disable-mtu-discovery", {true, "bool", false}}, // tuic
         {"disable-sni", {true, "bool", true}}, // tuic [HARDCODED]
-        {"ech-opts", {true, "string", false}}, // tuic
         {"fast-open", {true, "bool", false}}, // tuic
         {"fingerprint", {true, "string", false}}, // tuic
         {"heartbeat-interval", {true, "int", false}}, // tuic
@@ -328,7 +260,6 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"name", {true, "string", false}}, // tuic
         {"password", {true, "string", false}}, // tuic
         {"port", {true, "int", false}}, // tuic
-        {"private-key", {true, "string", false}}, // tuic
         {"recv-window", {true, "int", false}}, // tuic
         {"recv-window-conn", {true, "int", false}}, // tuic
         {"reduce-rtt", {true, "bool", false}}, // tuic
@@ -347,11 +278,8 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
     // Protocol: vless
     {"vless", {
         {"alpn", {true, "array", false}}, // vless
-        {"certificate", {true, "string", false}}, // vless
         {"client-fingerprint", {true, "string", false}}, // vless
         {"dialer-proxy", {true, "string", false}}, // BasicOption
-        {"ech-opts", {true, "string", false}}, // vless
-        {"encryption", {true, "string", false}}, // vless
         {"fingerprint", {true, "string", false}}, // vless
         {"flow", {true, "string", false}}, // vless
         {"grpc-opts", {true, "string", false}}, // vless
@@ -365,7 +293,6 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"packet-addr", {true, "bool", false}}, // vless
         {"packet-encoding", {true, "string", false}}, // vless
         {"port", {true, "int", false}}, // vless
-        {"private-key", {true, "string", false}}, // vless
         {"reality-opts", {true, "string", false}}, // vless
         {"routing-mark", {true, "int", false}}, // BasicOption
         {"server", {true, "string", false}}, // vless
@@ -377,6 +304,7 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"uuid", {true, "string", false}}, // vless
         {"ws-headers", {true, "object", false}}, // vless
         {"ws-opts", {true, "string", false}}, // vless
+        {"ws-path", {true, "string", false}}, // vless
         {"xudp", {true, "bool", false}}, // vless
     }},
     // Protocol: vmess
@@ -384,11 +312,9 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"alpn", {true, "array", false}}, // vmess
         {"alterId", {true, "int", true}}, // vmess [HARDCODED]
         {"authenticated-length", {true, "bool", false}}, // vmess
-        {"certificate", {true, "string", false}}, // vmess
         {"cipher", {true, "string", true}}, // vmess [HARDCODED]
         {"client-fingerprint", {true, "string", false}}, // vmess
         {"dialer-proxy", {true, "string", false}}, // BasicOption
-        {"ech-opts", {true, "string", false}}, // vmess
         {"fingerprint", {true, "string", false}}, // vmess
         {"global-padding", {true, "bool", false}}, // vmess
         {"grpc-opts", {true, "string", false}}, // vmess
@@ -402,7 +328,6 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"packet-addr", {true, "bool", false}}, // vmess
         {"packet-encoding", {true, "string", false}}, // vmess
         {"port", {true, "int", false}}, // vmess
-        {"private-key", {true, "string", false}}, // vmess
         {"reality-opts", {true, "string", false}}, // vmess
         {"routing-mark", {true, "int", false}}, // BasicOption
         {"server", {true, "string", false}}, // vmess
