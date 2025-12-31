@@ -91,7 +91,12 @@ jobs:
         sed -i '/add_dependencies(cron_test libcron)/d' CMakeLists.txt
         cmake -DCMAKE_BUILD_TYPE=Release .
         make -j$(nproc)
-        sudo make install
+        # Manual install (make install fails due to missing target)
+        sudo install -d /usr/local/include/libcron
+        sudo install -d /usr/local/include/date
+        sudo cp -r libcron/include/libcron/* /usr/local/include/libcron/
+        sudo cp -r libcron/externals/date/include/date/* /usr/local/include/date/
+        sudo install -m644 out/Release/liblibcron.a /usr/local/lib/
 
     # [SETUP] Restore Artifacts if Cache Hit
     - name: Restore Artifacts
@@ -110,7 +115,12 @@ jobs:
 
         # Restore LibCron
         cd libcron
-        sudo make install
+        sudo install -d /usr/local/include/libcron
+        sudo install -d /usr/local/include/date
+        sudo cp -r libcron/include/libcron/* /usr/local/include/libcron/
+        sudo cp -r libcron/externals/date/include/date/* /usr/local/include/date/
+        sudo install -m644 out/Release/liblibcron.a /usr/local/lib/
+        cd ..
 
     - name: Initialize CodeQL
       uses: github/codeql-action/init@v4
