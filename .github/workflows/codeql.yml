@@ -94,7 +94,9 @@ jobs:
         make -j$(nproc)
         # Manual install (make install fails due to missing target)
         sudo install -d /usr/local/include/libcron
-        if [ -d include/libcron ]; then
+        if [ -d libcron/include/libcron ]; then
+          sudo cp -r libcron/include/libcron/* /usr/local/include/libcron/
+        elif [ -d include/libcron ]; then
           sudo cp -r include/libcron/* /usr/local/include/libcron/
         elif [ -d include ]; then
           sudo cp -r include/* /usr/local/include/libcron/
@@ -123,7 +125,9 @@ jobs:
         # Restore LibCron
         cd libcron
         sudo install -d /usr/local/include/libcron
-        if [ -d include/libcron ]; then
+        if [ -d libcron/include/libcron ]; then
+          sudo cp -r libcron/include/libcron/* /usr/local/include/libcron/
+        elif [ -d include/libcron ]; then
           sudo cp -r include/libcron/* /usr/local/include/libcron/
         elif [ -d include ]; then
           sudo cp -r include/* /usr/local/include/libcron/
