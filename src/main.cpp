@@ -459,20 +459,24 @@ int main(int argc, char *argv[]) {
 
   webServer.append_response("HEAD", "/sub", "text/plain", subconverter);
 
+  /*
   webServer.append_response("GET", "/sub2clashr", "text/plain;charset=utf-8",
                             simpleToClashR);
 
   webServer.append_response("GET", "/surge2clash", "text/plain;charset=utf-8",
                             surgeConfToClash);
+  */
 
   webServer.append_response("GET", "/getruleset", "text/plain;charset=utf-8",
                             getRuleset);
 
+  /*
   webServer.append_response("GET", "/getprofile", "text/plain;charset=utf-8",
                             getProfile);
 
   webServer.append_response("GET", "/render", "text/plain;charset=utf-8",
                             renderTemplate);
+  */
 
   if (!global.APIMode) {
     webServer.append_response("GET", "/get", "text/plain;charset=utf-8",
