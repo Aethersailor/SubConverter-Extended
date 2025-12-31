@@ -8,16 +8,19 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends git build-essential && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy Go module file
-COPY bridge/go.mod ./
-
-# Download dependencies (this will auto-generate go.sum)
-RUN go mod download
-
-# Copy Go source code
+# Copy Go source code FIRST (needed for dependency analysis)
 COPY bridge/converter.go ./
 
-# Update go.sum with actual dependencies from source files
+# Initialize new go.mod dynamically
+RUN go mod init github.com/aethersailor/subconverter-extended/bridge
+
+# Get latest Mihomo and resolve all dependencies
+RUN go get github.com/metacubex/mihomo@Meta
+
+# Upgrade all dependencies to latest versions (security fix)
+RUN go get -u all
+
+# Tidy dependencies (auto-resolves transitive deps)
 RUN go mod tidy
 
 # Copy scripts for scheme generation
@@ -40,6 +43,7 @@ RUN ls -lh libmihomo.a libmihomo.h
 FROM debian:bookworm-slim AS builder
 ARG THREADS="4"
 ARG SHA=""
+ARG VERSION="dev"
 
 WORKDIR /
 
@@ -47,17 +51,15 @@ WORKDIR /
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     git g++ build-essential cmake python3 python3-pip \
-    pkg-config \
+    pkg-config curl \
     libcurl4-openssl-dev libpcre2-dev rapidjson-dev \
     libyaml-cpp-dev ca-certificates ninja-build ccache && \
     rm -rf /var/lib/apt/lists/*
 
 # quickjspp
 RUN set -xe && \
-    git clone --no-checkout https://github.com/ftk/quickjspp.git && \
+    git clone --depth=1 https://github.com/ftk/quickjspp.git && \
     cd quickjspp && \
-    git fetch origin 0c00c48895919fc02da3f191a2da06addeb07f09 && \
-    git checkout 0c00c48895919fc02da3f191a2da06addeb07f09 && \
     git submodule update --init && \
     cmake -DCMAKE_BUILD_TYPE=Release . && \
     make quickjs -j ${THREADS} && \
@@ -97,8 +99,23 @@ COPY . /src
 COPY --from=go-builder /build/bridge/mihomo_schemes.h /src/src/parser/mihomo_schemes.h
 COPY --from=go-builder /build/bridge/param_compat.h /src/src/parser/param_compat.h
 
+# Download latest header-only libraries (override old versions in repo)
 RUN set -xe && \
-    [ -n "${SHA}" ] && sed -i "s/#define BUILD_ID \"\"/#define BUILD_ID \"${SHA}\"/" src/version.h || true && \
+    echo "Downloading latest cpp-httplib..." && \
+    curl -fsSL https://raw.githubusercontent.com/yhirose/cpp-httplib/master/httplib.h -o include/httplib.h && \
+    echo "Downloading latest nlohmann/json..." && \
+    curl -fsSL https://github.com/nlohmann/json/releases/latest/download/json.hpp -o include/nlohmann/json.hpp && \
+    echo "Downloading latest inja..." && \
+    curl -fsSL https://raw.githubusercontent.com/pantor/inja/master/single_include/inja/inja.hpp -o include/inja.hpp && \
+    echo "Downloading latest jpcre2..." && \
+    curl -fsSL https://raw.githubusercontent.com/jpcre2/jpcre2/master/src/jpcre2.hpp -o include/jpcre2.hpp && \
+    echo "Copying latest quickjspp from compiled source..." && \
+    cp /usr/include/quickjspp.hpp include/quickjspp.hpp && \
+    echo "All header libraries updated to latest versions"
+
+RUN set -xe && \
+    [ -n "${SHA}" ] && sed -i "s/#define BUILD_ID \"\"/#define BUILD_ID \"${SHA}\"/ " src/version.h || true && \
+    [ -n "${VERSION}" ] && sed -i "s/#define VERSION \"dev\"/#define VERSION \"${VERSION}\"/" src/version.h || true && \
     # Copy Go library to bridge directory for CMake detection
     mkdir -p bridge && \
     cp /usr/lib/libmihomo.a bridge/ && \

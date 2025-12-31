@@ -406,10 +406,6 @@ struct js_traits<std::variant<Ts...>>
             case JS_TAG_BOOL:
                 return is_boolean<T>::value || std::is_integral_v<T> || std::is_floating_point_v<T>;
 
-            case JS_TAG_BIG_DECIMAL:
-                [[fallthrough]];
-            case JS_TAG_BIG_FLOAT:
-                [[fallthrough]];
             case JS_TAG_FLOAT64:
             default: // >JS_TAG_FLOAT64 (JS_NAN_BOXING)
                 return is_double<T>::value || std::is_floating_point_v<T>;
@@ -473,11 +469,6 @@ struct js_traits<std::variant<Ts...>>
                 [[fallthrough]];
             case JS_TAG_EXCEPTION:
                 break;
-
-            case JS_TAG_BIG_DECIMAL:
-                [[fallthrough]];
-            case JS_TAG_BIG_FLOAT:
-                [[fallthrough]];
 
             case JS_TAG_FLOAT64:
                 [[fallthrough]];
@@ -1775,6 +1766,11 @@ public:
 
     ~Context()
     {
+        // We need to run the GC to flush finalization of any pending unhandled
+        // rejected promises before we free the context, as they depend on it's
+        // opaque value.
+        JS_RunGC(JS_GetRuntime(ctx));
+        
         modules.clear();
         JS_FreeContext(ctx);
     }
@@ -1836,6 +1832,19 @@ public:
     {
         assert(buffer.data()[buffer.size()] == '\0' && "eval buffer is not null-terminated"); // JS_Eval requirement
         JSValue v = JS_Eval(ctx, buffer.data(), buffer.size(), filename, flags);
+
+        // For some time now module loads can return a (rejected) promise on
+        // failure. Keep old compatibility API for quickjspp's eval.
+        if(JS_PromiseState(ctx, v) == JS_PROMISE_REJECTED) {
+            JSValue result = JS_PromiseResult(ctx, v);
+            if(JS_IsError(ctx, result)) {
+                JS_FreeValue(ctx, v);
+                v = JS_Throw(ctx, result);
+            }
+            else {
+                JS_FreeValue(ctx, result);
+            }
+        }
         return Value{ctx, std::move(v)};
     }
 

@@ -3,17 +3,21 @@ name: Build and push Docker image (Docker Hub)
 on:
   push:
     branches:
-      - master
-      - dev
+      - dev  # Only dev branch triggers on push
+    tags:
+      - 'v*.*.*'  # Tag push triggers master build
     paths-ignore:
-      - '.github/workflows/**'
       - 'README.md'
       - 'README-*.md'
       - '.travis.yml'
-  workflow_dispatch: {}
+  pull_request:
+    branches:
+      - master
+      - dev
+  workflow_dispatch: {}  # Manual trigger
 
 permissions:
-  contents: read
+  contents: write  # Changed from 'read' to enable auto-commit
 
 concurrency:
   group: dockerhub-${{ github.ref_name }}
@@ -22,9 +26,14 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Skip if commit message contains [skip ci] or [ci skip]
+    if: "!contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '[ci skip]')"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0  # Fetch all history for proper git operations
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -36,7 +45,30 @@ jobs:
         id: vars
         run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            # Tag triggered: use tag as version
+            VERSION="${GITHUB_REF#refs/tags/}"
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "is_release=true" >> $GITHUB_OUTPUT
+            echo "Detected version from tag: $VERSION"
+          elif [[ "${{ github.ref }}" == refs/heads/master ]] && [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # Master manual trigger: use latest tag
+            VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "is_release=true" >> $GITHUB_OUTPUT
+            echo "Detected version from latest tag: $VERSION"
+          else
+            # Dev branch: use "dev"
+            echo "version=dev" >> $GITHUB_OUTPUT
+            echo "is_release=false" >> $GITHUB_OUTPUT
+            echo "Using dev version"
+          fi
+
       - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -48,20 +80,94 @@ jobs:
         with:
           images: aethersailor/subconverter-extended
           tags: |
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' }}
+            type=raw,value=latest,enable=${{ steps.version.outputs.is_release == 'true' }}
+            type=raw,value=${{ steps.version.outputs.version }},enable=${{ steps.version.outputs.is_release == 'true' }}
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
 
-      - name: Build and push
+      # Build temporary image to extract generated files
+      - name: Build temporary image for file extraction (go-builder)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
-          push: true
-          platforms: linux/amd64
+          load: true  # Load image to local Docker
+          tags: subconverter-temp:go-builder
+          target: go-builder  # Only build go-builder stage
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build temporary image for file extraction (builder)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true  # Load image to local Docker
+          tags: subconverter-temp:builder
+          target: builder  # Build to builder stage (includes header updates)
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Extract generated files from go-builder
+        run: |
+          # Create temporary container from go-builder stage
+          CONTAINER_ID=$(docker create subconverter-temp:go-builder)
+          
+          # Extract Go-generated files
+          docker cp $CONTAINER_ID:/build/bridge/go.mod bridge/go.mod
+          docker cp $CONTAINER_ID:/build/bridge/go.sum bridge/go.sum
+          docker cp $CONTAINER_ID:/build/bridge/mihomo_schemes.h src/parser/mihomo_schemes.h
+          docker cp $CONTAINER_ID:/build/bridge/param_compat.h src/parser/param_compat.h
+          
+          # Cleanup
+          docker rm $CONTAINER_ID
+
+      - name: Extract updated header files from builder
+        run: |
+          # Create temporary container from builder stage
+          CONTAINER_ID=$(docker create subconverter-temp:builder)
+          
+          # Extract updated header-only libraries
+          docker cp $CONTAINER_ID:/src/include/httplib.h include/httplib.h
+          docker cp $CONTAINER_ID:/src/include/nlohmann/json.hpp include/nlohmann/json.hpp
+          docker cp $CONTAINER_ID:/src/include/inja.hpp include/inja.hpp
+          docker cp $CONTAINER_ID:/src/include/jpcre2.hpp include/jpcre2.hpp
+          docker cp $CONTAINER_ID:/src/include/quickjspp.hpp include/quickjspp.hpp
+          
+          # Cleanup
+          docker rm $CONTAINER_ID
+
+      - name: Check for file changes
+        id: check_changes
+        run: |
+          git diff --quiet bridge/go.mod bridge/go.sum src/parser/mihomo_schemes.h src/parser/param_compat.h include/httplib.h include/nlohmann/json.hpp include/inja.hpp include/jpcre2.hpp include/quickjspp.hpp || echo "changed=true" >> $GITHUB_OUTPUT
+
+      - name: Commit and push generated files
+        if: steps.check_changes.outputs.changed == 'true' && github.event_name != 'pull_request'
+        run: |
+          # Get current branch name
+          BRANCH_NAME="${{ github.ref_name }}"
+          echo "Current branch: $BRANCH_NAME"
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add bridge/go.mod bridge/go.sum src/parser/mihomo_schemes.h src/parser/param_compat.h include/httplib.h include/nlohmann/json.hpp include/inja.hpp include/jpcre2.hpp include/quickjspp.hpp
+          git commit -m "chore: update auto-generated files and header libraries from build [skip ci]"
+          
+          # Push to the current branch explicitly
+          git push origin HEAD:$BRANCH_NAME
+
+      - name: Build and push final image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          platforms: ${{ steps.version.outputs.is_release == 'true' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           tags: ${{ steps.meta.outputs.tags }}
           build-args: |
             THREADS=16
             SHA=${{ steps.vars.outputs.sha_short }}
+            VERSION=${{ steps.version.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

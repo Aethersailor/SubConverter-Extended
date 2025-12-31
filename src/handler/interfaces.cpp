@@ -18,6 +18,19 @@
 #include "server/webserver.h"
 #include "settings.h"
 #include "upload.h"
+
+// Multiple CDN fallback URLs for default external config
+// Will be tried in order if user-provided config fails to load
+const std::vector<std::string> FALLBACK_CONFIG_URLS = {
+    "https://gcore.jsdelivr.net/gh/Aethersailor/Custom_OpenClash_Rules@refs/"
+    "heads/main/cfg/Custom_Clash.ini",
+    "https://testingcf.jsdelivr.net/gh/Aethersailor/"
+    "Custom_OpenClash_Rules@refs/heads/main/cfg/Custom_Clash.ini",
+    "https://cdn.jsdelivr.net/gh/Aethersailor/Custom_OpenClash_Rules@refs/"
+    "heads/main/cfg/Custom_Clash.ini",
+    "https://raw.githubusercontent.com/Aethersailor/Custom_OpenClash_Rules/"
+    "main/cfg/Custom_Clash.ini"};
+
 #include "utils/base64/base64.h"
 #include "utils/file_extra.h"
 #include "utils/ini_reader/ini_reader.h"
@@ -556,44 +569,61 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
     } else if (!userProvidedConfig.empty() &&
                !global.defaultExtConfig.empty() &&
                argExternalConfig != global.defaultExtConfig) {
-      // User provided config failed, fallback to default config
+      // User provided config failed, try multiple fallback CDN URLs
       writeLog(0,
-               "Failed to load user provided config, trying default config...",
+               "Failed to load user provided config, trying fallback configs...",
                LOG_LEVEL_WARNING);
-      ExternalConfig extconf;
-      extconf.tpl_args = &tpl_args;
-      if (loadExternalConfig(global.defaultExtConfig, extconf) == 0) {
-        configLoadSuccess = true;
-        if (!ext.nodelist) {
-          checkExternalBase(extconf.sssub_rule_base, lSSSubBase);
-          if (!lSimpleSubscription) {
-            checkExternalBase(extconf.clash_rule_base, lClashBase);
-            checkExternalBase(extconf.surge_rule_base, lSurgeBase);
-            checkExternalBase(extconf.surfboard_rule_base, lSurfboardBase);
-            checkExternalBase(extconf.mellow_rule_base, lMellowBase);
-            checkExternalBase(extconf.quan_rule_base, lQuanBase);
-            checkExternalBase(extconf.quanx_rule_base, lQuanXBase);
-            checkExternalBase(extconf.loon_rule_base, lLoonBase);
-            checkExternalBase(extconf.singbox_rule_base, lSingBoxBase);
+      
+      for (std::string fallbackUrl : FALLBACK_CONFIG_URLS) {
+        writeLog(0, "Attempting to load config from: " + fallbackUrl, 
+                 LOG_LEVEL_INFO);
+        
+        ExternalConfig extconf;
+        extconf.tpl_args = &tpl_args;
+        if (loadExternalConfig(fallbackUrl, extconf) == 0) {
+          writeLog(0, "Successfully loaded config from: " + fallbackUrl,
+                   LOG_LEVEL_INFO);
+          configLoadSuccess = true;
+          if (!ext.nodelist) {
+            checkExternalBase(extconf.sssub_rule_base, lSSSubBase);
+            if (!lSimpleSubscription) {
+              checkExternalBase(extconf.clash_rule_base, lClashBase);
+              checkExternalBase(extconf.surge_rule_base, lSurgeBase);
+              checkExternalBase(extconf.surfboard_rule_base, lSurfboardBase);
+              checkExternalBase(extconf.mellow_rule_base, lMellowBase);
+              checkExternalBase(extconf.quan_rule_base, lQuanBase);
+              checkExternalBase(extconf.quanx_rule_base, lQuanXBase);
+              checkExternalBase(extconf.loon_rule_base, lLoonBase);
+              checkExternalBase(extconf.singbox_rule_base, lSingBoxBase);
 
-            if (!extconf.surge_ruleset.empty())
-              lCustomRulesets = extconf.surge_ruleset;
-            if (!extconf.custom_proxy_group.empty())
-              lCustomProxyGroups = extconf.custom_proxy_group;
-            ext.enable_rule_generator = extconf.enable_rule_generator;
-            ext.overwrite_original_rules = extconf.overwrite_original_rules;
+              if (!extconf.surge_ruleset.empty())
+                lCustomRulesets = extconf.surge_ruleset;
+              if (!extconf.custom_proxy_group.empty())
+                lCustomProxyGroups = extconf.custom_proxy_group;
+              ext.enable_rule_generator = extconf.enable_rule_generator;
+              ext.overwrite_original_rules = extconf.overwrite_original_rules;
+            }
           }
+          if (!extconf.rename.empty())
+            ext.rename_array = extconf.rename;
+          if (!extconf.emoji.empty())
+            ext.emoji_array = extconf.emoji;
+          if (!extconf.include.empty())
+            lIncludeRemarks = extconf.include;
+          if (!extconf.exclude.empty())
+            lExcludeRemarks = extconf.exclude;
+          argAddEmoji.define(extconf.add_emoji);
+          argRemoveEmoji.define(extconf.remove_old_emoji);
+          break; // Success, stop trying other URLs
+        } else {
+          writeLog(0, "Failed to load config from: " + fallbackUrl,
+                   LOG_LEVEL_WARNING);
         }
-        if (!extconf.rename.empty())
-          ext.rename_array = extconf.rename;
-        if (!extconf.emoji.empty())
-          ext.emoji_array = extconf.emoji;
-        if (!extconf.include.empty())
-          lIncludeRemarks = extconf.include;
-        if (!extconf.exclude.empty())
-          lExcludeRemarks = extconf.exclude;
-        argAddEmoji.define(extconf.add_emoji);
-        argRemoveEmoji.define(extconf.remove_old_emoji);
+      }
+      
+      if (!configLoadSuccess) {
+        writeLog(0, "All fallback config URLs failed to load",
+                 LOG_LEVEL_ERROR);
       }
     }
   }

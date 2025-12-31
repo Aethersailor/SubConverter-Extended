@@ -1,7 +1,6 @@
 #include <mutex>
 #include <string>
 
-
 #include "config/binding.h"
 #include "handler/webget.h"
 #include "interfaces.h"
@@ -11,7 +10,6 @@
 #include "settings.h"
 #include "utils/logger.h"
 #include "utils/network.h"
-
 
 // multi-thread lock
 std::mutex gMutexConfigure;
@@ -331,6 +329,12 @@ void readYAMLConf(YAML::Node &node) {
   section["singbox_rule_base"] >> global.singBoxBase;
 
   section["default_external_config"] >> global.defaultExtConfig;
+  // Set hardcoded default if not configured or empty
+  if (global.defaultExtConfig.empty()) {
+    global.defaultExtConfig =
+        "https://gcore.jsdelivr.net/gh/Aethersailor/"
+        "Custom_OpenClash_Rules@refs/heads/main/cfg/Custom_Clash.ini";
+  }
   section["append_proxy_type"] >> global.appendType;
   section["proxy_config"] >> global.proxyConfig;
   section["proxy_ruleset"] >> global.proxyRuleset;
@@ -591,6 +595,13 @@ void readTOMLConf(toml::value &root) {
       "proxy_subscription", global.proxySubscription, "append_proxy_type",
       global.appendType, "reload_conf_on_request", global.reloadConfOnRequest);
 
+  // Set hardcoded default if not configured or empty (TOML)
+  if (global.defaultExtConfig.empty()) {
+    global.defaultExtConfig =
+        "https://gcore.jsdelivr.net/gh/Aethersailor/"
+        "Custom_OpenClash_Rules@refs/heads/main/cfg/Custom_Clash.ini";
+  }
+
   if (filter)
     find_if_exist(section_common, "filter_script", global.filterScript);
   else
@@ -806,6 +817,12 @@ void readConf() {
   ini.get_if_exist("sssub_rule_base", global.SSSubBase);
   ini.get_if_exist("singbox_rule_base", global.singBoxBase);
   ini.get_if_exist("default_external_config", global.defaultExtConfig);
+  // Set hardcoded default if not configured or empty
+  if (global.defaultExtConfig.empty()) {
+    global.defaultExtConfig =
+        "https://gcore.jsdelivr.net/gh/Aethersailor/"
+        "Custom_OpenClash_Rules@refs/heads/main/cfg/Custom_Clash.ini";
+  }
   ini.get_bool_if_exist("append_proxy_type", global.appendType);
   ini.get_if_exist("proxy_config", global.proxyConfig);
   ini.get_if_exist("proxy_ruleset", global.proxyRuleset);

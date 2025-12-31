@@ -200,7 +200,7 @@ static inline void _jvassert(bool cond, char const * name, const char* f, size_t
 
 static inline std::string _tostdstring(unsigned x){
     char buf[128];
-    int written = std::snprintf(buf, 128, "%u", x);
+    int written = std::sprintf(buf, "%u", x);
     return (written > 0) ? std::string(buf, buf + written) : std::string();
 }
 
