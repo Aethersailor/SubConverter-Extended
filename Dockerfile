@@ -50,7 +50,7 @@ WORKDIR /
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     git g++ build-essential cmake python3 python3-pip \
-    pkg-config wget \
+    pkg-config curl \
     libcurl4-openssl-dev libpcre2-dev rapidjson-dev \
     libyaml-cpp-dev ca-certificates ninja-build ccache && \
     rm -rf /var/lib/apt/lists/*
@@ -103,13 +103,13 @@ COPY --from=go-builder /build/bridge/param_compat.h /src/src/parser/param_compat
 # Download latest header-only libraries (override old versions in repo)
 RUN set -xe && \
     echo "Downloading latest cpp-httplib..." && \
-    wget -q https://raw.githubusercontent.com/yhirose/cpp-httplib/master/httplib.h -O include/httplib.h && \
+    curl -fsSL https://raw.githubusercontent.com/yhirose/cpp-httplib/master/httplib.h -o include/httplib.h && \
     echo "Downloading latest nlohmann/json..." && \
-    wget -q https://github.com/nlohmann/json/releases/latest/download/json.hpp -O include/nlohmann/json.hpp && \
+    curl -fsSL https://github.com/nlohmann/json/releases/latest/download/json.hpp -o include/nlohmann/json.hpp && \
     echo "Downloading latest inja..." && \
-    wget -q https://raw.githubusercontent.com/pantor/inja/master/single_include/inja/inja.hpp -O include/inja.hpp && \
+    curl -fsSL https://raw.githubusercontent.com/pantor/inja/master/single_include/inja/inja.hpp -o include/inja.hpp && \
     echo "Downloading latest jpcre2..." && \
-    wget -q https://raw.githubusercontent.com/jpcre2/jpcre2/master/src/jpcre2.hpp -O include/jpcre2.hpp && \
+    curl -fsSL https://raw.githubusercontent.com/jpcre2/jpcre2/master/src/jpcre2.hpp -o include/jpcre2.hpp && \
     echo "All header libraries updated to latest versions"
 
 RUN set -xe && \
