@@ -62,10 +62,18 @@ jobs:
             cmake \
             libpcre2-dev \
             rapidjson-dev \
-            libtoml11-dev \
             libyaml-cpp-dev \
             libcurl4-openssl-dev \
             libhowardhinnant-date-dev
+
+    # [SETUP] Install toml11 (v4.3.0) for compatible API
+    - name: Install toml11
+      if: matrix.language == 'c-cpp'
+      run: |
+        git clone --depth=1 --branch v4.3.0 https://github.com/ToruNiina/toml11
+        cmake -S toml11 -B toml11/build -DTOML11_INSTALL=ON -DTOML11_BUILD_TESTS=OFF -DTOML11_BUILD_EXAMPLES=OFF
+        cmake --build toml11/build -j$(nproc)
+        sudo cmake --install toml11/build
 
     # [SETUP] Build QuickJS (Only if cache missed)
     - name: Build QuickJS
@@ -158,7 +166,7 @@ jobs:
     - name: Build (manual)
       if: matrix.language == 'c-cpp'
       run: |
-        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/usr/local
         cmake --build build -j$(nproc)
 
     - name: Perform CodeQL Analysis
