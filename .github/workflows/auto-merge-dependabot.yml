@@ -17,7 +17,7 @@ jobs:
     steps:
       - name: Check PR labels
         id: check-labels
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const labels = context.payload.pull_request.labels.map(l => l.name);
@@ -28,7 +28,7 @@ jobs:
       
       - name: Wait for build workflow
         if: steps.check-labels.outputs.result == 'true'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -71,7 +71,7 @@ jobs:
       
       - name: Enable auto-merge
         if: steps.check-labels.outputs.result == 'true'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             await github.rest.pulls.merge({
