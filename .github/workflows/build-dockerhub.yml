@@ -4,13 +4,12 @@ on:
   push:
     branches:
       - dev  # Only dev branch triggers on push
+    tags:
+      - 'v*.*.*'  # Tag push triggers master build
     paths-ignore:
       - 'README.md'
       - 'README-*.md'
       - '.travis.yml'
-  push:
-    tags:
-      - 'v*.*.*'  # Tag push triggers master build
   pull_request:
     branches:
       - master
