@@ -9,7 +9,10 @@ on:
     paths-ignore:
       - 'README.md'
       - 'README-*.md'
-      - '.travis.yml'
+      # Ignore all workflows to avoid triggering Docker build on CI config changes
+      - '.github/workflows/**'
+      # But do allow THIS workflow to trigger a build when it is modified
+      - '!.github/workflows/build-dockerhub.yml'
   pull_request:
     branches:
       - master
