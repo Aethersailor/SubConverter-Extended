@@ -96,7 +96,9 @@ subconverter 对新节点格式的支持完全取决于维护者的积极性。�
 
 #### 1. Proxy-Provider 模式 🛡️
 
-**使用 Mihomo 的 Proxy-Provider 机制**
+**使用 Mihomo 的 Proxy-Provider 机制**  
+
+<img width="723" height="381" alt="22" src="https://github.com/user-attachments/assets/a349422e-b5ab-4240-96ea-d8eae1f283b5" />
 
 订阅链接**不再下载解析**，而是生成客户端可直接使用的配置，交由用户客户端的 Mihomo 内核自行拉取订阅：
 
