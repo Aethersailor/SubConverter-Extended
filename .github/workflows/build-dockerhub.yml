@@ -88,7 +88,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.PAT_TOKEN }}
           fetch-depth: 0  # Fetch all history for proper git operations
 
       - name: Set up Docker Buildx
