@@ -73,7 +73,7 @@ jobs:
     # [SETUP] Build Go library (libmihomo.a) for C++ linkage
     - name: Setup Go
       if: matrix.language == 'c-cpp'
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
         go-version: 'stable'
 
