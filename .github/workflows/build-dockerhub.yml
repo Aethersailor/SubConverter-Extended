@@ -148,9 +148,14 @@ jobs:
       - name: Commit and push generated files
         if: steps.check_changes.outputs.changed == 'true' && github.event_name != 'pull_request'
         run: |
-          # Get current branch name
-          BRANCH_NAME="${{ github.ref_name }}"
-          echo "Current branch: $BRANCH_NAME"
+          # Determine target branch: use 'master' for tag builds, otherwise use current branch
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            BRANCH_NAME="master"
+            echo "Tag build detected, pushing to master branch"
+          else
+            BRANCH_NAME="${{ github.ref_name }}"
+            echo "Branch build, pushing to: $BRANCH_NAME"
+          fi
           
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
