@@ -63,6 +63,50 @@ static void insertProxyProvidersBeforeGroups(std::string &yaml_str,
   }
 }
 
+// Helper function to insert proxies before proxy-groups
+static void insertProxiesBeforeTarget(std::string &yaml_str,
+                                      const std::string &proxies_yaml,
+                                      bool new_field_name) {
+  std::string proxies_content = proxies_yaml;
+  // 移除 YAML 文档分隔符 "---"
+  if (proxies_content.find("---") == 0) {
+    size_t newline_pos = proxies_content.find('\n');
+    if (newline_pos != std::string::npos) {
+      proxies_content = proxies_content.substr(newline_pos + 1);
+    }
+  }
+
+  // 为每一行添加2个空格的缩进（YAML格式要求）
+  std::string indented_content;
+  std::istringstream stream(proxies_content);
+  std::string line;
+  while (std::getline(stream, line)) {
+    if (!line.empty()) {
+      indented_content += "  " + line + "\n";
+    } else {
+      indented_content += "\n";
+    }
+  }
+
+  // 构建完整的 proxies 字符串
+  std::string proxies_key = new_field_name ? "proxies" : "Proxy";
+  std::string proxies_str = proxies_key + ":\n" + indented_content;
+
+  // 确保末尾有换行符
+  if (!proxies_str.empty() && proxies_str.back() != '\n') {
+    proxies_str += "\n";
+  }
+
+  // 始终在 proxy-groups 之前插入
+  // 这样顺序是：proxy-providers → proxies → proxy-groups
+  std::string target_key = new_field_name ? "proxy-groups:" : "Proxy Group:";
+
+  size_t target_pos = yaml_str.find(target_key);
+  if (target_pos != std::string::npos) {
+    yaml_str.insert(target_pos, proxies_str);
+  }
+}
+
 const string_array clashr_protocols = {"origin",          "auth_sha1_v4",
                                        "auth_aes128_md5", "auth_aes128_sha1",
                                        "auth_chain_a",    "auth_chain_b"};
@@ -851,14 +895,9 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
     return;
   }
 
-  // 对于 proxy-provider 模式，proxies 段可以为空或只包含少量直连节点
-  if (ext.use_proxy_provider && !ext.providers.empty() && nodes.empty()) {
-    // 不生成 proxies 字段，或生成一个空数组
-    if (ext.clash_new_field_name)
-      yamlnode["proxies"] = YAML::Node(YAML::NodeType::Sequence);
-    else
-      yamlnode["Proxy"] = YAML::Node(YAML::NodeType::Sequence);
-  } else {
+  // 只有当存在节点时才写入 proxies 字段
+  // 纯 proxy-provider 模式下不生成 proxies 字段（模板中已移除占位符）
+  if (!nodes.empty() || proxies.size() > 0) {
     if (ext.clash_new_field_name)
       yamlnode["proxies"] = proxies;
     else
@@ -1087,11 +1126,25 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
     yamlnode.remove("proxy-providers"); // 从 yamlnode 中移除
   }
 
+  // 提取 proxies 字段，用于手动控制输出顺序
+  std::string proxies_yaml;
+  std::string proxies_field_name =
+      ext.clash_new_field_name ? "proxies" : "Proxy";
+  if (yamlnode[proxies_field_name].IsDefined()) {
+    YAML::Node proxies_node = yamlnode[proxies_field_name];
+    proxies_yaml = YAML::Dump(proxies_node);
+    yamlnode.remove(proxies_field_name); // 从 yamlnode 中移除
+  }
+
   if (ext.nodelist) {
     std::string result = YAML::Dump(yamlnode);
-    if (!proxy_providers_yaml.empty()) {
+    bool has_providers = !proxy_providers_yaml.empty();
+    if (has_providers) {
       insertProxyProvidersBeforeGroups(result, proxy_providers_yaml,
                                        ext.clash_new_field_name);
+    }
+    if (!proxies_yaml.empty()) {
+      insertProxiesBeforeTarget(result, proxies_yaml, ext.clash_new_field_name);
     }
     return result;
   }
@@ -1105,9 +1158,13 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
   */
   if (!ext.enable_rule_generator) {
     std::string result = YAML::Dump(yamlnode);
-    if (!proxy_providers_yaml.empty()) {
+    bool has_providers = !proxy_providers_yaml.empty();
+    if (has_providers) {
       insertProxyProvidersBeforeGroups(result, proxy_providers_yaml,
                                        ext.clash_new_field_name);
+    }
+    if (!proxies_yaml.empty()) {
+      insertProxiesBeforeTarget(result, proxies_yaml, ext.clash_new_field_name);
     }
     return result;
   }
@@ -1125,9 +1182,13 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
                       ext.overwrite_original_rules,
                       ext.clash_classical_ruleset);
     std::string result = YAML::Dump(yamlnode);
-    if (!proxy_providers_yaml.empty()) {
+    bool has_providers = !proxy_providers_yaml.empty();
+    if (has_providers) {
       insertProxyProvidersBeforeGroups(result, proxy_providers_yaml,
                                        ext.clash_new_field_name);
+    }
+    if (!proxies_yaml.empty()) {
+      insertProxiesBeforeTarget(result, proxies_yaml, ext.clash_new_field_name);
     }
     return result;
   }
@@ -1215,6 +1276,12 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
   } else {
     writeLog(0, "proxy_providers_str is EMPTY, nothing to insert",
              LOG_LEVEL_WARNING);
+  }
+
+  // 插入 proxies 字段（在 proxy-groups 之前）
+  if (!proxies_yaml.empty()) {
+    insertProxiesBeforeTarget(yamlnode_str, proxies_yaml,
+                              ext.clash_new_field_name);
   }
 
   output_content.insert(0, yamlnode_str);
