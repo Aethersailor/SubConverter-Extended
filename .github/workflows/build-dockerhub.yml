@@ -27,22 +27,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  prepare:
     runs-on: ubuntu-latest
     # Skip if commit message contains [skip ci] or [ci skip]
     if: "!contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '[ci skip]')"
+    outputs:
+      sha_short: ${{ steps.vars.outputs.sha_short }}
+      version: ${{ steps.version.outputs.version }}
+      is_release: ${{ steps.version.outputs.is_release }}
+      tags: ${{ steps.meta.outputs.tags }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0  # Fetch all history for proper git operations
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
 
       - name: Get short SHA
         id: vars
@@ -70,13 +69,6 @@ jobs:
             echo "Using dev version"
           fi
 
-      - name: Log in to Docker Hub
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@v5
@@ -87,6 +79,28 @@ jobs:
             type=raw,value=${{ steps.version.outputs.version }},enable=${{ steps.version.outputs.is_release == 'true' }}
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
 
+  build-amd64:
+    runs-on: ubuntu-latest
+    needs: prepare
+    outputs:
+      digest: ${{ steps.build_image.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0  # Fetch all history for proper git operations
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       # Build temporary image to extract generated files
       - name: Build temporary image for file extraction (go-builder)
         uses: docker/build-push-action@v6
@@ -96,8 +110,8 @@ jobs:
           load: true  # Load image to local Docker
           tags: subconverter-temp:go-builder
           target: go-builder  # Only build go-builder stage
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=subconverter
+          cache-to: type=gha,mode=max,scope=subconverter
 
       - name: Build temporary image for file extraction (builder)
         uses: docker/build-push-action@v6
@@ -107,8 +121,8 @@ jobs:
           load: true  # Load image to local Docker
           tags: subconverter-temp:builder
           target: builder  # Build to builder stage (includes header updates)
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=subconverter
+          cache-to: type=gha,mode=max,scope=subconverter
 
       - name: Extract generated files from go-builder
         run: |
@@ -160,17 +174,83 @@ jobs:
           git push origin HEAD:$BRANCH_NAME
 
       - name: Build and push final image
+        id: build_image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           push: ${{ github.event_name != 'pull_request' }}
-          platforms: ${{ steps.version.outputs.is_release == 'true' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          platforms: linux/amd64
+          tags: ${{ needs.prepare.outputs.tags }}
           build-args: |
             THREADS=16
-            SHA=${{ steps.vars.outputs.sha_short }}
-            VERSION=${{ steps.version.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            SHA=${{ needs.prepare.outputs.sha_short }}
+            VERSION=${{ needs.prepare.outputs.version }}
+          cache-from: type=gha,scope=subconverter
+          cache-to: type=gha,mode=max,scope=subconverter
+
+  build-arm64:
+    runs-on: ubuntu-24.04-arm64
+    needs: prepare
+    if: needs.prepare.outputs.is_release == 'true'
+    outputs:
+      digest: ${{ steps.build_image.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0  # Fetch all history for proper git operations
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push final image
+        id: build_image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          platforms: linux/arm64
+          tags: ${{ needs.prepare.outputs.tags }}
+          build-args: |
+            THREADS=4
+            SHA=${{ needs.prepare.outputs.sha_short }}
+            VERSION=${{ needs.prepare.outputs.version }}
+          cache-from: type=gha,scope=subconverter
+          cache-to: type=gha,mode=max,scope=subconverter
+
+  merge-manifest:
+    runs-on: ubuntu-latest
+    needs: [prepare, build-amd64, build-arm64]
+    if: needs.prepare.outputs.is_release == 'true' && github.event_name != 'pull_request'
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create and push manifest list
+        env:
+          IMAGE_NAME: aethersailor/subconverter-extended
+        run: |
+          TAGS="${{ needs.prepare.outputs.tags }}"
+          for TAG in $TAGS; do
+            docker buildx imagetools create \
+              -t "$TAG" \
+              "${IMAGE_NAME}@${{ needs.build-amd64.outputs.digest }}" \
+              "${IMAGE_NAME}@${{ needs.build-arm64.outputs.digest }}"
+          done
 
