@@ -66,6 +66,34 @@ jobs:
             libcurl4-openssl-dev \
             libhowardhinnant-date-dev
 
+    # [SETUP] Build Go library (libmihomo.a) for C++ linkage
+    - name: Setup Go
+      if: matrix.language == 'c-cpp'
+      uses: actions/setup-go@v5
+      with:
+        go-version: 'stable'
+
+    - name: Build libmihomo.a
+      if: matrix.language == 'c-cpp'
+      run: |
+        cd bridge
+        # Initialize new go.mod dynamically
+        go mod init github.com/aethersailor/subconverter-extended/bridge
+        # Get latest Mihomo
+        go get github.com/metacubex/mihomo@Meta
+        go get -u all
+        go mod tidy
+        # Generate header files
+        go run ../scripts/generate_schemes.go mihomo_schemes.h
+        go run ../scripts/generate_param_compat.go -o param_compat.h
+        cp mihomo_schemes.h ../src/parser/
+        cp param_compat.h ../src/parser/
+        # Build static library
+        CGO_ENABLED=1 go build -buildmode=c-archive -ldflags="-s -w" -o libmihomo.a .
+        # Install to system paths
+        sudo install -m644 libmihomo.a /usr/lib/
+        sudo install -m644 libmihomo.h /usr/include/
+
     # [SETUP] Install toml11 (v4.3.0) for compatible API
     - name: Install toml11
       if: matrix.language == 'c-cpp'
