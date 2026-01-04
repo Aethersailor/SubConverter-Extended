@@ -308,101 +308,9 @@ jobs:
           cache-from: type=gha,scope=subconverter-arm64
           cache-to: type=gha,mode=max,scope=subconverter-arm64
 
-  build-armv7:
-    runs-on: ubuntu-24.04-arm
-    needs: prepare
-    if: needs.prepare.outputs.is_release == 'true'
-    outputs:
-      digest: ${{ steps.build_image.outputs.digest }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          token: ${{ secrets.PAT_TOKEN }}
-          fetch-depth: 0
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      
-      # Build to builder stage FIRST to extract binary
-      - name: Build to builder stage (extract binary)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          load: true
-          tags: subconverter-temp:armv7-builder
-          target: builder
-          platforms: linux/arm/v7
-          build-args: |
-            THREADS=4
-            SHA=${{ needs.prepare.outputs.sha_short }}
-            VERSION=${{ needs.prepare.outputs.version }}
-          cache-from: type=gha,scope=subconverter-armv7
-          cache-to: type=gha,mode=max,scope=subconverter-armv7
-
-      - name: Extract binaries
-        run: |
-          CONTAINER_ID=$(docker create subconverter-temp:armv7-builder)
-          docker cp $CONTAINER_ID:/src/subconverter ./subconverter
-          docker cp $CONTAINER_ID:/src/base ./base
-          docker rm $CONTAINER_ID
-          chmod +x subconverter
-
-      - name: Package Release Artifact (armv7)
-        run: |
-          mkdir -p SubConverter-Extended
-          mv subconverter SubConverter-Extended/
-          cp -r base SubConverter-Extended/
-
-          cat > SubConverter-Extended/start.sh << 'EOF'
-          #!/bin/bash
-          CONFIG_DIR="/etc/SubConverter-Extended"
-          sudo mkdir -p "$CONFIG_DIR"
-          sudo cp -n base/pref.example.toml "$CONFIG_DIR/pref.toml" 2>/dev/null || true
-          ./subconverter -f "$CONFIG_DIR/pref.toml"
-          EOF
-          chmod +x SubConverter-Extended/start.sh
-
-          tar -czf SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-armv7.tar.gz SubConverter-Extended
-
-      - name: Upload Artifact (armv7)
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-glibc-armv7
-          path: SubConverter-Extended-*.tar.gz
-
-      - name: Build and push final image
-        id: build_image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          push: ${{ github.event_name != 'pull_request' }}
-          platforms: linux/arm/v7
-          tags: ${{ needs.prepare.outputs.tags }}
-          build-args: |
-            THREADS=4
-            SHA=${{ needs.prepare.outputs.sha_short }}
-            VERSION=${{ needs.prepare.outputs.version }}
-          cache-from: type=gha,scope=subconverter-armv7
-          cache-to: type=gha,mode=max,scope=subconverter-armv7
-
   merge-manifest:
     runs-on: ubuntu-latest
-    needs: [prepare, build-amd64, build-arm64, build-armv7]
+    needs: [prepare, build-amd64, build-arm64]
     if: needs.prepare.outputs.is_release == 'true' && github.event_name != 'pull_request'
     steps:
       - name: Set up Docker Buildx
@@ -423,8 +331,7 @@ jobs:
             docker buildx imagetools create \
               -t "$TAG" \
               "${IMAGE_NAME}@${{ needs.build-amd64.outputs.digest }}" \
-              "${IMAGE_NAME}@${{ needs.build-arm64.outputs.digest }}" \
-              "${IMAGE_NAME}@${{ needs.build-armv7.outputs.digest }}"
+              "${IMAGE_NAME}@${{ needs.build-arm64.outputs.digest }}"
           done
 
   # [NEW] Alpine Build Job
@@ -441,18 +348,9 @@ jobs:
           - arch: arm64
             docker_platform: linux/arm64
             runner: ubuntu-24.04-arm
-          - arch: armv7
-            docker_platform: linux/arm/v7
-            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-
-      - name: Set up QEMU (for armv7)
-        if: matrix.platform.arch == 'armv7'
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -588,7 +486,7 @@ jobs:
   # [NEW] Release Creation Job (Only on Tag)
   create-release:
     runs-on: ubuntu-latest
-    needs: [prepare, build-amd64, build-arm64, build-armv7, build-linux-musl, build-windows]
+    needs: [prepare, build-amd64, build-arm64, build-linux-musl, build-windows]
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write
@@ -611,12 +509,10 @@ jobs:
             ### Linux (Debian/Ubuntu - glibc)
             - **amd64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-amd64.tar.gz`
             - **arm64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-arm64.tar.gz`
-            - **armv7**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-armv7.tar.gz`
 
             ### Linux (Alpine - musl)
             - **amd64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-alpine-amd64.tar.gz`
             - **arm64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-alpine-arm64.tar.gz`
-            - **armv7**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-alpine-armv7.tar.gz`
 
             ### Windows (x86_64)
             - **Portable**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-windows-portable.zip`

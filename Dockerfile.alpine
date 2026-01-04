@@ -1,10 +1,6 @@
 # ========== GO BUILD STAGE ==========
 FROM golang:1.25-alpine AS go-builder
 
-# Docker Buildx 自动注入目标架构信息
-ARG TARGETARCH
-ARG TARGETVARIANT
-
 WORKDIR /build/bridge
 
 # Alpine 使用 apk 包管理器
@@ -34,9 +30,7 @@ RUN go run ../scripts/generate_schemes.go mihomo_schemes.h
 RUN go run ../scripts/generate_param_compat.go -o param_compat.h
 
 # Build static library (enable CGO for musl)
-# Docker Buildx 会通过 QEMU 模拟目标架构，因此直接使用原生编译
-RUN echo "==> Building for $TARGETARCH" && \
-    CGO_ENABLED=1 go build \
+RUN CGO_ENABLED=1 go build \
     -buildmode=c-archive \
     -ldflags="-s -w" \
     -o libmihomo.a \

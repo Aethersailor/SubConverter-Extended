@@ -1,17 +1,11 @@
 # ========== GO BUILD STAGE ==========
 FROM golang:1.25-bookworm AS go-builder
 
-# Docker Buildx 自动注入目标架构信息
-ARG TARGETARCH
-ARG TARGETVARIANT
-
 WORKDIR /build/bridge
 
 # Install build dependencies (gcc required for CGO)
-# 包含 ARMv7 交叉编译工具链
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git build-essential \
-    gcc-arm-linux-gnueabihf && \
+    apt-get install -y --no-install-recommends git build-essential && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy Go source code FIRST (needed for dependency analysis)
@@ -35,19 +29,7 @@ RUN go run ../scripts/generate_schemes.go mihomo_schemes.h
 RUN go run ../scripts/generate_param_compat.go -o param_compat.h
 
 # Build static library (enable CGO for glibc)
-# 根据目标架构自动配置交叉编译环境
-RUN if [ "$TARGETARCH" = "arm" ] && [ "$TARGETVARIANT" = "v7" ]; then \
-    echo "==> Cross-compiling for ARMv7 (native ARM64 build)" && \
-    export CGO_ENABLED=1 \
-    CC=arm-linux-gnueabihf-gcc \
-    GOOS=linux \
-    GOARCH=arm \
-    GOARM=7; \
-    else \
-    echo "==> Native build for $TARGETARCH" && \
-    export CGO_ENABLED=1; \
-    fi && \
-    go build \
+RUN CGO_ENABLED=1 go build \
     -buildmode=c-archive \
     -ldflags="-s -w" \
     -o libmihomo.a \
