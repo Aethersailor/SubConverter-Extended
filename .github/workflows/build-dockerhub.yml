@@ -57,12 +57,19 @@ jobs:
             echo "is_release=true" >> $GITHUB_OUTPUT
             echo "Detected version from tag: $VERSION"
           elif [[ "${{ github.ref }}" == refs/heads/master ]] && ([[ "${{ github.event_name }}" == "workflow_dispatch" ]] || [[ "${{ github.event_name }}" == "schedule" ]]); then
-            # Master manual/schedule trigger: use latest tag or commit short hash as dev version if no tag
-            # If we want to treat master schedule/manual as a "release" build (generating artifacts), set is_release=true
-            VERSION="master-$(git rev-parse --short HEAD)"
+            # Master manual/schedule trigger: use latest tag as version
+            LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+            if [ -n "$LATEST_TAG" ]; then
+              VERSION="$LATEST_TAG"
+              echo "Detected latest tag: $VERSION"
+            else
+              # Fallback if no tags exist
+              VERSION="master-$(git rev-parse --short HEAD)"
+              echo "No tags found, using commit hash: $VERSION"
+            fi
             echo "version=$VERSION" >> $GITHUB_OUTPUT
             echo "is_release=true" >> $GITHUB_OUTPUT
-            echo "Master branch build (manual/schedule), treating as release candidate: $VERSION"
+            echo "Master branch build (manual/schedule): $VERSION"
           else
             # Dev branch: use "dev"
             echo "version=dev" >> $GITHUB_OUTPUT
