@@ -1,4 +1,4 @@
-name: Build and push Docker image (Docker Hub)
+name: Build and Push Docker image
 
 on:
   push:
@@ -28,6 +28,7 @@ concurrency:
 
 jobs:
   prepare:
+    name: "🔧 Prepare"
     runs-on: ubuntu-latest
     # Skip if [skip ci] and ensure schedule only runs on master
     if: "!contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '[ci skip]') && (github.event_name != 'schedule' || github.ref == 'refs/heads/master')"
@@ -88,6 +89,7 @@ jobs:
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
 
   build-amd64:
+    name: "📦 Docker + Binary (amd64)"
     runs-on: ubuntu-latest
     needs: prepare
     outputs:
@@ -222,6 +224,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=subconverter
 
   build-arm64:
+    name: "📦 Docker + Binary (arm64)"
     runs-on: ubuntu-24.04-arm
     needs: prepare
     if: needs.prepare.outputs.is_release == 'true'
@@ -309,6 +312,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=subconverter-arm64
 
   merge-manifest:
+    name: "🔗 Merge Manifest"
     runs-on: ubuntu-latest
     needs: [prepare, build-amd64, build-arm64]
     if: needs.prepare.outputs.is_release == 'true' && github.event_name != 'pull_request'
@@ -336,6 +340,7 @@ jobs:
 
   # [NEW] Alpine Build Job
   build-linux-musl:
+    name: "📦 Alpine (${{ matrix.platform.arch }})"
     runs-on: ${{ matrix.platform.runner }}
     needs: prepare
     if: needs.prepare.outputs.is_release == 'true'
@@ -403,6 +408,7 @@ jobs:
 
   # [NEW] Release Creation Job (Only on Tag)
   create-release:
+    name: "🚀 Release"
     runs-on: ubuntu-latest
     needs: [prepare, build-amd64, build-arm64, build-linux-musl]
     if: startsWith(github.ref, 'refs/tags/')
