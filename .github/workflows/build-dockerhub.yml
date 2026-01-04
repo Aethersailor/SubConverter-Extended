@@ -401,92 +401,10 @@ jobs:
           name: alpine-${{ matrix.platform.arch }}
           path: SubConverter-Extended-*.tar.gz
 
-  # [NEW] Windows Build Job
-  build-windows:
-    runs-on: ubuntu-latest
-    needs: prepare
-    if: needs.prepare.outputs.is_release == 'true'
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Set version
-        run: |
-          SHA="${{ needs.prepare.outputs.sha_short }}"
-          VERSION="${{ needs.prepare.outputs.version }}"
-          if [ -n "$SHA" ]; then
-            sed -i "s/#define BUILD_ID \"\"/#define BUILD_ID \"$SHA\"/ " src/version.h
-          fi
-          if [ -n "$VERSION" ]; then
-            sed -i "s/#define VERSION \"dev\"/#define VERSION \"$VERSION\"/" src/version.h
-          fi
-
-      - name: Cache vcpkg
-        uses: actions/cache@v4
-        with:
-          path: vcpkg
-          key: vcpkg-mingw-static-v2
-          restore-keys: |
-            vcpkg-mingw-static-v2
-
-      - name: Install MinGW-w64 toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y mingw-w64 cmake ninja-build
-
-      - name: Setup vcpkg
-        run: |
-          if [ ! -d "vcpkg" ]; then
-            git clone https://github.com/microsoft/vcpkg.git
-            cd vcpkg && ./bootstrap-vcpkg.sh
-          fi
-
-      - name: Install Windows dependencies
-        run: |
-          cd vcpkg
-          ./vcpkg install \
-            curl:x64-mingw-static \
-            pcre2:x64-mingw-static \
-            yaml-cpp:x64-mingw-static \
-            rapidjson:x64-mingw-static \
-            toml11:x64-mingw-static
-
-      - name: Build Windows binary
-        run: |
-          mkdir build && cd build
-          cmake -GNinja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_TOOLCHAIN_FILE=../vcpkg/scripts/buildsystems/vcpkg.cmake \
-            -DVCPKG_TARGET_TRIPLET=x64-mingw-static \
-            -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++ \
-            -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc \
-            ..
-          
-          ninja -j $(nproc)
-
-      - name: Package portable version
-        run: |
-          mkdir SubConverter-Extended
-          cp build/subconverter.exe SubConverter-Extended/
-          cp -r base SubConverter-Extended/
-          
-          cat > SubConverter-Extended/README.txt << 'EOF'
-          SubConverter-Extended - Windows Portable Edition
-          Run subconverter.exe directly, config file will be auto-created.
-          EOF
-          
-          zip -r SubConverter-Extended-${{ needs.prepare.outputs.version }}-windows-portable.zip SubConverter-Extended
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-x64
-          path: SubConverter-Extended-*.zip
-
   # [NEW] Release Creation Job (Only on Tag)
   create-release:
     runs-on: ubuntu-latest
-    needs: [prepare, build-amd64, build-arm64, build-linux-musl, build-windows]
+    needs: [prepare, build-amd64, build-arm64, build-linux-musl]
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write
@@ -502,7 +420,6 @@ jobs:
           files: |
             artifacts/linux-glibc-*/*.tar.gz
             artifacts/alpine-*/*.tar.gz
-            artifacts/windows-x64/*.zip
           body: |
             ## 📦 Downloads
 
@@ -513,6 +430,3 @@ jobs:
             ### Linux (Alpine - musl)
             - **amd64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-alpine-amd64.tar.gz`
             - **arm64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-alpine-arm64.tar.gz`
-
-            ### Windows (x86_64)
-            - **Portable**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-windows-portable.zip`
