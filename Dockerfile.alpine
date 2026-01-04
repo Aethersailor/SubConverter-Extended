@@ -1,0 +1,162 @@
+# ========== GO BUILD STAGE ==========
+FROM golang:1.25-alpine AS go-builder
+
+# Docker Buildx 自动注入目标架构信息
+ARG TARGETARCH
+ARG TARGETVARIANT
+
+WORKDIR /build/bridge
+
+# Alpine 使用 apk 包管理器
+# 包含 ARMv7 交叉编译工具链 (musl-cross)
+RUN apk add --no-cache \
+    git build-base gcc \
+    gcc-arm-linux-gnueabihf
+
+# Copy Go source code FIRST (needed for dependency analysis)
+COPY bridge/converter.go ./
+
+# Initialize new go.mod dynamically
+RUN go mod init github.com/aethersailor/subconverter-extended/bridge
+
+# Get latest Mihomo and resolve all dependencies
+RUN go get github.com/metacubex/mihomo@Meta
+
+# Upgrade all dependencies to latest versions (security fix)
+RUN go get -u all
+
+# Tidy dependencies (auto-resolves transitive deps)
+RUN go mod tidy
+
+# Copy scripts for scheme generation
+COPY scripts/ ../scripts/
+RUN go run ../scripts/generate_schemes.go mihomo_schemes.h
+RUN go run ../scripts/generate_param_compat.go -o param_compat.h
+
+# Build static library (enable CGO for musl)
+# 根据目标架构自动配置交叉编译环境
+RUN if [ "$TARGETARCH" = "arm" ] && [ "$TARGETVARIANT" = "v7" ]; then \
+    echo "==> Cross-compiling for ARMv7 (native ARM64 build)" && \
+    export CGO_ENABLED=1 \
+    CC=arm-linux-gnueabihf-gcc \
+    GOOS=linux \
+    GOARCH=arm \
+    GOARM=7; \
+    else \
+    echo "==> Native build for $TARGETARCH" && \
+    export CGO_ENABLED=1; \
+    fi && \
+    go build \
+    -buildmode=c-archive \
+    -ldflags="-s -w" \
+    -o libmihomo.a \
+    .
+
+# Verify build output
+RUN ls -lh libmihomo.a libmihomo.h
+
+# ========== C++ BUILD STAGE ==========
+FROM alpine:latest AS builder
+ARG THREADS="4"
+ARG SHA=""
+ARG VERSION="dev"
+
+WORKDIR /
+
+# 安装 Alpine 构建依赖 (使用 apk 而非 apt-get)
+RUN apk add --no-cache \
+    git g++ build-base cmake python3 py3-pip \
+    curl-dev pcre2-dev rapidjson-dev yaml-cpp-dev \
+    ca-certificates ninja ccache
+
+# quickjspp
+RUN set -xe && \
+    git clone --depth=1 https://github.com/ftk/quickjspp.git && \
+    cd quickjspp && \
+    git submodule update --init && \
+    cmake -DCMAKE_BUILD_TYPE=Release . && \
+    make quickjs -j ${THREADS} && \
+    install -d /usr/lib/quickjs/ && \
+    install -m644 quickjs/libquickjs.a /usr/lib/quickjs/ && \
+    install -d /usr/include/quickjs/ && \
+    install -m644 quickjs/quickjs.h quickjs/quickjs-libc.h /usr/include/quickjs/ && \
+    install -m644 quickjspp.hpp /usr/include
+
+# libcron
+RUN set -xe && \
+    git clone https://github.com/PerMalmberg/libcron --depth=1 && \
+    cd libcron && \
+    git submodule update --init && \
+    cmake -DCMAKE_BUILD_TYPE=Release . && \
+    make libcron -j ${THREADS} && \
+    install -m644 libcron/out/Release/liblibcron.a /usr/lib/ && \
+    install -d /usr/include/libcron/ && \
+    install -m644 libcron/include/libcron/* /usr/include/libcron/ && \
+    install -d /usr/include/date/ && \
+    install -m644 libcron/externals/date/include/date/* /usr/include/date/
+
+# toml11
+RUN set -xe && \
+    git clone https://github.com/ToruNiina/toml11 --branch="v4.3.0" --depth=1 && \
+    cd toml11 && \
+    cmake -DCMAKE_CXX_STANDARD=11 . && \
+    make install -j ${THREADS}
+
+# Copy Go library and module files from go-builder stage
+COPY --from=go-builder /build/bridge/libmihomo.a /usr/lib/
+COPY --from=go-builder /build/bridge/libmihomo.h /usr/include/
+COPY --from=go-builder /build/bridge/go.mod /src/bridge/go.mod
+COPY --from=go-builder /build/bridge/go.sum /src/bridge/go.sum
+
+# build subconverter from THIS repository source (provided by build context)
+WORKDIR /src
+COPY . /src
+COPY --from=go-builder /build/bridge/mihomo_schemes.h /src/src/parser/mihomo_schemes.h
+COPY --from=go-builder /build/bridge/param_compat.h /src/src/parser/param_compat.h
+
+# Download latest header-only libraries (override old versions in repo)
+RUN set -xe && \
+    echo "Downloading latest cpp-httplib..." && \
+    curl -fsSL https://raw.githubusercontent.com/yhirose/cpp-httplib/master/httplib.h -o include/httplib.h && \
+    echo "Downloading latest nlohmann/json..." && \
+    curl -fsSL https://github.com/nlohmann/json/releases/latest/download/json.hpp -o include/nlohmann/json.hpp && \
+    echo "Downloading latest inja..." && \
+    curl -fsSL https://raw.githubusercontent.com/pantor/inja/master/single_include/inja/inja.hpp -o include/inja.hpp && \
+    echo "Downloading latest jpcre2..." && \
+    curl -fsSL https://raw.githubusercontent.com/jpcre2/jpcre2/master/src/jpcre2.hpp -o include/jpcre2.hpp && \
+    echo "Copying latest quickjspp from compiled source..." && \
+    cp /usr/include/quickjspp.hpp include/quickjspp.hpp && \
+    echo "All header libraries updated to latest versions"
+
+RUN set -xe && \
+    [ -n "${SHA}" ] && sed -i "s/#define BUILD_ID \"\"/#define BUILD_ID \"${SHA}\"/ " src/version.h || true && \
+    [ -n "${VERSION}" ] && sed -i "s/#define VERSION \"dev\"/#define VERSION \"${VERSION}\"/\" src/version.h || true && \
+    # Copy Go library to bridge directory for CMake detection
+    mkdir -p bridge && \
+    cp /usr/lib/libmihomo.a bridge/ && \
+    cp /usr/include/libmihomo.h bridge/ && \
+    # Configure ccache
+    export PATH="/usr/lib/ccache:$PATH" && \
+    export CCACHE_DIR=/tmp/ccache && \
+    export CCACHE_COMPILERCHECK=content && \
+    # Use Ninja generator and enable ccache
+    cmake -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache . && \
+    # Parallel build
+    ninja -j ${THREADS}
+
+# ========== FINAL STAGE ==========
+FROM alpine:latest
+
+# 安装运行时依赖 (Alpine 使用 musl libc)
+RUN apk add --no-cache \
+    libstdc++ pcre2 libcurl yaml-cpp ca-certificates
+
+COPY --from=builder /src/subconverter /usr/bin/
+COPY --from=builder /src/base /base/
+
+ENV TZ=Africa/Abidjan
+RUN ln -sf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+WORKDIR /base
+CMD ["subconverter"]
+EXPOSE 25500/tcp
