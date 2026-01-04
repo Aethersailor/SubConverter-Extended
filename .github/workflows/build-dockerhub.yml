@@ -425,10 +425,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: vcpkg
-          # Removed hashFiles('vcpkg.json') since it doesn't exist, using static key
-          key: vcpkg-mingw-static
+          key: vcpkg-mingw-static-v2
           restore-keys: |
-            vcpkg-mingw-static
+            vcpkg-mingw-static-v2
 
       - name: Install MinGW-w64 toolchain
         run: |
@@ -449,7 +448,8 @@ jobs:
             curl:x64-mingw-static \
             pcre2:x64-mingw-static \
             yaml-cpp:x64-mingw-static \
-            rapidjson:x64-mingw-static
+            rapidjson:x64-mingw-static \
+            toml11:x64-mingw-static
 
       - name: Build Windows binary
         run: |
