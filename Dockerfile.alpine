@@ -54,8 +54,9 @@ ARG VERSION="dev"
 WORKDIR /
 
 # 安装 Alpine 构建依赖 (使用 apk 而非 apt-get)
+# 注意：curl 是命令行工具，curl-dev 是开发库，两者都需要
 RUN apk add --no-cache \
-    git g++ build-base cmake python3 py3-pip \
+    git g++ build-base cmake python3 py3-pip curl \
     curl-dev pcre2-dev rapidjson-dev yaml-cpp-dev \
     ca-certificates ninja ccache
 
