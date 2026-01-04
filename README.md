@@ -4,10 +4,10 @@
 
 **A Modern Evolution of subconverter**
 
-[![Version](https://img.shields.io/badge/version-1.0.5-blue?style=for-the-badge&logo=github)](https://github.com/Aethersailor/SubConverter-Extended/releases)
+![GitHub Tag](https://img.shields.io/github/v/tag/Aethersailor/SubConverter-Extended?style=for-the-badge&logo=github&label=VERSION&color=blue)
+![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/Aethersailor/SubConverter-Extended/build-dockerhub.yml?branch=master&style=for-the-badge&label=Docker%20Build&logo=GitHub%20Actions)
 [![Docker Pulls](https://img.shields.io/docker/pulls/aethersailor/subconverter-extended?style=for-the-badge&logo=docker)](https://hub.docker.com/r/aethersailor/subconverter-extended)
 [![License](https://img.shields.io/badge/license-GPL--3.0-orange?style=for-the-badge)](LICENSE)
-[![Mihomo](https://img.shields.io/badge/mihomo-integrated-brightgreen?style=for-the-badge&logo=go)](https://github.com/MetaCubeX/mihomo)
 
 <h3>⚡ 现代化的订阅转换后端 | 完美兼容 Mihomo 内核 ⚡</h3>
 
@@ -34,10 +34,12 @@
 **核心定位转变**：
 SubConverter-Extended 不再充当客户端和机场之间的"中转站"，而是成为独立的**"配置融合器"**——只对客户端服务，不连接机场订阅服务器。同时基于 Mihomo 内核源码，在编译时自动跟进协议支持。  
 
-<img width="723" height="447" alt="22" src="https://github.com/user-attachments/assets/8de3ff69-d7c4-45d7-976f-c9887b94b309" />
+<div align="center">
+<img width="719" height="442" alt="22" src="https://github.com/user-attachments/assets/506ab284-96cf-4aae-a844-bf69f15ce8df" />
+</div>
 
 > [!WARNING]
-> SubConverter-Extended 不再支持 Clash 以外的客户端。  
+> SubConverter-Extended 优先服务 Clash 客户端，对其他客户端如 Surge/Loon 的支持不作保证。  
 
 ---
 
@@ -88,12 +90,11 @@ subconverter 对新节点格式的支持完全取决于维护者的积极性。�
 
 | 功能 | 原版 Subconverter | SubConverter-Extended |
 | :--- | :--- | :--- |
-| **协议支持** | 🛠️ 人工维护解析器 | 🤖 **集成 Mihomo 内核解析器**，自动支持所有新协议 |
-| **订阅链接处理** | 📥 下载并解析节点 | 🔗 生成 `proxy-provider`，由 **用户的 Mihomo 内核直接拉取** |
-| **节点链接处理** | ⚠️ 有限的协议支持 | ✅ **内置 Mihomo 解析器 100% 兼容** |
-| **配置文件大小** | 📦 展开所有订阅和节点 | ⚡ **使用 provider 模式**，配置精简 (KB级) |
-| **新协议支持** | ⏳ 人工添加维护 | 🔄 **编译时自动扫描** Mihomo 源码添加支持 |
-| **全局参数透传** | 📝 人工维护参数列表 | 🔍 **编译时自动识别** 可覆写参数 |
+| **协议支持** | 🛠️ 人工维护解析器 | 🤖 **集成 Mihomo 内核解析器，自动支持所有协议** |
+| **订阅链接处理** | 📥 下载并解析节点 | 🔗  **生成 `proxy-provider`，由用户的 Mihomo 内核直接拉取** |
+| **节点链接处理** | ⚠️ 有限的协议支持 | ✅ **内置 Mihomo 内核的解析模块，完美解析** |
+| **新协议支持** | ⏳ 人工添加维护 | 🔄 **全自动维护，编译时自动扫描 Mihomo 源码添加支持** |
+| **全局参数透传** | 📝 人工维护参数列表 | 🔍 **全自动维护，编译时自动识别可覆写参数** |
 
 ### 🔥 独特功能
 
@@ -115,6 +116,11 @@ proxy-providers:
       interval: 600
       url: http://www.gstatic.com/generate_204
 ```
+
+> [!NOTE]
+> * 使用 proxy-provider 后，由你的客户端内核以**直连**的形式自行拉取订阅。  
+> * 订阅是否能成功，**与本后端无关，与规则无关**。效果等同于你自己制作 yaml 并填写订阅链接。  
+> * 如遇拉取不成功，说明你的订阅链接在国内无法正常直连访问（至少在你所在的位置是如此），请和机场客服对线。
 
 > [!TIP]
 > **优势**：
@@ -274,10 +280,26 @@ managed_config_prefix = "http://localhost:25500"  # 托管配置前缀
 
 ---
 
+## ⭐ 记录
+
+<a href="https://www.star-history.com/#Aethersailor/SubConverter-Extended&Date">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Aethersailor/SubConverter-Extended&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Aethersailor/SubConverter-Extended&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Aethersailor/SubConverter-Extended&type=Date" />
+ </picture>
+</a>
+
+## 📊 数据统计
+
+![Alt](https://repobeats.axiom.co/api/embed/c249ae5c34b99a067c78e9216600c1a5eac16c65.svg "Repobeats analytics image")
+
+</div>
+
+---
+
 <div align="center">
 
 **如果这个项目对你有帮助，请给个 ⭐ Star 支持一下！**
 
 Made with ❤️ by [Aethersailor](https://github.com/Aethersailor)
-
-</div>
