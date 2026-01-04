@@ -419,6 +419,8 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: '{linux-glibc-*,alpine-*}'
+          merge-multiple: false
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
