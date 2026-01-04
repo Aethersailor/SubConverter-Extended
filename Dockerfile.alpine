@@ -8,10 +8,10 @@ ARG TARGETVARIANT
 WORKDIR /build/bridge
 
 # Alpine 使用 apk 包管理器
-# 包含 ARMv7 交叉编译工具链 (musl-cross)
+# 注意：Alpine 没有 gcc-arm-linux-gnueabihf 包，但 Docker Buildx 会使用 QEMU 模拟目标架构
+# 所以容器内使用原生编译即可，无需交叉编译工具链
 RUN apk add --no-cache \
-    git build-base gcc \
-    gcc-arm-linux-gnueabihf
+    git build-base gcc
 
 # Copy Go source code FIRST (needed for dependency analysis)
 COPY bridge/converter.go ./
@@ -34,19 +34,9 @@ RUN go run ../scripts/generate_schemes.go mihomo_schemes.h
 RUN go run ../scripts/generate_param_compat.go -o param_compat.h
 
 # Build static library (enable CGO for musl)
-# 根据目标架构自动配置交叉编译环境
-RUN if [ "$TARGETARCH" = "arm" ] && [ "$TARGETVARIANT" = "v7" ]; then \
-    echo "==> Cross-compiling for ARMv7 (native ARM64 build)" && \
-    export CGO_ENABLED=1 \
-    CC=arm-linux-gnueabihf-gcc \
-    GOOS=linux \
-    GOARCH=arm \
-    GOARM=7; \
-    else \
-    echo "==> Native build for $TARGETARCH" && \
-    export CGO_ENABLED=1; \
-    fi && \
-    go build \
+# Docker Buildx 会通过 QEMU 模拟目标架构，因此直接使用原生编译
+RUN echo "==> Building for $TARGETARCH" && \
+    CGO_ENABLED=1 go build \
     -buildmode=c-archive \
     -ldflags="-s -w" \
     -o libmihomo.a \
@@ -130,7 +120,7 @@ RUN set -xe && \
 
 RUN set -xe && \
     [ -n "${SHA}" ] && sed -i "s/#define BUILD_ID \"\"/#define BUILD_ID \"${SHA}\"/ " src/version.h || true && \
-    [ -n "${VERSION}" ] && sed -i "s/#define VERSION \"dev\"/#define VERSION \"${VERSION}\"/\" src/version.h || true && \
+    [ -n "${VERSION}" ] && sed -i "s/#define VERSION \"dev\"/#define VERSION \"${VERSION}\"/" src/version.h || true && \
     # Copy Go library to bridge directory for CMake detection
     mkdir -p bridge && \
     cp /usr/lib/libmihomo.a bridge/ && \

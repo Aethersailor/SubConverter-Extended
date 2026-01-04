@@ -429,10 +429,13 @@ jobs:
       matrix:
         platform:
           - arch: amd64
+            docker_platform: linux/amd64
             runner: ubuntu-latest
           - arch: arm64
+            docker_platform: linux/arm64
             runner: ubuntu-24.04-arm
           - arch: armv7
+            docker_platform: linux/arm/v7
             runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
@@ -455,7 +458,7 @@ jobs:
           load: true
           tags: subconverter-alpine:builder
           target: builder
-          platforms: linux/${{ matrix.platform.arch }}
+          platforms: ${{ matrix.platform.docker_platform }}
           build-args: |
             THREADS=4
             VERSION=${{ needs.prepare.outputs.version }}
@@ -501,6 +504,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      - name: Set version
+        run: |
+          SHA="${{ needs.prepare.outputs.sha_short }}"
+          VERSION="${{ needs.prepare.outputs.version }}"
+          if [ -n "$SHA" ]; then
+            sed -i "s/#define BUILD_ID \"\"/#define BUILD_ID \"$SHA\"/ " src/version.h
+          fi
+          if [ -n "$VERSION" ]; then
+            sed -i "s/#define VERSION \"dev\"/#define VERSION \"$VERSION\"/" src/version.h
+          fi
 
       - name: Cache vcpkg
         uses: actions/cache@v4
