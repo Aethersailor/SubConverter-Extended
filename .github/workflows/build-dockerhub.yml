@@ -402,8 +402,6 @@ jobs:
 
       # Build OpenWrt ipk package (for OpenWrt 24.10 and earlier)
       - name: Build OpenWrt ipk package
-        env:
-          SIGNING_KEY: ${{ secrets.OPENWRT_SIGNING_KEY }}
         run: |
           # Create ipk directory structure
           IPK_ROOT="ipk-build"
@@ -487,25 +485,11 @@ jobs:
           # Create ipk using ar
           ar -r "$IPK_NAME" debian-binary control.tar.gz data.tar.gz
           
-          # Sign the ipk if signing key is available
-          if [ -n "$SIGNING_KEY" ]; then
-            echo "Signing ipk package..."
-            echo "$SIGNING_KEY" > signing.key
-            # Create signature using openssl (compatible with usign verification)
-            openssl dgst -sha256 -sign signing.key -out "${IPK_NAME}.sig" "$IPK_NAME"
-            rm -f signing.key
-            echo "Package signed successfully"
-          else
-            echo "No signing key available, skipping signature"
-          fi
-          
           # Cleanup temp files
           rm -rf "$IPK_ROOT" debian-binary control.tar.gz data.tar.gz
 
       # Build OpenWrt apk package (for OpenWrt 25.12+)
       - name: Build OpenWrt apk package
-        env:
-          SIGNING_KEY: ${{ secrets.OPENWRT_SIGNING_KEY }}
         run: |
           # Create apk directory structure
           APK_ROOT="apk-build"
@@ -566,31 +550,22 @@ jobs:
           
           APK_NAME="subconverter-extended-${{ needs.prepare.outputs.version }}-r0_${APK_ARCH}.apk"
           
-          # Sign the apk if signing key is available
-          if [ -n "$SIGNING_KEY" ]; then
-            echo "Signing apk package..."
-            echo "$SIGNING_KEY" > signing.key
-            
-            # Create signature file for .PKGINFO
-            openssl dgst -sha256 -sign signing.key -out "$APK_ROOT/.SIGN.RSA.subconverter-extended.pub" "$APK_ROOT/.PKGINFO"
-            
-            # Build signed apk
-            cd "$APK_ROOT"
-            tar --owner=root --group=root -czf "../$APK_NAME" \
-              .SIGN.RSA.subconverter-extended.pub .PKGINFO usr etc
-            cd ..
-            
-            rm -f signing.key
-            echo "Package signed successfully"
-          else
-            echo "No signing key available, building unsigned package"
-            cd "$APK_ROOT"
-            tar --owner=root --group=root -czf "../$APK_NAME" .PKGINFO usr etc
-            cd ..
-          fi
+          # Build apk package
+          cd "$APK_ROOT"
+          tar --owner=root --group=root -czf "../$APK_NAME" .PKGINFO usr etc
+          cd ..
           
           # Cleanup
           rm -rf "$APK_ROOT"
+
+      # Generate SHA256 checksums
+      - name: 生成 SHA256 校验和
+        run: |
+          sha256sum \
+            SubConverter-Extended-*.tar.gz \
+            subconverter-extended_*.ipk \
+            subconverter-extended-*.apk \
+            > SHA256SUMS-${{ matrix.platform.arch }}.txt
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -599,8 +574,8 @@ jobs:
           path: |
             SubConverter-Extended-*.tar.gz
             subconverter-extended_*.ipk
-            subconverter-extended_*.ipk.sig
             subconverter-extended-*.apk
+            SHA256SUMS-*.txt
 
   # [NEW] Release Creation Job (Only on Tag)
   create-release:
@@ -618,6 +593,10 @@ jobs:
           pattern: '{linux-glibc-*,alpine-*}'
           merge-multiple: false
 
+      - name: 合并校验和文件
+        run: |
+          cat artifacts/alpine-**/SHA256SUMS-*.txt > SHA256SUMS.txt
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -625,8 +604,8 @@ jobs:
             artifacts/linux-glibc-*/*.tar.gz
             artifacts/alpine-*/*.tar.gz
             artifacts/alpine-*/*.ipk
-            artifacts/alpine-*/*.ipk.sig
             artifacts/alpine-*/*.apk
+            SHA256SUMS.txt
           body: |
             ## 📦 Downloads
 
@@ -645,3 +624,24 @@ jobs:
             ### OpenWrt (apk - 适用于 25.12+)
             - **x86_64**: `subconverter-extended-${{ needs.prepare.outputs.version }}-r0_x86_64.apk`
             - **aarch64**: `subconverter-extended-${{ needs.prepare.outputs.version }}-r0_aarch64.apk`
+
+            ---
+
+            ## 🔐 文件校验（可选但推荐）
+
+            下载文件后，可验证完整性以确保文件未被篡改或损坏：
+
+            **Linux/macOS/OpenWrt**:
+            ```bash
+            sha256sum -c SHA256SUMS.txt
+            
+            # 或单独验证某个文件
+            sha256sum SubConverter-Extended-*.tar.gz
+            ```
+
+            **Windows PowerShell**:
+            ```powershell
+            Get-FileHash -Algorithm SHA256 .\SubConverter-Extended-*.tar.gz
+            ```
+
+            校验和文件 `SHA256SUMS.txt` 包含所有发布文件的 SHA256 哈希值。
