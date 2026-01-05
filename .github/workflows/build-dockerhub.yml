@@ -402,6 +402,8 @@ jobs:
 
       # Build OpenWrt ipk package (for OpenWrt 24.10 and earlier)
       - name: Build OpenWrt ipk package
+        env:
+          SIGNING_KEY: ${{ secrets.OPENWRT_SIGNING_KEY }}
         run: |
           # Create ipk directory structure
           IPK_ROOT="ipk-build"
@@ -480,15 +482,30 @@ jobs:
           # Create debian-binary
           echo "2.0" > debian-binary
           
+          IPK_NAME="subconverter-extended_${{ needs.prepare.outputs.version }}_${IPK_ARCH}.ipk"
+          
           # Create ipk using ar
-          ar -r subconverter-extended_${{ needs.prepare.outputs.version }}_${IPK_ARCH}.ipk \
-            debian-binary control.tar.gz data.tar.gz
+          ar -r "$IPK_NAME" debian-binary control.tar.gz data.tar.gz
+          
+          # Sign the ipk if signing key is available
+          if [ -n "$SIGNING_KEY" ]; then
+            echo "Signing ipk package..."
+            echo "$SIGNING_KEY" > signing.key
+            # Create signature using openssl (compatible with usign verification)
+            openssl dgst -sha256 -sign signing.key -out "${IPK_NAME}.sig" "$IPK_NAME"
+            rm -f signing.key
+            echo "Package signed successfully"
+          else
+            echo "No signing key available, skipping signature"
+          fi
           
           # Cleanup temp files
           rm -rf "$IPK_ROOT" debian-binary control.tar.gz data.tar.gz
 
       # Build OpenWrt apk package (for OpenWrt 25.12+)
       - name: Build OpenWrt apk package
+        env:
+          SIGNING_KEY: ${{ secrets.OPENWRT_SIGNING_KEY }}
         run: |
           # Create apk directory structure
           APK_ROOT="apk-build"
@@ -547,11 +564,30 @@ jobs:
           origin = subconverter-extended
           EOF
           
-          # Build apk (unsigned version)
-          cd "$APK_ROOT"
-          tar --owner=root --group=root -czf ../subconverter-extended-${{ needs.prepare.outputs.version }}-r0_${APK_ARCH}.apk \
-            .PKGINFO usr etc
-          cd ..
+          APK_NAME="subconverter-extended-${{ needs.prepare.outputs.version }}-r0_${APK_ARCH}.apk"
+          
+          # Sign the apk if signing key is available
+          if [ -n "$SIGNING_KEY" ]; then
+            echo "Signing apk package..."
+            echo "$SIGNING_KEY" > signing.key
+            
+            # Create signature file for .PKGINFO
+            openssl dgst -sha256 -sign signing.key -out "$APK_ROOT/.SIGN.RSA.subconverter-extended.pub" "$APK_ROOT/.PKGINFO"
+            
+            # Build signed apk
+            cd "$APK_ROOT"
+            tar --owner=root --group=root -czf "../$APK_NAME" \
+              .SIGN.RSA.subconverter-extended.pub .PKGINFO usr etc
+            cd ..
+            
+            rm -f signing.key
+            echo "Package signed successfully"
+          else
+            echo "No signing key available, building unsigned package"
+            cd "$APK_ROOT"
+            tar --owner=root --group=root -czf "../$APK_NAME" .PKGINFO usr etc
+            cd ..
+          fi
           
           # Cleanup
           rm -rf "$APK_ROOT"
@@ -563,6 +599,7 @@ jobs:
           path: |
             SubConverter-Extended-*.tar.gz
             subconverter-extended_*.ipk
+            subconverter-extended_*.ipk.sig
             subconverter-extended-*.apk
 
   # [NEW] Release Creation Job (Only on Tag)
@@ -588,6 +625,7 @@ jobs:
             artifacts/linux-glibc-*/*.tar.gz
             artifacts/alpine-*/*.tar.gz
             artifacts/alpine-*/*.ipk
+            artifacts/alpine-*/*.ipk.sig
             artifacts/alpine-*/*.apk
           body: |
             ## 📦 Downloads
