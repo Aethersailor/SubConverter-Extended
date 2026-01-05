@@ -400,179 +400,182 @@ jobs:
           
           tar -czf SubConverter-Extended-${{ needs.prepare.outputs.version }}-alpine-${{ matrix.platform.arch }}.tar.gz SubConverter-Extended
 
-      # Build OpenWrt ipk package (for OpenWrt 24.10 and earlier)
-      - name: Build OpenWrt ipk package
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpine-${{ matrix.platform.arch }}
+          path: SubConverter-Extended-*.tar.gz
+
+  # OpenWrt IPK/APK Package Build Job
+  build-openwrt-packages:
+    name: "📦 OpenWrt (${{ matrix.arch }})"
+    runs-on: ubuntu-latest
+    needs: [prepare, build-linux-musl]
+    if: needs.prepare.outputs.is_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: Download Alpine artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: alpine-${{ matrix.arch }}
+          path: ./artifacts/
+
+      - name: Install dependencies
         run: |
-          # Create ipk directory structure
-          IPK_ROOT="ipk-build"
-          mkdir -p "$IPK_ROOT/CONTROL"
-          mkdir -p "$IPK_ROOT/usr/bin"
-          mkdir -p "$IPK_ROOT/usr/share/subconverter"
-          mkdir -p "$IPK_ROOT/etc/init.d"
-          mkdir -p "$IPK_ROOT/etc/config"
-          
-          # Copy files from SubConverter-Extended directory
-          cp SubConverter-Extended/subconverter "$IPK_ROOT/usr/bin/"
-          cp -r SubConverter-Extended/base "$IPK_ROOT/usr/share/subconverter/"
-          
-          # Architecture mapping for OpenWrt
-          case "${{ matrix.platform.arch }}" in
-            amd64) IPK_ARCH="x86_64" ;;
-            arm64) IPK_ARCH="aarch64" ;;
+          sudo apt-get update
+          sudo apt-get install -y zstd
+
+      - name: Download OpenWrt SDK
+        run: |
+          SDK_URL="https://downloads.openwrt.org/releases/24.10.0/targets/x86/64/openwrt-sdk-24.10.0-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
+          curl -sSL "$SDK_URL" -o sdk.tar.zst
+          mkdir sdk
+          zstd -d -c sdk.tar.zst | tar -xf - -C sdk --strip-components=1
+
+      - name: Extract Alpine binary
+        run: |
+          tar -xzf artifacts/SubConverter-Extended-*-alpine-${{ matrix.arch }}.tar.gz
+
+      - name: Set architecture variables
+        id: arch
+        run: |
+          case "${{ matrix.arch }}" in
+            amd64) echo "openwrt=x86_64" >> $GITHUB_OUTPUT ;;
+            arm64) echo "openwrt=aarch64" >> $GITHUB_OUTPUT ;;
           esac
+
+      - name: Build IPK package
+        run: |
+          PKG="subconverter-extended"
+          mkdir -p $PKG/{CONTROL,usr/bin,usr/share/subconverter,etc/SubConverter-Extended,etc/init.d}
           
-          # Create control file
-          cat > "$IPK_ROOT/CONTROL/control" << EOF
+          # Copy files
+          cp SubConverter-Extended/subconverter $PKG/usr/bin/
+          cp -r SubConverter-Extended/base $PKG/usr/share/subconverter/
+          cp SubConverter-Extended/base/pref.example.toml $PKG/etc/SubConverter-Extended/pref.toml
+          chmod +x $PKG/usr/bin/subconverter
+          
+          # Control file
+          cat > $PKG/CONTROL/control << EOF
           Package: subconverter-extended
           Version: ${{ needs.prepare.outputs.version }}
-          Architecture: $IPK_ARCH
+          Architecture: ${{ steps.arch.outputs.openwrt }}
           Maintainer: AetherSailor
           Section: net
           Priority: optional
           Description: Subscription converter with Clash/Mihomo support
           EOF
           
-          # Create conffiles
-          echo "/etc/config/subconverter" > "$IPK_ROOT/CONTROL/conffiles"
+          # Conffiles
+          echo "/etc/SubConverter-Extended/pref.toml" > $PKG/CONTROL/conffiles
           
-          # Create postinst script
-          cat > "$IPK_ROOT/CONTROL/postinst" << 'POSTINST'
+          # Postinst script
+          cat > $PKG/CONTROL/postinst << 'EOF'
           #!/bin/sh
           chmod +x /usr/bin/subconverter
-          POSTINST
-          chmod +x "$IPK_ROOT/CONTROL/postinst"
+          exit 0
+          EOF
+          chmod +x $PKG/CONTROL/postinst
           
-          # Create init.d service script (procd)
-          cat > "$IPK_ROOT/etc/init.d/subconverter" << 'INITD'
+          # Init.d service (procd)
+          cat > $PKG/etc/init.d/subconverter << 'EOF'
           #!/bin/sh /etc/rc.common
           START=99
           STOP=10
           USE_PROCD=1
-
+          
           start_service() {
               procd_open_instance
-              procd_set_param command /usr/bin/subconverter
+              procd_set_param command /usr/bin/subconverter -f /etc/SubConverter-Extended/pref.toml
               procd_set_param respawn
               procd_set_param stdout 1
               procd_set_param stderr 1
               procd_close_instance
           }
-          INITD
-          chmod +x "$IPK_ROOT/etc/init.d/subconverter"
+          EOF
+          chmod +x $PKG/etc/init.d/subconverter
           
-          # Create UCI config file
-          cat > "$IPK_ROOT/etc/config/subconverter" << 'UCI'
-          config subconverter 'main'
-              option enabled '0'
-              option port '25500'
-          UCI
+          # Build using SDK ipkg-build
+          chmod +x sdk/scripts/ipkg-build
+          sdk/scripts/ipkg-build -o root -g root $PKG .
+          mv subconverter-extended_*.ipk subconverter-extended_${{ needs.prepare.outputs.version }}_${{ steps.arch.outputs.openwrt }}.ipk
           
-          # Build ipk: create data.tar.gz
-          cd "$IPK_ROOT"
-          tar --owner=root --group=root -czf ../data.tar.gz --exclude='CONTROL' .
-          cd ..
-          
-          # Create control.tar.gz
-          cd "$IPK_ROOT/CONTROL"
-          tar --owner=root --group=root -czf ../../control.tar.gz .
-          cd ../..
-          
-          # Create debian-binary
-          echo "2.0" > debian-binary
-          
-          IPK_NAME="subconverter-extended_${{ needs.prepare.outputs.version }}_${IPK_ARCH}.ipk"
-          
-          # Create ipk using ar
-          ar -r "$IPK_NAME" debian-binary control.tar.gz data.tar.gz
-          
-          # Cleanup temp files
-          rm -rf "$IPK_ROOT" debian-binary control.tar.gz data.tar.gz
+          # Cleanup
+          rm -rf $PKG
 
-      # Build OpenWrt apk package (for OpenWrt 25.12+)
-      - name: Build OpenWrt apk package
+      - name: Build APK package
         run: |
-          # Create apk directory structure
-          APK_ROOT="apk-build"
-          mkdir -p "$APK_ROOT/usr/bin"
-          mkdir -p "$APK_ROOT/usr/share/subconverter"
-          mkdir -p "$APK_ROOT/etc/init.d"
-          mkdir -p "$APK_ROOT/etc/config"
+          APK="apk-build"
+          mkdir -p $APK/{usr/bin,usr/share/subconverter,etc/SubConverter-Extended,etc/init.d}
           
-          # Copy files from SubConverter-Extended directory
-          cp SubConverter-Extended/subconverter "$APK_ROOT/usr/bin/"
-          cp -r SubConverter-Extended/base "$APK_ROOT/usr/share/subconverter/"
-          
-          # Create init.d service script (procd)
-          cat > "$APK_ROOT/etc/init.d/subconverter" << 'INITD'
-          #!/bin/sh /etc/rc.common
-          START=99
-          STOP=10
-          USE_PROCD=1
-
-          start_service() {
-              procd_open_instance
-              procd_set_param command /usr/bin/subconverter
-              procd_set_param respawn
-              procd_set_param stdout 1
-              procd_set_param stderr 1
-              procd_close_instance
-          }
-          INITD
-          chmod +x "$APK_ROOT/etc/init.d/subconverter"
-          
-          # Create UCI config file
-          cat > "$APK_ROOT/etc/config/subconverter" << 'UCI'
-          config subconverter 'main'
-              option enabled '0'
-              option port '25500'
-          UCI
-          
-          # Architecture mapping (apk uses same naming as Alpine)
-          case "${{ matrix.platform.arch }}" in
-            amd64) APK_ARCH="x86_64" ;;
-            arm64) APK_ARCH="aarch64" ;;
-          esac
+          # Copy files
+          cp SubConverter-Extended/subconverter $APK/usr/bin/
+          cp -r SubConverter-Extended/base $APK/usr/share/subconverter/
+          cp SubConverter-Extended/base/pref.example.toml $APK/etc/SubConverter-Extended/pref.toml
+          chmod +x $APK/usr/bin/subconverter
           
           # Calculate installed size
-          INSTALLED_SIZE=$(du -sb "$APK_ROOT" | cut -f1)
+          SIZE=$(du -sb $APK | cut -f1)
           
-          # Create .PKGINFO file
-          cat > "$APK_ROOT/.PKGINFO" << EOF
+          # .PKGINFO
+          cat > $APK/.PKGINFO << EOF
           pkgname = subconverter-extended
           pkgver = ${{ needs.prepare.outputs.version }}-r0
-          arch = $APK_ARCH
-          size = $INSTALLED_SIZE
+          arch = ${{ steps.arch.outputs.openwrt }}
+          size = $SIZE
           pkgdesc = Subscription converter with Clash/Mihomo support
           url = https://github.com/Aethersailor/SubConverter-Extended
           maintainer = AetherSailor
           origin = subconverter-extended
           EOF
           
-          APK_NAME="subconverter-extended-${{ needs.prepare.outputs.version }}-r0_${APK_ARCH}.apk"
+          # Init.d service (procd)
+          cat > $APK/etc/init.d/subconverter << 'EOF'
+          #!/bin/sh /etc/rc.common
+          START=99
+          STOP=10
+          USE_PROCD=1
           
-          # Build apk package
-          cd "$APK_ROOT"
-          tar --owner=root --group=root -czf "../$APK_NAME" .PKGINFO usr etc
+          start_service() {
+              procd_open_instance
+              procd_set_param command /usr/bin/subconverter -f /etc/SubConverter-Extended/pref.toml
+              procd_set_param respawn
+              procd_set_param stdout 1
+              procd_set_param stderr 1
+              procd_close_instance
+          }
+          EOF
+          chmod +x $APK/etc/init.d/subconverter
+          
+          # APK v2 format: two consecutive gzip streams
+          APK_NAME="subconverter-extended-${{ needs.prepare.outputs.version }}-r0_${{ steps.arch.outputs.openwrt }}.apk"
+          cd $APK
+          # Control segment (must be first)
+          tar -c --format=posix .PKGINFO | gzip > ../control.tar.gz
+          # Data segment
+          tar -c --format=posix --exclude='.PKGINFO' . | gzip > ../data.tar.gz
           cd ..
           
-          # Cleanup
-          rm -rf "$APK_ROOT"
+          # Concatenate
+          cat control.tar.gz data.tar.gz > "$APK_NAME"
+          rm -f control.tar.gz data.tar.gz
+          rm -rf $APK
 
-      # Generate SHA256 checksums
-      - name: 生成 SHA256 校验和
+      - name: Generate SHA256 checksums
         run: |
           sha256sum \
-            SubConverter-Extended-*.tar.gz \
             subconverter-extended_*.ipk \
             subconverter-extended-*.apk \
-            > SHA256SUMS-${{ matrix.platform.arch }}.txt
+            > SHA256SUMS-openwrt-${{ matrix.arch }}.txt
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: alpine-${{ matrix.platform.arch }}
+          name: openwrt-${{ matrix.arch }}
           path: |
-            SubConverter-Extended-*.tar.gz
             subconverter-extended_*.ipk
             subconverter-extended-*.apk
             SHA256SUMS-*.txt
@@ -581,7 +584,7 @@ jobs:
   create-release:
     name: "🚀 Release"
     runs-on: ubuntu-latest
-    needs: [prepare, build-amd64, build-arm64, build-linux-musl]
+    needs: [prepare, build-amd64, build-arm64, build-linux-musl, build-openwrt-packages]
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write
@@ -590,12 +593,12 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: '{linux-glibc-*,alpine-*}'
+          pattern: '{linux-glibc-*,alpine-*,openwrt-*}'
           merge-multiple: false
 
-      - name: 合并校验和文件
+      - name: Merge checksum files
         run: |
-          cat artifacts/alpine-**/SHA256SUMS-*.txt > SHA256SUMS.txt
+          cat artifacts/openwrt-*/SHA256SUMS-*.txt > SHA256SUMS.txt
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -603,8 +606,8 @@ jobs:
           files: |
             artifacts/linux-glibc-*/*.tar.gz
             artifacts/alpine-*/*.tar.gz
-            artifacts/alpine-*/*.ipk
-            artifacts/alpine-*/*.apk
+            artifacts/openwrt-*/*.ipk
+            artifacts/openwrt-*/*.apk
             SHA256SUMS.txt
           body: |
             ## 📦 Downloads
