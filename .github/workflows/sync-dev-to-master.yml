@@ -23,12 +23,34 @@ jobs:
         run: |
           echo "Merging dev into master..."
           # Attempt merge; if it fails (conflicts), continue execution to resolve them
-          git merge origin/dev --no-commit --no-ff || true
+          if ! git merge origin/dev --no-commit --no-ff; then
+            echo "Merge conflicts detected, resolving..."
+            
+            # Get list of conflicting files
+            CONFLICTED_FILES=$(git diff --name-only --diff-filter=U)
+            
+            for file in $CONFLICTED_FILES; do
+              if [[ "$file" == README*.md ]]; then
+                # For README files, keep master version
+                echo "Keeping master version of $file"
+                git checkout --ours "$file"
+              else
+                # For other files (code, workflows), use dev version
+                echo "Using dev version of $file"
+                git checkout --theirs "$file"
+              fi
+              git add "$file"
+            done
+          fi
           
           echo "Restoring master README..."
           # Restore README.md from HEAD (master) state, discarding changes from dev
-          git checkout HEAD -- README.md || true
-          git checkout HEAD -- README-*.md || true
+          git checkout HEAD -- README.md 2>/dev/null || true
+          git checkout HEAD -- 'README-*.md' 2>/dev/null || true
+          
+          # Re-add README files to staging if they were modified
+          git add README.md 2>/dev/null || true
+          git add README-*.md 2>/dev/null || true
           
           # Check if there are changes to commit (excluding README)
           if git diff --staged --quiet; then
@@ -39,3 +61,4 @@ jobs:
             echo "Pushing..."
             git push origin master
           fi
+
