@@ -492,7 +492,7 @@ jobs:
           chmod +x $PKG/etc/init.d/subconverter
           
           # Build using ipkg-build
-          ./ipkg-build -o root -g root $PKG .
+          ./ipkg-build $PKG .
           mv subconverter-extended_*.ipk subconverter-extended_${{ needs.prepare.outputs.version }}_${{ steps.arch.outputs.openwrt }}.ipk
           
           # Cleanup
