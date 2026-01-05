@@ -406,179 +406,11 @@ jobs:
           name: alpine-${{ matrix.platform.arch }}
           path: SubConverter-Extended-*.tar.gz
 
-  # OpenWrt IPK/APK Package Build Job
-  build-openwrt-packages:
-    name: "📦 OpenWrt (${{ matrix.arch }})"
-    runs-on: ubuntu-latest
-    needs: [prepare, build-linux-musl]
-    if: needs.prepare.outputs.is_release == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
-    steps:
-      - name: Download Alpine artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: alpine-${{ matrix.arch }}
-          path: ./artifacts/
-
-      - name: Download ipkg-build script
-        run: |
-          curl -sSL "https://raw.githubusercontent.com/openwrt/openwrt/main/scripts/ipkg-build" -o ipkg-build
-          chmod +x ipkg-build
-
-      - name: Extract Alpine binary
-        run: |
-          tar -xzf artifacts/SubConverter-Extended-*-alpine-${{ matrix.arch }}.tar.gz
-
-      - name: Set architecture variables
-        id: arch
-        run: |
-          case "${{ matrix.arch }}" in
-            amd64) echo "openwrt=x86_64" >> $GITHUB_OUTPUT ;;
-            arm64) echo "openwrt=aarch64" >> $GITHUB_OUTPUT ;;
-          esac
-
-      - name: Build IPK package
-        run: |
-          PKG="subconverter-extended"
-          mkdir -p $PKG/{CONTROL,usr/bin,usr/share/subconverter,etc/SubConverter-Extended,etc/init.d}
-          
-          # Copy files
-          cp SubConverter-Extended/subconverter $PKG/usr/bin/
-          cp -r SubConverter-Extended/base $PKG/usr/share/subconverter/
-          cp SubConverter-Extended/base/pref.example.toml $PKG/etc/SubConverter-Extended/pref.toml
-          chmod +x $PKG/usr/bin/subconverter
-          
-          # Control file
-          cat > $PKG/CONTROL/control << EOF
-          Package: subconverter-extended
-          Version: ${{ needs.prepare.outputs.version }}
-          Architecture: ${{ steps.arch.outputs.openwrt }}
-          Maintainer: AetherSailor
-          Section: net
-          Priority: optional
-          Description: Subscription converter with Clash/Mihomo support
-          EOF
-          
-          # Conffiles
-          echo "/etc/SubConverter-Extended/pref.toml" > $PKG/CONTROL/conffiles
-          
-          # Postinst script
-          cat > $PKG/CONTROL/postinst << 'EOF'
-          #!/bin/sh
-          chmod +x /usr/bin/subconverter
-          exit 0
-          EOF
-          chmod +x $PKG/CONTROL/postinst
-          
-          # Init.d service (procd)
-          cat > $PKG/etc/init.d/subconverter << 'EOF'
-          #!/bin/sh /etc/rc.common
-          START=99
-          STOP=10
-          USE_PROCD=1
-          
-          start_service() {
-              procd_open_instance
-              procd_set_param command /usr/bin/subconverter -f /etc/SubConverter-Extended/pref.toml
-              procd_set_param respawn
-              procd_set_param stdout 1
-              procd_set_param stderr 1
-              procd_close_instance
-          }
-          EOF
-          chmod +x $PKG/etc/init.d/subconverter
-          
-          # Build using ipkg-build
-          ./ipkg-build $PKG .
-          
-          # Cleanup
-          rm -rf $PKG
-
-      - name: Build APK package
-        env:
-          VERSION: ${{ needs.prepare.outputs.version }}
-          ARCH: ${{ steps.arch.outputs.openwrt }}
-        run: |
-          # Prepare files for APK
-          APK_ROOT="apk-build"
-          mkdir -p $APK_ROOT/{usr/bin,usr/share/subconverter,etc/SubConverter-Extended,etc/init.d}
-          
-          cp SubConverter-Extended/subconverter $APK_ROOT/usr/bin/
-          cp -r SubConverter-Extended/base $APK_ROOT/usr/share/subconverter/
-          cp SubConverter-Extended/base/pref.example.toml $APK_ROOT/etc/SubConverter-Extended/pref.toml
-          chmod +x $APK_ROOT/usr/bin/subconverter
-          
-          # Create .PKGINFO
-          SIZE=$(du -sb $APK_ROOT | cut -f1)
-          cat > $APK_ROOT/.PKGINFO << EOF
-          pkgname = subconverter-extended
-          pkgver = ${VERSION}-r0
-          arch = ${ARCH}
-          size = $SIZE
-          pkgdesc = Subscription converter with Clash/Mihomo support
-          url = https://github.com/Aethersailor/SubConverter-Extended
-          maintainer = AetherSailor
-          origin = subconverter-extended
-          EOF
-          
-          # Create init.d service (procd)
-          cat > $APK_ROOT/etc/init.d/subconverter << 'INITD'
-          #!/bin/sh /etc/rc.common
-          START=99
-          STOP=10
-          USE_PROCD=1
-          
-          start_service() {
-              procd_open_instance
-              procd_set_param command /usr/bin/subconverter -f /etc/SubConverter-Extended/pref.toml
-              procd_set_param respawn
-              procd_set_param stdout 1
-              procd_set_param stderr 1
-              procd_close_instance
-          }
-          INITD
-          chmod +x $APK_ROOT/etc/init.d/subconverter
-          
-          # Build APK using Alpine container with abuild-tar
-          APK_NAME="subconverter-extended-${VERSION}-r0_${ARCH}.apk"
-          docker run --rm -v $(pwd):/work -w /work alpine:latest sh -c "
-            apk add --no-cache tar gzip abuild > /dev/null 2>&1
-            cd apk-build
-            # Control segment with hash
-            tar -c .PKGINFO | abuild-tar --hash | gzip -9 > ../control.tar.gz
-            # Data segment with hash
-            tar -c --exclude='.PKGINFO' * | abuild-tar --hash | gzip -9 > ../data.tar.gz
-            cd ..
-            cat control.tar.gz data.tar.gz > '$APK_NAME'
-          "
-          
-          rm -f control.tar.gz data.tar.gz
-          rm -rf $APK_ROOT
-
-      - name: Generate SHA256 checksums
-        run: |
-          sha256sum \
-            subconverter-extended_*.ipk \
-            subconverter-extended-*.apk \
-            > SHA256SUMS-openwrt-${{ matrix.arch }}.txt
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: openwrt-${{ matrix.arch }}
-          path: |
-            subconverter-extended_*.ipk
-            subconverter-extended-*.apk
-            SHA256SUMS-*.txt
-
   # [NEW] Release Creation Job (Only on Tag)
   create-release:
     name: "🚀 Release"
     runs-on: ubuntu-latest
-    needs: [prepare, build-amd64, build-arm64, build-linux-musl, build-openwrt-packages]
+    needs: [prepare, build-amd64, build-arm64, build-linux-musl]
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write
@@ -587,12 +419,8 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: '{linux-glibc-*,alpine-*,openwrt-*}'
+          pattern: '{linux-glibc-*,alpine-*}'
           merge-multiple: false
-
-      - name: Merge checksum files
-        run: |
-          cat artifacts/openwrt-*/SHA256SUMS-*.txt > SHA256SUMS.txt
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -600,9 +428,6 @@ jobs:
           files: |
             artifacts/linux-glibc-*/*.tar.gz
             artifacts/alpine-*/*.tar.gz
-            artifacts/openwrt-*/*.ipk
-            artifacts/openwrt-*/*.apk
-            SHA256SUMS.txt
           body: |
             ## 📦 Downloads
 
@@ -613,32 +438,3 @@ jobs:
             ### Linux (Alpine - musl)
             - **amd64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-alpine-amd64.tar.gz`
             - **arm64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-alpine-arm64.tar.gz`
-
-            ### OpenWrt (ipk - 适用于 24.10 及更早版本)
-            - **x86_64**: `subconverter-extended_${{ needs.prepare.outputs.version }}_x86_64.ipk`
-            - **aarch64**: `subconverter-extended_${{ needs.prepare.outputs.version }}_aarch64.ipk`
-
-            ### OpenWrt (apk - 适用于 25.12+)
-            - **x86_64**: `subconverter-extended-${{ needs.prepare.outputs.version }}-r0_x86_64.apk`
-            - **aarch64**: `subconverter-extended-${{ needs.prepare.outputs.version }}-r0_aarch64.apk`
-
-            ---
-
-            ## 🔐 文件校验（可选但推荐）
-
-            下载文件后，可验证完整性以确保文件未被篡改或损坏：
-
-            **Linux/macOS/OpenWrt**:
-            ```bash
-            sha256sum -c SHA256SUMS.txt
-            
-            # 或单独验证某个文件
-            sha256sum SubConverter-Extended-*.tar.gz
-            ```
-
-            **Windows PowerShell**:
-            ```powershell
-            Get-FileHash -Algorithm SHA256 .\SubConverter-Extended-*.tar.gz
-            ```
-
-            校验和文件 `SHA256SUMS.txt` 包含所有发布文件的 SHA256 哈希值。
