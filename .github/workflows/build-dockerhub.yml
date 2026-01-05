@@ -493,30 +493,30 @@ jobs:
           
           # Build using ipkg-build
           ./ipkg-build $PKG .
-          mv subconverter-extended_*.ipk subconverter-extended_${{ needs.prepare.outputs.version }}_${{ steps.arch.outputs.openwrt }}.ipk
           
           # Cleanup
           rm -rf $PKG
 
       - name: Build APK package
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          ARCH: ${{ steps.arch.outputs.openwrt }}
         run: |
-          APK="apk-build"
-          mkdir -p $APK/{usr/bin,usr/share/subconverter,etc/SubConverter-Extended,etc/init.d}
+          # Prepare files for APK
+          APK_ROOT="apk-build"
+          mkdir -p $APK_ROOT/{usr/bin,usr/share/subconverter,etc/SubConverter-Extended,etc/init.d}
           
-          # Copy files
-          cp SubConverter-Extended/subconverter $APK/usr/bin/
-          cp -r SubConverter-Extended/base $APK/usr/share/subconverter/
-          cp SubConverter-Extended/base/pref.example.toml $APK/etc/SubConverter-Extended/pref.toml
-          chmod +x $APK/usr/bin/subconverter
+          cp SubConverter-Extended/subconverter $APK_ROOT/usr/bin/
+          cp -r SubConverter-Extended/base $APK_ROOT/usr/share/subconverter/
+          cp SubConverter-Extended/base/pref.example.toml $APK_ROOT/etc/SubConverter-Extended/pref.toml
+          chmod +x $APK_ROOT/usr/bin/subconverter
           
-          # Calculate installed size
-          SIZE=$(du -sb $APK | cut -f1)
-          
-          # .PKGINFO
-          cat > $APK/.PKGINFO << EOF
+          # Create .PKGINFO
+          SIZE=$(du -sb $APK_ROOT | cut -f1)
+          cat > $APK_ROOT/.PKGINFO << EOF
           pkgname = subconverter-extended
-          pkgver = ${{ needs.prepare.outputs.version }}-r0
-          arch = ${{ steps.arch.outputs.openwrt }}
+          pkgver = ${VERSION}-r0
+          arch = ${ARCH}
           size = $SIZE
           pkgdesc = Subscription converter with Clash/Mihomo support
           url = https://github.com/Aethersailor/SubConverter-Extended
@@ -524,8 +524,8 @@ jobs:
           origin = subconverter-extended
           EOF
           
-          # Init.d service (procd)
-          cat > $APK/etc/init.d/subconverter << 'EOF'
+          # Create init.d service (procd)
+          cat > $APK_ROOT/etc/init.d/subconverter << 'INITD'
           #!/bin/sh /etc/rc.common
           START=99
           STOP=10
@@ -539,22 +539,24 @@ jobs:
               procd_set_param stderr 1
               procd_close_instance
           }
-          EOF
-          chmod +x $APK/etc/init.d/subconverter
+          INITD
+          chmod +x $APK_ROOT/etc/init.d/subconverter
           
-          # APK v2 format: two consecutive gzip streams
-          APK_NAME="subconverter-extended-${{ needs.prepare.outputs.version }}-r0_${{ steps.arch.outputs.openwrt }}.apk"
-          cd $APK
-          # Control segment (must be first)
-          tar -c --format=posix .PKGINFO | gzip > ../control.tar.gz
-          # Data segment
-          tar -c --format=posix --exclude='.PKGINFO' . | gzip > ../data.tar.gz
-          cd ..
+          # Build APK using Alpine container with abuild-tar
+          APK_NAME="subconverter-extended-${VERSION}-r0_${ARCH}.apk"
+          docker run --rm -v $(pwd):/work -w /work alpine:latest sh -c "
+            apk add --no-cache tar gzip abuild > /dev/null 2>&1
+            cd apk-build
+            # Control segment with hash
+            tar -c .PKGINFO | abuild-tar --hash | gzip -9 > ../control.tar.gz
+            # Data segment with hash
+            tar -c --exclude='.PKGINFO' * | abuild-tar --hash | gzip -9 > ../data.tar.gz
+            cd ..
+            cat control.tar.gz data.tar.gz > '$APK_NAME'
+          "
           
-          # Concatenate
-          cat control.tar.gz data.tar.gz > "$APK_NAME"
           rm -f control.tar.gz data.tar.gz
-          rm -rf $APK
+          rm -rf $APK_ROOT
 
       - name: Generate SHA256 checksums
         run: |
