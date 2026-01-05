@@ -423,17 +423,10 @@ jobs:
           name: alpine-${{ matrix.arch }}
           path: ./artifacts/
 
-      - name: Install dependencies
+      - name: Download ipkg-build script
         run: |
-          sudo apt-get update
-          sudo apt-get install -y zstd
-
-      - name: Download OpenWrt SDK
-        run: |
-          SDK_URL="https://downloads.openwrt.org/releases/24.10.0/targets/x86/64/openwrt-sdk-24.10.0-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
-          curl -sSL "$SDK_URL" -o sdk.tar.zst
-          mkdir sdk
-          zstd -d -c sdk.tar.zst | tar -xf - -C sdk --strip-components=1
+          curl -sSL "https://raw.githubusercontent.com/openwrt/openwrt/main/scripts/ipkg-build" -o ipkg-build
+          chmod +x ipkg-build
 
       - name: Extract Alpine binary
         run: |
@@ -498,9 +491,8 @@ jobs:
           EOF
           chmod +x $PKG/etc/init.d/subconverter
           
-          # Build using SDK ipkg-build
-          chmod +x sdk/scripts/ipkg-build
-          sdk/scripts/ipkg-build -o root -g root $PKG .
+          # Build using ipkg-build
+          ./ipkg-build -o root -g root $PKG .
           mv subconverter-extended_*.ipk subconverter-extended_${{ needs.prepare.outputs.version }}_${{ steps.arch.outputs.openwrt }}.ipk
           
           # Cleanup
