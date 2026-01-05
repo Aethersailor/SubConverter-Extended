@@ -2,6 +2,7 @@
 #include <mutex>
 #include <numeric>
 #include <string>
+#include <ctime>
 
 #include <inja.hpp>
 #include <yaml-cpp/yaml.h>
@@ -1563,8 +1564,9 @@ std::string subInfoToMessage(std::string subinfo) {
     totaldata = intToStream(tot);
   if (expiry != 0) {
     char buffer[30];
-    struct tm *dt = localtime(&expiry);
-    strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M", dt);
+    struct tm dt;
+    localtime_r(&expiry, &dt);
+    strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M", &dt);
     expirydata.assign(buffer);
   }
   if (useddata == "N/A" && totaldata == "N/A" && expirydata == "N/A")

@@ -2464,8 +2464,9 @@ std::string proxyToSSD(std::vector<Proxy> &nodes, std::string &group,
     if (!expiry.empty()) {
       const time_t rawtime = to_int(expiry);
       char buffer[30];
-      struct tm *dt = localtime(&rawtime);
-      strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M", dt);
+      struct tm dt;
+      localtime_r(&rawtime, &dt);
+      strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M", &dt);
       writer.Key("expiry");
       writer.String(buffer);
     }

@@ -52,19 +52,20 @@ time_t dateStringToTimestamp(std::string date)
     }
     else
     {
-        struct tm *expire_time;
+        struct tm expire_time;
         std::vector<std::string> date_array = split(date, ":");
         if(date_array.size() != 6)
             return 0;
 
-        expire_time = localtime(&rawtime);
-        expire_time->tm_year = to_int(date_array[0], 1900) - 1900;
-        expire_time->tm_mon = to_int(date_array[1], 1) - 1;
-        expire_time->tm_mday = to_int(date_array[2]);
-        expire_time->tm_hour = to_int(date_array[3]);
-        expire_time->tm_min = to_int(date_array[4]);
-        expire_time->tm_sec = to_int(date_array[5]);
-        return mktime(expire_time);
+        if(localtime_r(&rawtime, &expire_time) == nullptr)
+            return 0;
+        expire_time.tm_year = to_int(date_array[0], 1900) - 1900;
+        expire_time.tm_mon = to_int(date_array[1], 1) - 1;
+        expire_time.tm_mday = to_int(date_array[2]);
+        expire_time.tm_hour = to_int(date_array[3]);
+        expire_time.tm_min = to_int(date_array[4]);
+        expire_time.tm_sec = to_int(date_array[5]);
+        return mktime(&expire_time);
     }
 }
 
