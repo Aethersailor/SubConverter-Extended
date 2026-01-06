@@ -89,7 +89,7 @@ jobs:
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
 
   build-amd64:
-    name: "📦 Docker + Binary (amd64)"
+    name: "🐳 Alpine Docker (amd64)"
     runs-on: ubuntu-latest
     needs: prepare
     outputs:
@@ -111,7 +111,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Build ONCE to builder stage and load to Docker
+      # Build ONCE to builder stage and load to Docker (using Alpine for smaller image)
       - name: Build to builder stage (single build)
         uses: docker/build-push-action@v6
         with:
@@ -124,8 +124,8 @@ jobs:
             THREADS=16
             SHA=${{ needs.prepare.outputs.sha_short }}
             VERSION=${{ needs.prepare.outputs.version }}
-          cache-from: type=gha,scope=subconverter
-          cache-to: type=gha,mode=max,scope=subconverter
+          cache-from: type=gha,scope=subconverter-alpine
+          cache-to: type=gha,mode=max,scope=subconverter-alpine
 
       # Extract ALL generated files from the single build
       - name: Extract generated files
@@ -152,36 +152,65 @@ jobs:
             echo "Extracting binary for release..."
             docker cp $CONTAINER_ID:/src/subconverter ./subconverter
             docker cp $CONTAINER_ID:/src/base ./base
+            docker cp $CONTAINER_ID:/runtime-libs ./runtime-libs
+            docker cp $CONTAINER_ID:/usr/lib/libmihomo.so ./libmihomo.so
           fi
 
           docker rm $CONTAINER_ID
 
-      # [NEW] Package Binary for Release
-      - name: Package Release Artifact (amd64)
+      # Package Alpine Binary for Release
+      - name: Package Release Artifact (Alpine amd64)
         if: needs.prepare.outputs.is_release == 'true'
         run: |
           mkdir -p SubConverter-Extended
           mv subconverter SubConverter-Extended/
           cp -r base SubConverter-Extended/
+          mkdir -p SubConverter-Extended/usr/lib
+          mv libmihomo.so SubConverter-Extended/usr/lib/
+          cp -r runtime-libs/* SubConverter-Extended/
           
-          # Create start script
+          # Create start script (use /bin/sh for Alpine compatibility)
           cat > SubConverter-Extended/start.sh << 'EOF'
-          #!/bin/bash
-          CONFIG_DIR="/etc/SubConverter-Extended"
-          sudo mkdir -p "$CONFIG_DIR"
-          sudo cp -n base/pref.example.toml "$CONFIG_DIR/pref.toml" 2>/dev/null || true
-          ./subconverter -f "$CONFIG_DIR/pref.toml"
+          #!/bin/sh
+          set -e
+          ROOT="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+          CONF="${PREF_PATH:-$ROOT/base/pref.toml}"
+          CONF_DIR="$(dirname "$CONF")"
+          mkdir -p "$CONF_DIR"
+          if [ ! -f "$CONF" ] && [ -f "$ROOT/base/pref.example.toml" ]; then
+            cp "$ROOT/base/pref.example.toml" "$CONF"
+          fi
+
+          if [ -x "$ROOT/lib64/ld-linux-x86-64.so.2" ]; then
+            LOADER="$ROOT/lib64/ld-linux-x86-64.so.2"
+            LIB_PATH="$ROOT/lib/x86_64-linux-gnu:$ROOT/usr/lib/x86_64-linux-gnu:$ROOT/lib64:$ROOT/lib:$ROOT/usr/lib"
+          elif [ -x "$ROOT/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2" ]; then
+            LOADER="$ROOT/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
+            LIB_PATH="$ROOT/lib/x86_64-linux-gnu:$ROOT/usr/lib/x86_64-linux-gnu:$ROOT/lib:$ROOT/usr/lib"
+          elif [ -x "$ROOT/lib/ld-linux-aarch64.so.1" ]; then
+            LOADER="$ROOT/lib/ld-linux-aarch64.so.1"
+            LIB_PATH="$ROOT/lib/aarch64-linux-gnu:$ROOT/usr/lib/aarch64-linux-gnu:$ROOT/lib:$ROOT/usr/lib"
+          elif [ -x "$ROOT/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1" ]; then
+            LOADER="$ROOT/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"
+            LIB_PATH="$ROOT/lib/aarch64-linux-gnu:$ROOT/usr/lib/aarch64-linux-gnu:$ROOT/lib:$ROOT/usr/lib"
+          else
+            echo "glibc loader not found in package."
+            exit 1
+          fi
+
+          exec "$LOADER" --library-path "$LIB_PATH" "$ROOT/subconverter" -f "$CONF"
           EOF
           chmod +x SubConverter-Extended/start.sh
           
-          tar -czf SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-amd64.tar.gz SubConverter-Extended
+          tar -czf SubConverter-Extended-${{ needs.prepare.outputs.version }}-alpine-amd64.tar.gz SubConverter-Extended
+          rm -rf runtime-libs libmihomo.so
 
-      # [NEW] Upload Artifact
-      - name: Upload Artifact (amd64)
+      # Upload Alpine Artifact
+      - name: Upload Artifact (Alpine amd64)
         if: needs.prepare.outputs.is_release == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: linux-glibc-amd64
+          name: alpine-amd64
           path: SubConverter-Extended-*.tar.gz
 
       - name: Check for file changes
@@ -220,11 +249,11 @@ jobs:
             THREADS=16
             SHA=${{ needs.prepare.outputs.sha_short }}
             VERSION=${{ needs.prepare.outputs.version }}
-          cache-from: type=gha,scope=subconverter
-          cache-to: type=gha,mode=max,scope=subconverter
+          cache-from: type=gha,scope=subconverter-alpine
+          cache-to: type=gha,mode=max,scope=subconverter-alpine
 
   build-arm64:
-    name: "📦 Docker + Binary (arm64)"
+    name: "🐳 Alpine Docker (arm64)"
     runs-on: ubuntu-24.04-arm
     needs: prepare
     if: needs.prepare.outputs.is_release == 'true'
@@ -247,7 +276,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Build to builder stage FIRST to extract binary
+      # Build to builder stage FIRST to extract binary (using Alpine for smaller image)
       - name: Build to builder stage (extract binary)
         uses: docker/build-push-action@v6
         with:
@@ -261,38 +290,67 @@ jobs:
             THREADS=4
             SHA=${{ needs.prepare.outputs.sha_short }}
             VERSION=${{ needs.prepare.outputs.version }}
-          cache-from: type=gha,scope=subconverter-arm64
-          cache-to: type=gha,mode=max,scope=subconverter-arm64
+          cache-from: type=gha,scope=subconverter-alpine-arm64
+          cache-to: type=gha,mode=max,scope=subconverter-alpine-arm64
 
       - name: Extract binaries
         run: |
           CONTAINER_ID=$(docker create subconverter-temp:arm64-builder)
           docker cp $CONTAINER_ID:/src/subconverter ./subconverter
           docker cp $CONTAINER_ID:/src/base ./base
+          docker cp $CONTAINER_ID:/runtime-libs ./runtime-libs
+          docker cp $CONTAINER_ID:/usr/lib/libmihomo.so ./libmihomo.so
           docker rm $CONTAINER_ID
           chmod +x subconverter
 
-      - name: Package Release Artifact (arm64)
+      - name: Package Release Artifact (Alpine arm64)
         run: |
           mkdir -p SubConverter-Extended
           mv subconverter SubConverter-Extended/
-          cp -r base SubConverter-Extended/ # base contains pref.example.toml
+          cp -r base SubConverter-Extended/
+          mkdir -p SubConverter-Extended/usr/lib
+          mv libmihomo.so SubConverter-Extended/usr/lib/
+          cp -r runtime-libs/* SubConverter-Extended/
 
           cat > SubConverter-Extended/start.sh << 'EOF'
-          #!/bin/bash
-          CONFIG_DIR="/etc/SubConverter-Extended"
-          sudo mkdir -p "$CONFIG_DIR"
-          sudo cp -n base/pref.example.toml "$CONFIG_DIR/pref.toml" 2>/dev/null || true
-          ./subconverter -f "$CONFIG_DIR/pref.toml"
+          #!/bin/sh
+          set -e
+          ROOT="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+          CONF="${PREF_PATH:-$ROOT/base/pref.toml}"
+          CONF_DIR="$(dirname "$CONF")"
+          mkdir -p "$CONF_DIR"
+          if [ ! -f "$CONF" ] && [ -f "$ROOT/base/pref.example.toml" ]; then
+            cp "$ROOT/base/pref.example.toml" "$CONF"
+          fi
+
+          if [ -x "$ROOT/lib64/ld-linux-x86-64.so.2" ]; then
+            LOADER="$ROOT/lib64/ld-linux-x86-64.so.2"
+            LIB_PATH="$ROOT/lib/x86_64-linux-gnu:$ROOT/usr/lib/x86_64-linux-gnu:$ROOT/lib64:$ROOT/lib:$ROOT/usr/lib"
+          elif [ -x "$ROOT/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2" ]; then
+            LOADER="$ROOT/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
+            LIB_PATH="$ROOT/lib/x86_64-linux-gnu:$ROOT/usr/lib/x86_64-linux-gnu:$ROOT/lib:$ROOT/usr/lib"
+          elif [ -x "$ROOT/lib/ld-linux-aarch64.so.1" ]; then
+            LOADER="$ROOT/lib/ld-linux-aarch64.so.1"
+            LIB_PATH="$ROOT/lib/aarch64-linux-gnu:$ROOT/usr/lib/aarch64-linux-gnu:$ROOT/lib:$ROOT/usr/lib"
+          elif [ -x "$ROOT/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1" ]; then
+            LOADER="$ROOT/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"
+            LIB_PATH="$ROOT/lib/aarch64-linux-gnu:$ROOT/usr/lib/aarch64-linux-gnu:$ROOT/lib:$ROOT/usr/lib"
+          else
+            echo "glibc loader not found in package."
+            exit 1
+          fi
+
+          exec "$LOADER" --library-path "$LIB_PATH" "$ROOT/subconverter" -f "$CONF"
           EOF
           chmod +x SubConverter-Extended/start.sh
 
-          tar -czf SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-arm64.tar.gz SubConverter-Extended
+          tar -czf SubConverter-Extended-${{ needs.prepare.outputs.version }}-alpine-arm64.tar.gz SubConverter-Extended
+          rm -rf runtime-libs libmihomo.so
 
-      - name: Upload Artifact (arm64)
+      - name: Upload Artifact (Alpine arm64)
         uses: actions/upload-artifact@v4
         with:
-          name: linux-glibc-arm64
+          name: alpine-arm64
           path: SubConverter-Extended-*.tar.gz
 
       - name: Build and push final image
@@ -308,8 +366,8 @@ jobs:
             THREADS=4
             SHA=${{ needs.prepare.outputs.sha_short }}
             VERSION=${{ needs.prepare.outputs.version }}
-          cache-from: type=gha,scope=subconverter-arm64
-          cache-to: type=gha,mode=max,scope=subconverter-arm64
+          cache-from: type=gha,scope=subconverter-alpine-arm64
+          cache-to: type=gha,mode=max,scope=subconverter-alpine-arm64
 
   merge-manifest:
     name: "🔗 Merge Manifest"
@@ -338,9 +396,9 @@ jobs:
               "${IMAGE_NAME}@${{ needs.build-arm64.outputs.digest }}"
           done
 
-  # [NEW] Alpine Build Job
-  build-linux-musl:
-    name: "📦 Alpine (${{ matrix.platform.arch }})"
+  # Glibc Binary Build Job (for Debian/Ubuntu compatibility)
+  build-glibc:
+    name: "📦 Glibc (${{ matrix.platform.arch }})"
     runs-on: ${{ matrix.platform.runner }}
     needs: prepare
     if: needs.prepare.outputs.is_release == 'true'
@@ -348,10 +406,8 @@ jobs:
       matrix:
         platform:
           - arch: amd64
-            docker_platform: linux/amd64
             runner: ubuntu-latest
           - arch: arm64
-            docker_platform: linux/arm64
             runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
@@ -360,57 +416,58 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Alpine binary
+      - name: Build Glibc binary (Debian)
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile.alpine
+          file: ./Dockerfile.debian
           load: true
-          tags: subconverter-alpine:builder
+          tags: subconverter-glibc:builder
           target: builder
-          platforms: ${{ matrix.platform.docker_platform }}
+          platforms: linux/${{ matrix.platform.arch }}
           build-args: |
             THREADS=4
             VERSION=${{ needs.prepare.outputs.version }}
-          cache-from: type=gha,scope=subconverter-musl-${{ matrix.platform.arch }}
-          cache-to: type=gha,mode=max,scope=subconverter-musl-${{ matrix.platform.arch }}
+          cache-from: type=gha,scope=subconverter-glibc-${{ matrix.platform.arch }}
+          cache-to: type=gha,mode=max,scope=subconverter-glibc-${{ matrix.platform.arch }}
 
-      - name: Extract Alpine binary
+      - name: Extract Glibc binary
         run: |
-          CONTAINER_ID=$(docker create subconverter-alpine:builder)
+          CONTAINER_ID=$(docker create subconverter-glibc:builder)
           docker cp $CONTAINER_ID:/src/subconverter ./subconverter
           docker cp $CONTAINER_ID:/src/base ./base
           docker rm $CONTAINER_ID
+          strip subconverter
           chmod +x subconverter
 
-      - name: Package Alpine release
+      - name: Package Glibc release
         run: |
           mkdir -p SubConverter-Extended
           mv subconverter SubConverter-Extended/
           mv base SubConverter-Extended/
           
           cat > SubConverter-Extended/start.sh << 'EOF'
-          #!/bin/sh
+          #!/bin/bash
           CONFIG_DIR="/etc/SubConverter-Extended"
-          mkdir -p "$CONFIG_DIR" 2>/dev/null || sudo mkdir -p "$CONFIG_DIR"
-          cp -n base/pref.example.toml "$CONFIG_DIR/pref.toml" 2>/dev/null || sudo cp -n base/pref.example.toml "$CONFIG_DIR/pref.toml"
+          sudo mkdir -p "$CONFIG_DIR"
+          sudo cp -n base/pref.example.toml "$CONFIG_DIR/pref.toml" 2>/dev/null || true
           ./subconverter -f "$CONFIG_DIR/pref.toml"
           EOF
           chmod +x SubConverter-Extended/start.sh
           
-          tar -czf SubConverter-Extended-${{ needs.prepare.outputs.version }}-alpine-${{ matrix.platform.arch }}.tar.gz SubConverter-Extended
+          tar -czf SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-${{ matrix.platform.arch }}.tar.gz SubConverter-Extended
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: alpine-${{ matrix.platform.arch }}
+          name: linux-glibc-${{ matrix.platform.arch }}
           path: SubConverter-Extended-*.tar.gz
 
-  # [NEW] Release Creation Job (Only on Tag)
+  # Release Creation Job (Only on Tag)
   create-release:
     name: "🚀 Release"
     runs-on: ubuntu-latest
-    needs: [prepare, build-amd64, build-arm64, build-linux-musl]
+    needs: [prepare, build-amd64, build-arm64, build-glibc]
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write
@@ -435,6 +492,6 @@ jobs:
             - **amd64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-amd64.tar.gz`
             - **arm64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-arm64.tar.gz`
 
-            ### Linux (Alpine - musl)
+            ### Linux (Alpine/OpenWrt - musl)
             - **amd64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-alpine-amd64.tar.gz`
             - **arm64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-alpine-arm64.tar.gz`

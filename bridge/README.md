@@ -19,13 +19,17 @@
 | 文件 | 修改内容 |
 |------|----------|
 | `CMakeLists.txt` | 链接 Go 静态库 |
-| `Dockerfile` | 添加 Go 编译阶段 |
+| `Dockerfile` | Alpine 版，添加 Go 编译阶段 |
+| `Dockerfile.debian` | Debian 版，用于 glibc 二进制 |
 
 ## 🚀 如何编译（Docker）
 
 ```bash
-# 在项目根目录执行
+# 在项目根目录执行（使用 Alpine 版）
 docker build -t subconverter:mihomo .
+
+# 或使用 Debian 版
+docker build -f Dockerfile.debian -t subconverter:mihomo-debian .
 ```
 
 **编译流程**：

@@ -13,6 +13,32 @@ IF(NOT CMAKE_BUILD_TYPE)
 ENDIF()
 SET(CMAKE_CXX_STANDARD 20)
 
+# ========== Alpine/musl 链接优化 ==========
+# 检测 musl 环境并应用特殊链接策略，解决 Go CGO 与 C++ 混合编译时的 Segfault 问题
+SET(USING_MUSL FALSE)
+IF(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # 检测是否为 musl libc（Alpine）
+    EXECUTE_PROCESS(
+        COMMAND ldd --version
+        OUTPUT_VARIABLE LDD_OUTPUT
+        ERROR_VARIABLE LDD_OUTPUT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    IF(LDD_OUTPUT MATCHES "musl")
+        SET(USING_MUSL TRUE)
+        MESSAGE(STATUS "Detected musl libc (Alpine), applying special link flags")
+        
+        # 禁用 LTO（Link Time Optimization）- 避免符号丢失
+        SET(CMAKE_INTERPROCEDURAL_OPTIMIZATION OFF)
+        
+        # 禁用 PIE（Position Independent Executable）- 减少重定位复杂度
+        SET(CMAKE_POSITION_INDEPENDENT_CODE OFF)
+        
+        # 添加链接器标志
+        SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--no-as-needed")
+    ENDIF()
+ENDIF()
+
 # Suppress warnings from third-party libraries
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
     add_compile_options(-Wno-array-bounds)
@@ -117,15 +143,43 @@ TARGET_INCLUDE_DIRECTORIES(${BUILD_TARGET_NAME} PRIVATE ${LIBCRON_INCLUDE_DIRS})
 TARGET_LINK_LIBRARIES(${BUILD_TARGET_NAME} ${LIBCRON_LIBRARIES})
 
 # Mihomo Go Parser Bridge
-IF(EXISTS "${CMAKE_SOURCE_DIR}/bridge/libmihomo.a")
-    MESSAGE(STATUS "Found mihomo Go library, enabling native parser support")
+# 支持 c-shared (.so) 和 c-archive (.a) 两种模式
+# c-shared 模式：解决 musl/Alpine 环境下 Go runtime 初始化问题
+IF(EXISTS "${CMAKE_SOURCE_DIR}/bridge/libmihomo.so")
+    MESSAGE(STATUS "Found mihomo Go shared library (.so), enabling native parser support")
     TARGET_INCLUDE_DIRECTORIES(${BUILD_TARGET_NAME} PRIVATE "${CMAKE_SOURCE_DIR}/bridge")
-    TARGET_LINK_LIBRARIES(${BUILD_TARGET_NAME} "${CMAKE_SOURCE_DIR}/bridge/libmihomo.a")
     TARGET_COMPILE_DEFINITIONS(${BUILD_TARGET_NAME} PRIVATE -DUSE_MIHOMO_PARSER)
     
     # Link pthread (required by Go runtime on Linux)
     IF(UNIX AND NOT APPLE)
         TARGET_LINK_LIBRARIES(${BUILD_TARGET_NAME} pthread)
+    ENDIF()
+    
+    # 动态库链接（无需 --whole-archive）
+    TARGET_LINK_LIBRARIES(${BUILD_TARGET_NAME} "${CMAKE_SOURCE_DIR}/bridge/libmihomo.so")
+    
+ELSEIF(EXISTS "${CMAKE_SOURCE_DIR}/bridge/libmihomo.a")
+    MESSAGE(STATUS "Found mihomo Go static library (.a), enabling native parser support")
+    TARGET_INCLUDE_DIRECTORIES(${BUILD_TARGET_NAME} PRIVATE "${CMAKE_SOURCE_DIR}/bridge")
+    TARGET_COMPILE_DEFINITIONS(${BUILD_TARGET_NAME} PRIVATE -DUSE_MIHOMO_PARSER)
+    
+    # Link pthread BEFORE Go library (required by Go runtime)
+    IF(UNIX AND NOT APPLE)
+        TARGET_LINK_LIBRARIES(${BUILD_TARGET_NAME} pthread)
+        
+        # 使用 --whole-archive 确保 Go 符号被完整拉入（仅静态库需要）
+        IF(USING_MUSL)
+            MESSAGE(STATUS "Using --whole-archive for Go library linking (musl mode)")
+            TARGET_LINK_LIBRARIES(${BUILD_TARGET_NAME} 
+                "-Wl,--whole-archive"
+                "${CMAKE_SOURCE_DIR}/bridge/libmihomo.a"
+                "-Wl,--no-whole-archive"
+            )
+        ELSE()
+            TARGET_LINK_LIBRARIES(${BUILD_TARGET_NAME} "${CMAKE_SOURCE_DIR}/bridge/libmihomo.a")
+        ENDIF()
+    ELSE()
+        TARGET_LINK_LIBRARIES(${BUILD_TARGET_NAME} "${CMAKE_SOURCE_DIR}/bridge/libmihomo.a")
     ENDIF()
 ELSE()
     MESSAGE(WARNING "mihomo Go library not found, parser will use fallback mode")
