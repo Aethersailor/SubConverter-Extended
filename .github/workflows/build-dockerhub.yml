@@ -208,7 +208,7 @@ jobs:
       # Upload Alpine Artifact
       - name: Upload Artifact (Alpine amd64)
         if: needs.prepare.outputs.is_release == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: alpine-amd64
           path: SubConverter-Extended-*.tar.gz
@@ -348,7 +348,7 @@ jobs:
           rm -rf runtime-libs libmihomo.so
 
       - name: Upload Artifact (Alpine arm64)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: alpine-arm64
           path: SubConverter-Extended-*.tar.gz
@@ -458,7 +458,7 @@ jobs:
           tar -czf SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-${{ matrix.platform.arch }}.tar.gz SubConverter-Extended
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: linux-glibc-${{ matrix.platform.arch }}
           path: SubConverter-Extended-*.tar.gz
@@ -473,7 +473,7 @@ jobs:
       contents: write
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: artifacts
           pattern: '{linux-glibc-*,alpine-*}'
