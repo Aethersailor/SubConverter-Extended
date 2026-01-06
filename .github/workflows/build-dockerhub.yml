@@ -158,8 +158,8 @@ jobs:
 
           docker rm $CONTAINER_ID
 
-      # Package Alpine Binary for Release
-      - name: Package Release Artifact (Alpine amd64)
+      # Package Release Binary
+      - name: Package Release Artifact (Linux amd64)
         if: needs.prepare.outputs.is_release == 'true'
         run: |
           mkdir -p SubConverter-Extended
@@ -202,15 +202,15 @@ jobs:
           EOF
           chmod +x SubConverter-Extended/start.sh
           
-          tar -czf SubConverter-Extended-${{ needs.prepare.outputs.version }}-alpine-amd64.tar.gz SubConverter-Extended
+          tar -czf SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-amd64.tar.gz SubConverter-Extended
           rm -rf runtime-libs libmihomo.so
 
-      # Upload Alpine Artifact
-      - name: Upload Artifact (Alpine amd64)
+      # Upload Release Artifact
+      - name: Upload Artifact (Linux amd64)
         if: needs.prepare.outputs.is_release == 'true'
         uses: actions/upload-artifact@v6
         with:
-          name: alpine-amd64
+          name: linux-amd64
           path: SubConverter-Extended-*.tar.gz
 
       - name: Check for file changes
@@ -303,7 +303,7 @@ jobs:
           docker rm $CONTAINER_ID
           chmod +x subconverter
 
-      - name: Package Release Artifact (Alpine arm64)
+      - name: Package Release Artifact (Linux arm64)
         run: |
           mkdir -p SubConverter-Extended
           mv subconverter SubConverter-Extended/
@@ -344,13 +344,13 @@ jobs:
           EOF
           chmod +x SubConverter-Extended/start.sh
 
-          tar -czf SubConverter-Extended-${{ needs.prepare.outputs.version }}-alpine-arm64.tar.gz SubConverter-Extended
+          tar -czf SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-arm64.tar.gz SubConverter-Extended
           rm -rf runtime-libs libmihomo.so
 
-      - name: Upload Artifact (Alpine arm64)
+      - name: Upload Artifact (Linux arm64)
         uses: actions/upload-artifact@v6
         with:
-          name: alpine-arm64
+          name: linux-arm64
           path: SubConverter-Extended-*.tar.gz
 
       - name: Build and push final image
@@ -409,17 +409,17 @@ jobs:
         uses: actions/download-artifact@v7
         with:
           path: artifacts
-          pattern: 'alpine-*'
+          pattern: 'linux-*'
           merge-multiple: false
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/alpine-*/*.tar.gz
+            artifacts/linux-*/*.tar.gz
           body: |
             ## 📦 Downloads
 
-            ### Linux (Alpine/OpenWrt - musl)
-            - **amd64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-alpine-amd64.tar.gz`
-            - **arm64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-alpine-arm64.tar.gz`
+            ### Linux (portable, glibc runtime bundled)
+            - **amd64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-amd64.tar.gz`
+            - **arm64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-arm64.tar.gz`
