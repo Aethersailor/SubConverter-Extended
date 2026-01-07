@@ -167,6 +167,30 @@ int main(int argc, char *argv[]) {
       "GET", "/version", "text/html; charset=utf-8",
       [](RESPONSE_CALLBACK_ARGS) -> std::string {
         std::string build_id = BUILD_ID;
+        std::string build_date = BUILD_DATE;
+        auto format_build_date = [](const std::string &value) -> std::string {
+          if (value.empty())
+            return "unknown";
+          size_t split_pos = value.find('T');
+          if (split_pos == std::string::npos)
+            split_pos = value.find(' ');
+          std::string candidate =
+              split_pos == std::string::npos ? value : value.substr(0, split_pos);
+          if (candidate.size() >= 10 && candidate[4] == '-' &&
+              candidate[7] == '-' && candidate[0] >= '0' &&
+              candidate[0] <= '9' && candidate[1] >= '0' &&
+              candidate[1] <= '9' && candidate[2] >= '0' &&
+              candidate[2] <= '9' && candidate[3] >= '0' &&
+              candidate[3] <= '9' && candidate[5] >= '0' &&
+              candidate[5] <= '9' && candidate[6] >= '0' &&
+              candidate[6] <= '9' && candidate[8] >= '0' &&
+              candidate[8] <= '9' && candidate[9] >= '0' &&
+              candidate[9] <= '9') {
+            return candidate.substr(0, 10);
+          }
+          return candidate;
+        };
+        std::string build_date_display = format_build_date(build_date);
         std::string commit_link =
             build_id.empty()
                 ? ""
@@ -182,124 +206,198 @@ int main(int argc, char *argv[]) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="color-scheme" content="light dark">
     <title>SubConverter-Extended</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
-            /* Light Theme (Default) */
-            --bg-gradient: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
-            --container-bg: rgba(255, 255, 255, 0.7);
+            /* Light Theme - 精准调优 */
+            --bg-gradient: linear-gradient(135deg, #f5f7fa 0%, #e4e7eb 100%);
+            --container-bg: rgba(255, 255, 255, 0.85);
             --container-border: rgba(255, 255, 255, 0.4);
-            --shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.1);
-            --text-primary: #2d3748;
+            --shadow: 0 12px 40px rgba(31, 38, 135, 0.08);
+            --text-primary: #1a202c;
             --text-secondary: #4a5568;
-            --divider-bg: linear-gradient(90deg, transparent, rgba(0,0,0,0.1), transparent);
-            --info-block-bg: rgba(0, 0, 0, 0.03);
-            --info-block-border: rgba(0,0,0,0.05);
-            --link-color: #667eea;
-            --link-hover: #764ba2;
-            --text-shadow: none;
+            --divider-bg: linear-gradient(90deg, transparent, rgba(0,0,0,0.08), transparent);
+            --info-block-bg: rgba(0, 0, 0, 0.02);
+            --info-block-border: rgba(0,0,0,0.04);
+            --link-color: #3182ce;
+            --link-hover: #2b6cb0;
+            --header-gradient: linear-gradient(135deg, #1a202c 0%, #4a5568 100%);
         }
 
         @media (prefers-color-scheme: dark) {
             :root {
-                /* Dark Theme */
-                --bg-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                --container-bg: rgba(255, 255, 255, 0.1);
-                --container-border: rgba(255, 255, 255, 0.18);
-                --shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
-                --text-primary: #ffffff;
-                --text-secondary: rgba(255, 255, 255, 0.95);
-                --divider-bg: linear-gradient(90deg, transparent, rgba(255,255,255,0.5), transparent);
-                --info-block-bg: rgba(255, 255, 255, 0.08);
-                --info-block-border: rgba(255,255,255,0.6);
-                --link-color: #ffd700;
-                --link-hover: #ffed4e;
-                --text-shadow: 2px 2px 4px rgba(0,0,0,0.1);
+                /* Dark Theme - 极黑质感 */
+                --bg-gradient: radial-gradient(circle at 50% 50%, #1a1b1e 0%, #000000 100%);
+                --container-bg: rgba(28, 28, 30, 0.7);
+                --container-border: rgba(255, 255, 255, 0.1);
+                --shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+                --text-primary: #f8f9fa;
+                --text-secondary: #a0aec0;
+                --divider-bg: linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent);
+                --info-block-bg: rgba(255, 255, 255, 0.04);
+                --info-block-border: rgba(255,255,255,0.06);
+                --link-color: #63b3ed;
+                --link-hover: #90cdf4;
+                --header-gradient: linear-gradient(135deg, #ffffff 0%, #90cdf4 100%);
             }
         }
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
         
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            font-family: 'Outfit', system-ui, -apple-system, sans-serif;
             min-height: 100vh;
             display: flex;
             align-items: center;
             justify-content: center;
             background: var(--bg-gradient);
-            padding: 20px;
+            background-attachment: fixed;
+            padding: 24px;
             color: var(--text-primary);
-            transition: background 0.3s ease, color 0.3s ease;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
         }
         
         .container {
             background: var(--container-bg);
-            backdrop-filter: blur(10px);
-            -webkit-backdrop-filter: blur(10px);
-            border-radius: 20px;
-            padding: 40px;
-            max-width: 900px;
+            backdrop-filter: blur(24px);
+            -webkit-backdrop-filter: blur(24px);
+            border-radius: 32px;
+            padding: 40px 50px;
+            max-width: 800px;
             width: 100%;
             box-shadow: var(--shadow);
             border: 1px solid var(--container-border);
-            animation: fadeIn 0.6s ease-out;
-            transition: background 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+            position: relative;
+            animation: fadeIn 1s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        .container::after {
+            content: "";
+            position: absolute;
+            inset: 0;
+            border-radius: 32px;
+            padding: 1px;
+            background: linear-gradient(135deg, rgba(255,255,255,0.2), transparent, rgba(255,255,255,0.05));
+            -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+            mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+            -webkit-mask-composite: xor;
+            mask-composite: exclude;
+            pointer-events: none;
         }
         
         @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(-20px); }
+            from { opacity: 0; transform: translateY(30px); }
             to { opacity: 1; transform: translateY(0); }
         }
         
+        header {
+            text-align: center;
+            margin-bottom: 32px;
+        }
+
         h1 {
-            color: var(--text-primary);
-            font-size: 2.5em;
-            margin-bottom: 10px;
+            background: var(--header-gradient);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+            font-size: 3em;
+            margin-bottom: 8px;
             font-weight: 700;
-            text-shadow: var(--text-shadow);
+            letter-spacing: -0.04em;
+            line-height: 1.05;
         }
         
         .subtitle {
             color: var(--text-secondary);
-            font-size: 1.2em;
-            margin-bottom: 20px;
-            font-weight: 400;
-            font-style: italic;
-            opacity: 0.9;
-        }
-        
-        .divider {
-            height: 1px;
-            background: var(--divider-bg);
-            margin: 25px 0;
-        }
-        
-        .description {
-            color: var(--text-secondary);
             font-size: 1.05em;
-            line-height: 1.8;
-            margin-bottom: 15px;
+            font-weight: 500;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            opacity: 0.6;
         }
         
-        .info-block {
+        .section {
+            margin: 20px 0;
+            padding: 20px 25px;
             background: var(--info-block-bg);
-            border-radius: 12px;
-            padding: 20px;
-            margin: 25px 0;
-            border-left: 4px solid var(--info-block-border);
+            border-radius: 20px;
+            border: 1px solid var(--info-block-border);
         }
-        
-        .info-row {
-            color: var(--text-secondary);
-            font-size: 1.1em;
-            margin: 10px 0;
+
+        .section-title {
+            font-size: 0.9em;
+            font-weight: 700;
+            color: var(--text-primary);
+            margin-bottom: 15px;
             display: flex;
             align-items: center;
+            gap: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            opacity: 0.8;
+        }
+
+        .description {
+            color: var(--text-secondary);
+            font-size: 1em;
+            line-height: 1.8;
+            margin-bottom: 12px;
+            padding-left: 1.5em;
+            position: relative;
+        }
+
+        .description::before {
+            content: "•";
+            position: absolute;
+            left: 0.2em;
+            color: var(--link-color);
+            font-weight: bold;
+        }
+
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 20px;
+            margin: 20px 0;
         }
         
-        .info-label {
+        .info-card {
+            background: var(--info-block-bg);
+            border: 1px solid var(--info-block-border);
+            border-radius: 16px;
+            padding: 20px;
+            text-align: center;
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+        
+        .info-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 20px rgba(0,0,0,0.05);
+        }
+
+        .info-card .info-label {
+            display: block;
+            text-transform: uppercase;
+            font-size: 0.75rem;
+            letter-spacing: 0.1em;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
             font-weight: 600;
-            min-width: 90px;
+        }
+        
+        .info-card .info-value {
+            font-size: 1.1rem;
+            font-weight: 700;
             color: var(--text-primary);
+            word-break: break-all;
+        }
+        
+        .info-card .info-value a {
+            font-family: 'Outfit', monospace;
+            font-weight: 600;
         }
         
         a {
@@ -327,73 +425,68 @@ int main(int argc, char *argv[]) {
         
         a:hover {
             color: var(--link-hover);
-            text-shadow: 0 0 8px rgba(var(--link-hover), 0.4);
         }
         
         .footer {
-            margin-top: 25px;
-            padding-top: 20px;
+            margin-top: 30px;
             text-align: center;
             color: var(--text-secondary);
-            opacity: 0.8;
-            font-size: 0.9em;
+            font-size: 0.85em;
+            opacity: 0.6;
+        }
+        
+        .footer a {
+            font-weight: 400;
         }
         
         @media (max-width: 600px) {
             .container { padding: 30px 20px; }
-            h1 { font-size: 2em; }
-            .info-row { flex-direction: column; align-items: flex-start; }
-            .info-label { margin-bottom: 5px; }
+            h1 { font-size: 2.2em; }
+            .info-grid { grid-template-columns: 1fr; gap: 12px; }
+            .section { padding: 15px; }
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>SubConverter-Extended</h1>
-        <p class="subtitle">A Modern Evolution of subconverter</p>
-        <div class="divider"></div>
-        
-        <p class="description">
-            An enhanced implementation of subconverter, aligned with the 
-            <a href="https://github.com/MetaCubeX/mihomo/tree/Meta" target="_blank">Mihomo</a> 
-            <a href="https://wiki.metacubex.one/config/" target="_blank">configuration</a>
-        </p>
-        
-        <p class="description">
-            Primarily intended for use alongside <a href="https://github.com/vernesong/OpenClash" target="_blank">OpenClash</a>, also compatible with other Clash clients
-        </p>
-        
-        <p class="description">
-            Derived as a companion backend for the 
-            <a href="https://github.com/Aethersailor/Custom_OpenClash_Rules" target="_blank">Custom_OpenClash_Rules</a> project
-        </p>
-        
-        <div class="info-block">
-            <div class="info-row">
-                <span class="info-label">Version:</span>
-                <span>)" VERSION R"(</span>
+        <header>
+            <h1>SubConverter-Extended</h1>
+            <p class="subtitle">A Modern Evolution of Subconverter</p>
+        </header>
+
+        <div class="info-grid">
+            <div class="info-card">
+                <span class="info-label">Version</span>
+                <div class="info-value">)" VERSION R"(</div>
             </div>
-            <div class="info-row">
-                <span class="info-label">Build:</span>
-                <span>)" +
-               commit_link + R"(</span>
+            <div class="info-card">
+                <span class="info-label">Build</span>
+                <div class="info-value">)" +
+               commit_link + R"(</div>
+            </div>
+            <div class="info-card">
+                <span class="info-label">Build Date</span>
+                <div class="info-value">)" +
+               build_date_display + R"(</div>
             </div>
         </div>
         
-        <div class="divider"></div>
-        
-        <p class="description">
-            Originated and enhanced from: 
-            <a href="https://github.com/asdlokj1qpi233/subconverter" target="_blank">subconverter v0.9.9</a>
-        </p>
-        
-        <p class="description">
-            Modified and evolved by: 
-            <a href="https://github.com/Aethersailor" target="_blank">Aethersailor</a>
-        </p>
-        
+        <div class="section">
+            <div class="section-title">✨ Overview</div>
+            <p class="description">An enhanced implementation of subconverter, aligned with the <a href="https://github.com/MetaCubeX/mihomo/tree/Meta" target="_blank">Mihomo</a> <a href="https://wiki.metacubex.one/config/" target="_blank">configuration</a>.</p>
+            <p class="description">Primarily for <a href="https://github.com/vernesong/OpenClash" target="_blank">OpenClash</a>, while compatible with other Clash clients.</p>
+            <p class="description">Dedicated companion backend for the <a href="https://github.com/Aethersailor/Custom_OpenClash_Rules" target="_blank">Custom_OpenClash_Rules</a> project.</p>
+        </div>
+
+        <div class="section">
+            <div class="section-title">🚀 Lineage</div>
+            <p class="description">Originated and enhanced from: <a href="https://github.com/asdlokj1qpi233/subconverter" target="_blank">subconverter v0.9.8</a></p>
+            <p class="description">Modified and evolved by: <a href="https://github.com/Aethersailor" target="_blank">Aethersailor</a></p>
+        </div>
+
         <div class="footer">
-            Source Code: <a href="https://github.com/Aethersailor/SubConverter-Extended" target="_blank">GitHub</a> • License: <a href="https://www.gnu.org/licenses/gpl-3.0.html" target="_blank">GPL-3.0</a>
+            Source Code: <a href="https://github.com/Aethersailor/SubConverter-Extended" target="_blank">GitHub</a> • 
+            License: <a href="https://www.gnu.org/licenses/gpl-3.0.html" target="_blank">GPL-3.0</a>
         </div>
     </div>
 </body>

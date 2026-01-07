@@ -54,6 +54,7 @@ FROM debian:latest AS builder
 ARG THREADS="4"
 ARG SHA=""
 ARG VERSION="dev"
+ARG BUILD_DATE=""
 
 WORKDIR /
 
@@ -128,6 +129,7 @@ RUN set -xe && \
 RUN set -xe && \
     [ -n "${SHA}" ] && sed -i "s/#define BUILD_ID \"\"/#define BUILD_ID \"${SHA}\"/ " src/version.h || true && \
     [ -n "${VERSION}" ] && sed -i "s/#define VERSION \"dev\"/#define VERSION \"${VERSION}\"/" src/version.h || true && \
+    [ -n "${BUILD_DATE}" ] && sed -i "s/#define BUILD_DATE \"\"/#define BUILD_DATE \"${BUILD_DATE}\"/" src/version.h || true && \
     mkdir -p bridge && \
     cp /usr/lib/libmihomo.so bridge/ && \
     cp /usr/include/libmihomo.h bridge/ && \
@@ -177,6 +179,20 @@ RUN set -xe && \
 # Alpine 运行时 + 搬运 glibc 依赖（不固定版本）
 FROM alpine:latest
 
+ARG VERSION="dev"
+ARG SHA=""
+ARG BUILD_DATE=""
+LABEL \
+  org.opencontainers.image.title="SubConverter-Extended" \
+  org.opencontainers.image.description="A Modern Evolution of subconverter; an enhanced implementation aligned with Mihomo configuration" \
+  org.opencontainers.image.url="https://github.com/Aethersailor/SubConverter-Extended" \
+  org.opencontainers.image.source="https://github.com/Aethersailor/SubConverter-Extended" \
+  org.opencontainers.image.licenses="GPL-3.0" \
+  org.opencontainers.image.version="${VERSION}" \
+  org.opencontainers.image.revision="${SHA}" \
+  org.opencontainers.image.created="${BUILD_DATE}" \
+  maintainer="Aethersailor"
+
 RUN apk add --no-cache ca-certificates
 
 COPY --from=builder /src/subconverter /usr/bin/subconverter
@@ -188,7 +204,7 @@ COPY --from=builder /etc/nsswitch.conf /etc/nsswitch.conf
 # 确保二进制和库可执行
 RUN chmod +x /usr/bin/subconverter && chmod +x /usr/lib/libmihomo.so
 
-ENV TZ=Africa/Abidjan
+ENV TZ=Asia/Shanghai
 ENV LD_LIBRARY_PATH="/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu:/lib/aarch64-linux-gnu:/usr/lib/aarch64-linux-gnu:/lib64:/usr/lib"
 RUN ln -sf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 

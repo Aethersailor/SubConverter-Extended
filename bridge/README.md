@@ -46,6 +46,8 @@ docker build -f Dockerfile.debian -t subconverter:mihomo-debian .
 
 ```bash
 docker run -d -p 25500:25500 subconverter:mihomo
+# 默认时区已设为 Asia/Shanghai，如需覆盖可传入：
+# docker run -d -p 25500:25500 -e TZ=Asia/Shanghai subconverter:mihomo
 ```
 
 ### 2. 测试节点解析

@@ -37,6 +37,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       is_release: ${{ steps.version.outputs.is_release }}
       tags: ${{ steps.meta.outputs.tags }}
+      build_date: ${{ steps.build_date.outputs.build_date }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -77,6 +78,10 @@ jobs:
             echo "is_release=false" >> $GITHUB_OUTPUT
             echo "Using dev version"
           fi
+
+      - name: Set build date
+        id: build_date
+        run: echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
 
       - name: Docker meta
         id: meta
@@ -124,6 +129,7 @@ jobs:
             THREADS=16
             SHA=${{ needs.prepare.outputs.sha_short }}
             VERSION=${{ needs.prepare.outputs.version }}
+            BUILD_DATE=${{ needs.prepare.outputs.build_date }}
           cache-from: type=gha,scope=subconverter-alpine
           cache-to: type=gha,mode=max,scope=subconverter-alpine
 
@@ -249,6 +255,7 @@ jobs:
             THREADS=16
             SHA=${{ needs.prepare.outputs.sha_short }}
             VERSION=${{ needs.prepare.outputs.version }}
+            BUILD_DATE=${{ needs.prepare.outputs.build_date }}
           cache-from: type=gha,scope=subconverter-alpine
           cache-to: type=gha,mode=max,scope=subconverter-alpine
 
@@ -290,6 +297,7 @@ jobs:
             THREADS=4
             SHA=${{ needs.prepare.outputs.sha_short }}
             VERSION=${{ needs.prepare.outputs.version }}
+            BUILD_DATE=${{ needs.prepare.outputs.build_date }}
           cache-from: type=gha,scope=subconverter-alpine-arm64
           cache-to: type=gha,mode=max,scope=subconverter-alpine-arm64
 
@@ -366,6 +374,7 @@ jobs:
             THREADS=4
             SHA=${{ needs.prepare.outputs.sha_short }}
             VERSION=${{ needs.prepare.outputs.version }}
+            BUILD_DATE=${{ needs.prepare.outputs.build_date }}
           cache-from: type=gha,scope=subconverter-alpine-arm64
           cache-to: type=gha,mode=max,scope=subconverter-alpine-arm64
 
