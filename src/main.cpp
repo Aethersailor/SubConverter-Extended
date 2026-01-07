@@ -174,8 +174,9 @@ int main(int argc, char *argv[]) {
           size_t split_pos = value.find('T');
           if (split_pos == std::string::npos)
             split_pos = value.find(' ');
-          std::string candidate =
-              split_pos == std::string::npos ? value : value.substr(0, split_pos);
+          std::string candidate = split_pos == std::string::npos
+                                      ? value
+                                      : value.substr(0, split_pos);
           if (candidate.size() >= 10 && candidate[4] == '-' &&
               candidate[7] == '-' && candidate[0] >= '0' &&
               candidate[0] <= '9' && candidate[1] >= '0' &&
@@ -480,7 +481,7 @@ int main(int argc, char *argv[]) {
 
         <div class="section">
             <div class="section-title">🚀 Lineage</div>
-            <p class="description">Originated and enhanced from: <a href="https://github.com/asdlokj1qpi233/subconverter" target="_blank">subconverter v0.9.8</a></p>
+            <p class="description">Originated and enhanced from: <a href="https://github.com/asdlokj1qpi233/subconverter" target="_blank">subconverter</a></p>
             <p class="description">Modified and evolved by: <a href="https://github.com/Aethersailor" target="_blank">Aethersailor</a></p>
         </div>
 
