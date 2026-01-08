@@ -1,8 +1,9 @@
+#include <algorithm>
+#include <ctime>
 #include <iostream>
 #include <mutex>
 #include <numeric>
 #include <string>
-#include <ctime>
 
 #include <inja.hpp>
 #include <yaml-cpp/yaml.h>
@@ -36,6 +37,7 @@ const std::vector<std::string> FALLBACK_CONFIG_URLS = {
 #include "utils/file_extra.h"
 #include "utils/ini_reader/ini_reader.h"
 #include "utils/logger.h"
+#include "utils/md5/md5_interface.h"
 #include "utils/network.h"
 #include "utils/regexp.h"
 #include "utils/stl_extra.h"
@@ -44,7 +46,6 @@ const std::vector<std::string> FALLBACK_CONFIG_URLS = {
 #include "utils/system.h"
 #include "utils/urlencode.h"
 #include "utils/yamlcpp_extra.h"
-#include "utils/md5/md5_interface.h"
 #include "webget.h"
 
 extern WebServer webServer;
@@ -324,15 +325,18 @@ void checkExternalBase(const std::string &path, std::string &dest) {
 }
 
 /**
- * 根据订阅链接生成唯一特征码（MD5 前 10 位）
+ * 根据订阅链接生成唯一特征码（MD5 前 6 位，大写）
  * @param url 订阅链接（会自动解码后计算哈希）
- * @return 10 位 hex 特征码字符串
+ * @return 6 位大写 hex 特征码字符串
  */
 inline std::string generateProviderHash(const std::string &url) {
-  // 确保 URL 已解码，避免编码差异导致哈希不一致
   std::string decodedUrl = urlDecode(url);
   std::string fullHash = getMD5(decodedUrl);
-  return fullHash.substr(0, 10);
+  std::string shortHash = fullHash.substr(0, 6);
+  // 转换为大写
+  std::transform(shortHash.begin(), shortHash.end(), shortHash.begin(),
+                 ::toupper);
+  return shortHash;
 }
 
 std::string subconverter(RESPONSE_CALLBACK_ARGS) {
@@ -584,14 +588,14 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
                !global.defaultExtConfig.empty() &&
                argExternalConfig != global.defaultExtConfig) {
       // User provided config failed, try multiple fallback CDN URLs
-      writeLog(0,
-               "Failed to load user provided config, trying fallback configs...",
-               LOG_LEVEL_WARNING);
-      
+      writeLog(
+          0, "Failed to load user provided config, trying fallback configs...",
+          LOG_LEVEL_WARNING);
+
       for (std::string fallbackUrl : FALLBACK_CONFIG_URLS) {
-        writeLog(0, "Attempting to load config from: " + fallbackUrl, 
+        writeLog(0, "Attempting to load config from: " + fallbackUrl,
                  LOG_LEVEL_INFO);
-        
+
         ExternalConfig extconf;
         extconf.tpl_args = &tpl_args;
         if (loadExternalConfig(fallbackUrl, extconf) == 0) {
@@ -634,10 +638,9 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
                    LOG_LEVEL_WARNING);
         }
       }
-      
+
       if (!configLoadSuccess) {
-        writeLog(0, "All fallback config URLs failed to load",
-                 LOG_LEVEL_ERROR);
+        writeLog(0, "All fallback config URLs failed to load", LOG_LEVEL_ERROR);
       }
     }
   }
@@ -788,11 +791,11 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
         // 这样相同的订阅链接会生成相同的 provider 名称
         // 不同的订阅链接会生成不同的名称，触发客户端自动更新
         std::string urlHash = generateProviderHash(x);
-        provider.name = "provider_" + urlHash;
+        provider.name = "Provider_" + urlHash;
         writeLog(0, "Generated provider: " + provider.name + " for URL: " + x,
                  LOG_LEVEL_INFO);
-        provider.url = x;
-        provider.interval = 3600; // 固定使用 3600 秒（1小时）
+        provider.url = urlDecode(x); // 解码 URL，同时过滤掉 \r 和 \n
+        provider.interval = 3600;    // 固定使用 3600 秒（1小时）
         provider.groupId = groupID;
         provider.path = "./providers/" + provider.name + ".yaml";
 
