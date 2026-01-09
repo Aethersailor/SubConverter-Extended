@@ -36,7 +36,7 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     # [OPTIMIZATION] Cache build artifacts (QuickJSPP & LibCron)
     - name: Cache Build Artifacts
@@ -71,7 +71,7 @@ jobs:
     # [SETUP] Build Go library (libmihomo.a) for C++ linkage
     - name: Setup Go
       if: matrix.language == 'c-cpp'
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
         go-version: 'stable'
 

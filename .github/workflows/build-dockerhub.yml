@@ -40,7 +40,7 @@ jobs:
       build_date: ${{ steps.build_date.outputs.build_date }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
@@ -101,7 +101,7 @@ jobs:
       digest: ${{ steps.build_image.outputs.digest }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           token: ${{ secrets.PAT_TOKEN }}
           fetch-depth: 0
@@ -118,7 +118,7 @@ jobs:
 
       # Build ONCE to builder stage and load to Docker (using Alpine for smaller image)
       - name: Build to builder stage (single build)
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
@@ -244,7 +244,7 @@ jobs:
 
       - name: Build and push final image
         id: build_image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
@@ -268,7 +268,7 @@ jobs:
       digest: ${{ steps.build_image.outputs.digest }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           token: ${{ secrets.PAT_TOKEN }}
           fetch-depth: 0
@@ -285,7 +285,7 @@ jobs:
 
       # Build to builder stage FIRST to extract binary (using Alpine for smaller image)
       - name: Build to builder stage (extract binary)
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
@@ -363,7 +363,7 @@ jobs:
 
       - name: Build and push final image
         id: build_image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
