@@ -231,7 +231,7 @@ curl "http://localhost:25500/sub?target=clash&url=YOUR_SUB&config=https://raw.gi
 | `target` | 目标格式 | `clash`, `surge`, `quanx` |
 | `url` | 订阅链接或节点链接（`\|` 分隔） | `https://sub.com\|vless://...` |
 | `config` | 外部配置文件 | `https://config-url` |
-| `include` | 包含节点（正则） **(暂不支持)** | `香港\|台湾` |
+| `include` | 包含节点（正则） | `香港\|台湾` |
 | `exclude` | 排除节点（正则） | `过期\|剩余` |
 | `emoji` | 添加 Emoji | `true`/`false` |
 
