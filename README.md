@@ -142,7 +142,7 @@ proxy-providers:
 
 直接使用 Mihomo Go 库解析节点链接，确保：
 
-* ✅ 支持 Mihomo 的所有协议（包括 `hysteria2`, `tuic`, `anytls` 等）
+* ✅ 支持 Mihomo 内核可解析的所有节点连接协议（包括但不限于 `hysteria2`, `tuic`, `anytls` 等）
 * ✅ 参数完全兼容，无需手动适配
 * ✅ 新协议零延迟支持（编译时跟随 Mihomo 更新）
 
@@ -150,12 +150,12 @@ proxy-providers:
 
 * ✅ **无缝切换**：完全兼容传统 subconverter 的 API 接口，确保客户端用户零学习成本，无缝切换。
 * ✅ **模板兼容**：继续沿用传统的订阅转换外部模板，无需修正任何内容，由后端内置逻辑确保 `proxy-provider` 模式在分流规则中正确生成。
-* ✅ **无忧更新**：编译时自动遍历 [Mihomo 内核源码仓库](https://github.com/MetaCubeX/mihomo/meta)，自动提取并写入当前最新支持的协议格式，确保永远对齐内核支持解析的所有节点连接协议。
+* ✅ **无忧更新**：编译时自动遍历 [Mihomo 内核源码仓库](https://github.com/MetaCubeX/mihomo/meta)，自动提取并写入当前最新支持的协议格式，自动识别可被全局参数覆盖的节点参数，确保永远对齐 Mihomo 内核支持解析的所有节点连接协议。
 
 #### 4. 新手友好 👶
 
 * ✅ 使用 **[Custom_OpenClash_Rules](https://github.com/Aethersailor/Custom_OpenClash_Rules)** 远程配置模板替代默认模板
-* ✅ 锁死 API 模式，避免新手误配置降低安全性
+* ✅ 锁死 API 模式，关闭 API 模式相关接口，避免新手误配置降低安全性
 * ✅ 简化参数，专注核心功能
 
 ---
