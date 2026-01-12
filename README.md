@@ -32,7 +32,7 @@
 它专为协同 [Mihomo](https://github.com/MetaCubeX/mihomo) 内核工作优化，提供更现代、更强大的订阅转换服务。
 
 **核心定位转变**：
-SubConverter-Extended 不再充当客户端和机场之间的"中转站"，而是成为独立的**"配置融合器"**——只对客户端服务，不连接机场订阅服务器。同时基于 Mihomo 内核源码，在编译时自动跟进协议支持。  
+SubConverter-Extended 不再充当客户端和机场之间的"中转站"，而是成为独立的 **"配置融合器"** ——只对客户端服务，不再连接机场订阅服务器。同时基于 Mihomo 内核源码，在编译时自动跟进协议支持。  
 
 <div align="center">
 <img width="719" height="442" alt="22" src="https://github.com/user-attachments/assets/506ab284-96cf-4aae-a844-bf69f15ce8df" />
@@ -51,14 +51,20 @@ SubConverter-Extended 不再充当客户端和机场之间的"中转站"，而�
 
 #### 1. 协议支持滞后 🐢
 
-subconverter 对新节点格式的支持完全取决于维护者的积极性。许多新兴协议（如 `hysteria2`、`tuic`、`anytls` 等）往往在相当长的时间内无法得到支持，而一些老协议至今也未能做到完美的转换。
+subconverter 对新节点格式的支持完全取决于开发者的积极性。许多新兴协议（如 `hysteria2`、`tuic`、`anytls` 等）往往在相当长的时间内无法得到完善的支持，而一些老协议（如 `vless`），由于传输层协议等参数的更新，至今也未能做到完美的转换。  
+
+在 subconverter 以及其流行分支的仓库中，可见大量相关的 issue。  
+
+当然，这并不是开发者的错，每一位开发者都没有一直为开源社区用爱发电的义务。  
+
+我也曾 fork 过 subconverter 并试图解决对各个协议支持不完美的问题，最后得出的结论就是完全靠人工来维护这样一个项目，势必要花费不少时间和精力去测试，而且很有可能取得不了预期的结果。  
 
 #### 2. 机场屏蔽问题 🚫
 
 由于 subconverter 需要连接机场订阅服务器拉取节点，而部分机场出于安全考虑：
 
 * 屏蔽海外 IP 访问
-* 直接屏蔽 subconverter 的 User-Agent
+* 屏蔽 subconverter 的 User-Agent
 * 限制非客户端的订阅请求
 
 这导致许多用户根本无法正常使用订阅转换服务。
@@ -67,7 +73,7 @@ subconverter 对新节点格式的支持完全取决于维护者的积极性。�
 
 由于上述问题，subconverter 逐渐被一些开发者和 UP 主视为"过时产物"，开始推崇使用 YAML 文件手动管理配置。但很多新手并没有兴趣和时间去研究 YAML 配置文件，更多的是希望“开袋即食”。  
 
-但由于 subconverter 的原因，许多人常遇到不能解析节点/不能拉取节点/拉下来的节点参数无效等等奇怪的问题，这对于很多新手来说，基本是没有能力去解决的。  
+但由于 subconverter 的种种问题，许多用户常遇到不能解析节点/不能拉取节点/拉下来的节点参数无效等等奇怪的问题。对于很多新手来说，大部分人是并没有能力解决此类问题。  
 
 **但也正是基于这一点，正如 [Custom_OpenClash_Rules](https://github.com/Aethersailor/Custom_OpenClash_Rules) 项目所坚持的：**
 
@@ -80,6 +86,10 @@ subconverter 对新节点格式的支持完全取决于维护者的积极性。�
 
 ### 🎯 我们的解决方案  
 
+从单纯服务于 Clash 客户端的角度来讲，完全可以以使用现代 Clash 内核的既有的 `rule-provider` 功能来取代原版 subconverter 的订阅链接解析功能。  
+
+同样，对于节点链接的解析，也完全可以引入内核的解析模块，来替代过去的人工维护解析器，直接获得最完美的结果。  
+
 **那就自己动手吧。** SubConverter-Extended 因此诞生，让转换工具更匹配现代 Clash 内核的使用场景，**服务于所有保留“订阅转换”接口且使用 Mihomo 内核的 Clash 客户端**。
 
 ---
@@ -90,11 +100,10 @@ subconverter 对新节点格式的支持完全取决于维护者的积极性。�
 
 | 功能 | 原版 Subconverter | SubConverter-Extended |
 | :--- | :--- | :--- |
-| **协议支持** | 🛠️ 人工维护解析器 | 🤖 **集成 Mihomo 内核解析器，自动支持所有协议** |
-| **订阅链接处理** | 📥 下载并解析节点 | 🔗  **生成 `proxy-provider`，由用户的 Mihomo 内核直接拉取** |
-| **节点链接处理** | ⚠️ 有限的协议支持 | ✅ **内置 Mihomo 内核的解析模块，完美解析** |
-| **新协议支持** | ⏳ 人工添加维护 | 🔄 **全自动维护，编译时自动扫描 Mihomo 源码添加支持** |
-| **全局参数透传** | 📝 人工维护参数列表 | 🔍 **全自动维护，编译时自动识别可覆写参数** |
+| **完美协议支持** | 🛠️ 人工维护解析器，有限支持 | 🤖 **集成 Mihomo 内核的解析器模块，完美支持所有节点连接协议** |
+| **订阅链接处理** | 📥 下载并解析节点，易被屏蔽 | 🔗  **生成 `proxy-provider`，不再连接机场，由用户的 Mihomo 内核直接拉取** |
+| **未来自动跟进** | ⏳ 人工添加维护新协议 | 🔄 **全自动维护，编译时自动扫描 Mihomo 源码添加支持新协议** |
+| **全局参数透传** | 📝 人工维护全局参数列表 | 🔍 **全自动维护，编译时自动扫描 Mihomo 源码，自动识别硬编码和可覆写参数** |
 
 ### 🔥 独特功能
 
@@ -141,7 +150,7 @@ proxy-providers:
 
 * ✅ **无缝切换**：完全兼容传统 subconverter 的 API 接口，确保客户端用户零学习成本，无缝切换。
 * ✅ **模板兼容**：继续沿用传统的订阅转换外部模板，无需修正任何内容，由后端内置逻辑确保 `proxy-provider` 模式在分流规则中正确生成。
-* ✅ **无忧更新**：编译时自动遍历 [Mihomo 内核仓库](https://github.com/MetaCubeX/mihomo)，提取并写入当前最新支持的协议格式，确保永远支持最新协议。
+* ✅ **无忧更新**：编译时自动遍历 [Mihomo 内核源码仓库](https://github.com/MetaCubeX/mihomo/meta)，自动提取并写入当前最新支持的协议格式，确保永远对齐内核支持解析的所有节点连接协议。
 
 #### 4. 新手友好 👶
 
@@ -265,9 +274,9 @@ managed_config_prefix = "http://localhost:25500"  # 托管配置前缀
 
 本项目使用或引用了以下开源项目，在此表示感谢：
 
-* [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) - Clash 内核，提供节点解析能力
-* [Aethersailor/Custom_OpenClash_Rules](https://github.com/Aethersailor/Custom_OpenClash_Rules) - OpenClash 规则集项目
-* [asdlokj1qpi233/subconverter](https://github.com/asdlokj1qpi233/subconverter) - 原版项目
+* [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) - Clash 内核，提供节点链接解析能力
+* [Aethersailor/Custom_OpenClash_Rules](https://github.com/Aethersailor/Custom_OpenClash_Rules) - OpenClash 订阅转换模板、规则集和教程项目
+* [asdlokj1qpi233/subconverter](https://github.com/asdlokj1qpi233/subconverter) - 原版 subconverter 项目
 
 ---
 
