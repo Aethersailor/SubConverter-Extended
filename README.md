@@ -39,7 +39,7 @@ SubConverter-Extended 不再充当客户端和机场之间的"中转站"，而�
 </div>
 
 > [!WARNING]
-> SubConverter-Extended 优先服务 Clash 客户端，对其他客户端如 Surge/Loon 的支持不作保证。  
+> SubConverter-Extended 优先服务 OpenClash，其次是各 Clash 客户端，对其他客户端的支持不作保证。对于修改代码造成的支持范围缩减不作修复。  
 
 ---
 
