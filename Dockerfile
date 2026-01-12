@@ -4,6 +4,8 @@ FROM golang:latest AS go-builder
 
 ARG TARGETARCH
 ARG TARGETVARIANT
+ARG MIHOMO_REF="Meta"
+ARG MIHOMO_CACHE_BUST=1
 
 WORKDIR /build/bridge
 
@@ -19,7 +21,8 @@ COPY bridge/converter.go ./
 RUN go mod init github.com/aethersailor/subconverter-extended/bridge
 
 # Get latest Mihomo and resolve all dependencies
-RUN go get github.com/metacubex/mihomo@Meta
+RUN echo "MIHOMO_CACHE_BUST=$MIHOMO_CACHE_BUST" && \
+    go get github.com/metacubex/mihomo@${MIHOMO_REF}
 
 # Upgrade all dependencies to latest versions (security fix)
 RUN go get -u all

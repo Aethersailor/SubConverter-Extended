@@ -339,6 +339,80 @@ inline std::string generateProviderHash(const std::string &url) {
   return shortHash;
 }
 
+inline std::string generateProviderHashFromDecodedUrl(
+    const std::string &decoded_url) {
+  std::string fullHash = getMD5(decoded_url);
+  std::string shortHash = fullHash.substr(0, 6);
+  std::transform(shortHash.begin(), shortHash.end(), shortHash.begin(),
+                 ::toupper);
+  return shortHash;
+}
+
+struct TaggedLink {
+  std::string tag;
+  std::string link;
+  bool has_tag = false;
+  bool link_decoded = false;
+};
+
+static bool extractTagPrefix(const std::string &input, std::string &tag,
+                             std::string &link) {
+  std::string value = trimWhitespace(input, true, true);
+  size_t start = std::string::npos;
+  bool bracketed = false;
+  if (startsWith(value, "<tag:")) {
+    start = 5;
+    bracketed = true;
+  } else if (startsWith(value, "tag:"))
+    start = 4;
+  else
+    return false;
+
+  size_t comma_pos = value.find(',', start);
+  if (comma_pos == std::string::npos)
+    return false;
+
+  tag = value.substr(start, comma_pos - start);
+  size_t link_pos = comma_pos + 1;
+  if (link_pos < value.size() && value[link_pos] == '>')
+    link_pos++;
+  if (tag.empty() || link_pos >= value.size())
+    return false;
+
+  link = value.substr(link_pos);
+  if (bracketed && !link.empty() && link.back() == '>')
+    link.pop_back();
+  return true;
+}
+
+static bool looksLikeEncodedTagPrefix(const std::string &input) {
+  std::string lower = toLower(input);
+  return startsWith(lower, "tag%3a") || startsWith(lower, "%3ctag%3a") ||
+         startsWith(lower, "%3ctag:") ||
+         (startsWith(lower, "tag:") &&
+          lower.find("%2c") != std::string::npos);
+}
+
+static TaggedLink parseTaggedLink(const std::string &input) {
+  TaggedLink result;
+  std::string value = trimWhitespace(input, true, true);
+  if (extractTagPrefix(value, result.tag, result.link)) {
+    result.has_tag = true;
+    return result;
+  }
+  if (looksLikeEncodedTagPrefix(value)) {
+    std::string decoded = urlDecode(value);
+    if (extractTagPrefix(decoded, result.tag, result.link)) {
+      result.has_tag = true;
+      result.link_decoded = true;
+      return result;
+    }
+  }
+  result.link = value;
+  return result;
+}
+
+
 std::string subconverter(RESPONSE_CALLBACK_ARGS) {
   auto &argument = request.argument;
   int *status_code = &response.status_code;
@@ -574,8 +648,10 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
           ext.overwrite_original_rules = extconf.overwrite_original_rules;
         }
       }
-      if (!extconf.rename.empty())
+      if (!extconf.rename.empty()) {
         ext.rename_array = extconf.rename;
+        ext.rename_for_providers = true;
+      }
       if (!extconf.emoji.empty())
         ext.emoji_array = extconf.emoji;
       if (!extconf.include.empty())
@@ -622,8 +698,10 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
               ext.overwrite_original_rules = extconf.overwrite_original_rules;
             }
           }
-          if (!extconf.rename.empty())
+          if (!extconf.rename.empty()) {
             ext.rename_array = extconf.rename;
+            ext.rename_for_providers = true;
+          }
           if (!extconf.emoji.empty())
             ext.emoji_array = extconf.emoji;
           if (!extconf.include.empty())
@@ -679,10 +757,11 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
   ext.remove_emoji = argRemoveEmoji.get(global.removeEmoji);
   if (ext.add_emoji && ext.emoji_array.empty())
     ext.emoji_array = safe_get_emojis();
-  if (!argRenames.empty())
+  if (!argRenames.empty()) {
     ext.rename_array = INIBinding::from<RegexMatchConfig>::from_ini(
         split(argRenames, "`"), "@");
-  else if (ext.rename_array.empty())
+    ext.rename_for_providers = true;
+  } else if (ext.rename_array.empty())
     ext.rename_array = safe_get_renames();
 
   /// check custom include/exclude settings
@@ -746,35 +825,50 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
   //  对于 Clash，区分节点链接和订阅链接
   if ((argTarget == "clash" || argTarget == "clashr") && !ext.nodelist) {
     // 先区分节点链接和订阅链接
-    std::vector<std::string> subscription_urls; // HTTP/HTTPS 订阅链接
+    struct SubscriptionLinkItem {
+      std::string url;
+      std::string tag;
+      bool url_decoded = false;
+    };
+    std::vector<SubscriptionLinkItem> subscription_urls; // HTTP/HTTPS 订阅链接
     std::vector<std::string> node_urls; // 节点链接（vless://, vmess:// 等）
 
     for (std::string &x : urls) {
       x = regTrim(x);
+      TaggedLink tagged = parseTaggedLink(x);
+      std::string link = tagged.link.empty() ? x : tagged.link;
 
       // 检查是否是节点链接（以协议前缀开头）
       bool isNodeLink =
-          startsWith(x, "vless://") || startsWith(x, "vmess://") ||
-          startsWith(x, "ss://") || startsWith(x, "ssr://") ||
-          startsWith(x, "trojan://") || startsWith(x, "hysteria://") ||
-          startsWith(x, "hysteria2://") || startsWith(x, "hy2://") ||
-          startsWith(x, "tuic://") || startsWith(x, "snell://") ||
-          startsWith(x, "socks5://") || startsWith(x, "socks://");
+          startsWith(link, "vless://") || startsWith(link, "vmess://") ||
+          startsWith(link, "ss://") || startsWith(link, "ssr://") ||
+          startsWith(link, "trojan://") || startsWith(link, "hysteria://") ||
+          startsWith(link, "hysteria2://") || startsWith(link, "hy2://") ||
+          startsWith(link, "tuic://") || startsWith(link, "snell://") ||
+          startsWith(link, "socks5://") || startsWith(link, "socks://");
 
       if (isNodeLink) {
-        writeLog(0, "Detected node link: '" + x + "', will parse directly.",
+        std::string node_link = link;
+        if (tagged.has_tag)
+          node_link = "tag:" + tagged.tag + "," + link;
+        writeLog(0, "Detected node link: '" + link + "', will parse directly.",
                  LOG_LEVEL_INFO);
-        node_urls.push_back(x);
-      } else if (isLink(x)) {
+        node_urls.push_back(node_link);
+      } else if (isLink(link)) {
         // HTTP/HTTPS 订阅链接
         writeLog(
-            0, "Detected subscription link: '" + x + "', will create provider.",
+            0, "Detected subscription link: '" + link +
+                   "', will create provider.",
             LOG_LEVEL_INFO);
-        subscription_urls.push_back(x);
+        subscription_urls.push_back(
+            {link, tagged.tag, tagged.link_decoded});
       } else {
-        writeLog(0, "Unknown URL type: '" + x + "', treating as node link.",
+        std::string node_link = link;
+        if (tagged.has_tag)
+          node_link = "tag:" + tagged.tag + "," + link;
+        writeLog(0, "Unknown URL type: '" + link + "', treating as node link.",
                  LOG_LEVEL_WARNING);
-        node_urls.push_back(x);
+        node_urls.push_back(node_link);
       }
     }
 
@@ -785,16 +879,22 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
       ext.use_proxy_provider = true;
 
       // 为订阅链接创建 proxy-provider
-      for (std::string &x : subscription_urls) {
+      for (const SubscriptionLinkItem &item : subscription_urls) {
         ProxyProvider provider;
         // 使用 URL 的 MD5 哈希前 10 位作为唯一特征码
         // 这样相同的订阅链接会生成相同的 provider 名称
         // 不同的订阅链接会生成不同的名称，触发客户端自动更新
-        std::string urlHash = generateProviderHash(x);
+        std::string urlHash =
+            item.url_decoded ? generateProviderHashFromDecodedUrl(item.url)
+                             : generateProviderHash(item.url);
         provider.name = "Provider_" + urlHash;
-        writeLog(0, "Generated provider: " + provider.name + " for URL: " + x,
+        provider.tag = item.tag;
+        writeLog(0,
+                 "Generated provider: " + provider.name + " for URL: " +
+                     item.url,
                  LOG_LEVEL_INFO);
-        provider.url = urlDecode(x); // 解码 URL，同时过滤掉 \r 和 \n
+        provider.url = item.url_decoded ? item.url
+                                        : urlDecode(item.url); // 解码 URL
         provider.interval = 3600;    // 固定使用 3600 秒（1小时）
         provider.groupId = groupID;
         provider.path = "./providers/" + provider.name + ".yaml";

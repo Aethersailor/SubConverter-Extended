@@ -130,6 +130,8 @@ jobs:
             SHA=${{ needs.prepare.outputs.sha_short }}
             VERSION=${{ needs.prepare.outputs.version }}
             BUILD_DATE=${{ needs.prepare.outputs.build_date }}
+            MIHOMO_REF=Meta
+            MIHOMO_CACHE_BUST=${{ github.run_id }}
           cache-from: type=gha,scope=subconverter-alpine
           cache-to: type=gha,mode=max,scope=subconverter-alpine
 
@@ -141,6 +143,7 @@ jobs:
           # Go module files
           docker cp $CONTAINER_ID:/src/bridge/go.mod bridge/go.mod
           docker cp $CONTAINER_ID:/src/bridge/go.sum bridge/go.sum
+          docker cp $CONTAINER_ID:/src/bridge/libmihomo.h bridge/libmihomo.h
           
           # Go-generated header files
           docker cp $CONTAINER_ID:/src/src/parser/mihomo_schemes.h src/parser/mihomo_schemes.h
@@ -222,7 +225,9 @@ jobs:
       - name: Check for file changes
         id: check_changes
         run: |
-          git diff --quiet bridge/go.mod bridge/go.sum src/parser/mihomo_schemes.h src/parser/param_compat.h include/httplib.h include/nlohmann/json.hpp include/inja.hpp include/jpcre2.hpp include/quickjspp.hpp || echo "changed=true" >> $GITHUB_OUTPUT
+          if [ -n "$(git status --porcelain -- bridge/go.mod bridge/go.sum bridge/libmihomo.h src/parser/mihomo_schemes.h src/parser/param_compat.h include/httplib.h include/nlohmann/json.hpp include/inja.hpp include/jpcre2.hpp include/quickjspp.hpp)" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
 
       - name: Commit and push generated files
         if: steps.check_changes.outputs.changed == 'true' && github.event_name != 'pull_request'
@@ -237,7 +242,7 @@ jobs:
           
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add bridge/go.mod bridge/go.sum src/parser/mihomo_schemes.h src/parser/param_compat.h include/httplib.h include/nlohmann/json.hpp include/inja.hpp include/jpcre2.hpp include/quickjspp.hpp
+          git add bridge/go.mod bridge/go.sum bridge/libmihomo.h src/parser/mihomo_schemes.h src/parser/param_compat.h include/httplib.h include/nlohmann/json.hpp include/inja.hpp include/jpcre2.hpp include/quickjspp.hpp
           git commit -m "chore: update auto-generated files and header libraries from build [skip ci]"
           
           git push origin HEAD:$BRANCH_NAME
@@ -256,6 +261,8 @@ jobs:
             SHA=${{ needs.prepare.outputs.sha_short }}
             VERSION=${{ needs.prepare.outputs.version }}
             BUILD_DATE=${{ needs.prepare.outputs.build_date }}
+            MIHOMO_REF=Meta
+            MIHOMO_CACHE_BUST=${{ github.run_id }}
           cache-from: type=gha,scope=subconverter-alpine
           cache-to: type=gha,mode=max,scope=subconverter-alpine
 
@@ -298,6 +305,8 @@ jobs:
             SHA=${{ needs.prepare.outputs.sha_short }}
             VERSION=${{ needs.prepare.outputs.version }}
             BUILD_DATE=${{ needs.prepare.outputs.build_date }}
+            MIHOMO_REF=Meta
+            MIHOMO_CACHE_BUST=${{ github.run_id }}
           cache-from: type=gha,scope=subconverter-alpine-arm64
           cache-to: type=gha,mode=max,scope=subconverter-alpine-arm64
 
@@ -375,6 +384,8 @@ jobs:
             SHA=${{ needs.prepare.outputs.sha_short }}
             VERSION=${{ needs.prepare.outputs.version }}
             BUILD_DATE=${{ needs.prepare.outputs.build_date }}
+            MIHOMO_REF=Meta
+            MIHOMO_CACHE_BUST=${{ github.run_id }}
           cache-from: type=gha,scope=subconverter-alpine-arm64
           cache-to: type=gha,mode=max,scope=subconverter-alpine-arm64
 

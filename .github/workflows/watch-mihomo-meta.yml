@@ -1,0 +1,80 @@
+name: Watch Mihomo Meta
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout dev
+        uses: actions/checkout@v6
+        with:
+          ref: dev
+          fetch-depth: 0
+          token: ${{ secrets.PAT_TOKEN || github.token }}
+
+      - name: Check Meta updates
+        env:
+          MIHOMO_REPO: https://github.com/MetaCubeX/mihomo.git
+          MARKER_FILE: .github/mihomo-meta.rev
+        run: |
+          set -euo pipefail
+
+          latest=$(git ls-remote "$MIHOMO_REPO" Meta | awk '{print $1}')
+          if [ -z "$latest" ]; then
+            echo "Failed to resolve Meta HEAD"
+            exit 1
+          fi
+
+          prev=""
+          if [ -f "$MARKER_FILE" ]; then
+            prev=$(tr -d '[:space:]' < "$MARKER_FILE")
+          fi
+
+          if [ "$latest" = "$prev" ]; then
+            echo "No upstream changes."
+            exit 0
+          fi
+
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+          git -C "$tmp" init -q
+          git -C "$tmp" remote add origin "$MIHOMO_REPO"
+          git -C "$tmp" fetch --no-tags --depth=2000 origin Meta
+
+          if [ -n "$prev" ] && ! git -C "$tmp" cat-file -e "${prev}^{commit}"; then
+            git -C "$tmp" fetch --no-tags --unshallow origin Meta || git -C "$tmp" fetch --no-tags origin Meta
+          fi
+
+          touched=""
+          if [ -n "$prev" ] && git -C "$tmp" merge-base --is-ancestor "$prev" "$latest"; then
+            touched=$(git -C "$tmp" log --name-only --pretty="" "$prev..$latest" -- \
+              common/convert/converter.go \
+              adapter/outbound/base.go \
+              adapter/outbound | sort -u | sed '/^$/d' || true)
+          else
+            touched="unknown"
+          fi
+
+          printf '%s\n' "$latest" > "$MARKER_FILE"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$MARKER_FILE"
+
+          if [ "$touched" = "unknown" ]; then
+            msg="chore(mihomo): update Meta revision"
+          elif [ -n "$touched" ]; then
+            msg="chore(mihomo): update Meta revision"
+          else
+            msg="chore(mihomo): update Meta revision [skip ci]"
+          fi
+
+          git commit -m "$msg" || exit 0
+          git push origin HEAD:dev

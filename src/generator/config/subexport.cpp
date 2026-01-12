@@ -26,6 +26,51 @@
 
 extern string_array ss_ciphers, ssr_ciphers;
 
+static bool splitRenameGroupRule(const std::string &match,
+                                 std::string &group_pattern,
+                                 std::string &name_pattern) {
+  static const std::string group_regex = R"(^!!(?:GROUP)=(.+?)(?:!!(.*))?$)";
+  if (!startsWith(match, "!!GROUP="))
+    return false;
+  regGetMatch(match, group_regex, 3, 0, &group_pattern, &name_pattern);
+  return true;
+}
+
+static YAML::Node buildProviderProxyNameOverride(const ProxyProvider &provider,
+                                                 const extra_settings &ext) {
+  YAML::Node proxy_name_node(YAML::NodeType::Sequence);
+  if (!ext.rename_for_providers || ext.rename_array.empty())
+    return proxy_name_node;
+
+  for (const RegexMatchConfig &rule : ext.rename_array) {
+    if (!rule.Script.empty() || rule.Match.empty())
+      continue;
+
+    std::string group_pattern, name_pattern;
+    if (splitRenameGroupRule(rule.Match, group_pattern, name_pattern)) {
+      if (group_pattern.empty() || name_pattern.empty())
+        continue;
+      if (!provider.tag.empty() && regFind(provider.tag, group_pattern)) {
+        YAML::Node item;
+        item["pattern"] = name_pattern;
+        item["target"] = rule.Replace;
+        proxy_name_node.push_back(item);
+      }
+      continue;
+    }
+
+    if (startsWith(rule.Match, "!!"))
+      continue;
+
+    YAML::Node item;
+    item["pattern"] = rule.Match;
+    item["target"] = rule.Replace;
+    proxy_name_node.push_back(item);
+  }
+
+  return proxy_name_node;
+}
+
 // Helper function to insert proxy-providers before proxy-groups
 static void insertProxyProvidersBeforeGroups(std::string &yaml_str,
                                              const std::string &providers_yaml,
@@ -941,6 +986,12 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
 
       if (!ext.udp.is_undef()) {
         override_node["udp"] = ext.udp.get();
+        has_override = true;
+      }
+
+      YAML::Node proxy_name_node = buildProviderProxyNameOverride(p, ext);
+      if (proxy_name_node.size() > 0) {
+        override_node["proxy-name"] = proxy_name_node;
         has_override = true;
       }
 
