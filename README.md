@@ -211,7 +211,7 @@ docker run -d \
   aethersailor/subconverter-extended:latest
 ```
 
-#### 3. DockerCompose
+#### 3. Docker Compose
 ```yaml
 services:
   sub:
