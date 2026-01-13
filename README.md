@@ -184,7 +184,7 @@ proxy-providers:
 
 ```bash
 docker run -d \
-  --name subconverter \
+  --name SubConverter-Extended \
   -p 25500:25500 \
   --restart unless-stopped \
   aethersailor/subconverter-extended:latest
@@ -196,19 +196,42 @@ docker run -d \
 
 ```bash
 # 1. 创建配置目录
-mkdir -p ~/subconverter/base
+mkdir -p ~/SubConverter-Extended/base
 
 # 2. 下载配置文件模板（可选）
-wget -O ~/subconverter/base/pref.toml \
+wget -O ~/SubConverter-Extended/base/pref.toml \
   https://raw.githubusercontent.com/Aethersailor/SubConverter-Extended/master/base/pref.example.toml
 
 # 3. 启动容器并挂载配置
 docker run -d \
-  --name subconverter \
+  --name SubConverter-Extended \
   -p 25500:25500 \
-  -v ~/subconverter/base:/base \
+  -v ~/SubConverter-Extended/base:/base \
   --restart unless-stopped \
   aethersailor/subconverter-extended:latest
+```
+
+#### 3. Docker Compose
+```yaml
+services:
+  sub:
+    container_name: SubConverter-Extended
+    hostname: SubConverter-Extended
+    image: aethersailor/subconverter-extended:latest
+    logging:
+      driver: json-file
+      options:
+        max-size: 1m
+    volumes:
+      - ./pref.toml:/base/pref.toml
+    ports:
+      # 映射宿主机 25500 端口
+      - "25500:25500"
+    environment:
+      - TZ=Asia/Shanghai
+    restart: unless-stopped
+    # 使用桥接的网络模式，bridge，host，none
+    network_mode: bridge
 ```
 
 ---
