@@ -184,7 +184,7 @@ proxy-providers:
 
 ```bash
 docker run -d \
-  --name subconverter \
+  --name SubConverter-Extended \
   -p 25500:25500 \
   --restart unless-stopped \
   aethersailor/subconverter-extended:latest
@@ -196,17 +196,17 @@ docker run -d \
 
 ```bash
 # 1. 创建配置目录
-mkdir -p ~/subconverter/base
+mkdir -p ~/SubConverter-Extended/base
 
 # 2. 下载配置文件模板（可选）
-wget -O ~/subconverter/base/pref.toml \
+wget -O ~/SubConverter-Extended/base/pref.toml \
   https://raw.githubusercontent.com/Aethersailor/SubConverter-Extended/master/base/pref.example.toml
 
 # 3. 启动容器并挂载配置
 docker run -d \
-  --name subconverter \
+  --name SubConverter-Extended \
   -p 25500:25500 \
-  -v ~/subconverter/base:/base \
+  -v ~/SubConverter-Extended/base:/base \
   --restart unless-stopped \
   aethersailor/subconverter-extended:latest
 ```
@@ -215,28 +215,20 @@ docker run -d \
 ```yaml
 services:
   sub:
-    container_name: sub
-    hostname: sub
-    # image: tindy2013/subconverter:latest
+    container_name: SubConverter-Extended
+    hostname: SubConverter-Extended
     image: aethersailor/subconverter-extended:latest
     logging:
       driver: json-file
       options:
         max-size: 1m
     volumes:
-      # 通过 config/*.ini 文件定义多个不同的 ruleset 和 proxy group, 适配多个不同的场景.
-      - ./config:/base/config
-      # 使用 yml 作为配置文件定义, 如果是 pref.toml 注释此行, 并注释 environment 里面的 PREF_PATH
-      - ./pref.yml:/base/pref.yml
-      # - ./pref.toml:/base/pref.toml
-      # /getprofile
-      # - ./profiles:/base/profiles
+      - ./pref.toml:/base/pref.toml
     ports:
       # 映射宿主机 25500 端口
       - "25500:25500"
     environment:
       - TZ=Asia/Shanghai
-      - PREF_PATH=/base/pref.yml
     restart: unless-stopped
     # 使用桥接的网络模式，bridge，host，none
     network_mode: bridge
