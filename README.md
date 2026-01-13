@@ -281,7 +281,7 @@ curl "http://localhost:25500/sub?target=clash&url=YOUR_SUB&config=https://raw.gi
 [managed_config]
 managed_config_prefix = "http://localhost:25500"  # 托管配置前缀
 ```
-
+非本机部署时，请将此项修改为 SubConverter-Extended 部署机的 IP 地址或域名。  
 ---
 
 ## 🔍 Docker Hub 镜像标签
