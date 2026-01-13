@@ -232,8 +232,8 @@ services:
       # /getprofile
       # - ./profiles:/base/profiles
     ports:
-      # 映射宿主机 0.0.0.0:25500 端口
-      - "0.0.0.0:25500:25500"
+      # 映射宿主机 25500 端口
+      - "25500:25500"
     environment:
       - TZ=Asia/Shanghai
       - PREF_PATH=/base/pref.yml
