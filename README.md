@@ -206,7 +206,7 @@ wget -O ~/SubConverter-Extended/base/pref.toml \
 docker run -d \
   --name SubConverter-Extended \
   -p 25500:25500 \
-  -v ~/SubConverter-Extended/base:/base \
+  -v ~/SubConverter-Extended/base/pref.toml:/base/pref.toml \
   --restart unless-stopped \
   aethersailor/subconverter-extended:latest
 ```
