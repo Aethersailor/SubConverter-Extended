@@ -218,7 +218,7 @@ services:
     container_name: sub
     hostname: sub
     # image: tindy2013/subconverter:latest
-    image: aethersailor/subconverter-extended
+    image: aethersailor/subconverter-extended:latest
     logging:
       driver: json-file
       options:
