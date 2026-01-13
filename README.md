@@ -212,7 +212,7 @@ docker run -d \
 ```
 
 #### 3. DockerCompose
-```
+```yaml
 services:
   sub:
     container_name: sub
