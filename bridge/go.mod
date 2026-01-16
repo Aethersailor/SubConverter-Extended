@@ -2,7 +2,7 @@ module github.com/aethersailor/subconverter-extended/bridge
 
 go 1.25.5
 
-require github.com/metacubex/mihomo v1.19.19-0.20251223142019-8deaed8287d2
+require github.com/metacubex/mihomo v1.19.19
 
 require (
 	github.com/RyuaNerin/go-krypto v1.3.0 // indirect
@@ -24,7 +24,7 @@ require (
 	github.com/metacubex/randv2 v0.2.0 // indirect
 	github.com/metacubex/sing v0.5.6 // indirect
 	github.com/metacubex/sing-shadowsocks v0.2.12 // indirect
-	github.com/metacubex/tls v0.1.0 // indirect
+	github.com/metacubex/tls v0.1.1 // indirect
 	github.com/oasisprotocol/deoxysii v0.0.0-20220228165953-2091330c22b7 // indirect
 	github.com/samber/lo v1.52.0 // indirect
 	github.com/sina-ghaderi/poly1305 v0.0.0-20220724002748-c5926b03988b // indirect
