@@ -273,6 +273,23 @@ curl "http://localhost:25500/sub?target=clash&url=YOUR_SUB&config=https://raw.gi
 | `exclude` | 排除节点（正则） | `过期\|剩余` |
 | `emoji` | 添加 Emoji | `true`/`false` |
 
+#### provider 前缀（仅 Clash/ClashR 订阅链接）
+
+`provider` 不是独立参数，而是写在 `url=` 列表中、放在订阅链接前，用逗号分隔，用于自定义 `proxy-providers` 名称。节点链接不生效。
+
+示例：
+
+```
+url=provider:HK,https://example.com/sub
+url=provider:HK,https://a|provider:HK,https://b
+url=provider%3AHK%2Chttps%3A%2F%2Fexample.com%2Fsub
+```
+
+补充说明：
+
+* 支持中文；非法字符或空值会回退为默认 `Provider_<MD5>`
+* 重名会自动追加 `_1`、`_2` 等后缀
+
 ---
 
 ## 🛠️ 配置说明
