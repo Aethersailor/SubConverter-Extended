@@ -4,6 +4,7 @@
 #include <mutex>
 #include <numeric>
 #include <string>
+#include <unordered_set>
 
 #include <inja.hpp>
 #include <yaml-cpp/yaml.h>
@@ -324,6 +325,36 @@ void checkExternalBase(const std::string &path, std::string &dest) {
     dest = path;
 }
 
+static bool hasEffectiveExternalConfig(const ExternalConfig &extconf,
+                                       const template_args &tpl_args,
+                                       const string_map &tpl_args_base) {
+  if (tpl_args.local_vars != tpl_args_base)
+    return true;
+
+  if (!extconf.custom_proxy_group.empty() || !extconf.surge_ruleset.empty())
+    return true;
+
+  if (!extconf.clash_rule_base.empty() || !extconf.surge_rule_base.empty() ||
+      !extconf.surfboard_rule_base.empty() ||
+      !extconf.mellow_rule_base.empty() || !extconf.quan_rule_base.empty() ||
+      !extconf.quanx_rule_base.empty() || !extconf.loon_rule_base.empty() ||
+      !extconf.sssub_rule_base.empty() ||
+      !extconf.singbox_rule_base.empty())
+    return true;
+
+  if (!extconf.rename.empty() || !extconf.emoji.empty() ||
+      !extconf.include.empty() || !extconf.exclude.empty())
+    return true;
+
+  if (!extconf.add_emoji.is_undef() || !extconf.remove_old_emoji.is_undef())
+    return true;
+
+  if (!extconf.enable_rule_generator || extconf.overwrite_original_rules)
+    return true;
+
+  return false;
+}
+
 /**
  * 根据订阅链接生成唯一特征码（MD5 前 6 位，大写）
  * @param url 订阅链接（会自动解码后计算哈希）
@@ -350,66 +381,207 @@ inline std::string generateProviderHashFromDecodedUrl(
 
 struct TaggedLink {
   std::string tag;
+  std::string provider;
   std::string link;
   bool has_tag = false;
+  bool has_provider = false;
   bool link_decoded = false;
 };
 
-static bool extractTagPrefix(const std::string &input, std::string &tag,
-                             std::string &link) {
-  std::string value = trimWhitespace(input, true, true);
+static bool extractLinkPrefix(const std::string &input,
+                              const std::string &prefix,
+                              std::string &value,
+                              std::string &remainder,
+                              bool &saw_bracketed) {
+  std::string trimmed = trimWhitespace(input, true, true);
   size_t start = std::string::npos;
   bool bracketed = false;
-  if (startsWith(value, "<tag:")) {
-    start = 5;
+  std::string bracket_prefix = "<" + prefix;
+  if (startsWith(trimmed, bracket_prefix)) {
+    start = bracket_prefix.size();
     bracketed = true;
-  } else if (startsWith(value, "tag:"))
-    start = 4;
-  else
+  } else if (startsWith(trimmed, prefix)) {
+    start = prefix.size();
+  } else {
     return false;
+  }
 
-  size_t comma_pos = value.find(',', start);
+  size_t comma_pos = trimmed.find(',', start);
   if (comma_pos == std::string::npos)
     return false;
 
-  tag = value.substr(start, comma_pos - start);
+  value = trimmed.substr(start, comma_pos - start);
   size_t link_pos = comma_pos + 1;
-  if (link_pos < value.size() && value[link_pos] == '>')
+  if (bracketed && link_pos < trimmed.size() && trimmed[link_pos] == '>')
     link_pos++;
-  if (tag.empty() || link_pos >= value.size())
+  if (link_pos >= trimmed.size())
     return false;
 
-  link = value.substr(link_pos);
-  if (bracketed && !link.empty() && link.back() == '>')
-    link.pop_back();
+  remainder = trimmed.substr(link_pos);
+  if (bracketed)
+    saw_bracketed = true;
   return true;
 }
 
-static bool looksLikeEncodedTagPrefix(const std::string &input) {
+static bool parseLinkPrefixes(const std::string &input, TaggedLink &result) {
+  std::string remainder = input;
+  bool saw_bracketed = false;
+  bool parsed = false;
+
+  while (true) {
+    std::string value;
+    std::string next;
+    if (extractLinkPrefix(remainder, "tag:", value, next, saw_bracketed)) {
+      parsed = true;
+      if (!value.empty() && !result.has_tag) {
+        result.tag = value;
+        result.has_tag = true;
+      }
+      remainder = next;
+      continue;
+    }
+    if (extractLinkPrefix(remainder, "provider:", value, next, saw_bracketed)) {
+      parsed = true;
+      if (!value.empty() && !result.has_provider) {
+        result.provider = value;
+        result.has_provider = true;
+      }
+      remainder = next;
+      continue;
+    }
+    break;
+  }
+
+  if (!parsed)
+    return false;
+
+  remainder = trimWhitespace(remainder, true, true);
+  if (saw_bracketed && !remainder.empty() && remainder.back() == '>')
+    remainder.pop_back();
+  result.link = remainder;
+  return true;
+}
+
+static bool looksLikeEncodedLinkPrefix(const std::string &input) {
   std::string lower = toLower(input);
-  return startsWith(lower, "tag%3a") || startsWith(lower, "%3ctag%3a") ||
-         startsWith(lower, "%3ctag:") ||
+  return startsWith(lower, "tag%3a") || startsWith(lower, "provider%3a") ||
+         startsWith(lower, "%3ctag%3a") ||
+         startsWith(lower, "%3cprovider%3a") || startsWith(lower, "%3ctag:") ||
+         startsWith(lower, "%3cprovider:") ||
          (startsWith(lower, "tag:") &&
+          lower.find("%2c") != std::string::npos) ||
+         (startsWith(lower, "provider:") &&
           lower.find("%2c") != std::string::npos);
 }
 
 static TaggedLink parseTaggedLink(const std::string &input) {
   TaggedLink result;
   std::string value = trimWhitespace(input, true, true);
-  if (extractTagPrefix(value, result.tag, result.link)) {
-    result.has_tag = true;
+  if (parseLinkPrefixes(value, result))
     return result;
-  }
-  if (looksLikeEncodedTagPrefix(value)) {
+  if (looksLikeEncodedLinkPrefix(value)) {
+    TaggedLink decoded_result;
     std::string decoded = urlDecode(value);
-    if (extractTagPrefix(decoded, result.tag, result.link)) {
-      result.has_tag = true;
-      result.link_decoded = true;
-      return result;
+    if (parseLinkPrefixes(decoded, decoded_result)) {
+      decoded_result.link_decoded = true;
+      return decoded_result;
     }
   }
   result.link = value;
   return result;
+}
+
+static constexpr size_t kProviderNameMaxLen = 64;
+
+static bool isWindowsReservedName(const std::string &name) {
+  if (name.empty())
+    return false;
+  std::string trimmed = trimWhitespace(name, true, true);
+  trimmed = trimOf(trimmed, '.', true, true);
+  if (trimmed.empty())
+    return false;
+  std::string upper = toUpper(trimmed);
+  string_size dot_pos = upper.find('.');
+  std::string base =
+      dot_pos == std::string::npos ? upper : upper.substr(0, dot_pos);
+  static const std::unordered_set<std::string> reserved = {
+      "CON",  "PRN",  "AUX",  "NUL",  "COM1", "COM2", "COM3", "COM4",
+      "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3",
+      "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"};
+  return reserved.find(base) != reserved.end();
+}
+
+static std::string clampProviderNameLength(const std::string &name,
+                                           size_t max_len) {
+  if (name.size() <= max_len)
+    return name;
+  std::string truncated = name.substr(0, max_len);
+  while (!truncated.empty() && !isStrUTF8(truncated))
+    truncated.pop_back();
+  return truncated;
+}
+
+static std::string sanitizeProviderName(const std::string &input) {
+  std::string name = trimWhitespace(input, true, true);
+  if (name.empty())
+    return "";
+
+  std::string cleaned;
+  cleaned.reserve(name.size());
+  bool last_was_underscore = false;
+  char last_out = '\0';
+
+  for (unsigned char c : name) {
+    bool invalid = false;
+    if (c < 0x20 || c == 0x7F)
+      invalid = true;
+    if (!invalid) {
+      switch (c) {
+      case '<':
+      case '>':
+      case ':':
+      case '"':
+      case '/':
+      case '\\':
+      case '|':
+      case '?':
+      case '*':
+        invalid = true;
+        break;
+      default:
+        break;
+      }
+    }
+    if (!invalid && c == '.' && last_out == '.')
+      invalid = true;
+    if (!invalid && c == '_')
+      invalid = true;
+
+    if (invalid) {
+      if (!last_was_underscore) {
+        cleaned.push_back('_');
+        last_was_underscore = true;
+        last_out = '_';
+      }
+      continue;
+    }
+
+    cleaned.push_back(static_cast<char>(c));
+    last_was_underscore = false;
+    last_out = static_cast<char>(c);
+  }
+
+  cleaned = trimWhitespace(cleaned, true, true);
+  cleaned = trimOf(cleaned, '.', true, true);
+  if (cleaned.empty() || isWindowsReservedName(cleaned))
+    return "";
+
+  cleaned = clampProviderNameLength(cleaned, kProviderNameMaxLen);
+  cleaned = trimOf(cleaned, '.', true, true);
+  if (cleaned.empty() || isWindowsReservedName(cleaned))
+    return "";
+
+  return cleaned;
 }
 
 
@@ -616,6 +788,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
   /// load external configuration
   std::string userProvidedConfig = getUrlArg(argument, "config");
   bool configLoadSuccess = false;
+  string_map tpl_args_base = tpl_args.local_vars;
 
   if (argExternalConfig.empty())
     argExternalConfig = global.defaultExtConfig;
@@ -626,7 +799,9 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
              LOG_LEVEL_INFO);
     ExternalConfig extconf;
     extconf.tpl_args = &tpl_args;
-    if (loadExternalConfig(argExternalConfig, extconf) == 0) {
+    int load_result = loadExternalConfig(argExternalConfig, extconf);
+    if (load_result == 0 &&
+        hasEffectiveExternalConfig(extconf, tpl_args, tpl_args_base)) {
       configLoadSuccess = true;
       if (!ext.nodelist) {
         checkExternalBase(extconf.sssub_rule_base, lSSSubBase);
@@ -660,9 +835,20 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
         lExcludeRemarks = extconf.exclude;
       argAddEmoji.define(extconf.add_emoji);
       argRemoveEmoji.define(extconf.remove_old_emoji);
-    } else if (!userProvidedConfig.empty() &&
-               !global.defaultExtConfig.empty() &&
-               argExternalConfig != global.defaultExtConfig) {
+    } else {
+      tpl_args.local_vars = tpl_args_base;
+      if (load_result == 0) {
+        writeLog(
+            0,
+            "External configuration loaded but contains no effective settings. "
+            "Treating as failure.",
+            LOG_LEVEL_WARNING);
+      }
+    }
+
+    if (!configLoadSuccess && !userProvidedConfig.empty() &&
+        !global.defaultExtConfig.empty() &&
+        argExternalConfig != global.defaultExtConfig) {
       // User provided config failed, try multiple fallback CDN URLs
       writeLog(
           0, "Failed to load user provided config, trying fallback configs...",
@@ -672,9 +858,12 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
         writeLog(0, "Attempting to load config from: " + fallbackUrl,
                  LOG_LEVEL_INFO);
 
+        tpl_args.local_vars = tpl_args_base;
         ExternalConfig extconf;
         extconf.tpl_args = &tpl_args;
-        if (loadExternalConfig(fallbackUrl, extconf) == 0) {
+        int fallback_result = loadExternalConfig(fallbackUrl, extconf);
+        if (fallback_result == 0 &&
+            hasEffectiveExternalConfig(extconf, tpl_args, tpl_args_base)) {
           writeLog(0, "Successfully loaded config from: " + fallbackUrl,
                    LOG_LEVEL_INFO);
           configLoadSuccess = true;
@@ -712,8 +901,17 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
           argRemoveEmoji.define(extconf.remove_old_emoji);
           break; // Success, stop trying other URLs
         } else {
-          writeLog(0, "Failed to load config from: " + fallbackUrl,
-                   LOG_LEVEL_WARNING);
+          tpl_args.local_vars = tpl_args_base;
+          if (fallback_result == 0) {
+            writeLog(
+                0,
+                "Loaded config from: " + fallbackUrl +
+                    " but found no effective settings. Skipping.",
+                LOG_LEVEL_WARNING);
+          } else {
+            writeLog(0, "Failed to load config from: " + fallbackUrl,
+                     LOG_LEVEL_WARNING);
+          }
         }
       }
 
@@ -828,6 +1026,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
     struct SubscriptionLinkItem {
       std::string url;
       std::string tag;
+      std::string provider;
       bool url_decoded = false;
     };
     std::vector<SubscriptionLinkItem> subscription_urls; // HTTP/HTTPS 订阅链接
@@ -861,7 +1060,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
                    "', will create provider.",
             LOG_LEVEL_INFO);
         subscription_urls.push_back(
-            {link, tagged.tag, tagged.link_decoded});
+            {link, tagged.tag, tagged.provider, tagged.link_decoded});
       } else {
         std::string node_link = link;
         if (tagged.has_tag)
@@ -877,6 +1076,31 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
       writeLog(0, "Found subscription URLs, enabling proxy-provider mode.",
                LOG_LEVEL_INFO);
       ext.use_proxy_provider = true;
+      std::unordered_set<std::string> provider_names;
+      auto reserve_provider_name = [&](const std::string &base) {
+        std::string base_name =
+            clampProviderNameLength(base, kProviderNameMaxLen);
+        base_name = trimOf(base_name, '.', true, true);
+        if (base_name.empty())
+          base_name = "Provider";
+        if (provider_names.insert(base_name).second)
+          return base_name;
+        int index = 1;
+        while (true) {
+          std::string suffix = "_" + std::to_string(index);
+          size_t max_base = kProviderNameMaxLen > suffix.size()
+                                ? kProviderNameMaxLen - suffix.size()
+                                : 0;
+          std::string prefix = clampProviderNameLength(base_name, max_base);
+          prefix = trimOf(prefix, '.', true, true);
+          if (prefix.empty())
+            prefix = clampProviderNameLength("Provider", max_base);
+          std::string candidate = prefix + suffix;
+          if (provider_names.insert(candidate).second)
+            return candidate;
+          index++;
+        }
+      };
 
       // 为订阅链接创建 proxy-provider
       for (const SubscriptionLinkItem &item : subscription_urls) {
@@ -887,7 +1111,14 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
         std::string urlHash =
             item.url_decoded ? generateProviderHashFromDecodedUrl(item.url)
                              : generateProviderHash(item.url);
-        provider.name = "Provider_" + urlHash;
+        std::string default_name = "Provider_" + urlHash;
+        std::string sanitized_provider = sanitizeProviderName(item.provider);
+        std::string base_name =
+            sanitized_provider.empty() ? default_name : sanitized_provider;
+        base_name = sanitizeProviderName(base_name);
+        if (base_name.empty())
+          base_name = default_name;
+        provider.name = reserve_provider_name(base_name);
         provider.tag = item.tag;
         writeLog(0,
                  "Generated provider: " + provider.name + " for URL: " +
