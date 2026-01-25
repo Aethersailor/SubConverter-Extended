@@ -3547,6 +3547,8 @@ inline time_t parse_http_date(const std::string &date_str) {
 
 #ifdef _WIN32
   return _mkgmtime(&tm_buf);
+#elif defined _AIX
+  return mktime(&tm_buf);
 #else
   return timegm(&tm_buf);
 #endif
@@ -13093,7 +13095,7 @@ inline bool SSLClient::load_certs() {
         last_openssl_error_ = ERR_get_error();
         ret = false;
       }
-    } else {
+    } else if (!ca_cert_store_) {
       auto loaded = false;
 #ifdef _WIN32
       loaded =
@@ -13340,7 +13342,11 @@ inline bool SSLClient::verify_host_with_common_name(X509 *server_cert) const {
 
 inline bool SSLClient::check_host_name(const char *pattern,
                                        size_t pattern_len) const {
-  if (host_.size() == pattern_len && host_ == pattern) { return true; }
+  // Exact match (case-insensitive)
+  if (host_.size() == pattern_len &&
+      detail::case_ignore::equal(host_, std::string(pattern, pattern_len))) {
+    return true;
+  }
 
   // Wildcard match
   // https://bugs.launchpad.net/ubuntu/+source/firefox-3.0/+bug/376484
@@ -13355,9 +13361,21 @@ inline bool SSLClient::check_host_name(const char *pattern,
   auto itr = pattern_components.begin();
   for (const auto &h : host_components_) {
     auto &p = *itr;
-    if (p != h && p != "*") {
-      auto partial_match = (p.size() > 0 && p[p.size() - 1] == '*' &&
-                            !p.compare(0, p.size() - 1, h));
+    if (!httplib::detail::case_ignore::equal(p, h) && p != "*") {
+      bool partial_match = false;
+      if (!p.empty() && p[p.size() - 1] == '*') {
+        const auto prefix_length = p.size() - 1;
+        if (prefix_length == 0) {
+          partial_match = true;
+        } else if (h.size() >= prefix_length) {
+          partial_match =
+              std::equal(p.begin(), p.begin() + prefix_length, h.begin(),
+                         [](const char ca, const char cb) {
+                           return httplib::detail::case_ignore::to_lower(ca) ==
+                                  httplib::detail::case_ignore::to_lower(cb);
+                         });
+        }
+      }
       if (!partial_match) { return false; }
     }
     ++itr;
