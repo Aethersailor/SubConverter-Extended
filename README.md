@@ -174,6 +174,8 @@ proxy-providers:
 
 > [!TIP]
 > **公共后端地址**：`https://api.asailor.org`
+>
+> ![Website](https://img.shields.io/website?url=https%3A%2F%2Fapi.asailor.org%2Fversion&up_message=%E5%9C%A8%E7%BA%BF&down_message=%E7%A6%BB%E7%BA%BF&style=for-the-badge&label=%E5%90%8E%E7%AB%AF%E6%9C%8D%E5%8A%A1%E5%BD%93%E5%89%8D%E7%8A%B6%E6%80%81)
 
 OpenClash 中已内置该公共后端地址，你也可以在任何支持自定义后端的订阅转换网站或客户端中填入此地址即可调用。  
 
