@@ -244,7 +244,12 @@ services:
 
 ## 📚 使用文档
 
-使用方式与原版 subconverter 完全相同。
+使用方式与原版 subconverter 完全相同。  
+
+> [!IMPORTANT]
+> 默认输出**最简配置**，无 DNS 参数，请启用 Clash 客户端中的 DNS 覆写功能！  
+> 例如 OpenClash > 覆写设置 > 自定义上游 DNS 服务器  
+> 或者自行在生成的配置文件中人工补全 DNS 参数  
 
 ### 基础转换
 
