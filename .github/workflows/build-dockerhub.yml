@@ -21,6 +21,7 @@ on:
 
 permissions:
   contents: write  # Changed from 'read' to enable auto-commit and release creation
+  packages: write  # Required for GHCR push
 
 concurrency:
   group: dockerhub-${{ github.ref_name }}
@@ -87,7 +88,9 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: aethersailor/subconverter-extended
+          images: |
+            aethersailor/subconverter-extended
+            ghcr.io/aethersailor/subconverter-extended
           tags: |
             type=raw,value=latest,enable=${{ steps.version.outputs.is_release == 'true' }}
             type=raw,value=${{ steps.version.outputs.version }},enable=${{ steps.version.outputs.is_release == 'true' }}
@@ -115,6 +118,14 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       # Build ONCE to builder stage and load to Docker (using Alpine for smaller image)
       - name: Build to builder stage (single build)
@@ -290,6 +301,14 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       # Build to builder stage FIRST to extract binary (using Alpine for smaller image)
       - name: Build to builder stage (extract binary)
         uses: docker/build-push-action@v6
@@ -404,16 +423,29 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Create and push manifest list
-        env:
-          IMAGE_NAME: aethersailor/subconverter-extended
         run: |
           TAGS="${{ needs.prepare.outputs.tags }}"
-          for TAG in $TAGS; do
-            docker buildx imagetools create \
-              -t "$TAG" \
-              "${IMAGE_NAME}@${{ needs.build-amd64.outputs.digest }}" \
-              "${IMAGE_NAME}@${{ needs.build-arm64.outputs.digest }}"
+          IMAGE_NAMES=(
+            "aethersailor/subconverter-extended"
+            "ghcr.io/aethersailor/subconverter-extended"
+          )
+          for IMAGE_NAME in "${IMAGE_NAMES[@]}"; do
+            for TAG in $TAGS; do
+              if [[ "$TAG" == "$IMAGE_NAME:"* ]]; then
+                docker buildx imagetools create \
+                  -t "$TAG" \
+                  "${IMAGE_NAME}@${{ needs.build-amd64.outputs.digest }}" \
+                  "${IMAGE_NAME}@${{ needs.build-arm64.outputs.digest }}"
+              fi
+            done
           done
 
   # Release Creation Job (Only on Tag)
