@@ -121,15 +121,19 @@ SubConverter-Extended 不再充当客户端和机场之间的"中转站"，而�
 
 ```yaml
 proxy-providers:
-  Provider_A1B2C3:
+  Provider_A1B2C3:  # <-- provider 名称可在生成时使用参数实现自定义
     type: http
     url: https://your-subscription-url  # <-- 客户端直接连接机场
     interval: 3600
-    path: ./providers/provider_1.yaml
+    proxy: DIRECT
+    path: ./providers/Provider_A1B2C3.yaml
     health-check:
       enable: true
-      interval: 600
-      url: http://www.gstatic.com/generate_204
+      url: https://cp.cloudflare.com/generate_204
+      interval: 300
+    override:  # <-- override 参数可正确传递用户订阅请求时附加的参数
+      skip-cert-verify: true
+      udp: true
 ```
 
 > [!NOTE]
