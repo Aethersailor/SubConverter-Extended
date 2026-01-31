@@ -202,6 +202,7 @@ docker run -d \
   -p 25500:25500 \
   --restart unless-stopped \
   aethersailor/subconverter-extended:latest
+
 ```
 
 访问 `http://localhost:25500/version` 验证部署。
@@ -221,7 +222,7 @@ cd /opt/SubConverter-Extended
 wget -O base/pref.toml \
   https://gcore.jsdelivr.net/gh/Aethersailor/SubConverter-Extended@master/base/pref.example.toml
 
-# 如需向公网提供服务，请自行修改 /opt/SubConverter-Extended/base/pref.toml 中的 URL 地址。
+# 如需向公网提供服务，请自行修改 /opt/SubConverter-Extended/base/pref.toml 中的 managed_config_prefix 地址。
 
 # 启动容器并挂载配置
 docker run -d \
@@ -230,6 +231,7 @@ docker run -d \
   -v /opt/SubConverter-Extended/base/pref.toml:/base/pref.toml \
   --restart unless-stopped \
   aethersailor/subconverter-extended:latest
+
 ```
 
 #### 3. Docker Compose
@@ -250,10 +252,11 @@ wget -O docker-compose.yml \
 wget -O base/pref.toml \
   https://gcore.jsdelivr.net/gh/Aethersailor/SubConverter-Extended@master/base/pref.example.toml
 
-# 如需向公网提供服务，请自行修改 /opt/SubConverter-Extended/base/pref.toml 中的 URL 地址。
+# 如需向公网提供服务，请自行修改 /opt/SubConverter-Extended/base/pref.toml 中的 managed_config_prefix 地址。
 
 # 启动容器
 docker-compose up -d
+
 ```
 
 ---
