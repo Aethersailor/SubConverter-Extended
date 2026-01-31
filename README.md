@@ -209,18 +209,25 @@ docker run -d \
 #### 2. 自定义配置启动
 
 ```bash
-# 1. 创建配置目录
-mkdir -p ~/SubConverter-Extended/base
+# 删除可能存在的工作目录
+rm -rf /opt/SubConverter-Extended
 
-# 2. 下载配置文件模板（可选）
-wget -O ~/SubConverter-Extended/base/pref.toml \
-  https://raw.githubusercontent.com/Aethersailor/SubConverter-Extended/master/base/pref.example.toml
+# 创建 SubConverter-Extended 工作目录
+mkdir -p /opt/SubConverter-Extended/base
 
-# 3. 启动容器并挂载配置
+cd /opt/SubConverter-Extended
+
+# 下载 SubConverter-Extended 配置文件
+wget -O base/pref.toml \
+  https://gcore.jsdelivr.net/gh/Aethersailor/SubConverter-Extended@master/base/pref.example.toml
+
+# 如需向公网提供服务，请自行修改 /opt/SubConverter-Extended/base/pref.toml 中的 URL 地址。
+
+# 启动容器并挂载配置
 docker run -d \
   --name SubConverter-Extended \
   -p 25500:25500 \
-  -v ~/SubConverter-Extended/base/pref.toml:/base/pref.toml \
+  -v /opt/SubConverter-Extended/base/pref.toml:/base/pref.toml \
   --restart unless-stopped \
   aethersailor/subconverter-extended:latest
 ```
@@ -237,11 +244,11 @@ cd /opt/SubConverter-Extended
 
 # 下载 docker-compose 配置文件
 wget -O docker-compose.yml \
-  https://raw.githubusercontent.com/Aethersailor/SubConverter-Extended/refs/heads/master/docker-compose.yml
+  https://gcore.jsdelivr.net/gh/Aethersailor/SubConverter-Extended@master/docker-compose.yml
 
 # 下载 SubConverter-Extended 配置文件
 wget -O base/pref.toml \
-  https://raw.githubusercontent.com/Aethersailor/SubConverter-Extended/refs/heads/master/base/config/example_external_config.toml
+  https://gcore.jsdelivr.net/gh/Aethersailor/SubConverter-Extended@master/base/pref.example.toml
 
 # 如需向公网提供服务，请自行修改 /opt/SubConverter-Extended/base/pref.toml 中的 URL 地址。
 
@@ -272,7 +279,7 @@ curl "http://localhost:25500/sub?target=clash&url=https://your-sub-url"
 配合 **Custom_OpenClash_Rules** 项目使用：
 
 ```bash
-curl "http://localhost:25500/sub?target=clash&url=YOUR_SUB&config=https://raw.githubusercontent.com/Aethersailor/Custom_OpenClash_Rules/main/cfg/Custom_Clash.ini"
+curl "http://localhost:25500/sub?target=clash&url=YOUR_SUB&config=https://gcore.jsdelivr.net/gh/Aethersailor/Custom_OpenClash_Rules@main/cfg/Custom_Clash.ini"
 ```
 
 ### 常用参数一览
