@@ -1,13 +1,17 @@
+version: "3.8"
+# Example compose for SubConverter-Extended.
+
 services:
-  SubConverter-Extended:
+  subconverter-extended:
     container_name: "SubConverter-Extended"
     image: "aethersailor/subconverter-extended:latest"
-    logging:
-      driver: "json-file"
-      options: {}
-    network_mode: bridge
     ports:
       - "25500:25500/tcp"
-    restart: "unless-stopped"
+    restart: unless-stopped
     volumes:
-      - "./base/pref.toml:/base/pref.toml"
+      - "./base/pref.toml:/base/pref.toml:ro"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

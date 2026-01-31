@@ -9,6 +9,7 @@ on:
     paths-ignore:
       - 'README.md'
       - 'README-*.md'
+      - 'docker-compose.yml'
       - '.github/workflows/**'
       - '!.github/workflows/build-dockerhub.yml'
   pull_request:
