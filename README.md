@@ -226,26 +226,27 @@ docker run -d \
 ```
 
 #### 3. Docker Compose
-```yaml
-services:
-  sub:
-    container_name: SubConverter-Extended
-    hostname: SubConverter-Extended
-    image: aethersailor/subconverter-extended:latest
-    logging:
-      driver: json-file
-      options:
-        max-size: 1m
-    volumes:
-      - ./pref.toml:/base/pref.toml
-    ports:
-      # 映射宿主机 25500 端口
-      - "25500:25500"
-    environment:
-      - TZ=Asia/Shanghai
-    restart: unless-stopped
-    # 使用桥接的网络模式，bridge，host，none
-    network_mode: bridge
+```bash
+# 删除可能存在的工作目录
+rm -rf /opt/SubConverter-Extended
+
+# 创建 SubConverter-Extended 工作目录
+mkdir -p /opt/SubConverter-Extended/base
+
+cd /opt/SubConverter-Extended
+
+# 下载 docker-compose 配置文件
+wget -O docker-compose.yml \
+  https://raw.githubusercontent.com/Aethersailor/SubConverter-Extended/refs/heads/master/docker-compose.yml
+
+# 下载 SubConverter-Extended 配置文件
+wget -O base/pref.toml \
+  https://raw.githubusercontent.com/Aethersailor/SubConverter-Extended/refs/heads/master/base/config/example_external_config.toml
+
+# 如需向公网提供服务，请自行修改 /opt/SubConverter-Extended/base/pref.toml 中的 URL 地址。
+
+# 启动容器
+docker-compose up -d
 ```
 
 ---
