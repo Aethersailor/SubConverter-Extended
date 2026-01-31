@@ -1,0 +1,13 @@
+services:
+  SubConverter-Extended:
+    container_name: "SubConverter-Extended"
+    image: "aethersailor/subconverter-extended:latest"
+    logging:
+      driver: "json-file"
+      options: {}
+    network_mode: bridge
+    ports:
+      - "25500:25500/tcp"
+    restart: "unless-stopped"
+    volumes:
+      - "./base/pref.toml:/base/pref.toml"
