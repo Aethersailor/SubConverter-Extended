@@ -87,13 +87,7 @@ typedef struct { void *data; GoInt len; GoInt cap; } GoSlice;
 extern "C" {
 #endif
 
-
-// ConvertSubscription converts V2Ray subscription links to mihomo proxy configs
-//
 extern char* ConvertSubscription(char* data);
-
-// FreeString frees memory allocated by Go (must be called from C++ after using the result)
-//
 extern void FreeString(char* s);
 
 #ifdef __cplusplus
