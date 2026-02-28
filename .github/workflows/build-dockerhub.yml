@@ -229,7 +229,7 @@ jobs:
       # Upload Release Artifact
       - name: Upload Artifact (Linux amd64)
         if: needs.prepare.outputs.is_release == 'true'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: linux-amd64
           path: SubConverter-Extended-*.tar.gz
@@ -385,7 +385,7 @@ jobs:
           rm -rf runtime-libs libmihomo.so
 
       - name: Upload Artifact (Linux arm64)
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: linux-arm64
           path: SubConverter-Extended-*.tar.gz
@@ -459,7 +459,7 @@ jobs:
       contents: write
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           pattern: 'linux-*'

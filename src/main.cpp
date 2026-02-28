@@ -148,9 +148,29 @@ int main(int argc, char *argv[]) {
 
   // API_MODE and API_TOKEN environment variables removed
   // APIMode is hardcoded to true for security
-  std::string env_managed_prefix = getEnv("MANAGED_PREFIX");
-  if (!env_managed_prefix.empty())
+  auto normalize_managed_prefix = [](const std::string &raw_value) {
+    std::string value = trimWhitespace(raw_value, true, true);
+    while (value.size() > 1 && value.back() == '/' && !endsWith(value, "://"))
+      value.pop_back();
+    return value;
+  };
+  global.managedConfigPrefix = normalize_managed_prefix(global.managedConfigPrefix);
+  std::string env_managed_config_prefix =
+      normalize_managed_prefix(getEnv("MANAGED_CONFIG_PREFIX"));
+  std::string env_managed_prefix =
+      normalize_managed_prefix(getEnv("MANAGED_PREFIX"));
+  if (!env_managed_config_prefix.empty() && !env_managed_prefix.empty() &&
+      env_managed_config_prefix != env_managed_prefix) {
+    writeLog(0,
+             "Both MANAGED_CONFIG_PREFIX and MANAGED_PREFIX are set. Using "
+             "MANAGED_CONFIG_PREFIX.",
+             LOG_LEVEL_WARNING);
+  }
+  if (!env_managed_config_prefix.empty())
+    global.managedConfigPrefix = env_managed_config_prefix;
+  else if (!env_managed_prefix.empty())
     global.managedConfigPrefix = env_managed_prefix;
+  global.templateVars["managed_config_prefix"] = global.managedConfigPrefix;
 
   if (global.generatorMode)
     return simpleGenerator();

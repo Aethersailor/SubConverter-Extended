@@ -1,5 +1,5 @@
 version: "3.8"
-# Example compose for SubConverter-Extended.
+# SubConverter-Extended 的 Compose 示例 / Example compose for SubConverter-Extended.
 
 services:
   subconverter-extended:
@@ -8,6 +8,9 @@ services:
     ports:
       - "25500:25500/tcp"
     restart: unless-stopped
+    environment:
+      # 可选：覆盖 [managed_config].managed_config_prefix / Optional: override [managed_config].managed_config_prefix
+      MANAGED_CONFIG_PREFIX: "http://your-domain-or-ip:25500"
     volumes:
       - "./base/pref.toml:/base/pref.toml:ro"
     logging:
