@@ -123,6 +123,8 @@ SubConverter-Extended 不再充当客户端和远程第三方服务商之间的"
 订阅链接**不再下载解析**，而是生成客户端可直接使用的配置，交由用户客户端的 Mihomo 内核自行拉取订阅：
 
 ```yaml
+# Subconverter-Extended 生成示例内容
+
 proxy-providers:
   Provider_A1B2C3:  # <-- provider 名称可在生成时使用参数实现自定义
     type: http
