@@ -377,6 +377,7 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"uuid", {true, "string", false}}, // vless
         {"ws-headers", {true, "object", false}}, // vless
         {"ws-opts", {true, "string", false}}, // vless
+        {"xhttp-opts", {true, "string", false}}, // vless
         {"xudp", {true, "bool", false}}, // vless
     }},
     // Protocol: vmess

@@ -23,5 +23,6 @@ namespace mihomo {
         "http",
         "https",
         "anytls",
+        "mierus",
     };
 }
