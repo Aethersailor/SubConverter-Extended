@@ -8,8 +8,8 @@
 #ifndef CPPHTTPLIB_HTTPLIB_H
 #define CPPHTTPLIB_HTTPLIB_H
 
-#define CPPHTTPLIB_VERSION "0.40.0"
-#define CPPHTTPLIB_VERSION_NUM "0x002800"
+#define CPPHTTPLIB_VERSION "0.41.0"
+#define CPPHTTPLIB_VERSION_NUM "0x002900"
 
 #ifdef _WIN32
 #if defined(_WIN32_WINNT) && _WIN32_WINNT < 0x0A00
@@ -333,9 +333,6 @@ using socket_t = int;
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
-#if __cplusplus >= 201703L
-#include <any>
-#endif
 
 // On macOS with a TLS backend, enable Keychain root certificates by default
 // unless the user explicitly opts out.
@@ -701,9 +698,96 @@ inline bool parse_port(const std::string &s, int &port) {
   return parse_port(s.data(), s.size(), port);
 }
 
+struct UrlComponents {
+  std::string scheme;
+  std::string host;
+  std::string port;
+  std::string path;
+  std::string query;
+};
+
+inline bool parse_url(const std::string &url, UrlComponents &uc) {
+  uc = {};
+  size_t pos = 0;
+
+  auto sep = url.find("://");
+  if (sep != std::string::npos) {
+    uc.scheme = url.substr(0, sep);
+
+    // Scheme must be [a-z]+ only
+    if (uc.scheme.empty()) { return false; }
+    for (auto c : uc.scheme) {
+      if (c < 'a' || c > 'z') { return false; }
+    }
+
+    pos = sep + 3;
+  } else if (url.compare(0, 2, "//") == 0) {
+    pos = 2;
+  }
+
+  auto has_authority_prefix = pos > 0;
+  auto has_authority = has_authority_prefix || (!url.empty() && url[0] != '/' &&
+                                                url[0] != '?' && url[0] != '#');
+  if (has_authority) {
+    if (pos < url.size() && url[pos] == '[') {
+      auto close = url.find(']', pos);
+      if (close == std::string::npos) { return false; }
+      uc.host = url.substr(pos + 1, close - pos - 1);
+
+      // IPv6 host must be [a-fA-F0-9:]+ only
+      if (uc.host.empty()) { return false; }
+      for (auto c : uc.host) {
+        if (!((c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') ||
+              (c >= '0' && c <= '9') || c == ':')) {
+          return false;
+        }
+      }
+
+      pos = close + 1;
+    } else {
+      auto end = url.find_first_of(":/?#", pos);
+      if (end == std::string::npos) { end = url.size(); }
+      uc.host = url.substr(pos, end - pos);
+      pos = end;
+    }
+
+    if (pos < url.size() && url[pos] == ':') {
+      ++pos;
+      auto end = url.find_first_of("/?#", pos);
+      if (end == std::string::npos) { end = url.size(); }
+      uc.port = url.substr(pos, end - pos);
+      pos = end;
+    }
+
+    // Without :// or //, the entire input must be consumed as host[:port].
+    // If there is leftover (path, query, etc.), this is not a valid
+    // host[:port] string — clear and reparse as a plain path.
+    if (!has_authority_prefix && pos < url.size()) {
+      uc.host.clear();
+      uc.port.clear();
+      pos = 0;
+    }
+  }
+
+  if (pos < url.size() && url[pos] != '?' && url[pos] != '#') {
+    auto end = url.find_first_of("?#", pos);
+    if (end == std::string::npos) { end = url.size(); }
+    uc.path = url.substr(pos, end - pos);
+    pos = end;
+  }
+
+  if (pos < url.size() && url[pos] == '?') {
+    auto end = url.find('#', pos);
+    if (end == std::string::npos) { end = url.size(); }
+    uc.query = url.substr(pos, end - pos);
+  }
+
+  return true;
+}
+
 } // namespace detail
 
-enum SSLVerifierResponse {
+enum class SSLVerifierResponse {
   // no decision has been made, use the built-in certificate verifier
   NoDecisionMade,
   // connection certificate is verified and accepted
@@ -797,42 +881,15 @@ using Match = std::smatch;
 using DownloadProgress = std::function<bool(size_t current, size_t total)>;
 using UploadProgress = std::function<bool(size_t current, size_t total)>;
 
-// ----------------------------------------------------------------------------
-// httplib::any — type-erased value container (C++11 compatible)
-// On C++17+ builds, thin wrappers around std::any are provided.
-// ----------------------------------------------------------------------------
-
-#if __cplusplus >= 201703L
-
-using any = std::any;
-using bad_any_cast = std::bad_any_cast;
-
-template <typename T> T any_cast(const any &a) { return std::any_cast<T>(a); }
-template <typename T> T any_cast(any &a) { return std::any_cast<T>(a); }
-template <typename T> T any_cast(any &&a) {
-  return std::any_cast<T>(std::move(a));
-}
-template <typename T> const T *any_cast(const any *a) noexcept {
-  return std::any_cast<T>(a);
-}
-template <typename T> T *any_cast(any *a) noexcept {
-  return std::any_cast<T>(a);
-}
-
-#else // C++11/14 implementation
-
-class bad_any_cast : public std::bad_cast {
-public:
-  const char *what() const noexcept override { return "bad any_cast"; }
-};
-
+/*
+ * detail: type-erased storage used by UserData.
+ * ABI-stable regardless of C++ standard — always uses this custom
+ * implementation instead of std::any.
+ */
 namespace detail {
 
 using any_type_id = const void *;
 
-// Returns a unique per-type ID without RTTI.
-// The static address is stable across TUs because function templates are
-// implicitly inline and the ODR merges their statics into one.
 template <typename T> any_type_id any_typeid() noexcept {
   static const char id = 0;
   return &id;
@@ -855,88 +912,59 @@ template <typename T> struct any_value final : any_storage {
 
 } // namespace detail
 
-class any {
-  std::unique_ptr<detail::any_storage> storage_;
-
+class UserData {
 public:
-  any() noexcept = default;
-  any(const any &o) : storage_(o.storage_ ? o.storage_->clone() : nullptr) {}
-  any(any &&) noexcept = default;
-  any &operator=(const any &o) {
-    storage_ = o.storage_ ? o.storage_->clone() : nullptr;
-    return *this;
-  }
-  any &operator=(any &&) noexcept = default;
+  UserData() = default;
+  UserData(UserData &&) noexcept = default;
+  UserData &operator=(UserData &&) noexcept = default;
 
-  template <
-      typename T, typename D = typename std::decay<T>::type,
-      typename std::enable_if<!std::is_same<D, any>::value, int>::type = 0>
-  any(T &&v) : storage_(new detail::any_value<D>(std::forward<T>(v))) {}
-
-  template <
-      typename T, typename D = typename std::decay<T>::type,
-      typename std::enable_if<!std::is_same<D, any>::value, int>::type = 0>
-  any &operator=(T &&v) {
-    storage_.reset(new detail::any_value<D>(std::forward<T>(v)));
-    return *this;
+  UserData(const UserData &o) {
+    for (const auto &e : o.entries_) {
+      if (e.second) { entries_[e.first] = e.second->clone(); }
+    }
   }
 
-  bool has_value() const noexcept { return storage_ != nullptr; }
-  void reset() noexcept { storage_.reset(); }
+  UserData &operator=(const UserData &o) {
+    if (this != &o) {
+      entries_.clear();
+      for (const auto &e : o.entries_) {
+        if (e.second) { entries_[e.first] = e.second->clone(); }
+      }
+    }
+    return *this;
+  }
 
-  template <typename T> friend T *any_cast(any *a) noexcept;
-  template <typename T> friend const T *any_cast(const any *a) noexcept;
+  template <typename T> void set(const std::string &key, T &&value) {
+    using D = typename std::decay<T>::type;
+    entries_[key].reset(new detail::any_value<D>(std::forward<T>(value)));
+  }
+
+  template <typename T> T *get(const std::string &key) noexcept {
+    auto it = entries_.find(key);
+    if (it == entries_.end() || !it->second) { return nullptr; }
+    if (it->second->type_id() != detail::any_typeid<T>()) { return nullptr; }
+    return &static_cast<detail::any_value<T> *>(it->second.get())->value;
+  }
+
+  template <typename T> const T *get(const std::string &key) const noexcept {
+    auto it = entries_.find(key);
+    if (it == entries_.end() || !it->second) { return nullptr; }
+    if (it->second->type_id() != detail::any_typeid<T>()) { return nullptr; }
+    return &static_cast<const detail::any_value<T> *>(it->second.get())->value;
+  }
+
+  bool has(const std::string &key) const noexcept {
+    return entries_.find(key) != entries_.end();
+  }
+
+  void erase(const std::string &key) { entries_.erase(key); }
+
+  void clear() noexcept { entries_.clear(); }
+
+private:
+  std::unordered_map<std::string, std::unique_ptr<detail::any_storage>>
+      entries_;
 };
-
-template <typename T> T *any_cast(any *a) noexcept {
-  if (!a || !a->storage_) { return nullptr; }
-  if (a->storage_->type_id() != detail::any_typeid<T>()) { return nullptr; }
-  return &static_cast<detail::any_value<T> *>(a->storage_.get())->value;
-}
-
-template <typename T> const T *any_cast(const any *a) noexcept {
-  if (!a || !a->storage_) { return nullptr; }
-  if (a->storage_->type_id() != detail::any_typeid<T>()) { return nullptr; }
-  return &static_cast<const detail::any_value<T> *>(a->storage_.get())->value;
-}
-
-template <typename T> T any_cast(const any &a) {
-  using U =
-      typename std::remove_cv<typename std::remove_reference<T>::type>::type;
-  const U *p = any_cast<U>(&a);
-#ifndef CPPHTTPLIB_NO_EXCEPTIONS
-  if (!p) { throw bad_any_cast{}; }
-#else
-  if (!p) { std::abort(); }
-#endif
-  return static_cast<T>(*p);
-}
-
-template <typename T> T any_cast(any &a) {
-  using U =
-      typename std::remove_cv<typename std::remove_reference<T>::type>::type;
-  U *p = any_cast<U>(&a);
-#ifndef CPPHTTPLIB_NO_EXCEPTIONS
-  if (!p) { throw bad_any_cast{}; }
-#else
-  if (!p) { std::abort(); }
-#endif
-  return static_cast<T>(*p);
-}
-
-template <typename T> T any_cast(any &&a) {
-  using U =
-      typename std::remove_cv<typename std::remove_reference<T>::type>::type;
-  U *p = any_cast<U>(&a);
-#ifndef CPPHTTPLIB_NO_EXCEPTIONS
-  if (!p) { throw bad_any_cast{}; }
-#else
-  if (!p) { std::abort(); }
-#endif
-  return static_cast<T>(std::move(*p));
-}
-
-#endif // __cplusplus >= 201703L
 
 struct Response;
 using ResponseHandler = std::function<bool(const Response &response)>;
@@ -1265,6 +1293,7 @@ struct Request {
 
   bool has_param(const std::string &key) const;
   std::string get_param_value(const std::string &key, size_t id = 0) const;
+  std::vector<std::string> get_param_values(const std::string &key) const;
   size_t get_param_value_count(const std::string &key) const;
 
   bool is_multipart_form_data() const;
@@ -1297,7 +1326,7 @@ struct Response {
 
   // User-defined context — set by pre-routing/pre-request handlers and read
   // by route handlers to pass arbitrary data (e.g. decoded auth tokens).
-  std::map<std::string, any> user_data;
+  UserData user_data;
 
   bool has_header(const std::string &key) const;
   std::string get_header_value(const std::string &key, const char *def = "",
@@ -1668,6 +1697,9 @@ public:
 
   Server &set_keep_alive_max_count(size_t count);
   Server &set_keep_alive_timeout(time_t sec);
+  template <class Rep, class Period>
+  Server &
+  set_keep_alive_timeout(const std::chrono::duration<Rep, Period> &duration);
 
   Server &set_read_timeout(time_t sec, time_t usec = 0);
   template <class Rep, class Period>
@@ -9716,6 +9748,17 @@ inline std::string Request::get_param_value(const std::string &key,
   return std::string();
 }
 
+inline std::vector<std::string>
+Request::get_param_values(const std::string &key) const {
+  auto rng = params.equal_range(key);
+  std::vector<std::string> values;
+  values.reserve(static_cast<size_t>(std::distance(rng.first, rng.second)));
+  for (auto it = rng.first; it != rng.second; ++it) {
+    values.push_back(it->second);
+  }
+  return values;
+}
+
 inline size_t Request::get_param_value_count(const std::string &key) const {
   auto r = params.equal_range(key);
   return static_cast<size_t>(std::distance(r.first, r.second));
@@ -10890,6 +10933,15 @@ inline Server &Server::set_keep_alive_max_count(size_t count) {
 
 inline Server &Server::set_keep_alive_timeout(time_t sec) {
   keep_alive_timeout_sec_ = sec;
+  return *this;
+}
+
+template <class Rep, class Period>
+inline Server &Server::set_keep_alive_timeout(
+    const std::chrono::duration<Rep, Period> &duration) {
+  detail::duration_to_sec_and_usec(duration, [&](time_t sec, time_t /*usec*/) {
+    set_keep_alive_timeout(sec);
+  });
   return *this;
 }
 
@@ -12999,20 +13051,21 @@ inline bool ClientImpl::redirect(Request &req, Response &res, Error &error) {
   auto location = res.get_header_value("location");
   if (location.empty()) { return false; }
 
-  thread_local const std::regex re(
-      R"((?:(https?):)?(?://(?:\[([a-fA-F\d:]+)\]|([^:/?#]+))(?::(\d+))?)?([^?#]*)(\?[^#]*)?(?:#.*)?)");
+  detail::UrlComponents uc;
+  if (!detail::parse_url(location, uc)) { return false; }
 
-  std::smatch m;
-  if (!std::regex_match(location, m, re)) { return false; }
+  // Only follow http/https redirects
+  if (!uc.scheme.empty() && uc.scheme != "http" && uc.scheme != "https") {
+    return false;
+  }
 
   auto scheme = is_ssl() ? "https" : "http";
 
-  auto next_scheme = m[1].str();
-  auto next_host = m[2].str();
-  if (next_host.empty()) { next_host = m[3].str(); }
-  auto port_str = m[4].str();
-  auto next_path = m[5].str();
-  auto next_query = m[6].str();
+  auto next_scheme = std::move(uc.scheme);
+  auto next_host = std::move(uc.host);
+  auto port_str = std::move(uc.port);
+  auto next_path = std::move(uc.path);
+  auto next_query = std::move(uc.query);
 
   auto next_port = port_;
   if (!port_str.empty()) {
@@ -13025,7 +13078,7 @@ inline bool ClientImpl::redirect(Request &req, Response &res, Error &error) {
   if (next_host.empty()) { next_host = host_; }
   if (next_path.empty()) { next_path = "/"; }
 
-  auto path = decode_query_component(next_path, true) + next_query;
+  auto path = decode_path_component(next_path) + next_query;
 
   // Same host redirect - use current client
   if (next_scheme == scheme && next_host == host_ && next_port == port_) {
@@ -14749,12 +14802,9 @@ inline Client::Client(const std::string &scheme_host_port)
 inline Client::Client(const std::string &scheme_host_port,
                       const std::string &client_cert_path,
                       const std::string &client_key_path) {
-  const static std::regex re(
-      R"((?:([a-z]+):\/\/)?(?:\[([a-fA-F\d:]+)\]|([^:/?#]+))(?::(\d+))?)");
-
-  std::smatch m;
-  if (std::regex_match(scheme_host_port, m, re)) {
-    auto scheme = m[1].str();
+  detail::UrlComponents uc;
+  if (detail::parse_url(scheme_host_port, uc) && !uc.host.empty()) {
+    auto &scheme = uc.scheme;
 
 #ifdef CPPHTTPLIB_SSL_ENABLED
     if (!scheme.empty() && (scheme != "http" && scheme != "https")) {
@@ -14770,12 +14820,10 @@ inline Client::Client(const std::string &scheme_host_port,
 
     auto is_ssl = scheme == "https";
 
-    auto host = m[2].str();
-    if (host.empty()) { host = m[3].str(); }
+    auto host = std::move(uc.host);
 
-    auto port_str = m[4].str();
     auto port = is_ssl ? 443 : 80;
-    if (!port_str.empty() && !detail::parse_port(port_str, port)) { return; }
+    if (!uc.port.empty() && !detail::parse_port(uc.port, port)) { return; }
 
     if (is_ssl) {
 #ifdef CPPHTTPLIB_SSL_ENABLED
@@ -20182,12 +20230,10 @@ inline bool WebSocket::is_open() const { return !closed_; }
 inline WebSocketClient::WebSocketClient(
     const std::string &scheme_host_port_path, const Headers &headers)
     : headers_(headers) {
-  const static std::regex re(
-      R"(([a-z]+):\/\/(?:\[([a-fA-F\d:]+)\]|([^:/?#]+))(?::(\d+))?(\/.*))");
-
-  std::smatch m;
-  if (std::regex_match(scheme_host_port_path, m, re)) {
-    auto scheme = m[1].str();
+  detail::UrlComponents uc;
+  if (detail::parse_url(scheme_host_port_path, uc) && !uc.scheme.empty() &&
+      !uc.host.empty() && !uc.path.empty()) {
+    auto &scheme = uc.scheme;
 
 #ifdef CPPHTTPLIB_SSL_ENABLED
     if (scheme != "ws" && scheme != "wss") {
@@ -20203,14 +20249,12 @@ inline WebSocketClient::WebSocketClient(
 
     auto is_ssl = scheme == "wss";
 
-    host_ = m[2].str();
-    if (host_.empty()) { host_ = m[3].str(); }
+    host_ = std::move(uc.host);
 
-    auto port_str = m[4].str();
     port_ = is_ssl ? 443 : 80;
-    if (!port_str.empty() && !detail::parse_port(port_str, port_)) { return; }
+    if (!uc.port.empty() && !detail::parse_port(uc.port, port_)) { return; }
 
-    path_ = m[5].str();
+    path_ = std::move(uc.path);
 
 #ifdef CPPHTTPLIB_SSL_ENABLED
     is_ssl_ = is_ssl;
