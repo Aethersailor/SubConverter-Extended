@@ -28,6 +28,8 @@
 
 > [!NOTE]
 > **SubConverter-Extended** 是基于 [asdlokj1qpi233/subconverter](https://github.com/asdlokj1qpi233/subconverter) 深度二次开发的订阅转换后端增强版本。
+> 
+> 彻底解决传统 subconverter 易被机场屏蔽、节点参数解析不完善、维护滞后等问题
 
 它专为协同 [Mihomo](https://github.com/MetaCubeX/mihomo) 内核工作优化，提供更现代、更强大的订阅转换功能。
 
