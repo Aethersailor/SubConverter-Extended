@@ -743,14 +743,10 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
   /// check other flags
   ext.authorized = authorized;
   ext.append_proxy_type = argAppendType.get(global.appendType);
-  if ((argTarget == "clash" || argTarget == "clashr") &&
-      argGenClashScript.is_undef())
-    argExpandRulesets.define(true);
-
-  // 强制 expand=false，直接覆盖用户提供的任何值
-  // 不使用 define()，因为它不会覆盖已有的值
-  // 直接重新赋值为 false
-  argExpandRulesets = false;
+  // 原项目（SubConverter）默认在 clash 目标下自动把 expand 设为 true
+  // 本项目默认 expand=false（使用 rule-provider 模式不展开规则集）
+  // 若用户主动传入 expand=true，则按照用户意愿内联展开规则集
+  argExpandRulesets.define(false);
 
   ext.clash_proxies_style = global.clashProxiesStyle;
   ext.clash_proxy_groups_style = global.clashProxyGroupsStyle;
@@ -769,9 +765,10 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
   ext.clash_new_field_name = argClashNewField.get(global.clashUseNewField);
   ext.clash_script = argGenClashScript.get();
   ext.clash_classical_ruleset = argGenClassicalRuleProvider.get();
-  if (!argExpandRulesets)
-    ext.clash_new_field_name = true;
-  else
+  // 无论 expand 取何值，均强制使用 Mihomo 新字段名（proxy-groups / rules）
+  // 避免因全局配置为旧字段名而导致 Mihomo 无法识别
+  ext.clash_new_field_name = true;
+  if (argExpandRulesets)
     ext.clash_script = false;
 
   ext.nodelist = argGenNodeList;
