@@ -165,13 +165,13 @@ proxy-providers:
 
 #### 3. 兼容性保证 🤝
 
-* ✅ **无缝切换**：兼容传统 subconverter 的 API 接口，确保客户端用户零学习成本，无缝切换。
+* ✅ **无缝切换**：兼容常见的传统 subconverter 的 API 接口，确保客户端用户零学习成本，无缝切换。
 * ✅ **模板兼容**：继续沿用传统的订阅转换外部模板，无需修改任何内容，由后端内置逻辑确保 `proxy-provider` 模式在分流规则中正确生成。
 * ✅ **无忧更新**：编译时自动遍历 [Mihomo 内核源码仓库](https://github.com/MetaCubeX/mihomo/meta)，自动提取最新内核解析模块，并读取当前最新支持的协议格式，自动识别可被全局参数覆盖的节点参数，确保永远对齐 Mihomo 内核支持解析的所有节点连接协议。
 
 #### 4. 新手友好 👶
 
-* ✅ 使用 **[Custom_OpenClash_Rules](https://github.com/Aethersailor/Custom_OpenClash_Rules)** 远程配置模板替代默认模板
+* ✅ 使用 **[Custom_OpenClash_Rules](https://github.com/Aethersailor/Custom_OpenClash_Rules)** 远程配置模板替代默认内置模板和自定义代理组功能
 * ✅ 锁死 API 模式，强制关闭 API 模式相关接口，避免新手误配置降低安全性
 * ✅ 简化参数，专注核心功能
 
