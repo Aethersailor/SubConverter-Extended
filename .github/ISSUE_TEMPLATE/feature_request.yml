@@ -1,6 +1,6 @@
 name: 建议新功能
 description: 建议此项目增加的功能
-title: "[Feature] <title>"
+title: "[Feature] "
 body:
   - type: checkboxes
     id: ensure

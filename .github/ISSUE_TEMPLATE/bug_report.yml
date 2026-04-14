@@ -1,34 +1,42 @@
 name: Bug 反馈
 description: 功能运行不正常 / 失效
-title: "[BUG] <title>"
+title: "[BUG] "
 body:
   - type: markdown
     attributes:
       value: |
-         遇到问题请先尝试使用[Action](https://github.com/tindy2013/subconverter/actions)中的最新版本
+         遇到问题请先尝试使用最新版本镜像
          如果是使用公共转换服务中遇到的问题，请先联系服务的提供者。
          Please note that if the bug report does not include reproduction steps, configuration files, or relevant URL content, it will not be considered.
   - type: checkboxes
     id: version-check
     attributes:
       label: 确认版本最新
-      description: 对于您遇到的BUG，是否尝试在最新Action编译的版本中复现？
+      description: 对于您遇到的 Bug，是否尝试在最新 Action 编译的版本中复现？
       options:
-      - label: 我已经确认在最新Action编译的版本中复现
+      - label: 我已经确认在最新 Action 编译的版本中复现
+        required: true
+  - type: checkboxes
+    id: public-check
+    attributes:
+      label: 已尝试使用公共实例
+      description: 对于您遇到的 Bug，是否尝试在本项目的公共实例(api.asailor.org)中复现？
+      options:
+      - label: 我已经确认在公共实例中复现
         required: true
   - type: checkboxes
     id: issue-check
     attributes:
       label: 检索issue
-      description: 对于您遇到的BUG，是否已经确认之前没有其他issue涉及？
+      description: 对于您遇到的 Bug，是否已经确认之前没有其他 Issue 涉及？
       options:
-      - label: 我已经确认之前没有issue涉及此BUG
+      - label: 我已经确认之前没有 Issue 涉及此 Bug
         required: true
   - type: input
     id: subconverter-version
     attributes:
-      label: subconverter版本
-      description: subconverter版本
+      label: SubConverter-Extended 版本
+      description: SubConverter-Extended 版本
       placeholder: 请输入详细的版本号
     validations:
       required: true
@@ -36,7 +44,7 @@ body:
     id: convert
     attributes:
       label: 转换过程
-      description: BUG发生在什么配置转换为什么配置的过程中？
+      description: Bug 发生在什么配置转换为什么配置的过程中？
       placeholder: 请输入“xxx转换为xxx配置”
     validations:
       required: true
@@ -44,7 +52,7 @@ body:
     id: config
     attributes:
       label: 转换设置
-      description: 转换时使用的subconverter配置文件或外部配置链接
+      description: 转换时使用的配置文件或外部配置链接
       placeholder: 请输入
     validations:
       required: true
@@ -52,7 +60,7 @@ body:
     id: description
     attributes:
       label: 复现步骤
-      description: BUG的详细复现步骤
+      description: Bug 的详细复现步骤
       placeholder: 请输入
     validations:
       required: true
@@ -76,7 +84,7 @@ body:
     id: logs
     attributes:
       label: 错误信息
-      description: subconverter转换时的日志/信息输出
+      description: SubConverter-Extended 转换时的日志/信息输出
       render: shell
       placeholder: 请输入
     validations:
