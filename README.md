@@ -132,15 +132,15 @@ SubConverter-Extended 不再充当客户端和远程第三方服务商之间的"
 proxy-providers:
   Provider_A1B2C3:  # <-- provider 名称可在生成时使用参数实现自定义
     type: http
-    url: https://your-subscription-url  # <-- 客户端直接连接机场
+    url: https://your-subscription-url  # <-- 客户端拉取订阅的地址
     interval: 3600
-    proxy: DIRECT
+    proxy: DIRECT  # <-- 默认以直连的形式拉取订阅
     path: ./providers/Provider_A1B2C3.yaml
     health-check:
       enable: true
       url: https://cp.cloudflare.com/generate_204
       interval: 300
-    override:  # <-- override 参数可正确传递用户订阅请求时附加的参数
+    override:  # <-- override 参数可正确传递用户订阅请求时附加的覆写参数
       skip-cert-verify: true
       udp: true
 ```
