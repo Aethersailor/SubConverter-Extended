@@ -294,7 +294,6 @@ docker-compose up -d
 #### provider 前缀（仅 Clash/ClashR 订阅链接）
 
 `provider` 不是独立参数，而是写在 `url=` 列表中、放在订阅链接前，用逗号分隔，用于自定义 `proxy-providers` 名称。节点链接不生效。
-
 示例：
 
 ```
@@ -302,6 +301,8 @@ url=provider:HK,https://example.com/sub
 url=provider:HK,https://a|provider:HK,https://b
 url=provider%3AHK%2Chttps%3A%2F%2Fexample.com%2Fsub
 ```
+> [!NOTE]
+> * 注意：在 OpenClash 这类预置了“订阅地址文本框”的软件中，无需填写开头的 `url=`，请在文本框中直接填写等号后的部分即可
 
 补充说明：
 
