@@ -6,6 +6,7 @@ services:
     container_name: "SubConverter-Extended"
     image: "aethersailor/subconverter-extended:latest"
     ports:
+    # 自定义映射端口号
       - "25500:25500/tcp"
     restart: unless-stopped
     environment:
