@@ -5,9 +5,8 @@ body:
   - type: markdown
     attributes:
       value: |
-         遇到问题请先尝试使用最新版本镜像
+         遇到问题请先尝试使用最新版本镜像。
          如果是使用公共转换服务中遇到的问题，请先联系服务的提供者。
-         Please note that if the bug report does not include reproduction steps, configuration files, or relevant URL content, it will not be considered.
   - type: checkboxes
     id: version-check
     attributes:
