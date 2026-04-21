@@ -84,13 +84,14 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
     // Protocol: hy2
     {"hy2", {
         {"alpn", {true, "array", false}}, // hy2
+        {"bbr-profile", {true, "string", false}}, // hy2
         {"certificate", {true, "string", false}}, // hy2
         {"cwnd", {true, "int", false}}, // hy2
         {"dialer-proxy", {true, "string", false}}, // BasicOption
         {"down", {true, "string", false}}, // hy2
         {"ech-opts", {true, "string", false}}, // hy2
         {"fingerprint", {true, "string", false}}, // hy2
-        {"hop-interval", {true, "int", false}}, // hy2
+        {"hop-interval", {true, "string", false}}, // hy2
         {"initial-connection-receive-window", {true, "int", false}}, // hy2
         {"initial-stream-receive-window", {true, "int", false}}, // hy2
         {"interface-name", {true, "string", false}}, // BasicOption
@@ -150,13 +151,14 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
     // Protocol: hysteria2
     {"hysteria2", {
         {"alpn", {true, "array", false}}, // hysteria2
+        {"bbr-profile", {true, "string", false}}, // hysteria2
         {"certificate", {true, "string", false}}, // hysteria2
         {"cwnd", {true, "int", false}}, // hysteria2
         {"dialer-proxy", {true, "string", false}}, // BasicOption
         {"down", {true, "string", false}}, // hysteria2
         {"ech-opts", {true, "string", false}}, // hysteria2
         {"fingerprint", {true, "string", false}}, // hysteria2
-        {"hop-interval", {true, "int", false}}, // hysteria2
+        {"hop-interval", {true, "string", false}}, // hysteria2
         {"initial-connection-receive-window", {true, "int", false}}, // hysteria2
         {"initial-stream-receive-window", {true, "int", false}}, // hysteria2
         {"interface-name", {true, "string", false}}, // BasicOption
@@ -308,6 +310,7 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
     // Protocol: tuic
     {"tuic", {
         {"alpn", {true, "array", false}}, // tuic
+        {"bbr-profile", {true, "string", false}}, // tuic
         {"certificate", {true, "string", false}}, // tuic
         {"congestion-controller", {true, "string", false}}, // tuic
         {"cwnd", {true, "int", false}}, // tuic

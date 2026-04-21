@@ -1,0 +1,59 @@
+name: Block PRs to Master
+on:
+  pull_request_target:
+    branches:
+      - master
+    types: [opened, reopened, synchronize]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  block-master-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Actor
+        id: check
+        run: |
+          # 允许拥有者（你自己）或者特定机器人的 PR 提给 master
+          # 这里把你的 GitHub username 填入（假设为 Aethersailor）
+          if [[ "${{ github.actor }}" == "Aethersailor" || "${{ github.actor }}" == "github-actions[bot]" || "${{ github.actor }}" == "dependabot[bot]" ]]; then
+            echo "is_allowed=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_allowed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Close PR and Leave Comment
+        if: steps.check.outputs.is_allowed == 'false'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const message = `
+            🚫 **自动拦截提示 (Auto-Block)** 🚫
+            
+            感谢你的提交！(Thanks for your contribution!)
+            
+            本项目严格使用双分支开发模型：
+            - \`master\` 分支仅用于最终发布。
+            - **所有的代码贡献和 PR 必须指向 \`dev\` 分支。**
+            
+            这个 PR 已经被自动关闭。请将你本地的分支目标修改为 \`dev\` 后再重新提交一个 PR。非常感谢你的理解与支持！
+            
+            (Please change the target branch of your PR to \`dev\` and resubmit. The \`master\` branch is for releases only.)
+            `;
+            
+            // 评论
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: message
+            });
+            
+            // 关闭 PR
+            await github.rest.pulls.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              state: 'closed'
+            });

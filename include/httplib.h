@@ -8,8 +8,8 @@
 #ifndef CPPHTTPLIB_HTTPLIB_H
 #define CPPHTTPLIB_HTTPLIB_H
 
-#define CPPHTTPLIB_VERSION "0.42.0"
-#define CPPHTTPLIB_VERSION_NUM "0x002a00"
+#define CPPHTTPLIB_VERSION "0.43.1"
+#define CPPHTTPLIB_VERSION_NUM "0x002b01"
 
 #ifdef _WIN32
 #if defined(_WIN32_WINNT) && _WIN32_WINNT < 0x0A00
@@ -16322,8 +16322,10 @@ inline STACK_OF(X509_NAME) *
   X509 *cert = nullptr;
   while ((cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr)) !=
          nullptr) {
-    X509_NAME *name = X509_get_subject_name(cert);
-    if (name) { sk_X509_NAME_push(ca_list, X509_NAME_dup(name)); }
+    const X509_NAME *name = X509_get_subject_name(cert);
+    if (name) {
+      sk_X509_NAME_push(ca_list, X509_NAME_dup(const_cast<X509_NAME *>(name)));
+    }
     X509_free(cert);
   }
   BIO_free(bio);
