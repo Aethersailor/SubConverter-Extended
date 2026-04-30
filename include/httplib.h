@@ -5319,8 +5319,9 @@ inline bool mmap::open(const char *path) {
   auto wpath = u8string_to_wstring(path);
   if (wpath.empty()) { return false; }
 
-  hFile_ = ::CreateFile2(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ,
-                         OPEN_EXISTING, NULL);
+  hFile_ =
+      ::CreateFile2(wpath.c_str(), GENERIC_READ,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_EXISTING, NULL);
 
   if (hFile_ == INVALID_HANDLE_VALUE) { return false; }
 
@@ -5905,17 +5906,52 @@ inline int getaddrinfo_with_timeout(const char *node, const char *service,
 
   *res = result_addrinfo;
   return 0;
+#elif defined(_GNU_SOURCE) && defined(__GLIBC__) &&                            \
+    (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 2))
+  // #2431: gai_cancel() is non-blocking and may return EAI_NOTCANCELED while
+  // the resolver worker still references the stack-local gaicb. The cancel
+  // path therefore waits (gai_suspend with no timeout) for the worker to
+  // actually finish before letting the stack frame go. The trade-off is that
+  // a wedged DNS server can hold this thread for the system resolver timeout
+  // (~30s by default) past the caller's connection timeout.
+  struct gaicb request {};
+  struct gaicb *requests[1] = {&request};
+  struct sigevent sevp {};
+  struct timespec timeout {
+    timeout_sec, 0
+  };
+
+  request.ar_name = node;
+  request.ar_service = service;
+  request.ar_request = hints;
+  sevp.sigev_notify = SIGEV_NONE;
+
+  int rc = getaddrinfo_a(GAI_NOWAIT, requests, 1, &sevp);
+  if (rc != 0) { return rc; }
+
+  auto cleanup = scope_exit([&] {
+    if (request.ar_result) { freeaddrinfo(request.ar_result); }
+  });
+
+  int wait_result = gai_suspend(requests, 1, &timeout);
+
+  if (wait_result == 0 || wait_result == EAI_ALLDONE) {
+    int gai_result = gai_error(&request);
+    if (gai_result == 0) {
+      *res = request.ar_result;
+      request.ar_result = nullptr;
+      return 0;
+    }
+    return gai_result;
+  }
+
+  gai_cancel(&request);
+  while (gai_error(&request) == EAI_INPROGRESS) {
+    gai_suspend(requests, 1, nullptr);
+  }
+  return wait_result;
 #else
   // Fallback implementation using thread-based timeout for other Unix systems.
-  //
-  // The previous Linux/glibc path used getaddrinfo_a(GAI_NOWAIT) with a
-  // stack-local gaicb. On timeout it called gai_cancel(), which is non-
-  // blocking and may return EAI_NOTCANCELED -- the resolver worker would
-  // then write back to the destroyed stack frame after this function had
-  // already returned (#2431). The std::thread + shared_ptr fallback below
-  // is correct for the same reason it works on other platforms: the
-  // worker captures shared ownership of the state, so it stays alive as
-  // long as anyone (caller or worker) still holds a reference.
 
   struct GetAddrInfoState {
     ~GetAddrInfoState() {
@@ -17956,6 +17992,9 @@ inline ssize_t read(session_t session, void *buf, size_t len, TlsError &err) {
   err.code = impl::map_mbedtls_error(ret, err.sys_errno);
   err.backend_code = static_cast<uint64_t>(-ret);
   impl::mbedtls_last_error() = ret;
+  // mbedTLS signals a clean close_notify via a negative error code rather
+  // than 0; surface it as a clean EOF the way OpenSSL/wolfSSL do.
+  if (err.code == ErrorCode::PeerClosed) { return 0; }
   return -1;
 }
 
