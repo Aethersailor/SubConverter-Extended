@@ -8,8 +8,8 @@
 #ifndef CPPHTTPLIB_HTTPLIB_H
 #define CPPHTTPLIB_HTTPLIB_H
 
-#define CPPHTTPLIB_VERSION "0.43.1"
-#define CPPHTTPLIB_VERSION_NUM "0x002b01"
+#define CPPHTTPLIB_VERSION "0.43.2"
+#define CPPHTTPLIB_VERSION_NUM "0x002b02"
 
 #ifdef _WIN32
 #if defined(_WIN32_WINNT) && _WIN32_WINNT < 0x0A00
@@ -6361,6 +6361,10 @@ inline void get_remote_ip_and_port(socket_t sock, std::string &ip, int &port) {
   }
 }
 
+// Recursive form retained so operator""_t below can compute hashes for
+// switch-case labels at compile time (C++11 constexpr forbids loops). Do not
+// call from runtime paths with arbitrary-length inputs — use str2tag()
+// instead, which is iterative and stack-safe.
 inline constexpr unsigned int str2tag_core(const char *s, size_t l,
                                            unsigned int h) {
   return (l == 0)
@@ -6374,7 +6378,16 @@ inline constexpr unsigned int str2tag_core(const char *s, size_t l,
 }
 
 inline unsigned int str2tag(const std::string &s) {
-  return str2tag_core(s.data(), s.size(), 0);
+  // Iterative form of str2tag_core: the recursive constexpr version is kept
+  // for compile-time UDL evaluation of short string literals, but at runtime
+  // we may receive arbitrarily long inputs (e.g. fuzzed Content-Type) that
+  // would blow the stack with one frame per character.
+  unsigned int h = 0;
+  for (auto c : s) {
+    h = (((std::numeric_limits<unsigned int>::max)() >> 6) & h * 33) ^
+        static_cast<unsigned char>(c);
+  }
+  return h;
 }
 
 namespace udl {
@@ -13632,7 +13645,15 @@ inline bool ClientImpl::process_request(Stream &strm, Request &req,
           output_error_log(error, &req);
           return false;
         }
-        res.body.reserve(static_cast<size_t>(len));
+        // Cap the reservation by payload_max_length_ to avoid OOM when a
+        // hostile or malformed server sends an enormous Content-Length.
+        // The actual body read below is bounded by payload_max_length_,
+        // so reserving more than that is never useful.
+        auto reserve_len = static_cast<size_t>(len);
+        if (payload_max_length_ > 0 && reserve_len > payload_max_length_) {
+          reserve_len = payload_max_length_;
+        }
+        res.body.reserve(reserve_len);
       }
     }
 
