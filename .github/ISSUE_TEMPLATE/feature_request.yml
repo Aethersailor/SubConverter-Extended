@@ -8,9 +8,9 @@ body:
       label: verify
       description: 在提交之前，请确认完成以下选项
       options:
-      - label: 我已经仔细阅读[项目文档](https://github.com/tindy2013/subconverter/blob/master/README-cn.md)，确认现有功能无法解决我的需求
+      - label: 我已经仔细阅读[项目文档](https://github.com/Aethersailor/SubConverter-Extended/blob/master/README-cn.md)，确认现有功能无法解决我的需求
         required: true
-      - label: 我已经检索过现有[issue](https://github.com/tindy2013/subconverter/issues)，确认与现有issue的内容并不重复
+      - label: 我已经检索过现有[issue](https://github.com/Aethersailor/SubConverter-Extended/issues)，确认与现有issue的内容并不重复
         required: true
       - label: 我已经尝试自行解决，确认自己没有能力解决
         required: true

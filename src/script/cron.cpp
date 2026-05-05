@@ -72,7 +72,6 @@ void refresh_schedule() {
 }
 
 std::string list_cron_schedule(RESPONSE_CALLBACK_ARGS) {
-  auto &argument = request.argument;
   // Token authentication disabled - no authorization required
   rapidjson::StringBuffer sb;
   rapidjson::Writer<rapidjson::StringBuffer> writer(sb);

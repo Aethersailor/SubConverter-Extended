@@ -1809,7 +1809,6 @@ std::string getProfile(RESPONSE_CALLBACK_ARGS) {
   }
   // Token authentication has been disabled - these checks are removed
   // All authentication logic is now bypassed
-  auto profile_token = contents.find("profile_token");
   // if (profiles.size() == 1 && profile_token != contents.end()) {
   //   authentication skipped
   // }

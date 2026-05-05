@@ -6,6 +6,16 @@
 
 bool isInScope(const std::string &path)
 {
+#ifndef S_ISREG
+#if defined(S_IFMT) && defined(S_IFREG)
+#define S_ISREG(m) (((m) & S_IFMT) == S_IFREG)
+#elif defined(_S_IFMT) && defined(_S_IFREG)
+#define S_ISREG(m) (((m) & _S_IFMT) == _S_IFREG)
+#else
+#define S_ISREG(m) (((m) & 0170000) == 0100000)
+#endif
+#endif
+
 #ifdef _WIN32
     if(path.find(":\\") != path.npos || path.find("..") != path.npos)
         return false;
