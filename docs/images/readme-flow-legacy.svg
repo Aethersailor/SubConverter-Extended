@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="270" viewBox="0 0 900 270" role="img" aria-labelledby="title desc">
+  <title id="title">传统 subconverter 远程订阅链接处理流程</title>
+  <desc id="desc">客户端把订阅链接发给原始后端，原始后端向机场请求节点信息，再把整合了节点信息的配置文件返回客户端。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8.5" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path class="arrow-head" d="M 0 0 L 10 5 L 0 10 z"/>
+    </marker>
+    <style>
+      svg {
+        color-scheme: light dark;
+        --canvas: #f8fafc;
+        --canvas-stroke: #d7dde8;
+        --node: #ffffff;
+        --node-stroke: #708199;
+        --backend: #fff8ec;
+        --backend-stroke: #b7843d;
+        --provider: #f4f7ff;
+        --provider-stroke: #738cc7;
+        --text: #1f2937;
+        --label: #4b5563;
+        --line: #596273;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        svg {
+          --canvas: #0f172a;
+          --canvas-stroke: #334155;
+          --node: #111827;
+          --node-stroke: #94a3b8;
+          --backend: #2a2113;
+          --backend-stroke: #d08b40;
+          --provider: #172033;
+          --provider-stroke: #8aa4e8;
+          --text: #e5e7eb;
+          --label: #cbd5e1;
+          --line: #cbd5e1;
+        }
+      }
+
+      .canvas { fill: var(--canvas); stroke: var(--canvas-stroke); stroke-width: 1.5; }
+      .node { fill: var(--node); stroke: var(--node-stroke); stroke-width: 1.6; }
+      .backend { fill: var(--backend); stroke: var(--backend-stroke); }
+      .provider { fill: var(--provider); stroke: var(--provider-stroke); }
+      .title { fill: var(--text); font: 700 22px "Segoe UI", "Microsoft YaHei", Arial, sans-serif; }
+      .text { fill: var(--text); font: 600 16px "Segoe UI", "Microsoft YaHei", Arial, sans-serif; }
+      .label { fill: var(--label); font: 14px "Segoe UI", "Microsoft YaHei", Arial, sans-serif; }
+      .line { fill: none; stroke: var(--line); stroke-width: 2; marker-end: url(#arrow); }
+      .arrow-head { fill: var(--line); }
+    </style>
+  </defs>
+
+  <rect class="canvas" x="1" y="1" width="898" height="268" rx="16"/>
+  <text class="title" x="450" y="42" text-anchor="middle">传统 subconverter：后端作为中转站</text>
+
+  <rect class="node" x="60" y="108" width="150" height="72" rx="10"/>
+  <text class="text" x="135" y="150" text-anchor="middle">客户端</text>
+
+  <rect class="node backend" x="375" y="108" width="150" height="72" rx="10"/>
+  <text class="text" x="450" y="150" text-anchor="middle">原始后端</text>
+
+  <rect class="node provider" x="690" y="108" width="150" height="72" rx="10"/>
+  <text class="text" x="765" y="150" text-anchor="middle">机场</text>
+
+  <path class="line" d="M 210 128 H 375"/>
+  <text class="label" x="292" y="112" text-anchor="middle">发送订阅链接</text>
+
+  <path class="line" d="M 375 162 H 210"/>
+  <text class="label" x="292" y="199" text-anchor="middle">返回整合节点的配置文件</text>
+
+  <path class="line" d="M 525 128 H 690"/>
+  <text class="label" x="607" y="112" text-anchor="middle">请求节点信息</text>
+
+  <path class="line" d="M 690 162 H 525"/>
+  <text class="label" x="607" y="199" text-anchor="middle">返回节点信息</text>
+</svg>

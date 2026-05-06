@@ -30,8 +30,8 @@ jobs:
             CONFLICTED_FILES=$(git diff --name-only --diff-filter=U)
             
             for file in $CONFLICTED_FILES; do
-              if [[ "$file" == README*.md ]]; then
-                # For README files, keep master version
+              if [[ "$file" == README*.md || "$file" == docs/images/readme-flow-*.svg ]]; then
+                # For README files and their diagram assets, keep master version
                 echo "Keeping master version of $file"
                 git checkout --ours "$file"
               else
@@ -43,18 +43,20 @@ jobs:
             done
           fi
           
-          echo "Restoring master README..."
-          # Restore README.md from HEAD (master) state, discarding changes from dev
+          echo "Restoring master README and diagram assets..."
+          # Restore README.md and its diagram assets from HEAD (master) state, discarding changes from dev
           git checkout HEAD -- README.md 2>/dev/null || true
           git checkout HEAD -- 'README-*.md' 2>/dev/null || true
+          git checkout HEAD -- 'docs/images/readme-flow-*.svg' 2>/dev/null || true
           
-          # Re-add README files to staging if they were modified
+          # Re-add README files and diagram assets to staging if they were modified
           git add README.md 2>/dev/null || true
           git add README-*.md 2>/dev/null || true
+          git add docs/images/readme-flow-*.svg 2>/dev/null || true
           
-          # Check if there are changes to commit (excluding README)
+          # Check if there are changes to commit after restoring protected docs
           if git diff --staged --quiet; then
-            echo "No changes to commit (maybe dev is already merged or only README changed)"
+            echo "No changes to commit (maybe dev is already merged or only protected docs changed)"
           else
             echo "Committing..."
             git commit -m "chore: sync dev to master"

@@ -36,9 +36,19 @@
 **核心定位转变**：
 SubConverter-Extended 不再充当客户端和远程第三方服务商之间的"中转站"，而是成为独立的 **"配置融合器"** ——只与客户端通信，不再连接远程订阅服务器。同时基于 Mihomo 内核源码，在编译时自动跟进协议支持。  
 
-<div align="center">
-<img width="719" height="442" alt="22" src="https://github.com/user-attachments/assets/506ab284-96cf-4aae-a844-bf69f15ce8df" />
-</div>
+**远程订阅链接处理流程对比**：
+
+<p align="center">
+  <strong>传统 subconverter</strong><br>
+  <img src="docs/images/readme-flow-legacy.svg" alt="传统 subconverter 远程订阅链接处理流程" width="820">
+</p>
+
+<p align="center">
+  <strong>SubConverter-Extended</strong><br>
+  <img src="docs/images/readme-flow-extended.svg" alt="SubConverter-Extended 远程订阅链接处理流程" width="820">
+</p>
+
+**关键差异**：SubConverter-Extended 只生成配置，不再直接连接远程订阅服务器。
 
 > [!WARNING]
 > 1. 本项目优先适配 OpenClash，其次是各 Clash 客户端，对其他客户端的支持不作保证。对于修改代码造成的支持范围缩减不作修复。  

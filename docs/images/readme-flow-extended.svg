@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="320" viewBox="0 0 900 320" role="img" aria-labelledby="title desc">
+  <title id="title">SubConverter-Extended 远程订阅链接处理流程</title>
+  <desc id="desc">SubConverter-Extended 只返回包含 proxy-provider 的配置，客户端中的 Mihomo 内核再按订阅链接向机场请求节点信息。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8.5" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path class="arrow-head" d="M 0 0 L 10 5 L 0 10 z"/>
+    </marker>
+    <style>
+      svg {
+        color-scheme: light dark;
+        --canvas: #f8fafc;
+        --canvas-stroke: #d7dde8;
+        --client-wrap: #eef8f4;
+        --client-wrap-stroke: #75a98f;
+        --node: #ffffff;
+        --node-stroke: #708199;
+        --backend: #f0f7ff;
+        --backend-stroke: #5f86bd;
+        --kernel: #effcf6;
+        --kernel-stroke: #5d9b7e;
+        --provider: #f4f7ff;
+        --provider-stroke: #738cc7;
+        --text: #1f2937;
+        --label: #4b5563;
+        --small: #5b6573;
+        --line: #596273;
+        --no-line: #c24141;
+        --no-text: #b42323;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        svg {
+          --canvas: #0f172a;
+          --canvas-stroke: #334155;
+          --client-wrap: #12231d;
+          --client-wrap-stroke: #58ad88;
+          --node: #111827;
+          --node-stroke: #94a3b8;
+          --backend: #142238;
+          --backend-stroke: #75a7e8;
+          --kernel: #12281f;
+          --kernel-stroke: #60c494;
+          --provider: #172033;
+          --provider-stroke: #8aa4e8;
+          --text: #e5e7eb;
+          --label: #cbd5e1;
+          --small: #b7c2d1;
+          --line: #cbd5e1;
+          --no-line: #f87171;
+          --no-text: #fca5a5;
+        }
+      }
+
+      .canvas { fill: var(--canvas); stroke: var(--canvas-stroke); stroke-width: 1.5; }
+      .client-wrap { fill: var(--client-wrap); stroke: var(--client-wrap-stroke); stroke-width: 1.6; }
+      .node { fill: var(--node); stroke: var(--node-stroke); stroke-width: 1.6; }
+      .backend { fill: var(--backend); stroke: var(--backend-stroke); }
+      .kernel { fill: var(--kernel); stroke: var(--kernel-stroke); }
+      .provider { fill: var(--provider); stroke: var(--provider-stroke); }
+      .title { fill: var(--text); font: 700 22px "Segoe UI", "Microsoft YaHei", Arial, sans-serif; }
+      .text { fill: var(--text); font: 600 16px "Segoe UI", "Microsoft YaHei", Arial, sans-serif; }
+      .label { fill: var(--label); font: 14px "Segoe UI", "Microsoft YaHei", Arial, sans-serif; }
+      .small { fill: var(--small); font: 13px "Segoe UI", "Microsoft YaHei", Arial, sans-serif; }
+      .line { fill: none; stroke: var(--line); stroke-width: 2; marker-end: url(#arrow); }
+      .no-line { fill: none; stroke: var(--no-line); stroke-width: 2; stroke-dasharray: 7 7; }
+      .no-mark { fill: none; stroke: var(--no-line); stroke-width: 3; stroke-linecap: round; }
+      .no-text { fill: var(--no-text); font: 600 13px "Segoe UI", "Microsoft YaHei", Arial, sans-serif; }
+      .arrow-head { fill: var(--line); }
+    </style>
+  </defs>
+
+  <rect class="canvas" x="1" y="1" width="898" height="318" rx="16"/>
+  <text class="title" x="450" y="42" text-anchor="middle">SubConverter-Extended：后端只生成配置</text>
+
+  <rect class="client-wrap" x="48" y="76" width="330" height="204" rx="14"/>
+  <text class="small" x="74" y="104">客户端</text>
+
+  <rect class="node" x="82" y="123" width="130" height="62" rx="10"/>
+  <text class="text" x="147" y="160" text-anchor="middle">客户端界面</text>
+
+  <rect class="node kernel" x="220" y="196" width="130" height="62" rx="10"/>
+  <text class="text" x="285" y="222" text-anchor="middle">Mihomo</text>
+  <text class="text" x="285" y="243" text-anchor="middle">内核</text>
+
+  <rect class="node backend" x="455" y="123" width="150" height="62" rx="10"/>
+  <text class="text" x="530" y="160" text-anchor="middle">新型后端</text>
+
+  <rect class="node provider" x="710" y="196" width="140" height="62" rx="10"/>
+  <text class="text" x="780" y="233" text-anchor="middle">机场</text>
+
+  <path class="line" d="M 212 138 H 455"/>
+  <text class="label" x="334" y="122" text-anchor="middle">发送订阅链接</text>
+
+  <path class="line" d="M 455 169 H 212"/>
+  <text class="label" x="334" y="198" text-anchor="middle">返回 proxy-provider 配置</text>
+
+  <path class="line" d="M 178 185 C 190 206, 204 217, 220 222"/>
+  <text class="label" x="156" y="217" text-anchor="middle">应用配置</text>
+
+  <path class="line" d="M 350 217 H 710"/>
+  <text class="label" x="530" y="201" text-anchor="middle">按订阅链接请求节点信息</text>
+
+  <path class="line" d="M 710 247 H 350"/>
+  <text class="label" x="530" y="275" text-anchor="middle">返回节点信息</text>
+
+  <path class="no-line" d="M 600 178 C 650 180, 683 186, 722 202"/>
+  <path class="no-mark" d="M 649 174 L 665 190 M 665 174 L 649 190"/>
+  <text class="no-text" x="654" y="165" text-anchor="middle">后端不直连机场</text>
+</svg>
