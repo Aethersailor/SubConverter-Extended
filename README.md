@@ -39,12 +39,10 @@ SubConverter-Extended 不再充当客户端和远程第三方服务商之间的"
 **远程订阅链接处理流程对比**：
 
 <p align="center">
-  <strong>传统 subconverter</strong><br>
   <img src="docs/images/readme-flow-legacy.svg" alt="传统 subconverter 远程订阅链接处理流程" width="820">
 </p>
 
 <p align="center">
-  <strong>SubConverter-Extended</strong><br>
   <img src="docs/images/readme-flow-extended.svg" alt="SubConverter-Extended 远程订阅链接处理流程" width="820">
 </p>
 
