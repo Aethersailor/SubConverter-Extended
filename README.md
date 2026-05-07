@@ -9,15 +9,15 @@
 [![Docker Pulls](https://img.shields.io/docker/pulls/aethersailor/subconverter-extended?style=flat&logo=docker)](https://hub.docker.com/r/aethersailor/subconverter-extended)
 [![License](https://img.shields.io/badge/license-GPL--3.0-orange?style=flat)](LICENSE)
 
-<h3>⚡ 现代化的订阅转换后端 | 完美兼容 Mihomo 内核 ⚡</h3>
+<h3>⚡ 现代化的订阅转换后端 | 深度适配 Mihomo 内核 ⚡</h3>
 
 <p align="center">
   <a href="#-项目简介">项目简介</a> •
   <a href="#-立项原因">立项原因</a> •
   <a href="#-核心特性">核心特性</a> •
   <a href="#-快速开始">快速开始</a> •
-  <a href="#-使用文档">使用文档</a> •
-  <a href="#-docker-部署">Docker 部署</a>
+  <a href="#-使用说明">使用说明</a> •
+  <a href="#-配置说明">配置说明</a>
 </p>
 
 </div>
@@ -27,16 +27,13 @@
 ## 📖 项目简介
 
 > [!NOTE]
-> **SubConverter-Extended** 是基于 [asdlokj1qpi233/subconverter](https://github.com/asdlokj1qpi233/subconverter) 深度二次开发的订阅转换后端增强版本。
-> 
-> 彻底解决传统 subconverter 易被机场屏蔽、节点参数解析不完善、维护滞后等问题
+> **SubConverter-Extended** 是基于 [asdlokj1qpi233/subconverter](https://github.com/asdlokj1qpi233/subconverter) 深度二次开发的订阅转换后端增强版本，重点解决传统 subconverter 易被机场屏蔽、节点参数解析不完善、维护滞后等问题。
 
-它专为协同 [Mihomo](https://github.com/MetaCubeX/mihomo) 内核工作优化，提供更现代、更强大的订阅转换功能。
+它围绕 [Mihomo](https://github.com/MetaCubeX/mihomo) 内核的实际使用场景进行优化，提供更现代、更稳定的订阅转换能力。
 
-**核心定位转变**：
-SubConverter-Extended 不再充当客户端和远程第三方服务商之间的"中转站"，而是成为独立的 **"配置融合器"** ——只与客户端通信，不再连接远程订阅服务器。同时基于 Mihomo 内核源码，在编译时自动跟进协议支持。  
+**核心定位**：SubConverter-Extended 不再充当客户端与远程订阅服务商之间的“中转站”，而是作为独立的 **配置融合器** 运行。它只与客户端通信，不再主动连接远程订阅服务器；同时在编译阶段自动跟进 Mihomo 的协议支持。
 
-**远程订阅链接处理流程对比**：
+**远程订阅链接处理流程对比：**
 
 <p align="center">
   <img src="docs/images/readme-flow-legacy.svg" alt="传统 subconverter 远程订阅链接处理流程" width="820">
@@ -46,13 +43,13 @@ SubConverter-Extended 不再充当客户端和远程第三方服务商之间的"
   <img src="docs/images/readme-flow-extended.svg" alt="SubConverter-Extended 远程订阅链接处理流程" width="820">
 </p>
 
-**关键差异**：SubConverter-Extended 只生成配置，不再直接连接远程订阅服务器。
+**关键差异**：SubConverter-Extended 仅负责生成配置，不再直接连接远程订阅服务器。
 
 > [!WARNING]
-> 1. 本项目优先适配 OpenClash，其次是各 Clash 客户端，对其他客户端的支持不作保证。对于修改代码造成的支持范围缩减不作修复。  
-> 2. 本项目保持中立，自身不提供任何规避监管制度的功能。
-> 3. 本项目仅作计算机编程代码学习研究之用，使用时请严格遵守当地法律法规，请勿用于任何非法用途。
-> 4. 本项目强烈建议使用合法的第三方服务商。
+> 1. 本项目优先适配 OpenClash，其次是各类 Clash 客户端；对其他客户端的支持不作保证。因代码调整造成的支持范围缩减，原则上不单独回补。
+> 2. 本项目保持中立，不提供任何规避监管制度的功能。
+> 3. 本项目仅用于计算机编程技术学习与研究，使用时请严格遵守当地法律法规，请勿用于任何非法用途。
+> 4. 建议始终使用合法合规的第三方服务商。
 
 ---
 
@@ -60,58 +57,56 @@ SubConverter-Extended 不再充当客户端和远程第三方服务商之间的"
 
 ### 遇到的问题
 
-在长期使用 subconverter 的过程中，我遇到了几个不如人意的痛点：
+在长期使用 subconverter 的过程中，主要会遇到以下几个痛点：
 
 #### 1. 协议支持滞后 🐢
 
-原版 subconverter 对节点参数的支持是否完善，完全取决于开发者的积极性，其解析器需要依靠人工进行维护。  
+原版 subconverter 对节点参数的支持高度依赖人工维护，其解析器的更新速度通常取决于开发者的时间与精力。
 
-许多新兴协议（如 `hysteria2`、`tuic`、`anytls` 等）往往在相当长的时间内无法得到完善的支持，而一些老协议（如 `vless`），由于传输层协议等参数的更新，至今也未能做到完美的转换。  
+许多新兴协议（如 `hysteria2`、`tuic`、`anytls` 等）往往无法在第一时间获得完善支持；一些老协议（如 `vless`）也会因为传输层参数持续演进，而长期存在转换不完整的问题。
 
-在 subconverter 以及其流行分支的仓库中，可见大量相关的 issue。  
+这一现象并非个别案例。在 subconverter 及其多个流行分支的仓库中，都能看到大量与协议支持相关的 issue。
 
-当然，这并不是开发者的错，任何一位开发者都没有一直为开源社区用爱发电的义务。  
-
-我也曾 fork 过 subconverter 并试图解决对各个协议支持不完美的问题，最后得出的结论就是完全靠人工来维护这样一个项目，势必要花费不少时间和精力去测试，而且很有可能取得不了预期的结果。  
+问题的根源并不在于开发者是否足够积极，而在于这类人工维护模式本身就需要持续投入大量测试和适配成本，长期来看很难稳定覆盖所有协议与参数变化。
 
 #### 2. 机场屏蔽问题 🚫
 
-由于 subconverter 需要连接机场订阅服务器拉取节点，而部分机场出于安全考虑：
+原版 subconverter 需要主动连接机场订阅服务器拉取节点，而部分机场出于安全策略，会采取如下限制：
 
 * 屏蔽海外 IP 访问
 * 屏蔽 subconverter 的 User-Agent
-* 限制非客户端的订阅请求
+* 限制非客户端发起的订阅请求
 
-这导致了许多用户根本无法正常使用订阅转换服务。  
+这会直接导致许多用户无法正常使用订阅转换服务。
 
-由于原版 subconverter 需要读取订阅链接内容，对于机场屏蔽特定地区 IP 请求订阅的限制完全无法通过其自身实现绕过。  
-
-对于 UA 的限制虽然可以通过修改或者删除原版中的特定 UA 来绕过，但这无形中也人为制造了和机场运营方的一种对抗。  
+对于按地区限制订阅访问的场景，原版 subconverter 无法从架构层面规避；对于 User-Agent 限制，虽然可以通过修改或删除特定 UA 进行绕过，但这本质上是在工具和服务商之间制造额外对抗，并不是稳妥的长期方案。
 
 #### 3. 新手友好度不足 🤯
 
-由于上述问题，subconverter 逐渐被一些开发者和 UP 主视为"过时产物"，开始推崇使用 YAML 文件手动管理配置。但很多新手并没有兴趣和时间去研究 YAML 配置文件，更多的是希望“开袋即食”。  
+由于上述问题，subconverter 逐渐被一些开发者和内容创作者视为“过时方案”，转而推崇手动维护 YAML 配置。
 
-但由于 subconverter 的种种问题，加上当下诸多机场的限制，许多用户常遇到不能解析节点/不能拉取节点/拉下来的节点参数无效等等奇怪的故障。对于很多新手来说，大部分人是并没有能力解决此类问题。  
+但对大量普通用户而言，他们并不希望研究 YAML 细节，更需要的是一套基于 UI、可直接使用、问题边界清晰的操作流程。
 
-**但也正是基于这一点，正如 [Custom_OpenClash_Rules](https://github.com/Aethersailor/Custom_OpenClash_Rules) 项目所坚持的：**
+现实情况是，在 subconverter 与机场限制叠加的情况下，用户经常会遇到无法解析节点、无法拉取节点、节点参数失效等问题；而新手用户通常也缺乏足够的排障能力。
+
+正因如此，正如 [Custom_OpenClash_Rules](https://github.com/Aethersailor/Custom_OpenClash_Rules) 项目一直坚持的理念：
 
 > [!IMPORTANT]
-> **最适合新手和普通用户且最具普适性的操作流程，永远是基于 UI 界面的操作流程。**
+> **最适合新手和普通用户、且最具普适性的操作流程，始终是基于 UI 的操作流程。**
 
-用户应当拿着订阅链接，点几下鼠标就能根据自己的实际情况配置出最佳效果，并自动享受完善的分流规则更新。  
+理想状态应当是：用户拿到订阅链接后，只需进行少量可视化操作，就能按自身场景生成合适配置，并自动获得后续规则更新。
 
-而不是繁琐的"手搓配置"、"上传文件"、"手动修改参数"，甚至还得到处提问，问的太蠢了还会被人喷，一点儿都不优雅。
+### 🎯 解决方案
 
-### 🎯 解决方案  
+如果目标客户端本身基于 Mihomo 内核，那么订阅转换后端完全可以直接在配置文件中生成符合内核要求的 `proxy-provider` 字段，以取代过去“读取订阅内容 -> 解析节点 -> 回写节点参数”的旧流程。
 
-从单纯服务于 Mihomo 内核的客户端的角度来讲，可以以令订阅转换后端在配置文件中生成符合内核配置文件格式要求的 `proxy-provider` 字段，取代过去的读取订阅>写入节点参数的功能，从而完全规避工具自身对节点参数的支持滞后以及订阅服务商的限制问题。  
+这样一来，工具自身无需再承担远程订阅抓取与节点参数适配的职责，从架构上同时规避了协议支持滞后和服务商访问限制这两类问题。
 
-同样，对于节点链接的解析，可以直接引入 Mihomo 内核的解析器模块，来替代过去的人工维护解析器，使订阅转换后端的节点链接解析能力与 Mihomo 内核完全对齐。  
+对于本地节点链接解析，则可以直接引入 Mihomo 内核的解析器模块，替代原先需要人工维护的解析器逻辑，使订阅转换后端与 Mihomo 内核的解析能力保持一致。
 
-基于以上，本项目只需要跟随内核进行更新，即可自动获得完美的转换效果，无需进一步的人工维护。  
+基于这一思路，本项目只需跟随 Mihomo 内核更新，即可在绝大多数场景下自动获得同步的协议与参数支持，而无需重复投入额外的人工适配成本。
 
-**那就自己动手吧。** SubConverter-Extended 因此诞生，更匹配 Mihomo 内核的使用场景的订阅转换工具，**服务于所有保留“订阅转换”接口且使用 Mihomo 内核的 Clash 客户端**。
+SubConverter-Extended 因此诞生。它是一款更贴合 Mihomo 使用场景的订阅转换工具，**服务于所有保留“订阅转换”接口且使用 Mihomo 内核的 Clash 客户端**。
 
 ---
 
@@ -121,98 +116,97 @@ SubConverter-Extended 不再充当客户端和远程第三方服务商之间的"
 
 | 功能 | 原版 Subconverter | SubConverter-Extended |
 | :--- | :--- | :--- |
-| **完美解析节点链接** | 🛠️ 人工维护解析器，有限支持 | 🤖 **集成 Mihomo 内核的解析器模块，完美支持所有节点链接协议** |
-| **完美处理订阅链接** | 📥 下读取并解析订阅，易被屏蔽 | 🔗  **生成 `proxy-provider`，不再连接机场，由客户端的 Mihomo 内核直接拉取订阅** |
-| **未来自动跟进维护** | ⏳ 人工添加维护新协议 | 🔄 **全自动维护，编译时自动扫描 Mihomo 源码并自动添加支持新协议** |
-| **自动维护全局参数** | 📝 人工维护节点全局参数列表 | 🔍 **全自动维护，编译时自动扫描 Mihomo 源码，自动识别硬编码和可覆写参数** |
+| **节点链接解析** | 🛠️ 人工维护解析器，支持有限 | 🤖 **集成 Mihomo 内核解析模块，自动对齐协议支持** |
+| **订阅链接处理** | 📥 拉取并解析订阅，容易被屏蔽 | 🔗 **生成 `proxy-provider`，由客户端 Mihomo 内核直接拉取订阅** |
+| **协议维护方式** | ⏳ 依赖人工新增和维护 | 🔄 **编译时自动扫描 Mihomo 源码，跟进新协议支持** |
+| **全局参数维护** | 📝 人工维护节点参数列表 | 🔍 **编译时自动识别硬编码参数和可覆写参数** |
 
 ### 🔥 独特功能
 
 #### 1. Proxy-Provider 模式 🛡️
 
-**使用 Mihomo 的 Proxy-Provider 机制**  
+**使用 Mihomo 的 Proxy-Provider 机制**
 
-**不再下载解析订阅链接**，而是生成客户端可直接使用的配置，交由用户客户端的 Mihomo 内核自行拉取订阅：
+项目不再下载并解析远程订阅内容，而是生成客户端可直接使用的配置，交由用户客户端内置的 Mihomo 内核自行拉取订阅：
 
 ```yaml
-# Subconverter-Extended 生成示例内容
+# SubConverter-Extended 生成示例内容
 
 proxy-providers:
-  Provider_A1B2C3:  # <-- provider 名称可在生成时使用参数实现自定义
+  Provider_A1B2C3:  # provider 名称可通过参数自定义
     type: http
-    url: https://your-subscription-url  # <-- 客户端拉取订阅的地址
+    url: https://your-subscription-url  # 客户端实际拉取订阅的地址
     interval: 3600
-    proxy: DIRECT  # <-- 默认以直连的形式拉取订阅
+    proxy: DIRECT  # 默认以直连方式拉取订阅
     path: ./providers/Provider_A1B2C3.yaml
     health-check:
       enable: true
       url: https://cp.cloudflare.com/generate_204
       interval: 300
-    override:  # <-- override 参数可正确传递用户订阅请求时附加的覆写参数
+    override:  # 将请求中附加的覆写参数透传给 provider
       skip-cert-verify: true
       udp: true
 ```
 
 > [!NOTE]
-> * proxy-provider 名称默认自动生成，可使用文档下方的自定义参数实现个性化名称
-> * 使用 proxy-provider 后，由你的客户端内核以**直连**的形式自行拉取订阅。  
-> * 订阅是否能成功，**与本后端无关，与规则无关**。效果**等同于**你自己制作 yaml 并填写订阅链接。  
-> * 如遇拉取订阅不成功，则说明你的订阅链接不正确或在国内无法正常直连访问（至少在你所在的位置是如此），请和机场客服对线。
+> * `proxy-provider` 名称默认自动生成，也可通过文档下方的自定义参数指定
+> * 使用 `proxy-provider` 后，订阅由客户端内核以**直连**方式自行拉取
+> * 订阅是否可访问，**与本后端无关，与规则无关**；效果等同于你手动编写 YAML 并填入订阅链接
+> * 如拉取失败，通常意味着订阅链接本身无效，或当前网络环境下无法直连访问该订阅地址
 
 > [!TIP]
-> **优势**：
+> **优势：**
 >
-> * ✅ 不再干涉用户节点，交由内核原生处理
+> * ✅ 不再干预用户节点，交由内核原生处理
 > * ✅ 订阅更新由客户端控制，无需重新转换
-> * ✅ 避免机场屏蔽转换服务器的问题
+> * ✅ 避免机场屏蔽转换服务器带来的问题
 
 #### 2. Mihomo 内核模块集成 🧩
 
-对于本地节点链接的处理（如 `vless://` 等格式链接），则直接使用 Mihomo Go 库解析节点链接，确保：
+对于本地节点链接（如 `vless://` 等格式）的处理，项目直接调用 Mihomo 的 Go 解析库，确保：
 
-* ✅ 原生支持 Mihomo 内核可解析的所有节点连接协议（包括但不限于 `hysteria2`, `tuic`, `anytls` 等）
-* ✅ 解析能力与 Mihomo 内核自动对齐，无需手动维护和适配
-* ✅ 新协议零延迟支持，编译时跟随 Mihomo 自动更新，无需手动维护
+* ✅ 原生支持 Mihomo 内核可解析的全部节点链接协议（包括但不限于 `hysteria2`、`tuic`、`anytls` 等）
+* ✅ 解析能力与 Mihomo 内核自动对齐，无需手动补丁式维护
+* ✅ 新协议可随 Mihomo 更新同步获得支持
 
 #### 3. 兼容性保证 🤝
 
-* ✅ **无缝切换**：兼容常见的传统 subconverter 的 API 接口，确保客户端用户零学习成本，无缝切换。
-* ✅ **模板兼容**：继续沿用传统的订阅转换外部模板，无需修改任何内容，由后端内置逻辑确保 `proxy-provider` 模式在分流规则中正确生成。
-* ✅ **无忧更新**：编译时自动遍历 [Mihomo 内核源码仓库](https://github.com/MetaCubeX/mihomo/meta)，自动提取最新内核解析模块，并读取当前最新支持的协议格式，自动识别可被全局参数覆盖的节点参数，确保永远对齐 Mihomo 内核支持解析的所有节点连接协议。
+* ✅ **无缝切换**：兼容常见传统 subconverter API 接口，客户端侧几乎无需学习成本即可迁移
+* ✅ **模板兼容**：继续沿用传统外部模板，由后端内置逻辑确保 `proxy-provider` 模式在分流规则中正确生成
+* ✅ **自动跟进**：编译时自动遍历 [Mihomo 内核源码仓库](https://github.com/MetaCubeX/mihomo/meta)，提取最新解析模块、协议格式与可覆写参数
 
 #### 4. 新手友好 👶
 
-* ✅ 使用 **[Custom_OpenClash_Rules](https://github.com/Aethersailor/Custom_OpenClash_Rules)** 远程配置模板替代默认内置模板和自定义代理组功能
-* ✅ 锁死 API 模式，强制关闭 API 模式相关接口，避免新手误配置降低安全性
-* ✅ 简化参数，专注核心功能
+* ✅ 使用 **[Custom_OpenClash_Rules](https://github.com/Aethersailor/Custom_OpenClash_Rules)** 远程配置模板，替代默认内置模板与自定义代理组功能
+* ✅ 锁定 API 模式，强制关闭相关接口，降低新手误配置带来的安全风险
+* ✅ 精简参数设计，聚焦高频核心场景
 
 ---
 
 ## 🚀 快速开始
 
-### 🌍 使用演示实例 (无需部署)
+### 🌍 使用演示实例（无需部署）
 
-如果你不想折腾，可以直接使用我们提供的演示实例：
+如果你不想自行部署，可以直接使用演示实例：
 
 > [!TIP]
 > **地址**：`https://api.asailor.org`
 >
 > ![Website](https://img.shields.io/website?url=https%3A%2F%2Fapi.asailor.org%2Fversion&up_message=%E5%9C%A8%E7%BA%BF&down_message=%E7%A6%BB%E7%BA%BF&style=for-the-badge&label=%E5%90%8E%E7%AB%AF%E6%9C%8D%E5%8A%A1%E5%BD%93%E5%89%8D%E7%8A%B6%E6%80%81)
 
-OpenClash 中已内置该演示实例地址，你也可以在任何支持自定义后端的订阅转换网站或客户端中填入此地址即可调用。  
+OpenClash 已内置该演示实例地址；在其他支持自定义后端的订阅转换网站或客户端中，也可以直接填入该地址进行调用。
 
 > [!IMPORTANT]
-> 默认输出**最简配置**，无 DNS 参数，请启用 Clash 客户端中的 DNS 覆写功能！  
-> 例如 OpenClash > 覆写设置 > 自定义上游 DNS 服务器  
-> 或者自行在生成的配置文件中人工补全 DNS 参数
-> 否则无法解析任何节点域名，导致全部节点无法连接
+> 默认输出为**最简配置**，不包含 DNS 参数，请在 Clash 客户端中启用 DNS 覆写功能。
+> 例如：`OpenClash > 覆写设置 > 自定义上游 DNS 服务器`
+> 否则将无法解析节点域名，导致全部节点无法连接。
 
-### 🐳 自行部署 (Docker)
+### 🐳 自行部署（Docker）
 
-如果你拥有自己的服务器，推荐使用 Docker 进行部署。
+如果你拥有自己的服务器，推荐使用 Docker 部署。
 
 > [!WARNING]
-> *由于开发者业余时间有限，以下部署指南部分内容由 AI 生成，仅供参考。*
+> 以下部署说明已经过整理，但仍建议结合你自身的网络环境和部署方式进行校验。
 
 #### 1. 一键启动
 
@@ -222,10 +216,9 @@ docker run -d \
   -p 25500:25500 \
   --restart unless-stopped \
   aethersailor/subconverter-extended:latest
-
 ```
 
-访问 `http://localhost:25500/version` 验证部署。
+访问 `http://localhost:25500/version` 验证服务是否正常启动。
 
 #### 2. 自定义配置启动
 
@@ -238,11 +231,11 @@ mkdir -p /opt/SubConverter-Extended/base
 
 cd /opt/SubConverter-Extended
 
-# 下载 SubConverter-Extended 配置文件
+# 下载配置文件
 wget -O base/pref.toml \
   https://gcore.jsdelivr.net/gh/Aethersailor/SubConverter-Extended@master/base/pref.example.toml
 
-# 如需外部访问，请自行修改 /opt/SubConverter-Extended/base/pref.toml 中的 managed_config_prefix 地址。
+# 如需外部访问，请修改 managed_config_prefix 为实际部署地址
 
 # 启动容器并挂载配置
 docker run -d \
@@ -251,10 +244,10 @@ docker run -d \
   -v /opt/SubConverter-Extended/base/pref.toml:/base/pref.toml \
   --restart unless-stopped \
   aethersailor/subconverter-extended:latest
-
 ```
 
 #### 3. Docker Compose
+
 ```bash
 # 删除可能存在的工作目录
 rm -rf /opt/SubConverter-Extended
@@ -268,26 +261,24 @@ cd /opt/SubConverter-Extended
 wget -O docker-compose.yml \
   https://gcore.jsdelivr.net/gh/Aethersailor/SubConverter-Extended@master/docker-compose.yml
 
-# 下载 SubConverter-Extended 配置文件
+# 下载配置文件
 wget -O base/pref.toml \
   https://gcore.jsdelivr.net/gh/Aethersailor/SubConverter-Extended@master/base/pref.example.toml
 
-# 如需外部访问，请自行修改 /opt/SubConverter-Extended/base/pref.toml 中的 managed_config_prefix 地址。
+# 如需外部访问，请修改 managed_config_prefix 为实际部署地址
 
 # 启动容器
 docker-compose up -d
-
 ```
 
 ---
 
-## 📚 使用文档
+## 📚 使用说明
 
-使用方式与原版 subconverter 完全相同。  
+整体使用方式与原版 subconverter 基本一致。
 
 > [!IMPORTANT]
-> 默认输出**最简配置**，无 DNS 参数，请启用各 Clash 客户端中的 DNS 覆写功能！  
-> 或者自行在生成的配置文件中人工补全 DNS 参数  
+> 默认输出为**最简配置**，不包含 DNS 参数，请在各 Clash 客户端中启用 DNS 覆写功能，或在生成的配置文件中自行补全 DNS 配置。
 
 ### 常用参数一览
 
@@ -298,25 +289,37 @@ docker-compose up -d
 | `config` | 外部配置文件 | `https://config-url` |
 | `include` | 包含节点（正则） | `香港\|台湾` |
 | `exclude` | 排除节点（正则） | `过期\|剩余` |
-| `emoji` | 添加 Emoji | `true`/`false` |
+| `emoji` | 添加 Emoji | `true` / `false` |
 
-#### provider 前缀（仅 Clash/ClashR 订阅链接）
+### 常见调用示例
 
-`provider` 不是独立参数，而是写在 `url=` 列表中、放在订阅链接前，用逗号分隔，用于自定义 `proxy-providers` 名称。节点链接不生效。
+```text
+https://api.asailor.org/sub?target=clash&url=https%3A%2F%2Fexample.com%2Fsub&config=https%3A%2F%2Fexample.com%2Fconfig.ini
+```
+
+```text
+https://api.asailor.org/sub?target=clash&url=provider%3AHK%2Chttps%3A%2F%2Fexample.com%2Fsub&include=%E9%A6%99%E6%B8%AF&emoji=true
+```
+
+### `provider` 前缀（仅适用于 Clash/ClashR 订阅链接）
+
+`provider` 不是独立参数，而是写在 `url=` 列表中、放在订阅链接前，并以逗号分隔，用于自定义 `proxy-providers` 名称；对节点链接不生效。
+
 示例：
 
-```
+```text
 url=provider:HK,https://example.com/sub
 url=provider:HK,https://a|provider:HK,https://b
 url=provider%3AHK%2Chttps%3A%2F%2Fexample.com%2Fsub
 ```
+
 > [!NOTE]
-> * 注意：在 OpenClash 这类预置了“订阅地址文本框”的软件中，无需填写开头的 `url=`，请在文本框中直接填写等号后的部分即可
+> 在 OpenClash 这类预置“订阅地址”输入框的软件中，无需填写开头的 `url=`，直接填入等号后的内容即可。
 
 补充说明：
 
-* 支持中文；非法字符或空值会回退为默认 `Provider_<MD5>`
-* 重名会自动追加 `_1`、`_2` 等后缀
+* 支持中文名称；非法字符或空值会回退为默认 `Provider_<MD5>`
+* 重名时会自动追加 `_1`、`_2` 等后缀
 
 ---
 
@@ -332,15 +335,17 @@ url=provider%3AHK%2Chttps%3A%2F%2Fexample.com%2Fsub
 [managed_config]
 managed_config_prefix = "http://localhost:25500"  # 托管配置前缀
 ```
-非本机部署时，请将此项修改为 SubConverter-Extended 部署机的 IP 地址或域名。  
+
+非本机部署时，请将该项修改为 SubConverter-Extended 实际部署机的 IP 地址或域名。
+
 ---
 
 ## 🔍 Docker Hub 镜像标签
 
 | 标签 | 用途 | 更新频率 |
 | :--- | :--- | :--- |
-| `latest` | 🟢 **稳定版本**（master 分支） | 有 release 时更新 |
-| `dev` | 🟡 **开发版本**（dev 分支） | 每次 dev 分支推送 |
+| `latest` | 🟢 **稳定版本**（`master` 分支） | 发布 Release 时更新 |
+| `dev` | 🟡 **开发版本**（`dev` 分支） | 每次 `dev` 分支推送后更新 |
 
 ---
 
@@ -349,7 +354,7 @@ managed_config_prefix = "http://localhost:25500"  # 托管配置前缀
 本项目使用或引用了以下开源项目，在此表示感谢：
 
 * [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) - Clash 内核，提供节点链接解析能力
-* [Aethersailor/Custom_OpenClash_Rules](https://github.com/Aethersailor/Custom_OpenClash_Rules) - OpenClash 订阅转换模板、规则集和教程项目
+* [Aethersailor/Custom_OpenClash_Rules](https://github.com/Aethersailor/Custom_OpenClash_Rules) - OpenClash 订阅转换模板、规则集与教程项目
 * [asdlokj1qpi233/subconverter](https://github.com/asdlokj1qpi233/subconverter) - 原版 subconverter 项目
 
 ---
@@ -377,12 +382,12 @@ managed_config_prefix = "http://localhost:25500"  # 托管配置前缀
 
 ![Alt](https://repobeats.axiom.co/api/embed/c249ae5c34b99a067c78e9216600c1a5eac16c65.svg "Repobeats analytics image")
 
-</div>
-
 ---
 
 <div align="center">
 
-**如果这个项目对你有帮助，请给个 ⭐ Star 支持一下！**
+**如果这个项目对你有帮助，欢迎给一个 ⭐ Star 支持。**
 
 Made with ❤️ by [Aethersailor](https://github.com/Aethersailor)
+
+</div>
