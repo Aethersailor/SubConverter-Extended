@@ -173,6 +173,7 @@ proxy-providers:
 
 * ✅ **无缝切换**：兼容常见传统 subconverter API 接口，客户端侧几乎无需学习成本即可迁移
 * ✅ **模板兼容**：继续沿用传统外部模板，由后端内置逻辑确保 `proxy-provider` 模式在分流规则中正确生成
+* ✅ **GitHub 文件回落**：远程外部配置、规则集或 `!!import` 引用 GitHub 原生文件地址失败时，自动回落到 `cdn.jsdelivr.net`
 * ✅ **自动跟进**：编译时自动遍历 [Mihomo 内核源码仓库](https://github.com/MetaCubeX/mihomo/meta)，提取最新解析模块、协议格式与可覆写参数
 
 #### 4. 新手友好 👶
@@ -299,6 +300,18 @@ https://api.asailor.org/sub?target=clash&url=https%3A%2F%2Fexample.com%2Fsub&con
 
 ```text
 https://api.asailor.org/sub?target=clash&url=provider%3AHK%2Chttps%3A%2F%2Fexample.com%2Fsub&include=%E9%A6%99%E6%B8%AF&emoji=true
+```
+
+### GitHub 原生文件地址回落
+
+当远程外部配置、规则集或 `!!import` 引用的是 GitHub 原生文件地址时，后端会优先访问原始 GitHub 地址；仅在原始地址因网络或服务端错误无法正常获取时，才自动改用 `cdn.jsdelivr.net` 加速地址重试一次。非 GitHub 地址不受影响。
+
+支持的 GitHub 文件地址形式包括：
+
+```text
+https://raw.githubusercontent.com/<owner>/<repo>/<ref>/<path>
+https://github.com/<owner>/<repo>/raw/<ref>/<path>
+https://github.com/<owner>/<repo>/blob/<ref>/<path>
 ```
 
 ### `provider` 前缀（仅适用于 Clash/ClashR 订阅链接）
