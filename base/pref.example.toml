@@ -329,8 +329,8 @@ port = 25500
 serve_file_root = "web"
 
 [advanced]
-log_level = "debug"
-print_debug_info = true
+log_level = "info"
+print_debug_info = false
 max_pending_connections = 10240
 max_concurrent_threads = 4
 max_allowed_rulesets = 64

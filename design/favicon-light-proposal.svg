@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="SubConverter-Extended icon">
+  <defs>
+    <linearGradient id="bg" x1="10" y1="8" x2="54" y2="56" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#e8eef7"/>
+    </linearGradient>
+    <linearGradient id="cyan" x1="18" y1="20" x2="46" y2="20" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0284c7"/>
+      <stop offset="1" stop-color="#0891b2"/>
+    </linearGradient>
+    <linearGradient id="green" x1="46" y1="44" x2="18" y2="44" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#059669"/>
+      <stop offset="1" stop-color="#65a30d"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <rect x="1.5" y="1.5" width="61" height="61" rx="12.5" fill="none" stroke="#cbd5e1" stroke-width="3"/>
+  <path d="M18 20h25" fill="none" stroke="url(#cyan)" stroke-width="6" stroke-linecap="round"/>
+  <path d="M40 11l10 9-10 9" fill="none" stroke="#06b6d4" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M46 44H21" fill="none" stroke="url(#green)" stroke-width="6" stroke-linecap="round"/>
+  <path d="M24 35l-10 9 10 9" fill="none" stroke="#84cc16" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M24 31c0-6 4-10 9-10 3 0 6 1 8 3" fill="none" stroke="#172033" stroke-width="5" stroke-linecap="round"/>
+  <path d="M40 33c0 6-4 10-9 10-3 0-6-1-8-3" fill="none" stroke="#172033" stroke-width="5" stroke-linecap="round"/>
+</svg>

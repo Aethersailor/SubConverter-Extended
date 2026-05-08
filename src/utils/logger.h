@@ -30,6 +30,7 @@ enum
 };
 
 std::string getTime(int type);
+bool shouldLog(int level);
 void writeLog(int type, const std::string &content, int level = LOG_LEVEL_VERBOSE);
 std::string demangle(const char* name);
 

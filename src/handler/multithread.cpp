@@ -1,5 +1,6 @@
 #include <future>
 #include <thread>
+#include <utility>
 
 #include "handler/settings.h"
 #include "utils/network.h"
@@ -9,6 +10,13 @@
 
 //safety lock for multi-thread
 std::mutex on_emoji, on_rename, on_stream, on_time;
+
+static std::shared_future<std::string> make_ready_future(std::string value)
+{
+    std::promise<std::string> promise;
+    promise.set_value(std::move(value));
+    return promise.get_future().share();
+}
 
 RegexMatchConfigs safe_get_emojis()
 {
@@ -60,6 +68,15 @@ void safe_set_times(RegexMatchConfigs data)
 
 std::shared_future<std::string> fetchFileAsync(const std::string &path, const std::string &proxy, int cache_ttl, bool find_local, bool async)
 {
+    if(!async)
+    {
+        if(find_local && fileExist(path, true))
+            return make_ready_future(fileGet(path, true));
+        if(isLink(path))
+            return make_ready_future(webGet(path, proxy, cache_ttl));
+        return make_ready_future(std::string());
+    }
+
     std::shared_future<std::string> retVal;
     /*if(vfs::vfs_exist(path))
         retVal = std::async(std::launch::async, [path](){return vfs::vfs_get(path);});
@@ -69,8 +86,6 @@ std::shared_future<std::string> fetchFileAsync(const std::string &path, const st
         retVal = std::async(std::launch::async, [path, proxy, cache_ttl](){return webGet(path, proxy, cache_ttl);});
     else
         return std::async(std::launch::async, [](){return std::string();});
-    if(!async)
-        retVal.wait();
     return retVal;
 }
 

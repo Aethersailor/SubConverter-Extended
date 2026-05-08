@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Favicon proposal preview</title>
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: #f5f7fa;
+      color: #172033;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main {
+      display: grid;
+      gap: 24px;
+      padding: 32px;
+    }
+    h1 {
+      margin: 0 0 4px;
+      font-size: 20px;
+      font-weight: 700;
+    }
+    .group {
+      display: grid;
+      gap: 16px;
+    }
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+    }
+    .sample {
+      display: grid;
+      place-items: center;
+      width: 96px;
+      height: 72px;
+      border: 1px solid #d8dee8;
+      border-radius: 8px;
+      background: #fff;
+    }
+    .tab {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 260px;
+      height: 40px;
+      padding: 0 12px;
+      border-radius: 8px 8px 0 0;
+      background: #ffffff;
+      box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+      font-size: 14px;
+    }
+    .dark {
+      background: #0f172a;
+      color: #e2e8f0;
+    }
+    .label {
+      min-width: 70px;
+      color: #64748b;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="group">
+      <h1>Light mode</h1>
+      <div class="row">
+        <span class="label">16px</span>
+        <div class="sample"><img src="favicon-light-proposal.svg" width="16" height="16" alt=""></div>
+      </div>
+      <div class="row">
+        <span class="label">32px</span>
+        <div class="sample"><img src="favicon-light-proposal.svg" width="32" height="32" alt=""></div>
+      </div>
+      <div class="row">
+        <span class="label">64px</span>
+        <div class="sample"><img src="favicon-light-proposal.svg" width="64" height="64" alt=""></div>
+      </div>
+      <div class="row">
+        <span class="label">标签页</span>
+        <div class="tab">
+          <img src="favicon-light-proposal.svg" width="16" height="16" alt="">
+          <span>SubConverter-Extended</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="group">
+      <h1>Dark mode</h1>
+      <div class="row">
+        <span class="label">16px</span>
+        <div class="sample dark"><img src="favicon-dark-proposal.svg" width="16" height="16" alt=""></div>
+      </div>
+      <div class="row">
+        <span class="label">32px</span>
+        <div class="sample dark"><img src="favicon-dark-proposal.svg" width="32" height="32" alt=""></div>
+      </div>
+      <div class="row">
+        <span class="label">64px</span>
+        <div class="sample dark"><img src="favicon-dark-proposal.svg" width="64" height="64" alt=""></div>
+      </div>
+      <div class="row">
+        <span class="label">标签页</span>
+        <div class="tab dark">
+          <img src="favicon-dark-proposal.svg" width="16" height="16" alt="">
+          <span>SubConverter-Extended</span>
+        </div>
+      </div>
+    </div>
+  </main>
+</body>
+</html>

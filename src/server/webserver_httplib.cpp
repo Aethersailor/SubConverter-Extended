@@ -2,6 +2,9 @@
 #ifdef MALLOC_TRIM
 #include <malloc.h>
 #endif // MALLOC_TRIM
+#ifndef CPPHTTPLIB_LISTEN_BACKLOG
+#define CPPHTTPLIB_LISTEN_BACKLOG 10240
+#endif // CPPHTTPLIB_LISTEN_BACKLOG
 #define CPPHTTPLIB_REQUEST_URI_MAX_LENGTH 819200
 #define CPPHTTPLIB_HEADER_MAX_LENGTH 819200
 #define CPPHTTPLIB_FORM_URL_ENCODED_PAYLOAD_MAX_LENGTH 819200
@@ -119,14 +122,19 @@ int WebServer::start_web_server_multi(listener_args *args) {
                  });
   server.set_pre_routing_handler([&](const httplib::Request &req,
                                      httplib::Response &res) {
-    writeLog(0,
-             "Accept connection from client " + req.remote_addr + ":" +
-                 std::to_string(req.remote_port),
-             LOG_LEVEL_DEBUG);
-    writeLog(0,
-             "handle_cmd:    " + req.method + " handle_uri:    " + req.target,
-             LOG_LEVEL_VERBOSE);
-    writeLog(0, "handle_header: " + dump(req.headers), LOG_LEVEL_VERBOSE);
+    if (shouldLog(LOG_LEVEL_DEBUG)) {
+      writeLog(0,
+               "Accept connection from client " + req.remote_addr + ":" +
+                   std::to_string(req.remote_port),
+               LOG_LEVEL_DEBUG);
+    }
+    if (shouldLog(LOG_LEVEL_VERBOSE)) {
+      writeLog(0,
+               "handle_cmd:    " + req.method + " handle_uri:    " +
+                   req.target,
+               LOG_LEVEL_VERBOSE);
+      writeLog(0, "handle_header: " + dump(req.headers), LOG_LEVEL_VERBOSE);
+    }
 
     if (req.has_header("SubConverter-Request")) {
       res.status = 500;

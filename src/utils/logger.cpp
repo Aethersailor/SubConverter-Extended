@@ -1,3 +1,6 @@
+#include <atomic>
+#include <map>
+#include <mutex>
 #include <string>
 #include <iostream>
 #include <thread>
@@ -61,9 +64,14 @@ static std::string get_thread_name()
 
 std::mutex log_mutex;
 
+bool shouldLog(int level)
+{
+    return level <= global.logLevel;
+}
+
 void writeLog(int type, const std::string &content, int level)
 {
-    if(level > global.logLevel)
+    if(!shouldLog(level))
         return;
     std::lock_guard<std::mutex> lock(log_mutex);
     const char *levels[] = {"[FATL]", "[ERRO]", "[WARN]", "[INFO]", "[DEBG]", "[VERB]"};
