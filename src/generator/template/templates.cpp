@@ -350,10 +350,8 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                 continue;
             }
             if(startsWith(strLine, "FINAL"))
-                strLine.replace(0, 5, "MATCH");
-            strLine += "," + rule_group;
-            if(count_least(strLine, ',', 3))
-                strLine = regReplace(strLine, "^(.*?,.*?)(,.*)(,.*)$", "$1$3$2");
+                strLine = "MATCH";
+            strLine = appendClashRuleTarget(strLine, rule_group);
             rules.emplace_back(std::move(strLine));
             continue;
         }
@@ -458,28 +456,8 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                         strLine.erase(strLine.find("//"));
                         strLine = trimWhitespace(strLine);
                     }
-                    // 步骤4：按规则类型分类处理
-                    // AND/OR/NOT 复合规则：追加 rule_group
-                    if(startsWith(strLine, "AND") || startsWith(strLine, "OR") || startsWith(strLine, "NOT"))
-                    {
-                        rules.emplace_back(strLine + "," + rule_group);
-                    }
-                    // RULE-SET/SUB-RULE：直接写入，不追加 rule_group
-                    else if(startsWith(strLine, "RULE-SET") || startsWith(strLine, "SUB-RULE"))
-                    {
-                        rules.emplace_back(strLine);
-                    }
-                    else
-                    {
-                        // 普通规则：重新组装 类型,内容,策略组[,附加标志]
-                        vArray = split(strLine, ",");
-                        if(vArray.size() < 2)
-                            continue;
-                        std::string inline_rule = vArray[0] + "," + trim(vArray[1]) + "," + rule_group;
-                        if(vArray.size() > 2)
-                            inline_rule += "," + vArray[2];
-                        rules.emplace_back(std::move(inline_rule));
-                    }
+                    // 步骤4：追加策略组，保留 Mihomo 复合规则中带逗号的 payload
+                    rules.emplace_back(appendClashRuleTarget(strLine, rule_group));
                 }
                 else if(startsWith(strLine, "DOMAIN-KEYWORD,"))
                 {

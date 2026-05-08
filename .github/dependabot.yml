@@ -6,6 +6,8 @@ updates:
     target-branch: "dev"
     schedule:
       interval: "daily"
+    open-pull-requests-limit: 10
+    rebase-strategy: "auto"
     groups:
       actions:
         patterns:
@@ -21,6 +23,12 @@ updates:
     target-branch: "dev"
     schedule:
       interval: "daily"
+    open-pull-requests-limit: 10
+    rebase-strategy: "auto"
+    groups:
+      docker:
+        patterns:
+          - "*"
     labels:
       - "dependencies"
       - "docker"
@@ -32,6 +40,8 @@ updates:
     target-branch: "dev"
     schedule:
       interval: "daily"
+    open-pull-requests-limit: 10
+    rebase-strategy: "auto"
     groups:
       go-dependencies:
         patterns:

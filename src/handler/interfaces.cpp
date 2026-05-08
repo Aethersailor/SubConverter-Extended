@@ -1739,9 +1739,7 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
                                 return startsWith(strLine, type);
                               })) // remove unsupported types
           continue;
-        strLine += strArray[2];
-        if (count_least(strLine, ',', 3))
-          strLine = regReplace(strLine, "^(.*?,.*?)(,.*)(,.*)$", "$1$3$2");
+        strLine = appendClashRuleTarget(strLine, trim(strArray[2]));
         rule.push_back(strLine);
       }
       ss.clear();

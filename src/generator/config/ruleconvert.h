@@ -30,6 +30,7 @@ struct RulesetContent
 };
 
 std::string convertRuleset(const std::string &content, int type);
+std::string appendClashRuleTarget(const std::string &rule, const std::string &target, bool no_resolve_only = false);
 void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_content_array, bool overwrite_original_rules, bool new_field_name);
 std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_content_array, bool overwrite_original_rules, bool new_field_name);
 void rulesetToSurge(INIReader &base_rule, std::vector<RulesetContent> &ruleset_content_array, int surge_ver, bool overwrite_original_rules, const std::string& remote_path_prefix);
