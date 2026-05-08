@@ -1,7 +1,7 @@
 #include <iostream>
 #include <unistd.h>
 #include <sys/stat.h>
-//#include <mutex>
+#include <mutex>
 #include <thread>
 #include <atomic>
 
@@ -38,14 +38,41 @@ struct curl_progress_data
     long size_limit = 0L;
 };
 
-static inline void curl_init()
+static CURLcode curl_init()
 {
-    static bool init = false;
-    if(!init)
+    static std::once_flag init_flag;
+    static CURLcode init_result = CURLE_FAILED_INIT;
+    std::call_once(init_flag, []() {
+        init_result = curl_global_init(CURL_GLOBAL_ALL);
+    });
+    return init_result;
+}
+
+static std::string build_cache_key(const std::string &url, const std::string &proxy,
+                                   const string_icase_map *request_headers)
+{
+    if(proxy.empty() && (!request_headers || request_headers->empty()))
+        return getMD5(url);
+
+    std::string identity = "url:" + std::to_string(url.size()) + ":" + url;
+    identity += "\nproxy:" + std::to_string(proxy.size()) + ":" + proxy;
+    identity += "\nheaders:";
+    if(request_headers)
     {
-        curl_global_init(CURL_GLOBAL_ALL);
-        init = true;
+        for(const auto &header : *request_headers)
+        {
+            std::string name = toLower(header.first);
+            identity += "\n" + name + ":" + std::to_string(header.second.size()) + ":" +
+                        header.second;
+        }
+        if(!request_headers->contains("User-Agent"))
+        {
+            std::string default_user_agent = user_agent_str;
+            identity += "\nuser-agent:" + std::to_string(default_user_agent.size()) + ":" +
+                        default_user_agent;
+        }
     }
+    return getMD5(identity);
 }
 
 static int writer(char *data, size_t size, size_t nmemb, std::string *writerData)
@@ -149,11 +176,23 @@ static int curlGet(const FetchArgument &argument, FetchResult &result)
     std::string *data = result.content, new_url = argument.url;
     curl_slist *header_list = nullptr;
     defer(curl_slist_free_all(header_list);)
-    long retVal;
+    CURLcode retVal;
 
-    curl_init();
+    retVal = curl_init();
+    if(retVal != CURLE_OK)
+    {
+        *result.status_code = 0;
+        writeLog(0, "curl_global_init failed: " + std::string(curl_easy_strerror(retVal)), LOG_LEVEL_ERROR);
+        return 0;
+    }
 
     curl_handle = curl_easy_init();
+    if(curl_handle == nullptr)
+    {
+        *result.status_code = 0;
+        writeLog(0, "curl_easy_init failed.", LOG_LEVEL_ERROR);
+        return 0;
+    }
     if(!argument.proxy.empty())
     {
         if(startsWith(argument.proxy, "cors:"))
@@ -311,7 +350,7 @@ std::string webGet(const std::string &url, const std::string &proxy, unsigned in
     if(cache_ttl > 0)
     {
         md("cache");
-        const std::string url_md5 = getMD5(url);
+        const std::string url_md5 = build_cache_key(url, proxy, request_headers);
         const std::string path = "cache/" + url_md5, path_header = path + "_header";
         struct stat result {};
         if(stat(path.data(), &result) == 0) // cache exist

@@ -633,13 +633,13 @@ int main(int argc, char *argv[]) {
   // std::cout<<"Serving HTTP @
   // http://"<<listen_address<<":"<<listen_port<<std::endl;
   writeLog(0,
-           "Startup completed. Serving HTTP @ http://" + global.listenAddress +
-               ":" + std::to_string(global.listenPort),
+           "Starting HTTP server at http://" + global.listenAddress + ":" +
+               std::to_string(global.listenPort),
            LOG_LEVEL_INFO);
-  webServer.start_web_server_multi(&args);
+  int ret = webServer.start_web_server_multi(&args);
 
 #ifdef _WIN32
   WSACleanup();
 #endif // _WIN32
-  return 0;
+  return ret;
 }

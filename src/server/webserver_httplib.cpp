@@ -198,9 +198,21 @@ int WebServer::start_web_server_multi(listener_args *args) {
   server.new_task_queue = [args] {
     return new httplib::ThreadPool(args->max_workers);
   };
-  server.bind_to_port(args->listen_address, args->port, 0);
+  if (!server.bind_to_port(args->listen_address, args->port, 0)) {
+    writeLog(0,
+             "Failed to bind HTTP server at " + args->listen_address + ":" +
+                 std::to_string(args->port),
+             LOG_LEVEL_FATAL);
+    return 1;
+  }
 
-  std::thread thread([&]() { server.listen_after_bind(); });
+  std::thread thread([&]() {
+    if (!server.listen_after_bind() && !SERVER_EXIT_FLAG) {
+      writeLog(0, "HTTP server stopped before accepting requests.",
+               LOG_LEVEL_ERROR);
+      SERVER_EXIT_FLAG = true;
+    }
+  });
 
   while (!SERVER_EXIT_FLAG) {
     if (args->looper_callback) {
