@@ -231,7 +231,8 @@ void readRuleset(YAML::Node node, string_array &dest, bool scope_limit = true) {
 
 void refreshRulesets(RulesetConfigs &ruleset_list,
                      std::vector<RulesetContent> &ruleset_content_array) {
-  eraseElements(ruleset_content_array);
+  ruleset_content_array.clear();
+  ruleset_content_array.reserve(ruleset_list.size());
   std::string rule_group, rule_url, rule_url_typed, interval;
   RulesetContent rc;
 
@@ -277,7 +278,6 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
     }
     ruleset_content_array.emplace_back(std::move(rc));
   }
-  ruleset_content_array.shrink_to_fit();
 }
 
 void readYAMLConf(YAML::Node &node) {

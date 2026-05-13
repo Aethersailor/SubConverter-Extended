@@ -528,21 +528,24 @@ bool chkIgnore(const Proxy &node, string_array &exclude_remarks,
 void filterNodes(std::vector<Proxy> &nodes, string_array &exclude_remarks,
                  string_array &include_remarks, int groupID) {
   int node_index = 0;
-  std::vector<Proxy>::iterator iter = nodes.begin();
-  while (iter != nodes.end()) {
+  auto write_iter = nodes.begin();
+  for (auto iter = nodes.begin(); iter != nodes.end(); ++iter) {
     if (chkIgnore(*iter, exclude_remarks, include_remarks)) {
       writeLog(LOG_TYPE_INFO, "Node  " + iter->Group + " - " + iter->Remark +
                                   "  has been ignored and will not be added.");
-      nodes.erase(iter);
-    } else {
-      writeLog(LOG_TYPE_INFO, "Node  " + iter->Group + " - " + iter->Remark +
-                                  "  has been added.");
-      iter->Id = node_index;
-      iter->GroupId = groupID;
-      ++node_index;
-      ++iter;
+      continue;
     }
+
+    writeLog(LOG_TYPE_INFO, "Node  " + iter->Group + " - " + iter->Remark +
+                                "  has been added.");
+    iter->Id = node_index;
+    iter->GroupId = groupID;
+    ++node_index;
+    if (write_iter != iter)
+      *write_iter = std::move(*iter);
+    ++write_iter;
   }
+  nodes.erase(write_iter, nodes.end());
   /*
   std::vector<std::unique_ptr<pcre2_code, decltype(&pcre2_code_free)>>
   exclude_patterns, include_patterns;
