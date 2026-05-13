@@ -458,6 +458,159 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Prepare Release Notes Context
+        run: |
+          set -euo pipefail
+
+          git fetch --tags --force origin
+
+          CURRENT_TAG="${GITHUB_REF_NAME}"
+          CURRENT_COMMIT="$(git rev-list -n 1 "$CURRENT_TAG")"
+          PREVIOUS_TAG="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' "${CURRENT_COMMIT}^" 2>/dev/null || true)"
+          EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+          if [ -n "$PREVIOUS_TAG" ]; then
+            RANGE_LABEL="$PREVIOUS_TAG..$CURRENT_TAG"
+            git log --pretty=format:'- %h %s' "$PREVIOUS_TAG..$CURRENT_TAG" > commits.md
+            git diff --name-only "$PREVIOUS_TAG" "$CURRENT_TAG" > changed-files.md
+            git diff --stat "$PREVIOUS_TAG" "$CURRENT_TAG" > diffstat.md
+          else
+            RANGE_LABEL="$CURRENT_TAG"
+            git log --pretty=format:'- %h %s' "$CURRENT_TAG" > commits.md
+            git diff --name-only "$EMPTY_TREE" "$CURRENT_TAG^{tree}" > changed-files.md
+            git diff --stat "$EMPTY_TREE" "$CURRENT_TAG^{tree}" > diffstat.md
+          fi
+
+          {
+            echo "# Release Context"
+            echo
+            echo "Current tag: $CURRENT_TAG"
+            echo "Previous tag: ${PREVIOUS_TAG:-none}"
+            echo "Range: $RANGE_LABEL"
+            echo
+            echo "## Commits"
+            cat commits.md
+            echo
+            echo
+            echo "## Changed files"
+            sed 's/^/- /' changed-files.md
+            echo
+            echo
+            echo "## Diff stat"
+            cat diffstat.md
+          } > release-context.md
+
+          {
+            echo "## English"
+            echo
+            echo "### Changes"
+            if [ -s commits.md ]; then
+              cat commits.md
+            else
+              echo "- No commit summary was available."
+            fi
+            echo
+            echo "## 中文"
+            echo
+            echo "### 变更"
+            echo "本次发布包含以下提交："
+            if [ -s commits.md ]; then
+              cat commits.md
+            else
+              echo "- 未获取到提交摘要。"
+            fi
+          } > release-notes.fallback.md
+
+      - name: Check Copilot Token
+        id: copilot_token
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+        run: |
+          if [ -n "${COPILOT_GITHUB_TOKEN:-}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Node.js
+        if: steps.copilot_token.outputs.available == 'true'
+        uses: actions/setup-node@v4
+
+      - name: Generate Bilingual Release Notes with Copilot
+        if: steps.copilot_token.outputs.available == 'true'
+        continue-on-error: true
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          npm install -g @github/copilot
+
+          PROMPT="$(cat <<'EOF'
+          You are writing release notes for SubConverter-Extended.
+
+          Use only the release context provided below. Do not invent features, fixes, platforms, or compatibility claims.
+          Summarize user-visible changes first. Mention maintenance or dependency changes only when relevant.
+          Ignore auto-generated files unless the context shows they affect users.
+
+          Return only Markdown. Do not wrap the answer in a code fence.
+          Do not include a downloads section; it will be appended by the workflow.
+
+          Required format:
+
+          ## English
+
+          ### Highlights
+          - ...
+
+          ### Changes
+          - ...
+
+          ## 中文
+
+          ### 亮点
+          - ...
+
+          ### 变更
+          - ...
+
+          Omit empty sections. Keep each language concise and accurate.
+          EOF
+          )"
+
+          PROMPT="$PROMPT
+
+          $(cat release-context.md)"
+
+          copilot -p "$PROMPT" --no-ask-user > release-notes.ai.md
+          grep -q '[[:alnum:]]' release-notes.ai.md
+
+      - name: Assemble Release Notes
+        run: |
+          set -euo pipefail
+
+          if [ -s release-notes.ai.md ]; then
+            cp release-notes.ai.md release-notes.md
+            echo "Using Copilot-generated release notes."
+          else
+            cp release-notes.fallback.md release-notes.md
+            echo "Using fallback release notes."
+          fi
+
+          cat >> release-notes.md <<'EOF'
+
+          ## Downloads
+
+          ### Linux (portable, glibc runtime bundled)
+          - **amd64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-amd64.tar.gz`
+          - **arm64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-arm64.tar.gz`
+          EOF
+
       - name: Download all artifacts
         uses: actions/download-artifact@v8
         with:
@@ -470,9 +623,4 @@ jobs:
         with:
           files: |
             artifacts/linux-*/*.tar.gz
-          body: |
-            ## 📦 Downloads
-
-            ### Linux (portable, glibc runtime bundled)
-            - **amd64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-amd64.tar.gz`
-            - **arm64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-arm64.tar.gz`
+          body_path: release-notes.md

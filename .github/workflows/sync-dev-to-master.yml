@@ -2,6 +2,15 @@ name: Sync Dev to Master
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag, e.g. v1.2.3. Leave empty to auto bump patch."
+        required: false
+        type: string
+
+concurrency:
+  group: sync-dev-to-master
+  cancel-in-progress: false
 
 jobs:
   sync-branches:
@@ -63,4 +72,54 @@ jobs:
             echo "Pushing..."
             git push origin master
           fi
+
+      - name: Create and Push Release Tag
+        env:
+          REQUESTED_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+
+          git fetch --tags --force origin
+
+          REQUESTED_VERSION="${REQUESTED_VERSION:-}"
+          REQUESTED_VERSION="${REQUESTED_VERSION#"${REQUESTED_VERSION%%[![:space:]]*}"}"
+          REQUESTED_VERSION="${REQUESTED_VERSION%"${REQUESTED_VERSION##*[![:space:]]}"}"
+
+          if [ -n "$REQUESTED_VERSION" ]; then
+            TAG_NAME="$REQUESTED_VERSION"
+            if [[ "$TAG_NAME" != v* ]]; then
+              TAG_NAME="v$TAG_NAME"
+            fi
+            echo "Using manually requested release tag: $TAG_NAME"
+          else
+            LATEST_TAG="$(git tag --list 'v*.*.*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
+
+            if [ -z "$LATEST_TAG" ]; then
+              TAG_NAME="v0.1.0"
+              echo "No existing vX.Y.Z tag found. Starting at $TAG_NAME"
+            else
+              VERSION="${LATEST_TAG#v}"
+              IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+              TAG_NAME="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+              echo "Auto bumped release tag from $LATEST_TAG to $TAG_NAME"
+            fi
+          fi
+
+          if [[ ! "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid release tag '$TAG_NAME'. Use vX.Y.Z, for example v1.2.3."
+            exit 1
+          fi
+
+          if git rev-parse -q --verify "refs/tags/$TAG_NAME" >/dev/null; then
+            echo "::error::Tag '$TAG_NAME' already exists locally."
+            exit 1
+          fi
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG_NAME" >/dev/null 2>&1; then
+            echo "::error::Tag '$TAG_NAME' already exists on origin."
+            exit 1
+          fi
+
+          git tag -a "$TAG_NAME" -m "Release $TAG_NAME"
+          git push origin "$TAG_NAME"
 
