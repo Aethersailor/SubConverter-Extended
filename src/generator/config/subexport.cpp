@@ -958,7 +958,8 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
       single_provider["type"] = "http";
       single_provider["url"] = p.url;
       single_provider["interval"] = p.interval;
-      single_provider["proxy"] = "DIRECT"; // 添加 proxy 字段
+      if (ext.provider_proxy_direct)
+        single_provider["proxy"] = "DIRECT";
       single_provider["path"] = p.path;
 
       // 添加过滤器

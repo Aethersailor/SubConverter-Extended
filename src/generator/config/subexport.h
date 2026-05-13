@@ -55,6 +55,7 @@ struct extra_settings {
   std::string clash_proxies_style = "flow";
   std::string clash_proxy_groups_style = "flow";
   bool use_proxy_provider = true;       // 默认启用 proxy-provider 模式
+  bool provider_proxy_direct = true;    // proxy-provider 默认使用 DIRECT 更新
   std::vector<ProxyProvider> providers; // provider 列表
   bool authorized = false;
 

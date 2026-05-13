@@ -169,7 +169,10 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS) {
   if (url.empty() || type.empty() || (type_int == 2 && group.empty()) ||
       (type_int < 1 || type_int > 6)) {
     *status_code = 400;
-    return "Invalid request!";
+    return "Invalid request: missing or invalid ruleset parameters.\n"
+           "无效请求：规则集参数缺失或无效。\n"
+           "Required: url and type=1..6; group is required when type=2.\n"
+           "必须提供 url 和 type=1..6；当 type=2 时还必须提供 group。";
   }
 
   std::string proxy = parseProxy(global.proxyRuleset);
@@ -186,7 +189,12 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS) {
 
   if (output_content.empty()) {
     *status_code = 400;
-    return "Invalid request!";
+    return "Invalid request: no valid rules were found in the supplied "
+           "ruleset source.\n"
+           "无效请求：提供的规则集来源中未找到有效规则。\n"
+           "Please check whether the URL is reachable and the ruleset type "
+           "matches the content.\n"
+           "请检查链接是否可访问，以及规则集类型是否与内容匹配。";
   }
 
   std::string strLine;
@@ -621,7 +629,14 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
     break;
   default:
     *status_code = 400;
-    return "Invalid target!";
+    return "Invalid request: unsupported target value.\n"
+           "无效请求：不支持的 target 参数值。\n"
+           "Supported targets: clash, clashr, surge, quan, quanx, loon, "
+           "surfboard, mellow, singbox, ss, ssd, ssr, sssub, v2ray, trojan, "
+           "mixed.\n"
+           "支持的 target：clash、clashr、surge、quan、quanx、loon、"
+           "surfboard、mellow、singbox、ss、ssd、ssr、sssub、v2ray、trojan、"
+           "mixed。";
   }
   // check if we need to read configuration
   if (global.reloadConfOnRequest &&
@@ -665,7 +680,8 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
           argAppendUserinfo = getUrlArg(argument, "append_info");
   tribool argPrependInsert = getUrlArg(argument, "prepend"),
           argGenClassicalRuleProvider = getUrlArg(argument, "classic"),
-          argTLS13 = getUrlArg(argument, "tls13");
+          argTLS13 = getUrlArg(argument, "tls13"),
+          argProviderProxyDirect = getUrlArg(argument, "provider_proxy_direct");
 
   std::string base_content, output_content;
   ProxyGroupConfigs lCustomProxyGroups = global.customProxyGroups;
@@ -686,8 +702,13 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
   if (std::find(gRegexBlacklist.cbegin(), gRegexBlacklist.cend(),
                 argIncludeRemark) != gRegexBlacklist.cend() ||
       std::find(gRegexBlacklist.cbegin(), gRegexBlacklist.cend(),
-                argExcludeRemark) != gRegexBlacklist.cend())
-    return "Invalid request!";
+                argExcludeRemark) != gRegexBlacklist.cend()) {
+    *status_code = 400;
+    return "Invalid request: include or exclude filter is not allowed.\n"
+           "无效请求：include 或 exclude 过滤条件不被允许。\n"
+           "Please remove blocked filter patterns and try again.\n"
+           "请移除被拦截的过滤表达式后重试。";
+  }
 
   /// for external configuration
   std::string lClashBase = global.clashBase, lSurgeBase = global.surgeBase,
@@ -705,7 +726,11 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
   if ((argUrl.empty() && !(!global.insertUrls.empty() && argEnableInsert)) ||
       argTarget.empty()) {
     *status_code = 400;
-    return "Invalid request!";
+    return "Invalid request: missing required target or url parameter.\n"
+           "无效请求：缺少必需的 target 或 url 参数。\n"
+           "Please provide target and url; url may be omitted only when "
+           "configured insert nodes are enabled.\n"
+           "请提供 target 和 url；只有启用已配置的插入节点时才能省略 url。";
   }
 
   /// load request arguments as template variables
@@ -765,6 +790,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
   ext.clash_new_field_name = argClashNewField.get(global.clashUseNewField);
   ext.clash_script = argGenClashScript.get();
   ext.clash_classical_ruleset = argGenClassicalRuleProvider.get();
+  ext.provider_proxy_direct = argProviderProxyDirect.get(true);
   // 无论 expand 取何值，均强制使用 Mihomo 新字段名（proxy-groups / rules）
   // 避免因全局配置为旧字段名而导致 Mihomo 无法识别
   ext.clash_new_field_name = true;
@@ -1008,7 +1034,14 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
               LOG_LEVEL_WARNING);
         else {
           *status_code = 400;
-          return "The following link doesn't contain any valid node info: " + x;
+          return "Invalid request: this link does not contain any supported "
+                 "proxy nodes.\n"
+                 "无效请求：该链接不包含任何受支持的代理节点。\n"
+                 "Please check whether the link is reachable and the node URI "
+                 "format is supported.\n"
+                 "请检查链接是否可访问，以及节点 URI 格式是否受支持。\n"
+                 "Link / 链接: " +
+                 x;
         }
       }
       groupID--;
@@ -1186,7 +1219,12 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
   // 对于 proxy-provider 模式，允许 nodes 为空（节点从 provider 获取）
   if (nodes.empty() && insert_nodes.empty() && ext.providers.empty()) {
     *status_code = 400;
-    return "No nodes were found!";
+    return "Invalid request: no valid proxy nodes or proxy providers were "
+           "found.\n"
+           "无效请求：未找到有效的代理节点或代理提供者。\n"
+           "Please check whether the subscription URL or node URI format is "
+           "supported, and whether filters excluded all nodes.\n"
+           "请检查订阅链接或节点 URI 格式是否受支持，以及过滤规则是否排除了所有节点。";
   }
   if (!subInfo.empty() && argAppendUserinfo.get(global.appendUserinfo))
     response.headers.emplace("Subscription-UserInfo", subInfo);
@@ -1502,7 +1540,11 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
   default:
     writeLog(0, "Generate target: Unspecified", LOG_LEVEL_INFO);
     *status_code = 500;
-    return "Unrecognized target";
+    return "Internal error: target passed validation but no generator handled "
+           "it.\n"
+           "内部错误：target 已通过校验，但没有对应的生成器处理它。\n"
+           "Please report this request to the service maintainer.\n"
+           "请将该请求反馈给服务维护者。";
   }
   writeLog(0, "Generate completed.", LOG_LEVEL_INFO);
   if (!argFilename.empty())
@@ -1520,12 +1562,18 @@ std::string simpleToClashR(RESPONSE_CALLBACK_ARGS) {
   std::string url = argument.size() <= 8 ? "" : argument.substr(8);
   if (url.empty() || argument.substr(0, 8) != "sublink=") {
     *status_code = 400;
-    return "Invalid request!";
+    return "Invalid request: missing sublink parameter.\n"
+           "无效请求：缺少 sublink 参数。\n"
+           "Please call this endpoint as /sub2clashr?sublink=<subscription-url>.\n"
+           "请使用 /sub2clashr?sublink=<订阅链接> 调用该接口。";
   }
   if (url == "sublink") {
     *status_code = 400;
-    return "Please insert your subscription link instead of clicking the "
-           "default link.";
+    return "Invalid request: the default placeholder was not replaced with a "
+           "subscription link.\n"
+           "无效请求：默认占位符没有被替换为订阅链接。\n"
+           "Please provide a real subscription URL in the sublink parameter.\n"
+           "请在 sublink 参数中提供真实订阅链接。";
   }
   request.argument.emplace("target", "clashr");
   request.argument.emplace("url", urlEncode(url));
@@ -1551,12 +1599,19 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
     url = global.defaultUrls;
   if (url.empty() || argument.substr(0, 5) != "link=") {
     *status_code = 400;
-    return "Invalid request!";
+    return "Invalid request: missing link parameter.\n"
+           "无效请求：缺少 link 参数。\n"
+           "Please call this endpoint as /surge2clash?link=<surge-config-url>.\n"
+           "请使用 /surge2clash?link=<Surge配置链接> 调用该接口。";
   }
   if (url == "link") {
     *status_code = 400;
-    return "Please insert your subscription link instead of clicking the "
-           "default link.";
+    return "Invalid request: the default placeholder was not replaced with a "
+           "Surge configuration link.\n"
+           "无效请求：默认占位符没有被替换为 Surge 配置链接。\n"
+           "Please provide a real Surge configuration URL in the link "
+           "parameter.\n"
+           "请在 link 参数中提供真实 Surge 配置链接。";
   }
   writeLog(0, "SurgeConfToClash called with url '" + url + "'.",
            LOG_LEVEL_INFO);
@@ -1580,8 +1635,11 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
   base_content = fetchFile(url, proxy, global.cacheConfig);
 
   if (ini.parse(base_content) != INIREADER_EXCEPTION_NONE) {
-    std::string errmsg =
-        "Parsing Surge config failed! Reason: " + ini.get_last_error();
+    std::string errmsg = "Invalid request: failed to parse Surge "
+                         "configuration.\n"
+                         "无效请求：Surge 配置解析失败。\n"
+                         "Reason / 原因: " +
+                         ini.get_last_error();
     // std::cerr<<errmsg<<"\n";
     writeLog(0, errmsg, LOG_LEVEL_ERROR);
     *status_code = 400;
@@ -1589,7 +1647,11 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
   }
   if (!ini.section_exist("Proxy") || !ini.section_exist("Proxy Group") ||
       !ini.section_exist("Rule")) {
-    std::string errmsg = "Incomplete surge config! Missing critical sections!";
+    std::string errmsg =
+        "Invalid request: incomplete Surge configuration.\n"
+        "无效请求：Surge 配置不完整。\n"
+        "Required sections: [Proxy], [Proxy Group], and [Rule].\n"
+        "必须包含以下配置段：[Proxy]、[Proxy Group] 和 [Rule]。";
     // std::cerr<<errmsg<<"\n";
     writeLog(0, errmsg, LOG_LEVEL_ERROR);
     *status_code = 400;
@@ -1655,7 +1717,14 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
                  LOG_LEVEL_WARNING);
       else {
         *status_code = 400;
-        return "The following link doesn't contain any valid node info: " + x;
+        return "Invalid request: this link does not contain any supported "
+               "proxy nodes.\n"
+               "无效请求：该链接不包含任何受支持的代理节点。\n"
+               "Please check whether the link is reachable and the node URI "
+               "format is supported.\n"
+               "请检查链接是否可访问，以及节点 URI 格式是否受支持。\n"
+               "Link / 链接: " +
+               x;
       }
     }
   }
@@ -1663,7 +1732,12 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
   // exit if found nothing
   if (nodes.empty()) {
     *status_code = 400;
-    return "No nodes were found!";
+    return "Invalid request: no valid proxy nodes were found in the Surge "
+           "configuration or its policy-path subscriptions.\n"
+           "无效请求：Surge 配置或其 policy-path 订阅中未找到有效代理节点。\n"
+           "Please check whether the source configuration contains supported "
+           "proxy entries.\n"
+           "请检查源配置中是否包含受支持的代理条目。";
   }
 
   extra_settings ext;
@@ -1768,7 +1842,8 @@ std::string getProfile(RESPONSE_CALLBACK_ARGS) {
   string_array profiles = split(name, "|");
   if (token.empty() || profiles.empty()) {
     *status_code = 403;
-    return "Forbidden";
+    return "Forbidden: missing profile name or access token.\n"
+           "禁止访问：缺少配置名称或访问令牌。";
   }
   std::string profile_content;
   name = profiles[0];
@@ -1781,7 +1856,10 @@ std::string getProfile(RESPONSE_CALLBACK_ARGS) {
     profile_content = fileGet(name, true);
   } else {
     *status_code = 404;
-    return "Profile not found";
+    return "Profile not found: the requested profile does not exist.\n"
+           "未找到配置：请求的 profile 不存在。\n"
+           "Profile / 配置: " +
+           name;
   }
   // std::cerr<<"Trying to load profile '" + name + "'.\n";
   writeLog(0, "Trying to load profile '" + name + "'.", LOG_LEVEL_INFO);
@@ -1792,7 +1870,10 @@ std::string getProfile(RESPONSE_CALLBACK_ARGS) {
     writeLog(0, "Load profile failed! Reason: " + ini.get_last_error(),
              LOG_LEVEL_ERROR);
     *status_code = 500;
-    return "Broken profile!";
+    return "Invalid profile: failed to parse profile content.\n"
+           "无效配置：profile 内容解析失败。\n"
+           "Reason / 原因: " +
+           ini.get_last_error();
   }
   // std::cerr<<"Trying to parse profile '" + name + "'.\n";
   writeLog(0, "Trying to parse profile '" + name + "'.", LOG_LEVEL_INFO);
@@ -1803,7 +1884,10 @@ std::string getProfile(RESPONSE_CALLBACK_ARGS) {
     writeLog(0, "Load profile failed! Reason: Empty Profile section",
              LOG_LEVEL_ERROR);
     *status_code = 500;
-    return "Broken profile!";
+    return "Invalid profile: [Profile] section is empty.\n"
+           "无效配置：[Profile] 配置段为空。\n"
+           "Please add at least one profile entry before requesting it.\n"
+           "请至少添加一个 profile 条目后再请求。";
   }
   // Token authentication has been disabled - these checks are removed
   // All authentication logic is now bypassed
@@ -2040,13 +2124,20 @@ std::string renderTemplate(RESPONSE_CALLBACK_ARGS) {
 
   if (!startsWith(path, global.templatePath) || !fileExist(path)) {
     *status_code = 404;
-    return "Not found";
+    return "Template not found or outside the allowed template directory.\n"
+           "未找到模板，或模板路径超出允许的模板目录。\n"
+           "Please provide a path under the configured template directory.\n"
+           "请提供位于已配置模板目录下的路径。";
   }
   std::string template_content =
       fetchFile(path, parseProxy(global.proxyConfig), global.cacheConfig);
   if (template_content.empty()) {
     *status_code = 400;
-    return "File empty or out of scope";
+    return "Invalid template: file is empty or cannot be read within the "
+           "allowed scope.\n"
+           "无效模板：文件为空，或无法在允许范围内读取。\n"
+           "Please check the template content and configured template path.\n"
+           "请检查模板内容和已配置的模板路径。";
   }
   template_args tpl_args;
   tpl_args.global_vars = global.templateVars;

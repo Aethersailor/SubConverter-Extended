@@ -138,7 +138,12 @@ int WebServer::start_web_server_multi(listener_args *args) {
 
     if (req.has_header("SubConverter-Request")) {
       res.status = 500;
-      res.set_content("Loop request detected!", "text/plain");
+      res.set_content("Internal error: loop request detected.\n"
+                      "内部错误：检测到循环请求。\n"
+                      "Please check subscription URLs and proxy settings to "
+                      "avoid routing the service back to itself.\n"
+                      "请检查订阅链接和代理设置，避免服务请求回到自身。",
+                      "text/plain");
       return httplib::Server::HandlerResponse::Handled;
     }
     res.set_header("Server", "subconverter/" VERSION " cURL/" LIBCURL_VERSION);
@@ -150,7 +155,9 @@ int WebServer::start_web_server_multi(listener_args *args) {
         res.status = 401;
         res.set_header("WWW-Authenticate",
                        "Basic realm=" + auth_realm + ", charset=\"UTF-8\"");
-        res.set_content("Unauthorized", "text/plain");
+        res.set_content("Unauthorized: missing or invalid credentials.\n"
+                        "未授权：认证凭据缺失或无效。",
+                        "text/plain");
         return httplib::Server::HandlerResponse::Handled;
       }
     }
@@ -188,9 +195,11 @@ int WebServer::start_web_server_multi(listener_args *args) {
       res.set_content(to_string(err), "text/plain");
     } catch (const std::exception &ex) {
       std::string return_data =
-          "Internal server error while processing request '" + req.target +
-          "'!\n";
-      return_data += "\n  exception: ";
+          "Internal server error while processing request.\n"
+          "处理请求时发生内部服务器错误。\n"
+          "Request / 请求: " +
+          req.target + "\n";
+      return_data += "\n  Exception / 异常: ";
       return_data += type(ex);
       return_data += "\n  what(): ";
       return_data += ex.what();
