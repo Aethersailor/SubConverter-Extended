@@ -539,7 +539,7 @@ jobs:
 
       - name: Set up Node.js
         if: steps.copilot_token.outputs.available == 'true'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
 
       - name: Generate Bilingual Release Notes with Copilot
         if: steps.copilot_token.outputs.available == 'true'
