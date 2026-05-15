@@ -1,5 +1,10 @@
 <div align="center">
 
+<p>
+  <img src="design/favicon-light-proposal.svg#gh-light-mode-only" alt="SubConverter-Extended icon" width="96" height="96">
+  <img src="design/favicon-dark-proposal.svg#gh-dark-mode-only" alt="SubConverter-Extended icon" width="96" height="96">
+</p>
+
 # SubConverter-Extended
 
 **A Modern Evolution of subconverter**
