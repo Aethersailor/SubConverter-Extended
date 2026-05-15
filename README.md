@@ -352,6 +352,54 @@ managed_config_prefix = "http://localhost:25500"  # 托管配置前缀
 
 非本机部署时，请将该项修改为 SubConverter-Extended 实际部署机的 IP 地址或域名。
 
+### 安全档位
+
+从本版本开始，主配置文件支持 `[security]` 安全档位，用于区分内网自用部署和公网暴露部署。
+
+默认值为 `lan`，保持历史行为不变，适合家庭内网、NAS、软路由、旁路由、Docker 内网等自用场景。该档位允许访问本地资源、私有网段资源和 fake-ip 资源，因此现有部署通常无需额外修改配置。
+
+公网部署建议显式切换为 `public`：
+
+```toml
+[security]
+profile = "public"
+allow_public_upload = false
+```
+
+INI 配置示例：
+
+```ini
+[security]
+profile=public
+allow_public_upload=false
+```
+
+Docker 环境变量示例：
+
+```bash
+docker run -d \
+  --name SubConverter-Extended \
+  -p 25500:25500 \
+  -e SUBCONVERTER_SECURITY_PROFILE=public \
+  -e SUBCONVERTER_ALLOW_PUBLIC_UPLOAD=false \
+  --restart unless-stopped \
+  aethersailor/subconverter-extended:latest
+```
+
+| 配置项 / 环境变量 | 默认值 | 说明 |
+| :--- | :--- | :--- |
+| `security.profile` / `SUBCONVERTER_SECURITY_PROFILE` | `lan` | 可选值：`lan`、`public`、`strict` |
+| `security.allow_public_upload` / `SUBCONVERTER_ALLOW_PUBLIC_UPLOAD` | `false` | 仅 `public` 档位生效，用于显式允许公开请求触发上传 |
+
+档位说明：
+
+* `lan`：默认档位，保持旧行为，适合可信内网自用部署。
+* `public`：公网推荐档位。限制公开请求参数、远程外部配置、公开 `!!import` 等不可信来源访问本地、私网和 fake-ip 字面量；项目自带本地模板、部署者配置的默认模板与可信本地配置仍可正常使用。
+* `strict`：在 `public` 的基础上，始终禁止公开请求触发上传，即使设置 `allow_public_upload=true` 也不会放行。
+
+> [!NOTE]
+> `public` 档位不会阻止正常域名在 OpenClash fake-ip DNS 环境下解析到 `198.18.0.0/15` 后继续访问；但会阻止请求方直接传入 `127.0.0.1`、私有地址或 fake-ip 字面量作为抓取目标。
+
 ---
 
 ## 🔍 Docker Hub 镜像标签
