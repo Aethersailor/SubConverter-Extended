@@ -248,6 +248,12 @@ static bool is_blocked_ipv4(const std::string &address)
            ip == 0xffffffffu;
 }
 
+static bool is_fake_ipv4(const std::string &address)
+{
+    uint32_t ip = 0;
+    return parse_ipv4_address(address, ip) && ipv4_in_cidr(ip, 0xc6120000u, 15);
+}
+
 static bool is_blocked_ipv6(const std::string &address)
 {
     std::string value = toLower(trimWhitespace(address, true, true));
@@ -264,8 +270,11 @@ static bool is_blocked_ipv6(const std::string &address)
     return false;
 }
 
-static bool is_blocked_ip_address(const std::string &address)
+static bool is_blocked_ip_address(const std::string &address,
+                                  bool allow_fake_ip = false)
 {
+    if(allow_fake_ip && is_fake_ipv4(address))
+        return false;
     return is_blocked_ipv4(address) || is_blocked_ipv6(address);
 }
 
@@ -313,7 +322,7 @@ bool isFetchUrlAllowed(const std::string &url, FetchContext context)
     }
 
     std::string resolved = hostnameToIPAddr(host);
-    if(!resolved.empty() && is_blocked_ip_address(resolved))
+    if(!resolved.empty() && is_blocked_ip_address(resolved, true))
     {
         writeLog(0,
                  "Blocked public fetch because host resolves to local/private "
@@ -332,7 +341,7 @@ static int public_fetch_prereq_callback(void *clientp, char *conn_primary_ip,
 {
     FetchContext *context = static_cast<FetchContext *>(clientp);
     if(context && isPublicFetchRestricted(*context) && conn_primary_ip &&
-       is_blocked_ip_address(conn_primary_ip))
+       is_blocked_ip_address(conn_primary_ip, true))
     {
         writeLog(0,
                  "Blocked public fetch connection to local/private address: " +
