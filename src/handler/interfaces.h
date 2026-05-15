@@ -7,11 +7,14 @@
 
 #include "config/ruleset.h"
 #include "generator/config/subexport.h"
+#include "handler/fetch_context.h"
 #include "server/webserver.h"
 
 std::string parseProxy(const std::string &source);
 
-void refreshRulesets(RulesetConfigs &ruleset_list, std::vector<RulesetContent> &rca);
+void refreshRulesets(RulesetConfigs &ruleset_list,
+                     std::vector<RulesetContent> &rca,
+                     FetchContext context = FetchContext::TrustedConfig);
 void readConf();
 int simpleGenerator();
 std::string convertRuleset(const std::string &content, int type);

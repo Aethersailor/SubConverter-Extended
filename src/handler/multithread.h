@@ -7,6 +7,7 @@
 #include <yaml-cpp/yaml.h>
 
 #include "config/regmatch.h"
+#include "handler/fetch_context.h"
 #include "utils/ini_reader/ini_reader.h"
 #include "utils/string.h"
 
@@ -22,7 +23,12 @@ void safe_set_emojis(RegexMatchConfigs data);
 void safe_set_renames(RegexMatchConfigs data);
 void safe_set_streams(RegexMatchConfigs data);
 void safe_set_times(RegexMatchConfigs data);
-std::shared_future<std::string> fetchFileAsync(const std::string &path, const std::string &proxy, int cache_ttl, bool find_local = true, bool async = false);
-std::string fetchFile(const std::string &path, const std::string &proxy, int cache_ttl, bool find_local = true);
+std::shared_future<std::string> fetchFileAsync(
+    const std::string &path, const std::string &proxy, int cache_ttl,
+    bool find_local = true, bool async = false,
+    FetchContext context = FetchContext::TrustedConfig);
+std::string fetchFile(const std::string &path, const std::string &proxy,
+                      int cache_ttl, bool find_local = true,
+                      FetchContext context = FetchContext::TrustedConfig);
 
 #endif // MULTITHREAD_H_INCLUDED

@@ -175,13 +175,12 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS) {
            "必须提供 url 和 type=1..6；当 type=2 时还必须提供 group。";
   }
 
-  std::string proxy = parseProxy(global.proxyRuleset);
   string_array vArray = split(url, "|");
   for (std::string &x : vArray)
     x.insert(0, "ruleset,");
   std::vector<RulesetContent> rca;
   RulesetConfigs confs = INIBinding::from<RulesetConfig>::from_ini(vArray);
-  refreshRulesets(confs, rca);
+  refreshRulesets(confs, rca, FetchContext::PublicRequest);
   for (RulesetContent &x : rca) {
     std::string content = x.rule_content.get();
     output_content += convertRuleset(content, x.rule_type);
@@ -328,9 +327,21 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS) {
   return output_content;
 }
 
-void checkExternalBase(const std::string &path, std::string &dest) {
-  if (isLink(path) || (startsWith(path, global.basePath) && fileExist(path)))
+bool checkExternalBase(const std::string &path, std::string &dest,
+                       FetchContext context) {
+  if (path.empty())
+    return false;
+  if (isLink(path)) {
+    if (!isFetchUrlAllowed(path, context))
+      return false;
     dest = path;
+    return true;
+  }
+  if (fileExist(path, true) && isTrustedLocalResourcePath(path)) {
+    dest = path;
+    return true;
+  }
+  return false;
 }
 
 static bool hasEffectiveExternalConfig(const ExternalConfig &extconf,
@@ -810,6 +821,12 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
 
   /// load external configuration
   std::string userProvidedConfig = getUrlArg(argument, "config");
+  bool userProvidedExternalConfig = !argExternalConfig.empty();
+  FetchContext externalConfigContext =
+      userProvidedExternalConfig ? FetchContext::PublicRequest
+                                 : FetchContext::TrustedConfig;
+  FetchContext rulesetFetchContext = FetchContext::TrustedConfig;
+  FetchContext baseFetchContext = FetchContext::TrustedConfig;
   bool configLoadSuccess = false;
   string_map tpl_args_base = tpl_args.local_vars;
 
@@ -822,24 +839,45 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
              LOG_LEVEL_INFO);
     ExternalConfig extconf;
     extconf.tpl_args = &tpl_args;
-    int load_result = loadExternalConfig(argExternalConfig, extconf);
+    int load_result =
+        loadExternalConfig(argExternalConfig, extconf, externalConfigContext);
     if (load_result == 0 &&
         hasEffectiveExternalConfig(extconf, tpl_args, tpl_args_base)) {
       configLoadSuccess = true;
       if (!ext.nodelist) {
-        checkExternalBase(extconf.sssub_rule_base, lSSSubBase);
+        if (checkExternalBase(extconf.sssub_rule_base, lSSSubBase,
+                              externalConfigContext))
+          baseFetchContext = externalConfigContext;
         if (!lSimpleSubscription) {
-          checkExternalBase(extconf.clash_rule_base, lClashBase);
-          checkExternalBase(extconf.surge_rule_base, lSurgeBase);
-          checkExternalBase(extconf.surfboard_rule_base, lSurfboardBase);
-          checkExternalBase(extconf.mellow_rule_base, lMellowBase);
-          checkExternalBase(extconf.quan_rule_base, lQuanBase);
-          checkExternalBase(extconf.quanx_rule_base, lQuanXBase);
-          checkExternalBase(extconf.loon_rule_base, lLoonBase);
-          checkExternalBase(extconf.singbox_rule_base, lSingBoxBase);
+          if (checkExternalBase(extconf.clash_rule_base, lClashBase,
+                                externalConfigContext))
+            baseFetchContext = externalConfigContext;
+          if (checkExternalBase(extconf.surge_rule_base, lSurgeBase,
+                                externalConfigContext))
+            baseFetchContext = externalConfigContext;
+          if (checkExternalBase(extconf.surfboard_rule_base, lSurfboardBase,
+                                externalConfigContext))
+            baseFetchContext = externalConfigContext;
+          if (checkExternalBase(extconf.mellow_rule_base, lMellowBase,
+                                externalConfigContext))
+            baseFetchContext = externalConfigContext;
+          if (checkExternalBase(extconf.quan_rule_base, lQuanBase,
+                                externalConfigContext))
+            baseFetchContext = externalConfigContext;
+          if (checkExternalBase(extconf.quanx_rule_base, lQuanXBase,
+                                externalConfigContext))
+            baseFetchContext = externalConfigContext;
+          if (checkExternalBase(extconf.loon_rule_base, lLoonBase,
+                                externalConfigContext))
+            baseFetchContext = externalConfigContext;
+          if (checkExternalBase(extconf.singbox_rule_base, lSingBoxBase,
+                                externalConfigContext))
+            baseFetchContext = externalConfigContext;
 
-          if (!extconf.surge_ruleset.empty())
+          if (!extconf.surge_ruleset.empty()) {
             lCustomRulesets = extconf.surge_ruleset;
+            rulesetFetchContext = externalConfigContext;
+          }
           if (!extconf.custom_proxy_group.empty())
             lCustomProxyGroups = extconf.custom_proxy_group;
           ext.enable_rule_generator = extconf.enable_rule_generator;
@@ -884,23 +922,33 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
         tpl_args.local_vars = tpl_args_base;
         ExternalConfig extconf;
         extconf.tpl_args = &tpl_args;
-        int fallback_result = loadExternalConfig(fallbackUrl, extconf);
+        int fallback_result =
+            loadExternalConfig(fallbackUrl, extconf, FetchContext::TrustedConfig);
         if (fallback_result == 0 &&
             hasEffectiveExternalConfig(extconf, tpl_args, tpl_args_base)) {
           writeLog(0, "Successfully loaded config from: " + fallbackUrl,
                    LOG_LEVEL_INFO);
           configLoadSuccess = true;
           if (!ext.nodelist) {
-            checkExternalBase(extconf.sssub_rule_base, lSSSubBase);
+            checkExternalBase(extconf.sssub_rule_base, lSSSubBase,
+                              FetchContext::TrustedConfig);
             if (!lSimpleSubscription) {
-              checkExternalBase(extconf.clash_rule_base, lClashBase);
-              checkExternalBase(extconf.surge_rule_base, lSurgeBase);
-              checkExternalBase(extconf.surfboard_rule_base, lSurfboardBase);
-              checkExternalBase(extconf.mellow_rule_base, lMellowBase);
-              checkExternalBase(extconf.quan_rule_base, lQuanBase);
-              checkExternalBase(extconf.quanx_rule_base, lQuanXBase);
-              checkExternalBase(extconf.loon_rule_base, lLoonBase);
-              checkExternalBase(extconf.singbox_rule_base, lSingBoxBase);
+              checkExternalBase(extconf.clash_rule_base, lClashBase,
+                                FetchContext::TrustedConfig);
+              checkExternalBase(extconf.surge_rule_base, lSurgeBase,
+                                FetchContext::TrustedConfig);
+              checkExternalBase(extconf.surfboard_rule_base, lSurfboardBase,
+                                FetchContext::TrustedConfig);
+              checkExternalBase(extconf.mellow_rule_base, lMellowBase,
+                                FetchContext::TrustedConfig);
+              checkExternalBase(extconf.quan_rule_base, lQuanBase,
+                                FetchContext::TrustedConfig);
+              checkExternalBase(extconf.quanx_rule_base, lQuanXBase,
+                                FetchContext::TrustedConfig);
+              checkExternalBase(extconf.loon_rule_base, lLoonBase,
+                                FetchContext::TrustedConfig);
+              checkExternalBase(extconf.singbox_rule_base, lSingBoxBase,
+                                FetchContext::TrustedConfig);
 
               if (!extconf.surge_ruleset.empty())
                 lCustomRulesets = extconf.surge_ruleset;
@@ -957,12 +1005,13 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
       if (!argCustomRulesets.empty() && !ext.nodelist) {
         string_array vArray = split(argCustomRulesets, "@");
         lCustomRulesets = INIBinding::from<RulesetConfig>::from_ini(vArray);
+        rulesetFetchContext = FetchContext::PublicRequest;
       }
     }
   }
   if (ext.enable_rule_generator && !ext.nodelist && !lSimpleSubscription) {
     if (lCustomRulesets != global.customRulesets)
-      refreshRulesets(lCustomRulesets, lRulesetContent);
+      refreshRulesets(lCustomRulesets, lRulesetContent, rulesetFetchContext);
     else {
       if (global.updateRulesetOnRequest)
         refreshRulesets(global.customRulesets, global.rulesetsContent);
@@ -1017,6 +1066,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
   parse_set.sub_info = &subInfo;
   parse_set.authorized = authorized;
   parse_set.request_header = &request.headers;
+  parse_set.fetch_context = FetchContext::TrustedConfig;
   parse_set.js_runtime = ext.js_runtime;
   parse_set.js_context = ext.js_context;
 
@@ -1048,6 +1098,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
     }
   }
   urls = split(argUrl, "|");
+  parse_set.fetch_context = FetchContext::PublicRequest;
   groupID = 0;
 
   //  对于 Clash，区分节点链接和订阅链接
@@ -1184,7 +1235,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
                "Parsing " + std::to_string(node_urls.size()) +
                    " node links directly.",
                LOG_LEVEL_INFO);
-      importItems(node_urls, true);
+      importItems(node_urls, true, FetchContext::PublicRequest);
       // 关键：实际添加节点到 nodes 列表
       for (std::string &x : node_urls) {
         writeLog(0, "Fetching node data from url '" + x + "'.", LOG_LEVEL_INFO);
@@ -1200,7 +1251,8 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
     }
   } else {
     // 其他格式保持原有逻辑，完全展开节点
-    importItems(urls, true); // 只为非 proxy-provider 模式处理 import 语法
+    importItems(urls, true,
+                FetchContext::PublicRequest); // 只为非 proxy-provider 模式处理 import 语法
     for (std::string &x : urls) {
       x = regTrim(x);
       // std::cerr<<"Fetching node data from url '"<<x<<"'."<<std::endl;
@@ -1231,6 +1283,16 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
 
   if (request.method == "HEAD")
     return "";
+
+  if (argUpload && !isPublicUploadAllowed()) {
+    *status_code = 403;
+    return "Upload is disabled for the current security profile.\n"
+           "当前安全档位已禁用公开请求上传。\n"
+           "Use security.profile=lan for private deployments, or explicitly "
+           "enable security.allow_public_upload in public profile.\n"
+           "内网私有部署请使用 security.profile=lan；公网档位如确需上传，"
+           "请显式开启 security.allow_public_upload。";
+  }
 
   argPrependInsert.define(global.prependInsert);
   if (argPrependInsert) {
@@ -1334,8 +1396,10 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
       proxyToClash(nodes, yamlnode, dummy_group, argTarget == "clashr", ext);
       output_content = YAML::Dump(yamlnode);
     } else {
-      if (render_template(fetchFile(lClashBase, proxy, global.cacheConfig),
-                          tpl_args, base_content, global.templatePath) != 0) {
+      if (render_template(fetchFile(lClashBase, proxy, global.cacheConfig,
+                                    true, baseFetchContext),
+                          tpl_args, base_content, global.templatePath,
+                          baseFetchContext) != 0) {
         *status_code = 400;
         return base_content;
       }
@@ -1360,8 +1424,10 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
         uploadGist("surge" + argSurgeVer + "list", argUploadPath,
                    output_content, true);
     } else {
-      if (render_template(fetchFile(lSurgeBase, proxy, global.cacheConfig),
-                          tpl_args, base_content, global.templatePath) != 0) {
+      if (render_template(fetchFile(lSurgeBase, proxy, global.cacheConfig,
+                                    true, baseFetchContext),
+                          tpl_args, base_content, global.templatePath,
+                          baseFetchContext) != 0) {
         *status_code = 400;
         return base_content;
       }
@@ -1382,8 +1448,10 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
   case "surfboard"_hash:
     writeLog(0, "Generate target: Surfboard", LOG_LEVEL_INFO);
 
-    if (render_template(fetchFile(lSurfboardBase, proxy, global.cacheConfig),
-                        tpl_args, base_content, global.templatePath) != 0) {
+    if (render_template(fetchFile(lSurfboardBase, proxy, global.cacheConfig,
+                                  true, baseFetchContext),
+                        tpl_args, base_content, global.templatePath,
+                        baseFetchContext) != 0) {
       *status_code = 400;
       return base_content;
     }
@@ -1402,8 +1470,10 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
   case "mellow"_hash:
     writeLog(0, "Generate target: Mellow", LOG_LEVEL_INFO);
 
-    if (render_template(fetchFile(lMellowBase, proxy, global.cacheConfig),
-                        tpl_args, base_content, global.templatePath) != 0) {
+    if (render_template(fetchFile(lMellowBase, proxy, global.cacheConfig, true,
+                                  baseFetchContext),
+                        tpl_args, base_content, global.templatePath,
+                        baseFetchContext) != 0) {
       *status_code = 400;
       return base_content;
     }
@@ -1416,8 +1486,10 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
   case "sssub"_hash:
     writeLog(0, "Generate target: SS Subscription", LOG_LEVEL_INFO);
 
-    if (render_template(fetchFile(lSSSubBase, proxy, global.cacheConfig),
-                        tpl_args, base_content, global.templatePath) != 0) {
+    if (render_template(fetchFile(lSSSubBase, proxy, global.cacheConfig, true,
+                                  baseFetchContext),
+                        tpl_args, base_content, global.templatePath,
+                        baseFetchContext) != 0) {
       *status_code = 400;
       return base_content;
     }
@@ -1470,8 +1542,10 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
   case "quan"_hash:
     writeLog(0, "Generate target: Quantumult", LOG_LEVEL_INFO);
     if (!ext.nodelist) {
-      if (render_template(fetchFile(lQuanBase, proxy, global.cacheConfig),
-                          tpl_args, base_content, global.templatePath) != 0) {
+      if (render_template(fetchFile(lQuanBase, proxy, global.cacheConfig, true,
+                                    baseFetchContext),
+                          tpl_args, base_content, global.templatePath,
+                          baseFetchContext) != 0) {
         *status_code = 400;
         return base_content;
       }
@@ -1486,8 +1560,10 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
   case "quanx"_hash:
     writeLog(0, "Generate target: Quantumult X", LOG_LEVEL_INFO);
     if (!ext.nodelist) {
-      if (render_template(fetchFile(lQuanXBase, proxy, global.cacheConfig),
-                          tpl_args, base_content, global.templatePath) != 0) {
+      if (render_template(fetchFile(lQuanXBase, proxy, global.cacheConfig,
+                                    true, baseFetchContext),
+                          tpl_args, base_content, global.templatePath,
+                          baseFetchContext) != 0) {
         *status_code = 400;
         return base_content;
       }
@@ -1502,8 +1578,10 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
   case "loon"_hash:
     writeLog(0, "Generate target: Loon", LOG_LEVEL_INFO);
     if (!ext.nodelist) {
-      if (render_template(fetchFile(lLoonBase, proxy, global.cacheConfig),
-                          tpl_args, base_content, global.templatePath) != 0) {
+      if (render_template(fetchFile(lLoonBase, proxy, global.cacheConfig, true,
+                                    baseFetchContext),
+                          tpl_args, base_content, global.templatePath,
+                          baseFetchContext) != 0) {
         *status_code = 400;
         return base_content;
       }
@@ -1524,8 +1602,10 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
   case "singbox"_hash:
     writeLog(0, "Generate target: sing-box", LOG_LEVEL_INFO);
     if (!ext.nodelist) {
-      if (render_template(fetchFile(lSingBoxBase, proxy, global.cacheConfig),
-                          tpl_args, base_content, global.templatePath) != 0) {
+      if (render_template(fetchFile(lSingBoxBase, proxy, global.cacheConfig,
+                                    true, baseFetchContext),
+                          tpl_args, base_content, global.templatePath,
+                          baseFetchContext) != 0) {
         *status_code = 400;
         return base_content;
       }

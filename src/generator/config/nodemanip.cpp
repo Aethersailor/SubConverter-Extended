@@ -288,7 +288,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
       }
 
       strSub = webGet(link, proxy, global.cacheSubscription, &extra_headers,
-                      request_headers);
+                      request_headers, parse_set.fetch_context);
     }
     /*
     if(strSub.size() == 0)

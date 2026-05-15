@@ -10,6 +10,7 @@
 #endif // NO_JS_RUNTIME
 
 #include "config/regmatch.h"
+#include "handler/fetch_context.h"
 #include "parser/config/proxy.h"
 #include "utils/map_extra.h"
 #include "utils/string.h"
@@ -23,6 +24,7 @@ struct parse_settings
     RegexMatchConfigs *time_rules = nullptr;
     std::string *sub_info = nullptr;
     bool authorized = false;
+    FetchContext fetch_context = FetchContext::TrustedConfig;
     string_icase_map *request_header = nullptr;
 #ifndef NO_JS_RUNTIME
     qjs::Runtime *js_runtime = nullptr;

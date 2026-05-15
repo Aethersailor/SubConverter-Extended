@@ -304,6 +304,13 @@ int main(int argc, char *argv[]) {
   std::string env_port = getEnv("PORT");
   if (!env_port.empty())
     global.listenPort = to_int(env_port, global.listenPort);
+  if (global.securityProfile == "lan" &&
+      (global.listenAddress == "0.0.0.0" || global.listenAddress == "::")) {
+    writeLog(0,
+             "Security profile is lan while listening on all interfaces. "
+             "Use security.profile=public for Internet-facing deployments.",
+             LOG_LEVEL_WARNING);
+  }
   listener_args args = {global.listenAddress,   global.listenPort,
                         global.maxPendingConns, global.maxConcurThreads,
                         cron_tick_caller,       200};

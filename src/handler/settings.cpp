@@ -1,5 +1,6 @@
 #include <mutex>
 #include <string>
+#include <filesystem>
 
 #include "config/binding.h"
 #include "handler/webget.h"
@@ -10,6 +11,7 @@
 #include "settings.h"
 #include "utils/logger.h"
 #include "utils/network.h"
+#include "utils/system.h"
 
 // multi-thread lock
 std::mutex gMutexConfigure;
@@ -25,7 +27,83 @@ const std::map<std::string, ruleset_type> RulesetTypes = {
     {"quanx:", RULESET_QUANX},
     {"surge:", RULESET_SURGE}};
 
-int importItems(string_array &target, bool scope_limit) {
+static bool parseBoolSetting(const std::string &value) {
+  std::string normalized = toLower(trimWhitespace(value, true, true));
+  return normalized == "1" || normalized == "true" || normalized == "yes" ||
+         normalized == "on";
+}
+
+static bool pathInsideRoot(const std::string &path, const std::string &root) {
+  if (path.empty() || root.empty())
+    return false;
+  try {
+    std::filesystem::path absolute_path =
+        std::filesystem::weakly_canonical(std::filesystem::absolute(path));
+    std::filesystem::path absolute_root =
+        std::filesystem::weakly_canonical(std::filesystem::absolute(root));
+    std::filesystem::path relative =
+        std::filesystem::relative(absolute_path, absolute_root);
+    std::string rel = relative.generic_string();
+    return rel == "." ||
+           (!relative.is_absolute() && rel != ".." &&
+            !startsWith(rel, "../"));
+  } catch (std::exception &e) {
+    writeLog(0, e.what(), LOG_LEVEL_DEBUG);
+    return false;
+  }
+}
+
+static void finalizeSecuritySettings() {
+  std::string profile_override = getEnv("SUBCONVERTER_SECURITY_PROFILE");
+  if (!profile_override.empty())
+    global.securityProfile = profile_override;
+
+  std::string upload_override = getEnv("SUBCONVERTER_ALLOW_PUBLIC_UPLOAD");
+  if (!upload_override.empty())
+    global.allowPublicUpload = parseBoolSetting(upload_override);
+
+  global.securityProfile =
+      toLower(trimWhitespace(global.securityProfile, true, true));
+  if (global.securityProfile != "lan" && global.securityProfile != "public" &&
+      global.securityProfile != "strict") {
+    writeLog(0,
+             "Invalid security.profile '" + global.securityProfile +
+                 "', falling back to lan.",
+             LOG_LEVEL_WARNING);
+    global.securityProfile = "lan";
+  }
+
+  writeLog(0, "Security profile: " + global.securityProfile, LOG_LEVEL_INFO);
+}
+
+bool isPublicFetchRestricted(FetchContext context) {
+  return context == FetchContext::PublicRequest &&
+         (global.securityProfile == "public" ||
+          global.securityProfile == "strict");
+}
+
+bool isTrustedLocalResourcePath(const std::string &path) {
+  return pathInsideRoot(path, global.basePath) ||
+         pathInsideRoot(path, global.templatePath);
+}
+
+bool isPublicUploadAllowed() {
+  if (global.securityProfile == "lan")
+    return true;
+  if (global.securityProfile == "strict")
+    return false;
+  return global.allowPublicUpload;
+}
+
+static bool canImportLocalPath(const std::string &path, FetchContext context) {
+  if (!isPublicFetchRestricted(context) || isTrustedLocalResourcePath(path))
+    return true;
+  writeLog(0, "Blocked public request from importing local file: " + path,
+           LOG_LEVEL_WARNING);
+  return false;
+}
+
+int importItems(string_array &target, bool scope_limit, FetchContext context) {
   string_array result;
   std::stringstream ss;
   std::string path, content, strLine;
@@ -37,13 +115,15 @@ int importItems(string_array &target, bool scope_limit) {
     }
     path = x.substr(x.find(":") + 1);
     writeLog(0, "Trying to import items from " + path);
+    content.clear();
 
     std::string proxy = parseProxy(global.proxyConfig);
 
-    if (fileExist(path))
+    if (fileExist(path, scope_limit) && canImportLocalPath(path, context))
       content = fileGet(path, scope_limit);
     else if (isLink(path))
-      content = webGet(path, proxy, global.cacheConfig);
+      content = webGet(path, proxy, global.cacheConfig, nullptr, nullptr,
+                       context);
     else
       writeLog(0, "File not found or not a valid URL: " + path,
                LOG_LEVEL_ERROR);
@@ -77,7 +157,8 @@ toml::value parseToml(const std::string &content, const std::string &fname) {
 }
 
 void importItems(std::vector<toml::value> &root, const std::string &import_key,
-                 bool scope_limit = true) {
+                 bool scope_limit = true,
+                 FetchContext context = FetchContext::TrustedConfig) {
   std::string content;
   std::vector<toml::value> newRoot;
   auto iter = root.begin();
@@ -91,10 +172,12 @@ void importItems(std::vector<toml::value> &root, const std::string &import_key,
     else {
       const std::string &path = toml::get<std::string>(table.at("import"));
       writeLog(0, "Trying to import items from " + path);
-      if (fileExist(path))
+      content.clear();
+      if (fileExist(path, scope_limit) && canImportLocalPath(path, context))
         content = fileGet(path, scope_limit);
       else if (isLink(path))
-        content = webGet(path, proxy, global.cacheConfig);
+        content = webGet(path, proxy, global.cacheConfig, nullptr, nullptr,
+                         context);
       else
         writeLog(0, "File not found or not a valid URL: " + path,
                  LOG_LEVEL_ERROR);
@@ -112,7 +195,8 @@ void importItems(std::vector<toml::value> &root, const std::string &import_key,
 }
 
 void readRegexMatch(YAML::Node node, const std::string &delimiter,
-                    string_array &dest, bool scope_limit = true) {
+                    string_array &dest, bool scope_limit = true,
+                    FetchContext context = FetchContext::TrustedConfig) {
   for (auto &&object : node) {
     std::string script, url, match, rep, strLine;
     object["script"] >>= script;
@@ -133,10 +217,11 @@ void readRegexMatch(YAML::Node node, const std::string &delimiter,
       continue;
     dest.emplace_back(std::move(strLine));
   }
-  importItems(dest, scope_limit);
+  importItems(dest, scope_limit, context);
 }
 
-void readEmoji(YAML::Node node, string_array &dest, bool scope_limit = true) {
+void readEmoji(YAML::Node node, string_array &dest, bool scope_limit = true,
+               FetchContext context = FetchContext::TrustedConfig) {
   for (auto &&object : node) {
     std::string script, url, match, rep, strLine;
     object["script"] >>= script;
@@ -158,10 +243,11 @@ void readEmoji(YAML::Node node, string_array &dest, bool scope_limit = true) {
       continue;
     dest.emplace_back(std::move(strLine));
   }
-  importItems(dest, scope_limit);
+  importItems(dest, scope_limit, context);
 }
 
-void readGroup(YAML::Node node, string_array &dest, bool scope_limit = true) {
+void readGroup(YAML::Node node, string_array &dest, bool scope_limit = true,
+               FetchContext context = FetchContext::TrustedConfig) {
   for (YAML::Node &&object : node) {
     string_array tempArray;
     std::string name, type;
@@ -201,10 +287,11 @@ void readGroup(YAML::Node node, string_array &dest, bool scope_limit = true) {
     std::string strLine = join(tempArray, "`");
     dest.emplace_back(std::move(strLine));
   }
-  importItems(dest, scope_limit);
+  importItems(dest, scope_limit, context);
 }
 
-void readRuleset(YAML::Node node, string_array &dest, bool scope_limit = true) {
+void readRuleset(YAML::Node node, string_array &dest, bool scope_limit = true,
+                 FetchContext context = FetchContext::TrustedConfig) {
   for (auto &&object : node) {
     std::string strLine, name, url, group, interval;
     object["import"] >>= name;
@@ -226,11 +313,12 @@ void readRuleset(YAML::Node node, string_array &dest, bool scope_limit = true) {
       continue;
     dest.emplace_back(std::move(strLine));
   }
-  importItems(dest, scope_limit);
+  importItems(dest, scope_limit, context);
 }
 
 void refreshRulesets(RulesetConfigs &ruleset_list,
-                     std::vector<RulesetContent> &ruleset_content_array) {
+                     std::vector<RulesetContent> &ruleset_content_array,
+                     FetchContext context) {
   ruleset_content_array.clear();
   ruleset_content_array.reserve(ruleset_list.size());
   std::string rule_group, rule_url, rule_url_typed, interval;
@@ -273,7 +361,7 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
             rule_url_typed,
             type,
             fetchFileAsync(rule_url, proxy, global.cacheRuleset, true,
-                           global.asyncFetchRuleset),
+                           global.asyncFetchRuleset, context),
             x.Interval};
     }
     ruleset_content_array.emplace_back(std::move(rc));
@@ -546,6 +634,11 @@ void readYAMLConf(YAML::Node &node) {
     node["advanced"]["async_fetch_ruleset"] >> global.asyncFetchRuleset;
     node["advanced"]["skip_failed_links"] >> global.skipFailedLinks;
   }
+  if (node["security"].IsDefined()) {
+    node["security"]["profile"] >> global.securityProfile;
+    node["security"]["allow_public_upload"] >> global.allowPublicUpload;
+  }
+  finalizeSecuritySettings();
   writeLog(0, "Load preference settings in YAML format completed.",
            LOG_LEVEL_INFO);
 }
@@ -746,6 +839,12 @@ void readTOMLConf(toml::value &root) {
   } else {
     global.cacheSubscription = global.cacheConfig = global.cacheRuleset = 0;
   }
+
+  auto section_security =
+      toml::find_or(root, "security", toml::value(toml::table()));
+  find_if_exist(section_security, "profile", global.securityProfile,
+                "allow_public_upload", global.allowPublicUpload);
+  finalizeSecuritySettings();
 
   writeLog(0, "Load preference settings in TOML format completed.",
            LOG_LEVEL_INFO);
@@ -1026,11 +1125,19 @@ void readConf() {
   ini.get_bool_if_exist("async_fetch_ruleset", global.asyncFetchRuleset);
   ini.get_bool_if_exist("skip_failed_links", global.skipFailedLinks);
 
+  if (ini.section_exist("security")) {
+    ini.enter_section("security");
+    ini.get_if_exist("profile", global.securityProfile);
+    ini.get_bool_if_exist("allow_public_upload", global.allowPublicUpload);
+  }
+  finalizeSecuritySettings();
+
   writeLog(0, "Load preference settings in INI format completed.",
            LOG_LEVEL_INFO);
 }
 
-int loadExternalYAML(YAML::Node &node, ExternalConfig &ext) {
+int loadExternalYAML(YAML::Node &node, ExternalConfig &ext,
+                     FetchContext context) {
   YAML::Node section = node["custom"], object;
   std::string name, type, url, interval;
   std::string group, strLine;
@@ -1053,7 +1160,7 @@ int loadExternalYAML(YAML::Node &node, ExternalConfig &ext) {
                                : "custom_proxy_group";
   if (section[group_name].size()) {
     string_array vArray;
-    readGroup(section[group_name], vArray, global.APIMode);
+    readGroup(section[group_name], vArray, global.APIMode, context);
     ext.custom_proxy_group =
         INIBinding::from<ProxyGroupConfig>::from_ini(vArray);
   }
@@ -1062,7 +1169,7 @@ int loadExternalYAML(YAML::Node &node, ExternalConfig &ext) {
       section["rulesets"].IsDefined() ? "rulesets" : "surge_ruleset";
   if (section[ruleset_name].size()) {
     string_array vArray;
-    readRuleset(section[ruleset_name], vArray, global.APIMode);
+    readRuleset(section[ruleset_name], vArray, global.APIMode, context);
     if (global.maxAllowedRulesets &&
         vArray.size() > global.maxAllowedRulesets) {
       writeLog(0, "Ruleset count in external config has exceeded limit.",
@@ -1074,7 +1181,8 @@ int loadExternalYAML(YAML::Node &node, ExternalConfig &ext) {
 
   if (section["rename_node"].size()) {
     string_array vArray;
-    readRegexMatch(section["rename_node"], "@", vArray, global.APIMode);
+    readRegexMatch(section["rename_node"], "@", vArray, global.APIMode,
+                   context);
     ext.rename = INIBinding::from<RegexMatchConfig>::from_ini(vArray, "@");
   }
 
@@ -1083,7 +1191,7 @@ int loadExternalYAML(YAML::Node &node, ExternalConfig &ext) {
   const char *emoji_name = section["emojis"].IsDefined() ? "emojis" : "emoji";
   if (section[emoji_name].size()) {
     string_array vArray;
-    readEmoji(section[emoji_name], vArray, global.APIMode);
+    readEmoji(section[emoji_name], vArray, global.APIMode, context);
     ext.emoji = INIBinding::from<RegexMatchConfig>::from_ini(vArray, ",");
   }
 
@@ -1102,8 +1210,11 @@ int loadExternalYAML(YAML::Node &node, ExternalConfig &ext) {
   return 0;
 }
 
-int loadExternalTOML(toml::value &root, ExternalConfig &ext) {
+int loadExternalTOML(toml::value &root, ExternalConfig &ext,
+                     FetchContext context) {
   auto section = toml::find(root, "custom");
+  bool import_scope_limit = isPublicFetchRestricted(context) ? global.APIMode
+                                                            : false;
 
   find_if_exist(section, "enable_rule_generator", ext.enable_rule_generator,
                 "overwrite_original_rules", ext.overwrite_original_rules,
@@ -1127,11 +1238,11 @@ int loadExternalTOML(toml::value &root, ExternalConfig &ext) {
 
   auto groups =
       toml::find_or<std::vector<toml::value>>(root, "custom_groups", {});
-  importItems(groups, "custom_groups", false);
+  importItems(groups, "custom_groups", import_scope_limit, context);
   ext.custom_proxy_group = toml::get<ProxyGroupConfigs>(toml::value(groups));
 
   auto rulesets = toml::find_or<std::vector<toml::value>>(root, "rulesets", {});
-  importItems(rulesets, "rulesets", false);
+  importItems(rulesets, "rulesets", import_scope_limit, context);
   if (global.maxAllowedRulesets &&
       rulesets.size() > global.maxAllowedRulesets) {
     writeLog(0, "Ruleset count in external config has exceeded limit. ",
@@ -1141,31 +1252,33 @@ int loadExternalTOML(toml::value &root, ExternalConfig &ext) {
   ext.surge_ruleset = toml::get<RulesetConfigs>(toml::value(rulesets));
 
   auto emojiconfs = toml::find_or<std::vector<toml::value>>(root, "emoji", {});
-  importItems(emojiconfs, "emoji", false);
+  importItems(emojiconfs, "emoji", import_scope_limit, context);
   ext.emoji = toml::get<RegexMatchConfigs>(toml::value(emojiconfs));
 
   auto renameconfs =
       toml::find_or<std::vector<toml::value>>(root, "rename_node", {});
-  importItems(renameconfs, "rename_node", false);
+  importItems(renameconfs, "rename_node", import_scope_limit, context);
   ext.rename = toml::get<RegexMatchConfigs>(toml::value(renameconfs));
 
   return 0;
 }
 
-int loadExternalConfig(std::string &path, ExternalConfig &ext) {
+int loadExternalConfig(std::string &path, ExternalConfig &ext,
+                       FetchContext context) {
   std::string base_content, proxy = parseProxy(global.proxyConfig),
-                            config = fetchFile(path, proxy, global.cacheConfig);
+                            config = fetchFile(path, proxy, global.cacheConfig,
+                                               true, context);
   if (render_template(config, *ext.tpl_args, base_content,
-                      global.templatePath) != 0)
+                      global.templatePath, context) != 0)
     base_content = config;
 
   try {
     YAML::Node yaml = YAML::Load(base_content);
     if (yaml.size() && yaml["custom"].IsDefined())
-      return loadExternalYAML(yaml, ext);
+      return loadExternalYAML(yaml, ext, context);
     toml::value conf = parseToml(base_content, path);
     if (!conf.is_empty() && toml::find_or<int>(conf, "version", 0))
-      return loadExternalTOML(conf, ext);
+      return loadExternalTOML(conf, ext, context);
   } catch (YAML::Exception &e) {
     // ignore
   } catch (toml::exception &e) {
@@ -1189,7 +1302,7 @@ int loadExternalConfig(std::string &path, ExternalConfig &ext) {
   if (ini.item_prefix_exist("custom_proxy_group")) {
     string_array vArray;
     ini.get_all("custom_proxy_group", vArray);
-    importItems(vArray, global.APIMode);
+    importItems(vArray, global.APIMode, context);
     ext.custom_proxy_group =
         INIBinding::from<ProxyGroupConfig>::from_ini(vArray);
   }
@@ -1198,7 +1311,7 @@ int loadExternalConfig(std::string &path, ExternalConfig &ext) {
   if (ini.item_prefix_exist(ruleset_name)) {
     string_array vArray;
     ini.get_all(ruleset_name, vArray);
-    importItems(vArray, global.APIMode);
+    importItems(vArray, global.APIMode, context);
     if (global.maxAllowedRulesets &&
         vArray.size() > global.maxAllowedRulesets) {
       writeLog(0, "Ruleset count in external config has exceeded limit. ",
@@ -1225,7 +1338,7 @@ int loadExternalConfig(std::string &path, ExternalConfig &ext) {
   if (ini.item_prefix_exist("rename")) {
     string_array vArray;
     ini.get_all("rename", vArray);
-    importItems(vArray, global.APIMode);
+    importItems(vArray, global.APIMode, context);
     ext.rename = INIBinding::from<RegexMatchConfig>::from_ini(vArray, "@");
   }
   ext.add_emoji = ini.get("add_emoji");
@@ -1233,7 +1346,7 @@ int loadExternalConfig(std::string &path, ExternalConfig &ext) {
   if (ini.item_prefix_exist("emoji")) {
     string_array vArray;
     ini.get_all("emoji", vArray);
-    importItems(vArray, global.APIMode);
+    importItems(vArray, global.APIMode, context);
     ext.emoji = INIBinding::from<RegexMatchConfig>::from_ini(vArray, ",");
   }
   if (ini.item_prefix_exist("include_remarks"))

@@ -13,11 +13,12 @@ std::string hostnameToIPAddr(const std::string &host)
     char cAddr[128] = {};
     struct sockaddr_in *target;
     struct sockaddr_in6 *target6;
-    struct addrinfo hint = {}, *retAddrInfo, *cur;
+    struct addrinfo hint = {}, *retAddrInfo = nullptr, *cur;
     retVal = getaddrinfo(host.data(), NULL, &hint, &retAddrInfo);
     if(retVal != 0)
     {
-        freeaddrinfo(retAddrInfo);
+        if(retAddrInfo)
+            freeaddrinfo(retAddrInfo);
         return "";
     }
 

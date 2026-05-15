@@ -7,6 +7,7 @@
 #include "config/proxygroup.h"
 #include "config/regmatch.h"
 #include "config/ruleset.h"
+#include "handler/fetch_context.h"
 #include "generator/config/ruleconvert.h"
 #include "generator/template/templates.h"
 #include "utils/logger.h"
@@ -38,6 +39,11 @@ struct Settings {
   int logLevel = LOG_LEVEL_VERBOSE;
   long maxAllowedDownloadSize = 1048576L;
   string_map aliases;
+
+  // security profile: lan keeps legacy behavior, public restricts untrusted
+  // request fetches, strict additionally disables public upload overrides.
+  std::string securityProfile = "lan";
+  bool allowPublicUpload = false;
 
   // global variables for template
   std::string templatePath = "templates";
@@ -104,8 +110,13 @@ struct ExternalConfig {
 
 extern Settings global;
 
-int importItems(string_array &target, bool scope_limit = true);
-int loadExternalConfig(std::string &path, ExternalConfig &ext);
+bool isPublicFetchRestricted(FetchContext context);
+bool isTrustedLocalResourcePath(const std::string &path);
+bool isPublicUploadAllowed();
+int importItems(string_array &target, bool scope_limit = true,
+                FetchContext context = FetchContext::TrustedConfig);
+int loadExternalConfig(std::string &path, ExternalConfig &ext,
+                       FetchContext context = FetchContext::TrustedConfig);
 // template <class T, class... U>
 // void find_if_exist(const toml::value &v, const toml::key &k, T& target,
 // U&&... args)

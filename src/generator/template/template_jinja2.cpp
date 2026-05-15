@@ -15,7 +15,9 @@ static inline void parse_json_pointer(nlohmann::json &json, const std::string &p
     json[nlohmann::json::json_pointer(pointer)] = value;
 }
 
-int render_template(const std::string &content, const template_args &vars, std::string &output, const std::string &include_scope)
+int render_template(const std::string &content, const template_args &vars,
+                    std::string &output, const std::string &include_scope,
+                    FetchContext context)
 {
     jinja2::Template tpl;
     nlohmann::json data;
