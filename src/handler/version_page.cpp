@@ -145,18 +145,31 @@ std::string page(Request &, Response &response) {
     <style>
         :root {
             /* Light Theme - 精准调优 */
-            --bg-gradient: linear-gradient(135deg, #f5f7fa 0%, #e4e7eb 100%);
-            --container-bg: rgba(255, 255, 255, 0.85);
-            --container-border: rgba(255, 255, 255, 0.4);
-            --shadow: 0 12px 40px rgba(31, 38, 135, 0.08);
+            --bg-gradient: linear-gradient(135deg, #f8fafc 0%, #eef2f7 48%, #e2e8f0 100%);
+            --bg-grid: rgba(15, 23, 42, 0.055);
+            --bg-sheen: linear-gradient(115deg, transparent 0%, transparent 33%, rgba(14, 165, 233, 0.11) 48%, rgba(132, 204, 22, 0.09) 58%, transparent 73%, transparent 100%);
+            --container-bg: rgba(255, 255, 255, 0.82);
+            --container-border: rgba(255, 255, 255, 0.68);
+            --container-highlight: rgba(255, 255, 255, 0.72);
+            --shadow: 0 28px 70px rgba(15, 23, 42, 0.13);
             --text-primary: #1a202c;
             --text-secondary: #4a5568;
-            --divider-bg: linear-gradient(90deg, transparent, rgba(0,0,0,0.08), transparent);
-            --info-block-bg: rgba(0, 0, 0, 0.02);
-            --info-block-border: rgba(0,0,0,0.04);
+            --text-muted: #64748b;
+            --divider-bg: linear-gradient(90deg, transparent, rgba(15, 23, 42, 0.12), transparent);
+            --info-block-bg: rgba(255, 255, 255, 0.52);
+            --info-block-border: rgba(15, 23, 42, 0.08);
+            --info-block-hover: rgba(255, 255, 255, 0.72);
             --link-color: #3182ce;
             --link-hover: #2b6cb0;
             --header-gradient: linear-gradient(135deg, #1a202c 0%, #4a5568 100%);
+            --accent-gradient: linear-gradient(135deg, #0284c7 0%, #0891b2 45%, #65a30d 100%);
+            --accent-soft: rgba(2, 132, 199, 0.1);
+            --status-bg: rgba(2, 132, 199, 0.08);
+            --status-border: rgba(2, 132, 199, 0.18);
+            --status-dot: #10b981;
+            --brand-mark-filter:
+                drop-shadow(0 16px 28px rgba(2, 132, 199, 0.16))
+                drop-shadow(0 8px 14px rgba(5, 150, 105, 0.12));
             --control-bg: rgba(255, 255, 255, 0.72);
             --control-hover: rgba(255, 255, 255, 0.92);
             --control-border: rgba(26, 32, 44, 0.12);
@@ -166,18 +179,31 @@ std::string page(Request &, Response &response) {
         @media (prefers-color-scheme: dark) {
             :root {
                 /* Dark Theme - 极黑质感 */
-                --bg-gradient: radial-gradient(circle at 50% 50%, #1a1b1e 0%, #000000 100%);
-                --container-bg: rgba(28, 28, 30, 0.7);
-                --container-border: rgba(255, 255, 255, 0.1);
-                --shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+                --bg-gradient: linear-gradient(135deg, #05070b 0%, #0d111a 46%, #111827 100%);
+                --bg-grid: rgba(148, 163, 184, 0.075);
+                --bg-sheen: linear-gradient(115deg, transparent 0%, transparent 31%, rgba(34, 211, 238, 0.12) 47%, rgba(132, 204, 22, 0.08) 58%, transparent 74%, transparent 100%);
+                --container-bg: rgba(15, 23, 42, 0.72);
+                --container-border: rgba(148, 163, 184, 0.18);
+                --container-highlight: rgba(255, 255, 255, 0.11);
+                --shadow: 0 32px 80px rgba(0, 0, 0, 0.62);
                 --text-primary: #f8f9fa;
                 --text-secondary: #a0aec0;
-                --divider-bg: linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent);
-                --info-block-bg: rgba(255, 255, 255, 0.04);
-                --info-block-border: rgba(255,255,255,0.06);
+                --text-muted: #7f8ea3;
+                --divider-bg: linear-gradient(90deg, transparent, rgba(148, 163, 184, 0.18), transparent);
+                --info-block-bg: rgba(255, 255, 255, 0.045);
+                --info-block-border: rgba(255, 255, 255, 0.08);
+                --info-block-hover: rgba(255, 255, 255, 0.065);
                 --link-color: #63b3ed;
                 --link-hover: #90cdf4;
                 --header-gradient: linear-gradient(135deg, #ffffff 0%, #90cdf4 100%);
+                --accent-gradient: linear-gradient(135deg, #38bdf8 0%, #22d3ee 42%, #84cc16 100%);
+                --accent-soft: rgba(56, 189, 248, 0.12);
+                --status-bg: rgba(34, 211, 238, 0.1);
+                --status-border: rgba(34, 211, 238, 0.22);
+                --status-dot: #34d399;
+                --brand-mark-filter:
+                    drop-shadow(0 18px 32px rgba(34, 211, 238, 0.2))
+                    drop-shadow(0 10px 18px rgba(132, 204, 22, 0.12));
                 --control-bg: rgba(20, 24, 33, 0.7);
                 --control-hover: rgba(35, 42, 56, 0.86);
                 --control-border: rgba(255, 255, 255, 0.16);
@@ -195,6 +221,7 @@ std::string page(Request &, Response &response) {
         body {
             font-family: 'Outfit', system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
             min-height: 100vh;
+            min-height: 100svh;
             display: flex;
             align-items: center;
             justify-content: center;
@@ -204,6 +231,31 @@ std::string page(Request &, Response &response) {
             color: var(--text-primary);
             -webkit-font-smoothing: antialiased;
             -moz-osx-font-smoothing: grayscale;
+            overflow-x: hidden;
+            position: relative;
+        }
+
+        body::before,
+        body::after {
+            content: "";
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+        }
+
+        body::before {
+            background-image:
+                linear-gradient(var(--bg-grid) 1px, transparent 1px),
+                linear-gradient(90deg, var(--bg-grid) 1px, transparent 1px);
+            background-size: 36px 36px;
+            mask-image: linear-gradient(to bottom, transparent 0%, #000 18%, #000 82%, transparent 100%);
+            -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 18%, #000 82%, transparent 100%);
+            opacity: 0.58;
+        }
+
+        body::after {
+            background: var(--bg-sheen);
+            opacity: 0.82;
         }
 
         .lang-toggle {
@@ -258,13 +310,27 @@ std::string page(Request &, Response &response) {
             backdrop-filter: blur(24px);
             -webkit-backdrop-filter: blur(24px);
             border-radius: 32px;
-            padding: 40px 50px;
-            max-width: 800px;
+            padding: 44px 52px 38px;
+            max-width: 860px;
             width: 100%;
+            min-width: 0;
             box-shadow: var(--shadow);
             border: 1px solid var(--container-border);
             position: relative;
+            z-index: 1;
+            overflow: hidden;
             animation: fadeIn 1s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        .container::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            background:
+                linear-gradient(180deg, var(--container-highlight), transparent 34%),
+                linear-gradient(90deg, transparent, var(--accent-soft), transparent);
+            opacity: 0.62;
+            pointer-events: none;
         }
 
         .container::after {
@@ -273,12 +339,17 @@ std::string page(Request &, Response &response) {
             inset: 0;
             border-radius: 32px;
             padding: 1px;
-            background: linear-gradient(135deg, rgba(255,255,255,0.2), transparent, rgba(255,255,255,0.05));
+            background: linear-gradient(135deg, var(--container-highlight), transparent 42%, rgba(255,255,255,0.05));
             -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
             mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
             -webkit-mask-composite: xor;
             mask-composite: exclude;
             pointer-events: none;
+        }
+
+        .container > * {
+            position: relative;
+            z-index: 1;
         }
 
         @keyframes fadeIn {
@@ -288,7 +359,53 @@ std::string page(Request &, Response &response) {
 
         header {
             text-align: center;
-            margin-bottom: 32px;
+            margin-bottom: 30px;
+        }
+
+        .brand-mark {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 96px;
+            height: 96px;
+            margin: 0 auto 16px;
+            filter: var(--brand-mark-filter);
+            transition: transform 0.28s ease, filter 0.28s ease;
+        }
+
+        .brand-mark img {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        .brand-mark:hover {
+            transform: translateY(-2px) scale(1.02);
+        }
+
+        .status-pill {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            margin-bottom: 14px;
+            padding: 7px 12px;
+            border-radius: 999px;
+            border: 1px solid var(--status-border);
+            background: var(--status-bg);
+            color: var(--text-primary);
+            font-size: 0.78rem;
+            font-weight: 700;
+            letter-spacing: 0;
+            text-transform: uppercase;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 999px;
+            background: var(--status-dot);
+            box-shadow: 0 0 0 5px color-mix(in srgb, var(--status-dot) 16%, transparent);
         }
 
         h1 {
@@ -297,10 +414,15 @@ std::string page(Request &, Response &response) {
             background-clip: text;
             -webkit-text-fill-color: transparent;
             font-size: 3em;
-            margin-bottom: 8px;
+            margin-bottom: 10px;
             font-weight: 700;
             letter-spacing: 0;
             line-height: 1.05;
+            overflow-wrap: anywhere;
+        }
+
+        .title-break {
+            display: none;
         }
 
         .subtitle {
@@ -309,15 +431,21 @@ std::string page(Request &, Response &response) {
             font-weight: 500;
             letter-spacing: 0;
             text-transform: uppercase;
-            opacity: 0.6;
+            opacity: 0.72;
         }
 
         .section {
-            margin: 20px 0;
-            padding: 20px 25px;
+            margin: 18px 0;
+            padding: 22px 24px;
             background: var(--info-block-bg);
-            border-radius: 20px;
+            border-radius: 22px;
             border: 1px solid var(--info-block-border);
+            transition: background 0.22s ease, border-color 0.22s ease, transform 0.22s ease;
+        }
+
+        .section:hover {
+            background: var(--info-block-hover);
+            transform: translateY(-1px);
         }
 
         .section-title {
@@ -330,45 +458,84 @@ std::string page(Request &, Response &response) {
             gap: 8px;
             text-transform: uppercase;
             letter-spacing: 0;
-            opacity: 0.8;
+            opacity: 0.88;
+        }
+
+        .section-title::before {
+            content: "";
+            width: 10px;
+            height: 10px;
+            border-radius: 999px;
+            background: var(--accent-gradient);
+            box-shadow: 0 0 0 5px var(--accent-soft);
         }
 
         .description {
             color: var(--text-secondary);
             font-size: 1em;
-            line-height: 1.8;
-            margin-bottom: 12px;
-            padding-left: 1.5em;
+            line-height: 1.72;
+            margin-bottom: 11px;
+            padding-left: 1.65em;
             position: relative;
         }
 
+        .description:last-child {
+            margin-bottom: 0;
+        }
+
         .description::before {
-            content: "•";
+            content: "";
             position: absolute;
-            left: 0.2em;
-            color: var(--link-color);
-            font-weight: bold;
+            left: 0.25em;
+            top: 0.76em;
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: var(--accent-gradient);
         }
 
         .info-grid {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
-            gap: 20px;
-            margin: 20px 0;
+            gap: 16px;
+            margin: 22px 0 24px;
         }
 
         .info-card {
             background: var(--info-block-bg);
             border: 1px solid var(--info-block-border);
-            border-radius: 16px;
-            padding: 20px;
-            text-align: center;
-            transition: transform 0.3s ease, box-shadow 0.3s ease;
+            border-radius: 20px;
+            padding: 18px;
+            text-align: left;
+            min-height: 132px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            transition: transform 0.24s ease, box-shadow 0.24s ease, background 0.24s ease, border-color 0.24s ease;
         }
 
         .info-card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 10px 20px rgba(0,0,0,0.05);
+            transform: translateY(-4px);
+            background: var(--info-block-hover);
+            border-color: var(--status-border);
+            box-shadow: 0 16px 32px rgba(15, 23, 42, 0.09);
+        }
+
+        .info-icon {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 34px;
+            height: 34px;
+            border-radius: 12px;
+            background: var(--accent-soft);
+            color: var(--link-color);
+            margin-bottom: 18px;
+        }
+
+        .info-icon svg {
+            width: 18px;
+            height: 18px;
         }
 
         .info-card .info-label {
@@ -376,16 +543,17 @@ std::string page(Request &, Response &response) {
             text-transform: uppercase;
             font-size: 0.75rem;
             letter-spacing: 0;
-            color: var(--text-secondary);
+            color: var(--text-muted);
             margin-bottom: 8px;
             font-weight: 600;
         }
 
         .info-card .info-value {
-            font-size: 1.1rem;
+            font-size: 1.12rem;
             font-weight: 700;
             color: var(--text-primary);
             word-break: break-all;
+            line-height: 1.25;
         }
 
         .info-card .info-value a {
@@ -421,29 +589,97 @@ std::string page(Request &, Response &response) {
         }
 
         .footer {
-            margin-top: 30px;
+            margin-top: 28px;
+            padding-top: 22px;
             text-align: center;
             color: var(--text-secondary);
             font-size: 0.85em;
-            opacity: 0.6;
+            opacity: 0.72;
+            position: relative;
+        }
+
+        .footer::before {
+            content: "";
+            position: absolute;
+            top: 0;
+            left: 8%;
+            right: 8%;
+            height: 1px;
+            background: var(--divider-bg);
         }
 
         .footer a {
             font-weight: 400;
         }
 
+        @media (prefers-reduced-motion: reduce) {
+            *,
+            *::before,
+            *::after {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                scroll-behavior: auto !important;
+                transition-duration: 0.01ms !important;
+            }
+        }
+
         @media (max-width: 600px) {
             body { padding: 72px 16px 24px; }
-            .container { padding: 30px 20px; }
+            body::before {
+                background-size: 28px 28px;
+            }
+            .container {
+                border-radius: 26px;
+                padding: 30px 20px 26px;
+                width: calc(100vw - 32px);
+                max-width: calc(100vw - 32px);
+            }
+            .container::after {
+                border-radius: 26px;
+            }
             .lang-toggle {
                 top: calc(14px + env(safe-area-inset-top, 0px));
                 right: calc(14px + env(safe-area-inset-right, 0px));
                 min-height: 38px;
                 min-width: 70px;
             }
-            h1 { font-size: 2.2em; }
+            header { margin-bottom: 24px; }
+            h1 {
+                font-size: 2em;
+                line-height: 1.12;
+            }
+            .title-break {
+                display: block;
+            }
+            .subtitle {
+                font-size: 0.92em;
+                line-height: 1.45;
+            }
+            .brand-mark {
+                width: 82px;
+                height: 82px;
+                margin-bottom: 14px;
+            }
+            .status-pill {
+                font-size: 0.72rem;
+                margin-bottom: 12px;
+            }
             .info-grid { grid-template-columns: 1fr; gap: 12px; }
-            .section { padding: 15px; }
+            .info-card {
+                min-height: auto;
+                padding: 16px;
+            }
+            .info-icon {
+                margin-bottom: 14px;
+            }
+            .section {
+                border-radius: 18px;
+                padding: 17px;
+            }
+            .description {
+                font-size: 0.96em;
+                line-height: 1.68;
+            }
         }
     </style>
 </head>
@@ -459,7 +695,16 @@ std::string page(Request &, Response &response) {
     </button>
     <div class="container">
         <header>
-            <h1>SubConverter-Extended</h1>
+            <picture class="brand-mark">
+                <source media="(prefers-color-scheme: dark)" srcset="/version/favicon-dark.svg">
+                <img src="/version/favicon-light.svg" alt="SubConverter-Extended icon" width="96" height="96" decoding="async">
+            </picture>
+            <div class="status-pill" aria-live="polite">
+                <span class="status-dot" aria-hidden="true"></span>
+                <span data-lang="en">Service Online</span>
+                <span data-lang="zh">服务在线</span>
+            </div>
+            <h1>SubConverter-<br class="title-break">Extended</h1>
             <p class="subtitle">
                 <span data-lang="en">A Modern Evolution of Subconverter</span>
                 <span data-lang="zh">Subconverter 的现代化演进版本</span>
@@ -468,6 +713,12 @@ std::string page(Request &, Response &response) {
 
         <div class="info-grid">
             <div class="info-card">
+                <span class="info-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M20.6 13.2 13.2 20.6a2 2 0 0 1-2.8 0L3.4 13.6a2 2 0 0 1-.6-1.4V5a2 2 0 0 1 2-2h7.2a2 2 0 0 1 1.4.6l7.2 7.2a2 2 0 0 1 0 2.8Z"></path>
+                        <circle cx="7.5" cy="7.5" r="1.2"></circle>
+                    </svg>
+                </span>
                 <span class="info-label">
                     <span data-lang="en">Version</span>
                     <span data-lang="zh">版本</span>
@@ -475,6 +726,14 @@ std::string page(Request &, Response &response) {
                 <div class="info-value">)html" VERSION R"html(</div>
             </div>
             <div class="info-card">
+                <span class="info-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="18" cy="18" r="3"></circle>
+                        <circle cx="6" cy="6" r="3"></circle>
+                        <path d="M6 9v6a3 3 0 0 0 3 3h6"></path>
+                        <path d="M12 6h6"></path>
+                    </svg>
+                </span>
                 <span class="info-label">
                     <span data-lang="en">Build</span>
                     <span data-lang="zh">构建</span>
@@ -483,6 +742,14 @@ std::string page(Request &, Response &response) {
          commit_link + R"html(</div>
             </div>
             <div class="info-card">
+                <span class="info-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="3" y="4.5" width="18" height="16.5" rx="3"></rect>
+                        <path d="M8 3v3"></path>
+                        <path d="M16 3v3"></path>
+                        <path d="M3 10h18"></path>
+                    </svg>
+                </span>
                 <span class="info-label">
                     <span data-lang="en">Build Date</span>
                     <span data-lang="zh">构建日期</span>
@@ -494,8 +761,8 @@ std::string page(Request &, Response &response) {
 
         <div class="section">
             <div class="section-title">
-                <span data-lang="en">✨ Overview</span>
-                <span data-lang="zh">✨ 项目概览</span>
+                <span data-lang="en">Overview</span>
+                <span data-lang="zh">项目概览</span>
             </div>
             <p class="description" data-lang="en">An enhanced implementation of subconverter, aligned with the <a href="https://github.com/MetaCubeX/mihomo/tree/Meta" target="_blank" rel="noopener noreferrer">Mihomo</a> <a href="https://wiki.metacubex.one/config/" target="_blank" rel="noopener noreferrer">configuration</a>.</p>
             <p class="description" data-lang="zh">subconverter 的增强实现，适配 <a href="https://github.com/MetaCubeX/mihomo/tree/Meta" target="_blank" rel="noopener noreferrer">Mihomo</a> <a href="https://wiki.metacubex.one/config/" target="_blank" rel="noopener noreferrer">配置规范</a>。</p>
@@ -507,8 +774,8 @@ std::string page(Request &, Response &response) {
 
         <div class="section">
             <div class="section-title">
-                <span data-lang="en">🚀 Lineage</span>
-                <span data-lang="zh">🚀 项目沿革</span>
+                <span data-lang="en">Lineage</span>
+                <span data-lang="zh">项目沿革</span>
             </div>
             <p class="description" data-lang="en">Originated and enhanced from: <a href="https://github.com/asdlokj1qpi233/subconverter" target="_blank" rel="noopener noreferrer">subconverter</a></p>
             <p class="description" data-lang="zh">源自并增强自：<a href="https://github.com/asdlokj1qpi233/subconverter" target="_blank" rel="noopener noreferrer">subconverter</a></p>
