@@ -95,6 +95,14 @@ bool isPublicUploadAllowed() {
   return global.allowPublicUpload;
 }
 
+static bool canImportLocalPath(const std::string &path, FetchContext context) {
+  if (!isPublicFetchRestricted(context) || isTrustedLocalResourcePath(path))
+    return true;
+  writeLog(0, "Blocked public request from importing local file: " + path,
+           LOG_LEVEL_WARNING);
+  return false;
+}
+
 int importItems(string_array &target, bool scope_limit, FetchContext context) {
   string_array result;
   std::stringstream ss;
@@ -111,7 +119,7 @@ int importItems(string_array &target, bool scope_limit, FetchContext context) {
 
     std::string proxy = parseProxy(global.proxyConfig);
 
-    if (fileExist(path, scope_limit))
+    if (fileExist(path, scope_limit) && canImportLocalPath(path, context))
       content = fileGet(path, scope_limit);
     else if (isLink(path))
       content = webGet(path, proxy, global.cacheConfig, nullptr, nullptr,
@@ -165,7 +173,7 @@ void importItems(std::vector<toml::value> &root, const std::string &import_key,
       const std::string &path = toml::get<std::string>(table.at("import"));
       writeLog(0, "Trying to import items from " + path);
       content.clear();
-      if (fileExist(path, scope_limit))
+      if (fileExist(path, scope_limit) && canImportLocalPath(path, context))
         content = fileGet(path, scope_limit);
       else if (isLink(path))
         content = webGet(path, proxy, global.cacheConfig, nullptr, nullptr,
