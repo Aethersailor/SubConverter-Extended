@@ -106,6 +106,7 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"port", {true, "int", false}}, // hy2
         {"ports", {true, "string", false}}, // hy2
         {"private-key", {true, "string", false}}, // hy2
+        {"realm-opts", {true, "string", false}}, // hy2
         {"routing-mark", {true, "int", false}}, // BasicOption
         {"server", {true, "string", false}}, // hy2
         {"skip-cert-verify", {true, "bool", false}}, // hy2
@@ -173,6 +174,7 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"port", {true, "int", true}}, // hysteria2 [HARDCODED]
         {"ports", {true, "string", false}}, // hysteria2
         {"private-key", {true, "string", false}}, // hysteria2
+        {"realm-opts", {true, "string", false}}, // hysteria2
         {"routing-mark", {true, "int", false}}, // BasicOption
         {"server", {true, "string", false}}, // hysteria2
         {"skip-cert-verify", {true, "bool", false}}, // hysteria2
