@@ -706,8 +706,8 @@ std::string page(Request &, Response &response) {
             </div>
             <h1>SubConverter-<br class="title-break">Extended</h1>
             <p class="subtitle">
-                <span data-lang="en">SubConverter-Extended for Modern Configuration Conversion</span>
-                <span data-lang="zh">面向现代配置转换的 SubConverter-Extended</span>
+                <span data-lang="en">A Modern Evolution of Subconverter</span>
+                <span data-lang="zh">Subconverter 的现代化演进版本</span>
             </p>
         </header>
 
