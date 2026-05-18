@@ -29,7 +29,9 @@ WebServer webServer;
 
 #ifndef _WIN32
 void SetConsoleTitle(const std::string &title) {
-  system(std::string("echo \"\\033]0;" + title + R"(\007\c")").data());
+  if (!isatty(STDOUT_FILENO))
+    return;
+  std::cout << "\033]0;" << title << '\007' << std::flush;
 }
 #endif // _WIN32
 
