@@ -55,7 +55,7 @@ class CJSModule {
 		let _script = std.loadFile(__file)
 		this._failed = _script === null
 		if (this._failed) {
-			return new Error(`Can't load script ${__file}`)
+			return new Error(`无法加载脚本 ${__file}`)
 		}
 
 		_script = _loaderTemplate.replace('<<SCRIPT>>', _script)
@@ -88,7 +88,7 @@ function _loadModule (path) {
 	debug(`_loadModule# Module ${path}`)
 	const [id, err] = os.realpath(path)
 	if (err) {
-		throw new Error(`Module require error: Can't get real module path for ${path}`)
+		throw new Error(`模块 require 错误：无法获取 ${path} 的真实路径`)
 		return
 	}
 
@@ -126,12 +126,12 @@ function _lookupModule (path) {
 			debug(`_lookupModule# Found appending .js to file name`)
 			return `${path}.js`
 		}
-		return new Error(`Error: Module ${path} not found!`)
+		return new Error(`错误：未找到模块 ${path}！`)
 	}
 
 	// Path found and it isn't a dir
 	if (!fstat.isDir) {
-		return new Error(`Error: Module file type not supported for ${path}`)
+		return new Error(`错误：模块文件类型不受支持 ${path}`)
 	}
 
 	// Path it's a dir
@@ -162,7 +162,7 @@ function _lookupModule (path) {
 	}
 
 	if (_path === null) {
-		return new Error(`Error: Module ${path} is a directory, but not a package`)
+		return new Error(`错误：模块 ${path} 是目录，但不是包`)
 	}
 
 	debug(`_lookupModule# Found module file: ${_path}`)
@@ -543,7 +543,7 @@ int script_cleanup(qjs::Context &context)
 void script_print_stack(qjs::Context &context)
 {
     auto exc = context.getException();
-    std::cerr << (std::string) exc << std::endl;
+    std::cerr << "脚本异常：" << (std::string) exc << std::endl;
     if((bool) exc["stack"])
-        std::cerr << (std::string) exc["stack"] << std::endl;
+        std::cerr << "脚本堆栈：" << (std::string) exc["stack"] << std::endl;
 }

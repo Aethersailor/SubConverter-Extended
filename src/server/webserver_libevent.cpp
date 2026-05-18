@@ -97,7 +97,7 @@ int serveFile(WebServer *server, const std::string &filename, std::string &conte
 
     return_data = fileGet(realname, false);
     content_type = checkMIMEType(realname);
-    writeLog(0, "file-server: serving '" + filename + "' type '" + content_type + "'", LOG_LEVEL_INFO);
+    writeLog(0, "文件服务：正在提供 '" + filename + "'，类型 '" + content_type + "'", LOG_LEVEL_INFO);
     return 0;
 }
 
@@ -114,7 +114,7 @@ static inline void buffer_cleanup(struct evbuffer *eb)
 
 static int process_request(WebServer *server, Request &request, Response &response, std::string &return_data)
 {
-    writeLog(0, "handle_cmd:    " + request.method + " handle_uri:    " + request.url, LOG_LEVEL_VERBOSE);
+    writeLog(0, "处理请求：method=" + request.method + " uri=" + request.url, LOG_LEVEL_VERBOSE);
 
     string_size pos = request.url.find('?');
     if(pos != std::string::npos)
@@ -161,7 +161,12 @@ static int process_request(WebServer *server, Request &request, Response &respon
                 return_data += e.what();
                 response.content_type = "text/plain";
                 response.status_code = 500;
-                writeLog(0, return_data, LOG_LEVEL_ERROR);
+                writeLog(0,
+                         "处理请求时发生内部服务器错误。\n路径：" +
+                             request.url + "\n参数：" +
+                             joinArguments(request.argument) + "\n异常：" +
+                             type(e) + "\nwhat()：" + e.what(),
+                         LOG_LEVEL_ERROR);
             }
             return 0;
         }
@@ -201,7 +206,7 @@ static void on_request(evhttp_request *req, void *args)
     u_short client_port;
     evhttp_connection_get_peer(evhttp_request_get_connection(req), &client_ip, &client_port);
     //std::cerr<<"Accept connection from client "<<client_ip<<":"<<client_port<<"\n";
-    writeLog(0, "Accept connection from client " + std::string(client_ip) + ":" + std::to_string(client_port), LOG_LEVEL_DEBUG);
+    writeLog(0, "接受客户端连接：" + std::string(client_ip) + ":" + std::to_string(client_port), LOG_LEVEL_DEBUG);
 
     if (internal_flag != nullptr)
     {
@@ -321,7 +326,7 @@ int WebServer::start_web_server(listener_args *args)
     if (!event_init())
     {
         //std::cerr << "Failed to init libevent." << std::endl;
-        writeLog(0, "Failed to init libevent.", LOG_LEVEL_FATAL);
+        writeLog(0, "初始化 libevent 失败。", LOG_LEVEL_FATAL);
         return -1;
     }
     const char *SrvAddress = listen_address.c_str();
@@ -330,7 +335,7 @@ int WebServer::start_web_server(listener_args *args)
     if (!server)
     {
         //std::cerr << "Failed to init http server." << std::endl;
-        writeLog(0, "Failed to init http server.", LOG_LEVEL_FATAL);
+        writeLog(0, "初始化 HTTP 服务失败。", LOG_LEVEL_FATAL);
         return -1;
     }
 
@@ -340,7 +345,7 @@ int WebServer::start_web_server(listener_args *args)
     if (event_dispatch() == -1)
     {
         //std::cerr << "Failed to run message loop." << std::endl;
-        writeLog(0, "Failed to run message loop.", LOG_LEVEL_FATAL);
+        writeLog(0, "运行消息循环失败。", LOG_LEVEL_FATAL);
         return -1;
     }
 

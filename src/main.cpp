@@ -29,7 +29,9 @@ WebServer webServer;
 
 #ifndef _WIN32
 void SetConsoleTitle(const std::string &title) {
-  system(std::string("echo \"\\033]0;" + title + R"(\007\c")").data());
+  if (!isatty(STDOUT_FILENO))
+    return;
+  std::cout << "\033]0;" << title << '\007' << std::flush;
 }
 #endif // _WIN32
 
@@ -73,7 +75,7 @@ void chkArg(int argc, char *argv[]) {
     } else if (strcmp(argv[i], "-l") == 0 || strcmp(argv[i], "--log") == 0) {
       if (i < argc - 1)
         if (freopen(argv[++i], "a", stderr) == nullptr)
-          std::cerr << "Error redirecting output to file.\n";
+          std::cerr << "无法将输出重定向到日志文件。\n";
     }
   }
 }
@@ -81,8 +83,7 @@ void chkArg(int argc, char *argv[]) {
 void signal_handler(int sig) {
   // std::cerr<<"Interrupt signal "<<sig<<" received. Exiting gracefully...\n";
   writeLog(0,
-           "Interrupt signal " + std::to_string(sig) +
-               " received. Exiting gracefully...",
+           "收到中断信号 " + std::to_string(sig) + "，正在退出...",
            LOG_LEVEL_FATAL);
   switch (sig) {
 #ifndef _WIN32
@@ -122,12 +123,12 @@ int main(int argc, char *argv[]) {
   }
   chkArg(argc, argv);
   setcd(global.prefPath); // then switch to pref directory
-  writeLog(0, "SubConverter " VERSION " starting up..", LOG_LEVEL_INFO);
+  writeLog(0, "SubConverter-Extended " VERSION " 正在启动...", LOG_LEVEL_INFO);
 #ifdef _WIN32
   WSADATA wsaData;
   if (WSAStartup(MAKEWORD(1, 1), &wsaData) != 0) {
     // std::cerr<<"WSAStartup failed.\n";
-    writeLog(0, "WSAStartup failed.", LOG_LEVEL_FATAL);
+    writeLog(0, "WSAStartup 初始化失败。", LOG_LEVEL_FATAL);
     return 1;
   }
   UINT origcp = GetConsoleOutputCP();
@@ -141,7 +142,7 @@ int main(int argc, char *argv[]) {
   signal(SIGTERM, signal_handler);
   signal(SIGINT, signal_handler);
 
-  SetConsoleTitle("SubConverter " VERSION);
+  SetConsoleTitle("SubConverter-Extended " VERSION);
   readConf();
   // vfs::vfs_read("vfs.ini");
   if (!global.updateRulesetOnRequest)
@@ -163,8 +164,8 @@ int main(int argc, char *argv[]) {
   if (!env_managed_config_prefix.empty() && !env_managed_prefix.empty() &&
       env_managed_config_prefix != env_managed_prefix) {
     writeLog(0,
-             "Both MANAGED_CONFIG_PREFIX and MANAGED_PREFIX are set. Using "
-             "MANAGED_CONFIG_PREFIX.",
+             "同时设置了 MANAGED_CONFIG_PREFIX 和 MANAGED_PREFIX，使用 "
+             "MANAGED_CONFIG_PREFIX。",
              LOG_LEVEL_WARNING);
   }
   if (!env_managed_config_prefix.empty())
@@ -180,7 +181,7 @@ int main(int argc, char *argv[]) {
   webServer.append_response("GET", "/", "text/plain", [](RESPONSE_CALLBACK_ARGS)
   -> std::string
   {
-      return "subconverter " VERSION " backend\n";
+      return "SubConverter-Extended " VERSION " backend\n";
   });
   */
 
@@ -307,8 +308,8 @@ int main(int argc, char *argv[]) {
   if (global.securityProfile == "lan" &&
       (global.listenAddress == "0.0.0.0" || global.listenAddress == "::")) {
     writeLog(0,
-             "Security profile is lan while listening on all interfaces. "
-             "Use security.profile=public for Internet-facing deployments.",
+             "当前安全档位为 lan，但正在监听所有网络接口。面向公网部署请使用 "
+             "security.profile=public。",
              LOG_LEVEL_WARNING);
   }
   listener_args args = {global.listenAddress,   global.listenPort,
@@ -317,7 +318,7 @@ int main(int argc, char *argv[]) {
   // std::cout<<"Serving HTTP @
   // http://"<<listen_address<<":"<<listen_port<<std::endl;
   writeLog(0,
-           "Starting HTTP server at http://" + global.listenAddress + ":" +
+           "正在启动 HTTP 服务：http://" + global.listenAddress + ":" +
                std::to_string(global.listenPort),
            LOG_LEVEL_INFO);
   int ret = webServer.start_web_server_multi(&args);

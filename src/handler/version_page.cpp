@@ -764,8 +764,8 @@ std::string page(Request &, Response &response) {
                 <span data-lang="en">Overview</span>
                 <span data-lang="zh">项目概览</span>
             </div>
-            <p class="description" data-lang="en">An enhanced implementation of subconverter, aligned with the <a href="https://github.com/MetaCubeX/mihomo/tree/Meta" target="_blank" rel="noopener noreferrer">Mihomo</a> <a href="https://wiki.metacubex.one/config/" target="_blank" rel="noopener noreferrer">configuration</a>.</p>
-            <p class="description" data-lang="zh">subconverter 的增强实现，适配 <a href="https://github.com/MetaCubeX/mihomo/tree/Meta" target="_blank" rel="noopener noreferrer">Mihomo</a> <a href="https://wiki.metacubex.one/config/" target="_blank" rel="noopener noreferrer">配置规范</a>。</p>
+            <p class="description" data-lang="en">SubConverter-Extended is an enhanced implementation aligned with the <a href="https://github.com/MetaCubeX/mihomo/tree/Meta" target="_blank" rel="noopener noreferrer">Mihomo</a> <a href="https://wiki.metacubex.one/config/" target="_blank" rel="noopener noreferrer">configuration</a>.</p>
+            <p class="description" data-lang="zh">SubConverter-Extended 是适配 <a href="https://github.com/MetaCubeX/mihomo/tree/Meta" target="_blank" rel="noopener noreferrer">Mihomo</a> <a href="https://wiki.metacubex.one/config/" target="_blank" rel="noopener noreferrer">配置规范</a>的增强实现。</p>
             <p class="description" data-lang="en">Primarily for <a href="https://github.com/vernesong/OpenClash" target="_blank" rel="noopener noreferrer">OpenClash</a>, while compatible with other Clash clients.</p>
             <p class="description" data-lang="zh">主要面向 <a href="https://github.com/vernesong/OpenClash" target="_blank" rel="noopener noreferrer">OpenClash</a>，同时兼容其他 Clash 客户端。</p>
             <p class="description" data-lang="en">Dedicated companion backend for the <a href="https://github.com/Aethersailor/Custom_OpenClash_Rules" target="_blank" rel="noopener noreferrer">Custom_OpenClash_Rules</a> project.</p>
@@ -777,8 +777,8 @@ std::string page(Request &, Response &response) {
                 <span data-lang="en">Lineage</span>
                 <span data-lang="zh">项目沿革</span>
             </div>
-            <p class="description" data-lang="en">Originated and enhanced from: <a href="https://github.com/asdlokj1qpi233/subconverter" target="_blank" rel="noopener noreferrer">subconverter</a></p>
-            <p class="description" data-lang="zh">源自并增强自：<a href="https://github.com/asdlokj1qpi233/subconverter" target="_blank" rel="noopener noreferrer">subconverter</a></p>
+            <p class="description" data-lang="en">Originated and enhanced from the <a href="https://github.com/asdlokj1qpi233/subconverter" target="_blank" rel="noopener noreferrer">upstream project</a></p>
+            <p class="description" data-lang="zh">源自并增强自<a href="https://github.com/asdlokj1qpi233/subconverter" target="_blank" rel="noopener noreferrer">上游项目</a></p>
             <p class="description" data-lang="en">Modified and evolved by: <a href="https://github.com/Aethersailor" target="_blank" rel="noopener noreferrer">Aethersailor</a></p>
             <p class="description" data-lang="zh">由 <a href="https://github.com/Aethersailor" target="_blank" rel="noopener noreferrer">Aethersailor</a> 修改并持续演进</p>
         </div>

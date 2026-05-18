@@ -67,13 +67,13 @@ static void finalizeSecuritySettings() {
   if (global.securityProfile != "lan" && global.securityProfile != "public" &&
       global.securityProfile != "strict") {
     writeLog(0,
-             "Invalid security.profile '" + global.securityProfile +
-                 "', falling back to lan.",
+             "security.profile 的值无效：'" + global.securityProfile +
+                 "'，已回退为 lan。",
              LOG_LEVEL_WARNING);
     global.securityProfile = "lan";
   }
 
-  writeLog(0, "Security profile: " + global.securityProfile, LOG_LEVEL_INFO);
+  writeLog(0, "当前安全档位：" + global.securityProfile, LOG_LEVEL_INFO);
 }
 
 bool isPublicFetchRestricted(FetchContext context) {
@@ -98,7 +98,7 @@ bool isPublicUploadAllowed() {
 static bool canImportLocalPath(const std::string &path, FetchContext context) {
   if (!isPublicFetchRestricted(context) || isTrustedLocalResourcePath(path))
     return true;
-  writeLog(0, "Blocked public request from importing local file: " + path,
+  writeLog(0, "已阻止公开请求导入本地文件：" + path,
            LOG_LEVEL_WARNING);
   return false;
 }
@@ -114,7 +114,7 @@ int importItems(string_array &target, bool scope_limit, FetchContext context) {
       continue;
     }
     path = x.substr(x.find(":") + 1);
-    writeLog(0, "Trying to import items from " + path);
+    writeLog(0, "正在导入项目：" + path);
     content.clear();
 
     std::string proxy = parseProxy(global.proxyConfig);
@@ -125,7 +125,7 @@ int importItems(string_array &target, bool scope_limit, FetchContext context) {
       content = webGet(path, proxy, global.cacheConfig, nullptr, nullptr,
                        context);
     else
-      writeLog(0, "File not found or not a valid URL: " + path,
+      writeLog(0, "文件不存在或不是有效 URL：" + path,
                LOG_LEVEL_ERROR);
     if (content.empty())
       return -1;
@@ -147,7 +147,7 @@ int importItems(string_array &target, bool scope_limit, FetchContext context) {
     ss.clear();
   }
   target.swap(result);
-  writeLog(0, "Imported " + std::to_string(itemCount) + " item(s).");
+  writeLog(0, "已导入 " + std::to_string(itemCount) + " 个项目。");
   return 0;
 }
 
@@ -171,7 +171,7 @@ void importItems(std::vector<toml::value> &root, const std::string &import_key,
       newRoot.emplace_back(std::move(*iter));
     else {
       const std::string &path = toml::get<std::string>(table.at("import"));
-      writeLog(0, "Trying to import items from " + path);
+      writeLog(0, "正在导入项目：" + path);
       content.clear();
       if (fileExist(path, scope_limit) && canImportLocalPath(path, context))
         content = fileGet(path, scope_limit);
@@ -179,7 +179,7 @@ void importItems(std::vector<toml::value> &root, const std::string &import_key,
         content = webGet(path, proxy, global.cacheConfig, nullptr, nullptr,
                          context);
       else
-        writeLog(0, "File not found or not a valid URL: " + path,
+        writeLog(0, "文件不存在或不是有效 URL：" + path,
                  LOG_LEVEL_ERROR);
       if (!content.empty()) {
         auto items = parseToml(content, path);
@@ -191,7 +191,7 @@ void importItems(std::vector<toml::value> &root, const std::string &import_key,
     iter++;
   }
   root.swap(newRoot);
-  writeLog(0, "Imported " + std::to_string(count) + " item(s).");
+  writeLog(0, "已导入 " + std::to_string(count) + " 个项目。");
 }
 
 void readRegexMatch(YAML::Node node, const std::string &delimiter,
@@ -332,8 +332,8 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
     std::string::size_type pos = x.Url.find("[]");
     if (pos != std::string::npos) {
       writeLog(0,
-               "Adding rule '" + rule_url.substr(pos + 2) + "," + rule_group +
-                   "'.",
+               "正在添加规则：'" + rule_url.substr(pos + 2) + "," +
+                   rule_group + "'。",
                LOG_LEVEL_INFO);
       rc = {rule_group,
             "",
@@ -353,8 +353,8 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
         type = iter->second;
       }
       writeLog(0,
-               "Updating ruleset url '" + rule_url + "' with group '" +
-                   rule_group + "'.",
+               "正在更新规则集 URL：'" + rule_url + "'，策略组：'" +
+                   rule_group + "'。",
                LOG_LEVEL_INFO);
       rc = {rule_group,
             rule_url,
@@ -639,7 +639,7 @@ void readYAMLConf(YAML::Node &node) {
     node["security"]["allow_public_upload"] >> global.allowPublicUpload;
   }
   finalizeSecuritySettings();
-  writeLog(0, "Load preference settings in YAML format completed.",
+  writeLog(0, "已加载 YAML 格式偏好设置。",
            LOG_LEVEL_INFO);
 }
 
@@ -846,13 +846,13 @@ void readTOMLConf(toml::value &root) {
                 "allow_public_upload", global.allowPublicUpload);
   finalizeSecuritySettings();
 
-  writeLog(0, "Load preference settings in TOML format completed.",
+  writeLog(0, "已加载 TOML 格式偏好设置。",
            LOG_LEVEL_INFO);
 }
 
 void readConf() {
   guarded_mutex guard(gMutexConfigure);
-  writeLog(0, "Loading preference settings...", LOG_LEVEL_INFO);
+  writeLog(0, "正在加载偏好设置...", LOG_LEVEL_INFO);
 
   eraseElements(global.excludeRemarks);
   eraseElements(global.includeRemarks);
@@ -872,11 +872,11 @@ void readConf() {
   } catch (YAML::Exception &e) {
     // ignore yaml parse error
     writeLog(0, e.what(), LOG_LEVEL_DEBUG);
-    writeLog(0, "Unable to load preference settings as YAML.", LOG_LEVEL_DEBUG);
+    writeLog(0, "无法按 YAML 格式加载偏好设置。", LOG_LEVEL_DEBUG);
   } catch (toml::exception &e) {
     // ignore toml parse error
     writeLog(0, e.what(), LOG_LEVEL_DEBUG);
-    writeLog(0, "Unable to load preference settings as TOML.", LOG_LEVEL_DEBUG);
+    writeLog(0, "无法按 TOML 格式加载偏好设置。", LOG_LEVEL_DEBUG);
   }
 
   INIReader ini;
@@ -885,7 +885,7 @@ void readConf() {
   int retVal = ini.parse_file(global.prefPath);
   if (retVal != INIREADER_EXCEPTION_NONE) {
     writeLog(0,
-             "Unable to load preference settings as INI. Reason: " +
+             "无法按 INI 格式加载偏好设置。原因：" +
                  ini.get_last_error(),
              LOG_LEVEL_FATAL);
     return;
@@ -1132,7 +1132,7 @@ void readConf() {
   }
   finalizeSecuritySettings();
 
-  writeLog(0, "Load preference settings in INI format completed.",
+  writeLog(0, "已加载 INI 格式偏好设置。",
            LOG_LEVEL_INFO);
 }
 
@@ -1172,7 +1172,7 @@ int loadExternalYAML(YAML::Node &node, ExternalConfig &ext,
     readRuleset(section[ruleset_name], vArray, global.APIMode, context);
     if (global.maxAllowedRulesets &&
         vArray.size() > global.maxAllowedRulesets) {
-      writeLog(0, "Ruleset count in external config has exceeded limit.",
+      writeLog(0, "外部配置中的规则集数量已超过限制。",
                LOG_LEVEL_WARNING);
       return -1;
     }
@@ -1245,7 +1245,7 @@ int loadExternalTOML(toml::value &root, ExternalConfig &ext,
   importItems(rulesets, "rulesets", import_scope_limit, context);
   if (global.maxAllowedRulesets &&
       rulesets.size() > global.maxAllowedRulesets) {
-    writeLog(0, "Ruleset count in external config has exceeded limit. ",
+    writeLog(0, "外部配置中的规则集数量已超过限制。",
              LOG_LEVEL_WARNING);
     return -1;
   }
@@ -1292,7 +1292,7 @@ int loadExternalConfig(std::string &path, ExternalConfig &ext,
     // std::cerr<<"Load external configuration failed. Reason:
     // "<<ini.get_last_error()<<"\n";
     writeLog(0,
-             "Load external configuration failed. Reason: " +
+             "加载外部配置失败。原因：" +
                  ini.get_last_error(),
              LOG_LEVEL_ERROR);
     return -1;
@@ -1314,7 +1314,7 @@ int loadExternalConfig(std::string &path, ExternalConfig &ext,
     importItems(vArray, global.APIMode, context);
     if (global.maxAllowedRulesets &&
         vArray.size() > global.maxAllowedRulesets) {
-      writeLog(0, "Ruleset count in external config has exceeded limit. ",
+      writeLog(0, "外部配置中的规则集数量已超过限制。",
                LOG_LEVEL_WARNING);
       return -1;
     }

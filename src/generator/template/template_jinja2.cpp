@@ -41,7 +41,7 @@ int render_template(const std::string &content, const template_args &vars,
     }
     catch (std::exception &e)
     {
-        output = "Template render failed! Reason: " + std::string(e.what());
+        output = "模板渲染失败！原因：" + std::string(e.what());
         return -1;
     }
     return -2;

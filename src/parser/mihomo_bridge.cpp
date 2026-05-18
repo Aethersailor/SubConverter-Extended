@@ -32,7 +32,7 @@ std::vector<ProxyNode> parseSubscription(const std::string &subscription) {
   // Call Go function
   char *result = ConvertSubscription(const_cast<char *>(subscription.c_str()));
   if (!result) {
-    throw std::runtime_error("Failed to call Go ConvertSubscription function");
+    throw std::runtime_error("调用 Go ConvertSubscription 函数失败");
   }
 
   // Parse JSON result
@@ -43,7 +43,7 @@ std::vector<ProxyNode> parseSubscription(const std::string &subscription) {
     if (json_result.contains("error")) {
       std::string error = json_result["error"];
       FreeString(result);
-      throw std::runtime_error("Mihomo parser error: " + error);
+      throw std::runtime_error("Mihomo 解析器错误：" + error);
     }
 
     // Parse proxy array
@@ -96,7 +96,7 @@ std::vector<ProxyNode> parseSubscription(const std::string &subscription) {
 
   } catch (const nlohmann::json::exception &e) {
     FreeString(result);
-    throw std::runtime_error(std::string("JSON parse error: ") + e.what());
+    throw std::runtime_error(std::string("JSON 解析错误：") + e.what());
   }
 
   // Free Go-allocated memory

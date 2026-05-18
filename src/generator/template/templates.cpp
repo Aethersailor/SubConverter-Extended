@@ -142,7 +142,7 @@ std::string parseHostname(inja::Arguments &args)
 std::string template_webGet(inja::Arguments &args)
 {
     std::string data = args.at(0)->get<std::string>(), proxy = parseProxy(global.proxyConfig);
-    writeLog(0, "Template called fetch with url '" + data + "'.", LOG_LEVEL_INFO);
+    writeLog(0, "模板调用 fetch，URL：'" + data + "'。", LOG_LEVEL_INFO);
     return webGet(data, proxy, global.cacheConfig, nullptr, nullptr,
                   current_template_fetch_context);
 }
@@ -339,7 +339,7 @@ int render_template(const std::string &content, const template_args &vars,
     }
     catch (std::exception &e)
     {
-        output = "Template render failed! Reason: " + std::string(e.what());
+        output = "模板渲染失败。原因：" + std::string(e.what());
         writeLog(0, output, LOG_LEVEL_ERROR);
         return -1;
     }
@@ -504,7 +504,7 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
             retrieved_rules = x.rule_content.get();
             if(retrieved_rules.empty())
             {
-                writeLog(0, "Failed to fetch ruleset or ruleset is empty: '" + x.rule_path + "'!", LOG_LEVEL_WARNING);
+                writeLog(0, "获取规则集失败或规则集为空：'" + x.rule_path + "'。", LOG_LEVEL_WARNING);
                 continue;
             }
 
@@ -683,7 +683,7 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
         }
         catch (std::exception &e)
         {
-            writeLog(0, "Error when rendering: " + std::string(e.what()), LOG_TYPE_ERROR);
+            writeLog(0, "渲染时发生错误：" + std::string(e.what()), LOG_TYPE_ERROR);
             return -1;
         }
     }

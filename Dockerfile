@@ -109,7 +109,7 @@ COPY --from=go-builder /build/bridge/libmihomo.h /usr/include/
 COPY --from=go-builder /build/bridge/go.mod /src/bridge/go.mod
 COPY --from=go-builder /build/bridge/go.sum /src/bridge/go.sum
 
-# build subconverter from THIS repository source
+# build SubConverter-Extended from THIS repository source
 WORKDIR /src
 COPY . /src
 COPY --from=go-builder /build/bridge/mihomo_schemes.h /src/src/parser/mihomo_schemes.h
