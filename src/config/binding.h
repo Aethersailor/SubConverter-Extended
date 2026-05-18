@@ -132,7 +132,7 @@ namespace toml
                 conf.Url = type + ":";
                 break;
             default:
-                throw serialization_error(format_error("Ruleset has unsupported type!", v.at("type").location(), "should be one of following: surge-ruleset, quantumultx, clash-domain, clash-ipcidr, clash-classic"), v.at("type").location());
+                throw serialization_error(format_error("规则集类型不受支持！", v.at("type").location(), "应为以下类型之一：surge-ruleset, quantumultx, clash-domain, clash-ipcidr, clash-classic"), v.at("type").location());
             }
             conf.Url += find<String>(v, "ruleset");
             conf.Interval = find_or<Integer>(v, "interval", 86400);

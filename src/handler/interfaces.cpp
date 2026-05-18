@@ -779,7 +779,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
   /// check other flags
   ext.authorized = authorized;
   ext.append_proxy_type = argAppendType.get(global.appendType);
-  // 原项目（SubConverter）默认在 clash 目标下自动把 expand 设为 true
+  // 上游项目默认在 clash 目标下自动把 expand 设为 true
   // 本项目默认 expand=false（使用 rule-provider 模式不展开规则集）
   // 若用户主动传入 expand=true，则按照用户意愿内联展开规则集
   argExpandRulesets.define(false);
@@ -835,7 +835,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
 
   if (!argExternalConfig.empty()) {
     // std::cerr<<"External configuration file provided. Loading...\n";
-    writeLog(0, "External configuration file provided. Loading...",
+    writeLog(0, "已提供外部配置文件，正在加载...",
              LOG_LEVEL_INFO);
     ExternalConfig extconf;
     extconf.tpl_args = &tpl_args;
@@ -901,8 +901,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
       if (load_result == 0) {
         writeLog(
             0,
-            "External configuration loaded but contains no effective settings. "
-            "Treating as failure.",
+            "外部配置已加载，但未包含有效设置，按加载失败处理。",
             LOG_LEVEL_WARNING);
       }
     }
@@ -912,11 +911,11 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
         argExternalConfig != global.defaultExtConfig) {
       // User provided config failed, try multiple fallback CDN URLs
       writeLog(
-          0, "Failed to load user provided config, trying fallback configs...",
+          0, "加载用户提供的配置失败，正在尝试回退配置...",
           LOG_LEVEL_WARNING);
 
       for (std::string fallbackUrl : FALLBACK_CONFIG_URLS) {
-        writeLog(0, "Attempting to load config from: " + fallbackUrl,
+        writeLog(0, "正在尝试加载配置：" + fallbackUrl,
                  LOG_LEVEL_INFO);
 
         tpl_args.local_vars = tpl_args_base;
@@ -926,7 +925,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
             loadExternalConfig(fallbackUrl, extconf, FetchContext::TrustedConfig);
         if (fallback_result == 0 &&
             hasEffectiveExternalConfig(extconf, tpl_args, tpl_args_base)) {
-          writeLog(0, "Successfully loaded config from: " + fallbackUrl,
+          writeLog(0, "已成功加载配置：" + fallbackUrl,
                    LOG_LEVEL_INFO);
           configLoadSuccess = true;
           if (!ext.nodelist) {
@@ -976,18 +975,17 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
           if (fallback_result == 0) {
             writeLog(
                 0,
-                "Loaded config from: " + fallbackUrl +
-                    " but found no effective settings. Skipping.",
+                "已从 " + fallbackUrl + " 加载配置，但未发现有效设置，跳过。",
                 LOG_LEVEL_WARNING);
           } else {
-            writeLog(0, "Failed to load config from: " + fallbackUrl,
+            writeLog(0, "加载配置失败：" + fallbackUrl,
                      LOG_LEVEL_WARNING);
           }
         }
       }
 
       if (!configLoadSuccess) {
-        writeLog(0, "All fallback config URLs failed to load", LOG_LEVEL_ERROR);
+        writeLog(0, "所有回退配置 URL 均加载失败。", LOG_LEVEL_ERROR);
       }
     }
   }
@@ -1076,11 +1074,11 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
     importItems(urls, true);
     for (std::string &x : urls) {
       x = regTrim(x);
-      writeLog(0, "Fetching node data from url '" + x + "'.", LOG_LEVEL_INFO);
+      writeLog(0, "正在从 URL 获取节点数据：'" + x + "'。", LOG_LEVEL_INFO);
       if (addNodes(x, insert_nodes, groupID, parse_set) == -1) {
         if (global.skipFailedLinks)
           writeLog(
-              0, "The following link doesn't contain any valid node info: " + x,
+              0, "以下链接不包含任何有效节点信息：" + x,
               LOG_LEVEL_WARNING);
         else {
           *status_code = 400;
@@ -1131,14 +1129,13 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
         std::string node_link = link;
         if (tagged.has_tag)
           node_link = "tag:" + tagged.tag + "," + link;
-        writeLog(0, "Detected node link: '" + link + "', will parse directly.",
+        writeLog(0, "检测到节点链接：'" + link + "'，将直接解析。",
                  LOG_LEVEL_INFO);
         node_urls.push_back(node_link);
       } else if (isLink(link)) {
         // HTTP/HTTPS 订阅链接
         writeLog(
-            0, "Detected subscription link: '" + link +
-                   "', will create provider.",
+            0, "检测到订阅链接：'" + link + "'，将创建 provider。",
             LOG_LEVEL_INFO);
         subscription_urls.push_back(
             {link, tagged.tag, tagged.provider, tagged.link_decoded});
@@ -1146,7 +1143,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
         std::string node_link = link;
         if (tagged.has_tag)
           node_link = "tag:" + tagged.tag + "," + link;
-        writeLog(0, "Unknown URL type: '" + link + "', treating as node link.",
+        writeLog(0, "未知 URL 类型：'" + link + "'，按节点链接处理。",
                  LOG_LEVEL_WARNING);
         node_urls.push_back(node_link);
       }
@@ -1154,7 +1151,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
 
     // 只有当有订阅链接时才启用 proxy-provider 模式
     if (!subscription_urls.empty()) {
-      writeLog(0, "Found subscription URLs, enabling proxy-provider mode.",
+      writeLog(0, "检测到订阅 URL，启用 proxy-provider 模式。",
                LOG_LEVEL_INFO);
       ext.use_proxy_provider = true;
       std::unordered_set<std::string> provider_names;
@@ -1202,7 +1199,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
         provider.name = reserve_provider_name(base_name);
         provider.tag = item.tag;
         writeLog(0,
-                 "Generated provider: " + provider.name + " for URL: " +
+                 "已生成 provider：" + provider.name + "，URL：" +
                      item.url,
                  LOG_LEVEL_INFO);
         provider.url = item.url_decoded ? item.url
@@ -1224,7 +1221,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
       }
     } else {
       // 没有订阅链接，禁用 proxy-provider 模式
-      writeLog(0, "No subscription URLs found, disabling proxy-provider mode.",
+      writeLog(0, "未检测到订阅 URL，禁用 proxy-provider 模式。",
                LOG_LEVEL_INFO);
       ext.use_proxy_provider = false;
     }
@@ -1232,18 +1229,17 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
     // 节点链接使用原有逻辑直接解析
     if (!node_urls.empty()) {
       writeLog(0,
-               "Parsing " + std::to_string(node_urls.size()) +
-                   " node links directly.",
+               "正在直接解析 " + std::to_string(node_urls.size()) +
+                   " 个节点链接。",
                LOG_LEVEL_INFO);
       importItems(node_urls, true, FetchContext::PublicRequest);
       // 关键：实际添加节点到 nodes 列表
       for (std::string &x : node_urls) {
-        writeLog(0, "Fetching node data from url '" + x + "'.", LOG_LEVEL_INFO);
+        writeLog(0, "正在从 URL 获取节点数据：'" + x + "'。", LOG_LEVEL_INFO);
         if (addNodes(x, nodes, groupID, parse_set) == -1) {
           // 跳过无法解析的节点链接，记录警告后继续处理其他节点
           writeLog(0,
-                   "Skipped invalid node link: '" + x +
-                       "', continuing with other nodes.",
+                   "已跳过无效节点链接：'" + x + "'，继续处理其他节点。",
                    LOG_LEVEL_WARNING);
         }
         groupID++;
@@ -1256,12 +1252,11 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
     for (std::string &x : urls) {
       x = regTrim(x);
       // std::cerr<<"Fetching node data from url '"<<x<<"'."<<std::endl;
-      writeLog(0, "Fetching node data from url '" + x + "'.", LOG_LEVEL_INFO);
+      writeLog(0, "正在从 URL 获取节点数据：'" + x + "'。", LOG_LEVEL_INFO);
       if (addNodes(x, nodes, groupID, parse_set) == -1) {
         // 跳过无法解析的节点链接，记录警告后继续处理其他节点
         writeLog(0,
-                 "Skipped invalid node link: '" + x +
-                     "', continuing with other nodes.",
+                 "已跳过无效节点链接：'" + x + "'，继续处理其他节点。",
                  LOG_LEVEL_WARNING);
       }
       groupID++;
@@ -1328,7 +1323,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
         }
         else
         {
-            writeLog(0, "Error when trying to parse script:\n" +
+            writeLog(0, "解析脚本时发生错误：\n" +
     duktape_get_err_stack(ctx), LOG_LEVEL_ERROR); duk_pop(ctx); /// pop err
         }
     }
@@ -1384,8 +1379,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
   case "clash"_hash:
   case "clashr"_hash:
     writeLog(0,
-             argTarget == "clashr" ? "Generate target: ClashR"
-                                   : "Generate target: Clash",
+             argTarget == "clashr" ? "生成目标：ClashR" : "生成目标：Clash",
              LOG_LEVEL_INFO);
     tpl_args.local_vars["clash.new_field_name"] =
         ext.clash_new_field_name ? "true" : "false";
@@ -1413,7 +1407,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
     break;
   case "surge"_hash:
 
-    writeLog(0, "Generate target: Surge " + std::to_string(intSurgeVer),
+    writeLog(0, "生成目标：Surge " + std::to_string(intSurgeVer),
              LOG_LEVEL_INFO);
 
     if (ext.nodelist) {
@@ -1446,7 +1440,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
     }
     break;
   case "surfboard"_hash:
-    writeLog(0, "Generate target: Surfboard", LOG_LEVEL_INFO);
+    writeLog(0, "生成目标：Surfboard", LOG_LEVEL_INFO);
 
     if (render_template(fetchFile(lSurfboardBase, proxy, global.cacheConfig,
                                   true, baseFetchContext),
@@ -1468,7 +1462,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
           output_content;
     break;
   case "mellow"_hash:
-    writeLog(0, "Generate target: Mellow", LOG_LEVEL_INFO);
+    writeLog(0, "生成目标：Mellow", LOG_LEVEL_INFO);
 
     if (render_template(fetchFile(lMellowBase, proxy, global.cacheConfig, true,
                                   baseFetchContext),
@@ -1484,7 +1478,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
       uploadGist("mellow", argUploadPath, output_content, true);
     break;
   case "sssub"_hash:
-    writeLog(0, "Generate target: SS Subscription", LOG_LEVEL_INFO);
+    writeLog(0, "生成目标：SS Subscription", LOG_LEVEL_INFO);
 
     if (render_template(fetchFile(lSSSubBase, proxy, global.cacheConfig, true,
                                   baseFetchContext),
@@ -1498,49 +1492,49 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
       uploadGist("sssub", argUploadPath, output_content, false);
     break;
   case "ss"_hash:
-    writeLog(0, "Generate target: SS", LOG_LEVEL_INFO);
+    writeLog(0, "生成目标：SS", LOG_LEVEL_INFO);
     output_content = proxyToSingle(nodes, 1, ext);
     if (argUpload)
       uploadGist("ss", argUploadPath, output_content, false);
     break;
   case "ssr"_hash:
-    writeLog(0, "Generate target: SSR", LOG_LEVEL_INFO);
+    writeLog(0, "生成目标：SSR", LOG_LEVEL_INFO);
     output_content = proxyToSingle(nodes, 2, ext);
     if (argUpload)
       uploadGist("ssr", argUploadPath, output_content, false);
     break;
   case "v2ray"_hash:
-    writeLog(0, "Generate target: v2rayN", LOG_LEVEL_INFO);
+    writeLog(0, "生成目标：v2rayN", LOG_LEVEL_INFO);
     output_content = proxyToSingle(nodes, 4, ext);
     if (argUpload)
       uploadGist("v2ray", argUploadPath, output_content, false);
     break;
   case "trojan"_hash:
-    writeLog(0, "Generate target: Trojan", LOG_LEVEL_INFO);
+    writeLog(0, "生成目标：Trojan", LOG_LEVEL_INFO);
     output_content = proxyToSingle(nodes, 8, ext);
     if (argUpload)
       uploadGist("trojan", argUploadPath, output_content, false);
     break;
   case "vless"_hash:
-    writeLog(0, "Generate target: vless", LOG_LEVEL_INFO);
+    writeLog(0, "生成目标：vless", LOG_LEVEL_INFO);
     output_content = proxyToSingle(nodes, 16, ext);
     if (argUpload)
       uploadGist("vless", argUploadPath, output_content, false);
     break;
   case "hysteria2"_hash:
-    writeLog(0, "Generate target: hysteria2", LOG_LEVEL_INFO);
+    writeLog(0, "生成目标：hysteria2", LOG_LEVEL_INFO);
     output_content = proxyToSingle(nodes, 32, ext);
     if (argUpload)
       uploadGist("hysteria2", argUploadPath, output_content, false);
     break;
   case "mixed"_hash:
-    writeLog(0, "Generate target: Standard Subscription", LOG_LEVEL_INFO);
+    writeLog(0, "生成目标：Standard Subscription", LOG_LEVEL_INFO);
     output_content = proxyToSingle(nodes, 63, ext);
     if (argUpload)
       uploadGist("sub", argUploadPath, output_content, false);
     break;
   case "quan"_hash:
-    writeLog(0, "Generate target: Quantumult", LOG_LEVEL_INFO);
+    writeLog(0, "生成目标：Quantumult", LOG_LEVEL_INFO);
     if (!ext.nodelist) {
       if (render_template(fetchFile(lQuanBase, proxy, global.cacheConfig, true,
                                     baseFetchContext),
@@ -1558,7 +1552,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
       uploadGist("quan", argUploadPath, output_content, false);
     break;
   case "quanx"_hash:
-    writeLog(0, "Generate target: Quantumult X", LOG_LEVEL_INFO);
+    writeLog(0, "生成目标：Quantumult X", LOG_LEVEL_INFO);
     if (!ext.nodelist) {
       if (render_template(fetchFile(lQuanXBase, proxy, global.cacheConfig,
                                     true, baseFetchContext),
@@ -1576,7 +1570,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
       uploadGist("quanx", argUploadPath, output_content, false);
     break;
   case "loon"_hash:
-    writeLog(0, "Generate target: Loon", LOG_LEVEL_INFO);
+    writeLog(0, "生成目标：Loon", LOG_LEVEL_INFO);
     if (!ext.nodelist) {
       if (render_template(fetchFile(lLoonBase, proxy, global.cacheConfig, true,
                                     baseFetchContext),
@@ -1594,13 +1588,13 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
       uploadGist("loon", argUploadPath, output_content, false);
     break;
   case "ssd"_hash:
-    writeLog(0, "Generate target: SSD", LOG_LEVEL_INFO);
+    writeLog(0, "生成目标：SSD", LOG_LEVEL_INFO);
     output_content = proxyToSSD(nodes, argGroupName, subInfo, ext);
     if (argUpload)
       uploadGist("ssd", argUploadPath, output_content, false);
     break;
   case "singbox"_hash:
-    writeLog(0, "Generate target: sing-box", LOG_LEVEL_INFO);
+    writeLog(0, "生成目标：sing-box", LOG_LEVEL_INFO);
     if (!ext.nodelist) {
       if (render_template(fetchFile(lSingBoxBase, proxy, global.cacheConfig,
                                     true, baseFetchContext),
@@ -1618,7 +1612,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
       uploadGist("singbox", argUploadPath, output_content, false);
     break;
   default:
-    writeLog(0, "Generate target: Unspecified", LOG_LEVEL_INFO);
+    writeLog(0, "生成目标：未指定", LOG_LEVEL_INFO);
     *status_code = 500;
     return "Internal error: target passed validation but no generator handled "
            "it.\n"
@@ -1626,7 +1620,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
            "Please report this request to the service maintainer.\n"
            "请将该请求反馈给服务维护者。";
   }
-  writeLog(0, "Generate completed.", LOG_LEVEL_INFO);
+  writeLog(0, "生成完成。", LOG_LEVEL_INFO);
   if (!argFilename.empty())
     response.headers.emplace("Content-Disposition",
                              "attachment; filename=\"" + argFilename +
@@ -1693,7 +1687,7 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
            "parameter.\n"
            "请在 link 参数中提供真实 Surge 配置链接。";
   }
-  writeLog(0, "SurgeConfToClash called with url '" + url + "'.",
+  writeLog(0, "SurgeConfToClash 调用，URL：'" + url + "'。",
            LOG_LEVEL_INFO);
 
   std::string proxy = parseProxy(global.proxyConfig);
@@ -1721,7 +1715,8 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
                          "Reason / 原因: " +
                          ini.get_last_error();
     // std::cerr<<errmsg<<"\n";
-    writeLog(0, errmsg, LOG_LEVEL_ERROR);
+    writeLog(0, "Surge 配置解析失败。原因：" + ini.get_last_error(),
+             LOG_LEVEL_ERROR);
     *status_code = 400;
     return errmsg;
   }
@@ -1733,7 +1728,8 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
         "Required sections: [Proxy], [Proxy Group], and [Rule].\n"
         "必须包含以下配置段：[Proxy]、[Proxy Group] 和 [Rule]。";
     // std::cerr<<errmsg<<"\n";
-    writeLog(0, errmsg, LOG_LEVEL_ERROR);
+    writeLog(0, "Surge 配置不完整，缺少必需配置段。",
+             LOG_LEVEL_ERROR);
     *status_code = 400;
     return errmsg;
   }
@@ -1789,11 +1785,11 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
   parse_set.authorized = !global.APIMode;
   for (std::string &x : links) {
     // std::cerr<<"Fetching node data from url '"<<x<<"'."<<std::endl;
-    writeLog(0, "Fetching node data from url '" + x + "'.", LOG_LEVEL_INFO);
+    writeLog(0, "正在从 URL 获取节点数据：'" + x + "'。", LOG_LEVEL_INFO);
     if (addNodes(x, nodes, 0, parse_set) == -1) {
       if (global.skipFailedLinks)
         writeLog(0,
-                 "The following link doesn't contain any valid node info: " + x,
+                 "以下链接不包含任何有效节点信息：" + x,
                  LOG_LEVEL_WARNING);
       else {
         *status_code = 400;
@@ -1909,7 +1905,7 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
 
   response.headers["profile-update-interval"] =
       std::to_string(global.updateInterval / 3600);
-  writeLog(0, "Conversion completed.", LOG_LEVEL_INFO);
+  writeLog(0, "转换完成。", LOG_LEVEL_INFO);
   return YAML::Dump(clash);
 }
 
@@ -1942,12 +1938,12 @@ std::string getProfile(RESPONSE_CALLBACK_ARGS) {
            name;
   }
   // std::cerr<<"Trying to load profile '" + name + "'.\n";
-  writeLog(0, "Trying to load profile '" + name + "'.", LOG_LEVEL_INFO);
+  writeLog(0, "正在加载配置档：'" + name + "'。", LOG_LEVEL_INFO);
   INIReader ini;
   if (ini.parse(profile_content) != INIREADER_EXCEPTION_NONE &&
       !ini.section_exist("Profile")) {
     // std::cerr<<"Load profile failed! Reason: "<<ini.get_last_error()<<"\n";
-    writeLog(0, "Load profile failed! Reason: " + ini.get_last_error(),
+    writeLog(0, "加载配置档失败！原因：" + ini.get_last_error(),
              LOG_LEVEL_ERROR);
     *status_code = 500;
     return "Invalid profile: failed to parse profile content.\n"
@@ -1956,12 +1952,12 @@ std::string getProfile(RESPONSE_CALLBACK_ARGS) {
            ini.get_last_error();
   }
   // std::cerr<<"Trying to parse profile '" + name + "'.\n";
-  writeLog(0, "Trying to parse profile '" + name + "'.", LOG_LEVEL_INFO);
+  writeLog(0, "正在解析配置档：'" + name + "'。", LOG_LEVEL_INFO);
   string_multimap contents;
   ini.get_items("Profile", contents);
   if (contents.empty()) {
     // std::cerr<<"Load profile failed! Reason: Empty Profile section\n";
-    writeLog(0, "Load profile failed! Reason: Empty Profile section",
+    writeLog(0, "加载配置档失败！原因：[Profile] 配置段为空。",
              LOG_LEVEL_ERROR);
     *status_code = 500;
     return "Invalid profile: [Profile] section is empty.\n"
@@ -1976,7 +1972,7 @@ std::string getProfile(RESPONSE_CALLBACK_ARGS) {
   // }
   /// check if more than one profile is provided
   if (profiles.size() > 1) {
-    writeLog(0, "Multiple profiles are provided. Trying to combine profiles...",
+    writeLog(0, "检测到多个配置档，正在合并...",
              LOG_TYPE_INFO);
     std::string all_urls, url;
     auto iter = contents.find("url");
@@ -1985,22 +1981,22 @@ std::string getProfile(RESPONSE_CALLBACK_ARGS) {
     for (size_t i = 1; i < profiles.size(); i++) {
       name = profiles[i];
       if (!fileExist(name)) {
-        writeLog(0, "Ignoring non-exist profile '" + name + "'...",
+        writeLog(0, "忽略不存在的配置档：'" + name + "'。",
                  LOG_LEVEL_WARNING);
         continue;
       }
       if (ini.parse_file(name) != INIREADER_EXCEPTION_NONE &&
           !ini.section_exist("Profile")) {
-        writeLog(0, "Ignoring broken profile '" + name + "'...",
+        writeLog(0, "忽略损坏的配置档：'" + name + "'。",
                  LOG_LEVEL_WARNING);
         continue;
       }
       url = ini.get("Profile", "url");
       if (!url.empty()) {
         all_urls += "|" + url;
-        writeLog(0, "Profile url from '" + name + "' added.", LOG_LEVEL_INFO);
+        writeLog(0, "已添加来自配置档 '" + name + "' 的 URL。", LOG_LEVEL_INFO);
       } else {
-        writeLog(0, "Profile '" + name + "' does not have url key. Skipping...",
+        writeLog(0, "配置档 '" + name + "' 没有 url 字段，跳过。",
                  LOG_LEVEL_INFO);
       }
     }
@@ -2021,7 +2017,7 @@ std::string getProfile(RESPONSE_CALLBACK_ARGS) {
 std::string jinja2_webGet(const std::string &url)
 {
     std::string proxy = parseProxy(global.proxyConfig);
-    writeLog(0, "Template called fetch with url '" + url + "'.",
+    writeLog(0, "模板调用 fetch，URL：'" + url + "'。",
 LOG_LEVEL_INFO); return webGet(url, proxy, global.cacheConfig);
 }*/
 
@@ -2062,20 +2058,20 @@ std::string subInfoToMessage(std::string subinfo) {
     expirydata.assign(buffer);
   }
   if (useddata == "N/A" && totaldata == "N/A" && expirydata == "N/A")
-    retdata = "Not Available";
+    retdata = "不可用";
   else
-    retdata += "Stream Used: " + useddata + " Stream Total: " + totaldata +
-               " Expiry Time: " + expirydata;
+    retdata += "已用流量：" + useddata + " 总流量：" + totaldata +
+               " 到期时间：" + expirydata;
   return retdata;
 }
 
 int simpleGenerator() {
   // std::cerr<<"\nReading generator configuration...\n";
-  writeLog(0, "Reading generator configuration...", LOG_LEVEL_INFO);
+  writeLog(0, "正在读取生成器配置...", LOG_LEVEL_INFO);
   std::string config = fileGet("generate.ini"), path, profile, content;
   if (config.empty()) {
     // std::cerr<<"Generator configuration not found or empty!\n";
-    writeLog(0, "Generator configuration not found or empty!", LOG_LEVEL_ERROR);
+    writeLog(0, "未找到生成器配置，或配置为空！", LOG_LEVEL_ERROR);
     return -1;
   }
 
@@ -2084,20 +2080,19 @@ int simpleGenerator() {
     // std::cerr<<"Generator configuration broken!
     // Reason:"<<ini.get_last_error()<<"\n";
     writeLog(0,
-             "Generator configuration broken! Reason:" + ini.get_last_error(),
+             "生成器配置损坏！原因：" + ini.get_last_error(),
              LOG_LEVEL_ERROR);
     return -2;
   }
   // std::cerr<<"Read generator configuration completed.\n\n";
-  writeLog(0, "Read generator configuration completed.\n", LOG_LEVEL_INFO);
+  writeLog(0, "生成器配置读取完成。\n", LOG_LEVEL_INFO);
 
   string_array sections = ini.get_section_names();
   if (!global.generateProfiles.empty()) {
     // std::cerr<<"Generating with specific artifacts:
     // \""<<gen_profile<<"\"...\n";
     writeLog(0,
-             "Generating with specific artifacts: \"" +
-                 global.generateProfiles + "\"...",
+             "正在按指定生成项生成：\"" + global.generateProfiles + "\"...",
              LOG_LEVEL_INFO);
     string_array targets = split(global.generateProfiles, ","), new_targets;
     for (std::string &x : targets) {
@@ -2106,7 +2101,7 @@ int simpleGenerator() {
         new_targets.emplace_back(std::move(x));
       else {
         // std::cerr<<"Artifact \""<<x<<"\" not found in generator settings!\n";
-        writeLog(0, "Artifact \"" + x + "\" not found in generator settings!",
+        writeLog(0, "生成器设置中未找到生成项：\"" + x + "\"！",
                  LOG_LEVEL_ERROR);
         return -3;
       }
@@ -2115,7 +2110,7 @@ int simpleGenerator() {
     sections.shrink_to_fit();
   } else
     // std::cerr<<"Generating all artifacts...\n";
-    writeLog(0, "Generating all artifacts...", LOG_LEVEL_INFO);
+    writeLog(0, "正在生成所有生成项...", LOG_LEVEL_INFO);
 
   string_multimap allItems;
   std::string proxy = parseProxy(global.proxySubscription);
@@ -2124,13 +2119,13 @@ int simpleGenerator() {
   for (std::string &x : sections) {
     response.status_code = 200;
     // std::cerr<<"Generating artifact '"<<x<<"'...\n";
-    writeLog(0, "Generating artifact '" + x + "'...", LOG_LEVEL_INFO);
+    writeLog(0, "正在生成生成项：'" + x + "'。", LOG_LEVEL_INFO);
     ini.enter_section(x);
     if (ini.item_exist("path"))
       path = ini.get("path");
     else {
       // std::cerr<<"Artifact '"<<x<<"' output path missing! Skipping...\n\n";
-      writeLog(0, "Artifact '" + x + "' output path missing! Skipping...\n",
+      writeLog(0, "生成项 '" + x + "' 缺少输出路径，跳过。\n",
                LOG_LEVEL_ERROR);
       continue;
     }
@@ -2148,8 +2143,7 @@ int simpleGenerator() {
           // std::cerr<<"Artifact '"<<x<<"' generate ERROR! Please check your
           // link.\n\n";
           writeLog(0,
-                   "Artifact '" + x +
-                       "' generate ERROR! Please check your link.\n",
+                   "生成项 '" + x + "' 生成失败！请检查链接。\n",
                    LOG_LEVEL_ERROR);
           if (sections.size() == 1)
             return -1;
@@ -2171,7 +2165,7 @@ int simpleGenerator() {
       // std::cerr<<"Artifact '"<<x<<"' generate ERROR! Reason:
       // "<<content<<"\n\n";
       writeLog(0,
-               "Artifact '" + x + "' generate ERROR! Reason: " + content + "\n",
+               "生成项 '" + x + "' 生成失败！原因：" + content + "\n",
                LOG_LEVEL_ERROR);
       if (sections.size() == 1)
         return -1;
@@ -2183,15 +2177,14 @@ int simpleGenerator() {
                      [](auto y) { return y.first == "Subscription-UserInfo"; });
     if (iter != response.headers.end())
       writeLog(0,
-               "User Info for artifact '" + x +
-                   "': " + subInfoToMessage(iter->second),
+               "生成项 '" + x + "' 的用户信息：" + subInfoToMessage(iter->second),
                LOG_LEVEL_INFO);
     // std::cerr<<"Artifact '"<<x<<"' generate SUCCESS!\n\n";
-    writeLog(0, "Artifact '" + x + "' generate SUCCESS!\n", LOG_LEVEL_INFO);
+    writeLog(0, "生成项 '" + x + "' 生成成功！\n", LOG_LEVEL_INFO);
     eraseElements(response.headers);
   }
   // std::cerr<<"All artifact generated. Exiting...\n";
-  writeLog(0, "All artifact generated. Exiting...", LOG_LEVEL_INFO);
+  writeLog(0, "所有生成项已生成，正在退出...", LOG_LEVEL_INFO);
   return 0;
 }
 
@@ -2200,7 +2193,7 @@ std::string renderTemplate(RESPONSE_CALLBACK_ARGS) {
   int *status_code = &response.status_code;
 
   std::string path = getUrlArg(argument, "path");
-  writeLog(0, "Trying to render template '" + path + "'...", LOG_LEVEL_INFO);
+  writeLog(0, "正在渲染模板：'" + path + "'。", LOG_LEVEL_INFO);
 
   if (!startsWith(path, global.templatePath) || !fileExist(path)) {
     *status_code = 404;
@@ -2233,9 +2226,9 @@ std::string renderTemplate(RESPONSE_CALLBACK_ARGS) {
   if (render_template(template_content, tpl_args, output_content,
                       global.templatePath) != 0) {
     *status_code = 400;
-    writeLog(0, "Render failed with error.", LOG_LEVEL_WARNING);
+    writeLog(0, "渲染失败。", LOG_LEVEL_WARNING);
   } else
-    writeLog(0, "Render completed.", LOG_LEVEL_INFO);
+    writeLog(0, "渲染完成。", LOG_LEVEL_INFO);
 
   return output_content;
 }

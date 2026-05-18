@@ -411,7 +411,7 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
 
     // Generic Pass-Through (Phase 9 + 9.3: Smart Global Parameter Application)
     // If RawParams are present (from Mihomo parser), use them directly.
-    // This allows supporting any new protocol without modifying subconverter
+    // This allows supporting any new protocol without modifying SubConverter-Extended
     // code.
     if (!x.RawParams.empty()) {
       // Get protocol type for compatibility check
@@ -1007,8 +1007,8 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
 
     yamlnode["proxy-providers"] = provider_node;
     writeLog(0,
-             "Generated " + std::to_string(ext.providers.size()) +
-                 " proxy providers.",
+             "已生成 " + std::to_string(ext.providers.size()) +
+                 " 个 proxy provider。",
              LOG_LEVEL_INFO);
   }
 
@@ -1164,7 +1164,7 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
   try {
     yamlnode = YAML::Load(base_conf);
   } catch (std::exception &e) {
-    writeLog(0, std::string("Clash base loader failed with error: ") + e.what(),
+    writeLog(0, std::string("Clash 基础配置加载失败：") + e.what(),
              LOG_LEVEL_ERROR);
     return "";
   }
@@ -1255,7 +1255,7 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
   // 使用之前在 998-1002 行已提取的 proxy_providers_yaml
   std::string proxy_providers_str;
   if (!proxy_providers_yaml.empty()) {
-    writeLog(0, "Using previously extracted proxy-providers", LOG_LEVEL_INFO);
+    writeLog(0, "正在使用先前提取的 proxy-providers", LOG_LEVEL_INFO);
 
     // proxy_providers_yaml 已经是 YAML::Dump 的结果
     // 需要移除可能的文档分隔符 "---"
@@ -1291,12 +1291,12 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
       }
 
       writeLog(0,
-               "Prepared proxy-providers for insertion, length: " +
+               "已准备待插入的 proxy-providers，长度：" +
                    std::to_string(proxy_providers_str.length()),
                LOG_LEVEL_INFO);
     }
   } else {
-    writeLog(0, "No proxy-providers to insert", LOG_LEVEL_INFO);
+    writeLog(0, "没有需要插入的 proxy-providers", LOG_LEVEL_INFO);
   }
 
   std::string yamlnode_str = YAML::Dump(yamlnode);
@@ -1305,7 +1305,7 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
   if (!proxy_providers_str.empty()) {
     writeLog(
         0,
-        "Attempting to insert proxy-providers before proxy-groups, size: " +
+        "正在尝试将 proxy-providers 插入到 proxy-groups 前，大小：" +
             std::to_string(proxy_providers_str.length()),
         LOG_LEVEL_INFO);
 
@@ -1315,20 +1315,20 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
 
     if (groups_pos != std::string::npos) {
       writeLog(0,
-               "Found proxy-groups at position: " + std::to_string(groups_pos),
+               "已在位置 " + std::to_string(groups_pos) + " 找到 proxy-groups",
                LOG_LEVEL_INFO);
       // 在 proxy-groups: 这一行之前插入
       yamlnode_str.insert(groups_pos, proxy_providers_str);
-      writeLog(0, "Successfully inserted proxy-providers before proxy-groups",
+      writeLog(0, "已将 proxy-providers 插入到 proxy-groups 前",
                LOG_LEVEL_INFO);
     } else {
-      writeLog(0, "WARNING: proxy-groups not found! Appending to end",
+      writeLog(0, "未找到 proxy-groups，将追加到末尾",
                LOG_LEVEL_WARNING);
       // 如果找不到 proxy-groups，尝试在文件末尾插入
       yamlnode_str += proxy_providers_str;
     }
   } else {
-    writeLog(0, "proxy_providers_str is EMPTY, nothing to insert",
+    writeLog(0, "proxy-providers 内容为空，没有内容需要插入",
              LOG_LEVEL_WARNING);
   }
 
@@ -1395,7 +1395,7 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
   ini.add_direct_save_section("URL Rewrite");
   ini.add_direct_save_section("Header Rewrite");
   if (ini.parse(base_conf) != 0 && !ext.nodelist) {
-    writeLog(0, "Surge base loader failed with error: " + ini.get_last_error(),
+    writeLog(0, "Surge 基础配置加载失败：" + ini.get_last_error(),
              LOG_LEVEL_ERROR);
     return "";
   }
@@ -1906,7 +1906,7 @@ std::string proxyToSSSub(std::string base_conf, std::vector<Proxy> &nodes,
   rapidjson::ParseResult result = base.Parse(base_conf.data());
   if (!result)
     writeLog(0,
-             std::string("SIP008 base loader failed with error: ") +
+             std::string("SIP008 基础配置加载失败：") +
                  rapidjson::GetParseError_En(result.Code()) + " (" +
                  std::to_string(result.Offset()) + ")",
              LOG_LEVEL_ERROR);
@@ -1967,7 +1967,7 @@ std::string proxyToQuan(std::vector<Proxy> &nodes, const std::string &base_conf,
   ini.store_any_line = true;
   if (!ext.nodelist && ini.parse(base_conf) != 0) {
     writeLog(
-        0, "Quantumult base loader failed with error: " + ini.get_last_error(),
+        0, "Quantumult 基础配置加载失败：" + ini.get_last_error(),
         LOG_LEVEL_ERROR);
     return "";
   }
@@ -2213,7 +2213,7 @@ std::string proxyToQuanX(std::vector<Proxy> &nodes,
   ini.add_direct_save_section("server_remote");
   if (!ext.nodelist && ini.parse(base_conf) != 0) {
     writeLog(
-        0, "QuantumultX base loader failed with error: " + ini.get_last_error(),
+        0, "Quantumult X 基础配置加载失败：" + ini.get_last_error(),
         LOG_LEVEL_ERROR);
     return "";
   }
@@ -2595,7 +2595,7 @@ std::string proxyToMellow(std::vector<Proxy> &nodes,
   INIReader ini;
   ini.store_any_line = true;
   if (ini.parse(base_conf) != 0) {
-    writeLog(0, "Mellow base loader failed with error: " + ini.get_last_error(),
+    writeLog(0, "Mellow 基础配置加载失败：" + ini.get_last_error(),
              LOG_LEVEL_ERROR);
     return "";
   }
@@ -2760,7 +2760,7 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
   ini.store_any_line = true;
   ini.add_direct_save_section("Plugin");
   if (ini.parse(base_conf) != INIREADER_EXCEPTION_NONE && !ext.nodelist) {
-    writeLog(0, "Loon base loader failed with error: " + ini.get_last_error(),
+    writeLog(0, "Loon 基础配置加载失败：" + ini.get_last_error(),
              LOG_LEVEL_ERROR);
     return "";
   }
@@ -3688,7 +3688,7 @@ std::string proxyToSingBox(std::vector<Proxy> &nodes,
     if (json.HasParseError()) {
       writeLog(
           0,
-          "sing-box base loader failed with error: " +
+          "sing-box 基础配置加载失败：" +
               std::string(rapidjson::GetParseError_En(json.GetParseError())),
           LOG_LEVEL_ERROR);
       return "";

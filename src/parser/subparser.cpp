@@ -987,7 +987,7 @@ void explodeMierus(std::string mierus, Proxy &node) {
 }
 
 void explodeHysteria(std::string hysteria, Proxy &node) {
-    printf("explodeHysteria\n");
+    writeLog(0, "正在解析 Hysteria 节点。", LOG_LEVEL_DEBUG);
     hysteria = regReplace(hysteria, "(hysteria|hy)://", "hysteria://");
     if (regMatch(hysteria, "hysteria://(.*?)[:](.*)")) {
         explodeStdHysteria(hysteria, node);
@@ -1466,7 +1466,7 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes) {
                     host = singleproxy["sni"].IsDefined()
                                ? safe_as<std::string>(singleproxy["sni"])
                                : safe_as<std::string>(singleproxy["servername"]);
-                    printf("host:%s", host.c_str());
+                    writeLog(0, "Reality 主机：" + host, LOG_LEVEL_DEBUG);
                     singleproxy["reality-opts"]["public-key"] >>= pbk;
                     singleproxy["reality-opts"]["short-id"] >>= sid;
                 }

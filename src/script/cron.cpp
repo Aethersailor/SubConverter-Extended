@@ -28,8 +28,8 @@ int timeout_checker(JSRuntime *rt, void *opaque) {
       time(NULL) >= info.begin_time + info.timeout) /// timeout reached
   {
     writeLog(0,
-             "Script '" + info.name + "' has exceeded timeout " +
-                 std::to_string(info.timeout) + ", terminate now.",
+             "脚本 '" + info.name + "' 已超过超时时间 " +
+                 std::to_string(info.timeout) + " 秒，正在终止。",
              LOG_LEVEL_WARNING);
     return 1;
   }
@@ -50,8 +50,7 @@ void refresh_schedule() {
         std::string script = fetchFile(x.Path, proxy, global.cacheConfig);
         if (script.empty()) {
           writeLog(0,
-                   "Script '" + x.Name +
-                       "' run failed: file is empty or not exist!",
+                   "脚本 '" + x.Name + "' 运行失败：文件为空或不存在！",
                    LOG_LEVEL_WARNING);
           return;
         }
