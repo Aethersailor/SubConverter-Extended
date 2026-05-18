@@ -8,23 +8,33 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: watch-mihomo-meta-dev
+  cancel-in-progress: false
+
+env:
+  # Scheduled workflows run from the default branch, but the marker belongs to dev.
+  TARGET_BRANCH: dev
+  MIHOMO_REPO: https://github.com/MetaCubeX/mihomo.git
+  MARKER_FILE: .github/mihomo-meta.rev
+
 jobs:
   watch:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout dev
+      - name: Checkout target branch
         uses: actions/checkout@v6
         with:
-          ref: dev
+          ref: ${{ env.TARGET_BRANCH }}
           fetch-depth: 0
           token: ${{ secrets.PAT_TOKEN || github.token }}
 
       - name: Check Meta updates
-        env:
-          MIHOMO_REPO: https://github.com/MetaCubeX/mihomo.git
-          MARKER_FILE: .github/mihomo-meta.rev
         run: |
           set -euo pipefail
+
+          echo "Workflow ref: ${GITHUB_REF}"
+          echo "Tracking Meta revision on ${TARGET_BRANCH}"
 
           latest=$(git ls-remote "$MIHOMO_REPO" Meta | awk '{print $1}')
           if [ -z "$latest" ]; then
@@ -77,4 +87,7 @@ jobs:
           fi
 
           git commit -m "$msg" || exit 0
-          git push origin HEAD:dev
+
+          git fetch --no-tags origin "refs/heads/$TARGET_BRANCH:refs/remotes/origin/$TARGET_BRANCH"
+          git rebase "origin/$TARGET_BRANCH"
+          git push origin "HEAD:refs/heads/$TARGET_BRANCH"
