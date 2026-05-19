@@ -68,8 +68,14 @@ jobs:
           git add README-*.md 2>/dev/null || true
           git add docs/images/readme-flow-*.svg 2>/dev/null || true
           
-          # Check if there are changes to commit after restoring protected docs
-          if git diff --staged --quiet; then
+          # Commit whenever a merge is in progress, even if protected docs made
+          # the final tree identical to master. This records dev as merged.
+          if [ -f .git/MERGE_HEAD ]; then
+            echo "Committing merge..."
+            git commit -m "chore: sync dev to master"
+            echo "Pushing..."
+            git push origin master
+          elif git diff --staged --quiet; then
             echo "No changes to commit (maybe dev is already merged or only protected docs changed)"
           else
             echo "Committing..."
