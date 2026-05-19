@@ -6,6 +6,7 @@ ARG TARGETARCH
 ARG TARGETVARIANT
 ARG MIHOMO_REF="Meta"
 ARG MIHOMO_CACHE_BUST=1
+ARG REFRESH_GO_DEPS=false
 
 WORKDIR /build/bridge
 
@@ -14,21 +15,19 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends git build-essential && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy Go source code FIRST (needed for dependency analysis)
+# Copy committed Go module files and source.
+COPY bridge/go.mod bridge/go.sum ./
 COPY bridge/converter.go ./
 
-# Initialize new go.mod dynamically
-RUN go mod init github.com/aethersailor/subconverter-extended/bridge
-
-# Get latest Mihomo and resolve all dependencies
-RUN echo "MIHOMO_CACHE_BUST=$MIHOMO_CACHE_BUST" && \
-    go get github.com/metacubex/mihomo@${MIHOMO_REF}
-
-# Upgrade all dependencies to latest versions (security fix)
-RUN go get -u all
-
-# Tidy dependencies (auto-resolves transitive deps)
-RUN go mod tidy
+RUN set -xe && \
+    if [ "${REFRESH_GO_DEPS}" = "true" ]; then \
+      echo "MIHOMO_CACHE_BUST=$MIHOMO_CACHE_BUST" && \
+      go get github.com/metacubex/mihomo@${MIHOMO_REF} && \
+      go get -u all && \
+      go mod tidy; \
+    else \
+      go mod download; \
+    fi
 
 # Copy scripts for scheme generation
 COPY scripts/ ../scripts/
@@ -58,6 +57,10 @@ ARG THREADS="4"
 ARG SHA=""
 ARG VERSION="dev"
 ARG BUILD_DATE=""
+ARG REFRESH_HEADERS=false
+ARG QUICKJSPP_REF="01cdd3047ced48265b127790848a0ca88204f2c7"
+ARG LIBCRON_REF="v1.3.3"
+ARG TOML11_REF="v4.4.0"
 
 WORKDIR /
 
@@ -72,8 +75,11 @@ RUN apt-get update && \
 
 # quickjspp
 RUN set -xe && \
-    git clone --depth=1 https://github.com/ftk/quickjspp.git && \
+    git init quickjspp && \
     cd quickjspp && \
+    git remote add origin https://github.com/ftk/quickjspp.git && \
+    git fetch --depth=1 origin "${QUICKJSPP_REF}" && \
+    git checkout --detach FETCH_HEAD && \
     git submodule update --init && \
     cmake -DCMAKE_BUILD_TYPE=Release . && \
     make quickjs -j ${THREADS} && \
@@ -85,8 +91,11 @@ RUN set -xe && \
 
 # libcron
 RUN set -xe && \
-    git clone https://github.com/PerMalmberg/libcron --depth=1 && \
+    git init libcron && \
     cd libcron && \
+    git remote add origin https://github.com/PerMalmberg/libcron && \
+    git fetch --depth=1 origin "${LIBCRON_REF}" && \
+    git checkout --detach FETCH_HEAD && \
     git submodule update --init && \
     cmake -DCMAKE_BUILD_TYPE=Release . && \
     make libcron -j ${THREADS} && \
@@ -96,10 +105,12 @@ RUN set -xe && \
     install -d /usr/include/date/ && \
     install -m644 libcron/externals/date/include/date/* /usr/include/date/
 
-# toml11 (跟随默认分支最新版本)
 RUN set -xe && \
-    git clone https://github.com/ToruNiina/toml11 --depth=1 && \
+    git init toml11 && \
     cd toml11 && \
+    git remote add origin https://github.com/ToruNiina/toml11 && \
+    git fetch --depth=1 origin "${TOML11_REF}" && \
+    git checkout --detach FETCH_HEAD && \
     cmake -DCMAKE_CXX_STANDARD=11 . && \
     make install -j ${THREADS}
 
@@ -115,19 +126,21 @@ COPY . /src
 COPY --from=go-builder /build/bridge/mihomo_schemes.h /src/src/parser/mihomo_schemes.h
 COPY --from=go-builder /build/bridge/param_compat.h /src/src/parser/param_compat.h
 
-# Download latest header-only libraries
 RUN set -xe && \
-    echo "Downloading latest cpp-httplib..." && \
-    curl -fsSL https://raw.githubusercontent.com/yhirose/cpp-httplib/master/httplib.h -o include/httplib.h && \
-    echo "Downloading latest nlohmann/json..." && \
-    curl -fsSL https://github.com/nlohmann/json/releases/latest/download/json.hpp -o include/nlohmann/json.hpp && \
-    echo "Downloading latest inja..." && \
-    curl -fsSL https://raw.githubusercontent.com/pantor/inja/master/single_include/inja/inja.hpp -o include/inja.hpp && \
-    echo "Downloading latest jpcre2..." && \
-    curl -fsSL https://raw.githubusercontent.com/jpcre2/jpcre2/master/src/jpcre2.hpp -o include/jpcre2.hpp && \
-    echo "Copying latest quickjspp from compiled source..." && \
-    cp /usr/include/quickjspp.hpp include/quickjspp.hpp && \
-    echo "All header libraries updated to latest versions"
+    if [ "${REFRESH_HEADERS}" = "true" ]; then \
+      echo "Downloading latest cpp-httplib..." && \
+      curl -fsSL https://raw.githubusercontent.com/yhirose/cpp-httplib/master/httplib.h -o include/httplib.h && \
+      echo "Downloading latest nlohmann/json..." && \
+      curl -fsSL https://github.com/nlohmann/json/releases/latest/download/json.hpp -o include/nlohmann/json.hpp && \
+      echo "Downloading latest inja..." && \
+      curl -fsSL https://raw.githubusercontent.com/pantor/inja/master/single_include/inja/inja.hpp -o include/inja.hpp && \
+      echo "Downloading latest jpcre2..." && \
+      curl -fsSL https://raw.githubusercontent.com/jpcre2/jpcre2/master/src/jpcre2.hpp -o include/jpcre2.hpp && \
+      echo "Copying pinned quickjspp from compiled source..." && \
+      cp /usr/include/quickjspp.hpp include/quickjspp.hpp; \
+    else \
+      echo "Using committed header-only libraries"; \
+    fi
 
 RUN set -xe && \
     [ -n "${SHA}" ] && sed -i "s/#define BUILD_ID \"\"/#define BUILD_ID \"${SHA}\"/ " src/version.h || true && \

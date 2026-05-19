@@ -5,6 +5,7 @@ ARG TARGETARCH
 ARG TARGETVARIANT
 ARG MIHOMO_REF="Meta"
 ARG MIHOMO_CACHE_BUST=1
+ARG REFRESH_GO_DEPS=false
 
 WORKDIR /build/bridge
 
@@ -13,16 +14,18 @@ RUN apt-get update && \
       git build-essential crossbuild-essential-armhf ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
+COPY bridge/go.mod bridge/go.sum ./
 COPY bridge/converter.go ./
 
-RUN go mod init github.com/aethersailor/subconverter-extended/bridge
-
-RUN echo "MIHOMO_CACHE_BUST=$MIHOMO_CACHE_BUST" && \
-    go get github.com/metacubex/mihomo@${MIHOMO_REF}
-
-RUN go get -u all
-
-RUN go mod tidy
+RUN set -xe && \
+    if [ "${REFRESH_GO_DEPS}" = "true" ]; then \
+      echo "MIHOMO_CACHE_BUST=$MIHOMO_CACHE_BUST" && \
+      go get github.com/metacubex/mihomo@${MIHOMO_REF} && \
+      go get -u all && \
+      go mod tidy; \
+    else \
+      go mod download; \
+    fi
 
 COPY scripts/ ../scripts/
 RUN go run ../scripts/generate_schemes.go mihomo_schemes.h
@@ -49,6 +52,10 @@ ARG THREADS="4"
 ARG SHA=""
 ARG VERSION="dev"
 ARG BUILD_DATE=""
+ARG REFRESH_HEADERS=false
+ARG QUICKJSPP_REF="01cdd3047ced48265b127790848a0ca88204f2c7"
+ARG LIBCRON_REF="v1.3.3"
+ARG TOML11_REF="v4.4.0"
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PKG_CONFIG_ALLOW_CROSS=1
@@ -72,8 +79,11 @@ RUN dpkg --add-architecture armhf && \
 COPY cmake/linux-armv7hf.cmake /opt/armv7-toolchain.cmake
 
 RUN set -xe && \
-    git clone --depth=1 https://github.com/ftk/quickjspp.git && \
+    git init quickjspp && \
     cd quickjspp && \
+    git remote add origin https://github.com/ftk/quickjspp.git && \
+    git fetch --depth=1 origin "${QUICKJSPP_REF}" && \
+    git checkout --detach FETCH_HEAD && \
     git submodule update --init && \
     cmake -DCMAKE_TOOLCHAIN_FILE=/opt/armv7-toolchain.cmake -DCMAKE_BUILD_TYPE=Release . && \
     make quickjs -j ${THREADS} && \
@@ -84,8 +94,11 @@ RUN set -xe && \
     install -m644 quickjspp.hpp /opt/armv7/include/
 
 RUN set -xe && \
-    git clone https://github.com/PerMalmberg/libcron --depth=1 && \
+    git init libcron && \
     cd libcron && \
+    git remote add origin https://github.com/PerMalmberg/libcron && \
+    git fetch --depth=1 origin "${LIBCRON_REF}" && \
+    git checkout --detach FETCH_HEAD && \
     git submodule update --init && \
     cmake -DCMAKE_TOOLCHAIN_FILE=/opt/armv7-toolchain.cmake -DCMAKE_BUILD_TYPE=Release . && \
     make libcron -j ${THREADS} && \
@@ -97,8 +110,11 @@ RUN set -xe && \
     install -m644 libcron/externals/date/include/date/* /opt/armv7/include/date/
 
 RUN set -xe && \
-    git clone https://github.com/ToruNiina/toml11 --depth=1 && \
+    git init toml11 && \
     cd toml11 && \
+    git remote add origin https://github.com/ToruNiina/toml11 && \
+    git fetch --depth=1 origin "${TOML11_REF}" && \
+    git checkout --detach FETCH_HEAD && \
     install -d /opt/armv7/include && \
     cp -a include/. /opt/armv7/include/
 
@@ -113,17 +129,20 @@ COPY --from=go-builder /build/bridge/mihomo_schemes.h /src/src/parser/mihomo_sch
 COPY --from=go-builder /build/bridge/param_compat.h /src/src/parser/param_compat.h
 
 RUN set -xe && \
-    echo "Downloading latest cpp-httplib..." && \
-    curl -fsSL https://raw.githubusercontent.com/yhirose/cpp-httplib/master/httplib.h -o include/httplib.h && \
-    echo "Downloading latest nlohmann/json..." && \
-    curl -fsSL https://github.com/nlohmann/json/releases/latest/download/json.hpp -o include/nlohmann/json.hpp && \
-    echo "Downloading latest inja..." && \
-    curl -fsSL https://raw.githubusercontent.com/pantor/inja/master/single_include/inja/inja.hpp -o include/inja.hpp && \
-    echo "Downloading latest jpcre2..." && \
-    curl -fsSL https://raw.githubusercontent.com/jpcre2/jpcre2/master/src/jpcre2.hpp -o include/jpcre2.hpp && \
-    echo "Copying latest quickjspp from compiled source..." && \
-    cp /opt/armv7/include/quickjspp.hpp include/quickjspp.hpp && \
-    echo "All header libraries updated to latest versions"
+    if [ "${REFRESH_HEADERS}" = "true" ]; then \
+      echo "Downloading latest cpp-httplib..." && \
+      curl -fsSL https://raw.githubusercontent.com/yhirose/cpp-httplib/master/httplib.h -o include/httplib.h && \
+      echo "Downloading latest nlohmann/json..." && \
+      curl -fsSL https://github.com/nlohmann/json/releases/latest/download/json.hpp -o include/nlohmann/json.hpp && \
+      echo "Downloading latest inja..." && \
+      curl -fsSL https://raw.githubusercontent.com/pantor/inja/master/single_include/inja/inja.hpp -o include/inja.hpp && \
+      echo "Downloading latest jpcre2..." && \
+      curl -fsSL https://raw.githubusercontent.com/jpcre2/jpcre2/master/src/jpcre2.hpp -o include/jpcre2.hpp && \
+      echo "Copying pinned quickjspp from compiled source..." && \
+      cp /opt/armv7/include/quickjspp.hpp include/quickjspp.hpp; \
+    else \
+      echo "Using committed header-only libraries"; \
+    fi
 
 RUN set -xe && \
     [ -n "${SHA}" ] && sed -i "s/#define BUILD_ID \"\"/#define BUILD_ID \"${SHA}\"/ " src/version.h || true && \

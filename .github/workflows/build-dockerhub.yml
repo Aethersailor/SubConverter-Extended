@@ -143,7 +143,9 @@ jobs:
             VERSION=${{ needs.prepare.outputs.version }}
             BUILD_DATE=${{ needs.prepare.outputs.build_date }}
             MIHOMO_REF=Meta
-            MIHOMO_CACHE_BUST=${{ github.run_id }}
+            MIHOMO_CACHE_BUST=${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && github.run_id || 'stable' }}
+            REFRESH_GO_DEPS=${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' }}
+            REFRESH_HEADERS=${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' }}
           cache-from: type=gha,scope=subconverter-alpine
           cache-to: type=gha,mode=max,scope=subconverter-alpine
 
@@ -276,7 +278,9 @@ jobs:
             VERSION=${{ needs.prepare.outputs.version }}
             BUILD_DATE=${{ needs.prepare.outputs.build_date }}
             MIHOMO_REF=Meta
-            MIHOMO_CACHE_BUST=${{ github.run_id }}
+            MIHOMO_CACHE_BUST=${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && github.run_id || 'stable' }}
+            REFRESH_GO_DEPS=${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' }}
+            REFRESH_HEADERS=${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' }}
           cache-from: type=gha,scope=subconverter-alpine
           cache-to: type=gha,mode=max,scope=subconverter-alpine
 
@@ -328,7 +332,9 @@ jobs:
             VERSION=${{ needs.prepare.outputs.version }}
             BUILD_DATE=${{ needs.prepare.outputs.build_date }}
             MIHOMO_REF=Meta
-            MIHOMO_CACHE_BUST=${{ github.run_id }}
+            MIHOMO_CACHE_BUST=stable
+            REFRESH_GO_DEPS=false
+            REFRESH_HEADERS=false
           cache-from: type=gha,scope=subconverter-alpine-arm64
           cache-to: type=gha,mode=max,scope=subconverter-alpine-arm64
 
@@ -407,7 +413,9 @@ jobs:
             VERSION=${{ needs.prepare.outputs.version }}
             BUILD_DATE=${{ needs.prepare.outputs.build_date }}
             MIHOMO_REF=Meta
-            MIHOMO_CACHE_BUST=${{ github.run_id }}
+            MIHOMO_CACHE_BUST=stable
+            REFRESH_GO_DEPS=false
+            REFRESH_HEADERS=false
           cache-from: type=gha,scope=subconverter-alpine-arm64
           cache-to: type=gha,mode=max,scope=subconverter-alpine-arm64
 
@@ -459,7 +467,9 @@ jobs:
             VERSION=${{ needs.prepare.outputs.version }}
             BUILD_DATE=${{ needs.prepare.outputs.build_date }}
             MIHOMO_REF=Meta
-            MIHOMO_CACHE_BUST=${{ github.run_id }}
+            MIHOMO_CACHE_BUST=stable
+            REFRESH_GO_DEPS=false
+            REFRESH_HEADERS=false
           cache-from: type=gha,scope=subconverter-armv7-cross
           cache-to: type=gha,mode=max,scope=subconverter-armv7-cross
 
