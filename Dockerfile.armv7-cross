@@ -99,9 +99,8 @@ RUN set -xe && \
 RUN set -xe && \
     git clone https://github.com/ToruNiina/toml11 --depth=1 && \
     cd toml11 && \
-    cmake -S . -B build -DCMAKE_INSTALL_PREFIX=/opt/armv7 -DCMAKE_CXX_STANDARD=11 && \
-    cmake --build build -j ${THREADS} && \
-    cmake --install build
+    install -d /opt/armv7/include && \
+    cp -a include/. /opt/armv7/include/
 
 COPY --from=go-builder /build/bridge/libmihomo.a /usr/lib/
 COPY --from=go-builder /build/bridge/libmihomo.h /usr/include/

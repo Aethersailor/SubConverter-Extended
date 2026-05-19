@@ -4,9 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release tag, e.g. v1.2.3. Leave empty to auto bump patch."
+        description: "Release tag, e.g. v1.2.3. Leave empty to auto bump patch. Used only when create_release_tag is true."
         required: false
         type: string
+      create_release_tag:
+        description: "Create and push a new release tag after syncing."
+        required: false
+        default: true
+        type: boolean
 
 concurrency:
   group: sync-dev-to-master
@@ -74,6 +79,7 @@ jobs:
           fi
 
       - name: Create and Push Release Tag
+        if: ${{ inputs.create_release_tag != false }}
         env:
           REQUESTED_VERSION: ${{ github.event.inputs.version }}
         run: |
@@ -122,4 +128,9 @@ jobs:
 
           git tag -a "$TAG_NAME" -m "Release $TAG_NAME"
           git push origin "$TAG_NAME"
+
+      - name: Skip Release Tag
+        if: ${{ inputs.create_release_tag == false }}
+        run: |
+          echo "create_release_tag=false; synced dev to master without creating a release tag."
 
