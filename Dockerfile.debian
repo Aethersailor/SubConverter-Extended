@@ -176,8 +176,13 @@ LABEL \
 
 # Install runtime dependencies
 RUN apt-get update && \
+    if apt-cache policy libcurl4 | grep -q 'Candidate: (none)'; then \
+      curl_runtime=libcurl4t64; \
+    else \
+      curl_runtime=libcurl4; \
+    fi && \
     apt-get install -y --no-install-recommends \
-    libpcre2-8-0 libcurl4 libyaml-cpp-dev ca-certificates && \
+    libpcre2-8-0 "$curl_runtime" libyaml-cpp-dev ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /src/subconverter /usr/bin/subconverter
