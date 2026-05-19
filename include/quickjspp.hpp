@@ -1460,7 +1460,11 @@ public:
         if(!rt)
             throw std::runtime_error{"qjs: Cannot create runtime"};
 
+#ifdef _WIN32
+        JS_SetHostPromiseRejectionTracker(rt, promise_unhandled_rejection_tracker, NULL);
+#else
         JS_SetHostUnhandledPromiseRejectionTracker(rt, promise_unhandled_rejection_tracker, NULL);
+#endif // _WIN32
         JS_SetModuleLoaderFunc(rt, nullptr, module_loader, nullptr);
     }
 

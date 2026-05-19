@@ -9,6 +9,7 @@
 #include "utils/rapidjson_extra.h"
 #include "utils/regexp.h"
 #include "utils/string.h"
+#include "utils/time_compat.h"
 
 unsigned long long streamToInt(const std::string &stream)
 {

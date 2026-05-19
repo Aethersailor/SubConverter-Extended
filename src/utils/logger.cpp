@@ -12,6 +12,7 @@
 #include "defer.h"
 #include "lock.h"
 #include "logger.h"
+#include "time_compat.h"
 
 std::string getTime(int type)
 {

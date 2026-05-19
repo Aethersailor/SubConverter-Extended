@@ -9,3 +9,7 @@ scripts/yaml-cpp
 src/.DS_Store
 
 build
+bridge/libmihomo.a
+bridge/libmihomo.so
+bridge/libmihomo.dll
+bridge/libmihomo.dll.a

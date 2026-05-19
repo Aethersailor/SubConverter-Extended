@@ -21,6 +21,7 @@
 #include "server/webserver.h"
 #include "settings.h"
 #include "upload.h"
+#include "utils/time_compat.h"
 
 // Multiple CDN fallback URLs for default external config
 // Will be tried in order if user-provided config fails to load
