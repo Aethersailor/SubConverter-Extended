@@ -22,6 +22,7 @@
 #include "utils/rapidjson_extra.h"
 #include "utils/regexp.h"
 #include "utils/stl_extra.h"
+#include "utils/time_compat.h"
 #include "utils/urlencode.h"
 #include "utils/yamlcpp_extra.h"
 

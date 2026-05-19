@@ -12,6 +12,7 @@
 #include "utils/logger.h"
 #include "utils/network.h"
 #include "utils/regexp.h"
+#include "utils/time_compat.h"
 #include "utils/urlencode.h"
 #include "utils/yamlcpp_extra.h"
 #include "templates.h"
@@ -312,12 +313,13 @@ int render_template(const std::string &content, const template_args &vars,
 #endif // NO_WEBGET
     //env.add_callback("parseHostname", 1, parseHostname);
 
-    env.set_include_callback([&](const std::string &name, const std::string &template_name)
+    env.set_include_callback([&](const std::filesystem::path &path, const std::string &template_name)
     {
+        const std::string include_path = path.string();
         std::string absolute_path;
         try
         {
-            absolute_path = std::filesystem::canonical(template_name).string();
+            absolute_path = std::filesystem::canonical(path).string();
         }
         catch(std::exception &e)
         {
@@ -326,7 +328,7 @@ int render_template(const std::string &content, const template_args &vars,
         if(!absolute_scope.empty() &&
            !path_is_inside_scope(absolute_path, absolute_scope))
             throw inja::FileError("access denied when trying to include '" + template_name + "': out of scope");
-        return env.parse(fileGet(template_name, true));
+        return env.parse(fileGet(include_path, true));
     });
     env.set_search_included_templates_in_files(false);
 
