@@ -58,9 +58,7 @@ ARG SHA=""
 ARG VERSION="dev"
 ARG BUILD_DATE=""
 ARG REFRESH_HEADERS=false
-ARG QUICKJSPP_REF="01cdd3047ced48265b127790848a0ca88204f2c7"
-ARG LIBCRON_REF="v1.3.3"
-ARG TOML11_REF="v4.4.0"
+ARG SOURCE_DEPS_CACHE_BUST=stable
 
 WORKDIR /
 
@@ -75,12 +73,9 @@ RUN apt-get update && \
 
 # quickjspp
 RUN set -xe && \
-    git init quickjspp && \
+    echo "SOURCE_DEPS_CACHE_BUST=${SOURCE_DEPS_CACHE_BUST}" && \
+    git clone --depth=1 --recurse-submodules --shallow-submodules https://github.com/ftk/quickjspp.git quickjspp && \
     cd quickjspp && \
-    git remote add origin https://github.com/ftk/quickjspp.git && \
-    git fetch --depth=1 origin "${QUICKJSPP_REF}" && \
-    git checkout --detach FETCH_HEAD && \
-    git submodule update --init && \
     cmake -DCMAKE_BUILD_TYPE=Release . && \
     make quickjs -j ${THREADS} && \
     install -d /usr/lib/quickjs/ && \
@@ -91,12 +86,9 @@ RUN set -xe && \
 
 # libcron
 RUN set -xe && \
-    git init libcron && \
+    echo "SOURCE_DEPS_CACHE_BUST=${SOURCE_DEPS_CACHE_BUST}" && \
+    git clone --depth=1 --recurse-submodules --shallow-submodules https://github.com/PerMalmberg/libcron.git libcron && \
     cd libcron && \
-    git remote add origin https://github.com/PerMalmberg/libcron && \
-    git fetch --depth=1 origin "${LIBCRON_REF}" && \
-    git checkout --detach FETCH_HEAD && \
-    git submodule update --init && \
     cmake -DCMAKE_BUILD_TYPE=Release . && \
     make libcron -j ${THREADS} && \
     install -m644 libcron/out/Release/liblibcron.a /usr/lib/ && \
@@ -106,11 +98,9 @@ RUN set -xe && \
     install -m644 libcron/externals/date/include/date/* /usr/include/date/
 
 RUN set -xe && \
-    git init toml11 && \
+    echo "SOURCE_DEPS_CACHE_BUST=${SOURCE_DEPS_CACHE_BUST}" && \
+    git clone --depth=1 https://github.com/ToruNiina/toml11.git toml11 && \
     cd toml11 && \
-    git remote add origin https://github.com/ToruNiina/toml11 && \
-    git fetch --depth=1 origin "${TOML11_REF}" && \
-    git checkout --detach FETCH_HEAD && \
     cmake -DCMAKE_CXX_STANDARD=11 . && \
     make install -j ${THREADS}
 
@@ -136,10 +126,18 @@ RUN set -xe && \
       curl -fsSL https://raw.githubusercontent.com/pantor/inja/master/single_include/inja/inja.hpp -o include/inja.hpp && \
       echo "Downloading latest jpcre2..." && \
       curl -fsSL https://raw.githubusercontent.com/jpcre2/jpcre2/master/src/jpcre2.hpp -o include/jpcre2.hpp && \
-      echo "Copying pinned quickjspp from compiled source..." && \
-      cp /usr/include/quickjspp.hpp include/quickjspp.hpp; \
+      echo "Copying latest quickjspp from compiled source..." && \
+      cp /usr/include/quickjspp.hpp include/quickjspp.hpp && \
+      echo "Copying latest libcron headers from compiled source..." && \
+      rm -rf include/libcron include/date && \
+      cp -a /libcron/libcron/include/libcron include/libcron && \
+      cp -a /libcron/libcron/externals/date/include/date include/date && \
+      echo "Copying latest toml11 headers from compiled source..." && \
+      rm -rf include/toml11 && \
+      cp /toml11/include/toml.hpp include/toml.hpp && \
+      cp -a /toml11/include/toml11 include/toml11; \
     else \
-      echo "Using committed header-only libraries"; \
+      echo "Using committed header libraries"; \
     fi
 
 RUN set -xe && \
