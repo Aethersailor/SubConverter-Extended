@@ -1,0 +1,49 @@
+name: Smoke test Docker image
+description: Run a Docker image and verify that the SubConverter HTTP endpoint responds.
+
+inputs:
+  image:
+    description: Image reference, preferably pinned by digest.
+    required: true
+  platform:
+    description: Docker platform to run, such as linux/amd64 or linux/arm/v7.
+    required: true
+  port:
+    description: Container port exposed by SubConverter.
+    required: false
+    default: "25500"
+
+runs:
+  using: composite
+  steps:
+    - name: Run image and check /version
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        IMAGE="${{ inputs.image }}"
+        PLATFORM="${{ inputs.platform }}"
+        CONTAINER_PORT="${{ inputs.port }}"
+
+        CID="$(docker run -d --platform "$PLATFORM" -e PORT="$CONTAINER_PORT" -p "127.0.0.1::${CONTAINER_PORT}" "$IMAGE")"
+        trap 'docker rm -f "$CID" >/dev/null 2>&1 || true' EXIT
+
+        HOST_PORT="$(docker port "$CID" "${CONTAINER_PORT}/tcp" | awk -F: 'END {print $NF}')"
+        URL="http://127.0.0.1:${HOST_PORT}/version"
+
+        for _ in $(seq 1 30); do
+          if curl -fsS "$URL" >/tmp/subconverter-smoke.out; then
+            head -c 200 /tmp/subconverter-smoke.out
+            exit 0
+          fi
+
+          if ! docker ps --filter "id=$CID" --format '{{.ID}}' | grep -q .; then
+            docker logs "$CID" || true
+            exit 1
+          fi
+
+          sleep 2
+        done
+
+        docker logs "$CID" || true
+        exit 1
