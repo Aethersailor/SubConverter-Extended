@@ -1,0 +1,201 @@
+# ========== GO BUILD STAGE ==========
+FROM --platform=$BUILDPLATFORM golang:latest AS go-builder
+
+ARG TARGETARCH
+ARG TARGETVARIANT
+ARG MIHOMO_REF="Meta"
+ARG MIHOMO_CACHE_BUST=1
+
+WORKDIR /build/bridge
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      git build-essential crossbuild-essential-armhf ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY bridge/converter.go ./
+
+RUN go mod init github.com/aethersailor/subconverter-extended/bridge
+
+RUN echo "MIHOMO_CACHE_BUST=$MIHOMO_CACHE_BUST" && \
+    go get github.com/metacubex/mihomo@${MIHOMO_REF}
+
+RUN go get -u all
+
+RUN go mod tidy
+
+COPY scripts/ ../scripts/
+RUN go run ../scripts/generate_schemes.go mihomo_schemes.h
+RUN go run ../scripts/generate_param_compat.go -o param_compat.h
+
+RUN echo "==> Cross-compiling Go bridge for linux/arm/v7" && \
+    CGO_ENABLED=1 \
+    GOOS=linux \
+    GOARCH=arm \
+    GOARM=7 \
+    CC=arm-linux-gnueabihf-gcc \
+    go build \
+      -trimpath \
+      -buildmode=c-archive \
+      -o libmihomo.a \
+      .
+
+RUN ls -lh libmihomo.a libmihomo.h
+
+# ========== C++ CROSS BUILD STAGE ==========
+FROM --platform=$BUILDPLATFORM debian:trixie AS builder
+
+ARG THREADS="4"
+ARG SHA=""
+ARG VERSION="dev"
+ARG BUILD_DATE=""
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PKG_CONFIG_ALLOW_CROSS=1
+ENV PKG_CONFIG_LIBDIR=/usr/lib/arm-linux-gnueabihf/pkgconfig:/usr/share/pkgconfig:/opt/armv7/lib/pkgconfig
+ENV PKG_CONFIG_PATH=/opt/armv7/lib/pkgconfig
+
+WORKDIR /
+
+RUN dpkg --add-architecture armhf && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+      git build-essential crossbuild-essential-armhf \
+      cmake ninja-build ccache pkg-config curl ca-certificates file \
+      libcurl4-openssl-dev:armhf \
+      libpcre2-dev:armhf \
+      libyaml-cpp-dev:armhf \
+      libatomic1:armhf \
+      rapidjson-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY cmake/linux-armv7hf.cmake /opt/armv7-toolchain.cmake
+
+RUN set -xe && \
+    git clone --depth=1 https://github.com/ftk/quickjspp.git && \
+    cd quickjspp && \
+    git submodule update --init && \
+    cmake -DCMAKE_TOOLCHAIN_FILE=/opt/armv7-toolchain.cmake -DCMAKE_BUILD_TYPE=Release . && \
+    make quickjs -j ${THREADS} && \
+    install -d /opt/armv7/lib/quickjs/ && \
+    install -m644 quickjs/libquickjs.a /opt/armv7/lib/quickjs/ && \
+    install -d /opt/armv7/include/quickjs/ && \
+    install -m644 quickjs/quickjs.h quickjs/quickjs-libc.h /opt/armv7/include/quickjs/ && \
+    install -m644 quickjspp.hpp /opt/armv7/include/
+
+RUN set -xe && \
+    git clone https://github.com/PerMalmberg/libcron --depth=1 && \
+    cd libcron && \
+    git submodule update --init && \
+    cmake -DCMAKE_TOOLCHAIN_FILE=/opt/armv7-toolchain.cmake -DCMAKE_BUILD_TYPE=Release . && \
+    make libcron -j ${THREADS} && \
+    install -d /opt/armv7/lib/ && \
+    install -m644 libcron/out/Release/liblibcron.a /opt/armv7/lib/ && \
+    install -d /opt/armv7/include/libcron/ && \
+    install -m644 libcron/include/libcron/* /opt/armv7/include/libcron/ && \
+    install -d /opt/armv7/include/date/ && \
+    install -m644 libcron/externals/date/include/date/* /opt/armv7/include/date/
+
+RUN set -xe && \
+    git clone https://github.com/ToruNiina/toml11 --depth=1 && \
+    cd toml11 && \
+    cmake -S . -B build -DCMAKE_INSTALL_PREFIX=/opt/armv7 -DCMAKE_CXX_STANDARD=11 && \
+    cmake --build build -j ${THREADS} && \
+    cmake --install build
+
+COPY --from=go-builder /build/bridge/libmihomo.a /usr/lib/
+COPY --from=go-builder /build/bridge/libmihomo.h /usr/include/
+COPY --from=go-builder /build/bridge/go.mod /src/bridge/go.mod
+COPY --from=go-builder /build/bridge/go.sum /src/bridge/go.sum
+
+WORKDIR /src
+COPY . /src
+COPY --from=go-builder /build/bridge/mihomo_schemes.h /src/src/parser/mihomo_schemes.h
+COPY --from=go-builder /build/bridge/param_compat.h /src/src/parser/param_compat.h
+
+RUN set -xe && \
+    echo "Downloading latest cpp-httplib..." && \
+    curl -fsSL https://raw.githubusercontent.com/yhirose/cpp-httplib/master/httplib.h -o include/httplib.h && \
+    echo "Downloading latest nlohmann/json..." && \
+    curl -fsSL https://github.com/nlohmann/json/releases/latest/download/json.hpp -o include/nlohmann/json.hpp && \
+    echo "Downloading latest inja..." && \
+    curl -fsSL https://raw.githubusercontent.com/pantor/inja/master/single_include/inja/inja.hpp -o include/inja.hpp && \
+    echo "Downloading latest jpcre2..." && \
+    curl -fsSL https://raw.githubusercontent.com/jpcre2/jpcre2/master/src/jpcre2.hpp -o include/jpcre2.hpp && \
+    echo "Copying latest quickjspp from compiled source..." && \
+    cp /opt/armv7/include/quickjspp.hpp include/quickjspp.hpp && \
+    echo "All header libraries updated to latest versions"
+
+RUN set -xe && \
+    [ -n "${SHA}" ] && sed -i "s/#define BUILD_ID \"\"/#define BUILD_ID \"${SHA}\"/ " src/version.h || true && \
+    [ -n "${VERSION}" ] && sed -i "s/#define VERSION \"dev\"/#define VERSION \"${VERSION}\"/" src/version.h || true && \
+    [ -n "${BUILD_DATE}" ] && sed -i "s/#define BUILD_DATE \"\"/#define BUILD_DATE \"${BUILD_DATE}\"/" src/version.h || true && \
+    mkdir -p bridge && \
+    cp /usr/lib/libmihomo.a bridge/ && \
+    cp /usr/include/libmihomo.h bridge/ && \
+    export PATH="/usr/lib/ccache:$PATH" && \
+    export CCACHE_DIR=/tmp/ccache && \
+    export CCACHE_COMPILERCHECK=content && \
+    cmake -GNinja \
+      -DCMAKE_TOOLCHAIN_FILE=/opt/armv7-toolchain.cmake \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+      -DCMAKE_PREFIX_PATH=/opt/armv7 \
+      -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
+      -DCMAKE_POSITION_INDEPENDENT_CODE=OFF \
+      -DCURL_INCLUDE_DIR=/usr/include \
+      -DCURL_LIBRARY=/usr/lib/arm-linux-gnueabihf/libcurl.so \
+      -DPCRE2_INCLUDE_DIR=/usr/include \
+      -DPCRE2_LIBRARY=/usr/lib/arm-linux-gnueabihf/libpcre2-8.so \
+      -DQUICKJS_INCLUDE_DIRS=/opt/armv7/include \
+      -DQUICKJS_LIBRARY=/opt/armv7/lib/quickjs/libquickjs.a \
+      -DLIBCRON_INCLUDE_DIR=/opt/armv7/include \
+      -DDATE_INCLUDE_DIR=/opt/armv7/include \
+      -DLIBCRON_LIBRARY=/opt/armv7/lib/liblibcron.a \
+      -DRAPIDJSON_INCLUDEDIR=/usr/include \
+      . && \
+    ninja -j ${THREADS} && \
+    file /src/subconverter && \
+    arm-linux-gnueabihf-readelf -h /src/subconverter && \
+    arm-linux-gnueabihf-readelf -d /src/subconverter
+
+RUN set -xe && \
+    mkdir -p /runtime-root/etc/ssl/certs /runtime-root/etc /runtime-root/tmp && \
+    cp -aL /etc/ssl/certs/ca-certificates.crt /runtime-root/etc/ssl/certs/ && \
+    if [ -f /etc/nsswitch.conf ]; then cp -aL /etc/nsswitch.conf /runtime-root/etc/nsswitch.conf; fi && \
+    for dir in /lib/arm-linux-gnueabihf /usr/lib/arm-linux-gnueabihf /usr/arm-linux-gnueabihf/lib; do \
+      if [ -d "$dir" ]; then \
+        find "$dir" -maxdepth 1 \( -name '*.so' -o -name '*.so.*' -o -name 'ld-linux*.so*' \) -print | \
+        while read -r lib; do \
+          dest="/runtime-root$lib"; \
+          mkdir -p "$(dirname "$dest")"; \
+          cp -aL "$lib" "$dest"; \
+        done; \
+      fi; \
+    done
+
+# ========== FINAL STAGE ==========
+FROM --platform=$TARGETPLATFORM debian:trixie-slim
+
+ARG VERSION="dev"
+ARG SHA=""
+ARG BUILD_DATE=""
+LABEL \
+  org.opencontainers.image.title="SubConverter-Extended" \
+  org.opencontainers.image.description="A Modern Evolution of subconverter; an enhanced implementation aligned with Mihomo configuration" \
+  org.opencontainers.image.url="https://github.com/Aethersailor/SubConverter-Extended" \
+  org.opencontainers.image.source="https://github.com/Aethersailor/SubConverter-Extended" \
+  org.opencontainers.image.licenses="GPL-3.0" \
+  org.opencontainers.image.version="${VERSION}" \
+  org.opencontainers.image.revision="${SHA}" \
+  org.opencontainers.image.created="${BUILD_DATE}" \
+  maintainer="Aethersailor"
+
+COPY --from=builder /runtime-root/ /
+COPY --from=builder --chmod=0755 /src/subconverter /usr/bin/subconverter
+COPY --from=builder /src/base /base/
+
+ENV TZ=Asia/Shanghai
+WORKDIR /base
+CMD ["/usr/bin/subconverter"]
+EXPOSE 25500/tcp
