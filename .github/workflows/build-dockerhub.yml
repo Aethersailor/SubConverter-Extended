@@ -175,6 +175,8 @@ jobs:
           docker cp $CONTAINER_ID:/src/include/date include/
           docker cp $CONTAINER_ID:/src/include/toml.hpp include/toml.hpp
           docker cp $CONTAINER_ID:/src/include/toml11 include/
+          find include/libcron include/date include/toml11 -type f -print0 | xargs -0 sed -i 's/[[:blank:]]\+$//'
+          sed -i 's/[[:blank:]]\+$//' include/toml.hpp
           
           # [NEW] Extract Binary for Release (if needed)
           if [ "${{ needs.prepare.outputs.is_release }}" == "true" ]; then
