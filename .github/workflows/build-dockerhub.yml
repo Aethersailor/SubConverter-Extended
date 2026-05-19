@@ -144,6 +144,7 @@ jobs:
             BUILD_DATE=${{ needs.prepare.outputs.build_date }}
             MIHOMO_REF=Meta
             MIHOMO_CACHE_BUST=${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && github.run_id || 'stable' }}
+            SOURCE_DEPS_CACHE_BUST=${{ github.event_name != 'pull_request' && github.run_id || 'stable' }}
             REFRESH_GO_DEPS=${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' }}
             REFRESH_HEADERS=${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' }}
           cache-from: type=gha,scope=subconverter-alpine
@@ -169,6 +170,11 @@ jobs:
           docker cp $CONTAINER_ID:/src/include/inja.hpp include/inja.hpp
           docker cp $CONTAINER_ID:/src/include/jpcre2.hpp include/jpcre2.hpp
           docker cp $CONTAINER_ID:/src/include/quickjspp.hpp include/quickjspp.hpp
+          rm -rf include/libcron include/date include/toml11 include/toml.hpp
+          docker cp $CONTAINER_ID:/src/include/libcron include/
+          docker cp $CONTAINER_ID:/src/include/date include/
+          docker cp $CONTAINER_ID:/src/include/toml.hpp include/toml.hpp
+          docker cp $CONTAINER_ID:/src/include/toml11 include/
           
           # [NEW] Extract Binary for Release (if needed)
           if [ "${{ needs.prepare.outputs.is_release }}" == "true" ]; then
@@ -239,7 +245,7 @@ jobs:
       - name: Check for file changes
         id: check_changes
         run: |
-          if [ -n "$(git status --porcelain -- bridge/go.mod bridge/go.sum bridge/libmihomo.h src/parser/mihomo_schemes.h src/parser/param_compat.h include/httplib.h include/nlohmann/json.hpp include/inja.hpp include/jpcre2.hpp include/quickjspp.hpp)" ]; then
+          if [ -n "$(git status --porcelain -- bridge/go.mod bridge/go.sum bridge/libmihomo.h src/parser/mihomo_schemes.h src/parser/param_compat.h include/httplib.h include/nlohmann/json.hpp include/inja.hpp include/jpcre2.hpp include/quickjspp.hpp include/libcron include/date include/toml.hpp include/toml11)" ]; then
             echo "changed=true" >> $GITHUB_OUTPUT
           fi
 
@@ -251,7 +257,7 @@ jobs:
           
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add bridge/go.mod bridge/go.sum bridge/libmihomo.h src/parser/mihomo_schemes.h src/parser/param_compat.h include/httplib.h include/nlohmann/json.hpp include/inja.hpp include/jpcre2.hpp include/quickjspp.hpp
+          git add bridge/go.mod bridge/go.sum bridge/libmihomo.h src/parser/mihomo_schemes.h src/parser/param_compat.h include/httplib.h include/nlohmann/json.hpp include/inja.hpp include/jpcre2.hpp include/quickjspp.hpp include/libcron include/date include/toml.hpp include/toml11
           git commit -m "chore: update auto-generated files and header libraries from build [skip ci]"
           
           git fetch --no-tags origin "refs/heads/$BRANCH_NAME:refs/remotes/origin/$BRANCH_NAME"
@@ -279,6 +285,7 @@ jobs:
             BUILD_DATE=${{ needs.prepare.outputs.build_date }}
             MIHOMO_REF=Meta
             MIHOMO_CACHE_BUST=${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && github.run_id || 'stable' }}
+            SOURCE_DEPS_CACHE_BUST=${{ github.event_name != 'pull_request' && github.run_id || 'stable' }}
             REFRESH_GO_DEPS=${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' }}
             REFRESH_HEADERS=${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' }}
           cache-from: type=gha,scope=subconverter-alpine
@@ -341,6 +348,7 @@ jobs:
             BUILD_DATE=${{ needs.prepare.outputs.build_date }}
             MIHOMO_REF=Meta
             MIHOMO_CACHE_BUST=stable
+            SOURCE_DEPS_CACHE_BUST=${{ github.event_name != 'pull_request' && github.run_id || 'stable' }}
             REFRESH_GO_DEPS=false
             REFRESH_HEADERS=false
           cache-from: type=gha,scope=subconverter-alpine-arm64
@@ -422,6 +430,7 @@ jobs:
             BUILD_DATE=${{ needs.prepare.outputs.build_date }}
             MIHOMO_REF=Meta
             MIHOMO_CACHE_BUST=stable
+            SOURCE_DEPS_CACHE_BUST=${{ github.event_name != 'pull_request' && github.run_id || 'stable' }}
             REFRESH_GO_DEPS=false
             REFRESH_HEADERS=false
           cache-from: type=gha,scope=subconverter-alpine-arm64
@@ -484,6 +493,7 @@ jobs:
             BUILD_DATE=${{ needs.prepare.outputs.build_date }}
             MIHOMO_REF=Meta
             MIHOMO_CACHE_BUST=stable
+            SOURCE_DEPS_CACHE_BUST=${{ github.event_name != 'pull_request' && github.run_id || 'stable' }}
             REFRESH_GO_DEPS=false
             REFRESH_HEADERS=false
           cache-from: type=gha,scope=subconverter-armv7-cross

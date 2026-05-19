@@ -1,5 +1,7 @@
-find_path(LIBCRON_INCLUDE_DIR libcron/Cron.h)
-find_path(DATE_INCLUDE_DIR date/date.h)
+find_path(LIBCRON_INCLUDE_DIR libcron/Cron.h
+  PATHS "${CMAKE_SOURCE_DIR}/include")
+find_path(DATE_INCLUDE_DIR date/date.h
+  PATHS "${CMAKE_SOURCE_DIR}/include")
 
 find_library(LIBCRON_LIBRARY libcron)
 

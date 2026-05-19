@@ -1,5 +1,6 @@
 find_path(TOML11_INCLUDE_DIR
   NAMES toml.hpp
+  PATHS "${CMAKE_SOURCE_DIR}/include"
 )
 
 set(TOML11_INCLUDE_DIRS "${TOML11_INCLUDE_DIR}")
