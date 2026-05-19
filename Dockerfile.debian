@@ -12,8 +12,10 @@ WORKDIR /build/bridge
 # Install build dependencies (gcc required for CGO)
 # 包含 ARMv7 交叉编译工具链
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git build-essential \
-    gcc-arm-linux-gnueabihf && \
+    apt-get install -y --no-install-recommends git build-essential && \
+    if [ "$(dpkg --print-architecture)" != "armhf" ]; then \
+      apt-get install -y --no-install-recommends gcc-arm-linux-gnueabihf; \
+    fi && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy Go source code FIRST (needed for dependency analysis)
@@ -41,12 +43,14 @@ RUN go run ../scripts/generate_param_compat.go -o param_compat.h
 # 根据目标架构自动配置交叉编译环境
 # 注意：不使用 -ldflags="-s -w"，因为移除符号表会导致 CGO 程序 Segfault
 RUN if [ "$TARGETARCH" = "arm" ] && [ "$TARGETVARIANT" = "v7" ]; then \
-    echo "==> Cross-compiling for ARMv7 (native ARM64 build)" && \
+    echo "==> Building for ARMv7" && \
     export CGO_ENABLED=1 \
-    CC=arm-linux-gnueabihf-gcc \
     GOOS=linux \
     GOARCH=arm \
     GOARM=7; \
+    if [ "$(dpkg --print-architecture)" != "armhf" ]; then \
+      export CC=arm-linux-gnueabihf-gcc; \
+    fi; \
     else \
     echo "==> Native build for $TARGETARCH" && \
     export CGO_ENABLED=1; \
@@ -150,8 +154,8 @@ RUN set -xe && \
     export CCACHE_COMPILERCHECK=content && \
     # Use Ninja generator and enable ccache
     cmake -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache . && \
-    # Parallel build (reduced from ${THREADS} to avoid OOM in Docker)
-    ninja -j 4
+    # Parallelism is controlled by the workflow to avoid OOM on smaller targets.
+    ninja -j ${THREADS}
 
 # ========== FINAL STAGE ==========
 FROM debian:latest
