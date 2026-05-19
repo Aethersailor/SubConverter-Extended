@@ -13,7 +13,7 @@
 
 namespace libcron
 {
-    class NullLock 
+    class NullLock
     {
         public:
             void lock() {}
@@ -35,13 +35,13 @@ namespace libcron
     template<typename ClockType, typename LockType>
     std::ostream& operator<<(std::ostream& stream, const Cron<ClockType, LockType>& c);
 
-    template<typename ClockType = libcron::LocalClock, 
+    template<typename ClockType = libcron::LocalClock,
              typename LockType = libcron::NullLock>
     class Cron
     {
         public:
             bool add_schedule(std::string name, const std::string& schedule, Task::TaskFunction work);
-            
+
             template<typename Schedules = std::map<std::string, std::string>>
             std::tuple<bool, std::string, std::string>
             add_schedule(const Schedules& name_schedule_map, Task::TaskFunction work);
@@ -92,7 +92,7 @@ namespace libcron
             bool first_tick = true;
             std::chrono::system_clock::time_point last_tick{};
     };
-    
+
     template<typename ClockType, typename LockType>
     bool Cron<ClockType, LockType>::add_schedule(std::string name, const std::string& schedule, Task::TaskFunction work)
     {
@@ -137,7 +137,7 @@ namespace libcron
                     tasks_to_add.push_back(std::move(t));
                 }
             }
-            else 
+            else
             {
                 std::get<1>(res) = name;
                 std::get<2>(res) = schedule;
@@ -162,7 +162,7 @@ namespace libcron
     {
         tasks.clear();
     }
-    
+
     template<typename ClockType, typename LockType>
     void Cron<ClockType, LockType>::remove_schedule(const std::string& name)
     {
