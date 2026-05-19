@@ -159,15 +159,14 @@ RUN set -xe && \
     arm-linux-gnueabihf-readelf -d /src/subconverter
 
 RUN set -xe && \
-    mkdir -p /runtime-root/etc/ssl/certs /runtime-root/etc /runtime-root/tmp && \
+    mkdir -p /runtime-root/etc/ssl/certs /runtime-root/etc /runtime-root/tmp /runtime-root/usr/lib/arm-linux-gnueabihf && \
     cp -aL /etc/ssl/certs/ca-certificates.crt /runtime-root/etc/ssl/certs/ && \
     if [ -f /etc/nsswitch.conf ]; then cp -aL /etc/nsswitch.conf /runtime-root/etc/nsswitch.conf; fi && \
     for dir in /lib/arm-linux-gnueabihf /usr/lib/arm-linux-gnueabihf /usr/arm-linux-gnueabihf/lib; do \
       if [ -d "$dir" ]; then \
-        find "$dir" -maxdepth 1 \( -name '*.so' -o -name '*.so.*' -o -name 'ld-linux*.so*' \) -print | \
+        find "$dir" -maxdepth 1 \( -name '*.so' -o -name '*.so.*' \) -print | \
         while read -r lib; do \
-          dest="/runtime-root$lib"; \
-          mkdir -p "$(dirname "$dest")"; \
+          dest="/runtime-root/usr/lib/arm-linux-gnueabihf/$(basename "$lib")"; \
           cp -aL "$lib" "$dest"; \
         done; \
       fi; \
