@@ -33,7 +33,7 @@ jobs:
     name: "🔧 Prepare Metadata"
     runs-on: ubuntu-latest
     # Skip if [skip ci] and ensure schedule only runs on master
-    if: "!contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '[ci skip]') && (github.event_name != 'schedule' || github.ref == 'refs/heads/master')"
+    if: github.actor != 'dependabot[bot]' && !contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '[ci skip]') && (github.event_name != 'schedule' || github.ref == 'refs/heads/master')
     outputs:
       sha_short: ${{ steps.vars.outputs.sha_short }}
       version: ${{ steps.version.outputs.version }}

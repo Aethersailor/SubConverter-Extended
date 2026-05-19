@@ -3,125 +3,29 @@ name: Auto-merge Dependabot PRs
 on:
   pull_request_target:
     types: [opened, synchronize, reopened]
-  workflow_dispatch:
 
 permissions:
   contents: write
   pull-requests: write
-  checks: read
 
 jobs:
   auto-merge:
     runs-on: ubuntu-latest
-    if: github.actor == 'dependabot[bot]' && github.event.pull_request.base.ref == 'dev'
+    if: github.actor == 'dependabot[bot]'
     steps:
-      - name: Fetch Dependabot metadata
-        id: metadata
-        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Check auto-merge eligibility
-        id: eligibility
-        uses: actions/github-script@v9
-        with:
-          script: |
-            const targetBranch = `${{ steps.metadata.outputs.target-branch }}`;
-            const updateType = `${{ steps.metadata.outputs.update-type }}`;
-            const packageEcosystem = `${{ steps.metadata.outputs.package-ecosystem }}`;
-            const labels = context.payload.pull_request.labels.map(label => label.name);
-
-            console.log(`target-branch=${targetBranch}`);
-            console.log(`update-type=${updateType}`);
-            console.log(`package-ecosystem=${packageEcosystem}`);
-            console.log(`labels=${labels.join(',')}`);
-
-            if (targetBranch !== 'dev') {
-              console.log('Skip: Dependabot metadata target branch is not dev.');
-              return 'false';
-            }
-
-            if (!labels.includes('automerge')) {
-              console.log('Skip: PR does not have automerge label.');
-              return 'false';
-            }
-
-            return 'true';
-
-      - name: Wait for all checks to pass
-        if: steps.eligibility.outputs.result == 'true'
-        uses: actions/github-script@v9
-        with:
-          script: |
-            const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
-            const maxWait = 30 * 60 * 1000;
-            const pollInterval = 30 * 1000;
-            const allowedConclusions = new Set(['success', 'neutral', 'skipped']);
-            const ignoredChecks = new Set(['auto-merge']);
-            const expectedChecks = new Set([
-              '🔧 Prepare Metadata',
-              '🐳 Docker Build (amd64)',
-              'Analyze (c-cpp)',
-              'Analyze (go)',
-              'Analyze (python)',
-              'Analyze (actions)',
-              'CodeQL',
-            ]);
-            let elapsed = 0;
-
-            while (elapsed < maxWait) {
-              const { data: checks } = await github.rest.checks.listForRef({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                ref: context.payload.pull_request.head.sha,
-              });
-
-              const relevantChecks = checks.check_runs.filter(
-                check => !ignoredChecks.has(check.name)
-              );
-              const checkNames = new Set(relevantChecks.map(check => check.name));
-              const missingExpectedChecks = [...expectedChecks].filter(
-                checkName => !checkNames.has(checkName)
-              );
-
-              const incompleteChecks = relevantChecks.filter(
-                check => check.status !== 'completed'
-              );
-              const failedChecks = relevantChecks.filter(
-                check => check.status === 'completed' && !allowedConclusions.has(check.conclusion)
-              );
-
-              console.log(`checks=${relevantChecks.length}, missing=${missingExpectedChecks.length}, incomplete=${incompleteChecks.length}, failed=${failedChecks.length}`);
-
-              if (failedChecks.length > 0) {
-                for (const check of failedChecks) {
-                  console.log(`Failed check: ${check.name} / ${check.conclusion}`);
-                }
-                core.setFailed('One or more checks failed.');
-                return;
-              } else if (missingExpectedChecks.length === 0 && incompleteChecks.length === 0) {
-                console.log('All expected checks passed.');
-                return;
-              } else if (missingExpectedChecks.length > 0) {
-                console.log(`Waiting for expected checks: ${missingExpectedChecks.join(', ')}`);
-              }
-
-              await wait(pollInterval);
-              elapsed += pollInterval;
-            }
-
-            core.setFailed('Checks did not complete successfully within 30 minutes.');
-
       - name: Merge Dependabot PR
-        if: steps.eligibility.outputs.result == 'true'
         uses: actions/github-script@v9
         with:
           script: |
+            const pullNumber = context.payload.pull_request.number;
+            const title = context.payload.pull_request.title;
+
             await github.rest.pulls.merge({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              pull_number: context.payload.pull_request.number,
+              pull_number: pullNumber,
               merge_method: 'squash',
-              commit_title: `${context.payload.pull_request.title} (#${context.payload.pull_request.number})`,
+              commit_title: `${title} (#${pullNumber})`,
             });
-            console.log('PR merged successfully!');
+
+            console.log('Dependabot PR merged successfully.');
