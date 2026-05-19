@@ -284,6 +284,14 @@ jobs:
           cache-from: type=gha,scope=subconverter-alpine
           cache-to: type=gha,mode=max,scope=subconverter-alpine
 
+      - name: Smoke test image (amd64)
+        if: github.event_name != 'pull_request' && needs.prepare.outputs.is_release == 'true'
+        timeout-minutes: 3
+        uses: ./.github/actions/smoke-docker-image
+        with:
+          image: aethersailor/subconverter-extended@${{ steps.build_image.outputs.digest }}
+          platform: linux/amd64
+
   build-arm64:
     name: "🐳 Docker Build (arm64)"
     runs-on: ubuntu-24.04-arm
@@ -419,6 +427,14 @@ jobs:
           cache-from: type=gha,scope=subconverter-alpine-arm64
           cache-to: type=gha,mode=max,scope=subconverter-alpine-arm64
 
+      - name: Smoke test image (arm64)
+        if: github.event_name != 'pull_request'
+        timeout-minutes: 3
+        uses: ./.github/actions/smoke-docker-image
+        with:
+          image: aethersailor/subconverter-extended@${{ steps.build_image.outputs.digest }}
+          platform: linux/arm64
+
   build-armv7:
     name: "🐳 Docker Build (armv7)"
     runs-on: ubuntu-latest
@@ -472,6 +488,20 @@ jobs:
             REFRESH_HEADERS=false
           cache-from: type=gha,scope=subconverter-armv7-cross
           cache-to: type=gha,mode=max,scope=subconverter-armv7-cross
+
+      - name: Set up QEMU for smoke test
+        if: github.event_name != 'pull_request'
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        with:
+          platforms: arm
+
+      - name: Smoke test image (armv7)
+        if: github.event_name != 'pull_request'
+        timeout-minutes: 3
+        uses: ./.github/actions/smoke-docker-image
+        with:
+          image: aethersailor/subconverter-extended@${{ steps.build_image.outputs.digest }}
+          platform: linux/arm/v7
 
   merge-manifest:
     name: "🔗 Docker Manifest"
