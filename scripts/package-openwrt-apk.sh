@@ -9,6 +9,7 @@ SOURCE_DIR="${SOURCE_DIR:-SubConverter-Extended}"
 PACKAGE_NAME="subconverter-extended"
 DISPLAY_NAME="SubConverter-Extended"
 ROOT_DIR="/opt/${PACKAGE_NAME}"
+CONFIG_DIR="/etc/subconverter"
 WORK_DIR="build/openwrt-apk/${LINUX_ARCH}"
 APK_VERSION="${VERSION#v}-r0"
 BUILD_TIME="${BUILD_TIME:-$(date +%s)}"
@@ -55,16 +56,17 @@ create_launcher() {
 set -e
 
 ROOT="/opt/subconverter-extended"
+CONFIG_DIR="/etc/subconverter"
 
-join_root_path() {
+join_config_path() {
   case "$1" in
     /*) printf '%s\n' "$1" ;;
-    *) printf '%s\n' "$ROOT/$1" ;;
+    *) printf '%s\n' "$CONFIG_DIR/$1" ;;
   esac
 }
 
 create_config() {
-  target="$(join_root_path "$1")"
+  target="$(join_config_path "$1")"
   target_dir="$(dirname "$target")"
   mkdir -p "$target_dir"
 
@@ -81,12 +83,13 @@ create_config() {
   fi
 
   cp "$example" "$target"
+  chmod 0600 "$target"
   printf '%s\n' "$target"
 }
 
 resolve_config() {
   if [ -n "${PREF_PATH:-}" ]; then
-    conf="$(join_root_path "$PREF_PATH")"
+    conf="$(join_config_path "$PREF_PATH")"
     if [ ! -f "$conf" ]; then
       create_config "$conf"
       return
@@ -94,6 +97,13 @@ resolve_config() {
     printf '%s\n' "$conf"
     return
   fi
+
+  for conf in "$CONFIG_DIR/pref.toml" "$CONFIG_DIR/pref.yml" "$CONFIG_DIR/pref.ini"; do
+    if [ -f "$conf" ]; then
+      printf '%s\n' "$conf"
+      return
+    fi
+  done
 
   for conf in "$ROOT/base/pref.toml" "$ROOT/base/pref.yml" "$ROOT/base/pref.ini"; do
     if [ -f "$conf" ]; then
@@ -109,13 +119,12 @@ resolve_config() {
     example="${pair%%:*}"
     target="${pair#*:}"
     if [ -f "$ROOT/base/$example" ]; then
-      cp "$ROOT/base/$example" "$ROOT/base/$target"
-      printf '%s\n' "$ROOT/base/$target"
+      create_config "$target"
       return
     fi
   done
 
-  echo "No configuration file found. Expected $ROOT/base/pref.toml, pref.yml, or pref.ini." >&2
+  echo "No configuration file found. Expected $CONFIG_DIR/pref.toml, pref.yml, or pref.ini." >&2
   exit 1
 }
 
@@ -164,8 +173,6 @@ start_service() {
   procd_open_instance
   procd_set_param command /usr/bin/subconverter-extended
   procd_set_param respawn
-  procd_set_param stdout 1
-  procd_set_param stderr 1
   procd_close_instance
 }
 EOF
@@ -189,13 +196,16 @@ Run as an OpenWrt service:
 
 Configuration priority:
   1. PREF_PATH environment variable
-  2. /opt/subconverter-extended/base/pref.toml
-  3. /opt/subconverter-extended/base/pref.yml
-  4. /opt/subconverter-extended/base/pref.ini
+  2. /etc/subconverter/pref.toml
+  3. /etc/subconverter/pref.yml
+  4. /etc/subconverter/pref.ini
+  5. /opt/subconverter-extended/base/pref.toml (legacy fallback)
+  6. /opt/subconverter-extended/base/pref.yml (legacy fallback)
+  7. /opt/subconverter-extended/base/pref.ini (legacy fallback)
 
 On first start, if no user configuration exists, the launcher creates
-/opt/subconverter-extended/base/pref.toml from pref.example.toml. Existing
-configuration files are never overwritten by the launcher.
+/etc/subconverter/pref.toml from pref.example.toml. Existing configuration
+files are never overwritten by the launcher.
 EOF
 }
 
@@ -217,6 +227,7 @@ for OPENWRT_ARCH in "${ARCH_ARRAY[@]}"; do
   rm -rf "${PKG_DIR}"
   mkdir -p \
     "${PKG_ROOT}${ROOT_DIR}" \
+    "${PKG_ROOT}${CONFIG_DIR}" \
     "${PKG_ROOT}/usr/bin" \
     "${PKG_ROOT}/etc/init.d" \
     "${PKG_ROOT}/usr/share/doc/${PACKAGE_NAME}"
