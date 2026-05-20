@@ -283,7 +283,7 @@ jobs:
         timeout-minutes: 3
         uses: ./.github/actions/smoke-docker-image
         with:
-          image: aethersailor/subconverter-extended@${{ steps.build_image.outputs.digest }}
+          image: ghcr.io/aethersailor/subconverter-extended@${{ steps.build_image.outputs.digest }}
           platform: linux/amd64
 
   build-arm64:
@@ -410,7 +410,7 @@ jobs:
         timeout-minutes: 3
         uses: ./.github/actions/smoke-docker-image
         with:
-          image: aethersailor/subconverter-extended@${{ steps.build_image.outputs.digest }}
+          image: ghcr.io/aethersailor/subconverter-extended@${{ steps.build_image.outputs.digest }}
           platform: linux/arm64
 
   build-armv7:
@@ -541,7 +541,7 @@ jobs:
         timeout-minutes: 3
         uses: ./.github/actions/smoke-docker-image
         with:
-          image: aethersailor/subconverter-extended@${{ steps.build_image.outputs.digest }}
+          image: ghcr.io/aethersailor/subconverter-extended@${{ steps.build_image.outputs.digest }}
           platform: linux/arm/v7
 
   build-windows-amd64:
