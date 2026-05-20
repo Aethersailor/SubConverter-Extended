@@ -64,6 +64,9 @@ elif [ -x "$ROOT/lib/ld-linux-armhf.so.3" ]; then
 elif [ -x "$ROOT/lib/arm-linux-gnueabihf/ld-linux-armhf.so.3" ]; then
   LOADER="$ROOT/lib/arm-linux-gnueabihf/ld-linux-armhf.so.3"
   LIB_PATH="$ROOT/lib/arm-linux-gnueabihf:$ROOT/usr/lib/arm-linux-gnueabihf:$ROOT/usr/arm-linux-gnueabihf/lib:$ROOT/lib:$ROOT/usr/lib"
+elif [ -x "$ROOT/usr/lib/arm-linux-gnueabihf/ld-linux-armhf.so.3" ]; then
+  LOADER="$ROOT/usr/lib/arm-linux-gnueabihf/ld-linux-armhf.so.3"
+  LIB_PATH="$ROOT/lib/arm-linux-gnueabihf:$ROOT/usr/lib/arm-linux-gnueabihf:$ROOT/usr/arm-linux-gnueabihf/lib:$ROOT/lib:$ROOT/usr/lib"
 else
   echo "glibc loader not found in package."
   exit 1
