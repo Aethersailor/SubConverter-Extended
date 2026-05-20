@@ -187,6 +187,13 @@ RUN set -xe && \
           cp -aL "$lib" "$dest"; \
         done; \
       fi; \
+    done && \
+    for loader in /lib/ld-linux-armhf.so.3 /usr/arm-linux-gnueabihf/lib/ld-linux-armhf.so.3 /lib/arm-linux-gnueabihf/ld-linux-armhf.so.3; do \
+      if [ -e "$loader" ]; then \
+        mkdir -p /runtime-root/lib && \
+        cp -aL "$loader" /runtime-root/lib/ld-linux-armhf.so.3 && \
+        break; \
+      fi; \
     done
 
 # ========== FINAL STAGE ==========

@@ -182,7 +182,6 @@ jobs:
           if [ "${{ needs.prepare.outputs.is_release }}" == "true" ]; then
             echo "Extracting binary for release..."
             docker cp $CONTAINER_ID:/src/subconverter ./subconverter
-            docker cp $CONTAINER_ID:/src/base ./base
             docker cp $CONTAINER_ID:/runtime-libs ./runtime-libs
             docker cp $CONTAINER_ID:/usr/lib/libmihomo.so ./libmihomo.so
           fi
@@ -193,48 +192,15 @@ jobs:
       - name: Package Release Artifact (Linux amd64)
         if: needs.prepare.outputs.is_release == 'true'
         run: |
-          mkdir -p SubConverter-Extended
-          mv subconverter SubConverter-Extended/
-          cp -r base SubConverter-Extended/
-          mkdir -p SubConverter-Extended/usr/lib
-          mv libmihomo.so SubConverter-Extended/usr/lib/
-          cp -r runtime-libs/* SubConverter-Extended/
-          
-          # Create start script (use /bin/sh for Alpine compatibility)
-          cat > SubConverter-Extended/start.sh << 'EOF'
-          #!/bin/sh
-          set -e
-          ROOT="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
-          CONF="${PREF_PATH:-$ROOT/base/pref.toml}"
-          CONF_DIR="$(dirname "$CONF")"
-          mkdir -p "$CONF_DIR"
-          if [ ! -f "$CONF" ] && [ -f "$ROOT/base/pref.example.toml" ]; then
-            cp "$ROOT/base/pref.example.toml" "$CONF"
-          fi
-
-          if [ -x "$ROOT/lib64/ld-linux-x86-64.so.2" ]; then
-            LOADER="$ROOT/lib64/ld-linux-x86-64.so.2"
-            LIB_PATH="$ROOT/lib/x86_64-linux-gnu:$ROOT/usr/lib/x86_64-linux-gnu:$ROOT/lib64:$ROOT/lib:$ROOT/usr/lib"
-          elif [ -x "$ROOT/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2" ]; then
-            LOADER="$ROOT/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
-            LIB_PATH="$ROOT/lib/x86_64-linux-gnu:$ROOT/usr/lib/x86_64-linux-gnu:$ROOT/lib:$ROOT/usr/lib"
-          elif [ -x "$ROOT/lib/ld-linux-aarch64.so.1" ]; then
-            LOADER="$ROOT/lib/ld-linux-aarch64.so.1"
-            LIB_PATH="$ROOT/lib/aarch64-linux-gnu:$ROOT/usr/lib/aarch64-linux-gnu:$ROOT/lib:$ROOT/usr/lib"
-          elif [ -x "$ROOT/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1" ]; then
-            LOADER="$ROOT/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"
-            LIB_PATH="$ROOT/lib/aarch64-linux-gnu:$ROOT/usr/lib/aarch64-linux-gnu:$ROOT/lib:$ROOT/usr/lib"
-          else
-            echo "glibc loader not found in package."
-            exit 1
-          fi
-
-          exec "$LOADER" --library-path "$LIB_PATH" "$ROOT/subconverter" -f "$CONF"
-          EOF
-          chmod +x SubConverter-Extended/start.sh
-          
-          tar -czf SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-amd64.tar.gz SubConverter-Extended
+          bash scripts/package-linux-portable.sh "${{ needs.prepare.outputs.version }}" amd64
           rm -rf runtime-libs libmihomo.so
+
+      - name: Smoke test artifact (Linux amd64)
+        if: needs.prepare.outputs.is_release == 'true'
+        timeout-minutes: 3
+        uses: ./.github/actions/smoke-linux-artifact
+        with:
+          artifact: SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-amd64.tar.gz
 
       # Upload Release Artifact
       - name: Upload Artifact (Linux amd64)
@@ -243,6 +209,10 @@ jobs:
         with:
           name: linux-amd64
           path: SubConverter-Extended-*.tar.gz
+
+      - name: Clean release packaging files
+        if: needs.prepare.outputs.is_release == 'true'
+        run: rm -rf SubConverter-Extended SubConverter-Extended-*.tar.gz subconverter runtime-libs libmihomo.so
 
       - name: Check for file changes
         id: check_changes
@@ -360,7 +330,6 @@ jobs:
         run: |
           CONTAINER_ID=$(docker create subconverter-temp:arm64-builder)
           docker cp $CONTAINER_ID:/src/subconverter ./subconverter
-          docker cp $CONTAINER_ID:/src/base ./base
           docker cp $CONTAINER_ID:/runtime-libs ./runtime-libs
           docker cp $CONTAINER_ID:/usr/lib/libmihomo.so ./libmihomo.so
           docker rm $CONTAINER_ID
@@ -368,53 +337,23 @@ jobs:
 
       - name: Package Release Artifact (Linux arm64)
         run: |
-          mkdir -p SubConverter-Extended
-          mv subconverter SubConverter-Extended/
-          cp -r base SubConverter-Extended/
-          mkdir -p SubConverter-Extended/usr/lib
-          mv libmihomo.so SubConverter-Extended/usr/lib/
-          cp -r runtime-libs/* SubConverter-Extended/
-
-          cat > SubConverter-Extended/start.sh << 'EOF'
-          #!/bin/sh
-          set -e
-          ROOT="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
-          CONF="${PREF_PATH:-$ROOT/base/pref.toml}"
-          CONF_DIR="$(dirname "$CONF")"
-          mkdir -p "$CONF_DIR"
-          if [ ! -f "$CONF" ] && [ -f "$ROOT/base/pref.example.toml" ]; then
-            cp "$ROOT/base/pref.example.toml" "$CONF"
-          fi
-
-          if [ -x "$ROOT/lib64/ld-linux-x86-64.so.2" ]; then
-            LOADER="$ROOT/lib64/ld-linux-x86-64.so.2"
-            LIB_PATH="$ROOT/lib/x86_64-linux-gnu:$ROOT/usr/lib/x86_64-linux-gnu:$ROOT/lib64:$ROOT/lib:$ROOT/usr/lib"
-          elif [ -x "$ROOT/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2" ]; then
-            LOADER="$ROOT/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
-            LIB_PATH="$ROOT/lib/x86_64-linux-gnu:$ROOT/usr/lib/x86_64-linux-gnu:$ROOT/lib:$ROOT/usr/lib"
-          elif [ -x "$ROOT/lib/ld-linux-aarch64.so.1" ]; then
-            LOADER="$ROOT/lib/ld-linux-aarch64.so.1"
-            LIB_PATH="$ROOT/lib/aarch64-linux-gnu:$ROOT/usr/lib/aarch64-linux-gnu:$ROOT/lib:$ROOT/usr/lib"
-          elif [ -x "$ROOT/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1" ]; then
-            LOADER="$ROOT/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"
-            LIB_PATH="$ROOT/lib/aarch64-linux-gnu:$ROOT/usr/lib/aarch64-linux-gnu:$ROOT/lib:$ROOT/usr/lib"
-          else
-            echo "glibc loader not found in package."
-            exit 1
-          fi
-
-          exec "$LOADER" --library-path "$LIB_PATH" "$ROOT/subconverter" -f "$CONF"
-          EOF
-          chmod +x SubConverter-Extended/start.sh
-
-          tar -czf SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-arm64.tar.gz SubConverter-Extended
+          bash scripts/package-linux-portable.sh "${{ needs.prepare.outputs.version }}" arm64
           rm -rf runtime-libs libmihomo.so
+
+      - name: Smoke test artifact (Linux arm64)
+        timeout-minutes: 3
+        uses: ./.github/actions/smoke-linux-artifact
+        with:
+          artifact: SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-arm64.tar.gz
 
       - name: Upload Artifact (Linux arm64)
         uses: actions/upload-artifact@v7
         with:
           name: linux-arm64
           path: SubConverter-Extended-*.tar.gz
+
+      - name: Clean release packaging files
+        run: rm -rf SubConverter-Extended SubConverter-Extended-*.tar.gz subconverter runtime-libs libmihomo.so
 
       - name: Build and push final image
         id: build_image
@@ -479,6 +418,61 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Build to builder stage (extract binary)
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7
+        with:
+          context: .
+          file: ./Dockerfile.armv7-cross
+          load: true
+          tags: subconverter-temp:armv7-builder
+          target: builder
+          build-args: |
+            THREADS=2
+            SHA=${{ needs.prepare.outputs.sha_short }}
+            VERSION=${{ needs.prepare.outputs.version }}
+            BUILD_DATE=${{ needs.prepare.outputs.build_date }}
+            MIHOMO_REF=Meta
+            MIHOMO_CACHE_BUST=stable
+            SOURCE_DEPS_CACHE_BUST=${{ github.event_name != 'pull_request' && github.run_id || 'stable' }}
+            REFRESH_GO_DEPS=false
+            REFRESH_HEADERS=false
+          cache-from: type=gha,scope=subconverter-armv7-cross
+          cache-to: type=gha,mode=max,scope=subconverter-armv7-cross
+
+      - name: Extract binaries
+        run: |
+          CONTAINER_ID=$(docker create subconverter-temp:armv7-builder)
+          docker cp $CONTAINER_ID:/src/subconverter ./subconverter
+          docker cp $CONTAINER_ID:/runtime-root ./runtime-root
+          docker rm $CONTAINER_ID
+          chmod +x subconverter
+
+      - name: Package Release Artifact (Linux armv7)
+        run: |
+          bash scripts/package-linux-portable.sh "${{ needs.prepare.outputs.version }}" armv7
+          rm -rf runtime-root
+
+      - name: Set up QEMU for smoke test
+        if: github.event_name != 'pull_request'
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+        with:
+          platforms: arm
+
+      - name: Smoke test artifact (Linux armv7)
+        timeout-minutes: 3
+        uses: ./.github/actions/smoke-linux-artifact
+        with:
+          artifact: SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-armv7.tar.gz
+
+      - name: Upload Artifact (Linux armv7)
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-armv7
+          path: SubConverter-Extended-*.tar.gz
+
+      - name: Clean release packaging files
+        run: rm -rf SubConverter-Extended SubConverter-Extended-*.tar.gz subconverter runtime-root
+
       - name: Build and push final image
         id: build_image
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7
@@ -500,12 +494,6 @@ jobs:
             REFRESH_HEADERS=false
           cache-from: type=gha,scope=subconverter-armv7-cross
           cache-to: type=gha,mode=max,scope=subconverter-armv7-cross
-
-      - name: Set up QEMU for smoke test
-        if: github.event_name != 'pull_request'
-        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
-        with:
-          platforms: arm
 
       - name: Smoke test image (armv7)
         if: github.event_name != 'pull_request'
@@ -556,11 +544,38 @@ jobs:
             done
           done
 
+      - name: Verify manifest platforms
+        run: |
+          set -euo pipefail
+
+          TAGS="${{ needs.prepare.outputs.tags }}"
+          for TAG in $TAGS; do
+            echo "Inspecting $TAG"
+            for attempt in $(seq 1 6); do
+              if docker buildx imagetools inspect "$TAG" > manifest.txt; then
+                break
+              fi
+              if [ "$attempt" -eq 6 ]; then
+                echo "Failed to inspect $TAG"
+                exit 1
+              fi
+              sleep 5
+            done
+
+            cat manifest.txt
+            for PLATFORM in "linux/amd64" "linux/arm64" "linux/arm/v7"; do
+              if ! grep -Eq "Platform:[[:space:]]+${PLATFORM}$" manifest.txt; then
+                echo "Missing platform ${PLATFORM} in ${TAG}"
+                exit 1
+              fi
+            done
+          done
+
   # Release Creation Job (Only on Tag)
   create-release:
     name: "🚀 Release Artifacts"
     runs-on: ubuntu-latest
-    needs: [prepare, build-amd64, build-arm64, merge-manifest]
+    needs: [prepare, build-amd64, build-arm64, build-armv7, merge-manifest]
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write
@@ -727,6 +742,10 @@ jobs:
           ### Linux (portable, glibc runtime bundled)
           - **amd64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-amd64.tar.gz`
           - **arm64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-arm64.tar.gz`
+          - **armv7**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-armv7.tar.gz`
+
+          ### Checksums
+          - `SHA256SUMS`
           EOF
 
       - name: Download all artifacts
@@ -736,9 +755,20 @@ jobs:
           pattern: 'linux-*'
           merge-multiple: false
 
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+
+          find artifacts -type f -name '*.tar.gz' -print | sort | while read -r file; do
+            sha256sum "$file" | sed 's#  artifacts/[^/]*/#  #'
+          done > SHA256SUMS
+
+          cat SHA256SUMS
+
       - name: Create Release
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
         with:
           files: |
             artifacts/linux-*/*.tar.gz
+            SHA256SUMS
           body_path: release-notes.md
