@@ -1,0 +1,59 @@
+name: Smoke test Linux portable artifact
+description: Extract a Linux release artifact and verify that the HTTP endpoint responds.
+
+inputs:
+  artifact:
+    description: Path to the tar.gz artifact.
+    required: true
+  port:
+    description: Port used for the smoke test.
+    required: false
+    default: "25500"
+
+runs:
+  using: composite
+  steps:
+    - name: Run artifact and check /version
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        ARTIFACT="${{ inputs.artifact }}"
+        PORT="${{ inputs.port }}"
+        WORKDIR="$(mktemp -d)"
+        PID=""
+
+        cleanup() {
+          if [ -n "$PID" ] && kill -0 "$PID" >/dev/null 2>&1; then
+            kill "$PID" >/dev/null 2>&1 || true
+            wait "$PID" >/dev/null 2>&1 || true
+          fi
+          rm -rf "$WORKDIR"
+        }
+        trap cleanup EXIT
+
+        tar -xzf "$ARTIFACT" -C "$WORKDIR"
+        cd "$WORKDIR/SubConverter-Extended"
+
+        PORT="$PORT" PREF_PATH="$PWD/base/pref.toml" ./start.sh >"$WORKDIR/stdout.log" 2>"$WORKDIR/stderr.log" &
+        PID="$!"
+
+        URL="http://127.0.0.1:${PORT}/version"
+        for _ in $(seq 1 30); do
+          if curl -fsS "$URL" >"$WORKDIR/response.out"; then
+            head -c 200 "$WORKDIR/response.out"
+            exit 0
+          fi
+
+          if ! kill -0 "$PID" >/dev/null 2>&1; then
+            cat "$WORKDIR/stdout.log" || true
+            cat "$WORKDIR/stderr.log" || true
+            exit 1
+          fi
+
+          sleep 2
+        done
+
+        cat "$WORKDIR/stdout.log" || true
+        cat "$WORKDIR/stderr.log" || true
+        exit 1
