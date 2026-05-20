@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -97,7 +98,25 @@ func main() {
 
 // findMihomoRoot locates the mihomo source directory
 func findMihomoRoot() string {
-	// Method 1: Check GOMODCACHE environment variable (Docker/CI)
+	// Method 1: Ask Go for the exact module directory. This is more reliable
+	// than reconstructing GOMODCACHE paths, especially on Windows runners.
+	moduleRoot := findModuleRoot()
+	if moduleRoot != "" {
+		cmd := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", "github.com/metacubex/mihomo")
+		cmd.Dir = moduleRoot
+		output, err := cmd.CombinedOutput()
+		if err == nil {
+			mihomoDir := strings.TrimSpace(string(output))
+			if mihomoDir != "" && dirExists(mihomoDir) {
+				log.Printf("Using mihomo from go list: %s\n", mihomoDir)
+				return mihomoDir
+			}
+		} else {
+			log.Printf("go list could not locate mihomo from %s: %v: %s\n", moduleRoot, err, strings.TrimSpace(string(output)))
+		}
+	}
+
+	// Method 2: Check GOMODCACHE environment variable (Docker/CI)
 	goModCache := os.Getenv("GOMODCACHE")
 	if goModCache == "" {
 		goModCache = filepath.Join(os.Getenv("GOPATH"), "pkg", "mod")
@@ -111,7 +130,7 @@ func findMihomoRoot() string {
 		}
 	}
 
-	// Method 2: Try several common locations relative to scripts directory
+	// Method 3: Try several common locations relative to scripts directory
 	candidates := []string{
 		"../../mihomo",
 		"../mihomo",
@@ -125,6 +144,27 @@ func findMihomoRoot() string {
 			if fileExists(goModPath) {
 				return absPath
 			}
+		}
+	}
+
+	return ""
+}
+
+func findModuleRoot() string {
+	candidates := []string{
+		".",
+		"../bridge",
+		"bridge",
+	}
+
+	for _, candidate := range candidates {
+		goModPath := filepath.Join(candidate, "go.mod")
+		if fileExists(goModPath) {
+			absPath, err := filepath.Abs(candidate)
+			if err == nil {
+				return absPath
+			}
+			return candidate
 		}
 	}
 
