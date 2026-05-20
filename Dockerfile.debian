@@ -1,5 +1,5 @@
 # ========== GO BUILD STAGE ==========
-FROM golang:latest AS go-builder
+FROM mirror.gcr.io/library/golang:latest AS go-builder
 
 # Docker Buildx 自动注入目标架构信息
 ARG TARGETARCH
@@ -63,7 +63,7 @@ RUN if [ "$TARGETARCH" = "arm" ] && [ "$TARGETVARIANT" = "v7" ]; then \
 RUN ls -lh libmihomo.a libmihomo.h
 
 # ========== C++ BUILD STAGE ==========
-FROM debian:latest AS builder
+FROM mirror.gcr.io/library/debian:latest AS builder
 ARG THREADS="4"
 ARG SHA=""
 ARG VERSION="dev"
@@ -171,7 +171,7 @@ RUN set -xe && \
     ninja -j ${THREADS}
 
 # ========== FINAL STAGE ==========
-FROM debian:latest
+FROM mirror.gcr.io/library/debian:latest
 
 ARG VERSION="dev"
 ARG SHA=""

@@ -1,5 +1,5 @@
 # ========== GO BUILD STAGE ==========
-FROM --platform=$BUILDPLATFORM golang:latest AS go-builder
+FROM --platform=$BUILDPLATFORM mirror.gcr.io/library/golang:latest AS go-builder
 
 ARG TARGETARCH
 ARG TARGETVARIANT
@@ -46,7 +46,7 @@ RUN echo "==> Cross-compiling Go bridge for linux/arm/v7" && \
 RUN ls -lh libmihomo.a libmihomo.h
 
 # ========== C++ CROSS BUILD STAGE ==========
-FROM --platform=$BUILDPLATFORM debian:trixie AS builder
+FROM --platform=$BUILDPLATFORM mirror.gcr.io/library/debian:trixie AS builder
 
 ARG THREADS="4"
 ARG SHA=""
@@ -190,7 +190,7 @@ RUN set -xe && \
     done
 
 # ========== FINAL STAGE ==========
-FROM --platform=$TARGETPLATFORM debian:trixie-slim
+FROM --platform=$TARGETPLATFORM mirror.gcr.io/library/debian:trixie-slim
 
 ARG VERSION="dev"
 ARG SHA=""

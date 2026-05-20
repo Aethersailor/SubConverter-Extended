@@ -1,6 +1,6 @@
 # ========== GO BUILD STAGE ==========
 # 使用 glibc (Debian) 构建 Go 共享库，避免 musl 下 Go runtime 初始化崩溃
-FROM golang:latest AS go-builder
+FROM mirror.gcr.io/library/golang:latest AS go-builder
 
 ARG TARGETARCH
 ARG TARGETVARIANT
@@ -52,7 +52,7 @@ RUN ls -lh libmihomo.so libmihomo.h
 
 # ========== C++ BUILD STAGE ==========
 # 使用 Debian (glibc) 编译，运行时再搬运依赖到 Alpine
-FROM debian:latest AS builder
+FROM mirror.gcr.io/library/debian:latest AS builder
 ARG THREADS="4"
 ARG SHA=""
 ARG VERSION="dev"
@@ -191,7 +191,7 @@ RUN set -xe && \
 
 # ========== FINAL STAGE ==========
 # Alpine 运行时 + 搬运 glibc 依赖（不固定版本）
-FROM alpine:latest
+FROM mirror.gcr.io/library/alpine:latest
 
 ARG VERSION="dev"
 ARG SHA=""
