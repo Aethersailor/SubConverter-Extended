@@ -246,7 +246,7 @@ apk mkpkg \\
   --info url:"https://github.com/Aethersailor/SubConverter-Extended" \\
   --info repo-commit:${REPO_COMMIT} \\
   --info build-time:${BUILD_TIME} \\
-  --info installed-size:${INSTALLED_SIZE}
+  --info size:${INSTALLED_SIZE}
 EOF
   chmod +x "${MKPKG_SCRIPT}"
 
