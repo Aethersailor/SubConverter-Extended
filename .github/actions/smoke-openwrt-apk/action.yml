@@ -26,13 +26,13 @@ runs:
           arch="${file%.apk}"
           arch="${arch##*-openwrt-}"
 
-          docker run --rm \
-            -v "$PWD:/work" \
-            -w /work \
-            -e "APK_ARTIFACT=$artifact" \
-            -e "OPENWRT_ARCH=$arch" \
-            alpine:latest \
-            sh -ec '
+            docker run --rm \
+              -v "$PWD:/work" \
+              -w /work \
+              -e "APK_ARTIFACT=$artifact" \
+              -e "OPENWRT_ARCH=$arch" \
+              mirror.gcr.io/library/alpine:latest \
+              sh -ec '
               apk add --root /tmp/apk-root --initdb --arch "$OPENWRT_ARCH" --allow-untrusted "/work/$APK_ARTIFACT"
               test -x /tmp/apk-root/usr/bin/subconverter-extended
               test -x /tmp/apk-root/etc/init.d/subconverter-extended

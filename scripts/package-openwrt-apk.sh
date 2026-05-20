@@ -37,10 +37,11 @@ run_mkpkg() {
   fi
 
   if command -v docker >/dev/null 2>&1; then
+    local image="${APK_MKPKG_IMAGE:-mirror.gcr.io/library/alpine:latest}"
     docker run --rm \
       -v "${PWD}:/work" \
       -w /work \
-      alpine:latest \
+      "${image}" \
       sh "$script"
     return
   fi
