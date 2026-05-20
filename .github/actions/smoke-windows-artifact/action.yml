@@ -29,9 +29,10 @@ runs:
           $pref = Join-Path $root "base\pref.toml"
           $stdout = Join-Path $workDir "stdout.log"
           $stderr = Join-Path $workDir "stderr.log"
-          if (-not (Test-Path $pref)) {
-            Copy-Item (Join-Path $root "base\pref.example.toml") $pref
-          }
+
+          Remove-Item (Join-Path $root "base\pref.toml") -ErrorAction SilentlyContinue
+          Remove-Item (Join-Path $root "base\pref.yml") -ErrorAction SilentlyContinue
+          Remove-Item (Join-Path $root "base\pref.ini") -ErrorAction SilentlyContinue
 
           $previousPort = $env:PORT
           $previousPath = $env:PATH
@@ -39,8 +40,8 @@ runs:
           $env:PATH = "$root;$env:PATH"
 
           $process = Start-Process `
-            -FilePath (Join-Path $root "subconverter.exe") `
-            -ArgumentList @("-f", $pref) `
+            -FilePath "pwsh" `
+            -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $root "start.ps1")) `
             -WorkingDirectory $root `
             -RedirectStandardOutput $stdout `
             -RedirectStandardError $stderr `
@@ -72,11 +73,18 @@ runs:
             if (Test-Path $stderr) { Get-Content $stderr -ErrorAction SilentlyContinue }
             throw "Windows artifact smoke test failed."
           }
+
+          if (-not (Test-Path $pref)) {
+            throw "Windows launcher did not create base\pref.toml on first start."
+          }
         } finally {
           if ($process -and -not $process.HasExited) {
             $process.Kill()
             $process.WaitForExit()
           }
+          Get-CimInstance Win32_Process -Filter "name = 'subconverter.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase) } |
+            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
           if ($null -ne $previousPort) { $env:PORT = $previousPort } else { Remove-Item Env:PORT -ErrorAction SilentlyContinue }
           if ($null -ne $previousPath) { $env:PATH = $previousPath }
           Remove-Item -Recurse -Force $workDir -ErrorAction SilentlyContinue
