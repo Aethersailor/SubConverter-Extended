@@ -650,6 +650,12 @@ jobs:
 
           TAGS="${{ needs.prepare.outputs.tags }}"
           for TAG in $TAGS; do
+            if [[ "$TAG" != ghcr.io/* ]]; then
+              echo "Skipping Docker Hub platform inspection for $TAG to avoid pull rate limits."
+              echo "The manifest push step above already covered Docker Hub publication."
+              continue
+            fi
+
             echo "Inspecting $TAG"
             for attempt in $(seq 1 6); do
               if docker buildx imagetools inspect "$TAG" > manifest.txt; then
