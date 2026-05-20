@@ -193,6 +193,7 @@ jobs:
         if: needs.prepare.outputs.is_release == 'true'
         run: |
           bash scripts/package-linux-portable.sh "${{ needs.prepare.outputs.version }}" amd64
+          bash scripts/package-openwrt-apk.sh "${{ needs.prepare.outputs.version }}" amd64 "x86_64"
           rm -rf runtime-libs libmihomo.so
 
       - name: Smoke test artifact (Linux amd64)
@@ -202,6 +203,13 @@ jobs:
         with:
           artifact: SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-amd64.tar.gz
 
+      - name: Smoke test APKs (OpenWrt amd64)
+        if: needs.prepare.outputs.is_release == 'true'
+        timeout-minutes: 3
+        uses: ./.github/actions/smoke-openwrt-apk
+        with:
+          artifacts: SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-*.apk
+
       # Upload Release Artifact
       - name: Upload Artifact (Linux amd64)
         if: needs.prepare.outputs.is_release == 'true'
@@ -210,9 +218,16 @@ jobs:
           name: linux-amd64
           path: SubConverter-Extended-*.tar.gz
 
+      - name: Upload Artifact (OpenWrt amd64)
+        if: needs.prepare.outputs.is_release == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: openwrt-amd64
+          path: SubConverter-Extended-*-openwrt-*.apk
+
       - name: Clean release packaging files
         if: needs.prepare.outputs.is_release == 'true'
-        run: rm -rf SubConverter-Extended SubConverter-Extended-*.tar.gz subconverter runtime-libs libmihomo.so
+        run: rm -rf SubConverter-Extended SubConverter-Extended-*.tar.gz SubConverter-Extended-*.apk subconverter runtime-libs libmihomo.so build/openwrt-apk
 
       - name: Check for file changes
         id: check_changes
@@ -338,6 +353,7 @@ jobs:
       - name: Package Release Artifact (Linux arm64)
         run: |
           bash scripts/package-linux-portable.sh "${{ needs.prepare.outputs.version }}" arm64
+          bash scripts/package-openwrt-apk.sh "${{ needs.prepare.outputs.version }}" arm64 "aarch64_generic,aarch64_cortex-a53,aarch64_cortex-a72"
           rm -rf runtime-libs libmihomo.so
 
       - name: Smoke test artifact (Linux arm64)
@@ -346,14 +362,26 @@ jobs:
         with:
           artifact: SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-arm64.tar.gz
 
+      - name: Smoke test APKs (OpenWrt arm64)
+        timeout-minutes: 3
+        uses: ./.github/actions/smoke-openwrt-apk
+        with:
+          artifacts: SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-*.apk
+
       - name: Upload Artifact (Linux arm64)
         uses: actions/upload-artifact@v7
         with:
           name: linux-arm64
           path: SubConverter-Extended-*.tar.gz
 
+      - name: Upload Artifact (OpenWrt arm64)
+        uses: actions/upload-artifact@v7
+        with:
+          name: openwrt-arm64
+          path: SubConverter-Extended-*-openwrt-*.apk
+
       - name: Clean release packaging files
-        run: rm -rf SubConverter-Extended SubConverter-Extended-*.tar.gz subconverter runtime-libs libmihomo.so
+        run: rm -rf SubConverter-Extended SubConverter-Extended-*.tar.gz SubConverter-Extended-*.apk subconverter runtime-libs libmihomo.so build/openwrt-apk
 
       - name: Build and push final image
         id: build_image
@@ -450,6 +478,7 @@ jobs:
       - name: Package Release Artifact (Linux armv7)
         run: |
           bash scripts/package-linux-portable.sh "${{ needs.prepare.outputs.version }}" armv7
+          bash scripts/package-openwrt-apk.sh "${{ needs.prepare.outputs.version }}" armv7 "arm_cortex-a5_vfpv4,arm_cortex-a7,arm_cortex-a7_vfpv4,arm_cortex-a7_neon-vfpv4,arm_cortex-a8_vfpv3,arm_cortex-a9,arm_cortex-a9_neon,arm_cortex-a9_vfpv3-d16,arm_cortex-a15_neon-vfpv4"
           rm -rf runtime-root
 
       - name: Set up QEMU for smoke test
@@ -464,14 +493,26 @@ jobs:
         with:
           artifact: SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-armv7.tar.gz
 
+      - name: Smoke test APKs (OpenWrt armv7)
+        timeout-minutes: 3
+        uses: ./.github/actions/smoke-openwrt-apk
+        with:
+          artifacts: SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-*.apk
+
       - name: Upload Artifact (Linux armv7)
         uses: actions/upload-artifact@v7
         with:
           name: linux-armv7
           path: SubConverter-Extended-*.tar.gz
 
+      - name: Upload Artifact (OpenWrt armv7)
+        uses: actions/upload-artifact@v7
+        with:
+          name: openwrt-armv7
+          path: SubConverter-Extended-*-openwrt-*.apk
+
       - name: Clean release packaging files
-        run: rm -rf SubConverter-Extended SubConverter-Extended-*.tar.gz subconverter runtime-root
+        run: rm -rf SubConverter-Extended SubConverter-Extended-*.tar.gz SubConverter-Extended-*.apk subconverter runtime-root build/openwrt-apk
 
       - name: Build and push final image
         id: build_image
@@ -806,6 +847,12 @@ jobs:
           ### Windows (portable)
           - **amd64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-windows-amd64.zip`
 
+          ### OpenWrt 25.12+ APK (unsigned)
+          Install with `apk add --allow-untrusted ./<package>.apk`. Choose the APK whose OpenWrt architecture suffix matches `apk print-arch`.
+          - **x86_64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-x86_64.apk`
+          - **aarch64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-aarch64_generic.apk`, `...-aarch64_cortex-a53.apk`, `...-aarch64_cortex-a72.apk`
+          - **armv7**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-arm_cortex-*.apk`
+
           ### Checksums
           - `SHA256SUMS`
           EOF
@@ -821,7 +868,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -print | sort | while read -r file; do
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.apk' \) -print | sort | while read -r file; do
             sha256sum "$file" | sed 's#  artifacts/[^/]*/#  #'
           done > SHA256SUMS
 
@@ -832,6 +879,7 @@ jobs:
         with:
           files: |
             artifacts/linux-*/*.tar.gz
+            artifacts/openwrt-*/*.apk
             artifacts/windows-*/*.zip
             SHA256SUMS
           body_path: release-notes.md

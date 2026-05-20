@@ -1,0 +1,44 @@
+name: Smoke test OpenWrt APK artifacts
+description: Verify that OpenWrt APK artifacts install into an apk root.
+
+inputs:
+  artifacts:
+    description: Shell glob matching APK artifacts.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install APKs into apk roots
+      shell: bash
+      run: |
+        set -euo pipefail
+        shopt -s nullglob
+
+        artifacts=( ${{ inputs.artifacts }} )
+        if [ "${#artifacts[@]}" -eq 0 ]; then
+          echo "No APK artifacts matched: ${{ inputs.artifacts }}" >&2
+          exit 1
+        fi
+
+        for artifact in "${artifacts[@]}"; do
+          file="$(basename "$artifact")"
+          arch="${file%.apk}"
+          arch="${arch##*-openwrt-}"
+
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            -e "APK_ARTIFACT=$artifact" \
+            -e "OPENWRT_ARCH=$arch" \
+            alpine:latest \
+            sh -ec '
+              apk add --root /tmp/apk-root --initdb --arch "$OPENWRT_ARCH" --allow-untrusted "/work/$APK_ARTIFACT"
+              test -x /tmp/apk-root/usr/bin/subconverter-extended
+              test -x /tmp/apk-root/etc/init.d/subconverter-extended
+              test -x /tmp/apk-root/opt/subconverter-extended/subconverter
+              test -f /tmp/apk-root/opt/subconverter-extended/base/pref.example.toml
+              test -f /tmp/apk-root/usr/share/doc/subconverter-extended/README.OpenWrt
+              apk info --root /tmp/apk-root subconverter-extended
+            '
+        done
