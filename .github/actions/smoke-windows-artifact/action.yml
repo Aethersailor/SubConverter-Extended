@@ -1,0 +1,83 @@
+name: Smoke test Windows portable artifact
+description: Extract a Windows release artifact and verify that the HTTP endpoint responds.
+
+inputs:
+  artifact:
+    description: Path to the zip artifact.
+    required: true
+  port:
+    description: Port used for the smoke test.
+    required: false
+    default: "25500"
+
+runs:
+  using: composite
+  steps:
+    - name: Run artifact and check /version
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+
+        $artifact = "${{ inputs.artifact }}"
+        $port = "${{ inputs.port }}"
+        $workDir = Join-Path $env:RUNNER_TEMP ("subconverter-windows-" + [guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $workDir | Out-Null
+
+        try {
+          Expand-Archive -Path $artifact -DestinationPath $workDir -Force
+          $root = Join-Path $workDir "SubConverter-Extended"
+          $pref = Join-Path $root "base\pref.toml"
+          $stdout = Join-Path $workDir "stdout.log"
+          $stderr = Join-Path $workDir "stderr.log"
+          if (-not (Test-Path $pref)) {
+            Copy-Item (Join-Path $root "base\pref.example.toml") $pref
+          }
+
+          $previousPort = $env:PORT
+          $previousPath = $env:PATH
+          $env:PORT = $port
+          $env:PATH = "$root;$env:PATH"
+
+          $process = Start-Process `
+            -FilePath (Join-Path $root "subconverter.exe") `
+            -ArgumentList @("-f", $pref) `
+            -WorkingDirectory $root `
+            -RedirectStandardOutput $stdout `
+            -RedirectStandardError $stderr `
+            -PassThru
+          $url = "http://127.0.0.1:$port/version"
+          $ok = $false
+
+          for ($i = 0; $i -lt 30; $i++) {
+            try {
+              $response = Invoke-WebRequest -UseBasicParsing -Uri $url -TimeoutSec 2
+              if ($response.StatusCode -eq 200) {
+                $response.Content.Substring(0, [Math]::Min(200, $response.Content.Length))
+                $ok = $true
+                break
+              }
+            } catch {
+              Start-Sleep -Seconds 1
+            }
+
+            if ($process.HasExited) {
+              break
+            }
+          }
+
+          if (-not $ok) {
+            Write-Host "stdout:"
+            if (Test-Path $stdout) { Get-Content $stdout -ErrorAction SilentlyContinue }
+            Write-Host "stderr:"
+            if (Test-Path $stderr) { Get-Content $stderr -ErrorAction SilentlyContinue }
+            throw "Windows artifact smoke test failed."
+          }
+        } finally {
+          if ($process -and -not $process.HasExited) {
+            $process.Kill()
+            $process.WaitForExit()
+          }
+          if ($null -ne $previousPort) { $env:PORT = $previousPort } else { Remove-Item Env:PORT -ErrorAction SilentlyContinue }
+          if ($null -ne $previousPath) { $env:PATH = $previousPath }
+          Remove-Item -Recurse -Force $workDir -ErrorAction SilentlyContinue
+        }
