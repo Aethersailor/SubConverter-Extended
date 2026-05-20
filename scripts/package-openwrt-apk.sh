@@ -227,8 +227,6 @@ for OPENWRT_ARCH in "${ARCH_ARRAY[@]}"; do
   create_init_script "${PKG_ROOT}/etc/init.d/subconverter-extended"
   create_readme "${PKG_ROOT}/usr/share/doc/${PACKAGE_NAME}/README.OpenWrt"
 
-  INSTALLED_SIZE="$(du -sk "${PKG_ROOT}" | awk '{print $1 * 1024}')"
-
   cat > "${MKPKG_SCRIPT}" <<EOF
 #!/bin/sh
 set -eu
@@ -245,8 +243,7 @@ apk mkpkg \\
   --info maintainer:"Aethersailor" \\
   --info url:"https://github.com/Aethersailor/SubConverter-Extended" \\
   --info repo-commit:${REPO_COMMIT} \\
-  --info build-time:${BUILD_TIME} \\
-  --info size:${INSTALLED_SIZE}
+  --info build-time:${BUILD_TIME}
 EOF
   chmod +x "${MKPKG_SCRIPT}"
 
