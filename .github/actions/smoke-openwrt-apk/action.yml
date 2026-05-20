@@ -36,9 +36,12 @@ runs:
               apk add --root /tmp/apk-root --initdb --arch "$OPENWRT_ARCH" --allow-untrusted "/work/$APK_ARTIFACT"
               test -x /tmp/apk-root/usr/bin/subconverter-extended
               test -x /tmp/apk-root/etc/init.d/subconverter-extended
+              test -d /tmp/apk-root/etc/subconverter
               test -x /tmp/apk-root/opt/subconverter-extended/subconverter
               test -f /tmp/apk-root/opt/subconverter-extended/base/pref.example.toml
               test -f /tmp/apk-root/usr/share/doc/subconverter-extended/README.OpenWrt
+              grep -q "/etc/subconverter/pref.toml" /tmp/apk-root/usr/share/doc/subconverter-extended/README.OpenWrt
+              grep -q "CONFIG_DIR=\"/etc/subconverter\"" /tmp/apk-root/usr/bin/subconverter-extended
               apk info --root /tmp/apk-root subconverter-extended
             '
         done
