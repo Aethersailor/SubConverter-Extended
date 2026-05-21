@@ -85,6 +85,18 @@ static void finalizePerformanceSettings() {
   if (!retry_on_5xx.empty())
     global.coalesceRetryOn5xx = parseBoolSetting(retry_on_5xx);
 
+  std::string max_concurrent_threads =
+      getEnv("SUBCONVERTER_MAX_CONCURRENT_THREADS");
+  if (!max_concurrent_threads.empty())
+    global.maxConcurThreads =
+        to_int(max_concurrent_threads, global.maxConcurThreads);
+
+  std::string coalesce_wait_timeout =
+      getEnv("SUBCONVERTER_COALESCE_WAIT_TIMEOUT_MS");
+  if (!coalesce_wait_timeout.empty())
+    global.coalesceWaitTimeoutMs =
+        to_int(coalesce_wait_timeout, global.coalesceWaitTimeoutMs);
+
   std::string response_cache_ttl = getEnv("SUBCONVERTER_RESPONSE_CACHE_TTL");
   if (!response_cache_ttl.empty())
     global.responseCacheTtl = to_int(response_cache_ttl, global.responseCacheTtl);
@@ -95,6 +107,16 @@ static void finalizePerformanceSettings() {
 
   if (global.responseCacheTtl < 0)
     global.responseCacheTtl = 0;
+  if (global.maxConcurThreads < 1)
+    global.maxConcurThreads = 1;
+  if (global.coalesceWaitTimeoutMs < 0)
+    global.coalesceWaitTimeoutMs = 0;
+  if (global.coalesceWaitTimeoutMs > 30000) {
+    writeLog(0,
+             "coalesce_wait_timeout_ms 最大允许 30000 毫秒，已自动收敛到 30000。",
+             LOG_LEVEL_WARNING);
+    global.coalesceWaitTimeoutMs = 30000;
+  }
   if (global.responseCacheTtl > 5) {
     writeLog(0,
              "response_cache_ttl 最大允许 5 秒，已自动收敛到 5。",
@@ -671,6 +693,8 @@ void readYAMLConf(YAML::Node &node) {
     node["advanced"]["enable_request_coalescing"] >>
         global.enableRequestCoalescing;
     node["advanced"]["coalesce_retry_on_5xx"] >> global.coalesceRetryOn5xx;
+    node["advanced"]["coalesce_wait_timeout_ms"] >>
+        global.coalesceWaitTimeoutMs;
     node["advanced"]["response_cache_ttl"] >> global.responseCacheTtl;
     node["advanced"]["max_async_fetches"] >> global.maxAsyncFetches;
   }
@@ -849,6 +873,7 @@ void readTOMLConf(toml::value &root) {
       global.asyncFetchRuleset, "skip_failed_links", global.skipFailedLinks,
       "enable_request_coalescing", global.enableRequestCoalescing,
       "coalesce_retry_on_5xx", global.coalesceRetryOn5xx,
+      "coalesce_wait_timeout_ms", global.coalesceWaitTimeoutMs,
       "response_cache_ttl", global.responseCacheTtl, "max_async_fetches",
       global.maxAsyncFetches);
 
@@ -1171,6 +1196,8 @@ void readConf() {
   ini.get_bool_if_exist("enable_request_coalescing",
                         global.enableRequestCoalescing);
   ini.get_bool_if_exist("coalesce_retry_on_5xx", global.coalesceRetryOn5xx);
+  ini.get_int_if_exist("coalesce_wait_timeout_ms",
+                       global.coalesceWaitTimeoutMs);
   ini.get_int_if_exist("response_cache_ttl", global.responseCacheTtl);
   ini.get_int_if_exist("max_async_fetches", global.maxAsyncFetches);
 
