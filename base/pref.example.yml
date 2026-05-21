@@ -171,3 +171,7 @@ advanced:
   script_clean_context: true
   async_fetch_ruleset: true
   skip_failed_links: true
+  enable_request_coalescing: true
+  coalesce_retry_on_5xx: true
+  response_cache_ttl: 0
+  max_async_fetches: 2

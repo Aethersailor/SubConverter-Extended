@@ -76,6 +76,41 @@ static void finalizeSecuritySettings() {
   writeLog(0, "当前安全档位：" + global.securityProfile, LOG_LEVEL_INFO);
 }
 
+static void finalizePerformanceSettings() {
+  std::string disable_coalescing = getEnv("SUBCONVERTER_DISABLE_COALESCING");
+  if (!disable_coalescing.empty() && parseBoolSetting(disable_coalescing))
+    global.enableRequestCoalescing = false;
+
+  std::string retry_on_5xx = getEnv("SUBCONVERTER_COALESCE_RETRY_ON_5XX");
+  if (!retry_on_5xx.empty())
+    global.coalesceRetryOn5xx = parseBoolSetting(retry_on_5xx);
+
+  std::string response_cache_ttl = getEnv("SUBCONVERTER_RESPONSE_CACHE_TTL");
+  if (!response_cache_ttl.empty())
+    global.responseCacheTtl = to_int(response_cache_ttl, global.responseCacheTtl);
+
+  std::string max_async_fetches = getEnv("SUBCONVERTER_MAX_ASYNC_FETCHES");
+  if (!max_async_fetches.empty())
+    global.maxAsyncFetches = to_int(max_async_fetches, global.maxAsyncFetches);
+
+  if (global.responseCacheTtl < 0)
+    global.responseCacheTtl = 0;
+  if (global.responseCacheTtl > 5) {
+    writeLog(0,
+             "response_cache_ttl 最大允许 5 秒，已自动收敛到 5。",
+             LOG_LEVEL_WARNING);
+    global.responseCacheTtl = 5;
+  }
+  if (global.maxAsyncFetches < 0)
+    global.maxAsyncFetches = 0;
+}
+
+static void finalizeRuntimeSettings() {
+  finalizeSecuritySettings();
+  finalizePerformanceSettings();
+  global.configGeneration++;
+}
+
 bool isPublicFetchRestricted(FetchContext context) {
   return context == FetchContext::PublicRequest &&
          (global.securityProfile == "public" ||
@@ -633,12 +668,17 @@ void readYAMLConf(YAML::Node &node) {
     node["advanced"]["script_clean_context"] >> global.scriptCleanContext;
     node["advanced"]["async_fetch_ruleset"] >> global.asyncFetchRuleset;
     node["advanced"]["skip_failed_links"] >> global.skipFailedLinks;
+    node["advanced"]["enable_request_coalescing"] >>
+        global.enableRequestCoalescing;
+    node["advanced"]["coalesce_retry_on_5xx"] >> global.coalesceRetryOn5xx;
+    node["advanced"]["response_cache_ttl"] >> global.responseCacheTtl;
+    node["advanced"]["max_async_fetches"] >> global.maxAsyncFetches;
   }
   if (node["security"].IsDefined()) {
     node["security"]["profile"] >> global.securityProfile;
     node["security"]["allow_public_upload"] >> global.allowPublicUpload;
   }
-  finalizeSecuritySettings();
+  finalizeRuntimeSettings();
   writeLog(0, "已加载 YAML 格式偏好设置。",
            LOG_LEVEL_INFO);
 }
@@ -806,7 +846,11 @@ void readTOMLConf(toml::value &root) {
       "enable_cache", enable_cache, "cache_subscription", cache_subscription,
       "cache_config", cache_config, "cache_ruleset", cache_ruleset,
       "script_clean_context", global.scriptCleanContext, "async_fetch_ruleset",
-      global.asyncFetchRuleset, "skip_failed_links", global.skipFailedLinks);
+      global.asyncFetchRuleset, "skip_failed_links", global.skipFailedLinks,
+      "enable_request_coalescing", global.enableRequestCoalescing,
+      "coalesce_retry_on_5xx", global.coalesceRetryOn5xx,
+      "response_cache_ttl", global.responseCacheTtl, "max_async_fetches",
+      global.maxAsyncFetches);
 
   if (global.printDbgInfo)
     global.logLevel = LOG_LEVEL_VERBOSE;
@@ -844,7 +888,7 @@ void readTOMLConf(toml::value &root) {
       toml::find_or(root, "security", toml::value(toml::table()));
   find_if_exist(section_security, "profile", global.securityProfile,
                 "allow_public_upload", global.allowPublicUpload);
-  finalizeSecuritySettings();
+  finalizeRuntimeSettings();
 
   writeLog(0, "已加载 TOML 格式偏好设置。",
            LOG_LEVEL_INFO);
@@ -1124,13 +1168,18 @@ void readConf() {
   ini.get_bool_if_exist("script_clean_context", global.scriptCleanContext);
   ini.get_bool_if_exist("async_fetch_ruleset", global.asyncFetchRuleset);
   ini.get_bool_if_exist("skip_failed_links", global.skipFailedLinks);
+  ini.get_bool_if_exist("enable_request_coalescing",
+                        global.enableRequestCoalescing);
+  ini.get_bool_if_exist("coalesce_retry_on_5xx", global.coalesceRetryOn5xx);
+  ini.get_int_if_exist("response_cache_ttl", global.responseCacheTtl);
+  ini.get_int_if_exist("max_async_fetches", global.maxAsyncFetches);
 
   if (ini.section_exist("security")) {
     ini.enter_section("security");
     ini.get_if_exist("profile", global.securityProfile);
     ini.get_bool_if_exist("allow_public_upload", global.allowPublicUpload);
   }
-  finalizeSecuritySettings();
+  finalizeRuntimeSettings();
 
   writeLog(0, "已加载 INI 格式偏好设置。",
            LOG_LEVEL_INFO);

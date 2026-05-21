@@ -76,6 +76,11 @@ struct Settings {
   bool serveCacheOnFetchFail = false;
   int cacheSubscription = 60, cacheConfig = 300, cacheRuleset = 21600;
 
+  // request coalescing and bounded background work
+  bool enableRequestCoalescing = true, coalesceRetryOn5xx = true;
+  int responseCacheTtl = 0, maxAsyncFetches = 2;
+  unsigned long long configGeneration = 0;
+
   // limits
   size_t maxAllowedRulesets = 64, maxAllowedRules = 32768;
   bool scriptCleanContext = false;

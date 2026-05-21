@@ -1,6 +1,8 @@
 #include <future>
 #include <thread>
 #include <utility>
+#include <condition_variable>
+#include <memory>
 
 #include "handler/settings.h"
 #include "utils/network.h"
@@ -10,6 +12,37 @@
 
 //safety lock for multi-thread
 std::mutex on_emoji, on_rename, on_stream, on_time;
+
+static std::mutex async_fetch_mutex;
+static std::condition_variable async_fetch_cv;
+static int active_async_fetches = 0;
+
+static void releaseAsyncFetchSlot()
+{
+    {
+        std::lock_guard<std::mutex> lock(async_fetch_mutex);
+        if(active_async_fetches > 0)
+            active_async_fetches--;
+    }
+    async_fetch_cv.notify_one();
+}
+
+static std::shared_ptr<int> acquireAsyncFetchSlot()
+{
+    int max_async_fetches = global.maxAsyncFetches;
+    if(max_async_fetches <= 0)
+        return {};
+
+    std::unique_lock<std::mutex> lock(async_fetch_mutex);
+    async_fetch_cv.wait(lock, [max_async_fetches]() {
+        return active_async_fetches < max_async_fetches;
+    });
+    active_async_fetches++;
+    return std::shared_ptr<int>(new int(0), [](int *token) {
+        delete token;
+        releaseAsyncFetchSlot();
+    });
+}
 
 static std::shared_future<std::string> make_ready_future(std::string value)
 {
@@ -95,7 +128,10 @@ std::shared_future<std::string> fetchFileAsync(const std::string &path, const st
     else */if(find_local && fileExist(path, true) && canReadLocalFetchPath(path, context))
         retVal = std::async(std::launch::async, [path](){return fileGet(path, true);});
     else if(isLink(path))
-        retVal = std::async(std::launch::async, [path, proxy, cache_ttl, context](){return webGet(path, proxy, cache_ttl, nullptr, nullptr, context);});
+    {
+        auto slot = acquireAsyncFetchSlot();
+        retVal = std::async(std::launch::async, [path, proxy, cache_ttl, context, slot](){return webGet(path, proxy, cache_ttl, nullptr, nullptr, context);});
+    }
     else
         return make_ready_future(std::string());
     return retVal;
