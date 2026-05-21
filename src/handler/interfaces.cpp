@@ -1,8 +1,13 @@
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <ctime>
+#include <exception>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <numeric>
+#include <sstream>
 #include <string>
 #include <unordered_set>
 
@@ -604,8 +609,264 @@ static std::string sanitizeProviderName(const std::string &input) {
   return cleaned;
 }
 
+static std::string subconverter_impl(RESPONSE_CALLBACK_ARGS);
+
+namespace {
+
+struct CoalescedResponse {
+  int status_code = 200;
+  std::string content_type;
+  string_icase_map headers;
+  std::string body;
+};
+
+struct InflightSubRequest {
+  std::mutex mutex;
+  std::condition_variable cv;
+  bool done = false;
+  CoalescedResponse result;
+  std::exception_ptr exception;
+};
+
+struct CachedSubResponse {
+  CoalescedResponse result;
+  std::chrono::steady_clock::time_point expires_at;
+};
+
+static std::mutex g_sub_inflight_mutex;
+static std::map<std::string, std::shared_ptr<InflightSubRequest>>
+    g_sub_inflight;
+static std::mutex g_sub_response_cache_mutex;
+static std::map<std::string, CachedSubResponse> g_sub_response_cache;
+
+static bool isTruthyRequestValue(const std::string &value) {
+  std::string normalized = toLower(trimWhitespace(value, true, true));
+  return normalized == "1" || normalized == "true" ||
+         normalized == "yes" || normalized == "on";
+}
+
+static bool appendKeyPart(std::string &identity, const std::string &name,
+                          const std::string &value) {
+  static constexpr size_t kMaxIdentitySize = 2 * 1024 * 1024;
+  size_t extra_size = name.size() + value.size() + 32;
+  if (identity.size() + extra_size > kMaxIdentitySize)
+    return false;
+  identity += name;
+  identity += ':';
+  identity += std::to_string(value.size());
+  identity += ':';
+  identity += value;
+  identity += '\n';
+  return true;
+}
+
+static bool shouldCoalesceSubRequest(const Request &request) {
+  if (!global.enableRequestCoalescing)
+    return false;
+  if (request.method != "GET" || request.url != "/sub")
+    return false;
+  if (isTruthyRequestValue(getUrlArg(request.argument, "upload")))
+    return false;
+  return true;
+}
+
+static std::string buildSubRequestKey(const Request &request) {
+  std::string identity;
+  if (!appendKeyPart(identity, "version", VERSION) ||
+      !appendKeyPart(identity, "config_generation",
+                     std::to_string(global.configGeneration)) ||
+      !appendKeyPart(identity, "managed_config_prefix",
+                     global.managedConfigPrefix) ||
+      !appendKeyPart(identity, "method", request.method) ||
+      !appendKeyPart(identity, "path", request.url))
+    return "";
+
+  for (const auto &arg : request.argument) {
+    if (!appendKeyPart(identity, "arg_name", arg.first) ||
+        !appendKeyPart(identity, "arg_value", arg.second))
+      return "";
+  }
+
+  for (const auto &header : request.headers) {
+    if (!appendKeyPart(identity, "header_name", toLower(header.first)) ||
+        !appendKeyPart(identity, "header_value", header.second))
+      return "";
+  }
+
+  return getMD5(identity);
+}
+
+static void copyCoalescedToResponse(const CoalescedResponse &result,
+                                    Response &response) {
+  response.status_code = result.status_code;
+  response.content_type = result.content_type;
+  response.headers = result.headers;
+}
+
+static CoalescedResponse makeCoalescedResult(const std::string &body,
+                                             const Response &response) {
+  CoalescedResponse result;
+  result.status_code = response.status_code;
+  result.content_type = response.content_type;
+  result.headers = response.headers;
+  result.body = body;
+  return result;
+}
+
+static void pruneExpiredSubResponseCache(
+    std::chrono::steady_clock::time_point now) {
+  for (auto iter = g_sub_response_cache.begin();
+       iter != g_sub_response_cache.end();) {
+    if (iter->second.expires_at <= now)
+      iter = g_sub_response_cache.erase(iter);
+    else
+      ++iter;
+  }
+}
+
+static bool getCachedSubResponse(const std::string &key,
+                                 CoalescedResponse &result) {
+  if (global.responseCacheTtl <= 0)
+    return false;
+
+  auto now = std::chrono::steady_clock::now();
+  std::lock_guard<std::mutex> lock(g_sub_response_cache_mutex);
+  auto iter = g_sub_response_cache.find(key);
+  if (iter == g_sub_response_cache.end())
+    return false;
+  if (iter->second.expires_at <= now) {
+    g_sub_response_cache.erase(iter);
+    return false;
+  }
+  result = iter->second.result;
+  return true;
+}
+
+static void storeCachedSubResponse(const std::string &key,
+                                   const CoalescedResponse &result) {
+  if (global.responseCacheTtl <= 0 || result.status_code != 200)
+    return;
+
+  int ttl = std::min(global.responseCacheTtl, 5);
+  if (ttl <= 0)
+    return;
+
+  auto now = std::chrono::steady_clock::now();
+  std::lock_guard<std::mutex> lock(g_sub_response_cache_mutex);
+  pruneExpiredSubResponseCache(now);
+  if (g_sub_response_cache.size() > 2048) {
+    writeLog(0,
+             "响应微缓存条目数量过多，已清空以避免占用过多内存。",
+             LOG_LEVEL_WARNING);
+    g_sub_response_cache.clear();
+  }
+  g_sub_response_cache[key] = {
+      result, now + std::chrono::seconds(ttl)};
+}
+
+static std::string runSubconverterImplWithRetry(const Request &original,
+                                                Response &response) {
+  Request first_request = original;
+  Response first_response;
+  std::string body = subconverter_impl(first_request, first_response);
+  if (first_response.status_code < 500 || !global.coalesceRetryOn5xx) {
+    response = first_response;
+    return body;
+  }
+
+  writeLog(0,
+           "/sub 请求首次转换返回 5xx，正在进行一次服务端内部重试。",
+           LOG_LEVEL_WARNING);
+  Request retry_request = original;
+  Response retry_response;
+  std::string retry_body = subconverter_impl(retry_request, retry_response);
+  if (retry_response.status_code < 500) {
+    response = retry_response;
+    return retry_body;
+  }
+
+  response = first_response;
+  return body;
+}
+
+} // namespace
 
 std::string subconverter(RESPONSE_CALLBACK_ARGS) {
+  if (!shouldCoalesceSubRequest(request))
+    return subconverter_impl(request, response);
+
+  std::string key = buildSubRequestKey(request);
+  if (key.empty())
+    return subconverter_impl(request, response);
+
+  CoalescedResponse cached_result;
+  if (getCachedSubResponse(key, cached_result)) {
+    writeLog(0, "/sub 响应微缓存命中。", LOG_LEVEL_DEBUG);
+    copyCoalescedToResponse(cached_result, response);
+    return cached_result.body;
+  }
+
+  std::shared_ptr<InflightSubRequest> call;
+  bool owner = false;
+  {
+    std::lock_guard<std::mutex> lock(g_sub_inflight_mutex);
+    auto iter = g_sub_inflight.find(key);
+    if (iter == g_sub_inflight.end()) {
+      call = std::make_shared<InflightSubRequest>();
+      g_sub_inflight.emplace(key, call);
+      owner = true;
+    } else {
+      call = iter->second;
+    }
+  }
+
+  if (!owner) {
+    writeLog(0, "/sub 请求已合并到正在执行的同 key 转换。",
+             LOG_LEVEL_DEBUG);
+    std::unique_lock<std::mutex> lock(call->mutex);
+    call->cv.wait(lock, [&call] { return call->done; });
+    if (call->exception)
+      std::rethrow_exception(call->exception);
+    copyCoalescedToResponse(call->result, response);
+    return call->result.body;
+  }
+
+  try {
+    writeLog(0, "/sub 请求成为同 key 转换 owner。", LOG_LEVEL_DEBUG);
+    Request original_request = request;
+    Response owner_response;
+    std::string body =
+        runSubconverterImplWithRetry(original_request, owner_response);
+    CoalescedResponse result = makeCoalescedResult(body, owner_response);
+    response = owner_response;
+    {
+      std::lock_guard<std::mutex> lock(call->mutex);
+      call->result = result;
+      call->done = true;
+    }
+    {
+      std::lock_guard<std::mutex> lock(g_sub_inflight_mutex);
+      g_sub_inflight.erase(key);
+    }
+    storeCachedSubResponse(key, result);
+    call->cv.notify_all();
+    return body;
+  } catch (...) {
+    {
+      std::lock_guard<std::mutex> lock(call->mutex);
+      call->exception = std::current_exception();
+      call->done = true;
+    }
+    {
+      std::lock_guard<std::mutex> lock(g_sub_inflight_mutex);
+      g_sub_inflight.erase(key);
+    }
+    call->cv.notify_all();
+    throw;
+  }
+}
+
+static std::string subconverter_impl(RESPONSE_CALLBACK_ARGS) {
   auto &argument = request.argument;
   int *status_code = &response.status_code;
 

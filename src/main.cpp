@@ -203,6 +203,11 @@ int main(int argc, char *argv[]) {
                "Disallow: /v\n";
       });
 
+  webServer.append_response("GET", "/healthz", "text/plain; charset=utf-8",
+                            [](RESPONSE_CALLBACK_ARGS) -> std::string {
+                              return "ok\n";
+                            });
+
   /*
   webServer.append_response("GET", "/refreshrules", "text/plain",
                             [](RESPONSE_CALLBACK_ARGS) -> std::string {

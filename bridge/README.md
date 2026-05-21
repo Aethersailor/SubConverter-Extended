@@ -29,7 +29,8 @@ the shared object, avoiding the musl initialization crash seen with static
 
 ### Debian Docker image
 
-`Dockerfile.debian` builds `libmihomo.a` with `go build -buildmode=c-archive`.
+`docker/Dockerfile.debian` builds `libmihomo.a` with `go build
+-buildmode=c-archive`.
 
 This path is kept for glibc-based binary builds where static archive linking is
 stable and easier to package.

@@ -270,7 +270,7 @@ jobs:
           fi
 
           echo "has_changes=true" >> "$GITHUB_OUTPUT"
-          if printf '%s\n' "$changed_files" | grep -Eq '^(src|bridge|include|CMakeLists\.txt|Dockerfile)'; then
+          if printf '%s\n' "$changed_files" | grep -Eq '^(src|bridge|include|CMakeLists\.txt|Dockerfile|docker/Dockerfile)'; then
             echo "has_source_changes=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_source_changes=false" >> "$GITHUB_OUTPUT"

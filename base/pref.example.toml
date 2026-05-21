@@ -358,3 +358,9 @@ cache_ruleset = 21600
 script_clean_context = true
 async_fetch_ruleset = true
 skip_failed_links = true
+enable_request_coalescing = true
+coalesce_retry_on_5xx = true
+# 0 disables completed response caching. If enabled, values above 5 seconds are clamped to 5.
+response_cache_ttl = 0
+# 0 disables the limiter. A small value is safer on single-core deployments.
+max_async_fetches = 2
