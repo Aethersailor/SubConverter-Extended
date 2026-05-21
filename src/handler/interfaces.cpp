@@ -824,7 +824,22 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
     writeLog(0, "/sub 请求已合并到正在执行的同 key 转换。",
              LOG_LEVEL_DEBUG);
     std::unique_lock<std::mutex> lock(call->mutex);
-    call->cv.wait(lock, [&call] { return call->done; });
+    bool completed = call->done;
+    if (!completed && global.coalesceWaitTimeoutMs > 0) {
+      completed = call->cv.wait_for(
+          lock, std::chrono::milliseconds(global.coalesceWaitTimeoutMs),
+          [&call] { return call->done; });
+    }
+    if (!completed) {
+      response.status_code = 503;
+      response.headers["Retry-After"] = "3";
+      writeLog(0,
+               "/sub 同 key 转换仍在执行，合并等待超时，已快速返回以释放 HTTP worker。",
+               LOG_LEVEL_WARNING);
+      return "Service busy: an identical /sub conversion is still running. "
+             "Please retry shortly.\n"
+             "服务繁忙：相同的 /sub 转换仍在执行，请稍后重试。\n";
+    }
     if (call->exception)
       std::rethrow_exception(call->exception);
     copyCoalescedToResponse(call->result, response);
