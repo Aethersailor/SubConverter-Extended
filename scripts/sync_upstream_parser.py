@@ -19,6 +19,7 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
+ROOT_RESOLVED = ROOT.resolve()
 
 SEEN_FILE = ROOT / ".github" / "upstream-subconverter.seen"
 APPLIED_FILE = ROOT / ".github" / "upstream-subconverter.applied.json"
@@ -60,6 +61,8 @@ def git(*args: str, input_text: str | None = None, check: bool = True) -> str:
         cwd=ROOT,
         input=input_text,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -75,6 +78,8 @@ def run(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         list(args),
         cwd=ROOT,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=check,
@@ -104,6 +109,24 @@ def read_seen() -> str:
     if not SEEN_FILE.exists():
         return ""
     return SEEN_FILE.read_text(encoding="utf-8").strip()
+
+
+def resolve_cursor_file(path_text: str) -> Path:
+    path = Path(path_text)
+    full = path if path.is_absolute() else ROOT / path
+    resolved = full.resolve()
+    try:
+        resolved.relative_to(ROOT_RESOLVED)
+    except ValueError as exc:
+        raise ValueError(f"cursor file must stay inside repository: {path_text}") from exc
+    return resolved
+
+
+def display_path(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(ROOT_RESOLVED).as_posix()
+    except ValueError:
+        return str(path)
 
 
 def path_is_protected(path: str) -> bool:
@@ -144,18 +167,22 @@ def classify_commit(sha: str) -> dict[str, Any]:
     if not allowed:
         rule_decision = "ignore_no_parser_changes"
         safe_by_rules = False
+        reviewable_by_ai = False
         reason = "Commit does not change parser whitelist files."
     elif protected:
         rule_decision = "skip_protected_path"
         safe_by_rules = False
+        reviewable_by_ai = False
         reason = "Commit touches protected project-specific integration paths."
     elif report_only or other:
         rule_decision = "needs_human_or_ai_report"
         safe_by_rules = False
+        reviewable_by_ai = True
         reason = "Commit changes parser files plus non-whitelisted files."
     else:
         rule_decision = "candidate"
         safe_by_rules = True
+        reviewable_by_ai = True
         reason = "Commit changes only parser whitelist files."
 
     return {
@@ -168,6 +195,7 @@ def classify_commit(sha: str) -> dict[str, Any]:
         "report_only_paths": report_only,
         "other_paths": other,
         "safe_by_rules": safe_by_rules,
+        "reviewable_by_ai": reviewable_by_ai,
         "rule_decision": rule_decision,
         "reason": reason,
         "patch_excerpt": commit_patch(sha, allowed or files[:10]),
@@ -176,13 +204,16 @@ def classify_commit(sha: str) -> dict[str, Any]:
 
 def plan(args: argparse.Namespace) -> int:
     upstream_head = git("rev-parse", args.upstream_ref).strip()
+    cursor_file = resolve_cursor_file(args.cursor_file)
     manual_since = (args.since or "").strip()
-    seen = manual_since or read_seen()
+    stored_seen = cursor_file.read_text(encoding="utf-8").strip() if cursor_file.exists() else ""
+    seen = manual_since or stored_seen
     bootstrap = False
+    commits: list[str] = []
+    all_commits: list[str] = []
 
     if not seen:
         bootstrap = True
-        commits: list[str] = []
     else:
         exists = run("git", "cat-file", "-e", f"{seen}^{{commit}}", check=False)
         if exists.returncode != 0:
@@ -206,7 +237,6 @@ def plan(args: argparse.Namespace) -> int:
                         f"{manual_since}"
                     )
                 bootstrap = True
-                commits = []
             else:
                 commits_out = git(
                     "rev-list",
@@ -219,18 +249,38 @@ def plan(args: argparse.Namespace) -> int:
                     for line in commits_out.splitlines()
                     if line.strip()
                 ]
+                all_commits = commits
 
+    total_commit_count = len(all_commits)
     if args.max_commits > 0:
         commits = commits[: args.max_commits]
+    selected_commit_count = len(commits)
+    truncated = total_commit_count > selected_commit_count
+    batch_last_sha = commits[-1] if commits else ""
+    cursor_update_enabled = not manual_since and not bootstrap
+    advance_to = ""
+    if cursor_update_enabled:
+        if batch_last_sha:
+            advance_to = batch_last_sha if truncated else upstream_head
+        elif seen and not bootstrap:
+            advance_to = upstream_head
 
     candidates = [classify_commit(sha) for sha in commits]
     data = {
         "generated_at": utc_now(),
         "upstream_ref": args.upstream_ref,
         "upstream_head": upstream_head,
+        "cursor_file": display_path(cursor_file),
+        "cursor_update_enabled": cursor_update_enabled,
         "seen": seen,
+        "stored_seen": stored_seen,
         "manual_since": manual_since,
         "bootstrap": bootstrap,
+        "total_commit_count": total_commit_count,
+        "selected_commit_count": selected_commit_count,
+        "truncated": truncated,
+        "batch_last_sha": batch_last_sha,
+        "advance_to": advance_to,
         "allowed_auto_paths": sorted(ALLOWED_AUTO_PATHS),
         "protected_paths": sorted(PROTECTED_PATHS),
         "protected_prefixes": list(PROTECTED_PREFIXES),
@@ -242,7 +292,11 @@ def plan(args: argparse.Namespace) -> int:
     write_plan_report(Path(args.report), data)
 
     safe_count = sum(1 for item in candidates if item["safe_by_rules"])
-    print(f"Planned {len(candidates)} upstream commits ({safe_count} rule-safe).")
+    reviewable_count = sum(1 for item in candidates if item["reviewable_by_ai"])
+    print(
+        f"Planned {len(candidates)} upstream commits "
+        f"({safe_count} rule-safe, {reviewable_count} AI-reviewable)."
+    )
     if bootstrap:
         print("No seen marker was available; plan bootstrapped without candidates.")
     return 0
@@ -254,10 +308,16 @@ def write_plan_report(path: Path, data: dict[str, Any]) -> None:
         "",
         f"- Generated: {data['generated_at']}",
         f"- Upstream ref: `{data['upstream_ref']}`",
+        f"- Cursor file: `{data['cursor_file']}`",
         f"- Seen: `{data['seen'] or 'none'}`",
+        f"- Stored seen: `{data['stored_seen'] or 'none'}`",
         f"- Manual since override: `{data['manual_since'] or 'none'}`",
         f"- Upstream head: `{data['upstream_head']}`",
         f"- Bootstrap: `{data['bootstrap']}`",
+        f"- Total pending commits: `{data['total_commit_count']}`",
+        f"- Selected commits: `{data['selected_commit_count']}`",
+        f"- Truncated: `{data['truncated']}`",
+        f"- Advance to: `{data['advance_to'] or 'none'}`",
         "",
         "## Candidates",
         "",
@@ -271,6 +331,7 @@ def write_plan_report(path: Path, data: dict[str, Any]) -> None:
                 "",
                 f"- Rule decision: `{item['rule_decision']}`",
                 f"- Safe by rules: `{item['safe_by_rules']}`",
+                f"- Reviewable by AI: `{item['reviewable_by_ai']}`",
                 f"- Reason: {item['reason']}",
                 f"- Files: {', '.join(f'`{path}`' for path in item['files']) or 'none'}",
                 "",
@@ -323,6 +384,8 @@ def apply_patch_for_commit(sha: str, paths: list[str]) -> tuple[bool, str]:
         cwd=ROOT,
         input=patch,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -334,6 +397,8 @@ def apply_patch_for_commit(sha: str, paths: list[str]) -> tuple[bool, str]:
         cwd=ROOT,
         input=patch,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -347,6 +412,8 @@ def run_guards() -> tuple[bool, str]:
         [sys.executable, "scripts/check_sync_guards.py", "--json"],
         cwd=ROOT,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -368,6 +435,10 @@ def apply(args: argparse.Namespace) -> int:
     applied_entries: list[dict[str, Any]] = []
     skipped_entries: list[dict[str, Any]] = []
     ignored_entries: list[dict[str, Any]] = []
+    cursor_update_enabled = bool(plan_data.get("cursor_update_enabled"))
+    cursor_file_text = plan_data.get("cursor_file") or display_path(SEEN_FILE)
+    cursor_file = resolve_cursor_file(cursor_file_text)
+    advance_to = plan_data.get("advance_to") or ""
 
     for item in plan_data.get("candidates", []):
         sha = item["sha"]
@@ -384,7 +455,7 @@ def apply(args: argparse.Namespace) -> int:
             )
             continue
 
-        if not item.get("safe_by_rules"):
+        if not item.get("reviewable_by_ai"):
             skipped_entries.append(
                 {
                     **record_base,
@@ -411,6 +482,11 @@ def apply(args: argparse.Namespace) -> int:
             continue
 
         paths = item.get("allowed_paths", [])
+        if not paths:
+            skipped_entries.append(
+                {**record_base, "reason": "No parser whitelist paths were available."}
+            )
+            continue
         backup = snapshot_paths(paths)
         ok, message = apply_patch_for_commit(sha, paths)
         if not ok:
@@ -441,12 +517,18 @@ def apply(args: argparse.Namespace) -> int:
     append_state(APPLIED_FILE, applied_entries)
     append_state(SKIPPED_FILE, skipped_entries)
 
-    if plan_data.get("upstream_head"):
-        SEEN_FILE.write_text(plan_data["upstream_head"] + "\n", encoding="utf-8")
+    advanced_to = ""
+    if cursor_update_enabled and advance_to:
+        cursor_file.parent.mkdir(parents=True, exist_ok=True)
+        cursor_file.write_text(advance_to + "\n", encoding="utf-8")
+        advanced_to = advance_to
 
     result = {
         "generated_at": utc_now(),
         "upstream_head": plan_data.get("upstream_head"),
+        "cursor_file": display_path(cursor_file),
+        "advanced_to": advanced_to,
+        "truncated": plan_data.get("truncated", False),
         "applied": applied_entries,
         "skipped": skipped_entries,
         "ignored": ignored_entries,
@@ -468,6 +550,9 @@ def write_apply_report(path: Path, result: dict[str, Any]) -> None:
         "",
         f"- Generated: {result['generated_at']}",
         f"- Upstream head: `{result.get('upstream_head') or 'unknown'}`",
+        f"- Cursor file: `{result.get('cursor_file') or 'unknown'}`",
+        f"- Advanced to: `{result.get('advanced_to') or 'none'}`",
+        f"- Truncated: `{result.get('truncated', False)}`",
         f"- Applied: {len(result['applied'])}",
         f"- Skipped: {len(result['skipped'])}",
         f"- Ignored: {len(result.get('ignored', []))}",
@@ -495,6 +580,11 @@ def main() -> int:
 
     plan_parser = sub.add_parser("plan")
     plan_parser.add_argument("--upstream-ref", required=True)
+    plan_parser.add_argument(
+        "--cursor-file",
+        default=".github/upstream-subconverter.seen",
+        help="state file that stores the last processed upstream commit",
+    )
     plan_parser.add_argument(
         "--since",
         default="",
