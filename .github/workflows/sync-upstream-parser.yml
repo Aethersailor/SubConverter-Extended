@@ -3,7 +3,22 @@ name: Sync Upstream Parser
 on:
   schedule:
     - cron: "0 20 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Plan/classify only; do not apply, test, commit, or push."
+        required: false
+        default: false
+        type: boolean
+      since_upstream_sha:
+        description: "Optional upstream commit SHA to plan from for dry-run testing."
+        required: false
+        type: string
+      max_commits:
+        description: "Maximum upstream commits to inspect."
+        required: false
+        default: "30"
+        type: string
 
 permissions:
   contents: write
@@ -19,6 +34,9 @@ env:
   TARGET_BRANCH: dev
   UPSTREAM_REPO: https://github.com/asdlokj1qpi233/subconverter.git
   UPSTREAM_BRANCH: master
+  SYNC_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+  SYNC_SINCE: ${{ github.event.inputs.since_upstream_sha || '' }}
+  SYNC_MAX_COMMITS: ${{ github.event.inputs.max_commits || '30' }}
 
 jobs:
   sync:
@@ -48,11 +66,21 @@ jobs:
       - name: Plan upstream parser sync
         run: |
           set -euo pipefail
-          python3 scripts/sync_upstream_parser.py plan \
-            --upstream-ref "upstream/$UPSTREAM_BRANCH" \
-            --max-commits 30 \
-            --output upstream-sync-candidates.json \
+          if [ -n "$SYNC_SINCE" ] && [ "$SYNC_DRY_RUN" != "true" ]; then
+            echo "::error::since_upstream_sha is allowed only when dry_run=true."
+            exit 1
+          fi
+          PLAN_ARGS=(
+            plan
+            --upstream-ref "upstream/$UPSTREAM_BRANCH"
+            --max-commits "$SYNC_MAX_COMMITS"
+            --output upstream-sync-candidates.json
             --report upstream-sync-plan.md
+          )
+          if [ -n "$SYNC_SINCE" ]; then
+            PLAN_ARGS+=(--since "$SYNC_SINCE")
+          fi
+          python3 scripts/sync_upstream_parser.py "${PLAN_ARGS[@]}"
 
       - name: Inspect sync plan
         id: plan
@@ -67,6 +95,39 @@ jobs:
           print(f"reviewable_count={len(reviewable)}")
           print(f"has_candidates={'true' if candidates else 'false'}")
           print(f"has_reviewable={'true' if reviewable else 'false'}")
+          PY
+
+      - name: Write sync summary
+        if: always()
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          import os
+          from pathlib import Path
+
+          print("## Upstream Parser Sync")
+          print("")
+          print(f"- Workflow ref: `{os.environ.get('GITHUB_REF_NAME', '')}`")
+          print(f"- Target branch: `{os.environ.get('TARGET_BRANCH', '')}`")
+          print(f"- Dry run: `{os.environ.get('SYNC_DRY_RUN', 'false')}`")
+          print(f"- Manual since override: `{os.environ.get('SYNC_SINCE') or 'none'}`")
+          print("")
+
+          plan_path = Path("upstream-sync-candidates.json")
+          if not plan_path.exists():
+              print("Plan file was not generated.")
+              raise SystemExit(0)
+
+          data = json.loads(plan_path.read_text(encoding="utf-8"))
+          candidates = data.get("candidates", [])
+          reviewable = [item for item in candidates if item.get("safe_by_rules")]
+          print(f"- Seen: `{data.get('seen') or 'none'}`")
+          print(f"- Upstream head: `{data.get('upstream_head') or 'unknown'}`")
+          print(f"- Candidate commits: `{len(candidates)}`")
+          print(f"- Rule-safe candidates: `{len(reviewable)}`")
+          if not candidates:
+              print("")
+              print("No upstream commits are pending for the current seen marker.")
           PY
 
       - name: Check Copilot token
@@ -154,7 +215,7 @@ jobs:
 
       - name: Apply approved upstream parser updates
         id: apply
-        if: steps.plan.outputs.has_candidates == 'true' && (steps.plan.outputs.has_reviewable != 'true' || steps.copilot_classify.outcome == 'success')
+        if: env.SYNC_DRY_RUN != 'true' && steps.plan.outputs.has_candidates == 'true' && (steps.plan.outputs.has_reviewable != 'true' || steps.copilot_classify.outcome == 'success')
         run: |
           set -euo pipefail
           python3 scripts/sync_upstream_parser.py apply \
@@ -171,6 +232,10 @@ jobs:
           print(f"has_applied={'true' if data.get('applied') else 'false'}")
           print(f"has_skipped={'true' if data.get('skipped') else 'false'}")
           PY
+
+      - name: Skip apply in dry run
+        if: env.SYNC_DRY_RUN == 'true'
+        run: echo "Dry run enabled; skipping apply, smoke tests, commit, and push."
 
       - name: Check protected integrations after sync
         if: steps.apply.outcome == 'success'
@@ -268,7 +333,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Report sync items that need attention
-        if: always() && (steps.apply.outputs.has_skipped == 'true' || (steps.plan.outputs.has_reviewable == 'true' && (steps.copilot_token.outputs.available != 'true' || steps.copilot_classify.outcome != 'success')))
+        if: always() && env.SYNC_DRY_RUN != 'true' && (steps.apply.outputs.has_skipped == 'true' || (steps.plan.outputs.has_reviewable == 'true' && (steps.copilot_token.outputs.available != 'true' || steps.copilot_classify.outcome != 'success')))
         uses: actions/github-script@v9
         with:
           script: |

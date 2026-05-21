@@ -176,7 +176,8 @@ def classify_commit(sha: str) -> dict[str, Any]:
 
 def plan(args: argparse.Namespace) -> int:
     upstream_head = git("rev-parse", args.upstream_ref).strip()
-    seen = read_seen()
+    manual_since = (args.since or "").strip()
+    seen = manual_since or read_seen()
     bootstrap = False
 
     if not seen:
@@ -185,16 +186,39 @@ def plan(args: argparse.Namespace) -> int:
     else:
         exists = run("git", "cat-file", "-e", f"{seen}^{{commit}}", check=False)
         if exists.returncode != 0:
+            if manual_since:
+                raise RuntimeError(f"manual --since commit does not exist: {manual_since}")
             bootstrap = True
             commits = []
         else:
-            commits_out = git(
-                "rev-list",
-                "--reverse",
-                "--no-merges",
-                f"{seen}..{args.upstream_ref}",
+            ancestor = run(
+                "git",
+                "merge-base",
+                "--is-ancestor",
+                seen,
+                args.upstream_ref,
+                check=False,
             )
-            commits = [line.strip() for line in commits_out.splitlines() if line.strip()]
+            if ancestor.returncode != 0:
+                if manual_since:
+                    raise RuntimeError(
+                        f"manual --since commit is not an ancestor of {args.upstream_ref}: "
+                        f"{manual_since}"
+                    )
+                bootstrap = True
+                commits = []
+            else:
+                commits_out = git(
+                    "rev-list",
+                    "--reverse",
+                    "--no-merges",
+                    f"{seen}..{args.upstream_ref}",
+                )
+                commits = [
+                    line.strip()
+                    for line in commits_out.splitlines()
+                    if line.strip()
+                ]
 
     if args.max_commits > 0:
         commits = commits[: args.max_commits]
@@ -205,6 +229,7 @@ def plan(args: argparse.Namespace) -> int:
         "upstream_ref": args.upstream_ref,
         "upstream_head": upstream_head,
         "seen": seen,
+        "manual_since": manual_since,
         "bootstrap": bootstrap,
         "allowed_auto_paths": sorted(ALLOWED_AUTO_PATHS),
         "protected_paths": sorted(PROTECTED_PATHS),
@@ -230,6 +255,7 @@ def write_plan_report(path: Path, data: dict[str, Any]) -> None:
         f"- Generated: {data['generated_at']}",
         f"- Upstream ref: `{data['upstream_ref']}`",
         f"- Seen: `{data['seen'] or 'none'}`",
+        f"- Manual since override: `{data['manual_since'] or 'none'}`",
         f"- Upstream head: `{data['upstream_head']}`",
         f"- Bootstrap: `{data['bootstrap']}`",
         "",
@@ -469,6 +495,11 @@ def main() -> int:
 
     plan_parser = sub.add_parser("plan")
     plan_parser.add_argument("--upstream-ref", required=True)
+    plan_parser.add_argument(
+        "--since",
+        default="",
+        help="override the stored seen marker, primarily for dry-run testing",
+    )
     plan_parser.add_argument("--max-commits", type=int, default=20)
     plan_parser.add_argument("--output", default="upstream-sync-candidates.json")
     plan_parser.add_argument("--report", default="upstream-sync-plan.md")
