@@ -1,0 +1,309 @@
+name: Sync Upstream Parser
+
+on:
+  schedule:
+    - cron: "0 20 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: sync-upstream-parser-dev
+  cancel-in-progress: false
+
+env:
+  # Scheduled workflows are read from the default branch, but parser syncs
+  # must be planned, tested, and committed on dev.
+  TARGET_BRANCH: dev
+  UPSTREAM_REPO: https://github.com/asdlokj1qpi233/subconverter.git
+  UPSTREAM_BRANCH: master
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout dev
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
+          fetch-depth: 0
+          token: ${{ secrets.PAT_TOKEN || github.token }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          set -euo pipefail
+          git remote add upstream "$UPSTREAM_REPO" 2>/dev/null || git remote set-url upstream "$UPSTREAM_REPO"
+          git fetch --no-tags upstream "$UPSTREAM_BRANCH"
+
+      - name: Check protected integrations before sync
+        run: python3 scripts/check_sync_guards.py
+
+      - name: Plan upstream parser sync
+        run: |
+          set -euo pipefail
+          python3 scripts/sync_upstream_parser.py plan \
+            --upstream-ref "upstream/$UPSTREAM_BRANCH" \
+            --max-commits 30 \
+            --output upstream-sync-candidates.json \
+            --report upstream-sync-plan.md
+
+      - name: Inspect sync plan
+        id: plan
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          data = json.load(open("upstream-sync-candidates.json", encoding="utf-8"))
+          candidates = data.get("candidates", [])
+          reviewable = [item for item in candidates if item.get("safe_by_rules")]
+          print(f"candidate_count={len(candidates)}")
+          print(f"reviewable_count={len(reviewable)}")
+          print(f"has_candidates={'true' if candidates else 'false'}")
+          print(f"has_reviewable={'true' if reviewable else 'false'}")
+          PY
+
+      - name: Check Copilot token
+        id: copilot_token
+        if: steps.plan.outputs.has_reviewable == 'true'
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+        run: |
+          if [ -n "${COPILOT_GITHUB_TOKEN:-}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Node.js
+        if: steps.plan.outputs.has_reviewable == 'true' && steps.copilot_token.outputs.available == 'true'
+        uses: actions/setup-node@v6
+
+      - name: Ask Copilot to classify parser candidates
+        id: copilot_classify
+        if: steps.plan.outputs.has_reviewable == 'true' && steps.copilot_token.outputs.available == 'true'
+        continue-on-error: true
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          npm install -g @github/copilot
+
+          PROMPT="$(cat <<'EOF'
+          You are reviewing upstream parser changes for SubConverter-Extended.
+
+          The project has protected Mihomo/proxy-provider integrations. A change
+          may be automatically applied only when it is a low-risk parser-only
+          update and does not require output adapter changes.
+
+          Return only strict JSON. Do not use Markdown.
+
+          Required schema:
+          {
+            "decisions": [
+              {
+                "sha": "full commit sha from the plan",
+                "decision": "safe_parser_only | needs_output_adapter | touches_protected_area | unsafe | skip",
+                "risk": "low | medium | high",
+                "reason": "short explanation",
+                "required_tests": ["test names"]
+              }
+            ]
+          }
+
+          Only use "safe_parser_only" with "low" risk when the diff updates
+          parser-only behavior and can be safely applied without touching
+          Mihomo parser bridge, RawParams pass-through, proxy-provider logic,
+          FetchContext handling, nodemanip.cpp, or Clash output internals.
+          EOF
+          )"
+
+          PROMPT="$PROMPT
+
+          $(cat upstream-sync-candidates.json)"
+
+          copilot -p "$PROMPT" --no-ask-user > upstream-sync-decisions.raw
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          raw = Path("upstream-sync-decisions.raw").read_text(encoding="utf-8")
+          start = raw.find("{")
+          end = raw.rfind("}")
+          if start == -1 or end == -1 or end < start:
+              raise SystemExit("Copilot did not return a JSON object.")
+          data = json.loads(raw[start:end + 1])
+          if "decisions" not in data or not isinstance(data["decisions"], list):
+              raise SystemExit("Copilot JSON is missing decisions array.")
+          Path("upstream-sync-decisions.json").write_text(
+              json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Create empty decisions for non-reviewable plan
+        if: steps.plan.outputs.has_candidates == 'true' && steps.plan.outputs.has_reviewable != 'true'
+        run: printf '%s\n' '{"decisions":[]}' > upstream-sync-decisions.json
+
+      - name: Apply approved upstream parser updates
+        id: apply
+        if: steps.plan.outputs.has_candidates == 'true' && (steps.plan.outputs.has_reviewable != 'true' || steps.copilot_classify.outcome == 'success')
+        run: |
+          set -euo pipefail
+          python3 scripts/sync_upstream_parser.py apply \
+            --plan upstream-sync-candidates.json \
+            --decisions upstream-sync-decisions.json \
+            --result upstream-sync-result.json \
+            --report upstream-sync-result.md
+
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          data = json.load(open("upstream-sync-result.json", encoding="utf-8"))
+          print(f"applied_count={len(data.get('applied', []))}")
+          print(f"skipped_count={len(data.get('skipped', []))}")
+          print(f"has_applied={'true' if data.get('applied') else 'false'}")
+          print(f"has_skipped={'true' if data.get('skipped') else 'false'}")
+          PY
+
+      - name: Check protected integrations after sync
+        if: steps.apply.outcome == 'success'
+        run: python3 scripts/check_sync_guards.py
+
+      - name: Determine changed source files
+        id: changes
+        if: steps.apply.outcome == 'success'
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            echo "has_source_changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          if git diff --name-only | grep -Eq '^(src|bridge|include|CMakeLists\.txt|Dockerfile)'; then
+            echo "has_source_changes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_source_changes=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and smoke test source changes
+        if: steps.changes.outputs.has_source_changes == 'true'
+        run: |
+          set -euo pipefail
+          docker build --target builder -t subconverter-upstream-sync-test --build-arg THREADS=2 .
+
+          CID="$(docker run -d -e PORT=25500 -p '127.0.0.1::25500' subconverter-upstream-sync-test /src/subconverter -f /src/base/pref.example.toml)"
+          trap 'docker rm -f "$CID" >/dev/null 2>&1 || true' EXIT
+
+          HOST_PORT="$(docker port "$CID" 25500/tcp | awk -F: 'END {print $NF}')"
+          BASE_URL="http://127.0.0.1:${HOST_PORT}"
+
+          for i in $(seq 1 60); do
+            if curl -fsS "$BASE_URL/version" >/tmp/version.out; then
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS "$BASE_URL/version" >/tmp/version.out
+
+          curl -fsS "$BASE_URL/sub?target=clash&url=https%3A%2F%2Fexample.com%2Fsub" > /tmp/clash-provider.yml
+          grep -q "proxy-providers:" /tmp/clash-provider.yml
+
+          curl -fsS "$BASE_URL/sub?target=clash&url=ss%3A%2F%2FY2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpwYXNzd29yZA%40www.example.com%3A1080%23Example" > /tmp/clash-node.yml
+          grep -Eq "type: ss|type: \"ss\"" /tmp/clash-node.yml
+
+          curl -fsS "$BASE_URL/sub?target=singbox&url=ss%3A%2F%2FY2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpwYXNzd29yZA%40www.example.com%3A1080%23Example" > /tmp/singbox.json
+          python3 -m json.tool /tmp/singbox.json >/dev/null
+
+          curl -fsS "$BASE_URL/sub?target=surge&url=ss%3A%2F%2FY2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpwYXNzd29yZA%40www.example.com%3A1080%23Example" > /tmp/surge.conf
+          test -s /tmp/surge.conf
+
+      - name: Commit sync result to dev
+        if: steps.changes.outputs.has_changes == 'true'
+        run: |
+          set -euo pipefail
+          git add \
+            .github/upstream-subconverter.seen \
+            .github/upstream-subconverter.applied.json \
+            .github/upstream-subconverter.skipped.json \
+            src/parser/subparser.cpp \
+            src/parser/subparser.h \
+            src/parser/config/proxy.h
+
+          if git diff --staged --quiet; then
+            echo "No staged sync changes."
+            exit 0
+          fi
+
+          if [ "${{ steps.apply.outputs.has_applied }}" = "true" ]; then
+            git commit -m "chore(parser): sync upstream parser updates"
+          else
+            git commit -m "chore(parser): update upstream sync marker [skip ci]"
+          fi
+
+          git fetch --no-tags origin "refs/heads/$TARGET_BRANCH:refs/remotes/origin/$TARGET_BRANCH"
+          git rebase "origin/$TARGET_BRANCH"
+          git push origin "HEAD:refs/heads/$TARGET_BRANCH"
+
+      - name: Upload sync reports
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: upstream-parser-sync-report
+          path: |
+            upstream-sync-candidates.json
+            upstream-sync-decisions.raw
+            upstream-sync-decisions.json
+            upstream-sync-plan.md
+            upstream-sync-result.json
+            upstream-sync-result.md
+          if-no-files-found: ignore
+
+      - name: Report sync items that need attention
+        if: always() && (steps.apply.outputs.has_skipped == 'true' || (steps.plan.outputs.has_reviewable == 'true' && (steps.copilot_token.outputs.available != 'true' || steps.copilot_classify.outcome != 'success')))
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const fs = require('fs');
+            const title = 'Upstream parser sync requires attention';
+            const marker = '<!-- upstream-parser-sync-attention -->';
+            let body = `${marker}\nAutomated upstream parser sync on \`${process.env.TARGET_BRANCH}\` needs attention.\n\n`;
+
+            if (fs.existsSync('upstream-sync-result.md')) {
+              body += fs.readFileSync('upstream-sync-result.md', 'utf8');
+            } else if (fs.existsSync('upstream-sync-plan.md')) {
+              body += fs.readFileSync('upstream-sync-plan.md', 'utf8');
+              body += '\n\nCopilot classification was unavailable or failed, so reviewable candidates were not applied.\n';
+            }
+
+            const {data: issues} = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: undefined,
+              per_page: 50
+            });
+            const existing = issues.find(issue => issue.title === title);
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body
+              });
+            }
