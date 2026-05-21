@@ -1,1 +1,20 @@
-[]
+[
+  {
+    "sha": "ca209069bef6aa192ea4c6d63acc8fcc2125ad03",
+    "subject": "Update subparser.cpp",
+    "time": "2026-05-21T02:19:51+00:00",
+    "paths": [
+      "src/parser/subparser.cpp"
+    ],
+    "copilot_reason": "Single-line parser tweak (case-insensitive regex for wssettings). No generator or bridge changes."
+  },
+  {
+    "sha": "79369b0e7617e24366b57cbfb0402e6293d04fb4",
+    "subject": "Update subparser.cpp",
+    "time": "2026-05-21T02:19:51+00:00",
+    "paths": [
+      "src/parser/subparser.cpp"
+    ],
+    "copilot_reason": "Small parser-only adjustments to plugin option handling; backward-compatible parsing changes."
+  }
+]

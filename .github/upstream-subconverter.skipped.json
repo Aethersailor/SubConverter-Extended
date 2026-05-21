@@ -1,1 +1,53 @@
-[]
+[
+  {
+    "sha": "c6b9661088941e56cd3def92f579add450276626",
+    "subject": "add vless encryption field support.(#59) fix AnyTLS and TUIC IPV6 filed parse and some AnyTLS.(#58) fix macos arm build.",
+    "time": "2026-05-21T02:19:51+00:00",
+    "reason": "Adds VLESS encryption and AnyTLS/TUIC parsing fixes while also changing generator/export code — requires coordinated exporter updates.",
+    "copilot_decision": {
+      "sha": "c6b9661088941e56cd3def92f579add450276626",
+      "decision": "needs_output_adapter",
+      "risk": "medium",
+      "reason": "Adds VLESS encryption and AnyTLS/TUIC parsing fixes while also changing generator/export code — requires coordinated exporter updates.",
+      "required_tests": [
+        "explodeStdVless_encryption_field",
+        "explodeSingbox_vless_encryption_capture",
+        "singbox_export_roundtrip_with_encryption"
+      ]
+    }
+  },
+  {
+    "sha": "bca37c74367792077d35a3260cb65bd0e75ae8e2",
+    "subject": "Enhance proxy configuration to support the WebSocket transport protocol and custom headers.",
+    "time": "2026-05-21T02:19:51+00:00",
+    "reason": "Introduces WebSocket host/path/header parsing and generator ws-opts mapping; parser and exporter must be applied together.",
+    "copilot_decision": {
+      "sha": "bca37c74367792077d35a3260cb65bd0e75ae8e2",
+      "decision": "needs_output_adapter",
+      "risk": "medium",
+      "reason": "Introduces WebSocket host/path/header parsing and generator ws-opts mapping; parser and exporter must be applied together.",
+      "required_tests": [
+        "explodeTrojan_ws_host_fallback",
+        "proxyToClash_ws_opts_generation",
+        "clash_ws_roundtrip_headers"
+      ]
+    }
+  },
+  {
+    "sha": "877a1291a0b618ad52f98ea1ffaddb5d17c1c22f",
+    "subject": "keep dialer-proxy when converting Clash subscriptions",
+    "time": "2026-05-21T02:19:51+00:00",
+    "reason": "Propagates dialer/underlying_proxy across many proxy types and updates generator; application requires exporter changes to preserve detour/dialer-proxy.",
+    "copilot_decision": {
+      "sha": "877a1291a0b618ad52f98ea1ffaddb5d17c1c22f",
+      "decision": "needs_output_adapter",
+      "risk": "medium",
+      "reason": "Propagates dialer/underlying_proxy across many proxy types and updates generator; application requires exporter changes to preserve detour/dialer-proxy.",
+      "required_tests": [
+        "explodeClash_underlying_proxy_propagation",
+        "proxy_export_preserves_dialer_proxy",
+        "clash_subscription_conversion_dialer_proxy"
+      ]
+    }
+  }
+]
