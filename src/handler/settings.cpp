@@ -101,10 +101,6 @@ static void finalizePerformanceSettings() {
   if (!response_cache_ttl.empty())
     global.responseCacheTtl = to_int(response_cache_ttl, global.responseCacheTtl);
 
-  std::string max_async_fetches = getEnv("SUBCONVERTER_MAX_ASYNC_FETCHES");
-  if (!max_async_fetches.empty())
-    global.maxAsyncFetches = to_int(max_async_fetches, global.maxAsyncFetches);
-
   if (global.responseCacheTtl < 0)
     global.responseCacheTtl = 0;
   if (global.maxConcurThreads < 1)
@@ -117,8 +113,6 @@ static void finalizePerformanceSettings() {
              LOG_LEVEL_WARNING);
     global.responseCacheTtl = 5;
   }
-  if (global.maxAsyncFetches < 0)
-    global.maxAsyncFetches = 0;
 }
 
 static void finalizeRuntimeSettings() {
@@ -689,7 +683,6 @@ void readYAMLConf(YAML::Node &node) {
         global.enableRequestCoalescing;
     node["advanced"]["coalesce_retry_on_5xx"] >> global.coalesceRetryOn5xx;
     node["advanced"]["response_cache_ttl"] >> global.responseCacheTtl;
-    node["advanced"]["max_async_fetches"] >> global.maxAsyncFetches;
   }
   if (node["security"].IsDefined()) {
     node["security"]["profile"] >> global.securityProfile;
@@ -867,8 +860,7 @@ void readTOMLConf(toml::value &root) {
       global.asyncFetchRuleset, "skip_failed_links", global.skipFailedLinks,
       "enable_request_coalescing", global.enableRequestCoalescing,
       "coalesce_retry_on_5xx", global.coalesceRetryOn5xx,
-      "response_cache_ttl", global.responseCacheTtl, "max_async_fetches",
-      global.maxAsyncFetches);
+      "response_cache_ttl", global.responseCacheTtl);
 
   if (global.printDbgInfo)
     global.logLevel = LOG_LEVEL_VERBOSE;
@@ -1191,7 +1183,6 @@ void readConf() {
                         global.enableRequestCoalescing);
   ini.get_bool_if_exist("coalesce_retry_on_5xx", global.coalesceRetryOn5xx);
   ini.get_int_if_exist("response_cache_ttl", global.responseCacheTtl);
-  ini.get_int_if_exist("max_async_fetches", global.maxAsyncFetches);
 
   if (ini.section_exist("security")) {
     ini.enter_section("security");
