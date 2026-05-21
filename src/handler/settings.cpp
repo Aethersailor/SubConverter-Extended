@@ -91,11 +91,11 @@ static void finalizePerformanceSettings() {
     global.maxConcurThreads =
         to_int(max_concurrent_threads, global.maxConcurThreads);
 
-  std::string coalesce_wait_timeout =
-      getEnv("SUBCONVERTER_COALESCE_WAIT_TIMEOUT_MS");
-  if (!coalesce_wait_timeout.empty())
-    global.coalesceWaitTimeoutMs =
-        to_int(coalesce_wait_timeout, global.coalesceWaitTimeoutMs);
+  std::string max_server_threads =
+      getEnv("SUBCONVERTER_MAX_SERVER_THREADS");
+  if (!max_server_threads.empty())
+    global.maxServerThreads =
+        to_int(max_server_threads, global.maxServerThreads);
 
   std::string response_cache_ttl = getEnv("SUBCONVERTER_RESPONSE_CACHE_TTL");
   if (!response_cache_ttl.empty())
@@ -109,14 +109,8 @@ static void finalizePerformanceSettings() {
     global.responseCacheTtl = 0;
   if (global.maxConcurThreads < 1)
     global.maxConcurThreads = 1;
-  if (global.coalesceWaitTimeoutMs < 0)
-    global.coalesceWaitTimeoutMs = 0;
-  if (global.coalesceWaitTimeoutMs > 30000) {
-    writeLog(0,
-             "coalesce_wait_timeout_ms 最大允许 30000 毫秒，已自动收敛到 30000。",
-             LOG_LEVEL_WARNING);
-    global.coalesceWaitTimeoutMs = 30000;
-  }
+  if (global.maxServerThreads < global.maxConcurThreads)
+    global.maxServerThreads = global.maxConcurThreads;
   if (global.responseCacheTtl > 5) {
     writeLog(0,
              "response_cache_ttl 最大允许 5 秒，已自动收敛到 5。",
@@ -672,6 +666,7 @@ void readYAMLConf(YAML::Node &node) {
     }
     node["advanced"]["max_pending_connections"] >> global.maxPendingConns;
     node["advanced"]["max_concurrent_threads"] >> global.maxConcurThreads;
+    node["advanced"]["max_server_threads"] >> global.maxServerThreads;
     node["advanced"]["max_allowed_rulesets"] >> global.maxAllowedRulesets;
     node["advanced"]["max_allowed_rules"] >> global.maxAllowedRules;
     node["advanced"]["max_allowed_download_size"] >>
@@ -693,8 +688,6 @@ void readYAMLConf(YAML::Node &node) {
     node["advanced"]["enable_request_coalescing"] >>
         global.enableRequestCoalescing;
     node["advanced"]["coalesce_retry_on_5xx"] >> global.coalesceRetryOn5xx;
-    node["advanced"]["coalesce_wait_timeout_ms"] >>
-        global.coalesceWaitTimeoutMs;
     node["advanced"]["response_cache_ttl"] >> global.responseCacheTtl;
     node["advanced"]["max_async_fetches"] >> global.maxAsyncFetches;
   }
@@ -864,7 +857,8 @@ void readTOMLConf(toml::value &root) {
   find_if_exist(
       section_advanced, "log_level", log_level, "print_debug_info",
       global.printDbgInfo, "max_pending_connections", global.maxPendingConns,
-      "max_concurrent_threads", global.maxConcurThreads, "max_allowed_rulesets",
+      "max_concurrent_threads", global.maxConcurThreads,
+      "max_server_threads", global.maxServerThreads, "max_allowed_rulesets",
       global.maxAllowedRulesets, "max_allowed_rules", global.maxAllowedRules,
       "max_allowed_download_size", global.maxAllowedDownloadSize,
       "enable_cache", enable_cache, "cache_subscription", cache_subscription,
@@ -873,7 +867,6 @@ void readTOMLConf(toml::value &root) {
       global.asyncFetchRuleset, "skip_failed_links", global.skipFailedLinks,
       "enable_request_coalescing", global.enableRequestCoalescing,
       "coalesce_retry_on_5xx", global.coalesceRetryOn5xx,
-      "coalesce_wait_timeout_ms", global.coalesceWaitTimeoutMs,
       "response_cache_ttl", global.responseCacheTtl, "max_async_fetches",
       global.maxAsyncFetches);
 
@@ -1173,6 +1166,7 @@ void readConf() {
   }
   ini.get_int_if_exist("max_pending_connections", global.maxPendingConns);
   ini.get_int_if_exist("max_concurrent_threads", global.maxConcurThreads);
+  ini.get_int_if_exist("max_server_threads", global.maxServerThreads);
   ini.get_number_if_exist("max_allowed_rulesets", global.maxAllowedRulesets);
   ini.get_number_if_exist("max_allowed_rules", global.maxAllowedRules);
   ini.get_number_if_exist("max_allowed_download_size",
@@ -1196,8 +1190,6 @@ void readConf() {
   ini.get_bool_if_exist("enable_request_coalescing",
                         global.enableRequestCoalescing);
   ini.get_bool_if_exist("coalesce_retry_on_5xx", global.coalesceRetryOn5xx);
-  ini.get_int_if_exist("coalesce_wait_timeout_ms",
-                       global.coalesceWaitTimeoutMs);
   ini.get_int_if_exist("response_cache_ttl", global.responseCacheTtl);
   ini.get_int_if_exist("max_async_fetches", global.maxAsyncFetches);
 

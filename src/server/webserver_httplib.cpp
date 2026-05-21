@@ -15,6 +15,7 @@
 #include "utils/stl_extra.h"
 #include "utils/string_hash.h"
 #include "utils/urlencode.h"
+#include "handler/settings.h"
 #include "webserver.h"
 
 
@@ -214,7 +215,8 @@ int WebServer::start_web_server_multi(listener_args *args) {
     server.set_mount_point("/", serve_file_root);
   }
   server.new_task_queue = [args] {
-    return new httplib::ThreadPool(args->max_workers);
+    return new httplib::ThreadPool(args->max_workers,
+                                   global.maxServerThreads);
   };
   if (!server.bind_to_port(args->listen_address, args->port, 0)) {
     writeLog(0,
