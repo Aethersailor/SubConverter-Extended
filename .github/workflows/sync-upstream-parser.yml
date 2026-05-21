@@ -337,7 +337,7 @@ jobs:
 
       - name: Upload sync reports
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: upstream-parser-sync-report
           path: |
