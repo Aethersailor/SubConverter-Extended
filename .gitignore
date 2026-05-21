@@ -13,3 +13,10 @@ bridge/libmihomo.a
 bridge/libmihomo.so
 bridge/libmihomo.dll
 bridge/libmihomo.dll.a
+
+__pycache__/
+*.pyc
+
+upstream-sync-*.json
+upstream-sync-*.md
+upstream-sync-decisions.raw
