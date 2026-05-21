@@ -90,7 +90,7 @@ jobs:
           import json
           data = json.load(open("upstream-sync-candidates.json", encoding="utf-8"))
           candidates = data.get("candidates", [])
-          reviewable = [item for item in candidates if item.get("safe_by_rules")]
+          reviewable = [item for item in candidates if item.get("reviewable_by_ai")]
           print(f"candidate_count={len(candidates)}")
           print(f"reviewable_count={len(reviewable)}")
           print(f"has_candidates={'true' if candidates else 'false'}")
@@ -120,11 +120,18 @@ jobs:
 
           data = json.loads(plan_path.read_text(encoding="utf-8"))
           candidates = data.get("candidates", [])
-          reviewable = [item for item in candidates if item.get("safe_by_rules")]
+          rule_safe = [item for item in candidates if item.get("safe_by_rules")]
+          reviewable = [item for item in candidates if item.get("reviewable_by_ai")]
+          print(f"- Cursor file: `{data.get('cursor_file') or 'unknown'}`")
           print(f"- Seen: `{data.get('seen') or 'none'}`")
+          print(f"- Stored seen: `{data.get('stored_seen') or 'none'}`")
           print(f"- Upstream head: `{data.get('upstream_head') or 'unknown'}`")
+          print(f"- Total pending commits: `{data.get('total_commit_count', 0)}`")
           print(f"- Candidate commits: `{len(candidates)}`")
-          print(f"- Rule-safe candidates: `{len(reviewable)}`")
+          print(f"- Rule-safe candidates: `{len(rule_safe)}`")
+          print(f"- AI-reviewable candidates: `{len(reviewable)}`")
+          print(f"- Truncated batch: `{data.get('truncated', False)}`")
+          print(f"- Planned cursor advance: `{data.get('advance_to') or 'none'}`")
           if not candidates:
               print("")
               print("No upstream commits are pending for the current seen marker.")
@@ -159,9 +166,10 @@ jobs:
           PROMPT="$(cat <<'EOF'
           You are reviewing upstream parser changes for SubConverter-Extended.
 
-          The project has protected Mihomo/proxy-provider integrations. A change
-          may be automatically applied only when it is a low-risk parser-only
-          update and does not require output adapter changes.
+          The project has protected Mihomo/proxy-provider integrations. Only
+          parser whitelist paths will ever be applied automatically. A change may
+          be approved only when applying just those parser paths is low risk and
+          does not require output adapter changes or other non-whitelisted files.
 
           Return only strict JSON. Do not use Markdown.
 
@@ -178,8 +186,10 @@ jobs:
             ]
           }
 
-          Only use "safe_parser_only" with "low" risk when the diff updates
-          parser-only behavior and can be safely applied without touching
+          Use "needs_output_adapter" when the parser changes depend on companion
+          output changes, schema changes outside the whitelist, or generated
+          config changes. Only use "safe_parser_only" with "low" risk when the
+          whitelisted parser diff can be safely applied by itself without touching
           Mihomo parser bridge, RawParams pass-through, proxy-provider logic,
           FetchContext handling, nodemanip.cpp, or Clash output internals.
           EOF
