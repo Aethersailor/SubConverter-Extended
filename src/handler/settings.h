@@ -77,9 +77,9 @@ struct Settings {
   bool serveCacheOnFetchFail = false;
   int cacheSubscription = 60, cacheConfig = 300, cacheRuleset = 21600;
 
-  // request coalescing and bounded background work
+  // request coalescing and short-lived response cache
   bool enableRequestCoalescing = true, coalesceRetryOn5xx = true;
-  int responseCacheTtl = 0, maxAsyncFetches = 0;
+  int responseCacheTtl = 0;
   unsigned long long configGeneration = 0;
 
   // limits
