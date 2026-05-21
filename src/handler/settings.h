@@ -79,7 +79,7 @@ struct Settings {
 
   // request coalescing and bounded background work
   bool enableRequestCoalescing = true, coalesceRetryOn5xx = true;
-  int responseCacheTtl = 0, maxAsyncFetches = 2;
+  int responseCacheTtl = 0, maxAsyncFetches = 0;
   unsigned long long configGeneration = 0;
 
   // limits

@@ -129,8 +129,10 @@ std::shared_future<std::string> fetchFileAsync(const std::string &path, const st
         retVal = std::async(std::launch::async, [path](){return fileGet(path, true);});
     else if(isLink(path))
     {
-        auto slot = acquireAsyncFetchSlot();
-        retVal = std::async(std::launch::async, [path, proxy, cache_ttl, context, slot](){return webGet(path, proxy, cache_ttl, nullptr, nullptr, context);});
+        retVal = std::async(std::launch::async, [path, proxy, cache_ttl, context](){
+            auto slot = acquireAsyncFetchSlot();
+            return webGet(path, proxy, cache_ttl, nullptr, nullptr, context);
+        });
     }
     else
         return make_ready_future(std::string());
