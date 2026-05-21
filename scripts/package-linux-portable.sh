@@ -4,6 +4,8 @@ set -euo pipefail
 VERSION="${1:?version is required}"
 ARCH="${2:?arch is required}"
 PACKAGE_DIR="SubConverter-Extended"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RENDER_LAUNCHER="${SCRIPT_DIR}/ci/render-linux-launcher.sh"
 
 copy_dir_contents() {
   local source_dir="$1"
@@ -33,47 +35,5 @@ fi
 copy_dir_contents runtime-libs
 copy_dir_contents runtime-root
 
-cat > "${PACKAGE_DIR}/start.sh" <<'EOF'
-#!/bin/sh
-set -e
-
-ROOT="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
-CONF="${PREF_PATH:-$ROOT/base/pref.toml}"
-CONF_DIR="$(dirname "$CONF")"
-mkdir -p "$CONF_DIR"
-
-if [ ! -f "$CONF" ] && [ -f "$ROOT/base/pref.example.toml" ]; then
-  cp "$ROOT/base/pref.example.toml" "$CONF"
-fi
-
-if [ -x "$ROOT/lib64/ld-linux-x86-64.so.2" ]; then
-  LOADER="$ROOT/lib64/ld-linux-x86-64.so.2"
-  LIB_PATH="$ROOT/lib/x86_64-linux-gnu:$ROOT/usr/lib/x86_64-linux-gnu:$ROOT/lib64:$ROOT/lib:$ROOT/usr/lib"
-elif [ -x "$ROOT/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2" ]; then
-  LOADER="$ROOT/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
-  LIB_PATH="$ROOT/lib/x86_64-linux-gnu:$ROOT/usr/lib/x86_64-linux-gnu:$ROOT/lib:$ROOT/usr/lib"
-elif [ -x "$ROOT/lib/ld-linux-aarch64.so.1" ]; then
-  LOADER="$ROOT/lib/ld-linux-aarch64.so.1"
-  LIB_PATH="$ROOT/lib/aarch64-linux-gnu:$ROOT/usr/lib/aarch64-linux-gnu:$ROOT/lib:$ROOT/usr/lib"
-elif [ -x "$ROOT/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1" ]; then
-  LOADER="$ROOT/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"
-  LIB_PATH="$ROOT/lib/aarch64-linux-gnu:$ROOT/usr/lib/aarch64-linux-gnu:$ROOT/lib:$ROOT/usr/lib"
-elif [ -x "$ROOT/lib/ld-linux-armhf.so.3" ]; then
-  LOADER="$ROOT/lib/ld-linux-armhf.so.3"
-  LIB_PATH="$ROOT/lib/arm-linux-gnueabihf:$ROOT/usr/lib/arm-linux-gnueabihf:$ROOT/usr/arm-linux-gnueabihf/lib:$ROOT/lib:$ROOT/usr/lib"
-elif [ -x "$ROOT/lib/arm-linux-gnueabihf/ld-linux-armhf.so.3" ]; then
-  LOADER="$ROOT/lib/arm-linux-gnueabihf/ld-linux-armhf.so.3"
-  LIB_PATH="$ROOT/lib/arm-linux-gnueabihf:$ROOT/usr/lib/arm-linux-gnueabihf:$ROOT/usr/arm-linux-gnueabihf/lib:$ROOT/lib:$ROOT/usr/lib"
-elif [ -x "$ROOT/usr/lib/arm-linux-gnueabihf/ld-linux-armhf.so.3" ]; then
-  LOADER="$ROOT/usr/lib/arm-linux-gnueabihf/ld-linux-armhf.so.3"
-  LIB_PATH="$ROOT/lib/arm-linux-gnueabihf:$ROOT/usr/lib/arm-linux-gnueabihf:$ROOT/usr/arm-linux-gnueabihf/lib:$ROOT/lib:$ROOT/usr/lib"
-else
-  echo "glibc loader not found in package."
-  exit 1
-fi
-
-exec "$LOADER" --library-path "$LIB_PATH" "$ROOT/subconverter" -f "$CONF"
-EOF
-
-chmod +x "${PACKAGE_DIR}/start.sh"
+bash "${RENDER_LAUNCHER}" "${PACKAGE_DIR}/start.sh" portable "__PORTABLE_ROOT__" "__ROOT_BASE__"
 tar -czf "SubConverter-Extended-${VERSION}-linux-${ARCH}.tar.gz" "${PACKAGE_DIR}"

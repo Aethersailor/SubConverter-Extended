@@ -3,9 +3,9 @@ name: Build and Push Docker image
 on:
   push:
     branches:
-      - dev  # Only dev branch triggers on push
+      - dev
     tags:
-      - 'v*.*.*'  # Tag push triggers master build
+      - 'v*.*.*'
     paths-ignore:
       - 'README.md'
       - 'README-*.md'
@@ -16,13 +16,13 @@ on:
     branches:
       - master
       - dev
-  workflow_dispatch: {}  # Manual trigger
+  workflow_dispatch: {}
   schedule:
-    - cron: '0 19 * * 0'  # Run at 03:00 (UTC+8) on Mondays
+    - cron: '0 19 * * 0'
 
 permissions:
-  contents: write  # Changed from 'read' to enable auto-commit and release creation
-  packages: write  # Required for GHCR push
+  contents: write
+  packages: write
 
 concurrency:
   group: dockerhub-${{ github.ref_name }}
@@ -32,7 +32,6 @@ jobs:
   prepare:
     name: "🔧 Prepare Metadata"
     runs-on: ubuntu-latest
-    # Skip if [skip ci] and ensure schedule only runs on master
     if: github.actor != 'dependabot[bot]' && !contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '[ci skip]') && (github.event_name != 'schedule' || github.ref == 'refs/heads/master')
     outputs:
       sha_short: ${{ steps.vars.outputs.sha_short }}
@@ -40,6 +39,7 @@ jobs:
       is_release: ${{ steps.version.outputs.is_release }}
       tags: ${{ steps.meta.outputs.tags }}
       build_date: ${{ steps.build_date.outputs.build_date }}
+      linux_matrix: ${{ steps.linux_matrix.outputs.matrix }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -55,19 +55,16 @@ jobs:
         id: version
         run: |
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            # Tag triggered: use tag as version
             VERSION="${GITHUB_REF#refs/tags/}"
             echo "version=$VERSION" >> $GITHUB_OUTPUT
             echo "is_release=true" >> $GITHUB_OUTPUT
             echo "Detected version from tag: $VERSION"
           elif [[ "${{ github.ref }}" == refs/heads/master ]] && ([[ "${{ github.event_name }}" == "workflow_dispatch" ]] || [[ "${{ github.event_name }}" == "schedule" ]]); then
-            # Master manual/schedule trigger: use latest tag as version
             LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
             if [ -n "$LATEST_TAG" ]; then
               VERSION="$LATEST_TAG"
               echo "Detected latest tag: $VERSION"
             else
-              # Fallback if no tags exist
               VERSION="master-$(git rev-parse --short HEAD)"
               echo "No tags found, using commit hash: $VERSION"
             fi
@@ -75,7 +72,6 @@ jobs:
             echo "is_release=true" >> $GITHUB_OUTPUT
             echo "Master branch build (manual/schedule): $VERSION"
           else
-            # Dev branch: use "dev"
             echo "version=dev" >> $GITHUB_OUTPUT
             echo "is_release=false" >> $GITHUB_OUTPUT
             echo "Using dev version"
@@ -84,6 +80,28 @@ jobs:
       - name: Set build date
         id: build_date
         run: echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
+
+      - name: Build Linux matrix
+        id: linux_matrix
+        shell: bash
+        run: |
+          if [ "${{ steps.version.outputs.is_release }}" = "true" ]; then
+            {
+              echo 'matrix<<JSON'
+              cat <<'JSON'
+          {"include":[{"arch":"amd64","runner":"ubuntu-latest","dockerfile":"./Dockerfile","builder_platform":"linux/amd64","image_platform":"linux/amd64","builder_tag":"subconverter-temp:amd64-builder","threads":"16","cache_scope":"subconverter-alpine","extract_mode":"shared","extract_generated":"true","openwrt_arches":"x86_64","qemu_platforms":""},{"arch":"arm64","runner":"ubuntu-24.04-arm","dockerfile":"./Dockerfile","builder_platform":"linux/arm64","image_platform":"linux/arm64","builder_tag":"subconverter-temp:arm64-builder","threads":"4","cache_scope":"subconverter-alpine-arm64","extract_mode":"shared","extract_generated":"false","openwrt_arches":"aarch64_generic,aarch64_cortex-a53,aarch64_cortex-a72","qemu_platforms":""},{"arch":"armv7","runner":"ubuntu-latest","dockerfile":"./docker/Dockerfile.armv7-cross","builder_platform":"linux/amd64","image_platform":"linux/arm/v7","builder_tag":"subconverter-temp:armv7-builder","threads":"2","cache_scope":"subconverter-armv7-cross","extract_mode":"root","extract_generated":"false","openwrt_arches":"arm_cortex-a5_vfpv4,arm_cortex-a7,arm_cortex-a7_vfpv4,arm_cortex-a7_neon-vfpv4,arm_cortex-a8_vfpv3,arm_cortex-a9,arm_cortex-a9_neon,arm_cortex-a9_vfpv3-d16,arm_cortex-a15_neon-vfpv4","qemu_platforms":"arm"}]}
+          JSON
+              echo 'JSON'
+            } >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo 'matrix<<JSON'
+              cat <<'JSON'
+          {"include":[{"arch":"amd64","runner":"ubuntu-latest","dockerfile":"./Dockerfile","builder_platform":"linux/amd64","image_platform":"linux/amd64","builder_tag":"subconverter-temp:amd64-builder","threads":"16","cache_scope":"subconverter-alpine","extract_mode":"shared","extract_generated":"true","openwrt_arches":"x86_64","qemu_platforms":""}]}
+          JSON
+              echo 'JSON'
+            } >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Docker meta
         id: meta
@@ -97,12 +115,13 @@ jobs:
             type=raw,value=${{ steps.version.outputs.version }},enable=${{ steps.version.outputs.is_release == 'true' }}
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
 
-  build-amd64:
-    name: "🐳 Docker Build (amd64)"
-    runs-on: ubuntu-latest
+  build-linux:
+    name: "🐳 Docker Build (${{ matrix.arch }})"
+    runs-on: ${{ matrix.runner }}
     needs: prepare
-    outputs:
-      digest: ${{ steps.build_image.outputs.digest }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.linux_matrix) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -128,109 +147,93 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Build ONCE to builder stage and load to Docker (using Alpine for smaller image)
-      - name: Build to builder stage (single build)
+      - name: Prepare Docker build args
+        id: docker_args
+        shell: bash
+        env:
+          THREADS: ${{ matrix.threads }}
+          SHA: ${{ needs.prepare.outputs.sha_short }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
+          MIHOMO_REF: Meta
+          MIHOMO_CACHE_BUST: ${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && matrix.extract_generated == 'true' && github.run_id || 'stable' }}
+          SOURCE_DEPS_CACHE_BUST: ${{ github.event_name != 'pull_request' && github.run_id || 'stable' }}
+          REFRESH_GO_DEPS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && matrix.extract_generated == 'true' }}
+          REFRESH_HEADERS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && matrix.extract_generated == 'true' }}
+        run: |
+          {
+            echo 'args<<EOF'
+            bash scripts/ci/docker-build-args.sh
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build to builder stage
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7
         with:
           context: .
-          file: ./Dockerfile
+          file: ${{ matrix.dockerfile }}
           load: true
-          tags: subconverter-temp:builder
+          tags: ${{ matrix.builder_tag }}
           target: builder
-          build-args: |
-            THREADS=16
-            SHA=${{ needs.prepare.outputs.sha_short }}
-            VERSION=${{ needs.prepare.outputs.version }}
-            BUILD_DATE=${{ needs.prepare.outputs.build_date }}
-            MIHOMO_REF=Meta
-            MIHOMO_CACHE_BUST=${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && github.run_id || 'stable' }}
-            SOURCE_DEPS_CACHE_BUST=${{ github.event_name != 'pull_request' && github.run_id || 'stable' }}
-            REFRESH_GO_DEPS=${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' }}
-            REFRESH_HEADERS=${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' }}
-          cache-from: type=gha,scope=subconverter-alpine
-          cache-to: type=gha,mode=max,scope=subconverter-alpine
+          platforms: ${{ matrix.builder_platform }}
+          build-args: ${{ steps.docker_args.outputs.args }}
+          cache-from: type=gha,scope=${{ matrix.cache_scope }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.cache_scope }}
 
-      # Extract ALL generated files from the single build
-      - name: Extract generated files
-        run: |
-          CONTAINER_ID=$(docker create subconverter-temp:builder)
-          
-          # Go module files
-          docker cp $CONTAINER_ID:/src/bridge/go.mod bridge/go.mod
-          docker cp $CONTAINER_ID:/src/bridge/go.sum bridge/go.sum
-          docker cp $CONTAINER_ID:/src/bridge/libmihomo.h bridge/libmihomo.h
-          
-          # Go-generated header files
-          docker cp $CONTAINER_ID:/src/src/parser/mihomo_schemes.h src/parser/mihomo_schemes.h
-          docker cp $CONTAINER_ID:/src/src/parser/param_compat.h src/parser/param_compat.h
-          
-          # Header-only libraries
-          docker cp $CONTAINER_ID:/src/include/httplib.h include/httplib.h
-          docker cp $CONTAINER_ID:/src/include/nlohmann/json.hpp include/nlohmann/json.hpp
-          docker cp $CONTAINER_ID:/src/include/inja.hpp include/inja.hpp
-          docker cp $CONTAINER_ID:/src/include/jpcre2.hpp include/jpcre2.hpp
-          docker cp $CONTAINER_ID:/src/include/quickjspp.hpp include/quickjspp.hpp
-          rm -rf include/libcron include/date include/toml11 include/toml.hpp
-          docker cp $CONTAINER_ID:/src/include/libcron include/
-          docker cp $CONTAINER_ID:/src/include/date include/
-          docker cp $CONTAINER_ID:/src/include/toml.hpp include/toml.hpp
-          docker cp $CONTAINER_ID:/src/include/toml11 include/
-          find include/libcron include/date include/toml11 -type f -print0 | xargs -0 sed -i 's/[[:blank:]]\+$//'
-          sed -i 's/[[:blank:]]\+$//' include/toml.hpp
-          
-          # [NEW] Extract Binary for Release (if needed)
-          if [ "${{ needs.prepare.outputs.is_release }}" == "true" ]; then
-            echo "Extracting binary for release..."
-            docker cp $CONTAINER_ID:/src/subconverter ./subconverter
-            docker cp $CONTAINER_ID:/runtime-libs ./runtime-libs
-            docker cp $CONTAINER_ID:/usr/lib/libmihomo.so ./libmihomo.so
-          fi
+      - name: Extract builder output
+        shell: bash
+        env:
+          EXTRACT_GENERATED: ${{ matrix.extract_generated }}
+        run: bash scripts/ci/extract-builder-output.sh "${{ matrix.builder_tag }}" "${{ matrix.extract_mode }}"
 
-          docker rm $CONTAINER_ID
-
-      # Package Release Binary
-      - name: Package Release Artifact (Linux amd64)
+      - name: Package Release Artifacts (Linux ${{ matrix.arch }})
         if: needs.prepare.outputs.is_release == 'true'
-        run: |
-          bash scripts/package-linux-portable.sh "${{ needs.prepare.outputs.version }}" amd64
-          bash scripts/package-openwrt-apk.sh "${{ needs.prepare.outputs.version }}" amd64 "x86_64"
-          rm -rf runtime-libs libmihomo.so
+        shell: bash
+        run: bash scripts/ci/build-linux-release.sh "${{ needs.prepare.outputs.version }}" "${{ matrix.arch }}" "${{ matrix.openwrt_arches }}"
 
-      - name: Smoke test artifact (Linux amd64)
+      - name: Set up QEMU for smoke test
+        if: needs.prepare.outputs.is_release == 'true' && matrix.qemu_platforms != ''
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+        with:
+          platforms: ${{ matrix.qemu_platforms }}
+
+      - name: Smoke test artifact (Linux ${{ matrix.arch }})
         if: needs.prepare.outputs.is_release == 'true'
         timeout-minutes: 3
         uses: ./.github/actions/smoke-linux-artifact
         with:
-          artifact: SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-amd64.tar.gz
+          artifact: SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
 
-      - name: Smoke test APKs (OpenWrt amd64)
+      - name: Smoke test APKs (OpenWrt ${{ matrix.arch }})
         if: needs.prepare.outputs.is_release == 'true'
         timeout-minutes: 3
         uses: ./.github/actions/smoke-openwrt-apk
         with:
           artifacts: SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-*.apk
 
-      # Upload Release Artifact
-      - name: Upload Artifact (Linux amd64)
+      - name: Upload Artifact (Linux ${{ matrix.arch }})
         if: needs.prepare.outputs.is_release == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: linux-amd64
+          name: linux-${{ matrix.arch }}
           path: SubConverter-Extended-*.tar.gz
 
-      - name: Upload Artifact (OpenWrt amd64)
+      - name: Upload Artifact (OpenWrt ${{ matrix.arch }})
         if: needs.prepare.outputs.is_release == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: openwrt-amd64
+          name: openwrt-${{ matrix.arch }}
           path: SubConverter-Extended-*-openwrt-*.apk
 
       - name: Clean release packaging files
         if: needs.prepare.outputs.is_release == 'true'
-        run: rm -rf SubConverter-Extended SubConverter-Extended-*.tar.gz SubConverter-Extended-*.apk subconverter runtime-libs libmihomo.so build/openwrt-apk
+        shell: bash
+        run: rm -rf SubConverter-Extended SubConverter-Extended-*.tar.gz SubConverter-Extended-*.apk subconverter runtime-libs runtime-root libmihomo.so build/openwrt-apk
 
       - name: Check for file changes
         id: check_changes
+        if: matrix.extract_generated == 'true'
+        shell: bash
         run: |
           if [ -n "$(git status --porcelain -- bridge/go.mod bridge/go.sum bridge/libmihomo.h src/parser/mihomo_schemes.h src/parser/param_compat.h include/httplib.h include/nlohmann/json.hpp include/inja.hpp include/jpcre2.hpp include/quickjspp.hpp include/libcron include/date include/toml.hpp include/toml11)" ]; then
             echo "changed=true" >> $GITHUB_OUTPUT
@@ -238,21 +241,23 @@ jobs:
 
       - name: Commit and push generated files
         if: steps.check_changes.outputs.changed == 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/dev'
+        shell: bash
         run: |
           BRANCH_NAME="dev"
           echo "Dev branch build, pushing generated files to: $BRANCH_NAME"
-          
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add bridge/go.mod bridge/go.sum bridge/libmihomo.h src/parser/mihomo_schemes.h src/parser/param_compat.h include/httplib.h include/nlohmann/json.hpp include/inja.hpp include/jpcre2.hpp include/quickjspp.hpp include/libcron include/date include/toml.hpp include/toml11
           git commit -m "chore: update auto-generated files and header libraries from build [skip ci]"
-          
+
           git fetch --no-tags origin "refs/heads/$BRANCH_NAME:refs/remotes/origin/$BRANCH_NAME"
           git rebase "origin/$BRANCH_NAME"
           git push origin "HEAD:refs/heads/$BRANCH_NAME"
 
       - name: Report generated file changes outside dev
         if: steps.check_changes.outputs.changed == 'true' && github.event_name != 'pull_request' && github.ref != 'refs/heads/dev'
+        shell: bash
         run: |
           echo "::warning::Generated file changes were detected on ${GITHUB_REF}, but source updates are committed only to dev."
 
@@ -261,288 +266,35 @@ jobs:
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7
         with:
           context: .
-          file: ./Dockerfile
+          file: ${{ matrix.dockerfile }}
           push: ${{ github.event_name != 'pull_request' }}
-          platforms: linux/amd64
+          platforms: ${{ matrix.image_platform }}
           tags: ${{ needs.prepare.outputs.tags }}
-          build-args: |
-            THREADS=16
-            SHA=${{ needs.prepare.outputs.sha_short }}
-            VERSION=${{ needs.prepare.outputs.version }}
-            BUILD_DATE=${{ needs.prepare.outputs.build_date }}
-            MIHOMO_REF=Meta
-            MIHOMO_CACHE_BUST=${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && github.run_id || 'stable' }}
-            SOURCE_DEPS_CACHE_BUST=${{ github.event_name != 'pull_request' && github.run_id || 'stable' }}
-            REFRESH_GO_DEPS=${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' }}
-            REFRESH_HEADERS=${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' }}
-          cache-from: type=gha,scope=subconverter-alpine
-          cache-to: type=gha,mode=max,scope=subconverter-alpine
+          build-args: ${{ steps.docker_args.outputs.args }}
+          cache-from: type=gha,scope=${{ matrix.cache_scope }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.cache_scope }}
 
-      - name: Smoke test image (amd64)
+      - name: Save image digest
+        if: needs.prepare.outputs.is_release == 'true' && github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          mkdir -p docker-digests
+          printf '%s\n' "${{ steps.build_image.outputs.digest }}" > "docker-digests/${{ matrix.arch }}.txt"
+
+      - name: Upload image digest
+        if: needs.prepare.outputs.is_release == 'true' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: docker-digest-${{ matrix.arch }}
+          path: docker-digests/${{ matrix.arch }}.txt
+
+      - name: Smoke test image (${{ matrix.arch }})
         if: github.event_name != 'pull_request' && needs.prepare.outputs.is_release == 'true'
         timeout-minutes: 3
         uses: ./.github/actions/smoke-docker-image
         with:
           image: ghcr.io/aethersailor/subconverter-extended@${{ steps.build_image.outputs.digest }}
-          platform: linux/amd64
-
-  build-arm64:
-    name: "🐳 Docker Build (arm64)"
-    runs-on: ubuntu-24.04-arm
-    needs: prepare
-    if: needs.prepare.outputs.is_release == 'true'
-    outputs:
-      digest: ${{ steps.build_image.outputs.digest }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          token: ${{ github.event_name == 'pull_request' && github.token || secrets.PAT_TOKEN }}
-          fetch-depth: 0
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
-
-      - name: Log in to Docker Hub
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # Build to builder stage FIRST to extract binary (using Alpine for smaller image)
-      - name: Build to builder stage (extract binary)
-        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7
-        with:
-          context: .
-          file: ./Dockerfile
-          load: true
-          tags: subconverter-temp:arm64-builder
-          target: builder
-          platforms: linux/arm64
-          build-args: |
-            THREADS=4
-            SHA=${{ needs.prepare.outputs.sha_short }}
-            VERSION=${{ needs.prepare.outputs.version }}
-            BUILD_DATE=${{ needs.prepare.outputs.build_date }}
-            MIHOMO_REF=Meta
-            MIHOMO_CACHE_BUST=stable
-            SOURCE_DEPS_CACHE_BUST=${{ github.event_name != 'pull_request' && github.run_id || 'stable' }}
-            REFRESH_GO_DEPS=false
-            REFRESH_HEADERS=false
-          cache-from: type=gha,scope=subconverter-alpine-arm64
-          cache-to: type=gha,mode=max,scope=subconverter-alpine-arm64
-
-      - name: Extract binaries
-        run: |
-          CONTAINER_ID=$(docker create subconverter-temp:arm64-builder)
-          docker cp $CONTAINER_ID:/src/subconverter ./subconverter
-          docker cp $CONTAINER_ID:/runtime-libs ./runtime-libs
-          docker cp $CONTAINER_ID:/usr/lib/libmihomo.so ./libmihomo.so
-          docker rm $CONTAINER_ID
-          chmod +x subconverter
-
-      - name: Package Release Artifact (Linux arm64)
-        run: |
-          bash scripts/package-linux-portable.sh "${{ needs.prepare.outputs.version }}" arm64
-          bash scripts/package-openwrt-apk.sh "${{ needs.prepare.outputs.version }}" arm64 "aarch64_generic,aarch64_cortex-a53,aarch64_cortex-a72"
-          rm -rf runtime-libs libmihomo.so
-
-      - name: Smoke test artifact (Linux arm64)
-        timeout-minutes: 3
-        uses: ./.github/actions/smoke-linux-artifact
-        with:
-          artifact: SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-arm64.tar.gz
-
-      - name: Smoke test APKs (OpenWrt arm64)
-        timeout-minutes: 3
-        uses: ./.github/actions/smoke-openwrt-apk
-        with:
-          artifacts: SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-*.apk
-
-      - name: Upload Artifact (Linux arm64)
-        uses: actions/upload-artifact@v7
-        with:
-          name: linux-arm64
-          path: SubConverter-Extended-*.tar.gz
-
-      - name: Upload Artifact (OpenWrt arm64)
-        uses: actions/upload-artifact@v7
-        with:
-          name: openwrt-arm64
-          path: SubConverter-Extended-*-openwrt-*.apk
-
-      - name: Clean release packaging files
-        run: rm -rf SubConverter-Extended SubConverter-Extended-*.tar.gz SubConverter-Extended-*.apk subconverter runtime-libs libmihomo.so build/openwrt-apk
-
-      - name: Build and push final image
-        id: build_image
-        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7
-        with:
-          context: .
-          file: ./Dockerfile
-          push: ${{ github.event_name != 'pull_request' }}
-          platforms: linux/arm64
-          tags: ${{ needs.prepare.outputs.tags }}
-          build-args: |
-            THREADS=4
-            SHA=${{ needs.prepare.outputs.sha_short }}
-            VERSION=${{ needs.prepare.outputs.version }}
-            BUILD_DATE=${{ needs.prepare.outputs.build_date }}
-            MIHOMO_REF=Meta
-            MIHOMO_CACHE_BUST=stable
-            SOURCE_DEPS_CACHE_BUST=${{ github.event_name != 'pull_request' && github.run_id || 'stable' }}
-            REFRESH_GO_DEPS=false
-            REFRESH_HEADERS=false
-          cache-from: type=gha,scope=subconverter-alpine-arm64
-          cache-to: type=gha,mode=max,scope=subconverter-alpine-arm64
-
-      - name: Smoke test image (arm64)
-        if: github.event_name != 'pull_request'
-        timeout-minutes: 3
-        uses: ./.github/actions/smoke-docker-image
-        with:
-          image: ghcr.io/aethersailor/subconverter-extended@${{ steps.build_image.outputs.digest }}
-          platform: linux/arm64
-
-  build-armv7:
-    name: "🐳 Docker Build (armv7)"
-    runs-on: ubuntu-latest
-    needs: prepare
-    if: needs.prepare.outputs.is_release == 'true'
-    timeout-minutes: 25
-    outputs:
-      digest: ${{ steps.build_image.outputs.digest }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          token: ${{ github.event_name == 'pull_request' && github.token || secrets.PAT_TOKEN }}
-          fetch-depth: 0
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
-
-      - name: Log in to Docker Hub
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build to builder stage (extract binary)
-        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7
-        with:
-          context: .
-          file: ./Dockerfile.armv7-cross
-          load: true
-          tags: subconverter-temp:armv7-builder
-          target: builder
-          build-args: |
-            THREADS=2
-            SHA=${{ needs.prepare.outputs.sha_short }}
-            VERSION=${{ needs.prepare.outputs.version }}
-            BUILD_DATE=${{ needs.prepare.outputs.build_date }}
-            MIHOMO_REF=Meta
-            MIHOMO_CACHE_BUST=stable
-            SOURCE_DEPS_CACHE_BUST=${{ github.event_name != 'pull_request' && github.run_id || 'stable' }}
-            REFRESH_GO_DEPS=false
-            REFRESH_HEADERS=false
-          cache-from: type=gha,scope=subconverter-armv7-cross
-          cache-to: type=gha,mode=max,scope=subconverter-armv7-cross
-
-      - name: Extract binaries
-        run: |
-          CONTAINER_ID=$(docker create subconverter-temp:armv7-builder)
-          docker cp $CONTAINER_ID:/src/subconverter ./subconverter
-          docker cp $CONTAINER_ID:/runtime-root ./runtime-root
-          docker rm $CONTAINER_ID
-          chmod +x subconverter
-
-      - name: Package Release Artifact (Linux armv7)
-        run: |
-          bash scripts/package-linux-portable.sh "${{ needs.prepare.outputs.version }}" armv7
-          bash scripts/package-openwrt-apk.sh "${{ needs.prepare.outputs.version }}" armv7 "arm_cortex-a5_vfpv4,arm_cortex-a7,arm_cortex-a7_vfpv4,arm_cortex-a7_neon-vfpv4,arm_cortex-a8_vfpv3,arm_cortex-a9,arm_cortex-a9_neon,arm_cortex-a9_vfpv3-d16,arm_cortex-a15_neon-vfpv4"
-          rm -rf runtime-root
-
-      - name: Set up QEMU for smoke test
-        if: github.event_name != 'pull_request'
-        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
-        with:
-          platforms: arm
-
-      - name: Smoke test artifact (Linux armv7)
-        timeout-minutes: 3
-        uses: ./.github/actions/smoke-linux-artifact
-        with:
-          artifact: SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-armv7.tar.gz
-
-      - name: Smoke test APKs (OpenWrt armv7)
-        timeout-minutes: 3
-        uses: ./.github/actions/smoke-openwrt-apk
-        with:
-          artifacts: SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-*.apk
-
-      - name: Upload Artifact (Linux armv7)
-        uses: actions/upload-artifact@v7
-        with:
-          name: linux-armv7
-          path: SubConverter-Extended-*.tar.gz
-
-      - name: Upload Artifact (OpenWrt armv7)
-        uses: actions/upload-artifact@v7
-        with:
-          name: openwrt-armv7
-          path: SubConverter-Extended-*-openwrt-*.apk
-
-      - name: Clean release packaging files
-        run: rm -rf SubConverter-Extended SubConverter-Extended-*.tar.gz SubConverter-Extended-*.apk subconverter runtime-root build/openwrt-apk
-
-      - name: Build and push final image
-        id: build_image
-        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7
-        with:
-          context: .
-          file: ./Dockerfile.armv7-cross
-          push: ${{ github.event_name != 'pull_request' }}
-          platforms: linux/arm/v7
-          tags: ${{ needs.prepare.outputs.tags }}
-          build-args: |
-            THREADS=2
-            SHA=${{ needs.prepare.outputs.sha_short }}
-            VERSION=${{ needs.prepare.outputs.version }}
-            BUILD_DATE=${{ needs.prepare.outputs.build_date }}
-            MIHOMO_REF=Meta
-            MIHOMO_CACHE_BUST=stable
-            SOURCE_DEPS_CACHE_BUST=${{ github.event_name != 'pull_request' && github.run_id || 'stable' }}
-            REFRESH_GO_DEPS=false
-            REFRESH_HEADERS=false
-          cache-from: type=gha,scope=subconverter-armv7-cross
-          cache-to: type=gha,mode=max,scope=subconverter-armv7-cross
-
-      - name: Smoke test image (armv7)
-        if: github.event_name != 'pull_request'
-        timeout-minutes: 3
-        uses: ./.github/actions/smoke-docker-image
-        with:
-          image: ghcr.io/aethersailor/subconverter-extended@${{ steps.build_image.outputs.digest }}
-          platform: linux/arm/v7
+          platform: ${{ matrix.image_platform }}
 
   build-windows-amd64:
     name: "🪟 Windows Build (amd64)"
@@ -606,7 +358,7 @@ jobs:
   merge-manifest:
     name: "🔗 Docker Manifest"
     runs-on: ubuntu-latest
-    needs: [prepare, build-amd64, build-arm64, build-armv7]
+    needs: [prepare, build-linux]
     if: needs.prepare.outputs.is_release == 'true' && github.event_name != 'pull_request'
     steps:
       - name: Set up Docker Buildx
@@ -625,26 +377,45 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Download image digests
+        uses: actions/download-artifact@v8
+        with:
+          path: digests
+          pattern: docker-digest-*
+          merge-multiple: true
+
       - name: Create and push manifest list
+        shell: bash
         run: |
+          set -euo pipefail
+
+          for arch in amd64 arm64 armv7; do
+            test -s "digests/${arch}.txt"
+          done
+
+          AMD64_DIGEST="$(cat digests/amd64.txt)"
+          ARM64_DIGEST="$(cat digests/arm64.txt)"
+          ARMV7_DIGEST="$(cat digests/armv7.txt)"
           TAGS="${{ needs.prepare.outputs.tags }}"
           IMAGE_NAMES=(
             "aethersailor/subconverter-extended"
             "ghcr.io/aethersailor/subconverter-extended"
           )
+
           for IMAGE_NAME in "${IMAGE_NAMES[@]}"; do
             for TAG in $TAGS; do
               if [[ "$TAG" == "$IMAGE_NAME:"* ]]; then
                 docker buildx imagetools create \
                   -t "$TAG" \
-                  "${IMAGE_NAME}@${{ needs.build-amd64.outputs.digest }}" \
-                  "${IMAGE_NAME}@${{ needs.build-arm64.outputs.digest }}" \
-                  "${IMAGE_NAME}@${{ needs.build-armv7.outputs.digest }}"
+                  "${IMAGE_NAME}@${AMD64_DIGEST}" \
+                  "${IMAGE_NAME}@${ARM64_DIGEST}" \
+                  "${IMAGE_NAME}@${ARMV7_DIGEST}"
               fi
             done
           done
 
       - name: Verify manifest platforms
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -677,11 +448,10 @@ jobs:
             done
           done
 
-  # Release Creation Job (Only on Tag)
   create-release:
     name: "🚀 Release Artifacts"
     runs-on: ubuntu-latest
-    needs: [prepare, build-amd64, build-arm64, build-armv7, build-windows-amd64, merge-manifest]
+    needs: [prepare, build-linux, build-windows-amd64, merge-manifest]
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write
