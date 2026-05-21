@@ -1,8 +1,8 @@
 name: Sync Upstream Parser
 
 on:
-  schedule:
-    - cron: "0 20 * * *"
+#  schedule:
+#    - cron: "0 20 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -40,6 +40,7 @@ env:
 
 jobs:
   sync:
+    if: false
     runs-on: ubuntu-latest
     steps:
       - name: Checkout dev
