@@ -32,7 +32,7 @@
 ## 📖 项目简介
 
 > [!NOTE]
-> **SubConverter-Extended** 是基于 [asdlokj1qpi233/subconverter](https://github.com/asdlokj1qpi233/subconverter) 深度二次开发的订阅转换后端增强版本，重点解决传统 subconverter 易被机场屏蔽、节点参数解析不完善、维护滞后等问题。
+> **SubConverter-Extended** 是基于 [asdlokj1qpi233/subconverter](https://github.com/asdlokj1qpi233/subconverter) 深度二次开发的订阅转换后端增强版本，重点解决传统 subconverter 易被远程订阅服务商屏蔽、节点参数解析不完善、维护滞后等问题。
 
 它围绕 [Mihomo](https://github.com/MetaCubeX/mihomo) 内核的实际使用场景进行优化，提供更现代、更稳定的订阅转换能力。
 
@@ -74,9 +74,9 @@
 
 问题的根源并不在于开发者是否足够积极，而在于这类人工维护模式本身就需要持续投入大量测试和适配成本，长期来看很难稳定覆盖所有协议与参数变化。
 
-#### 2. 机场屏蔽问题 🚫
+#### 2. 远程订阅服务商屏蔽问题 🚫
 
-原版 subconverter 需要主动连接机场订阅服务器拉取节点，而部分机场出于安全策略，会采取如下限制：
+原版 subconverter 需要主动连接远程订阅服务商的订阅服务器拉取节点，而部分远程订阅服务商出于安全策略，会采取如下限制：
 
 * 屏蔽海外 IP 访问
 * 屏蔽 subconverter 的 User-Agent
@@ -92,7 +92,7 @@
 
 但对大量普通用户而言，他们并不希望研究 YAML 细节，更需要的是一套基于 UI、可直接使用、问题边界清晰的操作流程。
 
-现实情况是，在 subconverter 与机场限制叠加的情况下，用户经常会遇到无法解析节点、无法拉取节点、节点参数失效等问题；而新手用户通常也缺乏足够的排障能力。
+现实情况是，在 subconverter 与远程订阅服务商限制叠加的情况下，用户经常会遇到无法解析节点、无法拉取节点、节点参数失效等问题；而新手用户通常也缺乏足够的排障能力。
 
 正因如此，正如 [Custom_OpenClash_Rules](https://github.com/Aethersailor/Custom_OpenClash_Rules) 项目一直坚持的理念：
 
@@ -164,7 +164,7 @@ proxy-providers:
 >
 > * ✅ 不再干预用户节点，交由内核原生处理
 > * ✅ 订阅更新由客户端控制，无需重新转换
-> * ✅ 避免机场屏蔽转换服务器带来的问题
+> * ✅ 避免远程订阅服务商屏蔽转换服务器带来的问题
 
 #### 2. Mihomo 内核模块集成 🧩
 
