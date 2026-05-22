@@ -21,6 +21,7 @@
 #include "generator/template/templates.h"
 #include "interfaces.h"
 #include "multithread.h"
+#include "parser/mihomo_scheme_utils.h"
 #include "script/cron.h"
 #include "script/script_quickjs.h"
 #include "server/webserver.h"
@@ -1378,14 +1379,9 @@ static std::string subconverter_impl(RESPONSE_CALLBACK_ARGS) {
       TaggedLink tagged = parseTaggedLink(x);
       std::string link = tagged.link.empty() ? x : tagged.link;
 
-      // 检查是否是节点链接（以协议前缀开头）
-      bool isNodeLink =
-          startsWith(link, "vless://") || startsWith(link, "vmess://") ||
-          startsWith(link, "ss://") || startsWith(link, "ssr://") ||
-          startsWith(link, "trojan://") || startsWith(link, "hysteria://") ||
-          startsWith(link, "hysteria2://") || startsWith(link, "hy2://") ||
-          startsWith(link, "tuic://") || startsWith(link, "snell://") ||
-          startsWith(link, "socks5://") || startsWith(link, "socks://");
+      // Keep HTTP(S)/data links available for proxy-provider mode. Other
+      // Mihomo-supported schemes are direct node links.
+      bool isNodeLink = mihomo::isSupportedNonHttpSchemeLink(link);
 
       if (isNodeLink) {
         std::string node_link = link;
@@ -1394,7 +1390,7 @@ static std::string subconverter_impl(RESPONSE_CALLBACK_ARGS) {
         writeLog(0, "检测到节点链接：'" + link + "'，将直接解析。",
                  LOG_LEVEL_INFO);
         node_urls.push_back(node_link);
-      } else if (isLink(link)) {
+      } else if (isLink(link) || mihomo::isHttpSchemeLink(link)) {
         // HTTP/HTTPS 订阅链接
         writeLog(
             0, "检测到订阅链接：'" + link + "'，将创建 provider。",

@@ -9,6 +9,7 @@
 #include "parser/config/proxy.h"
 #include "parser/infoparser.h"
 #include "parser/mihomo_bridge.h"
+#include "parser/mihomo_scheme_utils.h"
 #include "parser/subparser.h"
 #include "script/script_quickjs.h"
 #include "subexport.h"
@@ -16,9 +17,6 @@
 #include "utils/logger.h"
 #include "utils/map_extra.h"
 #include "utils/network.h"
-#ifdef USE_MIHOMO_PARSER
-#include "parser/mihomo_schemes.h"
-#endif
 #include "parser/config/proxy_utils.h"
 #include "utils/regexp.h"
 #include "utils/string.h"
@@ -142,15 +140,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
     return 0;
   }
 
-  bool isMihomoScheme = false;
-#ifdef USE_MIHOMO_PARSER
-  for (const auto &scheme : mihomo::SUPPORTED_SCHEMES) {
-    if (startsWith(link, scheme + "://")) {
-      isMihomoScheme = true;
-      break;
-    }
-  }
-#endif
+  bool isMihomoScheme = mihomo::isSupportedSchemeLink(link);
 
   // Handle pipe separated links recursively
   if (link.find('|') != std::string::npos && (isLink(link) || isMihomoScheme)) {
@@ -200,7 +190,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
     bool isNodeLink = false;     // 节点链接标志
 
     // 规则 1: HTTP(S) 开头的链接
-    if (startsWith(link, "http://") || startsWith(link, "https://")) {
+    if (mihomo::isHttpSchemeLink(link)) {
       size_t protocolEnd = link.find("://") + 3;
       size_t pathStart = link.find("/", protocolEnd);
       size_t queryStart = link.find("?", protocolEnd);
@@ -240,14 +230,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
     // 规则 3: 在 SUPPORTED_SCHEMES 中 = 节点链接
     // 例如: trojan://..., vmess://..., hysteria2://...
     else {
-#ifdef USE_MIHOMO_PARSER
-      for (const auto &scheme : mihomo::SUPPORTED_SCHEMES) {
-        if (startsWith(link, scheme + "://")) {
-          isNodeLink = true;
-          break;
-        }
-      }
-#endif
+      isNodeLink = mihomo::isSupportedSchemeLink(link);
       // 规则 4: 其他未知协议 = 节点链接（喂给 Mihomo 尝试）
       // 例如: newproto://..., unknown://...
       // 让 Mihomo 的静默失败机制过滤无效链接
