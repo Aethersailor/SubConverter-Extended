@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="900" height="360" viewBox="0 0 900 360" role="img" aria-labelledby="title desc">
   <title id="title">SubConverter-Extended 远程订阅链接处理流程</title>
-  <desc id="desc">SubConverter-Extended 只返回包含 proxy-provider 的配置，客户端中的 Mihomo 内核再按订阅链接向机场请求节点信息。</desc>
+  <desc id="desc">SubConverter-Extended 只返回包含 proxy-provider 的配置，客户端中的 Mihomo 内核再按订阅链接向远程订阅服务商请求节点信息。</desc>
   <defs>
     <marker id="arrow" markerWidth="10" markerHeight="10" refX="8.5" refY="5" orient="auto" markerUnits="strokeWidth">
       <path class="arrow-head" d="M 0 0 L 10 5 L 0 10 z"/>
@@ -86,7 +86,7 @@
   <text class="text" x="530" y="159" text-anchor="middle">新型后端</text>
 
   <rect class="node provider" x="710" y="235" width="140" height="62" rx="10"/>
-  <text class="text" x="780" y="272" text-anchor="middle">机场</text>
+  <text class="text" x="780" y="272" text-anchor="middle">远程订阅服务商</text>
 
   <path class="line" d="M 212 137 H 455"/>
   <text class="label" x="334" y="121" text-anchor="middle">发送订阅链接</text>
@@ -105,5 +105,5 @@
 
   <path class="no-line" d="M 600 178 C 650 194, 685 216, 722 240"/>
   <path class="no-mark" d="M 649 197 L 665 213 M 665 197 L 649 213"/>
-  <text class="no-text" x="654" y="192" text-anchor="middle">后端不直连机场</text>
+  <text class="no-text" x="654" y="192" text-anchor="middle">后端不直连远程订阅服务商</text>
 </svg>
