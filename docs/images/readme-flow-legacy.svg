@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="900" height="270" viewBox="0 0 900 270" role="img" aria-labelledby="title desc">
   <title id="title">传统 subconverter 远程订阅链接处理流程</title>
-  <desc id="desc">客户端把订阅链接发给原始后端，原始后端向机场请求节点信息，再把整合了节点信息的配置文件返回客户端。</desc>
+  <desc id="desc">客户端把订阅链接发给原始后端，原始后端向远程订阅服务商请求节点信息，再把整合了节点信息的配置文件返回客户端。</desc>
   <defs>
     <marker id="arrow" markerWidth="10" markerHeight="10" refX="8.5" refY="5" orient="auto" markerUnits="strokeWidth">
       <path class="arrow-head" d="M 0 0 L 10 5 L 0 10 z"/>
@@ -59,7 +59,7 @@
   <text class="text" x="450" y="150" text-anchor="middle">原始后端</text>
 
   <rect class="node provider" x="690" y="108" width="150" height="72" rx="10"/>
-  <text class="text" x="765" y="150" text-anchor="middle">机场</text>
+  <text class="text" x="765" y="150" text-anchor="middle">远程订阅服务商</text>
 
   <path class="line" d="M 210 128 H 375"/>
   <text class="label" x="292" y="112" text-anchor="middle">发送订阅链接</text>
