@@ -67,6 +67,7 @@ RUN dpkg --add-architecture armhf && \
     apt-get install -y --no-install-recommends \
       git build-essential crossbuild-essential-armhf \
       cmake ninja-build ccache pkg-config curl ca-certificates file \
+      tzdata \
       libcurl4-openssl-dev:armhf \
       libpcre2-dev:armhf \
       libyaml-cpp-dev:armhf \
@@ -176,8 +177,11 @@ RUN set -xe && \
     arm-linux-gnueabihf-readelf -d /src/subconverter
 
 RUN set -xe && \
-    mkdir -p /runtime-root/etc/ssl/certs /runtime-root/etc /runtime-root/tmp /runtime-root/usr/lib/arm-linux-gnueabihf && \
+    mkdir -p /runtime-root/etc/ssl/certs /runtime-root/etc /runtime-root/tmp /runtime-root/usr/lib/arm-linux-gnueabihf /runtime-root/usr/share/zoneinfo && \
     cp -aL /etc/ssl/certs/ca-certificates.crt /runtime-root/etc/ssl/certs/ && \
+    cp -aL /usr/share/zoneinfo/. /runtime-root/usr/share/zoneinfo/ && \
+    ln -snf /usr/share/zoneinfo/Asia/Shanghai /runtime-root/etc/localtime && \
+    echo Asia/Shanghai > /runtime-root/etc/timezone && \
     if [ -f /etc/nsswitch.conf ]; then cp -aL /etc/nsswitch.conf /runtime-root/etc/nsswitch.conf; fi && \
     for dir in /lib/arm-linux-gnueabihf /usr/lib/arm-linux-gnueabihf /usr/arm-linux-gnueabihf/lib; do \
       if [ -d "$dir" ]; then \
@@ -214,6 +218,8 @@ ENV TZ=Asia/Shanghai
 ENV LD_LIBRARY_PATH="/usr/lib/arm-linux-gnueabihf:/usr/lib"
 WORKDIR /base
 RUN set -e && \
+    ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && \
+    echo $TZ > /etc/timezone && \
     printf '%s\n' \
       '#!/bin/sh' \
       'set -e' \
