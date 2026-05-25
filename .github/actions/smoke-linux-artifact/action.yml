@@ -42,6 +42,7 @@ runs:
         for _ in $(seq 1 30); do
           if curl -fsS "$URL" >"$WORKDIR/response.out"; then
             head -c 200 "$WORKDIR/response.out"
+            python3 "$GITHUB_WORKSPACE/scripts/run-subconverter-smoke.py" --base-url "http://127.0.0.1:${PORT}"
             exit 0
           fi
 

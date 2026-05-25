@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <ctime>
 #include <exception>
 #include <iostream>
@@ -12,6 +13,7 @@
 #include <unordered_set>
 
 #include <inja.hpp>
+#include <rapidjson/stringbuffer.h>
 #include <yaml-cpp/yaml.h>
 
 #include "config/binding.h"
@@ -640,6 +642,179 @@ static std::map<std::string, std::shared_ptr<InflightSubRequest>>
 static std::mutex g_sub_response_cache_mutex;
 static std::map<std::string, CachedSubResponse> g_sub_response_cache;
 
+struct SubExplainProvider {
+  std::string name;
+  std::string tag;
+  std::string source_hash;
+  std::string path;
+  std::string filter;
+  std::string exclude_filter;
+  int group_id = 0;
+  uint32_t interval = 0;
+};
+
+struct SubExplainReport {
+  bool enabled = false;
+  std::string requested_target;
+  std::string target;
+  bool simple_subscription = false;
+  bool upload_requested = false;
+  bool upload_suppressed = false;
+  bool external_config_provided = false;
+  bool external_config_loaded = false;
+  bool fallback_config_used = false;
+  bool rule_generator_enabled = false;
+  bool expand_rulesets = false;
+  bool proxy_provider_mode = false;
+  bool nodelist = false;
+  bool managed_config = false;
+  std::string base_fetch_context = "trusted_config";
+  std::string ruleset_fetch_context = "trusted_config";
+  size_t raw_url_count = 0;
+  size_t insert_url_count = 0;
+  size_t subscription_url_count = 0;
+  size_t node_link_count = 0;
+  size_t unknown_node_link_count = 0;
+  size_t provider_count = 0;
+  size_t insert_node_count = 0;
+  size_t direct_node_count = 0;
+  size_t total_node_count = 0;
+  size_t ruleset_count = 0;
+  size_t custom_group_count = 0;
+  size_t output_bytes = 0;
+  std::vector<SubExplainProvider> providers;
+};
+
+static std::string fetchContextName(FetchContext context) {
+  switch (context) {
+  case FetchContext::PublicRequest:
+    return "public_request";
+  case FetchContext::TrustedConfig:
+  default:
+    return "trusted_config";
+  }
+}
+
+static std::string shortHash(const std::string &value) {
+  if (value.empty())
+    return "";
+  return getMD5(value).substr(0, 10);
+}
+
+static void writeJsonString(
+    rapidjson::Writer<rapidjson::StringBuffer> &writer, const char *key,
+    const std::string &value) {
+  writer.Key(key);
+  writer.String(value.c_str());
+}
+
+static std::string serializeSubExplainReport(const SubExplainReport &report,
+                                             const Response &response) {
+  rapidjson::StringBuffer buffer;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+
+  writer.StartObject();
+  writer.Key("ok");
+  writer.Bool(response.status_code >= 200 && response.status_code < 300);
+  writer.Key("status_code");
+  writer.Int(response.status_code);
+  writeJsonString(writer, "requested_target", report.requested_target);
+  writeJsonString(writer, "target", report.target);
+
+  writer.Key("mode");
+  writer.StartObject();
+  writer.Key("simple_subscription");
+  writer.Bool(report.simple_subscription);
+  writer.Key("proxy_provider");
+  writer.Bool(report.proxy_provider_mode);
+  writer.Key("nodelist");
+  writer.Bool(report.nodelist);
+  writer.Key("expand_rulesets");
+  writer.Bool(report.expand_rulesets);
+  writer.Key("rule_generator");
+  writer.Bool(report.rule_generator_enabled);
+  writer.Key("managed_config");
+  writer.Bool(report.managed_config);
+  writer.Key("upload_requested");
+  writer.Bool(report.upload_requested);
+  writer.Key("upload_suppressed");
+  writer.Bool(report.upload_suppressed);
+  writer.EndObject();
+
+  writer.Key("inputs");
+  writer.StartObject();
+  writer.Key("raw_url_count");
+  writer.Uint64(report.raw_url_count);
+  writer.Key("insert_url_count");
+  writer.Uint64(report.insert_url_count);
+  writer.Key("subscription_url_count");
+  writer.Uint64(report.subscription_url_count);
+  writer.Key("node_link_count");
+  writer.Uint64(report.node_link_count);
+  writer.Key("unknown_node_link_count");
+  writer.Uint64(report.unknown_node_link_count);
+  writer.EndObject();
+
+  writer.Key("external_config");
+  writer.StartObject();
+  writer.Key("provided");
+  writer.Bool(report.external_config_provided);
+  writer.Key("loaded");
+  writer.Bool(report.external_config_loaded);
+  writer.Key("fallback_used");
+  writer.Bool(report.fallback_config_used);
+  writer.EndObject();
+
+  writer.Key("resources");
+  writer.StartObject();
+  writeJsonString(writer, "base_fetch_context", report.base_fetch_context);
+  writeJsonString(writer, "ruleset_fetch_context", report.ruleset_fetch_context);
+  writer.Key("ruleset_count");
+  writer.Uint64(report.ruleset_count);
+  writer.Key("custom_group_count");
+  writer.Uint64(report.custom_group_count);
+  writer.EndObject();
+
+  writer.Key("nodes");
+  writer.StartObject();
+  writer.Key("insert");
+  writer.Uint64(report.insert_node_count);
+  writer.Key("direct");
+  writer.Uint64(report.direct_node_count);
+  writer.Key("total");
+  writer.Uint64(report.total_node_count);
+  writer.EndObject();
+
+  writer.Key("providers");
+  writer.StartArray();
+  for (const SubExplainProvider &provider : report.providers) {
+    writer.StartObject();
+    writeJsonString(writer, "name", provider.name);
+    writeJsonString(writer, "tag", provider.tag);
+    writeJsonString(writer, "source_hash", provider.source_hash);
+    writeJsonString(writer, "path", provider.path);
+    writeJsonString(writer, "filter", provider.filter);
+    writeJsonString(writer, "exclude_filter", provider.exclude_filter);
+    writer.Key("group_id");
+    writer.Int(provider.group_id);
+    writer.Key("interval");
+    writer.Uint(provider.interval);
+    writer.EndObject();
+  }
+  writer.EndArray();
+
+  writer.Key("output");
+  writer.StartObject();
+  writer.Key("bytes");
+  writer.Uint64(report.output_bytes);
+  writer.Key("provider_count");
+  writer.Uint64(report.provider_count);
+  writer.EndObject();
+
+  writer.EndObject();
+  return buffer.GetString();
+}
+
 static bool isTruthyRequestValue(const std::string &value) {
   std::string normalized = toLower(trimWhitespace(value, true, true));
   return normalized == "1" || normalized == "true" ||
@@ -873,11 +1048,16 @@ static std::string subconverter_impl(RESPONSE_CALLBACK_ARGS) {
 
   std::string argTarget = getUrlArg(argument, "target"),
               argSurgeVer = getUrlArg(argument, "ver");
+  bool explainMode = isTruthyRequestValue(getUrlArg(argument, "explain"));
+  SubExplainReport explain;
+  explain.enabled = explainMode;
+  explain.requested_target = argTarget;
   tribool argClashNewField = getUrlArg(argument, "new_name");
   int intSurgeVer = !argSurgeVer.empty() ? to_int(argSurgeVer, 3) : 3;
   if (argTarget == "auto")
     matchUserAgent(request.headers["User-Agent"], argTarget, argClashNewField,
                    intSurgeVer);
+  explain.target = argTarget;
 
   /// don't try to load groups or rulesets when generating simple subscriptions
   bool lSimpleSubscription = false;
@@ -956,6 +1136,11 @@ static std::string subconverter_impl(RESPONSE_CALLBACK_ARGS) {
           argGenClassicalRuleProvider = getUrlArg(argument, "classic"),
           argTLS13 = getUrlArg(argument, "tls13"),
           argProviderProxyDirect = getUrlArg(argument, "provider_proxy_direct");
+  explain.upload_requested = argUpload.get(false);
+  if (explainMode && argUpload) {
+    argUpload = false;
+    explain.upload_suppressed = true;
+  }
 
   std::string base_content, output_content;
   ProxyGroupConfigs lCustomProxyGroups = global.customProxyGroups;
@@ -972,6 +1157,7 @@ static std::string subconverter_impl(RESPONSE_CALLBACK_ARGS) {
   bool authorized = false, strict = !argUpdateStrict.empty()
                                         ? argUpdateStrict == "true"
                                         : global.updateStrict;
+  explain.simple_subscription = lSimpleSubscription;
 
   if (std::find(gRegexBlacklist.cbegin(), gRegexBlacklist.cend(),
                 argIncludeRemark) != gRegexBlacklist.cend() ||
@@ -1070,17 +1256,21 @@ static std::string subconverter_impl(RESPONSE_CALLBACK_ARGS) {
   ext.clash_new_field_name = true;
   if (argExpandRulesets)
     ext.clash_script = false;
+  explain.expand_rulesets = argExpandRulesets.get(false);
 
   ext.nodelist = argGenNodeList;
   // 强制 list=false，直接覆盖用户提供的任何值
   // 确保始终使用 proxy-provider 模式，而不是读取订阅并形成节点列表
   ext.nodelist = false;
+  explain.nodelist = ext.nodelist;
   ext.surge_ssr_path = global.surgeSSRPath;
   ext.quanx_dev_id = !argDeviceID.empty() ? argDeviceID : global.quanXDevID;
   ext.enable_rule_generator = global.enableRuleGen;
   ext.overwrite_original_rules = global.overwriteOriginalRules;
   if (!argExpandRulesets)
     ext.managed_config_prefix = global.managedConfigPrefix;
+  explain.rule_generator_enabled = ext.enable_rule_generator;
+  explain.managed_config = !ext.managed_config_prefix.empty();
 
   /// load external configuration
   std::string userProvidedConfig = getUrlArg(argument, "config");
@@ -1092,6 +1282,7 @@ static std::string subconverter_impl(RESPONSE_CALLBACK_ARGS) {
   FetchContext baseFetchContext = FetchContext::TrustedConfig;
   bool configLoadSuccess = false;
   string_map tpl_args_base = tpl_args.local_vars;
+  explain.external_config_provided = userProvidedExternalConfig;
 
   if (argExternalConfig.empty())
     argExternalConfig = global.defaultExtConfig;
@@ -1107,6 +1298,7 @@ static std::string subconverter_impl(RESPONSE_CALLBACK_ARGS) {
     if (load_result == 0 &&
         hasEffectiveExternalConfig(extconf, tpl_args, tpl_args_base)) {
       configLoadSuccess = true;
+      explain.external_config_loaded = true;
       if (!ext.nodelist) {
         if (checkExternalBase(extconf.sssub_rule_base, lSSSubBase,
                               externalConfigContext))
@@ -1191,6 +1383,8 @@ static std::string subconverter_impl(RESPONSE_CALLBACK_ARGS) {
           writeLog(0, "已成功加载配置：" + fallbackUrl,
                    LOG_LEVEL_INFO);
           configLoadSuccess = true;
+          explain.external_config_loaded = true;
+          explain.fallback_config_used = true;
           if (!ext.nodelist) {
             checkExternalBase(extconf.sssub_rule_base, lSSSubBase,
                               FetchContext::TrustedConfig);
@@ -1279,6 +1473,11 @@ static std::string subconverter_impl(RESPONSE_CALLBACK_ARGS) {
       lRulesetContent = global.rulesetsContent;
     }
   }
+  explain.rule_generator_enabled = ext.enable_rule_generator;
+  explain.base_fetch_context = fetchContextName(baseFetchContext);
+  explain.ruleset_fetch_context = fetchContextName(rulesetFetchContext);
+  explain.ruleset_count = lRulesetContent.size();
+  explain.custom_group_count = lCustomProxyGroups.size();
 
   if (!argEmoji.is_undef()) {
     argAddEmoji.set(argEmoji);
@@ -1334,6 +1533,7 @@ static std::string subconverter_impl(RESPONSE_CALLBACK_ARGS) {
   if (!global.insertUrls.empty() && argEnableInsert) {
     groupID = -1;
     urls = split(global.insertUrls, "|");
+    explain.insert_url_count = urls.size();
     importItems(urls, true);
     for (std::string &x : urls) {
       x = regTrim(x);
@@ -1359,6 +1559,7 @@ static std::string subconverter_impl(RESPONSE_CALLBACK_ARGS) {
     }
   }
   urls = split(argUrl, "|");
+  explain.raw_url_count = urls.size();
   parse_set.fetch_context = FetchContext::PublicRequest;
   groupID = 0;
 
@@ -1390,6 +1591,7 @@ static std::string subconverter_impl(RESPONSE_CALLBACK_ARGS) {
         writeLog(0, "检测到节点链接：'" + link + "'，将直接解析。",
                  LOG_LEVEL_INFO);
         node_urls.push_back(node_link);
+        explain.node_link_count++;
       } else if (isLink(link) || mihomo::isHttpSchemeLink(link)) {
         // HTTP/HTTPS 订阅链接
         writeLog(
@@ -1397,6 +1599,7 @@ static std::string subconverter_impl(RESPONSE_CALLBACK_ARGS) {
             LOG_LEVEL_INFO);
         subscription_urls.push_back(
             {link, tagged.tag, tagged.provider, tagged.link_decoded});
+        explain.subscription_url_count++;
       } else {
         std::string node_link = link;
         if (tagged.has_tag)
@@ -1404,6 +1607,8 @@ static std::string subconverter_impl(RESPONSE_CALLBACK_ARGS) {
         writeLog(0, "未知 URL 类型：'" + link + "'，按节点链接处理。",
                  LOG_LEVEL_WARNING);
         node_urls.push_back(node_link);
+        explain.node_link_count++;
+        explain.unknown_node_link_count++;
       }
     }
 
@@ -1475,6 +1680,16 @@ static std::string subconverter_impl(RESPONSE_CALLBACK_ARGS) {
         }
 
         ext.providers.push_back(provider);
+        SubExplainProvider explain_provider;
+        explain_provider.name = provider.name;
+        explain_provider.tag = provider.tag;
+        explain_provider.source_hash = shortHash(provider.url);
+        explain_provider.path = provider.path;
+        explain_provider.filter = provider.filter;
+        explain_provider.exclude_filter = provider.exclude_filter;
+        explain_provider.group_id = provider.groupId;
+        explain_provider.interval = provider.interval;
+        explain.providers.push_back(std::move(explain_provider));
         groupID++;
       }
     } else {
@@ -1522,6 +1737,10 @@ static std::string subconverter_impl(RESPONSE_CALLBACK_ARGS) {
   }
   // exit if found nothing
   // 对于 proxy-provider 模式，允许 nodes 为空（节点从 provider 获取）
+  explain.provider_count = ext.providers.size();
+  explain.proxy_provider_mode = ext.use_proxy_provider && !ext.providers.empty();
+  explain.insert_node_count = insert_nodes.size();
+  explain.direct_node_count = nodes.size();
   if (nodes.empty() && insert_nodes.empty() && ext.providers.empty()) {
     *status_code = 400;
     return "Invalid request: no valid proxy nodes or proxy providers were "
@@ -1609,6 +1828,7 @@ static std::string subconverter_impl(RESPONSE_CALLBACK_ARGS) {
 
   // do pre-process now
   preprocessNodes(nodes, ext);
+  explain.total_node_count = nodes.size();
 
   /*
   //insert node info to template
@@ -1879,6 +2099,11 @@ static std::string subconverter_impl(RESPONSE_CALLBACK_ARGS) {
            "请将该请求反馈给服务维护者。";
   }
   writeLog(0, "生成完成。", LOG_LEVEL_INFO);
+  if (explainMode) {
+    explain.output_bytes = output_content.size();
+    response.content_type = "application/json; charset=utf-8";
+    return serializeSubExplainReport(explain, response);
+  }
   if (!argFilename.empty())
     response.headers.emplace("Content-Disposition",
                              "attachment; filename=\"" + argFilename +

@@ -74,6 +74,8 @@ runs:
             throw "Windows artifact smoke test failed."
           }
 
+          python "$env:GITHUB_WORKSPACE\scripts\run-subconverter-smoke.py" --base-url "http://127.0.0.1:$port"
+
           if (-not (Test-Path $pref)) {
             throw "Windows launcher did not create base\pref.toml on first start."
           }
