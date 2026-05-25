@@ -569,6 +569,34 @@ https://api.asailor.org/sub?target=clash&url=https%3A%2F%2Fexample.com%2Fsub&exp
 > * 如果同一请求里包含上传参数，诊断模式会抑制上传，避免排障时产生托管配置写入。
 > * 诊断报告不会直接回显原始订阅地址；provider 来源会以短哈希形式显示，便于区分来源又避免泄露完整链接。
 
+### `/inspect` 请求诊断台
+
+如果不方便直接阅读 `explain=true` 返回的 JSON，可以访问 `/inspect` 打开网页诊断台：
+
+```text
+https://api.asailor.org/inspect
+```
+
+自部署环境可访问：
+
+```text
+http://localhost:25500/inspect
+```
+
+诊断台支持粘贴完整 `/sub?...` 链接、完整 URL，或仅粘贴查询参数。页面会自动补充 `explain=true` 并以只读方式发起诊断请求，然后展示摘要、已识别参数、未识别参数、生效配置、Provider 信息和原始 JSON。
+
+这个页面适合排查以下问题：
+
+* 某个请求参数是否被识别、是否生效、是否被覆盖或抑制
+* `list=true` 等参数是否被项目强制改写为 `proxy-provider` 模式
+* `include` / `exclude`、`emoji`、`new_name`、`config` 等外部参数最终是否参与转换
+* 外部配置、规则集、自定义组、Provider 是否按预期加载或生成
+
+> [!NOTE]
+> * `/inspect` 只是 `explain=true` 诊断报告的可视化界面，不会改变实际转换逻辑。
+> * 页面会隐藏敏感输入的明文，仅展示预览、长度和短哈希等排障信息。
+> * 请求诊断台会保留原始 JSON 区域，方便复制给维护者进一步分析。
+
 ### `provider` 前缀（仅适用于 Clash/ClashR 订阅链接）
 
 `provider` 不是独立参数，而是写在 `url=` 列表中、放在订阅链接前，并以逗号分隔，用于自定义 `proxy-providers` 名称；对节点链接不生效。
