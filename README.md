@@ -540,6 +540,7 @@ logread -e subconverter
 | `include` | 包含节点（正则） | `香港\|台湾` |
 | `exclude` | 排除节点（正则） | `过期\|剩余` |
 | `emoji` | 添加 Emoji | `true` / `false` |
+| `explain` | 返回本次转换的 JSON 诊断报告 | `true` |
 
 ### 常见调用示例
 
@@ -550,6 +551,23 @@ https://api.asailor.org/sub?target=clash&url=https%3A%2F%2Fexample.com%2Fsub&con
 ```text
 https://api.asailor.org/sub?target=clash&url=provider%3AHK%2Chttps%3A%2F%2Fexample.com%2Fsub&include=%E9%A6%99%E6%B8%AF&emoji=true
 ```
+
+### `explain=true` 诊断模式
+
+在 `/sub` 请求中追加 `explain=true` 后，后端会按同一组参数执行转换流程，但返回 JSON 诊断报告，而不是返回 Clash/Surge/QuanX 配置文件。
+
+示例：
+
+```text
+https://api.asailor.org/sub?target=clash&url=https%3A%2F%2Fexample.com%2Fsub&explain=true
+```
+
+这个模式适合排查“参数是否生效”“是否进入 `proxy-provider` 模式”“外部配置是否加载成功”“规则集和节点数量是否符合预期”等问题。报告会包含目标格式、模式开关、输入数量、外部配置状态、规则集统计、provider 数量和输出大小等信息。
+
+> [!NOTE]
+> * `explain=true` 只改变响应内容，不改变实际转换逻辑。
+> * 如果同一请求里包含上传参数，诊断模式会抑制上传，避免排障时产生托管配置写入。
+> * 诊断报告不会直接回显原始订阅地址；provider 来源会以短哈希形式显示，便于区分来源又避免泄露完整链接。
 
 ### `provider` 前缀（仅适用于 Clash/ClashR 订阅链接）
 
