@@ -1152,6 +1152,18 @@ static std::string subconverter_impl(RESPONSE_CALLBACK_ARGS) {
   SubExplainReport explain;
   explain.enabled = explainMode;
   explain.requested_target = argTarget;
+  if (explainMode) {
+    std::string rawUrlForLog = getUrlArg(argument, "url");
+    writeLog(0,
+             "收到 /sub explain JSON 诊断请求：target=" +
+                 (argTarget.empty() ? std::string("<empty>") : argTarget) +
+                 ", 参数数量=" + std::to_string(argument.size()) +
+                 ", url_hash=" +
+                 (rawUrlForLog.empty() ? std::string("-")
+                                       : shortHash(urlDecode(rawUrlForLog))) +
+                 "。",
+             LOG_LEVEL_INFO);
+  }
   tribool argClashNewField = getUrlArg(argument, "new_name");
   int intSurgeVer = !argSurgeVer.empty() ? to_int(argSurgeVer, 3) : 3;
   if (argTarget == "auto")
@@ -2459,6 +2471,16 @@ static std::string subconverter_impl(RESPONSE_CALLBACK_ARGS) {
                        "Managed config prefix is available.");
 
     explain.output_bytes = output_content.size();
+    writeLog(0,
+             "已生成 /sub explain JSON 诊断结果：target=" + argTarget +
+                 ", status=" + std::to_string(response.status_code) +
+                 ", providers=" + std::to_string(explain.provider_count) +
+                 ", nodes=" + std::to_string(explain.total_node_count) +
+                 ", recognized_params=" +
+                 std::to_string(explain.recognized_parameters.size()) +
+                 ", unrecognized_params=" +
+                 std::to_string(explain.unrecognized_parameters.size()) + "。",
+             LOG_LEVEL_INFO);
     response.content_type = "application/json; charset=utf-8";
     return serializeSubExplainReport(explain, response);
   }

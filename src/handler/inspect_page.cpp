@@ -2,11 +2,16 @@
 
 #include <string>
 
+#include "utils/logger.h"
 #include "version.h"
 
 namespace inspect_page {
 
-std::string page(Request &, Response &response) {
+std::string page(Request &request, Response &response) {
+  writeLog(0,
+           "收到 /inspect 诊断台访问请求：method=" + request.method +
+               ", remote=" + request.remote_addr + "。",
+           LOG_LEVEL_INFO);
   response.headers["X-Robots-Tag"] =
       "noindex, nofollow, noarchive, nosnippet, noimageindex";
 
@@ -617,6 +622,10 @@ std::string page(Request &, Response &response) {
             min-width: 680px;
         }
 
+        .provider-table {
+            min-width: 760px;
+        }
+
         .status-text {
             color: var(--text-primary);
             font-weight: 700;
@@ -820,7 +829,7 @@ std::string page(Request &, Response &response) {
                 </div>
                 <div class="metric">
                     <div class="metric-label" data-lang="en">Providers</div>
-                    <div class="metric-label" data-lang="zh">Provider</div>
+                    <div class="metric-label" data-lang="zh">提供者</div>
                     <div class="metric-value" id="metric-providers">-</div>
                 </div>
                 <div class="metric">
@@ -856,12 +865,12 @@ std::string page(Request &, Response &response) {
                 <table class="param-table">
                     <thead>
                         <tr>
-                            <th>Name</th>
-                            <th>Status</th>
-                            <th>Source</th>
-                            <th>Request value</th>
-                            <th>Effective</th>
-                            <th>Note</th>
+                            <th><span data-lang="en">Name</span><span data-lang="zh">名称</span></th>
+                            <th><span data-lang="en">Status</span><span data-lang="zh">状态</span></th>
+                            <th><span data-lang="en">Source</span><span data-lang="zh">来源</span></th>
+                            <th><span data-lang="en">Request value</span><span data-lang="zh">请求值</span></th>
+                            <th><span data-lang="en">Effective</span><span data-lang="zh">生效值</span></th>
+                            <th><span data-lang="en">Note</span><span data-lang="zh">说明</span></th>
                         </tr>
                     </thead>
                     <tbody id="parameters-body"></tbody>
@@ -878,10 +887,10 @@ std::string page(Request &, Response &response) {
                 <table class="config-table">
                     <thead>
                         <tr>
-                            <th>Section</th>
-                            <th>Status</th>
-                            <th>Source</th>
-                            <th>Detail</th>
+                            <th><span data-lang="en">Section</span><span data-lang="zh">项目</span></th>
+                            <th><span data-lang="en">Status</span><span data-lang="zh">状态</span></th>
+                            <th><span data-lang="en">Source</span><span data-lang="zh">来源</span></th>
+                            <th><span data-lang="en">Detail</span><span data-lang="zh">详情</span></th>
                         </tr>
                     </thead>
                     <tbody id="config-body"></tbody>
@@ -892,17 +901,18 @@ std::string page(Request &, Response &response) {
         <section class="section" id="provider-section" hidden>
             <div class="section-title">
                 <span data-lang="en">Providers</span>
-                <span data-lang="zh">Providers</span>
+                <span data-lang="zh">代理提供者</span>
             </div>
             <div class="table-wrap">
-                <table>
+                <table class="provider-table">
                     <thead>
                         <tr>
-                            <th>Name</th>
-                            <th>Source</th>
-                            <th>Path</th>
-                            <th>Filter</th>
-                            <th>Interval</th>
+                            <th><span data-lang="en">Name</span><span data-lang="zh">名称</span></th>
+                            <th><span data-lang="en">Source hash</span><span data-lang="zh">来源哈希</span></th>
+                            <th><span data-lang="en">Path</span><span data-lang="zh">路径</span></th>
+                            <th><span data-lang="en">Include</span><span data-lang="zh">包含过滤</span></th>
+                            <th><span data-lang="en">Exclude</span><span data-lang="zh">排除过滤</span></th>
+                            <th><span data-lang="en">Interval</span><span data-lang="zh">间隔</span></th>
                         </tr>
                     </thead>
                     <tbody id="providers-body"></tbody>
@@ -958,6 +968,7 @@ std::string page(Request &, Response &response) {
             var providersBody = document.getElementById("providers-body");
             var jsonOutput = document.getElementById("json-output");
             var stateLine = document.getElementById("state-line");
+            var lastReport = null;
 
             var sampleQuery = "target=clash&url=provider%3AHK%2Chttps%3A%2F%2Fexample.com%2Fsub&config=data%3A%2Cenable_rule_generator%3Dfalse";
 
@@ -967,6 +978,202 @@ std::string page(Request &, Response &response) {
 
             function text(en, zh) {
                 return isZh() ? zh : en;
+            }
+
+            function localize(value, zhMap) {
+                if (!isZh() || value === undefined || value === null || value === "") {
+                    return value;
+                }
+                return Object.prototype.hasOwnProperty.call(zhMap, value) ? zhMap[value] : value;
+            }
+
+            function localizeName(value) {
+                return localize(value, {
+                    target: "target / 目标",
+                    url: "url / 订阅链接",
+                    explain: "explain / 诊断 JSON",
+                    ver: "ver / Surge 版本",
+                    new_name: "new_name / 新字段名",
+                    group: "group / 节点分组",
+                    upload_path: "upload_path / 上传路径",
+                    include: "include / 包含过滤",
+                    exclude: "exclude / 排除过滤",
+                    groups: "groups / 自定义组",
+                    ruleset: "ruleset / 规则集",
+                    config: "config / 外部配置",
+                    dev_id: "dev_id / 设备 ID",
+                    filename: "filename / 文件名",
+                    interval: "interval / 更新间隔",
+                    strict: "strict / 严格模式",
+                    rename: "rename / 重命名",
+                    filter_script: "filter_script / 过滤脚本",
+                    upload: "upload / 上传",
+                    emoji: "emoji / 表情",
+                    add_emoji: "add_emoji / 添加表情",
+                    remove_emoji: "remove_emoji / 移除旧表情",
+                    append_type: "append_type / 追加类型",
+                    tfo: "tfo / TCP Fast Open",
+                    udp: "udp / UDP",
+                    list: "list / 节点列表",
+                    sort: "sort / 排序",
+                    sort_script: "sort_script / 排序脚本",
+                    script: "script / Clash 脚本",
+                    insert: "insert / 插入节点",
+                    scv: "scv / 跳过证书验证",
+                    fdn: "fdn / 过滤废弃节点",
+                    expand: "expand / 展开规则集",
+                    append_info: "append_info / 追加订阅信息",
+                    prepend: "prepend / 前置插入节点",
+                    classic: "classic / classical 规则",
+                    tls13: "tls13 / TLS 1.3",
+                    provider_proxy_direct: "provider_proxy_direct / Provider 直连",
+                    profile_data: "profile_data / 托管配置数据",
+                    external_config: "external_config / 外部配置",
+                    base_template: "base_template / 基础模板",
+                    rulesets: "rulesets / 规则集",
+                    custom_groups: "custom_groups / 自定义组",
+                    filters: "filters / 过滤器",
+                    proxy_providers: "proxy_providers / 代理提供者",
+                    managed_config: "managed_config / 托管配置"
+                });
+            }
+
+            function localizeStatus(value) {
+                return localize(value, {
+                    applied: "已生效",
+                    defaulted: "使用默认",
+                    overridden: "已覆盖",
+                    suppressed: "已抑制",
+                    ignored: "已忽略",
+                    invalid: "无效",
+                    resolved: "已解析",
+                    loaded: "已加载",
+                    not_loaded: "未加载",
+                    selected: "已选择",
+                    generated: "已生成",
+                    enabled: "已启用"
+                });
+            }
+
+            function localizeSource(value) {
+                return localize(value, {
+                    request: "请求参数",
+                    fallback: "回退配置",
+                    default: "默认配置",
+                    request_failed: "请求配置失败",
+                    none: "无",
+                    public_request: "公开请求",
+                    trusted_config: "可信配置",
+                    effective: "生效配置",
+                    configured: "已配置",
+                    global: "全局配置"
+                });
+            }
+
+            function localizeEffectiveValue(value) {
+                if (!isZh() || value === undefined || value === null || value === "") {
+                    return value;
+                }
+                var mapped = localize(value, {
+                    loaded: "已加载",
+                    "not loaded": "未加载",
+                    "fallback loaded": "已加载回退配置",
+                    "script accepted": "脚本已接受",
+                    "not used": "未使用",
+                    enabled: "已启用",
+                    disabled: "已禁用",
+                    provided: "已提供"
+                });
+                if (mapped !== value) {
+                    return mapped;
+                }
+                var match = /^(\d+) source item\(s\), (\d+) subscription\(s\), (\d+) node link\(s\)$/.exec(String(value));
+                if (match) {
+                    return match[1] + " 个来源项，" + match[2] + " 个订阅，" + match[3] + " 个节点链接";
+                }
+                match = /^(\d+) custom group\(s\)$/.exec(String(value));
+                if (match) {
+                    return match[1] + " 个自定义组";
+                }
+                match = /^(\d+) loaded ruleset\(s\)$/.exec(String(value));
+                if (match) {
+                    return match[1] + " 个已加载规则集";
+                }
+                match = /^(\d+) rename rule\(s\)$/.exec(String(value));
+                if (match) {
+                    return match[1] + " 条重命名规则";
+                }
+                return value;
+            }
+
+            function localizeNote(value) {
+                if (!isZh() || value === undefined || value === null || value === "") {
+                    return value;
+                }
+                var mapped = localize(value, {
+                    "target=auto was resolved from the User-Agent": "target=auto 已根据 User-Agent 解析为实际目标。",
+                    "Sensitive values are redacted; use hash and length to compare inputs.": "敏感值已隐藏，可通过哈希和长度比对输入。",
+                    "The request returned a JSON diagnostic report.": "该请求返回 JSON 诊断报告。",
+                    "Surge-compatible target version.": "Surge 兼容目标版本。",
+                    "Mihomo-compatible field names are forced for Clash output.": "Clash 输出会强制使用 Mihomo 兼容字段名。",
+                    "Overrides the group name on direct nodes.": "覆盖直连节点的分组名称。",
+                    "Only used when upload is effective.": "仅在上传生效时使用。",
+                    "Used as node/provider include filter when valid.": "有效时作为节点和 Provider 的包含过滤器。",
+                    "Used as node/provider exclude filter when valid.": "有效时作为节点和 Provider 的排除过滤器。",
+                    "External config loaded; request groups were not used.": "外部配置已加载，请求中的自定义组未使用。",
+                    "Decoded from URL-safe base64.": "已从 URL-safe base64 解码。",
+                    "External config loaded; request rulesets were not used.": "外部配置已加载，请求中的规则集未使用。",
+                    "User config failed and a fallback config was loaded.": "用户配置加载失败，已加载回退配置。",
+                    "External config URL or data source.": "外部配置 URL 或数据源。",
+                    "Quantumult X device id.": "Quantumult X 设备 ID。",
+                    "Content-Disposition is not emitted for explain JSON.": "explain JSON 不输出 Content-Disposition。",
+                    "Effective update interval in seconds.": "实际更新间隔，单位为秒。",
+                    "Managed config strict flag.": "托管配置 strict 标记。",
+                    "Request rename rules override configured rename rules.": "请求中的重命名规则会覆盖已配置规则。",
+                    "Public requests cannot provide executable filter scripts.": "公开请求不能提供可执行过滤脚本。",
+                    "Uploads are disabled in explain mode.": "explain 模式下上传会被禁用。",
+                    "Sets add_emoji and remove_emoji together.": "同时设置 add_emoji 和 remove_emoji。",
+                    "This project forces provider mode for Clash-compatible output.": "本项目对 Clash 兼容输出强制使用 Provider 模式。",
+                    "Uses configured sort script when sorting is enabled.": "启用排序时使用已配置排序脚本。",
+                    "Managed config URL override.": "托管配置 URL 覆盖值。",
+                    "This parameter is not recognized by /sub.": "该参数不是 /sub 可识别参数。",
+                    "Fallback config was used.": "已使用回退配置。",
+                    "User-provided config was evaluated.": "已评估用户提供的配置。",
+                    "Default external config was evaluated.": "已评估默认外部配置。",
+                    "Managed config prefix is available.": "托管配置前缀可用。"
+                });
+                if (mapped !== value) {
+                    return mapped;
+                }
+                var match = /^Base template fetch context for target (.+)\.$/.exec(String(value));
+                if (match) {
+                    return "目标 " + match[1] + " 的基础模板获取上下文。";
+                }
+                match = /^(\d+) ruleset\(s\)\.$/.exec(String(value));
+                if (match) {
+                    return match[1] + " 个规则集。";
+                }
+                match = /^(\d+) custom group\(s\)\.$/.exec(String(value));
+                if (match) {
+                    return match[1] + " 个自定义组。";
+                }
+                match = /^(\d+) rename rule\(s\)\.$/.exec(String(value));
+                if (match) {
+                    return match[1] + " 条重命名规则。";
+                }
+                match = /^(\d+) emoji rule\(s\)\.$/.exec(String(value));
+                if (match) {
+                    return match[1] + " 条表情规则。";
+                }
+                match = /^(\d+) include filter\(s\), (\d+) exclude filter\(s\)\.$/.exec(String(value));
+                if (match) {
+                    return match[1] + " 个包含过滤器，" + match[2] + " 个排除过滤器。";
+                }
+                match = /^(\d+) provider\(s\)\.$/.exec(String(value));
+                if (match) {
+                    return match[1] + " 个代理提供者。";
+                }
+                return value;
             }
 
             function setText(id, value) {
@@ -1027,6 +1234,7 @@ std::string page(Request &, Response &response) {
             }
 
             function showError(message, detail) {
+                lastReport = null;
                 summarySection.hidden = true;
                 parameterSection.hidden = true;
                 configSection.hidden = true;
@@ -1039,13 +1247,13 @@ std::string page(Request &, Response &response) {
             function valueSummary(item) {
                 var parts = [];
                 if (item.value_preview) {
-                    parts.push(item.value_preview);
+                    parts.push(isZh() && item.value_preview === "[redacted]" ? "[已隐藏]" : item.value_preview);
                 }
                 if (item.value_hash) {
                     parts.push("#" + item.value_hash);
                 }
                 if (Number.isFinite(item.value_length)) {
-                    parts.push(String(item.value_length) + " B");
+                    parts.push(String(item.value_length) + text(" B", " 字节"));
                 }
                 return parts.length ? parts.join(" · ") : "-";
             }
@@ -1070,12 +1278,12 @@ std::string page(Request &, Response &response) {
                 }
                 rows.forEach(function (item) {
                     var row = document.createElement("tr");
-                    appendCell(row, item.name);
-                    appendCell(row, item.status, "status-text");
-                    appendCell(row, item.source);
+                    appendCell(row, localizeName(item.name));
+                    appendCell(row, localizeStatus(item.status), "status-text");
+                    appendCell(row, localizeSource(item.source));
                     appendCell(row, valueSummary(item), "value-cell");
-                    appendCell(row, item.effective_value, "value-cell");
-                    appendCell(row, item.note, "value-cell");
+                    appendCell(row, localizeEffectiveValue(item.effective_value), "value-cell");
+                    appendCell(row, localizeNote(item.note), "value-cell");
                     parametersBody.appendChild(row);
                 });
                 parameterSection.hidden = false;
@@ -1090,10 +1298,10 @@ std::string page(Request &, Response &response) {
                 }
                 sections.forEach(function (section) {
                     var row = document.createElement("tr");
-                    appendCell(row, section.name);
-                    appendCell(row, section.status, "status-text");
-                    appendCell(row, section.source);
-                    appendCell(row, section.detail, "value-cell");
+                    appendCell(row, localizeName(section.name));
+                    appendCell(row, localizeStatus(section.status), "status-text");
+                    appendCell(row, localizeSource(section.source));
+                    appendCell(row, localizeNote(section.detail), "value-cell");
                     configBody.appendChild(row);
                 });
                 configSection.hidden = false;
@@ -1107,7 +1315,14 @@ std::string page(Request &, Response &response) {
                 }
                 providers.forEach(function (provider) {
                     var row = document.createElement("tr");
-                    [provider.name || "-", provider.source_hash || "-", provider.path || "-", provider.filter || provider.exclude_filter || "-", String(provider.interval || "-")].forEach(function (value) {
+                    [
+                        provider.name || "-",
+                        provider.source_hash || "-",
+                        provider.path || "-",
+                        provider.filter || "-",
+                        provider.exclude_filter || "-",
+                        provider.interval ? String(provider.interval) + text("s", " 秒") : "-"
+                    ].forEach(function (value) {
                         var cell = document.createElement("td");
                         cell.textContent = value;
                         row.appendChild(cell);
@@ -1118,6 +1333,7 @@ std::string page(Request &, Response &response) {
             }
 
             function renderReport(report) {
+                lastReport = report;
                 var mode = report.mode || {};
                 var inputs = report.inputs || {};
                 var nodes = report.nodes || {};
@@ -1201,6 +1417,9 @@ std::string page(Request &, Response &response) {
 
             document.querySelector(".lang-toggle").addEventListener("click", function () {
                 document.documentElement.lang = isZh() ? "en" : "zh-CN";
+                if (lastReport) {
+                    renderReport(lastReport);
+                }
                 updateResolvedUrl();
             });
 
@@ -1219,6 +1438,7 @@ std::string page(Request &, Response &response) {
                 providerSection.hidden = true;
                 jsonSection.hidden = true;
                 emptySection.hidden = false;
+                lastReport = null;
                 input.focus();
             });
 
