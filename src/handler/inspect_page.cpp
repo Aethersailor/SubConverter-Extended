@@ -10,7 +10,7 @@ namespace inspect_page {
 std::string page(Request &request, Response &response) {
   writeLog(0,
            "收到 /inspect 诊断台访问请求：method=" + request.method +
-               ", remote=" + request.remote_addr + "。",
+               ", path=" + request.url + "。",
            LOG_LEVEL_INFO);
   response.headers["X-Robots-Tag"] =
       "noindex, nofollow, noarchive, nosnippet, noimageindex";
