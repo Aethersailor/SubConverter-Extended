@@ -1,14 +1,14 @@
-#ifndef DEBUG_PAGE_H_INCLUDED
-#define DEBUG_PAGE_H_INCLUDED
+#ifndef INSPECT_PAGE_H_INCLUDED
+#define INSPECT_PAGE_H_INCLUDED
 
 #include <string>
 
 #include "server/webserver.h"
 
-namespace debug_page {
+namespace inspect_page {
 
 std::string page(Request &, Response &response);
 
-} // namespace debug_page
+} // namespace inspect_page
 
-#endif // DEBUG_PAGE_H_INCLUDED
+#endif // INSPECT_PAGE_H_INCLUDED

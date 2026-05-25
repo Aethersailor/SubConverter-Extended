@@ -1,10 +1,10 @@
-#include "handler/debug_page.h"
+#include "handler/inspect_page.h"
 
 #include <string>
 
 #include "version.h"
 
-namespace debug_page {
+namespace inspect_page {
 
 std::string page(Request &, Response &response) {
   response.headers["X-Robots-Tag"] =
@@ -1021,4 +1021,4 @@ std::string page(Request &, Response &response) {
 </html>)html";
 }
 
-} // namespace debug_page
+} // namespace inspect_page
