@@ -7,6 +7,7 @@
 #include <sys/types.h>
 
 #include "config/ruleset.h"
+#include "handler/debug_page.h"
 #include "handler/interfaces.h"
 #include "handler/settings.h"
 #include "handler/version_page.h"
@@ -194,12 +195,18 @@ int main(int argc, char *argv[]) {
 
   webServer.append_response("GET", "/version", "text/html; charset=utf-8",
                             version_page::page);
+  webServer.append_response("GET", "/debug", "text/html; charset=utf-8",
+                            debug_page::page);
+  webServer.append_response("GET", "/inspect", "text/html; charset=utf-8",
+                            debug_page::page);
 
   webServer.append_response(
       "GET", "/robots.txt", "text/plain; charset=utf-8",
       [](RESPONSE_CALLBACK_ARGS) -> std::string {
         return "User-agent: *\n"
                "Disallow: /version\n"
+               "Disallow: /debug\n"
+               "Disallow: /inspect\n"
                "Disallow: /v\n";
       });
 

@@ -76,6 +76,14 @@ def run_checks(base_url: str, timeout: int, snapshot_dir: Path | None, update: b
     if health.strip() != "ok":
         raise AssertionError(f"/healthz returned unexpected body: {health!r}")
 
+    debug_page = fetch(base_url, "/debug", None, timeout)
+    if "Request Inspector" not in debug_page or "explain" not in debug_page:
+        raise AssertionError("/debug did not return the inspector page")
+
+    inspect_page = fetch(base_url, "/inspect", None, timeout)
+    if "Request Inspector" not in inspect_page or "request-input" not in inspect_page:
+        raise AssertionError("/inspect did not return the inspector page")
+
     common_params = {
         "target": "clash",
         "url": SAMPLE_SS_LINK,
