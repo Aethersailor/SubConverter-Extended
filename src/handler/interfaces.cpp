@@ -14,6 +14,7 @@
 
 #include <inja.hpp>
 #include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 #include <yaml-cpp/yaml.h>
 
 #include "config/binding.h"
