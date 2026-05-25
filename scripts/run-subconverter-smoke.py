@@ -77,7 +77,12 @@ def run_checks(base_url: str, timeout: int, snapshot_dir: Path | None, update: b
         raise AssertionError(f"/healthz returned unexpected body: {health!r}")
 
     inspect_page = fetch(base_url, "/inspect", None, timeout)
-    if "Request Inspector" not in inspect_page or "request-input" not in inspect_page:
+    if (
+        "Request Inspector" not in inspect_page
+        or "request-input" not in inspect_page
+        or "request-preview" not in inspect_page
+        or "parameter-section" not in inspect_page
+    ):
         raise AssertionError("/inspect did not return the inspector page")
 
     common_params = {
@@ -102,6 +107,14 @@ def run_checks(base_url: str, timeout: int, snapshot_dir: Path | None, update: b
         raise AssertionError(f"unexpected explain target: {direct_report.get('target')!r}")
     if direct_report.get("nodes", {}).get("total", 0) < 1:
         raise AssertionError("direct explain report did not count the parsed node")
+    direct_params = direct_report.get("parameters", {})
+    direct_recognized = {
+        item.get("name"): item for item in direct_params.get("recognized", [])
+    }
+    if "target" not in direct_recognized or "url" not in direct_recognized:
+        raise AssertionError("direct explain report did not include recognized request parameters")
+    if "effective_config" not in direct_report:
+        raise AssertionError("direct explain report did not include effective config diagnostics")
     assert_snapshot("direct-explain.json", direct_explain, snapshot_dir, update)
 
     provider_explain = fetch(
@@ -120,6 +133,12 @@ def run_checks(base_url: str, timeout: int, snapshot_dir: Path | None, update: b
         raise AssertionError("provider explain report did not enter proxy-provider mode")
     if provider_report.get("output", {}).get("provider_count") != 1:
         raise AssertionError("provider explain report did not count one provider")
+    provider_params = provider_report.get("parameters", {})
+    provider_recognized = {
+        item.get("name"): item for item in provider_params.get("recognized", [])
+    }
+    if provider_recognized.get("config", {}).get("status") not in {"applied", "ignored"}:
+        raise AssertionError("provider explain report did not diagnose the config parameter")
     assert_snapshot("provider-explain.json", provider_explain, snapshot_dir, update)
 
 

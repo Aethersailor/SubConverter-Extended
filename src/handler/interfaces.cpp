@@ -654,6 +654,27 @@ struct SubExplainProvider {
   uint32_t interval = 0;
 };
 
+struct SubExplainParameter {
+  std::string name;
+  std::string source;
+  std::string status;
+  std::string value_preview;
+  std::string value_hash;
+  std::string effective_value;
+  std::string note;
+  size_t raw_length = 0;
+  size_t value_length = 0;
+  bool present = false;
+  bool sensitive = false;
+};
+
+struct SubExplainConfigSection {
+  std::string name;
+  std::string source;
+  std::string status;
+  std::string detail;
+};
+
 struct SubExplainReport {
   bool enabled = false;
   std::string requested_target;
@@ -684,6 +705,10 @@ struct SubExplainReport {
   size_t custom_group_count = 0;
   size_t output_bytes = 0;
   std::vector<SubExplainProvider> providers;
+  std::vector<SubExplainParameter> recognized_parameters;
+  std::vector<SubExplainParameter> unrecognized_parameters;
+  std::string effective_config_source = "none";
+  std::vector<SubExplainConfigSection> effective_config_sections;
 };
 
 static std::string fetchContextName(FetchContext context) {
@@ -702,11 +727,60 @@ static std::string shortHash(const std::string &value) {
   return getMD5(value).substr(0, 10);
 }
 
+static std::string boolString(bool value) { return value ? "true" : "false"; }
+
+static std::string previewExplainValue(const std::string &raw_value,
+                                       bool sensitive) {
+  std::string decoded = urlDecode(raw_value);
+  if (decoded.empty())
+    return "";
+  if (sensitive)
+    return "[redacted]";
+
+  static constexpr size_t kMaxPreview = 180;
+  if (decoded.size() <= kMaxPreview)
+    return decoded;
+  return decoded.substr(0, kMaxPreview) + "...";
+}
+
 static void writeJsonString(
     rapidjson::Writer<rapidjson::StringBuffer> &writer, const char *key,
     const std::string &value) {
   writer.Key(key);
   writer.String(value.c_str());
+}
+
+static void writeExplainParameter(
+    rapidjson::Writer<rapidjson::StringBuffer> &writer,
+    const SubExplainParameter &parameter) {
+  writer.StartObject();
+  writeJsonString(writer, "name", parameter.name);
+  writer.Key("present");
+  writer.Bool(parameter.present);
+  writeJsonString(writer, "source", parameter.source);
+  writeJsonString(writer, "status", parameter.status);
+  writeJsonString(writer, "value_preview", parameter.value_preview);
+  writeJsonString(writer, "value_hash", parameter.value_hash);
+  writer.Key("raw_length");
+  writer.Uint64(parameter.raw_length);
+  writer.Key("value_length");
+  writer.Uint64(parameter.value_length);
+  writeJsonString(writer, "effective_value", parameter.effective_value);
+  writeJsonString(writer, "note", parameter.note);
+  writer.Key("sensitive");
+  writer.Bool(parameter.sensitive);
+  writer.EndObject();
+}
+
+static void writeExplainConfigSection(
+    rapidjson::Writer<rapidjson::StringBuffer> &writer,
+    const SubExplainConfigSection &section) {
+  writer.StartObject();
+  writeJsonString(writer, "name", section.name);
+  writeJsonString(writer, "source", section.source);
+  writeJsonString(writer, "status", section.status);
+  writeJsonString(writer, "detail", section.detail);
+  writer.EndObject();
 }
 
 static std::string serializeSubExplainReport(const SubExplainReport &report,
@@ -764,6 +838,31 @@ static std::string serializeSubExplainReport(const SubExplainReport &report,
   writer.Bool(report.external_config_loaded);
   writer.Key("fallback_used");
   writer.Bool(report.fallback_config_used);
+  writer.EndObject();
+
+  writer.Key("parameters");
+  writer.StartObject();
+  writer.Key("recognized");
+  writer.StartArray();
+  for (const SubExplainParameter &parameter : report.recognized_parameters)
+    writeExplainParameter(writer, parameter);
+  writer.EndArray();
+  writer.Key("unrecognized");
+  writer.StartArray();
+  for (const SubExplainParameter &parameter : report.unrecognized_parameters)
+    writeExplainParameter(writer, parameter);
+  writer.EndArray();
+  writer.EndObject();
+
+  writer.Key("effective_config");
+  writer.StartObject();
+  writeJsonString(writer, "source", report.effective_config_source);
+  writer.Key("sections");
+  writer.StartArray();
+  for (const SubExplainConfigSection &section :
+       report.effective_config_sections)
+    writeExplainConfigSection(writer, section);
+  writer.EndArray();
   writer.EndObject();
 
   writer.Key("resources");
@@ -2101,6 +2200,264 @@ static std::string subconverter_impl(RESPONSE_CALLBACK_ARGS) {
   }
   writeLog(0, "生成完成。", LOG_LEVEL_INFO);
   if (explainMode) {
+    auto hasArg = [&](const std::string &name) {
+      return argument.find(name) != argument.end();
+    };
+    auto rawArg = [&](const std::string &name) {
+      return getUrlArg(argument, name);
+    };
+    auto addParameter = [&](const std::string &name,
+                            const std::string &effective_value,
+                            const std::string &status,
+                            const std::string &note,
+                            bool sensitive = false,
+                            const std::string &source = "request") {
+      if (!hasArg(name))
+        return;
+      std::string raw_value = rawArg(name);
+      std::string decoded_value = urlDecode(raw_value);
+      SubExplainParameter parameter;
+      parameter.name = name;
+      parameter.present = true;
+      parameter.source = source;
+      parameter.status = status;
+      parameter.value_preview = previewExplainValue(raw_value, sensitive);
+      parameter.value_hash = shortHash(decoded_value);
+      parameter.raw_length = raw_value.size();
+      parameter.value_length = decoded_value.size();
+      parameter.effective_value = effective_value;
+      parameter.note = note;
+      parameter.sensitive = sensitive;
+      explain.recognized_parameters.push_back(std::move(parameter));
+    };
+    auto addSwitchParameter = [&](const std::string &name, bool effective_value,
+                                  const tribool &arg_value,
+                                  const std::string &note = "") {
+      addParameter(name, boolString(effective_value),
+                   arg_value.is_undef() ? "defaulted" : "applied", note);
+    };
+    auto addConfigSection = [&](const std::string &name,
+                                const std::string &source,
+                                const std::string &status,
+                                const std::string &detail) {
+      SubExplainConfigSection section;
+      section.name = name;
+      section.source = source;
+      section.status = status;
+      section.detail = detail;
+      explain.effective_config_sections.push_back(std::move(section));
+    };
+
+    addParameter("target", argTarget,
+                 explain.requested_target != argTarget ? "resolved" : "applied",
+                 explain.requested_target != argTarget
+                     ? "target=auto was resolved from the User-Agent"
+                     : "");
+    addParameter("url",
+                 std::to_string(explain.raw_url_count) +
+                     " source item(s), " +
+                     std::to_string(explain.subscription_url_count) +
+                     " subscription(s), " +
+                     std::to_string(explain.node_link_count) + " node link(s)",
+                 "applied",
+                 "Sensitive values are redacted; use hash and length to "
+                 "compare inputs.",
+                 true);
+    addParameter("explain", "true", "applied",
+                 "The request returned a JSON diagnostic report.");
+    addParameter("ver", std::to_string(intSurgeVer), "applied",
+                 "Surge-compatible target version.");
+    addParameter("new_name", boolString(ext.clash_new_field_name),
+                 argClashNewField.is_undef() ||
+                         argClashNewField.get(false) == ext.clash_new_field_name
+                     ? "applied"
+                     : "overridden",
+                 "Mihomo-compatible field names are forced for Clash output.");
+    addParameter("group", argGroupName,
+                 argGroupName.empty() ? "ignored" : "applied",
+                 "Overrides the group name on direct nodes.");
+    addParameter("upload_path", argUploadPath,
+                 argUpload ? "applied" : "ignored",
+                 "Only used when upload is effective.", true);
+    addParameter("include", argIncludeRemark,
+                 !argIncludeRemark.empty() && regValid(argIncludeRemark)
+                     ? "applied"
+                     : "ignored",
+                 "Used as node/provider include filter when valid.");
+    addParameter("exclude", argExcludeRemark,
+                 !argExcludeRemark.empty() && regValid(argExcludeRemark)
+                     ? "applied"
+                     : "ignored",
+                 "Used as node/provider exclude filter when valid.");
+    addParameter("groups", std::to_string(lCustomProxyGroups.size()) +
+                              " custom group(s)",
+                 configLoadSuccess ? "ignored" : "applied",
+                 configLoadSuccess
+                     ? "External config loaded; request groups were not used."
+                     : "Decoded from URL-safe base64.");
+    addParameter("ruleset", std::to_string(lRulesetContent.size()) +
+                                " loaded ruleset(s)",
+                 configLoadSuccess ? "ignored" : "applied",
+                 configLoadSuccess
+                     ? "External config loaded; request rulesets were not used."
+                     : "Decoded from URL-safe base64.");
+    std::string config_effective = explain.external_config_loaded
+                                       ? "loaded"
+                                       : "not loaded";
+    if (explain.fallback_config_used)
+      config_effective = "fallback loaded";
+    addParameter("config", config_effective,
+                 explain.external_config_loaded ? "applied" : "ignored",
+                 explain.fallback_config_used
+                     ? "User config failed and a fallback config was loaded."
+                     : "External config URL or data source.",
+                 true);
+    addParameter("dev_id", ext.quanx_dev_id,
+                 ext.quanx_dev_id.empty() ? "ignored" : "applied",
+                 "Quantumult X device id.");
+    addParameter("filename", argFilename, "ignored",
+                 "Content-Disposition is not emitted for explain JSON.");
+    addParameter("interval", std::to_string(interval), "applied",
+                 "Effective update interval in seconds.");
+    addParameter("strict", boolString(strict), "applied",
+                 "Managed config strict flag.");
+    addParameter("rename", std::to_string(ext.rename_array.size()) +
+                               " rename rule(s)",
+                 argRenames.empty() ? "ignored" : "applied",
+                 "Request rename rules override configured rename rules.");
+    addParameter("filter_script",
+                 authorized && !argFilterScript.empty() ? "script accepted"
+                                                        : "not used",
+                 authorized ? "applied" : "ignored",
+                 "Public requests cannot provide executable filter scripts.",
+                 true);
+    addParameter("upload", boolString(argUpload), explain.upload_suppressed
+                                                    ? "suppressed"
+                                                    : "applied",
+                 explain.upload_suppressed
+                     ? "Uploads are disabled in explain mode."
+                     : "");
+    addParameter("emoji", boolString(ext.add_emoji), "applied",
+                 "Sets add_emoji and remove_emoji together.");
+    addSwitchParameter("add_emoji", ext.add_emoji, argAddEmoji);
+    addSwitchParameter("remove_emoji", ext.remove_emoji, argRemoveEmoji);
+    addSwitchParameter("append_type", ext.append_proxy_type, argAppendType);
+    addSwitchParameter("tfo", ext.tfo.get(false), ext.tfo);
+    addSwitchParameter("udp", ext.udp.get(false), ext.udp);
+    addParameter("list", boolString(ext.nodelist),
+                 isTruthyRequestValue(rawArg("list")) && !ext.nodelist
+                     ? "overridden"
+                     : "applied",
+                 "This project forces provider mode for Clash-compatible "
+                 "output.");
+    addSwitchParameter("sort", ext.sort_flag, argSort);
+    addParameter("sort_script",
+                 argUseSortScript ? "enabled" : "disabled",
+                 argUseSortScript ? "applied" : "ignored",
+                 "Uses configured sort script when sorting is enabled.");
+    addSwitchParameter("script", ext.clash_script, argGenClashScript);
+    addSwitchParameter("insert", argEnableInsert.get(global.enableInsert),
+                       argEnableInsert);
+    addSwitchParameter("scv", ext.skip_cert_verify.get(false),
+                       ext.skip_cert_verify);
+    addSwitchParameter("fdn", ext.filter_deprecated, argFilterDeprecated);
+    addSwitchParameter("expand", explain.expand_rulesets, argExpandRulesets);
+    addSwitchParameter("append_info",
+                       argAppendUserinfo.get(global.appendUserinfo),
+                       argAppendUserinfo);
+    addSwitchParameter("prepend", argPrependInsert.get(global.prependInsert),
+                       argPrependInsert);
+    addSwitchParameter("classic", ext.clash_classical_ruleset,
+                       argGenClassicalRuleProvider);
+    addSwitchParameter("tls13", ext.tls13.get(false), ext.tls13);
+    addSwitchParameter("provider_proxy_direct", ext.provider_proxy_direct,
+                       argProviderProxyDirect);
+    addParameter("profile_data", managed_url.empty() ? "not used" : "provided",
+                 managed_url.empty() ? "ignored" : "applied",
+                 "Managed config URL override.", true);
+
+    const std::unordered_set<std::string> known_parameters = {
+        "target", "url", "ver", "new_name", "group", "upload_path",
+        "include", "exclude", "groups", "ruleset", "config", "dev_id",
+        "filename", "interval", "strict", "rename", "filter_script",
+        "upload", "emoji", "add_emoji", "remove_emoji", "append_type",
+        "tfo", "udp", "list", "sort", "sort_script", "script", "insert",
+        "scv", "fdn", "expand", "append_info", "prepend", "classic",
+        "tls13", "provider_proxy_direct", "explain", "profile_data",
+        "token"};
+    for (const auto &arg : argument) {
+      if (known_parameters.find(arg.first) != known_parameters.end())
+        continue;
+      std::string decoded_value = urlDecode(arg.second);
+      SubExplainParameter parameter;
+      parameter.name = arg.first;
+      parameter.present = true;
+      parameter.source = "request";
+      parameter.status = "ignored";
+      parameter.value_preview = previewExplainValue(arg.second, false);
+      parameter.value_hash = shortHash(decoded_value);
+      parameter.raw_length = arg.second.size();
+      parameter.value_length = decoded_value.size();
+      parameter.effective_value = "";
+      parameter.note = "This parameter is not recognized by /sub.";
+      parameter.sensitive = false;
+      explain.unrecognized_parameters.push_back(std::move(parameter));
+    }
+
+    if (explain.fallback_config_used)
+      explain.effective_config_source = "fallback";
+    else if (explain.external_config_loaded && userProvidedExternalConfig)
+      explain.effective_config_source = "request";
+    else if (explain.external_config_loaded && !global.defaultExtConfig.empty())
+      explain.effective_config_source = "default";
+    else if (userProvidedExternalConfig)
+      explain.effective_config_source = "request_failed";
+    else
+      explain.effective_config_source = "none";
+
+    if (explain.external_config_provided || explain.external_config_loaded) {
+      addConfigSection("external_config", explain.effective_config_source,
+                       explain.external_config_loaded ? "loaded" : "not_loaded",
+                       explain.fallback_config_used
+                           ? "Fallback config was used."
+                           : (userProvidedExternalConfig
+                                  ? "User-provided config was evaluated."
+                                  : "Default external config was evaluated."));
+    }
+    addConfigSection("base_template", explain.base_fetch_context, "selected",
+                     "Base template fetch context for target " + argTarget +
+                         ".");
+    if (explain.rule_generator_enabled)
+      addConfigSection("rulesets", explain.ruleset_fetch_context, "loaded",
+                       std::to_string(explain.ruleset_count) +
+                           " ruleset(s).");
+    if (explain.custom_group_count)
+      addConfigSection("custom_groups", "effective", "loaded",
+                       std::to_string(explain.custom_group_count) +
+                           " custom group(s).");
+    if (!ext.rename_array.empty())
+      addConfigSection("rename", argRenames.empty() ? "configured" : "request",
+                       "loaded",
+                       std::to_string(ext.rename_array.size()) +
+                           " rename rule(s).");
+    if (!ext.emoji_array.empty())
+      addConfigSection("emoji", "configured", "loaded",
+                       std::to_string(ext.emoji_array.size()) +
+                           " emoji rule(s).");
+    if (!lIncludeRemarks.empty() || !lExcludeRemarks.empty())
+      addConfigSection("filters", "effective", "loaded",
+                       std::to_string(lIncludeRemarks.size()) +
+                           " include filter(s), " +
+                           std::to_string(lExcludeRemarks.size()) +
+                           " exclude filter(s).");
+    if (explain.provider_count)
+      addConfigSection("proxy_providers", "request", "generated",
+                       std::to_string(explain.provider_count) +
+                           " provider(s).");
+    if (explain.managed_config)
+      addConfigSection("managed_config", "global", "enabled",
+                       "Managed config prefix is available.");
+
     explain.output_bytes = output_content.size();
     response.content_type = "application/json; charset=utf-8";
     return serializeSubExplainReport(explain, response);

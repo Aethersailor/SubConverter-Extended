@@ -382,8 +382,10 @@ std::string page(Request &, Response &response) {
 
         textarea,
         input {
+            display: block;
             width: 100%;
             min-width: 0;
+            max-width: 100%;
             border: 1px solid var(--input-border);
             border-radius: 18px;
             background: var(--input-bg);
@@ -397,7 +399,13 @@ std::string page(Request &, Response &response) {
 
         textarea {
             min-height: 116px;
+            max-height: 260px;
+            overflow: auto;
             resize: vertical;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", "Microsoft YaHei", monospace;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            word-break: break-word;
         }
 
         textarea::placeholder,
@@ -409,10 +417,42 @@ std::string page(Request &, Response &response) {
         .toolbar {
             display: flex;
             align-items: center;
-            justify-content: space-between;
+            justify-content: flex-end;
             gap: 12px;
             margin-top: 14px;
             flex-wrap: wrap;
+        }
+
+        .request-preview {
+            margin-top: 12px;
+            padding: 12px 14px;
+            border: 1px solid var(--info-block-border);
+            border-radius: 16px;
+            background: var(--code-bg);
+            max-height: 132px;
+            overflow: auto;
+            min-width: 0;
+        }
+
+        .preview-label {
+            color: var(--text-muted);
+            font-size: 0.74rem;
+            font-weight: 700;
+            letter-spacing: 0;
+            text-transform: uppercase;
+            margin-bottom: 7px;
+        }
+
+        .request-preview code {
+            display: block;
+            max-width: 100%;
+            color: var(--text-secondary);
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+            font-size: 0.78rem;
+            line-height: 1.48;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            word-break: break-word;
         }
 
         .button-row {
@@ -466,7 +506,7 @@ std::string page(Request &, Response &response) {
 
         .summary-grid {
             display: grid;
-            grid-template-columns: repeat(4, minmax(0, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
             gap: 12px;
         }
 
@@ -569,6 +609,23 @@ std::string page(Request &, Response &response) {
             overflow-wrap: anywhere;
         }
 
+        .param-table {
+            min-width: 820px;
+        }
+
+        .config-table {
+            min-width: 680px;
+        }
+
+        .status-text {
+            color: var(--text-primary);
+            font-weight: 700;
+        }
+
+        .value-cell {
+            max-width: 320px;
+        }
+
         pre {
             max-height: 360px;
             overflow: auto;
@@ -660,6 +717,10 @@ std::string page(Request &, Response &response) {
                 display: grid;
                 grid-template-columns: 1fr;
             }
+
+            .request-preview {
+                max-height: 150px;
+            }
         }
 
         @media (max-width: 440px) {
@@ -721,8 +782,14 @@ std::string page(Request &, Response &response) {
                 <span data-lang="zh">/sub 链接或查询参数</span>
             </label>
             <textarea id="request-input" spellcheck="false" placeholder="target=clash&url=https%3A%2F%2Fexample.com%2Fsub"></textarea>
+            <div class="request-preview" aria-live="polite">
+                <div class="preview-label">
+                    <span data-lang="en">Normalized request</span>
+                    <span data-lang="zh">规范化请求</span>
+                </div>
+                <code id="resolved-url">/sub?explain=true</code>
+            </div>
             <div class="toolbar">
-                <p class="hint" id="resolved-url">/sub?explain=true</p>
                 <div class="button-row">
                     <button type="button" id="sample-button">
                         <span data-lang="en">Sample</span>
@@ -766,8 +833,60 @@ std::string page(Request &, Response &response) {
                     <div class="metric-label" data-lang="zh">输出</div>
                     <div class="metric-value" id="metric-output">-</div>
                 </div>
+                <div class="metric">
+                    <div class="metric-label" data-lang="en">Params</div>
+                    <div class="metric-label" data-lang="zh">参数</div>
+                    <div class="metric-value" id="metric-parameters">-</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label" data-lang="en">Config</div>
+                    <div class="metric-label" data-lang="zh">配置</div>
+                    <div class="metric-value" id="metric-config">-</div>
+                </div>
             </div>
             <div class="state-line" id="state-line"></div>
+        </section>
+
+        <section class="section" id="parameter-section" hidden>
+            <div class="section-title">
+                <span data-lang="en">Parameters</span>
+                <span data-lang="zh">参数</span>
+            </div>
+            <div class="table-wrap">
+                <table class="param-table">
+                    <thead>
+                        <tr>
+                            <th>Name</th>
+                            <th>Status</th>
+                            <th>Source</th>
+                            <th>Request value</th>
+                            <th>Effective</th>
+                            <th>Note</th>
+                        </tr>
+                    </thead>
+                    <tbody id="parameters-body"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="section" id="config-section" hidden>
+            <div class="section-title">
+                <span data-lang="en">Effective Config</span>
+                <span data-lang="zh">生效配置</span>
+            </div>
+            <div class="table-wrap">
+                <table class="config-table">
+                    <thead>
+                        <tr>
+                            <th>Section</th>
+                            <th>Status</th>
+                            <th>Source</th>
+                            <th>Detail</th>
+                        </tr>
+                    </thead>
+                    <tbody id="config-body"></tbody>
+                </table>
+            </div>
         </section>
 
         <section class="section" id="provider-section" hidden>
@@ -829,9 +948,13 @@ std::string page(Request &, Response &response) {
             var sampleButton = document.getElementById("sample-button");
             var clearButton = document.getElementById("clear-button");
             var summarySection = document.getElementById("summary-section");
+            var parameterSection = document.getElementById("parameter-section");
+            var configSection = document.getElementById("config-section");
             var providerSection = document.getElementById("provider-section");
             var jsonSection = document.getElementById("json-section");
             var emptySection = document.getElementById("empty-section");
+            var parametersBody = document.getElementById("parameters-body");
+            var configBody = document.getElementById("config-body");
             var providersBody = document.getElementById("providers-body");
             var jsonOutput = document.getElementById("json-output");
             var stateLine = document.getElementById("state-line");
@@ -905,10 +1028,75 @@ std::string page(Request &, Response &response) {
 
             function showError(message, detail) {
                 summarySection.hidden = true;
+                parameterSection.hidden = true;
+                configSection.hidden = true;
                 providerSection.hidden = true;
                 jsonSection.hidden = false;
                 emptySection.hidden = true;
                 jsonOutput.textContent = detail ? message + "\n\n" + detail : message;
+            }
+
+            function valueSummary(item) {
+                var parts = [];
+                if (item.value_preview) {
+                    parts.push(item.value_preview);
+                }
+                if (item.value_hash) {
+                    parts.push("#" + item.value_hash);
+                }
+                if (Number.isFinite(item.value_length)) {
+                    parts.push(String(item.value_length) + " B");
+                }
+                return parts.length ? parts.join(" · ") : "-";
+            }
+
+            function appendCell(row, value, className) {
+                var cell = document.createElement("td");
+                if (className) {
+                    cell.className = className;
+                }
+                cell.textContent = value === undefined || value === null || value === "" ? "-" : String(value);
+                row.appendChild(cell);
+            }
+
+            function renderParameters(parameters) {
+                var recognized = Array.isArray(parameters.recognized) ? parameters.recognized : [];
+                var unrecognized = Array.isArray(parameters.unrecognized) ? parameters.unrecognized : [];
+                var rows = recognized.concat(unrecognized);
+                parametersBody.textContent = "";
+                if (!rows.length) {
+                    parameterSection.hidden = true;
+                    return;
+                }
+                rows.forEach(function (item) {
+                    var row = document.createElement("tr");
+                    appendCell(row, item.name);
+                    appendCell(row, item.status, "status-text");
+                    appendCell(row, item.source);
+                    appendCell(row, valueSummary(item), "value-cell");
+                    appendCell(row, item.effective_value, "value-cell");
+                    appendCell(row, item.note, "value-cell");
+                    parametersBody.appendChild(row);
+                });
+                parameterSection.hidden = false;
+            }
+
+            function renderEffectiveConfig(effectiveConfig) {
+                var sections = Array.isArray(effectiveConfig.sections) ? effectiveConfig.sections : [];
+                configBody.textContent = "";
+                if (!sections.length) {
+                    configSection.hidden = true;
+                    return;
+                }
+                sections.forEach(function (section) {
+                    var row = document.createElement("tr");
+                    appendCell(row, section.name);
+                    appendCell(row, section.status, "status-text");
+                    appendCell(row, section.source);
+                    appendCell(row, section.detail, "value-cell");
+                    configBody.appendChild(row);
+                });
+                configSection.hidden = false;
             }
 
             function renderProviders(providers) {
@@ -934,14 +1122,24 @@ std::string page(Request &, Response &response) {
                 var inputs = report.inputs || {};
                 var nodes = report.nodes || {};
                 var external = report.external_config || {};
+                var parameters = report.parameters || {};
+                var effectiveConfig = report.effective_config || {};
                 var output = report.output || {};
                 var resources = report.resources || {};
                 var providers = Array.isArray(report.providers) ? report.providers : [];
+                var recognized = Array.isArray(parameters.recognized) ? parameters.recognized : [];
+                var unrecognized = Array.isArray(parameters.unrecognized) ? parameters.unrecognized : [];
+                var sections = Array.isArray(effectiveConfig.sections) ? effectiveConfig.sections : [];
+                var changedParameters = recognized.filter(function (item) {
+                    return item.status === "overridden" || item.status === "suppressed" || item.status === "ignored" || item.status === "invalid";
+                }).length;
 
                 setText("metric-target", report.target || "-");
                 setText("metric-providers", String(output.provider_count || providers.length || 0));
                 setText("metric-nodes", String(nodes.total || 0));
                 setText("metric-output", formatBytes(output.bytes));
+                setText("metric-parameters", String(recognized.length) + (unrecognized.length ? "+" + String(unrecognized.length) : ""));
+                setText("metric-config", String(sections.length));
 
                 stateLine.textContent = "";
                 stateLine.appendChild(tag((report.ok ? "HTTP " : "HTTP ") + (report.status_code || "-"), report.ok ? "" : "error"));
@@ -949,10 +1147,19 @@ std::string page(Request &, Response &response) {
                 stateLine.appendChild(tag(external.loaded ? text("config loaded", "配置已加载") : text("config not loaded", "配置未加载"), external.loaded ? "" : "warn"));
                 stateLine.appendChild(tag(text("rulesets ", "规则集 ") + (resources.ruleset_count || 0)));
                 stateLine.appendChild(tag(text("subscriptions ", "订阅 ") + (inputs.subscription_url_count || 0)));
+                stateLine.appendChild(tag(text("params ", "参数 ") + recognized.length));
+                if (changedParameters) {
+                    stateLine.appendChild(tag(text("changed ", "变更 ") + changedParameters, "warn"));
+                }
+                if (unrecognized.length) {
+                    stateLine.appendChild(tag(text("unknown ", "未知 ") + unrecognized.length, "warn"));
+                }
                 if (mode.upload_suppressed) {
                     stateLine.appendChild(tag(text("upload suppressed", "上传已抑制"), "warn"));
                 }
 
+                renderParameters(parameters);
+                renderEffectiveConfig(effectiveConfig);
                 renderProviders(providers);
                 jsonOutput.textContent = JSON.stringify(report, null, 2);
                 summarySection.hidden = false;
@@ -1007,6 +1214,8 @@ std::string page(Request &, Response &response) {
                 input.value = "";
                 updateResolvedUrl();
                 summarySection.hidden = true;
+                parameterSection.hidden = true;
+                configSection.hidden = true;
                 providerSection.hidden = true;
                 jsonSection.hidden = true;
                 emptySection.hidden = false;
