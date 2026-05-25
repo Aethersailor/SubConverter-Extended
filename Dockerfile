@@ -207,7 +207,10 @@ LABEL \
   org.opencontainers.image.created="${BUILD_DATE}" \
   maintainer="Aethersailor"
 
-RUN apk add --no-cache ca-certificates
+ENV TZ=Asia/Shanghai
+RUN apk add --no-cache ca-certificates tzdata && \
+    ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && \
+    echo $TZ > /etc/timezone
 
 COPY --from=builder /src/subconverter /usr/bin/subconverter
 COPY --from=builder /src/base /base/
@@ -218,9 +221,7 @@ COPY --from=builder /etc/nsswitch.conf /etc/nsswitch.conf
 # 确保二进制和库可执行
 RUN chmod +x /usr/bin/subconverter && chmod +x /usr/lib/libmihomo.so
 
-ENV TZ=Asia/Shanghai
 ENV LD_LIBRARY_PATH="/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu:/lib/aarch64-linux-gnu:/usr/lib/aarch64-linux-gnu:/lib64:/usr/lib"
-RUN ln -sf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 WORKDIR /base
 RUN set -e && \

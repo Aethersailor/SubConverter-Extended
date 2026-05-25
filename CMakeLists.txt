@@ -72,6 +72,7 @@ ADD_EXECUTABLE(${BUILD_TARGET_NAME}
     src/generator/config/ruleconvert.cpp
     src/generator/config/subexport.cpp
     src/generator/template/templates.cpp
+    src/handler/inspect_page.cpp
     src/handler/interfaces.cpp
     src/handler/multithread.cpp
     src/handler/upload.cpp

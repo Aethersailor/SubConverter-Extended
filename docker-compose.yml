@@ -10,6 +10,7 @@ services:
       - "25500:25500/tcp"
     restart: unless-stopped
     environment:
+      TZ: "Asia/Shanghai"
       # 可选：覆盖 [managed_config].managed_config_prefix / Optional: override [managed_config].managed_config_prefix
       MANAGED_CONFIG_PREFIX: "http://your-domain-or-ip:25500"
     volumes:

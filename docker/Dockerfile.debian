@@ -188,14 +188,17 @@ LABEL \
   maintainer="Aethersailor"
 
 # Install runtime dependencies
+ENV TZ=Asia/Shanghai
 RUN apt-get update && \
     if apt-cache policy libcurl4 | grep -q 'Candidate: (none)'; then \
       curl_runtime=libcurl4t64; \
     else \
       curl_runtime=libcurl4; \
     fi && \
-    apt-get install -y --no-install-recommends \
-    libpcre2-8-0 "$curl_runtime" libyaml-cpp-dev ca-certificates && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    libpcre2-8-0 "$curl_runtime" libyaml-cpp-dev ca-certificates tzdata && \
+    ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && \
+    echo $TZ > /etc/timezone && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /src/subconverter /usr/bin/subconverter
@@ -203,9 +206,6 @@ COPY --from=builder /src/base /base/
 
 # 确保二进制可执行
 RUN chmod +x /usr/bin/subconverter
-
-ENV TZ=Asia/Shanghai
-RUN ln -sf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 WORKDIR /base
 CMD ["/usr/bin/subconverter"]
