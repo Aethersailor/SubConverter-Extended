@@ -525,7 +525,9 @@ logread -e subconverter
 
 ## 📚 使用说明
 
-整体使用方式与原版 subconverter 基本一致。
+整体使用方式与原版 subconverter 基本一致，常见客户端和订阅转换前端通常无需额外适配即可迁移。
+
+下方仅重点说明本项目的高频参数、特有能力，以及与原版 subconverter 行为不同的部分；未列出的兼容参数仍可按原版 subconverter 的使用习惯传入。
 
 > [!IMPORTANT]
 > 默认输出为**最简配置**，不包含 DNS 参数，请在各 Clash 客户端中启用 DNS 覆写功能，或在生成的配置文件中自行补全 DNS 配置。
