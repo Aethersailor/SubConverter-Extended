@@ -105,15 +105,27 @@ jobs:
 
       - name: Docker meta
         id: meta
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6
-        with:
-          images: |
-            aethersailor/subconverter-extended
-            ghcr.io/aethersailor/subconverter-extended
-          tags: |
-            type=raw,value=latest,enable=${{ steps.version.outputs.is_release == 'true' }}
-            type=raw,value=${{ steps.version.outputs.version }},enable=${{ steps.version.outputs.is_release == 'true' }}
-            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          IS_RELEASE: ${{ steps.version.outputs.is_release }}
+        run: |
+          {
+            echo 'tags<<EOF'
+            if [ "$IS_RELEASE" = "true" ]; then
+              printf '%s\n' \
+                "aethersailor/subconverter-extended:latest" \
+                "aethersailor/subconverter-extended:${VERSION}" \
+                "ghcr.io/aethersailor/subconverter-extended:latest" \
+                "ghcr.io/aethersailor/subconverter-extended:${VERSION}"
+            fi
+            if [ "${GITHUB_REF}" = "refs/heads/dev" ]; then
+              printf '%s\n' \
+                "aethersailor/subconverter-extended:dev" \
+                "ghcr.io/aethersailor/subconverter-extended:dev"
+            fi
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
 
   build-linux:
     name: "🐳 Docker Build (${{ matrix.arch }})"
