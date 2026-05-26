@@ -51,7 +51,9 @@ std::string page(Request &, Response &response) {
             --control-border: rgba(26, 32, 44, 0.12);
             --map-fill: #dbe6ef;
             --map-stroke: rgba(255, 255, 255, 0.85);
-            --map-empty: #d4dde8;
+            --map-empty: #cbd5e1;
+            --map-data-min: #22c7d9;
+            --map-data-max: #15803d;
             --danger: #dc2626;
             --warn: #b45309;
         }
@@ -76,7 +78,9 @@ std::string page(Request &, Response &response) {
                 --control-border: rgba(255, 255, 255, 0.16);
                 --map-fill: #243245;
                 --map-stroke: rgba(2, 6, 23, 0.9);
-                --map-empty: #253244;
+                --map-empty: #1e293b;
+                --map-data-min: #22d3ee;
+                --map-data-max: #84cc16;
                 --danger: #f87171;
                 --warn: #fbbf24;
             }
@@ -363,6 +367,10 @@ std::string page(Request &, Response &response) {
             transition: fill 0.16s ease, opacity 0.16s ease;
         }
         .country.has-data { cursor: pointer; }
+        .country.has-data {
+            stroke: color-mix(in srgb, var(--map-stroke) 70%, var(--accent) 30%);
+            stroke-width: 0.7;
+        }
         .country:hover { opacity: 0.82; }
         .tooltip {
             position: absolute;
@@ -662,6 +670,11 @@ std::string page(Request &, Response &response) {
                     return '<button type="button" class="range-tab" aria-pressed="' + (item.key === selected ? "true" : "false") + '" ' + attr + '="' + item.key + '">' + label(item) + '</button>';
                 }).join("");
             }
+            function updateRangeTabs(container, attr, selected) {
+                container.querySelectorAll("[" + attr + "]").forEach(function (button) {
+                    button.setAttribute("aria-pressed", button.getAttribute(attr) === selected ? "true" : "false");
+                });
+            }
             function countersPairHtml(titleEn, titleZh, counters, helpEn, helpZh) {
                 counters = counters || {};
                 return '<article class="metric">' +
@@ -747,6 +760,7 @@ std::string page(Request &, Response &response) {
                     button.addEventListener("click", function () {
                         selectedCountryWindow = button.getAttribute("data-country-window");
                         localStorage.setItem("sce-dashboard-country-window", selectedCountryWindow);
+                        updateRangeTabs(countryTabs, "data-country-window", selectedCountryWindow);
                         if (latest) {
                             renderCountries(selectedCountries(latest));
                             renderMap();
@@ -759,6 +773,7 @@ std::string page(Request &, Response &response) {
                 countries.forEach(function (item) { countryMap.set(item.code, item); });
                 var countryConfig = windowConfig(selectedCountryWindow, COUNTRY_WINDOWS);
                 selectedCountryWindow = countryConfig.key;
+                updateRangeTabs(countryTabs, "data-country-window", selectedCountryWindow);
                 var visibleCountries = countries.filter(function (item) { return item.code !== "ZZ" && item.code !== "XX"; });
                 var totalRequests = countries.reduce(function (sum, item) { return sum + (item.subscription_requests || 0); }, 0);
                 countryRangeLabel.textContent = text("Showing ", "当前范围：") + label(countryConfig);
@@ -798,13 +813,27 @@ std::string page(Request &, Response &response) {
                 var node = svg.node();
                 var width = node.clientWidth || 800;
                 var height = node.clientHeight || 430;
+                var styles = getComputedStyle(document.documentElement);
+                var emptyColor = styles.getPropertyValue("--map-empty").trim() || "#cbd5e1";
+                var dataMinColor = styles.getPropertyValue("--map-data-min").trim() || "#22c7d9";
+                var dataMaxColor = styles.getPropertyValue("--map-data-max").trim() || "#15803d";
                 svg.attr("viewBox", "0 0 " + width + " " + height);
                 svg.selectAll("*").remove();
-                var projection = d3.geoNaturalEarth1().fitSize([width, height], { type: "Sphere" });
+                var projection = d3.geoNaturalEarth1().rotate([-105, 0]).fitSize([width, height], { type: "Sphere" });
                 var path = d3.geoPath(projection);
                 var features = topojson.feature(mapData, mapData.objects.countries).features;
                 var max = Math.max(1, ...Array.from(countryMap.values()).map(function (item) { return item.subscription_requests || 0; }));
-                var color = d3.scaleSequential([0, Math.log10(max + 1)], d3.interpolateYlGnBu);
+                var color = d3.interpolateRgb(dataMinColor, dataMaxColor);
+                function countryRequests(code) {
+                    var item = countryMap.get(code);
+                    return item ? item.subscription_requests || 0 : 0;
+                }
+                function countryFill(code) {
+                    var requests = countryRequests(code);
+                    if (requests < 1) return emptyColor;
+                    if (max <= 1) return color(0.35);
+                    return color(Math.log10(requests) / Math.log10(max));
+                }
                 svg.append("path").datum({ type: "Sphere" }).attr("d", path).attr("fill", "transparent");
                 svg.selectAll("path.country")
                     .data(features)
@@ -812,14 +841,12 @@ std::string page(Request &, Response &response) {
                     .append("path")
                     .attr("class", function (d) {
                         var code = ISO_N3[String(d.id).padStart(3, "0")];
-                        return "country" + (countryMap.has(code) ? " has-data" : "");
+                        return "country" + (countryRequests(code) > 0 ? " has-data" : "");
                     })
                     .attr("d", path)
                     .attr("fill", function (d) {
                         var code = ISO_N3[String(d.id).padStart(3, "0")];
-                        var item = countryMap.get(code);
-                        if (!item) return "var(--map-empty)";
-                        return color(Math.log10((item.subscription_requests || 0) + 1));
+                        return countryFill(code);
                     })
                     .on("mousemove", function (event, d) {
                         var code = ISO_N3[String(d.id).padStart(3, "0")] || "ZZ";
