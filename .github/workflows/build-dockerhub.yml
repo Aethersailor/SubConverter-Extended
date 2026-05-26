@@ -160,7 +160,7 @@ jobs:
         shell: bash
         env:
           GHCR_USERNAME: ${{ github.actor }}
-          GHCR_TOKEN: ${{ secrets.PAT_TOKEN || github.token }}
+          GHCR_TOKEN: ${{ github.token }}
         run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin
 
       - name: Prepare Docker build args
