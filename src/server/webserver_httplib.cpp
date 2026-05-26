@@ -40,6 +40,8 @@ static httplib::Server::Handler makeHandler(const responseRoute &rr) {
     Response resp;
     req.method = request.method;
     req.url = request.path;
+    req.remote_addr = request.remote_addr;
+    req.remote_port = request.remote_port;
     for (auto &h : request.headers) {
       if (startsWith(h.first, "LOCAL_") || startsWith(h.first, "REMOTE_") ||
           is_request_header_blacklisted(h.first)) {

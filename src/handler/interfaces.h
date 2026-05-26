@@ -23,6 +23,7 @@ std::string getProfile(RESPONSE_CALLBACK_ARGS);
 std::string getRuleset(RESPONSE_CALLBACK_ARGS);
 
 std::string subconverter(RESPONSE_CALLBACK_ARGS);
+std::string subconverterTracked(RESPONSE_CALLBACK_ARGS);
 std::string simpleToClashR(RESPONSE_CALLBACK_ARGS);
 std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS);
 

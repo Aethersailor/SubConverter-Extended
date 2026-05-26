@@ -14,6 +14,8 @@ struct Request
 {
     std::string method;
     std::string url;
+    std::string remote_addr;
+    int remote_port = 0;
     string_multimap argument;
     string_icase_map headers;
     std::string postdata;

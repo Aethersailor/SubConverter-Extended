@@ -158,7 +158,7 @@ static std::string transformRuleToCommon(string_view_array &temp, const std::str
     return strLine;
 }
 
-void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_content_array, bool overwrite_original_rules, bool new_field_name)
+void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_content_array, bool overwrite_original_rules, bool new_field_name, RuleConversionStats *stats)
 {
     string_array allRules;
     std::string rule_group, retrieved_rules, strLine;
@@ -187,6 +187,8 @@ void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_
             strLine = appendClashRuleTarget(strLine, rule_group);
             allRules.emplace_back(strLine);
             total_rules++;
+            if(stats)
+                stats->add();
             continue;
         }
         retrieved_rules = convertRuleset(retrieved_rules, x.rule_type);
@@ -212,6 +214,9 @@ void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_
             }
             strLine = appendClashRuleTarget(strLine, rule_group);
             allRules.emplace_back(strLine);
+            total_rules++;
+            if(stats)
+                stats->add();
         }
     }
 
@@ -223,7 +228,7 @@ void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_
     base_rule[field_name] = rules;
 }
 
-std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_content_array, bool overwrite_original_rules, bool new_field_name)
+std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_content_array, bool overwrite_original_rules, bool new_field_name, RuleConversionStats *stats)
 {
     std::string rule_group, retrieved_rules, strLine;
     std::stringstream strStrm;
@@ -255,6 +260,8 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent>
             strLine = appendClashRuleTarget(strLine, rule_group);
             output_content += "  - " + strLine + "\n";
             total_rules++;
+            if(stats)
+                stats->add();
             continue;
         }
         retrieved_rules = convertRuleset(retrieved_rules, x.rule_type);
@@ -282,12 +289,14 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent>
             strLine = appendClashRuleTarget(strLine, rule_group);
             output_content += "  - " + strLine + "\n";
             total_rules++;
+            if(stats)
+                stats->add();
         }
     }
     return output_content;
 }
 
-void rulesetToSurge(INIReader &base_rule, std::vector<RulesetContent> &ruleset_content_array, int surge_ver, bool overwrite_original_rules, const std::string &remote_path_prefix)
+void rulesetToSurge(INIReader &base_rule, std::vector<RulesetContent> &ruleset_content_array, int surge_ver, bool overwrite_original_rules, const std::string &remote_path_prefix, RuleConversionStats *stats)
 {
     string_array allRules;
     std::string rule_group, rule_path, rule_path_typed, retrieved_rules, strLine;
@@ -352,6 +361,8 @@ void rulesetToSurge(INIReader &base_rule, std::vector<RulesetContent> &ruleset_c
             strLine = replaceAllDistinct(strLine, ",,", ",");
             allRules.emplace_back(strLine);
             total_rules++;
+            if(stats)
+                stats->add();
             continue;
         }
         else
@@ -360,6 +371,8 @@ void rulesetToSurge(INIReader &base_rule, std::vector<RulesetContent> &ruleset_c
             {
                 strLine = rule_path + ", tag=" + rule_group + ", force-policy=" + rule_group + ", enabled=true";
                 base_rule.set("filter_remote", "{NONAME}", strLine);
+                if(stats)
+                    stats->add();
                 continue;
             }
             if(fileExist(rule_path))
@@ -370,6 +383,8 @@ void rulesetToSurge(INIReader &base_rule, std::vector<RulesetContent> &ruleset_c
                     if(x.update_interval)
                         strLine += ",update-interval=" + std::to_string(x.update_interval);
                     allRules.emplace_back(strLine);
+                    if(stats)
+                        stats->add();
                     continue;
                 }
                 else if(surge_ver == -1 && !remote_path_prefix.empty())
@@ -377,12 +392,16 @@ void rulesetToSurge(INIReader &base_rule, std::vector<RulesetContent> &ruleset_c
                     strLine = remote_path_prefix + "/getruleset?type=2&url=" + urlSafeBase64Encode(rule_path_typed) + "&group=" + urlSafeBase64Encode(rule_group);
                     strLine += ", tag=" + rule_group + ", enabled=true";
                     base_rule.set("filter_remote", "{NONAME}", strLine);
+                    if(stats)
+                        stats->add();
                     continue;
                 }
                 else if(surge_ver == -4 && !remote_path_prefix.empty())
                 {
                     strLine = remote_path_prefix + "/getruleset?type=1&url=" + urlSafeBase64Encode(rule_path_typed) + "," + rule_group;
                     base_rule.set("Remote Rule", "{NONAME}", strLine);
+                    if(stats)
+                        stats->add();
                     continue;
                 }
             }
@@ -404,6 +423,8 @@ void rulesetToSurge(INIReader &base_rule, std::vector<RulesetContent> &ruleset_c
                         strLine += ",update-interval=" + std::to_string(x.update_interval);
 
                     allRules.emplace_back(strLine);
+                    if(stats)
+                        stats->add();
                     continue;
                 }
                 else if(surge_ver == -1 && !remote_path_prefix.empty())
@@ -411,12 +432,16 @@ void rulesetToSurge(INIReader &base_rule, std::vector<RulesetContent> &ruleset_c
                     strLine = remote_path_prefix + "/getruleset?type=2&url=" + urlSafeBase64Encode(rule_path_typed) + "&group=" + urlSafeBase64Encode(rule_group);
                     strLine += ", tag=" + rule_group + ", enabled=true";
                     base_rule.set("filter_remote", "{NONAME}", strLine);
+                    if(stats)
+                        stats->add();
                     continue;
                 }
                 else if(surge_ver == -4)
                 {
                     strLine = rule_path + "," + rule_group;
                     base_rule.set("Remote Rule", "{NONAME}", strLine);
+                    if(stats)
+                        stats->add();
                     continue;
                 }
             }
@@ -491,6 +516,8 @@ void rulesetToSurge(INIReader &base_rule, std::vector<RulesetContent> &ruleset_c
                 }
                 allRules.emplace_back(strLine);
                 total_rules++;
+                if(stats)
+                    stats->add();
             }
         }
     }
@@ -527,18 +554,18 @@ static rapidjson::Value transformRuleToSingBox(std::vector<std::string_view> &ar
     return rule_obj;
 }
 
-static void appendSingBoxRule(std::vector<std::string_view> &args, rapidjson::Value &rules, const std::string& rule, rapidjson::MemoryPoolAllocator<>& allocator)
+static bool appendSingBoxRule(std::vector<std::string_view> &args, rapidjson::Value &rules, const std::string& rule, rapidjson::MemoryPoolAllocator<>& allocator)
 {
     using namespace rapidjson_ext;
     args.clear();
     split(args, rule, ',');
-    if (args.size() < 2) return;
+    if (args.size() < 2) return false;
     auto type = args[0];
 //    std::string_view option;
 //    if (args.size() >= 3) option = args[2];
 
     if (none_of(SingBoxRuleTypes, [&](const std::string& t){ return type == t; }))
-        return;
+        return false;
 
     auto realType = toLower(std::string(type));
     auto value = toLower(std::string(args[1]));
@@ -546,9 +573,10 @@ static void appendSingBoxRule(std::vector<std::string_view> &args, rapidjson::Va
     realType = replaceAllDistinct(realType, "ip_cidr6", "ip_cidr");
 
     rules | AppendToArray(realType.c_str(), rapidjson::Value(value.c_str(), value.size(), allocator), allocator);
+    return true;
 }
 
-void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent> &ruleset_content_array, bool overwrite_original_rules)
+void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent> &ruleset_content_array, bool overwrite_original_rules, RuleConversionStats *stats)
 {
     using namespace rapidjson_ext;
     std::string rule_group, retrieved_rules, strLine, final;
@@ -596,6 +624,8 @@ void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent
             }
             rules.PushBack(transformRuleToSingBox(temp, strLine, rule_group, allocator), allocator);
             total_rules++;
+            if(stats)
+                stats->add();
             continue;
         }
         retrieved_rules = convertRuleset(retrieved_rules, x.rule_type);
@@ -620,7 +650,12 @@ void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent
                 strLine.erase(strLine.find("//"));
                 strLine = trimWhitespace(strLine);
             }
-            appendSingBoxRule(temp, rule, strLine, allocator);
+            if (appendSingBoxRule(temp, rule, strLine, allocator))
+            {
+                total_rules++;
+                if(stats)
+                    stats->add();
+            }
         }
         if (rule.ObjectEmpty()) continue;
         rule.AddMember("outbound", rapidjson::Value(rule_group.c_str(), allocator), allocator);

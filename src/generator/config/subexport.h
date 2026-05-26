@@ -58,6 +58,7 @@ struct extra_settings {
   bool provider_proxy_direct = true;    // proxy-provider 默认使用 DIRECT 更新
   std::vector<ProxyProvider> providers; // provider 列表
   bool authorized = false;
+  RuleConversionStats *rule_stats = nullptr;
 
   extra_settings() = default;
   extra_settings(const extra_settings &) = delete;

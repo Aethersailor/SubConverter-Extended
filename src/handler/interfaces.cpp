@@ -29,6 +29,7 @@
 #include "script/script_quickjs.h"
 #include "server/webserver.h"
 #include "settings.h"
+#include "statistics.h"
 #include "upload.h"
 #include "utils/time_compat.h"
 
@@ -613,7 +614,8 @@ static std::string sanitizeProviderName(const std::string &input) {
   return cleaned;
 }
 
-static std::string subconverter_impl(RESPONSE_CALLBACK_ARGS);
+static std::string subconverter_impl(Request &request, Response &response,
+                                     RuleConversionStats *rule_stats = nullptr);
 
 namespace {
 
@@ -622,6 +624,7 @@ struct CoalescedResponse {
   std::string content_type;
   string_icase_map headers;
   std::string body;
+  uint64_t rule_conversions = 0;
 };
 
 struct InflightSubRequest {
@@ -980,12 +983,14 @@ static void copyCoalescedToResponse(const CoalescedResponse &result,
 }
 
 static CoalescedResponse makeCoalescedResult(const std::string &body,
-                                             const Response &response) {
+                                             const Response &response,
+                                             uint64_t rule_conversions) {
   CoalescedResponse result;
   result.status_code = response.status_code;
   result.content_type = response.content_type;
   result.headers = response.headers;
   result.body = body;
+  result.rule_conversions = rule_conversions;
   return result;
 }
 
@@ -1041,11 +1046,16 @@ static void storeCachedSubResponse(const std::string &key,
 }
 
 static std::string runSubconverterImplWithRetry(const Request &original,
-                                                Response &response) {
+                                                Response &response,
+                                                RuleConversionStats *stats) {
   Request first_request = original;
   Response first_response;
-  std::string body = subconverter_impl(first_request, first_response);
+  RuleConversionStats first_stats;
+  std::string body = subconverter_impl(first_request, first_response,
+                                       stats ? &first_stats : nullptr);
   if (first_response.status_code < 500 || !global.coalesceRetryOn5xx) {
+    if (stats)
+      *stats = first_stats;
     response = first_response;
     return body;
   }
@@ -1055,30 +1065,57 @@ static std::string runSubconverterImplWithRetry(const Request &original,
            LOG_LEVEL_WARNING);
   Request retry_request = original;
   Response retry_response;
-  std::string retry_body = subconverter_impl(retry_request, retry_response);
+  RuleConversionStats retry_stats;
+  std::string retry_body = subconverter_impl(retry_request, retry_response,
+                                             stats ? &retry_stats : nullptr);
   if (retry_response.status_code < 500) {
+    if (stats)
+      *stats = retry_stats;
     response = retry_response;
     return retry_body;
   }
 
+  if (stats)
+    *stats = first_stats;
   response = first_response;
   return body;
 }
 
-} // namespace
+static void recordTrackedSubRequest(bool track, const Request &request,
+                                    const Response &response,
+                                    uint64_t rule_conversions) {
+  if (!track)
+    return;
+  if (response.status_code < 200 || response.status_code >= 300)
+    return;
+  statistics::recordSubscriptionConversion(request, rule_conversions);
+}
 
-std::string subconverter(RESPONSE_CALLBACK_ARGS) {
-  if (!shouldCoalesceSubRequest(request))
-    return subconverter_impl(request, response);
+static std::string subconverterEntry(Request &request, Response &response,
+                                     bool track) {
+  if (!shouldCoalesceSubRequest(request)) {
+    RuleConversionStats stats;
+    std::string body =
+        subconverter_impl(request, response, track ? &stats : nullptr);
+    recordTrackedSubRequest(track, request, response, stats.rules);
+    return body;
+  }
 
   std::string key = buildSubRequestKey(request);
-  if (key.empty())
-    return subconverter_impl(request, response);
+  if (key.empty()) {
+    RuleConversionStats stats;
+    std::string body =
+        subconverter_impl(request, response, track ? &stats : nullptr);
+    recordTrackedSubRequest(track, request, response, stats.rules);
+    return body;
+  }
 
   CoalescedResponse cached_result;
   if (getCachedSubResponse(key, cached_result)) {
     writeLog(0, "/sub 响应微缓存命中。", LOG_LEVEL_DEBUG);
     copyCoalescedToResponse(cached_result, response);
+    recordTrackedSubRequest(track, request, response,
+                            cached_result.rule_conversions);
     return cached_result.body;
   }
 
@@ -1104,6 +1141,8 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
     if (call->exception)
       std::rethrow_exception(call->exception);
     copyCoalescedToResponse(call->result, response);
+    recordTrackedSubRequest(track, request, response,
+                            call->result.rule_conversions);
     return call->result.body;
   }
 
@@ -1111,9 +1150,11 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
     writeLog(0, "/sub 请求成为同 key 转换 owner。", LOG_LEVEL_DEBUG);
     Request original_request = request;
     Response owner_response;
-    std::string body =
-        runSubconverterImplWithRetry(original_request, owner_response);
-    CoalescedResponse result = makeCoalescedResult(body, owner_response);
+    RuleConversionStats stats;
+    std::string body = runSubconverterImplWithRetry(
+        original_request, owner_response, track ? &stats : nullptr);
+    CoalescedResponse result =
+        makeCoalescedResult(body, owner_response, stats.rules);
     response = owner_response;
     {
       std::lock_guard<std::mutex> lock(call->mutex);
@@ -1126,6 +1167,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
     }
     storeCachedSubResponse(key, result);
     call->cv.notify_all();
+    recordTrackedSubRequest(track, request, response, result.rule_conversions);
     return body;
   } catch (...) {
     {
@@ -1142,7 +1184,18 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
   }
 }
 
-static std::string subconverter_impl(RESPONSE_CALLBACK_ARGS) {
+} // namespace
+
+std::string subconverter(RESPONSE_CALLBACK_ARGS) {
+  return subconverterEntry(request, response, false);
+}
+
+std::string subconverterTracked(RESPONSE_CALLBACK_ARGS) {
+  return subconverterEntry(request, response, true);
+}
+
+static std::string subconverter_impl(Request &request, Response &response,
+                                     RuleConversionStats *rule_stats) {
   auto &argument = request.argument;
   int *status_code = &response.status_code;
 
@@ -1261,6 +1314,7 @@ static std::string subconverter_impl(RESPONSE_CALLBACK_ARGS) {
                lExcludeRemarks = global.excludeRemarks;
   std::vector<RulesetContent> lRulesetContent;
   extra_settings ext;
+  ext.rule_stats = rule_stats;
   std::string subInfo, dummy;
   int interval = !argUpdateInterval.empty()
                      ? to_int(argUpdateInterval, global.updateInterval)

@@ -15,6 +15,9 @@ services:
       MANAGED_CONFIG_PREFIX: "http://your-domain-or-ip:25500"
     volumes:
       - "./base/pref.toml:/base/pref.toml:ro"
+      # 可选：持久化 /dashboard 统计数据；删除该目录即可清空统计。
+      # Optional: persist /dashboard statistics; delete this directory to reset.
+      - "./stats:/base/stats"
     logging:
       driver: "json-file"
       options:
