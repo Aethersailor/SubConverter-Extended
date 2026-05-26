@@ -103,6 +103,8 @@ void signal_handler(int sig) {
 void cron_tick_caller() {
   if (global.enableCron)
     cron_tick();
+  if (global.statisticsEnabled)
+    statistics::tick();
 }
 
 int main(int argc, char *argv[]) {

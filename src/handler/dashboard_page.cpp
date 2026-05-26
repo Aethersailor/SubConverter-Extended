@@ -184,14 +184,46 @@ std::string page(Request &, Response &response) {
             -webkit-backdrop-filter: blur(24px);
             overflow: hidden;
         }
-        .hero {
+        .overview {
             padding: 24px;
             display: grid;
-            grid-template-columns: repeat(6, minmax(0, 1fr));
+            gap: 18px;
+        }
+        .stat-block {
+            min-width: 0;
+            padding: 0 0 18px;
+            border-bottom: 1px solid var(--surface-border);
+        }
+        .stat-block:last-child { border-bottom: 0; padding-bottom: 0; }
+        .block-head {
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-between;
+            gap: 14px;
+            margin-bottom: 14px;
+        }
+        .block-copy {
+            margin-top: 5px;
+            color: var(--text-muted);
+            font-size: 0.86rem;
+            font-weight: 650;
+            line-height: 1.45;
+        }
+        .runtime-grid,
+        .metric-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
             gap: 14px;
         }
+        .metric-grid.two-up { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .window-grid {
+            display: grid;
+            grid-template-columns: minmax(280px, 0.9fr) minmax(0, 1.1fr);
+            gap: 14px;
+            align-items: stretch;
+        }
         .metric {
-            min-height: 126px;
+            min-height: 116px;
             padding: 17px;
             border: 1px solid var(--surface-border);
             border-radius: 18px;
@@ -209,6 +241,7 @@ std::string page(Request &, Response &response) {
             font-size: 0.78rem;
             text-transform: uppercase;
         }
+        .metric-label.no-caps { text-transform: none; }
         .metric-value {
             margin-top: 12px;
             font-size: 1.8rem;
@@ -222,6 +255,65 @@ std::string page(Request &, Response &response) {
             font-size: 0.86rem;
             font-weight: 650;
         }
+        .metric-help {
+            margin-top: 10px;
+            color: var(--text-muted);
+            font-size: 0.78rem;
+            line-height: 1.42;
+        }
+        .metric-pair {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
+            margin-top: 10px;
+        }
+        .metric-pair strong {
+            display: block;
+            font-size: 1.55rem;
+            line-height: 1;
+        }
+        .metric-pair span {
+            display: block;
+            margin-top: 7px;
+            color: var(--text-secondary);
+            font-size: 0.82rem;
+            font-weight: 700;
+        }
+        .range-tabs {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            justify-content: flex-end;
+        }
+        .range-tab {
+            min-height: 34px;
+            padding: 7px 11px;
+            border-radius: 999px;
+            font-size: 0.78rem;
+        }
+        .range-tab[aria-pressed="true"] {
+            color: #ffffff;
+            border-color: transparent;
+            background: var(--accent-gradient);
+            box-shadow: 0 10px 24px rgba(2, 132, 199, 0.22);
+        }
+        .window-strip {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 10px;
+        }
+        .mini-window {
+            min-height: 84px;
+            padding: 13px;
+            border: 1px solid var(--surface-border);
+            border-radius: 16px;
+            background: rgba(255, 255, 255, 0.24);
+        }
+        @media (prefers-color-scheme: dark) {
+            .mini-window { background: rgba(255, 255, 255, 0.035); }
+        }
+        .mini-window .metric-value { font-size: 1.25rem; margin-top: 9px; }
+        .mini-window .metric-sub { font-size: 0.78rem; margin-top: 8px; }
         .content {
             display: grid;
             grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.8fr);
@@ -237,6 +329,7 @@ std::string page(Request &, Response &response) {
             display: flex;
             align-items: center;
             justify-content: space-between;
+            flex-wrap: wrap;
             gap: 12px;
             margin-bottom: 14px;
         }
@@ -327,6 +420,18 @@ std::string page(Request &, Response &response) {
             font-size: 0.76rem;
             text-transform: uppercase;
         }
+        .table-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin: 0 0 10px;
+        }
+        .table-head h3 {
+            margin: 0;
+            font-size: 0.96rem;
+            letter-spacing: 0;
+        }
         .country-table tr:last-child td { border-bottom: 0; }
         .country-icon {
             display: inline-flex;
@@ -375,13 +480,18 @@ std::string page(Request &, Response &response) {
             font-weight: 650;
         }
         @media (max-width: 980px) {
-            .hero { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+            .runtime-grid, .metric-grid, .window-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .window-grid { grid-template-columns: 1fr; }
             .content { grid-template-columns: 1fr; }
         }
         @media (max-width: 640px) {
             .shell { width: min(100% - 20px, 1180px); padding-top: 16px; }
             .topbar { align-items: flex-start; flex-direction: column; }
-            .hero { grid-template-columns: 1fr 1fr; padding: 14px; }
+            .overview { padding: 14px; }
+            .runtime-grid, .metric-grid, .window-strip { grid-template-columns: 1fr; }
+            .metric-grid.two-up, .metric-pair { grid-template-columns: 1fr; }
+            .block-head { align-items: flex-start; flex-direction: column; }
+            .range-tabs { justify-content: flex-start; }
             .metric { min-height: 112px; padding: 14px; }
             .metric-value { font-size: 1.42rem; }
             .content { padding: 0 14px 14px; }
@@ -415,11 +525,15 @@ std::string page(Request &, Response &response) {
         </div>
 
         <section class="panel">
-            <div class="hero" id="metrics"></div>
+            <div class="overview" id="metrics"></div>
             <div class="content">
                 <section class="section">
                     <div class="section-head">
-                        <h2><span data-lang="en">Country Distribution</span><span data-lang="zh">国家分布</span></h2>
+                        <div>
+                            <h2><span data-lang="en">Country Distribution</span><span data-lang="zh">国家分布</span></h2>
+                            <div class="state-line" id="country-range-label">-</div>
+                        </div>
+                        <div class="range-tabs" id="country-tabs"></div>
                         <span class="status"><span class="status-dot"></span><span id="country-status">-</span></span>
                     </div>
                     <div class="map-wrap">
@@ -434,12 +548,17 @@ std::string page(Request &, Response &response) {
                     </div>
                     <div class="chart" id="chart"></div>
                     <div style="height: 16px"></div>
+                    <div class="table-head">
+                        <h3><span data-lang="en">Country Ranking</span><span data-lang="zh">国家排行</span></h3>
+                        <span class="state-line" id="country-table-range">-</span>
+                    </div>
                     <table class="country-table">
                         <thead>
                             <tr>
                                 <th><span data-lang="en">Country</span><span data-lang="zh">国家</span></th>
                                 <th><span data-lang="en">Requests</span><span data-lang="zh">请求</span></th>
                                 <th><span data-lang="en">Rules</span><span data-lang="zh">规则</span></th>
+                                <th><span data-lang="en">Share</span><span data-lang="zh">占比</span></th>
                             </tr>
                         </thead>
                         <tbody id="country-body"></tbody>
@@ -459,16 +578,40 @@ std::string page(Request &, Response &response) {
             var metricsEl = document.getElementById("metrics");
             var countryBody = document.getElementById("country-body");
             var countryStatus = document.getElementById("country-status");
+            var countryTabs = document.getElementById("country-tabs");
+            var countryRangeLabel = document.getElementById("country-range-label");
+            var countryTableRange = document.getElementById("country-table-range");
             var updatedAt = document.getElementById("updated-at");
             var chart = document.getElementById("chart");
             var tooltip = document.getElementById("tooltip");
             var mapData = null;
             var latest = null;
             var countryMap = new Map();
+            var WINDOWS = [
+                { key: "hour", en: "1 Hour", zh: "1 小时" },
+                { key: "day", en: "1 Day", zh: "1 天" },
+                { key: "seven_days", en: "7 Days", zh: "7 天" },
+                { key: "thirty_days", en: "30 Days", zh: "30 天" }
+            ];
+            var COUNTRY_WINDOWS = [
+                { key: "startup", en: "Since Start", zh: "本次启动" },
+                { key: "hour", en: "1 Hour", zh: "1 小时" },
+                { key: "day", en: "1 Day", zh: "1 天" },
+                { key: "seven_days", en: "7 Days", zh: "7 天" },
+                { key: "thirty_days", en: "30 Days", zh: "30 天" },
+                { key: "lifetime", en: "Lifetime", zh: "历史总计" }
+            ];
+            var selectedWindow = localStorage.getItem("sce-dashboard-window") || "day";
+            var selectedCountryWindow = localStorage.getItem("sce-dashboard-country-window") || "day";
 
             function isZh() { return /^zh\b/i.test(document.documentElement.lang); }
             function text(en, zh) { return isZh() ? zh : en; }
             function number(value) { return new Intl.NumberFormat(isZh() ? "zh-CN" : "en").format(value || 0); }
+            function label(config) { return text(config.en, config.zh); }
+            function windowConfig(key, source) {
+                var list = source || COUNTRY_WINDOWS;
+                return list.find(function (item) { return item.key === key; }) || list[0];
+            }
             function countryName(code) {
                 if (code === "ZZ" || code === "XX") return text("Unknown", "未知");
                 if (code === "T1") return text("Tor network", "Tor 网络");
@@ -483,26 +626,103 @@ std::string page(Request &, Response &response) {
                 if (!seconds) return "-";
                 return new Intl.DateTimeFormat(isZh() ? "zh-CN" : "en", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date(seconds * 1000));
             }
-            function metric(labelEn, labelZh, data) {
-                var total = data || {};
-                var el = document.createElement("article");
-                el.className = "metric";
-                el.innerHTML = '<div class="metric-label">' + text(labelEn, labelZh) + '</div>' +
-                    '<div class="metric-value">' + number(total.subscription_requests) + '</div>' +
-                    '<div class="metric-sub">' + text("Rules ", "规则 ") + number(total.rule_conversions) + '</div>';
-                return el;
+            function fmtDateTime(seconds) {
+                if (!seconds) return "-";
+                return new Intl.DateTimeFormat(isZh() ? "zh-CN" : "en", {
+                    year: "numeric", month: "2-digit", day: "2-digit",
+                    hour: "2-digit", minute: "2-digit", second: "2-digit"
+                }).format(new Date(seconds * 1000));
+            }
+            function duration(seconds) {
+                seconds = Math.max(0, Math.floor(Number(seconds) || 0));
+                var days = Math.floor(seconds / 86400);
+                var hours = Math.floor((seconds % 86400) / 3600);
+                var minutes = Math.floor((seconds % 3600) / 60);
+                var secs = seconds % 60;
+                if (isZh()) {
+                    if (days) return days + " 天 " + hours + " 小时";
+                    if (hours) return hours + " 小时 " + minutes + " 分钟";
+                    if (minutes) return minutes + " 分钟 " + secs + " 秒";
+                    return secs + " 秒";
+                }
+                if (days) return days + "d " + hours + "h";
+                if (hours) return hours + "h " + minutes + "m";
+                if (minutes) return minutes + "m " + secs + "s";
+                return secs + "s";
+            }
+            function percentage(value, total) {
+                if (!total) return "0%";
+                var pct = (value || 0) * 100 / total;
+                if (pct > 0 && pct < 0.1) return "<0.1%";
+                return pct.toFixed(1) + "%";
+            }
+            function rangeTabsHtml(source, selected, attr) {
+                return source.map(function (item) {
+                    return '<button type="button" class="range-tab" aria-pressed="' + (item.key === selected ? "true" : "false") + '" ' + attr + '="' + item.key + '">' + label(item) + '</button>';
+                }).join("");
+            }
+            function countersPairHtml(titleEn, titleZh, counters, helpEn, helpZh) {
+                counters = counters || {};
+                return '<article class="metric">' +
+                    '<div class="metric-label">' + text(titleEn, titleZh) + '</div>' +
+                    '<div class="metric-pair">' +
+                    '<div><strong>' + number(counters.subscription_requests) + '</strong><span>' + text("Requests", "请求") + '</span></div>' +
+                    '<div><strong>' + number(counters.rule_conversions) + '</strong><span>' + text("Rules", "规则") + '</span></div>' +
+                    '</div>' +
+                    '<div class="metric-help">' + text(helpEn, helpZh) + '</div>' +
+                    '</article>';
+            }
+            function runtimeCardHtml(titleEn, titleZh, value, helpEn, helpZh) {
+                return '<article class="metric">' +
+                    '<div class="metric-label no-caps">' + text(titleEn, titleZh) + '</div>' +
+                    '<div class="metric-value">' + value + '</div>' +
+                    '<div class="metric-help">' + text(helpEn, helpZh) + '</div>' +
+                    '</article>';
+            }
+            function miniWindowHtml(config, counters) {
+                counters = counters || {};
+                return '<article class="mini-window">' +
+                    '<div class="metric-label">' + label(config) + '</div>' +
+                    '<div class="metric-value">' + number(counters.subscription_requests) + '</div>' +
+                    '<div class="metric-sub">' + text("Rules ", "规则 ") + number(counters.rule_conversions) + '</div>' +
+                    '</article>';
             }
             function renderMetrics(data) {
                 var windows = data.windows || {};
-                metricsEl.textContent = "";
-                [
-                    ["Since Start", "本次启动", windows.startup],
-                    ["1 Hour", "1 小时", windows.hour],
-                    ["1 Day", "1 天", windows.day],
-                    ["7 Days", "7 天", windows.seven_days],
-                    ["30 Days", "30 天", windows.thirty_days],
-                    ["Lifetime", "历史总计", windows.lifetime]
-                ].forEach(function (item) { metricsEl.appendChild(metric(item[0], item[1], item[2])); });
+                var runtime = data.runtime || {};
+                var selected = windowConfig(selectedWindow, WINDOWS);
+                selectedWindow = selected.key;
+                metricsEl.innerHTML =
+                    '<section class="stat-block">' +
+                    '<div class="block-head"><div><h2>' + text("Runtime", "运行状态") + '</h2>' +
+                    '<div class="block-copy">' + text("Process start, persisted total runtime, and launch count are tracked separately.", "本次启动、历史累计运行时间和启动次数分开持久化统计。") + '</div></div></div>' +
+                    '<div class="runtime-grid">' +
+                    runtimeCardHtml("Started", "本次启动时间", fmtDateTime(runtime.started_at || data.started_at), "Current process start time.", "当前进程启动时间。") +
+                    runtimeCardHtml("Uptime", "本次运行时长", duration(runtime.uptime_seconds), "Time since this process started.", "从本次进程启动到现在的时长。") +
+                    runtimeCardHtml("Total Runtime", "累计运行时长", duration(runtime.total_runtime_seconds), "Persisted across restarts.", "跨重启持久化累计。") +
+                    runtimeCardHtml("Launches", "启动次数", number(runtime.launch_count), "Number of launches recorded in the statistics file.", "统计文件记录到的启动次数。") +
+                    '</div></section>' +
+                    '<section class="stat-block"><div class="block-head"><div><h2>' + text("Conversion Totals", "转换总览") + '</h2>' +
+                    '<div class="block-copy">' + text("Current process and lifetime totals are shown apart to avoid mixing operational and historical readings.", "本次启动与历史总计分开展示，避免运行期读数和长期读数混在一起。") + '</div></div></div>' +
+                    '<div class="metric-grid two-up">' +
+                    countersPairHtml("Since Start", "本次启动", windows.startup, "Only conversions after the current process started.", "仅统计当前进程启动后的转换。") +
+                    countersPairHtml("Lifetime", "历史总计", windows.lifetime, "Persisted conversion totals since the statistics file was created.", "统计文件创建以来持久化累计的转换。") +
+                    '</div></section>' +
+                    '<section class="stat-block"><div class="block-head"><div><h2>' + text("Rolling Windows", "滚动时间窗") + '</h2>' +
+                    '<div class="block-copy">' + text("Pick a window to focus on recent traffic without losing the side-by-side comparison.", "选择一个时间窗聚焦近期流量，同时保留各时间窗对比。") + '</div></div>' +
+                    '<div class="range-tabs">' + rangeTabsHtml(WINDOWS, selectedWindow, "data-window-select") + '</div></div>' +
+                    '<div class="window-grid">' +
+                    countersPairHtml(selected.en, selected.zh, windows[selected.key], "Selected rolling window.", "当前选中的滚动时间窗。") +
+                    '<div class="window-strip">' + WINDOWS.map(function (item) { return miniWindowHtml(item, windows[item.key]); }).join("") + '</div>' +
+                    '</div></section>';
+
+                metricsEl.querySelectorAll("[data-window-select]").forEach(function (button) {
+                    button.addEventListener("click", function () {
+                        selectedWindow = button.getAttribute("data-window-select");
+                        localStorage.setItem("sce-dashboard-window", selectedWindow);
+                        renderMetrics(latest || data);
+                    });
+                });
             }
             function renderChart(series) {
                 chart.textContent = "";
@@ -515,17 +735,41 @@ std::string page(Request &, Response &response) {
                     chart.appendChild(bar);
                 });
             }
+            function selectedCountries(data) {
+                var windows = data.country_windows || {};
+                return windows[selectedCountryWindow] || data.countries || [];
+            }
+            function renderCountryTabs() {
+                selectedCountryWindow = windowConfig(selectedCountryWindow, COUNTRY_WINDOWS).key;
+                countryTabs.innerHTML = rangeTabsHtml(COUNTRY_WINDOWS, selectedCountryWindow, "data-country-window");
+                countryTabs.querySelectorAll("[data-country-window]").forEach(function (button) {
+                    button.addEventListener("click", function () {
+                        selectedCountryWindow = button.getAttribute("data-country-window");
+                        localStorage.setItem("sce-dashboard-country-window", selectedCountryWindow);
+                        if (latest) {
+                            renderCountries(selectedCountries(latest));
+                            renderMap();
+                        }
+                    });
+                });
+            }
             function renderCountries(countries) {
                 countryMap = new Map();
                 countries.forEach(function (item) { countryMap.set(item.code, item); });
-                countryStatus.textContent = text("Countries ", "国家 ") + number(countries.filter(function (item) { return item.code !== "ZZ" && item.code !== "XX"; }).length);
+                var countryConfig = windowConfig(selectedCountryWindow, COUNTRY_WINDOWS);
+                selectedCountryWindow = countryConfig.key;
+                var visibleCountries = countries.filter(function (item) { return item.code !== "ZZ" && item.code !== "XX"; });
+                var totalRequests = countries.reduce(function (sum, item) { return sum + (item.subscription_requests || 0); }, 0);
+                countryRangeLabel.textContent = text("Showing ", "当前范围：") + label(countryConfig);
+                countryTableRange.textContent = label(countryConfig);
+                countryStatus.textContent = text("Countries ", "国家 ") + number(visibleCountries.length);
                 countryBody.textContent = "";
                 if (!countries.length) {
                     var row = document.createElement("tr");
                     var cell = document.createElement("td");
-                    cell.colSpan = 3;
+                    cell.colSpan = 4;
                     cell.className = "empty";
-                    cell.textContent = text("No conversion data yet", "暂无转换数据");
+                    cell.textContent = text("No conversion data in this range", "当前范围暂无转换数据");
                     row.appendChild(cell);
                     countryBody.appendChild(row);
                     return;
@@ -538,9 +782,12 @@ std::string page(Request &, Response &response) {
                     req.textContent = number(item.subscription_requests);
                     var rules = document.createElement("td");
                     rules.textContent = number(item.rule_conversions);
+                    var share = document.createElement("td");
+                    share.textContent = percentage(item.subscription_requests, totalRequests);
                     row.appendChild(name);
                     row.appendChild(req);
                     row.appendChild(rules);
+                    row.appendChild(share);
                     countryBody.appendChild(row);
                 });
             }
@@ -576,7 +823,9 @@ std::string page(Request &, Response &response) {
                     .on("mousemove", function (event, d) {
                         var code = ISO_N3[String(d.id).padStart(3, "0")] || "ZZ";
                         var item = countryMap.get(code) || { subscription_requests: 0, rule_conversions: 0 };
+                        var countryConfig = windowConfig(selectedCountryWindow, COUNTRY_WINDOWS);
                         tooltip.innerHTML = '<div class="tooltip-title"><span class="country-icon">' + countryIcon(code) + '</span>' + countryName(code) + ' · ' + code + '</div>' +
+                            '<div class="tooltip-row"><span>' + text("Range", "范围") + '</span><strong>' + label(countryConfig) + '</strong></div>' +
                             '<div class="tooltip-row"><span>' + text("Requests", "请求") + '</span><strong>' + number(item.subscription_requests) + '</strong></div>' +
                             '<div class="tooltip-row"><span>' + text("Rules", "规则") + '</span><strong>' + number(item.rule_conversions) + '</strong></div>';
                         tooltip.style.left = event.offsetX + "px";
@@ -589,7 +838,8 @@ std::string page(Request &, Response &response) {
                 latest = data;
                 renderMetrics(data);
                 renderChart(data.series || []);
-                renderCountries(data.countries || []);
+                renderCountryTabs();
+                renderCountries(selectedCountries(data));
                 updatedAt.textContent = text("Updated ", "更新 ") + fmtTime(data.generated_at);
                 renderMap();
             }

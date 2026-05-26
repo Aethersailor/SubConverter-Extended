@@ -11,6 +11,7 @@ namespace statistics {
 void initialize();
 void shutdown();
 bool isEnabled();
+void tick();
 
 void recordSubscriptionConversion(const Request &request,
                                   uint64_t rule_conversions);
