@@ -198,6 +198,18 @@ flush_interval = 5
 provider = "header"
 country_headers = ["CF-IPCountry", "X-Geo-Country", "X-Vercel-IP-Country", "CloudFront-Viewer-Country"]
 
+[statistics.dashboard_auth]
+# Optional Basic authentication for /dashboard and /dashboard/data.
+# Only applies when statistics.enabled is true.
+# Missing or false keeps the dashboard password disabled.
+enabled = false
+username = ""
+password = ""
+# Failed login attempts allowed within window_seconds before lock_seconds applies.
+max_failures = 5
+window_seconds = 300
+lock_seconds = 900
+
 [emojis]
 add_emoji = false
 remove_old_emoji = true
