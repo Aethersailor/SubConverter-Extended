@@ -44,7 +44,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.PAT_TOKEN || github.token }}
           fetch-depth: 0
 
       - name: Get short SHA
@@ -105,15 +105,27 @@ jobs:
 
       - name: Docker meta
         id: meta
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6
-        with:
-          images: |
-            aethersailor/subconverter-extended
-            ghcr.io/aethersailor/subconverter-extended
-          tags: |
-            type=raw,value=latest,enable=${{ steps.version.outputs.is_release == 'true' }}
-            type=raw,value=${{ steps.version.outputs.version }},enable=${{ steps.version.outputs.is_release == 'true' }}
-            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          IS_RELEASE: ${{ steps.version.outputs.is_release }}
+        run: |
+          {
+            echo 'tags<<EOF'
+            if [ "$IS_RELEASE" = "true" ]; then
+              printf '%s\n' \
+                "aethersailor/subconverter-extended:latest" \
+                "aethersailor/subconverter-extended:${VERSION}" \
+                "ghcr.io/aethersailor/subconverter-extended:latest" \
+                "ghcr.io/aethersailor/subconverter-extended:${VERSION}"
+            fi
+            if [ "${GITHUB_REF}" = "refs/heads/dev" ]; then
+              printf '%s\n' \
+                "aethersailor/subconverter-extended:dev" \
+                "ghcr.io/aethersailor/subconverter-extended:dev"
+            fi
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
 
   build-linux:
     name: "🐳 Docker Build (${{ matrix.arch }})"
@@ -130,22 +142,26 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
+        shell: bash
+        run: |
+          docker buildx create --name sce-builder --driver docker-container --use
+          docker buildx inspect --bootstrap
 
       - name: Log in to Docker Hub
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+        shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: echo "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        env:
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin
 
       - name: Prepare Docker build args
         id: docker_args
@@ -168,17 +184,23 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Build to builder stage
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7
-        with:
-          context: .
-          file: ${{ matrix.dockerfile }}
-          load: true
-          tags: ${{ matrix.builder_tag }}
-          target: builder
-          platforms: ${{ matrix.builder_platform }}
-          build-args: ${{ steps.docker_args.outputs.args }}
-          cache-from: type=gha,scope=${{ matrix.cache_scope }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.cache_scope }}
+        shell: bash
+        env:
+          BUILD_ARGS: ${{ steps.docker_args.outputs.args }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r arg; do
+            [ -n "$arg" ] && args+=(--build-arg "$arg")
+          done <<< "$BUILD_ARGS"
+          docker buildx build \
+            --file "${{ matrix.dockerfile }}" \
+            --load \
+            --tag "${{ matrix.builder_tag }}" \
+            --target builder \
+            --platform "${{ matrix.builder_platform }}" \
+            "${args[@]}" \
+            .
 
       - name: Extract builder output
         shell: bash
@@ -193,9 +215,8 @@ jobs:
 
       - name: Set up QEMU for smoke test
         if: needs.prepare.outputs.is_release == 'true' && matrix.qemu_platforms != ''
-        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
-        with:
-          platforms: ${{ matrix.qemu_platforms }}
+        shell: bash
+        run: docker run --privileged --rm tonistiigi/binfmt --install "${{ matrix.qemu_platforms }}"
 
       - name: Smoke test artifact (Linux ${{ matrix.arch }})
         if: needs.prepare.outputs.is_release == 'true'
@@ -263,16 +284,48 @@ jobs:
 
       - name: Build and push final image
         id: build_image
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7
-        with:
-          context: .
-          file: ${{ matrix.dockerfile }}
-          push: ${{ github.event_name != 'pull_request' }}
-          platforms: ${{ matrix.image_platform }}
-          tags: ${{ needs.prepare.outputs.tags }}
-          build-args: ${{ steps.docker_args.outputs.args }}
-          cache-from: type=gha,scope=${{ matrix.cache_scope }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.cache_scope }}
+        shell: bash
+        env:
+          BUILD_ARGS: ${{ steps.docker_args.outputs.args }}
+          IMAGE_TAGS: ${{ needs.prepare.outputs.tags }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r arg; do
+            [ -n "$arg" ] && args+=(--build-arg "$arg")
+          done <<< "$BUILD_ARGS"
+          tags=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && tags+=(--tag "$tag")
+          done <<< "$IMAGE_TAGS"
+          if [ "${#tags[@]}" -eq 0 ]; then
+            tags+=(--tag "subconverter-extended:${{ matrix.arch }}-ci")
+          fi
+          output=(--load)
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            output=(--push)
+          fi
+          metadata_file="build-metadata-${{ matrix.arch }}.json"
+          docker buildx build \
+            --file "${{ matrix.dockerfile }}" \
+            --platform "${{ matrix.image_platform }}" \
+            "${output[@]}" \
+            "${tags[@]}" \
+            "${args[@]}" \
+            --metadata-file "$metadata_file" \
+            .
+          digest="$(python3 - "$metadata_file" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], "r", encoding="utf-8") as handle:
+              data = json.load(handle)
+          print(data.get("containerimage.digest", ""))
+          PY
+          )"
+          if [ -n "$digest" ]; then
+            echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Save image digest
         if: needs.prepare.outputs.is_release == 'true' && github.event_name != 'pull_request'

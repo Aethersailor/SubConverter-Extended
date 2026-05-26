@@ -40,6 +40,8 @@ static httplib::Server::Handler makeHandler(const responseRoute &rr) {
     Response resp;
     req.method = request.method;
     req.url = request.path;
+    req.remote_addr = request.remote_addr;
+    req.remote_port = request.remote_port;
     for (auto &h : request.headers) {
       if (startsWith(h.first, "LOCAL_") || startsWith(h.first, "REMOTE_") ||
           is_request_header_blacklisted(h.first)) {
@@ -75,6 +77,10 @@ static std::string dump(const httplib::Headers &headers) {
   for (auto &x : headers) {
     if (startsWith(x.first, "LOCAL_") || startsWith(x.first, "REMOTE_"))
       continue;
+    if (strcasecmp(x.first.c_str(), "Authorization") == 0) {
+      s += x.first + ": [redacted]|";
+      continue;
+    }
     s += x.first + ": " + x.second + "|";
   }
   return s;

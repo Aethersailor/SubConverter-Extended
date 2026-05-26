@@ -1207,7 +1207,7 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
   /*
   if(ext.enable_rule_generator)
       rulesetToClash(yamlnode, ruleset_content_array,
-  ext.overwrite_original_rules, ext.clash_new_field_name);
+  ext.overwrite_original_rules, ext.clash_new_field_name, ext.rule_stats);
 
   return YAML::Dump(yamlnode);
   */
@@ -1235,7 +1235,7 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
     renderClashScript(yamlnode, ruleset_content_array,
                       ext.managed_config_prefix, ext.clash_script,
                       ext.overwrite_original_rules,
-                      ext.clash_classical_ruleset);
+                      ext.clash_classical_ruleset, ext.rule_stats);
     std::string result = YAML::Dump(yamlnode);
     bool has_providers = !proxy_providers_yaml.empty();
     if (has_providers) {
@@ -1250,7 +1250,8 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
 
   std::string output_content =
       rulesetToClashStr(yamlnode, ruleset_content_array,
-                        ext.overwrite_original_rules, ext.clash_new_field_name);
+                        ext.overwrite_original_rules, ext.clash_new_field_name,
+                        ext.rule_stats);
 
   // 提取 proxy-providers，手动控制输出顺序
   // 使用之前在 998-1002 行已提取的 proxy_providers_yaml
@@ -1700,7 +1701,8 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
 
   if (ext.enable_rule_generator)
     rulesetToSurge(ini, ruleset_content_array, surge_ver,
-                   ext.overwrite_original_rules, ext.managed_config_prefix);
+                   ext.overwrite_original_rules, ext.managed_config_prefix,
+                   ext.rule_stats);
 
   return ini.to_string();
 }
@@ -2195,7 +2197,7 @@ void proxyToQuan(std::vector<Proxy> &nodes, INIReader &ini,
 
   if (ext.enable_rule_generator)
     rulesetToSurge(ini, ruleset_content_array, -2, ext.overwrite_original_rules,
-                   "");
+                   "", ext.rule_stats);
 }
 
 std::string proxyToQuanX(std::vector<Proxy> &nodes,
@@ -2482,7 +2484,7 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini,
 
   if (ext.enable_rule_generator)
     rulesetToSurge(ini, ruleset_content_array, -1, ext.overwrite_original_rules,
-                   ext.managed_config_prefix);
+                   ext.managed_config_prefix, ext.rule_stats);
 }
 
 std::string proxyToSSD(std::vector<Proxy> &nodes, std::string &group,
@@ -2745,7 +2747,7 @@ void proxyToMellow(std::vector<Proxy> &nodes, INIReader &ini,
 
   if (ext.enable_rule_generator)
     rulesetToSurge(ini, ruleset_content_array, 0, ext.overwrite_original_rules,
-                   "");
+                   "", ext.rule_stats);
 }
 
 std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
@@ -3049,7 +3051,7 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
 
   if (ext.enable_rule_generator)
     rulesetToSurge(ini, ruleset_content_array, -4, ext.overwrite_original_rules,
-                   ext.managed_config_prefix);
+                   ext.managed_config_prefix, ext.rule_stats);
 
   return ini.to_string();
 }
@@ -3703,7 +3705,8 @@ std::string proxyToSingBox(std::vector<Proxy> &nodes,
   if (ext.nodelist || !ext.enable_rule_generator)
     return json | SerializeObject();
 
-  rulesetToSingBox(json, ruleset_content_array, ext.overwrite_original_rules);
+  rulesetToSingBox(json, ruleset_content_array, ext.overwrite_original_rules,
+                   ext.rule_stats);
 
   return json | SerializeObject();
 }

@@ -183,6 +183,33 @@ profile = "lan"
 # Environment override: SUBCONVERTER_ALLOW_PUBLIC_UPLOAD=true|false
 allow_public_upload = false
 
+[statistics]
+# Opt-in runtime statistics and /dashboard. Missing or false keeps it disabled
+# and avoids registering the dashboard or statistics-enabled request handler.
+enabled = false
+# Put this directory on a Docker volume if statistics should survive restarts.
+data_dir = "stats"
+# Minimum seconds between persistence writes.
+flush_interval = 5
+
+[statistics.geo]
+# header uses country-only headers such as CF-IPCountry and never stores IPs.
+# none records all countries as unknown.
+provider = "header"
+country_headers = ["CF-IPCountry", "X-Geo-Country", "X-Vercel-IP-Country", "CloudFront-Viewer-Country"]
+
+[statistics.dashboard_auth]
+# Optional Basic authentication for /dashboard and /dashboard/data.
+# Only applies when statistics.enabled is true.
+# Missing or false keeps the dashboard password disabled.
+enabled = false
+username = ""
+password = ""
+# Failed login attempts allowed within window_seconds before lock_seconds applies.
+max_failures = 5
+window_seconds = 300
+lock_seconds = 900
+
 [emojis]
 add_emoji = false
 remove_old_emoji = true

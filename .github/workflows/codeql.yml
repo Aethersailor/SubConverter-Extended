@@ -38,6 +38,8 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v6
+      with:
+        token: ${{ secrets.PAT_TOKEN || github.token }}
 
     # [OPTIMIZATION] Cache build artifacts (QuickJSPP & LibCron)
     - name: Cache Build Artifacts
@@ -72,9 +74,13 @@ jobs:
     # [SETUP] Build Go library (libmihomo.a) for C++ linkage
     - name: Setup Go
       if: matrix.language == 'c-cpp'
-      uses: actions/setup-go@v6
-      with:
-        go-version: 'stable'
+      shell: bash
+      run: |
+        if ! command -v go >/dev/null 2>&1; then
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends golang-go
+        fi
+        go version
 
     - name: Build libmihomo.a
       if: matrix.language == 'c-cpp'

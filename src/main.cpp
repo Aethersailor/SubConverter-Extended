@@ -7,9 +7,12 @@
 #include <sys/types.h>
 
 #include "config/ruleset.h"
+#include "handler/dashboard_auth.h"
+#include "handler/dashboard_page.h"
 #include "handler/inspect_page.h"
 #include "handler/interfaces.h"
 #include "handler/settings.h"
+#include "handler/statistics.h"
 #include "handler/version_page.h"
 #include "handler/webget.h"
 #include "script/cron.h"
@@ -101,6 +104,8 @@ void signal_handler(int sig) {
 void cron_tick_caller() {
   if (global.enableCron)
     cron_tick();
+  if (global.statisticsEnabled)
+    statistics::tick();
 }
 
 int main(int argc, char *argv[]) {
@@ -145,6 +150,7 @@ int main(int argc, char *argv[]) {
 
   SetConsoleTitle("SubConverter-Extended " VERSION);
   readConf();
+  statistics::initialize();
   // vfs::vfs_read("vfs.ini");
   if (!global.updateRulesetOnRequest)
     refreshRulesets(global.customRulesets, global.rulesetsContent);
@@ -197,6 +203,16 @@ int main(int argc, char *argv[]) {
                             version_page::page);
   webServer.append_response("GET", "/inspect", "text/html; charset=utf-8",
                             inspect_page::page);
+  if (global.statisticsEnabled) {
+    webServer.append_response(
+        "GET", "/dashboard", "text/html; charset=utf-8",
+        global.dashboardAuthEnabled ? dashboard_auth::page
+                                    : dashboard_page::page);
+    webServer.append_response(
+        "GET", "/dashboard/data", "application/json; charset=utf-8",
+        global.dashboardAuthEnabled ? dashboard_auth::data
+                                    : statistics::dashboardData);
+  }
 
   webServer.append_response(
       "GET", "/robots.txt", "text/plain; charset=utf-8",
@@ -204,6 +220,7 @@ int main(int argc, char *argv[]) {
         return "User-agent: *\n"
                "Disallow: /version\n"
                "Disallow: /inspect\n"
+               "Disallow: /dashboard\n"
                "Disallow: /v\n";
       });
 
@@ -267,9 +284,12 @@ int main(int argc, char *argv[]) {
   */
 
   webServer.append_response("GET", "/sub", "text/plain;charset=utf-8",
-                            subconverter);
+                            global.statisticsEnabled ? subconverterTracked
+                                                     : subconverter);
 
-  webServer.append_response("HEAD", "/sub", "text/plain", subconverter);
+  webServer.append_response("HEAD", "/sub", "text/plain",
+                            global.statisticsEnabled ? subconverterTracked
+                                                     : subconverter);
 
   /*
   webServer.append_response("GET", "/sub2clashr", "text/plain;charset=utf-8",
@@ -331,6 +351,7 @@ int main(int argc, char *argv[]) {
                std::to_string(global.listenPort),
            LOG_LEVEL_INFO);
   int ret = webServer.start_web_server_multi(&args);
+  statistics::shutdown();
 
 #ifdef _WIN32
   WSACleanup();
