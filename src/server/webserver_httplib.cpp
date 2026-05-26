@@ -77,6 +77,10 @@ static std::string dump(const httplib::Headers &headers) {
   for (auto &x : headers) {
     if (startsWith(x.first, "LOCAL_") || startsWith(x.first, "REMOTE_"))
       continue;
+    if (strcasecmp(x.first.c_str(), "Authorization") == 0) {
+      s += x.first + ": [redacted]|";
+      continue;
+    }
     s += x.first + ": " + x.second + "|";
   }
   return s;

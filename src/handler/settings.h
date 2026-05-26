@@ -90,6 +90,10 @@ struct Settings {
   string_array statisticsCountryHeaders = {
       "CF-IPCountry", "X-Geo-Country", "X-Vercel-IP-Country",
       "CloudFront-Viewer-Country"};
+  bool dashboardAuthEnabled = false;
+  std::string dashboardAuthUsername, dashboardAuthPassword;
+  int dashboardAuthMaxFailures = 5, dashboardAuthWindowSeconds = 300,
+      dashboardAuthLockSeconds = 900;
 
   // limits
   size_t maxAllowedRulesets = 64, maxAllowedRules = 32768;

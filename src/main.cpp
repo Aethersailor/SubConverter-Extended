@@ -7,6 +7,7 @@
 #include <sys/types.h>
 
 #include "config/ruleset.h"
+#include "handler/dashboard_auth.h"
 #include "handler/dashboard_page.h"
 #include "handler/inspect_page.h"
 #include "handler/interfaces.h"
@@ -203,11 +204,14 @@ int main(int argc, char *argv[]) {
   webServer.append_response("GET", "/inspect", "text/html; charset=utf-8",
                             inspect_page::page);
   if (global.statisticsEnabled) {
-    webServer.append_response("GET", "/dashboard", "text/html; charset=utf-8",
-                              dashboard_page::page);
-    webServer.append_response("GET", "/dashboard/data",
-                              "application/json; charset=utf-8",
-                              statistics::dashboardData);
+    webServer.append_response(
+        "GET", "/dashboard", "text/html; charset=utf-8",
+        global.dashboardAuthEnabled ? dashboard_auth::page
+                                    : dashboard_page::page);
+    webServer.append_response(
+        "GET", "/dashboard/data", "application/json; charset=utf-8",
+        global.dashboardAuthEnabled ? dashboard_auth::data
+                                    : statistics::dashboardData);
   }
 
   webServer.append_response(

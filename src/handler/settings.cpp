@@ -116,9 +116,19 @@ static void finalizePerformanceSettings() {
   }
 }
 
+static void finalizeDashboardAuthSettings() {
+  if (global.dashboardAuthMaxFailures < 1)
+    global.dashboardAuthMaxFailures = 1;
+  if (global.dashboardAuthWindowSeconds < 1)
+    global.dashboardAuthWindowSeconds = 1;
+  if (global.dashboardAuthLockSeconds < 1)
+    global.dashboardAuthLockSeconds = 1;
+}
+
 static void finalizeRuntimeSettings() {
   finalizeSecuritySettings();
   finalizePerformanceSettings();
+  finalizeDashboardAuthSettings();
   global.configGeneration++;
 }
 
@@ -699,6 +709,15 @@ void readYAMLConf(YAML::Node &node) {
           global.statisticsCountryHeaders = country_headers;
       }
     }
+    if (stats["dashboard_auth"].IsDefined()) {
+      YAML::Node auth = stats["dashboard_auth"];
+      auth["enabled"] >> global.dashboardAuthEnabled;
+      auth["username"] >> global.dashboardAuthUsername;
+      auth["password"] >> global.dashboardAuthPassword;
+      auth["max_failures"] >> global.dashboardAuthMaxFailures;
+      auth["window_seconds"] >> global.dashboardAuthWindowSeconds;
+      auth["lock_seconds"] >> global.dashboardAuthLockSeconds;
+    }
   }
   if (node["security"].IsDefined()) {
     node["security"]["profile"] >> global.securityProfile;
@@ -923,6 +942,16 @@ void readTOMLConf(toml::value &root) {
       section_statistics_geo, "country_headers", string_array{});
   if (!country_headers.empty())
     global.statisticsCountryHeaders = country_headers;
+  auto section_dashboard_auth =
+      toml::find_or(section_statistics, "dashboard_auth",
+                    toml::value(toml::table()));
+  find_if_exist(section_dashboard_auth, "enabled",
+                global.dashboardAuthEnabled, "username",
+                global.dashboardAuthUsername, "password",
+                global.dashboardAuthPassword, "max_failures",
+                global.dashboardAuthMaxFailures, "window_seconds",
+                global.dashboardAuthWindowSeconds, "lock_seconds",
+                global.dashboardAuthLockSeconds);
 
   auto section_security =
       toml::find_or(root, "security", toml::value(toml::table()));
@@ -949,6 +978,12 @@ void readConf() {
   global.statisticsCountryHeaders = {"CF-IPCountry", "X-Geo-Country",
                                      "X-Vercel-IP-Country",
                                      "CloudFront-Viewer-Country"};
+  global.dashboardAuthEnabled = false;
+  global.dashboardAuthUsername.clear();
+  global.dashboardAuthPassword.clear();
+  global.dashboardAuthMaxFailures = 5;
+  global.dashboardAuthWindowSeconds = 300;
+  global.dashboardAuthLockSeconds = 900;
 
   try {
     std::string prefdata = fileGet(global.prefPath, false);
@@ -1238,6 +1273,18 @@ void readConf() {
       if (!country_headers.empty())
         global.statisticsCountryHeaders = country_headers;
     }
+    ini.get_bool_if_exist("dashboard_auth_enabled",
+                          global.dashboardAuthEnabled);
+    ini.get_if_exist("dashboard_auth_username",
+                     global.dashboardAuthUsername);
+    ini.get_if_exist("dashboard_auth_password",
+                     global.dashboardAuthPassword);
+    ini.get_int_if_exist("dashboard_auth_max_failures",
+                         global.dashboardAuthMaxFailures);
+    ini.get_int_if_exist("dashboard_auth_window_seconds",
+                         global.dashboardAuthWindowSeconds);
+    ini.get_int_if_exist("dashboard_auth_lock_seconds",
+                         global.dashboardAuthLockSeconds);
   }
 
   if (ini.section_exist("security")) {

@@ -509,7 +509,7 @@ std::string page(Request &, Response &response) {
                     <img src="/version/favicon-light.svg" alt="SubConverter-Extended" width="48" height="48" decoding="async">
                 </picture>
                 <div>
-                    <h1>Dashboard</h1>
+                    <h1><span data-lang="en">SubConverter-Extended Dashboard</span><span data-lang="zh">SubConverter-Extended 仪表盘</span></h1>
                     <div class="subtitle">
                         <span data-lang="en">Runtime conversion statistics</span>
                         <span data-lang="zh">运行期转换统计</span>
@@ -606,6 +606,7 @@ std::string page(Request &, Response &response) {
 
             function isZh() { return /^zh\b/i.test(document.documentElement.lang); }
             function text(en, zh) { return isZh() ? zh : en; }
+            function updateDocumentTitle() { document.title = text("SubConverter-Extended Dashboard", "SubConverter-Extended 仪表盘"); }
             function number(value) { return new Intl.NumberFormat(isZh() ? "zh-CN" : "en").format(value || 0); }
             function label(config) { return text(config.en, config.zh); }
             function windowConfig(key, source) {
@@ -695,7 +696,7 @@ std::string page(Request &, Response &response) {
                 metricsEl.innerHTML =
                     '<section class="stat-block">' +
                     '<div class="block-head"><div><h2>' + text("Runtime", "运行状态") + '</h2>' +
-                    '<div class="block-copy">' + text("Process start, persisted total runtime, and launch count are tracked separately.", "本次启动、历史累计运行时间和启动次数分开持久化统计。") + '</div></div></div>' +
+                    '<div class="block-copy">' + text("Service uptime and persisted runtime summary", "服务运行与累计运行概览") + '</div></div></div>' +
                     '<div class="runtime-grid">' +
                     runtimeCardHtml("Started", "本次启动时间", fmtDateTime(runtime.started_at || data.started_at), "Current process start time.", "当前进程启动时间。") +
                     runtimeCardHtml("Uptime", "本次运行时长", duration(runtime.uptime_seconds), "Time since this process started.", "从本次进程启动到现在的时长。") +
@@ -703,13 +704,13 @@ std::string page(Request &, Response &response) {
                     runtimeCardHtml("Launches", "启动次数", number(runtime.launch_count), "Number of launches recorded in the statistics file.", "统计文件记录到的启动次数。") +
                     '</div></section>' +
                     '<section class="stat-block"><div class="block-head"><div><h2>' + text("Conversion Totals", "转换总览") + '</h2>' +
-                    '<div class="block-copy">' + text("Current process and lifetime totals are shown apart to avoid mixing operational and historical readings.", "本次启动与历史总计分开展示，避免运行期读数和长期读数混在一起。") + '</div></div></div>' +
+                    '<div class="block-copy">' + text("Requests and rule conversions by scope", "按统计范围查看请求与规则转换") + '</div></div></div>' +
                     '<div class="metric-grid two-up">' +
                     countersPairHtml("Since Start", "本次启动", windows.startup, "Only conversions after the current process started.", "仅统计当前进程启动后的转换。") +
                     countersPairHtml("Lifetime", "历史总计", windows.lifetime, "Persisted conversion totals since the statistics file was created.", "统计文件创建以来持久化累计的转换。") +
                     '</div></section>' +
                     '<section class="stat-block"><div class="block-head"><div><h2>' + text("Rolling Windows", "滚动时间窗") + '</h2>' +
-                    '<div class="block-copy">' + text("Pick a window to focus on recent traffic without losing the side-by-side comparison.", "选择一个时间窗聚焦近期流量，同时保留各时间窗对比。") + '</div></div>' +
+                    '<div class="block-copy">' + text("Recent activity across selectable time ranges", "按时间范围查看近期活跃度") + '</div></div>' +
                     '<div class="range-tabs">' + rangeTabsHtml(WINDOWS, selectedWindow, "data-window-select") + '</div></div>' +
                     '<div class="window-grid">' +
                     countersPairHtml(selected.en, selected.zh, windows[selected.key], "Selected rolling window.", "当前选中的滚动时间窗。") +
@@ -850,10 +851,12 @@ std::string page(Request &, Response &response) {
             document.getElementById("lang-toggle").addEventListener("click", function () {
                 document.documentElement.lang = isZh() ? "en" : "zh-CN";
                 localStorage.setItem("sce-dashboard-lang", document.documentElement.lang);
+                updateDocumentTitle();
                 document.getElementById("lang-toggle").textContent = isZh() ? "中" : "EN";
                 if (latest) render(latest);
             });
             document.getElementById("refresh-button").addEventListener("click", refresh);
+            updateDocumentTitle();
             document.getElementById("lang-toggle").textContent = isZh() ? "中" : "EN";
             Promise.all([
                 fetch("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json").then(function (response) { return response.json(); }).catch(function () { return null; }),
