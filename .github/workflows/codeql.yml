@@ -38,6 +38,8 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v6
+      with:
+        token: ${{ secrets.PAT_TOKEN || github.token }}
 
     # [OPTIMIZATION] Cache build artifacts (QuickJSPP & LibCron)
     - name: Cache Build Artifacts
