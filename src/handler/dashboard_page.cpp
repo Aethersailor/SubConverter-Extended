@@ -42,16 +42,16 @@ std::string page(Request &, Response &response) {
         :root {
             --bg-gradient: linear-gradient(135deg, #f8fafc 0%, #eef2f7 48%, #e2e8f0 100%);
             --bg-grid: rgba(15, 23, 42, 0.055);
-            --bg-sheen: linear-gradient(115deg, transparent 0%, transparent 33%, rgba(14, 165, 233, 0.11) 48%, rgba(132, 204, 22, 0.09) 58%, transparent 73%, transparent 100%);
+            --bg-sheen: linear-gradient(115deg, transparent 0%, transparent 33%, rgba(14, 165, 233, 0.1) 48%, rgba(37, 99, 235, 0.075) 60%, transparent 73%, transparent 100%);
             --surface: rgba(255, 255, 255, 0.82);
             --surface-strong: rgba(255, 255, 255, 0.92);
             --surface-border: rgba(15, 23, 42, 0.1);
             --text-primary: #1a202c;
             --text-secondary: #4a5568;
             --text-muted: #64748b;
-            --accent: #0284c7;
-            --accent-2: #65a30d;
-            --accent-gradient: linear-gradient(135deg, #0284c7 0%, #0891b2 45%, #65a30d 100%);
+            --accent: #2563eb;
+            --accent-2: #0ea5e9;
+            --accent-gradient: linear-gradient(135deg, #0ea5e9 0%, #2563eb 58%, #1d4ed8 100%);
             --shadow: 0 28px 70px rgba(15, 23, 42, 0.13);
             --control-bg: rgba(255, 255, 255, 0.72);
             --control-hover: rgba(255, 255, 255, 0.92);
@@ -74,7 +74,7 @@ std::string page(Request &, Response &response) {
             :root {
                 --bg-gradient: linear-gradient(135deg, #05070b 0%, #0d111a 46%, #111827 100%);
                 --bg-grid: rgba(148, 163, 184, 0.075);
-                --bg-sheen: linear-gradient(115deg, transparent 0%, transparent 31%, rgba(34, 211, 238, 0.12) 47%, rgba(132, 204, 22, 0.08) 58%, transparent 74%, transparent 100%);
+                --bg-sheen: linear-gradient(115deg, transparent 0%, transparent 31%, rgba(56, 189, 248, 0.12) 47%, rgba(59, 130, 246, 0.09) 60%, transparent 74%, transparent 100%);
                 --surface: rgba(15, 23, 42, 0.72);
                 --surface-strong: rgba(21, 29, 43, 0.9);
                 --surface-border: rgba(148, 163, 184, 0.18);
@@ -82,8 +82,8 @@ std::string page(Request &, Response &response) {
                 --text-secondary: #a0aec0;
                 --text-muted: #7f8ea3;
                 --accent: #38bdf8;
-                --accent-2: #84cc16;
-                --accent-gradient: linear-gradient(135deg, #38bdf8 0%, #22d3ee 42%, #84cc16 100%);
+                --accent-2: #60a5fa;
+                --accent-gradient: linear-gradient(135deg, #38bdf8 0%, #2563eb 58%, #1d4ed8 100%);
                 --shadow: 0 32px 80px rgba(0, 0, 0, 0.62);
                 --control-bg: rgba(20, 24, 33, 0.7);
                 --control-hover: rgba(35, 42, 56, 0.86);
