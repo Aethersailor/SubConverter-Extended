@@ -58,9 +58,9 @@ std::string page(Request &, Response &response) {
             --control-border: rgba(26, 32, 44, 0.12);
             --map-stroke: rgba(255, 255, 255, 0.85);
             --map-empty: #d7e1ec;
-            --map-data-min: #38bdf8;
-            --map-data-mid: #0ea5e9;
-            --map-data-max: #166534;
+            --map-data-min: #93c5fd;
+            --map-data-mid: #2563eb;
+            --map-data-max: #1e3a8a;
             --chart-requests: linear-gradient(180deg, #0284c7 0%, #0891b2 52%, #65a30d 100%);
             --chart-rules: linear-gradient(180deg, #7c3aed 0%, #2563eb 48%, #0891b2 100%);
             --rank-track: rgba(15, 23, 42, 0.08);
@@ -90,9 +90,9 @@ std::string page(Request &, Response &response) {
                 --control-border: rgba(255, 255, 255, 0.16);
                 --map-stroke: rgba(2, 6, 23, 0.9);
                 --map-empty: #273449;
-                --map-data-min: #22d3ee;
+                --map-data-min: #7dd3fc;
                 --map-data-mid: #38bdf8;
-                --map-data-max: #84cc16;
+                --map-data-max: #2563eb;
                 --chart-requests: linear-gradient(180deg, #38bdf8 0%, #22d3ee 45%, #84cc16 100%);
                 --chart-rules: linear-gradient(180deg, #a78bfa 0%, #60a5fa 48%, #22d3ee 100%);
                 --rank-track: rgba(148, 163, 184, 0.16);
@@ -177,6 +177,46 @@ std::string page(Request &, Response &response) {
             display: flex;
             align-items: center;
             gap: 10px;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+        }
+        .menu-wrap {
+            position: relative;
+            display: inline-flex;
+        }
+        .refresh-menu {
+            position: absolute;
+            top: calc(100% + 8px);
+            right: 0;
+            display: grid;
+            gap: 5px;
+            min-width: 138px;
+            padding: 8px;
+            border: 1px solid var(--surface-border);
+            border-radius: 16px;
+            background: var(--surface-strong);
+            box-shadow: 0 18px 38px rgba(15, 23, 42, 0.18);
+            backdrop-filter: blur(18px);
+            -webkit-backdrop-filter: blur(18px);
+            z-index: 8;
+        }
+        .refresh-menu[hidden] { display: none; }
+        .refresh-option {
+            display: flex;
+            align-items: center;
+            width: 100%;
+            min-height: 34px;
+            justify-content: flex-start;
+            border-radius: 11px;
+            padding: 7px 10px;
+            text-align: left;
+            backdrop-filter: none;
+            -webkit-backdrop-filter: none;
+        }
+        .refresh-option[aria-pressed="true"] {
+            color: #ffffff;
+            border-color: transparent;
+            background: var(--accent-gradient);
         }
         button {
             border: 1px solid var(--control-border);
@@ -320,7 +360,7 @@ std::string page(Request &, Response &response) {
         }
         .window-strip {
             display: grid;
-            grid-template-columns: repeat(4, minmax(0, 1fr));
+            grid-template-columns: repeat(6, minmax(0, 1fr));
             gap: 10px;
         }
         .mini-window {
@@ -353,6 +393,14 @@ std::string page(Request &, Response &response) {
             flex-wrap: wrap;
             gap: 12px;
             margin-bottom: 14px;
+        }
+        .section-actions {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-left: auto;
         }
         h2 {
             margin: 0;
@@ -589,7 +637,8 @@ std::string page(Request &, Response &response) {
             }
         }
         @media (max-width: 980px) {
-            .runtime-grid, .metric-grid, .window-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .runtime-grid, .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .window-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
             .window-grid { grid-template-columns: 1fr; }
             .hourly-grid, .ranking-grid { grid-template-columns: 1fr; }
         }
@@ -601,6 +650,9 @@ std::string page(Request &, Response &response) {
             .metric-grid.two-up, .metric-pair { grid-template-columns: 1fr; }
             .block-head { align-items: flex-start; flex-direction: column; }
             .range-tabs { justify-content: flex-start; }
+            .section-actions { justify-content: flex-start; margin-left: 0; width: 100%; }
+            .actions { justify-content: flex-start; }
+            .refresh-menu { left: 0; right: auto; }
             .metric { min-height: 112px; padding: 14px; }
             .metric-value { font-size: 1.42rem; }
             .content { padding: 0 14px 14px; }
@@ -631,6 +683,10 @@ std::string page(Request &, Response &response) {
                 <button type="button" id="refresh-button">
                     <span data-lang="en">Refresh</span><span data-lang="zh">刷新</span>
                 </button>
+                <div class="menu-wrap">
+                    <button type="button" id="refresh-interval-button" aria-haspopup="menu" aria-expanded="false">Auto: 30s</button>
+                    <div class="refresh-menu" id="refresh-menu" role="menu" hidden></div>
+                </div>
                 <button type="button" id="lang-toggle">EN</button>
             </div>
         </div>
@@ -664,10 +720,12 @@ std::string page(Request &, Response &response) {
                     <div class="section-head">
                         <div>
                             <h2><span data-lang="en">Country Distribution</span><span data-lang="zh">国家分布</span></h2>
-                            <div class="state-line" id="country-range-label">-</div>
+                            <div class="state-line" id="map-range-label">-</div>
                         </div>
-                        <div class="range-tabs" id="country-tabs"></div>
-                        <span class="status"><span class="status-dot"></span><span id="country-status">-</span></span>
+                        <div class="section-actions">
+                            <span class="status"><span class="status-dot"></span><span id="country-status">-</span></span>
+                            <div class="range-tabs" id="map-tabs"></div>
+                        </div>
                     </div>
                     <div class="map-wrap">
                         <svg id="world-map" role="img" aria-label="World map"></svg>
@@ -685,18 +743,21 @@ std::string page(Request &, Response &response) {
                             <h2><span data-lang="en">Country Ranking</span><span data-lang="zh">国家排行</span></h2>
                             <div class="state-line" id="country-ranking-range">-</div>
                         </div>
+                        <div class="section-actions">
+                            <div class="range-tabs" id="ranking-tabs"></div>
+                        </div>
                     </div>
                     <div class="ranking-grid">
                         <article class="ranking-card">
                             <div class="ranking-card-head">
-                                <h3><span data-lang="en">Requests by Country</span><span data-lang="zh">国家请求排行</span></h3>
+                                <h3><span data-lang="en">Requests Ranking</span><span data-lang="zh">请求排行</span></h3>
                                 <span class="state-line" id="request-ranking-total">-</span>
                             </div>
                             <div class="ranking-list" id="request-ranking"></div>
                         </article>
                         <article class="ranking-card">
                             <div class="ranking-card-head">
-                                <h3><span data-lang="en">Rules by Country</span><span data-lang="zh">国家规则排行</span></h3>
+                                <h3><span data-lang="en">Rules Ranking</span><span data-lang="zh">规则排行</span></h3>
                                 <span class="state-line" id="rule-ranking-total">-</span>
                             </div>
                             <div class="ranking-list" id="rule-ranking"></div>
@@ -716,8 +777,9 @@ std::string page(Request &, Response &response) {
             };
             var metricsEl = document.getElementById("metrics");
             var countryStatus = document.getElementById("country-status");
-            var countryTabs = document.getElementById("country-tabs");
-            var countryRangeLabel = document.getElementById("country-range-label");
+            var mapTabs = document.getElementById("map-tabs");
+            var rankingTabs = document.getElementById("ranking-tabs");
+            var mapRangeLabel = document.getElementById("map-range-label");
             var countryRankingRange = document.getElementById("country-ranking-range");
             var updatedAt = document.getElementById("updated-at");
             var requestChart = document.getElementById("request-chart");
@@ -729,18 +791,14 @@ std::string page(Request &, Response &response) {
             var requestRankingTotal = document.getElementById("request-ranking-total");
             var ruleRankingTotal = document.getElementById("rule-ranking-total");
             var tooltip = document.getElementById("tooltip");
+            var refreshIntervalButton = document.getElementById("refresh-interval-button");
+            var refreshMenu = document.getElementById("refresh-menu");
             var mapData = null;
             var latest = null;
             var countryMap = new Map();
             var animatedValues = new Map();
             var reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-            var WINDOWS = [
-                { key: "hour", en: "1 Hour", zh: "1 小时" },
-                { key: "day", en: "1 Day", zh: "1 天" },
-                { key: "seven_days", en: "7 Days", zh: "7 天" },
-                { key: "thirty_days", en: "30 Days", zh: "30 天" }
-            ];
-            var COUNTRY_WINDOWS = [
+            var RANGE_WINDOWS = [
                 { key: "startup", en: "Since Start", zh: "本次启动" },
                 { key: "hour", en: "1 Hour", zh: "1 小时" },
                 { key: "day", en: "1 Day", zh: "1 天" },
@@ -748,8 +806,17 @@ std::string page(Request &, Response &response) {
                 { key: "thirty_days", en: "30 Days", zh: "30 天" },
                 { key: "lifetime", en: "Lifetime", zh: "历史总计" }
             ];
-            var selectedWindow = localStorage.getItem("sce-dashboard-window") || "day";
-            var selectedCountryWindow = localStorage.getItem("sce-dashboard-country-window") || "day";
+            var REFRESH_OPTIONS = [
+                { seconds: 0, en: "Pause", zh: "暂停" },
+                { seconds: 10, en: "10s", zh: "10 秒" },
+                { seconds: 30, en: "30s", zh: "30 秒" },
+                { seconds: 60, en: "1m", zh: "1 分钟" },
+                { seconds: 300, en: "5m", zh: "5 分钟" }
+            ];
+            var selectedMapWindow = localStorage.getItem("sce-dashboard-map-window") || "lifetime";
+            var selectedRankingWindow = localStorage.getItem("sce-dashboard-ranking-window") || "lifetime";
+            var refreshIntervalSeconds = Number(localStorage.getItem("sce-dashboard-refresh-interval") || 30);
+            var refreshTimer = null;
 
             function isZh() { return /^zh\b/i.test(document.documentElement.lang); }
             function text(en, zh) { return isZh() ? zh : en; }
@@ -757,8 +824,8 @@ std::string page(Request &, Response &response) {
             function number(value) { return new Intl.NumberFormat(isZh() ? "zh-CN" : "en").format(value || 0); }
             function label(config) { return text(config.en, config.zh); }
             function windowConfig(key, source) {
-                var list = source || COUNTRY_WINDOWS;
-                return list.find(function (item) { return item.key === key; }) || list[0];
+                var list = source || RANGE_WINDOWS;
+                return list.find(function (item) { return item.key === key; }) || list[list.length - 1];
             }
             function countryName(code) {
                 if (code === "ZZ" || code === "XX") return text("Unknown", "未知");
@@ -871,8 +938,6 @@ std::string page(Request &, Response &response) {
             function renderMetrics(data) {
                 var windows = data.windows || {};
                 var runtime = data.runtime || {};
-                var selected = windowConfig(selectedWindow, WINDOWS);
-                selectedWindow = selected.key;
                 metricsEl.innerHTML =
                     '<section class="stat-block">' +
                     '<div class="block-head"><div><h2>' + text("Runtime", "运行状态") + '</h2>' +
@@ -889,22 +954,10 @@ std::string page(Request &, Response &response) {
                     countersPairHtml("Since Start", "本次启动", windows.startup, "Only conversions after the current process started.", "仅统计当前进程启动后的转换。") +
                     countersPairHtml("Lifetime", "历史总计", windows.lifetime, "Persisted conversion totals since the statistics file was created.", "统计文件创建以来持久化累计的转换。") +
                     '</div></section>' +
-                    '<section class="stat-block"><div class="block-head"><div><h2>' + text("Rolling Windows", "滚动时间窗") + '</h2>' +
-                    '<div class="block-copy">' + text("Recent activity across selectable time ranges", "按时间范围查看近期活跃度") + '</div></div>' +
-                    '<div class="range-tabs">' + rangeTabsHtml(WINDOWS, selectedWindow, "data-window-select") + '</div></div>' +
-                    '<div class="window-grid">' +
-                    countersPairHtml(selected.en, selected.zh, windows[selected.key], "Selected rolling window.", "当前选中的滚动时间窗。") +
-                    '<div class="window-strip">' + WINDOWS.map(function (item) { return miniWindowHtml(item, windows[item.key]); }).join("") + '</div>' +
-                    '</div></section>';
+                    '<section class="stat-block"><div class="block-head"><div><h2>' + text("Time Ranges", "统计时间范围") + '</h2>' +
+                    '<div class="block-copy">' + text("Requests and rule conversions across common time ranges", "按常用时间范围查看请求与规则转换") + '</div></div></div>' +
+                    '<div class="window-strip">' + RANGE_WINDOWS.map(function (item) { return miniWindowHtml(item, windows[item.key]); }).join("") + '</div></section>';
                 animateCounters(metricsEl);
-
-                metricsEl.querySelectorAll("[data-window-select]").forEach(function (button) {
-                    button.addEventListener("click", function () {
-                        selectedWindow = button.getAttribute("data-window-select");
-                        localStorage.setItem("sce-dashboard-window", selectedWindow);
-                        renderMetrics(latest || data);
-                    });
-                });
             }
             function renderHourlyChart(container, series, field, className, labelEn, labelZh) {
                 container.textContent = "";
@@ -938,24 +991,76 @@ std::string page(Request &, Response &response) {
                 renderHourlyChart(requestChart, series, "subscription_requests", "request-bar", "Requests", "请求");
                 renderHourlyChart(ruleChart, series, "rule_conversions", "rule-bar", "Rules", "规则");
             }
-            function selectedCountries(data) {
+            function countriesForWindow(data, key) {
                 var windows = data.country_windows || {};
-                return windows[selectedCountryWindow] || data.countries || [];
+                return windows[key] || data.countries || [];
             }
-            function renderCountryTabs() {
-                selectedCountryWindow = windowConfig(selectedCountryWindow, COUNTRY_WINDOWS).key;
-                countryTabs.innerHTML = rangeTabsHtml(COUNTRY_WINDOWS, selectedCountryWindow, "data-country-window");
-                countryTabs.querySelectorAll("[data-country-window]").forEach(function (button) {
+            function renderTimeTabs() {
+                selectedMapWindow = windowConfig(selectedMapWindow, RANGE_WINDOWS).key;
+                selectedRankingWindow = windowConfig(selectedRankingWindow, RANGE_WINDOWS).key;
+                mapTabs.innerHTML = rangeTabsHtml(RANGE_WINDOWS, selectedMapWindow, "data-map-window");
+                mapTabs.querySelectorAll("[data-map-window]").forEach(function (button) {
                     button.addEventListener("click", function () {
-                        selectedCountryWindow = button.getAttribute("data-country-window");
-                        localStorage.setItem("sce-dashboard-country-window", selectedCountryWindow);
-                        updateRangeTabs(countryTabs, "data-country-window", selectedCountryWindow);
+                        selectedMapWindow = button.getAttribute("data-map-window");
+                        localStorage.setItem("sce-dashboard-map-window", selectedMapWindow);
+                        updateRangeTabs(mapTabs, "data-map-window", selectedMapWindow);
                         if (latest) {
-                            renderCountries(selectedCountries(latest));
+                            renderMapCountries(countriesForWindow(latest, selectedMapWindow));
                             renderMap();
                         }
                     });
                 });
+                rankingTabs.innerHTML = rangeTabsHtml(RANGE_WINDOWS, selectedRankingWindow, "data-ranking-window");
+                rankingTabs.querySelectorAll("[data-ranking-window]").forEach(function (button) {
+                    button.addEventListener("click", function () {
+                        selectedRankingWindow = button.getAttribute("data-ranking-window");
+                        localStorage.setItem("sce-dashboard-ranking-window", selectedRankingWindow);
+                        updateRangeTabs(rankingTabs, "data-ranking-window", selectedRankingWindow);
+                        if (latest)
+                            renderRankingCountries(countriesForWindow(latest, selectedRankingWindow));
+                    });
+                });
+            }
+            function refreshOption(seconds) {
+                return REFRESH_OPTIONS.find(function (item) { return item.seconds === seconds; }) || REFRESH_OPTIONS[2];
+            }
+            function refreshOptionText(option) {
+                if (option.seconds === 0)
+                    return text("Pause", "暂停");
+                return label(option);
+            }
+            function refreshButtonText() {
+                var option = refreshOption(refreshIntervalSeconds);
+                if (option.seconds === 0)
+                    return text("Auto: paused", "自动：暂停");
+                return text("Auto: ", "自动：") + label(option);
+            }
+            function updateRefreshIntervalUi() {
+                var normalized = refreshOption(refreshIntervalSeconds);
+                refreshIntervalSeconds = normalized.seconds;
+                refreshIntervalButton.textContent = refreshButtonText();
+                refreshMenu.innerHTML = REFRESH_OPTIONS.map(function (item) {
+                    return '<button type="button" class="refresh-option" role="menuitemradio" aria-pressed="' + (item.seconds === refreshIntervalSeconds ? "true" : "false") + '" data-refresh-seconds="' + item.seconds + '">' + refreshOptionText(item) + '</button>';
+                }).join("");
+                refreshMenu.querySelectorAll("[data-refresh-seconds]").forEach(function (button) {
+                    button.addEventListener("click", function () {
+                        refreshIntervalSeconds = Number(button.getAttribute("data-refresh-seconds")) || 0;
+                        localStorage.setItem("sce-dashboard-refresh-interval", String(refreshIntervalSeconds));
+                        refreshMenu.hidden = true;
+                        refreshIntervalButton.setAttribute("aria-expanded", "false");
+                        updateRefreshIntervalUi();
+                        scheduleAutoRefresh();
+                    });
+                });
+            }
+            function scheduleAutoRefresh() {
+                if (refreshTimer) {
+                    clearInterval(refreshTimer);
+                    refreshTimer = null;
+                }
+                if (refreshIntervalSeconds <= 0 || document.visibilityState === "hidden")
+                    return;
+                refreshTimer = setInterval(refresh, refreshIntervalSeconds * 1000);
             }
             function renderRankingPanel(container, countries, field, total, emptyMessageEn, emptyMessageZh) {
                 container.textContent = "";
@@ -1001,20 +1106,25 @@ std::string page(Request &, Response &response) {
                 });
                 animateCounters(container);
             }
-            function renderCountries(countries) {
+            function renderMapCountries(countries) {
                 countryMap = new Map();
                 countries.forEach(function (item) { countryMap.set(item.code, item); });
-                var countryConfig = windowConfig(selectedCountryWindow, COUNTRY_WINDOWS);
-                selectedCountryWindow = countryConfig.key;
-                updateRangeTabs(countryTabs, "data-country-window", selectedCountryWindow);
+                var countryConfig = windowConfig(selectedMapWindow, RANGE_WINDOWS);
+                selectedMapWindow = countryConfig.key;
+                updateRangeTabs(mapTabs, "data-map-window", selectedMapWindow);
                 var visibleCountries = countries.filter(function (item) { return item.code !== "ZZ" && item.code !== "XX"; });
+                mapRangeLabel.textContent = text("Showing ", "当前范围：") + label(countryConfig);
+                countryStatus.textContent = text("Countries ", "国家 ") + number(visibleCountries.length);
+            }
+            function renderRankingCountries(countries) {
+                var countryConfig = windowConfig(selectedRankingWindow, RANGE_WINDOWS);
+                selectedRankingWindow = countryConfig.key;
+                updateRangeTabs(rankingTabs, "data-ranking-window", selectedRankingWindow);
                 var totalRequests = countries.reduce(function (sum, item) { return sum + (item.subscription_requests || 0); }, 0);
                 var totalRules = countries.reduce(function (sum, item) { return sum + (item.rule_conversions || 0); }, 0);
-                countryRangeLabel.textContent = text("Showing ", "当前范围：") + label(countryConfig);
                 countryRankingRange.textContent = text("Showing ", "当前范围：") + label(countryConfig);
-                countryStatus.textContent = text("Countries ", "国家 ") + number(visibleCountries.length);
-                requestRankingTotal.innerHTML = text("Total ", "合计 ") + countValue("country:" + selectedCountryWindow + ":requests", totalRequests);
-                ruleRankingTotal.innerHTML = text("Total ", "合计 ") + countValue("country:" + selectedCountryWindow + ":rules", totalRules);
+                requestRankingTotal.innerHTML = text("Total ", "合计 ") + countValue("ranking:" + selectedRankingWindow + ":requests", totalRequests);
+                ruleRankingTotal.innerHTML = text("Total ", "合计 ") + countValue("ranking:" + selectedRankingWindow + ":rules", totalRules);
                 animateCounters(requestRankingTotal);
                 animateCounters(ruleRankingTotal);
                 renderRankingPanel(requestRanking, countries, "subscription_requests", totalRequests, "No request data in this range", "当前范围暂无请求数据");
@@ -1033,7 +1143,7 @@ std::string page(Request &, Response &response) {
                 var dataMaxColor = styles.getPropertyValue("--map-data-max").trim() || "#15803d";
                 svg.attr("viewBox", "0 0 " + width + " " + height);
                 svg.selectAll("*").remove();
-                var projection = d3.geoNaturalEarth1().rotate([-105, 0]).fitSize([width, height], { type: "Sphere" });
+                var projection = d3.geoNaturalEarth1().rotate([-150, 0]).fitSize([width, height], { type: "Sphere" });
                 var path = d3.geoPath(projection);
                 var features = topojson.feature(mapData, mapData.objects.countries).features;
                 var max = Math.max(1, ...Array.from(countryMap.values()).map(function (item) { return item.subscription_requests || 0; }));
@@ -1065,7 +1175,7 @@ std::string page(Request &, Response &response) {
                     .on("mousemove", function (event, d) {
                         var code = ISO_N3[String(d.id).padStart(3, "0")] || "ZZ";
                         var item = countryMap.get(code) || { subscription_requests: 0, rule_conversions: 0 };
-                        var countryConfig = windowConfig(selectedCountryWindow, COUNTRY_WINDOWS);
+                        var countryConfig = windowConfig(selectedMapWindow, RANGE_WINDOWS);
                         tooltip.innerHTML = '<div class="tooltip-title"><span class="country-icon">' + countryIcon(code) + '</span>' + countryName(code) + ' · ' + code + '</div>' +
                             '<div class="tooltip-row"><span>' + text("Range", "范围") + '</span><strong>' + label(countryConfig) + '</strong></div>' +
                             '<div class="tooltip-row"><span>' + text("Requests", "请求") + '</span><strong>' + number(item.subscription_requests) + '</strong></div>' +
@@ -1080,8 +1190,9 @@ std::string page(Request &, Response &response) {
                 latest = data;
                 renderMetrics(data);
                 renderHourlyCharts(data.series || []);
-                renderCountryTabs();
-                renderCountries(selectedCountries(data));
+                renderTimeTabs();
+                renderMapCountries(countriesForWindow(data, selectedMapWindow));
+                renderRankingCountries(countriesForWindow(data, selectedRankingWindow));
                 updatedAt.textContent = text("Updated ", "更新 ") + fmtTime(data.generated_at);
                 renderMap();
             }
@@ -1094,11 +1205,29 @@ std::string page(Request &, Response &response) {
                 localStorage.setItem("sce-dashboard-lang", document.documentElement.lang);
                 updateDocumentTitle();
                 document.getElementById("lang-toggle").textContent = isZh() ? "中" : "EN";
+                updateRefreshIntervalUi();
                 if (latest) render(latest);
             });
             document.getElementById("refresh-button").addEventListener("click", refresh);
+            refreshIntervalButton.addEventListener("click", function (event) {
+                event.stopPropagation();
+                refreshMenu.hidden = !refreshMenu.hidden;
+                refreshIntervalButton.setAttribute("aria-expanded", refreshMenu.hidden ? "false" : "true");
+            });
+            document.addEventListener("click", function (event) {
+                if (!refreshMenu.hidden && !refreshMenu.contains(event.target) && event.target !== refreshIntervalButton) {
+                    refreshMenu.hidden = true;
+                    refreshIntervalButton.setAttribute("aria-expanded", "false");
+                }
+            });
+            document.addEventListener("visibilitychange", function () {
+                scheduleAutoRefresh();
+                if (document.visibilityState !== "hidden" && refreshIntervalSeconds > 0)
+                    refresh();
+            });
             updateDocumentTitle();
             document.getElementById("lang-toggle").textContent = isZh() ? "中" : "EN";
+            updateRefreshIntervalUi();
             Promise.all([
                 fetch("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json").then(function (response) { return response.json(); }).catch(function () { return null; }),
                 refresh()
@@ -1107,10 +1236,7 @@ std::string page(Request &, Response &response) {
                 renderMap();
             });
             window.addEventListener("resize", function () { renderMap(); });
-            setInterval(function () {
-                if (document.visibilityState !== "hidden")
-                    refresh();
-            }, 30000);
+            scheduleAutoRefresh();
         })();
     </script>
 </body>
