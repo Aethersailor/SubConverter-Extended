@@ -3,15 +3,23 @@ name: Sync Dev to Master
 on:
   workflow_dispatch:
     inputs:
+      release_mode:
+        description: "Release mode: new creates a tag, overwrite rebuilds an existing release, sync_only only syncs branches."
+        required: true
+        default: "new"
+        type: choice
+        options:
+          - new
+          - overwrite
+          - sync_only
       version:
-        description: "Release tag, e.g. v1.2.3. Leave empty to auto bump patch. Used only when create_release_tag is true."
+        description: "Release tag, e.g. v1.2.3. Empty auto bumps for new or uses latest existing tag for overwrite."
         required: false
         type: string
-      create_release_tag:
-        description: "Create and push a new release tag after syncing."
+      confirm_overwrite:
+        description: "Type OVERWRITE to confirm rebuilding an existing release."
         required: false
-        default: true
-        type: boolean
+        type: string
 
 concurrency:
   group: sync-dev-to-master
@@ -84,10 +92,13 @@ jobs:
             git push origin master
           fi
 
-      - name: Create and Push Release Tag
-        if: ${{ inputs.create_release_tag != false }}
+      - name: Resolve Release Tag
+        id: release_tag
+        if: ${{ inputs.release_mode != 'sync_only' }}
         env:
-          REQUESTED_VERSION: ${{ github.event.inputs.version }}
+          RELEASE_MODE: ${{ inputs.release_mode }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+          CONFIRM_OVERWRITE: ${{ inputs.confirm_overwrite }}
         run: |
           set -euo pipefail
 
@@ -96,6 +107,11 @@ jobs:
           REQUESTED_VERSION="${REQUESTED_VERSION:-}"
           REQUESTED_VERSION="${REQUESTED_VERSION#"${REQUESTED_VERSION%%[![:space:]]*}"}"
           REQUESTED_VERSION="${REQUESTED_VERSION%"${REQUESTED_VERSION##*[![:space:]]}"}"
+
+          if [ "$RELEASE_MODE" = "overwrite" ] && [ "${CONFIRM_OVERWRITE:-}" != "OVERWRITE" ]; then
+            echo "::error::confirm_overwrite must be exactly 'OVERWRITE' when release_mode=overwrite."
+            exit 1
+          fi
 
           if [ -n "$REQUESTED_VERSION" ]; then
             TAG_NAME="$REQUESTED_VERSION"
@@ -107,13 +123,23 @@ jobs:
             LATEST_TAG="$(git tag --list 'v*.*.*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
 
             if [ -z "$LATEST_TAG" ]; then
-              TAG_NAME="v0.1.0"
-              echo "No existing vX.Y.Z tag found. Starting at $TAG_NAME"
+              if [ "$RELEASE_MODE" = "new" ]; then
+                TAG_NAME="v0.1.0"
+                echo "No existing vX.Y.Z tag found. Starting at $TAG_NAME"
+              else
+                echo "::error::No existing vX.Y.Z tag found to overwrite."
+                exit 1
+              fi
             else
-              VERSION="${LATEST_TAG#v}"
-              IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
-              TAG_NAME="v${MAJOR}.${MINOR}.$((PATCH + 1))"
-              echo "Auto bumped release tag from $LATEST_TAG to $TAG_NAME"
+              if [ "$RELEASE_MODE" = "new" ]; then
+                VERSION="${LATEST_TAG#v}"
+                IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+                TAG_NAME="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+                echo "Auto bumped release tag from $LATEST_TAG to $TAG_NAME"
+              else
+                TAG_NAME="$LATEST_TAG"
+                echo "No release tag requested. Using latest existing release tag: $TAG_NAME"
+              fi
             fi
           fi
 
@@ -122,21 +148,62 @@ jobs:
             exit 1
           fi
 
-          if git rev-parse -q --verify "refs/tags/$TAG_NAME" >/dev/null; then
-            echo "::error::Tag '$TAG_NAME' already exists locally."
-            exit 1
+          if [ "$RELEASE_MODE" = "new" ]; then
+            if git rev-parse -q --verify "refs/tags/$TAG_NAME" >/dev/null; then
+              echo "::error::Tag '$TAG_NAME' already exists locally."
+              exit 1
+            fi
+
+            if git ls-remote --exit-code --tags origin "refs/tags/$TAG_NAME" >/dev/null 2>&1; then
+              echo "::error::Tag '$TAG_NAME' already exists on origin."
+              exit 1
+            fi
+          else
+            if ! git rev-parse -q --verify "refs/tags/$TAG_NAME" >/dev/null; then
+              echo "::error::Tag '$TAG_NAME' does not exist locally."
+              exit 1
+            fi
+
+            if ! git ls-remote --exit-code --tags origin "refs/tags/$TAG_NAME" >/dev/null 2>&1; then
+              echo "::error::Tag '$TAG_NAME' does not exist on origin."
+              exit 1
+            fi
+
+            TAG_COMMIT="$(git rev-list -n 1 "$TAG_NAME")"
+            MASTER_COMMIT="$(git rev-parse HEAD)"
+            echo "Overwrite release tag: $TAG_NAME"
+            echo "Tag commit: $TAG_COMMIT"
+            echo "Master commit used for rebuilt assets: $MASTER_COMMIT"
           fi
 
-          if git ls-remote --exit-code --tags origin "refs/tags/$TAG_NAME" >/dev/null 2>&1; then
-            echo "::error::Tag '$TAG_NAME' already exists on origin."
-            exit 1
-          fi
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Create and Push Release Tag
+        if: ${{ inputs.release_mode == 'new' }}
+        env:
+          TAG_NAME: ${{ steps.release_tag.outputs.tag_name }}
+        run: |
+          set -euo pipefail
 
           git tag -a "$TAG_NAME" -m "Release $TAG_NAME"
           git push origin "$TAG_NAME"
 
-      - name: Skip Release Tag
-        if: ${{ inputs.create_release_tag == false }}
+      - name: Dispatch Overwrite Release Build
+        if: ${{ inputs.release_mode == 'overwrite' }}
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          TAG_NAME: ${{ steps.release_tag.outputs.tag_name }}
         run: |
-          echo "create_release_tag=false; synced dev to master without creating a release tag."
+          set -euo pipefail
 
+          gh workflow run build-dockerhub.yml \
+            --ref master \
+            -f release_tag="$TAG_NAME" \
+            -f overwrite_existing_release=true
+
+          echo "Dispatched release rebuild for $TAG_NAME from master."
+
+      - name: Skip Release
+        if: ${{ inputs.release_mode == 'sync_only' }}
+        run: |
+          echo "release_mode=sync_only; synced dev to master without creating or rebuilding a release."

@@ -720,7 +720,7 @@ std::string page(Request &, Response &response) {
                 <section class="section">
                     <div class="section-head">
                         <div>
-                            <h2><span data-lang="en">Country Distribution</span><span data-lang="zh">国家分布</span></h2>
+                            <h2><span data-lang="en">Country / Region Distribution</span><span data-lang="zh">国家和地区分布</span></h2>
                             <div class="state-line" id="map-range-label">-</div>
                         </div>
                         <div class="section-actions">
@@ -741,7 +741,7 @@ std::string page(Request &, Response &response) {
                 <section class="section">
                     <div class="section-head">
                         <div>
-                            <h2><span data-lang="en">Country Ranking</span><span data-lang="zh">国家排行</span></h2>
+                            <h2><span data-lang="en">Country / Region Ranking</span><span data-lang="zh">国家和地区排行</span></h2>
                             <div class="state-line" id="country-ranking-range">-</div>
                         </div>
                         <div class="section-actions">
@@ -834,6 +834,7 @@ std::string page(Request &, Response &response) {
             var selectedRankingWindow = localStorage.getItem(RANKING_WINDOW_STORAGE_KEY) || "lifetime";
             var refreshIntervalSeconds = Number(localStorage.getItem(REFRESH_INTERVAL_STORAGE_KEY) || 3);
             var refreshTimer = null;
+            var hourlyChartInitialized = new WeakMap();
 
             function isZh() { return /^zh\b/i.test(document.documentElement.lang); }
             function text(en, zh) { return isZh() ? zh : en; }
@@ -975,25 +976,43 @@ std::string page(Request &, Response &response) {
                 animateCounters(metricsEl);
             }
             function renderHourlyChart(container, series, field, className, labelEn, labelZh) {
-                container.textContent = "";
                 if (!series.length) {
+                    container.textContent = "";
+                    hourlyChartInitialized.delete(container);
                     var empty = document.createElement("div");
                     empty.className = "empty compact";
                     empty.textContent = text("No hourly data", "暂无小时数据");
                     container.appendChild(empty);
                     return;
                 }
+                container.querySelectorAll(".empty").forEach(function (node) { node.remove(); });
                 var max = Math.max(1, ...series.map(function (item) { return item[field] || 0; }));
-                series.forEach(function (item) {
+                var seen = new Set();
+                var initialized = hourlyChartInitialized.get(container) === true;
+                series.forEach(function (item, index) {
                     var value = item[field] || 0;
-                    var bar = document.createElement("div");
-                    bar.className = "bar " + className;
-                    bar.style.height = "4px";
+                    var key = String(item.time || index);
+                    seen.add(key);
+                    var bar = container.querySelector('[data-hour-key="' + key + '"]');
+                    if (!bar) {
+                        bar = document.createElement("div");
+                        bar.className = "bar " + className;
+                        bar.setAttribute("data-hour-key", key);
+                        bar.style.height = initialized ? Math.max(4, Math.round((value / max) * 132)) + "px" : "4px";
+                    } else {
+                        bar.className = "bar " + className;
+                    }
                     bar.title = fmtTime(item.time) + " / " + text(labelEn, labelZh) + " " + number(value);
                     container.appendChild(bar);
                     var targetHeight = Math.max(4, Math.round((value / max) * 132)) + "px";
-                    requestAnimationFrame(function () { bar.style.height = targetHeight; });
+                    if (bar.style.height !== targetHeight)
+                        requestAnimationFrame(function () { bar.style.height = targetHeight; });
                 });
+                container.querySelectorAll("[data-hour-key]").forEach(function (bar) {
+                    if (!seen.has(bar.getAttribute("data-hour-key")))
+                        bar.remove();
+                });
+                hourlyChartInitialized.set(container, true);
             }
             function renderHourlyCharts(series) {
                 series = series || [];
@@ -1078,46 +1097,62 @@ std::string page(Request &, Response &response) {
                 refreshTimer = setInterval(refresh, refreshIntervalSeconds * 1000);
             }
             function renderRankingPanel(container, countries, field, total, emptyMessageEn, emptyMessageZh) {
-                container.textContent = "";
                 var ranked = countries.filter(function (item) { return (item[field] || 0) > 0; })
                     .sort(function (a, b) { return (b[field] || 0) - (a[field] || 0); })
                     .slice(0, 12);
                 if (!ranked.length) {
+                    container.textContent = "";
                     var empty = document.createElement("div");
                     empty.className = "empty compact";
                     empty.textContent = text(emptyMessageEn, emptyMessageZh);
                     container.appendChild(empty);
                     return;
                 }
+                container.querySelectorAll(".empty").forEach(function (node) { node.remove(); });
                 var max = Math.max(1, ...ranked.map(function (item) { return item[field] || 0; }));
+                var seen = new Set();
                 ranked.forEach(function (item) {
                     var value = item[field] || 0;
-                    var row = document.createElement("div");
-                    row.className = "ranking-row";
+                    var key = field + ":" + item.code;
+                    seen.add(key);
+                    var row = container.querySelector('[data-rank-key="' + key + '"]');
+                    var fill;
+                    if (!row) {
+                        row = document.createElement("div");
+                        row.className = "ranking-row";
+                        row.setAttribute("data-rank-key", key);
 
-                    var country = document.createElement("div");
-                    country.className = "rank-country";
-                    country.innerHTML = '<span class="country-icon">' + countryIcon(item.code) + '</span><span class="code-badge">' + item.code + '</span><span class="rank-country-name">' + countryName(item.code) + '</span>';
+                        var country = document.createElement("div");
+                        country.className = "rank-country";
 
-                    var metric = document.createElement("div");
-                    metric.className = "rank-metric";
-                    var values = document.createElement("div");
-                    values.className = "rank-values";
-                    values.innerHTML = '<span>' + countValue("rank:" + field + ":" + item.code, value) + '</span><span>' + percentage(value, total) + '</span>';
-                    var track = document.createElement("div");
-                    track.className = "rank-bar-track";
-                    var fill = document.createElement("div");
-                    fill.className = "rank-bar-fill" + (field === "rule_conversions" ? " rule" : "");
-                    fill.style.setProperty("--rank-width", "0%");
-                    track.appendChild(fill);
-                    metric.appendChild(values);
-                    metric.appendChild(track);
-                    row.appendChild(country);
-                    row.appendChild(metric);
+                        var metric = document.createElement("div");
+                        metric.className = "rank-metric";
+                        var values = document.createElement("div");
+                        values.className = "rank-values";
+                        var track = document.createElement("div");
+                        track.className = "rank-bar-track";
+                        fill = document.createElement("div");
+                        fill.className = "rank-bar-fill" + (field === "rule_conversions" ? " rule" : "");
+                        fill.style.setProperty("--rank-width", "0%");
+                        track.appendChild(fill);
+                        metric.appendChild(values);
+                        metric.appendChild(track);
+                        row.appendChild(country);
+                        row.appendChild(metric);
+                    }
+                    row.querySelector(".rank-country").innerHTML = '<span class="country-icon">' + countryIcon(item.code) + '</span><span class="code-badge">' + item.code + '</span><span class="rank-country-name">' + countryName(item.code) + '</span>';
+                    row.querySelector(".rank-values").innerHTML = '<span>' + countValue("rank:" + field + ":" + item.code, value) + '</span><span>' + percentage(value, total) + '</span>';
+                    fill = row.querySelector(".rank-bar-fill");
                     container.appendChild(row);
+                    var targetWidth = Math.max(4, Math.round((value / max) * 100)) + "%";
                     requestAnimationFrame(function () {
-                        fill.style.setProperty("--rank-width", Math.max(4, Math.round((value / max) * 100)) + "%");
+                        if (fill.style.getPropertyValue("--rank-width") !== targetWidth)
+                            fill.style.setProperty("--rank-width", targetWidth);
                     });
+                });
+                container.querySelectorAll("[data-rank-key]").forEach(function (row) {
+                    if (!seen.has(row.getAttribute("data-rank-key")))
+                        row.remove();
                 });
                 animateCounters(container);
             }
@@ -1129,7 +1164,7 @@ std::string page(Request &, Response &response) {
                 updateRangeTabs(mapTabs, "data-map-window", selectedMapWindow);
                 var visibleCountries = countries.filter(function (item) { return item.code !== "ZZ" && item.code !== "XX"; });
                 mapRangeLabel.textContent = text("Showing ", "当前范围：") + label(countryConfig);
-                countryStatus.textContent = text("Countries ", "国家 ") + number(visibleCountries.length);
+                countryStatus.textContent = text("Countries / Regions ", "国家和地区 ") + number(visibleCountries.length);
             }
             function renderRankingCountries(countries) {
                 var countryConfig = windowConfig(selectedRankingWindow, RANGE_WINDOWS);
