@@ -61,11 +61,11 @@ std::string page(Request &, Response &response) {
             --map-data-min: #93c5fd;
             --map-data-mid: #2563eb;
             --map-data-max: #1e3a8a;
-            --chart-requests: linear-gradient(180deg, #0284c7 0%, #0891b2 52%, #65a30d 100%);
-            --chart-rules: linear-gradient(180deg, #7c3aed 0%, #2563eb 48%, #0891b2 100%);
+            --chart-requests: linear-gradient(180deg, #93c5fd 0%, #2563eb 58%, #1e3a8a 100%);
+            --chart-rules: linear-gradient(180deg, #93c5fd 0%, #2563eb 58%, #1e3a8a 100%);
             --rank-track: rgba(15, 23, 42, 0.08);
-            --rank-request: linear-gradient(90deg, #0ea5e9 0%, #65a30d 100%);
-            --rank-rule: linear-gradient(90deg, #7c3aed 0%, #0891b2 100%);
+            --rank-request: linear-gradient(90deg, #93c5fd 0%, #2563eb 62%, #1e3a8a 100%);
+            --rank-rule: linear-gradient(90deg, #93c5fd 0%, #2563eb 62%, #1e3a8a 100%);
             --danger: #dc2626;
             --warn: #b45309;
         }
@@ -93,11 +93,11 @@ std::string page(Request &, Response &response) {
                 --map-data-min: #7dd3fc;
                 --map-data-mid: #38bdf8;
                 --map-data-max: #2563eb;
-                --chart-requests: linear-gradient(180deg, #38bdf8 0%, #22d3ee 45%, #84cc16 100%);
-                --chart-rules: linear-gradient(180deg, #a78bfa 0%, #60a5fa 48%, #22d3ee 100%);
+                --chart-requests: linear-gradient(180deg, #7dd3fc 0%, #38bdf8 56%, #2563eb 100%);
+                --chart-rules: linear-gradient(180deg, #7dd3fc 0%, #38bdf8 56%, #2563eb 100%);
                 --rank-track: rgba(148, 163, 184, 0.16);
-                --rank-request: linear-gradient(90deg, #22d3ee 0%, #84cc16 100%);
-                --rank-rule: linear-gradient(90deg, #a78bfa 0%, #22d3ee 100%);
+                --rank-request: linear-gradient(90deg, #7dd3fc 0%, #38bdf8 58%, #2563eb 100%);
+                --rank-rule: linear-gradient(90deg, #7dd3fc 0%, #38bdf8 58%, #2563eb 100%);
                 --danger: #f87171;
                 --warn: #fbbf24;
             }
@@ -277,6 +277,7 @@ std::string page(Request &, Response &response) {
             gap: 14px;
         }
         .metric-grid.two-up { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .conversion-totals { margin-bottom: 12px; }
         .window-grid {
             display: grid;
             grid-template-columns: minmax(280px, 0.9fr) minmax(0, 1.1fr);
@@ -684,7 +685,7 @@ std::string page(Request &, Response &response) {
                     <span data-lang="en">Refresh</span><span data-lang="zh">刷新</span>
                 </button>
                 <div class="menu-wrap">
-                    <button type="button" id="refresh-interval-button" aria-haspopup="menu" aria-expanded="false">Auto: 30s</button>
+                    <button type="button" id="refresh-interval-button" aria-haspopup="menu" aria-expanded="false">Auto: 3s</button>
                     <div class="refresh-menu" id="refresh-menu" role="menu" hidden></div>
                 </div>
                 <button type="button" id="lang-toggle">EN</button>
@@ -804,18 +805,34 @@ std::string page(Request &, Response &response) {
                 { key: "day", en: "1 Day", zh: "1 天" },
                 { key: "seven_days", en: "7 Days", zh: "7 天" },
                 { key: "thirty_days", en: "30 Days", zh: "30 天" },
+                { key: "half_year", en: "Half Year", zh: "半年" },
+                { key: "year", en: "1 Year", zh: "1 年" },
                 { key: "lifetime", en: "Lifetime", zh: "历史总计" }
+            ];
+            var SUMMARY_WINDOWS = [
+                { key: "hour", en: "1 Hour", zh: "1 小时" },
+                { key: "day", en: "1 Day", zh: "1 天" },
+                { key: "seven_days", en: "7 Days", zh: "7 天" },
+                { key: "thirty_days", en: "30 Days", zh: "30 天" },
+                { key: "half_year", en: "Half Year", zh: "半年" },
+                { key: "year", en: "1 Year", zh: "1 年" }
             ];
             var REFRESH_OPTIONS = [
                 { seconds: 0, en: "Pause", zh: "暂停" },
+                { seconds: 1, en: "1s", zh: "1 秒" },
+                { seconds: 3, en: "3s", zh: "3 秒" },
+                { seconds: 5, en: "5s", zh: "5 秒" },
                 { seconds: 10, en: "10s", zh: "10 秒" },
                 { seconds: 30, en: "30s", zh: "30 秒" },
                 { seconds: 60, en: "1m", zh: "1 分钟" },
                 { seconds: 300, en: "5m", zh: "5 分钟" }
             ];
-            var selectedMapWindow = localStorage.getItem("sce-dashboard-map-window") || "lifetime";
-            var selectedRankingWindow = localStorage.getItem("sce-dashboard-ranking-window") || "lifetime";
-            var refreshIntervalSeconds = Number(localStorage.getItem("sce-dashboard-refresh-interval") || 30);
+            var MAP_WINDOW_STORAGE_KEY = "sce-dashboard-map-window-v2";
+            var RANKING_WINDOW_STORAGE_KEY = "sce-dashboard-ranking-window-v2";
+            var REFRESH_INTERVAL_STORAGE_KEY = "sce-dashboard-refresh-interval-v2";
+            var selectedMapWindow = localStorage.getItem(MAP_WINDOW_STORAGE_KEY) || "lifetime";
+            var selectedRankingWindow = localStorage.getItem(RANKING_WINDOW_STORAGE_KEY) || "lifetime";
+            var refreshIntervalSeconds = Number(localStorage.getItem(REFRESH_INTERVAL_STORAGE_KEY) || 3);
             var refreshTimer = null;
 
             function isZh() { return /^zh\b/i.test(document.documentElement.lang); }
@@ -948,15 +965,13 @@ std::string page(Request &, Response &response) {
                     runtimeCardHtml("Total Runtime", "累计运行时长", duration(runtime.total_runtime_seconds), "Persisted across restarts.", "跨重启持久化累计。") +
                     runtimeCardHtml("Launches", "启动次数", number(runtime.launch_count), "Number of launches recorded in the statistics file.", "统计文件记录到的启动次数。") +
                     '</div></section>' +
-                    '<section class="stat-block"><div class="block-head"><div><h2>' + text("Conversion Totals", "转换总览") + '</h2>' +
-                    '<div class="block-copy">' + text("Requests and rule conversions by scope", "按统计范围查看请求与规则转换") + '</div></div></div>' +
-                    '<div class="metric-grid two-up">' +
+                    '<section class="stat-block"><div class="block-head"><div><h2>' + text("Conversion Overview", "转换总览") + '</h2>' +
+                    '<div class="block-copy">' + text("Current-process and persisted totals with rolling comparison windows", "本次启动、历史总计与滚动时间范围对比") + '</div></div></div>' +
+                    '<div class="metric-grid two-up conversion-totals">' +
                     countersPairHtml("Since Start", "本次启动", windows.startup, "Only conversions after the current process started.", "仅统计当前进程启动后的转换。") +
                     countersPairHtml("Lifetime", "历史总计", windows.lifetime, "Persisted conversion totals since the statistics file was created.", "统计文件创建以来持久化累计的转换。") +
-                    '</div></section>' +
-                    '<section class="stat-block"><div class="block-head"><div><h2>' + text("Time Ranges", "统计时间范围") + '</h2>' +
-                    '<div class="block-copy">' + text("Requests and rule conversions across common time ranges", "按常用时间范围查看请求与规则转换") + '</div></div></div>' +
-                    '<div class="window-strip">' + RANGE_WINDOWS.map(function (item) { return miniWindowHtml(item, windows[item.key]); }).join("") + '</div></section>';
+                    '</div>' +
+                    '<div class="window-strip">' + SUMMARY_WINDOWS.map(function (item) { return miniWindowHtml(item, windows[item.key]); }).join("") + '</div></section>';
                 animateCounters(metricsEl);
             }
             function renderHourlyChart(container, series, field, className, labelEn, labelZh) {
@@ -1002,7 +1017,7 @@ std::string page(Request &, Response &response) {
                 mapTabs.querySelectorAll("[data-map-window]").forEach(function (button) {
                     button.addEventListener("click", function () {
                         selectedMapWindow = button.getAttribute("data-map-window");
-                        localStorage.setItem("sce-dashboard-map-window", selectedMapWindow);
+                        localStorage.setItem(MAP_WINDOW_STORAGE_KEY, selectedMapWindow);
                         updateRangeTabs(mapTabs, "data-map-window", selectedMapWindow);
                         if (latest) {
                             renderMapCountries(countriesForWindow(latest, selectedMapWindow));
@@ -1014,7 +1029,7 @@ std::string page(Request &, Response &response) {
                 rankingTabs.querySelectorAll("[data-ranking-window]").forEach(function (button) {
                     button.addEventListener("click", function () {
                         selectedRankingWindow = button.getAttribute("data-ranking-window");
-                        localStorage.setItem("sce-dashboard-ranking-window", selectedRankingWindow);
+                        localStorage.setItem(RANKING_WINDOW_STORAGE_KEY, selectedRankingWindow);
                         updateRangeTabs(rankingTabs, "data-ranking-window", selectedRankingWindow);
                         if (latest)
                             renderRankingCountries(countriesForWindow(latest, selectedRankingWindow));
@@ -1045,7 +1060,7 @@ std::string page(Request &, Response &response) {
                 refreshMenu.querySelectorAll("[data-refresh-seconds]").forEach(function (button) {
                     button.addEventListener("click", function () {
                         refreshIntervalSeconds = Number(button.getAttribute("data-refresh-seconds")) || 0;
-                        localStorage.setItem("sce-dashboard-refresh-interval", String(refreshIntervalSeconds));
+                        localStorage.setItem(REFRESH_INTERVAL_STORAGE_KEY, String(refreshIntervalSeconds));
                         refreshMenu.hidden = true;
                         refreshIntervalButton.setAttribute("aria-expanded", "false");
                         updateRefreshIntervalUi();
@@ -1138,9 +1153,9 @@ std::string page(Request &, Response &response) {
                 var height = node.clientHeight || 430;
                 var styles = getComputedStyle(document.documentElement);
                 var emptyColor = styles.getPropertyValue("--map-empty").trim() || "#cbd5e1";
-                var dataMinColor = styles.getPropertyValue("--map-data-min").trim() || "#22c7d9";
-                var dataMidColor = styles.getPropertyValue("--map-data-mid").trim() || "#0ea5e9";
-                var dataMaxColor = styles.getPropertyValue("--map-data-max").trim() || "#15803d";
+                var dataMinColor = styles.getPropertyValue("--map-data-min").trim() || "#93c5fd";
+                var dataMidColor = styles.getPropertyValue("--map-data-mid").trim() || "#2563eb";
+                var dataMaxColor = styles.getPropertyValue("--map-data-max").trim() || "#1e3a8a";
                 svg.attr("viewBox", "0 0 " + width + " " + height);
                 svg.selectAll("*").remove();
                 var projection = d3.geoNaturalEarth1().rotate([-150, 0]).fitSize([width, height], { type: "Sphere" });

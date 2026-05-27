@@ -31,6 +31,7 @@ namespace {
 using json = nlohmann::json;
 
 constexpr size_t kBucketCount = 30 * 24 * 60;
+constexpr size_t kDailyBucketCount = 366;
 
 struct Counters {
   uint64_t subscription_requests = 0;
@@ -46,6 +47,12 @@ struct CountryBucketEntry {
 
 struct Bucket {
   int64_t minute = 0;
+  Counters counters;
+  std::vector<CountryBucketEntry> countries;
+};
+
+struct DailyBucket {
+  int64_t day = 0;
   Counters counters;
   std::vector<CountryBucketEntry> countries;
 };
@@ -70,6 +77,7 @@ struct State {
   std::map<std::string, CountryCounters> startup_countries;
   std::map<std::string, CountryCounters> lifetime_countries;
   std::array<Bucket, kBucketCount> buckets;
+  std::array<DailyBucket, kDailyBucketCount> daily_buckets;
 };
 
 std::mutex g_mutex;
@@ -246,6 +254,43 @@ std::vector<SnapshotCountry> countryWindowLocked(int64_t now_minute,
   return result;
 }
 
+Counters dailyWindowCountersLocked(int64_t now_day, int days) {
+  Counters result;
+  if (!g_state)
+    return result;
+  int64_t earliest = now_day - days + 1;
+  for (const DailyBucket &bucket : g_state->daily_buckets) {
+    if (bucket.day >= earliest && bucket.day <= now_day) {
+      addCounters(result, bucket.counters.subscription_requests,
+                  bucket.counters.rule_conversions);
+    }
+  }
+  return result;
+}
+
+std::vector<SnapshotCountry> countryDailyWindowLocked(int64_t now_day,
+                                                      int days) {
+  std::map<std::string, CountryCounters> totals;
+  if (!g_state)
+    return {};
+  int64_t earliest = now_day - days + 1;
+  for (const DailyBucket &bucket : g_state->daily_buckets) {
+    if (bucket.day < earliest || bucket.day > now_day)
+      continue;
+    for (const CountryBucketEntry &entry : bucket.countries) {
+      addCountryCounters(totals, entry.code,
+                         entry.counters.subscription_requests,
+                         entry.counters.rule_conversions);
+    }
+  }
+
+  std::vector<SnapshotCountry> result;
+  result.reserve(totals.size());
+  for (const auto &entry : totals)
+    result.push_back({entry.first, entry.second});
+  return result;
+}
+
 std::vector<SnapshotCountry>
 countrySnapshotLocked(const std::map<std::string, CountryCounters> &source) {
   std::vector<SnapshotCountry> result;
@@ -314,6 +359,33 @@ json countriesObjectJson(const std::map<std::string, CountryCounters> &source) {
   return result;
 }
 
+void seedDailyBucketsFromMinuteBucketsLocked() {
+  if (!g_state)
+    return;
+  for (const Bucket &bucket : g_state->buckets) {
+    if (bucket.minute <= 0)
+      continue;
+    if (!bucket.counters.subscription_requests &&
+        !bucket.counters.rule_conversions)
+      continue;
+    int64_t day = bucket.minute / (24 * 60);
+    size_t index = static_cast<size_t>(day % kDailyBucketCount);
+    if (g_state->daily_buckets[index].day != day) {
+      g_state->daily_buckets[index].day = day;
+      g_state->daily_buckets[index].counters = Counters();
+      g_state->daily_buckets[index].countries.clear();
+    }
+    addCounters(g_state->daily_buckets[index].counters,
+                bucket.counters.subscription_requests,
+                bucket.counters.rule_conversions);
+    for (const CountryBucketEntry &entry : bucket.countries) {
+      addCountryCounters(g_state->daily_buckets[index].countries, entry.code,
+                         entry.counters.subscription_requests,
+                         entry.counters.rule_conversions);
+    }
+  }
+}
+
 int64_t currentUptimeLocked(int64_t now) {
   if (!g_state || g_state->started_at <= 0 || now <= g_state->started_at)
     return 0;
@@ -334,7 +406,7 @@ void loadLocked() {
   try {
     json root = json::parse(content);
     int schema = root.value("schema", 1);
-    if (schema < 1 || schema > 2)
+    if (schema < 1 || schema > 3)
       return;
 
     g_state->last_flush = root.value("updated_at", 0LL);
@@ -389,6 +461,38 @@ void loadLocked() {
                              rules);
       }
     }
+
+    bool loaded_daily_buckets = false;
+    auto daily_buckets = root.value("daily_buckets", json::array());
+    for (const auto &item : daily_buckets) {
+      int64_t day = item.value("day", 0LL);
+      if (day <= 0)
+        continue;
+      size_t index = static_cast<size_t>(day % kDailyBucketCount);
+      g_state->daily_buckets[index].day = day;
+      g_state->daily_buckets[index].counters.subscription_requests =
+          item.value("subscription_requests", 0ULL);
+      g_state->daily_buckets[index].counters.rule_conversions =
+          item.value("rule_conversions", 0ULL);
+      g_state->daily_buckets[index].countries.clear();
+
+      auto country_items = item.value("countries", json::array());
+      for (const auto &country_item : country_items) {
+        std::string code =
+            normalizeCountryCode(country_item.value("code", "ZZ"));
+        uint64_t requests =
+            country_item.value("subscription_requests", 0ULL);
+        uint64_t rules = country_item.value("rule_conversions", 0ULL);
+        if (requests || rules)
+          addCountryCounters(g_state->daily_buckets[index].countries, code,
+                             requests, rules);
+      }
+      if (g_state->daily_buckets[index].counters.subscription_requests ||
+          g_state->daily_buckets[index].counters.rule_conversions)
+        loaded_daily_buckets = true;
+    }
+    if (!loaded_daily_buckets)
+      seedDailyBucketsFromMinuteBucketsLocked();
   } catch (const std::exception &e) {
     writeLog(0, "统计数据加载失败：" + std::string(e.what()), LOG_LEVEL_WARNING);
   }
@@ -409,7 +513,7 @@ bool flushLocked(bool stopping, int64_t now) {
     g_state->last_stopped_at = now;
 
   json root;
-  root["schema"] = 2;
+  root["schema"] = 3;
   root["updated_at"] = now;
   root["runtime"] = {
       {"first_started_at", g_state->first_started_at},
@@ -448,6 +552,33 @@ bool flushLocked(bool stopping, int64_t now) {
                        {"countries", countries}});
   }
   root["buckets"] = buckets;
+
+  json daily_buckets = json::array();
+  for (const DailyBucket &bucket : g_state->daily_buckets) {
+    if (bucket.day <= 0)
+      continue;
+    if (!bucket.counters.subscription_requests &&
+        !bucket.counters.rule_conversions)
+      continue;
+    json countries = json::array();
+    for (const CountryBucketEntry &entry : bucket.countries) {
+      if (!entry.counters.subscription_requests &&
+          !entry.counters.rule_conversions)
+        continue;
+      countries.push_back({{"code", entry.code},
+                           {"subscription_requests",
+                            entry.counters.subscription_requests},
+                           {"rule_conversions",
+                            entry.counters.rule_conversions}});
+    }
+    daily_buckets.push_back({{"day", bucket.day},
+                             {"subscription_requests",
+                              bucket.counters.subscription_requests},
+                             {"rule_conversions",
+                              bucket.counters.rule_conversions},
+                             {"countries", countries}});
+  }
+  root["daily_buckets"] = daily_buckets;
 
   std::string tmp = path + ".tmp";
   if (!writeTextFile(tmp, root.dump()))
@@ -530,6 +661,7 @@ void recordSubscriptionConversion(const Request &request,
 
   int64_t now = nowSeconds();
   int64_t minute = now / 60;
+  int64_t day = now / (24 * 60 * 60);
   std::string country = countryFromHeaders(request);
 
   std::lock_guard<std::mutex> lock(g_mutex);
@@ -552,6 +684,17 @@ void recordSubscriptionConversion(const Request &request,
   addCountryCounters(g_state->buckets[index].countries, country, 1,
                      rule_conversions);
 
+  size_t daily_index = static_cast<size_t>(day % kDailyBucketCount);
+  if (g_state->daily_buckets[daily_index].day != day) {
+    g_state->daily_buckets[daily_index].day = day;
+    g_state->daily_buckets[daily_index].counters = Counters();
+    g_state->daily_buckets[daily_index].countries.clear();
+  }
+  addCounters(g_state->daily_buckets[daily_index].counters, 1,
+              rule_conversions);
+  addCountryCounters(g_state->daily_buckets[daily_index].countries, country, 1,
+                     rule_conversions);
+
   g_state->dirty = true;
 }
 
@@ -570,6 +713,7 @@ std::string dashboardData(RESPONSE_CALLBACK_ARGS) {
   std::lock_guard<std::mutex> lock(g_mutex);
   int64_t now = nowSeconds();
   int64_t now_minute = now / 60;
+  int64_t now_day = now / (24 * 60 * 60);
 
   json root;
   root["enabled"] = global.statisticsEnabled;
@@ -590,6 +734,8 @@ std::string dashboardData(RESPONSE_CALLBACK_ARGS) {
       {"seven_days", countersJson(windowCountersLocked(now_minute, 7 * 24 * 60))},
       {"thirty_days",
        countersJson(windowCountersLocked(now_minute, 30 * 24 * 60))},
+      {"half_year", countersJson(dailyWindowCountersLocked(now_day, 183))},
+      {"year", countersJson(dailyWindowCountersLocked(now_day, 365))},
       {"lifetime", countersJson(g_state ? g_state->lifetime : Counters())}};
 
   json country_windows = json::object();
@@ -603,6 +749,9 @@ std::string dashboardData(RESPONSE_CALLBACK_ARGS) {
       countriesJson(countryWindowLocked(now_minute, 7 * 24 * 60));
   country_windows["thirty_days"] =
       countriesJson(countryWindowLocked(now_minute, 30 * 24 * 60));
+  country_windows["half_year"] =
+      countriesJson(countryDailyWindowLocked(now_day, 183));
+  country_windows["year"] = countriesJson(countryDailyWindowLocked(now_day, 365));
   country_windows["lifetime"] =
       countriesJson(g_state ? countrySnapshotLocked(g_state->lifetime_countries)
                             : std::vector<SnapshotCountry>());
