@@ -122,10 +122,20 @@ void recordFailureLocked(const std::string &key, int64_t now) {
 
 void recordSuccessLocked(const std::string &key) { g_failures.erase(key); }
 
+void applyNoStoreHeaders(Response &response) {
+  response.headers["Cache-Control"] =
+      "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, "
+      "s-maxage=0";
+  response.headers["Pragma"] = "no-cache";
+  response.headers["Expires"] = "0";
+  response.headers["Surrogate-Control"] = "no-store";
+  response.headers["X-Accel-Expires"] = "0";
+}
+
 std::string unauthorized(Response &response) {
   response.status_code = 401;
   response.content_type = "text/plain; charset=utf-8";
-  response.headers["Cache-Control"] = "no-store";
+  applyNoStoreHeaders(response);
   response.headers["WWW-Authenticate"] =
       "Basic realm=\"SubConverter-Extended Dashboard\", charset=\"UTF-8\"";
   response.headers["X-Robots-Tag"] =
@@ -137,7 +147,7 @@ std::string unauthorized(Response &response) {
 std::string locked(Response &response, int64_t retry_after) {
   response.status_code = 429;
   response.content_type = "text/plain; charset=utf-8";
-  response.headers["Cache-Control"] = "no-store";
+  applyNoStoreHeaders(response);
   response.headers["Retry-After"] = std::to_string(std::max<int64_t>(
       1, retry_after));
   response.headers["X-Robots-Tag"] =
@@ -155,7 +165,7 @@ std::string misconfigured(Response &response) {
   }
   response.status_code = 503;
   response.content_type = "text/plain; charset=utf-8";
-  response.headers["Cache-Control"] = "no-store";
+  applyNoStoreHeaders(response);
   response.headers["X-Robots-Tag"] =
       "noindex, nofollow, noarchive, nosnippet, noimageindex";
   return "Dashboard authentication is enabled but not configured.\n"
