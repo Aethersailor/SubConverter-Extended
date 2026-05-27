@@ -556,7 +556,13 @@ void recordSubscriptionConversion(const Request &request,
 }
 
 std::string dashboardData(RESPONSE_CALLBACK_ARGS) {
-  response.headers["Cache-Control"] = "no-store";
+  response.headers["Cache-Control"] =
+      "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, "
+      "s-maxage=0";
+  response.headers["Pragma"] = "no-cache";
+  response.headers["Expires"] = "0";
+  response.headers["Surrogate-Control"] = "no-store";
+  response.headers["X-Accel-Expires"] = "0";
   response.headers["X-Robots-Tag"] =
       "noindex, nofollow, noarchive, nosnippet, noimageindex";
   response.content_type = "application/json; charset=utf-8";
