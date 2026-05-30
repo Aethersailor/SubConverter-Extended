@@ -18,6 +18,7 @@ RUN apt-get update && \
 # Copy committed Go module files and source.
 COPY bridge/go.mod bridge/go.sum ./
 COPY bridge/converter.go ./
+COPY bridge/preprocess.go ./
 
 RUN set -xe && \
     if [ "${REFRESH_GO_DEPS}" = "true" ]; then \

@@ -20,7 +20,7 @@ go build \
     -buildmode=c-archive \
     -ldflags="-s -w" \
     -o libmihomo.a \
-    converter.go
+    .
 
 echo "==> Build完成！"
 echo "Generated files:"
