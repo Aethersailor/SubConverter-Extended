@@ -237,7 +237,8 @@ namespace INIBinding
                     continue;
                 }
 
-                if(conf.Type == ProxyGroupType::URLTest || conf.Type == ProxyGroupType::LoadBalance || conf.Type == ProxyGroupType::Fallback)
+                if(conf.Type == ProxyGroupType::URLTest || conf.Type == ProxyGroupType::LoadBalance ||
+                   conf.Type == ProxyGroupType::Fallback || conf.Type == ProxyGroupType::Smart)
                 {
                     if(rules_upper_bound < 5)
                         continue;

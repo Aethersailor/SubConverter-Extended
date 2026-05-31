@@ -292,6 +292,36 @@ bool applyMatcher(const std::string &rule, std::string &real_rule,
   return true;
 }
 
+static bool parseProviderGroupIdMatcher(const std::string &rule,
+                                        std::string &target,
+                                        std::string &real_rule) {
+  static const std::string groupid_regex =
+      R"(^!!GROUPID=([\d\-+!,]+)(?:!!(.*))?$)";
+  if (!startsWith(rule, "!!GROUPID="))
+    return false;
+  target.clear();
+  real_rule.clear();
+  return regGetMatch(rule, groupid_regex, 3,
+                     static_cast<std::string *>(nullptr), &target,
+                     &real_rule) == 0 &&
+         !target.empty();
+}
+
+static bool isProviderRegexRule(const std::string &rule) {
+  return !rule.empty() && rule[0] != '[' && rule != "DIRECT" &&
+         rule != "REJECT";
+}
+
+static YAML::Node providersMatchingGroupId(
+    const std::string &target, const std::vector<ProxyProvider> &providers) {
+  YAML::Node use_node(YAML::NodeType::Sequence);
+  for (const ProxyProvider &p : providers) {
+    if (p.groupId >= 0 && matchRange(target, p.groupId))
+      use_node.push_back(p.name);
+  }
+  return use_node;
+}
+
 void processRemark(std::string &remark, const string_array &remarks_list,
                    bool proc_comma = true) {
   // Replace every '=' with '-' in the remark string to avoid parse errors from
@@ -1057,20 +1087,39 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
       // 检查策略组是否包含正则表达式（用于匹配节点）
       bool has_regex = false;
       std::string regex_pattern;
+      bool has_groupid_provider_match = false;
+      YAML::Node groupid_use_node(YAML::NodeType::Sequence);
 
       for (const auto &proxy : x.Proxies) {
         // 如果不是以 [] 开头，则认为是正则表达式
-        if (!proxy.empty() && proxy[0] != '[' && proxy != "DIRECT" &&
-            proxy != "REJECT") {
+        if (isProviderRegexRule(proxy)) {
+          std::string groupid_target, groupid_filter;
+          if (parseProviderGroupIdMatcher(proxy, groupid_target,
+                                          groupid_filter)) {
+            YAML::Node matched_providers =
+                providersMatchingGroupId(groupid_target, ext.providers);
+            if (matched_providers.size() > 0) {
+              has_groupid_provider_match = true;
+              groupid_use_node = matched_providers;
+              regex_pattern = groupid_filter;
+              has_regex = !regex_pattern.empty();
+              break;
+            }
+          }
+
           has_regex = true;
           regex_pattern = proxy;
           break; // 找到第一个正则就够了
         }
       }
 
-      // 只有包含正则表达式的策略组才引用 provider
-      // 不包含正则的策略组只引用其他策略组，不需要 provider
-      if (has_regex && !regex_pattern.empty()) {
+      if (has_groupid_provider_match) {
+        singlegroup["use"] = groupid_use_node;
+        if (has_regex)
+          singlegroup["filter"] = regex_pattern;
+      } else if (has_regex && !regex_pattern.empty()) {
+        // 只有包含正则表达式的策略组才引用 provider
+        // 不包含正则的策略组只引用其他策略组，不需要 provider
         // 添加 use 字段引用所有原始 provider
         YAML::Node use_node(YAML::NodeType::Sequence);
         for (const ProxyProvider &p : ext.providers) {
