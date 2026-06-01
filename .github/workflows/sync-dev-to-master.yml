@@ -203,7 +203,16 @@ jobs:
 
           echo "Dispatched release rebuild for $TAG_NAME from master."
 
-      - name: Skip Release
+      - name: Dispatch Sync-only Master Build
         if: ${{ inputs.release_mode == 'sync_only' }}
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
-          echo "release_mode=sync_only; synced dev to master without creating or rebuilding a release."
+          set -euo pipefail
+
+          MASTER_COMMIT="$(git rev-parse HEAD)"
+
+          gh workflow run build-dockerhub.yml \
+            --ref master
+
+          echo "release_mode=sync_only; synced dev to master at $MASTER_COMMIT and dispatched a master build without creating or overwriting a release."
