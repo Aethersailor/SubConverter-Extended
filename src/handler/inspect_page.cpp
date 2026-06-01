@@ -2,6 +2,7 @@
 
 #include <string>
 
+#include "handler/settings.h"
 #include "utils/logger.h"
 #include "version.h"
 
@@ -14,6 +15,21 @@ std::string page(Request &request, Response &response) {
            LOG_LEVEL_INFO);
   response.headers["X-Robots-Tag"] =
       "noindex, nofollow, noarchive, nosnippet, noimageindex";
+  std::string dashboard_link =
+      global.statisticsEnabled
+          ? R"html(
+                <a class="page-link" href="/dashboard" aria-label="Open dashboard">
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M4 19V5"></path>
+                        <path d="M4 19h16"></path>
+                        <path d="M8 16v-5"></path>
+                        <path d="M13 16V8"></path>
+                        <path d="M18 16v-3"></path>
+                    </svg>
+                    <span data-lang="en">Dashboard</span>
+                    <span data-lang="zh">仪表盘</span>
+                </a>)html"
+          : "";
 
   return R"html(<!DOCTYPE html>
 <html lang="en">
@@ -214,6 +230,55 @@ std::string page(Request &request, Response &response) {
         .lang-toggle-text {
             min-width: 20px;
             text-align: center;
+        }
+
+        .page-links {
+            display: inline-flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-top: 18px;
+        }
+
+        .page-link {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            min-height: 40px;
+            padding: 9px 14px;
+            border: 1px solid var(--control-border);
+            border-radius: 999px;
+            background: var(--control-bg);
+            box-shadow: var(--control-shadow);
+            color: var(--text-primary);
+            font-size: 0.86rem;
+            font-weight: 700;
+            line-height: 1;
+            text-decoration: none;
+            transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+        }
+
+        .page-link:hover {
+            background: var(--control-hover);
+            color: var(--text-primary);
+            transform: translateY(-1px);
+        }
+
+        .page-link:focus-visible {
+            outline: 3px solid rgba(99, 179, 237, 0.35);
+            outline-offset: 2px;
+        }
+
+        .page-link svg {
+            width: 17px;
+            height: 17px;
+            flex: 0 0 auto;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 1.9;
+            stroke-linecap: round;
+            stroke-linejoin: round;
         }
 
         .container {
@@ -727,6 +792,17 @@ std::string page(Request &request, Response &response) {
                 grid-template-columns: 1fr;
             }
 
+            .page-links {
+                margin-top: 16px;
+                gap: 8px;
+            }
+
+            .page-link {
+                min-height: 38px;
+                padding: 8px 12px;
+                font-size: 0.8rem;
+            }
+
             .request-preview {
                 max-height: 150px;
             }
@@ -779,6 +855,17 @@ std::string page(Request &request, Response &response) {
                 <span data-lang="en">Explain conversion without writing managed output</span>
                 <span data-lang="zh">以只读方式解释转换结果</span>
             </p>
+            <nav class="page-links" aria-label="Page navigation">
+                <a class="page-link" href="/version" aria-label="Open version page">
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M20.6 13.2 13.2 20.6a2 2 0 0 1-2.8 0L3.4 13.6a2 2 0 0 1-.6-1.4V5a2 2 0 0 1 2-2h7.2a2 2 0 0 1 1.4.6l7.2 7.2a2 2 0 0 1 0 2.8Z"></path>
+                        <circle cx="7.5" cy="7.5" r="1.2"></circle>
+                    </svg>
+                    <span data-lang="en">Version</span>
+                    <span data-lang="zh">版本信息</span>
+                </a>)html" +
+         dashboard_link + R"html(
+            </nav>
         </header>
 
         <section class="section">
