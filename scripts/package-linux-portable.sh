@@ -27,11 +27,6 @@ mkdir -p "${PACKAGE_DIR}"
 install -m755 subconverter "${PACKAGE_DIR}/subconverter"
 cp -a base "${PACKAGE_DIR}/"
 
-if [ -f libmihomo.so ]; then
-  mkdir -p "${PACKAGE_DIR}/usr/lib"
-  install -m755 libmihomo.so "${PACKAGE_DIR}/usr/lib/libmihomo.so"
-fi
-
 copy_dir_contents runtime-libs
 copy_dir_contents runtime-root
 
