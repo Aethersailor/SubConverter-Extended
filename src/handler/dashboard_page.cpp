@@ -451,12 +451,14 @@ std::string page(Request &, Response &response) {
             font-weight: 650;
         }
         .hourly-grid,
+        .map-grid,
         .ranking-grid {
             display: grid;
             grid-template-columns: repeat(2, minmax(0, 1fr));
             gap: 16px;
         }
         .chart-card,
+        .map-card,
         .ranking-card {
             border: 1px solid var(--surface-border);
             border-radius: 20px;
@@ -465,6 +467,7 @@ std::string page(Request &, Response &response) {
             min-width: 0;
         }
         .chart-card-head,
+        .map-card-head,
         .ranking-card-head {
             display: flex;
             align-items: center;
@@ -473,22 +476,20 @@ std::string page(Request &, Response &response) {
             padding: 14px 16px 0;
         }
         .chart-card h3,
+        .map-card h3,
         .ranking-card h3 {
             margin: 0;
             font-size: 0.94rem;
             letter-spacing: 0;
         }
-        .map-wrap {
+        .map-frame {
             position: relative;
-            min-height: 500px;
-            border: 1px solid var(--surface-border);
-            border-radius: 20px;
-            background: var(--surface-strong);
+            min-height: 420px;
             overflow: hidden;
         }
-        #world-map {
+        .world-map {
             width: 100%;
-            height: 500px;
+            height: 420px;
             display: block;
         }
         .country {
@@ -678,7 +679,7 @@ std::string page(Request &, Response &response) {
             .runtime-grid, .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
             .window-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
             .window-grid { grid-template-columns: 1fr; }
-            .hourly-grid, .ranking-grid { grid-template-columns: 1fr; }
+            .hourly-grid, .map-grid, .ranking-grid { grid-template-columns: 1fr; }
         }
         @media (max-width: 640px) {
             .shell { width: min(100% - 20px, 1180px); padding-top: 16px; }
@@ -694,7 +695,7 @@ std::string page(Request &, Response &response) {
             .metric { min-height: 112px; padding: 14px; }
             .metric-value { font-size: 1.42rem; }
             .content { padding: 0 14px 14px; }
-            #world-map, .map-wrap { min-height: 320px; height: 320px; }
+            .world-map, .map-frame { min-height: 320px; height: 320px; }
             .ranking-row { grid-template-columns: 1fr; gap: 8px; }
             .map-legend { left: 10px; right: 10px; justify-content: center; }
             h1 { font-size: 1.45rem; }
@@ -781,15 +782,37 @@ std::string page(Request &, Response &response) {
                             <div class="range-tabs" id="map-tabs"></div>
                         </div>
                     </div>
-                    <div class="map-wrap">
-                        <svg id="world-map" role="img" aria-label="World map"></svg>
-                        <div class="map-legend">
-                            <span>0</span>
-                            <span class="legend-swatch"></span>
-                            <span><span data-lang="en">High</span><span data-lang="zh">高</span></span>
-                        </div>
-                        <div class="tooltip" id="tooltip"></div>
+                    <div class="map-grid">
+                        <article class="map-card">
+                            <div class="map-card-head">
+                                <h3><span data-lang="en">Request Conversion Ranking</span><span data-lang="zh">请求转换排行</span></h3>
+                                <span class="state-line" id="request-map-total">-</span>
+                            </div>
+                            <div class="map-frame">
+                                <svg id="request-world-map" class="world-map" role="img" aria-label="Request conversion world map"></svg>
+                                <div class="map-legend">
+                                    <span>0</span>
+                                    <span class="legend-swatch"></span>
+                                    <span><span data-lang="en">High</span><span data-lang="zh">高</span></span>
+                                </div>
+                            </div>
+                        </article>
+                        <article class="map-card">
+                            <div class="map-card-head">
+                                <h3><span data-lang="en">Rule Conversion Ranking</span><span data-lang="zh">规则转换排行</span></h3>
+                                <span class="state-line" id="rule-map-total">-</span>
+                            </div>
+                            <div class="map-frame">
+                                <svg id="rule-world-map" class="world-map" role="img" aria-label="Rule conversion world map"></svg>
+                                <div class="map-legend">
+                                    <span>0</span>
+                                    <span class="legend-swatch"></span>
+                                    <span><span data-lang="en">High</span><span data-lang="zh">高</span></span>
+                                </div>
+                            </div>
+                        </article>
                     </div>
+                    <div class="tooltip" id="tooltip"></div>
                 </section>
                 <section class="section">
                     <div class="section-head">
@@ -840,6 +863,8 @@ std::string page(Request &, Response &response) {
             var ruleChart = document.getElementById("rule-chart");
             var requestTotal = document.getElementById("request-total");
             var ruleTotal = document.getElementById("rule-total");
+            var requestMapTotal = document.getElementById("request-map-total");
+            var ruleMapTotal = document.getElementById("rule-map-total");
             var requestRanking = document.getElementById("request-ranking");
             var ruleRanking = document.getElementById("rule-ranking");
             var requestRankingTotal = document.getElementById("request-ranking-total");
@@ -1217,8 +1242,14 @@ std::string page(Request &, Response &response) {
                 selectedMapWindow = countryConfig.key;
                 updateRangeTabs(mapTabs, "data-map-window", selectedMapWindow);
                 var visibleCountries = countries.filter(function (item) { return item.code !== "ZZ" && item.code !== "XX"; });
+                var totalRequests = countries.reduce(function (sum, item) { return sum + (item.subscription_requests || 0); }, 0);
+                var totalRules = countries.reduce(function (sum, item) { return sum + (item.rule_conversions || 0); }, 0);
                 mapRangeLabel.textContent = text("Showing ", "当前范围：") + label(countryConfig);
                 countryStatus.textContent = text("Countries / Regions ", "国家和地区 ") + number(visibleCountries.length);
+                requestMapTotal.innerHTML = text("Total ", "合计 ") + countValue("map:" + selectedMapWindow + ":requests", totalRequests);
+                ruleMapTotal.innerHTML = text("Total ", "合计 ") + countValue("map:" + selectedMapWindow + ":rules", totalRules);
+                animateCounters(requestMapTotal);
+                animateCounters(ruleMapTotal);
             }
             function renderRankingCountries(countries) {
                 var countryConfig = windowConfig(selectedRankingWindow, RANGE_WINDOWS);
@@ -1234,10 +1265,11 @@ std::string page(Request &, Response &response) {
                 renderRankingPanel(requestRanking, countries, "subscription_requests", totalRequests, "No request data in this range", "当前范围暂无请求数据");
                 renderRankingPanel(ruleRanking, countries, "rule_conversions", totalRules, "No rule data in this range", "当前范围暂无规则数据");
             }
-            function renderMap() {
+            function renderMetricMap(selector, field, metricEn, metricZh) {
                 if (!mapData || !window.d3 || !window.topojson) return;
-                var svg = d3.select("#world-map");
+                var svg = d3.select(selector);
                 var node = svg.node();
+                if (!node) return;
                 var width = node.clientWidth || 800;
                 var height = node.clientHeight || 430;
                 var styles = getComputedStyle(document.documentElement);
@@ -1250,17 +1282,17 @@ std::string page(Request &, Response &response) {
                 var projection = d3.geoNaturalEarth1().rotate([-150, 0]).fitSize([width, height], { type: "Sphere" });
                 var path = d3.geoPath(projection);
                 var features = topojson.feature(mapData, mapData.objects.countries).features;
-                var max = Math.max(1, ...Array.from(countryMap.values()).map(function (item) { return item.subscription_requests || 0; }));
+                var max = Math.max(1, ...Array.from(countryMap.values()).map(function (item) { return item[field] || 0; }));
                 var color = d3.interpolateRgbBasis([dataMinColor, dataMidColor, dataMaxColor]);
-                function countryRequests(code) {
+                function countryValue(code) {
                     var item = countryMap.get(code);
-                    return item ? item.subscription_requests || 0 : 0;
+                    return item ? item[field] || 0 : 0;
                 }
                 function countryFill(code) {
-                    var requests = countryRequests(code);
-                    if (requests < 1) return emptyColor;
+                    var value = countryValue(code);
+                    if (value < 1) return emptyColor;
                     if (max <= 1) return color(0.35);
-                    return color(Math.log10(requests) / Math.log10(max));
+                    return color(Math.log10(value) / Math.log10(max));
                 }
                 svg.append("path").datum({ type: "Sphere" }).attr("d", path).attr("fill", "transparent");
                 svg.selectAll("path.country")
@@ -1269,7 +1301,7 @@ std::string page(Request &, Response &response) {
                     .append("path")
                     .attr("class", function (d) {
                         var code = ISO_N3[String(d.id).padStart(3, "0")];
-                        return "country" + (countryRequests(code) > 0 ? " has-data" : "");
+                        return "country" + (countryValue(code) > 0 ? " has-data" : "");
                     })
                     .attr("d", path)
                     .style("--country-fill", function (d) {
@@ -1282,6 +1314,7 @@ std::string page(Request &, Response &response) {
                         var countryConfig = windowConfig(selectedMapWindow, RANGE_WINDOWS);
                         tooltip.innerHTML = '<div class="tooltip-title"><span class="country-icon">' + countryIcon(code) + '</span>' + countryName(code) + ' · ' + code + '</div>' +
                             '<div class="tooltip-row"><span>' + text("Range", "范围") + '</span><strong>' + label(countryConfig) + '</strong></div>' +
+                            '<div class="tooltip-row"><span>' + text("Metric", "指标") + '</span><strong>' + text(metricEn, metricZh) + '</strong></div>' +
                             '<div class="tooltip-row"><span>' + text("Requests", "请求") + '</span><strong>' + number(item.subscription_requests) + '</strong></div>' +
                             '<div class="tooltip-row"><span>' + text("Rules", "规则") + '</span><strong>' + number(item.rule_conversions) + '</strong></div>';
                         tooltip.style.left = event.clientX + "px";
@@ -1289,6 +1322,10 @@ std::string page(Request &, Response &response) {
                         tooltip.classList.add("show");
                     })
                     .on("mouseleave", function () { tooltip.classList.remove("show"); });
+            }
+            function renderMap() {
+                renderMetricMap("#request-world-map", "subscription_requests", "Requests", "请求");
+                renderMetricMap("#rule-world-map", "rule_conversions", "Rules", "规则");
             }
             function render(data) {
                 latest = data;
