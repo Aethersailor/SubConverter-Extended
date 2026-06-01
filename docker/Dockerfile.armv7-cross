@@ -191,7 +191,16 @@ RUN set -xe && \
         libnss_dns.so.2 \
         libnss_files.so.2 \
         libnss_compat.so.2 \
-        libresolv.so.2
+        libresolv.so.2 && \
+    if [ -d /runtime-root/lib ]; then \
+      install -d /runtime-root/usr/lib/arm-linux-gnueabihf; \
+      find /runtime-root/lib -maxdepth 1 -type f -name '*.so*' -exec mv -f -t /runtime-root/usr/lib/arm-linux-gnueabihf {} +; \
+      if [ -d /runtime-root/lib/arm-linux-gnueabihf ]; then \
+        cp -a /runtime-root/lib/arm-linux-gnueabihf/. /runtime-root/usr/lib/arm-linux-gnueabihf/; \
+        rm -rf /runtime-root/lib/arm-linux-gnueabihf; \
+      fi; \
+      rmdir /runtime-root/lib 2>/dev/null || true; \
+    fi
 
 # ========== FINAL STAGE ==========
 FROM --platform=$TARGETPLATFORM mirror.gcr.io/library/debian:trixie-slim
