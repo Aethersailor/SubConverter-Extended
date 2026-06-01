@@ -6,40 +6,10 @@ package main
 import "C"
 import (
 	"encoding/json"
-	"net/url"
-	"strings"
 	"unsafe"
 
 	"github.com/metacubex/mihomo/common/convert"
 )
-
-// preprocessSubscription fixes URL encoding issues in subscription links
-// Decodes the entire URL line to ensure Mihomo parser receives properly unencoded links
-func preprocessSubscription(subscription string) string {
-	lines := strings.Split(subscription, "\n")
-	var result []string
-
-	for _, line := range lines {
-		line = strings.TrimRight(line, " \r")
-		if line == "" {
-			result = append(result, line)
-			continue
-		}
-
-		// Decode the entire URL line
-		// This fixes issues like v2rayN's uuid%3Apassword encoding
-		// Safe for all protocols: url.QueryUnescape only decodes %XX patterns
-		// and leaves structural characters (://, @, ?, #) intact
-		if decoded, err := url.QueryUnescape(line); err == nil {
-			line = decoded
-		}
-		// If decoding fails (malformed %), keep original line
-
-		result = append(result, line)
-	}
-
-	return strings.Join(result, "\n")
-}
 
 // ConvertSubscription converts V2Ray subscription links to mihomo proxy configs
 //

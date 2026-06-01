@@ -18,6 +18,7 @@ RUN apt-get update && \
 # Copy committed Go module files and source.
 COPY bridge/go.mod bridge/go.sum ./
 COPY bridge/converter.go ./
+COPY bridge/preprocess.go ./
 
 RUN set -xe && \
     if [ "${REFRESH_GO_DEPS}" = "true" ]; then \
@@ -161,29 +162,14 @@ RUN set -xe && \
 # 收集 glibc 运行时依赖（动态探测，避免固定版本）
 RUN set -xe && \
     mkdir -p /runtime-libs && \
-    ldd /src/subconverter /usr/lib/libmihomo.so | \
-      awk '{for (i=1; i<=NF; i++) if ($i ~ "^/") print $i}' | \
-      sort -u | \
-      while read -r lib; do \
-        if [ -e "$lib" ]; then \
-          mkdir -p "/runtime-libs$(dirname "$lib")" && \
-          cp -aL "$lib" "/runtime-libs$lib"; \
-        fi; \
-      done && \
-    for loader in /lib64/ld-linux-x86-64.so.2 /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 /lib/ld-linux-aarch64.so.1 /lib/aarch64-linux-gnu/ld-linux-aarch64.so.1; do \
-      if [ -e "$loader" ]; then \
-        mkdir -p "/runtime-libs$(dirname "$loader")" && \
-        cp -aL "$loader" "/runtime-libs$loader"; \
-      fi; \
-    done && \
-    libc_path="$(ldd /src/subconverter | awk '$1 == "libc.so.6" {print $3; exit}')" && \
-    libc_dir="$(dirname "${libc_path:-/lib/x86_64-linux-gnu/libc.so.6}")" && \
-    for extra in libnss_dns.so.2 libnss_files.so.2 libnss_compat.so.2 libresolv.so.2; do \
-      if [ -e "$libc_dir/$extra" ]; then \
-        mkdir -p "/runtime-libs$libc_dir" && \
-        cp -aL "$libc_dir/$extra" "/runtime-libs$libc_dir/$extra"; \
-      fi; \
-    done && \
+    ELF_LIBRARY_PATH="/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu:/lib/aarch64-linux-gnu:/usr/lib/aarch64-linux-gnu:/lib64" \
+      bash /src/scripts/ci/copy-elf-runtime-deps.sh /runtime-libs \
+        /src/subconverter \
+        /usr/lib/libmihomo.so \
+        libnss_dns.so.2 \
+        libnss_files.so.2 \
+        libnss_compat.so.2 \
+        libresolv.so.2 && \
     if [ -f /etc/nsswitch.conf ]; then \
       mkdir -p /runtime-libs/etc && \
       cp -aL /etc/nsswitch.conf /runtime-libs/etc/nsswitch.conf; \
@@ -214,9 +200,7 @@ RUN apk add --no-cache ca-certificates tzdata && \
 
 COPY --from=builder /src/subconverter /usr/bin/subconverter
 COPY --from=builder /src/base /base/
-COPY --from=builder /usr/lib/libmihomo.so /usr/lib/
 COPY --from=builder /runtime-libs/ /
-COPY --from=builder /etc/nsswitch.conf /etc/nsswitch.conf
 
 # 确保二进制和库可执行
 RUN chmod +x /usr/bin/subconverter && chmod +x /usr/lib/libmihomo.so

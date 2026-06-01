@@ -16,6 +16,7 @@ RUN apt-get update && \
 
 COPY bridge/go.mod bridge/go.sum ./
 COPY bridge/converter.go ./
+COPY bridge/preprocess.go ./
 
 RUN set -xe && \
     if [ "${REFRESH_GO_DEPS}" = "true" ]; then \
@@ -183,15 +184,14 @@ RUN set -xe && \
     ln -snf /usr/share/zoneinfo/Asia/Shanghai /runtime-root/etc/localtime && \
     echo Asia/Shanghai > /runtime-root/etc/timezone && \
     if [ -f /etc/nsswitch.conf ]; then cp -aL /etc/nsswitch.conf /runtime-root/etc/nsswitch.conf; fi && \
-    for dir in /lib/arm-linux-gnueabihf /usr/lib/arm-linux-gnueabihf /usr/arm-linux-gnueabihf/lib; do \
-      if [ -d "$dir" ]; then \
-        find "$dir" -maxdepth 1 \( -name '*.so' -o -name '*.so.*' \) -print | \
-        while read -r lib; do \
-          dest="/runtime-root/usr/lib/arm-linux-gnueabihf/$(basename "$lib")"; \
-          cp -aL "$lib" "$dest"; \
-        done; \
-      fi; \
-    done
+    READELF=arm-linux-gnueabihf-readelf \
+    ELF_LIBRARY_PATH="/usr/lib/arm-linux-gnueabihf:/lib/arm-linux-gnueabihf:/usr/arm-linux-gnueabihf/lib:/usr/lib:/lib" \
+      bash /src/scripts/ci/copy-elf-runtime-deps.sh /runtime-root \
+        /src/subconverter \
+        libnss_dns.so.2 \
+        libnss_files.so.2 \
+        libnss_compat.so.2 \
+        libresolv.so.2
 
 # ========== FINAL STAGE ==========
 FROM --platform=$TARGETPLATFORM mirror.gcr.io/library/debian:trixie-slim

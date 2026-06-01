@@ -25,7 +25,6 @@ chmod +x ./subconverter
 case "${MODE}" in
   shared)
     docker cp "${CID}:/runtime-libs" ./runtime-libs
-    docker cp "${CID}:/usr/lib/libmihomo.so" ./libmihomo.so
     ;;
   root)
     docker cp "${CID}:/runtime-root" ./runtime-root

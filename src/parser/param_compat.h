@@ -101,6 +101,8 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"mptcp", {true, "bool", false}}, // BasicOption
         {"name", {true, "string", false}}, // hy2
         {"obfs", {true, "string", false}}, // hy2
+        {"obfs-max-packet-size", {true, "int", false}}, // hy2
+        {"obfs-min-packet-size", {true, "int", false}}, // hy2
         {"obfs-password", {true, "string", false}}, // hy2
         {"password", {true, "string", false}}, // hy2
         {"port", {true, "int", false}}, // hy2
@@ -169,6 +171,8 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"mptcp", {true, "bool", false}}, // BasicOption
         {"name", {true, "string", false}}, // hysteria2
         {"obfs", {true, "string", false}}, // hysteria2
+        {"obfs-max-packet-size", {true, "int", false}}, // hysteria2
+        {"obfs-min-packet-size", {true, "int", false}}, // hysteria2
         {"obfs-password", {true, "string", false}}, // hysteria2
         {"password", {true, "string", false}}, // hysteria2
         {"port", {true, "int", true}}, // hysteria2 [HARDCODED]
