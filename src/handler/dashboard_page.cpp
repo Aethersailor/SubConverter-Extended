@@ -901,6 +901,7 @@ std::string page(Request &, Response &response) {
             function countryName(code) {
                 if (code === "ZZ" || code === "XX") return text("Unknown", "未知");
                 if (code === "T1") return text("Tor network", "Tor 网络");
+                if (code === "CN") return text("Mainland China", "中国大陆");
                 try { return new Intl.DisplayNames([isZh() ? "zh-CN" : "en"], { type: "region" }).of(code) || code; }
                 catch (error) { return code; }
             }
