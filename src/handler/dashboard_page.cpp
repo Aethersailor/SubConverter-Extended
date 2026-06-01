@@ -1442,6 +1442,35 @@ std::string page(Request &, Response &response) {
                 var adcode = String(props.adcode || props.adcode_pro || props.code || "");
                 return CHINA_ADCODE[adcode] || "";
             }
+            function rewindChinaGeometry(geometry) {
+                if (!geometry || !Array.isArray(geometry.coordinates)) return geometry;
+                if (geometry.type === "Polygon") {
+                    return {
+                        type: "Polygon",
+                        coordinates: geometry.coordinates.map(function (ring) {
+                            return Array.isArray(ring) ? ring.slice().reverse() : ring;
+                        })
+                    };
+                }
+                if (geometry.type === "MultiPolygon") {
+                    return {
+                        type: "MultiPolygon",
+                        coordinates: geometry.coordinates.map(function (polygon) {
+                            return polygon.map(function (ring) {
+                                return Array.isArray(ring) ? ring.slice().reverse() : ring;
+                            });
+                        })
+                    };
+                }
+                return geometry;
+            }
+            function rewindChinaFeature(feature) {
+                return {
+                    type: feature.type || "Feature",
+                    properties: feature.properties || {},
+                    geometry: rewindChinaGeometry(feature.geometry)
+                };
+            }
             function renderChinaMap(selector, regions, field, metricEn, metricZh, config) {
                 if (!window.d3) return;
                 var svg = d3.select(selector);
@@ -1467,11 +1496,12 @@ std::string page(Request &, Response &response) {
                         '<div class="tooltip-row"><span>' + text("Rules", "规则") + '</span><strong>' + number(item.rule_conversions) + '</strong></div>');
                 }
                 if (chinaMapData && Array.isArray(chinaMapData.features) && chinaMapData.features.length) {
-                    var collection = { type: "FeatureCollection", features: chinaMapData.features };
+                    var features = chinaMapData.features.map(rewindChinaFeature);
+                    var collection = { type: "FeatureCollection", features: features };
                     var projection = d3.geoMercator().fitSize([width, height], collection);
                     var path = d3.geoPath(projection);
                     svg.selectAll("path.china-region")
-                        .data(chinaMapData.features)
+                        .data(features)
                         .enter()
                         .append("path")
                         .attr("class", function (d) {
