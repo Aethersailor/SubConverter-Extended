@@ -1502,9 +1502,16 @@ std::string page(Request &, Response &response) {
                 var projection = d3.geoMercator().fitSize(
                     [insetWidth - pad * 2, insetHeight - pad * 2], collection);
                 var path = d3.geoPath(projection);
+                function showInsetTooltip(event) {
+                    showTooltip(event, '<div class="tooltip-title"><span class="country-icon">' + neutralRegionIcon() + '</span>' + text("South China Sea Islands", "南海诸岛") + '</div>' +
+                        '<div class="tooltip-row"><span>' + text("Range", "范围") + '</span><strong>' + label(config) + '</strong></div>' +
+                        '<div class="tooltip-row"><span>' + text("Metric", "指标") + '</span><strong>' + text(metricEn, metricZh) + '</strong></div>');
+                }
                 var group = svg.append("g")
                     .attr("class", "china-south-sea-inset")
-                    .attr("transform", "translate(" + insetX + "," + insetY + ")");
+                    .attr("transform", "translate(" + insetX + "," + insetY + ")")
+                    .on("mousemove", showInsetTooltip)
+                    .on("mouseleave", hideTooltip);
                 group.append("rect")
                     .attr("class", "china-inset-frame")
                     .attr("width", insetWidth)
@@ -1517,13 +1524,7 @@ std::string page(Request &, Response &response) {
                     .append("path")
                     .attr("class", "china-region china-south-sea")
                     .attr("d", path)
-                    .style("--country-fill", colors.empty)
-                    .on("mousemove", function (event) {
-                        showTooltip(event, '<div class="tooltip-title"><span class="country-icon">' + neutralRegionIcon() + '</span>' + text("South China Sea Islands", "南海诸岛") + '</div>' +
-                            '<div class="tooltip-row"><span>' + text("Range", "范围") + '</span><strong>' + label(config) + '</strong></div>' +
-                            '<div class="tooltip-row"><span>' + text("Metric", "指标") + '</span><strong>' + text(metricEn, metricZh) + '</strong></div>');
-                    })
-                    .on("mouseleave", hideTooltip);
+                    .style("--country-fill", colors.empty);
             }
             function renderChinaMap(selector, regions, field, metricEn, metricZh, config) {
                 if (!window.d3) return;
