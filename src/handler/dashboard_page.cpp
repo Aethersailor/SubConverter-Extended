@@ -526,7 +526,7 @@ std::string page(Request &, Response &response) {
             background: linear-gradient(90deg, var(--map-empty) 0 28%, var(--map-data-min) 38%, var(--map-data-mid) 65%, var(--map-data-max) 100%);
         }
         .tooltip {
-            position: absolute;
+            position: fixed;
             pointer-events: none;
             min-width: 170px;
             padding: 10px 12px;
@@ -539,7 +539,7 @@ std::string page(Request &, Response &response) {
             opacity: 0;
             transition: opacity 0.12s ease;
             font-size: 0.86rem;
-            z-index: 3;
+            z-index: 1000;
         }
         .tooltip.show { opacity: 1; }
         .tooltip-title { font-weight: 800; margin-bottom: 4px; }
@@ -1284,8 +1284,8 @@ std::string page(Request &, Response &response) {
                             '<div class="tooltip-row"><span>' + text("Range", "范围") + '</span><strong>' + label(countryConfig) + '</strong></div>' +
                             '<div class="tooltip-row"><span>' + text("Requests", "请求") + '</span><strong>' + number(item.subscription_requests) + '</strong></div>' +
                             '<div class="tooltip-row"><span>' + text("Rules", "规则") + '</span><strong>' + number(item.rule_conversions) + '</strong></div>';
-                        tooltip.style.left = event.offsetX + "px";
-                        tooltip.style.top = event.offsetY + "px";
+                        tooltip.style.left = event.clientX + "px";
+                        tooltip.style.top = event.clientY + "px";
                         tooltip.classList.add("show");
                     })
                     .on("mouseleave", function () { tooltip.classList.remove("show"); });
