@@ -180,6 +180,43 @@ std::string page(Request &, Response &response) {
             flex-wrap: wrap;
             justify-content: flex-end;
         }
+        .page-link {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            min-height: 40px;
+            border: 1px solid var(--control-border);
+            border-radius: 999px;
+            background: var(--control-bg);
+            color: var(--text-primary);
+            cursor: pointer;
+            font: inherit;
+            font-size: 0.88rem;
+            font-weight: 800;
+            line-height: 1;
+            padding: 9px 13px;
+            text-decoration: none;
+            transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
+        }
+        .page-link:hover {
+            background: var(--control-hover);
+            transform: translateY(-1px);
+        }
+        .page-link:focus-visible {
+            outline: 3px solid rgba(99, 179, 237, 0.35);
+            outline-offset: 2px;
+        }
+        .page-link svg {
+            width: 17px;
+            height: 17px;
+            flex: 0 0 auto;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 1.9;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
         .menu-wrap {
             position: relative;
             display: inline-flex;
@@ -681,6 +718,22 @@ std::string page(Request &, Response &response) {
                 </div>
             </div>
             <div class="actions">
+                <a class="page-link" href="/version" aria-label="Open version page">
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M20.6 13.2 13.2 20.6a2 2 0 0 1-2.8 0L3.4 13.6a2 2 0 0 1-.6-1.4V5a2 2 0 0 1 2-2h7.2a2 2 0 0 1 1.4.6l7.2 7.2a2 2 0 0 1 0 2.8Z"></path>
+                        <circle cx="7.5" cy="7.5" r="1.2"></circle>
+                    </svg>
+                    <span data-lang="en">Version</span><span data-lang="zh">版本信息</span>
+                </a>
+                <a class="page-link" href="/inspect" aria-label="Open inspector">
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <circle cx="11" cy="11" r="6"></circle>
+                        <path d="m16 16 4 4"></path>
+                        <path d="M8.5 11h5"></path>
+                        <path d="M11 8.5v5"></path>
+                    </svg>
+                    <span data-lang="en">Inspector</span><span data-lang="zh">诊断台</span>
+                </a>
                 <button type="button" id="refresh-button">
                     <span data-lang="en">Refresh</span><span data-lang="zh">刷新</span>
                 </button>
