@@ -511,6 +511,19 @@ std::string page(Request &, Response &response) {
         }
         .country:hover,
         .china-region:hover { opacity: 0.82; }
+        .china-south-sea-inset {
+            pointer-events: all;
+        }
+        .china-inset-frame {
+            fill: color-mix(in srgb, var(--surface-strong) 76%, transparent);
+            stroke: var(--map-stroke);
+            stroke-width: 1;
+        }
+        .china-south-sea {
+            fill: var(--map-empty);
+            stroke: var(--map-stroke);
+            stroke-width: 0.8;
+        }
         .china-region-label {
             fill: var(--text-secondary);
             font-size: 0.68rem;
@@ -1442,6 +1455,12 @@ std::string page(Request &, Response &response) {
                 var adcode = String(props.adcode || props.adcode_pro || props.code || "");
                 return CHINA_ADCODE[adcode] || "";
             }
+            function isSouthChinaSeaFeature(feature) {
+                var props = feature.properties || {};
+                var adcode = String(props.adcode || props.adcode_pro || props.code || "");
+                var name = String(props.name || "");
+                return adcode.indexOf("_JD") !== -1 || /南海|九段|South China Sea/i.test(name);
+            }
             function rewindChinaGeometry(geometry) {
                 if (!geometry || !Array.isArray(geometry.coordinates)) return geometry;
                 if (geometry.type === "Polygon") {
@@ -1471,6 +1490,41 @@ std::string page(Request &, Response &response) {
                     geometry: rewindChinaGeometry(feature.geometry)
                 };
             }
+            function renderSouthChinaSeaInset(svg, features, width, height, colors, config, metricEn, metricZh) {
+                if (!features.length) return;
+                var insetWidth = Math.max(54, Math.min(74, width * 0.14));
+                var insetHeight = Math.max(72, Math.min(96, height * 0.23));
+                var insetMargin = Math.max(18, Math.min(26, width * 0.045));
+                var insetX = width - insetWidth - insetMargin;
+                var insetY = height - insetHeight - insetMargin;
+                var pad = 5;
+                var collection = { type: "FeatureCollection", features: features };
+                var projection = d3.geoMercator().fitSize(
+                    [insetWidth - pad * 2, insetHeight - pad * 2], collection);
+                var path = d3.geoPath(projection);
+                var group = svg.append("g")
+                    .attr("class", "china-south-sea-inset")
+                    .attr("transform", "translate(" + insetX + "," + insetY + ")");
+                group.append("rect")
+                    .attr("class", "china-inset-frame")
+                    .attr("width", insetWidth)
+                    .attr("height", insetHeight);
+                group.append("g")
+                    .attr("transform", "translate(" + pad + "," + pad + ")")
+                    .selectAll("path.china-south-sea")
+                    .data(features)
+                    .enter()
+                    .append("path")
+                    .attr("class", "china-region china-south-sea")
+                    .attr("d", path)
+                    .style("--country-fill", colors.empty)
+                    .on("mousemove", function (event) {
+                        showTooltip(event, '<div class="tooltip-title"><span class="country-icon">' + neutralRegionIcon() + '</span>' + text("South China Sea Islands", "南海诸岛") + '</div>' +
+                            '<div class="tooltip-row"><span>' + text("Range", "范围") + '</span><strong>' + label(config) + '</strong></div>' +
+                            '<div class="tooltip-row"><span>' + text("Metric", "指标") + '</span><strong>' + text(metricEn, metricZh) + '</strong></div>');
+                    })
+                    .on("mouseleave", hideTooltip);
+            }
             function renderChinaMap(selector, regions, field, metricEn, metricZh, config) {
                 if (!window.d3) return;
                 var svg = d3.select(selector);
@@ -1497,11 +1551,13 @@ std::string page(Request &, Response &response) {
                 }
                 if (chinaMapData && Array.isArray(chinaMapData.features) && chinaMapData.features.length) {
                     var features = chinaMapData.features.map(rewindChinaFeature);
-                    var collection = { type: "FeatureCollection", features: features };
+                    var mainFeatures = features.filter(function (feature) { return !isSouthChinaSeaFeature(feature); });
+                    var insetFeatures = features.filter(isSouthChinaSeaFeature);
+                    var collection = { type: "FeatureCollection", features: mainFeatures.length ? mainFeatures : features };
                     var projection = d3.geoMercator().fitSize([width, height], collection);
                     var path = d3.geoPath(projection);
                     svg.selectAll("path.china-region")
-                        .data(features)
+                        .data(collection.features)
                         .enter()
                         .append("path")
                         .attr("class", function (d) {
@@ -1517,6 +1573,7 @@ std::string page(Request &, Response &response) {
                             tooltipFor(event, code, regionMap.get(code));
                         })
                         .on("mouseleave", hideTooltip);
+                    renderSouthChinaSeaInset(svg, insetFeatures, width, height, colors, config, metricEn, metricZh);
                     return;
                 }
                 var rows = CHINA_REGION_TILES;
