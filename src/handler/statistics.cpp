@@ -49,17 +49,24 @@ struct Bucket {
   int64_t minute = 0;
   Counters counters;
   std::vector<CountryBucketEntry> countries;
+  std::vector<CountryBucketEntry> china_regions;
 };
 
 struct DailyBucket {
   int64_t day = 0;
   Counters counters;
   std::vector<CountryBucketEntry> countries;
+  std::vector<CountryBucketEntry> china_regions;
 };
 
 struct SnapshotCountry {
   std::string code;
   CountryCounters counters;
+};
+
+struct GeoLocation {
+  std::string country_code;
+  std::string china_region_code;
 };
 
 struct State {
@@ -76,6 +83,8 @@ struct State {
   Counters lifetime;
   std::map<std::string, CountryCounters> startup_countries;
   std::map<std::string, CountryCounters> lifetime_countries;
+  std::map<std::string, CountryCounters> startup_china_regions;
+  std::map<std::string, CountryCounters> lifetime_china_regions;
   std::array<Bucket, kBucketCount> buckets;
   std::array<DailyBucket, kDailyBucketCount> daily_buckets;
 };
@@ -175,6 +184,30 @@ std::string normalizeCountryCode(std::string value) {
   return value;
 }
 
+bool validChinaRegionSuffix(const std::string &value) {
+  static const std::array<const char *, 35> codes = {
+      "AH", "BJ", "CQ", "FJ", "GD", "GS", "GX", "GZ", "HA", "HB",
+      "HE", "HI", "HK", "HL", "HN", "JL", "JS", "JX", "LN", "MO",
+      "NM", "NX", "QH", "SC", "SD", "SH", "SN", "SX", "TJ", "TW",
+      "XJ", "XZ", "YN", "ZJ", "XX"};
+  return std::any_of(codes.begin(), codes.end(), [&](const char *code) {
+    return value == code;
+  });
+}
+
+std::string normalizeChinaRegionCode(std::string value) {
+  value = toUpper(trimWhitespace(value, true, true));
+  for (char &ch : value) {
+    if (ch == '_')
+      ch = '-';
+  }
+  if (value.rfind("CN-", 0) == 0)
+    value = value.substr(3);
+  if (!validChinaRegionSuffix(value))
+    return "";
+  return "CN-" + value;
+}
+
 std::string countryFromHeaders(const Request &request) {
   if (toLower(global.statisticsGeoProvider) == "none")
     return "ZZ";
@@ -188,6 +221,33 @@ std::string countryFromHeaders(const Request &request) {
       return code;
   }
   return "ZZ";
+}
+
+std::string chinaRegionFromHeaders(const Request &request,
+                                   const std::string &country) {
+  if (country == "HK" || country == "MO" || country == "TW")
+    return "CN-" + country;
+  if (country != "CN")
+    return "";
+
+  for (const std::string &header : global.statisticsChinaRegionHeaders) {
+    auto iter = request.headers.find(header);
+    if (iter == request.headers.end())
+      continue;
+    std::string code = normalizeChinaRegionCode(iter->second);
+    if (!code.empty())
+      return code;
+  }
+  return "CN-XX";
+}
+
+GeoLocation geoLocationFromHeaders(const Request &request) {
+  GeoLocation location;
+  location.country_code = countryFromHeaders(request);
+  if (toLower(global.statisticsGeoProvider) != "none")
+    location.china_region_code =
+        chinaRegionFromHeaders(request, location.country_code);
+  return location;
 }
 
 void addCounters(Counters &target, uint64_t requests, uint64_t rules) {
@@ -254,6 +314,29 @@ std::vector<SnapshotCountry> countryWindowLocked(int64_t now_minute,
   return result;
 }
 
+std::vector<SnapshotCountry> chinaRegionWindowLocked(int64_t now_minute,
+                                                     int minutes) {
+  std::map<std::string, CountryCounters> totals;
+  if (!g_state)
+    return {};
+  int64_t earliest = now_minute - minutes + 1;
+  for (const Bucket &bucket : g_state->buckets) {
+    if (bucket.minute < earliest || bucket.minute > now_minute)
+      continue;
+    for (const CountryBucketEntry &entry : bucket.china_regions) {
+      addCountryCounters(totals, entry.code,
+                         entry.counters.subscription_requests,
+                         entry.counters.rule_conversions);
+    }
+  }
+
+  std::vector<SnapshotCountry> result;
+  result.reserve(totals.size());
+  for (const auto &entry : totals)
+    result.push_back({entry.first, entry.second});
+  return result;
+}
+
 Counters dailyWindowCountersLocked(int64_t now_day, int days) {
   Counters result;
   if (!g_state)
@@ -278,6 +361,29 @@ std::vector<SnapshotCountry> countryDailyWindowLocked(int64_t now_day,
     if (bucket.day < earliest || bucket.day > now_day)
       continue;
     for (const CountryBucketEntry &entry : bucket.countries) {
+      addCountryCounters(totals, entry.code,
+                         entry.counters.subscription_requests,
+                         entry.counters.rule_conversions);
+    }
+  }
+
+  std::vector<SnapshotCountry> result;
+  result.reserve(totals.size());
+  for (const auto &entry : totals)
+    result.push_back({entry.first, entry.second});
+  return result;
+}
+
+std::vector<SnapshotCountry> chinaRegionDailyWindowLocked(int64_t now_day,
+                                                          int days) {
+  std::map<std::string, CountryCounters> totals;
+  if (!g_state)
+    return {};
+  int64_t earliest = now_day - days + 1;
+  for (const DailyBucket &bucket : g_state->daily_buckets) {
+    if (bucket.day < earliest || bucket.day > now_day)
+      continue;
+    for (const CountryBucketEntry &entry : bucket.china_regions) {
       addCountryCounters(totals, entry.code,
                          entry.counters.subscription_requests,
                          entry.counters.rule_conversions);
@@ -374,6 +480,7 @@ void seedDailyBucketsFromMinuteBucketsLocked() {
       g_state->daily_buckets[index].day = day;
       g_state->daily_buckets[index].counters = Counters();
       g_state->daily_buckets[index].countries.clear();
+      g_state->daily_buckets[index].china_regions.clear();
     }
     addCounters(g_state->daily_buckets[index].counters,
                 bucket.counters.subscription_requests,
@@ -381,6 +488,11 @@ void seedDailyBucketsFromMinuteBucketsLocked() {
     for (const CountryBucketEntry &entry : bucket.countries) {
       addCountryCounters(g_state->daily_buckets[index].countries, entry.code,
                          entry.counters.subscription_requests,
+                         entry.counters.rule_conversions);
+    }
+    for (const CountryBucketEntry &entry : bucket.china_regions) {
+      addCountryCounters(g_state->daily_buckets[index].china_regions,
+                         entry.code, entry.counters.subscription_requests,
                          entry.counters.rule_conversions);
     }
   }
@@ -406,7 +518,7 @@ void loadLocked() {
   try {
     json root = json::parse(content);
     int schema = root.value("schema", 1);
-    if (schema < 1 || schema > 3)
+    if (schema < 1 || schema > 4)
       return;
 
     g_state->last_flush = root.value("updated_at", 0LL);
@@ -436,6 +548,20 @@ void loadLocked() {
         g_state->lifetime_countries[code] = counters;
     }
 
+    auto china_regions = root.value("china_regions", json::object());
+    for (auto iter = china_regions.begin(); iter != china_regions.end();
+         ++iter) {
+      std::string code = normalizeChinaRegionCode(iter.key());
+      if (code.empty())
+        continue;
+      CountryCounters counters;
+      counters.subscription_requests =
+          iter.value().value("subscription_requests", 0ULL);
+      counters.rule_conversions = iter.value().value("rule_conversions", 0ULL);
+      if (counters.subscription_requests || counters.rule_conversions)
+        g_state->lifetime_china_regions[code] = counters;
+    }
+
     auto buckets = root.value("buckets", json::array());
     for (const auto &item : buckets) {
       int64_t minute = item.value("minute", 0LL);
@@ -448,6 +574,7 @@ void loadLocked() {
       g_state->buckets[index].counters.rule_conversions =
           item.value("rule_conversions", 0ULL);
       g_state->buckets[index].countries.clear();
+      g_state->buckets[index].china_regions.clear();
 
       auto country_items = item.value("countries", json::array());
       for (const auto &country_item : country_items) {
@@ -459,6 +586,20 @@ void loadLocked() {
         if (requests || rules)
           addCountryCounters(g_state->buckets[index].countries, code, requests,
                              rules);
+      }
+
+      auto region_items = item.value("china_regions", json::array());
+      for (const auto &region_item : region_items) {
+        std::string code =
+            normalizeChinaRegionCode(region_item.value("code", ""));
+        if (code.empty())
+          continue;
+        uint64_t requests =
+            region_item.value("subscription_requests", 0ULL);
+        uint64_t rules = region_item.value("rule_conversions", 0ULL);
+        if (requests || rules)
+          addCountryCounters(g_state->buckets[index].china_regions, code,
+                             requests, rules);
       }
     }
 
@@ -475,6 +616,7 @@ void loadLocked() {
       g_state->daily_buckets[index].counters.rule_conversions =
           item.value("rule_conversions", 0ULL);
       g_state->daily_buckets[index].countries.clear();
+      g_state->daily_buckets[index].china_regions.clear();
 
       auto country_items = item.value("countries", json::array());
       for (const auto &country_item : country_items) {
@@ -485,6 +627,19 @@ void loadLocked() {
         uint64_t rules = country_item.value("rule_conversions", 0ULL);
         if (requests || rules)
           addCountryCounters(g_state->daily_buckets[index].countries, code,
+                             requests, rules);
+      }
+      auto region_items = item.value("china_regions", json::array());
+      for (const auto &region_item : region_items) {
+        std::string code =
+            normalizeChinaRegionCode(region_item.value("code", ""));
+        if (code.empty())
+          continue;
+        uint64_t requests =
+            region_item.value("subscription_requests", 0ULL);
+        uint64_t rules = region_item.value("rule_conversions", 0ULL);
+        if (requests || rules)
+          addCountryCounters(g_state->daily_buckets[index].china_regions, code,
                              requests, rules);
       }
       if (g_state->daily_buckets[index].counters.subscription_requests ||
@@ -513,7 +668,7 @@ bool flushLocked(bool stopping, int64_t now) {
     g_state->last_stopped_at = now;
 
   json root;
-  root["schema"] = 3;
+  root["schema"] = 4;
   root["updated_at"] = now;
   root["runtime"] = {
       {"first_started_at", g_state->first_started_at},
@@ -525,6 +680,8 @@ bool flushLocked(bool stopping, int64_t now) {
       {"last_stopped_at", g_state->last_stopped_at}};
   root["lifetime"] = countersJson(g_state->lifetime);
   root["countries"] = countriesObjectJson(g_state->lifetime_countries);
+  root["china_regions"] =
+      countriesObjectJson(g_state->lifetime_china_regions);
 
   json buckets = json::array();
   for (const Bucket &bucket : g_state->buckets) {
@@ -544,12 +701,24 @@ bool flushLocked(bool stopping, int64_t now) {
                            {"rule_conversions",
                             entry.counters.rule_conversions}});
     }
+    json china_regions = json::array();
+    for (const CountryBucketEntry &entry : bucket.china_regions) {
+      if (!entry.counters.subscription_requests &&
+          !entry.counters.rule_conversions)
+        continue;
+      china_regions.push_back({{"code", entry.code},
+                               {"subscription_requests",
+                                entry.counters.subscription_requests},
+                               {"rule_conversions",
+                                entry.counters.rule_conversions}});
+    }
     buckets.push_back({{"minute", bucket.minute},
                        {"subscription_requests",
                         bucket.counters.subscription_requests},
                        {"rule_conversions",
                         bucket.counters.rule_conversions},
-                       {"countries", countries}});
+                       {"countries", countries},
+                       {"china_regions", china_regions}});
   }
   root["buckets"] = buckets;
 
@@ -571,12 +740,24 @@ bool flushLocked(bool stopping, int64_t now) {
                            {"rule_conversions",
                             entry.counters.rule_conversions}});
     }
+    json china_regions = json::array();
+    for (const CountryBucketEntry &entry : bucket.china_regions) {
+      if (!entry.counters.subscription_requests &&
+          !entry.counters.rule_conversions)
+        continue;
+      china_regions.push_back({{"code", entry.code},
+                               {"subscription_requests",
+                                entry.counters.subscription_requests},
+                               {"rule_conversions",
+                                entry.counters.rule_conversions}});
+    }
     daily_buckets.push_back({{"day", bucket.day},
                              {"subscription_requests",
                               bucket.counters.subscription_requests},
                              {"rule_conversions",
                               bucket.counters.rule_conversions},
-                             {"countries", countries}});
+                             {"countries", countries},
+                             {"china_regions", china_regions}});
   }
   root["daily_buckets"] = daily_buckets;
 
@@ -662,7 +843,7 @@ void recordSubscriptionConversion(const Request &request,
   int64_t now = nowSeconds();
   int64_t minute = now / 60;
   int64_t day = now / (24 * 60 * 60);
-  std::string country = countryFromHeaders(request);
+  GeoLocation location = geoLocationFromHeaders(request);
 
   std::lock_guard<std::mutex> lock(g_mutex);
   if (!g_state || !g_state->initialized)
@@ -670,30 +851,45 @@ void recordSubscriptionConversion(const Request &request,
 
   addCounters(g_state->startup, 1, rule_conversions);
   addCounters(g_state->lifetime, 1, rule_conversions);
-  addCountryCounters(g_state->startup_countries, country, 1, rule_conversions);
-  addCountryCounters(g_state->lifetime_countries, country, 1,
+  addCountryCounters(g_state->startup_countries, location.country_code, 1,
                      rule_conversions);
+  addCountryCounters(g_state->lifetime_countries, location.country_code, 1,
+                     rule_conversions);
+  if (!location.china_region_code.empty()) {
+    addCountryCounters(g_state->startup_china_regions,
+                       location.china_region_code, 1, rule_conversions);
+    addCountryCounters(g_state->lifetime_china_regions,
+                       location.china_region_code, 1, rule_conversions);
+  }
 
   size_t index = static_cast<size_t>(minute % kBucketCount);
   if (g_state->buckets[index].minute != minute) {
     g_state->buckets[index].minute = minute;
     g_state->buckets[index].counters = Counters();
     g_state->buckets[index].countries.clear();
+    g_state->buckets[index].china_regions.clear();
   }
   addCounters(g_state->buckets[index].counters, 1, rule_conversions);
-  addCountryCounters(g_state->buckets[index].countries, country, 1,
-                     rule_conversions);
+  addCountryCounters(g_state->buckets[index].countries, location.country_code,
+                     1, rule_conversions);
+  if (!location.china_region_code.empty())
+    addCountryCounters(g_state->buckets[index].china_regions,
+                       location.china_region_code, 1, rule_conversions);
 
   size_t daily_index = static_cast<size_t>(day % kDailyBucketCount);
   if (g_state->daily_buckets[daily_index].day != day) {
     g_state->daily_buckets[daily_index].day = day;
     g_state->daily_buckets[daily_index].counters = Counters();
     g_state->daily_buckets[daily_index].countries.clear();
+    g_state->daily_buckets[daily_index].china_regions.clear();
   }
   addCounters(g_state->daily_buckets[daily_index].counters, 1,
               rule_conversions);
-  addCountryCounters(g_state->daily_buckets[daily_index].countries, country, 1,
-                     rule_conversions);
+  addCountryCounters(g_state->daily_buckets[daily_index].countries,
+                     location.country_code, 1, rule_conversions);
+  if (!location.china_region_code.empty())
+    addCountryCounters(g_state->daily_buckets[daily_index].china_regions,
+                       location.china_region_code, 1, rule_conversions);
 
   g_state->dirty = true;
 }
@@ -757,6 +953,30 @@ std::string dashboardData(RESPONSE_CALLBACK_ARGS) {
                             : std::vector<SnapshotCountry>());
   root["country_windows"] = country_windows;
   root["countries"] = country_windows["lifetime"];
+
+  json china_region_windows = json::object();
+  china_region_windows["startup"] =
+      countriesJson(g_state
+                        ? countrySnapshotLocked(g_state->startup_china_regions)
+                        : std::vector<SnapshotCountry>());
+  china_region_windows["hour"] =
+      countriesJson(chinaRegionWindowLocked(now_minute, 60));
+  china_region_windows["day"] =
+      countriesJson(chinaRegionWindowLocked(now_minute, 24 * 60));
+  china_region_windows["seven_days"] =
+      countriesJson(chinaRegionWindowLocked(now_minute, 7 * 24 * 60));
+  china_region_windows["thirty_days"] =
+      countriesJson(chinaRegionWindowLocked(now_minute, 30 * 24 * 60));
+  china_region_windows["half_year"] =
+      countriesJson(chinaRegionDailyWindowLocked(now_day, 183));
+  china_region_windows["year"] =
+      countriesJson(chinaRegionDailyWindowLocked(now_day, 365));
+  china_region_windows["lifetime"] =
+      countriesJson(g_state ? countrySnapshotLocked(
+                                  g_state->lifetime_china_regions)
+                            : std::vector<SnapshotCountry>());
+  root["china_region_windows"] = china_region_windows;
+  root["china_regions"] = china_region_windows["lifetime"];
 
   json series = json::array();
   std::vector<Counters> hourly = hourlySeriesLocked(now_minute, 24);
