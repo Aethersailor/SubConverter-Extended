@@ -551,11 +551,11 @@ std::string page(Request &, Response &response) {
             background: var(--surface-strong);
             color: var(--text-primary);
             box-shadow: 0 18px 36px rgba(15, 23, 42, 0.22);
-            transform: translate(-50%, calc(-100% - 12px));
+            max-width: min(280px, calc(100vw - 24px));
             opacity: 0;
             transition: opacity 0.12s ease;
             font-size: 0.86rem;
-            z-index: 1000;
+            z-index: 10000;
         }
         .tooltip.show { opacity: 1; }
         .tooltip-title { font-weight: 800; margin-bottom: 4px; }
@@ -1378,9 +1378,19 @@ std::string page(Request &, Response &response) {
             }
             function showTooltip(event, html) {
                 tooltip.innerHTML = html;
-                tooltip.style.left = event.clientX + "px";
-                tooltip.style.top = event.clientY + "px";
                 tooltip.classList.add("show");
+                var gap = 14;
+                var margin = 12;
+                var width = tooltip.offsetWidth || 220;
+                var height = tooltip.offsetHeight || 120;
+                var x = event.clientX + gap;
+                var y = event.clientY + gap;
+                if (x + width + margin > window.innerWidth)
+                    x = event.clientX - width - gap;
+                if (y + height + margin > window.innerHeight)
+                    y = event.clientY - height - gap;
+                tooltip.style.left = Math.max(margin, Math.min(x, window.innerWidth - width - margin)) + "px";
+                tooltip.style.top = Math.max(margin, Math.min(y, window.innerHeight - height - margin)) + "px";
             }
             function hideTooltip() { tooltip.classList.remove("show"); }
             function renderWorldMap(selector, countries, field, metricEn, metricZh, config) {
