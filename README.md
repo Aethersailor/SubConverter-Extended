@@ -590,10 +590,11 @@ https://api.asailor.org/sub?target=clash&url=https%3A%2F%2Fexample.com%2Fsub&exp
 
 这个模式适合排查“参数是否生效”“是否进入 `proxy-provider` 模式”“外部配置是否加载成功”“规则集和节点数量是否符合预期”等问题。报告会包含目标格式、模式开关、输入数量、外部配置状态、规则集统计、provider 数量和输出大小等信息。
 
-> [!NOTE]
-> * `explain=true` 只改变响应内容，不改变实际转换逻辑。
-> * 如果同一请求里包含上传参数，诊断模式会抑制上传，避免排障时产生托管配置写入。
-> * 诊断报告不会直接回显原始订阅地址；provider 来源会以短哈希形式显示，便于区分来源又避免泄露完整链接。
+**说明：**
+
+* `explain=true` 只改变响应内容，不改变实际转换逻辑。
+* 如果同一请求里包含上传参数，诊断模式会抑制上传，避免排障时产生托管配置写入。
+* 诊断报告不会直接回显原始订阅地址；provider 来源会以短哈希形式显示，便于区分来源又避免泄露完整链接。
 
 ### `/inspect` 请求诊断台
 
@@ -618,15 +619,16 @@ http://localhost:25500/inspect
 * `include` / `exclude`、`emoji`、`new_name`、`config` 等外部参数最终是否参与转换
 * 外部配置、规则集、自定义组、Provider 是否按预期加载或生成
 
-> [!NOTE]
-> * `/inspect` 只是 `explain=true` 诊断报告的可视化界面，不会改变实际转换逻辑。
-> * 页面会隐藏敏感输入的明文，仅展示预览、长度和短哈希等排障信息。
-> * 请求诊断台会保留原始 JSON 区域，方便复制给维护者进一步分析。
+**说明：**
+
+* `/inspect` 只是 `explain=true` 诊断报告的可视化界面，不会改变实际转换逻辑。
+* 页面会隐藏敏感输入的明文，仅展示预览、长度和短哈希等排障信息。
+* 请求诊断台会保留原始 JSON 区域，方便复制给维护者进一步分析。
 
 </details>
 
 <details>
-<summary><strong>`/dashboard` 运行仪表盘</strong></summary>
+<summary><strong>/dashboard 运行仪表盘</strong></summary>
 
 ### `/dashboard` 使用方法
 
@@ -658,11 +660,12 @@ http://localhost:25500/dashboard/data
 * 按 1 小时、1 天、7 天、30 天、半年、1 年和历史总计统计的国家 / 地区分布与排行
 * 当可信边缘网关提供地区请求头时，展示中国地区请求 / 规则转换地图和排行
 
-> [!NOTE]
-> * 统计只在 `statistics.enabled=true` 后开始写入，启用前的历史请求不会回补。
-> * 统计模块只记录成功的 `GET /sub` 转换请求和规则转换计数，不存储订阅链接、节点内容或访问者 IP。
-> * 国家 / 地区来源于配置的国家码请求头；中国地区来源于配置的地区请求头；无法识别时会归为未知。
-> * Docker 部署如需跨重启保留统计数据，请将 `data_dir` 对应目录挂载为卷，例如 `./stats:/base/stats`。
+**说明：**
+
+* 统计只在 `statistics.enabled=true` 后开始写入，启用前的历史请求不会回补。
+* 统计模块只记录成功的 `GET /sub` 转换请求和规则转换计数，不存储订阅链接、节点内容或访问者 IP。
+* 国家 / 地区来源于配置的国家码请求头；中国地区来源于配置的地区请求头；无法识别时会归为未知。
+* Docker 部署如需跨重启保留统计数据，请将 `data_dir` 对应目录挂载为卷，例如 `./stats:/base/stats`。
 
 ### 启用示例（TOML）
 
@@ -705,8 +708,7 @@ lock_seconds = 900
 | `statistics.dashboard_auth.window_seconds` | `dashboard_auth_window_seconds` | `300` | 失败登录统计窗口，单位为秒。 |
 | `statistics.dashboard_auth.lock_seconds` | `dashboard_auth_lock_seconds` | `900` | 超过失败次数后的锁定时长，单位为秒。 |
 
-> [!TIP]
-> `pref.yml` 使用同名嵌套字段；`pref.ini` 的上述 INI 配置项均写在 `[statistics]` 段内。
+**提示：** `pref.yml` 使用同名嵌套字段；`pref.ini` 的上述 INI 配置项均写在 `[statistics]` 段内。
 
 </details>
 
@@ -725,8 +727,7 @@ url=provider:HK,https://a|provider:HK,https://b
 url=provider%3AHK%2Chttps%3A%2F%2Fexample.com%2Fsub
 ```
 
-> [!NOTE]
-> 在 OpenClash 这类预置“订阅地址”输入框的软件中，无需填写开头的 `url=`，直接填入等号后的内容即可。
+**说明：** 在 OpenClash 这类预置“订阅地址”输入框的软件中，无需填写开头的 `url=`，直接填入等号后的内容即可。
 
 补充说明：
 
