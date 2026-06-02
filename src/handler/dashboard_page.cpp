@@ -1439,6 +1439,10 @@ std::string page(Request &, Response &response) {
                 tooltip.style.top = Math.max(margin, Math.min(y, window.innerHeight - height - margin)) + "px";
             }
             function hideTooltip() { tooltip.classList.remove("show"); }
+            function metricTooltipRow(item, field, metricEn, metricZh) {
+                item = item || {};
+                return '<div class="tooltip-row"><span>' + text(metricEn, metricZh) + '</span><strong>' + number(item[field]) + '</strong></div>';
+            }
             function renderWorldMap(selector, countries, field, metricEn, metricZh, config) {
                 if (!worldMapData || !window.d3 || !window.topojson) return;
                 var svg = d3.select(selector);
@@ -1475,11 +1479,9 @@ std::string page(Request &, Response &response) {
                     .on("mousemove", function (event, d) {
                         var code = ISO_N3[String(d.id).padStart(3, "0")] || "ZZ";
                         var item = countriesMap.get(code) || { subscription_requests: 0, rule_conversions: 0 };
-                        showTooltip(event, '<div class="tooltip-title"><span class="country-icon">' + countryIcon(code) + '</span>' + escapeHtml(countryName(code)) + ' · ' + escapeHtml(code) + '</div>' +
+                        showTooltip(event, '<div class="tooltip-title"><span class="country-icon">' + countryIcon(code) + '</span>' + escapeHtml(countryName(code)) + '</div>' +
                             '<div class="tooltip-row"><span>' + text("Range", "范围") + '</span><strong>' + label(config) + '</strong></div>' +
-                            '<div class="tooltip-row"><span>' + text("Metric", "指标") + '</span><strong>' + text(metricEn, metricZh) + '</strong></div>' +
-                            '<div class="tooltip-row"><span>' + text("Requests", "请求") + '</span><strong>' + number(item.subscription_requests) + '</strong></div>' +
-                            '<div class="tooltip-row"><span>' + text("Rules", "规则") + '</span><strong>' + number(item.rule_conversions) + '</strong></div>');
+                            metricTooltipRow(item, field, metricEn, metricZh));
                     })
                     .on("mouseleave", hideTooltip);
             }
@@ -1543,7 +1545,7 @@ std::string page(Request &, Response &response) {
                 }
                 return projection;
             }
-            function renderSouthChinaSeaInset(svg, features, width, height, colors, config, metricEn, metricZh) {
+            function renderSouthChinaSeaInset(svg, features, width, height, colors, config, field, metricEn, metricZh) {
                 if (!features.length) return;
                 var insetWidth = Math.max(54, Math.min(74, width * 0.14));
                 var insetHeight = Math.max(72, Math.min(96, height * 0.23));
@@ -1556,9 +1558,10 @@ std::string page(Request &, Response &response) {
                     [insetWidth - pad * 2, insetHeight - pad * 2], collection);
                 var path = d3.geoPath(projection);
                 function showInsetTooltip(event) {
+                    var item = { subscription_requests: 0, rule_conversions: 0 };
                     showTooltip(event, '<div class="tooltip-title"><span class="country-icon">' + neutralRegionIcon() + '</span>' + text("South China Sea Islands", "南海诸岛") + '</div>' +
                         '<div class="tooltip-row"><span>' + text("Range", "范围") + '</span><strong>' + label(config) + '</strong></div>' +
-                        '<div class="tooltip-row"><span>' + text("Metric", "指标") + '</span><strong>' + text(metricEn, metricZh) + '</strong></div>');
+                        metricTooltipRow(item, field, metricEn, metricZh));
                 }
                 var group = svg.append("g")
                     .attr("class", "china-south-sea-inset")
@@ -1597,11 +1600,9 @@ std::string page(Request &, Response &response) {
                 }
                 function tooltipFor(event, code, item) {
                     item = item || { subscription_requests: 0, rule_conversions: 0 };
-                    showTooltip(event, '<div class="tooltip-title"><span class="country-icon">' + neutralRegionIcon() + '</span>' + escapeHtml(chinaRegionName(code)) + ' · ' + escapeHtml(code) + '</div>' +
+                    showTooltip(event, '<div class="tooltip-title"><span class="country-icon">' + neutralRegionIcon() + '</span>' + escapeHtml(chinaRegionName(code)) + '</div>' +
                         '<div class="tooltip-row"><span>' + text("Range", "范围") + '</span><strong>' + label(config) + '</strong></div>' +
-                        '<div class="tooltip-row"><span>' + text("Metric", "指标") + '</span><strong>' + text(metricEn, metricZh) + '</strong></div>' +
-                        '<div class="tooltip-row"><span>' + text("Requests", "请求") + '</span><strong>' + number(item.subscription_requests) + '</strong></div>' +
-                        '<div class="tooltip-row"><span>' + text("Rules", "规则") + '</span><strong>' + number(item.rule_conversions) + '</strong></div>');
+                        metricTooltipRow(item, field, metricEn, metricZh));
                 }
                 if (chinaMapData && Array.isArray(chinaMapData.features) && chinaMapData.features.length) {
                     var features = chinaMapData.features.map(rewindChinaFeature);
@@ -1631,7 +1632,7 @@ std::string page(Request &, Response &response) {
                             tooltipFor(event, code, regionMap.get(code));
                         })
                         .on("mouseleave", hideTooltip);
-                    renderSouthChinaSeaInset(svg, insetFeatures, width, height, colors, config, metricEn, metricZh);
+                    renderSouthChinaSeaInset(svg, insetFeatures, width, height, colors, config, field, metricEn, metricZh);
                     return;
                 }
                 var rows = CHINA_REGION_TILES;
