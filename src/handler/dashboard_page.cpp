@@ -1505,7 +1505,7 @@ std::string page(Request &, Response &response) {
                 var bounds = path.bounds(reference);
                 if (isFinite(bounds[0][1]) && isFinite(bounds[1][1])) {
                     var currentCenterY = (bounds[0][1] + bounds[1][1]) / 2;
-                    var shiftY = height / 2 - currentCenterY;
+                    var shiftY = height * 0.55 - currentCenterY;
                     var maxShift = height * 0.12;
                     shiftY = Math.max(-maxShift, Math.min(maxShift, shiftY));
                     var translate = projection.translate();
@@ -1579,7 +1579,7 @@ std::string page(Request &, Response &response) {
                     var insetFeatures = features.filter(isSouthChinaSeaFeature);
                     var collection = { type: "FeatureCollection", features: mainFeatures.length ? mainFeatures : features };
                     var mainlandCenterFeatures = collection.features.filter(function (feature) {
-                        return ["CN-TW", "CN-HK", "CN-MO"].indexOf(chinaFeatureCode(feature)) === -1;
+                        return ["CN-TW", "CN-HK", "CN-MO", "CN-HI"].indexOf(chinaFeatureCode(feature)) === -1;
                     });
                     var mainlandCenterCollection = { type: "FeatureCollection", features: mainlandCenterFeatures };
                     var projection = fitChinaMainProjection(collection, mainlandCenterCollection, width, height);
