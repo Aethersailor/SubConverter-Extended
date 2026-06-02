@@ -58,6 +58,8 @@ std::string page(Request &, Response &response) {
             --control-border: rgba(26, 32, 44, 0.12);
             --map-stroke: rgba(255, 255, 255, 0.85);
             --map-empty: #d7e1ec;
+            --china-inset-fill: #b9cce0;
+            --china-inset-stroke: rgba(30, 64, 175, 0.58);
             --map-data-min: #93c5fd;
             --map-data-mid: #2563eb;
             --map-data-max: #1e3a8a;
@@ -90,6 +92,8 @@ std::string page(Request &, Response &response) {
                 --control-border: rgba(255, 255, 255, 0.16);
                 --map-stroke: rgba(2, 6, 23, 0.9);
                 --map-empty: #273449;
+                --china-inset-fill: #445f7a;
+                --china-inset-stroke: rgba(125, 211, 252, 0.72);
                 --map-data-min: #7dd3fc;
                 --map-data-mid: #38bdf8;
                 --map-data-max: #2563eb;
@@ -520,9 +524,10 @@ std::string page(Request &, Response &response) {
             stroke-width: 1;
         }
         .china-south-sea {
-            fill: var(--map-empty);
-            stroke: var(--map-stroke);
-            stroke-width: 0.8;
+            fill: var(--china-inset-fill);
+            stroke: var(--china-inset-stroke);
+            stroke-width: 1.15;
+            vector-effect: non-scaling-stroke;
         }
         .china-region-label {
             fill: var(--text-secondary);
@@ -1490,6 +1495,26 @@ std::string page(Request &, Response &response) {
                     geometry: rewindChinaGeometry(feature.geometry)
                 };
             }
+            function fitChinaMainProjection(collection, centerCollection, width, height) {
+                var horizontalPad = Math.max(20, Math.min(34, width * 0.055));
+                var verticalPad = Math.max(22, Math.min(38, height * 0.08));
+                var projection = d3.geoMercator().fitExtent(
+                    [[horizontalPad, verticalPad], [width - horizontalPad, height - verticalPad]],
+                    collection);
+                var reference = centerCollection && centerCollection.features && centerCollection.features.length
+                    ? centerCollection : collection;
+                var path = d3.geoPath(projection);
+                var bounds = path.bounds(reference);
+                if (isFinite(bounds[0][1]) && isFinite(bounds[1][1])) {
+                    var currentCenterY = (bounds[0][1] + bounds[1][1]) / 2;
+                    var shiftY = height / 2 - currentCenterY;
+                    var maxShift = height * 0.12;
+                    shiftY = Math.max(-maxShift, Math.min(maxShift, shiftY));
+                    var translate = projection.translate();
+                    projection.translate([translate[0], translate[1] + shiftY]);
+                }
+                return projection;
+            }
             function renderSouthChinaSeaInset(svg, features, width, height, colors, config, metricEn, metricZh) {
                 if (!features.length) return;
                 var insetWidth = Math.max(54, Math.min(74, width * 0.14));
@@ -1555,7 +1580,11 @@ std::string page(Request &, Response &response) {
                     var mainFeatures = features.filter(function (feature) { return !isSouthChinaSeaFeature(feature); });
                     var insetFeatures = features.filter(isSouthChinaSeaFeature);
                     var collection = { type: "FeatureCollection", features: mainFeatures.length ? mainFeatures : features };
-                    var projection = d3.geoMercator().fitSize([width, height], collection);
+                    var mainlandCenterFeatures = collection.features.filter(function (feature) {
+                        return ["CN-TW", "CN-HK", "CN-MO"].indexOf(chinaFeatureCode(feature)) === -1;
+                    });
+                    var mainlandCenterCollection = { type: "FeatureCollection", features: mainlandCenterFeatures };
+                    var projection = fitChinaMainProjection(collection, mainlandCenterCollection, width, height);
                     var path = d3.geoPath(projection);
                     svg.selectAll("path.china-region")
                         .data(collection.features)
