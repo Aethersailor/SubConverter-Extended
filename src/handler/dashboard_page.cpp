@@ -926,8 +926,6 @@ std::string page(Request &, Response &response) {
     </main>
     <div class="tooltip" id="tooltip"></div>
 
-    <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js"></script>
     <script>
         (function () {
             var ISO_N3 = {
@@ -1299,7 +1297,7 @@ std::string page(Request &, Response &response) {
                 }
                 if (refreshIntervalSeconds <= 0 || document.visibilityState === "hidden")
                     return;
-                refreshTimer = setInterval(refresh, refreshIntervalSeconds * 1000);
+                refreshTimer = setInterval(triggerRefresh, refreshIntervalSeconds * 1000);
             }
             function escapeHtml(value) {
                 return String(value == null ? "" : value).replace(/[&<>"']/g, function (ch) {
@@ -1696,9 +1694,51 @@ std::string page(Request &, Response &response) {
                 renderGeoSections();
                 updatedAt.textContent = text("Updated ", "更新 ") + fmtTime(data.generated_at);
             }
+            function loadScript(src, globalName) {
+                if (globalName && window[globalName]) return Promise.resolve();
+                return new Promise(function (resolve, reject) {
+                    var script = document.createElement("script");
+                    script.src = src;
+                    script.async = true;
+                    script.onload = function () { resolve(); };
+                    script.onerror = function () { reject(new Error("Failed to load " + src)); };
+                    document.head.appendChild(script);
+                });
+            }
+            function loadJson(src) {
+                return fetch(src, { cache: "force-cache" })
+                    .then(function (response) { return response.ok ? response.json() : null; })
+                    .catch(function () { return null; });
+            }
+            function loadMapResources() {
+                return Promise.all([
+                    loadScript("https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js", "d3"),
+                    loadScript("https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js", "topojson")
+                ]).then(function () {
+                    return Promise.all([
+                        loadJson("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json"),
+                        loadJson("https://geo.datav.aliyun.com/areas_v3/bound/100000_full.json")
+                    ]);
+                }).then(function (values) {
+                    worldMapData = values[0];
+                    chinaMapData = values[1];
+                    renderGeoSections();
+                }).catch(function () {
+                    renderGeoSections();
+                });
+            }
             async function refresh() {
-                var response = await fetch("/dashboard/data?_=" + Date.now(), { cache: "no-store", headers: { "Accept": "application/json" } });
-                render(await response.json());
+                try {
+                    var response = await fetch("/dashboard/data?_=" + Date.now(), { cache: "no-store", headers: { "Accept": "application/json" } });
+                    if (!response.ok) throw new Error("Dashboard data request failed: " + response.status);
+                    render(await response.json());
+                } catch (error) {
+                    updatedAt.textContent = text("Update failed", "更新失败");
+                    throw error;
+                }
+            }
+            function triggerRefresh() {
+                refresh().catch(function () {});
             }
             document.getElementById("lang-toggle").addEventListener("click", function () {
                 document.documentElement.lang = isZh() ? "en" : "zh-CN";
@@ -1708,7 +1748,7 @@ std::string page(Request &, Response &response) {
                 updateRefreshIntervalUi();
                 if (latest) render(latest);
             });
-            document.getElementById("refresh-button").addEventListener("click", refresh);
+            document.getElementById("refresh-button").addEventListener("click", triggerRefresh);
             refreshIntervalButton.addEventListener("click", function (event) {
                 event.stopPropagation();
                 refreshMenu.hidden = !refreshMenu.hidden;
@@ -1723,20 +1763,13 @@ std::string page(Request &, Response &response) {
             document.addEventListener("visibilitychange", function () {
                 scheduleAutoRefresh();
                 if (document.visibilityState !== "hidden" && refreshIntervalSeconds > 0)
-                    refresh();
+                    triggerRefresh();
             });
             updateDocumentTitle();
             document.getElementById("lang-toggle").textContent = isZh() ? "中" : "EN";
             updateRefreshIntervalUi();
-            Promise.all([
-                fetch("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json").then(function (response) { return response.json(); }).catch(function () { return null; }),
-                fetch("https://geo.datav.aliyun.com/areas_v3/bound/100000_full.json").then(function (response) { return response.json(); }).catch(function () { return null; }),
-                refresh()
-            ]).then(function (values) {
-                worldMapData = values[0];
-                chinaMapData = values[1];
-                renderGeoSections();
-            });
+            triggerRefresh();
+            loadMapResources();
             window.addEventListener("resize", renderGeoSections);
             scheduleAutoRefresh();
         })();
