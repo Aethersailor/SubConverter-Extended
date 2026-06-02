@@ -95,6 +95,8 @@ statistics:
     # none records all countries as unknown.
     provider: header
     country_headers: ["CF-IPCountry", "X-Geo-Country", "X-Vercel-IP-Country", "CloudFront-Viewer-Country"]
+    # Used for China regional statistics when visitor location headers are added by a trusted edge.
+    china_region_headers: ["CF-Region-Code", "cf-region-code", "X-Geo-Subdivision"]
   dashboard_auth:
     # Optional Basic authentication for /dashboard and /dashboard/data.
     # Only applies when statistics.enabled is true.

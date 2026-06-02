@@ -90,6 +90,8 @@ struct Settings {
   string_array statisticsCountryHeaders = {
       "CF-IPCountry", "X-Geo-Country", "X-Vercel-IP-Country",
       "CloudFront-Viewer-Country"};
+  string_array statisticsChinaRegionHeaders = {
+      "CF-Region-Code", "cf-region-code", "X-Geo-Subdivision"};
   bool dashboardAuthEnabled = false;
   std::string dashboardAuthUsername, dashboardAuthPassword;
   int dashboardAuthMaxFailures = 5, dashboardAuthWindowSeconds = 300,

@@ -708,6 +708,12 @@ void readYAMLConf(YAML::Node &node) {
         if (!country_headers.empty())
           global.statisticsCountryHeaders = country_headers;
       }
+      if (stats["geo"]["china_region_headers"].IsSequence()) {
+        string_array region_headers;
+        stats["geo"]["china_region_headers"] >> region_headers;
+        if (!region_headers.empty())
+          global.statisticsChinaRegionHeaders = region_headers;
+      }
     }
     if (stats["dashboard_auth"].IsDefined()) {
       YAML::Node auth = stats["dashboard_auth"];
@@ -942,6 +948,10 @@ void readTOMLConf(toml::value &root) {
       section_statistics_geo, "country_headers", string_array{});
   if (!country_headers.empty())
     global.statisticsCountryHeaders = country_headers;
+  string_array region_headers = toml::find_or<string_array>(
+      section_statistics_geo, "china_region_headers", string_array{});
+  if (!region_headers.empty())
+    global.statisticsChinaRegionHeaders = region_headers;
   auto section_dashboard_auth =
       toml::find_or(section_statistics, "dashboard_auth",
                     toml::value(toml::table()));
@@ -978,6 +988,8 @@ void readConf() {
   global.statisticsCountryHeaders = {"CF-IPCountry", "X-Geo-Country",
                                      "X-Vercel-IP-Country",
                                      "CloudFront-Viewer-Country"};
+  global.statisticsChinaRegionHeaders = {"CF-Region-Code", "cf-region-code",
+                                         "X-Geo-Subdivision"};
   global.dashboardAuthEnabled = false;
   global.dashboardAuthUsername.clear();
   global.dashboardAuthPassword.clear();
@@ -1272,6 +1284,18 @@ void readConf() {
           country_headers.end());
       if (!country_headers.empty())
         global.statisticsCountryHeaders = country_headers;
+    }
+    if (ini.item_exist("china_region_headers")) {
+      string_array region_headers =
+          split(ini.get("china_region_headers"), ",");
+      for (std::string &header : region_headers)
+        header = trimWhitespace(header, true, true);
+      region_headers.erase(
+          std::remove_if(region_headers.begin(), region_headers.end(),
+                         [](const std::string &value) { return value.empty(); }),
+          region_headers.end());
+      if (!region_headers.empty())
+        global.statisticsChinaRegionHeaders = region_headers;
     }
     ini.get_bool_if_exist("dashboard_auth_enabled",
                           global.dashboardAuthEnabled);
