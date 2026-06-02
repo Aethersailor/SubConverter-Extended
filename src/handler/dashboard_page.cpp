@@ -59,6 +59,7 @@ std::string page(Request &, Response &response) {
             --map-stroke: rgba(255, 255, 255, 0.85);
             --map-empty: #d7e1ec;
             --china-inset-fill: #b9cce0;
+            --china-inset-frame-stroke: rgba(71, 85, 105, 0.58);
             --china-inset-stroke: rgba(30, 64, 175, 0.58);
             --map-data-min: #93c5fd;
             --map-data-mid: #2563eb;
@@ -93,6 +94,7 @@ std::string page(Request &, Response &response) {
                 --map-stroke: rgba(2, 6, 23, 0.9);
                 --map-empty: #273449;
                 --china-inset-fill: #445f7a;
+                --china-inset-frame-stroke: rgba(148, 163, 184, 0.55);
                 --china-inset-stroke: rgba(125, 211, 252, 0.72);
                 --map-data-min: #7dd3fc;
                 --map-data-mid: #38bdf8;
@@ -374,8 +376,16 @@ std::string page(Request &, Response &response) {
             display: block;
             font-size: 1.55rem;
             line-height: 1;
+            color: var(--text-primary);
         }
-        .metric-pair span {
+        .metric-pair strong span {
+            display: inline;
+            margin-top: 0;
+            color: inherit;
+            font-size: inherit;
+            font-weight: inherit;
+        }
+        .metric-pair > div > span {
             display: block;
             margin-top: 7px;
             color: var(--text-secondary);
@@ -520,8 +530,9 @@ std::string page(Request &, Response &response) {
         }
         .china-inset-frame {
             fill: color-mix(in srgb, var(--surface-strong) 76%, transparent);
-            stroke: var(--map-stroke);
+            stroke: var(--china-inset-frame-stroke);
             stroke-width: 1;
+            vector-effect: non-scaling-stroke;
         }
         .china-south-sea {
             fill: var(--china-inset-fill);
