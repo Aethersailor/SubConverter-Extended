@@ -1030,10 +1030,10 @@ std::string page(Request &request, Response &response) {
         <footer>
             <span data-lang="en">SubConverter-Extended )html" +
          std::string(VERSION) +
-         R"html( · <a href="/version">Version</a></span>
+         R"html( · <a href="/version">Version</a> · Source Code: <a href="https://github.com/Aethersailor/SubConverter-Extended" target="_blank" rel="noopener noreferrer">GitHub</a> · License: <a href="https://www.gnu.org/licenses/gpl-3.0.html" target="_blank" rel="noopener noreferrer">GPL-3.0</a></span>
             <span data-lang="zh">SubConverter-Extended )html" +
          std::string(VERSION) +
-         R"html( · <a href="/version">版本信息</a></span>
+         R"html( · <a href="/version">版本信息</a> · 源代码：<a href="https://github.com/Aethersailor/SubConverter-Extended" target="_blank" rel="noopener noreferrer">GitHub</a> · 许可证：<a href="https://www.gnu.org/licenses/gpl-3.0.html" target="_blank" rel="noopener noreferrer">GPL-3.0</a></span>
         </footer>
     </main>
 

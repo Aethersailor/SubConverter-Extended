@@ -712,6 +712,21 @@ std::string page(Request &, Response &response) {
             padding: 14px;
             text-align: left;
         }
+        .page-footer {
+            margin-top: 22px;
+            padding-top: 18px;
+            border-top: 1px solid var(--surface-border);
+            color: var(--text-muted);
+            font-size: 0.84rem;
+            line-height: 1.55;
+            text-align: center;
+        }
+        .page-footer a {
+            color: var(--accent);
+            text-decoration: none;
+            font-weight: 700;
+        }
+        .page-footer a:hover { color: var(--accent-2); }
         @media (prefers-reduced-motion: reduce) {
             *, *::before, *::after {
                 animation-duration: 0.01ms !important;
@@ -934,6 +949,10 @@ std::string page(Request &, Response &response) {
                 </section>
             </div>
         </section>
+        <footer class="page-footer">
+            <span data-lang="en">Source Code: <a href="https://github.com/Aethersailor/SubConverter-Extended" target="_blank" rel="noopener noreferrer">GitHub</a> • License: <a href="https://www.gnu.org/licenses/gpl-3.0.html" target="_blank" rel="noopener noreferrer">GPL-3.0</a></span>
+            <span data-lang="zh">源代码：<a href="https://github.com/Aethersailor/SubConverter-Extended" target="_blank" rel="noopener noreferrer">GitHub</a> • 许可证：<a href="https://www.gnu.org/licenses/gpl-3.0.html" target="_blank" rel="noopener noreferrer">GPL-3.0</a></span>
+        </footer>
     </main>
     <div class="tooltip" id="tooltip"></div>
 
