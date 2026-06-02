@@ -192,13 +192,29 @@ https://github.com/<owner>/<repo>/raw/<ref>/<path>
 https://github.com/<owner>/<repo>/blob/<ref>/<path>
 ```
 
-#### 4. 兼容性保证 🤝
+#### 4. 请求诊断台 🔎
+
+内置 `explain=true` 诊断模式和 `/inspect` 网页诊断台，方便在不改变实际转换逻辑的前提下排查请求：
+
+* ✅ 展示请求参数是否被识别、是否生效、是否被项目安全逻辑覆盖
+* ✅ 汇总外部配置、规则集、自定义组、Provider、输出大小等关键状态
+* ✅ 对订阅来源等敏感信息只展示预览、长度或短哈希，便于排障时降低泄露风险
+
+#### 5. 运行仪表盘 📊
+
+启用统计后，`/dashboard` 可展示服务运行期转换统计，适合自部署用户观察后端使用情况：
+
+* ✅ 展示本次启动、历史总计、最近 24 小时和滚动时间窗口统计
+* ✅ 按请求数和规则转换数展示国家 / 地区分布与排行
+* ✅ 支持统计数据持久化和可选 Basic Auth，便于公网部署时限制访问
+
+#### 6. 兼容性保证 🤝
 
 * ✅ **无缝切换**：兼容常见传统 subconverter API 接口，客户端侧几乎无需学习成本即可迁移
 * ✅ **模板兼容**：继续沿用传统外部模板，由后端内置逻辑确保 `proxy-provider` 模式在分流规则中正确生成
 * ✅ **自动跟进**：编译时自动遍历 [Mihomo 内核源码仓库](https://github.com/MetaCubeX/mihomo/meta)，提取最新解析模块、协议格式与可覆写参数
 
-#### 5. 新手友好 👶
+#### 7. 新手友好 👶
 
 * ✅ 使用 **[Custom_OpenClash_Rules](https://github.com/Aethersailor/Custom_OpenClash_Rules)** 远程配置模板，替代默认内置模板与自定义代理组功能
 * ✅ 锁定 API 模式，强制关闭相关接口，降低新手误配置带来的安全风险
@@ -532,6 +548,9 @@ logread -e subconverter
 > [!IMPORTANT]
 > 默认输出为**最简配置**，不包含 DNS 参数，请在各 Clash 客户端中启用 DNS 覆写功能，或在生成的配置文件中自行补全 DNS 配置。
 
+<details open>
+<summary><strong>快速调用与常用参数</strong></summary>
+
 ### 常用参数一览
 
 | 参数 | 说明 | 示例 |
@@ -553,6 +572,11 @@ https://api.asailor.org/sub?target=clash&url=https%3A%2F%2Fexample.com%2Fsub&con
 ```text
 https://api.asailor.org/sub?target=clash&url=provider%3AHK%2Chttps%3A%2F%2Fexample.com%2Fsub&include=%E9%A6%99%E6%B8%AF&emoji=true
 ```
+
+</details>
+
+<details>
+<summary><strong>诊断与排障</strong></summary>
 
 ### `explain=true` 诊断模式
 
@@ -599,6 +623,96 @@ http://localhost:25500/inspect
 > * 页面会隐藏敏感输入的明文，仅展示预览、长度和短哈希等排障信息。
 > * 请求诊断台会保留原始 JSON 区域，方便复制给维护者进一步分析。
 
+</details>
+
+<details>
+<summary><strong>`/dashboard` 运行仪表盘</strong></summary>
+
+### `/dashboard` 使用方法
+
+`/dashboard` 用于查看运行期转换统计。该功能默认关闭；只有在配置文件中启用 `statistics.enabled` 后，服务才会注册 `/dashboard` 和 `/dashboard/data` 路由。
+
+启用后可访问：
+
+```text
+http://localhost:25500/dashboard
+```
+
+公网或反代部署时，请替换为实际域名：
+
+```text
+https://sub.example.com/dashboard
+```
+
+`/dashboard/data` 会返回仪表盘使用的 JSON 数据，适合接入外部监控或自行排查：
+
+```text
+http://localhost:25500/dashboard/data
+```
+
+仪表盘主要展示：
+
+* 服务启动时间、本次运行时长、累计运行时长和启动次数
+* 成功 `/sub` 转换请求数与规则转换数
+* 最近 24 小时请求 / 规则转换柱状图
+* 按 1 小时、1 天、7 天、30 天、半年、1 年和历史总计统计的国家 / 地区分布与排行
+* 当可信边缘网关提供地区请求头时，展示中国地区请求 / 规则转换地图和排行
+
+> [!NOTE]
+> * 统计只在 `statistics.enabled=true` 后开始写入，启用前的历史请求不会回补。
+> * 统计模块只记录成功的 `GET /sub` 转换请求和规则转换计数，不存储订阅链接、节点内容或访问者 IP。
+> * 国家 / 地区来源于配置的国家码请求头；中国地区来源于配置的地区请求头；无法识别时会归为未知。
+> * Docker 部署如需跨重启保留统计数据，请将 `data_dir` 对应目录挂载为卷，例如 `./stats:/base/stats`。
+
+### 启用示例（TOML）
+
+修改 `base/pref.toml` 后重启服务：
+
+```toml
+[statistics]
+enabled = true
+data_dir = "stats"
+flush_interval = 5
+
+[statistics.geo]
+provider = "header"
+country_headers = ["CF-IPCountry", "X-Geo-Country", "X-Vercel-IP-Country", "CloudFront-Viewer-Country"]
+china_region_headers = ["CF-Region-Code", "cf-region-code", "X-Geo-Subdivision"]
+
+[statistics.dashboard_auth]
+enabled = true
+username = "admin"
+password = "change-this-password"
+max_failures = 5
+window_seconds = 300
+lock_seconds = 900
+```
+
+### 新增配置项说明
+
+| TOML / YAML 配置项 | INI 配置项 | 默认值 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `statistics.enabled` | `enabled` | `false` | 是否启用运行期统计和 `/dashboard`。关闭时不会注册 `/dashboard` 与 `/dashboard/data`。 |
+| `statistics.data_dir` | `data_dir` | `stats` | 统计数据目录，按程序工作目录解析；Docker 中可挂载 `/base/stats` 持久化。 |
+| `statistics.flush_interval` | `flush_interval` | `5` | 统计数据最小写盘间隔，单位为秒。 |
+| `statistics.geo.provider` | `geo_provider` | `header` | 国家 / 地区识别方式。`header` 表示读取国家码请求头，`none` 表示全部记为未知。 |
+| `statistics.geo.country_headers` | `country_headers` | `CF-IPCountry`, `X-Geo-Country`, `X-Vercel-IP-Country`, `CloudFront-Viewer-Country` | `provider=header` 时依次尝试读取的国家码请求头。 |
+| `statistics.geo.china_region_headers` | `china_region_headers` | `CF-Region-Code`, `cf-region-code`, `X-Geo-Subdivision` | 可信边缘网关注入中国地区码时依次尝试读取的请求头，用于中国地区地图和排行。 |
+| `statistics.dashboard_auth.enabled` | `dashboard_auth_enabled` | `false` | 是否为 `/dashboard` 和 `/dashboard/data` 启用 Basic Auth。 |
+| `statistics.dashboard_auth.username` | `dashboard_auth_username` | 空 | Basic Auth 用户名。启用认证后不能为空。 |
+| `statistics.dashboard_auth.password` | `dashboard_auth_password` | 空 | Basic Auth 密码。启用认证后不能为空；公网部署建议配合 HTTPS。 |
+| `statistics.dashboard_auth.max_failures` | `dashboard_auth_max_failures` | `5` | 在统计窗口内允许的失败登录次数。 |
+| `statistics.dashboard_auth.window_seconds` | `dashboard_auth_window_seconds` | `300` | 失败登录统计窗口，单位为秒。 |
+| `statistics.dashboard_auth.lock_seconds` | `dashboard_auth_lock_seconds` | `900` | 超过失败次数后的锁定时长，单位为秒。 |
+
+> [!TIP]
+> `pref.yml` 使用同名嵌套字段；`pref.ini` 的上述 INI 配置项均写在 `[statistics]` 段内。
+
+</details>
+
+<details>
+<summary><strong>Proxy-Provider 自定义名称</strong></summary>
+
 ### `provider` 前缀（仅适用于 Clash/ClashR 订阅链接）
 
 `provider` 不是独立参数，而是写在 `url=` 列表中、放在订阅链接前，并以逗号分隔，用于自定义 `proxy-providers` 名称；对节点链接不生效。
@@ -618,6 +732,8 @@ url=provider%3AHK%2Chttps%3A%2F%2Fexample.com%2Fsub
 
 * 支持中文名称；非法字符或空值会回退为默认 `Provider_<MD5>`
 * 重名时会自动追加 `_1`、`_2` 等后缀
+
+</details>
 
 ---
 
