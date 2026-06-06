@@ -1643,6 +1643,8 @@ public:
   using Expect100ContinueHandler =
       std::function<int(const Request &, Response &)>;
 
+  using StartHandler = std::function<void()>;
+
   using WebSocketHandler =
       std::function<void(const Request &, ws::WebSocket &)>;
   using SubProtocolSelector =
@@ -1694,6 +1696,9 @@ public:
   Server &set_pre_request_handler(HandlerWithResponse handler);
 
   Server &set_expect_100_continue_handler(Expect100ContinueHandler handler);
+
+  Server &set_start_handler(StartHandler handler);
+
   Server &set_logger(Logger logger);
   Server &set_pre_compression_logger(Logger logger);
   Server &set_error_logger(ErrorLogger error_logger);
@@ -1883,6 +1888,7 @@ private:
   Handler post_routing_handler_;
   HandlerWithResponse pre_request_handler_;
   Expect100ContinueHandler expect_100_continue_handler_;
+  StartHandler start_handler_;
 
   mutable std::mutex logger_mutex_;
   Logger logger_;
@@ -3842,6 +3848,7 @@ public:
   void set_socket_options(SocketOptions socket_options);
   void set_connection_timeout(time_t sec, time_t usec = 0);
   void set_interface(const std::string &intf);
+  void set_hostname_addr_map(std::map<std::string, std::string> addr_map);
 
 #ifdef CPPHTTPLIB_SSL_ENABLED
   void set_ca_cert_path(const std::string &path);
@@ -3875,6 +3882,9 @@ private:
   time_t connection_timeout_sec_ = CPPHTTPLIB_CONNECTION_TIMEOUT_SECOND;
   time_t connection_timeout_usec_ = CPPHTTPLIB_CONNECTION_TIMEOUT_USECOND;
   std::string interface_;
+
+  // Hostname-IP map
+  std::map<std::string, std::string> addr_map_;
 
 #ifdef CPPHTTPLIB_SSL_ENABLED
   bool is_ssl_ = false;
@@ -4629,7 +4639,7 @@ inline std::string sha1(const std::string &input) {
   // Pre-processing: adding padding bits
   std::string msg = input;
   uint64_t original_bit_len = static_cast<uint64_t>(msg.size()) * 8;
-  msg.push_back(static_cast<char>(0x80));
+  msg.push_back(static_cast<char>(0x80u));
   while (msg.size() % 64 != 56) {
     msg.push_back(0);
   }
@@ -8443,6 +8453,14 @@ inline void coalesce_ranges(Ranges &ranges, size_t content_length) {
 
 inline bool range_error(Request &req, Response &res) {
   if (!req.ranges.empty() && 200 <= res.status && res.status < 300) {
+    if (res.body.empty() && res.content_provider_ && res.content_length_ == 0) {
+      req.ranges.clear();
+      if (res.status == StatusCode::PartialContent_206) {
+        res.status = StatusCode::OK_200;
+      }
+      return false;
+    }
+
     ssize_t content_len = static_cast<ssize_t>(
         res.content_length_ ? res.content_length_ : res.body.size());
 
@@ -11092,6 +11110,11 @@ Server::set_expect_100_continue_handler(Expect100ContinueHandler handler) {
   return *this;
 }
 
+inline Server &Server::set_start_handler(StartHandler handler) {
+  start_handler_ = std::move(handler);
+  return *this;
+}
+
 inline Server &Server::set_address_family(int family) {
   address_family_ = family;
   return *this;
@@ -11786,6 +11809,8 @@ inline bool Server::listen_internal() {
   auto ret = true;
   is_running_ = true;
   auto se = detail::scope_exit([&]() { is_running_ = false; });
+
+  if (start_handler_) { start_handler_(); }
 
   {
     std::unique_ptr<TaskQueue> task_queue(new_task_queue());
@@ -20305,9 +20330,14 @@ inline bool WebSocketClient::connect() {
   if (!is_valid_) { return false; }
   shutdown_and_close();
 
+  // Check is custom IP specified for host_
+  std::string ip;
+  auto it = addr_map_.find(host_);
+  if (it != addr_map_.end()) { ip = it->second; }
+
   Error error;
   sock_ = detail::create_client_socket(
-      host_, std::string(), port_, address_family_, tcp_nodelay_, ipv6_v6only_,
+      host_, ip, port_, address_family_, tcp_nodelay_, ipv6_v6only_,
       socket_options_, connection_timeout_sec_, connection_timeout_usec_,
       read_timeout_sec_, read_timeout_usec_, write_timeout_sec_,
       write_timeout_usec_, interface_, error);
@@ -20400,6 +20430,11 @@ inline void WebSocketClient::set_connection_timeout(time_t sec, time_t usec) {
 
 inline void WebSocketClient::set_interface(const std::string &intf) {
   interface_ = intf;
+}
+
+inline void WebSocketClient::set_hostname_addr_map(
+    std::map<std::string, std::string> addr_map) {
+  addr_map_ = std::move(addr_map);
 }
 
 #ifdef CPPHTTPLIB_SSL_ENABLED
