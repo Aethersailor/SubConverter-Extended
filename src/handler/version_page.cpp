@@ -3,6 +3,7 @@
 #include <string>
 
 #include "handler/settings.h"
+#include "utils/string.h"
 #include "version.h"
 
 namespace {
@@ -88,6 +89,32 @@ std::string buildCommitLink(const std::string &build_id) {
          build_id + "</a>";
 }
 
+std::string headerValue(const Request &request, const std::string &name) {
+  auto iter = request.headers.find(name);
+  if (iter == request.headers.end())
+    return "";
+  return trimWhitespace(iter->second, true, true);
+}
+
+bool isScriptVersionProbe(const Request &request) {
+  std::string fetch_mode = toLower(headerValue(request, "Sec-Fetch-Mode"));
+  std::string fetch_dest = toLower(headerValue(request, "Sec-Fetch-Dest"));
+
+  if (fetch_mode == "cors" && fetch_dest == "empty")
+    return true;
+
+  return fetch_mode.empty() && fetch_dest.empty() &&
+         !headerValue(request, "Origin").empty();
+}
+
+std::string buildPlainVersion() {
+  std::string version = VERSION;
+  std::string build_id = BUILD_ID;
+  if (!build_id.empty())
+    version += "-" + build_id;
+  return "SubConverter-Extended " + version + " backend\n";
+}
+
 } // namespace
 
 namespace version_page {
@@ -102,9 +129,16 @@ std::string faviconLight(Request &, Response &response) {
   return VERSION_FAVICON_LIGHT;
 }
 
-std::string page(Request &, Response &response) {
+std::string page(Request &request, Response &response) {
   response.headers["X-Robots-Tag"] =
       "noindex, nofollow, noarchive, nosnippet, noimageindex";
+  response.headers["Vary"] = "Sec-Fetch-Mode, Sec-Fetch-Dest, Origin";
+  if (isScriptVersionProbe(request)) {
+    response.content_type = "text/plain; charset=utf-8";
+    response.headers["Cache-Control"] = "no-store";
+    return buildPlainVersion();
+  }
+
   std::string build_id = BUILD_ID;
   std::string build_date = BUILD_DATE;
   std::string build_date_display = formatBuildDate(build_date);

@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -29,12 +30,22 @@ def build_url(base_url: str, path: str, params: dict[str, str] | None = None) ->
     return f"{base}{path}" + (f"?{query}" if query else "")
 
 
-def fetch(base_url: str, path: str, params: dict[str, str] | None, timeout: int) -> str:
+def fetch_response(
+    base_url: str,
+    path: str,
+    params: dict[str, str] | None,
+    timeout: int,
+    headers: dict[str, str] | None = None,
+) -> tuple[str, dict[str, str]]:
     url = build_url(base_url, path, params)
+    request = urllib.request.Request(url, headers=headers or {})
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             status = response.status
             body = response.read().decode("utf-8", errors="replace")
+            response_headers = {
+                key.lower(): value for key, value in response.headers.items()
+            }
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise AssertionError(f"{url} returned HTTP {exc.code}\n{body}") from exc
@@ -43,6 +54,11 @@ def fetch(base_url: str, path: str, params: dict[str, str] | None, timeout: int)
 
     if status < 200 or status >= 300:
         raise AssertionError(f"{url} returned HTTP {status}\n{body}")
+    return body, response_headers
+
+
+def fetch(base_url: str, path: str, params: dict[str, str] | None, timeout: int) -> str:
+    body, _ = fetch_response(base_url, path, params, timeout)
     return body
 
 
@@ -75,6 +91,75 @@ def run_checks(base_url: str, timeout: int, snapshot_dir: Path | None, update: b
     health = fetch(base_url, "/healthz", None, timeout)
     if health.strip() != "ok":
         raise AssertionError(f"/healthz returned unexpected body: {health!r}")
+
+    version_page, version_headers = fetch_response(
+        base_url, "/version", None, timeout
+    )
+    if (
+        "<!DOCTYPE html>" not in version_page
+        or "SubConverter-Extended" not in version_page
+    ):
+        raise AssertionError("/version did not return the HTML version page")
+    if not version_headers.get("content-type", "").lower().startswith("text/html"):
+        raise AssertionError("/version HTML response has an unexpected content type")
+
+    navigation_page, navigation_headers = fetch_response(
+        base_url,
+        "/version",
+        None,
+        timeout,
+        {
+            "Origin": "https://edgetunnel.example",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Dest": "document",
+        },
+    )
+    if "<!DOCTYPE html>" not in navigation_page:
+        raise AssertionError("/version navigation request did not return HTML")
+    if not navigation_headers.get("content-type", "").lower().startswith(
+        "text/html"
+    ):
+        raise AssertionError("/version navigation response has an unexpected content type")
+
+    probe_headers = {
+        "Origin": "https://edgetunnel.example",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
+    }
+    version_probe, version_probe_headers = fetch_response(
+        base_url, "/version", None, timeout, probe_headers
+    )
+    version_probe_line = version_probe.strip()
+    if not re.fullmatch(
+        r"SubConverter-Extended \S+ backend", version_probe_line
+    ):
+        raise AssertionError(
+            f"/version probe returned an unexpected body: {version_probe!r}"
+        )
+    if "subconverter" not in version_probe_line.lower() or "<" in version_probe_line:
+        raise AssertionError("/version probe is not compatible with backend detection")
+    if not version_probe_headers.get("content-type", "").lower().startswith(
+        "text/plain"
+    ):
+        raise AssertionError("/version probe response has an unexpected content type")
+    if version_probe_headers.get("access-control-allow-origin") != "*":
+        raise AssertionError("/version probe response is missing the CORS header")
+    if "no-store" not in version_probe_headers.get("cache-control", "").lower():
+        raise AssertionError("/version probe response is missing no-store caching")
+    vary = version_probe_headers.get("vary", "").lower()
+    for header in ("sec-fetch-mode", "sec-fetch-dest", "origin"):
+        if header not in vary:
+            raise AssertionError(f"/version probe Vary header is missing {header}")
+
+    legacy_probe, _ = fetch_response(
+        base_url,
+        "/version",
+        None,
+        timeout,
+        {"Origin": "https://edgetunnel.example"},
+    )
+    if legacy_probe != version_probe:
+        raise AssertionError("/version legacy browser probe response is inconsistent")
 
     inspect_page = fetch(base_url, "/inspect", None, timeout)
     if (
