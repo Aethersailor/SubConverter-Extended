@@ -16,5 +16,23 @@
       "src/parser/subparser.cpp"
     ],
     "copilot_reason": "Small parser-only adjustments to plugin option handling; backward-compatible parsing changes."
+  },
+  {
+    "sha": "3c640b1976eb48babf49f7e01e0a57d3311bd9e8",
+    "subject": "feat: add shadow-tls filtering and AnyTLS Surge INI import",
+    "time": "2026-06-08T21:45:14+00:00",
+    "paths": [
+      "src/parser/subparser.cpp"
+    ],
+    "copilot_reason": "Only modifies src/parser/subparser.cpp (whitelisted). Adds shadow-tls filtering via port=0 skip and AnyTLS Surge INI parsing. No output adapter or schema changes required."
+  },
+  {
+    "sha": "adfc7b4445fac65326fb77337af3921032ad802b",
+    "subject": "fix(subparser): prevent  remark fragments from leaking into query params",
+    "time": "2026-06-08T21:45:14+00:00",
+    "paths": [
+      "src/parser/subparser.cpp"
+    ],
+    "copilot_reason": "Only modifies src/parser/subparser.cpp (whitelisted). Refactors remark fragment extraction into extractRemark() helper. Pure internal refactoring with no schema or output changes."
   }
 ]
