@@ -8,11 +8,13 @@ Mihomo's native subscription parser.
 The bridge is integrated into the C++ build:
 
 - `bridge/converter.go` exports `ConvertSubscription` and `FreeString`.
+- `bridge/parser.go` mirrors Mihomo proxy-provider parsing for native YAML and
+  URI/base64 subscriptions, including per-proxy validation.
 - `src/parser/mihomo_bridge.cpp` calls the exported Go functions and converts
   Mihomo JSON output into C++ proxy nodes.
 - `src/generator/config/nodemanip.cpp` uses the Mihomo parser when
-  `USE_MIHOMO_PARSER` is defined, then falls back to the legacy parser on
-  parser errors.
+  `USE_MIHOMO_PARSER` is defined. Clash-compatible output fails closed on
+  Mihomo parser errors; other targets retain the legacy compatibility fallback.
 - `CMakeLists.txt` enables `USE_MIHOMO_PARSER` automatically when either
   `bridge/libmihomo.so` or `bridge/libmihomo.a` is present.
 
@@ -69,16 +71,10 @@ Then regenerate the parser compatibility headers and rebuild the Docker image.
 
 ## Testing notes
 
-There is no dedicated automated test suite for the bridge yet. Before changing
-parser behavior, manually compare representative `ss://`, `vmess://`,
-`trojan://`, `hysteria2://`, and mixed subscriptions against the generated
-Clash/Mihomo output.
-
-Recommended future coverage:
-
-- Go unit tests for subscription preprocessing in `converter.go`.
-- C++ tests for `mihomo_bridge.cpp` JSON conversion and error handling.
-- Snapshot tests for `/sub?target=clash` with representative node links.
+Run `go test ./...` in `bridge/` for preprocessing, native provider YAML,
+validation, and duplicate-name coverage. The Docker smoke action also verifies
+remote-only, URI-only, and mixed Clash inputs with both `list=false` and
+`list=true`, plus scalar and nested YAML type preservation.
 
 ## License
 

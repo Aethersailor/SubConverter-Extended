@@ -30,6 +30,7 @@ runs:
 
         HOST_PORT="$(docker port "$CID" "${CONTAINER_PORT}/tcp" | awk -F: 'END {print $NF}')"
         URL="http://127.0.0.1:${HOST_PORT}/version"
+        FIXTURE_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/tests/fixtures"
 
         docker exec "$CID" sh -c '
           test "${TZ:-}" = "Asia/Shanghai"
@@ -40,7 +41,12 @@ runs:
         for _ in $(seq 1 30); do
           if curl -fsS "$URL" >/tmp/subconverter-smoke.out; then
             head -c 200 /tmp/subconverter-smoke.out
-            python3 scripts/run-subconverter-smoke.py --base-url "http://127.0.0.1:${HOST_PORT}"
+            python3 scripts/run-subconverter-smoke.py \
+              --base-url "http://127.0.0.1:${HOST_PORT}" \
+              --remote-subscription-url "${FIXTURE_BASE}/sample-subscription.txt" \
+              --mihomo-yaml-subscription-url "${FIXTURE_BASE}/mihomo-provider-subscription.yml" \
+              --legacy-subscription-url "${FIXTURE_BASE}/legacy-surge-subscription.conf" \
+              --verify-non-clash
             exit 0
           fi
 

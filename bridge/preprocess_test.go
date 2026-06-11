@@ -3,8 +3,6 @@ package main
 import (
 	"strings"
 	"testing"
-
-	"github.com/metacubex/mihomo/common/convert"
 )
 
 func TestPreprocessLegacyShadowrocketVmess(t *testing.T) {
@@ -13,7 +11,7 @@ func TestPreprocessLegacyShadowrocketVmess(t *testing.T) {
 		"vmess://YXV0bzpmMmJiMmE4ZC02YWM0LTQ3NGYtYjJlYS1lMjJjNzhlYjkwMGZAMTI5LjE1MS4yNS4xOjE4MjU?remarks=US-O&udp=1&alterId=0",
 	}, "\n")
 
-	proxies, err := convert.ConvertsV2Ray([]byte(preprocessSubscription(input)))
+	proxies, err := parseSubscriptionWithMihomo(input)
 	if err != nil {
 		t.Fatalf("convert error: %v", err)
 	}
@@ -51,5 +49,78 @@ func TestPreprocessKeepsStandardVmess(t *testing.T) {
 	input := "vmess://uuid@example.com:443?encryption=auto#name"
 	if got := preprocessSubscription(input); got != input {
 		t.Fatalf("standard vmess changed:\nwant %q\n got %q", input, got)
+	}
+}
+
+func TestParseNativeMihomoProviderYAML(t *testing.T) {
+	input := strings.Join([]string{
+		"proxies:",
+		"  - name: NativeYAML",
+		"    type: ss",
+		"    server: yaml.example.com",
+		"    port: 8388",
+		"    cipher: aes-128-gcm",
+		"    password: password",
+		"    udp: true",
+	}, "\n")
+
+	proxies, err := parseSubscriptionWithMihomo(input)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if len(proxies) != 1 {
+		t.Fatalf("got %d proxies: %#v", len(proxies), proxies)
+	}
+	if proxies[0]["name"] != "NativeYAML" {
+		t.Fatalf("unexpected name: %#v", proxies[0]["name"])
+	}
+	if proxies[0]["port"] != 8388 {
+		t.Fatalf("port type or value was not preserved: %#v", proxies[0]["port"])
+	}
+	if proxies[0]["udp"] != true {
+		t.Fatalf("boolean type or value was not preserved: %#v", proxies[0]["udp"])
+	}
+}
+
+func TestParseRejectsInvalidNativeMihomoProxy(t *testing.T) {
+	input := strings.Join([]string{
+		"proxies:",
+		"  - name: Invalid",
+		"    type: unsupported-protocol",
+		"    server: invalid.example.com",
+		"    port: 443",
+	}, "\n")
+
+	if _, err := parseSubscriptionWithMihomo(input); err == nil {
+		t.Fatal("expected Mihomo to reject an unsupported proxy type")
+	}
+}
+
+func TestParseDeduplicatesNamesLikeMihomoProvider(t *testing.T) {
+	input := strings.Join([]string{
+		"proxies:",
+		"  - name: Duplicate",
+		"    type: ss",
+		"    server: first.example.com",
+		"    port: 8388",
+		"    cipher: aes-128-gcm",
+		"    password: password",
+		"  - name: Duplicate",
+		"    type: ss",
+		"    server: second.example.com",
+		"    port: 8388",
+		"    cipher: aes-128-gcm",
+		"    password: password",
+	}, "\n")
+
+	proxies, err := parseSubscriptionWithMihomo(input)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if len(proxies) != 1 {
+		t.Fatalf("got %d proxies: %#v", len(proxies), proxies)
+	}
+	if proxies[0]["server"] != "first.example.com" {
+		t.Fatalf("unexpected duplicate selection: %#v", proxies[0]["server"])
 	}
 }

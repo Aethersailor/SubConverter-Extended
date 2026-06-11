@@ -88,6 +88,7 @@ std::vector<ProxyNode> parseSubscription(const std::string &subscription) {
             value = it->dump(); // For complex types, serialize to JSON
           }
           node.params[key] = value;
+          node.param_json[key] = it->dump();
         }
       }
 

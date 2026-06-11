@@ -456,19 +456,15 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
         if (key == "name" || key == "server" || key == "port")
           continue;
 
-        // Check if value is a JSON string (starts with { or [)
-        // If so, parse it back to YAML structure
-        if (!value.empty() && (value[0] == '{' || value[0] == '[')) {
+        auto json_value = x.RawParamJson.find(key);
+        if (json_value != x.RawParamJson.end()) {
           try {
-            // Parse JSON string to YAML node
-            YAML::Node parsed = YAML::Load(value);
+            YAML::Node parsed = YAML::Load(json_value->second);
             singleproxy[key] = parsed;
           } catch (...) {
-            // If parsing fails, use as-is
             singleproxy[key] = value;
           }
         } else {
-          // Regular string value
           singleproxy[key] = value;
         }
       }
@@ -521,6 +517,7 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
       singleproxy.SetStyle(YAML::EmitterStyle::Flow);
       proxies.push_back(singleproxy);
       nodelist.emplace_back(x);
+      remarks_list.emplace_back(x.Remark);
 
       continue;
     }

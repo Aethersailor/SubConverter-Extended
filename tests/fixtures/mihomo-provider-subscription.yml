@@ -1,0 +1,26 @@
+proxies:
+  - name: NativeYAML
+    type: ss
+    server: yaml.example.com
+    port: 8388
+    cipher: aes-128-gcm
+    password: password
+    udp: true
+    smux:
+      enabled: true
+      protocol: h2mux
+  - name: NativeVLESS
+    type: vless
+    server: vless.example.com
+    port: 443
+    uuid: 00000000-0000-4000-8000-000000000001
+    tls: true
+    servername: vless.example.com
+    network: ws
+    alpn:
+      - h2
+      - http/1.1
+    ws-opts:
+      path: /ws
+      headers:
+        Host: vless.example.com

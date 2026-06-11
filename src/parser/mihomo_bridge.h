@@ -17,6 +17,7 @@ struct ProxyNode {
   std::string server;
   int port;
   std::map<std::string, std::string> params; // Additional parameters
+  std::map<std::string, std::string> param_json; // Type-preserving JSON values
 
   // For easier access
   std::string toYAML() const;

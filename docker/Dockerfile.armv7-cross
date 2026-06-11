@@ -16,6 +16,7 @@ RUN apt-get update && \
 
 COPY bridge/go.mod bridge/go.sum ./
 COPY bridge/converter.go ./
+COPY bridge/parser.go ./
 COPY bridge/preprocess.go ./
 
 RUN set -xe && \

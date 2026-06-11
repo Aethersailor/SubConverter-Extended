@@ -49,5 +49,56 @@
         "clash_subscription_conversion_dialer_proxy"
       ]
     }
+  },
+  {
+    "sha": "781f06a8ed61e4d59e5113455bbaf0758e973cbc",
+    "subject": "fix: preserve base64 passwords with embedded '=' in Surge SS parser",
+    "time": "2026-06-08T21:45:14+00:00",
+    "reason": "Parser changes depend on split_first() utility added to non-whitelisted src/utils/string.cpp and src/utils/string.h. Parser changes in subparser.cpp cannot function independently without utility implementation.",
+    "copilot_decision": {
+      "sha": "781f06a8ed61e4d59e5113455bbaf0758e973cbc",
+      "decision": "needs_output_adapter",
+      "risk": "medium",
+      "reason": "Parser changes depend on split_first() utility added to non-whitelisted src/utils/string.cpp and src/utils/string.h. Parser changes in subparser.cpp cannot function independently without utility implementation.",
+      "required_tests": [
+        "test_base64_password_preservation",
+        "test_split_first_utility",
+        "test_ss_2022_blake3_parsing"
+      ]
+    }
+  },
+  {
+    "sha": "a34ac8d91b3a3c0f8703d6e773b6cd19d6bd8881",
+    "subject": "feat(xhttp): add support for xhttp proxy type and related options",
+    "time": "2026-06-08T21:45:14+00:00",
+    "reason": "Adds XHTTPOptions field to Proxy struct (proxy.h) and parsing logic, but companion changes in src/generator/config/subexport.cpp (non-whitelisted output adapter) are needed for proper xhttp proxy rendering. Parser alone cannot export xhttp proxies correctly.",
+    "copilot_decision": {
+      "sha": "a34ac8d91b3a3c0f8703d6e773b6cd19d6bd8881",
+      "decision": "needs_output_adapter",
+      "risk": "medium",
+      "reason": "Adds XHTTPOptions field to Proxy struct (proxy.h) and parsing logic, but companion changes in src/generator/config/subexport.cpp (non-whitelisted output adapter) are needed for proper xhttp proxy rendering. Parser alone cannot export xhttp proxies correctly.",
+      "required_tests": [
+        "test_xhttp_parsing",
+        "test_xhttp_options_extraction",
+        "test_xhttp_output_generation"
+      ]
+    }
+  },
+  {
+    "sha": "0f9f6f002198c58c3996abb9ba5d61f96727f8d0",
+    "subject": "fix: decode ALPN values from URL links",
+    "time": "2026-06-08T21:45:14+00:00",
+    "reason": "Adds getUrlAlpnList() and getUrlAlpn() ALPN decoding helpers to src/parser/subparser.cpp, but src/generator/config/subexport.cpp (non-whitelisted) requires companion changes to properly render decoded ALPN values. Parser-only application may cause ALPN mishandling in output.",
+    "copilot_decision": {
+      "sha": "0f9f6f002198c58c3996abb9ba5d61f96727f8d0",
+      "decision": "needs_output_adapter",
+      "risk": "medium",
+      "reason": "Adds getUrlAlpnList() and getUrlAlpn() ALPN decoding helpers to src/parser/subparser.cpp, but src/generator/config/subexport.cpp (non-whitelisted) requires companion changes to properly render decoded ALPN values. Parser-only application may cause ALPN mishandling in output.",
+      "required_tests": [
+        "test_alpn_decoding",
+        "test_alpn_url_parsing",
+        "test_alpn_output_rendering"
+      ]
+    }
   }
 ]

@@ -45,6 +45,12 @@ const std::vector<std::string> FALLBACK_CONFIG_URLS = {
     "https://raw.githubusercontent.com/Aethersailor/Custom_OpenClash_Rules/"
     "main/cfg/Custom_Clash.ini"};
 
+static string_icase_map buildSubscriptionRequestHeaders() {
+  string_icase_map headers;
+  headers.emplace("User-Agent", "clash.meta");
+  return headers;
+}
+
 #include "utils/base64/base64.h"
 #include "utils/file_extra.h"
 #include "utils/ini_reader/ini_reader.h"
@@ -71,6 +77,21 @@ std::string parseProxy(const std::string &source) {
   else if (source == "NONE")
     proxy = "";
   return proxy;
+}
+
+static std::string buildProviderRemarkFilter(const string_array &rules) {
+  string_array valid_rules;
+  for (const std::string &rule : rules) {
+    if (!rule.empty() && regValid(rule))
+      valid_rules.emplace_back(rule);
+  }
+
+  if (valid_rules.empty())
+    return "";
+  if (valid_rules.size() == 1)
+    return valid_rules.front();
+
+  return "(" + join(valid_rules, ")|(") + ")";
 }
 
 extern string_array ClashRuleTypes, SurgeRuleTypes, QuanXRuleTypes;
@@ -1424,10 +1445,9 @@ static std::string subconverter_impl(Request &request, Response &response,
     ext.clash_script = false;
   explain.expand_rulesets = argExpandRulesets.get(false);
 
-  ext.nodelist = argGenNodeList;
-  // 强制 list=false，直接覆盖用户提供的任何值
-  // 确保始终使用 proxy-provider 模式，而不是读取订阅并形成节点列表
-  ext.nodelist = false;
+  // Clash defaults to proxy-provider mode, while an explicit list=true keeps
+  // the traditional expanded-node behavior.
+  ext.nodelist = argGenNodeList.get(false);
   explain.nodelist = ext.nodelist;
   ext.surge_ssr_path = global.surgeSSRPath;
   ext.quanx_dev_id = !argDeviceID.empty() ? argDeviceID : global.quanXDevID;
@@ -1691,7 +1711,9 @@ static std::string subconverter_impl(Request &request, Response &response,
   parse_set.time_rules = &time_temp;
   parse_set.sub_info = &subInfo;
   parse_set.authorized = authorized;
-  parse_set.request_header = &request.headers;
+  parse_set.mihomo_only = argTarget == "clash" || argTarget == "clashr";
+  string_icase_map subscription_headers = buildSubscriptionRequestHeaders();
+  parse_set.request_header = &subscription_headers;
   parse_set.fetch_context = FetchContext::TrustedConfig;
   parse_set.js_runtime = ext.js_runtime;
   parse_set.js_context = ext.js_context;
@@ -1837,13 +1859,11 @@ static std::string subconverter_impl(Request &request, Response &response,
         provider.groupId = groupID;
         provider.path = "./providers/" + provider.name + ".yaml";
 
-        // 将 include/exclude 参数转换为 filter
-        if (!argIncludeRemark.empty() && regValid(argIncludeRemark)) {
-          provider.filter = argIncludeRemark;
-        }
-        if (!argExcludeRemark.empty() && regValid(argExcludeRemark)) {
-          provider.exclude_filter = argExcludeRemark;
-        }
+        // Provider mode cannot filter expanded nodes locally, so pass the
+        // final effective remark filters through to Mihomo.
+        provider.filter = buildProviderRemarkFilter(lIncludeRemarks);
+        provider.exclude_filter =
+            buildProviderRemarkFilter(lExcludeRemarks);
 
         ext.providers.push_back(provider);
         SubExplainProvider explain_provider;
@@ -2410,12 +2430,10 @@ static std::string subconverter_impl(Request &request, Response &response,
     addSwitchParameter("append_type", ext.append_proxy_type, argAppendType);
     addSwitchParameter("tfo", ext.tfo.get(false), ext.tfo);
     addSwitchParameter("udp", ext.udp.get(false), ext.udp);
-    addParameter("list", boolString(ext.nodelist),
-                 isTruthyRequestValue(rawArg("list")) && !ext.nodelist
-                     ? "overridden"
-                     : "applied",
-                 "This project forces provider mode for Clash-compatible "
-                 "output.");
+    addParameter("list", boolString(ext.nodelist), "applied",
+                 ext.nodelist
+                     ? "Explicit node-list mode expands subscription sources."
+                     : "Clash-compatible output defaults to provider mode.");
     addSwitchParameter("sort", ext.sort_flag, argSort);
     addParameter("sort_script",
                  argUseSortScript ? "enabled" : "disabled",

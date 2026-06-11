@@ -7,11 +7,9 @@ import "C"
 import (
 	"encoding/json"
 	"unsafe"
-
-	"github.com/metacubex/mihomo/common/convert"
 )
 
-// ConvertSubscription converts V2Ray subscription links to mihomo proxy configs
+// ConvertSubscription parses native Mihomo provider YAML or URI subscriptions.
 //
 //export ConvertSubscription
 func ConvertSubscription(data *C.char) *C.char {
@@ -22,11 +20,7 @@ func ConvertSubscription(data *C.char) *C.char {
 	// Convert C string to Go string
 	subscription := C.GoString(data)
 
-	// Preprocess subscription to fix URL encoding issues (e.g., v2rayN exported links)
-	subscription = preprocessSubscription(subscription)
-
-	// Call mihomo's converter
-	proxies, err := convert.ConvertsV2Ray([]byte(subscription))
+	proxies, err := parseSubscriptionWithMihomo(subscription)
 	if err != nil {
 		errJSON, _ := json.Marshal(map[string]string{
 			"error": err.Error(),
