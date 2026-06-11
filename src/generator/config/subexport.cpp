@@ -517,6 +517,7 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
       singleproxy.SetStyle(YAML::EmitterStyle::Flow);
       proxies.push_back(singleproxy);
       nodelist.emplace_back(x);
+      remarks_list.emplace_back(x.Remark);
 
       continue;
     }

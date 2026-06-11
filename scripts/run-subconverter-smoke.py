@@ -346,6 +346,34 @@ def run_checks(
                     f"{output}"
                 )
 
+        duplicate_uri_nodes = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "clash",
+                "url": f"{DIRECT_SS_LINK}|{DIRECT_SS_LINK}",
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+            timeout,
+        )
+        if "DirectSmoke 2" not in duplicate_uri_nodes:
+            raise AssertionError("duplicate URI node names were not made unique")
+
+        duplicate_remote_nodes = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "clash",
+                "url": f"{remote_subscription_url}|{remote_subscription_url}",
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+            timeout,
+        )
+        if "Smoke 2" not in duplicate_remote_nodes:
+            raise AssertionError("duplicate subscription node names were not made unique")
+
         if verify_non_clash:
             singbox_config = fetch(
                 base_url,
