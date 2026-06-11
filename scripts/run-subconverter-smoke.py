@@ -22,6 +22,9 @@ from pathlib import Path
 
 
 SAMPLE_SS_LINK = "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388#Smoke"
+DIRECT_SS_LINK = (
+    "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@direct.example.com:8389#DirectSmoke"
+)
 DISABLE_RULEGEN_CONFIG = "data:,enable_rule_generator=false"
 PROVIDER_FILTER_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
     b"\n".join(
@@ -74,6 +77,18 @@ def fetch(base_url: str, path: str, params: dict[str, str] | None, timeout: int)
     return body
 
 
+def assert_rejected(
+    base_url: str, path: str, params: dict[str, str], timeout: int, label: str
+) -> None:
+    try:
+        fetch(base_url, path, params, timeout)
+    except AssertionError as exc:
+        if "returned HTTP 400" not in str(exc):
+            raise AssertionError(f"{label} failed unexpectedly: {exc}") from exc
+        return
+    raise AssertionError(f"{label} was unexpectedly accepted")
+
+
 def assert_snapshot(name: str, content: str, snapshot_dir: Path | None, update: bool) -> None:
     if snapshot_dir is None:
         return
@@ -105,7 +120,9 @@ def run_checks(
     snapshot_dir: Path | None,
     update: bool,
     remote_subscription_url: str | None,
+    mihomo_yaml_subscription_url: str | None,
     legacy_subscription_url: str | None,
+    verify_non_clash: bool,
 ) -> None:
     health = fetch(base_url, "/healthz", None, timeout)
     if health.strip() != "ok":
@@ -267,62 +284,145 @@ def run_checks(
     assert_snapshot("provider-explain.json", provider_explain, snapshot_dir, update)
 
     if remote_subscription_url:
-        clash_provider = fetch(
-            base_url,
-            "/sub",
-            {
-                "target": "clash",
-                "url": remote_subscription_url,
-                "config": DISABLE_RULEGEN_CONFIG,
-            },
-            timeout,
+        mixed_url = f"{remote_subscription_url}|{DIRECT_SS_LINK}"
+        clash_cases = (
+            (
+                "remote/list=false",
+                remote_subscription_url,
+                False,
+                ("proxy-providers:", remote_subscription_url),
+                ("name: Smoke", "DirectSmoke"),
+            ),
+            (
+                "uri/list=false",
+                DIRECT_SS_LINK,
+                False,
+                ("DirectSmoke", "direct.example.com"),
+                ("proxy-providers:", "name: Smoke"),
+            ),
+            (
+                "mixed/list=false",
+                mixed_url,
+                False,
+                ("proxy-providers:", remote_subscription_url, "DirectSmoke"),
+                ("name: Smoke",),
+            ),
+            (
+                "remote/list=true",
+                remote_subscription_url,
+                True,
+                ("Smoke", "example.com"),
+                ("proxy-providers:", "DirectSmoke"),
+            ),
+            (
+                "uri/list=true",
+                DIRECT_SS_LINK,
+                True,
+                ("DirectSmoke", "direct.example.com"),
+                ("proxy-providers:", "name: Smoke"),
+            ),
+            (
+                "mixed/list=true",
+                mixed_url,
+                True,
+                ("Smoke", "DirectSmoke", "example.com", "direct.example.com"),
+                ("proxy-providers:",),
+            ),
         )
-        if "proxy-providers:" not in clash_provider:
-            raise AssertionError("remote Clash conversion did not preserve proxy-provider mode")
+        for case_name, source_url, list_mode, expected, forbidden in clash_cases:
+            params = {
+                "target": "clash",
+                "url": source_url,
+                "config": DISABLE_RULEGEN_CONFIG,
+            }
+            if list_mode:
+                params["list"] = "true"
+            output = fetch(base_url, "/sub", params, timeout)
+            missing = [value for value in expected if value not in output]
+            unexpected = [value for value in forbidden if value in output]
+            if missing or unexpected:
+                raise AssertionError(
+                    f"{case_name} failed: missing={missing}, unexpected={unexpected}\n"
+                    f"{output}"
+                )
 
-        clash_nodes = fetch(
+        if verify_non_clash:
+            singbox_config = fetch(
+                base_url,
+                "/sub",
+                {
+                    "target": "singbox",
+                    "url": remote_subscription_url,
+                    "config": DISABLE_RULEGEN_CONFIG,
+                },
+                timeout,
+            )
+            singbox_json = json.loads(singbox_config)
+            outbounds = singbox_json.get("outbounds", [])
+            if not any(outbound.get("tag") == "Smoke" for outbound in outbounds):
+                raise AssertionError(
+                    "remote sing-box conversion did not expand the subscription"
+                )
+
+            surge_config = fetch(
+                base_url,
+                "/sub",
+                {
+                    "target": "surge",
+                    "url": remote_subscription_url,
+                    "config": DISABLE_RULEGEN_CONFIG,
+                },
+                timeout,
+            )
+            if "Smoke" not in surge_config or "example.com" not in surge_config:
+                raise AssertionError(
+                    "remote Surge conversion did not expand the subscription"
+                )
+
+    if mihomo_yaml_subscription_url:
+        mihomo_yaml_nodes = fetch(
             base_url,
             "/sub",
             {
                 "target": "clash",
-                "url": remote_subscription_url,
+                "url": mihomo_yaml_subscription_url,
                 "config": DISABLE_RULEGEN_CONFIG,
                 "list": "true",
             },
             timeout,
         )
-        if "Smoke" not in clash_nodes or "proxy-providers:" in clash_nodes:
-            raise AssertionError("remote Clash list mode did not expand the subscription")
-
-        singbox_config = fetch(
-            base_url,
-            "/sub",
-            {
-                "target": "singbox",
-                "url": remote_subscription_url,
-                "config": DISABLE_RULEGEN_CONFIG,
-            },
-            timeout,
-        )
-        singbox_json = json.loads(singbox_config)
-        outbounds = singbox_json.get("outbounds", [])
-        if not any(outbound.get("tag") == "Smoke" for outbound in outbounds):
-            raise AssertionError("remote sing-box conversion did not expand the subscription")
-
-        surge_config = fetch(
-            base_url,
-            "/sub",
-            {
-                "target": "surge",
-                "url": remote_subscription_url,
-                "config": DISABLE_RULEGEN_CONFIG,
-            },
-            timeout,
-        )
-        if "Smoke" not in surge_config or "example.com" not in surge_config:
-            raise AssertionError("remote Surge conversion did not expand the subscription")
+        if (
+            "NativeYAML" not in mihomo_yaml_nodes
+            or "yaml.example.com" not in mihomo_yaml_nodes
+            or "udp: true" not in mihomo_yaml_nodes
+            or "smux:" not in mihomo_yaml_nodes
+            or "enabled: true" not in mihomo_yaml_nodes
+            or "NativeVLESS" not in mihomo_yaml_nodes
+            or "alpn:" not in mihomo_yaml_nodes
+            or "h2" not in mihomo_yaml_nodes
+            or "ws-opts:" not in mihomo_yaml_nodes
+            or "path: /ws" not in mihomo_yaml_nodes
+            or "proxy-providers:" in mihomo_yaml_nodes
+        ):
+            raise AssertionError(
+                "Mihomo native YAML was not expanded with scalar types preserved"
+            )
 
     if legacy_subscription_url:
+        assert_rejected(
+            base_url,
+            "/sub",
+            {
+                "target": "clash",
+                "url": legacy_subscription_url,
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+            timeout,
+            "Clash Mihomo-only mode",
+        )
+
+    if legacy_subscription_url and verify_non_clash:
         legacy_singbox = fetch(
             base_url,
             "/sub",
@@ -336,10 +436,10 @@ def run_checks(
         legacy_json = json.loads(legacy_singbox)
         legacy_outbounds = legacy_json.get("outbounds", [])
         if not any(
-            outbound.get("tag") == "LegacySmoke" for outbound in legacy_outbounds
+            outbound.get("tag") == "LegacyFallback" for outbound in legacy_outbounds
         ):
             raise AssertionError(
-                "legacy parser fallback did not expand the Clash YAML subscription"
+                "legacy parser fallback did not expand the Surge subscription"
             )
 
 
@@ -354,8 +454,17 @@ def main() -> int:
         help="Optional HTTP(S) subscription used to verify provider vs expanded output.",
     )
     parser.add_argument(
+        "--mihomo-yaml-subscription-url",
+        help="Optional native Mihomo YAML subscription used to verify list expansion.",
+    )
+    parser.add_argument(
         "--legacy-subscription-url",
-        help="Optional Clash YAML subscription used to verify legacy parser fallback.",
+        help="Optional legacy subscription used to verify non-Clash fallback.",
+    )
+    parser.add_argument(
+        "--verify-non-clash",
+        action="store_true",
+        help="Also verify sing-box, Surge, and legacy-parser compatibility.",
     )
     args = parser.parse_args()
 
@@ -366,7 +475,9 @@ def main() -> int:
             args.snapshot_dir,
             args.update_snapshots,
             args.remote_subscription_url,
+            args.mihomo_yaml_subscription_url,
             args.legacy_subscription_url,
+            args.verify_non_clash,
         )
     except Exception as exc:
         print(f"smoke checks failed: {exc}", file=sys.stderr)

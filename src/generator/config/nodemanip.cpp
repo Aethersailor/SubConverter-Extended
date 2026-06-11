@@ -35,6 +35,48 @@ void copyNodes(std::vector<Proxy> &source, std::vector<Proxy> &dest) {
   std::move(source.begin(), source.end(), std::back_inserter(dest));
 }
 
+static void appendMihomoNodes(const std::vector<mihomo::ProxyNode> &source,
+                              std::vector<Proxy> &nodes) {
+  for (const auto &mnode : source) {
+    Proxy node;
+    node.Remark = mnode.name;
+    node.Type = getProxyTypeFromString(mnode.type);
+    node.Hostname = mnode.server;
+    node.Port = mnode.port;
+
+    for (const auto &[key, value] : mnode.params)
+      node.RawParams[key] = value;
+    for (const auto &[key, value] : mnode.param_json)
+      node.RawParamJson[key] = value;
+
+    // Preserve Mihomo's canonical type for generic pass-through, including
+    // protocols that do not yet have a dedicated C++ ProxyType.
+    node.RawParams["type"] = mnode.type;
+    node.RawParamJson["type"] = "\"" + mnode.type + "\"";
+
+    for (const auto &[key, value] : mnode.params) {
+      if (key == "password")
+        node.Password = value;
+      else if (key == "cipher" || key == "method")
+        node.EncryptMethod = value;
+      else if (key == "uuid")
+        node.UserId = value;
+      else if (key == "alterId")
+        node.AlterId = std::stoi(value);
+      else if (key == "udp")
+        node.UDP = (value == "true");
+      else if (key == "tls")
+        node.TLSStr = value;
+      else if (key == "sni" || key == "servername")
+        node.ServerName = value;
+      else if (key == "network")
+        node.TransferProtocol = value;
+    }
+
+    nodes.emplace_back(std::move(node));
+  }
+}
+
 static bool isBrowserUA(const std::string &ua) {
   static const std::vector<std::string> browser_keywords = {
       "Mozilla/",        "AppleWebKit/", "Chrome/",
@@ -306,61 +348,10 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
                "正在使用 Mihomo 解析器解析订阅数据...");
 
 #ifdef USE_MIHOMO_PARSER
-      // Use mihomo parser (100% compatible with mihomo)
       bool parsed_by_mihomo = false;
       try {
         auto mihomo_nodes = mihomo::parseSubscription(strSub);
-
-        // Convert mihomo::ProxyNode to SubConverter-Extended's Proxy structure
-        for (const auto &mnode : mihomo_nodes) {
-          Proxy node;
-          node.Remark = mnode.name;
-          node.Type = ProxyType::Unknown; // Will be set based on type string
-
-          // Map mihomo proxy type to SubConverter-Extended ProxyType
-          node.Type = getProxyTypeFromString(mnode.type);
-
-          // Copy all raw params for generic pass-through
-          for (const auto &[key, value] : mnode.params) {
-            node.RawParams[key] = value;
-          }
-
-          // CRITICAL: Preserve original type string from mihomo
-          // This ensures unknown protocols (e.g., linksb) output correctly as
-          // "type: linksb" instead of "type: Unknown" which would break Clash
-          node.RawParams["type"] = mnode.type;
-
-          // Add more types as needed
-
-          node.Hostname = mnode.server;
-          node.Port = mnode.port;
-
-          // Store all additional params for later serialization
-          // (mihomo guarantees these are correct for the protocol)
-          for (const auto &[key, value] : mnode.params) {
-            // These will be used when generating the final config
-            if (key == "password")
-              node.Password = value;
-            else if (key == "cipher" || key == "method")
-              node.EncryptMethod = value;
-            else if (key == "uuid")
-              node.UserId = value;
-            else if (key == "alterId")
-              node.AlterId = std::stoi(value);
-            else if (key == "udp")
-              node.UDP = (value == "true");
-            else if (key == "tls")
-              node.TLSStr = value;
-            else if (key == "sni" || key == "servername")
-              node.ServerName = value;
-            else if (key == "network")
-              node.TransferProtocol = value;
-            // Store everything else in a raw format for mihomo-compatible
-            // output
-          }
-
-          nodes.push_back(node);
-        }
+        appendMihomoNodes(mihomo_nodes, nodes);
 
         if (nodes.empty()) {
           writeLog(LOG_TYPE_WARN,
@@ -382,6 +373,11 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
       }
 
       if (!parsed_by_mihomo) {
+        if (parse_set.mihomo_only) {
+          writeLog(LOG_TYPE_ERROR,
+                   "Mihomo 专用解析模式拒绝使用旧解析器：'" + link + "'。");
+          return -1;
+        }
         nodes.clear();
         if (explodeConfContent(strSub, nodes) == 0) {
           writeLog(LOG_TYPE_ERROR, "无效订阅：'" + link + "'！");
@@ -389,7 +385,11 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
         }
       }
 #else
-      // Fallback when mihomo parser is not available
+      if (parse_set.mihomo_only) {
+        writeLog(LOG_TYPE_ERROR,
+                 "当前构建未集成 Mihomo 解析器，无法生成 Clash/Mihomo 节点列表。");
+        return -1;
+      }
       if (explodeConfContent(strSub, nodes) == 0) {
         writeLog(LOG_TYPE_ERROR, "无效订阅：'" + link + "'！");
         return -1;
@@ -461,14 +461,9 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
 #ifdef USE_MIHOMO_PARSER
       try {
         auto mihomo_nodes = mihomo::parseSubscription(strSub);
-        for (const auto &mnode : mihomo_nodes) {
-          Proxy node;
-          node.Remark = mnode.name;
-          node.Type = getProxyTypeFromString(mnode.type);
-          for (const auto &[key, value] : mnode.params) {
-            node.RawParams[key] = value;
-          }
-          node.RawParams["_mihomo_type"] = mnode.type;
+        std::vector<Proxy> parsed_nodes;
+        appendMihomoNodes(mihomo_nodes, parsed_nodes);
+        for (auto &node : parsed_nodes) {
           node.GroupId = groupID;
           if (!custom_group.empty())
             node.Group = custom_group;

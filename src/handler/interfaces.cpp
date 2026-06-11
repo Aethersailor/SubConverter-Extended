@@ -1711,6 +1711,7 @@ static std::string subconverter_impl(Request &request, Response &response,
   parse_set.time_rules = &time_temp;
   parse_set.sub_info = &subInfo;
   parse_set.authorized = authorized;
+  parse_set.mihomo_only = argTarget == "clash" || argTarget == "clashr";
   string_icase_map subscription_headers = buildSubscriptionRequestHeaders();
   parse_set.request_header = &subscription_headers;
   parse_set.fetch_context = FetchContext::TrustedConfig;

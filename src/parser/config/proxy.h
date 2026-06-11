@@ -149,6 +149,8 @@ struct Proxy {
 
   // Store raw params from mihomo parser for generic pass-through
   std::map<String, String> RawParams;
+  // JSON-encoded values preserve Mihomo scalar and nested YAML types.
+  std::map<String, String> RawParamJson;
 };
 
 #define SS_DEFAULT_GROUP "SSProvider"

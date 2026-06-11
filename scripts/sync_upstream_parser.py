@@ -44,6 +44,7 @@ PROTECTED_PATHS = {
     "src/parser/mihomo_schemes.h",
     "src/parser/param_compat.h",
     "bridge/converter.go",
+    "bridge/parser.go",
     "bridge/go.mod",
     "bridge/go.sum",
 }
