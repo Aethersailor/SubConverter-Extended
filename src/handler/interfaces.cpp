@@ -73,6 +73,21 @@ std::string parseProxy(const std::string &source) {
   return proxy;
 }
 
+static std::string buildProviderRemarkFilter(const string_array &rules) {
+  string_array valid_rules;
+  for (const std::string &rule : rules) {
+    if (!rule.empty() && regValid(rule))
+      valid_rules.emplace_back(rule);
+  }
+
+  if (valid_rules.empty())
+    return "";
+  if (valid_rules.size() == 1)
+    return valid_rules.front();
+
+  return "(" + join(valid_rules, ")|(") + ")";
+}
+
 extern string_array ClashRuleTypes, SurgeRuleTypes, QuanXRuleTypes;
 
 struct UAProfile {
@@ -1837,13 +1852,11 @@ static std::string subconverter_impl(Request &request, Response &response,
         provider.groupId = groupID;
         provider.path = "./providers/" + provider.name + ".yaml";
 
-        // 将 include/exclude 参数转换为 filter
-        if (!argIncludeRemark.empty() && regValid(argIncludeRemark)) {
-          provider.filter = argIncludeRemark;
-        }
-        if (!argExcludeRemark.empty() && regValid(argExcludeRemark)) {
-          provider.exclude_filter = argExcludeRemark;
-        }
+        // Provider mode cannot filter expanded nodes locally, so pass the
+        // final effective remark filters through to Mihomo.
+        provider.filter = buildProviderRemarkFilter(lIncludeRemarks);
+        provider.exclude_filter =
+            buildProviderRemarkFilter(lExcludeRemarks);
 
         ext.providers.push_back(provider);
         SubExplainProvider explain_provider;

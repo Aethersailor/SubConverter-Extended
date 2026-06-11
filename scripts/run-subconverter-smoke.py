@@ -10,6 +10,7 @@ refresh them.
 from __future__ import annotations
 
 import argparse
+import base64
 import difflib
 import json
 import re
@@ -22,6 +23,17 @@ from pathlib import Path
 
 SAMPLE_SS_LINK = "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388#Smoke"
 DISABLE_RULEGEN_CONFIG = "data:,enable_rule_generator=false"
+PROVIDER_FILTER_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
+    b"\n".join(
+        (
+            b"enable_rule_generator=false",
+            b"include_remarks=HK",
+            b"include_remarks=JP",
+            b"exclude_remarks=Expired",
+            b"exclude_remarks=Traffic",
+        )
+    )
+).decode("ascii")
 
 
 def build_url(base_url: str, path: str, params: dict[str, str] | None = None) -> str:
@@ -224,7 +236,7 @@ def run_checks(base_url: str, timeout: int, snapshot_dir: Path | None, update: b
         {
             "target": "clash",
             "url": "https://example.com/sub",
-            "config": DISABLE_RULEGEN_CONFIG,
+            "config": PROVIDER_FILTER_CONFIG,
             "explain": "true",
         },
         timeout,
@@ -234,6 +246,11 @@ def run_checks(base_url: str, timeout: int, snapshot_dir: Path | None, update: b
         raise AssertionError("provider explain report did not enter proxy-provider mode")
     if provider_report.get("output", {}).get("provider_count") != 1:
         raise AssertionError("provider explain report did not count one provider")
+    provider = provider_report.get("providers", [{}])[0]
+    if provider.get("filter") != "(HK)|(JP)":
+        raise AssertionError("provider did not inherit configured include filters")
+    if provider.get("exclude_filter") != "(Expired)|(Traffic)":
+        raise AssertionError("provider did not inherit configured exclude filters")
     provider_params = provider_report.get("parameters", {})
     provider_recognized = {
         item.get("name"): item for item in provider_params.get("recognized", [])
