@@ -96,6 +96,73 @@ func TestParseRejectsInvalidNativeMihomoProxy(t *testing.T) {
 	}
 }
 
+func TestParseRejectsMissingRequiredNativeMihomoField(t *testing.T) {
+	input := strings.Join([]string{
+		"proxies:",
+		"  - name: MissingServer",
+		"    type: ss",
+		"    port: 8388",
+		"    cipher: aes-128-gcm",
+		"    password: password",
+	}, "\n")
+
+	if _, err := parseSubscriptionWithMihomo(input); err == nil ||
+		!strings.Contains(err.Error(), "missing server") {
+		t.Fatalf("expected missing server error, got %v", err)
+	}
+}
+
+func TestParseRejectsInvalidNativeMihomoFieldType(t *testing.T) {
+	input := strings.Join([]string{
+		"proxies:",
+		"  - name: InvalidPort",
+		"    type: ss",
+		"    server: invalid.example.com",
+		"    port: not-a-port",
+		"    cipher: aes-128-gcm",
+		"    password: password",
+	}, "\n")
+
+	if _, err := parseSubscriptionWithMihomo(input); err == nil ||
+		!strings.Contains(err.Error(), "port must be int") {
+		t.Fatalf("expected invalid port type error, got %v", err)
+	}
+}
+
+func TestParseAllowsOmittedZeroValueOptions(t *testing.T) {
+	input := strings.Join([]string{
+		"proxies:",
+		"  - name: MinimalVMess",
+		"    type: vmess",
+		"    server: example.com",
+		"    port: 443",
+		"    uuid: 00000000-0000-0000-0000-000000000001",
+	}, "\n")
+
+	proxies, err := parseSubscriptionWithMihomo(input)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if len(proxies) != 1 || proxies[0]["name"] != "MinimalVMess" {
+		t.Fatalf("unexpected proxies: %#v", proxies)
+	}
+}
+
+func TestGeneratedProxyRulesCoverRepresentativeProtocols(t *testing.T) {
+	for _, proxyType := range []string{
+		"ss", "vmess", "vless", "trojan", "hysteria2", "tuic", "wireguard",
+	} {
+		if _, ok := generatedProxyRules[proxyType]; !ok {
+			t.Fatalf("generated rules do not contain %q", proxyType)
+		}
+	}
+
+	wireGuardRules := generatedProxyRules["wireguard"]
+	if wireGuardRules["server"].required || wireGuardRules["port"].required {
+		t.Fatal("wireguard peer mode must not require top-level server or port")
+	}
+}
+
 func TestParseDeduplicatesNamesLikeMihomoProvider(t *testing.T) {
 	input := strings.Join([]string{
 		"proxies:",

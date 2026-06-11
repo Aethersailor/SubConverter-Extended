@@ -29,6 +29,7 @@ fi
 (
   cd bridge
   go mod download
+  go run ../scripts/generate_proxy_validation.go -o proxy_validation_generated.go
   go run ../scripts/generate_schemes.go ../src/parser/mihomo_schemes.h
   go run ../scripts/generate_param_compat.go -o ../src/parser/param_compat.h
   CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=gcc \

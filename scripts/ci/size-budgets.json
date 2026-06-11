@@ -1,0 +1,8 @@
+{
+  "bridge-linux-amd64": 12582912,
+  "bridge-linux-arm64": 12582912,
+  "bridge-linux-armv7": 20971520,
+  "release-linux": 26214400,
+  "release-openwrt": 26214400,
+  "release-windows-amd64": 18874368
+}
