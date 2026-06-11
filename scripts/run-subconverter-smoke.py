@@ -99,7 +99,14 @@ def assert_snapshot(name: str, content: str, snapshot_dir: Path | None, update: 
         raise AssertionError(f"Snapshot mismatch for {name}\n{diff}")
 
 
-def run_checks(base_url: str, timeout: int, snapshot_dir: Path | None, update: bool) -> None:
+def run_checks(
+    base_url: str,
+    timeout: int,
+    snapshot_dir: Path | None,
+    update: bool,
+    remote_subscription_url: str | None,
+    legacy_subscription_url: str | None,
+) -> None:
     health = fetch(base_url, "/healthz", None, timeout)
     if health.strip() != "ok":
         raise AssertionError(f"/healthz returned unexpected body: {health!r}")
@@ -259,6 +266,82 @@ def run_checks(base_url: str, timeout: int, snapshot_dir: Path | None, update: b
         raise AssertionError("provider explain report did not diagnose the config parameter")
     assert_snapshot("provider-explain.json", provider_explain, snapshot_dir, update)
 
+    if remote_subscription_url:
+        clash_provider = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "clash",
+                "url": remote_subscription_url,
+                "config": DISABLE_RULEGEN_CONFIG,
+            },
+            timeout,
+        )
+        if "proxy-providers:" not in clash_provider:
+            raise AssertionError("remote Clash conversion did not preserve proxy-provider mode")
+
+        clash_nodes = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "clash",
+                "url": remote_subscription_url,
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+            timeout,
+        )
+        if "Smoke" not in clash_nodes or "proxy-providers:" in clash_nodes:
+            raise AssertionError("remote Clash list mode did not expand the subscription")
+
+        singbox_config = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "singbox",
+                "url": remote_subscription_url,
+                "config": DISABLE_RULEGEN_CONFIG,
+            },
+            timeout,
+        )
+        singbox_json = json.loads(singbox_config)
+        outbounds = singbox_json.get("outbounds", [])
+        if not any(outbound.get("tag") == "Smoke" for outbound in outbounds):
+            raise AssertionError("remote sing-box conversion did not expand the subscription")
+
+        surge_config = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "surge",
+                "url": remote_subscription_url,
+                "config": DISABLE_RULEGEN_CONFIG,
+            },
+            timeout,
+        )
+        if "Smoke" not in surge_config or "example.com" not in surge_config:
+            raise AssertionError("remote Surge conversion did not expand the subscription")
+
+    if legacy_subscription_url:
+        legacy_singbox = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "singbox",
+                "url": legacy_subscription_url,
+                "config": DISABLE_RULEGEN_CONFIG,
+            },
+            timeout,
+        )
+        legacy_json = json.loads(legacy_singbox)
+        legacy_outbounds = legacy_json.get("outbounds", [])
+        if not any(
+            outbound.get("tag") == "LegacySmoke" for outbound in legacy_outbounds
+        ):
+            raise AssertionError(
+                "legacy parser fallback did not expand the Clash YAML subscription"
+            )
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -266,10 +349,25 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=20)
     parser.add_argument("--snapshot-dir", type=Path)
     parser.add_argument("--update-snapshots", action="store_true")
+    parser.add_argument(
+        "--remote-subscription-url",
+        help="Optional HTTP(S) subscription used to verify provider vs expanded output.",
+    )
+    parser.add_argument(
+        "--legacy-subscription-url",
+        help="Optional Clash YAML subscription used to verify legacy parser fallback.",
+    )
     args = parser.parse_args()
 
     try:
-        run_checks(args.base_url, args.timeout, args.snapshot_dir, args.update_snapshots)
+        run_checks(
+            args.base_url,
+            args.timeout,
+            args.snapshot_dir,
+            args.update_snapshots,
+            args.remote_subscription_url,
+            args.legacy_subscription_url,
+        )
     except Exception as exc:
         print(f"smoke checks failed: {exc}", file=sys.stderr)
         return 1

@@ -189,8 +189,12 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
     bool isSubscription = false; // 订阅链接标志
     bool isNodeLink = false;     // 节点链接标志
 
+    // Surge install-config links wrap a remote subscription URL.
+    if (startsWith(link, "surge:///install-config")) {
+      isSubscription = true;
+    }
     // 规则 1: HTTP(S) 开头的链接
-    if (mihomo::isHttpSchemeLink(link)) {
+    else if (mihomo::isHttpSchemeLink(link)) {
       size_t protocolEnd = link.find("://") + 3;
       size_t pathStart = link.find("/", protocolEnd);
       size_t queryStart = link.find("?", protocolEnd);
@@ -242,16 +246,27 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
       }
     }
 
-    // 处理订阅链接：跳过下载，交给 proxy-provider
+    // Clash proxy-provider sources are intercepted by the caller. Any
+    // subscription URL that reaches addNodes must be expanded into nodes.
     if (isSubscription) {
-      writeLog(LOG_TYPE_INFO, "检测到订阅 URL，跳过下载（将作为 "
-                              "proxy-provider 使用）：" +
-                                  link);
-      return 0; // 返回成功，让后续逻辑将其写入 proxy-provider
-    }
+      writeLog(LOG_TYPE_INFO, "正在下载订阅数据...");
+      if (startsWith(link, "surge:///install-config"))
+        link = urlDecode(getUrlArg(link, "url"));
 
-    // 节点链接：直接用 mihomo 解析（不需要 webGet）
-    if (isNodeLink) {
+      // Replace browser UA with clash.meta to avoid subscription-side blocks.
+      if (request_headers) {
+        auto ua_it = request_headers->find("User-Agent");
+        if (ua_it != request_headers->end() && isBrowserUA(ua_it->second)) {
+          writeLog(LOG_TYPE_INFO, "检测到浏览器 UA，已替换为 clash.meta UA "
+                                  "以避免被拦截");
+          ua_it->second = "clash.meta";
+        }
+      }
+
+      strSub = webGet(link, proxy, global.cacheSubscription, &extra_headers,
+                      request_headers, parse_set.fetch_context);
+    } else if (isNodeLink) {
+      // 节点链接：直接用 mihomo 解析（不需要 webGet）
       writeLog(LOG_TYPE_INFO, "检测到节点链接，正在使用 Mihomo 解析...");
       strSub = link; // 直接使用链接本身作为解析内容
     } else {
@@ -292,6 +307,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
 
 #ifdef USE_MIHOMO_PARSER
       // Use mihomo parser (100% compatible with mihomo)
+      bool parsed_by_mihomo = false;
       try {
         auto mihomo_nodes = mihomo::parseSubscription(strSub);
 
@@ -347,23 +363,26 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
         }
 
         if (nodes.empty()) {
-          writeLog(LOG_TYPE_ERROR,
-                   "Mihomo 解析器未从链接中解析到有效节点：'" + link +
-                       "'！");
-          return -1;
+          writeLog(LOG_TYPE_WARN,
+                   "Mihomo 解析器未从链接中解析到有效节点，将回退到旧解析器：'" +
+                       link + "'。");
+        } else {
+          parsed_by_mihomo = true;
         }
 
-        writeLog(LOG_TYPE_INFO, "Mihomo 解析器成功解析 " +
-                                    std::to_string(nodes.size()) + " 个节点。");
-        // Debug: Log first node name if available
-        if (!nodes.empty()) {
+        if (parsed_by_mihomo) {
+          writeLog(LOG_TYPE_INFO, "Mihomo 解析器成功解析 " +
+                                      std::to_string(nodes.size()) + " 个节点。");
           writeLog(LOG_TYPE_INFO, "第一个节点：" + nodes[0].Remark);
         }
       } catch (const std::exception &e) {
         writeLog(LOG_TYPE_ERROR,
                  "Mihomo 解析器错误：" + std::string(e.what()) +
                      "，回退到旧解析器。");
-        // Fallback to legacy parser
+      }
+
+      if (!parsed_by_mihomo) {
+        nodes.clear();
         if (explodeConfContent(strSub, nodes) == 0) {
           writeLog(LOG_TYPE_ERROR, "无效订阅：'" + link + "'！");
           return -1;

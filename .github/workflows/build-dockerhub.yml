@@ -384,7 +384,7 @@ jobs:
           path: docker-digests/${{ matrix.arch }}.txt
 
       - name: Smoke test image (${{ matrix.arch }})
-        if: github.event_name != 'pull_request' && needs.prepare.outputs.is_release == 'true'
+        if: github.event_name != 'pull_request'
         timeout-minutes: 3
         uses: ./.github/actions/smoke-docker-image
         with:
