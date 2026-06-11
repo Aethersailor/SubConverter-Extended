@@ -22,12 +22,17 @@ trap cleanup EXIT
 docker cp "${CID}:/src/subconverter" ./subconverter
 chmod +x ./subconverter
 
+rm -rf build/bridge-output
+mkdir -p build/bridge-output
+
 case "${MODE}" in
   shared)
     docker cp "${CID}:/runtime-libs" ./runtime-libs
+    docker cp "${CID}:/src/bridge/libmihomo.so" build/bridge-output/libmihomo.so
     ;;
   root)
     docker cp "${CID}:/runtime-root" ./runtime-root
+    docker cp "${CID}:/src/bridge/libmihomo.a" build/bridge-output/libmihomo.a
     ;;
 esac
 
@@ -35,6 +40,7 @@ if [ "${EXTRACT_GENERATED}" = "true" ]; then
   docker cp "${CID}:/src/bridge/go.mod" bridge/go.mod
   docker cp "${CID}:/src/bridge/go.sum" bridge/go.sum
   docker cp "${CID}:/src/bridge/libmihomo.h" bridge/libmihomo.h
+  docker cp "${CID}:/src/bridge/proxy_validation_generated.go" bridge/proxy_validation_generated.go
 
   docker cp "${CID}:/src/src/parser/mihomo_schemes.h" src/parser/mihomo_schemes.h
   docker cp "${CID}:/src/src/parser/param_compat.h" src/parser/param_compat.h

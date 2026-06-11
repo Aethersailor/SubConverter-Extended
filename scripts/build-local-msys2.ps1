@@ -71,6 +71,7 @@ fi
 if [ "$SCX_REBUILD_BRIDGE" = "1" ] || [ ! -f bridge/libmihomo.a ]; then
   cd "$root/bridge"
   go mod download
+  go run ../scripts/generate_proxy_validation.go -o proxy_validation_generated.go
   CC=gcc CXX=g++ CGO_ENABLED=1 go build -buildmode=c-archive -o libmihomo.a .
   unix2dos libmihomo.h >/dev/null 2>&1 || true
   cd "$root"

@@ -131,7 +131,7 @@ jobs:
             {
               echo 'matrix<<JSON'
               cat <<'JSON'
-          {"include":[{"arch":"amd64","runner":"ubuntu-latest","dockerfile":"./Dockerfile","builder_platform":"linux/amd64","image_platform":"linux/amd64","builder_tag":"subconverter-temp:amd64-builder","threads":"16","cache_scope":"subconverter-alpine","extract_mode":"shared","extract_generated":"true","openwrt_arches":"x86_64","qemu_platforms":""},{"arch":"arm64","runner":"ubuntu-24.04-arm","dockerfile":"./Dockerfile","builder_platform":"linux/arm64","image_platform":"linux/arm64","builder_tag":"subconverter-temp:arm64-builder","threads":"4","cache_scope":"subconverter-alpine-arm64","extract_mode":"shared","extract_generated":"false","openwrt_arches":"aarch64_generic,aarch64_cortex-a53,aarch64_cortex-a72","qemu_platforms":""},{"arch":"armv7","runner":"ubuntu-latest","dockerfile":"./docker/Dockerfile.armv7-cross","builder_platform":"linux/amd64","image_platform":"linux/arm/v7","builder_tag":"subconverter-temp:armv7-builder","threads":"2","cache_scope":"subconverter-armv7-cross","extract_mode":"root","extract_generated":"false","openwrt_arches":"arm_cortex-a5_vfpv4,arm_cortex-a7,arm_cortex-a7_vfpv4,arm_cortex-a7_neon-vfpv4,arm_cortex-a8_vfpv3,arm_cortex-a9,arm_cortex-a9_neon,arm_cortex-a9_vfpv3-d16,arm_cortex-a15_neon-vfpv4","qemu_platforms":"arm"}]}
+          {"include":[{"arch":"amd64","runner":"ubuntu-latest","dockerfile":"./Dockerfile","builder_platform":"linux/amd64","image_platform":"linux/amd64","builder_tag":"subconverter-temp:amd64-builder","threads":"16","cache_scope":"subconverter-alpine","extract_mode":"shared","extract_generated":"true","bridge_budget":"bridge-linux-amd64","openwrt_arches":"x86_64","qemu_platforms":""},{"arch":"arm64","runner":"ubuntu-24.04-arm","dockerfile":"./Dockerfile","builder_platform":"linux/arm64","image_platform":"linux/arm64","builder_tag":"subconverter-temp:arm64-builder","threads":"4","cache_scope":"subconverter-alpine-arm64","extract_mode":"shared","extract_generated":"false","bridge_budget":"bridge-linux-arm64","openwrt_arches":"aarch64_generic,aarch64_cortex-a53,aarch64_cortex-a72","qemu_platforms":""},{"arch":"armv7","runner":"ubuntu-latest","dockerfile":"./docker/Dockerfile.armv7-cross","builder_platform":"linux/amd64","image_platform":"linux/arm/v7","builder_tag":"subconverter-temp:armv7-builder","threads":"2","cache_scope":"subconverter-armv7-cross","extract_mode":"root","extract_generated":"false","bridge_budget":"bridge-linux-armv7","openwrt_arches":"arm_cortex-a5_vfpv4,arm_cortex-a7,arm_cortex-a7_vfpv4,arm_cortex-a7_neon-vfpv4,arm_cortex-a8_vfpv3,arm_cortex-a9,arm_cortex-a9_neon,arm_cortex-a9_vfpv3-d16,arm_cortex-a15_neon-vfpv4","qemu_platforms":"arm"}]}
           JSON
               echo 'JSON'
             } >> "$GITHUB_OUTPUT"
@@ -139,7 +139,7 @@ jobs:
             {
               echo 'matrix<<JSON'
               cat <<'JSON'
-          {"include":[{"arch":"amd64","runner":"ubuntu-latest","dockerfile":"./Dockerfile","builder_platform":"linux/amd64","image_platform":"linux/amd64","builder_tag":"subconverter-temp:amd64-builder","threads":"16","cache_scope":"subconverter-alpine","extract_mode":"shared","extract_generated":"true","openwrt_arches":"x86_64","qemu_platforms":""}]}
+          {"include":[{"arch":"amd64","runner":"ubuntu-latest","dockerfile":"./Dockerfile","builder_platform":"linux/amd64","image_platform":"linux/amd64","builder_tag":"subconverter-temp:amd64-builder","threads":"16","cache_scope":"subconverter-alpine","extract_mode":"shared","extract_generated":"true","bridge_budget":"bridge-linux-amd64","openwrt_arches":"x86_64","qemu_platforms":""}]}
           JSON
               echo 'JSON'
             } >> "$GITHUB_OUTPUT"
@@ -250,10 +250,23 @@ jobs:
           EXTRACT_GENERATED: ${{ matrix.extract_generated }}
         run: bash scripts/ci/extract-builder-output.sh "${{ matrix.builder_tag }}" "${{ matrix.extract_mode }}"
 
+      - name: Check bridge size budget (${{ matrix.arch }})
+        shell: bash
+        run: python3 scripts/ci/check_file_size.py --budget "${{ matrix.bridge_budget }}" "build/bridge-output/libmihomo.*"
+
       - name: Package Release Artifacts (Linux ${{ matrix.arch }})
         if: needs.prepare.outputs.is_release == 'true'
         shell: bash
         run: bash scripts/ci/build-linux-release.sh "${{ needs.prepare.outputs.version }}" "${{ matrix.arch }}" "${{ matrix.openwrt_arches }}"
+
+      - name: Check release size budgets (Linux ${{ matrix.arch }})
+        if: needs.prepare.outputs.is_release == 'true'
+        shell: bash
+        run: |
+          python3 scripts/ci/check_file_size.py --budget release-linux \
+            "SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-${{ matrix.arch }}.tar.gz"
+          python3 scripts/ci/check_file_size.py --budget release-openwrt \
+            "SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-*.apk"
 
       - name: Set up QEMU for smoke test
         if: needs.prepare.outputs.is_release == 'true' && matrix.qemu_platforms != ''
@@ -298,7 +311,7 @@ jobs:
         if: matrix.extract_generated == 'true'
         shell: bash
         run: |
-          if [ -n "$(git status --porcelain -- bridge/go.mod bridge/go.sum bridge/libmihomo.h src/parser/mihomo_schemes.h src/parser/param_compat.h include/httplib.h include/nlohmann/json.hpp include/inja.hpp include/jpcre2.hpp include/quickjspp.hpp include/libcron include/date include/toml.hpp include/toml11)" ]; then
+          if [ -n "$(git status --porcelain -- bridge/go.mod bridge/go.sum bridge/libmihomo.h bridge/proxy_validation_generated.go src/parser/mihomo_schemes.h src/parser/param_compat.h include/httplib.h include/nlohmann/json.hpp include/inja.hpp include/jpcre2.hpp include/quickjspp.hpp include/libcron include/date include/toml.hpp include/toml11)" ]; then
             echo "changed=true" >> $GITHUB_OUTPUT
           fi
 
@@ -311,7 +324,7 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add bridge/go.mod bridge/go.sum bridge/libmihomo.h src/parser/mihomo_schemes.h src/parser/param_compat.h include/httplib.h include/nlohmann/json.hpp include/inja.hpp include/jpcre2.hpp include/quickjspp.hpp include/libcron include/date include/toml.hpp include/toml11
+          git add bridge/go.mod bridge/go.sum bridge/libmihomo.h bridge/proxy_validation_generated.go src/parser/mihomo_schemes.h src/parser/param_compat.h include/httplib.h include/nlohmann/json.hpp include/inja.hpp include/jpcre2.hpp include/quickjspp.hpp include/libcron include/date include/toml.hpp include/toml11
           git commit -m "chore: update auto-generated files and header libraries from build [skip ci]"
 
           git fetch --no-tags origin "refs/heads/$BRANCH_NAME:refs/remotes/origin/$BRANCH_NAME"
@@ -437,6 +450,10 @@ jobs:
       - name: Package Release Artifact (Windows amd64)
         shell: pwsh
         run: ./scripts/package-windows-portable.ps1 -Version "${{ needs.prepare.outputs.version }}"
+
+      - name: Check release size budget (Windows amd64)
+        shell: pwsh
+        run: python scripts/ci/check_file_size.py --budget release-windows-amd64 "SubConverter-Extended-${{ needs.prepare.outputs.version }}-windows-amd64.zip"
 
       - name: Smoke test artifact (Windows amd64)
         timeout-minutes: 3

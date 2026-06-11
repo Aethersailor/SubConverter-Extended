@@ -45,6 +45,7 @@ PROTECTED_PATHS = {
     "src/parser/param_compat.h",
     "bridge/converter.go",
     "bridge/parser.go",
+    "bridge/proxy_validation_generated.go",
     "bridge/go.mod",
     "bridge/go.sum",
 }
