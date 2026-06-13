@@ -22,6 +22,7 @@
 #include "generator/config/ruleconvert.h"
 #include "generator/config/subexport.h"
 #include "generator/template/templates.h"
+#include "external_config_fallback.h"
 #include "interfaces.h"
 #include "multithread.h"
 #include "parser/mihomo_scheme_utils.h"
@@ -33,9 +34,7 @@
 #include "upload.h"
 #include "utils/time_compat.h"
 
-// Multiple CDN fallback URLs for default external config
-// Will be tried in order if user-provided config fails to load
-const std::vector<std::string> FALLBACK_CONFIG_URLS = {
+const std::vector<std::string> DEFAULT_REMOTE_CONFIG_FALLBACKS = {
     "https://gcore.jsdelivr.net/gh/Aethersailor/Custom_OpenClash_Rules@refs/"
     "heads/main/cfg/Custom_Clash.ini",
     "https://testingcf.jsdelivr.net/gh/Aethersailor/"
@@ -44,6 +43,39 @@ const std::vector<std::string> FALLBACK_CONFIG_URLS = {
     "heads/main/cfg/Custom_Clash.ini",
     "https://raw.githubusercontent.com/Aethersailor/Custom_OpenClash_Rules/"
     "main/cfg/Custom_Clash.ini"};
+
+static void appendUniqueConfig(std::vector<std::string> &configs,
+                               std::unordered_set<std::string> &seen,
+                               const std::string &config) {
+  if (!config.empty() && seen.insert(config).second)
+    configs.emplace_back(config);
+}
+
+static void appendBundledConfig(std::vector<std::string> &configs,
+                                std::unordered_set<std::string> &seen,
+                                const std::string &name) {
+  if (name.empty())
+    return;
+  appendUniqueConfig(configs, seen, "config/" + name);
+  appendUniqueConfig(configs, seen, "base/config/" + name);
+}
+
+static std::vector<std::string>
+buildExternalConfigFallbacks(const std::string &failedConfig) {
+  std::vector<std::string> configs;
+  std::unordered_set<std::string> seen;
+  seen.insert(failedConfig);
+
+  appendBundledConfig(
+      configs, seen,
+      external_config_fallback::bundledCustomClashConfigName(failedConfig));
+
+  for (const std::string &remote : DEFAULT_REMOTE_CONFIG_FALLBACKS)
+    appendUniqueConfig(configs, seen, remote);
+
+  appendBundledConfig(configs, seen, "Custom_Clash.ini");
+  return configs;
+}
 
 static string_icase_map buildSubscriptionRequestHeaders() {
   string_icase_map headers;
@@ -1459,7 +1491,6 @@ static std::string subconverter_impl(Request &request, Response &response,
   explain.managed_config = !ext.managed_config_prefix.empty();
 
   /// load external configuration
-  std::string userProvidedConfig = getUrlArg(argument, "config");
   bool userProvidedExternalConfig = !argExternalConfig.empty();
   FetchContext externalConfigContext =
       userProvidedExternalConfig ? FetchContext::PublicRequest
@@ -1547,26 +1578,25 @@ static std::string subconverter_impl(Request &request, Response &response,
       }
     }
 
-    if (!configLoadSuccess && !userProvidedConfig.empty() &&
-        !global.defaultExtConfig.empty() &&
-        argExternalConfig != global.defaultExtConfig) {
-      // User provided config failed, try multiple fallback CDN URLs
+    if (!configLoadSuccess) {
       writeLog(
-          0, "加载用户提供的配置失败，正在尝试回退配置...",
+          0, "加载外部配置失败，正在尝试远程及内置回退配置...",
           LOG_LEVEL_WARNING);
 
-      for (std::string fallbackUrl : FALLBACK_CONFIG_URLS) {
-        writeLog(0, "正在尝试加载配置：" + fallbackUrl,
+      for (std::string fallbackConfig :
+           buildExternalConfigFallbacks(argExternalConfig)) {
+        writeLog(0, "正在尝试加载配置：" + fallbackConfig,
                  LOG_LEVEL_INFO);
 
         tpl_args.local_vars = tpl_args_base;
         ExternalConfig extconf;
         extconf.tpl_args = &tpl_args;
         int fallback_result =
-            loadExternalConfig(fallbackUrl, extconf, FetchContext::TrustedConfig);
+            loadExternalConfig(fallbackConfig, extconf,
+                               FetchContext::TrustedConfig);
         if (fallback_result == 0 &&
             hasEffectiveExternalConfig(extconf, tpl_args, tpl_args_base)) {
-          writeLog(0, "已成功加载配置：" + fallbackUrl,
+          writeLog(0, "已成功加载配置：" + fallbackConfig,
                    LOG_LEVEL_INFO);
           configLoadSuccess = true;
           explain.external_config_loaded = true;
@@ -1612,23 +1642,24 @@ static std::string subconverter_impl(Request &request, Response &response,
             lExcludeRemarks = extconf.exclude;
           argAddEmoji.define(extconf.add_emoji);
           argRemoveEmoji.define(extconf.remove_old_emoji);
-          break; // Success, stop trying other URLs
+          break; // Success, stop trying other configs
         } else {
           tpl_args.local_vars = tpl_args_base;
           if (fallback_result == 0) {
             writeLog(
                 0,
-                "已从 " + fallbackUrl + " 加载配置，但未发现有效设置，跳过。",
+                "已从 " + fallbackConfig +
+                    " 加载配置，但未发现有效设置，跳过。",
                 LOG_LEVEL_WARNING);
           } else {
-            writeLog(0, "加载配置失败：" + fallbackUrl,
+            writeLog(0, "加载配置失败：" + fallbackConfig,
                      LOG_LEVEL_WARNING);
           }
         }
       }
 
       if (!configLoadSuccess) {
-        writeLog(0, "所有回退配置 URL 均加载失败。", LOG_LEVEL_ERROR);
+        writeLog(0, "所有远程及内置回退配置均加载失败。", LOG_LEVEL_ERROR);
       }
     }
   }

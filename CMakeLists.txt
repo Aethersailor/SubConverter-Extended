@@ -57,6 +57,7 @@ OPTION(USING_MALLOC_TRIM "Call malloc_trim after processing request to lower mem
 #now using internal MD5 calculation
 #OPTION(USING_MBEDTLS "Use mbedTLS instead of OpenSSL for MD5 calculation." OFF)
 OPTION(BUILD_STATIC_LIBRARY "Build a static library containing only the essential part." OFF)
+OPTION(BUILD_TESTS "Build focused regression tests." OFF)
 
 INCLUDE(CheckCXXSourceCompiles)
 CHECK_CXX_SOURCE_COMPILES(
@@ -74,6 +75,7 @@ ADD_EXECUTABLE(${BUILD_TARGET_NAME}
     src/generator/template/templates.cpp
     src/handler/dashboard_auth.cpp
     src/handler/dashboard_page.cpp
+    src/handler/external_config_fallback.cpp
     src/handler/inspect_page.cpp
     src/handler/interfaces.cpp
     src/handler/multithread.cpp
@@ -209,6 +211,15 @@ ELSE()
     INCLUDE(GNUInstallDirs)
     INSTALL(TARGETS ${BUILD_TARGET_NAME} DESTINATION ${CMAKE_INSTALL_BINDIR}/${BUILD_TARGET_NAME})
     INSTALL(DIRECTORY base/ DESTINATION ${CMAKE_INSTALL_BINDIR}/${BUILD_TARGET_NAME} FILES_MATCHING PATTERN "*")
+ENDIF()
+
+IF(BUILD_TESTS)
+    ENABLE_TESTING()
+    ADD_EXECUTABLE(external_config_fallback_test
+        tests/external_config_fallback_test.cpp
+        src/handler/external_config_fallback.cpp)
+    TARGET_INCLUDE_DIRECTORIES(external_config_fallback_test PRIVATE src)
+    ADD_TEST(NAME external_config_fallback COMMAND external_config_fallback_test)
 ENDIF()
 
 ELSE() #BUILD_STATIC_LIBRARY
