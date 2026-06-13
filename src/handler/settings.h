@@ -29,6 +29,7 @@ struct Settings {
   int listenPort = 25500, maxPendingConns = 10, maxConcurThreads = 16,
       maxServerThreads = 128;
   bool prependInsert = true, skipFailedLinks = false;
+  bool customOpenClashRulesFallback = false;
   const bool APIMode = true; // Hardcoded for security - cannot be changed
   bool writeManagedConfig = false, enableRuleGen = true,
        updateRulesetOnRequest = false, overwriteOriginalRules = true;

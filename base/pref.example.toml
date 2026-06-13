@@ -79,6 +79,13 @@ append_proxy_type = false
 # When requesting /sub, reload this config file first.
 reload_conf_on_request = false
 
+[custom_openclash_rules]
+# Enable bundled fallback and URL rewriting for the
+# Aethersailor/Custom_OpenClash_Rules main branch.
+# Keep disabled during normal operation; enable it when the upstream repository
+# or its CDN mirrors are unavailable.
+fallback_enabled = false
+
 [[userinfo.stream_rule]]
 # Rules to extract stream data from node
 # Format: full_match_regex|new_format_regex

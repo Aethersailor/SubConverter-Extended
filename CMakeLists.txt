@@ -69,13 +69,14 @@ int main(){std::to_string(0);}
 IF(NOT BUILD_STATIC_LIBRARY)
 
 ADD_EXECUTABLE(${BUILD_TARGET_NAME} 
+    src/config/custom_openclash_rules.cpp
     src/generator/config/nodemanip.cpp
     src/generator/config/ruleconvert.cpp
     src/generator/config/subexport.cpp
     src/generator/template/templates.cpp
     src/handler/dashboard_auth.cpp
     src/handler/dashboard_page.cpp
-    src/handler/external_config_fallback.cpp
+    src/handler/custom_openclash_rules_endpoint.cpp
     src/handler/inspect_page.cpp
     src/handler/interfaces.cpp
     src/handler/multithread.cpp
@@ -215,16 +216,23 @@ ENDIF()
 
 IF(BUILD_TESTS)
     ENABLE_TESTING()
-    ADD_EXECUTABLE(external_config_fallback_test
-        tests/external_config_fallback_test.cpp
-        src/handler/external_config_fallback.cpp)
-    TARGET_INCLUDE_DIRECTORIES(external_config_fallback_test PRIVATE src)
-    ADD_TEST(NAME external_config_fallback COMMAND external_config_fallback_test)
+    ADD_EXECUTABLE(custom_openclash_rules_test
+        tests/custom_openclash_rules_test.cpp
+        src/config/custom_openclash_rules.cpp)
+    TARGET_INCLUDE_DIRECTORIES(custom_openclash_rules_test PRIVATE
+        src
+        ${YAML_CPP_INCLUDE_DIRS})
+    TARGET_LINK_DIRECTORIES(custom_openclash_rules_test PRIVATE
+        ${YAML_CPP_LIBRARY_DIRS})
+    TARGET_LINK_LIBRARIES(custom_openclash_rules_test
+        ${YAML_CPP_LIBRARY})
+    ADD_TEST(NAME custom_openclash_rules COMMAND custom_openclash_rules_test)
 ENDIF()
 
 ELSE() #BUILD_STATIC_LIBRARY
 
 ADD_LIBRARY(${BUILD_TARGET_NAME} STATIC
+    src/config/custom_openclash_rules.cpp
     src/generator/config/ruleconvert.cpp
     src/generator/config/subexport.cpp
     src/generator/template/templates.cpp
