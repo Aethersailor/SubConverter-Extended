@@ -293,7 +293,7 @@ int main(int argc, char *argv[]) {
                                                      : subconverter);
 
   webServer.append_response(
-      "GET", R"(/Custom_OpenClash_Rules/main/(cfg|rule)/.+)",
+      "GET", R"(/Custom_OpenClash_Rules/main(/.*)?)",
       "application/octet-stream",
       custom_openclash_rules_endpoint::serve);
 

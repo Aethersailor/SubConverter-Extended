@@ -9,6 +9,7 @@ namespace custom_openclash_rules {
 namespace {
 
 const std::string PUBLISHED_PREFIX = "/Custom_OpenClash_Rules/main/";
+const std::string PUBLISHED_ROOT = "/Custom_OpenClash_Rules/main";
 const std::string LOCAL_PREFIX = "Custom_OpenClash_Rules/main/";
 
 std::string toLower(std::string value) {
@@ -208,6 +209,47 @@ Resource matchPublishedPath(const std::string &path) {
   if (segments.empty())
     return {};
   return buildResource(segments, 0);
+}
+
+PublishedDirectory matchPublishedDirectory(const std::string &path) {
+  if (path.compare(0, PUBLISHED_ROOT.size(), PUBLISHED_ROOT) != 0)
+    return {};
+  if (path.size() > PUBLISHED_ROOT.size() &&
+      path[PUBLISHED_ROOT.size()] != '/')
+    return {};
+  if (path.size() == PUBLISHED_ROOT.size())
+    return {true, false, ""};
+
+  bool trailing_slash = path.size() > PUBLISHED_ROOT.size() &&
+                        path.back() == '/';
+  std::string relative = path.substr(PUBLISHED_ROOT.size());
+  if (!relative.empty() && relative.front() == '/')
+    relative.erase(0, 1);
+  if (relative.empty())
+    return {true, true, ""};
+  if (!relative.empty() && relative.back() == '/') {
+    relative.pop_back();
+    if (relative.empty())
+      return {};
+  }
+
+  std::vector<std::string> segments = splitPath(relative);
+  if (segments.empty() ||
+      (!equalsIgnoreCase(segments[0], "cfg") &&
+       !equalsIgnoreCase(segments[0], "rule")))
+    return {};
+  for (const std::string &segment : segments) {
+    if (!isSafeSegment(segment))
+      return {};
+  }
+
+  std::string repository_path;
+  for (const std::string &segment : segments) {
+    if (!repository_path.empty())
+      repository_path += '/';
+    repository_path += segment;
+  }
+  return {true, trailing_slash, repository_path};
 }
 
 std::vector<std::string> localPathCandidates(const Resource &resource) {

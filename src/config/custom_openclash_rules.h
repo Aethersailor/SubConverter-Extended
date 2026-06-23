@@ -24,8 +24,17 @@ struct Resource {
   bool matched() const { return kind != ResourceKind::None; }
 };
 
+struct PublishedDirectory {
+  bool valid = false;
+  bool trailing_slash = false;
+  std::string repository_path;
+
+  bool matched() const { return valid; }
+};
+
 Resource matchRepositoryUrl(const std::string &url);
 Resource matchPublishedPath(const std::string &path);
+PublishedDirectory matchPublishedDirectory(const std::string &path);
 
 std::vector<std::string> localPathCandidates(const Resource &resource);
 std::string publishedPath(const Resource &resource);
