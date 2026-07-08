@@ -1,0 +1,11 @@
+.git
+.github
+.vs
+build
+cmake-build-*
+stats
+**/__pycache__
+*.pyc
+*.pyo
+*.log
+subconverter.exe

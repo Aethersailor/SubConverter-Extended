@@ -25,6 +25,13 @@ common:
   append_proxy_type: false
   reload_conf_on_request: false
 
+custom_openclash_rules:
+  # Enable bundled fallback and URL rewriting for the
+  # Aethersailor/Custom_OpenClash_Rules main branch.
+  # Keep disabled during normal operation; enable it when the upstream
+  # repository or its CDN mirrors are unavailable.
+  fallback_enabled: false
+
 userinfo:
   stream_rule: 
   - {match: "^剩余流量：(.*?)\\|总流量：(.*)$", replace: "total=$2&left=$1"}

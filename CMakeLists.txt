@@ -57,6 +57,7 @@ OPTION(USING_MALLOC_TRIM "Call malloc_trim after processing request to lower mem
 #now using internal MD5 calculation
 #OPTION(USING_MBEDTLS "Use mbedTLS instead of OpenSSL for MD5 calculation." OFF)
 OPTION(BUILD_STATIC_LIBRARY "Build a static library containing only the essential part." OFF)
+OPTION(BUILD_TESTS "Build focused regression tests." OFF)
 
 INCLUDE(CheckCXXSourceCompiles)
 CHECK_CXX_SOURCE_COMPILES(
@@ -68,12 +69,14 @@ int main(){std::to_string(0);}
 IF(NOT BUILD_STATIC_LIBRARY)
 
 ADD_EXECUTABLE(${BUILD_TARGET_NAME} 
+    src/config/custom_openclash_rules.cpp
     src/generator/config/nodemanip.cpp
     src/generator/config/ruleconvert.cpp
     src/generator/config/subexport.cpp
     src/generator/template/templates.cpp
     src/handler/dashboard_auth.cpp
     src/handler/dashboard_page.cpp
+    src/handler/custom_openclash_rules_endpoint.cpp
     src/handler/inspect_page.cpp
     src/handler/interfaces.cpp
     src/handler/multithread.cpp
@@ -211,9 +214,31 @@ ELSE()
     INSTALL(DIRECTORY base/ DESTINATION ${CMAKE_INSTALL_BINDIR}/${BUILD_TARGET_NAME} FILES_MATCHING PATTERN "*")
 ENDIF()
 
+IF(BUILD_TESTS)
+    ENABLE_TESTING()
+    ADD_EXECUTABLE(custom_openclash_rules_test
+        tests/custom_openclash_rules_test.cpp
+        src/config/custom_openclash_rules.cpp
+        src/handler/custom_openclash_rules_endpoint.cpp
+        src/utils/file.cpp
+        src/utils/md5/md5.cpp
+        src/utils/urlencode.cpp)
+    TARGET_INCLUDE_DIRECTORIES(custom_openclash_rules_test PRIVATE
+        src
+        ${YAML_CPP_INCLUDE_DIRS})
+    TARGET_LINK_DIRECTORIES(custom_openclash_rules_test PRIVATE
+        ${YAML_CPP_LIBRARY_DIRS})
+    TARGET_LINK_LIBRARIES(custom_openclash_rules_test
+        ${YAML_CPP_LIBRARY})
+    ADD_TEST(NAME custom_openclash_rules COMMAND custom_openclash_rules_test)
+    SET_TESTS_PROPERTIES(custom_openclash_rules PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+ENDIF()
+
 ELSE() #BUILD_STATIC_LIBRARY
 
 ADD_LIBRARY(${BUILD_TARGET_NAME} STATIC
+    src/config/custom_openclash_rules.cpp
     src/generator/config/ruleconvert.cpp
     src/generator/config/subexport.cpp
     src/generator/template/templates.cpp

@@ -406,6 +406,8 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"http-opts", {true, "string", false}}, // vmess
         {"interface-name", {true, "string", false}}, // BasicOption
         {"ip-version", {true, "string", false}}, // BasicOption
+        {"mekya-opts", {true, "string", false}}, // vmess
+        {"mkcp-opts", {true, "string", false}}, // vmess
         {"mptcp", {true, "bool", false}}, // BasicOption
         {"name", {true, "string", false}}, // vmess
         {"network", {true, "string", false}}, // vmess
@@ -420,6 +422,7 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"skip-cert-verify", {true, "bool", true}}, // vmess [HARDCODED]
         {"tfo", {true, "bool", false}}, // BasicOption
         {"tls", {true, "bool", true}}, // vmess [HARDCODED]
+        {"tlsmirror-opts", {true, "string", false}}, // vmess
         {"udp", {true, "bool", true}}, // vmess [HARDCODED]
         {"uuid", {true, "string", false}}, // vmess
         {"ws-opts", {true, "string", false}}, // vmess

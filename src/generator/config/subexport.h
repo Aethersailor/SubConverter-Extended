@@ -44,6 +44,7 @@ struct extra_settings {
   bool clash_script = false;
   std::string surge_ssr_path;
   std::string managed_config_prefix;
+  std::string custom_openclash_rules_base_url;
   std::string quanx_dev_id;
   tribool udp = tribool();
   tribool tfo = tribool();
@@ -56,6 +57,7 @@ struct extra_settings {
   std::string clash_proxy_groups_style = "flow";
   bool use_proxy_provider = true;       // 默认启用 proxy-provider 模式
   bool provider_proxy_direct = true;    // proxy-provider 默认使用 DIRECT 更新
+  bool custom_openclash_rules_fallback = false;
   std::vector<ProxyProvider> providers; // provider 列表
   bool authorized = false;
   RuleConversionStats *rule_stats = nullptr;

@@ -4,6 +4,7 @@
 #include <filesystem>
 
 #include "config/binding.h"
+#include "config/custom_openclash_rules.h"
 #include "handler/webget.h"
 #include "interfaces.h"
 #include "multithread.h"
@@ -27,6 +28,23 @@ const std::map<std::string, ruleset_type> RulesetTypes = {
     {"clash-classic:", RULESET_CLASH_CLASSICAL},
     {"quanx:", RULESET_QUANX},
     {"surge:", RULESET_SURGE}};
+
+static std::shared_future<std::string>
+makeReadyRulesetContent(std::string content = "") {
+  std::promise<std::string> promise;
+  promise.set_value(std::move(content));
+  return promise.get_future().share();
+}
+
+static std::string findBundledCustomOpenClashResource(
+    const custom_openclash_rules::Resource &resource) {
+  for (const std::string &candidate :
+       custom_openclash_rules::localPathCandidates(resource)) {
+    if (fileExist(candidate, true))
+      return candidate;
+  }
+  return "";
+}
 
 static bool parseBoolSetting(const std::string &value) {
   std::string normalized = toLower(trimWhitespace(value, true, true));
@@ -140,7 +158,9 @@ bool isPublicFetchRestricted(FetchContext context) {
 
 bool isTrustedLocalResourcePath(const std::string &path) {
   return pathInsideRoot(path, global.basePath) ||
-         pathInsideRoot(path, global.templatePath);
+         pathInsideRoot(path, global.templatePath) ||
+         pathInsideRoot(path, "Custom_OpenClash_Rules") ||
+         pathInsideRoot(path, "base/Custom_OpenClash_Rules");
 }
 
 bool isPublicUploadAllowed() {
@@ -401,12 +421,70 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
     } else {
       ruleset_type type = RULESET_SURGE;
       rule_url_typed = rule_url;
+      std::string type_prefix;
       auto iter = std::find_if(
           RulesetTypes.begin(), RulesetTypes.end(),
           [rule_url](auto y) { return startsWith(rule_url, y.first); });
       if (iter != RulesetTypes.end()) {
         rule_url.erase(0, iter->first.size());
         type = iter->second;
+        type_prefix = iter->first;
+      }
+
+      if (global.customOpenClashRulesFallback) {
+        custom_openclash_rules::Resource resource =
+            custom_openclash_rules::matchRepositoryUrl(rule_url);
+        std::string bundled_path =
+            findBundledCustomOpenClashResource(resource);
+
+        if (resource.kind ==
+                custom_openclash_rules::ResourceKind::RuleList &&
+            !bundled_path.empty()) {
+          writeLog(0,
+                   "规则集命中 Custom_OpenClash_Rules 本地副本：'" +
+                       resource.repository_path + "'，策略组：'" +
+                       rule_group + "'。",
+                   LOG_LEVEL_INFO);
+          rc = {rule_group,
+                bundled_path,
+                rule_url_typed,
+                type,
+                fetchFileAsync(bundled_path, proxy, global.cacheRuleset, true,
+                               global.asyncFetchRuleset,
+                               FetchContext::TrustedConfig),
+                x.Interval};
+          ruleset_content_array.emplace_back(std::move(rc));
+          continue;
+        }
+
+        bool clash_provider =
+            type == RULESET_CLASH_DOMAIN || type == RULESET_CLASH_IPCIDR ||
+            type == RULESET_CLASH_CLASSICAL;
+        if (clash_provider &&
+            custom_openclash_rules::isDirectProvider(resource) &&
+            !bundled_path.empty()) {
+          std::string published_url =
+              custom_openclash_rules::publishedUrl(
+                  resource, global.managedConfigPrefix);
+          if (!published_url.empty()) {
+            writeLog(0,
+                     "规则集命中 Custom_OpenClash_Rules 静态发布地址：'" +
+                         published_url + "'，策略组：'" + rule_group + "'。",
+                     LOG_LEVEL_INFO);
+            rc = {rule_group,
+                  published_url,
+                  type_prefix + published_url,
+                  type,
+                  makeReadyRulesetContent(),
+                  x.Interval};
+            ruleset_content_array.emplace_back(std::move(rc));
+            continue;
+          }
+          writeLog(0,
+                   "Custom_OpenClash_Rules 回落已开启，但 "
+                   "managed_config_prefix 为空，无法改写规则链接。",
+                   LOG_LEVEL_WARNING);
+        }
       }
       writeLog(0,
                "正在更新规则集 URL：'" + rule_url + "'，策略组：'" +
@@ -484,6 +562,12 @@ void readYAMLConf(YAML::Node &node) {
   section["proxy_ruleset"] >> global.proxyRuleset;
   section["proxy_subscription"] >> global.proxySubscription;
   section["reload_conf_on_request"] >> global.reloadConfOnRequest;
+
+  if (node["custom_openclash_rules"].IsDefined()) {
+    section = node["custom_openclash_rules"];
+    section["fallback_enabled"] >>
+        global.customOpenClashRulesFallback;
+  }
 
   if (node["userinfo"].IsDefined()) {
     section = node["userinfo"];
@@ -791,6 +875,12 @@ void readTOMLConf(toml::value &root) {
   else
     global.filterScript.clear();
 
+  auto section_custom_openclash =
+      toml::find_or(root, "custom_openclash_rules",
+                    toml::value(toml::table()));
+  find_if_exist(section_custom_openclash, "fallback_enabled",
+                global.customOpenClashRulesFallback);
+
   safe_set_streams(toml::find_or<RegexMatchConfigs>(
       root, "userinfo", "stream_rule", RegexMatchConfigs{}));
   safe_set_times(toml::find_or<RegexMatchConfigs>(root, "userinfo", "time_rule",
@@ -996,6 +1086,7 @@ void readConf() {
   global.dashboardAuthMaxFailures = 5;
   global.dashboardAuthWindowSeconds = 300;
   global.dashboardAuthLockSeconds = 900;
+  global.customOpenClashRulesFallback = false;
 
   try {
     std::string prefdata = fileGet(global.prefPath, false);
@@ -1065,6 +1156,12 @@ void readConf() {
   ini.get_if_exist("proxy_ruleset", global.proxyRuleset);
   ini.get_if_exist("proxy_subscription", global.proxySubscription);
   ini.get_bool_if_exist("reload_conf_on_request", global.reloadConfOnRequest);
+
+  if (ini.section_exist("custom_openclash_rules")) {
+    ini.enter_section("custom_openclash_rules");
+    ini.get_bool_if_exist("fallback_enabled",
+                          global.customOpenClashRulesFallback);
+  }
 
   if (ini.section_exist("surge_external_proxy")) {
     ini.enter_section("surge_external_proxy");
