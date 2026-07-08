@@ -135,10 +135,7 @@ DOMAIN-SUFFIX,epg.v1.mk
 DOMAIN-SUFFIX,epg.aptv.app
 DOMAIN-SUFFIX,gdcucc.v1.mk
 
-# Bangumi番组计划
-DOMAIN-SUFFIX,bgm.tv
 DOMAIN-SUFFIX,chii.in
-DOMAIN-SUFFIX,bangumi.tv
 
 # 肥羊 All in One
 DOMAIN-SUFFIX,freetv.top
@@ -324,6 +321,22 @@ DOMAIN-SUFFIX,jsj.top
 # 以下是准备向 GeoSite 上游仓库提交 PR 的国内冷门域名，收录后会注释对应内容
 # ---------------------------------------
 # 以下域名待提交 PR
+# add by Telegram user: Evan / Date: 2026-07-05 10:09:41
+DOMAIN-SUFFIX,yunqin.online
+# 个人网站 / add by Telegram user: Harry / Date: 2026-07-03 22:51:54
+DOMAIN-SUFFIX,inetlab.top
+# Raz伴学 / add by Telegram user: along / Date: 2026-06-24 22:14:45
+DOMAIN-SUFFIX,listenai.com
+# 小程序 / add by Telegram user: 哈Lay / Date: 2026-06-21 17:10:29
+DOMAIN-SUFFIX,dcshfu.com
+# 打印服务 / add by Telegram user: Shady / Date: 2026-06-18 13:42:23
+DOMAIN-SUFFIX,tluyou.com
+# 中转api / add by Telegram user: 美 / Date: 2026-06-12 08:03:48
+DOMAIN-SUFFIX,kldai.vip
+# 印条 / add by Telegram user: Coco / Date: 2026-06-08 02:24:28
+DOMAIN-SUFFIX,hprtupgrade.com
+# add by Telegram user: Coco / Date: 2026-06-07 17:28:21
+DOMAIN-SUFFIX,mystery0.vip
 # 操作系统网站 / add by Telegram user: young / Date: 2026-06-02 18:02:31
 DOMAIN-SUFFIX,xiuxitong.com
 # add by Telegram user: IllIllIlIl / Date: 2026-06-01 16:02:45

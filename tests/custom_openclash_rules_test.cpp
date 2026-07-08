@@ -30,15 +30,9 @@ int main() {
       {"https://testingcf.jsdelivr.net/gh/Aethersailor/"
        "Custom_OpenClash_Rules@refs/heads/main/rule/Custom_Direct_Domain.mrs",
        ResourceKind::RuleMrs, "rule/Custom_Direct_Domain.mrs"},
-      {"HTTPS://GCORE.JSDELIVR.NET/gh/Aethersailor/"
-       "Custom_OpenClash_Rules@main/rule/archived/Emby.list#fragment",
-       ResourceKind::RuleList, "rule/archived/Emby.list"},
       {"https://raw.githubusercontent.com/Aethersailor/"
        "Custom_OpenClash_Rules/main/cfg/yaml/Custom_Clash.yaml",
        ResourceKind::StaticFile, "cfg/yaml/Custom_Clash.yaml"},
-      {"https://raw.githubusercontent.com/Aethersailor/"
-       "Custom_OpenClash_Rules/main/cfg/test/Nested.ini",
-       ResourceKind::StaticFile, "cfg/test/Nested.ini"},
   };
 
   for (const MatchCase &test : valid) {
@@ -60,6 +54,12 @@ int main() {
       "Custom_OpenClash_Rules@main/rule/../README.md",
       "https://cdn.jsdelivr.net/gh/Aethersailor/"
       "Custom_OpenClash_Rules@main/doc/README.md",
+      "https://cdn.jsdelivr.net/gh/Aethersailor/"
+      "Custom_OpenClash_Rules@main/rule/README.md",
+      "HTTPS://GCORE.JSDELIVR.NET/gh/Aethersailor/"
+      "Custom_OpenClash_Rules@main/rule/archived/Emby.list#fragment",
+      "https://raw.githubusercontent.com/Aethersailor/"
+      "Custom_OpenClash_Rules/main/cfg/test/Nested.ini",
       "file:///base/Custom_OpenClash_Rules/main/rule/Custom_Direct.list",
   };
 
@@ -71,12 +71,12 @@ int main() {
   }
 
   auto published = custom_openclash_rules::matchPublishedPath(
-      "/Custom_OpenClash_Rules/main/rule/archived/Emby.list");
+      "/Custom_OpenClash_Rules/main/rule/Custom_Direct.list");
   if (published.kind != ResourceKind::RuleList ||
       custom_openclash_rules::publishedUrl(
           published, "https://test-api.asailor.org/") !=
           "https://test-api.asailor.org/Custom_OpenClash_Rules/main/rule/"
-          "archived/Emby.list") {
+          "Custom_Direct.list") {
     std::cerr << "Published path mapping failed\n";
     return 1;
   }
@@ -87,12 +87,21 @@ int main() {
     std::cerr << "Encoded traversal path matched\n";
     return 1;
   }
+  if (custom_openclash_rules::matchPublishedPath(
+          "/Custom_OpenClash_Rules/main/rule/archived/Emby.list")
+          .matched() ||
+      custom_openclash_rules::matchPublishedPath(
+          "/Custom_OpenClash_Rules/main/cfg/README.md")
+          .matched()) {
+    std::cerr << "Excluded published path matched\n";
+    return 1;
+  }
 
   const std::vector<std::string> valid_directories = {
       "/Custom_OpenClash_Rules/main",
       "/Custom_OpenClash_Rules/main/",
       "/Custom_OpenClash_Rules/main/cfg/",
-      "/Custom_OpenClash_Rules/main/rule/archived/"};
+      "/Custom_OpenClash_Rules/main/cfg/yaml/"};
   for (const std::string &path : valid_directories) {
     if (!custom_openclash_rules::matchPublishedDirectory(path).matched()) {
       std::cerr << "Directory path did not match: " << path << '\n';
@@ -106,6 +115,9 @@ int main() {
       "/Custom_OpenClash_Rules/main/cfg/../",
       "/Custom_OpenClash_Rules/main/cfg/%2e%2e/",
       "/Custom_OpenClash_Rules/main//",
+      "/Custom_OpenClash_Rules/main/cfg/archived/",
+      "/Custom_OpenClash_Rules/main/cfg/test/",
+      "/Custom_OpenClash_Rules/main/rule/archived/",
       "/Custom_OpenClash_Rules/main/cfg//archived/",
       "/Custom_OpenClash_Rules/main/cfg\\archived/"};
   for (const std::string &path : invalid_directories) {
@@ -154,8 +166,10 @@ int main() {
   auto cfg_page = requestPath("/Custom_OpenClash_Rules/main/cfg/");
   if (std::get<0>(cfg_page).status_code != 200 ||
       std::get<1>(cfg_page).find("Custom_Clash.ini") == std::string::npos ||
-      std::get<1>(cfg_page).find("href=\"archived/\"") ==
+      std::get<1>(cfg_page).find("href=\"archived/\"") !=
           std::string::npos ||
+      std::get<1>(cfg_page).find("href=\"test/\"") != std::string::npos ||
+      std::get<1>(cfg_page).find("README.md") != std::string::npos ||
       std::get<1>(cfg_page).find("href=\"yaml/\"") == std::string::npos ||
       std::get<1>(cfg_page).find("Custom_Direct.list") !=
           std::string::npos) {
@@ -171,11 +185,10 @@ int main() {
     return 1;
   }
 
-  auto nested_redirect = requestPath(
-      "/Custom_OpenClash_Rules/main/cfg/archived");
+  auto nested_redirect = requestPath("/Custom_OpenClash_Rules/main/cfg/yaml");
   if (std::get<0>(nested_redirect).status_code != 308 ||
       std::get<0>(nested_redirect).headers["Location"] !=
-          "/Custom_OpenClash_Rules/main/cfg/archived/") {
+          "/Custom_OpenClash_Rules/main/cfg/yaml/") {
     std::cerr << "Nested directory redirect failed\n";
     return 1;
   }
@@ -201,6 +214,11 @@ int main() {
 
   const std::vector<std::string> missing_paths = {
       "/Custom_OpenClash_Rules/main/doc/",
+      "/Custom_OpenClash_Rules/main/cfg/README.md",
+      "/Custom_OpenClash_Rules/main/cfg/test/",
+      "/Custom_OpenClash_Rules/main/rule/README.md",
+      "/Custom_OpenClash_Rules/main/rule/archived/",
+      "/Custom_OpenClash_Rules/main/rule/archived/Emby.list",
       "/Custom_OpenClash_Rules/main/cfg/missing/",
       "/Custom_OpenClash_Rules/main/cfg/../rule/",
       "/Custom_OpenClash_Rules/main/manifest.sha256",
