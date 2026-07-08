@@ -11,6 +11,8 @@ namespace mihomo {
         "hysteria",
         "hysteria2",
         "hy2",
+        "hysteria2+realm",
+        "hy2+realm",
         "tuic",
         "trojan",
         "vless",
