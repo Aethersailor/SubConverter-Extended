@@ -369,6 +369,8 @@ int main(int argc, char *argv[]) {
     else
       writeLog(0, "已忽略非法 PORT 环境变量。", LOG_LEVEL_WARNING);
   }
+
+  // codeql[cpp/user-controlled-bypass] PORT is validated as a numeric deployment setting in the 1-65535 range before it affects listener_args.
   if (global.securityProfile == "lan" &&
       (global.listenAddress == "0.0.0.0" || global.listenAddress == "::")) {
     writeLog(0,
