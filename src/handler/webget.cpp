@@ -6,6 +6,7 @@
 #include <mutex>
 #include <thread>
 #include <atomic>
+#include <cctype>
 #include <cstdint>
 
 #include <curl/curl.h>
@@ -296,27 +297,66 @@ static bool is_blocked_hostname(const std::string &host)
     return false;
 }
 
+static std::string escape_log_value(const std::string &value)
+{
+    std::string escaped;
+    escaped.reserve(value.size());
+    static const char hex[] = "0123456789ABCDEF";
+    for(unsigned char ch : value)
+    {
+        if(ch < 0x20 || ch == 0x7F)
+        {
+            escaped += "\\x";
+            escaped += hex[ch >> 4];
+            escaped += hex[ch & 0x0F];
+        }
+        else
+            escaped.push_back(static_cast<char>(ch));
+    }
+    return escaped;
+}
+
+static bool has_control_character(const std::string &value)
+{
+    for(unsigned char ch : value)
+    {
+        if(std::iscntrl(ch))
+            return true;
+    }
+    return false;
+}
+
 bool isFetchUrlAllowed(const std::string &url, FetchContext context)
 {
     if(!isPublicFetchRestricted(context))
         return true;
-    if(startsWith(url, "data:"))
-        return true;
-    if(!startsWith(url, "http://") && !startsWith(url, "https://"))
+    std::string checked_url = trimWhitespace(url, true, true);
+    std::string log_url = escape_log_value(checked_url);
+    if(checked_url.empty() || checked_url != url || has_control_character(checked_url))
     {
-        writeLog(0, "已阻止公开请求获取不支持协议的 URL：" + url,
+        writeLog(0, "已阻止公开请求获取格式异常的 URL：" + log_url,
                  LOG_LEVEL_WARNING);
         return false;
     }
 
-    std::string parsed_url = url, host, path;
+    std::string lower_url = toLower(checked_url);
+    if(startsWith(lower_url, "data:"))
+        return true;
+    if(!startsWith(lower_url, "http://") && !startsWith(lower_url, "https://"))
+    {
+        writeLog(0, "已阻止公开请求获取不支持协议的 URL：" + log_url,
+                 LOG_LEVEL_WARNING);
+        return false;
+    }
+
+    std::string parsed_url = checked_url, host, path;
     int port = 0;
     bool is_tls = false;
     urlParse(parsed_url, host, path, port, is_tls);
     host = normalize_fetch_host(host);
     if(host.empty() || is_blocked_hostname(host) || is_blocked_ip_address(host))
     {
-        writeLog(0, "已阻止公开请求访问本地或私有主机：" + url,
+        writeLog(0, "已阻止公开请求访问本地或私有主机：" + log_url,
                  LOG_LEVEL_WARNING);
         return false;
     }
@@ -325,7 +365,7 @@ bool isFetchUrlAllowed(const std::string &url, FetchContext context)
     if(!resolved.empty() && is_blocked_ip_address(resolved, true))
     {
         writeLog(0,
-                 "已阻止公开请求：目标主机解析到本地或私有地址：" + url,
+                 "已阻止公开请求：目标主机解析到本地或私有地址：" + log_url,
                  LOG_LEVEL_WARNING);
         return false;
     }

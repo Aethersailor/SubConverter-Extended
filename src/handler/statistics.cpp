@@ -16,7 +16,9 @@
 #ifdef _WIN32
 #include <direct.h>
 #else
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 #include <nlohmann/json.hpp>
@@ -153,7 +155,19 @@ bool ensureDirectory(const std::string &raw_path) {
 }
 
 bool writeTextFile(const std::string &path, const std::string &content) {
+#ifdef _WIN32
   std::FILE *fp = std::fopen(path.c_str(), "wb");
+#else
+  int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC,
+                S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+  if (fd == -1)
+    return false;
+  std::FILE *fp = fdopen(fd, "wb");
+  if (!fp) {
+    close(fd);
+    return false;
+  }
+#endif
   if (!fp)
     return false;
   size_t written = std::fwrite(content.c_str(), 1, content.size(), fp);
