@@ -337,6 +337,9 @@ int main(int argc, char *argv[]) {
   // webServer.append_response("GET", "/list-profiles",
   // "text/plain;charset=utf-8", listProfiles);
 
+  std::string env_port = getEnv("PORT");
+  if (!env_port.empty())
+    global.listenPort = to_int(env_port, global.listenPort);
   if (global.securityProfile == "lan" &&
       (global.listenAddress == "0.0.0.0" || global.listenAddress == "::")) {
     writeLog(0,

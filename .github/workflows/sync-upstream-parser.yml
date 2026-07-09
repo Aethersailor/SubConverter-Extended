@@ -282,7 +282,7 @@ jobs:
           set -euo pipefail
           docker build --target builder -t subconverter-upstream-sync-test --build-arg THREADS=2 .
 
-          CID="$(docker run -d -p '127.0.0.1::25500' subconverter-upstream-sync-test /src/subconverter -f /src/base/pref.example.toml)"
+          CID="$(docker run -d -e PORT=25500 -p '127.0.0.1::25500' subconverter-upstream-sync-test /src/subconverter -f /src/base/pref.example.toml)"
           trap 'docker rm -f "$CID" >/dev/null 2>&1 || true' EXIT
 
           HOST_PORT="$(docker port "$CID" 25500/tcp | awk -F: 'END {print $NF}')"

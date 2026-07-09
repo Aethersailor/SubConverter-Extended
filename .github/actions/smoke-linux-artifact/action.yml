@@ -35,20 +35,7 @@ runs:
         tar -xzf "$ARTIFACT" -C "$WORKDIR"
         cd "$WORKDIR/SubConverter-Extended"
 
-        cp base/pref.example.toml base/pref.toml
-        python3 - "$PORT" <<'PY'
-        import re
-        import sys
-        from pathlib import Path
-
-        port = int(sys.argv[1])
-        path = Path("base/pref.toml")
-        text = path.read_text(encoding="utf-8")
-        text = re.sub(r"(?m)^port = \d+$", f"port = {port}", text, count=1)
-        path.write_text(text, encoding="utf-8")
-        PY
-
-        PREF_PATH="$PWD/base/pref.toml" ./start.sh >"$WORKDIR/stdout.log" 2>"$WORKDIR/stderr.log" &
+        PORT="$PORT" PREF_PATH="$PWD/base/pref.toml" ./start.sh >"$WORKDIR/stdout.log" 2>"$WORKDIR/stderr.log" &
         PID="$!"
 
         URL="http://127.0.0.1:${PORT}/version"

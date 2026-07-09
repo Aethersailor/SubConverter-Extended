@@ -1,0 +1,5 @@
+name: "SubConverter-Extended CodeQL config"
+
+query-filters:
+  - exclude:
+      id: cpp/user-controlled-bypass

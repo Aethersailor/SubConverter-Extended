@@ -73,6 +73,14 @@ static bool pathInsideRoot(const std::string &path, const std::string &root) {
 }
 
 static void finalizeSecuritySettings() {
+  std::string profile_override = getEnv("SUBCONVERTER_SECURITY_PROFILE");
+  if (!profile_override.empty())
+    global.securityProfile = profile_override;
+
+  std::string upload_override = getEnv("SUBCONVERTER_ALLOW_PUBLIC_UPLOAD");
+  if (!upload_override.empty())
+    global.allowPublicUpload = parseBoolSetting(upload_override);
+
   global.securityProfile =
       toLower(trimWhitespace(global.securityProfile, true, true));
   if (global.securityProfile != "lan" && global.securityProfile != "public" &&
