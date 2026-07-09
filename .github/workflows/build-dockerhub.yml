@@ -39,10 +39,79 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  sync_custom_openclash_rules:
+    name: "🔄 Sync Custom OpenClash Rules"
+    runs-on: ubuntu-latest
+    outputs:
+      continue_build: ${{ steps.build_gate.outputs.continue_build }}
+    steps:
+      - name: Checkout
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/dev'
+        uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.PAT_TOKEN || github.token }}
+          fetch-depth: 0
+
+      - name: Checkout Custom_OpenClash_Rules
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/dev'
+        uses: actions/checkout@v6
+        with:
+          repository: Aethersailor/Custom_OpenClash_Rules
+          ref: main
+          token: ${{ secrets.PAT_TOKEN || github.token }}
+          path: .tmp/custom-openclash-rules
+          sparse-checkout: |
+            cfg
+            rule
+          sparse-checkout-cone-mode: true
+
+      - name: Sync bundled Custom_OpenClash_Rules files
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/dev'
+        shell: bash
+        run: python3 scripts/sync_custom_openclash_rules.py .tmp/custom-openclash-rules
+
+      - name: Commit and push synced files
+        id: sync_commit
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/dev'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "$(git status --porcelain -- base/Custom_OpenClash_Rules)" ]; then
+            echo "Custom_OpenClash_Rules assets are already up to date."
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A base/Custom_OpenClash_Rules
+          git commit -m "chore(rules): sync Custom OpenClash assets"
+
+          git fetch --no-tags origin "refs/heads/dev:refs/remotes/origin/dev"
+          git rebase "origin/dev"
+          git push origin "HEAD:refs/heads/dev"
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Set build gate
+        id: build_gate
+        if: always()
+        shell: bash
+        env:
+          PUSHED: ${{ steps.sync_commit.outputs.pushed }}
+        run: |
+          if [ "$PUSHED" = "true" ]; then
+            echo "continue_build=false" >> "$GITHUB_OUTPUT"
+            echo "Synced assets were pushed to dev; the next workflow run will build that commit."
+          else
+            echo "continue_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
   prepare:
     name: "🔧 Prepare Metadata"
     runs-on: ubuntu-latest
-    if: github.actor != 'dependabot[bot]' && !contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '[ci skip]') && (github.event_name != 'schedule' || github.ref == 'refs/heads/master')
+    needs: sync_custom_openclash_rules
+    if: needs.sync_custom_openclash_rules.outputs.continue_build == 'true' && github.actor != 'dependabot[bot]' && !contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '[ci skip]') && (github.event_name != 'schedule' || github.ref == 'refs/heads/master')
     outputs:
       sha_short: ${{ steps.vars.outputs.sha_short }}
       version: ${{ steps.version.outputs.version }}

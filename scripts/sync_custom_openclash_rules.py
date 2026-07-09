@@ -6,6 +6,22 @@ import shutil
 from pathlib import Path
 
 
+EXCLUDED_DIRECTORIES = {"archived", "test"}
+EXCLUDED_FILES = {"readme.md"}
+
+
+def ignore_unpublished(directory, names):
+    ignored = set()
+    for name in names:
+        lowered = name.lower()
+        path = Path(directory) / name
+        if path.is_dir() and lowered in EXCLUDED_DIRECTORIES:
+            ignored.add(name)
+        elif path.is_file() and lowered in EXCLUDED_FILES:
+            ignored.add(name)
+    return ignored
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -37,7 +53,7 @@ def main() -> int:
         destination_dir = destination / name
         if destination_dir.exists():
             shutil.rmtree(destination_dir)
-        shutil.copytree(source_dir, destination_dir)
+        shutil.copytree(source_dir, destination_dir, ignore=ignore_unpublished)
 
     manifest = repository / "base" / "Custom_OpenClash_Rules" / "manifest.sha256"
     entries = []

@@ -51,6 +51,18 @@ bool isSafeSegment(const std::string &segment) {
   return true;
 }
 
+bool isExcludedRepositoryPath(const std::vector<std::string> &segments,
+                              size_t offset) {
+  if (segments.size() <= offset)
+    return true;
+  for (size_t i = offset; i < segments.size(); ++i) {
+    std::string segment = toLower(segments[i]);
+    if (segment == "archived" || segment == "test")
+      return true;
+  }
+  return toLower(segments.back()) == "readme.md";
+}
+
 bool isRepository(const std::vector<std::string> &segments, size_t offset) {
   return segments.size() > offset + 1 &&
          equalsIgnoreCase(segments[offset], "Aethersailor") &&
@@ -77,6 +89,8 @@ Resource buildResource(const std::vector<std::string> &segments,
     if (!isSafeSegment(segments[i]))
       return {};
   }
+  if (isExcludedRepositoryPath(segments, offset))
+    return {};
 
   bool cfg = equalsIgnoreCase(segments[offset], "cfg");
   bool rule = equalsIgnoreCase(segments[offset], "rule");
@@ -242,6 +256,8 @@ PublishedDirectory matchPublishedDirectory(const std::string &path) {
     if (!isSafeSegment(segment))
       return {};
   }
+  if (isExcludedRepositoryPath(segments, 0))
+    return {};
 
   std::string repository_path;
   for (const std::string &segment : segments) {
