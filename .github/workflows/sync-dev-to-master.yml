@@ -25,6 +25,9 @@ concurrency:
   group: sync-dev-to-master
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   sync-branches:
     runs-on: ubuntu-latest
