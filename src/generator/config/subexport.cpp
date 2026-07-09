@@ -1001,6 +1001,10 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
         single_provider["exclude-filter"] = p.exclude_filter;
       }
 
+      if (!p.user_agent.empty()) {
+        single_provider["header"]["User-Agent"].push_back(p.user_agent);
+      }
+
       // 健康检查配置
       single_provider["health-check"]["enable"] = true;
       single_provider["health-check"]["url"] =
