@@ -201,6 +201,7 @@ jobs:
       with:
         languages: ${{ matrix.language }}
         build-mode: ${{ matrix.build-mode }}
+        config-file: ./.github/codeql/codeql-config.yml
         queries: security-extended
         # Disable trap caching to avoid "No such file or directory" error
         trap-caching: false

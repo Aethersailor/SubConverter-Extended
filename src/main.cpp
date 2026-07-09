@@ -1,4 +1,3 @@
-#include <cctype>
 #include <csignal>
 #include <iostream>
 #include <string>
@@ -40,29 +39,6 @@ void SetConsoleTitle(const std::string &title) {
   std::cout << "\033]0;" << title << '\007' << std::flush;
 }
 #endif // _WIN32
-
-static bool parse_port_value(const std::string &value, int &port) {
-  int parsed = 0;
-  bool has_digit = false;
-  bool seen_trailing_space = false;
-  for (unsigned char ch : value) {
-    if (std::isspace(ch)) {
-      if (has_digit)
-        seen_trailing_space = true;
-      continue;
-    }
-    if (seen_trailing_space || !std::isdigit(ch))
-      return false;
-    has_digit = true;
-    parsed = parsed * 10 + (ch - '0');
-    if (parsed > 65535)
-      return false;
-  }
-  if (!has_digit || parsed < 1)
-    return false;
-  port = parsed;
-  return true;
-}
 
 void setcd(std::string &file) {
   char szTemp[4096] = {}, filename[256] = {};
@@ -362,15 +338,8 @@ int main(int argc, char *argv[]) {
   // "text/plain;charset=utf-8", listProfiles);
 
   std::string env_port = getEnv("PORT");
-  if (!env_port.empty()) {
-    int parsed_port = 0;
-    if (parse_port_value(env_port, parsed_port))
-      global.listenPort = parsed_port;
-    else
-      writeLog(0, "已忽略非法 PORT 环境变量。", LOG_LEVEL_WARNING);
-  }
-
-  // codeql[cpp/user-controlled-bypass] PORT is validated as a numeric deployment setting in the 1-65535 range before it affects listener_args.
+  if (!env_port.empty())
+    global.listenPort = to_int(env_port, global.listenPort);
   if (global.securityProfile == "lan" &&
       (global.listenAddress == "0.0.0.0" || global.listenAddress == "::")) {
     writeLog(0,
