@@ -126,13 +126,13 @@ COPY --from=go-builder /build/bridge/param_compat.h /src/src/parser/param_compat
 RUN set -xe && \
     if [ "${REFRESH_HEADERS}" = "true" ]; then \
       echo "Downloading latest cpp-httplib..." && \
-      curl -fsSL https://raw.githubusercontent.com/yhirose/cpp-httplib/master/httplib.h -o include/httplib.h && \
+      curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL https://raw.githubusercontent.com/yhirose/cpp-httplib/master/httplib.h -o include/httplib.h && \
       echo "Downloading latest nlohmann/json..." && \
-      curl -fsSL https://github.com/nlohmann/json/releases/latest/download/json.hpp -o include/nlohmann/json.hpp && \
+      curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL https://github.com/nlohmann/json/releases/latest/download/json.hpp -o include/nlohmann/json.hpp && \
       echo "Downloading latest inja..." && \
-      curl -fsSL https://raw.githubusercontent.com/pantor/inja/master/single_include/inja/inja.hpp -o include/inja.hpp && \
+      curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL https://raw.githubusercontent.com/pantor/inja/master/single_include/inja/inja.hpp -o include/inja.hpp && \
       echo "Downloading latest jpcre2..." && \
-      curl -fsSL https://raw.githubusercontent.com/jpcre2/jpcre2/master/src/jpcre2.hpp -o include/jpcre2.hpp && \
+      curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL https://raw.githubusercontent.com/jpcre2/jpcre2/master/src/jpcre2.hpp -o include/jpcre2.hpp && \
       echo "Copying latest quickjspp from compiled source..." && \
       cp /opt/armv7/include/quickjspp.hpp include/quickjspp.hpp && \
       echo "Copying latest libcron headers from compiled source..." && \
