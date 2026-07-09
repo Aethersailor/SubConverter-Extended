@@ -281,7 +281,7 @@ void vlessConstruct(Proxy &node, const std::string &group, const std::string &re
         case "grpc"_hash:
             node.Host = host;
             node.GRPCMode = mode.empty() ? "gun" : mode;
-            node.GRPCServiceName = path.empty() ? "/" : urlEncode(urlDecode(trim(path)));
+            node.GRPCServiceName = path.empty() ? "/" : urlDecode(trim(path));
             break;
         case "quic"_hash:
             node.Host = host;
