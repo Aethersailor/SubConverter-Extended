@@ -72,8 +72,14 @@ def fetch_response(
     return body, response_headers
 
 
-def fetch(base_url: str, path: str, params: dict[str, str] | None, timeout: int) -> str:
-    body, _ = fetch_response(base_url, path, params, timeout)
+def fetch(
+    base_url: str,
+    path: str,
+    params: dict[str, str] | None,
+    timeout: int,
+    headers: dict[str, str] | None = None,
+) -> str:
+    body, _ = fetch_response(base_url, path, params, timeout, headers)
     return body
 
 
@@ -345,6 +351,138 @@ def run_checks(
                     f"{case_name} failed: missing={missing}, unexpected={unexpected}\n"
                     f"{output}"
                 )
+
+        def assert_provider_ua_present(label: str, output: str, user_agent: str) -> None:
+            required = ("proxy-providers:", "header:", "User-Agent:", user_agent)
+            missing = [value for value in required if value not in output]
+            if missing:
+                raise AssertionError(
+                    f"{label} did not include provider User-Agent: missing={missing}\n"
+                    f"{output}"
+                )
+
+        def assert_provider_ua_absent(label: str, output: str) -> None:
+            if "User-Agent:" in output:
+                raise AssertionError(
+                    f"{label} unexpectedly included provider User-Agent\n{output}"
+                )
+
+        provider_params = {
+            "target": "clash",
+            "url": remote_subscription_url,
+            "config": DISABLE_RULEGEN_CONFIG,
+        }
+        client_ua = "clash.meta/1.19.20"
+        client_output, client_headers = fetch_response(
+            base_url,
+            "/sub",
+            provider_params,
+            timeout,
+            {"User-Agent": client_ua},
+        )
+        assert_provider_ua_present("client UA provider", client_output, client_ua)
+        vary_values = {
+            value.strip().lower()
+            for value in client_headers.get("vary", "").split(",")
+            if value.strip()
+        }
+        if "user-agent" not in vary_values:
+            raise AssertionError(
+                "client UA provider response did not emit Vary: User-Agent"
+            )
+
+        custom_ua = "AirportRequired-UA/2026.07"
+        custom_output = fetch(
+            base_url,
+            "/sub",
+            provider_params,
+            timeout,
+            {"User-Agent": custom_ua},
+        )
+        assert_provider_ua_present("custom UA provider", custom_output, custom_ua)
+        if client_ua in custom_output:
+            raise AssertionError("custom UA provider output reused the sample UA")
+
+        browser_output, browser_headers = fetch_response(
+            base_url,
+            "/sub",
+            provider_params,
+            timeout,
+            {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/126.0.0.0 Safari/537.36"
+                )
+            },
+        )
+        if "proxy-providers:" not in browser_output:
+            raise AssertionError("browser UA provider request did not stay in provider mode")
+        assert_provider_ua_absent("browser UA provider", browser_output)
+        browser_vary_values = {
+            value.strip().lower()
+            for value in browser_headers.get("vary", "").split(",")
+            if value.strip()
+        }
+        if "user-agent" not in browser_vary_values:
+            raise AssertionError(
+                "browser UA provider response did not emit Vary: User-Agent"
+            )
+
+        tool_output = fetch(
+            base_url,
+            "/sub",
+            provider_params,
+            timeout,
+            {"User-Agent": "curl/8.5.0"},
+        )
+        assert_provider_ua_absent("inspection-tool UA provider", tool_output)
+
+        uri_with_client_ua = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "clash",
+                "url": DIRECT_SS_LINK,
+                "config": DISABLE_RULEGEN_CONFIG,
+            },
+            timeout,
+            {"User-Agent": client_ua},
+        )
+        if "proxy-providers:" in uri_with_client_ua:
+            raise AssertionError("URI-only request unexpectedly entered provider mode")
+        assert_provider_ua_absent("URI-only client UA", uri_with_client_ua)
+
+        list_true_with_client_ua = fetch(
+            base_url,
+            "/sub",
+            {**provider_params, "list": "true"},
+            timeout,
+            {"User-Agent": client_ua},
+        )
+        if "proxy-providers:" in list_true_with_client_ua:
+            raise AssertionError("list=true request unexpectedly emitted proxy-providers")
+        assert_provider_ua_absent("list=true client UA", list_true_with_client_ua)
+
+        mixed_with_client_ua = fetch(
+            base_url,
+            "/sub",
+            {**provider_params, "url": mixed_url},
+            timeout,
+            {"User-Agent": client_ua},
+        )
+        assert_provider_ua_present("mixed client UA provider", mixed_with_client_ua, client_ua)
+        if "DirectSmoke" not in mixed_with_client_ua:
+            raise AssertionError("mixed client UA provider lost direct URI nodes")
+
+        clashr_with_client_ua = fetch(
+            base_url,
+            "/sub",
+            {**provider_params, "target": "clashr"},
+            timeout,
+            {"User-Agent": client_ua},
+        )
+        assert_provider_ua_absent("clashr client UA provider", clashr_with_client_ua)
 
         duplicate_uri_nodes = fetch(
             base_url,

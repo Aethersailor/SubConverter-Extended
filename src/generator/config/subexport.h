@@ -23,6 +23,7 @@ struct ProxyProvider {
   std::string filter;         // 过滤正则
   std::string exclude_filter; // 排除正则
   std::string path;           // 本地缓存路径
+  std::string user_agent;     // provider 更新时使用的 User-Agent
   int groupId;                // 所属组 ID
 
   ProxyProvider() : interval(3600), groupId(0) {}

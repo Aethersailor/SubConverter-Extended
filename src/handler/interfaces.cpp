@@ -117,6 +117,87 @@ extern WebServer webServer;
 
 string_array gRegexBlacklist = {"(.*)*"};
 
+static constexpr size_t kProviderUserAgentMaxLen = 512;
+
+static std::string trimProviderUserAgentCandidate(const std::string &ua) {
+  size_t begin = ua.find_first_not_of(" \t");
+  if (begin == std::string::npos)
+    return "";
+  size_t end = ua.find_last_not_of(" \t");
+  return ua.substr(begin, end - begin + 1);
+}
+
+static bool hasInvalidProviderUserAgentChar(const std::string &ua) {
+  for (unsigned char ch : ua) {
+    if (ch < 0x20 || ch == 0x7f)
+      return true;
+  }
+  return false;
+}
+
+static bool containsAnyUserAgentToken(const std::string &lower_ua,
+                                      const string_array &tokens) {
+  for (const std::string &token : tokens) {
+    if (lower_ua.find(token) != std::string::npos)
+      return true;
+  }
+  return false;
+}
+
+static bool isExcludedProviderUserAgent(const std::string &ua) {
+  std::string lower = toLower(ua);
+  static const string_array browser_tokens = {
+      "mozilla/",        "applewebkit/",     "chrome/",
+      "chromium/",       "crios/",           "safari/",
+      "firefox/",        "fxios/",           "edg/",
+      "edga/",           "edgios/",          "edge/",
+      "opr/",            "opera/",           "brave/",
+      "vivaldi/",        "yabrowser/",       "samsungbrowser/",
+      "ucbrowser/",      "maxthon/",         "qqbrowser/",
+      "mqqbrowser/",     "sogou/",           "360se",
+      "360ee",           "whale/",           "micromessenger/",
+      "msie ",           "trident/"};
+  static const string_array inspection_tool_tokens = {
+      "curl/",             "wget/",         "python-requests/",
+      "python-urllib/",    "postmanruntime/", "insomnia/",
+      "go-http-client/",   "java/",         "apache-httpclient/",
+      "httpie/",           "powershell/",   "libwww-perl/",
+      "axios/",            "node-fetch/",   "undici"};
+
+  return containsAnyUserAgentToken(lower, browser_tokens) ||
+         containsAnyUserAgentToken(lower, inspection_tool_tokens);
+}
+
+static std::string providerUserAgentFromRequest(const Request &request) {
+  auto ua = request.headers.find("User-Agent");
+  if (ua == request.headers.end())
+    return "";
+
+  std::string value = trimProviderUserAgentCandidate(ua->second);
+  if (value.empty() || value.size() > kProviderUserAgentMaxLen ||
+      hasInvalidProviderUserAgentChar(value) ||
+      isExcludedProviderUserAgent(value))
+    return "";
+
+  return value;
+}
+
+static void appendVaryHeader(Response &response, const std::string &field) {
+  auto iter = response.headers.find("Vary");
+  if (iter == response.headers.end() || iter->second.empty()) {
+    response.headers["Vary"] = field;
+    return;
+  }
+
+  std::string lower_field = toLower(field);
+  for (std::string token : split(iter->second, ",")) {
+    token = trim(token);
+    if (toLower(token) == lower_field)
+      return;
+  }
+  iter->second += ", " + field;
+}
+
 std::string parseProxy(const std::string &source) {
   std::string proxy = source;
   if (source == "SYSTEM")
@@ -1867,6 +1948,8 @@ static std::string subconverter_impl(Request &request, Response &response,
       writeLog(0, "检测到订阅 URL，启用 proxy-provider 模式。",
                LOG_LEVEL_INFO);
       ext.use_proxy_provider = true;
+      std::string provider_user_agent =
+          argTarget == "clash" ? providerUserAgentFromRequest(request) : "";
       std::unordered_set<std::string> provider_names;
       auto reserve_provider_name = [&](const std::string &base) {
         std::string base_name =
@@ -1920,6 +2003,7 @@ static std::string subconverter_impl(Request &request, Response &response,
         provider.interval = 3600;    // 固定使用 3600 秒（1小时）
         provider.groupId = groupID;
         provider.path = "./providers/" + provider.name + ".yaml";
+        provider.user_agent = provider_user_agent;
 
         // Provider mode cannot filter expanded nodes locally, so pass the
         // final effective remark filters through to Mihomo.
@@ -2347,6 +2431,9 @@ static std::string subconverter_impl(Request &request, Response &response,
            "请将该请求反馈给服务维护者。";
   }
   writeLog(0, "生成完成。", LOG_LEVEL_INFO);
+  if (argTarget == "clash" && explain.proxy_provider_mode)
+    appendVaryHeader(response, "User-Agent");
+
   if (explainMode) {
     auto hasArg = [&](const std::string &name) {
       return argument.find(name) != argument.end();
