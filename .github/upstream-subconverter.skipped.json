@@ -100,5 +100,11 @@
         "test_alpn_output_rendering"
       ]
     }
+  },
+  {
+    "sha": "8c7b1ede4d29807a83022f2e8de76bb97fe81784",
+    "subject": "fix(subparser): map VLESS xhttp extra options to mihomo fields",
+    "time": "2026-07-09T21:36:07+00:00",
+    "reason": "Applied patch to 'src/parser/subparser.cpp' with conflicts.\nU src/parser/subparser.cpp"
   }
 ]

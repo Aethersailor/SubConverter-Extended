@@ -34,5 +34,14 @@
       "src/parser/subparser.cpp"
     ],
     "copilot_reason": "Only modifies src/parser/subparser.cpp (whitelisted). Refactors remark fragment extraction into extractRemark() helper. Pure internal refactoring with no schema or output changes."
+  },
+  {
+    "sha": "74c5ec00c732a61edc94f2b62886c8ba61243844",
+    "subject": "fix(subparser): Decode the serviceName value of gRPC from the URL",
+    "time": "2026-07-09T21:36:07+00:00",
+    "paths": [
+      "src/parser/subparser.cpp"
+    ],
+    "copilot_reason": "Removes redundant urlEncode call in gRPC service name handling within whitelisted subparser.cpp. Change normalizes gRPC path parsing to decode only. Parser-only, no output schema impact."
   }
 ]

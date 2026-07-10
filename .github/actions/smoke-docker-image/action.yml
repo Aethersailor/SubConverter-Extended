@@ -8,6 +8,9 @@ inputs:
   platform:
     description: Docker platform to run, such as linux/amd64 or linux/arm/v7.
     required: true
+  custom-openclash-rules-revision:
+    description: Custom_OpenClash_Rules revision expected in the image.
+    required: true
   port:
     description: Container port exposed by SubConverter.
     required: false
@@ -24,6 +27,7 @@ runs:
         IMAGE="${{ inputs.image }}"
         PLATFORM="${{ inputs.platform }}"
         CONTAINER_PORT="${{ inputs.port }}"
+        RULES_REVISION="${{ inputs.custom-openclash-rules-revision }}"
 
         CID="$(docker run -d --platform "$PLATFORM" -e PORT="$CONTAINER_PORT" -p "127.0.0.1::${CONTAINER_PORT}" "$IMAGE")"
         trap 'docker rm -f "$CID" >/dev/null 2>&1 || true' EXIT
@@ -36,7 +40,15 @@ runs:
           test "${TZ:-}" = "Asia/Shanghai"
           test -e /usr/share/zoneinfo/Asia/Shanghai
           test "$(date +%z)" = "+0800"
+          test -s /base/Custom_OpenClash_Rules/manifest.sha256
+          test -s /base/Custom_OpenClash_Rules/main/rule/Custom_Direct.list
         '
+
+        image_rules_revision="$(docker inspect --format '{{ index .Config.Labels "com.aethersailor.custom-openclash-rules.revision" }}' "$CID")"
+        if [ "$image_rules_revision" != "$RULES_REVISION" ]; then
+          echo "Image rules revision mismatch: expected $RULES_REVISION, got $image_rules_revision" >&2
+          exit 1
+        fi
 
         for _ in $(seq 1 30); do
           if curl -fsS "$URL" >/tmp/subconverter-smoke.out; then
@@ -47,6 +59,9 @@ runs:
               --mihomo-yaml-subscription-url "${FIXTURE_BASE}/mihomo-provider-subscription.yml" \
               --legacy-subscription-url "${FIXTURE_BASE}/legacy-surge-subscription.conf" \
               --verify-non-clash
+            curl -fsS "http://127.0.0.1:${HOST_PORT}/Custom_OpenClash_Rules/main/rule/Custom_Direct.list" > /tmp/bundled-custom-direct.list
+            curl -fsS "https://raw.githubusercontent.com/Aethersailor/Custom_OpenClash_Rules/${RULES_REVISION}/rule/Custom_Direct.list" > /tmp/upstream-custom-direct.list
+            cmp /tmp/bundled-custom-direct.list /tmp/upstream-custom-direct.list
             exit 0
           fi
 

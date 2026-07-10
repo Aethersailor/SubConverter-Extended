@@ -3,6 +3,7 @@ subconverter.exe
 cmake-build-debug
 .idea
 base/cache
+base/Custom_OpenClash_Rules/
 scripts/quickjspp
 scripts/yaml-cpp
 .DS_Store

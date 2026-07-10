@@ -211,6 +211,7 @@ FROM --platform=$TARGETPLATFORM mirror.gcr.io/library/debian:trixie-slim
 ARG VERSION="dev"
 ARG SHA=""
 ARG BUILD_DATE=""
+ARG CUSTOM_OPENCLASH_RULES_REVISION=""
 LABEL \
   org.opencontainers.image.title="SubConverter-Extended" \
   org.opencontainers.image.description="A Modern Evolution of subconverter; an enhanced implementation aligned with Mihomo configuration" \
@@ -220,6 +221,7 @@ LABEL \
   org.opencontainers.image.version="${VERSION}" \
   org.opencontainers.image.revision="${SHA}" \
   org.opencontainers.image.created="${BUILD_DATE}" \
+  com.aethersailor.custom-openclash-rules.revision="${CUSTOM_OPENCLASH_RULES_REVISION}" \
   maintainer="Aethersailor"
 
 COPY --from=builder /runtime-root/ /
