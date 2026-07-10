@@ -34,6 +34,8 @@ runs:
 
         tar -xzf "$ARTIFACT" -C "$WORKDIR"
         cd "$WORKDIR/SubConverter-Extended"
+        test -s base/Custom_OpenClash_Rules/manifest.sha256
+        test -s base/Custom_OpenClash_Rules/main/rule/Custom_Direct.list
 
         PORT="$PORT" PREF_PATH="$PWD/base/pref.toml" ./start.sh >"$WORKDIR/stdout.log" 2>"$WORKDIR/stderr.log" &
         PID="$!"

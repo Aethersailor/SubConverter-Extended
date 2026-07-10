@@ -30,6 +30,13 @@ runs:
           $stdout = Join-Path $workDir "stdout.log"
           $stderr = Join-Path $workDir "stderr.log"
 
+          if (-not (Test-Path (Join-Path $root "base\Custom_OpenClash_Rules\manifest.sha256"))) {
+            throw "Windows artifact is missing the Custom_OpenClash_Rules manifest."
+          }
+          if (-not (Test-Path (Join-Path $root "base\Custom_OpenClash_Rules\main\rule\Custom_Direct.list"))) {
+            throw "Windows artifact is missing the Custom_OpenClash_Rules runtime assets."
+          }
+
           Remove-Item (Join-Path $root "base\pref.toml") -ErrorAction SilentlyContinue
           Remove-Item (Join-Path $root "base\pref.yml") -ErrorAction SilentlyContinue
           Remove-Item (Join-Path $root "base\pref.ini") -ErrorAction SilentlyContinue

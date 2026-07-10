@@ -39,6 +39,8 @@ runs:
               test -d /tmp/apk-root/etc/subconverter
               test -x /tmp/apk-root/opt/subconverter-extended/subconverter
               test -f /tmp/apk-root/opt/subconverter-extended/base/pref.example.toml
+              test -s /tmp/apk-root/opt/subconverter-extended/base/Custom_OpenClash_Rules/manifest.sha256
+              test -s /tmp/apk-root/opt/subconverter-extended/base/Custom_OpenClash_Rules/main/rule/Custom_Direct.list
               test -f /tmp/apk-root/usr/share/doc/subconverter-extended/README.OpenWrt
               grep -q "/etc/subconverter/pref.toml" /tmp/apk-root/usr/share/doc/subconverter-extended/README.OpenWrt
               grep -q "CONFIG_DIR=\"/etc/subconverter\"" /tmp/apk-root/usr/bin/subconverter-extended

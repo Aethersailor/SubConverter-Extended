@@ -280,6 +280,14 @@ jobs:
         if: steps.changes.outputs.has_source_changes == 'true'
         run: |
           set -euo pipefail
+          rules_revision="$(git ls-remote https://github.com/Aethersailor/Custom_OpenClash_Rules.git refs/heads/main | awk '{print $1}')"
+          if [[ ! "$rules_revision" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Unable to resolve the latest Custom_OpenClash_Rules main revision."
+            exit 1
+          fi
+          python3 scripts/sync_custom_openclash_rules.py --ref "$rules_revision"
+          test -s base/Custom_OpenClash_Rules/manifest.sha256
+
           docker build --target builder -t subconverter-upstream-sync-test --build-arg THREADS=2 .
 
           CID="$(docker run -d -e PORT=25500 -p '127.0.0.1::25500' subconverter-upstream-sync-test /src/subconverter -f /src/base/pref.example.toml)"
