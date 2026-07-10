@@ -1,0 +1,46 @@
+name: Manage Inactive Issues
+
+on:
+  issue_comment:
+    types: [created]
+  schedule:
+    # 03:17 Asia/Shanghai. Avoid the busiest time at the start of an hour.
+    - cron: "17 19 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Only report the actions that would be taken
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: manage-inactive-issues-${{ github.event.issue.number || 'scheduled' }}
+  cancel-in-progress: false
+
+jobs:
+  manage:
+    if: github.event_name != 'issue_comment' || (github.event.issue.pull_request == null && github.event.sender.type != 'Bot')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      INACTIVE_ISSUE_WAIT_DAYS: "14"
+      INACTIVE_ISSUE_GRACE_DAYS: "7"
+      INACTIVE_ISSUE_DRY_RUN: ${{ inputs.dry_run || 'false' }}
+    steps:
+      - name: Check out repository automation
+        uses: actions/checkout@v6
+
+      - name: Test issue management rules
+        run: node --test .github/scripts/manage-inactive-issues.test.cjs
+
+      - name: Manage issues waiting for feedback
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const manageInactiveIssues = require('./.github/scripts/manage-inactive-issues.cjs');
+            await manageInactiveIssues({ github, context, core });
