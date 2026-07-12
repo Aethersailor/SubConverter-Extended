@@ -15,7 +15,7 @@ insert_url = [""]
 prepend_insert_url = true
 
 # Exclude nodes which remarks match the following patterns. Supports regular expression.
-exclude_remarks = ["(到期|剩余流量|时间|官网|产品)"]
+#exclude_remarks = ["(到期|剩余流量|时间|官网|产品)"]
 
 # Only include nodes which remarks match the following patterns. Supports regular expression.
 #include_remarks = ["V3.*港"]
