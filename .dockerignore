@@ -8,4 +8,5 @@ stats
 *.pyc
 *.pyo
 *.log
+build-metadata-*.json
 subconverter.exe

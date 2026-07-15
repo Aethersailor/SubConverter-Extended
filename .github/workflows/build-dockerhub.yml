@@ -10,8 +10,6 @@ on:
       - 'README.md'
       - 'README-*.md'
       - 'docker-compose.yml'
-      - '.github/workflows/**'
-      - '!.github/workflows/build-dockerhub.yml'
   pull_request:
     branches:
       - master
@@ -27,30 +25,27 @@ on:
         required: false
         default: false
         type: boolean
-  schedule:
-    - cron: '0 19 * * 0'
-
 permissions:
   contents: write
   packages: write
 
 concurrency:
-  group: dockerhub-${{ github.ref_name }}
+  group: dockerhub-${{ inputs.overwrite_existing_release && inputs.release_tag || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
   prepare:
     name: "🔧 Prepare Metadata"
     runs-on: ubuntu-latest
-    if: github.actor != 'dependabot[bot]' && !contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '[ci skip]') && (github.event_name != 'schedule' || github.ref == 'refs/heads/master')
+    if: github.actor != 'dependabot[bot]' && !contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '[ci skip]')
     outputs:
       sha_short: ${{ steps.vars.outputs.sha_short }}
-      version: ${{ steps.version.outputs.version }}
-      is_release: ${{ steps.version.outputs.is_release }}
+      version: ${{ steps.mode.outputs.version }}
+      mode: ${{ steps.mode.outputs.mode }}
+      is_release: ${{ steps.mode.outputs.is_release }}
       tags: ${{ steps.meta.outputs.tags }}
       build_date: ${{ steps.build_date.outputs.build_date }}
       linux_matrix: ${{ steps.linux_matrix.outputs.matrix }}
-      custom_openclash_rules_revision: ${{ steps.custom_openclash_rules.outputs.revision }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -62,6 +57,60 @@ jobs:
         id: vars
         run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
+      - name: Determine build mode and version
+        id: mode
+        shell: bash
+        env:
+          DISPATCH_RELEASE_TAG: ${{ inputs.release_tag }}
+          OVERWRITE_EXISTING_RELEASE: ${{ inputs.overwrite_existing_release }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            MODE="release"
+            VERSION="${GITHUB_REF#refs/tags/}"
+          elif [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "${OVERWRITE_EXISTING_RELEASE:-false}" = "true" ]; then
+            if [ "$GITHUB_REF" != "refs/heads/master" ]; then
+              echo "::error::Existing releases may be rebuilt only from master."
+              exit 1
+            fi
+            MODE="release"
+            VERSION="${DISPATCH_RELEASE_TAG:-}"
+            VERSION="${VERSION#"${VERSION%%[![:space:]]*}"}"
+            VERSION="${VERSION%"${VERSION##*[![:space:]]}"}"
+            [[ "$VERSION" == v* ]] || VERSION="v$VERSION"
+            if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Invalid release tag '$VERSION'. Use vX.Y.Z."
+              exit 1
+            fi
+            git fetch --tags --force origin
+            git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null || {
+              echo "::error::Release tag '$VERSION' does not exist."
+              exit 1
+            }
+          elif [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            MODE="pr"
+            VERSION="pr-${{ steps.vars.outputs.sha_short }}"
+          elif [ "$GITHUB_REF" = "refs/heads/dev" ]; then
+            MODE="dev"
+            VERSION="dev"
+          elif [ "$GITHUB_REF" = "refs/heads/master" ]; then
+            MODE="master"
+            VERSION="master-${{ steps.vars.outputs.sha_short }}"
+          else
+            echo "::error::Unsupported build ref $GITHUB_REF ($GITHUB_EVENT_NAME)."
+            exit 1
+          fi
+
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [ "$MODE" = "release" ]; then
+            echo "is_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Build mode: $MODE; version: $VERSION"
+
       - name: Verify runtime rule assets are not tracked
         shell: bash
         run: |
@@ -71,90 +120,57 @@ jobs:
             exit 1
           fi
 
-      - name: Resolve latest Custom_OpenClash_Rules revision
-        id: custom_openclash_rules
+      - name: Refresh dependency snapshot on dev
+        if: steps.mode.outputs.mode == 'dev'
         shell: bash
         run: |
           set -euo pipefail
-          revision="$(git ls-remote https://github.com/Aethersailor/Custom_OpenClash_Rules.git refs/heads/main | awk '{print $1}')"
-          if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::Unable to resolve the latest Custom_OpenClash_Rules main revision."
-            exit 1
-          fi
-          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          python3 scripts/ci/dependency_snapshot.py refresh
+
+      - name: Validate dependency snapshot
+        shell: bash
+        run: python3 scripts/ci/dependency_snapshot.py check
+
+      - name: Export dependency metadata
+        id: dependencies
+        shell: bash
+        run: |
+          python3 scripts/ci/dependency_snapshot.py emit \
+            --github-output "$GITHUB_OUTPUT" \
+            --github-env "$GITHUB_ENV"
+
+      - name: Summarize dependency snapshot
+        shell: bash
+        run: |
           {
-            echo "### Custom_OpenClash_Rules"
+            echo "### Dependency snapshot"
             echo
-            echo "Latest main revision selected for every build job: \`$revision\`"
+            echo "Mode: \`${{ steps.mode.outputs.mode }}\`"
+            echo "Snapshot SHA-256: \`${{ steps.dependencies.outputs.dependency_snapshot_sha }}\`"
+            echo "Custom_OpenClash_Rules: \`${{ steps.dependencies.outputs.custom_openclash_rules_revision }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Determine version
-        id: version
-        env:
-          DISPATCH_RELEASE_TAG: ${{ inputs.release_tag }}
-          OVERWRITE_EXISTING_RELEASE: ${{ inputs.overwrite_existing_release }}
-        run: |
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            VERSION="${GITHUB_REF#refs/tags/}"
-            echo "version=$VERSION" >> $GITHUB_OUTPUT
-            echo "is_release=true" >> $GITHUB_OUTPUT
-            echo "Detected version from tag: $VERSION"
-          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && "$OVERWRITE_EXISTING_RELEASE" == "true" ]]; then
-            git fetch --tags --force origin
-
-            VERSION="${DISPATCH_RELEASE_TAG:-}"
-            VERSION="${VERSION#"${VERSION%%[![:space:]]*}"}"
-            VERSION="${VERSION%"${VERSION##*[![:space:]]}"}"
-
-            if [[ "$VERSION" != v* ]]; then
-              VERSION="v$VERSION"
-            fi
-
-            if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo "::error::Invalid release tag '$VERSION'. Use vX.Y.Z, for example v1.2.3."
-              exit 1
-            fi
-
-            if ! git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1; then
-              echo "::error::Tag '$VERSION' does not exist on origin."
-              exit 1
-            fi
-
-            TAG_COMMIT="$(git rev-list -n 1 "$VERSION")"
-            MASTER_COMMIT="$(git rev-parse HEAD)"
-            echo "Overwrite release tag: $VERSION"
-            echo "Tag commit: $TAG_COMMIT"
-            echo "Master commit used for rebuilt assets: $MASTER_COMMIT"
-
-            echo "version=$VERSION" >> $GITHUB_OUTPUT
-            echo "is_release=true" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.ref }}" == refs/heads/master ]] && ([[ "${{ github.event_name }}" == "workflow_dispatch" ]] || [[ "${{ github.event_name }}" == "schedule" ]]); then
-            LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-            if [ -n "$LATEST_TAG" ]; then
-              VERSION="$LATEST_TAG"
-              echo "Detected latest tag: $VERSION"
-            else
-              VERSION="master-$(git rev-parse --short HEAD)"
-              echo "No tags found, using commit hash: $VERSION"
-            fi
-            echo "version=$VERSION" >> $GITHUB_OUTPUT
-            echo "is_release=true" >> $GITHUB_OUTPUT
-            echo "Master branch build (manual/schedule): $VERSION"
-          else
-            echo "version=dev" >> $GITHUB_OUTPUT
-            echo "is_release=false" >> $GITHUB_OUTPUT
-            echo "Using dev version"
-          fi
+      - name: Upload dependency snapshot
+        uses: actions/upload-artifact@v7
+        with:
+          name: dependency-snapshot
+          path: scripts/ci/dependencies.lock.json
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Set build date
         id: build_date
-        run: echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
+        shell: bash
+        run: |
+          commit_date="$(git show -s --format=%cI HEAD)"
+          build_date="$(date -u --date="$commit_date" +%Y-%m-%dT%H:%M:%SZ)"
+          echo "build_date=$build_date" >> "$GITHUB_OUTPUT"
 
       - name: Build Linux matrix
         id: linux_matrix
         shell: bash
         run: |
-          if [ "${{ steps.version.outputs.is_release }}" = "true" ]; then
+          if [ "${{ steps.mode.outputs.mode }}" = "release" ] || [ "${{ steps.mode.outputs.mode }}" = "master" ]; then
             {
               echo 'matrix<<JSON'
               cat <<'JSON'
@@ -176,19 +192,18 @@ jobs:
         id: meta
         shell: bash
         env:
-          VERSION: ${{ steps.version.outputs.version }}
-          IS_RELEASE: ${{ steps.version.outputs.is_release }}
+          VERSION: ${{ steps.mode.outputs.version }}
+          MODE: ${{ steps.mode.outputs.mode }}
         run: |
           {
             echo 'tags<<EOF'
-            if [ "$IS_RELEASE" = "true" ]; then
+            if [ "$MODE" = "release" ]; then
               printf '%s\n' \
                 "aethersailor/subconverter-extended:latest" \
                 "aethersailor/subconverter-extended:${VERSION}" \
                 "ghcr.io/aethersailor/subconverter-extended:latest" \
                 "ghcr.io/aethersailor/subconverter-extended:${VERSION}"
-            fi
-            if [ "${GITHUB_REF}" = "refs/heads/dev" ]; then
+            elif [ "$MODE" = "dev" ]; then
               printf '%s\n' \
                 "aethersailor/subconverter-extended:dev" \
                 "ghcr.io/aethersailor/subconverter-extended:dev"
@@ -210,10 +225,25 @@ jobs:
           token: ${{ secrets.PAT_TOKEN || github.token }}
           fetch-depth: 0
 
-      - name: Fetch latest Custom_OpenClash_Rules assets
+      - name: Download dependency snapshot
+        uses: actions/download-artifact@v8
+        with:
+          name: dependency-snapshot
+          path: dependency-snapshot
+
+      - name: Activate dependency snapshot
+        id: dependencies
         shell: bash
-        env:
-          CUSTOM_OPENCLASH_RULES_REVISION: ${{ needs.prepare.outputs.custom_openclash_rules_revision }}
+        run: |
+          set -euo pipefail
+          cp dependency-snapshot/dependencies.lock.json scripts/ci/dependencies.lock.json
+          python3 scripts/ci/dependency_snapshot.py check
+          python3 scripts/ci/dependency_snapshot.py emit \
+            --github-output "$GITHUB_OUTPUT" \
+            --github-env "$GITHUB_ENV"
+
+      - name: Fetch pinned Custom_OpenClash_Rules assets
+        shell: bash
         run: |
           set -euo pipefail
           python3 scripts/sync_custom_openclash_rules.py --ref "$CUSTOM_OPENCLASH_RULES_REVISION"
@@ -251,12 +281,8 @@ jobs:
           SHA: ${{ needs.prepare.outputs.sha_short }}
           VERSION: ${{ needs.prepare.outputs.version }}
           BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
-          CUSTOM_OPENCLASH_RULES_REVISION: ${{ needs.prepare.outputs.custom_openclash_rules_revision }}
-          MIHOMO_REF: Meta
-          MIHOMO_CACHE_BUST: ${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && matrix.extract_generated == 'true' && github.run_id || 'stable' }}
-          SOURCE_DEPS_CACHE_BUST: ${{ github.event_name != 'pull_request' && github.run_id || 'stable' }}
-          REFRESH_GO_DEPS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && matrix.extract_generated == 'true' }}
-          REFRESH_HEADERS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && matrix.extract_generated == 'true' }}
+          REFRESH_GO_DEPS: ${{ needs.prepare.outputs.mode == 'dev' && matrix.extract_generated == 'true' }}
+          REFRESH_HEADERS: ${{ needs.prepare.outputs.mode == 'dev' && matrix.extract_generated == 'true' }}
         run: |
           {
             echo 'args<<EOF'
@@ -264,7 +290,61 @@ jobs:
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
-      - name: Build to builder stage
+      - name: Build candidate image once
+        id: build_image
+        shell: bash
+        env:
+          BUILD_ARGS: ${{ steps.docker_args.outputs.args }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r arg; do
+            [ -n "$arg" ] && args+=(--build-arg "$arg")
+          done <<< "$BUILD_ARGS"
+          tags=(--tag "subconverter-extended:${{ matrix.arch }}-ci")
+          output=(--load)
+          cache=()
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            candidate="ci-${{ needs.prepare.outputs.mode }}-${{ matrix.arch }}"
+            if [ "${{ needs.prepare.outputs.mode }}" = "release" ]; then
+              candidate="ci-${{ needs.prepare.outputs.version }}-${{ matrix.arch }}"
+            fi
+            tags=(
+              --tag "aethersailor/subconverter-extended:${candidate}"
+              --tag "ghcr.io/aethersailor/subconverter-extended:${candidate}"
+            )
+            output=(--push)
+            cache=(
+              --cache-from "type=registry,ref=ghcr.io/aethersailor/subconverter-extended:buildcache-${{ matrix.cache_scope }}"
+              --cache-to "type=registry,ref=ghcr.io/aethersailor/subconverter-extended:buildcache-${{ matrix.cache_scope }},mode=max,ignore-error=true"
+            )
+          fi
+          metadata_file="${RUNNER_TEMP}/build-metadata-${{ matrix.arch }}.json"
+          docker buildx build \
+            --file "${{ matrix.dockerfile }}" \
+            --platform "${{ matrix.image_platform }}" \
+            "${output[@]}" \
+            "${tags[@]}" \
+            "${cache[@]}" \
+            "${args[@]}" \
+            --metadata-file "$metadata_file" \
+            .
+          digest="$(python3 - "$metadata_file" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], "r", encoding="utf-8") as handle:
+              data = json.load(handle)
+          print(data.get("containerimage.digest", ""))
+          PY
+          )"
+          if [ "${{ github.event_name }}" != "pull_request" ] && [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Build did not return a valid candidate image digest."
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Export CI artifacts from the existing cache
         shell: bash
         env:
           BUILD_ARGS: ${{ steps.docker_args.outputs.args }}
@@ -278,7 +358,7 @@ jobs:
             --file "${{ matrix.dockerfile }}" \
             --load \
             --tag "${{ matrix.builder_tag }}" \
-            --target builder \
+            --target ci-export \
             --platform "${{ matrix.builder_platform }}" \
             "${args[@]}" \
             .
@@ -308,7 +388,7 @@ jobs:
             "SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-*.apk"
 
       - name: Set up QEMU for smoke test
-        if: needs.prepare.outputs.is_release == 'true' && matrix.qemu_platforms != ''
+        if: matrix.qemu_platforms != ''
         shell: bash
         run: docker run --privileged --rm tonistiigi/binfmt --install "${{ matrix.qemu_platforms }}"
 
@@ -350,82 +430,32 @@ jobs:
         if: matrix.extract_generated == 'true'
         shell: bash
         run: |
-          if [ -n "$(git status --porcelain -- bridge/go.mod bridge/go.sum bridge/libmihomo.h bridge/proxy_validation_generated.go src/parser/mihomo_schemes.h src/parser/param_compat.h include/httplib.h include/nlohmann/json.hpp include/inja.hpp include/jpcre2.hpp include/quickjspp.hpp include/libcron include/date include/toml.hpp include/toml11)" ]; then
+          if [ -n "$(git status --porcelain -- scripts/ci/dependencies.lock.json bridge/go.mod bridge/go.sum bridge/libmihomo.h bridge/proxy_validation_generated.go src/parser/mihomo_schemes.h src/parser/param_compat.h include/httplib.h include/nlohmann/json.hpp include/inja.hpp include/jpcre2.hpp include/quickjspp.hpp include/libcron include/date include/toml.hpp include/toml11)" ]; then
             echo "changed=true" >> $GITHUB_OUTPUT
           fi
 
-      - name: Report generated file changes outside dev
-        if: steps.check_changes.outputs.changed == 'true' && github.event_name != 'pull_request' && github.ref != 'refs/heads/dev'
+      - name: Verify frozen generated inputs outside dev
+        if: steps.check_changes.outputs.changed == 'true' && needs.prepare.outputs.mode != 'dev'
         shell: bash
         run: |
-          echo "::warning::Generated file changes were detected on ${GITHUB_REF}, but source updates are committed only to dev."
-
-      - name: Build and push final image
-        id: build_image
-        shell: bash
-        env:
-          BUILD_ARGS: ${{ steps.docker_args.outputs.args }}
-          IMAGE_TAGS: ${{ needs.prepare.outputs.tags }}
-        run: |
-          set -euo pipefail
-          args=()
-          while IFS= read -r arg; do
-            [ -n "$arg" ] && args+=(--build-arg "$arg")
-          done <<< "$BUILD_ARGS"
-          if [ "${{ matrix.extract_generated }}" = "true" ]; then
-            for index in "${!args[@]}"; do
-              case "${args[$index]}" in
-                REFRESH_GO_DEPS=*) args[$index]="REFRESH_GO_DEPS=false" ;;
-                REFRESH_HEADERS=*) args[$index]="REFRESH_HEADERS=false" ;;
-              esac
-            done
-          fi
-          tags=()
-          while IFS= read -r tag; do
-            [ -n "$tag" ] && tags+=(--tag "$tag")
-          done <<< "$IMAGE_TAGS"
-          if [ "${#tags[@]}" -eq 0 ]; then
-            tags+=(--tag "subconverter-extended:${{ matrix.arch }}-ci")
-          fi
-          output=(--load)
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            output=(--push)
-          fi
-          metadata_file="build-metadata-${{ matrix.arch }}.json"
-          docker buildx build \
-            --file "${{ matrix.dockerfile }}" \
-            --platform "${{ matrix.image_platform }}" \
-            "${output[@]}" \
-            "${tags[@]}" \
-            "${args[@]}" \
-            --metadata-file "$metadata_file" \
-            .
-          digest="$(python3 - "$metadata_file" <<'PY'
-          import json
-          import sys
-
-          with open(sys.argv[1], "r", encoding="utf-8") as handle:
-              data = json.load(handle)
-          print(data.get("containerimage.digest", ""))
-          PY
-          )"
-          if [ -n "$digest" ]; then
-            echo "digest=$digest" >> "$GITHUB_OUTPUT"
-          fi
+          git status --short -- scripts/ci/dependencies.lock.json bridge/go.mod bridge/go.sum bridge/libmihomo.h bridge/proxy_validation_generated.go src/parser/mihomo_schemes.h src/parser/param_compat.h include/httplib.h include/nlohmann/json.hpp include/inja.hpp include/jpcre2.hpp include/quickjspp.hpp include/libcron include/date include/toml.hpp include/toml11
+          echo "::error::Frozen dependency/generated inputs are stale. Refresh and commit them on dev before building master or a release."
+          exit 1
 
       - name: Save image digest
-        if: needs.prepare.outputs.is_release == 'true' && github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request'
         shell: bash
         run: |
           mkdir -p docker-digests
           printf '%s\n' "${{ steps.build_image.outputs.digest }}" > "docker-digests/${{ matrix.arch }}.txt"
 
       - name: Upload image digest
-        if: needs.prepare.outputs.is_release == 'true' && github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v7
         with:
           name: docker-digest-${{ matrix.arch }}
           path: docker-digests/${{ matrix.arch }}.txt
+          retention-days: 1
 
       - name: Smoke test image (${{ matrix.arch }})
         if: github.event_name != 'pull_request'
@@ -434,7 +464,7 @@ jobs:
         with:
           image: ghcr.io/aethersailor/subconverter-extended@${{ steps.build_image.outputs.digest }}
           platform: ${{ matrix.image_platform }}
-          custom-openclash-rules-revision: ${{ needs.prepare.outputs.custom_openclash_rules_revision }}
+          custom-openclash-rules-revision: ${{ steps.dependencies.outputs.custom_openclash_rules_revision }}
 
       - name: Commit and push generated development files
         if: steps.check_changes.outputs.changed == 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/dev'
@@ -454,7 +484,7 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add bridge/go.mod bridge/go.sum bridge/libmihomo.h bridge/proxy_validation_generated.go src/parser/mihomo_schemes.h src/parser/param_compat.h include/httplib.h include/nlohmann/json.hpp include/inja.hpp include/jpcre2.hpp include/quickjspp.hpp include/libcron include/date include/toml.hpp include/toml11
+          git add scripts/ci/dependencies.lock.json bridge/go.mod bridge/go.sum bridge/libmihomo.h bridge/proxy_validation_generated.go src/parser/mihomo_schemes.h src/parser/param_compat.h include/httplib.h include/nlohmann/json.hpp include/inja.hpp include/jpcre2.hpp include/quickjspp.hpp include/libcron include/date include/toml.hpp include/toml11
           git commit -m "chore: update generated development inputs after build [skip ci]"
           git push origin "HEAD:refs/heads/$BRANCH_NAME"
 
@@ -470,10 +500,21 @@ jobs:
           token: ${{ github.event_name == 'pull_request' && github.token || secrets.PAT_TOKEN }}
           fetch-depth: 0
 
-      - name: Fetch latest Custom_OpenClash_Rules assets
+      - name: Download dependency snapshot
+        uses: actions/download-artifact@v8
+        with:
+          name: dependency-snapshot
+          path: dependency-snapshot
+
+      - name: Activate dependency snapshot
         shell: pwsh
-        env:
-          CUSTOM_OPENCLASH_RULES_REVISION: ${{ needs.prepare.outputs.custom_openclash_rules_revision }}
+        run: |
+          Copy-Item dependency-snapshot/dependencies.lock.json scripts/ci/dependencies.lock.json -Force
+          python scripts/ci/dependency_snapshot.py check
+          python scripts/ci/dependency_snapshot.py emit --github-env $env:GITHUB_ENV
+
+      - name: Fetch pinned Custom_OpenClash_Rules assets
+        shell: pwsh
         run: |
           python scripts/sync_custom_openclash_rules.py --ref $env:CUSTOM_OPENCLASH_RULES_REVISION
           if (!(Test-Path "base/Custom_OpenClash_Rules/manifest.sha256")) {
@@ -483,7 +524,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: stable
+          go-version-file: bridge/go.mod
           cache-dependency-path: bridge/go.sum
 
       - name: Set up MSYS2
@@ -532,10 +573,10 @@ jobs:
           path: SubConverter-Extended-*.zip
 
   merge-manifest:
-    name: "🔗 Docker Manifest"
+    name: "🔗 Promote Docker Images"
     runs-on: ubuntu-latest
     needs: [prepare, build-linux]
-    if: needs.prepare.outputs.is_release == 'true' && github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'
     steps:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
@@ -560,18 +601,21 @@ jobs:
           pattern: docker-digest-*
           merge-multiple: true
 
-      - name: Create and push manifest list
+      - name: Promote tested candidates
         shell: bash
         run: |
           set -euo pipefail
 
-          for arch in amd64 arm64 armv7; do
+          if [ "${{ needs.prepare.outputs.mode }}" = "dev" ]; then
+            ARCHES=(amd64)
+          else
+            ARCHES=(amd64 arm64 armv7)
+          fi
+          for arch in "${ARCHES[@]}"; do
             test -s "digests/${arch}.txt"
+            grep -Eq '^sha256:[0-9a-f]{64}$' "digests/${arch}.txt"
           done
 
-          AMD64_DIGEST="$(cat digests/amd64.txt)"
-          ARM64_DIGEST="$(cat digests/arm64.txt)"
-          ARMV7_DIGEST="$(cat digests/armv7.txt)"
           TAGS="${{ needs.prepare.outputs.tags }}"
           IMAGE_NAMES=(
             "aethersailor/subconverter-extended"
@@ -579,13 +623,18 @@ jobs:
           )
 
           for IMAGE_NAME in "${IMAGE_NAMES[@]}"; do
+            SOURCES=()
+            for arch in "${ARCHES[@]}"; do
+              candidate="ci-${{ needs.prepare.outputs.mode }}-${arch}"
+              if [ "${{ needs.prepare.outputs.mode }}" = "release" ]; then
+                candidate="ci-${{ needs.prepare.outputs.version }}-${arch}"
+              fi
+              SOURCES+=("${IMAGE_NAME}:${candidate}")
+            done
             for TAG in $TAGS; do
               if [[ "$TAG" == "$IMAGE_NAME:"* ]]; then
-                docker buildx imagetools create \
-                  -t "$TAG" \
-                  "${IMAGE_NAME}@${AMD64_DIGEST}" \
-                  "${IMAGE_NAME}@${ARM64_DIGEST}" \
-                  "${IMAGE_NAME}@${ARMV7_DIGEST}"
+                echo "Promoting ${SOURCES[*]} to $TAG"
+                docker buildx imagetools create -t "$TAG" "${SOURCES[@]}"
               fi
             done
           done
@@ -595,6 +644,11 @@ jobs:
         run: |
           set -euo pipefail
 
+          if [ "${{ needs.prepare.outputs.mode }}" = "dev" ]; then
+            PLATFORMS=("linux/amd64")
+          else
+            PLATFORMS=("linux/amd64" "linux/arm64" "linux/arm/v7")
+          fi
           TAGS="${{ needs.prepare.outputs.tags }}"
           for TAG in $TAGS; do
             if [[ "$TAG" != ghcr.io/* ]]; then
@@ -616,7 +670,7 @@ jobs:
             done
 
             cat manifest.txt
-            for PLATFORM in "linux/amd64" "linux/arm64" "linux/arm/v7"; do
+            for PLATFORM in "${PLATFORMS[@]}"; do
               if ! grep -Eq "Platform:[[:space:]]+${PLATFORM}$" manifest.txt; then
                 echo "Missing platform ${PLATFORM} in ${TAG}"
                 exit 1
