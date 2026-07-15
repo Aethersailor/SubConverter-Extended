@@ -1,5 +1,10 @@
 # ========== GO BUILD STAGE ==========
-FROM --platform=$BUILDPLATFORM mirror.gcr.io/library/golang:latest AS go-builder
+ARG GO_IMAGE=mirror.gcr.io/library/golang:latest
+ARG DEBIAN_IMAGE=mirror.gcr.io/library/debian:latest
+ARG ALPINE_IMAGE=mirror.gcr.io/library/alpine:latest
+ARG DEBIAN_TRIXIE_IMAGE=mirror.gcr.io/library/debian:trixie
+ARG DEBIAN_TRIXIE_SLIM_IMAGE=mirror.gcr.io/library/debian:trixie-slim
+FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS go-builder
 
 ARG TARGETARCH
 ARG TARGETVARIANT
@@ -50,7 +55,7 @@ RUN echo "==> Cross-compiling Go bridge for linux/arm/v7" && \
 RUN ls -lh libmihomo.a libmihomo.h
 
 # ========== C++ CROSS BUILD STAGE ==========
-FROM --platform=$BUILDPLATFORM mirror.gcr.io/library/debian:trixie AS builder
+FROM --platform=$BUILDPLATFORM ${DEBIAN_TRIXIE_IMAGE} AS builder
 
 ARG THREADS="4"
 ARG SHA=""
@@ -58,6 +63,13 @@ ARG VERSION="dev"
 ARG BUILD_DATE=""
 ARG REFRESH_HEADERS=false
 ARG SOURCE_DEPS_CACHE_BUST=stable
+ARG QUICKJSPP_REF
+ARG LIBCRON_REF
+ARG TOML11_REF
+ARG CPP_HTTPLIB_REF
+ARG NLOHMANN_JSON_REF
+ARG INJA_REF
+ARG JPCRE2_REF
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PKG_CONFIG_ALLOW_CROSS=1
@@ -83,7 +95,11 @@ COPY cmake/linux-armv7hf.cmake /opt/armv7-toolchain.cmake
 
 RUN set -xe && \
     echo "SOURCE_DEPS_CACHE_BUST=${SOURCE_DEPS_CACHE_BUST}" && \
-    git clone --depth=1 --recurse-submodules --shallow-submodules https://github.com/ftk/quickjspp.git quickjspp && \
+    git init quickjspp && \
+    git -C quickjspp remote add origin https://github.com/ftk/quickjspp.git && \
+    git -C quickjspp fetch --depth=1 origin "${QUICKJSPP_REF}" && \
+    git -C quickjspp checkout --detach FETCH_HEAD && \
+    git -C quickjspp submodule update --init --recursive --depth=1 && \
     cd quickjspp && \
     cmake -DCMAKE_TOOLCHAIN_FILE=/opt/armv7-toolchain.cmake -DCMAKE_BUILD_TYPE=Release . && \
     make quickjs -j ${THREADS} && \
@@ -95,7 +111,11 @@ RUN set -xe && \
 
 RUN set -xe && \
     echo "SOURCE_DEPS_CACHE_BUST=${SOURCE_DEPS_CACHE_BUST}" && \
-    git clone --depth=1 --recurse-submodules --shallow-submodules https://github.com/PerMalmberg/libcron.git libcron && \
+    git init libcron && \
+    git -C libcron remote add origin https://github.com/PerMalmberg/libcron.git && \
+    git -C libcron fetch --depth=1 origin "${LIBCRON_REF}" && \
+    git -C libcron checkout --detach FETCH_HEAD && \
+    git -C libcron submodule update --init --recursive --depth=1 && \
     cd libcron && \
     cmake -DCMAKE_TOOLCHAIN_FILE=/opt/armv7-toolchain.cmake -DCMAKE_BUILD_TYPE=Release . && \
     make libcron -j ${THREADS} && \
@@ -108,7 +128,10 @@ RUN set -xe && \
 
 RUN set -xe && \
     echo "SOURCE_DEPS_CACHE_BUST=${SOURCE_DEPS_CACHE_BUST}" && \
-    git clone --depth=1 https://github.com/ToruNiina/toml11.git toml11 && \
+    git init toml11 && \
+    git -C toml11 remote add origin https://github.com/ToruNiina/toml11.git && \
+    git -C toml11 fetch --depth=1 origin "${TOML11_REF}" && \
+    git -C toml11 checkout --detach FETCH_HEAD && \
     cd toml11 && \
     install -d /opt/armv7/include && \
     cp -a include/. /opt/armv7/include/
@@ -126,21 +149,21 @@ COPY --from=go-builder /build/bridge/param_compat.h /src/src/parser/param_compat
 
 RUN set -xe && \
     if [ "${REFRESH_HEADERS}" = "true" ]; then \
-      echo "Downloading latest cpp-httplib..." && \
-      curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL https://raw.githubusercontent.com/yhirose/cpp-httplib/master/httplib.h -o include/httplib.h && \
-      echo "Downloading latest nlohmann/json..." && \
-      curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL https://github.com/nlohmann/json/releases/latest/download/json.hpp -o include/nlohmann/json.hpp && \
-      echo "Downloading latest inja..." && \
-      curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL https://raw.githubusercontent.com/pantor/inja/master/single_include/inja/inja.hpp -o include/inja.hpp && \
-      echo "Downloading latest jpcre2..." && \
-      curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL https://raw.githubusercontent.com/jpcre2/jpcre2/master/src/jpcre2.hpp -o include/jpcre2.hpp && \
-      echo "Copying latest quickjspp from compiled source..." && \
+      echo "Downloading pinned cpp-httplib..." && \
+      curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL "https://raw.githubusercontent.com/yhirose/cpp-httplib/${CPP_HTTPLIB_REF}/httplib.h" -o include/httplib.h && \
+      echo "Downloading pinned nlohmann/json..." && \
+      curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL "https://raw.githubusercontent.com/nlohmann/json/${NLOHMANN_JSON_REF}/single_include/nlohmann/json.hpp" -o include/nlohmann/json.hpp && \
+      echo "Downloading pinned inja..." && \
+      curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL "https://raw.githubusercontent.com/pantor/inja/${INJA_REF}/single_include/inja/inja.hpp" -o include/inja.hpp && \
+      echo "Downloading pinned jpcre2..." && \
+      curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL "https://raw.githubusercontent.com/jpcre2/jpcre2/${JPCRE2_REF}/src/jpcre2.hpp" -o include/jpcre2.hpp && \
+      echo "Copying pinned quickjspp from compiled source..." && \
       cp /opt/armv7/include/quickjspp.hpp include/quickjspp.hpp && \
-      echo "Copying latest libcron headers from compiled source..." && \
+      echo "Copying pinned libcron headers from compiled source..." && \
       rm -rf include/libcron include/date && \
       cp -a /libcron/libcron/include/libcron include/libcron && \
       cp -a /libcron/libcron/externals/date/include/date include/date && \
-      echo "Copying latest toml11 headers from compiled source..." && \
+      echo "Copying pinned toml11 headers from compiled source..." && \
       rm -rf include/toml11 && \
       cp /toml11/include/toml.hpp include/toml.hpp && \
       cp -a /toml11/include/toml11 include/toml11; \
@@ -206,13 +229,25 @@ RUN set -xe && \
       rmdir /runtime-root/lib 2>/dev/null || true; \
     fi
 
+# Small CI-only export image. It reuses the completed builder cache without
+# loading the full compiler toolchain into the runner's Docker daemon.
+FROM scratch AS ci-export
+COPY --from=builder /src/subconverter /src/subconverter
+COPY --from=builder /runtime-root /runtime-root
+COPY --from=builder /src/bridge /src/bridge
+COPY --from=builder /src/src/parser/mihomo_schemes.h /src/src/parser/mihomo_schemes.h
+COPY --from=builder /src/src/parser/param_compat.h /src/src/parser/param_compat.h
+COPY --from=builder /src/include /src/include
+CMD ["/src/subconverter"]
+
 # ========== FINAL STAGE ==========
-FROM --platform=$TARGETPLATFORM mirror.gcr.io/library/debian:trixie-slim
+FROM --platform=$TARGETPLATFORM ${DEBIAN_TRIXIE_SLIM_IMAGE}
 
 ARG VERSION="dev"
 ARG SHA=""
 ARG BUILD_DATE=""
 ARG CUSTOM_OPENCLASH_RULES_REVISION=""
+ARG DEPENDENCY_SNAPSHOT_SHA=""
 LABEL \
   org.opencontainers.image.title="SubConverter-Extended" \
   org.opencontainers.image.description="A Modern Evolution of subconverter; an enhanced implementation aligned with Mihomo configuration" \
@@ -223,6 +258,7 @@ LABEL \
   org.opencontainers.image.revision="${SHA}" \
   org.opencontainers.image.created="${BUILD_DATE}" \
   com.aethersailor.custom-openclash-rules.revision="${CUSTOM_OPENCLASH_RULES_REVISION}" \
+  com.aethersailor.dependency-snapshot.sha256="${DEPENDENCY_SNAPSHOT_SHA}" \
   maintainer="Aethersailor"
 
 COPY --from=builder /runtime-root/ /
