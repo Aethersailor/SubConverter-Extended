@@ -688,12 +688,12 @@ void readYAMLConf(YAML::Node &node) {
   }
 
   if (node["aliases"].IsSequence()) {
-    webServer.reset_redirect();
+    eraseElements(global.aliases);
     for (size_t i = 0; i < node["aliases"].size(); i++) {
       std::string uri, target;
       node["aliases"][i]["uri"] >> uri;
       node["aliases"][i]["target"] >> target;
-      webServer.append_redirect(uri, target);
+      global.aliases[uri] = target;
     }
   }
 
@@ -716,14 +716,12 @@ void readYAMLConf(YAML::Node &node) {
     importItems(vArray, false);
     global.enableCron = !vArray.empty();
     global.cronTasks = INIBinding::from<CronTaskConfig>::from_ini(vArray);
-    refresh_schedule();
   }
 
   if (node["server"].IsDefined()) {
     node["server"]["listen"] >> global.listenAddress;
     node["server"]["port"] >> global.listenPort;
-    node["server"]["serve_file_root"] >>= webServer.serve_file_root;
-    webServer.serve_file = !webServer.serve_file_root.empty();
+    node["server"]["serve_file_root"] >>= global.serveFileRoot;
   }
 
   if (node["advanced"].IsDefined()) {
@@ -952,24 +950,22 @@ void readTOMLConf(toml::value &root) {
         global.templateVars[key.as_string()] = value.as_string();
       });
 
-  webServer.reset_redirect();
+  eraseElements(global.aliases);
   operate_toml_kv_table(
       toml::find_or<std::vector<toml::table>>(root, "aliases", {}), "uri",
       "target", [&](const toml::value &key, const toml::value &value) {
-        webServer.append_redirect(key.as_string(), value.as_string());
+        global.aliases[key.as_string()] = value.as_string();
       });
 
   auto tasks = toml::find_or<std::vector<toml::value>>(root, "tasks", {});
   importItems(tasks, "tasks", false);
   global.cronTasks = toml::get<CronTaskConfigs>(toml::value(tasks));
-  refresh_schedule();
 
   auto section_server = toml::find(root, "server");
 
   find_if_exist(section_server, "listen", global.listenAddress, "port",
                 global.listenPort, "serve_file_root",
-                webServer.serve_file_root);
-  webServer.serve_file = !webServer.serve_file_root.empty();
+                global.serveFileRoot);
 
   auto section_advanced = toml::find(root, "advanced");
 
@@ -1063,49 +1059,130 @@ void readTOMLConf(toml::value &root) {
            LOG_LEVEL_INFO);
 }
 
-void readConf() {
+static void applyRuntimeConfiguration() {
+  webServer.reset_redirect();
+  for (const auto &alias : global.aliases)
+    webServer.append_redirect(alias.first, alias.second);
+  webServer.serve_file_root = global.serveFileRoot;
+  webServer.serve_file = !webServer.serve_file_root.empty();
+  refresh_schedule();
+}
+
+bool readConf() {
   guarded_mutex guard(gMutexConfigure);
   writeLog(0, "正在加载偏好设置...", LOG_LEVEL_INFO);
 
-  eraseElements(global.excludeRemarks);
-  eraseElements(global.includeRemarks);
-  eraseElements(global.customProxyGroups);
-  eraseElements(global.customRulesets);
-  global.statisticsEnabled = false;
-  global.statisticsDataDir = "stats";
-  global.statisticsFlushInterval = 5;
-  global.statisticsGeoProvider = "header";
-  global.statisticsCountryHeaders = {"CF-IPCountry", "X-Geo-Country",
-                                     "X-Vercel-IP-Country",
-                                     "CloudFront-Viewer-Country"};
-  global.statisticsChinaRegionHeaders = {"CF-Region-Code", "cf-region-code",
-                                         "X-Geo-Subdivision"};
-  global.dashboardAuthEnabled = false;
-  global.dashboardAuthUsername.clear();
-  global.dashboardAuthPassword.clear();
-  global.dashboardAuthMaxFailures = 5;
-  global.dashboardAuthWindowSeconds = 300;
-  global.dashboardAuthLockSeconds = 900;
-  global.customOpenClashRulesFallback = false;
+  Settings previous = global;
 
+  auto restorePreviousSettings = [&](const std::string &reason) {
+    safe_replace_settings(std::move(previous));
+    writeLog(0, reason, LOG_LEVEL_FATAL);
+    writeLog(0, "偏好设置加载失败，已保留上一份有效配置。",
+             LOG_LEVEL_FATAL);
+    return false;
+  };
+
+  auto resetReloadableSettings = []() {
+    eraseElements(global.excludeRemarks);
+    eraseElements(global.includeRemarks);
+    eraseElements(global.customProxyGroups);
+    eraseElements(global.customRulesets);
+    global.statisticsEnabled = false;
+    global.statisticsDataDir = "stats";
+    global.statisticsFlushInterval = 5;
+    global.statisticsGeoProvider = "header";
+    global.statisticsCountryHeaders = {"CF-IPCountry", "X-Geo-Country",
+                                       "X-Vercel-IP-Country",
+                                       "CloudFront-Viewer-Country"};
+    global.statisticsChinaRegionHeaders = {"CF-Region-Code", "cf-region-code",
+                                           "X-Geo-Subdivision"};
+    global.dashboardAuthEnabled = false;
+    global.dashboardAuthUsername.clear();
+    global.dashboardAuthPassword.clear();
+    global.dashboardAuthMaxFailures = 5;
+    global.dashboardAuthWindowSeconds = 300;
+    global.dashboardAuthLockSeconds = 900;
+    global.customOpenClashRulesFallback = false;
+  };
+
+  std::string prefdata;
   try {
-    std::string prefdata = fileGet(global.prefPath, false);
-    if (prefdata.find("common:") != std::string::npos) {
-      YAML::Node yaml = YAML::Load(prefdata);
-      if (yaml.size() && yaml["common"])
-        return readYAMLConf(yaml);
+    prefdata = fileGet(global.prefPath, false);
+  } catch (std::exception &e) {
+    return restorePreviousSettings(
+        "无法读取偏好设置。原因：" + std::string(e.what()));
+  }
+  std::string extension =
+      toLower(std::filesystem::path(global.prefPath).extension().string());
+
+  auto loadYAML = [&](YAML::Node &yaml) {
+    if (!yaml.size() || !yaml["common"])
+      return restorePreviousSettings(
+          "YAML 偏好设置缺少必需的 common 节。");
+    resetReloadableSettings();
+    try {
+      readYAMLConf(yaml);
+      applyRuntimeConfiguration();
+      return true;
+    } catch (std::exception &e) {
+      return restorePreviousSettings(
+          "无法按 YAML 格式加载偏好设置。原因：" + std::string(e.what()));
     }
-    toml::value conf = parseToml(prefdata, global.prefPath);
-    if (!conf.is_empty() && toml::find_or<int>(conf, "version", 0))
-      return readTOMLConf(conf);
-  } catch (YAML::Exception &e) {
-    // ignore yaml parse error
-    writeLog(0, e.what(), LOG_LEVEL_DEBUG);
-    writeLog(0, "无法按 YAML 格式加载偏好设置。", LOG_LEVEL_DEBUG);
-  } catch (toml::exception &e) {
-    // ignore toml parse error
-    writeLog(0, e.what(), LOG_LEVEL_DEBUG);
-    writeLog(0, "无法按 TOML 格式加载偏好设置。", LOG_LEVEL_DEBUG);
+  };
+
+  auto loadTOML = [&](toml::value &conf) {
+    if (conf.is_empty() || !toml::find_or<int>(conf, "version", 0))
+      return restorePreviousSettings(
+          "TOML 偏好设置缺少有效的 version 字段。");
+    resetReloadableSettings();
+    try {
+      readTOMLConf(conf);
+      applyRuntimeConfiguration();
+      return true;
+    } catch (std::exception &e) {
+      return restorePreviousSettings(
+          "无法按 TOML 格式加载偏好设置。原因：" + std::string(e.what()));
+    }
+  };
+
+  if (extension == ".yml" || extension == ".yaml") {
+    try {
+      YAML::Node yaml = YAML::Load(prefdata);
+      return loadYAML(yaml);
+    } catch (std::exception &e) {
+      return restorePreviousSettings(
+          "无法解析 YAML 偏好设置。原因：" + std::string(e.what()));
+    }
+  }
+
+  if (extension == ".toml") {
+    try {
+      toml::value conf = parseToml(prefdata, global.prefPath);
+      return loadTOML(conf);
+    } catch (std::exception &e) {
+      return restorePreviousSettings(
+          "无法解析 TOML 偏好设置。原因：" + std::string(e.what()));
+    }
+  }
+
+  if (extension != ".ini") {
+    if (prefdata.find("common:") != std::string::npos) {
+      try {
+        YAML::Node yaml = YAML::Load(prefdata);
+        return loadYAML(yaml);
+      } catch (std::exception &e) {
+        return restorePreviousSettings(
+            "无法解析 YAML 偏好设置。原因：" + std::string(e.what()));
+      }
+    }
+    try {
+      toml::value conf = parseToml(prefdata, global.prefPath);
+      if (!conf.is_empty() && toml::find_or<int>(conf, "version", 0))
+        return loadTOML(conf);
+    } catch (std::exception &e) {
+      writeLog(0, e.what(), LOG_LEVEL_DEBUG);
+      writeLog(0, "无法按 TOML 格式加载偏好设置。", LOG_LEVEL_DEBUG);
+    }
   }
 
   INIReader ini;
@@ -1113,14 +1190,14 @@ void readConf() {
   // ini.do_utf8_to_gbk = true;
   int retVal = ini.parse_file(global.prefPath);
   if (retVal != INIREADER_EXCEPTION_NONE) {
-    writeLog(0,
-             "无法按 INI 格式加载偏好设置。原因：" +
-                 ini.get_last_error(),
-             LOG_LEVEL_FATAL);
-    return;
+    return restorePreviousSettings(
+        "无法按 INI 格式加载偏好设置。原因：" + ini.get_last_error());
   }
 
-  string_array tempArray;
+  resetReloadableSettings();
+
+  try {
+    string_array tempArray;
 
   ini.enter_section("common");
   // api_mode and api_access_token removed - hardcoded in settings.h
@@ -1289,9 +1366,9 @@ void readConf() {
   if (ini.section_exist("aliases")) {
     ini.enter_section("aliases");
     ini.get_items(tempmap);
-    webServer.reset_redirect();
+    eraseElements(global.aliases);
     for (auto &x : tempmap)
-      webServer.append_redirect(x.first, x.second);
+      global.aliases[x.first] = x.second;
   }
 
   if (ini.section_exist("tasks")) {
@@ -1301,14 +1378,12 @@ void readConf() {
     importItems(vArray, false);
     global.enableCron = !vArray.empty();
     global.cronTasks = INIBinding::from<CronTaskConfig>::from_ini(vArray);
-    refresh_schedule();
   }
 
   ini.enter_section("server");
   ini.get_if_exist("listen", global.listenAddress);
   ini.get_int_if_exist("port", global.listenPort);
-  webServer.serve_file_root = ini.get("serve_file_root");
-  webServer.serve_file = !webServer.serve_file_root.empty();
+  global.serveFileRoot = ini.get("serve_file_root");
 
   ini.enter_section("advanced");
   std::string log_level;
@@ -1413,10 +1488,15 @@ void readConf() {
     ini.get_if_exist("profile", global.securityProfile);
     ini.get_bool_if_exist("allow_public_upload", global.allowPublicUpload);
   }
-  finalizeRuntimeSettings();
+    finalizeRuntimeSettings();
 
-  writeLog(0, "已加载 INI 格式偏好设置。",
-           LOG_LEVEL_INFO);
+    writeLog(0, "已加载 INI 格式偏好设置。", LOG_LEVEL_INFO);
+    applyRuntimeConfiguration();
+    return true;
+  } catch (std::exception &e) {
+    return restorePreviousSettings(
+        "无法按 INI 格式加载偏好设置。原因：" + std::string(e.what()));
+  }
 }
 
 int loadExternalYAML(YAML::Node &node, ExternalConfig &ext,

@@ -30,7 +30,7 @@ struct Settings {
       maxServerThreads = 128;
   bool prependInsert = true, skipFailedLinks = false;
   bool customOpenClashRulesFallback = false;
-  const bool APIMode = true; // Hardcoded for security - cannot be changed
+  static constexpr bool APIMode = true; // Hardcoded for security
   bool writeManagedConfig = false, enableRuleGen = true,
        updateRulesetOnRequest = false, overwriteOriginalRules = true;
   bool printDbgInfo = false, CFWChildProcess = false, appendUserinfo = true,
@@ -41,6 +41,7 @@ struct Settings {
   int logLevel = LOG_LEVEL_VERBOSE;
   long maxAllowedDownloadSize = 1048576L;
   string_map aliases;
+  std::string serveFileRoot;
 
   // security profile: lan keeps legacy behavior, public restricts untrusted
   // request fetches, strict additionally disables public upload overrides.

@@ -66,6 +66,12 @@ void safe_set_times(RegexMatchConfigs data)
     global.timeNodeRules.swap(data);
 }
 
+void safe_replace_settings(Settings &&settings)
+{
+    std::scoped_lock guard(on_emoji, on_rename, on_stream, on_time);
+    global = std::move(settings);
+}
+
 static bool canReadLocalFetchPath(const std::string &path,
                                   FetchContext context)
 {

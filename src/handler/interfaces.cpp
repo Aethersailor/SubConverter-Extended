@@ -2012,8 +2012,10 @@ static std::string subconverter_impl(Request &request, Response &response,
       refreshRulesets(lCustomRulesets, lRulesetContent, rulesetFetchContext);
     else {
       if (global.updateRulesetOnRequest)
-        refreshRulesets(global.customRulesets, global.rulesetsContent);
-      lRulesetContent = global.rulesetsContent;
+        refreshRulesets(lCustomRulesets, lRulesetContent,
+                        rulesetFetchContext);
+      else
+        lRulesetContent = global.rulesetsContent;
     }
   }
   explain.rule_generator_enabled = ext.enable_rule_generator;

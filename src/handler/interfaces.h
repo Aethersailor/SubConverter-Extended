@@ -15,7 +15,7 @@ std::string parseProxy(const std::string &source);
 void refreshRulesets(RulesetConfigs &ruleset_list,
                      std::vector<RulesetContent> &rca,
                      FetchContext context = FetchContext::TrustedConfig);
-void readConf();
+bool readConf();
 int simpleGenerator();
 std::string convertRuleset(const std::string &content, int type);
 

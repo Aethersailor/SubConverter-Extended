@@ -13,6 +13,8 @@
 
 using guarded_mutex = std::lock_guard<std::mutex>;
 
+struct Settings;
+
 RegexMatchConfigs safe_get_emojis();
 RegexMatchConfigs safe_get_renames();
 RegexMatchConfigs safe_get_streams();
@@ -23,6 +25,7 @@ void safe_set_emojis(RegexMatchConfigs data);
 void safe_set_renames(RegexMatchConfigs data);
 void safe_set_streams(RegexMatchConfigs data);
 void safe_set_times(RegexMatchConfigs data);
+void safe_replace_settings(Settings &&settings);
 std::shared_future<std::string> fetchFileAsync(
     const std::string &path, const std::string &proxy, int cache_ttl,
     bool find_local = true, bool async = false,

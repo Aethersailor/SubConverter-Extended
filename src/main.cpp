@@ -31,6 +31,7 @@
 // #include "vfs.h"
 
 WebServer webServer;
+static volatile std::sig_atomic_t pendingShutdownSignal = 0;
 
 #ifndef _WIN32
 void SetConsoleTitle(const std::string &title) {
@@ -86,10 +87,6 @@ void chkArg(int argc, char *argv[]) {
 }
 
 void signal_handler(int sig) {
-  // std::cerr<<"Interrupt signal "<<sig<<" received. Exiting gracefully...\n";
-  writeLog(0,
-           "收到中断信号 " + std::to_string(sig) + "，正在退出...",
-           LOG_LEVEL_FATAL);
   switch (sig) {
 #ifndef _WIN32
   case SIGHUP:
@@ -97,12 +94,21 @@ void signal_handler(int sig) {
 #endif // _WIN32
   case SIGTERM:
   case SIGINT:
-    webServer.stop_web_server();
+    pendingShutdownSignal = sig;
     break;
   }
 }
 
 void cron_tick_caller() {
+  const std::sig_atomic_t signal = pendingShutdownSignal;
+  if (signal != 0) {
+    pendingShutdownSignal = 0;
+    writeLog(0,
+             "收到中断信号 " + std::to_string(signal) + "，正在退出...",
+             LOG_LEVEL_FATAL);
+    webServer.stop_web_server();
+    return;
+  }
   if (global.enableCron)
     cron_tick();
   if (global.statisticsEnabled)
@@ -150,7 +156,8 @@ int main(int argc, char *argv[]) {
   signal(SIGINT, signal_handler);
 
   SetConsoleTitle("SubConverter-Extended " VERSION);
-  readConf();
+  if (!readConf())
+    return 1;
   statistics::initialize();
   // vfs::vfs_read("vfs.ini");
   if (!global.updateRulesetOnRequest)
