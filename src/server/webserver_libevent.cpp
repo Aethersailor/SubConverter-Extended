@@ -430,6 +430,8 @@ int WebServer::start_web_server_multi(listener_args *args)
     {
         if (args->looper_callback != nullptr)
             args->looper_callback();
+        if (SERVER_EXIT_FLAG)
+            break;
         std::this_thread::sleep_for(std::chrono::milliseconds(args->looper_interval)); //block forever until receive stop signal
     }
 
