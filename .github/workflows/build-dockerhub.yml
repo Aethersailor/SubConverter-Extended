@@ -319,7 +319,7 @@ jobs:
               --cache-to "type=registry,ref=ghcr.io/aethersailor/subconverter-extended:buildcache-${{ matrix.cache_scope }},mode=max,ignore-error=true"
             )
           fi
-          metadata_file="build-metadata-${{ matrix.arch }}.json"
+          metadata_file="${RUNNER_TEMP}/build-metadata-${{ matrix.arch }}.json"
           docker buildx build \
             --file "${{ matrix.dockerfile }}" \
             --platform "${{ matrix.image_platform }}" \
