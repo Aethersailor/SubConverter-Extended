@@ -150,7 +150,8 @@ int main(int argc, char *argv[]) {
   signal(SIGINT, signal_handler);
 
   SetConsoleTitle("SubConverter-Extended " VERSION);
-  readConf();
+  if (!readConf())
+    return 1;
   statistics::initialize();
   // vfs::vfs_read("vfs.ini");
   if (!global.updateRulesetOnRequest)
