@@ -1004,6 +1004,9 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
       if (!p.user_agent.empty()) {
         single_provider["header"]["User-Agent"].push_back(p.user_agent);
       }
+      for (const auto &[name, value] : p.headers) {
+        single_provider["header"][name].push_back(value);
+      }
 
       // 健康检查配置
       single_provider["health-check"]["enable"] = true;

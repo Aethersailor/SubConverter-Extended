@@ -73,6 +73,18 @@ CHECKS = [
         "pattern": r"ProxyProvider\s+provider",
         "message": "provider creation path is missing from request handling.",
     },
+    {
+        "id": "openclash-age-response",
+        "file": "src/handler/interfaces.cpp",
+        "pattern": r"consumeAgeResponseContext",
+        "message": "OpenClash-compatible Age response encryption is missing.",
+    },
+    {
+        "id": "provider-header-selection",
+        "file": "src/handler/interfaces.cpp",
+        "pattern": r"providerHeadersFromRequest",
+        "message": "Explicit proxy-provider header selection is missing.",
+    },
 ]
 
 

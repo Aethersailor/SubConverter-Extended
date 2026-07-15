@@ -1,11 +1,13 @@
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <condition_variable>
 #include <cstdint>
 #include <ctime>
 #include <exception>
 #include <iostream>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <numeric>
 #include <sstream>
@@ -26,6 +28,7 @@
 #include "interfaces.h"
 #include "multithread.h"
 #include "parser/mihomo_scheme_utils.h"
+#include "parser/mihomo_bridge.h"
 #include "script/cron.h"
 #include "script/script_quickjs.h"
 #include "server/webserver.h"
@@ -180,6 +183,99 @@ static std::string providerUserAgentFromRequest(const Request &request) {
     return "";
 
   return value;
+}
+
+static bool isValidProviderHeaderName(const std::string &name) {
+  if (name.empty() || name.size() > 128)
+    return false;
+  static const std::string punctuation = "!#$%&'*+-.^_`|~";
+  for (unsigned char ch : name) {
+    if (!std::isalnum(ch) && punctuation.find(ch) == std::string::npos)
+      return false;
+  }
+  return true;
+}
+
+static bool isReservedProviderHeader(const std::string &name) {
+  std::string lower = toLower(name);
+  static const std::unordered_set<std::string> reserved = {
+      "host",              "connection",        "keep-alive",
+      "proxy-authenticate", "proxy-authorization", "te",
+      "trailer",           "transfer-encoding", "upgrade",
+      "content-length",    "cookie",            "forwarded",
+      "origin",            "referer",           "user-agent",
+      "x-age-public-key",  "if-match",          "if-none-match",
+      "if-modified-since", "if-unmodified-since", "if-range",
+      "range"};
+  if (reserved.find(lower) != reserved.end())
+    return true;
+
+  static const string_array reserved_prefixes = {
+      "cf-",          "sec-",        "x-forwarded-", "x-real-ip",
+      "x-client-ip",  "x-original-", "x-envoy-",     "true-client-ip",
+      "fastly-",      "fly-"};
+  for (const std::string &prefix : reserved_prefixes) {
+    if (startsWith(lower, prefix))
+      return true;
+  }
+  return false;
+}
+
+static bool hasInvalidProviderHeaderValue(const std::string &value) {
+  if (value.empty() || value.size() > 8192)
+    return true;
+  for (unsigned char ch : value) {
+    if (ch == '\r' || ch == '\n' || ch == 0 || ch == 0x7f)
+      return true;
+  }
+  return false;
+}
+
+static bool providerHeadersFromRequest(
+    const Request &request, const std::string &selected,
+    std::map<std::string, std::string> &headers, std::string &error) {
+  headers.clear();
+  if (selected.empty())
+    return true;
+  if (selected.size() > 1024) {
+    error = "provider_headers is too long";
+    return false;
+  }
+
+  std::unordered_set<std::string> seen;
+  string_array names = split(selected, ",");
+  if (names.empty() || names.size() > 16) {
+    error = "provider_headers must select between 1 and 16 headers";
+    return false;
+  }
+  for (std::string name : names) {
+    name = trim(name);
+    std::string lower = toLower(name);
+    if (!isValidProviderHeaderName(name)) {
+      error = "provider_headers contains an invalid header name";
+      return false;
+    }
+    if (isReservedProviderHeader(name)) {
+      error = "provider_headers contains a reserved header name: " + name;
+      return false;
+    }
+    if (!seen.insert(lower).second) {
+      error = "provider_headers contains a duplicate header name: " + name;
+      return false;
+    }
+
+    auto iter = request.headers.find(name);
+    if (iter == request.headers.end()) {
+      error = "provider_headers selected a header that is missing: " + name;
+      return false;
+    }
+    if (hasInvalidProviderHeaderValue(iter->second)) {
+      error = "provider_headers selected an invalid header value: " + name;
+      return false;
+    }
+    headers.emplace(iter->first, iter->second);
+  }
+  return true;
 }
 
 static void appendVaryHeader(Response &response, const std::string &field) {
@@ -1073,6 +1169,83 @@ static bool isTruthyRequestValue(const std::string &value) {
          normalized == "yes" || normalized == "on";
 }
 
+struct AgeResponseContext {
+  bool requested = false;
+  bool valid = true;
+  std::string recipient;
+  std::string fingerprint;
+};
+
+static AgeResponseContext consumeAgeResponseContext(Request &request) {
+  AgeResponseContext context;
+  auto iter = request.headers.find("X-Age-Public-Key");
+  if (iter == request.headers.end())
+    return context;
+
+  context.requested = true;
+  std::string supplied_key = std::move(iter->second);
+  request.headers.erase(iter);
+  try {
+    mihomo::AgeRecipient resolved = mihomo::resolveAgeRecipient(supplied_key);
+    context.recipient = std::move(resolved.recipient);
+    context.fingerprint = std::move(resolved.fingerprint);
+  } catch (...) {
+    context.valid = false;
+  }
+  std::fill(supplied_key.begin(), supplied_key.end(), '\0');
+  supplied_key.clear();
+  return context;
+}
+
+static std::string rejectAgeRequest(Response &response,
+                                    const std::string &message) {
+  response.status_code = 400;
+  response.content_type = "text/plain; charset=utf-8";
+  response.headers["Cache-Control"] = "private, no-store";
+  response.headers["X-SCE-Age"] = "rejected";
+  appendVaryHeader(response, "X-Age-Public-Key");
+  return message;
+}
+
+static std::string finalizeSubResponse(const Request &request,
+                                       Response &response, std::string body,
+                                       const AgeResponseContext &age) {
+  // Every /sub representation varies on this header, including the plaintext
+  // variant, so shared caches cannot serve plaintext to an encrypted request.
+  appendVaryHeader(response, "X-Age-Public-Key");
+  if (!age.requested)
+    return body;
+
+  response.headers["Cache-Control"] = "private, no-store";
+  response.headers["X-SCE-Age-Recipient"] = age.fingerprint;
+  if (response.status_code < 200 || response.status_code >= 300) {
+    response.headers["X-SCE-Age"] = "error-not-encrypted";
+    return body;
+  }
+  if (request.method == "HEAD" ||
+      isTruthyRequestValue(getUrlArg(request.argument, "explain"))) {
+    response.headers["X-SCE-Age"] = "diagnostic-not-encrypted";
+    return body;
+  }
+
+  try {
+    body = mihomo::encryptAgeArmored(body, age.recipient);
+    response.headers.erase("ETag");
+    response.headers.erase("Content-MD5");
+    response.headers.erase("Digest");
+    response.headers["X-SCE-Age"] = "encrypted";
+    return body;
+  } catch (...) {
+    response.status_code = 500;
+    response.content_type = "text/plain; charset=utf-8";
+    response.headers.erase("Subscription-UserInfo");
+    response.headers.erase("Content-Disposition");
+    response.headers["X-SCE-Age"] = "encryption-failed";
+    return "Internal error: Age response encryption failed.\n"
+           "内部错误：Age 响应加密失败。";
+  }
+}
+
 static bool appendKeyPart(std::string &identity, const std::string &name,
                           const std::string &value) {
   static constexpr size_t kMaxIdentitySize = 2 * 1024 * 1024;
@@ -1098,7 +1271,8 @@ static bool shouldCoalesceSubRequest(const Request &request) {
   return true;
 }
 
-static std::string buildSubRequestKey(const Request &request) {
+static std::string buildSubRequestKey(const Request &request,
+                                      const AgeResponseContext &age) {
   std::string identity;
   if (!appendKeyPart(identity, "version", VERSION) ||
       !appendKeyPart(identity, "config_generation",
@@ -1106,7 +1280,9 @@ static std::string buildSubRequestKey(const Request &request) {
       !appendKeyPart(identity, "managed_config_prefix",
                      global.managedConfigPrefix) ||
       !appendKeyPart(identity, "method", request.method) ||
-      !appendKeyPart(identity, "path", request.url))
+      !appendKeyPart(identity, "path", request.url) ||
+      !appendKeyPart(identity, "age_recipient_fingerprint",
+                     age.fingerprint))
     return "";
 
   for (const auto &arg : request.argument) {
@@ -1242,19 +1418,39 @@ static void recordTrackedSubRequest(bool track, const Request &request,
 
 static std::string subconverterEntry(Request &request, Response &response,
                                      bool track) {
+  AgeResponseContext age = consumeAgeResponseContext(request);
+  if (age.requested && !age.valid) {
+    return rejectAgeRequest(
+        response,
+        "Invalid X-Age-Public-Key: expected one Mihomo-supported Age public "
+        "or secret key.\n"
+        "X-Age-Public-Key 无效：应提供一个 Mihomo 支持的 Age 公钥或私钥。"
+    );
+  }
+  if (age.requested && getUrlArg(request.argument, "target") != "clash") {
+    return rejectAgeRequest(
+        response,
+        "Invalid request: Age response encryption is supported only for "
+        "target=clash.\n"
+        "无效请求：Age 响应加密仅支持 target=clash。"
+    );
+  }
+
   if (!shouldCoalesceSubRequest(request)) {
     RuleConversionStats stats;
     std::string body =
         subconverter_impl(request, response, track ? &stats : nullptr);
+    body = finalizeSubResponse(request, response, std::move(body), age);
     recordTrackedSubRequest(track, request, response, stats.rules);
     return body;
   }
 
-  std::string key = buildSubRequestKey(request);
+  std::string key = buildSubRequestKey(request, age);
   if (key.empty()) {
     RuleConversionStats stats;
     std::string body =
         subconverter_impl(request, response, track ? &stats : nullptr);
+    body = finalizeSubResponse(request, response, std::move(body), age);
     recordTrackedSubRequest(track, request, response, stats.rules);
     return body;
   }
@@ -1302,6 +1498,7 @@ static std::string subconverterEntry(Request &request, Response &response,
     RuleConversionStats stats;
     std::string body = runSubconverterImplWithRetry(
         original_request, owner_response, track ? &stats : nullptr);
+    body = finalizeSubResponse(request, owner_response, std::move(body), age);
     CoalescedResponse result =
         makeCoalescedResult(body, owner_response, stats.rules);
     response = owner_response;
@@ -1314,7 +1511,8 @@ static std::string subconverterEntry(Request &request, Response &response,
       std::lock_guard<std::mutex> lock(g_sub_inflight_mutex);
       g_sub_inflight.erase(key);
     }
-    storeCachedSubResponse(key, result);
+    if (!age.requested)
+      storeCachedSubResponse(key, result);
     call->cv.notify_all();
     recordTrackedSubRequest(track, request, response, result.rule_conversions);
     return body;
@@ -1427,7 +1625,8 @@ static std::string subconverter_impl(Request &request, Response &response,
               argUpdateInterval = getUrlArg(argument, "interval"),
               argUpdateStrict = getUrlArg(argument, "strict");
   std::string argRenames = getUrlArg(argument, "rename"),
-              argFilterScript = getUrlArg(argument, "filter_script");
+              argFilterScript = getUrlArg(argument, "filter_script"),
+              argProviderHeaders = getUrlArg(argument, "provider_headers");
 
   /// switches with default value
   tribool argUpload = getUrlArg(argument, "upload"),
@@ -1506,6 +1705,21 @@ static std::string subconverter_impl(Request &request, Response &response,
            "Please provide target and url; url may be omitted only when "
            "configured insert nodes are enabled.\n"
            "请提供 target 和 url；只有启用已配置的插入节点时才能省略 url。";
+  }
+
+  std::map<std::string, std::string> provider_headers;
+  std::string provider_headers_error;
+  if (!argProviderHeaders.empty() && argTarget != "clash") {
+    *status_code = 400;
+    return "Invalid request: provider_headers is supported only for target=clash.\n"
+           "无效请求：provider_headers 仅支持 target=clash。";
+  }
+  if (!providerHeadersFromRequest(request, argProviderHeaders,
+                                  provider_headers,
+                                  provider_headers_error)) {
+    *status_code = 400;
+    return "Invalid request: " + provider_headers_error + ".\n"
+           "无效请求：proxy-provider 请求头选择失败。";
   }
 
   /// load request arguments as template variables
@@ -1856,6 +2070,11 @@ static std::string subconverter_impl(Request &request, Response &response,
   parse_set.authorized = authorized;
   parse_set.mihomo_only = argTarget == "clash" || argTarget == "clashr";
   string_icase_map subscription_headers = buildSubscriptionRequestHeaders();
+  std::string selected_user_agent = providerUserAgentFromRequest(request);
+  if (!selected_user_agent.empty())
+    subscription_headers["User-Agent"] = selected_user_agent;
+  for (const auto &[name, value] : provider_headers)
+    subscription_headers[name] = value;
   parse_set.request_header = &subscription_headers;
   parse_set.fetch_context = FetchContext::TrustedConfig;
   parse_set.js_runtime = ext.js_runtime;
@@ -2004,6 +2223,7 @@ static std::string subconverter_impl(Request &request, Response &response,
         provider.groupId = groupID;
         provider.path = "./providers/" + provider.name + ".yaml";
         provider.user_agent = provider_user_agent;
+        provider.headers = provider_headers;
 
         // Provider mode cannot filter expanded nodes locally, so pass the
         // final effective remark filters through to Mihomo.
@@ -2073,6 +2293,12 @@ static std::string subconverter_impl(Request &request, Response &response,
   explain.proxy_provider_mode = ext.use_proxy_provider && !ext.providers.empty();
   explain.insert_node_count = insert_nodes.size();
   explain.direct_node_count = nodes.size();
+  if (!argProviderHeaders.empty() && !ext.nodelist && ext.providers.empty()) {
+    *status_code = 400;
+    return "Invalid request: provider_headers was selected, but no "
+           "proxy-provider was generated.\n"
+           "无效请求：已选择 provider_headers，但没有生成 proxy-provider。";
+  }
   if (nodes.empty() && insert_nodes.empty() && ext.providers.empty()) {
     *status_code = 400;
     return "Invalid request: no valid proxy nodes or proxy providers were "
@@ -2433,6 +2659,10 @@ static std::string subconverter_impl(Request &request, Response &response,
   writeLog(0, "生成完成。", LOG_LEVEL_INFO);
   if (argTarget == "clash" && explain.proxy_provider_mode)
     appendVaryHeader(response, "User-Agent");
+  for (const auto &[name, value] : provider_headers) {
+    (void)value;
+    appendVaryHeader(response, name);
+  }
 
   if (explainMode) {
     auto hasArg = [&](const std::string &name) {
@@ -2564,8 +2794,14 @@ static std::string subconverter_impl(Request &request, Response &response,
                  authorized && !argFilterScript.empty() ? "script accepted"
                                                         : "not used",
                  authorized ? "applied" : "ignored",
-                 "Public requests cannot provide executable filter scripts.",
-                 true);
+                  "Public requests cannot provide executable filter scripts.",
+                  true);
+    addParameter("provider_headers",
+                 std::to_string(provider_headers.size()) +
+                     " explicitly selected header(s)",
+                 provider_headers.empty() ? "ignored" : "applied",
+                 "Only named, present, non-reserved request headers are "
+                 "copied into generated proxy-providers.");
     addParameter("upload", boolString(argUpload), explain.upload_suppressed
                                                     ? "suppressed"
                                                     : "applied",
@@ -2616,8 +2852,8 @@ static std::string subconverter_impl(Request &request, Response &response,
         "upload", "emoji", "add_emoji", "remove_emoji", "append_type",
         "tfo", "udp", "list", "sort", "sort_script", "script", "insert",
         "scv", "fdn", "expand", "append_info", "prepend", "classic",
-        "tls13", "provider_proxy_direct", "explain", "profile_data",
-        "token"};
+        "tls13", "provider_proxy_direct", "provider_headers", "explain",
+        "profile_data", "token"};
     for (const auto &arg : argument) {
       if (known_parameters.find(arg.first) != known_parameters.end())
         continue;

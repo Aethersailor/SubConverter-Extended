@@ -37,6 +37,9 @@ PROVIDER_FILTER_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
         )
     )
 ).decode("ascii")
+AGE_PUBLIC_KEY = (
+    "age1xh86kh9v23vattr58yedspm3f57sxvnswu9krr6ns438amekx5gsd09uma"
+)
 
 
 def build_url(base_url: str, path: str, params: dict[str, str] | None = None) -> str:
@@ -84,10 +87,15 @@ def fetch(
 
 
 def assert_rejected(
-    base_url: str, path: str, params: dict[str, str], timeout: int, label: str
+    base_url: str,
+    path: str,
+    params: dict[str, str],
+    timeout: int,
+    label: str,
+    headers: dict[str, str] | None = None,
 ) -> None:
     try:
-        fetch(base_url, path, params, timeout)
+        fetch(base_url, path, params, timeout, headers)
     except AssertionError as exc:
         if "returned HTTP 400" not in str(exc):
             raise AssertionError(f"{label} failed unexpectedly: {exc}") from exc
@@ -239,6 +247,63 @@ def run_checks(
         raise AssertionError("direct Clash conversion did not include expected node output")
     assert_snapshot("direct-clash.yaml", direct_config, snapshot_dir, update)
 
+    _, plaintext_headers = fetch_response(
+        base_url, "/sub", common_params, timeout
+    )
+    plaintext_vary = {
+        value.strip().lower()
+        for value in plaintext_headers.get("vary", "").split(",")
+        if value.strip()
+    }
+    if "x-age-public-key" not in plaintext_vary:
+        raise AssertionError("plaintext /sub response is missing Vary: X-Age-Public-Key")
+
+    age_config, age_headers = fetch_response(
+        base_url,
+        "/sub",
+        common_params,
+        timeout,
+        {"X-Age-Public-Key": AGE_PUBLIC_KEY},
+    )
+    if not age_config.startswith("-----BEGIN AGE ENCRYPTED FILE-----"):
+        raise AssertionError("Age response is not official ASCII armor")
+    if age_headers.get("x-sce-age") != "encrypted":
+        raise AssertionError("Age response is missing its encrypted diagnostic header")
+    if len(age_headers.get("x-sce-age-recipient", "")) != 64:
+        raise AssertionError("Age response is missing its recipient fingerprint")
+    if "no-store" not in age_headers.get("cache-control", "").lower():
+        raise AssertionError("Age response is not marked no-store")
+    age_vary = {
+        value.strip().lower()
+        for value in age_headers.get("vary", "").split(",")
+        if value.strip()
+    }
+    if "x-age-public-key" not in age_vary:
+        raise AssertionError("Age response is missing Vary: X-Age-Public-Key")
+
+    plaintext_after_age = fetch(base_url, "/sub", common_params, timeout)
+    if plaintext_after_age.startswith("-----BEGIN AGE ENCRYPTED FILE-----"):
+        raise AssertionError("Age response leaked into the plaintext cache variant")
+    if plaintext_after_age != direct_config:
+        raise AssertionError("plaintext response changed after an Age request")
+
+    assert_rejected(
+        base_url,
+        "/sub",
+        common_params,
+        timeout,
+        "invalid Age key",
+        {"X-Age-Public-Key": "not-an-age-key"},
+    )
+    assert_rejected(
+        base_url,
+        "/sub",
+        {**common_params, "target": "clashr"},
+        timeout,
+        "Age encryption for non-Clash target",
+        {"X-Age-Public-Key": AGE_PUBLIC_KEY},
+    )
+
     direct_explain = fetch(
         base_url,
         "/sub",
@@ -259,6 +324,17 @@ def run_checks(
     if "effective_config" not in direct_report:
         raise AssertionError("direct explain report did not include effective config diagnostics")
     assert_snapshot("direct-explain.json", direct_explain, snapshot_dir, update)
+
+    age_explain, age_explain_headers = fetch_response(
+        base_url,
+        "/sub",
+        {**common_params, "explain": "true"},
+        timeout,
+        {"X-Age-Public-Key": AGE_PUBLIC_KEY},
+    )
+    json.loads(age_explain)
+    if age_explain_headers.get("x-sce-age") != "diagnostic-not-encrypted":
+        raise AssertionError("Age explain response did not remain diagnostic JSON")
 
     provider_explain = fetch(
         base_url,
@@ -402,6 +478,91 @@ def run_checks(
         assert_provider_ua_present("custom UA provider", custom_output, custom_ua)
         if client_ua in custom_output:
             raise AssertionError("custom UA provider output reused the sample UA")
+
+        selected_header_output, selected_header_response_headers = fetch_response(
+            base_url,
+            "/sub",
+            {**provider_params, "provider_headers": "x-hwid,Authorization"},
+            timeout,
+            {
+                "User-Agent": client_ua,
+                "x-hwid": "smoke-device-2026",
+                "Authorization": "Bearer provider-smoke-token",
+                "X-Unselected-Smoke": "must-not-leak",
+            },
+        )
+        selected_header_output_lower = selected_header_output.lower()
+        for expected in ("x-hwid:", "authorization:"):
+            if expected not in selected_header_output_lower:
+                raise AssertionError(
+                    f"selected provider header output is missing {expected!r}"
+                )
+        for expected in ("smoke-device-2026", "Bearer provider-smoke-token"):
+            if expected not in selected_header_output:
+                raise AssertionError(
+                    f"selected provider header output is missing {expected!r}"
+                )
+        if "must-not-leak" in selected_header_output:
+            raise AssertionError("unselected request header leaked into proxy-provider")
+        selected_vary = {
+            value.strip().lower()
+            for value in selected_header_response_headers.get("vary", "").split(",")
+            if value.strip()
+        }
+        for expected in ("x-hwid", "authorization", "x-age-public-key"):
+            if expected not in selected_vary:
+                raise AssertionError(
+                    f"selected provider response Vary is missing {expected}"
+                )
+
+        expanded_with_headers = fetch(
+            base_url,
+            "/sub",
+            {
+                **provider_params,
+                "list": "true",
+                "provider_headers": "x-hwid",
+            },
+            timeout,
+            {
+                "User-Agent": client_ua,
+                "x-hwid": "smoke-device-2026",
+            },
+        )
+        if (
+            "Smoke" not in expanded_with_headers
+            or "proxy-providers:" in expanded_with_headers
+        ):
+            raise AssertionError("list=true provider header fetch did not expand nodes")
+
+        assert_rejected(
+            base_url,
+            "/sub",
+            {**provider_params, "provider_headers": "x-missing-smoke"},
+            timeout,
+            "missing selected provider header",
+        )
+        assert_rejected(
+            base_url,
+            "/sub",
+            {**provider_params, "provider_headers": "X-Age-Public-Key"},
+            timeout,
+            "reserved selected provider header",
+            {"X-Age-Public-Key": AGE_PUBLIC_KEY},
+        )
+        assert_rejected(
+            base_url,
+            "/sub",
+            {
+                "target": "clash",
+                "url": DIRECT_SS_LINK,
+                "config": DISABLE_RULEGEN_CONFIG,
+                "provider_headers": "x-hwid",
+            },
+            timeout,
+            "selected provider header without a generated provider",
+            {"x-hwid": "smoke-device-2026"},
+        )
 
         browser_output, browser_headers = fetch_response(
             base_url,

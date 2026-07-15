@@ -106,5 +106,66 @@
     "subject": "fix(subparser): map VLESS xhttp extra options to mihomo fields",
     "time": "2026-07-09T21:36:07+00:00",
     "reason": "Applied patch to 'src/parser/subparser.cpp' with conflicts.\nU src/parser/subparser.cpp"
+  },
+  {
+    "sha": "e60ff5fcb102d63769904a2d98622faaf1ba296d",
+    "subject": "feat: improve clash configuration parsing in explodeSub function",
+    "time": "2026-07-10T21:14:19+00:00",
+    "reason": "Modifies parser plus a non-whitelisted file (.codex-pr895); cannot safely apply parser-only.",
+    "copilot_decision": {
+      "sha": "e60ff5fcb102d63769904a2d98622faaf1ba296d",
+      "decision": "skip",
+      "risk": "medium",
+      "reason": "Modifies parser plus a non-whitelisted file (.codex-pr895); cannot safely apply parser-only.",
+      "required_tests": [
+        "unit:parser::explodeSub_clash_detection",
+        "build"
+      ]
+    }
+  },
+  {
+    "sha": "c34916493c717109d96e9911a43b2e95d7271185",
+    "subject": "feat: add function to read Clash TUIC ALPN configuration",
+    "time": "2026-07-10T21:14:19+00:00",
+    "reason": "Applied patch to 'src/parser/subparser.cpp' with conflicts.\nU src/parser/subparser.cpp"
+  },
+  {
+    "sha": "723071d8cb46cd258d0ddb54a6b648b32e0e3d07",
+    "subject": "feat: enhance explodeSub function to support Clash proxy sequences",
+    "time": "2026-07-10T21:14:19+00:00",
+    "reason": "Enhances explodeSub to accept top-level proxy sequences; behavior-sensitive but limited to parser.",
+    "copilot_decision": {
+      "sha": "723071d8cb46cd258d0ddb54a6b648b32e0e3d07",
+      "decision": "safe_parser_only",
+      "risk": "medium",
+      "reason": "Enhances explodeSub to accept top-level proxy sequences; behavior-sensitive but limited to parser.",
+      "required_tests": [
+        "unit:parser::explodeSub_sequence",
+        "fuzz:parser_detection"
+      ]
+    }
+  },
+  {
+    "sha": "086ced011fb2479fdd762ad4458821fbaef82f78",
+    "subject": "fix: reset yamlnode in explodeSub function for proper proxy sequence handling",
+    "time": "2026-07-10T21:14:19+00:00",
+    "reason": "Applied patch to 'src/parser/subparser.cpp' with conflicts.\nU src/parser/subparser.cpp"
+  },
+  {
+    "sha": "344ad270fc3f44affebec401be6074844f5cb7f5",
+    "subject": "Implement code changes to enhance functionality and improve performance",
+    "time": "2026-07-10T21:14:19+00:00",
+    "reason": "Large refactor/deletions in parser that remove helper and reintroduce thrown exceptions; high risk to parsing stability.",
+    "copilot_decision": {
+      "sha": "344ad270fc3f44affebec401be6074844f5cb7f5",
+      "decision": "unsafe",
+      "risk": "high",
+      "reason": "Large refactor/deletions in parser that remove helper and reintroduce thrown exceptions; high risk to parsing stability.",
+      "required_tests": [
+        "unit:parser::explodeClash_regression",
+        "integration:subconverter_end_to_end",
+        "fuzz:parser"
+      ]
+    }
   }
 ]
