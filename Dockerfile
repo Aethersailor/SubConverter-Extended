@@ -134,12 +134,12 @@ RUN set -xe && \
 # Copy Go shared library and module files from go-builder stage
 COPY --from=go-builder /build/bridge/libmihomo.so /usr/lib/
 COPY --from=go-builder /build/bridge/libmihomo.h /usr/include/
-COPY --from=go-builder /build/bridge/go.mod /src/bridge/go.mod
-COPY --from=go-builder /build/bridge/go.sum /src/bridge/go.sum
 
 # build SubConverter-Extended from THIS repository source
 WORKDIR /src
 COPY . /src
+COPY --from=go-builder /build/bridge/go.mod /src/bridge/go.mod
+COPY --from=go-builder /build/bridge/go.sum /src/bridge/go.sum
 COPY --from=go-builder /build/bridge/proxy_validation_generated.go /src/bridge/proxy_validation_generated.go
 COPY --from=go-builder /build/bridge/mihomo_schemes.h /src/src/parser/mihomo_schemes.h
 COPY --from=go-builder /build/bridge/param_compat.h /src/src/parser/param_compat.h
