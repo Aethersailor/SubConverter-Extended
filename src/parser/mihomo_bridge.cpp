@@ -6,6 +6,8 @@
 // Go library functions (generated from libconvert.h)
 extern "C" {
 char *ConvertSubscription(char *data);
+char *ResolveAgeRecipient(char *key);
+char *EncryptAgeArmored(char *data, char *recipient);
 void FreeString(char *s);
 }
 
@@ -119,6 +121,41 @@ bool isMihomoParserAvailable() {
     return false;
   }
   return false;
+}
+
+AgeRecipient resolveAgeRecipient(const std::string &key) {
+  char *result =
+      ResolveAgeRecipient(const_cast<char *>(key.c_str()));
+  if (!result)
+    throw std::runtime_error("Age 密钥解析失败");
+
+  std::string payload(result);
+  FreeString(result);
+  auto parsed = nlohmann::json::parse(payload);
+  if (parsed.contains("error"))
+    throw std::runtime_error(parsed.value("error", "invalid age key"));
+
+  AgeRecipient resolved;
+  resolved.recipient = parsed.value("recipient", "");
+  resolved.fingerprint = parsed.value("fingerprint", "");
+  resolved.source = parsed.value("source", "");
+  if (resolved.recipient.empty() || resolved.fingerprint.size() != 64)
+    throw std::runtime_error("Age 密钥解析结果无效");
+  return resolved;
+}
+
+std::string encryptAgeArmored(const std::string &data,
+                              const std::string &recipient) {
+  char *result = EncryptAgeArmored(const_cast<char *>(data.c_str()),
+                                   const_cast<char *>(recipient.c_str()));
+  if (!result)
+    throw std::runtime_error("Age 加密失败");
+
+  std::string payload(result);
+  FreeString(result);
+  if (payload.rfind("OK\n", 0) != 0)
+    throw std::runtime_error("Age 加密失败");
+  return payload.substr(3);
 }
 
 } // namespace mihomo

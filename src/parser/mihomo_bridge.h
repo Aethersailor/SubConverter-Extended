@@ -38,6 +38,25 @@ std::vector<ProxyNode> parseSubscription(const std::string &subscription);
  */
 bool isMihomoParserAvailable();
 
+struct AgeRecipient {
+  std::string recipient;
+  std::string fingerprint;
+  std::string source;
+};
+
+/**
+ * @brief Resolve one Age public or secret key to a public recipient.
+ * @throws std::runtime_error when the key is invalid.
+ */
+AgeRecipient resolveAgeRecipient(const std::string &key);
+
+/**
+ * @brief Encrypt text using Mihomo's official Age ASCII armor implementation.
+ * @throws std::runtime_error when encryption fails.
+ */
+std::string encryptAgeArmored(const std::string &data,
+                              const std::string &recipient);
+
 } // namespace mihomo
 
 #endif // MIHOMO_BRIDGE_H
