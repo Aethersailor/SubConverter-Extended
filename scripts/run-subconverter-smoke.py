@@ -521,13 +521,12 @@ def run_checks(
             {
                 **provider_params,
                 "list": "true",
-                "provider_headers": "x-hwid,Authorization",
+                "provider_headers": "x-hwid",
             },
             timeout,
             {
                 "User-Agent": client_ua,
                 "x-hwid": "smoke-device-2026",
-                "Authorization": "Bearer provider-smoke-token",
             },
         )
         if (
