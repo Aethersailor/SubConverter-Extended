@@ -331,6 +331,7 @@ cd /opt/SubConverter-Extended
 # 下载 docker-compose 配置文件
 wget -O docker-compose.yml \
   https://gcore.jsdelivr.net/gh/Aethersailor/SubConverter-Extended@master/docker-compose.yml
+# 根据自己实际情况，修改 compose 文件
 
 # 下载配置文件
 wget -O base/pref.toml \
