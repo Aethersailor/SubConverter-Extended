@@ -2,12 +2,11 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const manageInactiveIssues = require('./manage-inactive-issues.cjs');
 const {
   evaluateIssue,
-  inferCloseReason,
-  LABELS,
-  WARNING_MARKER,
-} = require('./manage-inactive-issues.cjs');
+  lastHumanActivityAt,
+} = manageInactiveIssues;
 
 const NOW = new Date('2026-07-10T12:00:00Z');
 
@@ -15,6 +14,7 @@ function issue(overrides = {}) {
   return {
     number: 1,
     state: 'open',
+    created_at: new Date(NOW - 20 * 24 * 60 * 60 * 1000).toISOString(),
     user: { login: 'reporter', type: 'User' },
     author_association: 'NONE',
     labels: [],
@@ -39,65 +39,93 @@ function evaluate(targetIssue, comments) {
     comments,
     now: NOW,
     waitDays: 14,
-    graceDays: 7,
   });
 }
 
-test('does not touch an issue before a maintainer responds', () => {
-  assert.deepEqual(evaluate(issue(), [comment(20, 'NONE')]), {
-    action: 'clear',
-    reason: 'no-maintainer-response',
+test('waits until a new issue has been inactive for fourteen days', () => {
+  const target = issue({
+    created_at: new Date(NOW - 13 * 24 * 60 * 60 * 1000).toISOString(),
   });
+  assert.equal(evaluate(target, []).action, 'wait');
 });
 
-test('starts waiting automatically after a recent maintainer response', () => {
+test('closes an issue with no replies at the fourteen day boundary', () => {
+  const target = issue({
+    created_at: new Date(NOW - 14 * 24 * 60 * 60 * 1000).toISOString(),
+  });
+  assert.equal(evaluate(target, []).action, 'close');
+});
+
+test('any recent human reply resets the inactivity period', () => {
+  assert.equal(evaluate(issue(), [comment(5, 'NONE')]).action, 'wait');
   assert.equal(evaluate(issue(), [comment(5, 'OWNER')]).action, 'wait');
 });
 
-test('clears automation labels after a community response', () => {
-  const outcome = evaluate(issue(), [comment(10, 'OWNER'), comment(2, 'NONE')]);
-  assert.deepEqual(outcome, {
-    action: 'clear',
-    reason: 'external-reply-after-maintainer',
-  });
+test('closes fourteen days after the latest human reply', () => {
+  assert.equal(evaluate(issue(), [comment(18, 'OWNER'), comment(14, 'NONE')]).action, 'close');
 });
 
-test('warns after fourteen days without feedback', () => {
-  assert.equal(evaluate(issue(), [comment(14, 'OWNER')]).action, 'warn');
-});
-
-test('waits through the seven day warning grace period', () => {
-  const warning = comment(3, 'NONE', {
+test('bot comments do not extend the inactivity period', () => {
+  const botComment = comment(1, 'NONE', {
     user: { login: 'github-actions[bot]', type: 'Bot' },
-    body: WARNING_MARKER,
   });
-  assert.equal(evaluate(issue(), [comment(20, 'OWNER'), warning]).action, 'grace');
+  assert.equal(evaluate(issue(), [comment(15, 'OWNER'), botComment]).action, 'close');
 });
 
-test('closes after the warning grace period', () => {
-  const warning = comment(8, 'NONE', {
-    user: { login: 'github-actions[bot]', type: 'Bot' },
-    body: WARNING_MARKER,
-  });
-  assert.equal(evaluate(issue(), [comment(23, 'OWNER'), warning]).action, 'close');
+test('uses the newest human reply regardless of comment order', () => {
+  const latest = lastHumanActivityAt(issue(), [comment(3, 'NONE'), comment(9, 'OWNER')]);
+  assert.equal(latest.toISOString(), comment(3, 'NONE').created_at);
 });
 
-test('ignores an old warning after a newer maintainer response', () => {
-  const warning = comment(20, 'NONE', {
-    user: { login: 'github-actions[bot]', type: 'Bot' },
-    body: WARNING_MARKER,
-  });
-  assert.equal(evaluate(issue(), [warning, comment(5, 'OWNER')]).action, 'wait');
+test('labels and milestones do not change the inactivity rule', () => {
+  const target = issue({ labels: [{ name: 'status: keep-open' }], milestone: { number: 1 } });
+  assert.equal(evaluate(target, []).action, 'close');
 });
 
-test('exempts milestones and keep-open issues', () => {
-  const keepOpen = issue({ labels: [{ name: LABELS.keepOpen.name }] });
-  const milestone = issue({ milestone: { number: 1 } });
-  assert.equal(evaluate(keepOpen, [comment(30, 'OWNER')]).reason, 'explicitly-exempt');
-  assert.equal(evaluate(milestone, [comment(30, 'OWNER')]).reason, 'explicitly-exempt');
+test('skips pull requests and closed issues', () => {
+  assert.equal(evaluate(issue({ pull_request: {} }), []).reason, 'pull-request');
+  assert.equal(evaluate(issue({ state: 'closed' }), []).reason, 'not-open');
 });
 
-test('uses completed only when a maintainer explicitly reports completion', () => {
-  assert.equal(inferCloseReason('已修复，请测试'), 'completed');
-  assert.equal(inferCloseReason('请补充完整日志'), 'not_planned');
+test('scheduled run closes an inactive issue without calling label APIs', async () => {
+  const calls = [];
+  const listForRepo = Symbol('listForRepo');
+  const listComments = Symbol('listComments');
+  const github = {
+    rest: {
+      issues: {
+        listForRepo,
+        listComments,
+        createComment: async (params) => calls.push(['comment', params]),
+        update: async (params) => calls.push(['update', params]),
+      },
+    },
+    paginate: async (endpoint) => endpoint === listForRepo ? [issue()] : [],
+  };
+  const summary = {
+    addHeading() { return this; },
+    addTable() { return this; },
+    async write() {},
+  };
+  const previousWaitDays = process.env.INACTIVE_ISSUE_WAIT_DAYS;
+  const previousDryRun = process.env.INACTIVE_ISSUE_DRY_RUN;
+  process.env.INACTIVE_ISSUE_WAIT_DAYS = '14';
+  process.env.INACTIVE_ISSUE_DRY_RUN = 'false';
+
+  try {
+    await manageInactiveIssues({
+      github,
+      context: { repo: { owner: 'Aethersailor', repo: 'SubConverter-Extended' } },
+      core: { info() {}, summary },
+    });
+  } finally {
+    if (previousWaitDays === undefined) delete process.env.INACTIVE_ISSUE_WAIT_DAYS;
+    else process.env.INACTIVE_ISSUE_WAIT_DAYS = previousWaitDays;
+    if (previousDryRun === undefined) delete process.env.INACTIVE_ISSUE_DRY_RUN;
+    else process.env.INACTIVE_ISSUE_DRY_RUN = previousDryRun;
+  }
+
+  assert.deepEqual(calls.map(([operation]) => operation), ['comment', 'update']);
+  assert.equal(calls[1][1].state, 'closed');
+  assert.equal(calls[1][1].state_reason, 'not_planned');
 });
