@@ -1,22 +1,28 @@
-version: "3.8"
 # SubConverter-Extended 的 Compose 示例 / Example compose for SubConverter-Extended.
 
 services:
   subconverter-extended:
-    container_name: "SubConverter-Extended"
-    image: "aethersailor/subconverter-extended:latest"
+    container_name: SubConverter-Extended
+    image: aethersailor/subconverter-extended:latest
     ports:
-    # 自定义映射端口号
+      # 自定义映射端口号 / Customize the published port.
       - "25500:25500/tcp"
     restart: unless-stopped
     environment:
-      TZ: "Asia/Shanghai"
-      # 可选：覆盖 [managed_config].managed_config_prefix / Optional: override [managed_config].managed_config_prefix
-      MANAGED_CONFIG_PREFIX: "http://your-domain-or-ip:25500"
+      TZ: Asia/Shanghai
+      # 按需取消注释并修改；环境变量会覆盖 pref.toml 中的对应配置。
+      # Uncomment and edit as needed; environment variables override pref.toml.
+      # MANAGED_CONFIG_PREFIX: "http://your-domain-or-ip:25500"
+      # SUBCONVERTER_SECURITY_PROFILE: public
+      # SUBCONVERTER_ALLOW_PUBLIC_UPLOAD: "false"
     volumes:
+      # 启动前请先创建 ./base/pref.toml；不要将整个 ./base 挂载到 /base，
+      # 否则会遮盖镜像内随版本更新的规则和模板。
+      # Create ./base/pref.toml before startup. Do not mount all of ./base to /base,
+      # or image-provided rules and templates will be hidden.
       - "./base/pref.toml:/base/pref.toml:ro"
-      # 可选：持久化 /dashboard 统计数据；删除该目录即可清空统计。
-      # Optional: persist /dashboard statistics; delete this directory to reset.
+      # 持久化 /dashboard 统计数据；仅在 pref.toml 中启用 statistics 后写入。
+      # Persist /dashboard statistics; data is written only when statistics is enabled.
       - "./stats:/base/stats"
     logging:
       driver: "json-file"
