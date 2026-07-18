@@ -266,7 +266,7 @@ Docker 镜像支持以下平台：
 * `linux/arm64`
 * `linux/arm/v7`
 
-#### 一键启动
+#### 一键试运行
 
 ```bash
 docker run -d \
@@ -278,71 +278,103 @@ docker run -d \
 
 访问 `http://localhost:25500/version` 验证服务是否正常启动。
 
-#### 自定义配置启动
+> [!NOTE]
+> 上述命令适合快速体验，不会持久化自定义配置和 `/dashboard` 统计数据。删除容器后，这些容器内数据会一并删除；长期运行请使用下方的持久化部署方式。
+
+#### 持久化配置和统计数据
+
+Docker 部署建议持久化以下内容：
+
+* 宿主机 `/opt/SubConverter-Extended/base/pref.toml` → 容器 `/base/pref.toml`
+* 宿主机 `/opt/SubConverter-Extended/stats` → 容器 `/base/stats`
+
+容器内的统计目录是 `/base/stats`，不是 `/stats`。不建议直接将整个宿主机目录挂载到容器 `/base`，否则会遮盖镜像内随版本更新的规则、模板等内置文件。
 
 ```bash
-# 删除可能存在的工作目录
-rm -rf /opt/SubConverter-Extended
-
-# 创建 SubConverter-Extended 工作目录
-mkdir -p /opt/SubConverter-Extended/base
+# 创建持久化目录；重复执行不会删除已有配置和统计数据
+mkdir -p /opt/SubConverter-Extended/base /opt/SubConverter-Extended/stats
 
 cd /opt/SubConverter-Extended
 
-# 下载配置文件
-wget -O base/pref.toml \
-  https://gcore.jsdelivr.net/gh/Aethersailor/SubConverter-Extended@master/base/pref.example.toml
+# 仅在配置不存在时下载默认配置，避免覆盖已有设置
+if [ ! -f base/pref.toml ]; then
+  wget -O base/pref.toml \
+    https://gcore.jsdelivr.net/gh/Aethersailor/SubConverter-Extended@master/base/pref.example.toml
+fi
 
 # 如需外部访问，请修改 base/pref.toml 中的 managed_config_prefix
+# 如需启用运行统计，请将 [statistics] 下的 enabled 改为 true
 
-# 启动容器并挂载配置
+# 启动容器并挂载配置文件和统计目录
 docker run -d \
   --name SubConverter-Extended \
   -p 25500:25500 \
   -v /opt/SubConverter-Extended/base/pref.toml:/base/pref.toml:ro \
+  -v /opt/SubConverter-Extended/stats:/base/stats \
   --restart unless-stopped \
   aethersailor/subconverter-extended:latest
 ```
 
-也可以直接用环境变量覆盖常用配置：
+也可以在上述 `docker run` 命令中按需加入环境变量，覆盖常用配置：
+
+```text
+-e MANAGED_CONFIG_PREFIX="http://your-domain-or-ip:25500" \
+-e SUBCONVERTER_SECURITY_PROFILE=public \
+-e SUBCONVERTER_ALLOW_PUBLIC_UPLOAD=false
+```
+
+更新 Docker 镜像时，保留宿主机上的 `base/pref.toml` 和 `stats`，拉取新镜像后重新创建容器即可：
 
 ```bash
-docker run -d \
-  --name SubConverter-Extended \
-  -p 25500:25500 \
-  -e MANAGED_CONFIG_PREFIX="http://your-domain-or-ip:25500" \
-  -e SUBCONVERTER_SECURITY_PROFILE=public \
-  -e SUBCONVERTER_ALLOW_PUBLIC_UPLOAD=false \
-  --restart unless-stopped \
-  aethersailor/subconverter-extended:latest
+docker pull aethersailor/subconverter-extended:latest
+docker rm -f SubConverter-Extended
+# 然后重新执行上面的 docker run 命令
 ```
 
 #### Docker Compose
 
 ```bash
-# 删除可能存在的工作目录
-rm -rf /opt/SubConverter-Extended
-
-# 创建 SubConverter-Extended 工作目录
-mkdir -p /opt/SubConverter-Extended/base
+# 创建持久化目录；重复执行不会删除已有配置和统计数据
+mkdir -p /opt/SubConverter-Extended/base /opt/SubConverter-Extended/stats
 
 cd /opt/SubConverter-Extended
 
-# 下载 docker-compose 配置文件
-wget -O docker-compose.yml \
-  https://gcore.jsdelivr.net/gh/Aethersailor/SubConverter-Extended@master/docker-compose.yml
-# 根据自己实际情况，修改 compose 文件
+# 仅在文件不存在时下载 Compose 示例和默认配置，避免覆盖已有设置
+if [ ! -f docker-compose.yml ]; then
+  wget -O docker-compose.yml \
+    https://gcore.jsdelivr.net/gh/Aethersailor/SubConverter-Extended@master/docker-compose.yml
+fi
 
-# 下载配置文件
-wget -O base/pref.toml \
-  https://gcore.jsdelivr.net/gh/Aethersailor/SubConverter-Extended@master/base/pref.example.toml
+if [ ! -f base/pref.toml ]; then
+  wget -O base/pref.toml \
+    https://gcore.jsdelivr.net/gh/Aethersailor/SubConverter-Extended@master/base/pref.example.toml
+fi
 
 # 如需外部访问，请修改 docker-compose.yml 中的 MANAGED_CONFIG_PREFIX，
 # 或修改 base/pref.toml 中的 managed_config_prefix
+# 如需启用运行统计，请将 [statistics] 下的 enabled 改为 true
 
 # 启动容器
 docker compose up -d
 ```
+
+仓库提供的 `docker-compose.yml` 已包含以下持久化挂载：
+
+```yaml
+volumes:
+  - ./base/pref.toml:/base/pref.toml:ro
+  - ./stats:/base/stats
+```
+
+更新 Compose 部署：
+
+```bash
+cd /opt/SubConverter-Extended
+docker compose pull
+docker compose up -d
+```
+
+只要不删除宿主机上的 `/opt/SubConverter-Extended/base/pref.toml` 和 `/opt/SubConverter-Extended/stats`，更新镜像或重建容器都不会丢失配置和历史统计。
 
 常用维护命令：
 
