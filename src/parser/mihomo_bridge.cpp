@@ -1,7 +1,6 @@
 #include "mihomo_bridge.h"
 #include <nlohmann/json.hpp>
 #include <memory>
-#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -11,62 +10,8 @@ extern "C" {
 char *ConvertSubscription(char *data);
 char *ResolveAgeRecipient(char *key);
 char *EncryptAgeArmored(char *data, char *recipient);
-void ReleaseUnusedMemory();
 void FreeString(char *s);
 }
-
-namespace {
-
-constexpr size_t kLargeSubscriptionThreshold = 256 * 1024;
-
-struct GoParseMemoryState {
-  std::mutex mutex;
-  size_t active_parses = 0;
-  size_t pending_bytes = 0;
-};
-
-GoParseMemoryState &goParseMemoryState() {
-  static GoParseMemoryState state;
-  return state;
-}
-
-class GoParseMemoryGuard {
-public:
-  explicit GoParseMemoryGuard(size_t subscription_size) {
-    GoParseMemoryState &state = goParseMemoryState();
-    std::lock_guard<std::mutex> lock(state.mutex);
-    state.active_parses++;
-
-    // Saturating accumulation prevents many concurrent medium subscriptions
-    // from bypassing the same reclamation boundary as one large subscription.
-    if (subscription_size >=
-        kLargeSubscriptionThreshold - state.pending_bytes) {
-      state.pending_bytes = kLargeSubscriptionThreshold;
-    } else {
-      state.pending_bytes += subscription_size;
-    }
-  }
-
-  ~GoParseMemoryGuard() {
-    GoParseMemoryState &state = goParseMemoryState();
-    std::lock_guard<std::mutex> lock(state.mutex);
-    state.active_parses--;
-    if (state.active_parses != 0 ||
-        state.pending_bytes < kLargeSubscriptionThreshold)
-      return;
-
-    state.pending_bytes = 0;
-    try {
-      // Holding the guard mutex keeps a newly starting parse from racing the
-      // reclamation pass after the previous batch has fully drained.
-      ReleaseUnusedMemory();
-    } catch (...) {
-      // Memory reclamation is opportunistic and must never fail a conversion.
-    }
-  }
-};
-
-} // namespace
 
 namespace mihomo {
 
@@ -87,7 +32,6 @@ std::string ProxyNode::toYAML() const {
 
 std::vector<ProxyNode> parseSubscription(const std::string &subscription) {
   std::vector<ProxyNode> nodes;
-  GoParseMemoryGuard memory_guard(subscription.size());
 
   // Call Go function
   char *raw_result =

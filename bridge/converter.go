@@ -7,14 +7,41 @@ import "C"
 import (
 	"encoding/json"
 	"runtime/debug"
+	"sync"
 	"unsafe"
 )
 
-// ReleaseUnusedMemory forces the embedded Go runtime to return unused heap
-// pages after an unusually large subscription parse.
-//
-//export ReleaseUnusedMemory
-func ReleaseUnusedMemory() {
+const parseMemoryReleaseThreshold = 256 * 1024
+
+var parseMemoryState struct {
+	sync.Mutex
+	active       int
+	pendingBytes int
+}
+
+func beginSubscriptionParse(size int) {
+	parseMemoryState.Lock()
+	defer parseMemoryState.Unlock()
+	parseMemoryState.active++
+	if size >= parseMemoryReleaseThreshold-parseMemoryState.pendingBytes {
+		parseMemoryState.pendingBytes = parseMemoryReleaseThreshold
+	} else {
+		parseMemoryState.pendingBytes += size
+	}
+}
+
+func finishSubscriptionParse() {
+	parseMemoryState.Lock()
+	defer parseMemoryState.Unlock()
+	parseMemoryState.active--
+	if parseMemoryState.active != 0 ||
+		parseMemoryState.pendingBytes < parseMemoryReleaseThreshold {
+		return
+	}
+
+	parseMemoryState.pendingBytes = 0
+	// This runs after the parsing helper has returned, so its large maps and
+	// JSON buffers are no longer rooted by the active cgo stack frame.
 	debug.FreeOSMemory()
 }
 
@@ -62,9 +89,15 @@ func ConvertSubscription(data *C.char) *C.char {
 		return C.CString(`{"error": "null input"}`)
 	}
 
-	// Convert C string to Go string
 	subscription := C.GoString(data)
+	beginSubscriptionParse(len(subscription))
+	result := convertSubscription(subscription)
+	subscription = ""
+	finishSubscriptionParse()
+	return result
+}
 
+func convertSubscription(subscription string) *C.char {
 	proxies, err := parseSubscriptionWithMihomo(subscription)
 	if err != nil {
 		errJSON, _ := json.Marshal(map[string]string{
