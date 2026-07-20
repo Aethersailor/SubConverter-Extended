@@ -87,6 +87,7 @@ typedef struct { void *data; GoInt len; GoInt cap; } GoSlice;
 extern "C" {
 #endif
 
+extern void ReleaseUnusedMemory(void);
 extern char* ResolveAgeRecipient(char* key);
 extern char* EncryptAgeArmored(char* data, char* recipient);
 extern char* ConvertSubscription(char* data);

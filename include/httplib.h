@@ -696,7 +696,7 @@ inline from_chars_result<T> from_chars(const char *first, const char *last,
     return {first, std::errc::invalid_argument};
   }
 
-  value = negative ? -result : result;
+  value = negative ? T(0) - result : result;
   return {p, std::errc{}};
 }
 
@@ -2957,7 +2957,18 @@ inline size_t get_header_value_u64(const Headers &headers,
   std::advance(it, static_cast<ssize_t>(id));
   if (it != rng.second) {
     if (is_numeric(it->second)) {
-      return static_cast<size_t>(std::strtoull(it->second.data(), nullptr, 10));
+      // Parse at size_t width so an out-of-range Content-Length is reported
+      // rather than silently saturated/truncated (a value above 2^32 would
+      // otherwise wrap to a small framing length on 32-bit builds). Flag it
+      // and return SIZE_MAX so the existing oversized-value guards reject it.
+      size_t val = 0;
+      const auto &s = it->second;
+      auto r = from_chars(s.data(), s.data() + s.size(), val);
+      if (r.ec == std::errc::result_out_of_range) {
+        is_invalid_value = true;
+        return (std::numeric_limits<size_t>::max)();
+      }
+      return val;
     } else {
       is_invalid_value = true;
     }
@@ -7386,8 +7397,46 @@ inline ReadContentResult read_content_chunked(Stream &strm, T &x,
 }
 
 inline bool is_chunked_transfer_encoding(const Headers &headers) {
-  return case_ignore::equal(
-      get_header_value(headers, "Transfer-Encoding", "", 0), "chunked");
+  // RFC 9112 6.1: a message is framed with the chunked coding when "chunked"
+  // is the final transfer coding. A single field value may list several
+  // codings ("gzip, chunked"), and the list may be split across multiple
+  // Transfer-Encoding header lines (RFC 9110 5.3). Match the last coding token
+  // case-insensitively rather than comparing the whole value against "chunked".
+  //
+  // Security: reading a chunked message as unframed leaves its body in the
+  // socket, where a keep-alive connection parses it as a smuggled request.
+  // Headers is an unordered_multimap whose iteration order for duplicate keys
+  // is not portable, so when there is more than one Transfer-Encoding line we
+  // cannot tell which coding is truly final. In that ambiguous case we fail
+  // safe by treating the message as chunked (a mis-parse just closes the
+  // connection, whereas the opposite error enables smuggling).
+  auto rng = headers.equal_range("Transfer-Encoding");
+
+  size_t line_count = 0;
+  bool chunked_present = false;
+  bool last_line_ends_with_chunked = false;
+
+  for (auto it = rng.first; it != rng.second; ++it) {
+    line_count++;
+    const auto &value = it->second;
+
+    std::string last_coding;
+    bool line_has_chunked = false;
+    split(value.data(), value.data() + value.size(), ',',
+          [&](const char *b, const char *e) {
+            last_coding.assign(b, e);
+            if (case_ignore::equal(last_coding, "chunked")) {
+              line_has_chunked = true;
+            }
+          });
+
+    if (line_has_chunked) { chunked_present = true; }
+    last_line_ends_with_chunked = case_ignore::equal(last_coding, "chunked");
+  }
+
+  if (line_count == 0) { return false; }
+  if (line_count == 1) { return last_line_ends_with_chunked; }
+  return chunked_present;
 }
 
 template <typename T, typename U>
@@ -7504,6 +7553,13 @@ bool read_content(Stream &strm, T &x, size_t payload_max_length, int &status,
 
 inline ssize_t write_request_line(Stream &strm, const std::string &method,
                                   const std::string &path) {
+  // A request target must not carry CR/LF (or other control octets); otherwise
+  // a value smuggled into it splits the request line and injects headers or a
+  // whole request. The same field-value check already guards header values in
+  // check_and_write_headers and the request target in
+  // perform_websocket_handshake; apply it here too.
+  if (!fields::is_field_value(path)) { return -1; }
+
   std::string s = method;
   s += ' ';
   s += path;
@@ -13226,9 +13282,8 @@ ClientImpl::open_stream(const std::string &method, const std::string &path,
     handle.body_reader_.content_length = content_length;
   }
 
-  auto transfer_encoding =
-      handle.response->get_header_value("Transfer-Encoding");
-  handle.body_reader_.chunked = (transfer_encoding == "chunked");
+  handle.body_reader_.chunked =
+      detail::is_chunked_transfer_encoding(handle.response->headers);
 
   auto content_encoding = handle.response->get_header_value("Content-Encoding");
   if (!content_encoding.empty()) {
@@ -13812,7 +13867,14 @@ inline bool ClientImpl::write_request(Stream &strm, Request &req,
     }
 
     // Write request line and headers
-    detail::write_request_line(bstrm, req.method, path_with_query);
+    if (detail::write_request_line(bstrm, req.method, path_with_query) < 0) {
+      // A rejected target (e.g. CR/LF smuggled in via a decoded redirect
+      // Location under set_path_encode(false)) must fail the request cleanly
+      // instead of emitting a request-line-less, header-injecting request.
+      error = Error::Write;
+      output_error_log(error, &req);
+      return false;
+    }
     if (!detail::check_and_write_headers(bstrm, req.headers, header_writer_,
                                          error)) {
       output_error_log(error, &req);
