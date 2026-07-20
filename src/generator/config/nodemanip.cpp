@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <iostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "handler/settings.h"
@@ -35,26 +36,25 @@ void copyNodes(std::vector<Proxy> &source, std::vector<Proxy> &dest) {
   std::move(source.begin(), source.end(), std::back_inserter(dest));
 }
 
-static void appendMihomoNodes(const std::vector<mihomo::ProxyNode> &source,
+static void appendMihomoNodes(std::vector<mihomo::ProxyNode> &source,
                               std::vector<Proxy> &nodes) {
-  for (const auto &mnode : source) {
+  nodes.reserve(nodes.size() + source.size());
+  for (auto &mnode : source) {
     Proxy node;
-    node.Remark = mnode.name;
+    node.Remark = std::move(mnode.name);
     node.Type = getProxyTypeFromString(mnode.type);
-    node.Hostname = mnode.server;
+    node.Hostname = std::move(mnode.server);
     node.Port = mnode.port;
 
-    for (const auto &[key, value] : mnode.params)
-      node.RawParams[key] = value;
-    for (const auto &[key, value] : mnode.param_json)
-      node.RawParamJson[key] = value;
+    node.RawParams = std::move(mnode.params);
+    node.RawParamJson = std::move(mnode.param_json);
 
     // Preserve Mihomo's canonical type for generic pass-through, including
     // protocols that do not yet have a dedicated C++ ProxyType.
-    node.RawParams["type"] = mnode.type;
     node.RawParamJson["type"] = "\"" + mnode.type + "\"";
+    node.RawParams["type"] = std::move(mnode.type);
 
-    for (const auto &[key, value] : mnode.params) {
+    for (const auto &[key, value] : node.RawParams) {
       if (key == "password")
         node.Password = value;
       else if (key == "cipher" || key == "method")

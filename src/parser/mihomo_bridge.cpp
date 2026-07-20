@@ -1,7 +1,9 @@
 #include "mihomo_bridge.h"
 #include <nlohmann/json.hpp>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 // Go library functions (generated from libconvert.h)
 extern "C" {
@@ -32,23 +34,25 @@ std::vector<ProxyNode> parseSubscription(const std::string &subscription) {
   std::vector<ProxyNode> nodes;
 
   // Call Go function
-  char *result = ConvertSubscription(const_cast<char *>(subscription.c_str()));
-  if (!result) {
+  char *raw_result =
+      ConvertSubscription(const_cast<char *>(subscription.c_str()));
+  if (!raw_result) {
     throw std::runtime_error("调用 Go ConvertSubscription 函数失败");
   }
+  std::unique_ptr<char, decltype(&FreeString)> result(raw_result, &FreeString);
 
   // Parse JSON result
   try {
-    auto json_result = nlohmann::json::parse(result);
+    auto json_result = nlohmann::json::parse(result.get());
 
     // Check for error
     if (json_result.contains("error")) {
       std::string error = json_result["error"];
-      FreeString(result);
       throw std::runtime_error("Mihomo 解析器错误：" + error);
     }
 
     // Parse proxy array
+    nodes.reserve(json_result.size());
     for (const auto &item : json_result) {
       ProxyNode node;
       node.name = item.value("name", "");
@@ -94,16 +98,12 @@ std::vector<ProxyNode> parseSubscription(const std::string &subscription) {
         }
       }
 
-      nodes.push_back(node);
+      nodes.emplace_back(std::move(node));
     }
 
   } catch (const nlohmann::json::exception &e) {
-    FreeString(result);
     throw std::runtime_error(std::string("JSON 解析错误：") + e.what());
   }
-
-  // Free Go-allocated memory
-  FreeString(result);
 
   return nodes;
 }
