@@ -6,8 +6,17 @@ package main
 import "C"
 import (
 	"encoding/json"
+	"runtime/debug"
 	"unsafe"
 )
+
+// ReleaseUnusedMemory forces the embedded Go runtime to return unused heap
+// pages after an unusually large subscription parse.
+//
+//export ReleaseUnusedMemory
+func ReleaseUnusedMemory() {
+	debug.FreeOSMemory()
+}
 
 // ResolveAgeRecipient validates one Age public or secret key and returns a
 // canonical public recipient plus a SHA-256 fingerprint. Errors intentionally
