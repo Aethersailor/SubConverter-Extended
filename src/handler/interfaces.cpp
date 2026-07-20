@@ -872,16 +872,18 @@ struct CoalescedResponse {
   uint64_t rule_conversions = 0;
 };
 
+using SharedCoalescedResponse = std::shared_ptr<const CoalescedResponse>;
+
 struct InflightSubRequest {
   std::mutex mutex;
   std::condition_variable cv;
   bool done = false;
-  CoalescedResponse result;
+  SharedCoalescedResponse result;
   std::exception_ptr exception;
 };
 
 struct CachedSubResponse {
-  CoalescedResponse result;
+  SharedCoalescedResponse result;
   std::chrono::steady_clock::time_point expires_at;
 };
 
@@ -1307,15 +1309,14 @@ static void copyCoalescedToResponse(const CoalescedResponse &result,
   response.headers = result.headers;
 }
 
-static CoalescedResponse makeCoalescedResult(const std::string &body,
-                                             const Response &response,
-                                             uint64_t rule_conversions) {
-  CoalescedResponse result;
-  result.status_code = response.status_code;
-  result.content_type = response.content_type;
-  result.headers = response.headers;
-  result.body = body;
-  result.rule_conversions = rule_conversions;
+static SharedCoalescedResponse makeCoalescedResult(
+    std::string &&body, Response &&response, uint64_t rule_conversions) {
+  auto result = std::make_shared<CoalescedResponse>();
+  result->status_code = response.status_code;
+  result->content_type = std::move(response.content_type);
+  result->headers = std::move(response.headers);
+  result->body = std::move(body);
+  result->rule_conversions = rule_conversions;
   return result;
 }
 
@@ -1331,7 +1332,7 @@ static void pruneExpiredSubResponseCache(
 }
 
 static bool getCachedSubResponse(const std::string &key,
-                                 CoalescedResponse &result) {
+                                 SharedCoalescedResponse &result) {
   if (global.responseCacheTtl <= 0)
     return false;
 
@@ -1349,8 +1350,8 @@ static bool getCachedSubResponse(const std::string &key,
 }
 
 static void storeCachedSubResponse(const std::string &key,
-                                   const CoalescedResponse &result) {
-  if (global.responseCacheTtl <= 0 || result.status_code != 200)
+                                   const SharedCoalescedResponse &result) {
+  if (global.responseCacheTtl <= 0 || !result || result->status_code != 200)
     return;
 
   int ttl = std::min(global.responseCacheTtl, 5);
@@ -1455,13 +1456,13 @@ static std::string subconverterEntry(Request &request, Response &response,
     return body;
   }
 
-  CoalescedResponse cached_result;
+  SharedCoalescedResponse cached_result;
   if (getCachedSubResponse(key, cached_result)) {
     writeLog(0, "/sub 响应微缓存命中。", LOG_LEVEL_DEBUG);
-    copyCoalescedToResponse(cached_result, response);
+    copyCoalescedToResponse(*cached_result, response);
     recordTrackedSubRequest(track, request, response,
-                            cached_result.rule_conversions);
-    return cached_result.body;
+                            cached_result->rule_conversions);
+    return cached_result->body;
   }
 
   std::shared_ptr<InflightSubRequest> call;
@@ -1485,10 +1486,10 @@ static std::string subconverterEntry(Request &request, Response &response,
     call->cv.wait(lock, [&call] { return call->done; });
     if (call->exception)
       std::rethrow_exception(call->exception);
-    copyCoalescedToResponse(call->result, response);
+    copyCoalescedToResponse(*call->result, response);
     recordTrackedSubRequest(track, request, response,
-                            call->result.rule_conversions);
-    return call->result.body;
+                            call->result->rule_conversions);
+    return call->result->body;
   }
 
   try {
@@ -1499,9 +1500,9 @@ static std::string subconverterEntry(Request &request, Response &response,
     std::string body = runSubconverterImplWithRetry(
         original_request, owner_response, track ? &stats : nullptr);
     body = finalizeSubResponse(request, owner_response, std::move(body), age);
-    CoalescedResponse result =
-        makeCoalescedResult(body, owner_response, stats.rules);
-    response = owner_response;
+    SharedCoalescedResponse result = makeCoalescedResult(
+        std::move(body), std::move(owner_response), stats.rules);
+    copyCoalescedToResponse(*result, response);
     {
       std::lock_guard<std::mutex> lock(call->mutex);
       call->result = result;
@@ -1514,8 +1515,9 @@ static std::string subconverterEntry(Request &request, Response &response,
     if (!age.requested)
       storeCachedSubResponse(key, result);
     call->cv.notify_all();
-    recordTrackedSubRequest(track, request, response, result.rule_conversions);
-    return body;
+    recordTrackedSubRequest(track, request, response,
+                            result->rule_conversions);
+    return result->body;
   } catch (...) {
     {
       std::lock_guard<std::mutex> lock(call->mutex);
