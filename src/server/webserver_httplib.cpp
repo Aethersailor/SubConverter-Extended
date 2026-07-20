@@ -1,4 +1,5 @@
 #include <string>
+#include <utility>
 #ifdef MALLOC_TRIM
 #include <malloc.h>
 #endif // MALLOC_TRIM
@@ -68,7 +69,7 @@ static httplib::Server::Handler makeHandler(const responseRoute &rr) {
     if (content_type.empty()) {
       content_type = rr.content_type;
     }
-    response.set_content(result, content_type);
+    response.set_content(std::move(result), content_type);
   };
 }
 
