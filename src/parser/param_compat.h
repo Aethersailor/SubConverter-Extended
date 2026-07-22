@@ -20,20 +20,25 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"certificate", {true, "string", false}}, // anytls
         {"client-fingerprint", {true, "string", false}}, // anytls
         {"dialer-proxy", {true, "string", false}}, // BasicOption
+        {"disable-reuse", {true, "bool", false}}, // anytls
         {"ech-opts", {true, "string", false}}, // anytls
         {"fingerprint", {true, "string", false}}, // anytls
         {"idle-session-check-interval", {true, "int", false}}, // anytls
         {"idle-session-timeout", {true, "int", false}}, // anytls
         {"interface-name", {true, "string", false}}, // BasicOption
         {"ip-version", {true, "string", false}}, // BasicOption
+        {"jls-opts", {true, "string", false}}, // anytls
         {"min-idle-session", {true, "int", false}}, // anytls
         {"mptcp", {true, "bool", false}}, // BasicOption
         {"name", {true, "string", false}}, // anytls
+        {"name-cert-verify", {true, "string", false}}, // anytls
         {"password", {true, "string", false}}, // anytls
         {"port", {true, "int", false}}, // anytls
         {"private-key", {true, "string", false}}, // anytls
+        {"restls-opts", {true, "string", false}}, // anytls
         {"routing-mark", {true, "int", false}}, // BasicOption
         {"server", {true, "string", false}}, // anytls
+        {"shadow-tls-opts", {true, "string", false}}, // anytls
         {"skip-cert-verify", {true, "bool", false}}, // anytls
         {"sni", {true, "string", false}}, // anytls
         {"tfo", {true, "bool", false}}, // BasicOption
@@ -49,6 +54,7 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"ip-version", {true, "string", false}}, // BasicOption
         {"mptcp", {true, "bool", false}}, // BasicOption
         {"name", {true, "string", false}}, // http
+        {"name-cert-verify", {true, "string", false}}, // http
         {"password", {true, "string", false}}, // http
         {"port", {true, "int", false}}, // http
         {"private-key", {true, "string", false}}, // http
@@ -70,6 +76,7 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"ip-version", {true, "string", false}}, // BasicOption
         {"mptcp", {true, "bool", false}}, // BasicOption
         {"name", {true, "string", false}}, // https
+        {"name-cert-verify", {true, "string", false}}, // https
         {"password", {true, "string", false}}, // https
         {"port", {true, "int", false}}, // https
         {"private-key", {true, "string", false}}, // https
@@ -100,6 +107,7 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"max-stream-receive-window", {true, "int", false}}, // hy2
         {"mptcp", {true, "bool", false}}, // BasicOption
         {"name", {true, "string", false}}, // hy2
+        {"name-cert-verify", {true, "string", false}}, // hy2
         {"obfs", {true, "string", false}}, // hy2
         {"obfs-max-packet-size", {true, "int", false}}, // hy2
         {"obfs-min-packet-size", {true, "int", false}}, // hy2
@@ -135,6 +143,7 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"ip-version", {true, "string", false}}, // BasicOption
         {"mptcp", {true, "bool", false}}, // BasicOption
         {"name", {true, "string", false}}, // hysteria
+        {"name-cert-verify", {true, "string", false}}, // hysteria
         {"obfs", {true, "string", false}}, // hysteria
         {"obfs-protocol", {true, "string", false}}, // hysteria
         {"port", {true, "int", false}}, // hysteria
@@ -170,6 +179,7 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"max-stream-receive-window", {true, "int", false}}, // hysteria2
         {"mptcp", {true, "bool", false}}, // BasicOption
         {"name", {true, "string", false}}, // hysteria2
+        {"name-cert-verify", {true, "string", false}}, // hysteria2
         {"obfs", {true, "string", false}}, // hysteria2
         {"obfs-max-packet-size", {true, "int", false}}, // hysteria2
         {"obfs-min-packet-size", {true, "int", false}}, // hysteria2
@@ -196,6 +206,7 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"ip-version", {true, "string", false}}, // BasicOption
         {"mptcp", {true, "bool", false}}, // BasicOption
         {"name", {true, "string", false}}, // socks
+        {"name-cert-verify", {true, "string", false}}, // socks
         {"password", {true, "string", false}}, // socks
         {"port", {true, "int", false}}, // socks
         {"private-key", {true, "string", false}}, // socks
@@ -216,6 +227,7 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"ip-version", {true, "string", false}}, // BasicOption
         {"mptcp", {true, "bool", false}}, // BasicOption
         {"name", {true, "string", false}}, // socks5
+        {"name-cert-verify", {true, "string", false}}, // socks5
         {"password", {true, "string", false}}, // socks5
         {"port", {true, "int", false}}, // socks5
         {"private-key", {true, "string", false}}, // socks5
@@ -236,6 +248,7 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"ip-version", {true, "string", false}}, // BasicOption
         {"mptcp", {true, "bool", false}}, // BasicOption
         {"name", {true, "string", false}}, // socks5h
+        {"name-cert-verify", {true, "string", false}}, // socks5h
         {"password", {true, "string", false}}, // socks5h
         {"port", {true, "int", false}}, // socks5h
         {"private-key", {true, "string", false}}, // socks5h
@@ -297,15 +310,19 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"grpc-opts", {true, "string", false}}, // trojan
         {"interface-name", {true, "string", false}}, // BasicOption
         {"ip-version", {true, "string", false}}, // BasicOption
+        {"jls-opts", {true, "string", false}}, // trojan
         {"mptcp", {true, "bool", false}}, // BasicOption
         {"name", {true, "string", false}}, // trojan
+        {"name-cert-verify", {true, "string", false}}, // trojan
         {"network", {true, "string", false}}, // trojan
         {"password", {true, "string", false}}, // trojan
         {"port", {true, "int", false}}, // trojan
         {"private-key", {true, "string", false}}, // trojan
         {"reality-opts", {true, "string", false}}, // trojan
+        {"restls-opts", {true, "string", false}}, // trojan
         {"routing-mark", {true, "int", false}}, // BasicOption
         {"server", {true, "string", false}}, // trojan
+        {"shadow-tls-opts", {true, "string", false}}, // trojan
         {"skip-cert-verify", {true, "bool", false}}, // trojan
         {"sni", {true, "string", false}}, // trojan
         {"ss-opts", {true, "string", false}}, // trojan
@@ -335,6 +352,7 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"max-udp-relay-packet-size", {true, "int", false}}, // tuic
         {"mptcp", {true, "bool", false}}, // BasicOption
         {"name", {true, "string", false}}, // tuic
+        {"name-cert-verify", {true, "string", false}}, // tuic
         {"password", {true, "string", false}}, // tuic
         {"port", {true, "int", false}}, // tuic
         {"private-key", {true, "string", false}}, // tuic
@@ -368,17 +386,21 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"http-opts", {true, "string", false}}, // vless
         {"interface-name", {true, "string", false}}, // BasicOption
         {"ip-version", {true, "string", false}}, // BasicOption
+        {"jls-opts", {true, "string", false}}, // vless
         {"mptcp", {true, "bool", false}}, // BasicOption
         {"name", {true, "string", false}}, // vless
+        {"name-cert-verify", {true, "string", false}}, // vless
         {"network", {true, "string", false}}, // vless
         {"packet-addr", {true, "bool", false}}, // vless
         {"packet-encoding", {true, "string", false}}, // vless
         {"port", {true, "int", false}}, // vless
         {"private-key", {true, "string", false}}, // vless
         {"reality-opts", {true, "string", false}}, // vless
+        {"restls-opts", {true, "string", false}}, // vless
         {"routing-mark", {true, "int", false}}, // BasicOption
         {"server", {true, "string", false}}, // vless
         {"servername", {true, "string", false}}, // vless
+        {"shadow-tls-opts", {true, "string", false}}, // vless
         {"skip-cert-verify", {true, "bool", false}}, // vless
         {"tfo", {true, "bool", false}}, // BasicOption
         {"tls", {true, "bool", false}}, // vless
@@ -406,19 +428,23 @@ const std::map<std::string, std::map<std::string, ParamCompatInfo>> PARAM_COMPAT
         {"http-opts", {true, "string", false}}, // vmess
         {"interface-name", {true, "string", false}}, // BasicOption
         {"ip-version", {true, "string", false}}, // BasicOption
+        {"jls-opts", {true, "string", false}}, // vmess
         {"mekya-opts", {true, "string", false}}, // vmess
         {"mkcp-opts", {true, "string", false}}, // vmess
         {"mptcp", {true, "bool", false}}, // BasicOption
         {"name", {true, "string", false}}, // vmess
+        {"name-cert-verify", {true, "string", false}}, // vmess
         {"network", {true, "string", false}}, // vmess
         {"packet-addr", {true, "bool", false}}, // vmess
         {"packet-encoding", {true, "string", false}}, // vmess
         {"port", {true, "int", false}}, // vmess
         {"private-key", {true, "string", false}}, // vmess
         {"reality-opts", {true, "string", false}}, // vmess
+        {"restls-opts", {true, "string", false}}, // vmess
         {"routing-mark", {true, "int", false}}, // BasicOption
         {"server", {true, "string", false}}, // vmess
         {"servername", {true, "string", false}}, // vmess
+        {"shadow-tls-opts", {true, "string", false}}, // vmess
         {"skip-cert-verify", {true, "bool", true}}, // vmess [HARDCODED]
         {"tfo", {true, "bool", false}}, // BasicOption
         {"tls", {true, "bool", true}}, // vmess [HARDCODED]

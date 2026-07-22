@@ -3,6 +3,7 @@
 #include <cmath>
 #include <iostream>
 #include <numeric>
+#include <string_view>
 #include <unordered_set>
 
 #include "config/custom_openclash_rules.h"
@@ -323,7 +324,9 @@ static YAML::Node providersMatchingGroupId(
   return use_node;
 }
 
-void processRemark(std::string &remark, const string_array &remarks_list,
+using RemarkSet = std::unordered_set<std::string_view>;
+
+void processRemark(std::string &remark, const RemarkSet &used_remarks,
                    bool proc_comma = true) {
   // Replace every '=' with '-' in the remark string to avoid parse errors from
   // the clients.
@@ -339,8 +342,7 @@ void processRemark(std::string &remark, const string_array &remarks_list,
   }
   std::string tempRemark = remark;
   int cnt = 2;
-  while (std::find(remarks_list.cbegin(), remarks_list.cend(), tempRemark) !=
-         remarks_list.cend()) {
+  while (used_remarks.find(tempRemark) != used_remarks.end()) {
     tempRemark = remark + " " + std::to_string(cnt);
     cnt++;
   }
@@ -391,7 +393,8 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
                   extra_settings &ext) {
   YAML::Node proxies, original_groups;
   std::vector<Proxy> nodelist;
-  string_array remarks_list;
+  RemarkSet used_remarks;
+  used_remarks.reserve(nodes.size());
   /// proxies style
 
   bool proxy_block = false, proxy_compact = false, group_block = false,
@@ -427,7 +430,7 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
     if (ext.append_proxy_type)
       x.Remark = "[" + type + "] " + x.Remark;
 
-    processRemark(x.Remark, remarks_list, false);
+    processRemark(x.Remark, used_remarks, false);
 
     tribool udp = ext.udp;
     tribool xudp = ext.xudp;
@@ -518,7 +521,7 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
       singleproxy.SetStyle(YAML::EmitterStyle::Flow);
       proxies.push_back(singleproxy);
       nodelist.emplace_back(x);
-      remarks_list.emplace_back(x.Remark);
+      used_remarks.emplace(x.Remark);
 
       continue;
     }
@@ -957,7 +960,7 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
     else
       singleproxy.SetStyle(YAML::EmitterStyle::Flow);
     proxies.push_back(singleproxy);
-    remarks_list.emplace_back(x.Remark);
+    used_remarks.emplace(x.Remark);
     nodelist.emplace_back(x);
   }
 
@@ -1449,7 +1452,8 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
   std::string output_nodelist;
   std::vector<Proxy> nodelist;
   unsigned short local_port = 1080;
-  string_array remarks_list;
+  RemarkSet used_remarks;
+  used_remarks.reserve(nodes.size());
 
   ini.store_any_line = true;
   // filter out sections that requires direct-save
@@ -1477,7 +1481,7 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
       x.Remark = "[" + type + "] " + x.Remark;
     }
 
-    processRemark(x.Remark, remarks_list);
+    processRemark(x.Remark, used_remarks);
 
     std::string &hostname = x.Hostname, &sni = x.ServerName,
                 &username = x.Username, &password = x.Password,
@@ -1697,7 +1701,7 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
       ini.set("{NONAME}", x.Remark + " = " + proxy);
       nodelist.emplace_back(x);
     }
-    remarks_list.emplace_back(x.Remark);
+    used_remarks.emplace(x.Remark);
   }
 
   if (ext.nodelist)
@@ -2059,7 +2063,8 @@ void proxyToQuan(std::vector<Proxy> &nodes, INIReader &ini,
                  extra_settings &ext) {
   std::string proxyStr;
   std::vector<Proxy> nodelist;
-  string_array remarks_list;
+  RemarkSet used_remarks;
+  used_remarks.reserve(nodes.size());
 
   ini.set_current_section("SERVER");
   ini.erase_section();
@@ -2069,7 +2074,7 @@ void proxyToQuan(std::vector<Proxy> &nodes, INIReader &ini,
       x.Remark = "[" + type + "] " + x.Remark;
     }
 
-    processRemark(x.Remark, remarks_list);
+    processRemark(x.Remark, used_remarks);
 
     std::string &hostname = x.Hostname, &method = x.EncryptMethod,
                 &password = x.Password, &id = x.UserId,
@@ -2192,7 +2197,7 @@ void proxyToQuan(std::vector<Proxy> &nodes, INIReader &ini,
     }
 
     ini.set("{NONAME}", proxyStr);
-    remarks_list.emplace_back(x.Remark);
+    used_remarks.emplace(x.Remark);
     nodelist.emplace_back(x);
   }
 
@@ -2306,7 +2311,8 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini,
   std::string proxyStr;
   tribool udp, tfo, scv, tls13;
   std::vector<Proxy> nodelist;
-  string_array remarks_list;
+  RemarkSet used_remarks;
+  used_remarks.reserve(nodes.size());
 
   ini.set_current_section("server_local");
   ini.erase_section();
@@ -2316,7 +2322,7 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini,
       x.Remark = "[" + type + "] " + x.Remark;
     }
 
-    processRemark(x.Remark, remarks_list);
+    processRemark(x.Remark, used_remarks);
 
     std::string &hostname = x.Hostname, &method = x.EncryptMethod,
                 &id = x.UserId, &transproto = x.TransferProtocol,
@@ -2469,7 +2475,7 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini,
     proxyStr += ", tag=" + x.Remark;
 
     ini.set("{NONAME}", proxyStr);
-    remarks_list.emplace_back(x.Remark);
+    used_remarks.emplace(x.Remark);
     nodelist.emplace_back(x);
   }
 
@@ -2686,6 +2692,8 @@ void proxyToMellow(std::vector<Proxy> &nodes, INIReader &ini,
   tribool tfo, scv;
   std::vector<Proxy> nodelist;
   string_array vArray, remarks_list;
+  RemarkSet used_remarks;
+  used_remarks.reserve(nodes.size());
 
   ini.set_current_section("Endpoint");
 
@@ -2695,7 +2703,7 @@ void proxyToMellow(std::vector<Proxy> &nodes, INIReader &ini,
       x.Remark = "[" + type + "] " + x.Remark;
     }
 
-    processRemark(x.Remark, remarks_list);
+    processRemark(x.Remark, used_remarks);
 
     std::string &hostname = x.Hostname, port = std::to_string(x.Port);
 
@@ -2758,6 +2766,7 @@ void proxyToMellow(std::vector<Proxy> &nodes, INIReader &ini,
 
     ini.set("{NONAME}", proxy);
     remarks_list.emplace_back(x.Remark);
+    used_remarks.emplace(x.Remark);
     nodelist.emplace_back(x);
   }
 
@@ -2823,7 +2832,8 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
   std::string output_nodelist;
   std::vector<Proxy> nodelist;
 
-  string_array remarks_list;
+  RemarkSet used_remarks;
+  used_remarks.reserve(nodes.size());
 
   ini.store_any_line = true;
   ini.add_direct_save_section("Plugin");
@@ -2841,7 +2851,7 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
       std::string type = getProxyTypeName(x.Type);
       x.Remark = "[" + type + "] " + x.Remark;
     }
-    processRemark(x.Remark, remarks_list);
+    processRemark(x.Remark, used_remarks);
 
     std::string &hostname = x.Hostname, &username = x.Username,
                 &password = x.Password, &method = x.EncryptMethod,
@@ -3035,7 +3045,7 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
     else {
       ini.set("{NONAME}", x.Remark + " = " + proxy);
       nodelist.emplace_back(x);
-      remarks_list.emplace_back(x.Remark);
+      used_remarks.emplace(x.Remark);
     }
   }
 
@@ -3230,6 +3240,8 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
       route(rapidjson::kArrayType);
   std::vector<Proxy> nodelist;
   string_array remarks_list;
+  RemarkSet used_remarks;
+  used_remarks.reserve(nodes.size());
   std::string search = " Mbps";
 
   if (!ext.nodelist) {
@@ -3247,7 +3259,7 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
     if (ext.append_proxy_type)
       x.Remark = "[" + type + "] " + x.Remark;
 
-    processRemark(x.Remark, remarks_list, false);
+    processRemark(x.Remark, used_remarks, false);
 
     tribool udp = ext.udp, tfo = ext.tfo, scv = ext.skip_cert_verify,
             xudp = ext.xudp;
@@ -3668,6 +3680,7 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
     }
     nodelist.push_back(x);
     remarks_list.emplace_back(x.Remark);
+    used_remarks.emplace(x.Remark);
     outbounds.PushBack(proxy, allocator);
   }
 

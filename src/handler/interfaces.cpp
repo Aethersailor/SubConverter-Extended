@@ -872,16 +872,18 @@ struct CoalescedResponse {
   uint64_t rule_conversions = 0;
 };
 
+using SharedCoalescedResponse = std::shared_ptr<const CoalescedResponse>;
+
 struct InflightSubRequest {
   std::mutex mutex;
   std::condition_variable cv;
   bool done = false;
-  CoalescedResponse result;
+  SharedCoalescedResponse result;
   std::exception_ptr exception;
 };
 
 struct CachedSubResponse {
-  CoalescedResponse result;
+  SharedCoalescedResponse result;
   std::chrono::steady_clock::time_point expires_at;
 };
 
@@ -1246,20 +1248,44 @@ static std::string finalizeSubResponse(const Request &request,
   }
 }
 
-static bool appendKeyPart(std::string &identity, const std::string &name,
-                          const std::string &value) {
-  static constexpr size_t kMaxIdentitySize = 2 * 1024 * 1024;
-  size_t extra_size = name.size() + value.size() + 32;
-  if (identity.size() + extra_size > kMaxIdentitySize)
-    return false;
-  identity += name;
-  identity += ':';
-  identity += std::to_string(value.size());
-  identity += ':';
-  identity += value;
-  identity += '\n';
-  return true;
-}
+class SubRequestKeyBuilder {
+public:
+  bool append(const std::string &name, const std::string &value) {
+    static constexpr size_t kMaxIdentitySize = 2 * 1024 * 1024;
+    size_t extra_size = name.size() + value.size() + 32;
+    if (size_ + extra_size > kMaxIdentitySize)
+      return false;
+
+    std::string value_size = std::to_string(value.size());
+    process(name);
+    process(":", 1);
+    process(value_size);
+    process(":", 1);
+    process(value);
+    process("\n", 1);
+    size_ += name.size() + value_size.size() + value.size() + 3;
+    return true;
+  }
+
+  std::string finish() {
+    char digest[MD5_STRING_SIZE];
+    md5_.finish();
+    md5_.get_string(digest);
+    return digest;
+  }
+
+private:
+  void process(const std::string &value) {
+    process(value.data(), value.size());
+  }
+
+  void process(const char *value, size_t size) {
+    md5_.process(value, static_cast<uint32_t>(size));
+  }
+
+  md5::md5_t md5_;
+  size_t size_ = 0;
+};
 
 static bool shouldCoalesceSubRequest(const Request &request) {
   if (!global.enableRequestCoalescing)
@@ -1273,31 +1299,29 @@ static bool shouldCoalesceSubRequest(const Request &request) {
 
 static std::string buildSubRequestKey(const Request &request,
                                       const AgeResponseContext &age) {
-  std::string identity;
-  if (!appendKeyPart(identity, "version", VERSION) ||
-      !appendKeyPart(identity, "config_generation",
-                     std::to_string(global.configGeneration)) ||
-      !appendKeyPart(identity, "managed_config_prefix",
-                     global.managedConfigPrefix) ||
-      !appendKeyPart(identity, "method", request.method) ||
-      !appendKeyPart(identity, "path", request.url) ||
-      !appendKeyPart(identity, "age_recipient_fingerprint",
-                     age.fingerprint))
+  SubRequestKeyBuilder identity;
+  if (!identity.append("version", VERSION) ||
+      !identity.append("config_generation",
+                       std::to_string(global.configGeneration)) ||
+      !identity.append("managed_config_prefix", global.managedConfigPrefix) ||
+      !identity.append("method", request.method) ||
+      !identity.append("path", request.url) ||
+      !identity.append("age_recipient_fingerprint", age.fingerprint))
     return "";
 
   for (const auto &arg : request.argument) {
-    if (!appendKeyPart(identity, "arg_name", arg.first) ||
-        !appendKeyPart(identity, "arg_value", arg.second))
+    if (!identity.append("arg_name", arg.first) ||
+        !identity.append("arg_value", arg.second))
       return "";
   }
 
   for (const auto &header : request.headers) {
-    if (!appendKeyPart(identity, "header_name", toLower(header.first)) ||
-        !appendKeyPart(identity, "header_value", header.second))
+    if (!identity.append("header_name", toLower(header.first)) ||
+        !identity.append("header_value", header.second))
       return "";
   }
 
-  return getMD5(identity);
+  return identity.finish();
 }
 
 static void copyCoalescedToResponse(const CoalescedResponse &result,
@@ -1307,15 +1331,14 @@ static void copyCoalescedToResponse(const CoalescedResponse &result,
   response.headers = result.headers;
 }
 
-static CoalescedResponse makeCoalescedResult(const std::string &body,
-                                             const Response &response,
-                                             uint64_t rule_conversions) {
-  CoalescedResponse result;
-  result.status_code = response.status_code;
-  result.content_type = response.content_type;
-  result.headers = response.headers;
-  result.body = body;
-  result.rule_conversions = rule_conversions;
+static SharedCoalescedResponse makeCoalescedResult(
+    std::string &&body, Response &&response, uint64_t rule_conversions) {
+  auto result = std::make_shared<CoalescedResponse>();
+  result->status_code = response.status_code;
+  result->content_type = std::move(response.content_type);
+  result->headers = std::move(response.headers);
+  result->body = std::move(body);
+  result->rule_conversions = rule_conversions;
   return result;
 }
 
@@ -1331,7 +1354,7 @@ static void pruneExpiredSubResponseCache(
 }
 
 static bool getCachedSubResponse(const std::string &key,
-                                 CoalescedResponse &result) {
+                                 SharedCoalescedResponse &result) {
   if (global.responseCacheTtl <= 0)
     return false;
 
@@ -1349,8 +1372,8 @@ static bool getCachedSubResponse(const std::string &key,
 }
 
 static void storeCachedSubResponse(const std::string &key,
-                                   const CoalescedResponse &result) {
-  if (global.responseCacheTtl <= 0 || result.status_code != 200)
+                                   const SharedCoalescedResponse &result) {
+  if (global.responseCacheTtl <= 0 || !result || result->status_code != 200)
     return;
 
   int ttl = std::min(global.responseCacheTtl, 5);
@@ -1455,13 +1478,13 @@ static std::string subconverterEntry(Request &request, Response &response,
     return body;
   }
 
-  CoalescedResponse cached_result;
+  SharedCoalescedResponse cached_result;
   if (getCachedSubResponse(key, cached_result)) {
     writeLog(0, "/sub 响应微缓存命中。", LOG_LEVEL_DEBUG);
-    copyCoalescedToResponse(cached_result, response);
+    copyCoalescedToResponse(*cached_result, response);
     recordTrackedSubRequest(track, request, response,
-                            cached_result.rule_conversions);
-    return cached_result.body;
+                            cached_result->rule_conversions);
+    return cached_result->body;
   }
 
   std::shared_ptr<InflightSubRequest> call;
@@ -1485,23 +1508,22 @@ static std::string subconverterEntry(Request &request, Response &response,
     call->cv.wait(lock, [&call] { return call->done; });
     if (call->exception)
       std::rethrow_exception(call->exception);
-    copyCoalescedToResponse(call->result, response);
+    copyCoalescedToResponse(*call->result, response);
     recordTrackedSubRequest(track, request, response,
-                            call->result.rule_conversions);
-    return call->result.body;
+                            call->result->rule_conversions);
+    return call->result->body;
   }
 
   try {
     writeLog(0, "/sub 请求成为同 key 转换 owner。", LOG_LEVEL_DEBUG);
-    Request original_request = request;
     Response owner_response;
     RuleConversionStats stats;
     std::string body = runSubconverterImplWithRetry(
-        original_request, owner_response, track ? &stats : nullptr);
+        request, owner_response, track ? &stats : nullptr);
     body = finalizeSubResponse(request, owner_response, std::move(body), age);
-    CoalescedResponse result =
-        makeCoalescedResult(body, owner_response, stats.rules);
-    response = owner_response;
+    SharedCoalescedResponse result = makeCoalescedResult(
+        std::move(body), std::move(owner_response), stats.rules);
+    copyCoalescedToResponse(*result, response);
     {
       std::lock_guard<std::mutex> lock(call->mutex);
       call->result = result;
@@ -1514,8 +1536,9 @@ static std::string subconverterEntry(Request &request, Response &response,
     if (!age.requested)
       storeCachedSubResponse(key, result);
     call->cv.notify_all();
-    recordTrackedSubRequest(track, request, response, result.rule_conversions);
-    return body;
+    recordTrackedSubRequest(track, request, response,
+                            result->rule_conversions);
+    return result->body;
   } catch (...) {
     {
       std::lock_guard<std::mutex> lock(call->mutex);
@@ -1749,7 +1772,7 @@ static std::string subconverter_impl(Request &request, Response &response,
   /// save template variables
   template_args tpl_args;
   tpl_args.global_vars = global.templateVars;
-  tpl_args.request_params = req_arg_map;
+  tpl_args.request_params = std::move(req_arg_map);
 
   /// check for proxy settings
   std::string proxy = parseProxy(global.proxySubscription);
