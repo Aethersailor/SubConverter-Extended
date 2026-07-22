@@ -6,6 +6,7 @@ package main
 import "C"
 import (
 	"encoding/json"
+	"runtime"
 	"runtime/debug"
 	"sync"
 	"unsafe"
@@ -41,7 +42,10 @@ func finishSubscriptionParse() {
 
 	parseMemoryState.pendingBytes = 0
 	// This runs after the parsing helper has returned, so its large maps and
-	// JSON buffers are no longer rooted by the active cgo stack frame.
+	// JSON buffers are no longer rooted by the active cgo stack frame. The
+	// first collection also clears the prior sync.Pool generation before the
+	// scavenger returns unused pages to the operating system.
+	runtime.GC()
 	debug.FreeOSMemory()
 }
 
