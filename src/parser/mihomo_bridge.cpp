@@ -1,6 +1,8 @@
 #include "mihomo_bridge.h"
 #include <nlohmann/json.hpp>
+#include <chrono>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -10,8 +12,54 @@ extern "C" {
 char *ConvertSubscription(char *data);
 char *ResolveAgeRecipient(char *key);
 char *EncryptAgeArmored(char *data, char *recipient);
+void ReleaseUnusedMemory();
 void FreeString(char *s);
 }
+
+namespace {
+
+constexpr size_t kLargeSubscriptionThreshold = 256 * 1024;
+constexpr auto kGoMemoryReleaseInterval = std::chrono::seconds(30);
+
+void releaseGoMemoryAfterLargeParse(size_t subscription_size) noexcept {
+  if (subscription_size < kLargeSubscriptionThreshold)
+    return;
+
+  try {
+    static std::mutex release_mutex;
+    static std::chrono::steady_clock::time_point last_release;
+    static bool released_once = false;
+
+    std::unique_lock<std::mutex> lock(release_mutex, std::try_to_lock);
+    if (!lock.owns_lock())
+      return;
+
+    auto now = std::chrono::steady_clock::now();
+    if (released_once && now - last_release < kGoMemoryReleaseInterval)
+      return;
+
+    ReleaseUnusedMemory();
+    last_release = now;
+    released_once = true;
+  } catch (...) {
+    // Memory reclamation is opportunistic and must never fail a conversion.
+  }
+}
+
+class LargeParseMemoryGuard {
+public:
+  explicit LargeParseMemoryGuard(size_t subscription_size)
+      : subscription_size_(subscription_size) {}
+
+  ~LargeParseMemoryGuard() {
+    releaseGoMemoryAfterLargeParse(subscription_size_);
+  }
+
+private:
+  size_t subscription_size_;
+};
+
+} // namespace
 
 namespace mihomo {
 
@@ -32,6 +80,7 @@ std::string ProxyNode::toYAML() const {
 
 std::vector<ProxyNode> parseSubscription(const std::string &subscription) {
   std::vector<ProxyNode> nodes;
+  LargeParseMemoryGuard memory_guard(subscription.size());
 
   // Call Go function
   char *raw_result =
