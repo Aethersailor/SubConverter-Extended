@@ -420,18 +420,26 @@ using socket_t = int;
 #endif // CPPHTTPLIB_OPENSSL_SUPPORT
 
 #ifdef CPPHTTPLIB_MBEDTLS_SUPPORT
-#include <mbedtls/ctr_drbg.h>
-#include <mbedtls/entropy.h>
+// version.h defines MBEDTLS_VERSION_MAJOR (on 2.x/3.x/4.x alike); it is pulled
+// in with this first include group so the version gating below can use it.
 #include <mbedtls/error.h>
-#include <mbedtls/md5.h>
 #include <mbedtls/net_sockets.h>
 #include <mbedtls/oid.h>
 #include <mbedtls/pk.h>
+#include <mbedtls/ssl.h>
+#include <mbedtls/version.h>
+#include <mbedtls/x509_crt.h>
+#if MBEDTLS_VERSION_MAJOR >= 4
+// Mbed TLS 4.x moved hashing/RNG to PSA Crypto and removed these headers.
+#include <psa/crypto.h>
+#else
+#include <mbedtls/ctr_drbg.h>
+#include <mbedtls/entropy.h>
+#include <mbedtls/md5.h>
 #include <mbedtls/sha1.h>
 #include <mbedtls/sha256.h>
 #include <mbedtls/sha512.h>
-#include <mbedtls/ssl.h>
-#include <mbedtls/x509_crt.h>
+#endif
 #ifdef _WIN32
 #include <wincrypt.h>
 #ifdef _MSC_VER
@@ -444,7 +452,11 @@ using socket_t = int;
 #endif
 #endif
 
-// Mbed TLS 3.x API compatibility
+// Mbed TLS version API compatibility. Note: V4 implies V3 (both defined on
+// 4.x), so version-specific 3.x-only code must check V3 && !V4.
+#if MBEDTLS_VERSION_MAJOR >= 4
+#define CPPHTTPLIB_MBEDTLS_V4
+#endif
 #if MBEDTLS_VERSION_MAJOR >= 3
 #define CPPHTTPLIB_MBEDTLS_V3
 #endif
@@ -3433,8 +3445,11 @@ namespace impl {
 // setup callbacks (cast ctx_t to tls::impl::MbedTlsContext*).
 struct MbedTlsContext {
   mbedtls_ssl_config conf;
+#ifndef CPPHTTPLIB_MBEDTLS_V4
+  // Mbed TLS 4.x uses PSA Crypto's internal RNG; no explicit entropy/DRBG.
   mbedtls_entropy_context entropy;
   mbedtls_ctr_drbg_context ctr_drbg;
+#endif
   mbedtls_x509_crt ca_chain;
   mbedtls_x509_crt own_cert;
   mbedtls_pk_context own_key;
@@ -8151,6 +8166,13 @@ public:
             break;
           }
 
+          // Check header count limit
+          if (header_count_ >= CPPHTTPLIB_HEADER_MAX_COUNT) {
+            is_valid_ = false;
+            return false;
+          }
+          header_count_++;
+
           const auto header = buf_head(pos);
 
           if (!parse_header(header.data(), header.data() + header.size(),
@@ -8266,6 +8288,7 @@ private:
     file_.filename.clear();
     file_.content_type.clear();
     file_.headers.clear();
+    header_count_ = 0;
   }
 
   bool start_with_case_ignore(const std::string &a, const char *b,
@@ -8319,6 +8342,7 @@ private:
   size_t state_ = 0;
   bool is_valid_ = false;
   FormData file_;
+  size_t header_count_ = 0;
 
   // Buffer
   bool start_with(const std::string &a, size_t spos, size_t epos,
@@ -9114,9 +9138,31 @@ inline std::string hash_to_hex(const unsigned char (&hash)[N]) {
 }
 } // namespace
 
+#ifdef CPPHTTPLIB_MBEDTLS_V4
+// Mbed TLS 4.x provides hashing (and TLS RNG) via PSA Crypto, which must be
+// initialized once. PSA state is process-global; do not free it.
+inline bool ensure_mbedtls_psa_crypto() {
+  static std::once_flag once;
+  static bool ok = false;
+  std::call_once(once, []() { ok = (psa_crypto_init() == PSA_SUCCESS); });
+  return ok;
+}
+
+inline bool psa_hash(psa_algorithm_t alg, const std::string &s,
+                     unsigned char *out, size_t out_size) {
+  if (!ensure_mbedtls_psa_crypto()) { return false; }
+  size_t olen = 0;
+  return psa_hash_compute(alg, reinterpret_cast<const uint8_t *>(s.data()),
+                          s.size(), out, out_size, &olen) == PSA_SUCCESS &&
+         olen == out_size;
+}
+#endif
+
 inline std::string MD5(const std::string &s) {
   unsigned char hash[16];
-#ifdef CPPHTTPLIB_MBEDTLS_V3
+#ifdef CPPHTTPLIB_MBEDTLS_V4
+  if (!psa_hash(PSA_ALG_MD5, s, hash, sizeof(hash))) { return {}; }
+#elif defined(CPPHTTPLIB_MBEDTLS_V3)
   mbedtls_md5(reinterpret_cast<const unsigned char *>(s.c_str()), s.size(),
               hash);
 #else
@@ -9128,7 +9174,9 @@ inline std::string MD5(const std::string &s) {
 
 inline std::string SHA_256(const std::string &s) {
   unsigned char hash[32];
-#ifdef CPPHTTPLIB_MBEDTLS_V3
+#ifdef CPPHTTPLIB_MBEDTLS_V4
+  if (!psa_hash(PSA_ALG_SHA_256, s, hash, sizeof(hash))) { return {}; }
+#elif defined(CPPHTTPLIB_MBEDTLS_V3)
   mbedtls_sha256(reinterpret_cast<const unsigned char *>(s.c_str()), s.size(),
                  hash, 0);
 #else
@@ -9140,7 +9188,9 @@ inline std::string SHA_256(const std::string &s) {
 
 inline std::string SHA_512(const std::string &s) {
   unsigned char hash[64];
-#ifdef CPPHTTPLIB_MBEDTLS_V3
+#ifdef CPPHTTPLIB_MBEDTLS_V4
+  if (!psa_hash(PSA_ALG_SHA_512, s, hash, sizeof(hash))) { return {}; }
+#elif defined(CPPHTTPLIB_MBEDTLS_V3)
   mbedtls_sha512(reinterpret_cast<const unsigned char *>(s.c_str()), s.size(),
                  hash, 0);
 #else
@@ -12420,25 +12470,25 @@ get_client_ip(const std::string &x_forwarded_for,
   // caller can fall back to the connection-level remote address.
   if (ip_list.empty()) { return std::string(); }
 
-  for (size_t i = 0; i < ip_list.size(); ++i) {
-    auto ip = ip_list[i];
+  // Each hop appends the address it received the request from, so the rightmost
+  // entries are the ones written by our own infrastructure while the leftmost
+  // are whatever the original client chose to send. Walk from the right and
+  // skip trusted proxies; the first address that is not a trusted proxy is the
+  // furthest point still attributable to a real hop, i.e. the client. Scanning
+  // from the left instead lets a client forge an arbitrary address by following
+  // it with a trusted proxy's address, which the left-to-right scan then
+  // returned as the client.
+  for (size_t i = ip_list.size(); i-- > 0;) {
+    const auto &ip = ip_list[i];
 
     auto is_trusted_proxy =
         std::any_of(trusted_proxies.begin(), trusted_proxies.end(),
                     [&](const std::string &proxy) { return ip == proxy; });
 
-    if (is_trusted_proxy) {
-      if (i == 0) {
-        // If the trusted proxy is the first IP, there's no preceding client IP
-        return ip;
-      } else {
-        // Return the IP immediately before the trusted proxy
-        return ip_list[i - 1];
-      }
-    }
+    if (!is_trusted_proxy) { return ip; }
   }
 
-  // If no trusted proxy is found, return the first IP in the list
+  // Every hop was a trusted proxy; fall back to the first entry.
   return ip_list.front();
 }
 
@@ -12508,7 +12558,14 @@ Server::process_request(Stream &strm, const std::string &remote_addr,
     connection_closed = true;
   }
 
-  if (!trusted_proxies_.empty() && req.has_header("X-Forwarded-For")) {
+  // Only honor X-Forwarded-For if the peer on the actual TCP connection is
+  // itself a trusted proxy. Otherwise any direct client could spoof
+  // remote_addr simply by sending an arbitrary X-Forwarded-For header.
+  auto is_trusted_peer = std::any_of(
+      trusted_proxies_.begin(), trusted_proxies_.end(),
+      [&](const std::string &proxy) { return proxy == remote_addr; });
+
+  if (is_trusted_peer && req.has_header("X-Forwarded-For")) {
     auto x_forwarded_for = req.get_header_value("X-Forwarded-For");
     auto derived = get_client_ip(x_forwarded_for, trusted_proxies_);
     req.remote_addr = derived.empty() ? remote_addr : derived;
@@ -18005,6 +18062,20 @@ inline ErrorCode map_mbedtls_error(int ret, int &out_errno) {
   return ErrorCode::Fatal;
 }
 
+// A TLS 1.3 NewSessionTicket (signaled by default on Mbed TLS 4.x) is a
+// non-fatal notification delivered between records, not an error and not
+// application data, so I/O calls that see it should just be retried. Kept in
+// one helper so the retry loops keep an intact "do { } while (...)" instead of
+// splitting the closing brace across an #if.
+inline bool mbedtls_is_session_ticket(int ret) {
+#if defined(MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET)
+  return ret == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET;
+#else
+  (void)ret;
+  return false;
+#endif
+}
+
 // BIO-like send callback for Mbed TLS
 inline int mbedtls_net_send_cb(void *ctx, const unsigned char *buf,
                                size_t len) {
@@ -18056,8 +18127,10 @@ inline int mbedtls_net_recv_cb(void *ctx, unsigned char *buf, size_t len) {
 // MbedTlsContext constructor/destructor implementations
 inline MbedTlsContext::MbedTlsContext() {
   mbedtls_ssl_config_init(&conf);
+#ifndef CPPHTTPLIB_MBEDTLS_V4
   mbedtls_entropy_init(&entropy);
   mbedtls_ctr_drbg_init(&ctr_drbg);
+#endif
   mbedtls_x509_crt_init(&ca_chain);
   mbedtls_x509_crt_init(&own_cert);
   mbedtls_pk_init(&own_key);
@@ -18067,8 +18140,10 @@ inline MbedTlsContext::~MbedTlsContext() {
   mbedtls_pk_free(&own_key);
   mbedtls_x509_crt_free(&own_cert);
   mbedtls_x509_crt_free(&ca_chain);
+#ifndef CPPHTTPLIB_MBEDTLS_V4
   mbedtls_ctr_drbg_free(&ctr_drbg);
   mbedtls_entropy_free(&entropy);
+#endif
   mbedtls_ssl_config_free(&conf);
 }
 
@@ -18142,6 +18217,14 @@ inline ctx_t create_client_context() {
 
   ctx->is_server = false;
 
+#ifdef CPPHTTPLIB_MBEDTLS_V4
+  // Mbed TLS 4.x draws randomness from PSA Crypto; just ensure it is ready.
+  if (!detail::ensure_mbedtls_psa_crypto()) {
+    delete ctx;
+    return nullptr;
+  }
+  int ret;
+#else
   // Seed the random number generator
   const char *pers = "httplib_client";
   int ret = mbedtls_ctr_drbg_seed(
@@ -18152,6 +18235,7 @@ inline ctx_t create_client_context() {
     delete ctx;
     return nullptr;
   }
+#endif
 
   // Set up SSL config for client
   ret = mbedtls_ssl_config_defaults(&ctx->conf, MBEDTLS_SSL_IS_CLIENT,
@@ -18163,8 +18247,10 @@ inline ctx_t create_client_context() {
     return nullptr;
   }
 
-  // Set random number generator
+#ifndef CPPHTTPLIB_MBEDTLS_V4
+  // Set random number generator (Mbed TLS 4.x uses the PSA RNG implicitly)
   mbedtls_ssl_conf_rng(&ctx->conf, mbedtls_ctr_drbg_random, &ctx->ctr_drbg);
+#endif
 
   // Default: verify peer certificate
   mbedtls_ssl_conf_authmode(&ctx->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
@@ -18186,6 +18272,14 @@ inline ctx_t create_server_context() {
 
   ctx->is_server = true;
 
+#ifdef CPPHTTPLIB_MBEDTLS_V4
+  // Mbed TLS 4.x draws randomness from PSA Crypto; just ensure it is ready.
+  if (!detail::ensure_mbedtls_psa_crypto()) {
+    delete ctx;
+    return nullptr;
+  }
+  int ret;
+#else
   // Seed the random number generator
   const char *pers = "httplib_server";
   int ret = mbedtls_ctr_drbg_seed(
@@ -18196,6 +18290,7 @@ inline ctx_t create_server_context() {
     delete ctx;
     return nullptr;
   }
+#endif
 
   // Set up SSL config for server
   ret = mbedtls_ssl_config_defaults(&ctx->conf, MBEDTLS_SSL_IS_SERVER,
@@ -18207,8 +18302,10 @@ inline ctx_t create_server_context() {
     return nullptr;
   }
 
-  // Set random number generator
+#ifndef CPPHTTPLIB_MBEDTLS_V4
+  // Set random number generator (Mbed TLS 4.x uses the PSA RNG implicitly)
   mbedtls_ssl_conf_rng(&ctx->conf, mbedtls_ctr_drbg_random, &ctx->ctr_drbg);
+#endif
 
   // Default: don't verify client
   mbedtls_ssl_conf_authmode(&ctx->conf, MBEDTLS_SSL_VERIFY_NONE);
@@ -18368,7 +18465,7 @@ inline bool set_client_cert_pem(ctx_t ctx, const char *cert, const char *key,
       password ? reinterpret_cast<const unsigned char *>(password) : nullptr;
   size_t pwd_len = password ? strlen(password) : 0;
 
-#ifdef CPPHTTPLIB_MBEDTLS_V3
+#if defined(CPPHTTPLIB_MBEDTLS_V3) && !defined(CPPHTTPLIB_MBEDTLS_V4)
   ret = mbedtls_pk_parse_key(
       &mctx->own_key, reinterpret_cast<const unsigned char *>(key_str.c_str()),
       key_str.size() + 1, pwd, pwd_len, mbedtls_ctr_drbg_random,
@@ -18383,7 +18480,10 @@ inline bool set_client_cert_pem(ctx_t ctx, const char *cert, const char *key,
     return false;
   }
 
-  // Verify that the certificate and private key match
+  // Verify that the certificate and private key match.
+  // Mbed TLS 4.x: mbedtls_pk_check_pair() reports a spurious mismatch for
+  // PSA-backed keys, so skip it and let the handshake surface a real mismatch.
+#ifndef CPPHTTPLIB_MBEDTLS_V4
 #ifdef CPPHTTPLIB_MBEDTLS_V3
   ret = mbedtls_pk_check_pair(&mctx->own_cert.pk, &mctx->own_key,
                               mbedtls_ctr_drbg_random, &mctx->ctr_drbg);
@@ -18394,6 +18494,7 @@ inline bool set_client_cert_pem(ctx_t ctx, const char *cert, const char *key,
     impl::mbedtls_last_error() = ret;
     return false;
   }
+#endif
 
   ret = mbedtls_ssl_conf_own_cert(&mctx->conf, &mctx->own_cert, &mctx->own_key);
   if (ret != 0) {
@@ -18417,7 +18518,7 @@ inline bool set_client_cert_file(ctx_t ctx, const char *cert_path,
   }
 
   // Parse private key file
-#ifdef CPPHTTPLIB_MBEDTLS_V3
+#if defined(CPPHTTPLIB_MBEDTLS_V3) && !defined(CPPHTTPLIB_MBEDTLS_V4)
   ret = mbedtls_pk_parse_keyfile(&mctx->own_key, key_path, password,
                                  mbedtls_ctr_drbg_random, &mctx->ctr_drbg);
 #else
@@ -18428,7 +18529,9 @@ inline bool set_client_cert_file(ctx_t ctx, const char *cert_path,
     return false;
   }
 
-  // Verify that the certificate and private key match
+  // Verify that the certificate and private key match.
+  // Mbed TLS 4.x: see set_client_cert() — skip the spurious check_pair.
+#ifndef CPPHTTPLIB_MBEDTLS_V4
 #ifdef CPPHTTPLIB_MBEDTLS_V3
   ret = mbedtls_pk_check_pair(&mctx->own_cert.pk, &mctx->own_key,
                               mbedtls_ctr_drbg_random, &mctx->ctr_drbg);
@@ -18439,6 +18542,7 @@ inline bool set_client_cert_file(ctx_t ctx, const char *cert_path,
     impl::mbedtls_last_error() = ret;
     return false;
   }
+#endif
 
   ret = mbedtls_ssl_conf_own_cert(&mctx->conf, &mctx->own_cert, &mctx->own_key);
   if (ret != 0) {
@@ -18533,7 +18637,10 @@ inline TlsError connect(session_t session) {
   }
 
   auto msession = static_cast<impl::MbedTlsSession *>(session);
-  int ret = mbedtls_ssl_handshake(&msession->ssl);
+  int ret;
+  do {
+    ret = mbedtls_ssl_handshake(&msession->ssl);
+  } while (impl::mbedtls_is_session_ticket(ret));
 
   if (ret == 0) {
     err.code = ErrorCode::Success;
@@ -18577,6 +18684,8 @@ inline bool connect_nonblocking(session_t session, socket_t sock,
 
   int ret;
   while ((ret = mbedtls_ssl_handshake(&msession->ssl)) != 0) {
+    // Non-fatal TLS 1.3 ticket; retry immediately.
+    if (impl::mbedtls_is_session_ticket(ret)) { continue; }
     if (ret == MBEDTLS_ERR_SSL_WANT_READ) {
       if (detail::select_read(sock, timeout_sec, timeout_usec) > 0) {
         continue;
@@ -18624,8 +18733,11 @@ inline ssize_t read(session_t session, void *buf, size_t len, TlsError &err) {
   }
 
   auto msession = static_cast<impl::MbedTlsSession *>(session);
-  int ret =
-      mbedtls_ssl_read(&msession->ssl, static_cast<unsigned char *>(buf), len);
+  int ret;
+  do {
+    ret = mbedtls_ssl_read(&msession->ssl, static_cast<unsigned char *>(buf),
+                           len);
+  } while (impl::mbedtls_is_session_ticket(ret));
 
   if (ret > 0) {
     err.code = ErrorCode::Success;
@@ -18654,8 +18766,11 @@ inline ssize_t write(session_t session, const void *buf, size_t len,
   }
 
   auto msession = static_cast<impl::MbedTlsSession *>(session);
-  int ret = mbedtls_ssl_write(&msession->ssl,
-                              static_cast<const unsigned char *>(buf), len);
+  int ret;
+  do {
+    ret = mbedtls_ssl_write(&msession->ssl,
+                            static_cast<const unsigned char *>(buf), len);
+  } while (impl::mbedtls_is_session_ticket(ret));
 
   if (ret > 0) {
     err.code = ErrorCode::Success;
@@ -18717,7 +18832,10 @@ inline bool is_peer_closed(session_t session, socket_t sock) {
   // purpose of checking if peer is closed, this should be acceptable
   // since we're only called when we expect the connection might be closing
   unsigned char buf;
-  int ret = mbedtls_ssl_read(&msession->ssl, &buf, 1);
+  int ret;
+  do {
+    ret = mbedtls_ssl_read(&msession->ssl, &buf, 1);
+  } while (impl::mbedtls_is_session_ticket(ret));
 
   // If we got data or WANT_READ (would block), connection is alive
   if (ret > 0 || ret == MBEDTLS_ERR_SSL_WANT_READ) { return false; }
@@ -19127,7 +19245,7 @@ inline bool update_server_cert(ctx_t ctx, const char *cert_pem,
   }
 
   // Parse private key PEM
-#ifdef CPPHTTPLIB_MBEDTLS_V3
+#if defined(CPPHTTPLIB_MBEDTLS_V3) && !defined(CPPHTTPLIB_MBEDTLS_V4)
   ret = mbedtls_pk_parse_key(
       &mbed_ctx->own_key, reinterpret_cast<const unsigned char *>(key_pem),
       strlen(key_pem) + 1,

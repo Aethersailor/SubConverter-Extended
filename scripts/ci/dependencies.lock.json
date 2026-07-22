@@ -3,17 +3,17 @@
     "cpp_httplib": {
       "ref": "HEAD",
       "repository": "https://github.com/yhirose/cpp-httplib.git",
-      "revision": "ef2beaea34cca0c4e31b9f9a8463e36ca2938d02"
+      "revision": "bf8baf07391cec982b99028b0bc2182fc5ad5083"
     },
     "custom_openclash_rules": {
       "ref": "refs/heads/main",
       "repository": "https://github.com/Aethersailor/Custom_OpenClash_Rules.git",
-      "revision": "bf135191f7eb1ebe9488826f0becfd4773a4cdea"
+      "revision": "b41c9b4f6dd81c671f48f5854c53252fc73c46c5"
     },
     "inja": {
       "ref": "HEAD",
       "repository": "https://github.com/pantor/inja.git",
-      "revision": "3329d67b003d4004aed38abdc74307c20db6ee5e"
+      "revision": "94289188eaee21b6b553ed4c706a1ecea2a03387"
     },
     "jpcre2": {
       "ref": "HEAD",
