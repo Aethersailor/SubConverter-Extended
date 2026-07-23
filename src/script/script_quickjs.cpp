@@ -1,4 +1,5 @@
 #include <string>
+#include <cstring>
 #include <map>
 #include <iostream>
 #include <quickjspp.hpp>
