@@ -75,6 +75,7 @@ ARG CPP_HTTPLIB_REF
 ARG NLOHMANN_JSON_REF
 ARG INJA_REF
 ARG JPCRE2_REF
+ARG BUILD_TESTS=false
 
 WORKDIR /
 
@@ -180,11 +181,14 @@ RUN set -xe && \
     export CCACHE_COMPILERCHECK=content && \
     cmake -GNinja \
     -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_TESTS=${BUILD_TESTS} \
     -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
     -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
     -DCMAKE_POSITION_INDEPENDENT_CODE=OFF \
     . && \
     ninja -j ${THREADS}
+
+RUN if [ "${BUILD_TESTS}" = "true" ]; then ctest --output-on-failure; fi
 
 # 收集 glibc 运行时依赖（动态探测，避免固定版本）
 RUN set -xe && \

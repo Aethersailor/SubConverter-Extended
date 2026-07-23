@@ -1,0 +1,39 @@
+name: Proxy egress integration
+
+on:
+  pull_request:
+    branches: [dev, master]
+    paths:
+      - 'src/handler/**'
+      - 'src/generator/**'
+      - 'src/script/**'
+      - 'src/utils/**'
+      - 'tests/proxy_egress_integration.py'
+      - 'tests/proxy_policy_test.cpp'
+      - 'CMakeLists.txt'
+      - 'Dockerfile'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  docker-proxy-egress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build and run policy unit tests in the official Docker builder
+        run: docker build --target builder --build-arg BUILD_TESTS=true .
+      - name: Build the official Dockerfile
+        run: docker build --pull --tag sce-proxy-egress:${{ github.sha }} .
+      - name: Verify final-image CA bundle
+        run: |
+          docker run --rm --entrypoint sh sce-proxy-egress:${{ github.sha }} -ec '
+            test -s /etc/ssl/cert.pem || test -s /etc/ssl/certs/ca-certificates.crt
+            ls -l /etc/ssl/cert.pem /etc/ssl/certs/ca-certificates.crt 2>/dev/null || true
+          '
+      - name: Verify policy unit tests and Docker SOCKS5 egress
+        run: |
+          set -euo pipefail
+          python3 tests/proxy_egress_integration.py --image sce-proxy-egress:${{ github.sha }}
