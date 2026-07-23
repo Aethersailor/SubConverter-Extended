@@ -270,6 +270,7 @@ def write_config(path: Path, proxy_config: str, proxy_ruleset: str, proxy_subscr
     path.write_text(
         "\n".join(
             (
+                "version = 1",
                 "[common]",
                 'clash_rule_base = "/base/all_base.tpl"',
                 f'proxy_config = "{proxy_config}"',
