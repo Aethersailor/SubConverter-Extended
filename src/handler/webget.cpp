@@ -18,6 +18,7 @@
 #include "utils/lock.h"
 #include "utils/logger.h"
 #include "utils/network.h"
+#include "utils/system.h"
 #include "utils/urlencode.h"
 #include "version.h"
 #include "webget.h"
