@@ -84,7 +84,7 @@ static bool canReadLocalFetchPath(const std::string &path,
     return false;
 }
 
-std::shared_future<std::string> fetchFileAsync(const std::string &path, const std::string &proxy, int cache_ttl, bool find_local, bool async, FetchContext context)
+std::shared_future<std::string> fetchFileAsync(const std::string &path, const ProxyPolicy &proxy, int cache_ttl, bool find_local, bool async, FetchContext context)
 {
     if(!async)
     {
@@ -107,7 +107,7 @@ std::shared_future<std::string> fetchFileAsync(const std::string &path, const st
     return retVal;
 }
 
-std::string fetchFile(const std::string &path, const std::string &proxy, int cache_ttl, bool find_local, FetchContext context)
+std::string fetchFile(const std::string &path, const ProxyPolicy &proxy, int cache_ttl, bool find_local, FetchContext context)
 {
     return fetchFileAsync(path, proxy, cache_ttl, find_local, false, context).get();
 }

@@ -17,8 +17,6 @@
 #include "utils/system.h"
 #include "script_quickjs.h"
 
-std::string parseProxy(const std::string &source);
-
 static const std::string qjs_require_module {R"(import * as std from 'std'
 import * as os from 'os'
 
@@ -224,11 +222,24 @@ public:
     std::string method = "GET";
     std::string url;
     std::string proxy;
+    bool proxy_specified = false;
     qjs_fetch_Headers headers;
     std::string cookies;
     std::string postdata;
     explicit qjs_fetch_Request(std::string url) : url(std::move(url)) {}
 };
+
+static bool qjs_has_own_property(JSContext *ctx, JSValueConst object,
+                                 const char *name)
+{
+    JSAtom property = JS_NewAtom(ctx, name);
+    JSPropertyDescriptor descriptor {};
+    const int found = JS_GetOwnProperty(ctx, &descriptor, object, property);
+    JS_FreeAtom(ctx, property);
+    if(found > 0)
+        JS_FreePropertyDescriptor(ctx, &descriptor);
+    return found > 0;
+}
 
 class qjs_fetch_Response
 {
@@ -313,7 +324,9 @@ namespace qjs
             request.method = unwrap_free<std::string>(ctx, v, "method");
             request.url = unwrap_free<std::string>(ctx, v, "url");
             request.postdata = unwrap_free<std::string>(ctx, v, "data");
-            request.proxy = unwrap_free<std::string>(ctx, v, "proxy");
+            request.proxy_specified = qjs_has_own_property(ctx, v, "proxy");
+            if(request.proxy_specified)
+                request.proxy = unwrap_free<std::string>(ctx, v, "proxy");
             request.cookies = unwrap_free<std::string>(ctx, v, "cookies");
             request.headers = unwrap_free<qjs_fetch_Headers>(ctx, v, "headers");
             return request;
@@ -366,7 +379,10 @@ static qjs_fetch_Response qjs_fetch(qjs_fetch_Request request)
     }
 
     std::string response_headers;
-    FetchArgument argument {method, request.url, request.proxy, &request.postdata, &request.headers.headers, &request.cookies, 0};
+    ProxyPolicy proxy = request.proxy_specified
+                            ? parseProxy(request.proxy)
+                            : parseProxy(global.proxyConfig);
+    FetchArgument argument {method, request.url, proxy, &request.postdata, &request.headers.headers, &request.cookies, 0};
     FetchResult result {&response.status_code, &response.content, &response_headers, &response.cookies};
 
     webGet(argument, result);
@@ -382,7 +398,9 @@ static std::string qjs_getUrlArg(const std::string &url, const std::string &requ
 
 std::string getGeoIP(const std::string &address, const std::string &proxy)
 {
-    return fetchFile("https://api.ip.sb/geoip/" + address, parseProxy(proxy), global.cacheConfig);
+    ProxyPolicy policy = proxy.empty() ? parseProxy(global.proxyConfig)
+                                       : parseProxy(proxy);
+    return fetchFile("https://api.ip.sb/geoip/" + address, policy, global.cacheConfig);
 }
 
 void script_runtime_init(qjs::Runtime &runtime)

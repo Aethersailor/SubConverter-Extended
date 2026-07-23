@@ -12,6 +12,7 @@
 #include "defer.h"
 #include "lock.h"
 #include "logger.h"
+#include "redact.h"
 #include "time_compat.h"
 
 std::string getTime(int type)
@@ -77,7 +78,7 @@ void writeLog(int type, const std::string &content, int level)
     std::lock_guard<std::mutex> lock(log_mutex);
     const char *levels[] = {"[FATL]", "[ERRO]", "[WARN]", "[INFO]", "[DEBG]", "[VERB]"};
     std::cerr<<getTime(2)<<" ["<<getpid()<<" "<<get_thread_name()<<"]"<<levels[level % 6];
-    std::cerr<<" "<<content<<"\n";
+    std::cerr<<" "<<redactSensitiveLogText(content)<<"\n";
 }
 
 

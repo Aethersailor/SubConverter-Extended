@@ -8,6 +8,7 @@
 
 #include "config/regmatch.h"
 #include "handler/fetch_context.h"
+#include "handler/proxy_policy.h"
 #include "utils/ini_reader/ini_reader.h"
 #include "utils/string.h"
 
@@ -27,10 +28,10 @@ void safe_set_streams(RegexMatchConfigs data);
 void safe_set_times(RegexMatchConfigs data);
 void safe_replace_settings(Settings &&settings);
 std::shared_future<std::string> fetchFileAsync(
-    const std::string &path, const std::string &proxy, int cache_ttl,
+    const std::string &path, const ProxyPolicy &proxy, int cache_ttl,
     bool find_local = true, bool async = false,
     FetchContext context = FetchContext::TrustedConfig);
-std::string fetchFile(const std::string &path, const std::string &proxy,
+std::string fetchFile(const std::string &path, const ProxyPolicy &proxy,
                       int cache_ttl, bool find_local = true,
                       FetchContext context = FetchContext::TrustedConfig);
 

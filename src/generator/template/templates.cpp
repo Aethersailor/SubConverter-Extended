@@ -118,7 +118,8 @@ std::string parseHostname(inja::Arguments &args)
     if(!urls.size())
         return std::string();
 
-    std::string input_content, output_content, proxy = parseProxy(global.proxyConfig);
+    std::string input_content, output_content;
+    ProxyPolicy proxy = parseProxy(global.proxyConfig);
     for(std::string &x : urls)
     {
         input_content = webGet(x, proxy, global.cacheConfig);
@@ -143,7 +144,8 @@ std::string parseHostname(inja::Arguments &args)
 #ifndef NO_WEBGET
 std::string template_webGet(inja::Arguments &args)
 {
-    std::string data = args.at(0)->get<std::string>(), proxy = parseProxy(global.proxyConfig);
+    std::string data = args.at(0)->get<std::string>();
+    ProxyPolicy proxy = parseProxy(global.proxyConfig);
     writeLog(0, "模板调用 fetch，URL：'" + data + "'。", LOG_LEVEL_INFO);
     return webGet(data, proxy, global.cacheConfig, nullptr, nullptr,
                   current_template_fetch_context);

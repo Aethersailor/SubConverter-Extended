@@ -11,13 +11,14 @@
 
 #include "config/regmatch.h"
 #include "handler/fetch_context.h"
+#include "handler/proxy_policy.h"
 #include "parser/config/proxy.h"
 #include "utils/map_extra.h"
 #include "utils/string.h"
 
 struct parse_settings
 {
-    std::string *proxy = nullptr;
+    ProxyPolicy *proxy = nullptr;
     string_array *exclude_remarks = nullptr;
     string_array *include_remarks = nullptr;
     RegexMatchConfigs *stream_rules = nullptr;

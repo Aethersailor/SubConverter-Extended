@@ -193,7 +193,7 @@ int importItems(string_array &target, bool scope_limit, FetchContext context) {
     writeLog(0, "正在导入项目：" + path);
     content.clear();
 
-    std::string proxy = parseProxy(global.proxyConfig);
+    ProxyPolicy proxy = parseProxy(global.proxyConfig);
 
     if (fileExist(path, scope_limit) && canImportLocalPath(path, context))
       content = fileGet(path, scope_limit);
@@ -240,7 +240,7 @@ void importItems(std::vector<toml::value> &root, const std::string &import_key,
   auto iter = root.begin();
   size_t count = 0;
 
-  std::string proxy = parseProxy(global.proxyConfig);
+  ProxyPolicy proxy = parseProxy(global.proxyConfig);
   while (iter != root.end()) {
     auto &table = iter->as_table();
     if (table.find("import") == table.end())
@@ -400,7 +400,7 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
   std::string rule_group, rule_url, rule_url_typed, interval;
   RulesetContent rc;
 
-  std::string proxy = parseProxy(global.proxyRuleset);
+  ProxyPolicy proxy = parseProxy(global.proxyRuleset);
 
   for (RulesetConfig &x : ruleset_list) {
     rule_group = x.Group;
@@ -964,6 +964,7 @@ void readTOMLConf(toml::value &root) {
   auto tasks = toml::find_or<std::vector<toml::value>>(root, "tasks", {});
   importItems(tasks, "tasks", false);
   global.cronTasks = toml::get<CronTaskConfigs>(toml::value(tasks));
+  global.enableCron = !global.cronTasks.empty();
 
   auto section_server = toml::find(root, "server");
 
@@ -1635,9 +1636,9 @@ int loadExternalTOML(toml::value &root, ExternalConfig &ext,
 
 int loadExternalConfig(std::string &path, ExternalConfig &ext,
                        FetchContext context) {
-  std::string base_content, proxy = parseProxy(global.proxyConfig),
-                            config = fetchFile(path, proxy, global.cacheConfig,
-                                               true, context);
+  std::string base_content;
+  ProxyPolicy proxy = parseProxy(global.proxyConfig);
+  std::string config = fetchFile(path, proxy, global.cacheConfig, true, context);
   if (render_template(config, *ext.tpl_args, base_content,
                       global.templatePath, context) != 0)
     base_content = config;

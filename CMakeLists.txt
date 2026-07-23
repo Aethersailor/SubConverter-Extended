@@ -84,6 +84,7 @@ ADD_EXECUTABLE(${BUILD_TARGET_NAME}
     src/handler/upload.cpp
     src/handler/version_page.cpp
     src/handler/webget.cpp
+    src/handler/proxy_policy.cpp
     src/handler/settings.cpp
     src/main.cpp
     src/parser/infoparser.cpp
@@ -99,6 +100,7 @@ ADD_EXECUTABLE(${BUILD_TARGET_NAME}
     src/utils/logger.cpp
     src/utils/md5/md5.cpp
     src/utils/network.cpp
+    src/utils/redact.cpp
     src/utils/regexp.cpp
     src/utils/string.cpp
     src/utils/system.cpp
@@ -216,6 +218,16 @@ ENDIF()
 
 IF(BUILD_TESTS)
     ENABLE_TESTING()
+    ADD_EXECUTABLE(proxy_policy_test
+        tests/proxy_policy_test.cpp
+        src/handler/proxy_policy.cpp
+        src/utils/redact.cpp
+        src/utils/string.cpp
+        src/utils/system.cpp)
+    TARGET_INCLUDE_DIRECTORIES(proxy_policy_test PRIVATE src)
+    TARGET_LINK_LIBRARIES(proxy_policy_test ${CMAKE_THREAD_LIBS_INIT})
+    ADD_TEST(NAME proxy_policy COMMAND proxy_policy_test)
+
     ADD_EXECUTABLE(custom_openclash_rules_test
         tests/custom_openclash_rules_test.cpp
         src/config/custom_openclash_rules.cpp

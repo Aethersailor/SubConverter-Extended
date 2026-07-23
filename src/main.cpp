@@ -330,7 +330,7 @@ int main(int argc, char *argv[]) {
                               [](RESPONSE_CALLBACK_ARGS) -> std::string {
                                 std::string url = urlDecode(
                                     getUrlArg(request.argument, "url"));
-                                return webGet(url, "");
+                                return webGet(url, parseProxy(global.proxyConfig));
                               });
 
     webServer.append_response(
