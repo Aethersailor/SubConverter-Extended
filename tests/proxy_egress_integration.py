@@ -565,9 +565,17 @@ def run(image: str) -> None:
                 gist=gist_conf,
             ) as container:
                 upload_request(container.port)
+                gist_logs = container.logs()
             with recorder.lock:
-                assert recorder.requests and recorder.requests[0].address_type == "domain", "Gist request bypassed proxy_config"
-                assert "/gists" in recorder.target_hits, "local Gist API did not receive the request"
+                gist_records = list(recorder.requests)
+                gist_hits = list(recorder.target_hits)
+            assert gist_records and gist_records[0].address_type == "domain", (
+                f"Gist request bypassed proxy_config: {gist_records}"
+            )
+            assert "/gists" in gist_hits, (
+                "local Gist API did not receive the request; "
+                f"SOCKS={gist_records}, target={gist_hits}, logs={gist_logs}"
+            )
 
             # The default Clash Proxy-Provider path is a client-side pull:
             # backend proxy_subscription must not pre-download it.
