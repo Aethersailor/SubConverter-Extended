@@ -232,10 +232,26 @@ public:
 static bool qjs_has_own_property(JSContext *ctx, JSValueConst object,
                                  const char *name)
 {
-    JSAtom property = JS_NewAtom(ctx, name);
-    const int found = JS_HasOwnProperty(ctx, object, property);
-    JS_FreeAtom(ctx, property);
-    return found > 0;
+    JSPropertyEnum *properties = nullptr;
+    uint32_t count = 0;
+    if(JS_GetOwnPropertyNames(ctx, &properties, &count, object,
+                              JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) < 0)
+        return false;
+
+    bool found = false;
+    for(uint32_t index = 0; index < count; index++)
+    {
+        const char *property = JS_AtomToCString(ctx, properties[index].atom);
+        if(property != nullptr)
+        {
+            found = found || std::strcmp(property, name) == 0;
+            JS_FreeCString(ctx, property);
+        }
+        JS_FreeAtom(ctx, properties[index].atom);
+    }
+    // JS_GetOwnPropertyNames allocates with QuickJS's allocator.
+    js_free(ctx, properties);
+    return found;
 }
 
 class qjs_fetch_Response
