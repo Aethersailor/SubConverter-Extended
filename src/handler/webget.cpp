@@ -506,8 +506,10 @@ static inline void curl_set_common_options(CURL *curl_handle, const char *url, c
     curl_easy_setopt(curl_handle, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl_handle, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl_handle, CURLOPT_MAXREDIRS, 20L);
-    curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYPEER, 1L);
-    curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYHOST, 2L);
+    curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYPEER,
+                     global.allowInsecureTls ? 0L : 1L);
+    curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYHOST,
+                     global.allowInsecureTls ? 0L : 2L);
     curl_easy_setopt(curl_handle, CURLOPT_TIMEOUT, 15L);
     curl_easy_setopt(curl_handle, CURLOPT_COOKIEFILE, "");
     if(data)

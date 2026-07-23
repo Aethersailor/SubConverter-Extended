@@ -777,6 +777,7 @@ void readYAMLConf(YAML::Node &node) {
     node["advanced"]["enable_request_coalescing"] >>
         global.enableRequestCoalescing;
     node["advanced"]["coalesce_retry_on_5xx"] >> global.coalesceRetryOn5xx;
+    node["advanced"]["allow_insecure_tls"] >> global.allowInsecureTls;
     node["advanced"]["response_cache_ttl"] >> global.responseCacheTtl;
   }
   if (node["statistics"].IsDefined()) {
@@ -992,6 +993,7 @@ void readTOMLConf(toml::value &root) {
       global.asyncFetchRuleset, "skip_failed_links", global.skipFailedLinks,
       "enable_request_coalescing", global.enableRequestCoalescing,
       "coalesce_retry_on_5xx", global.coalesceRetryOn5xx,
+      "allow_insecure_tls", global.allowInsecureTls,
       "response_cache_ttl", global.responseCacheTtl);
 
   if (global.printDbgInfo)
@@ -1446,6 +1448,7 @@ bool readConf() {
   ini.get_bool_if_exist("enable_request_coalescing",
                         global.enableRequestCoalescing);
   ini.get_bool_if_exist("coalesce_retry_on_5xx", global.coalesceRetryOn5xx);
+  ini.get_bool_if_exist("allow_insecure_tls", global.allowInsecureTls);
   ini.get_int_if_exist("response_cache_ttl", global.responseCacheTtl);
 
   if (ini.section_exist("statistics")) {
