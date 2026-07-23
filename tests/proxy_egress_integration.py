@@ -20,6 +20,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import re
 import urllib.parse
 import urllib.error
 import urllib.request
@@ -267,30 +268,27 @@ def reserve_port() -> int:
 
 
 def write_config(path: Path, proxy_config: str, proxy_ruleset: str, proxy_subscription: str) -> None:
-    path.write_text(
-        "\n".join(
-            (
-                "version = 1",
-                "[common]",
-                'clash_rule_base = "/base/all_base.tpl"',
-                f'proxy_config = "{proxy_config}"',
-                f'proxy_ruleset = "{proxy_ruleset}"',
-                f'proxy_subscription = "{proxy_subscription}"',
-                "",
-                "[advanced]",
-                "log_level = 5",
-                "enable_cache = true",
-                "cache_subscription = 120",
-                "cache_config = 120",
-                "cache_ruleset = 120",
-                "",
-                "[server]",
-                'listen = "127.0.0.1"',
-                "port = 25500",
-            )
-        ),
-        encoding="utf-8",
-    )
+    # Keep every required preference section in the real distribution sample;
+    # this test changes only the egress knobs it is asserting.
+    example = Path(__file__).resolve().parents[1] / "base" / "pref.example.toml"
+    content = example.read_text(encoding="utf-8")
+
+    def replace(key: str, value: str) -> None:
+        nonlocal content
+        content, count = re.subn(
+            rf"(?m)^{re.escape(key)}\s*=.*$", f'{key} = {value}', content, count=1
+        )
+        if count != 1:
+            raise AssertionError(f"example preference is missing {key}")
+
+    replace("proxy_config", f'"{proxy_config}"')
+    replace("proxy_ruleset", f'"{proxy_ruleset}"')
+    replace("proxy_subscription", f'"{proxy_subscription}"')
+    replace("enable_cache", "true")
+    replace("cache_subscription", "120")
+    replace("cache_config", "120")
+    replace("cache_ruleset", "120")
+    path.write_text(content, encoding="utf-8")
 
 
 def add_cron_task(path: Path, script_url: str) -> None:
