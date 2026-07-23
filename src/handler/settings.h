@@ -30,6 +30,7 @@ struct Settings {
       maxServerThreads = 128;
   bool prependInsert = true, skipFailedLinks = false;
   bool customOpenClashRulesFallback = false;
+  bool customOpenClashRulesPublish = false;
   static constexpr bool APIMode = true; // Hardcoded for security
   bool writeManagedConfig = false, enableRuleGen = true,
        updateRulesetOnRequest = false, overwriteOriginalRules = true;
