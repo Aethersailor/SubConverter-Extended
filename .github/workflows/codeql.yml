@@ -3,19 +3,60 @@ name: "CodeQL"
 on:
   workflow_dispatch:
   push:
-    branches: [ "dev", "master" ]
+    branches: [ "dev" ]
   pull_request:
     branches: [ "dev", "master" ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
+  source-head:
+    name: Verify Current Source Head
+    runs-on: ubuntu-latest
+    outputs:
+      current: ${{ steps.verify.outputs.current }}
+    steps:
+      - name: Skip stale branch events
+        id: verify
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        with:
+          script: |
+            const isBranch = context.ref.startsWith('refs/heads/');
+            const checksBranchHead =
+              isBranch &&
+              (context.eventName === 'push' || context.eventName === 'workflow_dispatch');
+
+            if (!checksBranchHead) {
+              core.setOutput('current', 'true');
+              return;
+            }
+
+            const branch = context.ref.slice('refs/heads/'.length);
+            const { data } = await github.rest.repos.getBranch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              branch,
+            });
+            const currentSha = data.commit.sha;
+            const isCurrent = currentSha === context.sha;
+
+            core.setOutput('current', String(isCurrent));
+            if (isCurrent) {
+              core.info(`${context.sha} is still the current head of ${branch}.`);
+            } else {
+              core.notice(
+                `Skipping stale ${context.eventName} event for ${context.sha}; ` +
+                `${branch} now points to ${currentSha}.`
+              );
+            }
+
   analyze:
     name: Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
-    if: github.actor != 'dependabot[bot]'
+    needs: source-head
+    if: needs.source-head.outputs.current == 'true' && github.actor != 'dependabot[bot]'
     permissions:
       actions: read
       contents: read

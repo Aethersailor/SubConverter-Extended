@@ -299,10 +299,12 @@ int main(int argc, char *argv[]) {
                             global.statisticsEnabled ? subconverterTracked
                                                      : subconverter);
 
-  webServer.append_response(
-      "GET", R"(/Custom_OpenClash_Rules/main(/.*)?)",
-      "application/octet-stream",
-      custom_openclash_rules_endpoint::serve);
+  if (global.customOpenClashRulesPublish) {
+    webServer.append_response(
+        "GET", R"(/Custom_OpenClash_Rules/main(/.*)?)",
+        "application/octet-stream",
+        custom_openclash_rules_endpoint::serve);
+  }
 
   /*
   webServer.append_response("GET", "/sub2clashr", "text/plain;charset=utf-8",

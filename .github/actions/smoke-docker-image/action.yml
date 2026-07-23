@@ -29,8 +29,23 @@ runs:
         CONTAINER_PORT="${{ inputs.port }}"
         RULES_REVISION="${{ inputs.custom-openclash-rules-revision }}"
 
+        CID=""
+        PUBLISH_CID=""
+        PUBLISH_CONFIG=""
+        cleanup() {
+          if [ -n "$PUBLISH_CID" ]; then
+            docker rm -f "$PUBLISH_CID" >/dev/null 2>&1 || true
+          fi
+          if [ -n "$CID" ]; then
+            docker rm -f "$CID" >/dev/null 2>&1 || true
+          fi
+          if [ -n "$PUBLISH_CONFIG" ]; then
+            rm -f "$PUBLISH_CONFIG"
+          fi
+        }
+        trap cleanup EXIT
+
         CID="$(docker run -d --platform "$PLATFORM" -e PORT="$CONTAINER_PORT" -p "127.0.0.1::${CONTAINER_PORT}" "$IMAGE")"
-        trap 'docker rm -f "$CID" >/dev/null 2>&1 || true' EXIT
 
         HOST_PORT="$(docker port "$CID" "${CONTAINER_PORT}/tcp" | awk -F: 'END {print $NF}')"
         URL="http://127.0.0.1:${HOST_PORT}/version"
@@ -59,7 +74,49 @@ runs:
               --mihomo-yaml-subscription-url "${FIXTURE_BASE}/mihomo-provider-subscription.yml" \
               --legacy-subscription-url "${FIXTURE_BASE}/legacy-surge-subscription.conf" \
               --verify-non-clash
-            curl -fsS "http://127.0.0.1:${HOST_PORT}/Custom_OpenClash_Rules/main/rule/Custom_Direct.list" > /tmp/bundled-custom-direct.list
+
+            default_publish_status="$(
+              curl -sS -o /dev/null -w '%{http_code}' \
+                "http://127.0.0.1:${HOST_PORT}/Custom_OpenClash_Rules/main/rule/Custom_Direct.list"
+            )"
+            if [ "$default_publish_status" != "404" ]; then
+              echo "Expected bundled rule publication to default to 404, got ${default_publish_status}" >&2
+              exit 1
+            fi
+
+            PUBLISH_CONFIG="$(mktemp)"
+            sed 's/^publish_enabled = false$/publish_enabled = true/' \
+              base/pref.example.toml > "$PUBLISH_CONFIG"
+            grep -qx 'publish_enabled = true' "$PUBLISH_CONFIG"
+
+            PUBLISH_CID="$(
+              docker run -d --platform "$PLATFORM" \
+                -e PORT="$CONTAINER_PORT" \
+                -p "127.0.0.1::${CONTAINER_PORT}" \
+                -v "$PUBLISH_CONFIG:/base/pref.toml:ro" \
+                "$IMAGE"
+            )"
+            PUBLISH_HOST_PORT="$(
+              docker port "$PUBLISH_CID" "${CONTAINER_PORT}/tcp" |
+                awk -F: 'END {print $NF}'
+            )"
+            PUBLISH_URL="http://127.0.0.1:${PUBLISH_HOST_PORT}/version"
+            publish_ready=0
+            for _ in $(seq 1 30); do
+              if curl -fsS "$PUBLISH_URL" >/dev/null; then
+                publish_ready=1
+                break
+              fi
+              sleep 2
+            done
+            if [ "$publish_ready" != "1" ]; then
+              docker logs "$PUBLISH_CID" || true
+              exit 1
+            fi
+
+            curl -fsS \
+              "http://127.0.0.1:${PUBLISH_HOST_PORT}/Custom_OpenClash_Rules/main/rule/Custom_Direct.list" \
+              > /tmp/bundled-custom-direct.list
             curl -fsS "https://raw.githubusercontent.com/Aethersailor/Custom_OpenClash_Rules/${RULES_REVISION}/rule/Custom_Direct.list" > /tmp/upstream-custom-direct.list
             cmp /tmp/bundled-custom-direct.list /tmp/upstream-custom-direct.list
             exit 0

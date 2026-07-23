@@ -567,6 +567,8 @@ void readYAMLConf(YAML::Node &node) {
     section = node["custom_openclash_rules"];
     section["fallback_enabled"] >>
         global.customOpenClashRulesFallback;
+    section["publish_enabled"] >>
+        global.customOpenClashRulesPublish;
   }
 
   if (node["userinfo"].IsDefined()) {
@@ -878,6 +880,8 @@ void readTOMLConf(toml::value &root) {
                     toml::value(toml::table()));
   find_if_exist(section_custom_openclash, "fallback_enabled",
                 global.customOpenClashRulesFallback);
+  find_if_exist(section_custom_openclash, "publish_enabled",
+                global.customOpenClashRulesPublish);
 
   safe_set_streams(toml::find_or<RegexMatchConfigs>(
       root, "userinfo", "stream_rule", RegexMatchConfigs{}));
@@ -1103,6 +1107,7 @@ bool readConf() {
     global.dashboardAuthWindowSeconds = 300;
     global.dashboardAuthLockSeconds = 900;
     global.customOpenClashRulesFallback = false;
+    global.customOpenClashRulesPublish = false;
   };
 
   std::string prefdata;
@@ -1238,6 +1243,8 @@ bool readConf() {
     ini.enter_section("custom_openclash_rules");
     ini.get_bool_if_exist("fallback_enabled",
                           global.customOpenClashRulesFallback);
+    ini.get_bool_if_exist("publish_enabled",
+                          global.customOpenClashRulesPublish);
   }
 
   if (ini.section_exist("surge_external_proxy")) {
