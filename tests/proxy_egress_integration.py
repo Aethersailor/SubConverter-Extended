@@ -311,10 +311,16 @@ def wait_until(condition: callable, timeout: float, message: str) -> None:
     raise AssertionError(message)
 
 
-def sub_request(port: int, url: str, config: str = "data:,enable_rule_generator=false") -> str:
-    query = urllib.parse.urlencode(
-        {"target": "clash", "list": "true", "url": url, "config": config}
-    )
+def sub_request(
+    port: int,
+    url: str,
+    config: str = "data:,enable_rule_generator=false",
+    list_mode: bool = True,
+) -> str:
+    arguments = {"target": "clash", "url": url, "config": config}
+    if list_mode:
+        arguments["list"] = "true"
+    query = urllib.parse.urlencode(arguments)
     request_url = f"http://127.0.0.1:{port}/sub?{query}"
     try:
         with urllib.request.urlopen(request_url, timeout=15) as response:
@@ -448,7 +454,12 @@ def run(image: str) -> None:
             write_config(config_ruleset, socks5h, socks5h, "NONE")
             remote_config = f"http://target.test:{fixture.server_port}/remote.ini"
             with RunningContainer(image, config_ruleset, reserve_port(), {}) as container:
-                sub_request(container.port, remote_url, config=remote_config)
+                sub_request(
+                    container.port,
+                    "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388#ProxySmoke",
+                    config=remote_config,
+                    list_mode=False,
+                )
             with recorder.lock:
                 assert len(recorder.requests) >= 2, "external config or ruleset bypassed its proxy policy"
                 assert all(item.address_type == "domain" for item in recorder.requests), recorder.requests
