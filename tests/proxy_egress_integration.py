@@ -218,17 +218,16 @@ class RunningContainer:
             # available in the assertion output.
             "docker", "run", "-d", "--network", "host",
             "--add-host", "target.test:127.0.0.1",
-            "-v", f"{config}:/tmp/pref.toml:ro",
-            "-e", "PREF_PATH=/tmp/pref.toml", "-e", f"PORT={port}",
+            # Match the production compose layout.  Besides making relative
+            # resources available, main.cpp then resolves gistconf.ini in the
+            # same directory as the supplied preference file.
+            "-v", f"{config}:/base/pref.toml:ro",
+            "-e", "PREF_PATH=/base/pref.toml", "-e", f"PORT={port}",
         ]
         if cache is not None:
             command += ["-v", f"{cache}:/tmp/cache"]
         if gist is not None:
-            # main.cpp changes to PREF_PATH's directory after loading it.
-            # The fixture mounts the preference at /tmp/pref.toml, so Gist's
-            # historical relative gistconf.ini lookup must be /tmp as well.
-            # Keep /base populated too: it is the image's normal layout.
-            command += ["-v", f"{gist}:/tmp/gistconf.ini"]
+            # upload.cpp intentionally keeps its historical relative lookup.
             command += ["-v", f"{gist}:/base/gistconf.ini"]
         for name, value in env.items():
             command += ["-e", f"{name}={value}"]
