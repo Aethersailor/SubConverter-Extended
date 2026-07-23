@@ -224,7 +224,10 @@ class RunningContainer:
         if cache is not None:
             command += ["-v", f"{cache}:/tmp/cache"]
         if gist is not None:
-            command += ["-v", f"{gist}:/base/gistconf.ini"]
+            # main.cpp changes to PREF_PATH's directory after loading it.
+            # The fixture mounts the preference at /tmp/pref.toml, so Gist's
+            # historical relative gistconf.ini lookup must be /tmp as well.
+            command += ["-v", f"{gist}:/tmp/gistconf.ini"]
         for name, value in env.items():
             command += ["-e", f"{name}={value}"]
         command.append(image)
@@ -345,7 +348,12 @@ def expect_sub_failure(port: int, url: str) -> None:
 
 def upload_request(port: int) -> None:
     query = urllib.parse.urlencode(
-        {"target": "clash", "url": "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388#UploadSmoke", "upload": "true"}
+        {
+            "target": "clash",
+            "url": "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388#UploadSmoke",
+            "config": "data:,enable_rule_generator=false",
+            "upload": "true",
+        }
     )
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/sub?{query}", timeout=15) as response:
         if response.status != 200:
