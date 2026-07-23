@@ -213,7 +213,9 @@ class SocksServer(socketserver.ThreadingTCPServer):
 class RunningContainer:
     def __init__(self, image: str, config: Path, port: int, env: dict[str, str], cache: Path | None = None, gist: Path | None = None) -> None:
         command = [
-            "docker", "run", "-d", "--rm", "--network", "host",
+            # Keep a failed container until close() so its startup log is
+            # available in the assertion output.
+            "docker", "run", "-d", "--network", "host",
             "--add-host", "target.test:127.0.0.1",
             "-v", f"{config}:/tmp/pref.toml:ro",
             "-e", "PREF_PATH=/tmp/pref.toml", "-e", f"PORT={port}",
