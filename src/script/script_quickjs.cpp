@@ -335,7 +335,10 @@ namespace qjs
         static qjs_fetch_Request unwrap(JSContext *ctx, JSValueConst v)
         {
             qjs_fetch_Request request;
-            request.method = unwrap_free<std::string>(ctx, v, "method");
+            // Keep the documented Request default when the object literal only
+            // supplies a URL (the usual fetch({url: ...}) form).
+            if(qjs_has_own_property(ctx, v, "method"))
+                request.method = unwrap_free<std::string>(ctx, v, "method");
             request.url = unwrap_free<std::string>(ctx, v, "url");
             request.postdata = unwrap_free<std::string>(ctx, v, "data");
             request.proxy_specified = qjs_has_own_property(ctx, v, "proxy");

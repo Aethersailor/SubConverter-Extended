@@ -474,11 +474,14 @@ def run(image: str) -> None:
             add_cron_task(cron_config, f"http://target.test:{fixture.server_port}/cron.js")
             with RunningContainer(
                 image, cron_config, reserve_port(), {"ALL_PROXY": socks5h, "NO_PROXY": "", "no_proxy": ""}
-            ):
+            ) as container:
                 def quickjs_complete() -> bool:
                     with recorder.lock:
                         return {"/cron.js", "/quickjs-default", "/quickjs-none", "/quickjs-system", "/quickjs-explicit"}.issubset(set(recorder.target_hits))
-                wait_until(quickjs_complete, 8, "Cron/QuickJS proxy policy requests did not all complete")
+                try:
+                    wait_until(quickjs_complete, 8, "Cron/QuickJS proxy policy requests did not all complete")
+                except AssertionError as error:
+                    raise AssertionError(f"{error}\nSubConverter logs:\n{container.logs()}") from error
             with recorder.lock:
                 proxied_paths = len(recorder.requests)
                 assert proxied_paths >= 4, f"Cron/QuickJS expected four SOCKS requests, got {recorder.requests}"
