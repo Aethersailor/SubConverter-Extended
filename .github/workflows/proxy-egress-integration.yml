@@ -23,6 +23,12 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v6
+      - name: Fetch pinned Custom_OpenClash_Rules test assets
+        run: |
+          set -euo pipefail
+          ref="$(python3 -c "import json; print(json.load(open('scripts/ci/dependencies.lock.json'))['git']['custom_openclash_rules']['revision'])")"
+          python3 scripts/sync_custom_openclash_rules.py --ref "$ref"
+          test -s base/Custom_OpenClash_Rules/manifest.sha256
       - name: Build and run policy unit tests in the official Docker builder
         run: docker build --target builder --build-arg BUILD_TESTS=true .
       - name: Build the official Dockerfile
