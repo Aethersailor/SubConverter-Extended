@@ -227,7 +227,9 @@ class RunningContainer:
             # main.cpp changes to PREF_PATH's directory after loading it.
             # The fixture mounts the preference at /tmp/pref.toml, so Gist's
             # historical relative gistconf.ini lookup must be /tmp as well.
+            # Keep /base populated too: it is the image's normal layout.
             command += ["-v", f"{gist}:/tmp/gistconf.ini"]
+            command += ["-v", f"{gist}:/base/gistconf.ini"]
         for name, value in env.items():
             command += ["-e", f"{name}={value}"]
         command.append(image)
@@ -564,7 +566,12 @@ def run(image: str) -> None:
             # deterministic without contacting GitHub.
             recorder.clear()
             gist_conf = temp / "gistconf.ini"
-            gist_conf.write_text("[common]\\ntoken=fixture-token\\n", encoding="utf-8")
+            gist_conf.write_text(
+                "[common]\\n"
+                "; local token used only by the deterministic Gist mock\\n"
+                "token = fixture-token\\n",
+                encoding="utf-8",
+            )
             gist_config = temp / "gist.toml"
             write_config(gist_config, socks5h, "NONE", "NONE")
             with RunningContainer(
