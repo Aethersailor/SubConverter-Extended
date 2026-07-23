@@ -233,11 +233,8 @@ static bool qjs_has_own_property(JSContext *ctx, JSValueConst object,
                                  const char *name)
 {
     JSAtom property = JS_NewAtom(ctx, name);
-    JSPropertyDescriptor descriptor {};
-    const int found = JS_GetOwnProperty(ctx, &descriptor, object, property);
+    const int found = JS_HasOwnProperty(ctx, object, property);
     JS_FreeAtom(ctx, property);
-    if(found > 0)
-        JS_FreePropertyDescriptor(ctx, &descriptor);
     return found > 0;
 }
 
