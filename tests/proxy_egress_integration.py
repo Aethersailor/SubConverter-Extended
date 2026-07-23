@@ -566,9 +566,9 @@ def run(image: str) -> None:
             recorder.clear()
             gist_conf = temp / "gistconf.ini"
             gist_conf.write_text(
-                "[common]\\n"
-                "; local token used only by the deterministic Gist mock\\n"
-                "token = fixture-token\\n",
+                "[common]\n"
+                "; local token used only by the deterministic Gist mock\n"
+                "token = fixture-token\n",
                 encoding="utf-8",
             )
             gist_config = temp / "gist.toml"
