@@ -318,6 +318,9 @@ update_ruleset_on_request = false
 # ruleset = "https://raw.githubusercontent.com/DivineEngine/Profiles/master/Surge/Ruleset/Unbreak.list"
 # type = "surge-ruleset"
 # interval = 86400
+# SubConverter-Extended extension for non-Script Clash/Mihomo IP-CIDR rules:
+# type = "clash-ipcidr"
+# options = ["no-resolve"]
 
 [[rulesets]]
 import = "snippets/rulesets.toml"

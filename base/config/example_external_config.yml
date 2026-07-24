@@ -7,6 +7,7 @@ custom:
 
 #  rulesets:
 #  - {import: snippets/ruleset_remote.txt}
+#  - {ruleset: "clash-ipcidr:https://example.com/cn-ip.yaml", group: "🎯 全球直连", interval: 28800, options: ["no-resolve"]}
 
   clash_rule_base: base/forcerule.yml
 #  surge_rule_base: base/surge.conf
