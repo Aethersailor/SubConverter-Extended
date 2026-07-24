@@ -370,6 +370,7 @@ void readRuleset(YAML::Node node, string_array &dest, bool scope_limit = true,
                  FetchContext context = FetchContext::TrustedConfig) {
   for (auto &&object : node) {
     std::string strLine, name, url, group, interval;
+    string_array options;
     object["import"] >>= name;
     if (!name.empty()) {
       dest.emplace_back("!!import:" + name);
@@ -379,10 +380,16 @@ void readRuleset(YAML::Node node, string_array &dest, bool scope_limit = true,
     object["group"] >>= group;
     object["rule"] >>= name;
     object["interval"] >>= interval;
+    if (object["options"].IsSequence())
+      object["options"] >> options;
     if (!url.empty()) {
       strLine = group + "," + url;
+      if (!options.empty() && interval.empty())
+        interval = "86400";
       if (!interval.empty())
         strLine += "," + interval;
+      if (!options.empty())
+        strLine += "|" + join(options, "|");
     } else if (!name.empty())
       strLine = group + ",[]" + name;
     else
@@ -417,7 +424,8 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
             RULESET_SURGE,
             std::async(std::launch::async,
                        [=]() { return rule_url.substr(pos); }),
-            0};
+            0,
+            x.Options};
     } else {
       ruleset_type type = RULESET_SURGE;
       rule_url_typed = rule_url;
@@ -430,6 +438,11 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
         type = iter->second;
         type_prefix = iter->first;
       }
+      if (x.Options.no_resolve && type != RULESET_CLASH_IPCIDR)
+        writeLog(0,
+                 "规则集选项 no-resolve 仅适用于 clash-ipcidr，已对策略组 '" +
+                     rule_group + "' 安全忽略。",
+                 LOG_LEVEL_WARNING);
 
       if (global.customOpenClashRulesFallback) {
         custom_openclash_rules::Resource resource =
@@ -452,7 +465,8 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
                 fetchFileAsync(bundled_path, proxy, global.cacheRuleset, true,
                                global.asyncFetchRuleset,
                                FetchContext::TrustedConfig),
-                x.Interval};
+                x.Interval,
+                x.Options};
           ruleset_content_array.emplace_back(std::move(rc));
           continue;
         }
@@ -476,7 +490,8 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
                   type_prefix + published_url,
                   type,
                   makeReadyRulesetContent(),
-                  x.Interval};
+                  x.Interval,
+                  x.Options};
             ruleset_content_array.emplace_back(std::move(rc));
             continue;
           }
@@ -496,7 +511,8 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
             type,
             fetchFileAsync(rule_url, proxy, global.cacheRuleset, true,
                            global.asyncFetchRuleset, context),
-            x.Interval};
+            x.Interval,
+            x.Options};
     }
     ruleset_content_array.emplace_back(std::move(rc));
   }

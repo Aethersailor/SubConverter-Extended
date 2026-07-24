@@ -469,10 +469,20 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                     break;
                 case RULESET_CLASH_CLASSICAL:
                     break;
+                default:
+                    break;
                 }
+                if(script && x.rule_type == RULESET_CLASH_IPCIDR &&
+                   x.options.no_resolve)
+                    writeLog(0,
+                             "Clash Script 模式不支持规则集选项 "
+                             "no-resolve，已对策略组 '" +
+                                 rule_group + "' 安全忽略。",
+                             LOG_LEVEL_WARNING);
                 if(!script)
                 {
-                    rules.emplace_back("RULE-SET," + rule_name + "," + rule_group);
+                    rules.emplace_back(buildClashRuleSetReference(
+                        rule_name, rule_group, x.rule_type, x.options));
                     if(stats)
                         stats->add();
                 }

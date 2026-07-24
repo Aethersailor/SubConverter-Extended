@@ -158,6 +158,22 @@ static std::string transformRuleToCommon(string_view_array &temp, const std::str
     return strLine;
 }
 
+static void warnNoResolveIgnoredForTarget(
+    const std::vector<RulesetContent> &ruleset_content_array,
+    const std::string &target)
+{
+    for(const RulesetContent &ruleset : ruleset_content_array)
+    {
+        if(!ruleset.options.no_resolve)
+            continue;
+        writeLog(0,
+                 "规则集选项 no-resolve 不支持 " + target +
+                     " 输出，已对策略组 '" + ruleset.rule_group +
+                     "' 安全忽略。",
+                 LOG_LEVEL_WARNING);
+    }
+}
+
 void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_content_array, bool overwrite_original_rules, bool new_field_name, RuleConversionStats *stats)
 {
     string_array allRules;
@@ -213,6 +229,8 @@ void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_
                 strLine = trimWhitespace(strLine);
             }
             strLine = appendClashRuleTarget(strLine, rule_group);
+            strLine =
+                appendClashIpCidrNoResolve(strLine, x.rule_type, x.options);
             allRules.emplace_back(strLine);
             total_rules++;
             if(stats)
@@ -287,6 +305,8 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent>
             }
 
             strLine = appendClashRuleTarget(strLine, rule_group);
+            strLine =
+                appendClashIpCidrNoResolve(strLine, x.rule_type, x.options);
             output_content += "  - " + strLine + "\n";
             total_rules++;
             if(stats)
@@ -298,6 +318,7 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent>
 
 void rulesetToSurge(INIReader &base_rule, std::vector<RulesetContent> &ruleset_content_array, int surge_ver, bool overwrite_original_rules, const std::string &remote_path_prefix, RuleConversionStats *stats)
 {
+    warnNoResolveIgnoredForTarget(ruleset_content_array, "非 Clash");
     string_array allRules;
     std::string rule_group, rule_path, rule_path_typed, retrieved_rules, strLine;
     std::stringstream strStrm;
@@ -578,6 +599,7 @@ static bool appendSingBoxRule(std::vector<std::string_view> &args, rapidjson::Va
 
 void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent> &ruleset_content_array, bool overwrite_original_rules, RuleConversionStats *stats)
 {
+    warnNoResolveIgnoredForTarget(ruleset_content_array, "sing-box");
     using namespace rapidjson_ext;
     std::string rule_group, retrieved_rules, strLine, final;
     std::stringstream strStrm;

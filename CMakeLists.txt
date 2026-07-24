@@ -70,6 +70,7 @@ IF(NOT BUILD_STATIC_LIBRARY)
 
 ADD_EXECUTABLE(${BUILD_TARGET_NAME} 
     src/config/custom_openclash_rules.cpp
+    src/config/ruleset.cpp
     src/generator/config/nodemanip.cpp
     src/generator/config/ruleconvert.cpp
     src/generator/config/subexport.cpp
@@ -245,12 +246,19 @@ IF(BUILD_TESTS)
     ADD_TEST(NAME custom_openclash_rules COMMAND custom_openclash_rules_test)
     SET_TESTS_PROPERTIES(custom_openclash_rules PROPERTIES
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+    ADD_EXECUTABLE(ruleset_options_test
+        tests/ruleset_options_test.cpp
+        src/config/ruleset.cpp)
+    TARGET_INCLUDE_DIRECTORIES(ruleset_options_test PRIVATE src)
+    ADD_TEST(NAME ruleset_options COMMAND ruleset_options_test)
 ENDIF()
 
 ELSE() #BUILD_STATIC_LIBRARY
 
 ADD_LIBRARY(${BUILD_TARGET_NAME} STATIC
     src/config/custom_openclash_rules.cpp
+    src/config/ruleset.cpp
     src/generator/config/ruleconvert.cpp
     src/generator/config/subexport.cpp
     src/generator/template/templates.cpp

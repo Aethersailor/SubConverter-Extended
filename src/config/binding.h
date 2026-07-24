@@ -8,6 +8,14 @@
 #include "proxygroup.h"
 #include "regmatch.h"
 #include "ruleset.h"
+#include "utils/logger.h"
+
+inline void warnUnknownRulesetOptions(const StrArray &unknown_options)
+{
+    for(const String &option : unknown_options)
+        writeLog(0, "未知规则集选项 '" + option + "'，已忽略。",
+                 LOG_LEVEL_WARNING);
+}
 
 namespace toml
 {
@@ -136,6 +144,10 @@ namespace toml
             }
             conf.Url += find<String>(v, "ruleset");
             conf.Interval = find_or<Integer>(v, "interval", 86400);
+            StrArray unknown_options;
+            conf.Options = parseRulesetOptions(
+                find_or<StrArray>(v, "options", {}), &unknown_options);
+            warnUnknownRulesetOptions(unknown_options);
             return conf;
         }
     };
@@ -282,25 +294,10 @@ namespace INIBinding
             for(const String &x : arr)
             {
                 RulesetConfig conf;
-                String::size_type pos = x.find(",");
-                if(pos == String::npos)
+                StrArray unknown_options;
+                if(!parseRulesetConfigLine(x, conf, &unknown_options))
                     continue;
-                conf.Group = x.substr(0, pos);
-                if(x.substr(pos + 1, 2) == "[]")
-                {
-                    conf.Url = x.substr(pos + 1);
-                    //conf.Type = RulesetType::SurgeRuleset;
-                    confs.emplace_back(std::move(conf));
-                    continue;
-                }
-                String::size_type epos = x.rfind(",");
-                if(pos != epos)
-                {
-                    conf.Interval = to_int(x.substr(epos + 1), 0);
-                    conf.Url = x.substr(pos + 1, epos - pos - 1);
-                }
-                else
-                    conf.Url = x.substr(pos + 1);
+                warnUnknownRulesetOptions(unknown_options);
                 confs.emplace_back(std::move(conf));
             }
             return confs;
