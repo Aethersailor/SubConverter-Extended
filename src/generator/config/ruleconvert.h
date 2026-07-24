@@ -9,25 +9,18 @@
 #include <yaml-cpp/yaml.h>
 #include <rapidjson/document.h>
 
+#include "config/ruleset.h"
 #include "utils/ini_reader/ini_reader.h"
-
-enum ruleset_type
-{
-    RULESET_SURGE,
-    RULESET_QUANX,
-    RULESET_CLASH_DOMAIN,
-    RULESET_CLASH_IPCIDR,
-    RULESET_CLASH_CLASSICAL
-};
 
 struct RulesetContent
 {
     std::string rule_group;
     std::string rule_path;
     std::string rule_path_typed;
-    int rule_type = RULESET_SURGE;
+    ruleset_type rule_type = RULESET_SURGE;
     std::shared_future<std::string> rule_content;
     int update_interval = 0;
+    RulesetOptions options;
 };
 
 struct RuleConversionStats

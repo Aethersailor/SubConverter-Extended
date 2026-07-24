@@ -10,8 +10,6 @@
 #include "handler/fetch_context.h"
 #include "server/webserver.h"
 
-std::string parseProxy(const std::string &source);
-
 void refreshRulesets(RulesetConfigs &ruleset_list,
                      std::vector<RulesetContent> &rca,
                      FetchContext context = FetchContext::TrustedConfig);

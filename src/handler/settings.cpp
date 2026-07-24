@@ -193,7 +193,7 @@ int importItems(string_array &target, bool scope_limit, FetchContext context) {
     writeLog(0, "正在导入项目：" + path);
     content.clear();
 
-    std::string proxy = parseProxy(global.proxyConfig);
+    ProxyPolicy proxy = parseProxy(global.proxyConfig);
 
     if (fileExist(path, scope_limit) && canImportLocalPath(path, context))
       content = fileGet(path, scope_limit);
@@ -240,7 +240,7 @@ void importItems(std::vector<toml::value> &root, const std::string &import_key,
   auto iter = root.begin();
   size_t count = 0;
 
-  std::string proxy = parseProxy(global.proxyConfig);
+  ProxyPolicy proxy = parseProxy(global.proxyConfig);
   while (iter != root.end()) {
     auto &table = iter->as_table();
     if (table.find("import") == table.end())
@@ -370,6 +370,7 @@ void readRuleset(YAML::Node node, string_array &dest, bool scope_limit = true,
                  FetchContext context = FetchContext::TrustedConfig) {
   for (auto &&object : node) {
     std::string strLine, name, url, group, interval;
+    string_array options;
     object["import"] >>= name;
     if (!name.empty()) {
       dest.emplace_back("!!import:" + name);
@@ -379,10 +380,16 @@ void readRuleset(YAML::Node node, string_array &dest, bool scope_limit = true,
     object["group"] >>= group;
     object["rule"] >>= name;
     object["interval"] >>= interval;
+    if (object["options"].IsSequence())
+      object["options"] >> options;
     if (!url.empty()) {
       strLine = group + "," + url;
+      if (!options.empty() && interval.empty())
+        interval = "86400";
       if (!interval.empty())
         strLine += "," + interval;
+      if (!options.empty())
+        strLine += "|" + join(options, "|");
     } else if (!name.empty())
       strLine = group + ",[]" + name;
     else
@@ -400,7 +407,7 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
   std::string rule_group, rule_url, rule_url_typed, interval;
   RulesetContent rc;
 
-  std::string proxy = parseProxy(global.proxyRuleset);
+  ProxyPolicy proxy = parseProxy(global.proxyRuleset);
 
   for (RulesetConfig &x : ruleset_list) {
     rule_group = x.Group;
@@ -417,7 +424,8 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
             RULESET_SURGE,
             std::async(std::launch::async,
                        [=]() { return rule_url.substr(pos); }),
-            0};
+            0,
+            x.Options};
     } else {
       ruleset_type type = RULESET_SURGE;
       rule_url_typed = rule_url;
@@ -430,6 +438,11 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
         type = iter->second;
         type_prefix = iter->first;
       }
+      if (x.Options.no_resolve && type != RULESET_CLASH_IPCIDR)
+        writeLog(0,
+                 "规则集选项 no-resolve 仅适用于 clash-ipcidr，已对策略组 '" +
+                     rule_group + "' 安全忽略。",
+                 LOG_LEVEL_WARNING);
 
       if (global.customOpenClashRulesFallback) {
         custom_openclash_rules::Resource resource =
@@ -452,7 +465,8 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
                 fetchFileAsync(bundled_path, proxy, global.cacheRuleset, true,
                                global.asyncFetchRuleset,
                                FetchContext::TrustedConfig),
-                x.Interval};
+                x.Interval,
+                x.Options};
           ruleset_content_array.emplace_back(std::move(rc));
           continue;
         }
@@ -476,7 +490,8 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
                   type_prefix + published_url,
                   type,
                   makeReadyRulesetContent(),
-                  x.Interval};
+                  x.Interval,
+                  x.Options};
             ruleset_content_array.emplace_back(std::move(rc));
             continue;
           }
@@ -496,7 +511,8 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
             type,
             fetchFileAsync(rule_url, proxy, global.cacheRuleset, true,
                            global.asyncFetchRuleset, context),
-            x.Interval};
+            x.Interval,
+            x.Options};
     }
     ruleset_content_array.emplace_back(std::move(rc));
   }
@@ -777,6 +793,7 @@ void readYAMLConf(YAML::Node &node) {
     node["advanced"]["enable_request_coalescing"] >>
         global.enableRequestCoalescing;
     node["advanced"]["coalesce_retry_on_5xx"] >> global.coalesceRetryOn5xx;
+    node["advanced"]["allow_insecure_tls"] >> global.allowInsecureTls;
     node["advanced"]["response_cache_ttl"] >> global.responseCacheTtl;
   }
   if (node["statistics"].IsDefined()) {
@@ -964,6 +981,7 @@ void readTOMLConf(toml::value &root) {
   auto tasks = toml::find_or<std::vector<toml::value>>(root, "tasks", {});
   importItems(tasks, "tasks", false);
   global.cronTasks = toml::get<CronTaskConfigs>(toml::value(tasks));
+  global.enableCron = !global.cronTasks.empty();
 
   auto section_server = toml::find(root, "server");
 
@@ -991,6 +1009,7 @@ void readTOMLConf(toml::value &root) {
       global.asyncFetchRuleset, "skip_failed_links", global.skipFailedLinks,
       "enable_request_coalescing", global.enableRequestCoalescing,
       "coalesce_retry_on_5xx", global.coalesceRetryOn5xx,
+      "allow_insecure_tls", global.allowInsecureTls,
       "response_cache_ttl", global.responseCacheTtl);
 
   if (global.printDbgInfo)
@@ -1445,6 +1464,7 @@ bool readConf() {
   ini.get_bool_if_exist("enable_request_coalescing",
                         global.enableRequestCoalescing);
   ini.get_bool_if_exist("coalesce_retry_on_5xx", global.coalesceRetryOn5xx);
+  ini.get_bool_if_exist("allow_insecure_tls", global.allowInsecureTls);
   ini.get_int_if_exist("response_cache_ttl", global.responseCacheTtl);
 
   if (ini.section_exist("statistics")) {
@@ -1635,9 +1655,9 @@ int loadExternalTOML(toml::value &root, ExternalConfig &ext,
 
 int loadExternalConfig(std::string &path, ExternalConfig &ext,
                        FetchContext context) {
-  std::string base_content, proxy = parseProxy(global.proxyConfig),
-                            config = fetchFile(path, proxy, global.cacheConfig,
-                                               true, context);
+  std::string base_content;
+  ProxyPolicy proxy = parseProxy(global.proxyConfig);
+  std::string config = fetchFile(path, proxy, global.cacheConfig, true, context);
   if (render_template(config, *ext.tpl_args, base_content,
                       global.templatePath, context) != 0)
     base_content = config;

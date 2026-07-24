@@ -28,6 +28,13 @@ import = "snippets/groups_forcerule.toml"
 #[[rulesets]]
 #import = ""
 
+#[[rulesets]]
+#group = "🎯 全球直连"
+#type = "clash-ipcidr"
+#ruleset = "https://example.com/cn-ip.yaml"
+#interval = 28800
+#options = ["no-resolve"]
+
 [[template_args]]
 key = "clash.dns.port"
 value = "5353"

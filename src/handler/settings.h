@@ -82,6 +82,9 @@ struct Settings {
 
   // request coalescing and short-lived response cache
   bool enableRequestCoalescing = true, coalesceRetryOn5xx = true;
+  // Secure TLS is the default. This is an explicit compatibility escape hatch
+  // for outbound libcurl requests only.
+  bool allowInsecureTls = false;
   int responseCacheTtl = 0;
   unsigned long long configGeneration = 0;
 

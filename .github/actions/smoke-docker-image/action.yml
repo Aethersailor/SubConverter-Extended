@@ -74,6 +74,9 @@ runs:
               --mihomo-yaml-subscription-url "${FIXTURE_BASE}/mihomo-provider-subscription.yml" \
               --legacy-subscription-url "${FIXTURE_BASE}/legacy-surge-subscription.conf" \
               --verify-non-clash
+            python3 scripts/run-no-resolve-smoke.py \
+              --base-url "http://127.0.0.1:${HOST_PORT}" \
+              --fixture-base-url "${FIXTURE_BASE}"
 
             default_publish_status="$(
               curl -sS -o /dev/null -w '%{http_code}' \

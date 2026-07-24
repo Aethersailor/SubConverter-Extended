@@ -5,6 +5,7 @@
 #include <map>
 
 #include "handler/fetch_context.h"
+#include "handler/proxy_policy.h"
 #include "utils/map_extra.h"
 #include "utils/string.h"
 
@@ -20,7 +21,7 @@ struct FetchArgument
 {
     const http_method method;
     const std::string url;
-    const std::string proxy;
+    const ProxyPolicy proxy;
     const std::string *post_data = nullptr;
     const string_icase_map *request_headers = nullptr;
     std::string *cookies = nullptr;
@@ -38,11 +39,19 @@ struct FetchResult
 };
 
 int webGet(const FetchArgument& argument, FetchResult &result);
-std::string webGet(const std::string &url, const std::string &proxy = "", unsigned int cache_ttl = 0, std::string *response_headers = nullptr, string_icase_map *request_headers = nullptr, FetchContext context = FetchContext::TrustedConfig);
+std::string webGet(const std::string &url, const ProxyPolicy &proxy,
+                   unsigned int cache_ttl = 0,
+                   std::string *response_headers = nullptr,
+                   string_icase_map *request_headers = nullptr,
+                   FetchContext context = FetchContext::TrustedConfig);
 bool isFetchUrlAllowed(const std::string &url, FetchContext context);
 void flushCache();
-int webPost(const std::string &url, const std::string &data, const std::string &proxy, const string_icase_map &request_headers, std::string *retData);
-int webPatch(const std::string &url, const std::string &data, const std::string &proxy, const string_icase_map &request_headers, std::string *retData);
+int webPost(const std::string &url, const std::string &data,
+            const ProxyPolicy &proxy, const string_icase_map &request_headers,
+            std::string *retData);
+int webPatch(const std::string &url, const std::string &data,
+             const ProxyPolicy &proxy, const string_icase_map &request_headers,
+             std::string *retData);
 std::string buildSocks5ProxyString(const std::string &addr, int port, const std::string &username, const std::string &password);
 
 // Unimplemented: (CURLOPT_HTTPHEADER: Host:)

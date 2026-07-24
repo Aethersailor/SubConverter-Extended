@@ -77,8 +77,10 @@ sssub_rule_base = "base/all_base.tpl"
 # sing-box 基础模板。/ sing-box base template.
 singbox_rule_base = "base/all_base.tpl"
 
-# 分别控制下载外部配置、规则集和订阅时使用的代理。SYSTEM 使用系统代理，NONE 或空值直连，也支持 http/https/socks4a/socks5 URL。
-# Proxies used when downloading external configs, rulesets, and subscriptions respectively. SYSTEM uses the system proxy; NONE or empty connects directly; http/https/socks4a/socks5 URLs are supported.
+# 分别控制下载外部配置、规则集和订阅时使用的代理。NONE（不区分大小写）和空值强制直连并忽略环境代理；SYSTEM 按系统代理来源解析；显式 URI 支持 http/https/socks4/socks4a/socks5/socks5h，且不会被 NO_PROXY 绕过。
+# Proxies used when downloading external configs, rulesets, and subscriptions. NONE (case-insensitive) and an empty value force direct connections and ignore proxy environment variables. SYSTEM resolves the documented system source. Explicit http/https/socks4/socks4a/socks5/socks5h URIs are never bypassed by NO_PROXY.
+# socks5 在本地解析域名，socks5h 将域名交给 SOCKS 服务端解析。cors:https://relay.example/ 是兼容的 HTTP CORS 中继，不是底层网络代理。
+# socks5 resolves names locally; socks5h lets the SOCKS server resolve them. cors:https://relay.example/ is a compatible HTTP CORS relay, not a network proxy.
 proxy_config = "SYSTEM"
 proxy_ruleset = "SYSTEM"
 proxy_subscription = "NONE"
@@ -316,6 +318,9 @@ update_ruleset_on_request = false
 # ruleset = "https://raw.githubusercontent.com/DivineEngine/Profiles/master/Surge/Ruleset/Unbreak.list"
 # type = "surge-ruleset"
 # interval = 86400
+# SubConverter-Extended extension for non-Script Clash/Mihomo IP-CIDR rules:
+# type = "clash-ipcidr"
+# options = ["no-resolve"]
 
 [[rulesets]]
 import = "snippets/rulesets.toml"
@@ -492,6 +497,9 @@ enable_request_coalescing = true
 # 合并请求首次得到 5xx 时是否在服务端内部重试一次；SUBCONVERTER_COALESCE_RETRY_ON_5XX 可覆盖。
 # Whether a coalesced request performs one internal retry after an initial 5xx; SUBCONVERTER_COALESCE_RETRY_ON_5XX overrides it.
 coalesce_retry_on_5xx = true
+# 默认验证远程 TLS 证书。仅在受控兼容场景临时设为 true；不要把它作为网络错误的常规修复手段。
+# Remote TLS certificates are verified by default. Set true only as a temporary, controlled compatibility exception; do not use it as a routine response to network errors.
+allow_insecure_tls = false
 # 符合请求合并条件且未启用 Age 加密的 200 /sub 响应微缓存秒数；0 关闭，正值最大收敛为 5。SUBCONVERTER_RESPONSE_CACHE_TTL 可覆盖。
 # Micro-cache seconds for eligible coalesced, non-Age-encrypted 200 /sub responses; 0 disables it and values are capped at 5. SUBCONVERTER_RESPONSE_CACHE_TTL overrides it.
 response_cache_ttl = 0

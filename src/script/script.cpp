@@ -13,8 +13,6 @@
 extern int gCacheConfig;
 extern std::string gProxyConfig;
 
-std::string parseProxy(const std::string &source);
-
 std::string foldPathString(const std::string &path)
 {
     std::string output = path;
@@ -117,13 +115,15 @@ static duk_ret_t fetch(duk_context *ctx)
     std::string filepath, proxy, method, postdata, content;
     if(duktape_get_arguments_str(ctx, 1, 4, &filepath, &proxy, &method, &postdata) == 0)
         return 0;
+    ProxyPolicy policy = proxy.empty() ? parseProxy(gProxyConfig)
+                                       : parseProxy(proxy);
     switch(hash_(method))
     {
     case "POST"_hash:
-        webPost(filepath, postdata, proxy, string_array{}, &content);
+        webPost(filepath, postdata, policy, string_array{}, &content);
         break;
     default:
-        content = fetchFile(filepath, proxy, gCacheConfig);
+        content = fetchFile(filepath, policy, gCacheConfig);
         break;
     }
     duk_push_lstring(ctx, content.c_str(), content.size());
@@ -154,7 +154,9 @@ static duk_ret_t getGeoIP(duk_context *ctx)
     if(address.empty())
         duk_push_undefined(ctx);
     else
-        duk_push_string(ctx, fetchFile("https://api.ip.sb/geoip/" + address, parseProxy(proxy), gCacheConfig).c_str());
+        ProxyPolicy policy = proxy.empty() ? parseProxy(gProxyConfig)
+                                           : parseProxy(proxy);
+        duk_push_string(ctx, fetchFile("https://api.ip.sb/geoip/" + address, policy, gCacheConfig).c_str());
     return 1;
 }
 

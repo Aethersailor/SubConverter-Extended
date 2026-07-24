@@ -96,7 +96,8 @@ static bool isBrowserUA(const std::string &ua) {
 
 int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
              parse_settings &parse_set) {
-  std::string &proxy = *parse_set.proxy, &subInfo = *parse_set.sub_info;
+  ProxyPolicy &proxy = *parse_set.proxy;
+  std::string &subInfo = *parse_set.sub_info;
   string_array &exclude_remarks = *parse_set.exclude_remarks;
   string_array &include_remarks = *parse_set.include_remarks;
   RegexMatchConfigs &stream_rules = *parse_set.stream_rules;

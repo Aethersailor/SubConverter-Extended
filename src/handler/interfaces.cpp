@@ -294,15 +294,6 @@ static void appendVaryHeader(Response &response, const std::string &field) {
   iter->second += ", " + field;
 }
 
-std::string parseProxy(const std::string &source) {
-  std::string proxy = source;
-  if (source == "SYSTEM")
-    proxy = getSystemProxy();
-  else if (source == "NONE")
-    proxy = "";
-  return proxy;
-}
-
 static std::string buildProviderRemarkFilter(const string_array &rules) {
   string_array valid_rules;
   for (const std::string &rule : rules) {
@@ -940,6 +931,9 @@ struct SubExplainReport {
   bool proxy_provider_mode = false;
   bool nodelist = false;
   bool managed_config = false;
+  std::string proxy_config;
+  std::string proxy_ruleset;
+  std::string proxy_subscription;
   std::string base_fetch_context = "trusted_config";
   std::string ruleset_fetch_context = "trusted_config";
   size_t raw_url_count = 0;
@@ -1113,6 +1107,13 @@ static std::string serializeSubExplainReport(const SubExplainReport &report,
        report.effective_config_sections)
     writeExplainConfigSection(writer, section);
   writer.EndArray();
+  writer.EndObject();
+
+  writer.Key("outbound_proxy");
+  writer.StartObject();
+  writeJsonString(writer, "config", report.proxy_config);
+  writeJsonString(writer, "ruleset", report.proxy_ruleset);
+  writeJsonString(writer, "subscription", report.proxy_subscription);
   writer.EndObject();
 
   writer.Key("resources");
@@ -1574,6 +1575,9 @@ static std::string subconverter_impl(Request &request, Response &response,
   bool explainMode = isTruthyRequestValue(getUrlArg(argument, "explain"));
   SubExplainReport explain;
   explain.enabled = explainMode;
+  explain.proxy_config = parseProxy(global.proxyConfig).describe();
+  explain.proxy_ruleset = parseProxy(global.proxyRuleset).describe();
+  explain.proxy_subscription = parseProxy(global.proxySubscription).describe();
   explain.requested_target = argTarget;
   if (explainMode) {
     std::string rawUrlForLog = getUrlArg(argument, "url");
@@ -1775,7 +1779,7 @@ static std::string subconverter_impl(Request &request, Response &response,
   tpl_args.request_params = std::move(req_arg_map);
 
   /// check for proxy settings
-  std::string proxy = parseProxy(global.proxySubscription);
+  ProxyPolicy proxy = parseProxy(global.proxySubscription);
 
   /// check other flags
   ext.authorized = authorized;
@@ -3035,7 +3039,7 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
   writeLog(0, "SurgeConfToClash 调用，URL：'" + url + "'。",
            LOG_LEVEL_INFO);
 
-  std::string proxy = parseProxy(global.proxyConfig);
+  ProxyPolicy proxy = parseProxy(global.proxyConfig);
   YAML::Node clash;
   template_args tpl_args;
   tpl_args.global_vars = global.templateVars;
@@ -3361,7 +3365,7 @@ std::string getProfile(RESPONSE_CALLBACK_ARGS) {
 /*
 std::string jinja2_webGet(const std::string &url)
 {
-    std::string proxy = parseProxy(global.proxyConfig);
+    ProxyPolicy proxy = parseProxy(global.proxyConfig);
     writeLog(0, "模板调用 fetch，URL：'" + url + "'。",
 LOG_LEVEL_INFO); return webGet(url, proxy, global.cacheConfig);
 }*/
@@ -3458,7 +3462,7 @@ int simpleGenerator() {
     writeLog(0, "正在生成所有生成项...", LOG_LEVEL_INFO);
 
   string_multimap allItems;
-  std::string proxy = parseProxy(global.proxySubscription);
+  ProxyPolicy proxy = parseProxy(global.proxySubscription);
   Request request;
   Response response;
   for (std::string &x : sections) {

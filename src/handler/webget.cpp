@@ -18,6 +18,7 @@
 #include "utils/lock.h"
 #include "utils/logger.h"
 #include "utils/network.h"
+#include "utils/system.h"
 #include "utils/urlencode.h"
 #include "version.h"
 #include "webget.h"
@@ -71,14 +72,15 @@ static CURLcode curl_init()
     return init_result;
 }
 
-static std::string build_cache_key(const std::string &url, const std::string &proxy,
+static std::string build_cache_key(const std::string &url, const ProxyPolicy &proxy,
                                    const string_icase_map *request_headers)
 {
-    if(proxy.empty() && (!request_headers || request_headers->empty()))
+    if(proxy.mode == ProxyMode::Direct && (!request_headers || request_headers->empty()))
         return getMD5(url);
 
     std::string identity = "url:" + std::to_string(url.size()) + ":" + url;
-    identity += "\nproxy:" + std::to_string(proxy.size()) + ":" + proxy;
+    const std::string proxy_identity = proxy.cacheIdentity();
+    identity += "\nproxy:" + std::to_string(proxy_identity.size()) + ":" + proxy_identity;
     identity += "\nheaders:";
     if(request_headers)
     {
@@ -201,7 +203,8 @@ static bool build_jsdelivr_github_url(const std::string &url,
        !parse_github_file_url(clean_url, file_ref))
         return false;
 
-    fallback_url = "https://cdn.jsdelivr.net/gh/" + file_ref.owner + "/" +
+    const std::string scheme = startsWith(clean_url, "http://") ? "http" : "https";
+    fallback_url = scheme + "://cdn.jsdelivr.net/gh/" + file_ref.owner + "/" +
                    file_ref.repo + "@" + file_ref.ref + "/" + file_ref.path;
     return true;
 }
@@ -504,8 +507,10 @@ static inline void curl_set_common_options(CURL *curl_handle, const char *url, c
     curl_easy_setopt(curl_handle, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl_handle, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl_handle, CURLOPT_MAXREDIRS, 20L);
-    curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYPEER, 0L);
-    curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYHOST, 0L);
+    curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYPEER,
+                     global.allowInsecureTls ? 0L : 1L);
+    curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYHOST,
+                     global.allowInsecureTls ? 0L : 2L);
     curl_easy_setopt(curl_handle, CURLOPT_TIMEOUT, 15L);
     curl_easy_setopt(curl_handle, CURLOPT_COOKIEFILE, "");
     if(data)
@@ -514,6 +519,98 @@ static inline void curl_set_common_options(CURL *curl_handle, const char *url, c
             curl_easy_setopt(curl_handle, CURLOPT_MAXFILESIZE, data->size_limit);
         curl_easy_setopt(curl_handle, CURLOPT_XFERINFOFUNCTION, size_checker);
         curl_easy_setopt(curl_handle, CURLOPT_XFERINFODATA, data);
+    }
+}
+
+static CURLcode apply_curl_proxy_policy(CURL *curl_handle,
+                                        const ProxyPolicy &requested,
+                                        std::string &url,
+                                        ProxyPolicy &effective)
+{
+    effective = requested.resolved();
+    if(!effective.valid)
+    {
+        writeLog(0, "出站代理配置无效：" + effective.describe() + "。",
+                 LOG_LEVEL_ERROR);
+        return CURLE_URL_MALFORMAT;
+    }
+
+    switch(effective.mode)
+    {
+    case ProxyMode::Direct:
+        // CURLOPT_PROXY="" is libcurl's documented way to suppress every
+        // environment-derived proxy for this request.
+        curl_easy_setopt(curl_handle, CURLOPT_PROXY, "");
+        break;
+    case ProxyMode::System:
+        if(effective.endpoint.empty())
+            curl_easy_setopt(curl_handle, CURLOPT_PROXY, "");
+        else
+            curl_easy_setopt(curl_handle, CURLOPT_PROXY,
+                             effective.endpoint.c_str());
+        // Do not set CURLOPT_NOPROXY here: System intentionally preserves the
+        // platform's NO_PROXY/no_proxy behaviour.
+        break;
+    case ProxyMode::Explicit:
+        curl_easy_setopt(curl_handle, CURLOPT_PROXY, effective.endpoint.c_str());
+        // An explicitly configured proxy is fail-closed and must not be
+        // bypassed by an inherited NO_PROXY/no_proxy environment variable.
+        curl_easy_setopt(curl_handle, CURLOPT_NOPROXY, "");
+        break;
+    case ProxyMode::Cors:
+        // cors: names an HTTP relay URL, not a libcurl network proxy.  Its
+        // transport is direct so ambient proxy variables cannot alter it.
+        curl_easy_setopt(curl_handle, CURLOPT_PROXY, "");
+        url = effective.endpoint + url;
+        break;
+    }
+
+    if(shouldLog(LOG_LEVEL_VERBOSE))
+        writeLog(0, "出站代理策略：" + effective.describe() + "。",
+                 LOG_LEVEL_VERBOSE);
+    return CURLE_OK;
+}
+
+static const char *classify_curl_error(CURLcode code)
+{
+    switch(code)
+    {
+    case CURLE_OK:
+        return "none";
+    case CURLE_COULDNT_RESOLVE_PROXY:
+        return "proxy_dns";
+#if LIBCURL_VERSION_NUM >= 0x074900
+    case CURLE_PROXY:
+        return "proxy";
+#endif
+    case CURLE_SSL_CONNECT_ERROR:
+    case CURLE_PEER_FAILED_VERIFICATION:
+        return "tls";
+    case CURLE_LOGIN_DENIED:
+        return "authentication";
+    default:
+        return "transport";
+    }
+}
+
+// A single retry is intentionally limited to idempotent transfers and errors
+// that can plausibly be transient.  Authentication, TLS, policy validation,
+// HTTP status failures, and non-idempotent uploads never take this path.
+static bool is_recoverable_curl_error(CURLcode code)
+{
+    switch(code)
+    {
+    case CURLE_COULDNT_RESOLVE_PROXY:
+    case CURLE_COULDNT_RESOLVE_HOST:
+    case CURLE_COULDNT_CONNECT:
+    case CURLE_OPERATION_TIMEDOUT:
+    case CURLE_RECV_ERROR:
+    case CURLE_SEND_ERROR:
+    case CURLE_GOT_NOTHING:
+    case CURLE_PARTIAL_FILE:
+        return true;
+    default:
+        return false;
     }
 }
 
@@ -546,22 +643,29 @@ static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode 
         writeLog(0, "curl_easy_init 失败。", LOG_LEVEL_ERROR);
         return 0;
     }
-    if(!argument.proxy.empty())
+    ProxyPolicy effective_proxy;
+    retVal = apply_curl_proxy_policy(curl_handle, argument.proxy, new_url,
+                                     effective_proxy);
+    if(retVal != CURLE_OK)
     {
-        if(startsWith(argument.proxy, "cors:"))
-        {
-            header_list = curl_slist_append(header_list, "X-Requested-With: SubConverter-Extended " VERSION);
-            new_url = argument.proxy.substr(5) + argument.url;
-        }
-        else
-            curl_easy_setopt(curl_handle, CURLOPT_PROXY, argument.proxy.data());
+        *result.status_code = 0;
+        if(return_code)
+            *return_code = retVal;
+        curl_easy_cleanup(curl_handle);
+        return 0;
     }
+    if(effective_proxy.mode == ProxyMode::Cors)
+        header_list = curl_slist_append(header_list,
+                                        "X-Requested-With: SubConverter-Extended " VERSION);
     curl_progress_data limit;
     limit.size_limit = global.maxAllowedDownloadSize;
     curl_set_common_options(curl_handle, new_url.data(), &limit);
 #if LIBCURL_VERSION_NUM >= 0x075000
     FetchContext prereq_context = argument.context;
-    if(isPublicFetchRestricted(argument.context) && argument.proxy.empty())
+    if(isPublicFetchRestricted(argument.context) &&
+       (effective_proxy.mode == ProxyMode::Direct ||
+        (effective_proxy.mode == ProxyMode::System &&
+         effective_proxy.endpoint.empty())))
     {
         curl_easy_setopt(curl_handle, CURLOPT_PREREQFUNCTION,
                          public_fetch_prereq_callback);
@@ -631,14 +735,19 @@ static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode 
         break;
     }
 
-    unsigned int fail_count = 0, max_fails = 1;
-    while(true)
+    retVal = curl_easy_perform(curl_handle);
+    if(retVal != CURLE_OK &&
+       (argument.method == HTTP_GET || argument.method == HTTP_HEAD) &&
+       is_recoverable_curl_error(retVal))
     {
+        writeLog(0, "出站请求遇到可恢复网络错误，200ms 后重试一次。",
+                 LOG_LEVEL_WARNING);
+        if(result.content)
+            result.content->clear();
+        if(result.response_headers)
+            result.response_headers->clear();
+        sleepMs(200);
         retVal = curl_easy_perform(curl_handle);
-        if(retVal == CURLE_OK || max_fails <= fail_count || global.APIMode)
-            break;
-        else
-            fail_count++;
     }
 
     long code = 0;
@@ -646,6 +755,26 @@ static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode 
     *result.status_code = code;
     if(return_code)
         *return_code = retVal;
+
+#if LIBCURL_VERSION_NUM >= 0x080700
+    long used_proxy = 0;
+    if(curl_easy_getinfo(curl_handle, CURLINFO_USED_PROXY, &used_proxy) == CURLE_OK &&
+       shouldLog(LOG_LEVEL_VERBOSE))
+        writeLog(0, std::string("出站代理实际使用：") +
+                        (used_proxy ? "是" : "否") + "。",
+                 LOG_LEVEL_VERBOSE);
+#endif
+#if LIBCURL_VERSION_NUM >= 0x074900
+    long proxy_error = 0;
+    if(curl_easy_getinfo(curl_handle, CURLINFO_PROXY_ERROR, &proxy_error) == CURLE_OK &&
+       proxy_error != 0 && shouldLog(LOG_LEVEL_VERBOSE))
+        writeLog(0, "出站代理错误代码：" + std::to_string(proxy_error) + "。",
+                 LOG_LEVEL_VERBOSE);
+#endif
+    if(retVal != CURLE_OK && shouldLog(LOG_LEVEL_VERBOSE))
+        writeLog(0, "出站请求错误类别：" +
+                        std::string(classify_curl_error(retVal)) + "。",
+                 LOG_LEVEL_VERBOSE);
 
     if(result.cookies)
     {
@@ -767,7 +896,7 @@ std::string buildSocks5ProxyString(const std::string &addr, int port, const std:
     return proxystr;
 }
 
-std::string webGet(const std::string &url, const std::string &proxy, unsigned int cache_ttl, std::string *response_headers, string_icase_map *request_headers, FetchContext context)
+std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned int cache_ttl, std::string *response_headers, string_icase_map *request_headers, FetchContext context)
 {
     int return_code = 0;
     std::string content;
@@ -887,7 +1016,7 @@ void flushCache()
     operateFiles("cache", [](const std::string &file){ remove(("cache/" + file).data()); return 0; });
 }
 
-int webPost(const std::string &url, const std::string &data, const std::string &proxy, const string_icase_map &request_headers, std::string *retData)
+int webPost(const std::string &url, const std::string &data, const ProxyPolicy &proxy, const string_icase_map &request_headers, std::string *retData)
 {
     //return curlPost(url, data, proxy, request_headers, retData);
     int return_code = 0;
@@ -896,7 +1025,7 @@ int webPost(const std::string &url, const std::string &data, const std::string &
     return webGet(argument, fetch_res);
 }
 
-int webPatch(const std::string &url, const std::string &data, const std::string &proxy, const string_icase_map &request_headers, std::string *retData)
+int webPatch(const std::string &url, const std::string &data, const ProxyPolicy &proxy, const string_icase_map &request_headers, std::string *retData)
 {
     //return curlPatch(url, data, proxy, request_headers, retData);
     int return_code = 0;
@@ -905,7 +1034,7 @@ int webPatch(const std::string &url, const std::string &data, const std::string 
     return webGet(argument, fetch_res);
 }
 
-int webHead(const std::string &url, const std::string &proxy, const string_icase_map &request_headers, std::string &response_headers)
+int webHead(const std::string &url, const ProxyPolicy &proxy, const string_icase_map &request_headers, std::string &response_headers)
 {
     //return curlHead(url, proxy, request_headers, response_headers);
     int return_code = 0;

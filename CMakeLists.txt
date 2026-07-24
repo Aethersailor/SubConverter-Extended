@@ -70,6 +70,7 @@ IF(NOT BUILD_STATIC_LIBRARY)
 
 ADD_EXECUTABLE(${BUILD_TARGET_NAME} 
     src/config/custom_openclash_rules.cpp
+    src/config/ruleset.cpp
     src/generator/config/nodemanip.cpp
     src/generator/config/ruleconvert.cpp
     src/generator/config/subexport.cpp
@@ -84,6 +85,7 @@ ADD_EXECUTABLE(${BUILD_TARGET_NAME}
     src/handler/upload.cpp
     src/handler/version_page.cpp
     src/handler/webget.cpp
+    src/handler/proxy_policy.cpp
     src/handler/settings.cpp
     src/main.cpp
     src/parser/infoparser.cpp
@@ -99,6 +101,7 @@ ADD_EXECUTABLE(${BUILD_TARGET_NAME}
     src/utils/logger.cpp
     src/utils/md5/md5.cpp
     src/utils/network.cpp
+    src/utils/redact.cpp
     src/utils/regexp.cpp
     src/utils/string.cpp
     src/utils/system.cpp
@@ -216,6 +219,16 @@ ENDIF()
 
 IF(BUILD_TESTS)
     ENABLE_TESTING()
+    ADD_EXECUTABLE(proxy_policy_test
+        tests/proxy_policy_test.cpp
+        src/handler/proxy_policy.cpp
+        src/utils/redact.cpp
+        src/utils/string.cpp
+        src/utils/system.cpp)
+    TARGET_INCLUDE_DIRECTORIES(proxy_policy_test PRIVATE src)
+    TARGET_LINK_LIBRARIES(proxy_policy_test ${CMAKE_THREAD_LIBS_INIT})
+    ADD_TEST(NAME proxy_policy COMMAND proxy_policy_test)
+
     ADD_EXECUTABLE(custom_openclash_rules_test
         tests/custom_openclash_rules_test.cpp
         src/config/custom_openclash_rules.cpp
@@ -233,12 +246,19 @@ IF(BUILD_TESTS)
     ADD_TEST(NAME custom_openclash_rules COMMAND custom_openclash_rules_test)
     SET_TESTS_PROPERTIES(custom_openclash_rules PROPERTIES
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+    ADD_EXECUTABLE(ruleset_options_test
+        tests/ruleset_options_test.cpp
+        src/config/ruleset.cpp)
+    TARGET_INCLUDE_DIRECTORIES(ruleset_options_test PRIVATE src)
+    ADD_TEST(NAME ruleset_options COMMAND ruleset_options_test)
 ENDIF()
 
 ELSE() #BUILD_STATIC_LIBRARY
 
 ADD_LIBRARY(${BUILD_TARGET_NAME} STATIC
     src/config/custom_openclash_rules.cpp
+    src/config/ruleset.cpp
     src/generator/config/ruleconvert.cpp
     src/generator/config/subexport.cpp
     src/generator/template/templates.cpp
