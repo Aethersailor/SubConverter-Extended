@@ -21,7 +21,7 @@ require (
 	github.com/metacubex/cpu v0.1.1 // indirect
 	github.com/metacubex/hkdf v0.1.0 // indirect
 	github.com/metacubex/hpke v0.1.0 // indirect
-	github.com/metacubex/http v0.1.6 // indirect
+	github.com/metacubex/http v0.1.7 // indirect
 	github.com/metacubex/mlkem v0.1.0 // indirect
 	github.com/metacubex/randv2 v0.2.0 // indirect
 	github.com/metacubex/sing v0.5.7 // indirect
