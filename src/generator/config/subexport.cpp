@@ -8,6 +8,7 @@
 
 #include "config/custom_openclash_rules.h"
 #include "config/regmatch.h"
+#include "external_rules.h"
 #include "generator/config/subexport.h"
 #include "generator/template/templates.h"
 #include "handler/settings.h"
@@ -1259,17 +1260,52 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
     yamlnode.remove(proxies_field_name); // 从 yamlnode 中移除
   }
 
-  if (ext.nodelist) {
+  auto dump_with_extracted_fields = [&]() {
     std::string result = YAML::Dump(yamlnode);
-    bool has_providers = !proxy_providers_yaml.empty();
-    if (has_providers) {
+    if (!proxy_providers_yaml.empty()) {
       insertProxyProvidersBeforeGroups(result, proxy_providers_yaml,
                                        ext.clash_new_field_name);
     }
     if (!proxies_yaml.empty()) {
-      insertProxiesBeforeTarget(result, proxies_yaml, ext.clash_new_field_name);
+      insertProxiesBeforeTarget(result, proxies_yaml,
+                                ext.clash_new_field_name);
     }
     return result;
+  };
+
+  const bool has_external_rules =
+      !ext.rule_prepend.empty() || !ext.rule_append.empty();
+  const std::string rules_field_name =
+      ext.clash_new_field_name ? "rules" : "Rule";
+  string_array original_rules;
+  if (has_external_rules &&
+      yamlnode[rules_field_name].IsDefined() &&
+      yamlnode[rules_field_name].IsSequence()) {
+    original_rules = safe_as<string_array>(yamlnode[rules_field_name]);
+  }
+
+  auto merge_external_rules = [&](const string_array &generated_rules) {
+    const string_array kept_original =
+        ext.overwrite_original_rules ? string_array{} : original_rules;
+    string_array merged;
+    if (!mergeClashRulesWithinLimit(
+            ext.rule_prepend, kept_original, generated_rules,
+            ext.rule_append, global.maxAllowedRules, merged)) {
+      ext.external_rule_error =
+          "Invalid request: the final Clash rule count exceeds "
+          "max_allowed_rules (" +
+          std::to_string(global.maxAllowedRules) +
+          ").\n"
+          "无效请求：最终 Clash 规则数量超过 max_allowed_rules 限制（" +
+          std::to_string(global.maxAllowedRules) + "）。";
+      return false;
+    }
+    yamlnode[rules_field_name] = std::move(merged);
+    return true;
+  };
+
+  if (ext.nodelist) {
+    return dump_with_extracted_fields();
   }
 
   /*
@@ -1280,16 +1316,12 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
   return YAML::Dump(yamlnode);
   */
   if (!ext.enable_rule_generator) {
-    std::string result = YAML::Dump(yamlnode);
-    bool has_providers = !proxy_providers_yaml.empty();
-    if (has_providers) {
-      insertProxyProvidersBeforeGroups(result, proxy_providers_yaml,
-                                       ext.clash_new_field_name);
+    if (has_external_rules) {
+      yamlnode.remove(rules_field_name);
+      if (!merge_external_rules({}))
+        return "";
     }
-    if (!proxies_yaml.empty()) {
-      insertProxiesBeforeTarget(result, proxies_yaml, ext.clash_new_field_name);
-    }
-    return result;
+    return dump_with_extracted_fields();
   }
 
   if (!ext.managed_config_prefix.empty() || ext.clash_script) {
@@ -1300,20 +1332,37 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
         yamlnode["mode"] = ext.clash_script ? "Script" : "Rule";
     }
 
-    renderClashScript(yamlnode, ruleset_content_array,
-                      ext.managed_config_prefix, ext.clash_script,
-                      ext.overwrite_original_rules,
-                      ext.clash_classical_ruleset, ext.rule_stats);
-    std::string result = YAML::Dump(yamlnode);
-    bool has_providers = !proxy_providers_yaml.empty();
-    if (has_providers) {
-      insertProxyProvidersBeforeGroups(result, proxy_providers_yaml,
-                                       ext.clash_new_field_name);
+    if (has_external_rules)
+      yamlnode.remove(rules_field_name);
+    renderClashScript(
+        yamlnode, ruleset_content_array, ext.managed_config_prefix,
+        ext.clash_script,
+        has_external_rules ? true : ext.overwrite_original_rules,
+        ext.clash_classical_ruleset, ext.rule_stats);
+    if (has_external_rules) {
+      string_array generated_rules;
+      if (yamlnode[rules_field_name].IsDefined() &&
+          yamlnode[rules_field_name].IsSequence())
+        generated_rules = safe_as<string_array>(yamlnode[rules_field_name]);
+      yamlnode.remove(rules_field_name);
+      if (!merge_external_rules(generated_rules))
+        return "";
     }
-    if (!proxies_yaml.empty()) {
-      insertProxiesBeforeTarget(result, proxies_yaml, ext.clash_new_field_name);
-    }
-    return result;
+    return dump_with_extracted_fields();
+  }
+
+  if (has_external_rules) {
+    yamlnode.remove(rules_field_name);
+    rulesetToClash(yamlnode, ruleset_content_array, true,
+                   ext.clash_new_field_name, ext.rule_stats);
+    string_array generated_rules;
+    if (yamlnode[rules_field_name].IsDefined() &&
+        yamlnode[rules_field_name].IsSequence())
+      generated_rules = safe_as<string_array>(yamlnode[rules_field_name]);
+    yamlnode.remove(rules_field_name);
+    if (!merge_external_rules(generated_rules))
+      return "";
+    return dump_with_extracted_fields();
   }
 
   std::string output_content =

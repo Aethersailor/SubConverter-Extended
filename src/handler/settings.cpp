@@ -1544,6 +1544,8 @@ int loadExternalYAML(YAML::Node &node, ExternalConfig &ext,
 
   section["enable_rule_generator"] >> ext.enable_rule_generator;
   section["overwrite_original_rules"] >> ext.overwrite_original_rules;
+  section["ruleprepend"] >> ext.rule_prepend_sources;
+  section["ruleappend"] >> ext.rule_append_sources;
 
   const char *group_name = section["proxy_groups"].IsDefined()
                                ? "proxy_groups"
@@ -1608,6 +1610,8 @@ int loadExternalTOML(toml::value &root, ExternalConfig &ext,
 
   find_if_exist(section, "enable_rule_generator", ext.enable_rule_generator,
                 "overwrite_original_rules", ext.overwrite_original_rules,
+                "ruleprepend", ext.rule_prepend_sources, "ruleappend",
+                ext.rule_append_sources,
                 "clash_rule_base", ext.clash_rule_base, "surge_rule_base",
                 ext.surge_rule_base, "surfboard_rule_base",
                 ext.surfboard_rule_base, "mellow_rule_base",
@@ -1655,6 +1659,7 @@ int loadExternalTOML(toml::value &root, ExternalConfig &ext,
 
 int loadExternalConfig(std::string &path, ExternalConfig &ext,
                        FetchContext context) {
+  ext.rule_sources_context = context;
   std::string base_content;
   ProxyPolicy proxy = parseProxy(global.proxyConfig);
   std::string config = fetchFile(path, proxy, global.cacheConfig, true, context);
@@ -1724,6 +1729,8 @@ int loadExternalConfig(std::string &path, ExternalConfig &ext,
   ini.get_bool_if_exist("overwrite_original_rules",
                         ext.overwrite_original_rules);
   ini.get_bool_if_exist("enable_rule_generator", ext.enable_rule_generator);
+  ini.get_all("ruleprepend", ext.rule_prepend_sources);
+  ini.get_all("ruleappend", ext.rule_append_sources);
 
   if (ini.item_prefix_exist("rename")) {
     string_array vArray;

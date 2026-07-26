@@ -34,6 +34,9 @@ struct ProxyProvider {
 struct extra_settings {
   bool enable_rule_generator = true;
   bool overwrite_original_rules = true;
+  string_array rule_prepend;
+  string_array rule_append;
+  std::string external_rule_error;
   RegexMatchConfigs rename_array;
   bool rename_for_providers = false;
   RegexMatchConfigs emoji_array;
