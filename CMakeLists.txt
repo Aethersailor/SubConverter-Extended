@@ -71,6 +71,7 @@ IF(NOT BUILD_STATIC_LIBRARY)
 ADD_EXECUTABLE(${BUILD_TARGET_NAME} 
     src/config/custom_openclash_rules.cpp
     src/config/ruleset.cpp
+    src/generator/config/external_rules.cpp
     src/generator/config/nodemanip.cpp
     src/generator/config/ruleconvert.cpp
     src/generator/config/subexport.cpp
@@ -252,6 +253,18 @@ IF(BUILD_TESTS)
         src/config/ruleset.cpp)
     TARGET_INCLUDE_DIRECTORIES(ruleset_options_test PRIVATE src)
     ADD_TEST(NAME ruleset_options COMMAND ruleset_options_test)
+
+    ADD_EXECUTABLE(external_rules_test
+        tests/external_rules_test.cpp
+        src/generator/config/external_rules.cpp)
+    TARGET_INCLUDE_DIRECTORIES(external_rules_test PRIVATE
+        src
+        ${YAML_CPP_INCLUDE_DIRS})
+    TARGET_LINK_DIRECTORIES(external_rules_test PRIVATE
+        ${YAML_CPP_LIBRARY_DIRS})
+    TARGET_LINK_LIBRARIES(external_rules_test
+        ${YAML_CPP_LIBRARY})
+    ADD_TEST(NAME external_rules COMMAND external_rules_test)
 ENDIF()
 
 ELSE() #BUILD_STATIC_LIBRARY
@@ -259,6 +272,7 @@ ELSE() #BUILD_STATIC_LIBRARY
 ADD_LIBRARY(${BUILD_TARGET_NAME} STATIC
     src/config/custom_openclash_rules.cpp
     src/config/ruleset.cpp
+    src/generator/config/external_rules.cpp
     src/generator/config/ruleconvert.cpp
     src/generator/config/subexport.cpp
     src/generator/template/templates.cpp

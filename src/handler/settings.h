@@ -115,6 +115,9 @@ struct Settings {
 struct ExternalConfig {
   ProxyGroupConfigs custom_proxy_group;
   RulesetConfigs surge_ruleset;
+  string_array rule_prepend_sources;
+  string_array rule_append_sources;
+  FetchContext rule_sources_context = FetchContext::TrustedConfig;
   std::string clash_rule_base;
   std::string surge_rule_base;
   std::string surfboard_rule_base;

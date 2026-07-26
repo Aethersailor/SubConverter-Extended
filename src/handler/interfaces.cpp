@@ -21,6 +21,7 @@
 
 #include "config/binding.h"
 #include "config/custom_openclash_rules.h"
+#include "generator/config/external_rules.h"
 #include "generator/config/nodemanip.h"
 #include "generator/config/ruleconvert.h"
 #include "generator/config/subexport.h"
@@ -35,6 +36,7 @@
 #include "settings.h"
 #include "statistics.h"
 #include "upload.h"
+#include "webget.h"
 #include "utils/time_compat.h"
 
 const std::vector<std::string> DEFAULT_REMOTE_CONFIG_FALLBACKS = {
@@ -600,6 +602,10 @@ static bool hasEffectiveExternalConfig(const ExternalConfig &extconf,
   if (!extconf.custom_proxy_group.empty() || !extconf.surge_ruleset.empty())
     return true;
 
+  if (!extconf.rule_prepend_sources.empty() ||
+      !extconf.rule_append_sources.empty())
+    return true;
+
   if (!extconf.clash_rule_base.empty() || !extconf.surge_rule_base.empty() ||
       !extconf.surfboard_rule_base.empty() ||
       !extconf.mellow_rule_base.empty() || !extconf.quan_rule_base.empty() ||
@@ -619,6 +625,74 @@ static bool hasEffectiveExternalConfig(const ExternalConfig &extconf,
     return true;
 
   return false;
+}
+
+static bool fetchExternalRuleSources(const string_array &sources,
+                                     const std::string &field_name,
+                                     FetchContext context,
+                                     string_array &destination,
+                                     std::string &error) {
+  ProxyPolicy proxy = parseProxy(global.proxyRuleset);
+  string_icase_map request_headers = {
+      {"Cache-Control", "no-cache, no-store, max-age=0"},
+      {"Pragma", "no-cache"}};
+
+  for (size_t i = 0; i < sources.size(); ++i) {
+    const std::string source_identifier =
+        field_name + " source #" + std::to_string(i + 1);
+    const std::string lower_source = toLower(sources[i]);
+    if (!startsWith(lower_source, "http://") &&
+        !startsWith(lower_source, "https://")) {
+      error =
+          "Invalid external rule source " + source_identifier +
+          ": only remote HTTP(S) URLs are supported; local paths and data "
+          "URLs are not allowed.\n"
+          "外部规则来源 " +
+          source_identifier +
+          " 无效：仅支持远程 HTTP(S) URL，不允许本地路径或 data URL。";
+      return false;
+    }
+
+    int fetch_status = 0;
+    std::string content;
+    FetchArgument argument{HTTP_GET,
+                           sources[i],
+                           proxy,
+                           nullptr,
+                           &request_headers,
+                           nullptr,
+                           0,
+                           false,
+                           context};
+    FetchResult result{&fetch_status, &content, nullptr, nullptr};
+    webGet(argument, result);
+    if (fetch_status < 200 || fetch_status >= 300 || content.empty()) {
+      writeLog(0,
+               "外部规则来源 " + source_identifier +
+                   " 拉取失败、HTTP 状态异常或内容为空，已跳过。",
+               LOG_LEVEL_WARNING);
+      continue;
+    }
+
+    ExternalRuleParseResult parsed =
+        parseExternalClashRules(content, source_identifier, ClashRuleTypes);
+    if (!parsed.ok) {
+      error = std::move(parsed.error);
+      return false;
+    }
+    if (parsed.rules.empty()) {
+      error =
+          "Invalid external rule source " + source_identifier +
+          ": no usable rules were found.\n"
+          "外部规则来源 " +
+          source_identifier + " 无效：未找到可用规则。";
+      return false;
+    }
+    destination.insert(destination.end(),
+                       std::make_move_iterator(parsed.rules.begin()),
+                       std::make_move_iterator(parsed.rules.end()));
+  }
+  return true;
 }
 
 /**
@@ -1838,6 +1912,8 @@ static std::string subconverter_impl(Request &request, Response &response,
   FetchContext rulesetFetchContext = FetchContext::TrustedConfig;
   FetchContext baseFetchContext = FetchContext::TrustedConfig;
   bool configLoadSuccess = false;
+  string_array rulePrependSources, ruleAppendSources;
+  FetchContext externalRuleFetchContext = FetchContext::TrustedConfig;
   string_map tpl_args_base = tpl_args.local_vars;
   explain.external_config_provided = userProvidedExternalConfig;
 
@@ -1856,6 +1932,9 @@ static std::string subconverter_impl(Request &request, Response &response,
         hasEffectiveExternalConfig(extconf, tpl_args, tpl_args_base)) {
       configLoadSuccess = true;
       explain.external_config_loaded = true;
+      rulePrependSources = extconf.rule_prepend_sources;
+      ruleAppendSources = extconf.rule_append_sources;
+      externalRuleFetchContext = extconf.rule_sources_context;
       if (!ext.nodelist) {
         if (checkExternalBase(extconf.sssub_rule_base, lSSSubBase,
                               externalConfigContext))
@@ -1950,6 +2029,9 @@ static std::string subconverter_impl(Request &request, Response &response,
           configLoadSuccess = true;
           explain.external_config_loaded = true;
           explain.fallback_config_used = true;
+          rulePrependSources = extconf.rule_prepend_sources;
+          ruleAppendSources = extconf.rule_append_sources;
+          externalRuleFetchContext = extconf.rule_sources_context;
           if (!ext.nodelist) {
             checkExternalBase(extconf.sssub_rule_base, lSSSubBase,
                               FetchContext::TrustedConfig);
@@ -2034,6 +2116,53 @@ static std::string subconverter_impl(Request &request, Response &response,
       }
     }
   }
+
+  const size_t externalRuleSourceCount =
+      rulePrependSources.size() + ruleAppendSources.size();
+  if (externalRuleSourceCount) {
+    if (global.maxAllowedRulesets &&
+        externalRuleSourceCount > global.maxAllowedRulesets) {
+      *status_code = 400;
+      return "Invalid request: ruleprepend and ruleappend contain more "
+             "sources than max_allowed_rulesets (" +
+             std::to_string(global.maxAllowedRulesets) +
+             ").\n"
+             "无效请求：ruleprepend 与 ruleappend 的来源总数超过 "
+             "max_allowed_rulesets 限制（" +
+             std::to_string(global.maxAllowedRulesets) + "）。";
+    }
+    if (argTarget != "clash") {
+      *status_code = 400;
+      return "Invalid request: ruleprepend and ruleappend are supported only "
+             "for target=clash.\n"
+             "无效请求：ruleprepend 与 ruleappend 第一版仅支持 "
+             "target=clash。";
+    }
+    if (argGenNodeList.get(false)) {
+      *status_code = 400;
+      return "Invalid request: ruleprepend and ruleappend do not support "
+             "list=true.\n"
+             "无效请求：ruleprepend 与 ruleappend 不支持 list=true。";
+    }
+    if (argGenClashScript.get(false)) {
+      *status_code = 400;
+      return "Invalid request: ruleprepend and ruleappend do not support "
+             "script=true.\n"
+             "无效请求：ruleprepend 与 ruleappend 不支持 script=true。";
+    }
+
+    std::string external_rule_error;
+    if (!fetchExternalRuleSources(rulePrependSources, "ruleprepend",
+                                  externalRuleFetchContext,
+                                  ext.rule_prepend, external_rule_error) ||
+        !fetchExternalRuleSources(ruleAppendSources, "ruleappend",
+                                  externalRuleFetchContext,
+                                  ext.rule_append, external_rule_error)) {
+      *status_code = 400;
+      return external_rule_error;
+    }
+  }
+
   if (ext.enable_rule_generator && !ext.nodelist && !lSimpleSubscription) {
     if (lCustomRulesets != global.customRulesets)
       refreshRulesets(lCustomRulesets, lRulesetContent, rulesetFetchContext);
@@ -2465,6 +2594,10 @@ static std::string subconverter_impl(Request &request, Response &response,
       output_content =
           proxyToClash(nodes, base_content, lRulesetContent, lCustomProxyGroups,
                        argTarget == "clashr", ext);
+      if (!ext.external_rule_error.empty()) {
+        *status_code = 400;
+        return ext.external_rule_error;
+      }
     }
 
     if (argUpload)
