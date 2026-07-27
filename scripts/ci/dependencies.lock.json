@@ -8,7 +8,7 @@
     "custom_openclash_rules": {
       "ref": "refs/heads/main",
       "repository": "https://github.com/Aethersailor/Custom_OpenClash_Rules.git",
-      "revision": "600abe1f8a6b4c725f36f3510acab266c219a5f1"
+      "revision": "c8c8deef52b70416d1bb66e0126e487fa6f3a082"
     },
     "inja": {
       "ref": "HEAD",
