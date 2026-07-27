@@ -8,10 +8,12 @@
 
 #include "config/ruleset.h"
 #include "handler/custom_openclash_rules_endpoint.h"
+#include "handler/curl_handle_pool.h"
 #include "handler/dashboard_auth.h"
 #include "handler/dashboard_page.h"
 #include "handler/inspect_page.h"
 #include "handler/interfaces.h"
+#include "handler/multithread.h"
 #include "handler/settings.h"
 #include "handler/statistics.h"
 #include "handler/version_page.h"
@@ -158,6 +160,24 @@ int main(int argc, char *argv[]) {
   SetConsoleTitle("SubConverter-Extended " VERSION);
   if (!readConf())
     return 1;
+  writeLog(
+      0,
+      "并发运行参数：HTTP base/max threads=" +
+          std::to_string(global.maxConcurThreads) + "/" +
+          std::to_string(global.maxServerThreads) +
+          ", ruleset executor workers/queue=" +
+          std::to_string(rulesetExecutorWorkerCount()) + "/" +
+          std::to_string(rulesetExecutorQueueCapacity()) +
+          ", curl pool cap=" +
+          std::to_string(curlHandlePoolCapacity(
+              static_cast<size_t>(global.maxConcurThreads))) +
+          ", ExternalConfig cache=" +
+          std::to_string(externalConfigCacheMaxEntries()) + " entries/" +
+          std::to_string(externalConfigCacheMaxBytes()) + " bytes" +
+          ", ruleset conversion cache=" +
+          std::to_string(rulesetConversionCacheMaxEntries()) + " entries/" +
+          std::to_string(rulesetConversionCacheMaxBytes()) + " bytes。",
+      LOG_LEVEL_INFO);
   statistics::initialize();
   // vfs::vfs_read("vfs.ini");
   if (!global.updateRulesetOnRequest)
