@@ -45,7 +45,10 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Merge Dev into Master
+        id: sync
         run: |
+          set -euo pipefail
+
           echo "Merging dev into master..."
           # Attempt merge; if it fails (conflicts), continue execution to resolve them
           if ! git merge origin/dev --no-commit --no-ff; then
@@ -94,6 +97,10 @@ jobs:
             echo "Pushing..."
             git push origin master
           fi
+
+          MASTER_COMMIT="$(git rev-parse HEAD)"
+          echo "master_commit=$MASTER_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "Master commit selected for downstream work: $MASTER_COMMIT"
 
       - name: Resolve Release Tag
         id: release_tag
@@ -191,31 +198,127 @@ jobs:
           git tag -a "$TAG_NAME" -m "Release $TAG_NAME"
           git push origin "$TAG_NAME"
 
-      - name: Dispatch Overwrite Release Build
-        if: ${{ inputs.release_mode == 'overwrite' }}
+      - name: Dispatch and Verify Master Build
+        if: ${{ inputs.release_mode == 'overwrite' || inputs.release_mode == 'sync_only' }}
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          RELEASE_MODE: ${{ inputs.release_mode }}
           TAG_NAME: ${{ steps.release_tag.outputs.tag_name }}
+          EXPECTED_SHA: ${{ steps.sync.outputs.master_commit }}
         run: |
           set -euo pipefail
 
-          gh workflow run build-dockerhub.yml \
-            --ref master \
-            -f release_tag="$TAG_NAME" \
-            -f overwrite_existing_release=true
+          repo="$GITHUB_REPOSITORY"
+          run_id=""
 
-          echo "Dispatched release rebuild for $TAG_NAME from master."
+          for attempt in 1 2 3 4 5; do
+            branch_visible=false
+            for visibility_attempt in 1 2 3 4 5 6; do
+              visible_sha="$(gh api "repos/$repo/branches/master" --jq '.commit.sha')"
+              if [ "$visible_sha" = "$EXPECTED_SHA" ]; then
+                branch_visible=true
+                break
+              fi
 
-      - name: Dispatch Sync-only Master Build
-        if: ${{ inputs.release_mode == 'sync_only' }}
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-        run: |
-          set -euo pipefail
+              echo "Waiting for GitHub API to expose master at $EXPECTED_SHA (currently $visible_sha)..."
+              sleep 2
+            done
 
-          MASTER_COMMIT="$(git rev-parse HEAD)"
+            if [ "$branch_visible" != "true" ]; then
+              echo "::warning::GitHub API did not expose master at $EXPECTED_SHA before dispatch attempt $attempt."
+              sleep "$((attempt * 2))"
+              continue
+            fi
 
-          gh workflow run build-dockerhub.yml \
-            --ref master
+            dispatch_args=(--ref master)
+            if [ "$RELEASE_MODE" = "overwrite" ]; then
+              dispatch_args+=(
+                -f "release_tag=$TAG_NAME"
+                -f overwrite_existing_release=true
+              )
+            fi
 
-          echo "release_mode=sync_only; synced dev to master at $MASTER_COMMIT and dispatched a master build without creating or overwriting a release."
+            dispatch_output="$(gh workflow run build-dockerhub.yml "${dispatch_args[@]}")"
+            printf '%s\n' "$dispatch_output"
+            candidate_run_id="$(
+              printf '%s\n' "$dispatch_output" |
+                sed -n 's#^.*/actions/runs/\([0-9][0-9]*\).*$#\1#p' |
+                tail -n 1
+            )"
+
+            if [ -z "$candidate_run_id" ]; then
+              echo "::warning::Could not determine the dispatched workflow run ID on attempt $attempt."
+              sleep "$((attempt * 2))"
+              continue
+            fi
+
+            dispatched_sha="$(gh run view "$candidate_run_id" --repo "$repo" --json headSha --jq '.headSha')"
+            if [ "$dispatched_sha" = "$EXPECTED_SHA" ]; then
+              run_id="$candidate_run_id"
+              echo "Dispatched build run $run_id for expected master SHA $EXPECTED_SHA."
+              break
+            fi
+
+            echo "::warning::Dispatched run $candidate_run_id resolved stale master SHA $dispatched_sha; expected $EXPECTED_SHA."
+            gh run watch "$candidate_run_id" --repo "$repo" --exit-status || true
+            sleep "$((attempt * 2))"
+          done
+
+          if [ -z "$run_id" ]; then
+            echo "::error::Failed to dispatch build-dockerhub.yml for master SHA $EXPECTED_SHA after 5 attempts."
+            exit 1
+          fi
+
+          gh run watch "$run_id" --repo "$repo" --exit-status
+
+          jobs_file="$(mktemp)"
+          trap 'rm -f "$jobs_file"' EXIT
+          gh run view "$run_id" --repo "$repo" --json jobs > "$jobs_file"
+
+          python3 - "$jobs_file" "$RELEASE_MODE" <<'PY'
+          import json
+          import sys
+
+          jobs_path, release_mode = sys.argv[1:]
+          with open(jobs_path, encoding="utf-8") as handle:
+              jobs = {
+                  job["name"]: job["conclusion"]
+                  for job in json.load(handle)["jobs"]
+              }
+
+          required = [
+              "🧭 Verify Current Source Head",
+              "🔧 Prepare Metadata",
+              "🐳 Docker Build (amd64)",
+              "🐳 Docker Build (arm64)",
+              "🐳 Docker Build (armv7)",
+          ]
+          if release_mode == "overwrite":
+              required.extend(
+                  [
+                      "🪟 Windows Build (amd64)",
+                      "🔗 Promote Docker Images",
+                      "🚀 Release Artifacts",
+                  ]
+              )
+
+          failures = [
+              f"{name}: {jobs.get(name, 'missing')}"
+              for name in required
+              if jobs.get(name) != "success"
+          ]
+          if failures:
+              print(
+                  "::error::Required downstream jobs did not succeed: "
+                  + "; ".join(failures)
+              )
+              raise SystemExit(1)
+
+          print("Verified required downstream jobs: " + ", ".join(required))
+          PY
+
+          if [ "$RELEASE_MODE" = "overwrite" ]; then
+            echo "Rebuilt release $TAG_NAME from master SHA $EXPECTED_SHA in run $run_id."
+          else
+            echo "Synced dev to master at $EXPECTED_SHA and verified master build run $run_id."
+          fi
