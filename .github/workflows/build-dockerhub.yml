@@ -67,6 +67,11 @@ jobs:
             core.setOutput('current', String(isCurrent));
             if (isCurrent) {
               core.info(`${context.sha} is still the current head of ${branch}.`);
+            } else if (context.eventName === 'workflow_dispatch') {
+              core.setFailed(
+                `Refusing stale workflow_dispatch event for ${context.sha}; ` +
+                `${branch} now points to ${currentSha}.`
+              );
             } else {
               core.notice(
                 `Skipping stale ${context.eventName} event for ${context.sha}; ` +
