@@ -12,6 +12,8 @@
 #include "server/webserver.h"
 #include "settings.h"
 #include "utils/logger.h"
+#include "utils/concurrent_lru_cache.h"
+#include "utils/md5/md5_interface.h"
 #include "utils/network.h"
 #include "utils/system.h"
 
@@ -422,8 +424,7 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
             "",
             "",
             RULESET_SURGE,
-            std::async(std::launch::async,
-                       [=]() { return rule_url.substr(pos); }),
+            makeReadyStringFuture(rule_url.substr(pos)),
             0,
             x.Options};
     } else {
@@ -1657,16 +1658,11 @@ int loadExternalTOML(toml::value &root, ExternalConfig &ext,
   return 0;
 }
 
-int loadExternalConfig(std::string &path, ExternalConfig &ext,
-                       FetchContext context) {
+static int parseExternalConfigContent(const std::string &path,
+                                      const std::string &base_content,
+                                      ExternalConfig &ext,
+                                      FetchContext context) {
   ext.rule_sources_context = context;
-  std::string base_content;
-  ProxyPolicy proxy = parseProxy(global.proxyConfig);
-  std::string config = fetchFile(path, proxy, global.cacheConfig, true, context);
-  if (render_template(config, *ext.tpl_args, base_content,
-                      global.templatePath, context) != 0)
-    base_content = config;
-
   try {
     YAML::Node yaml = YAML::Load(base_content);
     if (yaml.size() && yaml["custom"].IsDefined())
@@ -1760,4 +1756,105 @@ int loadExternalConfig(std::string &path, ExternalConfig &ext,
   }
 
   return 0;
+}
+
+namespace {
+
+constexpr size_t kExternalConfigCacheEntries = 64;
+constexpr size_t kExternalConfigCacheBytes = 8 * 1024 * 1024;
+constexpr const char *kExternalConfigParserIdentity =
+    "external-config:auto-yaml-toml-ini:v1";
+
+struct CachedExternalConfig {
+  int result = -1;
+  ExternalConfig config;
+  string_map local_vars;
+  size_t cache_bytes = 0;
+};
+
+ConcurrentLruCache<std::string, CachedExternalConfig> external_config_cache(
+    kExternalConfigCacheEntries, kExternalConfigCacheBytes);
+
+static std::string buildExternalConfigCacheKey(
+    const std::string &base_content, FetchContext context,
+    unsigned long long config_generation) {
+  return getMD5(base_content) + ":" +
+         std::to_string(static_cast<int>(context)) + ":" +
+         std::to_string(config_generation) + ":" +
+         kExternalConfigParserIdentity;
+}
+
+static size_t localVarsSize(const string_map &vars) {
+  size_t bytes = 0;
+  for (const auto &[name, value] : vars)
+    bytes += name.size() + value.size();
+  return bytes;
+}
+
+} // namespace
+
+bool isExternalConfigCacheableContent(const std::string &content) {
+  std::string lower = toLower(content);
+  static const string_array dynamic_markers = {
+      "!!import:", "!!script:", "import:", "script:",
+      "import =",  "import=",    "script =", "script="};
+  for (const std::string &marker : dynamic_markers) {
+    if (lower.find(marker) != std::string::npos)
+      return false;
+  }
+  return true;
+}
+
+size_t externalConfigCacheMaxEntries() {
+  return kExternalConfigCacheEntries;
+}
+
+size_t externalConfigCacheMaxBytes() { return kExternalConfigCacheBytes; }
+
+int loadExternalConfig(std::string &path, ExternalConfig &ext,
+                       FetchContext context) {
+  template_args *request_tpl_args = ext.tpl_args;
+  std::string base_content;
+  ProxyPolicy proxy = parseProxy(global.proxyConfig);
+  std::string config = fetchFile(path, proxy, global.cacheConfig, true, context);
+  if (render_template(config, *request_tpl_args, base_content,
+                      global.templatePath, context) != 0)
+    base_content = config;
+
+  bool cache_enabled =
+      global.cacheConfig > 0 && isExternalConfigCacheableContent(config) &&
+      isExternalConfigCacheableContent(base_content);
+  const std::string key = buildExternalConfigCacheKey(
+      base_content, context, global.configGeneration);
+
+  CachedExternalConfig cached = external_config_cache.getOrCompute(
+      key, cache_enabled,
+      [&] {
+        CachedExternalConfig value;
+        template_args parsed_tpl_args = *request_tpl_args;
+        parsed_tpl_args.local_vars.clear();
+        ExternalConfig parsed;
+        parsed.tpl_args = &parsed_tpl_args;
+        value.result =
+            parseExternalConfigContent(path, base_content, parsed, context);
+        value.local_vars = std::move(parsed_tpl_args.local_vars);
+        parsed.tpl_args = nullptr;
+        value.config = std::move(parsed);
+        value.cache_bytes =
+            base_content.size() + localVarsSize(value.local_vars);
+        return value;
+      },
+      [](const CachedExternalConfig &value)
+          -> ConcurrentLruCache<std::string,
+                                CachedExternalConfig>::CacheSize {
+        if (value.result != 0)
+          return std::nullopt;
+        return value.cache_bytes;
+      });
+
+  ext = std::move(cached.config);
+  ext.tpl_args = request_tpl_args;
+  for (const auto &[name, value] : cached.local_vars)
+    request_tpl_args->local_vars[name] = value;
+  return cached.result;
 }

@@ -1,9 +1,11 @@
+#include <algorithm>
 #include <future>
 #include <thread>
 #include <utility>
 
 #include "handler/settings.h"
 #include "utils/network.h"
+#include "utils/bounded_executor.h"
 #include "webget.h"
 #include "multithread.h"
 //#include "vfs.h"
@@ -11,11 +13,39 @@
 //safety lock for multi-thread
 std::mutex on_emoji, on_rename, on_stream, on_time;
 
-static std::shared_future<std::string> make_ready_future(std::string value)
+static size_t configuredWorkerCount()
+{
+    return static_cast<size_t>(
+        std::clamp(global.maxConcurThreads / 2, 2, 8));
+}
+
+static size_t configuredQueueCapacity()
+{
+    return std::max<size_t>(64, configuredWorkerCount() * 16);
+}
+
+static BoundedExecutor &rulesetExecutor()
+{
+    static BoundedExecutor executor(configuredWorkerCount(),
+                                    configuredQueueCapacity());
+    return executor;
+}
+
+std::shared_future<std::string> makeReadyStringFuture(std::string value)
 {
     std::promise<std::string> promise;
     promise.set_value(std::move(value));
     return promise.get_future().share();
+}
+
+size_t rulesetExecutorWorkerCount()
+{
+    return rulesetExecutor().workerCount();
+}
+
+size_t rulesetExecutorQueueCapacity()
+{
+    return rulesetExecutor().queueCapacity();
 }
 
 RegexMatchConfigs safe_get_emojis()
@@ -89,22 +119,26 @@ std::shared_future<std::string> fetchFileAsync(const std::string &path, const Pr
     if(!async)
     {
         if(find_local && fileExist(path, true) && canReadLocalFetchPath(path, context))
-            return make_ready_future(fileGet(path, true));
+            return makeReadyStringFuture(fileGet(path, true));
         if(isLink(path))
-            return make_ready_future(webGet(path, proxy, cache_ttl, nullptr, nullptr, context));
-        return make_ready_future(std::string());
+            return makeReadyStringFuture(webGet(path, proxy, cache_ttl, nullptr, nullptr, context));
+        return makeReadyStringFuture(std::string());
     }
 
-    std::shared_future<std::string> retVal;
-    /*if(vfs::vfs_exist(path))
-        retVal = std::async(std::launch::async, [path](){return vfs::vfs_get(path);});
-    else */if(find_local && fileExist(path, true) && canReadLocalFetchPath(path, context))
-        retVal = std::async(std::launch::async, [path](){return fileGet(path, true);});
+    std::future<std::string> retVal;
+    if(find_local && fileExist(path, true) &&
+       canReadLocalFetchPath(path, context))
+        retVal = rulesetExecutor().submit(
+            [path](){ return fileGet(path, true); });
     else if(isLink(path))
-        retVal = std::async(std::launch::async, [path, proxy, cache_ttl, context](){return webGet(path, proxy, cache_ttl, nullptr, nullptr, context);});
+        retVal = rulesetExecutor().submit(
+            [path, proxy, cache_ttl, context](){
+                return webGet(path, proxy, cache_ttl, nullptr, nullptr,
+                              context);
+            });
     else
-        return make_ready_future(std::string());
-    return retVal;
+        return makeReadyStringFuture(std::string());
+    return retVal.share();
 }
 
 std::string fetchFile(const std::string &path, const ProxyPolicy &proxy, int cache_ttl, bool find_local, FetchContext context)

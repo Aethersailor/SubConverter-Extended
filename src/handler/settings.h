@@ -147,6 +147,9 @@ int importItems(string_array &target, bool scope_limit = true,
                 FetchContext context = FetchContext::TrustedConfig);
 int loadExternalConfig(std::string &path, ExternalConfig &ext,
                        FetchContext context = FetchContext::TrustedConfig);
+bool isExternalConfigCacheableContent(const std::string &content);
+size_t externalConfigCacheMaxEntries();
+size_t externalConfigCacheMaxBytes();
 // template <class T, class... U>
 // void find_if_exist(const toml::value &v, const toml::key &k, T& target,
 // U&&... args)
