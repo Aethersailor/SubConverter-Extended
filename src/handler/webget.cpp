@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <future>
 #include <iostream>
 #include <map>
@@ -5,6 +6,7 @@
 #include <sys/stat.h>
 #include <mutex>
 #include <thread>
+#include <utility>
 #include <atomic>
 #include <cctype>
 #include <cstdint>
@@ -12,6 +14,7 @@
 #include <curl/curl.h>
 
 #include "handler/settings.h"
+#include "handler/curl_handle_pool.h"
 #include "utils/base64/base64.h"
 #include "utils/defer.h"
 #include "utils/file_extra.h"
@@ -61,6 +64,24 @@ struct GitHubFileRef
 
 static std::mutex cache_fetch_mutex;
 static std::map<std::string, std::shared_future<CacheFetchResult>> cache_fetches;
+
+class CacheFetchOwnerCleanup
+{
+public:
+    CacheFetchOwnerCleanup(bool owner, std::string key)
+        : owner_(owner), key_(std::move(key)) {}
+    ~CacheFetchOwnerCleanup()
+    {
+        if(!owner_)
+            return;
+        std::lock_guard<std::mutex> lock(cache_fetch_mutex);
+        cache_fetches.erase(key_);
+    }
+
+private:
+    bool owner_;
+    std::string key_;
+};
 
 static CURLcode curl_init()
 {
@@ -633,7 +654,11 @@ static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode 
         return 0;
     }
 
-    curl_handle = curl_easy_init();
+    CurlHandleLease curl_lease =
+        globalCurlHandlePool(
+            static_cast<size_t>(std::max(1, global.maxConcurThreads)))
+            .acquire();
+    curl_handle = curl_lease.get();
     if(curl_handle == nullptr)
     {
         retVal = CURLE_FAILED_INIT;
@@ -651,7 +676,6 @@ static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode 
         *result.status_code = 0;
         if(return_code)
             *return_code = retVal;
-        curl_easy_cleanup(curl_handle);
         return 0;
     }
     if(effective_proxy.mode == ProxyMode::Cors)
@@ -793,13 +817,10 @@ static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode 
         curl_slist_free_all(cookies);
     }
 
-    curl_easy_cleanup(curl_handle);
-
     if(data && !argument.keep_resp_on_fail)
     {
         if(retVal != CURLE_OK || *result.status_code != 200)
             data->clear();
-        data->shrink_to_fit();
     }
 
     return *result.status_code;
@@ -940,24 +961,39 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned in
                 writeLog(0, "缓存不存在：'" + url + "'，正在创建新缓存。");
         }
         std::shared_future<CacheFetchResult> fetch_future;
+        std::shared_ptr<std::promise<CacheFetchResult>> fetch_promise;
         bool owner = false;
         {
             std::lock_guard<std::mutex> lock(cache_fetch_mutex);
             auto iter = cache_fetches.find(url_md5);
             if(iter == cache_fetches.end())
             {
-                fetch_future = std::async(std::launch::async, [argument]() {
-                    CacheFetchResult result;
-                    FetchResult fetch_result {&result.status_code, &result.content,
-                                               &result.response_headers, nullptr};
-                    curlGetWithGitHubFallback(argument, fetch_result);
-                    return result;
-                }).share();
+                fetch_promise =
+                    std::make_shared<std::promise<CacheFetchResult>>();
+                fetch_future = fetch_promise->get_future().share();
                 cache_fetches.emplace(url_md5, fetch_future);
                 owner = true;
             }
             else
                 fetch_future = iter->second;
+        }
+        CacheFetchOwnerCleanup owner_cleanup(owner, url_md5);
+
+        if(owner)
+        {
+            try
+            {
+                CacheFetchResult result;
+                FetchResult fetch_result {
+                    &result.status_code, &result.content,
+                    &result.response_headers, nullptr};
+                curlGetWithGitHubFallback(argument, fetch_result);
+                fetch_promise->set_value(std::move(result));
+            }
+            catch(...)
+            {
+                fetch_promise->set_exception(std::current_exception());
+            }
         }
 
         CacheFetchResult fetched = fetch_future.get();
@@ -995,11 +1031,6 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned in
                 if(shouldLog(LOG_LEVEL_VERBOSE))
                     writeLog(0, "获取失败，且没有可用的本地缓存。"); // cache not exist or not allow to serve cache, serving nothing
             }
-        }
-        if(owner)
-        {
-            std::lock_guard<std::mutex> lock(cache_fetch_mutex);
-            cache_fetches.erase(url_md5);
         }
         return content;
     }
