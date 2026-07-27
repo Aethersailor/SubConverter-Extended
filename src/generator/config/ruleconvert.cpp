@@ -2,6 +2,8 @@
 
 #include "handler/settings.h"
 #include "utils/logger.h"
+#include "utils/concurrent_lru_cache.h"
+#include "utils/md5/md5_interface.h"
 #include "utils/network.h"
 #include "utils/regexp.h"
 #include "utils/string.h"
@@ -19,7 +21,7 @@ string_array QuanXRuleTypes = {basic_types, "USER-AGENT", "HOST", "HOST-SUFFIX",
 string_array SurfRuleTypes = {basic_types, "IP-CIDR6", "PROCESS-NAME", "IN-PORT", "DEST-PORT", "SRC-IP"};
 string_array SingBoxRuleTypes = {basic_types, "IP-VERSION", "INBOUND", "PROTOCOL", "NETWORK", "GEOSITE", "SRC-GEOIP", "DOMAIN-REGEX", "PROCESS-NAME", "PROCESS-PATH", "PACKAGE-NAME", "PORT", "PORT-RANGE", "SRC-PORT", "SRC-PORT-RANGE", "USER", "USER-ID"};
 
-std::string convertRuleset(const std::string &content, int type)
+static std::string convertRulesetUncached(const std::string &content, int type)
 {
     /// Target: Surge type,pattern[,flag]
     /// Source: QuanX type,pattern[,group]
@@ -95,6 +97,40 @@ std::string convertRuleset(const std::string &content, int type)
         output = regReplace(output, "^((?i:DOMAIN(?:-(?:SUFFIX|KEYWORD))?|IP-CIDR6?|USER-AGENT),)\\s*?(\\S*?)(?:,(?!no-resolve).*?)(,no-resolve)?$", "\\U$1\\E$2${3:-}", true); //remove group
         return output;
     }
+}
+
+namespace {
+
+constexpr size_t kRulesetConversionCacheEntries = 256;
+constexpr size_t kRulesetConversionCacheBytes = 16 * 1024 * 1024;
+ConcurrentLruCache<std::string, std::string> ruleset_conversion_cache(
+    kRulesetConversionCacheEntries, kRulesetConversionCacheBytes);
+
+} // namespace
+
+std::string convertRuleset(const std::string &content, int type)
+{
+    if(type == RULESET_SURGE)
+        return content;
+
+    const std::string key =
+        getMD5(content) + ":" + std::to_string(type);
+    return ruleset_conversion_cache.getOrCompute(
+        key, true, [&] { return convertRulesetUncached(content, type); },
+        [](const std::string &value)
+            -> ConcurrentLruCache<std::string, std::string>::CacheSize {
+            return value.size();
+        });
+}
+
+size_t rulesetConversionCacheMaxEntries()
+{
+    return kRulesetConversionCacheEntries;
+}
+
+size_t rulesetConversionCacheMaxBytes()
+{
+    return kRulesetConversionCacheBytes;
 }
 
 static bool isClashCommaPayloadRule(const std::string &rule_type)

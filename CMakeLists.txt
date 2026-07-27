@@ -79,6 +79,7 @@ ADD_EXECUTABLE(${BUILD_TARGET_NAME}
     src/handler/dashboard_auth.cpp
     src/handler/dashboard_page.cpp
     src/handler/custom_openclash_rules_endpoint.cpp
+    src/handler/curl_handle_pool.cpp
     src/handler/inspect_page.cpp
     src/handler/interfaces.cpp
     src/handler/multithread.cpp
@@ -88,6 +89,7 @@ ADD_EXECUTABLE(${BUILD_TARGET_NAME}
     src/handler/webget.cpp
     src/handler/proxy_policy.cpp
     src/handler/settings.cpp
+    src/handler/sub_request_key.cpp
     src/main.cpp
     src/parser/infoparser.cpp
     src/parser/subparser.cpp
@@ -265,6 +267,35 @@ IF(BUILD_TESTS)
     TARGET_LINK_LIBRARIES(external_rules_test
         ${YAML_CPP_LIBRARY})
     ADD_TEST(NAME external_rules COMMAND external_rules_test)
+
+    ADD_EXECUTABLE(concurrency_primitives_test
+        tests/concurrency_primitives_test.cpp)
+    TARGET_INCLUDE_DIRECTORIES(concurrency_primitives_test PRIVATE src)
+    TARGET_LINK_LIBRARIES(concurrency_primitives_test
+        ${CMAKE_THREAD_LIBS_INIT})
+    ADD_TEST(NAME concurrency_primitives COMMAND concurrency_primitives_test)
+
+    ADD_EXECUTABLE(sub_request_key_test
+        tests/sub_request_key_test.cpp
+        src/handler/sub_request_key.cpp
+        src/utils/md5/md5.cpp)
+    TARGET_INCLUDE_DIRECTORIES(sub_request_key_test PRIVATE src)
+    ADD_TEST(NAME sub_request_key COMMAND sub_request_key_test)
+
+    ADD_EXECUTABLE(curl_handle_pool_test
+        tests/curl_handle_pool_test.cpp
+        src/handler/curl_handle_pool.cpp)
+    TARGET_INCLUDE_DIRECTORIES(curl_handle_pool_test PRIVATE
+        src
+        ${CURL_INCLUDE_DIRS})
+    TARGET_LINK_LIBRARIES(curl_handle_pool_test
+        ${CMAKE_THREAD_LIBS_INIT}
+        CURL::libcurl)
+    TARGET_COMPILE_DEFINITIONS(curl_handle_pool_test PRIVATE CURL_STATICLIB)
+    IF(WIN32)
+        TARGET_LINK_LIBRARIES(curl_handle_pool_test ws2_32)
+    ENDIF()
+    ADD_TEST(NAME curl_handle_pool COMMAND curl_handle_pool_test)
 ENDIF()
 
 ELSE() #BUILD_STATIC_LIBRARY
