@@ -53,5 +53,33 @@ int main() {
   Request unselected_b = private_a;
   unselected_b.headers["X-HWID"] = "device-b";
   assert(key(unselected_a) == key(unselected_b));
+
+  Request order_a = baseRequest("data:,ss://same");
+  order_a.argument.emplace("config", "data:,enable_rule_generator=false");
+  order_a.argument.emplace("list", "true");
+  Request order_b;
+  order_b.method = "GET";
+  order_b.url = "/sub";
+  order_b.argument.emplace("list", "true");
+  order_b.argument.emplace("url", "data:,ss://same");
+  order_b.argument.emplace("target", "clash");
+  order_b.argument.emplace("config", "data:,enable_rule_generator=false");
+  order_b.headers.emplace("User-Agent", "Clash.Meta/1.0");
+  assert(key(order_a) == key(order_b));
+
+  Request framed_a = baseRequest("value\narg_name:1:x");
+  Request framed_b = baseRequest("value");
+  framed_b.argument.emplace("x", "x");
+  assert(key(framed_a) != key(framed_b));
+
+  Request selected_order_a = private_a;
+  selected_order_a.argument.emplace("provider_headers", "x-hwid, authorization");
+  selected_order_a.headers["X-HWID"] = "device";
+  selected_order_a.headers["Authorization"] = "Bearer one";
+  Request selected_order_b = private_a;
+  selected_order_b.argument.emplace("provider_headers", "authorization,x-hwid");
+  selected_order_b.headers["X-HWID"] = "device";
+  selected_order_b.headers["Authorization"] = "Bearer one";
+  assert(key(selected_order_a) != key(selected_order_b));
   return 0;
 }

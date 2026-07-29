@@ -1,0 +1,104 @@
+common:
+  default_url: []
+  enable_insert: false
+  insert_url: []
+  prepend_insert_url: true
+  enable_filter: false
+  base_path: base
+  clash_rule_base: base/all_base.tpl
+  surge_rule_base: base/all_base.tpl
+  surfboard_rule_base: base/all_base.tpl
+  mellow_rule_base: base/all_base.tpl
+  quan_rule_base: base/all_base.tpl
+  quanx_rule_base: base/all_base.tpl
+  loon_rule_base: base/all_base.tpl
+  sssub_rule_base: base/all_base.tpl
+  singbox_rule_base: base/all_base.tpl
+  default_external_config: "data:,enable_rule_generator=false"
+  append_proxy_type: false
+  proxy_config: "socks5h://fixture-user:fixture-secret@proxy.example.test:1080"
+  proxy_ruleset: NONE
+  proxy_subscription: SYSTEM
+  reload_conf_on_request: false
+
+custom_openclash_rules:
+  fallback_enabled: false
+  publish_enabled: false
+
+node_pref:
+  udp_flag: false
+  tcp_fast_open_flag: true
+  skip_cert_verify_flag: false
+  tls13_flag: true
+  sort_flag: false
+  filter_deprecated_nodes: false
+  append_sub_userinfo: true
+  clash_use_new_field_name: true
+  clash_proxies_style: flow
+  singbox_add_clash_modes: true
+
+managed_config:
+  write_managed_config: false
+  managed_config_prefix: https://managed.example.test
+  config_update_interval: 86400
+  config_update_strict: false
+  quanx_device_id: ""
+
+rulesets:
+  enabled: false
+  overwrite_original_rules: false
+  update_ruleset_on_request: false
+
+server:
+  listen: 127.0.0.1
+  port: 25500
+  serve_file_root: ""
+
+advanced:
+  log_level: info
+  print_debug_info: false
+  max_pending_connections: 16
+  max_concurrent_threads: 8
+  max_server_threads: 64
+  max_allowed_rulesets: 32
+  max_allowed_rules: 4096
+  max_allowed_download_size: 1048576
+  enable_cache: true
+  cache_subscription: 60
+  cache_config: 300
+  cache_ruleset: 21600
+  serve_cache_on_fetch_fail: false
+  script_clean_context: false
+  async_fetch_ruleset: false
+  skip_failed_links: false
+  enable_request_coalescing: true
+  coalesce_retry_on_5xx: true
+  allow_insecure_tls: false
+  response_cache_ttl: 0
+
+statistics:
+  enabled: true
+  data_dir: stats
+  flush_interval: 5
+  geo:
+    provider: header
+    country_headers:
+      - CF-IPCountry
+      - X-Geo-Country
+      - X-Vercel-IP-Country
+      - CloudFront-Viewer-Country
+    china_region_headers:
+      - CF-Region-Code
+      - cf-region-code
+      - X-Geo-Subdivision
+  dashboard_auth:
+    enabled: true
+    username: fixture-admin
+    password: fixture-dashboard-secret
+    max_failures: 3
+    window_seconds: 30
+    lock_seconds: 60
+
+security:
+  profile: lan
+  allow_public_upload: false

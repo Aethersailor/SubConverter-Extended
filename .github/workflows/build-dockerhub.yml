@@ -297,6 +297,10 @@ jobs:
           python3 scripts/verify_custom_openclash_rules_bundle.py \
             --root base/Custom_OpenClash_Rules
 
+      - name: Run Python regression baselines
+        shell: bash
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
       - name: Set up Docker Buildx
         shell: bash
         run: |
