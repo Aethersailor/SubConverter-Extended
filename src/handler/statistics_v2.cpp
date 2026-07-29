@@ -40,6 +40,11 @@ constexpr std::size_t kMaxPayloadBytes =
     (kMinuteBucketCount + kDailyBucketCount) *
         (sizeof(uint32_t) + kMaxEncodedBucketBytes) +
     kGeoCount * (sizeof(uint16_t) + sizeof(uint64_t) * 2) + 256;
+constexpr std::size_t kMaxCheckpointPayloadBytes =
+    128U * 1024U * 1024U;
+constexpr std::size_t kMaxWalPayloadBytes = 8U * 1024U * 1024U;
+constexpr std::size_t kMaxWalFileBytes = 16U * 1024U * 1024U;
+constexpr std::size_t kCheckpointEnvelopeBytes = 44;
 constexpr std::size_t kWalCompactBytes = 4U * 1024U * 1024U;
 constexpr std::size_t kWalCompactRecords = 256;
 constexpr auto kCheckpointPeriod = std::chrono::hours(6);
@@ -189,10 +194,19 @@ public:
     bytes_.insert(bytes_.end(), data, data + size);
   }
 
-  void raw(const std::vector<uint8_t> &data) {
-    raw(data.data(), data.size());
+  void patchU64(std::size_t offset, uint64_t value) {
+    for (std::size_t i = 0; i < 8; ++i)
+      bytes_[offset + i] =
+          static_cast<uint8_t>((value >> (i * 8)) & UINT64_C(0xff));
   }
 
+  void patchU32(std::size_t offset, uint32_t value) {
+    for (std::size_t i = 0; i < 4; ++i)
+      bytes_[offset + i] =
+          static_cast<uint8_t>((value >> (i * 8)) & UINT32_C(0xff));
+  }
+
+  std::size_t size() const { return bytes_.size(); }
   const std::vector<uint8_t> &bytes() const { return bytes_; }
   std::vector<uint8_t> take() { return std::move(bytes_); }
 
@@ -343,8 +357,7 @@ bool decodeBucket(Decoder &decoder, BucketRecord &record) {
   return true;
 }
 
-std::vector<uint8_t> encodeImagePayload(const PersistentImage &image) {
-  Encoder encoder;
+void encodeImagePayload(Encoder &encoder, const PersistentImage &image) {
   encodeRuntime(encoder, image.runtime);
   encodeCounters(encoder, image.lifetime);
 
@@ -383,12 +396,11 @@ std::vector<uint8_t> encodeImagePayload(const PersistentImage &image) {
     encoder.u32(static_cast<uint32_t>(i));
     encodeBucket(encoder, image.days[i]);
   }
-  return encoder.take();
 }
 
 bool decodeImagePayload(const uint8_t *data, std::size_t size,
                         PersistentImage &image) {
-  if (size > kMaxPayloadBytes)
+  if (size > kMaxCheckpointPayloadBytes || size > kMaxPayloadBytes)
     return false;
   Decoder decoder(data, size);
   image = PersistentImage{};
@@ -449,8 +461,7 @@ bool decodeImagePayload(const uint8_t *data, std::size_t size,
   return decoder.remaining() == 0;
 }
 
-std::vector<uint8_t> encodePatchPayload(const DirtyPatch &patch) {
-  Encoder encoder;
+void encodePatchPayload(Encoder &encoder, const DirtyPatch &patch) {
   encodeRuntime(encoder, patch.runtime);
   encodeCounters(encoder, patch.lifetime);
   encoder.u32(static_cast<uint32_t>(patch.lifetime_geo.size()));
@@ -468,12 +479,11 @@ std::vector<uint8_t> encodePatchPayload(const DirtyPatch &patch) {
     encoder.u32(entry.index);
     encodeBucket(encoder, entry.record);
   }
-  return encoder.take();
 }
 
 bool decodeAndApplyPatch(const uint8_t *data, std::size_t size,
                          PersistentImage &image) {
-  if (size > kMaxPayloadBytes)
+  if (size > kMaxWalPayloadBytes || size > kMaxPayloadBytes)
     return false;
   Decoder decoder(data, size);
   RuntimeState runtime;
@@ -554,7 +564,8 @@ bool decodeAndApplyPatch(const uint8_t *data, std::size_t size,
 }
 
 bool readFile(const std::string &path, std::vector<uint8_t> &bytes,
-              std::size_t max_bytes = kMaxPayloadBytes + 128) {
+              std::size_t max_bytes =
+                  kMaxCheckpointPayloadBytes + kCheckpointEnvelopeBytes) {
   std::error_code error;
   const auto size = std::filesystem::file_size(path, error);
   if (error || size > max_bytes)
@@ -619,14 +630,19 @@ bool writeAll(std::FILE *file, const uint8_t *data, std::size_t size) {
 
 std::vector<uint8_t> checkpointBytes(const PersistentImage &image,
                                      uint64_t generation, uint64_t sequence) {
-  const std::vector<uint8_t> payload = encodeImagePayload(image);
   Encoder encoder;
   encoder.raw(kCheckpointMagic.data(), kCheckpointMagic.size());
   encoder.u32(kSchemaVersion);
   encoder.u64(generation);
   encoder.u64(sequence);
-  encoder.u64(static_cast<uint64_t>(payload.size()));
-  encoder.raw(payload);
+  const std::size_t payload_size_offset = encoder.size();
+  encoder.u64(0);
+  const std::size_t payload_offset = encoder.size();
+  encodeImagePayload(encoder, image);
+  const std::size_t payload_size = encoder.size() - payload_offset;
+  if (payload_size > kMaxCheckpointPayloadBytes)
+    return {};
+  encoder.patchU64(payload_size_offset, payload_size);
   const uint64_t value = checksum(encoder.bytes().data(), encoder.bytes().size());
   encoder.u64(value);
   return encoder.take();
@@ -645,7 +661,9 @@ bool decodeCheckpoint(const std::vector<uint8_t> &bytes,
       !decoder.u32(schema) || schema != kSchemaVersion ||
       !decoder.u64(result.generation) || !decoder.u64(result.sequence) ||
       result.generation == 0 ||
-      !decoder.u64(payload_size) || payload_size > kMaxPayloadBytes ||
+      !decoder.u64(payload_size) ||
+      payload_size > kMaxCheckpointPayloadBytes ||
+      payload_size > kMaxPayloadBytes ||
       payload_size > decoder.remaining() - 8)
     return false;
   const uint8_t *payload = decoder.current();
@@ -668,14 +686,21 @@ bool decodeCheckpoint(const std::vector<uint8_t> &bytes,
 
 std::vector<uint8_t> walRecordBytes(const DirtyPatch &patch,
                                     uint64_t generation, uint64_t sequence) {
-  const std::vector<uint8_t> payload = encodePatchPayload(patch);
   Encoder encoder;
   encoder.raw(kWalMagic.data(), kWalMagic.size());
   encoder.u32(kWalPatchType);
   encoder.u64(generation);
   encoder.u64(sequence);
-  encoder.u32(static_cast<uint32_t>(payload.size()));
-  encoder.raw(payload);
+  const std::size_t payload_size_offset = encoder.size();
+  encoder.u32(0);
+  const std::size_t payload_offset = encoder.size();
+  encodePatchPayload(encoder, patch);
+  const std::size_t payload_size = encoder.size() - payload_offset;
+  if (payload_size > kMaxWalPayloadBytes ||
+      payload_size > std::numeric_limits<uint32_t>::max())
+    return {};
+  encoder.patchU32(payload_size_offset,
+                   static_cast<uint32_t>(payload_size));
   const uint64_t value = checksum(encoder.bytes().data(), encoder.bytes().size());
   encoder.u64(value);
   return encoder.take();
@@ -840,8 +865,8 @@ void Core::startFromImage(const PersistentImage &image, int64_t now_seconds) {
     current_minute_.stamp = now_seconds / 60;
   if (current_day_.stamp <= 0)
     current_day_.stamp = now_seconds / (24 * 60 * 60);
-  rebuildAggregates(now_seconds);
   advanceTo(now_seconds);
+  rebuildAggregates(now_seconds);
   runtime_dirty_ = true;
   dirty_version_ = std::max<uint64_t>(dirty_version_, 1);
   revision_ = 1;
@@ -1145,16 +1170,8 @@ bool Core::hasDirty() const {
 }
 
 DirtyPatch Core::takeDirtyPatch(int64_t now_seconds, bool stopping) {
-  DirtyPatch patch;
-  runtime_.last_seen_at = now_seconds;
-  if (stopping)
-    runtime_.last_stopped_at = now_seconds;
-  patch.runtime = runtime_;
-  const int64_t uptime =
-      now_seconds > started_at_ ? now_seconds - started_at_ : 0;
-  patch.runtime.persisted_runtime_seconds =
-      saturatedRuntime(runtime_.persisted_runtime_seconds, uptime);
-  patch.lifetime = lifetime_;
+  DirtyPatch patch = runtimePatch(now_seconds, stopping);
+  patch.metadata_present = true;
   for (std::size_t i = 0; i < kGeoCount; ++i) {
     if (dirty_lifetime_geo_.test(i))
       patch.lifetime_geo.push_back(
@@ -1173,6 +1190,21 @@ DirtyPatch Core::takeDirtyPatch(int64_t now_seconds, bool stopping) {
   dirty_minutes_.reset();
   dirty_days_.reset();
   runtime_dirty_ = false;
+  return patch;
+}
+
+DirtyPatch Core::runtimePatch(int64_t now_seconds, bool stopping) {
+  DirtyPatch patch;
+  patch.metadata_present = true;
+  runtime_.last_seen_at = now_seconds;
+  if (stopping)
+    runtime_.last_stopped_at = now_seconds;
+  patch.runtime = runtime_;
+  const int64_t uptime =
+      now_seconds > started_at_ ? now_seconds - started_at_ : 0;
+  patch.runtime.persisted_runtime_seconds =
+      saturatedRuntime(runtime_.persisted_runtime_seconds, uptime);
+  patch.lifetime = lifetime_;
   return patch;
 }
 
@@ -1217,6 +1249,10 @@ void Core::acknowledgeCheckpoint(uint64_t dirty_version) {
   dirty_minutes_.reset();
   dirty_days_.reset();
   runtime_dirty_ = false;
+}
+
+int runtimeHeartbeatIntervalSeconds(int flush_interval_seconds) {
+  return std::max(60, std::max(1, flush_interval_seconds));
 }
 
 class Store::FileLock {
@@ -1344,6 +1380,20 @@ StoreLoadResult Store::load() {
   else if (second_ok)
     best = std::move(second);
 
+  auto oversized_checkpoint = [&](const char *name) {
+    std::error_code size_error;
+    const auto size = std::filesystem::file_size(path(name), size_error);
+    return !size_error &&
+           size > kMaxCheckpointPayloadBytes + kCheckpointEnvelopeBytes;
+  };
+  if (!best.has_image &&
+      (oversized_checkpoint("statistics-v2-a.bin") ||
+       oversized_checkpoint("statistics-v2-b.bin"))) {
+    setError("statistics checkpoint exceeds the safety limit");
+    close();
+    return best;
+  }
+
   generation_ = best.has_image ? best.generation : 0;
   sequence_ = best.has_image ? best.sequence : 0;
   wal_bytes_ = 0;
@@ -1354,12 +1404,16 @@ StoreLoadResult Store::load() {
   std::error_code error;
   if (!std::filesystem::exists(wal_path, error) || error)
     return best;
-  if (!readFile(wal_path, wal, kMaxPayloadBytes + 64)) {
+  if (!readFile(wal_path, wal, kMaxWalFileBytes)) {
     setError("statistics WAL is unreadable or exceeds the safety limit");
+    close();
     return best;
   }
   wal_bytes_ = wal.size();
   Decoder decoder(wal.data(), wal.size());
+  std::size_t last_valid_offset = 0;
+  std::size_t valid_records = 0;
+  bool invalid_suffix = false;
   while (decoder.remaining() > 0) {
     const std::size_t record_start = decoder.offset();
     std::array<uint8_t, 4> magic{};
@@ -1369,35 +1423,73 @@ StoreLoadResult Store::load() {
     if (!decoder.raw(magic.data(), magic.size()) || magic != kWalMagic ||
         !decoder.u32(type) || type != kWalPatchType ||
         !decoder.u64(generation) || !decoder.u64(sequence) ||
-        !decoder.u32(payload_size) || payload_size > kMaxPayloadBytes ||
+        !decoder.u32(payload_size) ||
+        payload_size > kMaxWalPayloadBytes ||
+        payload_size > kMaxPayloadBytes ||
         payload_size > decoder.remaining() - std::min<std::size_t>(
                                                decoder.remaining(), 8))
-      break;
+      {
+        invalid_suffix = true;
+        break;
+      }
     const uint8_t *payload = decoder.current();
-    if (!decoder.skip(payload_size))
+    if (!decoder.skip(payload_size)) {
+      invalid_suffix = true;
       break;
+    }
     uint64_t stored_checksum = 0;
-    if (!decoder.u64(stored_checksum))
+    if (!decoder.u64(stored_checksum)) {
+      invalid_suffix = true;
       break;
+    }
     const std::size_t record_end_without_checksum =
         decoder.offset() - sizeof(uint64_t);
     const uint64_t actual_checksum =
         checksum(wal.data() + record_start,
                  record_end_without_checksum - record_start);
-    if (stored_checksum != actual_checksum)
+    if (stored_checksum != actual_checksum) {
+      invalid_suffix = true;
       break;
-    ++wal_records_;
-    if (!best.has_image || generation != best.generation ||
-        sequence <= best.sequence)
+    }
+    if (!best.has_image)
       continue;
-    if (sequence != best.sequence + 1)
+    if (generation != best.generation) {
+      invalid_suffix = true;
       break;
+    }
+    if (sequence <= best.sequence) {
+      PersistentImage ignored = best.image;
+      if (!decodeAndApplyPatch(payload, payload_size, ignored)) {
+        invalid_suffix = true;
+        break;
+      }
+      last_valid_offset = decoder.offset();
+      ++valid_records;
+      continue;
+    }
+    if (sequence != best.sequence + 1) {
+      invalid_suffix = true;
+      break;
+    }
     PersistentImage candidate = best.image;
-    if (!decodeAndApplyPatch(payload, payload_size, candidate))
+    if (!decodeAndApplyPatch(payload, payload_size, candidate)) {
+      invalid_suffix = true;
       break;
+    }
     best.image = std::move(candidate);
     best.sequence = sequence;
     sequence_ = sequence;
+    last_valid_offset = decoder.offset();
+    ++valid_records;
+  }
+  if (best.has_image) {
+    wal_records_ = valid_records;
+    if (invalid_suffix || last_valid_offset < wal.size()) {
+      if (!truncateWalTo(last_valid_offset, valid_records)) {
+        setError("invalid statistics WAL suffix could not be truncated");
+        close();
+      }
+    }
   }
   return best;
 }
@@ -1462,6 +1554,12 @@ bool Store::appendFile(const std::string &target,
   std::error_code size_error;
   const auto existing_size = std::filesystem::file_size(target, size_error);
   const std::uintmax_t rollback_size = size_error ? 0 : existing_size;
+  if (!size_error &&
+      (existing_size > kMaxWalFileBytes ||
+       bytes.size() > kMaxWalFileBytes - existing_size)) {
+    setError("statistics WAL exceeds the safety limit");
+    return false;
+  }
 #ifdef STATISTICS_V2_TESTING
   std::FILE *file =
       g_test_write_fault == TestWriteFault::OpenFailure
@@ -1493,11 +1591,72 @@ bool Store::appendFile(const std::string &target,
 }
 
 bool Store::truncateWal() {
-  const std::vector<uint8_t> empty;
-  if (!replaceFile(path("statistics-v2.wal"), empty))
+  return truncateWalTo(0, 0);
+}
+
+bool Store::truncateWalTo(std::size_t size, std::size_t records) {
+#ifdef STATISTICS_V2_TESTING
+  if (g_test_write_fault == TestWriteFault::TruncateFailure) {
+    errno = EIO;
+    setError("injected statistics WAL truncation failure");
     return false;
-  wal_bytes_ = 0;
-  wal_records_ = 0;
+  }
+#endif
+  const std::string wal_path = path("statistics-v2.wal");
+#ifdef _WIN32
+  HANDLE file = CreateFileA(wal_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                            nullptr, OPEN_ALWAYS,
+                            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
+                            nullptr);
+  if (file == INVALID_HANDLE_VALUE) {
+    setError("cannot open statistics WAL for truncation");
+    return false;
+  }
+  LARGE_INTEGER offset;
+  offset.QuadPart = static_cast<LONGLONG>(size);
+  const bool ok =
+      SetFilePointerEx(file, offset, nullptr, FILE_BEGIN) != FALSE &&
+      SetEndOfFile(file) != FALSE && FlushFileBuffers(file) != FALSE;
+  CloseHandle(file);
+  if (!ok) {
+    setError("statistics WAL truncation could not be flushed");
+    return false;
+  }
+  HANDLE directory = CreateFileA(
+      directory_.c_str(), FILE_READ_ATTRIBUTES,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+      OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+  if (directory != INVALID_HANDLE_VALUE) {
+    FlushFileBuffers(directory);
+    CloseHandle(directory);
+  }
+#else
+  const int file =
+      ::open(wal_path.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC,
+             S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+  if (file < 0) {
+    setError("cannot open statistics WAL for truncation");
+    return false;
+  }
+  const bool ok =
+      ftruncate(file, static_cast<off_t>(size)) == 0 && fsync(file) == 0;
+  ::close(file);
+  if (!ok) {
+    setError("statistics WAL truncation could not be flushed");
+    return false;
+  }
+  const int directory =
+      ::open(directory_.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (directory < 0 || fsync(directory) != 0) {
+    if (directory >= 0)
+      ::close(directory);
+    setError("statistics WAL directory metadata could not be flushed");
+    return false;
+  }
+  ::close(directory);
+#endif
+  wal_bytes_ = size;
+  wal_records_ = records;
   return true;
 }
 
@@ -1515,7 +1674,12 @@ bool Store::appendPatch(const DirtyPatch &patch) {
   }
   const std::vector<uint8_t> record =
       walRecordBytes(patch, generation_, next);
-  if (record.size() > kMaxPayloadBytes + 64 ||
+  if (record.empty()) {
+    setError("statistics WAL patch exceeds the safety limit");
+    return false;
+  }
+  if (record.size() > kMaxWalFileBytes ||
+      wal_bytes_ > kMaxWalFileBytes - record.size() ||
       !appendFile(path("statistics-v2.wal"), record))
     return false;
   sequence_ = next;
@@ -1537,6 +1701,10 @@ bool Store::writeCheckpoint(const PersistentImage &image) {
   }
   const std::vector<uint8_t> bytes =
       checkpointBytes(image, next_generation, sequence_);
+  if (bytes.empty()) {
+    setError("statistics checkpoint exceeds the safety limit");
+    return false;
+  }
   const char *name =
       next_generation % 2 == 1 ? "statistics-v2-a.bin"
                                : "statistics-v2-b.bin";

@@ -72,9 +72,11 @@ struct DirtyPatch {
   std::vector<GeoCounters> lifetime_geo;
   std::vector<IndexedBucket> minutes;
   std::vector<IndexedBucket> days;
+  bool metadata_present = false;
 
   bool empty() const {
-    return lifetime_geo.empty() && minutes.empty() && days.empty();
+    return !metadata_present && lifetime_geo.empty() && minutes.empty() &&
+           days.empty();
   }
 };
 
@@ -120,6 +122,7 @@ public:
 
   bool hasDirty() const;
   DirtyPatch takeDirtyPatch(int64_t now_seconds, bool stopping);
+  DirtyPatch runtimePatch(int64_t now_seconds, bool stopping);
   PersistentImage persistentImage(int64_t now_seconds, bool stopping) const;
   PersistentImage checkpointImage(int64_t now_seconds, bool stopping,
                                   uint64_t &dirty_version) const;
@@ -178,6 +181,8 @@ private:
   uint64_t dirty_version_ = 0;
 };
 
+int runtimeHeartbeatIntervalSeconds(int flush_interval_seconds);
+
 enum class StoreStatus {
   Ready,
   DirectoryUnavailable,
@@ -229,6 +234,7 @@ private:
   bool appendFile(const std::string &target,
                   const std::vector<uint8_t> &bytes);
   bool truncateWal();
+  bool truncateWalTo(std::size_t size, std::size_t records);
   void setError(const std::string &message);
 
   std::string directory_;
@@ -249,7 +255,8 @@ enum class TestWriteFault {
   OpenFailure,
   NoSpace,
   ShortWrite,
-  FlushFailure
+  FlushFailure,
+  TruncateFailure
 };
 
 void setTestWriteFault(TestWriteFault fault);

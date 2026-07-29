@@ -6,8 +6,11 @@
 #include <condition_variable>
 #include <cstdint>
 #include <ctime>
+#include <exception>
+#include <filesystem>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <string>
 #include <thread>
 #include <utility>
@@ -135,33 +138,93 @@ void logPersistenceError(const std::string &message,
            LOG_LEVEL_WARNING);
 }
 
+void logPersistenceException(
+    const char *category, const char *detail,
+    std::chrono::steady_clock::time_point &last_log) noexcept {
+  try {
+    std::string message(category);
+    if (detail && detail[0] != '\0') {
+      message += ": ";
+      message += detail;
+    }
+    logPersistenceError(message, last_log);
+  } catch (...) {
+    // Logging must never make the persistence worker terminate.
+  }
+}
+
 void persistenceWorker() {
-  auto next_flush = std::chrono::steady_clock::now();
+  const auto heartbeat_interval = std::chrono::seconds(
+      statistics_v2::runtimeHeartbeatIntervalSeconds(
+          g_engine.flush_interval_seconds));
+  const auto started = std::chrono::steady_clock::now();
+  auto next_flush = started;
+  auto next_heartbeat = started + heartbeat_interval;
   auto retry_delay = std::chrono::seconds(1);
-  auto next_retry = std::chrono::steady_clock::now();
+  auto next_retry = started;
   std::chrono::steady_clock::time_point last_error_log{};
   std::unique_ptr<statistics_v2::DirtyPatch> pending;
 
   for (;;) {
     bool stopping = false;
-    {
-      std::unique_lock<std::mutex> lock(g_engine.mutex);
-      const bool store_ready =
-          g_engine.store && g_engine.store->ready();
-      const auto wake_at = store_ready ? next_flush : next_retry;
-      g_engine.condition.wait_until(lock, wake_at, [] {
-        return g_engine.stopping;
-      });
-      stopping = g_engine.stopping;
-    }
+    bool cycle_failed = false;
+    try {
+      {
+        std::unique_lock<std::mutex> lock(g_engine.mutex);
+        const bool store_ready =
+            g_engine.store && g_engine.store->ready();
+        const auto wake_at =
+            store_ready ? std::min(next_flush, next_heartbeat) : next_retry;
+        g_engine.condition.wait_until(lock, wake_at, [] {
+          return g_engine.stopping;
+        });
+        stopping = g_engine.stopping;
+      }
 
-    const auto steady_now = std::chrono::steady_clock::now();
-    bool store_ready = g_engine.store && g_engine.store->ready();
-    if (!store_ready && (stopping || steady_now >= next_retry)) {
-      const statistics_v2::StoreStatus status = g_engine.store->open();
-      if (status == statistics_v2::StoreStatus::Ready) {
-        // A later recovery must not replace the authoritative in-memory state.
-        g_engine.store->load();
+      const auto steady_now = std::chrono::steady_clock::now();
+      bool store_ready = g_engine.store && g_engine.store->ready();
+      if (!store_ready && (stopping || steady_now >= next_retry)) {
+        const statistics_v2::StoreStatus status = g_engine.store->open();
+        if (status == statistics_v2::StoreStatus::Ready) {
+          // A later recovery must not replace the authoritative in-memory
+          // state. load() only validates/repairs the existing files.
+          g_engine.store->load();
+          store_ready = g_engine.store->ready();
+          statistics_v2::PersistentImage image;
+          uint64_t dirty_version = 0;
+          if (store_ready) {
+            std::lock_guard<std::mutex> lock(g_engine.mutex);
+            image = g_engine.core.checkpointImage(
+                nowSeconds(), stopping, dirty_version);
+          }
+          if (store_ready && g_engine.store->writeCheckpoint(image)) {
+            {
+              std::lock_guard<std::mutex> lock(g_engine.mutex);
+              g_engine.core.acknowledgeCheckpoint(dirty_version);
+            }
+            pending.reset();
+            g_engine.store->cleanupLegacyFile();
+            retry_delay = std::chrono::seconds(1);
+            store_ready = true;
+            next_heartbeat = steady_now + heartbeat_interval;
+            writeLog(0, "Statistics v2 持久化已恢复。",
+                     LOG_LEVEL_INFO);
+          } else {
+            logPersistenceError(g_engine.store->lastError(), last_error_log);
+            g_engine.store->close();
+            store_ready = false;
+          }
+        } else {
+          logPersistenceError(g_engine.store->lastError(), last_error_log);
+        }
+        if (!store_ready) {
+          next_retry = steady_now + retry_delay;
+          retry_delay = std::min(retry_delay * 2, kMaximumRetry);
+        }
+      }
+
+      store_ready = g_engine.store && g_engine.store->ready();
+      if (store_ready && g_engine.store->generation() == 0) {
         statistics_v2::PersistentImage image;
         uint64_t dirty_version = 0;
         {
@@ -169,96 +232,110 @@ void persistenceWorker() {
           image = g_engine.core.checkpointImage(
               nowSeconds(), stopping, dirty_version);
         }
-        if (g_engine.store->writeCheckpoint(image)) {
-          {
-            std::lock_guard<std::mutex> lock(g_engine.mutex);
-            g_engine.core.acknowledgeCheckpoint(dirty_version);
-          }
-          pending.reset();
-          g_engine.store->cleanupLegacyFile();
-          retry_delay = std::chrono::seconds(1);
-          store_ready = true;
-          writeLog(0, "Statistics v2 持久化已恢复。",
-                   LOG_LEVEL_INFO);
-        } else {
-          logPersistenceError(g_engine.store->lastError(), last_error_log);
-          g_engine.store->close();
-        }
-      } else {
-        logPersistenceError(g_engine.store->lastError(), last_error_log);
-      }
-      if (!store_ready) {
-        next_retry = steady_now + retry_delay;
-        retry_delay = std::min(retry_delay * 2, kMaximumRetry);
-      }
-    }
-
-    store_ready = g_engine.store && g_engine.store->ready();
-    if (store_ready && g_engine.store->generation() == 0) {
-      statistics_v2::PersistentImage image;
-      uint64_t dirty_version = 0;
-      {
-        std::lock_guard<std::mutex> lock(g_engine.mutex);
-        image = g_engine.core.checkpointImage(
-            nowSeconds(), stopping, dirty_version);
-      }
-      if (!g_engine.store->ensureInitialCheckpoint(image)) {
-        logPersistenceError(g_engine.store->lastError(), last_error_log);
-        g_engine.store->close();
-        next_retry = steady_now + retry_delay;
-        continue;
-      }
-      {
-        std::lock_guard<std::mutex> lock(g_engine.mutex);
-        g_engine.core.acknowledgeCheckpoint(dirty_version);
-      }
-      g_engine.store->cleanupLegacyFile();
-    }
-
-    if (g_engine.store && g_engine.store->ready() &&
-        (stopping || steady_now >= next_flush)) {
-      if (!pending) {
-        std::lock_guard<std::mutex> lock(g_engine.mutex);
-        if (stopping || g_engine.core.hasDirty())
-          pending.reset(new statistics_v2::DirtyPatch(
-              g_engine.core.takeDirtyPatch(nowSeconds(), stopping)));
-      }
-      if (pending) {
-        if (g_engine.store->appendPatch(*pending)) {
-          pending.reset();
-          if (g_engine.store->needsCompaction()) {
-            statistics_v2::PersistentImage image;
-            uint64_t dirty_version = 0;
-            {
-              std::lock_guard<std::mutex> lock(g_engine.mutex);
-              image = g_engine.core.checkpointImage(
-                  nowSeconds(), stopping, dirty_version);
-            }
-            if (!g_engine.store->writeCheckpoint(image)) {
-              logPersistenceError(g_engine.store->lastError(),
-                                  last_error_log);
-              g_engine.store->close();
-              next_retry = steady_now + retry_delay;
-            } else {
-              std::lock_guard<std::mutex> lock(g_engine.mutex);
-              g_engine.core.acknowledgeCheckpoint(dirty_version);
-            }
-          }
-        } else {
+        if (!g_engine.store->ensureInitialCheckpoint(image)) {
           logPersistenceError(g_engine.store->lastError(), last_error_log);
           g_engine.store->close();
           next_retry = steady_now + retry_delay;
+          if (stopping)
+            break;
+          continue;
         }
+        {
+          std::lock_guard<std::mutex> lock(g_engine.mutex);
+          g_engine.core.acknowledgeCheckpoint(dirty_version);
+        }
+        g_engine.store->cleanupLegacyFile();
+        next_heartbeat = steady_now + heartbeat_interval;
       }
-      next_flush =
-          steady_now + std::chrono::seconds(g_engine.flush_interval_seconds);
+
+      const bool flush_due = steady_now >= next_flush;
+      const bool heartbeat_due = steady_now >= next_heartbeat;
+      if (g_engine.store && g_engine.store->ready() &&
+          (stopping || flush_due || heartbeat_due)) {
+        if (!pending) {
+          std::lock_guard<std::mutex> lock(g_engine.mutex);
+          if (stopping || g_engine.core.hasDirty()) {
+            pending.reset(new statistics_v2::DirtyPatch(
+                g_engine.core.takeDirtyPatch(nowSeconds(), stopping)));
+          } else if (heartbeat_due) {
+            pending.reset(new statistics_v2::DirtyPatch(
+                g_engine.core.runtimePatch(nowSeconds(), false)));
+          }
+        }
+        if (pending && !pending->empty()) {
+          if (g_engine.store->appendPatch(*pending)) {
+            pending.reset();
+            next_heartbeat = steady_now + heartbeat_interval;
+            if (g_engine.store->needsCompaction()) {
+              statistics_v2::PersistentImage image;
+              uint64_t dirty_version = 0;
+              {
+                std::lock_guard<std::mutex> lock(g_engine.mutex);
+                image = g_engine.core.checkpointImage(
+                    nowSeconds(), stopping, dirty_version);
+              }
+              if (!g_engine.store->writeCheckpoint(image)) {
+                logPersistenceError(g_engine.store->lastError(),
+                                    last_error_log);
+                g_engine.store->close();
+                next_retry = steady_now + retry_delay;
+              } else {
+                std::lock_guard<std::mutex> lock(g_engine.mutex);
+                g_engine.core.acknowledgeCheckpoint(dirty_version);
+              }
+            }
+          } else {
+            logPersistenceError(g_engine.store->lastError(), last_error_log);
+            g_engine.store->close();
+            next_retry = steady_now + retry_delay;
+          }
+        }
+        next_flush =
+            steady_now + std::chrono::seconds(g_engine.flush_interval_seconds);
+      }
+
+      if (stopping)
+        break;
+    } catch (const std::bad_alloc &error) {
+      cycle_failed = true;
+      logPersistenceException("memory allocation failure", error.what(),
+                              last_error_log);
+    } catch (const std::filesystem::filesystem_error &error) {
+      cycle_failed = true;
+      logPersistenceException("filesystem exception", error.what(),
+                              last_error_log);
+    } catch (const std::exception &error) {
+      cycle_failed = true;
+      logPersistenceException("unexpected persistence exception", error.what(),
+                              last_error_log);
+    } catch (...) {
+      cycle_failed = true;
+      logPersistenceException("unknown persistence exception", nullptr,
+                              last_error_log);
     }
 
+    if (!cycle_failed)
+      continue;
+    try {
+      if (g_engine.store)
+        g_engine.store->close();
+    } catch (...) {
+    }
+    const auto retry_from = std::chrono::steady_clock::now();
+    next_retry = retry_from + retry_delay;
+    retry_delay = std::min(retry_delay * 2, kMaximumRetry);
+    {
+      std::lock_guard<std::mutex> lock(g_engine.mutex);
+      stopping = g_engine.stopping;
+    }
     if (stopping)
       break;
   }
-  if (g_engine.store)
-    g_engine.store->close();
+  try {
+    if (g_engine.store)
+      g_engine.store->close();
+  } catch (...) {
+  }
 }
 
 void cacheHeaders(Response &response) {
@@ -455,13 +532,32 @@ void initialize() {
   }
 
   bool loaded = false;
-  if (g_engine.store->open() == statistics_v2::StoreStatus::Ready) {
-    const statistics_v2::StoreLoadResult recovered = g_engine.store->load();
-    if (recovered.has_image) {
-      std::lock_guard<std::mutex> lock(g_engine.mutex);
-      g_engine.core.startFromImage(recovered.image, nowSeconds());
-      loaded = true;
+  std::chrono::steady_clock::time_point initialization_error_log{};
+  try {
+    if (g_engine.store->open() == statistics_v2::StoreStatus::Ready) {
+      const statistics_v2::StoreLoadResult recovered = g_engine.store->load();
+      if (recovered.has_image) {
+        std::lock_guard<std::mutex> lock(g_engine.mutex);
+        g_engine.core.startFromImage(recovered.image, nowSeconds());
+        loaded = true;
+      }
     }
+  } catch (const std::bad_alloc &error) {
+    logPersistenceException("initial memory allocation failure", error.what(),
+                            initialization_error_log);
+    g_engine.store->close();
+  } catch (const std::filesystem::filesystem_error &error) {
+    logPersistenceException("initial filesystem exception", error.what(),
+                            initialization_error_log);
+    g_engine.store->close();
+  } catch (const std::exception &error) {
+    logPersistenceException("initial persistence exception", error.what(),
+                            initialization_error_log);
+    g_engine.store->close();
+  } catch (...) {
+    logPersistenceException("unknown initial persistence exception", nullptr,
+                            initialization_error_log);
+    g_engine.store->close();
   }
   if (!loaded) {
     std::lock_guard<std::mutex> lock(g_engine.mutex);
