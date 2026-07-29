@@ -222,6 +222,12 @@ ENDIF()
 
 IF(BUILD_TESTS)
     ENABLE_TESTING()
+    FIND_PACKAGE(Python3 COMPONENTS Interpreter REQUIRED)
+    ADD_TEST(
+        NAME custom_openclash_rules_bundle
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/test_custom_openclash_rules_bundle.py)
+
     ADD_EXECUTABLE(proxy_policy_test
         tests/proxy_policy_test.cpp
         src/handler/proxy_policy.cpp
