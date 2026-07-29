@@ -84,6 +84,7 @@ SET(SUBCONVERTER_RUNTIME_SOURCES
     src/handler/interfaces.cpp
     src/handler/multithread.cpp
     src/handler/statistics.cpp
+    src/handler/statistics_v2.cpp
     src/handler/upload.cpp
     src/handler/version_page.cpp
     src/handler/webget.cpp
@@ -314,6 +315,30 @@ IF(BUILD_TESTS)
         ${CMAKE_THREAD_LIBS_INIT})
     ADD_TEST(NAME concurrency_primitives COMMAND concurrency_primitives_test)
     SET_TESTS_PROPERTIES(concurrency_primitives PROPERTIES LABELS fast)
+
+    ADD_EXECUTABLE(statistics_v2_test
+        tests/statistics_v2_test.cpp
+        src/handler/statistics_v2.cpp)
+    TARGET_INCLUDE_DIRECTORIES(statistics_v2_test PRIVATE src)
+    TARGET_COMPILE_DEFINITIONS(statistics_v2_test PRIVATE
+        STATISTICS_V2_TESTING)
+    TARGET_LINK_LIBRARIES(statistics_v2_test
+        ${CMAKE_THREAD_LIBS_INIT})
+    ADD_TEST(NAME statistics_v2 COMMAND statistics_v2_test)
+    SET_TESTS_PROPERTIES(statistics_v2 PROPERTIES
+        LABELS fast
+        TIMEOUT 120)
+
+    ADD_EXECUTABLE(statistics_v2_benchmark
+        tests/statistics_v2_benchmark.cpp
+        src/handler/statistics_v2.cpp)
+    TARGET_INCLUDE_DIRECTORIES(statistics_v2_benchmark PRIVATE src)
+    TARGET_LINK_LIBRARIES(statistics_v2_benchmark
+        ${CMAKE_THREAD_LIBS_INIT})
+    ADD_TEST(NAME statistics_v2_benchmark COMMAND statistics_v2_benchmark)
+    SET_TESTS_PROPERTIES(statistics_v2_benchmark PROPERTIES
+        LABELS benchmark
+        TIMEOUT 120)
 
     ADD_EXECUTABLE(sub_request_key_test
         tests/sub_request_key_test.cpp

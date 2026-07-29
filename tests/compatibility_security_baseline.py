@@ -126,6 +126,9 @@ def running_service(
     statistics: bool = False,
     security_profile: str = "lan",
     extra_args: tuple[str, ...] = (),
+    runtime_details: bool = False,
+    legacy_statistics: bool = False,
+    invalid_statistics_path: bool = False,
 ):
     port = unused_port()
     baseline = (COMPAT_FIXTURES / "legacy-pref.toml").read_text(
@@ -150,8 +153,17 @@ def running_service(
     runtime_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=runtime_dir) as temporary:
         temporary_path = Path(temporary)
-        stats_path = (temporary_path / "stats").as_posix()
+        statistics_path = temporary_path / "stats"
+        stats_path = statistics_path.as_posix()
         baseline = baseline.replace('data_dir = "stats"', f'data_dir = "{stats_path}"')
+        if legacy_statistics:
+            statistics_path.mkdir(parents=True, exist_ok=True)
+            (statistics_path / "statistics.json").write_text(
+                '{"schema":4,"legacy":true}',
+                encoding="utf-8",
+            )
+        elif invalid_statistics_path:
+            statistics_path.write_text("not a directory", encoding="utf-8")
         pref = temporary_path / "pref.toml"
         pref.write_text(baseline, encoding="utf-8", newline="\n")
         stdout = (temporary_path / "stdout.log").open("wb")
@@ -170,7 +182,11 @@ def running_service(
         base_url = f"http://127.0.0.1:{port}"
         try:
             wait_ready(base_url, process)
-            yield base_url
+            yield (
+                (base_url, statistics_path)
+                if runtime_details
+                else base_url
+            )
         finally:
             process.terminate()
             try:
@@ -342,8 +358,14 @@ def conversion_baselines(
         raise AssertionError("/getruleset semantic baseline failed")
 
 
-def dashboard_baseline(binary: Path) -> None:
-    with running_service(binary, statistics=True) as base_url:
+def dashboard_baseline(binary: Path, fixture_base: str) -> None:
+    with running_service(
+        binary,
+        statistics=True,
+        runtime_details=True,
+        legacy_statistics=True,
+    ) as runtime:
+        base_url, statistics_path = runtime
         status, _, headers = request(base_url, "/dashboard")
         if status != 401 or "no-store" not in headers.get("cache-control", ""):
             raise AssertionError("Dashboard missing-auth baseline failed")
@@ -355,6 +377,96 @@ def dashboard_baseline(binary: Path) -> None:
         )
         if status != 200 or b"SubConverter-Extended Dashboard" not in body:
             raise AssertionError("Dashboard valid-auth baseline failed")
+        auth_headers = {"Authorization": "Basic " + token}
+        status, first_body, first_headers = request(
+            base_url, "/dashboard/data", headers=auth_headers
+        )
+        if status != 200 or "no-store" not in first_headers.get("cache-control", ""):
+            raise AssertionError("Dashboard data cache-control baseline failed")
+        data = json.loads(first_body)
+        required_top_level = {
+            "enabled",
+            "generated_at",
+            "started_at",
+            "runtime",
+            "windows",
+            "country_windows",
+            "countries",
+            "china_region_windows",
+            "china_regions",
+            "series",
+        }
+        if not required_top_level.issubset(data):
+            raise AssertionError(
+                f"Dashboard data fields changed: {required_top_level - set(data)}"
+            )
+        window_names = {
+            "startup",
+            "hour",
+            "day",
+            "seven_days",
+            "thirty_days",
+            "half_year",
+            "year",
+            "lifetime",
+        }
+        if set(data["windows"]) != window_names:
+            raise AssertionError("Dashboard window names changed")
+        for window in data["windows"].values():
+            if (
+                not isinstance(window.get("subscription_requests"), int)
+                or not isinstance(window.get("rule_conversions"), int)
+            ):
+                raise AssertionError("Dashboard counter types changed")
+        if len(data["series"]) != 24 or not isinstance(data.get("revision"), int):
+            raise AssertionError("Dashboard series/revision compatibility failed")
+        status, second_body, _ = request(
+            base_url, "/dashboard/data", headers=auth_headers
+        )
+        if status != 200 or second_body != first_body:
+            raise AssertionError("Dashboard clients did not share the one-second snapshot")
+
+        status, _, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "clash",
+                "url": fixture_base + "/subscription.txt",
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+        )
+        if status != 200:
+            raise AssertionError("statistics-enabled /sub compatibility failed")
+        time.sleep(1.1)
+        status, updated_body, _ = request(
+            base_url, "/dashboard/data", headers=auth_headers
+        )
+        updated = json.loads(updated_body)
+        if (
+            status != 200
+            or updated["revision"] <= data["revision"]
+            or updated["windows"]["lifetime"]["subscription_requests"] != 1
+        ):
+            raise AssertionError("Dashboard revision/request accounting failed")
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            checkpoints = list(
+                statistics_path.glob("statistics-v2-*.bin")
+            )
+            wal = statistics_path / "statistics-v2.wal"
+            if (
+                checkpoints
+                and wal.is_file()
+                and wal.stat().st_size > 0
+                and not (statistics_path / "statistics.json").exists()
+            ):
+                break
+            time.sleep(0.1)
+        else:
+            raise AssertionError(
+                "Statistics v2 checkpoint/WAL creation or legacy cleanup failed"
+            )
         for expected in (401, 401, 429):
             status, _, _ = request(
                 base_url,
@@ -365,6 +477,54 @@ def dashboard_baseline(binary: Path) -> None:
                 raise AssertionError(
                     f"Dashboard lockout expected HTTP {expected}, got {status}"
                 )
+
+
+def persistence_degradation_baseline(binary: Path, fixture_base: str) -> None:
+    with running_service(
+        binary,
+        statistics=True,
+        invalid_statistics_path=True,
+    ) as base_url:
+        token = base64.b64encode(
+            b"fixture-admin:fixture-dashboard-secret"
+        ).decode()
+        status, body, _ = request(
+            base_url,
+            "/dashboard/data",
+            headers={"Authorization": "Basic " + token},
+        )
+        if status != 200 or not json.loads(body).get("enabled"):
+            raise AssertionError(
+                "Dashboard failed after persistence degradation"
+            )
+        status, _, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "clash",
+                "url": fixture_base + "/subscription.txt",
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+        )
+        if status != 200:
+            raise AssertionError(
+                "/sub failed after persistence degradation"
+            )
+
+    with running_service(
+        binary,
+        statistics=False,
+        runtime_details=True,
+    ) as runtime:
+        base_url, statistics_path = runtime
+        status, body, _ = request(base_url, "/healthz")
+        if status != 200 or body.strip() != b"ok":
+            raise AssertionError("statistics-disabled service failed")
+        if statistics_path.exists():
+            raise AssertionError(
+                "statistics-disabled service touched the data directory"
+            )
 
 
 def public_request_baseline(binary: Path, fixture_base: str) -> None:
@@ -427,7 +587,8 @@ def main() -> int:
     with fixture_server() as fixture_base:
         with running_service(binary) as base_url:
             conversion_baselines(base_url, fixture_base, args.update_golden)
-        dashboard_baseline(binary)
+        dashboard_baseline(binary, fixture_base)
+        persistence_degradation_baseline(binary, fixture_base)
         public_request_baseline(binary, fixture_base)
 
     print("compatibility and security baselines passed")
