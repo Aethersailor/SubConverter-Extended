@@ -1,0 +1,2 @@
+proxies:
+  - {name: Smoke, server: example.com, port: 8388, cipher: aes-128-gcm, password: password, type: ss, udp: true, tfo: true}

@@ -1,68 +1,101 @@
+#include <cassert>
 #include <iostream>
+#include <set>
 #include <string>
-#include <tuple>
 #include <vector>
 
 #include <yaml-cpp/yaml.h>
 
 #include "config/custom_openclash_rules.h"
 #include "handler/custom_openclash_rules_endpoint.h"
+#include "utils/urlencode.h"
+
+namespace {
+
+using custom_openclash_rules::ResourceKind;
 
 struct MatchCase {
   std::string url;
-  custom_openclash_rules::ResourceKind kind;
+  ResourceKind kind;
   std::string path;
 };
 
+std::string manifestLine(char digest, const std::string &path) {
+  return std::string(64, digest) + "  main/" + path + "\n";
+}
+
+void expectMatch(const MatchCase &test) {
+  auto actual = custom_openclash_rules::matchRepositoryUrl(test.url);
+  if (actual.kind != test.kind || actual.repository_path != test.path) {
+    std::cerr << "URL mismatch: " << test.url << '\n';
+    std::exit(1);
+  }
+}
+
+} // namespace
+
 int main() {
-  using custom_openclash_rules::ResourceKind;
+  const std::vector<std::string> expected_directories = {
+      "cfg",       "cfg/yaml",      "rule", "game_rule",
+      "overwrite", "overwrite/yaml", "shell"};
+  assert(custom_openclash_rules::allowedDirectories() ==
+         expected_directories);
 
   const std::vector<MatchCase> valid = {
       {"https://raw.githubusercontent.com/Aethersailor/"
-       "Custom_OpenClash_Rules/main/cfg/Custom_Clash.ini",
-       ResourceKind::ConfigIni, "cfg/Custom_Clash.ini"},
+       "Custom_OpenClash_Rules/main/cfg/Fixture.ini",
+       ResourceKind::ConfigIni, "cfg/Fixture.ini"},
+      {"https://raw.githubusercontent.com/AETHERSAILOR/"
+       "CUSTOM_OPENCLASH_RULES/refs/heads/main/cfg/yaml/Fixture.yaml",
+       ResourceKind::StaticFile, "cfg/yaml/Fixture.yaml"},
+      {"https://github.com/Aethersailor/Custom_OpenClash_Rules/raw/main/"
+       "rule/Fixture.list?download=1",
+       ResourceKind::RuleList, "rule/Fixture.list"},
       {"https://github.com/Aethersailor/Custom_OpenClash_Rules/blob/refs/"
-       "heads/main/rule/Custom_Direct.list?raw=1",
-       ResourceKind::RuleList, "rule/Custom_Direct.list"},
+       "heads/main/rule/Fixture.yaml?raw=1#fragment",
+       ResourceKind::RuleYaml, "rule/Fixture.yaml"},
       {"https://cdn.jsdelivr.net/gh/Aethersailor/"
-       "Custom_OpenClash_Rules@main/rule/Custom_Direct_Domain.yaml",
-       ResourceKind::RuleYaml, "rule/Custom_Direct_Domain.yaml"},
+       "Custom_OpenClash_Rules@main/game_rule/Fixture.yml",
+       ResourceKind::RuleYaml, "game_rule/Fixture.yml"},
       {"https://testingcf.jsdelivr.net/gh/Aethersailor/"
-       "Custom_OpenClash_Rules@refs/heads/main/rule/Custom_Direct_Domain.mrs",
-       ResourceKind::RuleMrs, "rule/Custom_Direct_Domain.mrs"},
+       "Custom_OpenClash_Rules@refs/heads/main/game_rule/Fixture.mrs",
+       ResourceKind::RuleMrs, "game_rule/Fixture.mrs"},
+      {"https://gcore.jsdelivr.net/gh/Aethersailor/"
+       "Custom_OpenClash_Rules@main/overwrite/Fixture.conf",
+       ResourceKind::StaticFile, "overwrite/Fixture.conf"},
+      {"https://jsdelivr.net/gh/Aethersailor/"
+       "Custom_OpenClash_Rules@main/overwrite/yaml/Fixture.json",
+       ResourceKind::StaticFile, "overwrite/yaml/Fixture.json"},
       {"https://raw.githubusercontent.com/Aethersailor/"
-       "Custom_OpenClash_Rules/main/cfg/yaml/Custom_Clash.yaml",
-       ResourceKind::StaticFile, "cfg/yaml/Custom_Clash.yaml"},
+       "Custom_OpenClash_Rules/main/shell/Fixture.sh",
+       ResourceKind::StaticFile, "shell/Fixture.sh"},
   };
-
-  for (const MatchCase &test : valid) {
-    auto actual = custom_openclash_rules::matchRepositoryUrl(test.url);
-    if (actual.kind != test.kind || actual.repository_path != test.path) {
-      std::cerr << "URL mismatch: " << test.url << '\n';
-      return 1;
-    }
-  }
+  for (const MatchCase &test : valid)
+    expectMatch(test);
 
   const std::vector<std::string> invalid = {
       "https://raw.githubusercontent.com/Aethersailor/"
-      "Custom_OpenClash_Rules/dev/rule/Custom_Direct.list",
+      "Custom_OpenClash_Rules/dev/rule/Fixture.list",
       "https://cdn.jsdelivr.net/gh/Other/"
-      "Custom_OpenClash_Rules@main/rule/Custom_Direct.list",
+      "Custom_OpenClash_Rules@main/rule/Fixture.list",
       "https://cdn.jsdelivr.net.evil.example/gh/Aethersailor/"
-      "Custom_OpenClash_Rules@main/rule/Custom_Direct.list",
+      "Custom_OpenClash_Rules@main/rule/Fixture.list",
       "https://cdn.jsdelivr.net/gh/Aethersailor/"
       "Custom_OpenClash_Rules@main/rule/../README.md",
       "https://cdn.jsdelivr.net/gh/Aethersailor/"
-      "Custom_OpenClash_Rules@main/doc/README.md",
+      "Custom_OpenClash_Rules@main/doc/Fixture.txt",
       "https://cdn.jsdelivr.net/gh/Aethersailor/"
       "Custom_OpenClash_Rules@main/rule/README.md",
-      "HTTPS://GCORE.JSDELIVR.NET/gh/Aethersailor/"
-      "Custom_OpenClash_Rules@main/rule/archived/Emby.list#fragment",
+      "https://cdn.jsdelivr.net/gh/Aethersailor/"
+      "Custom_OpenClash_Rules@main/rule/nested/Fixture.list",
       "https://raw.githubusercontent.com/Aethersailor/"
-      "Custom_OpenClash_Rules/main/cfg/test/Nested.ini",
-      "file:///base/Custom_OpenClash_Rules/main/rule/Custom_Direct.list",
+      "Custom_OpenClash_Rules/main/cfg/test/Fixture.ini",
+      "https://raw.githubusercontent.com/Aethersailor/"
+      "Custom_OpenClash_Rules/main/shell/subdir/Fixture.sh",
+      "https://raw.githubusercontent.com/Aethersailor/"
+      "Custom_OpenClash_Rules/main/overwrite/yaml/nested/Fixture.conf",
+      "file:///base/Custom_OpenClash_Rules/main/rule/Fixture.list",
   };
-
   for (const std::string &url : invalid) {
     if (custom_openclash_rules::matchRepositoryUrl(url).matched()) {
       std::cerr << "Unexpected URL match: " << url << '\n';
@@ -70,44 +103,41 @@ int main() {
     }
   }
 
-  auto published = custom_openclash_rules::matchPublishedPath(
-      "/Custom_OpenClash_Rules/main/rule/Custom_Direct.list");
-  if (published.kind != ResourceKind::RuleList ||
-      custom_openclash_rules::publishedUrl(
-          published, "https://test-api.asailor.org/") !=
-          "https://test-api.asailor.org/Custom_OpenClash_Rules/main/rule/"
-          "Custom_Direct.list") {
-    std::cerr << "Published path mapping failed\n";
-    return 1;
-  }
+  const std::string encoded =
+      urlDecode("/Custom_OpenClash_Rules/main/cfg/yaml/"
+                "Fixture%26Airport.yaml");
+  auto published = custom_openclash_rules::matchPublishedPath(encoded);
+  assert(published.matched());
+  assert(published.repository_path == "cfg/yaml/Fixture&Airport.yaml");
+  assert(custom_openclash_rules::publishedUrl(
+             published, "https://test-api.asailor.org/") ==
+         "https://test-api.asailor.org/Custom_OpenClash_Rules/main/cfg/yaml/"
+         "Fixture&Airport.yaml");
 
-  if (custom_openclash_rules::matchPublishedPath(
-          "/Custom_OpenClash_Rules/main/rule/%2e%2e/README.md")
-          .matched()) {
-    std::cerr << "Encoded traversal path matched\n";
-    return 1;
-  }
-  if (custom_openclash_rules::matchPublishedPath(
-          "/Custom_OpenClash_Rules/main/rule/archived/Emby.list")
-          .matched() ||
-      custom_openclash_rules::matchPublishedPath(
-          "/Custom_OpenClash_Rules/main/cfg/README.md")
-          .matched()) {
-    std::cerr << "Excluded published path matched\n";
-    return 1;
-  }
+  const std::vector<std::string> unsafe_published_paths = {
+      "/Custom_OpenClash_Rules/main/rule/%2e%2e",
+      "/Custom_OpenClash_Rules/main/rule/../Fixture.list",
+      "/Custom_OpenClash_Rules/main/rule\\Fixture.list",
+      "/Custom_OpenClash_Rules/main/rule/README.md",
+      "/Custom_OpenClash_Rules/main/rule/nested/Fixture.list",
+      urlDecode("/Custom_OpenClash_Rules/main/rule/%252e%252e"),
+      urlDecode("/Custom_OpenClash_Rules/main/rule/%25252e%25252e"),
+  };
+  for (const std::string &path : unsafe_published_paths)
+    assert(!custom_openclash_rules::matchPublishedPath(path).matched());
 
   const std::vector<std::string> valid_directories = {
       "/Custom_OpenClash_Rules/main",
       "/Custom_OpenClash_Rules/main/",
       "/Custom_OpenClash_Rules/main/cfg/",
-      "/Custom_OpenClash_Rules/main/cfg/yaml/"};
-  for (const std::string &path : valid_directories) {
-    if (!custom_openclash_rules::matchPublishedDirectory(path).matched()) {
-      std::cerr << "Directory path did not match: " << path << '\n';
-      return 1;
-    }
-  }
+      "/Custom_OpenClash_Rules/main/cfg/yaml/",
+      "/Custom_OpenClash_Rules/main/rule/",
+      "/Custom_OpenClash_Rules/main/game_rule/",
+      "/Custom_OpenClash_Rules/main/overwrite/",
+      "/Custom_OpenClash_Rules/main/overwrite/yaml/",
+      "/Custom_OpenClash_Rules/main/shell/"};
+  for (const std::string &path : valid_directories)
+    assert(custom_openclash_rules::matchPublishedDirectory(path).matched());
 
   const std::vector<std::string> invalid_directories = {
       "/Custom_OpenClash_Rules/mainly/",
@@ -115,149 +145,131 @@ int main() {
       "/Custom_OpenClash_Rules/main/cfg/../",
       "/Custom_OpenClash_Rules/main/cfg/%2e%2e/",
       "/Custom_OpenClash_Rules/main//",
-      "/Custom_OpenClash_Rules/main/cfg/archived/",
-      "/Custom_OpenClash_Rules/main/cfg/test/",
+      "/Custom_OpenClash_Rules/main/cfg/nested/",
       "/Custom_OpenClash_Rules/main/rule/archived/",
-      "/Custom_OpenClash_Rules/main/cfg//archived/",
-      "/Custom_OpenClash_Rules/main/cfg\\archived/"};
-  for (const std::string &path : invalid_directories) {
-    if (custom_openclash_rules::matchPublishedDirectory(path).matched()) {
-      std::cerr << "Unexpected directory path match: " << path << '\n';
-      return 1;
-    }
-  }
+      "/Custom_OpenClash_Rules/main/cfg\\yaml/"};
+  for (const std::string &path : invalid_directories)
+    assert(!custom_openclash_rules::matchPublishedDirectory(path).matched());
 
-  auto requestPath = [](const std::string &path, const std::string &etag = "") {
-    Request request;
-    Response response;
-    request.method = "GET";
-    request.url = path;
-    if (!etag.empty())
-      request.headers["If-None-Match"] = etag;
-    std::string content =
-        custom_openclash_rules_endpoint::serve(request, response);
-    return std::make_tuple(response, content);
+  const std::vector<std::pair<std::string, std::string>> mime_cases = {
+      {"cfg/yaml/a.yaml", "application/yaml; charset=utf-8"},
+      {"overwrite/yaml/a.json", "application/json; charset=utf-8"},
+      {"cfg/a.ini", "text/plain; charset=utf-8"},
+      {"rule/a.list", "text/plain; charset=utf-8"},
+      {"overwrite/a.conf", "text/plain; charset=utf-8"},
+      {"shell/a.txt", "text/plain; charset=utf-8"},
+      {"shell/a.sh", "text/plain; charset=utf-8"},
+      {"game_rule/a.mrs", "application/octet-stream"},
+      {"shell/a.bin", "application/octet-stream"},
   };
-
-  auto root_redirect = requestPath("/Custom_OpenClash_Rules/main");
-  if (std::get<0>(root_redirect).status_code != 308 ||
-      std::get<0>(root_redirect).headers["Location"] !=
-          "/Custom_OpenClash_Rules/main/") {
-    std::cerr << "Root directory redirect failed\n";
-    return 1;
+  for (const auto &test : mime_cases) {
+    auto resource = custom_openclash_rules::matchPublishedPath(
+        "/Custom_OpenClash_Rules/main/" + test.first);
+    assert(resource.matched());
+    assert(custom_openclash_rules::contentType(resource) == test.second);
   }
 
-  auto root_page = requestPath("/Custom_OpenClash_Rules/main/");
-  const Response &root_response = std::get<0>(root_page);
-  const std::string &root_content = std::get<1>(root_page);
-  if (root_response.status_code != 200 ||
-      root_response.content_type != "text/html; charset=utf-8" ||
-      root_content.find("href=\"cfg/\"") == std::string::npos ||
-      root_content.find("href=\"rule/\"") == std::string::npos ||
-      root_content.find("manifest.sha256") != std::string::npos ||
-      root_response.headers.find("Content-Security-Policy") ==
-          root_response.headers.end() ||
-      root_response.headers.find("X-Robots-Tag") ==
-          root_response.headers.end()) {
-    std::cerr << "Root directory page failed\n";
-    return 1;
-  }
+  const std::string fixture_name = "Fixture&<Airport>.yaml";
+  const std::string unicode_name = "测试规则.yaml";
+  const std::string manifest =
+      manifestLine('a', "cfg/yaml/" + fixture_name) +
+      manifestLine('b', "overwrite/Fixture Name.conf") +
+      manifestLine('c', "rule/" + unicode_name);
+  const std::set<std::string> available = {
+      "cfg/yaml/" + fixture_name,
+      "overwrite/Fixture Name.conf",
+      "rule/" + unicode_name,
+  };
+  custom_openclash_rules_endpoint::DirectoryIndexSnapshot pages;
+  std::string index_error;
+  assert(custom_openclash_rules_endpoint::buildDirectoryIndexSnapshot(
+      manifest, available, pages, &index_error));
+  assert(pages.size() == 8);
+  for (const std::string &directory : expected_directories)
+    assert(pages.count(directory) == 1);
+  assert(pages.at("").content.find("href=\"cfg/\"") != std::string::npos);
+  assert(pages.at("").content.find("href=\"game_rule/\"") !=
+         std::string::npos);
+  assert(pages.at("").content.find("href=\"overwrite/\"") !=
+         std::string::npos);
+  assert(pages.at("").content.find("href=\"shell/\"") !=
+         std::string::npos);
+  assert(pages.at("cfg").content.find("href=\"yaml/\"") !=
+         std::string::npos);
+  assert(pages.at("cfg/yaml").content.find(
+             "href=\"Fixture%26%3CAirport%3E.yaml\"") != std::string::npos);
+  assert(pages.at("cfg/yaml").content.find(
+             "Fixture&amp;&lt;Airport&gt;.yaml") != std::string::npos);
+  assert(pages.at("overwrite").content.find("href=\"Fixture%20Name.conf\"") !=
+         std::string::npos);
+  assert(pages.at("rule").content.find(urlEncode(unicode_name)) !=
+         std::string::npos);
+  assert(pages.at("game_rule").content.find("Fixture") ==
+         std::string::npos);
 
-  auto cfg_page = requestPath("/Custom_OpenClash_Rules/main/cfg/");
-  if (std::get<0>(cfg_page).status_code != 200 ||
-      std::get<1>(cfg_page).find("Custom_Clash.ini") == std::string::npos ||
-      std::get<1>(cfg_page).find("href=\"archived/\"") !=
-          std::string::npos ||
-      std::get<1>(cfg_page).find("href=\"test/\"") != std::string::npos ||
-      std::get<1>(cfg_page).find("README.md") != std::string::npos ||
-      std::get<1>(cfg_page).find("href=\"yaml/\"") == std::string::npos ||
-      std::get<1>(cfg_page).find("Custom_Direct.list") !=
-          std::string::npos) {
-    std::cerr << "Cfg directory page failed\n";
-    return 1;
-  }
+  custom_openclash_rules_endpoint::DirectoryIndexSnapshot same_pages;
+  assert(custom_openclash_rules_endpoint::buildDirectoryIndexSnapshot(
+      manifest, available, same_pages));
+  assert(same_pages.at("").etag == pages.at("").etag);
+  assert(same_pages.at("cfg/yaml").etag == pages.at("cfg/yaml").etag);
 
-  auto yaml_page = requestPath("/Custom_OpenClash_Rules/main/cfg/yaml/");
-  if (std::get<0>(yaml_page).status_code != 200 ||
-      std::get<1>(yaml_page).find("Custom_Clash_DIY%26Airport.yaml") ==
-          std::string::npos) {
-    std::cerr << "Encoded directory link failed\n";
-    return 1;
-  }
+  const std::string added_manifest =
+      manifest + manifestLine('d', "shell/added.sh");
+  std::set<std::string> added_available = available;
+  added_available.insert("shell/added.sh");
+  custom_openclash_rules_endpoint::DirectoryIndexSnapshot added_pages;
+  assert(custom_openclash_rules_endpoint::buildDirectoryIndexSnapshot(
+      added_manifest, added_available, added_pages));
+  assert(added_pages.at("").etag == pages.at("").etag);
+  assert(added_pages.at("shell").etag != pages.at("shell").etag);
+  assert(added_pages.at("rule").etag == pages.at("rule").etag);
 
-  auto nested_redirect = requestPath("/Custom_OpenClash_Rules/main/cfg/yaml");
-  if (std::get<0>(nested_redirect).status_code != 308 ||
-      std::get<0>(nested_redirect).headers["Location"] !=
-          "/Custom_OpenClash_Rules/main/cfg/yaml/") {
-    std::cerr << "Nested directory redirect failed\n";
-    return 1;
-  }
-
-  std::string root_etag = root_response.headers.at("ETag");
-  auto cached_root =
-      requestPath("/Custom_OpenClash_Rules/main/", root_etag);
-  if (std::get<0>(cached_root).status_code != 304 ||
-      !std::get<1>(cached_root).empty()) {
-    std::cerr << "Directory ETag handling failed\n";
-    return 1;
-  }
-
-  auto file_response = requestPath(
-      "/Custom_OpenClash_Rules/main/rule/Custom_Direct_Domain.yaml");
-  if (std::get<0>(file_response).status_code != 200 ||
-      std::get<0>(file_response).content_type !=
-          "application/yaml; charset=utf-8" ||
-      std::get<1>(file_response).empty()) {
-    std::cerr << "Existing file serving regressed\n";
-    return 1;
-  }
-
-  const std::vector<std::string> missing_paths = {
-      "/Custom_OpenClash_Rules/main/doc/",
-      "/Custom_OpenClash_Rules/main/cfg/README.md",
-      "/Custom_OpenClash_Rules/main/cfg/test/",
-      "/Custom_OpenClash_Rules/main/rule/README.md",
-      "/Custom_OpenClash_Rules/main/rule/archived/",
-      "/Custom_OpenClash_Rules/main/rule/archived/Emby.list",
-      "/Custom_OpenClash_Rules/main/cfg/missing/",
-      "/Custom_OpenClash_Rules/main/cfg/../rule/",
-      "/Custom_OpenClash_Rules/main/manifest.sha256",
-      "/Custom_OpenClash_Rules/main/rule/Custom_Direct_Domain.yaml/"};
-  for (const std::string &path : missing_paths) {
-    auto missing = requestPath(path);
-    if (std::get<0>(missing).status_code != 404) {
-      std::cerr << "Unsafe or missing path did not return 404: " << path
-                << '\n';
-      return 1;
-    }
-  }
+  custom_openclash_rules_endpoint::DirectoryIndexSnapshot rejected_pages;
+  assert(!custom_openclash_rules_endpoint::buildDirectoryIndexSnapshot(
+      manifestLine('a', "rule/nested/rejected.yaml"),
+      {"rule/nested/rejected.yaml"}, rejected_pages));
+  assert(!custom_openclash_rules_endpoint::buildDirectoryIndexSnapshot(
+      manifestLine('a', "rule/README.md"), {"rule/README.md"},
+      rejected_pages));
+  assert(!custom_openclash_rules_endpoint::buildDirectoryIndexSnapshot(
+      manifestLine('a', "rule/duplicate.yaml") +
+          manifestLine('b', "rule/duplicate.yaml"),
+      {"rule/duplicate.yaml"}, rejected_pages));
 
   YAML::Node root = YAML::Load(R"(
 rule-providers:
-  direct:
-    type: http
-    behavior: domain
-    url: https://cdn.jsdelivr.net/gh/Aethersailor/Custom_OpenClash_Rules@main/rule/Custom_Direct_Domain.mrs
-    path: ./providers/direct.yaml
-  third-party:
-    type: http
-    behavior: domain
-    url: https://example.com/domain.yaml
+  rule-yaml:
+    url: https://cdn.jsdelivr.net/gh/Aethersailor/Custom_OpenClash_Rules@main/rule/Fixture.yaml
+    path: ./providers/rule.mrs
+  game-mrs:
+    url: https://raw.githubusercontent.com/Aethersailor/Custom_OpenClash_Rules/main/game_rule/Game.mrs
+    path: ./providers/game.yaml
+  overwrite:
+    url: https://raw.githubusercontent.com/Aethersailor/Custom_OpenClash_Rules/main/overwrite/Fixture.yaml
+  shell:
+    url: https://raw.githubusercontent.com/Aethersailor/Custom_OpenClash_Rules/main/shell/Fixture.yaml
 )");
-  if (custom_openclash_rules::rewriteRuleProviderUrls(
-          root, "https://test-api.asailor.org") != 1 ||
-      root["rule-providers"]["direct"]["url"].as<std::string>() !=
-          "https://test-api.asailor.org/Custom_OpenClash_Rules/main/rule/"
-          "Custom_Direct_Domain.mrs" ||
-      root["rule-providers"]["direct"]["format"].as<std::string>() != "mrs" ||
-      root["rule-providers"]["direct"]["path"].as<std::string>() !=
-          "./providers/direct.mrs" ||
-      root["rule-providers"]["third-party"]["url"].as<std::string>() !=
-          "https://example.com/domain.yaml") {
-    std::cerr << "Rule provider rewrite failed\n";
-    return 1;
-  }
+  assert(custom_openclash_rules::rewriteRuleProviderUrls(
+             root, "https://test-api.asailor.org") == 2);
+  assert(root["rule-providers"]["rule-yaml"]["url"].as<std::string>() ==
+         "https://test-api.asailor.org/Custom_OpenClash_Rules/main/rule/"
+         "Fixture.yaml");
+  assert(root["rule-providers"]["rule-yaml"]["format"].as<std::string>() ==
+         "yaml");
+  assert(root["rule-providers"]["rule-yaml"]["path"].as<std::string>() ==
+         "./providers/rule.yaml");
+  assert(root["rule-providers"]["game-mrs"]["url"].as<std::string>() ==
+         "https://test-api.asailor.org/Custom_OpenClash_Rules/main/game_rule/"
+         "Game.mrs");
+  assert(root["rule-providers"]["game-mrs"]["format"].as<std::string>() ==
+         "mrs");
+  assert(root["rule-providers"]["game-mrs"]["path"].as<std::string>() ==
+         "./providers/game.mrs");
+  assert(root["rule-providers"]["overwrite"]["url"].as<std::string>().find(
+             "raw.githubusercontent.com") != std::string::npos);
+  assert(root["rule-providers"]["shell"]["url"].as<std::string>().find(
+             "raw.githubusercontent.com") != std::string::npos);
 
-  std::cout << "Custom_OpenClash_Rules tests passed\n";
+  std::cout << "Custom_OpenClash_Rules policy tests passed\n";
   return 0;
 }

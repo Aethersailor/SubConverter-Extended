@@ -1,0 +1,14 @@
+proxy-providers:
+  Provider_FIXTURE:
+    type: http
+    url: http://fixture.test/subscription.txt
+    interval: 3600
+    proxy: DIRECT
+    path: ./providers/Provider_FIXTURE.yaml
+    health-check:
+      enable: true
+      url: https://cp.cloudflare.com/generate_204
+      interval: 300
+    override:
+      skip-cert-verify: false
+      udp: false

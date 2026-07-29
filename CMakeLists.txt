@@ -68,7 +68,7 @@ int main(){std::to_string(0);}
 
 IF(NOT BUILD_STATIC_LIBRARY)
 
-ADD_EXECUTABLE(${BUILD_TARGET_NAME} 
+SET(SUBCONVERTER_RUNTIME_SOURCES
     src/config/custom_openclash_rules.cpp
     src/config/ruleset.cpp
     src/generator/config/external_rules.cpp
@@ -84,13 +84,13 @@ ADD_EXECUTABLE(${BUILD_TARGET_NAME}
     src/handler/interfaces.cpp
     src/handler/multithread.cpp
     src/handler/statistics.cpp
+    src/handler/statistics_v2.cpp
     src/handler/upload.cpp
     src/handler/version_page.cpp
     src/handler/webget.cpp
     src/handler/proxy_policy.cpp
     src/handler/settings.cpp
     src/handler/sub_request_key.cpp
-    src/main.cpp
     src/parser/infoparser.cpp
     src/parser/subparser.cpp
     src/parser/mihomo_bridge.cpp
@@ -109,6 +109,9 @@ ADD_EXECUTABLE(${BUILD_TARGET_NAME}
     src/utils/string.cpp
     src/utils/system.cpp
     src/utils/urlencode.cpp)
+ADD_EXECUTABLE(${BUILD_TARGET_NAME}
+    ${SUBCONVERTER_RUNTIME_SOURCES}
+    src/main.cpp)
 TARGET_INCLUDE_DIRECTORIES(${BUILD_TARGET_NAME} PRIVATE src)
 TARGET_LINK_DIRECTORIES(${BUILD_TARGET_NAME} PRIVATE ${CMAKE_SOURCE_DIR})
 
@@ -222,6 +225,39 @@ ENDIF()
 
 IF(BUILD_TESTS)
     ENABLE_TESTING()
+    FIND_PACKAGE(Python3 COMPONENTS Interpreter REQUIRED)
+
+    ADD_EXECUTABLE(settings_snapshot_test_helper
+        ${SUBCONVERTER_RUNTIME_SOURCES}
+        src/handler/settings_snapshot.cpp
+        tests/settings_snapshot_test_helper.cpp)
+    TARGET_INCLUDE_DIRECTORIES(settings_snapshot_test_helper PRIVATE
+        $<TARGET_PROPERTY:${BUILD_TARGET_NAME},INCLUDE_DIRECTORIES>)
+    TARGET_LINK_DIRECTORIES(settings_snapshot_test_helper PRIVATE
+        $<TARGET_PROPERTY:${BUILD_TARGET_NAME},LINK_DIRECTORIES>)
+    TARGET_LINK_LIBRARIES(settings_snapshot_test_helper PRIVATE
+        $<TARGET_PROPERTY:${BUILD_TARGET_NAME},LINK_LIBRARIES>)
+    TARGET_COMPILE_DEFINITIONS(settings_snapshot_test_helper PRIVATE
+        $<TARGET_PROPERTY:${BUILD_TARGET_NAME},COMPILE_DEFINITIONS>)
+
+    ADD_TEST(
+        NAME custom_openclash_rules_bundle
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/test_custom_openclash_rules_bundle.py)
+    SET_TESTS_PROPERTIES(custom_openclash_rules_bundle PROPERTIES LABELS fast)
+
+    ADD_TEST(
+        NAME compatibility_security_baseline
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/compatibility_security_baseline.py
+                --binary $<TARGET_FILE:${BUILD_TARGET_NAME}>
+                --settings-snapshot-helper
+                $<TARGET_FILE:settings_snapshot_test_helper>)
+    SET_TESTS_PROPERTIES(compatibility_security_baseline PROPERTIES
+        LABELS full
+        TIMEOUT 120
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
     ADD_EXECUTABLE(proxy_policy_test
         tests/proxy_policy_test.cpp
         src/handler/proxy_policy.cpp
@@ -231,6 +267,7 @@ IF(BUILD_TESTS)
     TARGET_INCLUDE_DIRECTORIES(proxy_policy_test PRIVATE src)
     TARGET_LINK_LIBRARIES(proxy_policy_test ${CMAKE_THREAD_LIBS_INIT})
     ADD_TEST(NAME proxy_policy COMMAND proxy_policy_test)
+    SET_TESTS_PROPERTIES(proxy_policy PROPERTIES LABELS fast)
 
     ADD_EXECUTABLE(custom_openclash_rules_test
         tests/custom_openclash_rules_test.cpp
@@ -248,6 +285,7 @@ IF(BUILD_TESTS)
         ${YAML_CPP_LIBRARY})
     ADD_TEST(NAME custom_openclash_rules COMMAND custom_openclash_rules_test)
     SET_TESTS_PROPERTIES(custom_openclash_rules PROPERTIES
+        LABELS fast
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
     ADD_EXECUTABLE(ruleset_options_test
@@ -255,6 +293,7 @@ IF(BUILD_TESTS)
         src/config/ruleset.cpp)
     TARGET_INCLUDE_DIRECTORIES(ruleset_options_test PRIVATE src)
     ADD_TEST(NAME ruleset_options COMMAND ruleset_options_test)
+    SET_TESTS_PROPERTIES(ruleset_options PROPERTIES LABELS fast)
 
     ADD_EXECUTABLE(external_rules_test
         tests/external_rules_test.cpp
@@ -267,6 +306,7 @@ IF(BUILD_TESTS)
     TARGET_LINK_LIBRARIES(external_rules_test
         ${YAML_CPP_LIBRARY})
     ADD_TEST(NAME external_rules COMMAND external_rules_test)
+    SET_TESTS_PROPERTIES(external_rules PROPERTIES LABELS fast)
 
     ADD_EXECUTABLE(concurrency_primitives_test
         tests/concurrency_primitives_test.cpp)
@@ -274,6 +314,31 @@ IF(BUILD_TESTS)
     TARGET_LINK_LIBRARIES(concurrency_primitives_test
         ${CMAKE_THREAD_LIBS_INIT})
     ADD_TEST(NAME concurrency_primitives COMMAND concurrency_primitives_test)
+    SET_TESTS_PROPERTIES(concurrency_primitives PROPERTIES LABELS fast)
+
+    ADD_EXECUTABLE(statistics_v2_test
+        tests/statistics_v2_test.cpp
+        src/handler/statistics_v2.cpp)
+    TARGET_INCLUDE_DIRECTORIES(statistics_v2_test PRIVATE src)
+    TARGET_COMPILE_DEFINITIONS(statistics_v2_test PRIVATE
+        STATISTICS_V2_TESTING)
+    TARGET_LINK_LIBRARIES(statistics_v2_test
+        ${CMAKE_THREAD_LIBS_INIT})
+    ADD_TEST(NAME statistics_v2 COMMAND statistics_v2_test)
+    SET_TESTS_PROPERTIES(statistics_v2 PROPERTIES
+        LABELS fast
+        TIMEOUT 120)
+
+    ADD_EXECUTABLE(statistics_v2_benchmark
+        tests/statistics_v2_benchmark.cpp
+        src/handler/statistics_v2.cpp)
+    TARGET_INCLUDE_DIRECTORIES(statistics_v2_benchmark PRIVATE src)
+    TARGET_LINK_LIBRARIES(statistics_v2_benchmark
+        ${CMAKE_THREAD_LIBS_INIT})
+    ADD_TEST(NAME statistics_v2_benchmark COMMAND statistics_v2_benchmark)
+    SET_TESTS_PROPERTIES(statistics_v2_benchmark PROPERTIES
+        LABELS benchmark
+        TIMEOUT 120)
 
     ADD_EXECUTABLE(sub_request_key_test
         tests/sub_request_key_test.cpp
@@ -281,6 +346,7 @@ IF(BUILD_TESTS)
         src/utils/md5/md5.cpp)
     TARGET_INCLUDE_DIRECTORIES(sub_request_key_test PRIVATE src)
     ADD_TEST(NAME sub_request_key COMMAND sub_request_key_test)
+    SET_TESTS_PROPERTIES(sub_request_key PROPERTIES LABELS fast)
 
     ADD_EXECUTABLE(curl_handle_pool_test
         tests/curl_handle_pool_test.cpp
@@ -296,6 +362,17 @@ IF(BUILD_TESTS)
         TARGET_LINK_LIBRARIES(curl_handle_pool_test ws2_32)
     ENDIF()
     ADD_TEST(NAME curl_handle_pool COMMAND curl_handle_pool_test)
+    SET_TESTS_PROPERTIES(curl_handle_pool PROPERTIES LABELS fast)
+
+    ADD_EXECUTABLE(file_scope_test
+        tests/file_scope_test.cpp
+        src/utils/file.cpp
+        src/utils/string.cpp)
+    TARGET_INCLUDE_DIRECTORIES(file_scope_test PRIVATE src)
+    ADD_TEST(NAME file_scope COMMAND file_scope_test)
+    SET_TESTS_PROPERTIES(file_scope PROPERTIES
+        LABELS fast
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 ENDIF()
 
 ELSE() #BUILD_STATIC_LIBRARY

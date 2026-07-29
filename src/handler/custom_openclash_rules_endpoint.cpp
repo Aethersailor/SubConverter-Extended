@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <functional>
 #include <map>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -17,14 +19,9 @@ namespace {
 
 const std::string PUBLISHED_ROOT = "/Custom_OpenClash_Rules/main";
 
-struct DirectoryPage {
-  std::string content;
-  std::string etag;
-};
-
 struct DirectoryIndex {
   bool available = false;
-  std::map<std::string, DirectoryPage> pages;
+  DirectoryIndexSnapshot pages;
 };
 
 std::string htmlEscape(const std::string &value) {
@@ -154,64 +151,92 @@ std::string renderDirectoryPage(
   return output.str();
 }
 
-DirectoryIndex buildDirectoryIndex() {
+DirectoryIndex buildDirectoryIndexFromManifest(
+    const std::string &manifest,
+    const std::function<bool(
+        const custom_openclash_rules::Resource &)> &resource_exists,
+    std::string *error = nullptr) {
   DirectoryIndex index;
-  std::string manifest = loadManifest();
+  auto fail = [&](const std::string &message) {
+    if (error != nullptr)
+      *error = message;
+    return DirectoryIndex{};
+  };
   if (manifest.empty())
     return index;
 
   std::map<std::string, std::map<std::string, bool>> directories;
   directories[""];
+  for (const std::string &allowed :
+       custom_openclash_rules::allowedDirectories()) {
+    std::vector<std::string> segments = splitRepositoryPath(allowed);
+    for (size_t i = 0; i < segments.size(); ++i) {
+      std::string parent = joinRepositoryPath(segments, i);
+      auto inserted = directories[parent].emplace(segments[i], true);
+      if (!inserted.second && !inserted.first->second)
+        return fail("policy directory collides with a resource");
+      directories[joinRepositoryPath(segments, i + 1)];
+    }
+  }
+
   std::istringstream stream(manifest);
   std::string line;
   size_t files = 0;
+  std::set<std::string> manifest_paths;
 
   while (std::getline(stream, line)) {
     if (!line.empty() && line.back() == '\r')
       line.pop_back();
     if (line.size() <= 66 || line[64] != ' ' || line[65] != ' ' ||
         !isHexDigest(line.substr(0, 64)))
-      return {};
+      return fail("invalid manifest syntax");
 
     std::string manifest_path = line.substr(66);
     if (manifest_path.compare(0, 5, "main/") != 0)
-      return {};
+      return fail("manifest path does not start with main/");
     std::string repository_path = manifest_path.substr(5);
     custom_openclash_rules::Resource resource =
         custom_openclash_rules::matchPublishedPath(PUBLISHED_ROOT + "/" +
                                                    repository_path);
     if (!resource.matched() || resource.repository_path != repository_path ||
-        !bundledFileExists(resource))
-      return {};
+        !resource_exists(resource))
+      return fail("manifest resource violates policy or is unavailable");
+    if (!manifest_paths.insert(manifest_path).second)
+      return fail("manifest contains a duplicate resource path");
 
     std::vector<std::string> segments =
         splitRepositoryPath(repository_path);
     if (segments.size() < 2)
-      return {};
-
-    for (size_t i = 0; i < segments.size(); ++i) {
-      std::string parent = joinRepositoryPath(segments, i);
-      bool directory = i + 1 < segments.size();
-      auto inserted = directories[parent].emplace(segments[i], directory);
-      if (!inserted.second && inserted.first->second != directory)
-        return {};
-      if (directory)
-        directories[joinRepositoryPath(segments, i + 1)];
-    }
+      return fail("manifest resource has no policy directory");
+    std::string directory =
+        joinRepositoryPath(segments, segments.size() - 1);
+    if (!directories.count(directory))
+      return fail("manifest resource directory is outside the policy");
+    auto inserted =
+        directories[directory].emplace(segments.back(), false);
+    if (!inserted.second)
+      return fail("manifest resource collides with another entry");
     ++files;
   }
 
-  if (!files || !directories.count("cfg") || !directories.count("rule"))
-    return {};
+  if (!files)
+    return fail("manifest contains no resources");
 
   for (const auto &directory : directories) {
-    DirectoryPage page;
+    DirectoryPageSnapshot page;
     page.content = renderDirectoryPage(directory.first, directory.second);
     page.etag = "\"" + getMD5(page.content) + "\"";
     index.pages.emplace(directory.first, std::move(page));
   }
   index.available = true;
   return index;
+}
+
+DirectoryIndex buildDirectoryIndex() {
+  return buildDirectoryIndexFromManifest(
+      loadManifest(), [](const custom_openclash_rules::Resource &resource) {
+        return bundledFileExists(resource);
+      });
 }
 
 const DirectoryIndex &directoryIndex() {
@@ -241,8 +266,7 @@ std::string serveDirectory(const custom_openclash_rules::PublishedDirectory &dir
                            bool &handled) {
   const DirectoryIndex &index = directoryIndex();
   if (!index.available) {
-    if (dir.repository_path.empty() || dir.trailing_slash ||
-        dir.repository_path == "cfg" || dir.repository_path == "rule") {
+    if (dir.repository_path.empty() || dir.trailing_slash) {
       handled = true;
       response.status_code = 503;
       response.content_type = "text/plain; charset=utf-8";
@@ -277,6 +301,20 @@ std::string serveDirectory(const custom_openclash_rules::PublishedDirectory &dir
 }
 
 } // namespace
+
+bool buildDirectoryIndexSnapshot(
+    const std::string &manifest,
+    const std::set<std::string> &available_repository_paths,
+    DirectoryIndexSnapshot &pages, std::string *error) {
+  DirectoryIndex index = buildDirectoryIndexFromManifest(
+      manifest,
+      [&](const custom_openclash_rules::Resource &resource) {
+        return available_repository_paths.count(resource.repository_path) != 0;
+      },
+      error);
+  pages = std::move(index.pages);
+  return index.available;
+}
 
 std::string serve(RESPONSE_CALLBACK_ARGS) {
   custom_openclash_rules::PublishedDirectory directory =

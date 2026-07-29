@@ -1,0 +1,1 @@
+{"outbounds":[{"method":"aes-128-gcm","network":"tcp","password":"password","server":"example.com","server_port":8388,"tag":"Smoke","tcp_fast_open":true,"type":"shadowsocks"}]}

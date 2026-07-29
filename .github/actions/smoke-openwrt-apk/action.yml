@@ -33,14 +33,15 @@ runs:
               -e "OPENWRT_ARCH=$arch" \
               mirror.gcr.io/library/alpine:latest \
               sh -ec '
+              apk add --no-cache python3
               apk add --root /tmp/apk-root --initdb --arch "$OPENWRT_ARCH" --allow-untrusted "/work/$APK_ARTIFACT"
               test -x /tmp/apk-root/usr/bin/subconverter-extended
               test -x /tmp/apk-root/etc/init.d/subconverter-extended
               test -d /tmp/apk-root/etc/subconverter
               test -x /tmp/apk-root/opt/subconverter-extended/subconverter
               test -f /tmp/apk-root/opt/subconverter-extended/base/pref.example.toml
-              test -s /tmp/apk-root/opt/subconverter-extended/base/Custom_OpenClash_Rules/manifest.sha256
-              test -s /tmp/apk-root/opt/subconverter-extended/base/Custom_OpenClash_Rules/main/rule/Custom_Direct.list
+              python3 /work/scripts/verify_custom_openclash_rules_bundle.py \
+                --root /tmp/apk-root/opt/subconverter-extended/base/Custom_OpenClash_Rules
               test -f /tmp/apk-root/usr/share/doc/subconverter-extended/README.OpenWrt
               grep -q "/etc/subconverter/pref.toml" /tmp/apk-root/usr/share/doc/subconverter-extended/README.OpenWrt
               grep -q "CONFIG_DIR=\"/etc/subconverter\"" /tmp/apk-root/usr/bin/subconverter-extended

@@ -25,6 +25,7 @@ struct FailureState {
 std::mutex g_auth_mutex;
 std::map<std::string, FailureState> g_failures;
 std::atomic_bool g_misconfig_logged{false};
+int64_t g_next_cleanup_at = 0;
 
 int64_t nowSeconds() { return static_cast<int64_t>(std::time(nullptr)); }
 
@@ -77,7 +78,7 @@ bool validBasicAuth(const Request &request) {
   if (auth.size() <= 6 || toLower(auth.substr(0, 6)) != "basic ")
     return false;
   std::string supplied = "Basic " + trimWhitespace(auth.substr(6), true, true);
-  std::string expected =
+  static const std::string expected =
       "Basic " + base64Encode(global.dashboardAuthUsername + ":" +
                               global.dashboardAuthPassword);
   return constantTimeEquals(supplied, expected);
@@ -118,6 +119,8 @@ void recordFailureLocked(const std::string &key, int64_t now) {
   state.failures++;
   if (state.failures >= global.dashboardAuthMaxFailures)
     state.locked_until = now + global.dashboardAuthLockSeconds;
+  while (g_failures.size() > 4096)
+    g_failures.erase(g_failures.begin());
 }
 
 void recordSuccessLocked(const std::string &key) { g_failures.erase(key); }
@@ -187,7 +190,10 @@ bool authorize(Request &request, Response &response, std::string &body) {
 
   {
     std::lock_guard<std::mutex> lock(g_auth_mutex);
-    cleanupFailuresLocked(now);
+    if (now >= g_next_cleanup_at) {
+      cleanupFailuresLocked(now);
+      g_next_cleanup_at = now + 45;
+    }
     int64_t locked_until = lockedUntilLocked(key, now);
     if (locked_until > now) {
       body = locked(response, locked_until - now);

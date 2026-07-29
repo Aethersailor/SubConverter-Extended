@@ -1019,7 +1019,9 @@ std::string page(Request &, Response &response) {
             var refreshMenu = document.getElementById("refresh-menu");
             var worldMapData = null;
             var chinaMapData = null;
+            var mapStates = new Map();
             var latest = null;
+            var renderedRevision = null;
             var animatedValues = new Map();
             var reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
             var RANGE_WINDOWS = [
@@ -1057,6 +1059,9 @@ std::string page(Request &, Response &response) {
             var selectedRuleWindow = localStorage.getItem(RULE_WINDOW_STORAGE_KEY) || "lifetime";
             var refreshIntervalSeconds = Number(localStorage.getItem(REFRESH_INTERVAL_STORAGE_KEY) || 3);
             var refreshTimer = null;
+            var resizeTimer = null;
+            var inFlight = false;
+            var activeController = null;
             var hourlyChartInitialized = new WeakMap();
 
             function isZh() { return /^zh\b/i.test(document.documentElement.lang); }
@@ -1269,24 +1274,36 @@ std::string page(Request &, Response &response) {
             function renderTimeTabs() {
                 selectedRequestWindow = windowConfig(selectedRequestWindow, RANGE_WINDOWS).key;
                 selectedRuleWindow = windowConfig(selectedRuleWindow, RANGE_WINDOWS).key;
-                requestTabs.innerHTML = rangeTabsHtml(RANGE_WINDOWS, selectedRequestWindow, "data-request-window");
+                if (!requestTabs.hasChildNodes()) {
+                    requestTabs.innerHTML = rangeTabsHtml(RANGE_WINDOWS, selectedRequestWindow, "data-request-window");
+                    requestTabs.querySelectorAll("[data-request-window]").forEach(function (button) {
+                        button.addEventListener("click", function () {
+                            selectedRequestWindow = button.getAttribute("data-request-window");
+                            localStorage.setItem(REQUEST_WINDOW_STORAGE_KEY, selectedRequestWindow);
+                            updateRangeTabs(requestTabs, "data-request-window", selectedRequestWindow);
+                            renderGeoSection("request");
+                        });
+                    });
+                }
+                if (!ruleTabs.hasChildNodes()) {
+                    ruleTabs.innerHTML = rangeTabsHtml(RANGE_WINDOWS, selectedRuleWindow, "data-rule-window");
+                    ruleTabs.querySelectorAll("[data-rule-window]").forEach(function (button) {
+                        button.addEventListener("click", function () {
+                            selectedRuleWindow = button.getAttribute("data-rule-window");
+                            localStorage.setItem(RULE_WINDOW_STORAGE_KEY, selectedRuleWindow);
+                            updateRangeTabs(ruleTabs, "data-rule-window", selectedRuleWindow);
+                            renderGeoSection("rule");
+                        });
+                    });
+                }
                 requestTabs.querySelectorAll("[data-request-window]").forEach(function (button) {
-                    button.addEventListener("click", function () {
-                        selectedRequestWindow = button.getAttribute("data-request-window");
-                        localStorage.setItem(REQUEST_WINDOW_STORAGE_KEY, selectedRequestWindow);
-                        updateRangeTabs(requestTabs, "data-request-window", selectedRequestWindow);
-                        renderGeoSections();
-                    });
+                    button.textContent = label(windowConfig(button.getAttribute("data-request-window"), RANGE_WINDOWS));
                 });
-                ruleTabs.innerHTML = rangeTabsHtml(RANGE_WINDOWS, selectedRuleWindow, "data-rule-window");
                 ruleTabs.querySelectorAll("[data-rule-window]").forEach(function (button) {
-                    button.addEventListener("click", function () {
-                        selectedRuleWindow = button.getAttribute("data-rule-window");
-                        localStorage.setItem(RULE_WINDOW_STORAGE_KEY, selectedRuleWindow);
-                        updateRangeTabs(ruleTabs, "data-rule-window", selectedRuleWindow);
-                        renderGeoSections();
-                    });
+                    button.textContent = label(windowConfig(button.getAttribute("data-rule-window"), RANGE_WINDOWS));
                 });
+                updateRangeTabs(requestTabs, "data-request-window", selectedRequestWindow);
+                updateRangeTabs(ruleTabs, "data-rule-window", selectedRuleWindow);
             }
             function refreshOption(seconds) {
                 return REFRESH_OPTIONS.find(function (item) { return item.seconds === seconds; }) || REFRESH_OPTIONS[2];
@@ -1306,28 +1323,36 @@ std::string page(Request &, Response &response) {
                 var normalized = refreshOption(refreshIntervalSeconds);
                 refreshIntervalSeconds = normalized.seconds;
                 refreshIntervalButton.textContent = refreshButtonText();
-                refreshMenu.innerHTML = REFRESH_OPTIONS.map(function (item) {
-                    return '<button type="button" class="refresh-option" role="menuitemradio" aria-pressed="' + (item.seconds === refreshIntervalSeconds ? "true" : "false") + '" data-refresh-seconds="' + item.seconds + '">' + refreshOptionText(item) + '</button>';
-                }).join("");
+                if (!refreshMenu.hasChildNodes()) {
+                    refreshMenu.innerHTML = REFRESH_OPTIONS.map(function (item) {
+                        return '<button type="button" class="refresh-option" role="menuitemradio" aria-pressed="false" data-refresh-seconds="' + item.seconds + '"></button>';
+                    }).join("");
+                }
                 refreshMenu.querySelectorAll("[data-refresh-seconds]").forEach(function (button) {
-                    button.addEventListener("click", function () {
-                        refreshIntervalSeconds = Number(button.getAttribute("data-refresh-seconds")) || 0;
-                        localStorage.setItem(REFRESH_INTERVAL_STORAGE_KEY, String(refreshIntervalSeconds));
-                        refreshMenu.hidden = true;
-                        refreshIntervalButton.setAttribute("aria-expanded", "false");
-                        updateRefreshIntervalUi();
-                        scheduleAutoRefresh();
-                    });
+                    var seconds = Number(button.getAttribute("data-refresh-seconds")) || 0;
+                    button.textContent = refreshOptionText(refreshOption(seconds));
+                    button.setAttribute("aria-pressed", seconds === refreshIntervalSeconds ? "true" : "false");
+                    if (button.getAttribute("data-bound") !== "true") {
+                        button.setAttribute("data-bound", "true");
+                        button.addEventListener("click", function () {
+                            refreshIntervalSeconds = Number(button.getAttribute("data-refresh-seconds")) || 0;
+                            localStorage.setItem(REFRESH_INTERVAL_STORAGE_KEY, String(refreshIntervalSeconds));
+                            refreshMenu.hidden = true;
+                            refreshIntervalButton.setAttribute("aria-expanded", "false");
+                            updateRefreshIntervalUi();
+                            scheduleAutoRefresh();
+                        });
+                    }
                 });
             }
             function scheduleAutoRefresh() {
                 if (refreshTimer) {
-                    clearInterval(refreshTimer);
+                    clearTimeout(refreshTimer);
                     refreshTimer = null;
                 }
-                if (refreshIntervalSeconds <= 0 || document.visibilityState === "hidden")
+                if (refreshIntervalSeconds <= 0 || document.visibilityState === "hidden" || inFlight)
                     return;
-                refreshTimer = setInterval(triggerRefresh, refreshIntervalSeconds * 1000);
+                refreshTimer = setTimeout(triggerRefresh, refreshIntervalSeconds * 1000);
             }
             function escapeHtml(value) {
                 return String(value == null ? "" : value).replace(/[&<>"']/g, function (ch) {
@@ -1450,40 +1475,51 @@ std::string page(Request &, Response &response) {
                 if (!node) return;
                 var width = node.clientWidth || 800;
                 var height = node.clientHeight || 430;
-                var countriesMap = itemMap(countries);
-                var colors = mapColors();
                 svg.attr("viewBox", "0 0 " + width + " " + height);
-                svg.selectAll("*").remove();
-                var projection = d3.geoNaturalEarth1().rotate([-150, 0]).fitSize([width, height], { type: "Sphere" });
-                var path = d3.geoPath(projection);
-                var features = topojson.feature(worldMapData, worldMapData.objects.countries).features;
+                var state = mapStates.get(selector);
+                if (!state || state.width !== width || state.height !== height || state.source !== worldMapData) {
+                    svg.selectAll("*").remove();
+                    var projection = d3.geoNaturalEarth1().rotate([-150, 0]).fitSize([width, height], { type: "Sphere" });
+                    var path = d3.geoPath(projection);
+                    var features = topojson.feature(worldMapData, worldMapData.objects.countries).features;
+                    svg.append("path").datum({ type: "Sphere" }).attr("d", path).attr("fill", "transparent");
+                    var paths = svg.selectAll("path.country")
+                        .data(features)
+                        .enter()
+                        .append("path")
+                        .attr("d", path);
+                    state = { width: width, height: height, source: worldMapData, paths: paths };
+                    mapStates.set(selector, state);
+                    paths.on("mousemove", function (event, d) {
+                        var code = ISO_N3[String(d.id).padStart(3, "0")];
+                        code = code || "ZZ";
+                        var item = state.values.get(code) || { subscription_requests: 0, rule_conversions: 0 };
+                        showTooltip(event, '<div class="tooltip-title"><span class="country-icon">' + countryIcon(code) + '</span>' + escapeHtml(countryName(code)) + '</div>' +
+                            '<div class="tooltip-row"><span>' + text("Range", "范围") + '</span><strong>' + label(state.config) + '</strong></div>' +
+                            metricTooltipRow(item, state.field, state.metricEn, state.metricZh));
+                    })
+                    .on("mouseleave", hideTooltip);
+                }
+                state.values = itemMap(countries);
+                state.config = config;
+                state.field = field;
+                state.metricEn = metricEn;
+                state.metricZh = metricZh;
+                var colors = mapColors();
                 var max = Math.max(1, ...countries.map(function (item) { return item[field] || 0; }));
                 function countryValue(code) {
-                    var item = countriesMap.get(code);
+                    var item = state.values.get(code);
                     return item ? item[field] || 0 : 0;
                 }
-                svg.append("path").datum({ type: "Sphere" }).attr("d", path).attr("fill", "transparent");
-                svg.selectAll("path.country")
-                    .data(features)
-                    .enter()
-                    .append("path")
+                state.paths
                     .attr("class", function (d) {
                         var code = ISO_N3[String(d.id).padStart(3, "0")];
                         return "country" + (countryValue(code) > 0 ? " has-data" : "");
                     })
-                    .attr("d", path)
                     .style("--country-fill", function (d) {
                         var code = ISO_N3[String(d.id).padStart(3, "0")];
                         return colorForValue(countryValue(code), max, colors);
-                    })
-                    .on("mousemove", function (event, d) {
-                        var code = ISO_N3[String(d.id).padStart(3, "0")] || "ZZ";
-                        var item = countriesMap.get(code) || { subscription_requests: 0, rule_conversions: 0 };
-                        showTooltip(event, '<div class="tooltip-title"><span class="country-icon">' + countryIcon(code) + '</span>' + escapeHtml(countryName(code)) + '</div>' +
-                            '<div class="tooltip-row"><span>' + text("Range", "范围") + '</span><strong>' + label(config) + '</strong></div>' +
-                            metricTooltipRow(item, field, metricEn, metricZh));
-                    })
-                    .on("mouseleave", hideTooltip);
+                    });
             }
             function chinaFeatureCode(feature) {
                 var props = feature.properties || {};
@@ -1545,7 +1581,7 @@ std::string page(Request &, Response &response) {
                 }
                 return projection;
             }
-            function renderSouthChinaSeaInset(svg, features, width, height, colors, config, field, metricEn, metricZh) {
+            function renderSouthChinaSeaInset(svg, features, width, height, colors, state) {
                 if (!features.length) return;
                 var insetWidth = Math.max(54, Math.min(74, width * 0.14));
                 var insetHeight = Math.max(72, Math.min(96, height * 0.23));
@@ -1560,8 +1596,8 @@ std::string page(Request &, Response &response) {
                 function showInsetTooltip(event) {
                     var item = { subscription_requests: 0, rule_conversions: 0 };
                     showTooltip(event, '<div class="tooltip-title"><span class="country-icon">' + neutralRegionIcon() + '</span>' + text("South China Sea Islands", "南海诸岛") + '</div>' +
-                        '<div class="tooltip-row"><span>' + text("Range", "范围") + '</span><strong>' + label(config) + '</strong></div>' +
-                        metricTooltipRow(item, field, metricEn, metricZh));
+                        '<div class="tooltip-row"><span>' + text("Range", "范围") + '</span><strong>' + label(state.config) + '</strong></div>' +
+                        metricTooltipRow(item, state.field, state.metricEn, state.metricZh));
                 }
                 var group = svg.append("g")
                     .attr("class", "china-south-sea-inset")
@@ -1589,21 +1625,49 @@ std::string page(Request &, Response &response) {
                 if (!node) return;
                 var width = node.clientWidth || 800;
                 var height = node.clientHeight || 430;
-                var regionMap = itemMap(regions);
+                var state = mapStates.get(selector);
+                var sameGeometry = state && state.width === width && state.height === height && state.source === chinaMapData;
+                if (!sameGeometry) {
+                    state = { width: width, height: height, source: chinaMapData };
+                    mapStates.set(selector, state);
+                }
+                state.values = itemMap(regions);
+                state.config = config;
+                state.field = field;
+                state.metricEn = metricEn;
+                state.metricZh = metricZh;
                 var colors = mapColors();
                 var max = Math.max(1, ...regions.map(function (item) { return item[field] || 0; }));
                 svg.attr("viewBox", "0 0 " + width + " " + height);
-                svg.selectAll("*").remove();
                 function valueFor(code) {
-                    var item = regionMap.get(code);
+                    var item = state.values.get(code);
                     return item ? item[field] || 0 : 0;
                 }
                 function tooltipFor(event, code, item) {
                     item = item || { subscription_requests: 0, rule_conversions: 0 };
                     showTooltip(event, '<div class="tooltip-title"><span class="country-icon">' + neutralRegionIcon() + '</span>' + escapeHtml(chinaRegionName(code)) + '</div>' +
-                        '<div class="tooltip-row"><span>' + text("Range", "范围") + '</span><strong>' + label(config) + '</strong></div>' +
-                        metricTooltipRow(item, field, metricEn, metricZh));
+                        '<div class="tooltip-row"><span>' + text("Range", "范围") + '</span><strong>' + label(state.config) + '</strong></div>' +
+                        metricTooltipRow(item, state.field, state.metricEn, state.metricZh));
                 }
+                if (sameGeometry) {
+                    svg.selectAll("path.china-region:not(.china-south-sea)")
+                        .attr("class", function (d) {
+                            var code = chinaFeatureCode(d);
+                            return "china-region" + (valueFor(code) > 0 ? " has-data" : "");
+                        })
+                        .style("--country-fill", function (d) {
+                            return colorForValue(valueFor(chinaFeatureCode(d)), max, colors);
+                        });
+                    svg.selectAll("rect.china-region")
+                        .attr("class", function (code) {
+                            return "china-region" + (valueFor(code) > 0 ? " has-data" : "");
+                        })
+                        .style("--country-fill", function (code) {
+                            return colorForValue(valueFor(code), max, colors);
+                        });
+                    return;
+                }
+                svg.selectAll("*").remove();
                 if (chinaMapData && Array.isArray(chinaMapData.features) && chinaMapData.features.length) {
                     var features = chinaMapData.features.map(rewindChinaFeature);
                     var mainFeatures = features.filter(function (feature) { return !isSouthChinaSeaFeature(feature); });
@@ -1629,10 +1693,10 @@ std::string page(Request &, Response &response) {
                         })
                         .on("mousemove", function (event, d) {
                             var code = chinaFeatureCode(d) || "CN-XX";
-                            tooltipFor(event, code, regionMap.get(code));
+                            tooltipFor(event, code, state.values.get(code));
                         })
                         .on("mouseleave", hideTooltip);
-                    renderSouthChinaSeaInset(svg, insetFeatures, width, height, colors, config, field, metricEn, metricZh);
+                    renderSouthChinaSeaInset(svg, insetFeatures, width, height, colors, state);
                     return;
                 }
                 var rows = CHINA_REGION_TILES;
@@ -1643,17 +1707,17 @@ std::string page(Request &, Response &response) {
                 var cellH = (height - pad * 2 - gap * (rows.length - 1)) / rows.length;
                 rows.forEach(function (row, y) {
                     row.forEach(function (code, x) {
-                        var item = regionMap.get(code) || { subscription_requests: 0, rule_conversions: 0 };
                         var group = svg.append("g")
                             .attr("transform", "translate(" + (pad + x * (cellW + gap)) + "," + (pad + y * (cellH + gap)) + ")");
                         group.append("rect")
+                            .datum(code)
                             .attr("class", "china-region" + (valueFor(code) > 0 ? " has-data" : ""))
                             .attr("rx", 7)
                             .attr("ry", 7)
                             .attr("width", cellW)
                             .attr("height", cellH)
                             .style("--country-fill", colorForValue(valueFor(code), max, colors))
-                            .on("mousemove", function (event) { tooltipFor(event, code, item); })
+                            .on("mousemove", function (event) { tooltipFor(event, code, state.values.get(code)); })
                             .on("mouseleave", hideTooltip);
                         group.append("text")
                             .attr("class", "china-region-label")
@@ -1720,9 +1784,12 @@ std::string page(Request &, Response &response) {
             function render(data) {
                 latest = data;
                 renderMetrics(data);
-                renderHourlyCharts(data.series || []);
                 renderTimeTabs();
-                renderGeoSections();
+                if (renderedRevision !== data.revision) {
+                    renderHourlyCharts(data.series || []);
+                    renderGeoSections();
+                    renderedRevision = data.revision;
+                }
                 updatedAt.textContent = text("Updated ", "更新 ") + fmtTime(data.generated_at);
             }
             function loadScript(src, globalName) {
@@ -1759,16 +1826,28 @@ std::string page(Request &, Response &response) {
                 });
             }
             async function refresh() {
+                if (inFlight || document.visibilityState === "hidden") return;
+                inFlight = true;
+                activeController = window.AbortController ? new AbortController() : null;
                 try {
-                    var response = await fetch("/dashboard/data?_=" + Date.now(), { cache: "no-store", headers: { "Accept": "application/json" } });
+                    var options = { cache: "no-store", headers: { "Accept": "application/json" } };
+                    if (activeController) options.signal = activeController.signal;
+                    var response = await fetch("/dashboard/data?_=" + Date.now(), options);
                     if (!response.ok) throw new Error("Dashboard data request failed: " + response.status);
                     render(await response.json());
                 } catch (error) {
-                    updatedAt.textContent = text("Update failed", "更新失败");
-                    throw error;
+                    if (error.name !== "AbortError") {
+                        updatedAt.textContent = text("Update failed", "更新失败");
+                        throw error;
+                    }
+                } finally {
+                    inFlight = false;
+                    activeController = null;
+                    scheduleAutoRefresh();
                 }
             }
             function triggerRefresh() {
+                if (inFlight) return;
                 refresh().catch(function () {});
             }
             document.getElementById("lang-toggle").addEventListener("click", function () {
@@ -1777,7 +1856,10 @@ std::string page(Request &, Response &response) {
                 updateDocumentTitle();
                 document.getElementById("lang-toggle").textContent = isZh() ? "中" : "EN";
                 updateRefreshIntervalUi();
-                if (latest) render(latest);
+                if (latest) {
+                    renderedRevision = null;
+                    render(latest);
+                }
             });
             document.getElementById("refresh-button").addEventListener("click", triggerRefresh);
             refreshIntervalButton.addEventListener("click", function (event) {
@@ -1792,17 +1874,25 @@ std::string page(Request &, Response &response) {
                 }
             });
             document.addEventListener("visibilitychange", function () {
+                if (document.visibilityState === "hidden" && activeController)
+                    activeController.abort();
                 scheduleAutoRefresh();
                 if (document.visibilityState !== "hidden" && refreshIntervalSeconds > 0)
                     triggerRefresh();
             });
             updateDocumentTitle();
             document.getElementById("lang-toggle").textContent = isZh() ? "中" : "EN";
+            renderTimeTabs();
             updateRefreshIntervalUi();
             triggerRefresh();
             loadMapResources();
-            window.addEventListener("resize", renderGeoSections);
-            scheduleAutoRefresh();
+            window.addEventListener("resize", function () {
+                if (resizeTimer) clearTimeout(resizeTimer);
+                resizeTimer = setTimeout(function () {
+                    resizeTimer = null;
+                    renderGeoSections();
+                }, 160);
+            });
         })();
     </script>
 </body>
