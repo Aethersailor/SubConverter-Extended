@@ -18,6 +18,7 @@
 
 std::string fileGet(const std::string &path, bool scope_limit = false);
 bool fileExist(const std::string &path, bool scope_limit = false);
+bool isInScope(const std::string &path);
 bool fileCopy(const std::string &source, const std::string &dest);
 int fileWrite(const std::string &path, const std::string &content, bool overwrite);
 
