@@ -68,7 +68,7 @@ int main(){std::to_string(0);}
 
 IF(NOT BUILD_STATIC_LIBRARY)
 
-ADD_EXECUTABLE(${BUILD_TARGET_NAME} 
+SET(SUBCONVERTER_RUNTIME_SOURCES
     src/config/custom_openclash_rules.cpp
     src/config/ruleset.cpp
     src/generator/config/external_rules.cpp
@@ -89,9 +89,7 @@ ADD_EXECUTABLE(${BUILD_TARGET_NAME}
     src/handler/webget.cpp
     src/handler/proxy_policy.cpp
     src/handler/settings.cpp
-    src/handler/settings_snapshot.cpp
     src/handler/sub_request_key.cpp
-    src/main.cpp
     src/parser/infoparser.cpp
     src/parser/subparser.cpp
     src/parser/mihomo_bridge.cpp
@@ -110,6 +108,9 @@ ADD_EXECUTABLE(${BUILD_TARGET_NAME}
     src/utils/string.cpp
     src/utils/system.cpp
     src/utils/urlencode.cpp)
+ADD_EXECUTABLE(${BUILD_TARGET_NAME}
+    ${SUBCONVERTER_RUNTIME_SOURCES}
+    src/main.cpp)
 TARGET_INCLUDE_DIRECTORIES(${BUILD_TARGET_NAME} PRIVATE src)
 TARGET_LINK_DIRECTORIES(${BUILD_TARGET_NAME} PRIVATE ${CMAKE_SOURCE_DIR})
 
@@ -224,6 +225,20 @@ ENDIF()
 IF(BUILD_TESTS)
     ENABLE_TESTING()
     FIND_PACKAGE(Python3 COMPONENTS Interpreter REQUIRED)
+
+    ADD_EXECUTABLE(settings_snapshot_test_helper
+        ${SUBCONVERTER_RUNTIME_SOURCES}
+        src/handler/settings_snapshot.cpp
+        tests/settings_snapshot_test_helper.cpp)
+    TARGET_INCLUDE_DIRECTORIES(settings_snapshot_test_helper PRIVATE
+        $<TARGET_PROPERTY:${BUILD_TARGET_NAME},INCLUDE_DIRECTORIES>)
+    TARGET_LINK_DIRECTORIES(settings_snapshot_test_helper PRIVATE
+        $<TARGET_PROPERTY:${BUILD_TARGET_NAME},LINK_DIRECTORIES>)
+    TARGET_LINK_LIBRARIES(settings_snapshot_test_helper PRIVATE
+        $<TARGET_PROPERTY:${BUILD_TARGET_NAME},LINK_LIBRARIES>)
+    TARGET_COMPILE_DEFINITIONS(settings_snapshot_test_helper PRIVATE
+        $<TARGET_PROPERTY:${BUILD_TARGET_NAME},COMPILE_DEFINITIONS>)
+
     ADD_TEST(
         NAME custom_openclash_rules_bundle
         COMMAND ${Python3_EXECUTABLE}
@@ -234,7 +249,9 @@ IF(BUILD_TESTS)
         NAME compatibility_security_baseline
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/compatibility_security_baseline.py
-                --binary $<TARGET_FILE:${BUILD_TARGET_NAME}>)
+                --binary $<TARGET_FILE:${BUILD_TARGET_NAME}>
+                --settings-snapshot-helper
+                $<TARGET_FILE:settings_snapshot_test_helper>)
     SET_TESTS_PROPERTIES(compatibility_security_baseline PROPERTIES
         LABELS full
         TIMEOUT 120
