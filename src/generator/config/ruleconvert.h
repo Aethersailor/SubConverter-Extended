@@ -27,7 +27,10 @@ struct RulesetContent
 struct RuleConversionStats
 {
     uint64_t rules = 0;
-    void add(uint64_t count = 1) { rules += count; }
+    void add(uint64_t count = 1)
+    {
+        rules = count > UINT64_MAX - rules ? UINT64_MAX : rules + count;
+    }
 };
 
 std::string convertRuleset(const std::string &content, int type);

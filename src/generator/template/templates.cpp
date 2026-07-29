@@ -402,6 +402,7 @@ std::string findFileName(const std::string &path)
 
 int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_content_array, const std::string &remote_path_prefix, bool script, bool overwrite_original_rules, bool clash_classical_ruleset, RuleConversionStats *stats)
 {
+    RuleConversionStats local_stats;
     nlohmann::json data;
     std::string match_group, geoips, retrieved_rules;
     std::string strLine, rule_group, rule_path, rule_path_typed, rule_name, old_rule_name;
@@ -442,8 +443,7 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                 strLine = "MATCH";
             strLine = appendClashRuleTarget(strLine, rule_group);
             rules.emplace_back(std::move(strLine));
-            if(stats)
-                stats->add();
+            local_stats.add();
             continue;
         }
         else
@@ -483,8 +483,7 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                 {
                     rules.emplace_back(buildClashRuleSetReference(
                         rule_name, rule_group, x.rule_type, x.options));
-                    if(stats)
-                        stats->add();
+                    local_stats.add();
                 }
                 groups.emplace_back(rule_name);
                 continue;
@@ -507,8 +506,7 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                         if(!script)
                         {
                             rules.emplace_back("RULE-SET," + rule_name + "," + rule_group);
-                            if(stats)
-                                stats->add();
+                            local_stats.add();
                         }
                         groups.emplace_back(rule_name);
                         continue;
@@ -568,8 +566,7 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                                 strLine += "," + vArray[2];
                         }
                         rules.emplace_back(strLine);
-                        if(stats)
-                            stats->add();
+                        local_stats.add();
                     }
                 }
                 else if(!has_domain[rule_name] && (startsWith(strLine, "DOMAIN,") || startsWith(strLine, "DOMAIN-SUFFIX,")))
@@ -584,8 +581,7 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
             if(has_domain[rule_name] && !script)
             {
                 rules.emplace_back("RULE-SET," + rule_name + " (Domain)," + rule_group);
-                if(stats)
-                    stats->add();
+                local_stats.add();
             }
             if(has_ipcidr[rule_name] && !script)
             {
@@ -593,14 +589,12 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                     rules.emplace_back("RULE-SET," + rule_name + " (IP-CIDR)," + rule_group + ",no-resolve");
                 else
                     rules.emplace_back("RULE-SET," + rule_name + " (IP-CIDR)," + rule_group);
-                if(stats)
-                    stats->add();
+                local_stats.add();
             }
             if(!has_domain[rule_name] && !has_ipcidr[rule_name] && !script)
             {
                 rules.emplace_back("RULE-SET," + rule_name + "," + rule_group);
-                if(stats)
-                    stats->add();
+                local_stats.add();
             }
             if(std::find(groups.begin(), groups.end(), rule_name) == groups.end())
                 groups.emplace_back(rule_name);
@@ -674,8 +668,7 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
         }
         if(script)
         {
-            if(stats)
-                stats->add();
+            local_stats.add();
             std::string json_path = "rules." + std::to_string(index) + ".";
             parse_json_pointer(data, json_path + "has_domain", group_has_domain ? "true" : "false");
             parse_json_pointer(data, json_path + "has_ipcidr", group_has_ipcidr ? "true" : "false");
@@ -708,10 +701,14 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
         catch (std::exception &e)
         {
             writeLog(0, "渲染时发生错误：" + std::string(e.what()), LOG_TYPE_ERROR);
+            if(stats)
+                stats->add(local_stats.rules);
             return -1;
         }
     }
     else
         base_rule["rules"] = rules;
+    if(stats)
+        stats->add(local_stats.rules);
     return 0;
 }
