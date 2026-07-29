@@ -1,0 +1,3 @@
+payload:
+  - DOMAIN-SUFFIX,example.com,Proxy
+  - IP-CIDR,198.51.100.0/24,Proxy

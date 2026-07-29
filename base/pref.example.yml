@@ -212,7 +212,7 @@ rulesets:
   enabled: true
   # 是否用生成的规则覆盖基础模板已有规则；false 保留原规则并追加生成结果。
   # Whether generated rules replace rules already present in the base template; false preserves the originals and appends generated output.
-  overwrite_original_rules: false
+  overwrite_original_rules: true
   # 是否每次请求都更新规则集；false 使用启动/配置加载时取得的内容以及缓存策略。
   # Whether to refresh rulesets on every request; false uses content obtained during startup/config loading together with cache policy.
   update_ruleset_on_request: false

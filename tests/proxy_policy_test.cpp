@@ -43,5 +43,22 @@ int main() {
   assert(redacted.find("private-token") == std::string::npos);
   assert(redacted.find("user:secret") == std::string::npos);
   assert(redacted.find("private-key") == std::string::npos);
+
+  const std::string credential_url = redactSensitiveLogText(
+      "proxy=socks5h://fixture-user:fixture-password@proxy.example.test:1080");
+  assert(credential_url.find("fixture-user") == std::string::npos);
+  assert(credential_url.find("fixture-password") == std::string::npos);
+  assert(credential_url.find("proxy.example.test:1080") != std::string::npos);
+
+  const std::string query_url = redactSensitiveLogText(
+      "url=https://example.test/sub?token=fixture-token&mode=clash&api_key="
+      "fixture-api-key");
+  assert(query_url.find("fixture-token") == std::string::npos);
+  assert(query_url.find("fixture-api-key") == std::string::npos);
+  assert(query_url.find("mode=clash") != std::string::npos);
+
+  const std::string header = redactSensitiveLogText(
+      "Proxy-Authorization: Basic fixture-proxy-secret");
+  assert(header.find("fixture-proxy-secret") == std::string::npos);
   return 0;
 }

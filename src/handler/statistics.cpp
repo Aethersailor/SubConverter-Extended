@@ -1,914 +1,344 @@
 #include "handler/statistics.h"
 
 #include <algorithm>
-#include <array>
 #include <atomic>
-#include <cerrno>
-#include <cctype>
-#include <cstdio>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
 #include <ctime>
-#include <map>
+#include <exception>
+#include <filesystem>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
-#ifdef _WIN32
-#include <direct.h>
-#else
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#endif
-
-#include <nlohmann/json.hpp>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 
 #include "handler/settings.h"
-#include "utils/file.h"
+#include "handler/statistics_v2.h"
 #include "utils/logger.h"
-#include "utils/string.h"
 
 namespace {
 
-using json = nlohmann::json;
+using statistics_v2::Counters;
+using statistics_v2::DashboardSnapshot;
+using statistics_v2::GeoId;
+using statistics_v2::WindowSnapshot;
 
-constexpr size_t kBucketCount = 30 * 24 * 60;
-constexpr size_t kDailyBucketCount = 366;
-
-struct Counters {
-  uint64_t subscription_requests = 0;
-  uint64_t rule_conversions = 0;
-};
-
-using CountryCounters = Counters;
-
-struct CountryBucketEntry {
-  std::string code;
-  CountryCounters counters;
-};
-
-struct Bucket {
-  int64_t minute = 0;
-  Counters counters;
-  std::vector<CountryBucketEntry> countries;
-  std::vector<CountryBucketEntry> china_regions;
-};
-
-struct DailyBucket {
-  int64_t day = 0;
-  Counters counters;
-  std::vector<CountryBucketEntry> countries;
-  std::vector<CountryBucketEntry> china_regions;
-};
-
-struct SnapshotCountry {
-  std::string code;
-  CountryCounters counters;
-};
-
-struct GeoLocation {
-  std::string country_code;
-  std::string china_region_code;
-};
-
-struct State {
-  bool initialized = false;
-  bool dirty = false;
-  int64_t first_started_at = 0;
-  int64_t started_at = 0;
-  int64_t persisted_runtime_seconds = 0;
-  int64_t last_seen_at = 0;
-  int64_t last_stopped_at = 0;
-  int64_t last_flush = 0;
-  uint64_t launch_count = 0;
-  Counters startup;
-  Counters lifetime;
-  std::map<std::string, CountryCounters> startup_countries;
-  std::map<std::string, CountryCounters> lifetime_countries;
-  std::map<std::string, CountryCounters> startup_china_regions;
-  std::map<std::string, CountryCounters> lifetime_china_regions;
-  std::array<Bucket, kBucketCount> buckets;
-  std::array<DailyBucket, kDailyBucketCount> daily_buckets;
-};
-
-std::mutex g_mutex;
-std::unique_ptr<State> g_state;
-std::atomic<int64_t> g_next_tick_at{0};
+constexpr auto kDashboardCacheLifetime = std::chrono::seconds(1);
+constexpr auto kMaximumRetry = std::chrono::seconds(60);
+constexpr auto kErrorLogInterval = std::chrono::seconds(60);
 
 int64_t nowSeconds() { return static_cast<int64_t>(std::time(nullptr)); }
 
-std::string normalizePath(std::string path) {
-  for (char &ch : path) {
-    if (ch == '\\')
-      ch = '/';
-  }
-  while (path.size() > 1 && path.back() == '/')
-    path.pop_back();
-  return path;
-}
-
-bool pathIsSafe(const std::string &path) {
-  if (path.empty())
+bool asciiEqualsIgnoreCase(const std::string &value, const char *expected) {
+  std::size_t length = 0;
+  while (expected[length] != '\0')
+    ++length;
+  if (value.size() != length)
     return false;
-  if (path.find("..") != std::string::npos)
-    return false;
-#ifdef _WIN32
-  if (path.size() > 1 && path[1] == ':')
-    return false;
-#else
-  if (!path.empty() && path[0] == '/')
-    return false;
-#endif
-  return true;
-}
-
-bool ensureDirectory(const std::string &raw_path) {
-  std::string path = normalizePath(raw_path);
-  if (!pathIsSafe(path))
-    return false;
-
-  std::string current;
-  size_t pos = 0;
-  while (pos <= path.size()) {
-    size_t next = path.find('/', pos);
-    std::string part =
-        path.substr(pos, next == std::string::npos ? path.size() - pos
-                                                   : next - pos);
-    if (!part.empty()) {
-      if (!current.empty())
-        current += '/';
-      current += part;
-#ifdef _WIN32
-      if (_mkdir(current.c_str()) != 0 && errno != EEXIST)
-        return false;
-#else
-      if (mkdir(current.c_str(), S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH) != 0 &&
-          errno != EEXIST)
-        return false;
-#endif
-    }
-    if (next == std::string::npos)
-      break;
-    pos = next + 1;
+  for (std::size_t i = 0; i < length; ++i) {
+    char left = value[i], right = expected[i];
+    if (left >= 'A' && left <= 'Z')
+      left = static_cast<char>(left - 'A' + 'a');
+    if (right >= 'A' && right <= 'Z')
+      right = static_cast<char>(right - 'A' + 'a');
+    if (left != right)
+      return false;
   }
   return true;
 }
 
-bool writeTextFile(const std::string &path, const std::string &content) {
-#ifdef _WIN32
-  std::FILE *fp = std::fopen(path.c_str(), "wb");
-#else
-  int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC,
-                S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
-  if (fd == -1)
-    return false;
-  std::FILE *fp = fdopen(fd, "wb");
-  if (!fp) {
-    close(fd);
-    return false;
-  }
-#endif
-  if (!fp)
-    return false;
-  size_t written = std::fwrite(content.c_str(), 1, content.size(), fp);
-  std::fclose(fp);
-  return written == content.size();
-}
+struct GeoConfig {
+  bool enabled = true;
+  std::vector<std::string> country_headers;
+  std::vector<std::string> china_region_headers;
+};
 
-std::string dataFilePath() {
-  std::string dir = normalizePath(global.statisticsDataDir);
-  if (dir.empty())
-    dir = "stats";
-  return dir + "/statistics.json";
-}
+struct GeoLocation {
+  GeoId country = statistics_v2::countryGeoId("ZZ");
+  GeoId china_region = statistics_v2::kInvalidGeoId;
+};
 
-bool validCountryCode(const std::string &value) {
-  if (value == "T1" || value == "XX")
-    return true;
-  if (value.size() != 2)
-    return false;
-  return std::isalpha(static_cast<unsigned char>(value[0])) &&
-         std::isalpha(static_cast<unsigned char>(value[1]));
-}
-
-std::string normalizeCountryCode(std::string value) {
-  value = toUpper(trimWhitespace(value, true, true));
-  if (!validCountryCode(value))
-    return "ZZ";
-  return value;
-}
-
-bool validChinaRegionSuffix(const std::string &value) {
-  static const std::array<const char *, 35> codes = {
-      "AH", "BJ", "CQ", "FJ", "GD", "GS", "GX", "GZ", "HA", "HB",
-      "HE", "HI", "HK", "HL", "HN", "JL", "JS", "JX", "LN", "MO",
-      "NM", "NX", "QH", "SC", "SD", "SH", "SN", "SX", "TJ", "TW",
-      "XJ", "XZ", "YN", "ZJ", "XX"};
-  return std::any_of(codes.begin(), codes.end(), [&](const char *code) {
-    return value == code;
-  });
-}
-
-std::string normalizeChinaRegionCode(std::string value) {
-  value = toUpper(trimWhitespace(value, true, true));
-  for (char &ch : value) {
-    if (ch == '_')
-      ch = '-';
-  }
-  if (value.rfind("CN-", 0) == 0)
-    value = value.substr(3);
-  if (!validChinaRegionSuffix(value))
-    return "";
-  return "CN-" + value;
-}
-
-std::string countryFromHeaders(const Request &request) {
-  if (toLower(global.statisticsGeoProvider) == "none")
-    return "ZZ";
-
-  for (const std::string &header : global.statisticsCountryHeaders) {
-    auto iter = request.headers.find(header);
-    if (iter == request.headers.end())
+GeoId findCountry(const Request &request, const GeoConfig &config) {
+  const GeoId unknown = statistics_v2::countryGeoId("ZZ");
+  for (const std::string &header : config.country_headers) {
+    const auto found = request.headers.find(header);
+    if (found == request.headers.end())
       continue;
-    std::string code = normalizeCountryCode(iter->second);
-    if (code != "ZZ")
-      return code;
+    const GeoId id = statistics_v2::countryGeoId(found->second);
+    // Historical behavior treats explicit/invalid ZZ as "keep looking".
+    if (id != unknown)
+      return id;
   }
-  return "ZZ";
+  return unknown;
 }
 
-std::string chinaRegionFromHeaders(const Request &request,
-                                   const std::string &country) {
-  if (country == "HK" || country == "MO" || country == "TW")
-    return "CN-" + country;
-  if (country != "CN")
-    return "";
-
-  for (const std::string &header : global.statisticsChinaRegionHeaders) {
-    auto iter = request.headers.find(header);
-    if (iter == request.headers.end())
-      continue;
-    std::string code = normalizeChinaRegionCode(iter->second);
-    if (!code.empty())
-      return code;
-  }
-  return "CN-XX";
-}
-
-GeoLocation geoLocationFromHeaders(const Request &request) {
-  GeoLocation location;
-  location.country_code = countryFromHeaders(request);
-  if (toLower(global.statisticsGeoProvider) != "none")
-    location.china_region_code =
-        chinaRegionFromHeaders(request, location.country_code);
-  return location;
-}
-
-void addCounters(Counters &target, uint64_t requests, uint64_t rules) {
-  target.subscription_requests += requests;
-  target.rule_conversions += rules;
-}
-
-void addCountryCounters(std::map<std::string, CountryCounters> &target,
-                        const std::string &code, uint64_t requests,
-                        uint64_t rules) {
-  CountryCounters &counters = target[code];
-  addCounters(counters, requests, rules);
-}
-
-void addCountryCounters(std::vector<CountryBucketEntry> &target,
-                        const std::string &code, uint64_t requests,
-                        uint64_t rules) {
-  for (CountryBucketEntry &entry : target) {
-    if (entry.code == code) {
-      addCounters(entry.counters, requests, rules);
-      return;
-    }
-  }
-  CountryBucketEntry entry;
-  entry.code = code;
-  addCounters(entry.counters, requests, rules);
-  target.push_back(entry);
-}
-
-Counters windowCountersLocked(int64_t now_minute, int minutes) {
-  Counters result;
-  if (!g_state)
+GeoLocation geoLocation(const Request &request, const GeoConfig &config) {
+  GeoLocation result;
+  if (!config.enabled)
     return result;
-  int64_t earliest = now_minute - minutes + 1;
-  for (const Bucket &bucket : g_state->buckets) {
-    if (bucket.minute >= earliest && bucket.minute <= now_minute) {
-      addCounters(result, bucket.counters.subscription_requests,
-                  bucket.counters.rule_conversions);
+  result.country = findCountry(request, config);
+  const GeoId cn = statistics_v2::countryGeoId("CN");
+  const GeoId hk = statistics_v2::countryGeoId("HK");
+  const GeoId mo = statistics_v2::countryGeoId("MO");
+  const GeoId tw = statistics_v2::countryGeoId("TW");
+  if (result.country == hk)
+    result.china_region = statistics_v2::chinaRegionGeoId("CN-HK");
+  else if (result.country == mo)
+    result.china_region = statistics_v2::chinaRegionGeoId("CN-MO");
+  else if (result.country == tw)
+    result.china_region = statistics_v2::chinaRegionGeoId("CN-TW");
+  else if (result.country == cn) {
+    for (const std::string &header : config.china_region_headers) {
+      const auto found = request.headers.find(header);
+      if (found == request.headers.end())
+        continue;
+      result.china_region =
+          statistics_v2::chinaRegionGeoId(found->second);
+      if (result.china_region != statistics_v2::kInvalidGeoId)
+        break;
     }
+    if (result.china_region == statistics_v2::kInvalidGeoId)
+      result.china_region = statistics_v2::chinaRegionGeoId("CN-XX");
   }
   return result;
 }
 
-std::vector<SnapshotCountry> countryWindowLocked(int64_t now_minute,
-                                                 int minutes) {
-  std::map<std::string, CountryCounters> totals;
-  if (!g_state)
-    return {};
-  int64_t earliest = now_minute - minutes + 1;
-  for (const Bucket &bucket : g_state->buckets) {
-    if (bucket.minute < earliest || bucket.minute > now_minute)
-      continue;
-    for (const CountryBucketEntry &entry : bucket.countries) {
-      addCountryCounters(totals, entry.code,
-                         entry.counters.subscription_requests,
-                         entry.counters.rule_conversions);
-    }
-  }
+struct Engine {
+  std::mutex mutex;
+  std::condition_variable condition;
+  statistics_v2::Core core;
+  std::unique_ptr<statistics_v2::Store> store;
+  std::thread persistence_thread;
+  GeoConfig geo;
+  bool initialized = false;
+  bool stopping = false;
+  int flush_interval_seconds = 5;
+};
 
-  std::vector<SnapshotCountry> result;
-  result.reserve(totals.size());
-  for (const auto &entry : totals)
-    result.push_back({entry.first, entry.second});
-  return result;
-}
+Engine g_engine;
+std::mutex g_cache_mutex;
+std::string g_cached_dashboard;
+std::chrono::steady_clock::time_point g_cached_dashboard_at{};
 
-std::vector<SnapshotCountry> chinaRegionWindowLocked(int64_t now_minute,
-                                                     int minutes) {
-  std::map<std::string, CountryCounters> totals;
-  if (!g_state)
-    return {};
-  int64_t earliest = now_minute - minutes + 1;
-  for (const Bucket &bucket : g_state->buckets) {
-    if (bucket.minute < earliest || bucket.minute > now_minute)
-      continue;
-    for (const CountryBucketEntry &entry : bucket.china_regions) {
-      addCountryCounters(totals, entry.code,
-                         entry.counters.subscription_requests,
-                         entry.counters.rule_conversions);
-    }
-  }
-
-  std::vector<SnapshotCountry> result;
-  result.reserve(totals.size());
-  for (const auto &entry : totals)
-    result.push_back({entry.first, entry.second});
-  return result;
-}
-
-Counters dailyWindowCountersLocked(int64_t now_day, int days) {
-  Counters result;
-  if (!g_state)
-    return result;
-  int64_t earliest = now_day - days + 1;
-  for (const DailyBucket &bucket : g_state->daily_buckets) {
-    if (bucket.day >= earliest && bucket.day <= now_day) {
-      addCounters(result, bucket.counters.subscription_requests,
-                  bucket.counters.rule_conversions);
-    }
-  }
-  return result;
-}
-
-std::vector<SnapshotCountry> countryDailyWindowLocked(int64_t now_day,
-                                                      int days) {
-  std::map<std::string, CountryCounters> totals;
-  if (!g_state)
-    return {};
-  int64_t earliest = now_day - days + 1;
-  for (const DailyBucket &bucket : g_state->daily_buckets) {
-    if (bucket.day < earliest || bucket.day > now_day)
-      continue;
-    for (const CountryBucketEntry &entry : bucket.countries) {
-      addCountryCounters(totals, entry.code,
-                         entry.counters.subscription_requests,
-                         entry.counters.rule_conversions);
-    }
-  }
-
-  std::vector<SnapshotCountry> result;
-  result.reserve(totals.size());
-  for (const auto &entry : totals)
-    result.push_back({entry.first, entry.second});
-  return result;
-}
-
-std::vector<SnapshotCountry> chinaRegionDailyWindowLocked(int64_t now_day,
-                                                          int days) {
-  std::map<std::string, CountryCounters> totals;
-  if (!g_state)
-    return {};
-  int64_t earliest = now_day - days + 1;
-  for (const DailyBucket &bucket : g_state->daily_buckets) {
-    if (bucket.day < earliest || bucket.day > now_day)
-      continue;
-    for (const CountryBucketEntry &entry : bucket.china_regions) {
-      addCountryCounters(totals, entry.code,
-                         entry.counters.subscription_requests,
-                         entry.counters.rule_conversions);
-    }
-  }
-
-  std::vector<SnapshotCountry> result;
-  result.reserve(totals.size());
-  for (const auto &entry : totals)
-    result.push_back({entry.first, entry.second});
-  return result;
-}
-
-std::vector<SnapshotCountry>
-countrySnapshotLocked(const std::map<std::string, CountryCounters> &source) {
-  std::vector<SnapshotCountry> result;
-  result.reserve(source.size());
-  for (const auto &entry : source)
-    result.push_back({entry.first, entry.second});
-  return result;
-}
-
-void sortCountries(std::vector<SnapshotCountry> &countries) {
-  std::sort(countries.begin(), countries.end(),
-            [](const SnapshotCountry &lhs, const SnapshotCountry &rhs) {
-              if (lhs.counters.subscription_requests !=
-                  rhs.counters.subscription_requests)
-                return lhs.counters.subscription_requests >
-                       rhs.counters.subscription_requests;
-              if (lhs.counters.rule_conversions !=
-                  rhs.counters.rule_conversions)
-                return lhs.counters.rule_conversions >
-                       rhs.counters.rule_conversions;
-              return lhs.code < rhs.code;
-            });
-}
-
-std::vector<Counters> hourlySeriesLocked(int64_t now_minute, int hours) {
-  std::vector<Counters> result(static_cast<size_t>(hours));
-  if (!g_state)
-    return result;
-  int64_t current_hour = now_minute / 60;
-  int64_t first_hour = current_hour - hours + 1;
-  for (const Bucket &bucket : g_state->buckets) {
-    if (bucket.minute <= 0)
-      continue;
-    int64_t hour = bucket.minute / 60;
-    if (hour < first_hour || hour > current_hour)
-      continue;
-    size_t index = static_cast<size_t>(hour - first_hour);
-    addCounters(result[index], bucket.counters.subscription_requests,
-                bucket.counters.rule_conversions);
-  }
-  return result;
-}
-
-json countersJson(const Counters &counters) {
-  return json{{"subscription_requests", counters.subscription_requests},
-              {"rule_conversions", counters.rule_conversions}};
-}
-
-json countriesJson(std::vector<SnapshotCountry> countries) {
-  sortCountries(countries);
-  json result = json::array();
-  for (const SnapshotCountry &country : countries) {
-    result.push_back({{"code", country.code},
-                      {"subscription_requests",
-                       country.counters.subscription_requests},
-                      {"rule_conversions",
-                       country.counters.rule_conversions}});
-  }
-  return result;
-}
-
-json countriesObjectJson(const std::map<std::string, CountryCounters> &source) {
-  json result = json::object();
-  for (const auto &entry : source)
-    result[entry.first] = countersJson(entry.second);
-  return result;
-}
-
-void seedDailyBucketsFromMinuteBucketsLocked() {
-  if (!g_state)
+void logPersistenceError(const std::string &message,
+                         std::chrono::steady_clock::time_point &last_log) {
+  const auto now = std::chrono::steady_clock::now();
+  if (last_log.time_since_epoch().count() != 0 &&
+      now - last_log < kErrorLogInterval)
     return;
-  for (const Bucket &bucket : g_state->buckets) {
-    if (bucket.minute <= 0)
-      continue;
-    if (!bucket.counters.subscription_requests &&
-        !bucket.counters.rule_conversions)
-      continue;
-    int64_t day = bucket.minute / (24 * 60);
-    size_t index = static_cast<size_t>(day % kDailyBucketCount);
-    if (g_state->daily_buckets[index].day != day) {
-      g_state->daily_buckets[index].day = day;
-      g_state->daily_buckets[index].counters = Counters();
-      g_state->daily_buckets[index].countries.clear();
-      g_state->daily_buckets[index].china_regions.clear();
-    }
-    addCounters(g_state->daily_buckets[index].counters,
-                bucket.counters.subscription_requests,
-                bucket.counters.rule_conversions);
-    for (const CountryBucketEntry &entry : bucket.countries) {
-      addCountryCounters(g_state->daily_buckets[index].countries, entry.code,
-                         entry.counters.subscription_requests,
-                         entry.counters.rule_conversions);
-    }
-    for (const CountryBucketEntry &entry : bucket.china_regions) {
-      addCountryCounters(g_state->daily_buckets[index].china_regions,
-                         entry.code, entry.counters.subscription_requests,
-                         entry.counters.rule_conversions);
-    }
-  }
+  last_log = now;
+  writeLog(0, "Statistics v2 持久化已降级为纯内存模式：" + message,
+           LOG_LEVEL_WARNING);
 }
 
-int64_t currentUptimeLocked(int64_t now) {
-  if (!g_state || g_state->started_at <= 0 || now <= g_state->started_at)
-    return 0;
-  return now - g_state->started_at;
-}
-
-int64_t totalRuntimeLocked(int64_t now) {
-  if (!g_state)
-    return 0;
-  return g_state->persisted_runtime_seconds + currentUptimeLocked(now);
-}
-
-void loadLocked() {
-  std::string content = fileGet(dataFilePath(), false);
-  if (content.empty())
-    return;
-
+void logPersistenceException(
+    const char *category, const char *detail,
+    std::chrono::steady_clock::time_point &last_log) noexcept {
   try {
-    json root = json::parse(content);
-    int schema = root.value("schema", 1);
-    if (schema < 1 || schema > 4)
-      return;
-
-    g_state->last_flush = root.value("updated_at", 0LL);
-
-    auto runtime = root.value("runtime", json::object());
-    g_state->first_started_at = runtime.value("first_started_at", 0LL);
-    g_state->persisted_runtime_seconds =
-        runtime.value("total_runtime_seconds", 0LL);
-    g_state->last_seen_at = runtime.value("last_seen_at", 0LL);
-    g_state->last_stopped_at = runtime.value("last_stopped_at", 0LL);
-    g_state->launch_count = runtime.value("launch_count", 0ULL);
-
-    auto lifetime = root.value("lifetime", json::object());
-    g_state->lifetime.subscription_requests =
-        lifetime.value("subscription_requests", 0ULL);
-    g_state->lifetime.rule_conversions =
-        lifetime.value("rule_conversions", 0ULL);
-
-    auto countries = root.value("countries", json::object());
-    for (auto iter = countries.begin(); iter != countries.end(); ++iter) {
-      std::string code = normalizeCountryCode(iter.key());
-      CountryCounters counters;
-      counters.subscription_requests =
-          iter.value().value("subscription_requests", 0ULL);
-      counters.rule_conversions = iter.value().value("rule_conversions", 0ULL);
-      if (counters.subscription_requests || counters.rule_conversions)
-        g_state->lifetime_countries[code] = counters;
+    std::string message(category);
+    if (detail && detail[0] != '\0') {
+      message += ": ";
+      message += detail;
     }
+    logPersistenceError(message, last_log);
+  } catch (...) {
+    // Logging must never make the persistence worker terminate.
+  }
+}
 
-    auto china_regions = root.value("china_regions", json::object());
-    for (auto iter = china_regions.begin(); iter != china_regions.end();
-         ++iter) {
-      std::string code = normalizeChinaRegionCode(iter.key());
-      if (code.empty())
-        continue;
-      CountryCounters counters;
-      counters.subscription_requests =
-          iter.value().value("subscription_requests", 0ULL);
-      counters.rule_conversions = iter.value().value("rule_conversions", 0ULL);
-      if (counters.subscription_requests || counters.rule_conversions)
-        g_state->lifetime_china_regions[code] = counters;
-    }
+void persistenceWorker() {
+  const auto heartbeat_interval = std::chrono::seconds(
+      statistics_v2::runtimeHeartbeatIntervalSeconds(
+          g_engine.flush_interval_seconds));
+  const auto started = std::chrono::steady_clock::now();
+  auto next_flush = started;
+  auto next_heartbeat = started + heartbeat_interval;
+  auto retry_delay = std::chrono::seconds(1);
+  auto next_retry = started;
+  std::chrono::steady_clock::time_point last_error_log{};
+  std::unique_ptr<statistics_v2::DirtyPatch> pending;
 
-    auto buckets = root.value("buckets", json::array());
-    for (const auto &item : buckets) {
-      int64_t minute = item.value("minute", 0LL);
-      if (minute <= 0)
-        continue;
-      size_t index = static_cast<size_t>(minute % kBucketCount);
-      g_state->buckets[index].minute = minute;
-      g_state->buckets[index].counters.subscription_requests =
-          item.value("subscription_requests", 0ULL);
-      g_state->buckets[index].counters.rule_conversions =
-          item.value("rule_conversions", 0ULL);
-      g_state->buckets[index].countries.clear();
-      g_state->buckets[index].china_regions.clear();
-
-      auto country_items = item.value("countries", json::array());
-      for (const auto &country_item : country_items) {
-        std::string code =
-            normalizeCountryCode(country_item.value("code", "ZZ"));
-        uint64_t requests =
-            country_item.value("subscription_requests", 0ULL);
-        uint64_t rules = country_item.value("rule_conversions", 0ULL);
-        if (requests || rules)
-          addCountryCounters(g_state->buckets[index].countries, code, requests,
-                             rules);
+  for (;;) {
+    bool stopping = false;
+    bool cycle_failed = false;
+    try {
+      {
+        std::unique_lock<std::mutex> lock(g_engine.mutex);
+        const bool store_ready =
+            g_engine.store && g_engine.store->ready();
+        const auto wake_at =
+            store_ready ? std::min(next_flush, next_heartbeat) : next_retry;
+        g_engine.condition.wait_until(lock, wake_at, [] {
+          return g_engine.stopping;
+        });
+        stopping = g_engine.stopping;
       }
 
-      auto region_items = item.value("china_regions", json::array());
-      for (const auto &region_item : region_items) {
-        std::string code =
-            normalizeChinaRegionCode(region_item.value("code", ""));
-        if (code.empty())
+      const auto steady_now = std::chrono::steady_clock::now();
+      bool store_ready = g_engine.store && g_engine.store->ready();
+      if (!store_ready && (stopping || steady_now >= next_retry)) {
+        const statistics_v2::StoreStatus status = g_engine.store->open();
+        if (status == statistics_v2::StoreStatus::Ready) {
+          // A later recovery must not replace the authoritative in-memory
+          // state. load() only validates/repairs the existing files.
+          g_engine.store->load();
+          store_ready = g_engine.store->ready();
+          statistics_v2::PersistentImage image;
+          uint64_t dirty_version = 0;
+          if (store_ready) {
+            std::lock_guard<std::mutex> lock(g_engine.mutex);
+            image = g_engine.core.checkpointImage(
+                nowSeconds(), stopping, dirty_version);
+          }
+          if (store_ready && g_engine.store->writeCheckpoint(image)) {
+            {
+              std::lock_guard<std::mutex> lock(g_engine.mutex);
+              g_engine.core.acknowledgeCheckpoint(dirty_version);
+            }
+            pending.reset();
+            g_engine.store->cleanupLegacyFile();
+            retry_delay = std::chrono::seconds(1);
+            store_ready = true;
+            next_heartbeat = steady_now + heartbeat_interval;
+            writeLog(0, "Statistics v2 持久化已恢复。",
+                     LOG_LEVEL_INFO);
+          } else {
+            logPersistenceError(g_engine.store->lastError(), last_error_log);
+            g_engine.store->close();
+            store_ready = false;
+          }
+        } else {
+          logPersistenceError(g_engine.store->lastError(), last_error_log);
+        }
+        if (!store_ready) {
+          next_retry = steady_now + retry_delay;
+          retry_delay = std::min(retry_delay * 2, kMaximumRetry);
+        }
+      }
+
+      store_ready = g_engine.store && g_engine.store->ready();
+      if (store_ready && g_engine.store->generation() == 0) {
+        statistics_v2::PersistentImage image;
+        uint64_t dirty_version = 0;
+        {
+          std::lock_guard<std::mutex> lock(g_engine.mutex);
+          image = g_engine.core.checkpointImage(
+              nowSeconds(), stopping, dirty_version);
+        }
+        if (!g_engine.store->ensureInitialCheckpoint(image)) {
+          logPersistenceError(g_engine.store->lastError(), last_error_log);
+          g_engine.store->close();
+          next_retry = steady_now + retry_delay;
+          if (stopping)
+            break;
           continue;
-        uint64_t requests =
-            region_item.value("subscription_requests", 0ULL);
-        uint64_t rules = region_item.value("rule_conversions", 0ULL);
-        if (requests || rules)
-          addCountryCounters(g_state->buckets[index].china_regions, code,
-                             requests, rules);
+        }
+        {
+          std::lock_guard<std::mutex> lock(g_engine.mutex);
+          g_engine.core.acknowledgeCheckpoint(dirty_version);
+        }
+        g_engine.store->cleanupLegacyFile();
+        next_heartbeat = steady_now + heartbeat_interval;
       }
-    }
 
-    bool loaded_daily_buckets = false;
-    auto daily_buckets = root.value("daily_buckets", json::array());
-    for (const auto &item : daily_buckets) {
-      int64_t day = item.value("day", 0LL);
-      if (day <= 0)
-        continue;
-      size_t index = static_cast<size_t>(day % kDailyBucketCount);
-      g_state->daily_buckets[index].day = day;
-      g_state->daily_buckets[index].counters.subscription_requests =
-          item.value("subscription_requests", 0ULL);
-      g_state->daily_buckets[index].counters.rule_conversions =
-          item.value("rule_conversions", 0ULL);
-      g_state->daily_buckets[index].countries.clear();
-      g_state->daily_buckets[index].china_regions.clear();
-
-      auto country_items = item.value("countries", json::array());
-      for (const auto &country_item : country_items) {
-        std::string code =
-            normalizeCountryCode(country_item.value("code", "ZZ"));
-        uint64_t requests =
-            country_item.value("subscription_requests", 0ULL);
-        uint64_t rules = country_item.value("rule_conversions", 0ULL);
-        if (requests || rules)
-          addCountryCounters(g_state->daily_buckets[index].countries, code,
-                             requests, rules);
+      const bool flush_due = steady_now >= next_flush;
+      const bool heartbeat_due = steady_now >= next_heartbeat;
+      if (g_engine.store && g_engine.store->ready() &&
+          (stopping || flush_due || heartbeat_due)) {
+        if (!pending) {
+          std::lock_guard<std::mutex> lock(g_engine.mutex);
+          if (stopping || g_engine.core.hasDirty()) {
+            pending.reset(new statistics_v2::DirtyPatch(
+                g_engine.core.takeDirtyPatch(nowSeconds(), stopping)));
+          } else if (heartbeat_due) {
+            pending.reset(new statistics_v2::DirtyPatch(
+                g_engine.core.runtimePatch(nowSeconds(), false)));
+          }
+        }
+        if (pending && !pending->empty()) {
+          if (g_engine.store->appendPatch(*pending)) {
+            pending.reset();
+            next_heartbeat = steady_now + heartbeat_interval;
+            if (g_engine.store->needsCompaction()) {
+              statistics_v2::PersistentImage image;
+              uint64_t dirty_version = 0;
+              {
+                std::lock_guard<std::mutex> lock(g_engine.mutex);
+                image = g_engine.core.checkpointImage(
+                    nowSeconds(), stopping, dirty_version);
+              }
+              if (!g_engine.store->writeCheckpoint(image)) {
+                logPersistenceError(g_engine.store->lastError(),
+                                    last_error_log);
+                g_engine.store->close();
+                next_retry = steady_now + retry_delay;
+              } else {
+                std::lock_guard<std::mutex> lock(g_engine.mutex);
+                g_engine.core.acknowledgeCheckpoint(dirty_version);
+              }
+            }
+          } else {
+            logPersistenceError(g_engine.store->lastError(), last_error_log);
+            g_engine.store->close();
+            next_retry = steady_now + retry_delay;
+          }
+        }
+        next_flush =
+            steady_now + std::chrono::seconds(g_engine.flush_interval_seconds);
       }
-      auto region_items = item.value("china_regions", json::array());
-      for (const auto &region_item : region_items) {
-        std::string code =
-            normalizeChinaRegionCode(region_item.value("code", ""));
-        if (code.empty())
-          continue;
-        uint64_t requests =
-            region_item.value("subscription_requests", 0ULL);
-        uint64_t rules = region_item.value("rule_conversions", 0ULL);
-        if (requests || rules)
-          addCountryCounters(g_state->daily_buckets[index].china_regions, code,
-                             requests, rules);
-      }
-      if (g_state->daily_buckets[index].counters.subscription_requests ||
-          g_state->daily_buckets[index].counters.rule_conversions)
-        loaded_daily_buckets = true;
+
+      if (stopping)
+        break;
+    } catch (const std::bad_alloc &error) {
+      cycle_failed = true;
+      logPersistenceException("memory allocation failure", error.what(),
+                              last_error_log);
+    } catch (const std::filesystem::filesystem_error &error) {
+      cycle_failed = true;
+      logPersistenceException("filesystem exception", error.what(),
+                              last_error_log);
+    } catch (const std::exception &error) {
+      cycle_failed = true;
+      logPersistenceException("unexpected persistence exception", error.what(),
+                              last_error_log);
+    } catch (...) {
+      cycle_failed = true;
+      logPersistenceException("unknown persistence exception", nullptr,
+                              last_error_log);
     }
-    if (!loaded_daily_buckets)
-      seedDailyBucketsFromMinuteBucketsLocked();
-  } catch (const std::exception &e) {
-    writeLog(0, "统计数据加载失败：" + std::string(e.what()), LOG_LEVEL_WARNING);
-  }
-}
 
-bool flushLocked(bool stopping, int64_t now) {
-  std::string path = dataFilePath();
-  std::string dir = normalizePath(global.statisticsDataDir);
-  if (dir.empty())
-    dir = "stats";
-  if (!ensureDirectory(dir)) {
-    writeLog(0, "无法创建统计数据目录：" + dir, LOG_LEVEL_WARNING);
-    return false;
-  }
-
-  g_state->last_seen_at = now;
-  if (stopping)
-    g_state->last_stopped_at = now;
-
-  json root;
-  root["schema"] = 4;
-  root["updated_at"] = now;
-  root["runtime"] = {
-      {"first_started_at", g_state->first_started_at},
-      {"started_at", g_state->started_at},
-      {"uptime_seconds", currentUptimeLocked(now)},
-      {"total_runtime_seconds", totalRuntimeLocked(now)},
-      {"launch_count", g_state->launch_count},
-      {"last_seen_at", g_state->last_seen_at},
-      {"last_stopped_at", g_state->last_stopped_at}};
-  root["lifetime"] = countersJson(g_state->lifetime);
-  root["countries"] = countriesObjectJson(g_state->lifetime_countries);
-  root["china_regions"] =
-      countriesObjectJson(g_state->lifetime_china_regions);
-
-  json buckets = json::array();
-  for (const Bucket &bucket : g_state->buckets) {
-    if (bucket.minute <= 0)
+    if (!cycle_failed)
       continue;
-    if (!bucket.counters.subscription_requests &&
-        !bucket.counters.rule_conversions)
-      continue;
-    json countries = json::array();
-    for (const CountryBucketEntry &entry : bucket.countries) {
-      if (!entry.counters.subscription_requests &&
-          !entry.counters.rule_conversions)
-        continue;
-      countries.push_back({{"code", entry.code},
-                           {"subscription_requests",
-                            entry.counters.subscription_requests},
-                           {"rule_conversions",
-                            entry.counters.rule_conversions}});
+    try {
+      if (g_engine.store)
+        g_engine.store->close();
+    } catch (...) {
     }
-    json china_regions = json::array();
-    for (const CountryBucketEntry &entry : bucket.china_regions) {
-      if (!entry.counters.subscription_requests &&
-          !entry.counters.rule_conversions)
-        continue;
-      china_regions.push_back({{"code", entry.code},
-                               {"subscription_requests",
-                                entry.counters.subscription_requests},
-                               {"rule_conversions",
-                                entry.counters.rule_conversions}});
+    const auto retry_from = std::chrono::steady_clock::now();
+    next_retry = retry_from + retry_delay;
+    retry_delay = std::min(retry_delay * 2, kMaximumRetry);
+    {
+      std::lock_guard<std::mutex> lock(g_engine.mutex);
+      stopping = g_engine.stopping;
     }
-    buckets.push_back({{"minute", bucket.minute},
-                       {"subscription_requests",
-                        bucket.counters.subscription_requests},
-                       {"rule_conversions",
-                        bucket.counters.rule_conversions},
-                       {"countries", countries},
-                       {"china_regions", china_regions}});
+    if (stopping)
+      break;
   }
-  root["buckets"] = buckets;
-
-  json daily_buckets = json::array();
-  for (const DailyBucket &bucket : g_state->daily_buckets) {
-    if (bucket.day <= 0)
-      continue;
-    if (!bucket.counters.subscription_requests &&
-        !bucket.counters.rule_conversions)
-      continue;
-    json countries = json::array();
-    for (const CountryBucketEntry &entry : bucket.countries) {
-      if (!entry.counters.subscription_requests &&
-          !entry.counters.rule_conversions)
-        continue;
-      countries.push_back({{"code", entry.code},
-                           {"subscription_requests",
-                            entry.counters.subscription_requests},
-                           {"rule_conversions",
-                            entry.counters.rule_conversions}});
-    }
-    json china_regions = json::array();
-    for (const CountryBucketEntry &entry : bucket.china_regions) {
-      if (!entry.counters.subscription_requests &&
-          !entry.counters.rule_conversions)
-        continue;
-      china_regions.push_back({{"code", entry.code},
-                               {"subscription_requests",
-                                entry.counters.subscription_requests},
-                               {"rule_conversions",
-                                entry.counters.rule_conversions}});
-    }
-    daily_buckets.push_back({{"day", bucket.day},
-                             {"subscription_requests",
-                              bucket.counters.subscription_requests},
-                             {"rule_conversions",
-                              bucket.counters.rule_conversions},
-                             {"countries", countries},
-                             {"china_regions", china_regions}});
+  try {
+    if (g_engine.store)
+      g_engine.store->close();
+  } catch (...) {
   }
-  root["daily_buckets"] = daily_buckets;
-
-  std::string tmp = path + ".tmp";
-  if (!writeTextFile(tmp, root.dump()))
-    return false;
-  std::remove(path.c_str());
-  if (std::rename(tmp.c_str(), path.c_str()) != 0) {
-    std::remove(tmp.c_str());
-    return false;
-  }
-  g_state->dirty = false;
-  g_state->last_flush = now;
-  return true;
 }
 
-} // namespace
-
-namespace statistics {
-
-void initialize() {
-  if (!global.statisticsEnabled)
-    return;
-
-  std::lock_guard<std::mutex> lock(g_mutex);
-  if (g_state && g_state->initialized)
-    return;
-  int64_t now = nowSeconds();
-  g_state.reset(new State());
-  g_state->initialized = true;
-  loadLocked();
-  if (g_state->first_started_at <= 0)
-    g_state->first_started_at = now;
-  g_state->started_at = now;
-  g_state->last_seen_at = now;
-  g_state->last_stopped_at = 0;
-  g_state->launch_count++;
-  g_state->dirty = true;
-  g_next_tick_at.store(now, std::memory_order_relaxed);
-  writeLog(0, "统计数据已启用，数据目录：" + global.statisticsDataDir,
-           LOG_LEVEL_INFO);
-}
-
-void shutdown() {
-  if (!global.statisticsEnabled)
-    return;
-  std::lock_guard<std::mutex> lock(g_mutex);
-  if (g_state && g_state->initialized)
-    flushLocked(true, nowSeconds());
-}
-
-bool isEnabled() { return global.statisticsEnabled; }
-
-void tick() {
-  if (!global.statisticsEnabled)
-    return;
-
-  int64_t now = nowSeconds();
-  int64_t next = g_next_tick_at.load(std::memory_order_relaxed);
-  if (now < next)
-    return;
-  if (!g_next_tick_at.compare_exchange_strong(next, now + 1,
-                                              std::memory_order_relaxed))
-    return;
-
-  std::lock_guard<std::mutex> lock(g_mutex);
-  if (!g_state || !g_state->initialized)
-    return;
-
-  int flush_interval = std::max(1, global.statisticsFlushInterval);
-  int heartbeat_interval = std::max(60, flush_interval);
-  bool dirty_due = g_state->dirty && now - g_state->last_flush >= flush_interval;
-  bool heartbeat_due = now - g_state->last_flush >= heartbeat_interval;
-  if (dirty_due || heartbeat_due)
-    flushLocked(false, now);
-}
-
-void recordSubscriptionConversion(const Request &request,
-                                  uint64_t rule_conversions) {
-  if (!global.statisticsEnabled || request.method != "GET")
-    return;
-
-  int64_t now = nowSeconds();
-  int64_t minute = now / 60;
-  int64_t day = now / (24 * 60 * 60);
-  GeoLocation location = geoLocationFromHeaders(request);
-
-  std::lock_guard<std::mutex> lock(g_mutex);
-  if (!g_state || !g_state->initialized)
-    return;
-
-  addCounters(g_state->startup, 1, rule_conversions);
-  addCounters(g_state->lifetime, 1, rule_conversions);
-  addCountryCounters(g_state->startup_countries, location.country_code, 1,
-                     rule_conversions);
-  addCountryCounters(g_state->lifetime_countries, location.country_code, 1,
-                     rule_conversions);
-  if (!location.china_region_code.empty()) {
-    addCountryCounters(g_state->startup_china_regions,
-                       location.china_region_code, 1, rule_conversions);
-    addCountryCounters(g_state->lifetime_china_regions,
-                       location.china_region_code, 1, rule_conversions);
-  }
-
-  size_t index = static_cast<size_t>(minute % kBucketCount);
-  if (g_state->buckets[index].minute != minute) {
-    g_state->buckets[index].minute = minute;
-    g_state->buckets[index].counters = Counters();
-    g_state->buckets[index].countries.clear();
-    g_state->buckets[index].china_regions.clear();
-  }
-  addCounters(g_state->buckets[index].counters, 1, rule_conversions);
-  addCountryCounters(g_state->buckets[index].countries, location.country_code,
-                     1, rule_conversions);
-  if (!location.china_region_code.empty())
-    addCountryCounters(g_state->buckets[index].china_regions,
-                       location.china_region_code, 1, rule_conversions);
-
-  size_t daily_index = static_cast<size_t>(day % kDailyBucketCount);
-  if (g_state->daily_buckets[daily_index].day != day) {
-    g_state->daily_buckets[daily_index].day = day;
-    g_state->daily_buckets[daily_index].counters = Counters();
-    g_state->daily_buckets[daily_index].countries.clear();
-    g_state->daily_buckets[daily_index].china_regions.clear();
-  }
-  addCounters(g_state->daily_buckets[daily_index].counters, 1,
-              rule_conversions);
-  addCountryCounters(g_state->daily_buckets[daily_index].countries,
-                     location.country_code, 1, rule_conversions);
-  if (!location.china_region_code.empty())
-    addCountryCounters(g_state->daily_buckets[daily_index].china_regions,
-                       location.china_region_code, 1, rule_conversions);
-
-  g_state->dirty = true;
-}
-
-std::string dashboardData(RESPONSE_CALLBACK_ARGS) {
+void cacheHeaders(Response &response) {
   response.headers["Cache-Control"] =
       "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, "
       "s-maxage=0";
@@ -919,93 +349,280 @@ std::string dashboardData(RESPONSE_CALLBACK_ARGS) {
   response.headers["X-Robots-Tag"] =
       "noindex, nofollow, noarchive, nosnippet, noimageindex";
   response.content_type = "application/json; charset=utf-8";
+}
 
-  std::lock_guard<std::mutex> lock(g_mutex);
-  int64_t now = nowSeconds();
-  int64_t now_minute = now / 60;
-  int64_t now_day = now / (24 * 60 * 60);
+template <typename Writer>
+void writeCounters(Writer &writer, const Counters &counters) {
+  writer.StartObject();
+  writer.Key("subscription_requests");
+  writer.Uint64(counters.subscription_requests);
+  writer.Key("rule_conversions");
+  writer.Uint64(counters.rule_conversions);
+  writer.EndObject();
+}
 
-  json root;
-  root["enabled"] = global.statisticsEnabled;
-  root["generated_at"] = now;
-  root["started_at"] = g_state ? g_state->started_at : 0;
-  root["runtime"] = {
-      {"first_started_at", g_state ? g_state->first_started_at : 0},
-      {"started_at", g_state ? g_state->started_at : 0},
-      {"uptime_seconds", currentUptimeLocked(now)},
-      {"total_runtime_seconds", totalRuntimeLocked(now)},
-      {"launch_count", g_state ? g_state->launch_count : 0},
-      {"last_seen_at", g_state ? g_state->last_seen_at : 0},
-      {"last_stopped_at", g_state ? g_state->last_stopped_at : 0}};
-  root["windows"] = {
-      {"startup", countersJson(g_state ? g_state->startup : Counters())},
-      {"hour", countersJson(windowCountersLocked(now_minute, 60))},
-      {"day", countersJson(windowCountersLocked(now_minute, 24 * 60))},
-      {"seven_days", countersJson(windowCountersLocked(now_minute, 7 * 24 * 60))},
-      {"thirty_days",
-       countersJson(windowCountersLocked(now_minute, 30 * 24 * 60))},
-      {"half_year", countersJson(dailyWindowCountersLocked(now_day, 183))},
-      {"year", countersJson(dailyWindowCountersLocked(now_day, 365))},
-      {"lifetime", countersJson(g_state ? g_state->lifetime : Counters())}};
+struct RankedGeo {
+  GeoId id;
+  Counters counters;
+  std::string code;
+};
 
-  json country_windows = json::object();
-  country_windows["startup"] =
-      countriesJson(g_state ? countrySnapshotLocked(g_state->startup_countries)
-                            : std::vector<SnapshotCountry>());
-  country_windows["hour"] = countriesJson(countryWindowLocked(now_minute, 60));
-  country_windows["day"] =
-      countriesJson(countryWindowLocked(now_minute, 24 * 60));
-  country_windows["seven_days"] =
-      countriesJson(countryWindowLocked(now_minute, 7 * 24 * 60));
-  country_windows["thirty_days"] =
-      countriesJson(countryWindowLocked(now_minute, 30 * 24 * 60));
-  country_windows["half_year"] =
-      countriesJson(countryDailyWindowLocked(now_day, 183));
-  country_windows["year"] = countriesJson(countryDailyWindowLocked(now_day, 365));
-  country_windows["lifetime"] =
-      countriesJson(g_state ? countrySnapshotLocked(g_state->lifetime_countries)
-                            : std::vector<SnapshotCountry>());
-  root["country_windows"] = country_windows;
-  root["countries"] = country_windows["lifetime"];
-
-  json china_region_windows = json::object();
-  china_region_windows["startup"] =
-      countriesJson(g_state
-                        ? countrySnapshotLocked(g_state->startup_china_regions)
-                        : std::vector<SnapshotCountry>());
-  china_region_windows["hour"] =
-      countriesJson(chinaRegionWindowLocked(now_minute, 60));
-  china_region_windows["day"] =
-      countriesJson(chinaRegionWindowLocked(now_minute, 24 * 60));
-  china_region_windows["seven_days"] =
-      countriesJson(chinaRegionWindowLocked(now_minute, 7 * 24 * 60));
-  china_region_windows["thirty_days"] =
-      countriesJson(chinaRegionWindowLocked(now_minute, 30 * 24 * 60));
-  china_region_windows["half_year"] =
-      countriesJson(chinaRegionDailyWindowLocked(now_day, 183));
-  china_region_windows["year"] =
-      countriesJson(chinaRegionDailyWindowLocked(now_day, 365));
-  china_region_windows["lifetime"] =
-      countriesJson(g_state ? countrySnapshotLocked(
-                                  g_state->lifetime_china_regions)
-                            : std::vector<SnapshotCountry>());
-  root["china_region_windows"] = china_region_windows;
-  root["china_regions"] = china_region_windows["lifetime"];
-
-  json series = json::array();
-  std::vector<Counters> hourly = hourlySeriesLocked(now_minute, 24);
-  int64_t current_hour = now_minute / 60;
-  int64_t first_hour = current_hour - 24 + 1;
-  for (size_t i = 0; i < hourly.size(); ++i) {
-    int64_t hour = first_hour + static_cast<int64_t>(i);
-    series.push_back({{"time", hour * 3600},
-                      {"subscription_requests",
-                       hourly[i].subscription_requests},
-                      {"rule_conversions", hourly[i].rule_conversions}});
+std::vector<RankedGeo>
+rankedGeo(const std::array<Counters, statistics_v2::kGeoCount> &geo,
+          bool china_regions) {
+  std::vector<RankedGeo> result;
+  for (std::size_t i = 0; i < geo.size(); ++i) {
+    const GeoId id = static_cast<GeoId>(i);
+    if (geo[i].empty() ||
+        statistics_v2::isChinaRegionGeoId(id) != china_regions)
+      continue;
+    result.push_back({id, geo[i], statistics_v2::geoCode(id)});
   }
-  root["series"] = series;
+  std::sort(result.begin(), result.end(),
+            [](const RankedGeo &left, const RankedGeo &right) {
+              if (left.counters.subscription_requests !=
+                  right.counters.subscription_requests)
+                return left.counters.subscription_requests >
+                       right.counters.subscription_requests;
+              if (left.counters.rule_conversions !=
+                  right.counters.rule_conversions)
+                return left.counters.rule_conversions >
+                       right.counters.rule_conversions;
+              return left.code < right.code;
+            });
+  return result;
+}
 
-  return root.dump();
+template <typename Writer>
+void writeGeoArray(Writer &writer, const WindowSnapshot &window,
+                   bool china_regions) {
+  const std::vector<RankedGeo> entries =
+      rankedGeo(window.geo, china_regions);
+  writer.StartArray();
+  for (const RankedGeo &entry : entries) {
+    writer.StartObject();
+    writer.Key("code");
+    writer.String(entry.code.c_str(),
+                  static_cast<rapidjson::SizeType>(entry.code.size()));
+    writer.Key("subscription_requests");
+    writer.Uint64(entry.counters.subscription_requests);
+    writer.Key("rule_conversions");
+    writer.Uint64(entry.counters.rule_conversions);
+    writer.EndObject();
+  }
+  writer.EndArray();
+}
+
+const std::array<const char *, 8> kWindowNames = {
+    "startup", "hour",      "day",      "seven_days",
+    "thirty_days", "half_year", "year", "lifetime"};
+
+const WindowSnapshot &windowAt(const DashboardSnapshot &snapshot,
+                               std::size_t index) {
+  if (index == 0)
+    return snapshot.startup;
+  if (index >= 1 && index <= 4)
+    return snapshot.minute_windows[index - 1];
+  if (index >= 5 && index <= 6)
+    return snapshot.daily_windows[index - 5];
+  return snapshot.lifetime;
+}
+
+template <typename Writer>
+void writeGeoWindows(Writer &writer, const DashboardSnapshot &snapshot,
+                     bool china_regions) {
+  writer.StartObject();
+  for (std::size_t i = 0; i < kWindowNames.size(); ++i) {
+    writer.Key(kWindowNames[i]);
+    writeGeoArray(writer, windowAt(snapshot, i), china_regions);
+  }
+  writer.EndObject();
+}
+
+std::string serializeDashboard(const DashboardSnapshot &snapshot) {
+  rapidjson::StringBuffer buffer;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+  writer.StartObject();
+  writer.Key("enabled");
+  writer.Bool(global.statisticsEnabled);
+  writer.Key("generated_at");
+  writer.Int64(snapshot.generated_at);
+  writer.Key("started_at");
+  writer.Int64(snapshot.started_at);
+  writer.Key("revision");
+  writer.Uint64(snapshot.revision);
+
+  writer.Key("runtime");
+  writer.StartObject();
+  writer.Key("first_started_at");
+  writer.Int64(snapshot.runtime.first_started_at);
+  writer.Key("started_at");
+  writer.Int64(snapshot.started_at);
+  writer.Key("uptime_seconds");
+  writer.Int64(snapshot.uptime_seconds);
+  writer.Key("total_runtime_seconds");
+  writer.Int64(snapshot.total_runtime_seconds);
+  writer.Key("launch_count");
+  writer.Uint64(snapshot.runtime.launch_count);
+  writer.Key("last_seen_at");
+  writer.Int64(snapshot.runtime.last_seen_at);
+  writer.Key("last_stopped_at");
+  writer.Int64(snapshot.runtime.last_stopped_at);
+  writer.EndObject();
+
+  writer.Key("windows");
+  writer.StartObject();
+  for (std::size_t i = 0; i < kWindowNames.size(); ++i) {
+    writer.Key(kWindowNames[i]);
+    writeCounters(writer, windowAt(snapshot, i).counters);
+  }
+  writer.EndObject();
+
+  writer.Key("country_windows");
+  writeGeoWindows(writer, snapshot, false);
+  writer.Key("countries");
+  writeGeoArray(writer, snapshot.lifetime, false);
+  writer.Key("china_region_windows");
+  writeGeoWindows(writer, snapshot, true);
+  writer.Key("china_regions");
+  writeGeoArray(writer, snapshot.lifetime, true);
+
+  writer.Key("series");
+  writer.StartArray();
+  for (const statistics_v2::SeriesPoint &point : snapshot.series) {
+    writer.StartObject();
+    writer.Key("time");
+    writer.Int64(point.time);
+    writer.Key("subscription_requests");
+    writer.Uint64(point.counters.subscription_requests);
+    writer.Key("rule_conversions");
+    writer.Uint64(point.counters.rule_conversions);
+    writer.EndObject();
+  }
+  writer.EndArray();
+  writer.EndObject();
+  return std::string(buffer.GetString(), buffer.GetSize());
+}
+
+} // namespace
+
+namespace statistics {
+
+void initialize() {
+  if (!global.statisticsEnabled)
+    return;
+  {
+    std::lock_guard<std::mutex> lock(g_engine.mutex);
+    if (g_engine.initialized)
+      return;
+    g_engine.initialized = true;
+    g_engine.stopping = false;
+    g_engine.flush_interval_seconds =
+        std::max(1, global.statisticsFlushInterval);
+    g_engine.geo.enabled =
+        !asciiEqualsIgnoreCase(global.statisticsGeoProvider, "none");
+    g_engine.geo.country_headers.assign(
+        global.statisticsCountryHeaders.begin(),
+        global.statisticsCountryHeaders.end());
+    g_engine.geo.china_region_headers.assign(
+        global.statisticsChinaRegionHeaders.begin(),
+        global.statisticsChinaRegionHeaders.end());
+    g_engine.store.reset(
+        new statistics_v2::Store(global.statisticsDataDir));
+  }
+
+  bool loaded = false;
+  std::chrono::steady_clock::time_point initialization_error_log{};
+  try {
+    if (g_engine.store->open() == statistics_v2::StoreStatus::Ready) {
+      const statistics_v2::StoreLoadResult recovered = g_engine.store->load();
+      if (recovered.has_image) {
+        std::lock_guard<std::mutex> lock(g_engine.mutex);
+        g_engine.core.startFromImage(recovered.image, nowSeconds());
+        loaded = true;
+      }
+    }
+  } catch (const std::bad_alloc &error) {
+    logPersistenceException("initial memory allocation failure", error.what(),
+                            initialization_error_log);
+    g_engine.store->close();
+  } catch (const std::filesystem::filesystem_error &error) {
+    logPersistenceException("initial filesystem exception", error.what(),
+                            initialization_error_log);
+    g_engine.store->close();
+  } catch (const std::exception &error) {
+    logPersistenceException("initial persistence exception", error.what(),
+                            initialization_error_log);
+    g_engine.store->close();
+  } catch (...) {
+    logPersistenceException("unknown initial persistence exception", nullptr,
+                            initialization_error_log);
+    g_engine.store->close();
+  }
+  if (!loaded) {
+    std::lock_guard<std::mutex> lock(g_engine.mutex);
+    g_engine.core.startEmpty(nowSeconds());
+  }
+
+  g_engine.persistence_thread = std::thread(persistenceWorker);
+  writeLog(0, "Statistics v2 已启用，数据目录：" +
+                  global.statisticsDataDir,
+           LOG_LEVEL_INFO);
+}
+
+void shutdown() {
+  if (!global.statisticsEnabled)
+    return;
+  {
+    std::lock_guard<std::mutex> lock(g_engine.mutex);
+    if (!g_engine.initialized)
+      return;
+    g_engine.stopping = true;
+  }
+  g_engine.condition.notify_all();
+  if (g_engine.persistence_thread.joinable())
+    g_engine.persistence_thread.join();
+  std::lock_guard<std::mutex> lock(g_engine.mutex);
+  g_engine.initialized = false;
+}
+
+bool isEnabled() { return global.statisticsEnabled; }
+
+void tick() {
+  // Statistics v2 owns its steady-clock persistence schedule. The retained
+  // entry point keeps the existing main-loop contract unchanged.
+}
+
+void recordSubscriptionConversion(const Request &request,
+                                  uint64_t rule_conversions) {
+  if (!global.statisticsEnabled || request.method != "GET")
+    return;
+  const GeoLocation location = geoLocation(request, g_engine.geo);
+  {
+    std::lock_guard<std::mutex> lock(g_engine.mutex);
+    if (!g_engine.initialized)
+      return;
+    g_engine.core.record(nowSeconds(), location.country,
+                         location.china_region, rule_conversions);
+  }
+}
+
+std::string dashboardData(RESPONSE_CALLBACK_ARGS) {
+  cacheHeaders(response);
+  std::lock_guard<std::mutex> cache_lock(g_cache_mutex);
+  const auto steady_now = std::chrono::steady_clock::now();
+  if (!g_cached_dashboard.empty() &&
+      steady_now - g_cached_dashboard_at < kDashboardCacheLifetime)
+    return g_cached_dashboard;
+
+  DashboardSnapshot snapshot;
+  {
+    std::lock_guard<std::mutex> lock(g_engine.mutex);
+    snapshot = g_engine.core.dashboardSnapshot(nowSeconds());
+  }
+  g_cached_dashboard = serializeDashboard(snapshot);
+  g_cached_dashboard_at = steady_now;
+  return g_cached_dashboard;
 }
 
 } // namespace statistics

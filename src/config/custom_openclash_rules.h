@@ -32,6 +32,7 @@ struct PublishedDirectory {
   bool matched() const { return valid; }
 };
 
+const std::vector<std::string> &allowedDirectories();
 Resource matchRepositoryUrl(const std::string &url);
 Resource matchPublishedPath(const std::string &path);
 PublishedDirectory matchPublishedDirectory(const std::string &path);

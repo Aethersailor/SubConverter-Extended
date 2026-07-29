@@ -11,6 +11,11 @@ namespace {
 const std::string PUBLISHED_PREFIX = "/Custom_OpenClash_Rules/main/";
 const std::string PUBLISHED_ROOT = "/Custom_OpenClash_Rules/main";
 const std::string LOCAL_PREFIX = "Custom_OpenClash_Rules/main/";
+const std::vector<std::string> ALLOWED_DIRECTORIES = {
+#define COCR_ALLOWED_DIRECTORY(path) path,
+#include "custom_openclash_rules_policy.def"
+#undef COCR_ALLOWED_DIRECTORY
+};
 
 std::string toLower(std::string value) {
   std::transform(value.begin(), value.end(), value.begin(),
@@ -51,18 +56,6 @@ bool isSafeSegment(const std::string &segment) {
   return true;
 }
 
-bool isExcludedRepositoryPath(const std::vector<std::string> &segments,
-                              size_t offset) {
-  if (segments.size() <= offset)
-    return true;
-  for (size_t i = offset; i < segments.size(); ++i) {
-    std::string segment = toLower(segments[i]);
-    if (segment == "archived" || segment == "test")
-      return true;
-  }
-  return toLower(segments.back()) == "readme.md";
-}
-
 bool isRepository(const std::vector<std::string> &segments, size_t offset) {
   return segments.size() > offset + 1 &&
          equalsIgnoreCase(segments[offset], "Aethersailor") &&
@@ -89,30 +82,39 @@ Resource buildResource(const std::vector<std::string> &segments,
     if (!isSafeSegment(segments[i]))
       return {};
   }
-  if (isExcludedRepositoryPath(segments, offset))
+  if (equalsIgnoreCase(segments.back(), "README.md"))
     return {};
 
-  bool cfg = equalsIgnoreCase(segments[offset], "cfg");
-  bool rule = equalsIgnoreCase(segments[offset], "rule");
-  if (!cfg && !rule)
-    return {};
-
-  std::string repository_path;
-  for (size_t i = offset; i < segments.size(); ++i) {
-    if (!repository_path.empty())
-      repository_path += '/';
-    repository_path += segments[i];
+  std::string requested_directory;
+  for (size_t i = offset; i + 1 < segments.size(); ++i) {
+    if (!requested_directory.empty())
+      requested_directory += '/';
+    requested_directory += segments[i];
   }
+  auto allowed = std::find_if(
+      ALLOWED_DIRECTORIES.begin(), ALLOWED_DIRECTORIES.end(),
+      [&](const std::string &directory) {
+        return equalsIgnoreCase(directory, requested_directory);
+      });
+  if (allowed == ALLOWED_DIRECTORIES.end())
+    return {};
+
+  const std::string &directory = *allowed;
+  const std::string &filename = segments.back();
+  std::string repository_path = directory + "/" + filename;
 
   std::string extension = extensionOf(repository_path);
   ResourceKind kind = ResourceKind::StaticFile;
-  if (cfg && segments.size() == offset + 2 && extension == ".ini")
+  if (directory == "cfg" && extension == ".ini")
     kind = ResourceKind::ConfigIni;
-  else if (rule && extension == ".list")
+  else if ((directory == "rule" || directory == "game_rule") &&
+           extension == ".list")
     kind = ResourceKind::RuleList;
-  else if (rule && (extension == ".yaml" || extension == ".yml"))
+  else if ((directory == "rule" || directory == "game_rule") &&
+           (extension == ".yaml" || extension == ".yml"))
     kind = ResourceKind::RuleYaml;
-  else if (rule && extension == ".mrs")
+  else if ((directory == "rule" || directory == "game_rule") &&
+           extension == ".mrs")
     kind = ResourceKind::RuleMrs;
 
   return {kind, repository_path};
@@ -168,6 +170,10 @@ Resource matchJsDelivr(const std::vector<std::string> &segments) {
 }
 
 } // namespace
+
+const std::vector<std::string> &allowedDirectories() {
+  return ALLOWED_DIRECTORIES;
+}
 
 Resource matchRepositoryUrl(const std::string &url) {
   size_t scheme_end = url.find("://");
@@ -248,24 +254,28 @@ PublishedDirectory matchPublishedDirectory(const std::string &path) {
   }
 
   std::vector<std::string> segments = splitPath(relative);
-  if (segments.empty() ||
-      (!equalsIgnoreCase(segments[0], "cfg") &&
-       !equalsIgnoreCase(segments[0], "rule")))
+  if (segments.empty())
     return {};
   for (const std::string &segment : segments) {
     if (!isSafeSegment(segment))
       return {};
   }
-  if (isExcludedRepositoryPath(segments, 0))
+
+  std::string requested_directory;
+  for (const std::string &segment : segments) {
+    if (!requested_directory.empty())
+      requested_directory += '/';
+    requested_directory += segment;
+  }
+  auto allowed = std::find_if(
+      ALLOWED_DIRECTORIES.begin(), ALLOWED_DIRECTORIES.end(),
+      [&](const std::string &directory) {
+        return equalsIgnoreCase(directory, requested_directory);
+      });
+  if (allowed == ALLOWED_DIRECTORIES.end())
     return {};
 
-  std::string repository_path;
-  for (const std::string &segment : segments) {
-    if (!repository_path.empty())
-      repository_path += '/';
-    repository_path += segment;
-  }
-  return {true, trailing_slash, repository_path};
+  return {true, trailing_slash, *allowed};
 }
 
 std::vector<std::string> localPathCandidates(const Resource &resource) {
@@ -296,7 +306,10 @@ std::string contentType(const Resource &resource) {
   std::string extension = extensionOf(resource.repository_path);
   if (extension == ".yaml" || extension == ".yml")
     return "application/yaml; charset=utf-8";
-  if (extension == ".ini" || extension == ".list" || extension == ".md")
+  if (extension == ".json")
+    return "application/json; charset=utf-8";
+  if (extension == ".ini" || extension == ".list" || extension == ".conf" ||
+      extension == ".txt" || extension == ".sh")
     return "text/plain; charset=utf-8";
   if (extension == ".mrs")
     return "application/octet-stream";
