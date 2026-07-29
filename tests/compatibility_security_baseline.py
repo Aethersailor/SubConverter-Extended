@@ -125,6 +125,7 @@ def running_service(
     *,
     statistics: bool = False,
     security_profile: str = "lan",
+    extra_args: tuple[str, ...] = (),
 ):
     port = unused_port()
     baseline = (COMPAT_FIXTURES / "legacy-pref.toml").read_text(
@@ -160,7 +161,7 @@ def running_service(
         env["NO_PROXY"] = "127.0.0.1,localhost"
         env["no_proxy"] = "127.0.0.1,localhost"
         process = subprocess.Popen(
-            [str(binary), "-f", str(pref)],
+            [str(binary), *extra_args, "-f", str(pref)],
             cwd=REPOSITORY,
             env=env,
             stdout=stdout,
@@ -181,9 +182,9 @@ def running_service(
             stderr.close()
 
 
-def load_settings_snapshot(binary: Path, fixture: Path) -> dict[str, object]:
+def load_settings_snapshot(helper: Path, fixture: Path) -> dict[str, object]:
     completed = subprocess.run(
-        [str(binary), "--settings-snapshot", "-f", str(fixture)],
+        [str(helper), str(fixture)],
         cwd=REPOSITORY,
         check=True,
         capture_output=True,
@@ -194,6 +195,21 @@ def load_settings_snapshot(binary: Path, fixture: Path) -> dict[str, object]:
     if "fixture-secret" in completed.stdout or "fixture-dashboard-secret" in completed.stdout:
         raise AssertionError("SettingsSnapshot leaked a fixture secret")
     return json.loads(completed.stdout)
+
+
+def runtime_cli_isolation_baseline(binary: Path) -> None:
+    marker = b"--settings-snapshot"
+    if marker in binary.read_bytes():
+        raise AssertionError(
+            "formal subconverter binary still contains --settings-snapshot"
+        )
+    with running_service(binary, extra_args=(marker.decode(),)) as base_url:
+        status, body, _ = request(base_url, "/healthz")
+        if status != 200 or body.strip() != b"ok":
+            raise AssertionError(
+                "formal subconverter binary still handles --settings-snapshot "
+                "instead of preserving legacy unknown-argument behavior"
+            )
 
 
 def normalize_output(content: bytes, fixture_base: str) -> str:
@@ -376,14 +392,29 @@ def public_request_baseline(binary: Path, fixture_base: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, required=True)
+    parser.add_argument(
+        "--settings-snapshot-helper", type=Path, required=True
+    )
     parser.add_argument("--update-golden", action="store_true")
     args = parser.parse_args()
     binary = args.binary.resolve()
+    settings_snapshot_helper = args.settings_snapshot_helper.resolve()
     if not binary.is_file():
         parser.error(f"binary does not exist: {binary}")
+    if not settings_snapshot_helper.is_file():
+        parser.error(
+            "settings snapshot helper does not exist: "
+            f"{settings_snapshot_helper}"
+        )
+    if settings_snapshot_helper == binary:
+        parser.error(
+            "settings snapshot helper must be separate from the runtime binary"
+        )
+
+    runtime_cli_isolation_baseline(binary)
 
     snapshots = [
-        load_settings_snapshot(binary, COMPAT_FIXTURES / name)
+        load_settings_snapshot(settings_snapshot_helper, COMPAT_FIXTURES / name)
         for name in ("legacy-pref.ini", "legacy-pref.yml", "legacy-pref.toml")
     ]
     if snapshots[1:] != snapshots[:1] * 2:

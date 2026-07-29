@@ -15,7 +15,6 @@
 #include "handler/interfaces.h"
 #include "handler/multithread.h"
 #include "handler/settings.h"
-#include "handler/settings_snapshot.h"
 #include "handler/statistics.h"
 #include "handler/version_page.h"
 #include "handler/webget.h"
@@ -35,7 +34,6 @@
 
 WebServer webServer;
 static volatile std::sig_atomic_t pendingShutdownSignal = 0;
-static bool settingsSnapshotMode = false;
 
 #ifndef _WIN32
 void SetConsoleTitle(const std::string &title) {
@@ -86,8 +84,6 @@ void chkArg(int argc, char *argv[]) {
       if (i < argc - 1)
         if (freopen(argv[++i], "a", stderr) == nullptr)
           std::cerr << "无法将输出重定向到日志文件。\n";
-    } else if (strcmp(argv[i], "--settings-snapshot") == 0) {
-      settingsSnapshotMode = true;
     }
   }
 }
@@ -164,10 +160,6 @@ int main(int argc, char *argv[]) {
   SetConsoleTitle("SubConverter-Extended " VERSION);
   if (!readConf())
     return 1;
-  if (settingsSnapshotMode) {
-    std::cout << sanitizedSettingsSnapshot(global);
-    return 0;
-  }
   writeLog(
       0,
       "并发运行参数：HTTP base/max threads=" +
