@@ -224,7 +224,6 @@ FROM ${ALPINE_IMAGE}
 ARG VERSION="dev"
 ARG SHA=""
 ARG BUILD_DATE=""
-ARG CUSTOM_OPENCLASH_RULES_REVISION=""
 ARG DEPENDENCY_SNAPSHOT_SHA=""
 LABEL \
   org.opencontainers.image.title="SubConverter-Extended" \
@@ -235,7 +234,6 @@ LABEL \
   org.opencontainers.image.version="${VERSION}" \
   org.opencontainers.image.revision="${SHA}" \
   org.opencontainers.image.created="${BUILD_DATE}" \
-  com.aethersailor.custom-openclash-rules.revision="${CUSTOM_OPENCLASH_RULES_REVISION}" \
   com.aethersailor.dependency-snapshot.sha256="${DEPENDENCY_SNAPSHOT_SHA}" \
   maintainer="Aethersailor"
 

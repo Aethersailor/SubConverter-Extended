@@ -5,11 +5,6 @@
       "repository": "https://github.com/yhirose/cpp-httplib.git",
       "revision": "34b7c846d43e30598f3b748ef5ce23591077cb7e"
     },
-    "custom_openclash_rules": {
-      "ref": "refs/heads/main",
-      "repository": "https://github.com/Aethersailor/Custom_OpenClash_Rules.git",
-      "revision": "a1005ae908c7b7e67d91f933120afdd1fde8c5e5"
-    },
     "inja": {
       "ref": "HEAD",
       "repository": "https://github.com/pantor/inja.git",

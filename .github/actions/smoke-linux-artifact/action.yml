@@ -34,9 +34,6 @@ runs:
 
         tar -xzf "$ARTIFACT" -C "$WORKDIR"
         cd "$WORKDIR/SubConverter-Extended"
-        python3 "$GITHUB_WORKSPACE/scripts/verify_custom_openclash_rules_bundle.py" \
-          --root base/Custom_OpenClash_Rules
-
         PORT="$PORT" PREF_PATH="$PWD/base/pref.toml" ./start.sh >"$WORKDIR/stdout.log" 2>"$WORKDIR/stderr.log" &
         PID="$!"
 

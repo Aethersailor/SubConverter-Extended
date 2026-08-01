@@ -30,12 +30,6 @@ runs:
           $stdout = Join-Path $workDir "stdout.log"
           $stderr = Join-Path $workDir "stderr.log"
 
-          if (-not (Test-Path (Join-Path $root "base\Custom_OpenClash_Rules\manifest.sha256"))) {
-            throw "Windows artifact is missing the Custom_OpenClash_Rules manifest."
-          }
-          python "$env:GITHUB_WORKSPACE\scripts\verify_custom_openclash_rules_bundle.py" `
-            --root (Join-Path $root "base\Custom_OpenClash_Rules")
-
           Remove-Item (Join-Path $root "base\pref.toml") -ErrorAction SilentlyContinue
           Remove-Item (Join-Path $root "base\pref.yml") -ErrorAction SilentlyContinue
           Remove-Item (Join-Path $root "base\pref.ini") -ErrorAction SilentlyContinue

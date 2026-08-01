@@ -28,10 +28,6 @@ MANIFEST_ACCEPT = ", ".join(
 )
 
 GIT_DEPENDENCIES = {
-    "custom_openclash_rules": {
-        "repository": "https://github.com/Aethersailor/Custom_OpenClash_Rules.git",
-        "ref": "refs/heads/main",
-    },
     "mihomo": {
         "repository": "https://github.com/MetaCubeX/mihomo.git",
         "ref": "refs/heads/Meta",
@@ -75,7 +71,6 @@ IMAGE_DEPENDENCIES = {
 }
 
 EXPORTS = {
-    "CUSTOM_OPENCLASH_RULES_REVISION": ("git", "custom_openclash_rules", "revision"),
     "MIHOMO_REF": ("git", "mihomo", "revision"),
     "QUICKJSPP_REF": ("git", "quickjspp", "revision"),
     "LIBCRON_REF": ("git", "libcron", "revision"),
