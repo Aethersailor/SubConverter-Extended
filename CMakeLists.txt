@@ -239,13 +239,33 @@ IF(BUILD_TESTS)
     TARGET_COMPILE_DEFINITIONS(settings_snapshot_test_helper PRIVATE
         $<TARGET_PROPERTY:${BUILD_TARGET_NAME},COMPILE_DEFINITIONS>)
 
+    IF(EXISTS "${CMAKE_SOURCE_DIR}/bridge/libmihomo.so" OR
+       EXISTS "${CMAKE_SOURCE_DIR}/bridge/libmihomo.a")
+        ADD_EXECUTABLE(mihomo_config_test_helper
+            src/parser/mihomo_bridge.cpp
+            tests/mihomo_config_test_helper.cpp)
+        TARGET_INCLUDE_DIRECTORIES(mihomo_config_test_helper PRIVATE
+            src
+            $<TARGET_PROPERTY:${BUILD_TARGET_NAME},INCLUDE_DIRECTORIES>)
+        TARGET_LINK_DIRECTORIES(mihomo_config_test_helper PRIVATE
+            $<TARGET_PROPERTY:${BUILD_TARGET_NAME},LINK_DIRECTORIES>)
+        TARGET_LINK_LIBRARIES(mihomo_config_test_helper PRIVATE
+            $<TARGET_PROPERTY:${BUILD_TARGET_NAME},LINK_LIBRARIES>)
+        TARGET_COMPILE_DEFINITIONS(mihomo_config_test_helper PRIVATE
+            $<TARGET_PROPERTY:${BUILD_TARGET_NAME},COMPILE_DEFINITIONS>)
+        SET(MIHOMO_CONFIG_VALIDATOR_ARGUMENT
+            --mihomo-config-validator
+            $<TARGET_FILE:mihomo_config_test_helper>)
+    ENDIF()
+
     ADD_TEST(
         NAME compatibility_security_baseline
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/compatibility_security_baseline.py
                 --binary $<TARGET_FILE:${BUILD_TARGET_NAME}>
                 --settings-snapshot-helper
-                $<TARGET_FILE:settings_snapshot_test_helper>)
+                $<TARGET_FILE:settings_snapshot_test_helper>
+                ${MIHOMO_CONFIG_VALIDATOR_ARGUMENT})
     SET_TESTS_PROPERTIES(compatibility_security_baseline PROPERTIES
         LABELS full
         TIMEOUT 120
