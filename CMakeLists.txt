@@ -174,7 +174,7 @@ TARGET_LINK_LIBRARIES(${BUILD_TARGET_NAME} ${LIBCRON_LIBRARIES})
 # Mihomo Go Parser Bridge
 # 支持 c-shared (.so) 和 c-archive (.a) 两种模式
 # c-shared 模式：解决 musl/Alpine 环境下 Go runtime 初始化问题
-IF(EXISTS "${CMAKE_SOURCE_DIR}/bridge/libmihomo.so")
+IF(EXISTS "${CMAKE_SOURCE_DIR}/bridge/libmihomo.so" AND NOT WIN32)
     MESSAGE(STATUS "Found mihomo Go shared library (.so), enabling native parser support")
     TARGET_INCLUDE_DIRECTORIES(${BUILD_TARGET_NAME} PRIVATE "${CMAKE_SOURCE_DIR}/bridge")
     TARGET_COMPILE_DEFINITIONS(${BUILD_TARGET_NAME} PRIVATE USE_MIHOMO_PARSER)
@@ -239,23 +239,42 @@ IF(BUILD_TESTS)
     TARGET_COMPILE_DEFINITIONS(settings_snapshot_test_helper PRIVATE
         $<TARGET_PROPERTY:${BUILD_TARGET_NAME},COMPILE_DEFINITIONS>)
 
-    IF(EXISTS "${CMAKE_SOURCE_DIR}/bridge/libmihomo.so" OR
-       EXISTS "${CMAKE_SOURCE_DIR}/bridge/libmihomo.a")
-        ADD_EXECUTABLE(mihomo_config_test_helper
-            src/parser/mihomo_bridge.cpp
-            tests/mihomo_config_test_helper.cpp)
-        TARGET_INCLUDE_DIRECTORIES(mihomo_config_test_helper PRIVATE
-            src
-            $<TARGET_PROPERTY:${BUILD_TARGET_NAME},INCLUDE_DIRECTORIES>)
-        TARGET_LINK_DIRECTORIES(mihomo_config_test_helper PRIVATE
-            $<TARGET_PROPERTY:${BUILD_TARGET_NAME},LINK_DIRECTORIES>)
-        TARGET_LINK_LIBRARIES(mihomo_config_test_helper PRIVATE
-            $<TARGET_PROPERTY:${BUILD_TARGET_NAME},LINK_LIBRARIES>)
-        TARGET_COMPILE_DEFINITIONS(mihomo_config_test_helper PRIVATE
-            $<TARGET_PROPERTY:${BUILD_TARGET_NAME},COMPILE_DEFINITIONS>)
+    SET(MIHOMO_CONFIG_VALIDATOR_PATH "")
+    FOREACH(candidate
+        "${CMAKE_SOURCE_DIR}/mihomo_config_test_helper"
+        "${CMAKE_SOURCE_DIR}/mihomo_config_test_helper.exe"
+        "${CMAKE_SOURCE_DIR}/bridge/mihomo_config_test_helper"
+        "${CMAKE_SOURCE_DIR}/bridge/mihomo_config_test_helper.exe")
+        IF(EXISTS "${candidate}")
+            SET(MIHOMO_CONFIG_VALIDATOR_PATH "${candidate}")
+            BREAK()
+        ENDIF()
+    ENDFOREACH()
+
+    IF(NOT MIHOMO_CONFIG_VALIDATOR_PATH)
+        FIND_PROGRAM(GO_EXECUTABLE go)
+        IF(GO_EXECUTABLE)
+            SET(MIHOMO_CONFIG_VALIDATOR_PATH
+                "${CMAKE_BINARY_DIR}/mihomo_config_test_helper${CMAKE_EXECUTABLE_SUFFIX}")
+            ADD_CUSTOM_COMMAND(
+                OUTPUT "${MIHOMO_CONFIG_VALIDATOR_PATH}"
+                COMMAND "${GO_EXECUTABLE}" build -trimpath
+                        -o "${MIHOMO_CONFIG_VALIDATOR_PATH}" ./testhelper
+                WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/bridge"
+                DEPENDS
+                    "${CMAKE_SOURCE_DIR}/bridge/testhelper/main.go"
+                    "${CMAKE_SOURCE_DIR}/bridge/go.mod"
+                    "${CMAKE_SOURCE_DIR}/bridge/go.sum"
+                VERBATIM)
+            ADD_CUSTOM_TARGET(mihomo_config_test_helper_build ALL
+                DEPENDS "${MIHOMO_CONFIG_VALIDATOR_PATH}")
+        ENDIF()
+    ENDIF()
+
+    IF(MIHOMO_CONFIG_VALIDATOR_PATH)
         SET(MIHOMO_CONFIG_VALIDATOR_ARGUMENT
             --mihomo-config-validator
-            $<TARGET_FILE:mihomo_config_test_helper>)
+            "${MIHOMO_CONFIG_VALIDATOR_PATH}")
     ENDIF()
 
     ADD_TEST(

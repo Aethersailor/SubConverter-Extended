@@ -43,17 +43,6 @@ bool isMihomoParserAvailable();
  */
 bool isMihomoRegexValid(const std::string &pattern);
 
-/**
- * @brief Parse and validate the rule-bearing portion of a Mihomo YAML config.
- * @return Empty on success, otherwise the parser error.
- */
-std::string validateMihomoRuleConfig(const std::string &config);
-
-/**
- * @brief Parse a final Mihomo regex rule and return canonical JSON metadata.
- */
-std::string parseMihomoRegexRule(const std::string &rule);
-
 struct AgeRecipient {
   std::string recipient;
   std::string fingerprint;
