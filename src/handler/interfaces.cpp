@@ -130,6 +130,69 @@ static std::string externalDependencyFailure(Response &response,
   return body;
 }
 
+static std::string externalConfigFailurePage(
+    bool user_provided, bool fallback_enabled,
+    FetchFailureCategory failure) {
+  std::string body =
+      "External configuration error / 外部配置错误\n\n";
+
+  if (user_provided) {
+    body += "The supplied config could not be loaded or used.\n"
+            "用户提供的 config 无法加载或使用。\n";
+  } else {
+    body += "No config parameter was supplied, and the configured default "
+            "external config could not be loaded or used.\n"
+            "请求未提供 config 参数，且服务端配置的默认外部配置无法加载或使用。\n";
+  }
+
+  switch (failure) {
+  case FetchFailureCategory::RequestRejected:
+    body += "Reason: the source was rejected by the security policy.\n"
+            "原因：该来源被安全策略拒绝。\n";
+    break;
+  case FetchFailureCategory::NotFound:
+    body += "Reason: the config source returned HTTP 404.\n"
+            "原因：config 来源返回 HTTP 404。\n";
+    break;
+  case FetchFailureCategory::ContentInvalid:
+    body += "Reason: the downloaded content was empty, malformed, or contained "
+            "no effective settings.\n"
+            "原因：下载内容为空、格式无效，或未包含任何有效设置。\n";
+    break;
+  case FetchFailureCategory::SourceUnavailable:
+    body += "Reason: the config source was unreachable or temporarily "
+            "unavailable.\n"
+            "原因：config 来源无法访问或暂时不可用。\n";
+    break;
+  case FetchFailureCategory::Internal:
+    body += "Reason: the config source could not be resolved safely.\n"
+            "原因：无法安全解析 config 来源。\n";
+    break;
+  case FetchFailureCategory::None:
+  default:
+    body += "Reason: the config did not produce usable settings.\n"
+            "原因：config 未产生可用设置。\n";
+    break;
+  }
+
+  if (user_provided) {
+    if (fallback_enabled) {
+      body += "The configured default fallback was also unable to recover the "
+              "request.\n"
+              "配置的默认回退也未能恢复该请求。\n";
+    } else {
+      body += "Default external-config fallback is disabled, so no replacement "
+              "config was used.\n"
+              "默认外部配置回退已关闭，因此未使用替代 config。\n";
+    }
+  }
+
+  body += "Check the config URL and content, then try again. Add explain=true "
+          "for structured diagnostics.\n"
+          "请检查 config 链接及内容后重试；可添加 explain=true 查看结构化诊断。";
+  return body;
+}
+
 static void clearInternalResponseHeaders(Response &response) {
   response.headers.erase(kExternalDependencyFailureHeader);
   response.headers.erase("X-Subconverter-No-Retry");
@@ -2274,10 +2337,12 @@ static std::string subconverter_impl(Request &request, Response &response,
     explain.effective_config_source = userProvidedExternalConfig
                                            ? "request_failed"
                                            : "default_failed";
+    response.content_type = "text/plain; charset=utf-8";
     const std::string error = externalDependencyFailure(
-        response, request_rejected ? 403 : 502,
-        "External configuration could not be loaded.\n"
-        "外部配置无法加载，未应用请求级全局回退。",
+        response, request_rejected ? 403 : 400,
+        externalConfigFailurePage(userProvidedExternalConfig,
+                                  global.fallbackToDefaultExternalConfig,
+                                  externalConfigFailure),
         request_rejected);
     if (explainMode) {
       response.content_type = "application/json; charset=utf-8";
