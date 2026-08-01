@@ -40,9 +40,6 @@ func validateConfig(path string) error {
 	if err := mihomoYAML.Unmarshal(data, &config); err != nil {
 		return err
 	}
-	if len(config.SubRules) == 0 {
-		return fmt.Errorf("sub-rules are missing")
-	}
 	knownSubRules := make(map[string][]mihomoConstant.Rule, len(config.SubRules))
 	for name := range config.SubRules {
 		knownSubRules[name] = nil
