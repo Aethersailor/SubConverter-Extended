@@ -1,6 +1,7 @@
 #include <string>
 
 #include <cctype>
+#include <vector>
 
 #include "handler/settings.h"
 #include "utils/logger.h"
@@ -149,6 +150,18 @@ static bool splitRuleFieldsStrict(const std::string &line,
                 quote = '\0';
             continue;
         }
+        if(escaped)
+        {
+            field += character;
+            escaped = false;
+            continue;
+        }
+        if(character == '\\')
+        {
+            field += character;
+            escaped = true;
+            continue;
+        }
         if(character == '\'' || character == '"')
         {
             quote = character;
@@ -228,6 +241,24 @@ static bool isClashRegexRule(const std::string &rule_type)
            rule_type == "PROCESS-PATH-REGEX";
 }
 
+static std::string clashRuleType(const std::string &line)
+{
+    std::string payload = trimWhitespace(line, true, true);
+    if(startsWith(payload, "[]"))
+        payload = trimWhitespace(payload.substr(2), true, true);
+    const std::string::size_type separator = payload.find(',');
+    return toUpper(trimWhitespace(
+        separator == std::string::npos ? payload : payload.substr(0, separator),
+        true, true));
+}
+
+static void stripClashInlineComment(std::string &line)
+{
+    const std::string::size_type comment = line.find("//");
+    if(comment != std::string::npos)
+        line = trimWhitespace(line.substr(0, comment), true, true);
+}
+
 static bool normalizeClashRegexPattern(const std::string &value,
                                         std::string &pattern)
 {
@@ -249,25 +280,94 @@ static bool parseClashRegexRule(const std::string &line,
                                 string_array &fields,
                                 std::string &pattern)
 {
-    if(!splitRuleFieldsStrict(line, fields) || fields.size() < 2 ||
-       !isClashRegexRule(toUpper(fields.front())))
+    fields.clear();
+    const std::string::size_type type_separator = line.find(',');
+    if(type_separator == std::string::npos)
         return false;
 
-    // Mihomo treats the last field as the target and joins every field in
-    // between the type and target into the regex payload. This permits both
-    // an input-side quoted comma and an explicitly escaped comma without
-    // changing the payload Mihomo actually compiles.
-    const size_t pattern_end = fields.size() - (fields.size() >= 3 ? 1 : 0);
-    std::string raw_pattern;
-    for(size_t index = 1; index < pattern_end; ++index)
-    {
-        if(index != 1)
-            raw_pattern += ",";
-        raw_pattern += fields[index];
-    }
-    if(fields.size() >= 3 && fields.back().empty())
+    const std::string rule_type = trimWhitespace(
+        line.substr(0, type_separator), true, true);
+    if(!isClashRegexRule(toUpper(rule_type)))
         return false;
-    return normalizeClashRegexPattern(raw_pattern, pattern);
+
+    // Regex payloads are not generic compound-rule fields. Parentheses,
+    // quotes, //, and escaped commas are regex syntax and must not be
+    // interpreted by splitRuleFieldsStrict(). Only the optional input-side
+    // outer quote protects commas; all other unescaped commas are treated as
+    // payload separators and the last one is the existing target delimiter.
+    const std::string body = trimWhitespace(
+        line.substr(type_separator + 1), true, true);
+    if(body.empty())
+        return false;
+
+    size_t outer_quote_end = std::string::npos;
+    if(body.front() == '\'' || body.front() == '"')
+    {
+        const char quote = body.front();
+        bool escaped = false;
+        for(size_t index = 1; index < body.size(); ++index)
+        {
+            const char character = body[index];
+            if(escaped)
+            {
+                escaped = false;
+                continue;
+            }
+            if(character == '\\')
+            {
+                escaped = true;
+                continue;
+            }
+            if(character == quote)
+            {
+                const std::string suffix = trimWhitespace(
+                    body.substr(index + 1), true, true);
+                if(suffix.empty() || suffix.front() == ',')
+                    outer_quote_end = index;
+                break;
+            }
+        }
+    }
+
+    std::vector<size_t> separators;
+    bool escaped = false;
+    for(size_t index = 0; index < body.size(); ++index)
+    {
+        if(outer_quote_end != std::string::npos && index <= outer_quote_end)
+            continue;
+        const char character = body[index];
+        if(escaped)
+        {
+            escaped = false;
+            continue;
+        }
+        if(character == '\\')
+        {
+            escaped = true;
+            continue;
+        }
+        if(character == ',')
+            separators.push_back(index);
+    }
+
+    std::string raw_pattern = body;
+    std::string target;
+    if(!separators.empty())
+    {
+        const size_t target_separator = separators.back();
+        raw_pattern = body.substr(0, target_separator);
+        target = trimWhitespace(body.substr(target_separator + 1), true, true);
+        if(target.empty())
+            return false;
+    }
+    if(!normalizeClashRegexPattern(raw_pattern, pattern))
+        return false;
+
+    fields.emplace_back(rule_type);
+    fields.emplace_back(pattern);
+    if(!target.empty())
+        fields.emplace_back(target);
+    return true;
 }
 
 static bool unwrapRuleExpression(const std::string &value,
@@ -350,14 +450,25 @@ static bool validCompoundExpression(const std::string &expression,
 static bool validRuleLine(const std::string &line,
                           const string_array &known_types)
 {
+    const std::string type = clashRuleType(line);
+    if(isClashRegexRule(type))
+    {
+        if(std::none_of(known_types.begin(), known_types.end(),
+                        [&](const std::string &known) { return type == known; }))
+            return false;
+        string_array fields;
+        std::string pattern;
+        return parseClashRegexRule(line, fields, pattern);
+    }
+
     string_array fields;
     if(!splitRuleFieldsStrict(line, fields) || fields.size() < 2)
         return false;
-    const std::string type = toUpper(fields.front());
+    const std::string parsed_type = toUpper(fields.front());
     if(std::none_of(known_types.begin(), known_types.end(),
-                    [&](const std::string &known) { return type == known; }))
+                    [&](const std::string &known) { return parsed_type == known; }))
         return false;
-    if(type == "SUB-RULE")
+    if(parsed_type == "SUB-RULE")
         // RulesetConfig supplies a proxy policy as the third field. A
         // SUB-RULE third field is a sub-rule name instead, and its sub-rules
         // cannot travel with a server-side ruleset, so reject it here rather
@@ -368,28 +479,23 @@ static bool validRuleLine(const std::string &line,
         if(fields[index].empty())
             return false;
     }
-    if(type == "IP-CIDR" &&
+    if(parsed_type == "IP-CIDR" &&
        !validRuleAddress(fields[1], false, true))
         return false;
-    if(type == "IP-CIDR6" &&
+    if(parsed_type == "IP-CIDR6" &&
        !validRuleAddress(fields[1], true, false))
         return false;
-    if(type == "SRC-IP-CIDR" &&
+    if(parsed_type == "SRC-IP-CIDR" &&
        !validRuleAddress(fields[1], false, false))
         return false;
-    if(type == "AND" || type == "OR" || type == "NOT")
+    if(parsed_type == "AND" || parsed_type == "OR" || parsed_type == "NOT")
     {
         if(fields.size() != 2 && fields.size() != 3)
             return false;
-        const size_t minimum_components = type == "NOT" ? 1 : 2;
+        const size_t minimum_components = parsed_type == "NOT" ? 1 : 2;
         if(!validCompoundExpression(fields[1], known_types,
-                                     minimum_components, type == "NOT"))
+                                     minimum_components, parsed_type == "NOT"))
             return false;
-    }
-    if(isClashRegexRule(type))
-    {
-        std::string pattern;
-        return parseClashRegexRule(line, fields, pattern);
     }
     return true;
 }
@@ -400,6 +506,12 @@ static bool validInlineRuleLine(const std::string &line,
     const std::string payload = trimWhitespace(line.substr(2), true, true);
     if(payload.empty())
         return false;
+    if(isClashRegexRule(clashRuleType(payload)))
+    {
+        string_array fields;
+        std::string pattern;
+        return parseClashRegexRule(payload, fields, pattern);
+    }
     string_array fields;
     if(!splitRuleFieldsStrict(payload, fields))
         return false;
@@ -448,9 +560,8 @@ RulesetValidationResult validateRulesetEntries(const std::string &content,
         if (line.empty() || line[0] == ';' || line[0] == '#' ||
             (line.size() >= 2 && line[0] == '/' && line[1] == '/'))
             continue;
-        const std::string::size_type comment = line.find("//");
-        if (comment != std::string::npos)
-            line = trimWhitespace(line.substr(0, comment), true, true);
+        if(!isClashRegexRule(clashRuleType(line)))
+            stripClashInlineComment(line);
         if (line.empty())
             continue;
         const bool valid = startsWith(line, "[]")
@@ -662,11 +773,8 @@ void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_
                 continue;
             if(std::none_of(ClashRuleTypes.begin(), ClashRuleTypes.end(), [strLine](const std::string& type){return startsWith(strLine, type);}))
                 continue;
-            if(strFind(strLine, "//"))
-            {
-                strLine.erase(strLine.find("//"));
-                strLine = trimWhitespace(strLine);
-            }
+            if(!isClashRegexRule(clashRuleType(strLine)))
+                stripClashInlineComment(strLine);
             strLine = appendClashRuleTarget(strLine, rule_group);
             if(strLine.empty())
                 continue;
@@ -742,11 +850,8 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent>
                 continue;
             if(std::none_of(ClashRuleTypes.begin(), ClashRuleTypes.end(), [strLine](const std::string& type){ return startsWith(strLine, type); }))
                 continue;
-            if(strFind(strLine, "//"))
-            {
-                strLine.erase(strLine.find("//"));
-                strLine = trimWhitespace(strLine);
-            }
+            if(!isClashRegexRule(clashRuleType(strLine)))
+                stripClashInlineComment(strLine);
 
             strLine = appendClashRuleTarget(strLine, rule_group);
             if(strLine.empty())

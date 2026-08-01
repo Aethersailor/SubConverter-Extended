@@ -48,6 +48,9 @@ STRICT_VALID_RULESET = (
     "PROCESS-NAME-REGEX,\"^chrome,helper$\",OldPolicy\n"
     "PROCESS-PATH-REGEX,^/usr/bin/example$,OldPolicy\n"
     "DOMAIN-REGEX,^example\\,comma$,OldPolicy\n"
+    "PROCESS-NAME-REGEX,^\\($,OldPolicy\n"
+    "PROCESS-NAME-REGEX,^foo\\\"bar$,OldPolicy\n"
+    "PROCESS-PATH-REGEX,^//server/share$,OldPolicy\n"
 )
 DISABLE_RULEGEN_CONFIG = "data:,enable_rule_generator=false"
 
@@ -167,6 +170,9 @@ class FixtureHandler(BaseHTTPRequestHandler):
                     b"PROCESS-NAME-REGEX,\"^chrome,helper$\",OldPolicy\n"
                     b"PROCESS-PATH-REGEX,^/usr/bin/example$,OldPolicy\n"
                     b"DOMAIN-REGEX,^example\\,comma$,OldPolicy\n"
+                    b"PROCESS-NAME-REGEX,^\\($,OldPolicy\n"
+                    b"PROCESS-NAME-REGEX,^foo\\\"bar$,OldPolicy\n"
+                    b"PROCESS-PATH-REGEX,^//server/share$,OldPolicy\n"
                 )
             content_type = "text/plain; charset=utf-8"
         elif self.path.startswith("/ruleset-sub-rule-probe"):
@@ -1282,6 +1288,9 @@ def external_ruleset_strict_validation_baseline(
             b"PROCESS-NAME-REGEX,^chrome,helper$,Proxy",
             b"PROCESS-PATH-REGEX,^/usr/bin/example$,Proxy",
             b"DOMAIN-REGEX,^example\\,comma$,Proxy",
+            b"PROCESS-NAME-REGEX,^\\($,Proxy",
+            b"PROCESS-NAME-REGEX,^foo\\\"bar$,Proxy",
+            b"PROCESS-PATH-REGEX,^//server/share$,Proxy",
         ):
             if expected_rule not in body:
                 raise AssertionError(
@@ -1300,11 +1309,7 @@ def external_ruleset_strict_validation_baseline(
         )
 
 
-def assert_mihomo_config(
-    validator: Path | None, body: bytes, description: str
-) -> None:
-    if validator is None:
-        return
+def assert_mihomo_config(validator: Path, body: bytes, description: str) -> None:
     with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False) as handle:
         handle.write(body)
         config_path = Path(handle.name)
@@ -1325,14 +1330,12 @@ def assert_mihomo_config(
 
 
 def assert_mihomo_regex_rule(
-    validator: Path | None,
+    validator: Path,
     rule: str,
     expected_type: str,
     expected_payload: str,
     expected_target: str,
 ) -> None:
-    if validator is None:
-        return
     completed = subprocess.run(
         [str(validator), "--regex", rule],
         capture_output=True,
@@ -1363,7 +1366,7 @@ def assert_mihomo_regex_rule(
 
 
 def external_ruleset_regex_validation_baseline(
-    binary: Path, fixture_base: str, mihomo_config_validator: Path | None
+    binary: Path, fixture_base: str, mihomo_config_validator: Path
 ) -> None:
     probe_url = fixture_base + "/ruleset-regex-probe?nonce=" + str(time.time_ns())
     config = (
@@ -1410,6 +1413,9 @@ def external_ruleset_regex_validation_baseline(
             ("PROCESS-NAME-REGEX,^chrome,helper$,Proxy", "^chrome,helper$"),
             ("PROCESS-PATH-REGEX,^/usr/bin/example$,Proxy", r"^/usr/bin/example$"),
             ("DOMAIN-REGEX,^example\\,comma$,Proxy", r"^example\,comma$"),
+            (r"PROCESS-NAME-REGEX,^\($,Proxy", r"^\($"),
+            (r'PROCESS-NAME-REGEX,^foo\"bar$,Proxy', r'^foo\"bar$'),
+            (r"PROCESS-PATH-REGEX,^//server/share$,Proxy", r"^//server/share$"),
         ):
             assert_mihomo_regex_rule(
                 mihomo_config_validator,
@@ -1420,6 +1426,9 @@ def external_ruleset_regex_validation_baseline(
             )
         if b"OldPolicy" in body:
             raise AssertionError("regex rule policy was duplicated instead of replaced")
+        assert_mihomo_config(
+            mihomo_config_validator, body, "the generated regex ruleset configuration"
+        )
         status, body, _ = request(
             base_url, "/sub", {**common, "config": config_url}
         )
@@ -1525,7 +1534,7 @@ def json_base_shape_baseline(binary: Path, fixture_base: str) -> None:
 
 
 def clash_base_sub_rule_baseline(
-    binary: Path, fixture_base: str, mihomo_config_validator: Path | None
+    binary: Path, fixture_base: str, mihomo_config_validator: Path
 ) -> None:
     config = (
         "[custom]\n"
@@ -1851,7 +1860,7 @@ def main() -> int:
     parser.add_argument(
         "--settings-snapshot-helper", type=Path, required=True
     )
-    parser.add_argument("--mihomo-config-validator", type=Path)
+    parser.add_argument("--mihomo-config-validator", type=Path, required=True)
     parser.add_argument("--update-golden", action="store_true")
     args = parser.parse_args()
     binary = args.binary.resolve()
@@ -1867,12 +1876,8 @@ def main() -> int:
         parser.error(
             "settings snapshot helper must be separate from the runtime binary"
         )
-    mihomo_config_validator = (
-        args.mihomo_config_validator.resolve()
-        if args.mihomo_config_validator
-        else None
-    )
-    if mihomo_config_validator is not None and not mihomo_config_validator.is_file():
+    mihomo_config_validator = args.mihomo_config_validator.resolve()
+    if not mihomo_config_validator.is_file():
         parser.error(
             "Mihomo config validator does not exist: "
             f"{mihomo_config_validator}"

@@ -268,14 +268,25 @@ IF(BUILD_TESTS)
                 VERBATIM)
             ADD_CUSTOM_TARGET(mihomo_config_test_helper_build ALL
                 DEPENDS "${MIHOMO_CONFIG_VALIDATOR_PATH}")
+        ELSE()
+            MESSAGE(FATAL_ERROR
+                "BUILD_TESTS=ON requires mihomo_config_test_helper or a Go compiler")
         ENDIF()
     ENDIF()
 
-    IF(MIHOMO_CONFIG_VALIDATOR_PATH)
-        SET(MIHOMO_CONFIG_VALIDATOR_ARGUMENT
-            --mihomo-config-validator
-            "${MIHOMO_CONFIG_VALIDATOR_PATH}")
-    ENDIF()
+    SET(MIHOMO_CONFIG_VALIDATOR_ARGUMENT
+        --mihomo-config-validator
+        "${MIHOMO_CONFIG_VALIDATOR_PATH}")
+
+    ADD_TEST(
+        NAME mihomo_config_helper_smoke
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/mihomo_config_helper_smoke.py
+                --validator "${MIHOMO_CONFIG_VALIDATOR_PATH}")
+    SET_TESTS_PROPERTIES(mihomo_config_helper_smoke PROPERTIES
+        LABELS full
+        TIMEOUT 60
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
     ADD_TEST(
         NAME compatibility_security_baseline
