@@ -47,6 +47,7 @@ STRICT_VALID_RULESET = (
     "DOMAIN-REGEX,^example\\.com$,OldPolicy\n"
     "PROCESS-NAME-REGEX,\"^chrome,helper$\",OldPolicy\n"
     "PROCESS-PATH-REGEX,^/usr/bin/example$,OldPolicy\n"
+    "DOMAIN-REGEX,^example\\,comma$,OldPolicy\n"
 )
 DISABLE_RULEGEN_CONFIG = "data:,enable_rule_generator=false"
 
@@ -165,6 +166,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
                     b"DOMAIN-REGEX,^example\\.com$,OldPolicy\n"
                     b"PROCESS-NAME-REGEX,\"^chrome,helper$\",OldPolicy\n"
                     b"PROCESS-PATH-REGEX,^/usr/bin/example$,OldPolicy\n"
+                    b"DOMAIN-REGEX,^example\\,comma$,OldPolicy\n"
                 )
             content_type = "text/plain; charset=utf-8"
         elif self.path.startswith("/ruleset-sub-rule-probe"):
@@ -216,9 +218,16 @@ class FixtureHandler(BaseHTTPRequestHandler):
             body = (
                 b"mixed-port: 7890\n"
                 b"proxies: []\n"
-                b"proxy-groups: []\n"
+                b"proxy-groups:\n"
+                b"  - name: Proxy\n"
+                b"    type: select\n"
+                b"    proxies: [DIRECT]\n"
                 b"rules:\n"
                 b"  - SUB-RULE,(NETWORK,TCP),sub-rule-name\n"
+                b"sub-rules:\n"
+                b"  sub-rule-name:\n"
+                b"    - DOMAIN-SUFFIX,example.com,DIRECT\n"
+                b"    - MATCH,DIRECT\n"
             )
             content_type = "text/plain; charset=utf-8"
         elif self.path.startswith("/clash-base-transaction-probe"):
@@ -1270,8 +1279,9 @@ def external_ruleset_strict_validation_baseline(
             b"OR,((DOMAIN,old-one.example),(DOMAIN,old-two.example)),Proxy",
             b"NOT,((DOMAIN,old-not.example)),Proxy",
             b"DOMAIN-REGEX,^example\\.com$,Proxy",
-            b'PROCESS-NAME-REGEX,"^chrome,helper$",Proxy',
+            b"PROCESS-NAME-REGEX,^chrome,helper$,Proxy",
             b"PROCESS-PATH-REGEX,^/usr/bin/example$,Proxy",
+            b"DOMAIN-REGEX,^example\\,comma$,Proxy",
         ):
             if expected_rule not in body:
                 raise AssertionError(
@@ -1290,8 +1300,70 @@ def external_ruleset_strict_validation_baseline(
         )
 
 
+def assert_mihomo_config(
+    validator: Path | None, body: bytes, description: str
+) -> None:
+    if validator is None:
+        return
+    with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False) as handle:
+        handle.write(body)
+        config_path = Path(handle.name)
+    try:
+        completed = subprocess.run(
+            [str(validator), str(config_path)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    finally:
+        config_path.unlink(missing_ok=True)
+    if completed.returncode != 0:
+        raise AssertionError(
+            f"Mihomo rejected {description}: "
+            f"{completed.stderr.strip() or completed.stdout.strip()}"
+        )
+
+
+def assert_mihomo_regex_rule(
+    validator: Path | None,
+    rule: str,
+    expected_type: str,
+    expected_payload: str,
+    expected_target: str,
+) -> None:
+    if validator is None:
+        return
+    completed = subprocess.run(
+        [str(validator), "--regex", rule],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(
+            f"Mihomo rejected final regex rule {rule!r}: "
+            f"{completed.stderr.strip() or completed.stdout.strip()}"
+        )
+    try:
+        parsed = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            f"Mihomo regex helper returned invalid JSON for {rule!r}: "
+            f"{completed.stdout!r}"
+        ) from exc
+    expected = {
+        "type": expected_type,
+        "payload": expected_payload,
+        "target": expected_target,
+    }
+    if parsed != expected:
+        raise AssertionError(
+            f"Mihomo parsed {rule!r} as {parsed!r}, expected {expected!r}"
+        )
+
+
 def external_ruleset_regex_validation_baseline(
-    binary: Path, fixture_base: str
+    binary: Path, fixture_base: str, mihomo_config_validator: Path | None
 ) -> None:
     probe_url = fixture_base + "/ruleset-regex-probe?nonce=" + str(time.time_ns())
     config = (
@@ -1323,13 +1395,29 @@ def external_ruleset_regex_validation_baseline(
             raise AssertionError("valid regex ruleset did not recover")
         for expected_rule in (
             b"DOMAIN-REGEX,^example\\.com$,Proxy",
-            b'PROCESS-NAME-REGEX,"^chrome,helper$",Proxy',
+            b"PROCESS-NAME-REGEX,^chrome,helper$,Proxy",
             b"PROCESS-PATH-REGEX,^/usr/bin/example$,Proxy",
+            b"DOMAIN-REGEX,^example\\,comma$,Proxy",
         ):
             if expected_rule not in body:
                 raise AssertionError(
                     "valid regex rule was not preserved: " + expected_rule.decode()
                 )
+        if b'PROCESS-NAME-REGEX,"' in body:
+            raise AssertionError("regex input quotes leaked into Mihomo output")
+        for rule, payload in (
+            ("DOMAIN-REGEX,^example\\.com$,Proxy", r"^example\.com$"),
+            ("PROCESS-NAME-REGEX,^chrome,helper$,Proxy", "^chrome,helper$"),
+            ("PROCESS-PATH-REGEX,^/usr/bin/example$,Proxy", r"^/usr/bin/example$"),
+            ("DOMAIN-REGEX,^example\\,comma$,Proxy", r"^example\,comma$"),
+        ):
+            assert_mihomo_regex_rule(
+                mihomo_config_validator,
+                rule,
+                rule.split(",", 1)[0],
+                payload,
+                "Proxy",
+            )
         if b"OldPolicy" in body:
             raise AssertionError("regex rule policy was duplicated instead of replaced")
         status, body, _ = request(
@@ -1436,16 +1524,23 @@ def json_base_shape_baseline(binary: Path, fixture_base: str) -> None:
             raise AssertionError("non-object JSON base caused the service to stop")
 
 
-def clash_base_sub_rule_baseline(binary: Path, fixture_base: str) -> None:
+def clash_base_sub_rule_baseline(
+    binary: Path, fixture_base: str, mihomo_config_validator: Path | None
+) -> None:
     config = (
         "[custom]\n"
-        "enable_rule_generator=false\n"
+        "enable_rule_generator=true\n"
+        f"ruleset=Proxy,clash-classic:{fixture_base}/rules.list\n"
         f"clash_rule_base={fixture_base}/clash-base-sub-rule-probe?nonce={time.time_ns()}\n"
     )
     config_url = "data:text/plain;base64," + base64.urlsafe_b64encode(
         config.encode()
     ).decode()
-    common = {"target": "clash", "url": fixture_base + "/subscription.txt"}
+    common = {
+        "target": "clash",
+        "url": fixture_base + "/subscription.txt",
+        "expand": "true",
+    }
 
     FixtureHandler.reset_counters()
     with running_service(binary) as base_url:
@@ -1454,6 +1549,16 @@ def clash_base_sub_rule_baseline(binary: Path, fixture_base: str) -> None:
         )
         if status != 200 or b"SUB-RULE,(NETWORK,TCP),sub-rule-name" not in body:
             raise AssertionError("valid base SUB-RULE was rewritten or rejected")
+        if b"sub-rules:" not in body:
+            raise AssertionError("base SUB-RULE definition was not preserved")
+        if (
+            b"rules:\n  - SUB-RULE,(NETWORK,TCP),sub-rule-name\n"
+            b"  - DOMAIN-SUFFIX,example.com,Proxy" not in body
+        ):
+            raise AssertionError("rule generation did not append after base SUB-RULE")
+        assert_mihomo_config(
+            mihomo_config_validator, body, "the generated base SUB-RULE configuration"
+        )
         status, body, _ = request(
             base_url, "/sub", {**common, "config": config_url}
         )
@@ -1746,6 +1851,7 @@ def main() -> int:
     parser.add_argument(
         "--settings-snapshot-helper", type=Path, required=True
     )
+    parser.add_argument("--mihomo-config-validator", type=Path)
     parser.add_argument("--update-golden", action="store_true")
     args = parser.parse_args()
     binary = args.binary.resolve()
@@ -1760,6 +1866,16 @@ def main() -> int:
     if settings_snapshot_helper == binary:
         parser.error(
             "settings snapshot helper must be separate from the runtime binary"
+        )
+    mihomo_config_validator = (
+        args.mihomo_config_validator.resolve()
+        if args.mihomo_config_validator
+        else None
+    )
+    if mihomo_config_validator is not None and not mihomo_config_validator.is_file():
+        parser.error(
+            "Mihomo config validator does not exist: "
+            f"{mihomo_config_validator}"
         )
 
     runtime_cli_isolation_baseline(binary)
@@ -1789,10 +1905,14 @@ def main() -> int:
         external_ruleset_semantic_cache_baseline(binary, fixture_base)
         external_ruleset_structure_baseline(binary, fixture_base)
         external_ruleset_strict_validation_baseline(binary, fixture_base)
-        external_ruleset_regex_validation_baseline(binary, fixture_base)
+        external_ruleset_regex_validation_baseline(
+            binary, fixture_base, mihomo_config_validator
+        )
         external_ruleset_sub_rule_baseline(binary, fixture_base)
         json_base_shape_baseline(binary, fixture_base)
-        clash_base_sub_rule_baseline(binary, fixture_base)
+        clash_base_sub_rule_baseline(
+            binary, fixture_base, mihomo_config_validator
+        )
         external_get_status_baseline(binary, fixture_base)
         semantic_cache_concurrency_baseline(binary, fixture_base)
         template_dependency_cache_baseline(binary, fixture_base)

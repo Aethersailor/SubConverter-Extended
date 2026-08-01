@@ -11,6 +11,9 @@
 #include "utils/string.h"
 #include "utils/rapidjson_extra.h"
 #include "subexport.h"
+#ifdef USE_MIHOMO_PARSER
+#include "parser/mihomo_bridge.h"
+#endif
 
 /// rule type lists
 #define basic_types "DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "IP-CIDR", "SRC-IP-CIDR", "GEOIP", "MATCH", "FINAL"
@@ -218,14 +221,53 @@ static bool validRuleAddress(const std::string &value, bool ipv6_only,
 static bool validRuleLine(const std::string &line,
                           const string_array &known_types);
 
-static bool validClashRegexPattern(const std::string &value)
+static bool isClashRegexRule(const std::string &rule_type)
 {
-    std::string pattern = trimWhitespace(value, true, true);
+    return rule_type == "DOMAIN-REGEX" ||
+           rule_type == "PROCESS-NAME-REGEX" ||
+           rule_type == "PROCESS-PATH-REGEX";
+}
+
+static bool normalizeClashRegexPattern(const std::string &value,
+                                        std::string &pattern)
+{
+    pattern = trimWhitespace(value, true, true);
     if(pattern.size() >= 2 &&
        ((pattern.front() == '"' && pattern.back() == '"') ||
         (pattern.front() == '\'' && pattern.back() == '\'')))
         pattern = pattern.substr(1, pattern.size() - 2);
-    return !pattern.empty() && regValid(pattern);
+    if(pattern.empty())
+        return false;
+#ifdef USE_MIHOMO_PARSER
+    return mihomo::isMihomoRegexValid(pattern);
+#else
+    return regValid(pattern);
+#endif
+}
+
+static bool parseClashRegexRule(const std::string &line,
+                                string_array &fields,
+                                std::string &pattern)
+{
+    if(!splitRuleFieldsStrict(line, fields) || fields.size() < 2 ||
+       !isClashRegexRule(toUpper(fields.front())))
+        return false;
+
+    // Mihomo treats the last field as the target and joins every field in
+    // between the type and target into the regex payload. This permits both
+    // an input-side quoted comma and an explicitly escaped comma without
+    // changing the payload Mihomo actually compiles.
+    const size_t pattern_end = fields.size() - (fields.size() >= 3 ? 1 : 0);
+    std::string raw_pattern;
+    for(size_t index = 1; index < pattern_end; ++index)
+    {
+        if(index != 1)
+            raw_pattern += ",";
+        raw_pattern += fields[index];
+    }
+    if(fields.size() >= 3 && fields.back().empty())
+        return false;
+    return normalizeClashRegexPattern(raw_pattern, pattern);
 }
 
 static bool unwrapRuleExpression(const std::string &value,
@@ -344,14 +386,11 @@ static bool validRuleLine(const std::string &line,
                                      minimum_components, type == "NOT"))
             return false;
     }
-    if((type == "SUB-RULE" || type == "DOMAIN-REGEX" ||
-        type == "PROCESS-NAME-REGEX" || type == "PROCESS-PATH-REGEX") &&
-       fields.size() != 2 && fields.size() != 3)
-        return false;
-    if((type == "DOMAIN-REGEX" || type == "PROCESS-NAME-REGEX" ||
-        type == "PROCESS-PATH-REGEX") &&
-       !validClashRegexPattern(fields[1]))
-        return false;
+    if(isClashRegexRule(type))
+    {
+        std::string pattern;
+        return parseClashRegexRule(line, fields, pattern);
+    }
     return true;
 }
 
@@ -452,13 +491,6 @@ static bool isClashCompoundRule(const std::string &rule_type)
     return rule_type == "AND" || rule_type == "OR" || rule_type == "NOT";
 }
 
-static bool isClashRegexRule(const std::string &rule_type)
-{
-    return rule_type == "DOMAIN-REGEX" ||
-           rule_type == "PROCESS-NAME-REGEX" ||
-           rule_type == "PROCESS-PATH-REGEX";
-}
-
 static bool isClashStructuredPayloadRule(const std::string &rule_type)
 {
     return isClashRegexRule(rule_type);
@@ -507,13 +539,13 @@ std::string appendClashRuleTarget(const std::string &rule, const std::string &ta
     if(isClashStructuredPayloadRule(rule_type))
     {
         string_array fields;
-        // Regex rules are type, pattern, optional policy; quoted commas stay
-        // in field 2.
-        // An unquoted comma is ambiguous, so do not guess at its meaning.
-        if(!splitRuleFieldsStrict(strLine, fields) ||
-           (fields.size() != 2 && fields.size() != 3))
+        std::string pattern;
+        if(!parseClashRegexRule(strLine, fields, pattern))
             return {};
-        return fields[0] + "," + fields[1] + "," + target;
+        // The normalized pattern is also the value validated above. Outer
+        // quotes are input-side disambiguation only and must not reach
+        // Mihomo's regexp2 parser.
+        return fields[0] + "," + pattern + "," + target;
     }
 
     if(pos == std::string::npos)
