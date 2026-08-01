@@ -44,13 +44,13 @@ STRICT_VALID_RULESET = (
     "AND,((DOMAIN,already.example),(DOMAIN,also.example)),OldPolicy\n"
     "OR,((DOMAIN,old-one.example),(DOMAIN,old-two.example)),OldPolicy\n"
     "NOT,((DOMAIN,old-not.example)),OldPolicy\n"
-    "DOMAIN-REGEX,^example\\.com$,OldPolicy\n"
+    "DOMAIN-REGEX,\"^example\\.com$\",OldPolicy\n"
     "PROCESS-NAME-REGEX,\"^chrome,helper$\",OldPolicy\n"
-    "PROCESS-PATH-REGEX,^/usr/bin/example$,OldPolicy\n"
-    "DOMAIN-REGEX,^example\\,comma$,OldPolicy\n"
-    "PROCESS-NAME-REGEX,^\\($,OldPolicy\n"
-    "PROCESS-NAME-REGEX,^foo\\\"bar$,OldPolicy\n"
-    "PROCESS-PATH-REGEX,^//server/share$,OldPolicy\n"
+    "PROCESS-PATH-REGEX,\"^/usr/bin/example$\",OldPolicy\n"
+    "DOMAIN-REGEX,\"^example\\,comma$\",OldPolicy\n"
+    "PROCESS-NAME-REGEX,\"^\\($\",OldPolicy\n"
+    "PROCESS-NAME-REGEX,\"^foo\\\"bar$\",OldPolicy\n"
+    "PROCESS-PATH-REGEX,\"^//server/share$\",OldPolicy\n"
 )
 DISABLE_RULEGEN_CONFIG = "data:,enable_rule_generator=false"
 
@@ -166,13 +166,14 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 )
             else:
                 body = (
-                    b"DOMAIN-REGEX,^example\\.com$,OldPolicy\n"
+                    b"DOMAIN-REGEX,\"^example\\.com$\",OldPolicy\n"
                     b"PROCESS-NAME-REGEX,\"^chrome,helper$\",OldPolicy\n"
-                    b"PROCESS-PATH-REGEX,^/usr/bin/example$,OldPolicy\n"
-                    b"DOMAIN-REGEX,^example\\,comma$,OldPolicy\n"
-                    b"PROCESS-NAME-REGEX,^\\($,OldPolicy\n"
-                    b"PROCESS-NAME-REGEX,^foo\\\"bar$,OldPolicy\n"
-                    b"PROCESS-PATH-REGEX,^//server/share$,OldPolicy\n"
+                    b"PROCESS-PATH-REGEX,\"^/usr/bin/example$\",OldPolicy\n"
+                    b"DOMAIN-REGEX,\"^example\\,comma$\",OldPolicy\n"
+                    b"DOMAIN-REGEX,^foo,bar,baz$\n"
+                    b"PROCESS-NAME-REGEX,\"^\\($\",OldPolicy\n"
+                    b"PROCESS-NAME-REGEX,\"^foo\\\"bar$\",OldPolicy\n"
+                    b"PROCESS-PATH-REGEX,\"^//server/share$\",OldPolicy\n"
                 )
             content_type = "text/plain; charset=utf-8"
         elif self.path.startswith("/ruleset-sub-rule-probe"):
@@ -1401,6 +1402,7 @@ def external_ruleset_regex_validation_baseline(
             b"PROCESS-NAME-REGEX,^chrome,helper$,Proxy",
             b"PROCESS-PATH-REGEX,^/usr/bin/example$,Proxy",
             b"DOMAIN-REGEX,^example\\,comma$,Proxy",
+            b"DOMAIN-REGEX,^foo,bar,baz$,Proxy",
         ):
             if expected_rule not in body:
                 raise AssertionError(
@@ -1413,6 +1415,7 @@ def external_ruleset_regex_validation_baseline(
             ("PROCESS-NAME-REGEX,^chrome,helper$,Proxy", "^chrome,helper$"),
             ("PROCESS-PATH-REGEX,^/usr/bin/example$,Proxy", r"^/usr/bin/example$"),
             ("DOMAIN-REGEX,^example\\,comma$,Proxy", r"^example\,comma$"),
+            (r"DOMAIN-REGEX,^foo,bar,baz$,Proxy", r"^foo,bar,baz$"),
             (r"PROCESS-NAME-REGEX,^\($,Proxy", r"^\($"),
             (r'PROCESS-NAME-REGEX,^foo\"bar$,Proxy', r'^foo\"bar$'),
             (r"PROCESS-PATH-REGEX,^//server/share$,Proxy", r"^//server/share$"),
