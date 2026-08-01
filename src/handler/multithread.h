@@ -4,6 +4,7 @@
 #include <mutex>
 #include <future>
 #include <cstddef>
+#include <memory>
 
 #include <yaml-cpp/yaml.h>
 
@@ -16,6 +17,7 @@
 using guarded_mutex = std::lock_guard<std::mutex>;
 
 struct Settings;
+struct RulesetFetchState;
 
 RegexMatchConfigs safe_get_emojis();
 RegexMatchConfigs safe_get_renames();
@@ -34,7 +36,8 @@ size_t rulesetExecutorQueueCapacity();
 std::shared_future<std::string> fetchFileAsync(
     const std::string &path, const ProxyPolicy &proxy, int cache_ttl,
     bool find_local = true, bool async = false,
-    FetchContext context = FetchContext::TrustedConfig);
+    FetchContext context = FetchContext::TrustedConfig,
+    std::shared_ptr<RulesetFetchState> fetch_state = nullptr);
 std::string fetchFile(const std::string &path, const ProxyPolicy &proxy,
                       int cache_ttl, bool find_local = true,
                       FetchContext context = FetchContext::TrustedConfig);
