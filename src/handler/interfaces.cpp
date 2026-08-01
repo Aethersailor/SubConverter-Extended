@@ -3683,6 +3683,8 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
                               })) // remove unsupported types
           continue;
         strLine = appendClashRuleTarget(strLine, trim(strArray[2]));
+        if (strLine.empty())
+          continue;
         rule.push_back(strLine);
       }
       ss.clear();
