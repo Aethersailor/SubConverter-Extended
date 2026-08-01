@@ -81,6 +81,10 @@ class FixtureHandler(http.server.BaseHTTPRequestHandler):
             return
         if self.path.startswith("/invalid-base"):
             payload = b"mixed-port: [\n"
+        elif self.path.startswith("/invalid-sssub-array"):
+            payload = b"[]"
+        elif self.path.startswith("/invalid-sssub-scalar"):
+            payload = b"true"
         elif self.path.startswith("/valid-base"):
             payload = (
                 b"mixed-port: 7890\n"
@@ -376,10 +380,12 @@ def upload_request(port: int, config: str = "data:,enable_rule_generator=false")
             raise AssertionError(f"Gist upload conversion failed: {response.status}")
 
 
-def expect_upload_failure(port: int, config: str) -> None:
+def expect_upload_failure(
+    port: int, config: str, target: str = "clash"
+) -> None:
     query = urllib.parse.urlencode(
         {
-            "target": "clash",
+            "target": target,
             "url": "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388#UploadFailure",
             "config": config,
             "upload": "true",
@@ -620,6 +626,21 @@ def run(image: str) -> None:
                 assert "/gists" not in invalid_gist_hits, (
                     "invalid external base triggered a Gist upload: "
                     f"{invalid_gist_hits}"
+                )
+                recorder.clear()
+                invalid_sssub_config = encoded_config(
+                    "[custom]\n"
+                    "enable_rule_generator=false\n"
+                    f"sssub_rule_base=http://target.test:{fixture.server_port}/invalid-sssub-array\n"
+                )
+                expect_upload_failure(
+                    container.port, invalid_sssub_config, target="sssub"
+                )
+                with recorder.lock:
+                    invalid_sssub_gist_hits = list(recorder.target_hits)
+                assert "/gists" not in invalid_sssub_gist_hits, (
+                    "invalid SSSUB base triggered a Gist upload: "
+                    f"{invalid_sssub_gist_hits}"
                 )
                 recorder.clear()
                 upload_request(container.port)

@@ -39,6 +39,11 @@ STRICT_VALID_RULESET = (
     "NOT,((DOMAIN-SUFFIX,example.net))\n"
     "AND,((OR,((DOMAIN-SUFFIX,nested.example),(DOMAIN,inner.example))),"
     "(DOMAIN,network.example))\n"
+    "DOMAIN-SUFFIX,existing.example,OldPolicy\n"
+    "IP-CIDR,203.0.113.0/24,OldPolicy,no-resolve\n"
+    "AND,((DOMAIN,already.example),(DOMAIN,also.example)),OldPolicy\n"
+    "OR,((DOMAIN,old-one.example),(DOMAIN,old-two.example)),OldPolicy\n"
+    "NOT,((DOMAIN,old-not.example)),OldPolicy\n"
 )
 DISABLE_RULEGEN_CONFIG = "data:,enable_rule_generator=false"
 
@@ -142,6 +147,24 @@ class FixtureHandler(BaseHTTPRequestHandler):
             else:
                 body = STRICT_VALID_RULESET.encode()
             content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/sssub-base-object"):
+            body = b'{"base":"kept"}'
+            content_type = "application/json"
+        elif self.path.startswith("/sssub-base-array"):
+            body = b"[]"
+            content_type = "application/json"
+        elif self.path.startswith("/sssub-base-scalar"):
+            body = b"true"
+            content_type = "application/json"
+        elif self.path.startswith("/singbox-base-object"):
+            body = b'{"route":{"rules":[]}}'
+            content_type = "application/json"
+        elif self.path.startswith("/singbox-base-array"):
+            body = b"[]"
+            content_type = "application/json"
+        elif self.path.startswith("/singbox-base-scalar"):
+            body = b"true"
+            content_type = "application/json"
         elif self.path.startswith("/clash-base-transaction-probe"):
             if request_number == 1:
                 body = b"mixed-port: [\n"
@@ -1185,12 +1208,19 @@ def external_ruleset_strict_validation_baseline(
             b"NOT,((DOMAIN-SUFFIX,example.net)),Proxy",
             b"AND,((OR,((DOMAIN-SUFFIX,nested.example),(DOMAIN,inner.example))),"
             b"(DOMAIN,network.example)),Proxy",
+            b"DOMAIN-SUFFIX,existing.example,Proxy",
+            b"IP-CIDR,203.0.113.0/24,Proxy,no-resolve",
+            b"AND,((DOMAIN,already.example),(DOMAIN,also.example)),Proxy",
+            b"OR,((DOMAIN,old-one.example),(DOMAIN,old-two.example)),Proxy",
+            b"NOT,((DOMAIN,old-not.example)),Proxy",
         ):
             if expected_rule not in body:
                 raise AssertionError(
                     "valid server-side compound rule was not preserved: "
                     + expected_rule.decode()
                 )
+        if b"OldPolicy" in body:
+            raise AssertionError("existing rule policy was duplicated instead of replaced")
         status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
         if status != 200 or b"proxy-groups:" not in body:
             raise AssertionError("fully valid ruleset did not remain cached")
@@ -1199,6 +1229,61 @@ def external_ruleset_strict_validation_baseline(
         raise AssertionError(
             "strict ruleset validation cached an invalid mixed or nested response"
         )
+
+
+def json_base_shape_baseline(binary: Path, fixture_base: str) -> None:
+    subscription_url = fixture_base + "/subscription.txt"
+
+    def config_url(key: str, endpoint: str) -> str:
+        config = (
+            "[custom]\n"
+            "enable_rule_generator=false\n"
+            f"{key}={fixture_base}{endpoint}?nonce={time.time_ns()}\n"
+        )
+        return "data:text/plain;base64," + base64.urlsafe_b64encode(
+            config.encode()
+        ).decode()
+
+    def request_target(
+        base_url: str, target: str, config: str
+    ) -> tuple[int, bytes, dict[str, str]]:
+        return request(
+            base_url,
+            "/sub",
+            {"target": target, "url": subscription_url, "config": config},
+        )
+
+    with running_service(binary) as base_url:
+        status, body, _ = request_target(
+            base_url, "sssub", config_url("sssub_rule_base", "/sssub-base-object")
+        )
+        if status != 200 or not isinstance(json.loads(body), list):
+            raise AssertionError("valid SSSUB object base did not produce a JSON array")
+
+        status, body, _ = request_target(
+            base_url,
+            "singbox",
+            config_url("singbox_rule_base", "/singbox-base-object"),
+        )
+        if status != 200 or not isinstance(json.loads(body), dict):
+            raise AssertionError("valid sing-box object base did not produce a JSON object")
+
+        for target, key, endpoint in (
+            ("sssub", "sssub_rule_base", "/sssub-base-array"),
+            ("sssub", "sssub_rule_base", "/sssub-base-scalar"),
+            ("singbox", "singbox_rule_base", "/singbox-base-array"),
+            ("singbox", "singbox_rule_base", "/singbox-base-scalar"),
+        ):
+            status, _, headers = request_target(
+                base_url, target, config_url(key, endpoint)
+            )
+            if status != 502 or "no-store" not in headers.get("cache-control", ""):
+                raise AssertionError(
+                    f"non-object {target} base was not rejected with no-store: {status}"
+                )
+        status, body, _ = request(base_url, "/healthz")
+        if status != 200 or body.strip() != b"ok":
+            raise AssertionError("non-object JSON base caused the service to stop")
 
 
 def external_base_cache_transaction_baseline(
@@ -1485,6 +1570,7 @@ def main() -> int:
         external_ruleset_semantic_cache_baseline(binary, fixture_base)
         external_ruleset_structure_baseline(binary, fixture_base)
         external_ruleset_strict_validation_baseline(binary, fixture_base)
+        json_base_shape_baseline(binary, fixture_base)
         semantic_cache_concurrency_baseline(binary, fixture_base)
         template_dependency_cache_baseline(binary, fixture_base)
         template_static_dependency_failure_baseline(binary, fixture_base)

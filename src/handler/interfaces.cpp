@@ -82,7 +82,9 @@ static bool validateGeneratedTargetOutput(const std::string &target,
     if (target == "sssub" || target == "singbox") {
       rapidjson::Document json;
       json.Parse(content.data());
-      return !json.HasParseError() && json.IsObject();
+      if (json.HasParseError())
+        return false;
+      return target == "sssub" ? json.IsArray() : json.IsObject();
     }
   } catch (...) {
     return false;
