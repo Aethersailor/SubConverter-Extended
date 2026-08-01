@@ -881,9 +881,9 @@ static FetchFailureCategory classify_fetch_failure(CURLcode code, int status) {
     // different default template.
     if (status == 401 || status == 403 || (status >= 400 && status < 500))
         return FetchFailureCategory::RequestRejected;
-    if (status != 200)
-        return FetchFailureCategory::RequestRejected;
-    return FetchFailureCategory::None;
+    if (status >= 200 && status < 300)
+        return FetchFailureCategory::None;
+    return FetchFailureCategory::RequestRejected;
 }
 
 static bool can_try_next_source(FetchFailureCategory failure) {
@@ -1080,7 +1080,7 @@ static FetchOutcome perform_fetch(const FetchArgument &argument) {
                                     status, static_cast<int>(curl_code), failure});
         if (failure == FetchFailureCategory::None) {
             outcome.success = true;
-            outcome.status_code = 200;
+            outcome.status_code = status;
             outcome.content = std::move(content);
             outcome.response_headers = std::move(headers);
             outcome.cookies = std::move(cookies);
