@@ -328,6 +328,10 @@ static bool validRuleLine(const std::string &line,
                                      minimum_components, type == "NOT"))
             return false;
     }
+    if((type == "SUB-RULE" || type == "DOMAIN-REGEX" ||
+        type == "PROCESS-NAME-REGEX" || type == "PROCESS-PATH-REGEX") &&
+       fields.size() != 2 && fields.size() != 3)
+        return false;
     return true;
 }
 
@@ -423,16 +427,21 @@ size_t rulesetConversionCacheMaxBytes()
     return kRulesetConversionCacheBytes;
 }
 
-static bool isClashCommaPayloadRule(const std::string &rule_type)
-{
-    return rule_type == "AND" || rule_type == "OR" || rule_type == "NOT" ||
-           rule_type == "SUB-RULE" || rule_type == "DOMAIN-REGEX" ||
-           rule_type == "PROCESS-NAME-REGEX" || rule_type == "PROCESS-PATH-REGEX";
-}
-
 static bool isClashCompoundRule(const std::string &rule_type)
 {
     return rule_type == "AND" || rule_type == "OR" || rule_type == "NOT";
+}
+
+static bool isClashRegexRule(const std::string &rule_type)
+{
+    return rule_type == "DOMAIN-REGEX" ||
+           rule_type == "PROCESS-NAME-REGEX" ||
+           rule_type == "PROCESS-PATH-REGEX";
+}
+
+static bool isClashStructuredPayloadRule(const std::string &rule_type)
+{
+    return rule_type == "SUB-RULE" || isClashRegexRule(rule_type);
 }
 
 static bool isNoResolveOption(const std::string &value)
@@ -461,7 +470,19 @@ std::string appendClashRuleTarget(const std::string &rule, const std::string &ta
         return output;
     }
 
-    if(pos == std::string::npos || isClashCommaPayloadRule(rule_type))
+    if(isClashStructuredPayloadRule(rule_type))
+    {
+        string_array fields;
+        // SUB-RULE is type, sub-rule name/expression, policy. Regex rules
+        // have the same optional policy field; quoted commas stay in field 2.
+        // An unquoted comma is ambiguous, so do not guess at its meaning.
+        if(!splitRuleFieldsStrict(strLine, fields) ||
+           (fields.size() != 2 && fields.size() != 3))
+            return {};
+        return fields[0] + "," + fields[1] + "," + target;
+    }
+
+    if(pos == std::string::npos)
         return strLine + "," + target;
 
     string_array fields;
@@ -552,6 +573,8 @@ void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_
         {
             strLine = retrieved_rules.substr(2);
             strLine = appendClashRuleTarget(strLine, rule_group);
+            if(strLine.empty())
+                continue;
             allRules.emplace_back(strLine);
             total_rules++;
             local_stats.add();
@@ -579,6 +602,8 @@ void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_
                 strLine = trimWhitespace(strLine);
             }
             strLine = appendClashRuleTarget(strLine, rule_group);
+            if(strLine.empty())
+                continue;
             strLine =
                 appendClashIpCidrNoResolve(strLine, x.rule_type, x.options);
             allRules.emplace_back(strLine);
@@ -628,6 +653,8 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent>
         {
             strLine = retrieved_rules.substr(2);
             strLine = appendClashRuleTarget(strLine, rule_group);
+            if(strLine.empty())
+                continue;
             output_content += "  - " + strLine + "\n";
             total_rules++;
             local_stats.add();
@@ -656,6 +683,8 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent>
             }
 
             strLine = appendClashRuleTarget(strLine, rule_group);
+            if(strLine.empty())
+                continue;
             strLine =
                 appendClashIpCidrNoResolve(strLine, x.rule_type, x.options);
             output_content += "  - " + strLine + "\n";

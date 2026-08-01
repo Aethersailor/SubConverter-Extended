@@ -857,7 +857,16 @@ static bool is_http_get(const FetchArgument &argument) {
     return argument.method == HTTP_GET;
 }
 
-static FetchFailureCategory classify_fetch_failure(CURLcode code, int status) {
+static bool is_success_status(http_method method, int status) {
+    if (status < 200 || status >= 300)
+        return false;
+    if (method == HTTP_GET)
+        return status == 200;
+    return method == HTTP_HEAD || method == HTTP_POST || method == HTTP_PATCH;
+}
+
+static FetchFailureCategory classify_fetch_failure(CURLcode code, int status,
+                                                   http_method method) {
     if (code != CURLE_OK) {
         switch (code) {
         case CURLE_UNSUPPORTED_PROTOCOL:
@@ -881,8 +890,10 @@ static FetchFailureCategory classify_fetch_failure(CURLcode code, int status) {
     // different default template.
     if (status == 401 || status == 403 || (status >= 400 && status < 500))
         return FetchFailureCategory::RequestRejected;
-    if (status >= 200 && status < 300)
+    if (is_success_status(method, status))
         return FetchFailureCategory::None;
+    if (status >= 200 && status < 300 && method == HTTP_GET)
+        return FetchFailureCategory::ContentInvalid;
     return FetchFailureCategory::RequestRejected;
 }
 
@@ -1072,9 +1083,8 @@ static FetchOutcome perform_fetch(const FetchArgument &argument) {
         CURLcode curl_code = CURLE_OK;
         const int returned_status = curlGet(request, result, &curl_code);
         status = returned_status;
-        const auto failure = (curl_code == CURLE_OK && status == 200)
-                                 ? FetchFailureCategory::None
-                                 : classify_fetch_failure(curl_code, status);
+        const auto failure = classify_fetch_failure(curl_code, status,
+                                                    argument.method);
         outcome.attempts.push_back({candidate.source_kind,
                                     remote_source::redactForLog(candidate.url),
                                     status, static_cast<int>(curl_code), failure});

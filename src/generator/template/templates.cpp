@@ -509,6 +509,8 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
             if(startsWith(strLine, "FINAL"))
                 strLine = "MATCH";
             strLine = appendClashRuleTarget(strLine, rule_group);
+            if(strLine.empty())
+                continue;
             rules.emplace_back(std::move(strLine));
             local_stats.add();
             continue;

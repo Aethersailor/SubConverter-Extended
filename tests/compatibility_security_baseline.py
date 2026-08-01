@@ -44,6 +44,10 @@ STRICT_VALID_RULESET = (
     "AND,((DOMAIN,already.example),(DOMAIN,also.example)),OldPolicy\n"
     "OR,((DOMAIN,old-one.example),(DOMAIN,old-two.example)),OldPolicy\n"
     "NOT,((DOMAIN,old-not.example)),OldPolicy\n"
+    "DOMAIN-REGEX,^example\\.com$,OldPolicy\n"
+    "PROCESS-NAME-REGEX,\"^chrome,helper$\",OldPolicy\n"
+    "PROCESS-PATH-REGEX,^/usr/bin/example$,OldPolicy\n"
+    "SUB-RULE,sub-rule-name,OldPolicy\n"
 )
 DISABLE_RULEGEN_CONFIG = "data:,enable_rule_generator=false"
 
@@ -71,6 +75,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         request_number = self.record_request(self.path)
+        response_status = 200
         if self.path == "/subscription.txt":
             body = SUBSCRIPTION.encode()
             content_type = "text/plain; charset=utf-8"
@@ -137,6 +142,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 body = (
                     b"DOMAIN-SUFFIX,example.com,Proxy\n"
                     b"IP-CIDR,not-a-cidr,Proxy\n"
+                    b"PROCESS-NAME-REGEX,^chrome,helper$,Proxy\n"
                     b"[]garbage\n"
                 )
             elif request_number == 2:
@@ -146,6 +152,27 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 )
             else:
                 body = STRICT_VALID_RULESET.encode()
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/http-get-204-probe"):
+            if request_number == 1:
+                self.send_response(204)
+                self.end_headers()
+                return
+            body = (
+                b"mixed-port: 7890\n"
+                b"proxies: []\n"
+                b"proxy-groups: []\n"
+                b"rules:\n  - MATCH,DIRECT\n"
+            )
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/http-get-206-probe"):
+            response_status = 206 if request_number == 1 else 200
+            body = (
+                b"mixed-port: 7890\n"
+                b"proxies: []\n"
+                b"proxy-groups: []\n"
+                b"rules:\n  - MATCH,DIRECT\n"
+            )
             content_type = "text/plain; charset=utf-8"
         elif self.path.startswith("/sssub-base-object"):
             body = b'{"base":"kept"}'
@@ -279,7 +306,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
         else:
             self.send_error(404)
             return
-        self.send_response(200)
+        self.send_response(response_status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -1178,7 +1205,7 @@ def external_ruleset_strict_validation_baseline(
         "[custom]\n"
         "enable_rule_generator=true\n"
         "overwrite_original_rules=true\n"
-        f"ruleset=Proxy,surge:{probe_url}\n"
+        f"ruleset=Proxy,clash-classic:{probe_url}\n"
     )
     config_url = "data:text/plain;base64," + base64.urlsafe_b64encode(
         config.encode()
@@ -1213,6 +1240,10 @@ def external_ruleset_strict_validation_baseline(
             b"AND,((DOMAIN,already.example),(DOMAIN,also.example)),Proxy",
             b"OR,((DOMAIN,old-one.example),(DOMAIN,old-two.example)),Proxy",
             b"NOT,((DOMAIN,old-not.example)),Proxy",
+            b"DOMAIN-REGEX,^example\\.com$,Proxy",
+            b'PROCESS-NAME-REGEX,"^chrome,helper$",Proxy',
+            b"PROCESS-PATH-REGEX,^/usr/bin/example$,Proxy",
+            b"SUB-RULE,sub-rule-name,Proxy",
         ):
             if expected_rule not in body:
                 raise AssertionError(
@@ -1284,6 +1315,47 @@ def json_base_shape_baseline(binary: Path, fixture_base: str) -> None:
         status, body, _ = request(base_url, "/healthz")
         if status != 200 or body.strip() != b"ok":
             raise AssertionError("non-object JSON base caused the service to stop")
+
+
+def external_get_status_baseline(binary: Path, fixture_base: str) -> None:
+    subscription_url = fixture_base + "/subscription.txt"
+
+    def config_url(endpoint: str) -> str:
+        config = (
+            "[custom]\n"
+            "enable_rule_generator=false\n"
+            f"clash_rule_base={fixture_base}{endpoint}?nonce={time.time_ns()}\n"
+        )
+        return "data:text/plain;base64," + base64.urlsafe_b64encode(
+            config.encode()
+        ).decode()
+
+    common = {"target": "clash", "url": subscription_url}
+    with running_service(binary) as base_url:
+        for endpoint in ("/http-get-204-probe", "/http-get-206-probe"):
+            FixtureHandler.reset_counters()
+            params = {**common, "config": config_url(endpoint)}
+            status, _, headers = request(base_url, "/sub", params)
+            if status != 502 or "no-store" not in headers.get(
+                "cache-control", ""
+            ):
+                raise AssertionError(
+                    f"GET {endpoint} non-200 2xx response was accepted or cached"
+                )
+            status, body, _ = request(base_url, "/sub", params)
+            if status != 200 or b"proxy-groups:" not in body:
+                raise AssertionError(
+                    f"GET {endpoint} did not recover on a later 200 response"
+                )
+            status, body, _ = request(base_url, "/sub", params)
+            if status != 200 or b"proxy-groups:" not in body:
+                raise AssertionError(
+                    f"GET {endpoint} valid 200 response was not cached"
+                )
+            if FixtureHandler.request_counts.get(endpoint) != 2:
+                raise AssertionError(
+                    f"GET {endpoint} non-200 2xx response was cached"
+                )
 
 
 def external_base_cache_transaction_baseline(
@@ -1571,6 +1643,7 @@ def main() -> int:
         external_ruleset_structure_baseline(binary, fixture_base)
         external_ruleset_strict_validation_baseline(binary, fixture_base)
         json_base_shape_baseline(binary, fixture_base)
+        external_get_status_baseline(binary, fixture_base)
         semantic_cache_concurrency_baseline(binary, fixture_base)
         template_dependency_cache_baseline(binary, fixture_base)
         template_static_dependency_failure_baseline(binary, fixture_base)
