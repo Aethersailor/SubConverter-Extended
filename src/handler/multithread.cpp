@@ -163,7 +163,8 @@ static std::string fetchFileWithState(
                            static_cast<unsigned int>(std::max(cache_ttl, 0)),
                            false,
                            context,
-                           true};
+                           true,
+                           FetchCacheSemantic::Ruleset};
     FetchOutcome outcome;
     fetchRemote(argument, outcome);
     record(outcome.status_code,

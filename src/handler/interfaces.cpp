@@ -2820,7 +2820,8 @@ static std::string subconverter_impl(Request &request, Response &response,
                                        std::max(global.cacheConfig, 0)),
                                    true,
                                    baseFetchContext,
-                                   true};
+                                   true,
+                                   FetchCacheSemantic::ExternalBase};
       fetchRemote(fetch_argument, fetch_outcome);
       fetched = fetch_outcome.success ? fetch_outcome.content : "";
     }
