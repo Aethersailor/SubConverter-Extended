@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <atomic>
 #include <memory>
+#include <mutex>
 
 #include <yaml-cpp/yaml.h>
 #include <rapidjson/document.h>
@@ -15,9 +16,13 @@
 #include "config/ruleset.h"
 #include "utils/ini_reader/ini_reader.h"
 
+struct FetchOutcome;
+
 struct RulesetFetchState {
     std::atomic<int> status_code{0};
     std::atomic<bool> request_rejected{false};
+    mutable std::mutex pending_mutex;
+    std::shared_ptr<FetchOutcome> pending_fetch;
 };
 
 struct RulesetContent
@@ -43,6 +48,8 @@ struct RuleConversionStats
 };
 
 std::string convertRuleset(const std::string &content, int type);
+size_t countValidRulesetEntries(const std::string &content,
+                                ruleset_type type);
 size_t rulesetConversionCacheMaxEntries();
 size_t rulesetConversionCacheMaxBytes();
 std::string appendClashRuleTarget(const std::string &rule, const std::string &target, bool no_resolve_only = false);

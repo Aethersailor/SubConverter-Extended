@@ -81,12 +81,40 @@ struct FetchOutcome
     std::string cache_path;
     std::string cache_header_path;
     std::vector<FetchAttempt> attempts;
+    // Fetches performed while validating this resource (for example template
+    // `fetch()` calls or imported configuration fragments).  They remain
+    // provisional until the owning resource has completed semantic
+    // validation, so a parent parse/render failure can discard the complete
+    // dependency tree atomically.
+    std::vector<FetchOutcome> deferred_dependencies;
+};
+
+struct FetchCacheTransaction
+{
+    std::vector<FetchOutcome> pending;
+};
+
+class FetchCacheTransactionScope
+{
+public:
+    explicit FetchCacheTransactionScope(FetchCacheTransaction &transaction);
+    ~FetchCacheTransactionScope();
+
+    FetchCacheTransactionScope(const FetchCacheTransactionScope &) = delete;
+    FetchCacheTransactionScope &operator=(const FetchCacheTransactionScope &) = delete;
+
+private:
+    FetchCacheTransaction *previous_;
 };
 
 int webGet(const FetchArgument& argument, FetchResult &result);
 int fetchRemote(const FetchArgument &argument, FetchOutcome &outcome);
 bool commitFetchOutcomeCache(const FetchOutcome &outcome);
 void discardFetchOutcomeCache(const FetchOutcome &outcome);
+FetchCacheTransaction *currentFetchCacheTransaction();
+void deferFetchOutcomeCache(FetchOutcome outcome);
+void commitFetchCacheTransaction(FetchCacheTransaction &transaction);
+void discardFetchCacheTransaction(FetchCacheTransaction &transaction);
 std::string webGet(const std::string &url, const ProxyPolicy &proxy,
                    unsigned int cache_ttl = 0,
                    std::string *response_headers = nullptr,

@@ -174,8 +174,15 @@ static std::string fetchFileWithState(
             record(422, false);
         return {};
     }
-    commitFetchOutcomeCache(outcome);
-    return outcome.content;
+    std::string content = outcome.content;
+    if (fetch_state && outcome.cache_commit_pending) {
+        std::lock_guard<std::mutex> lock(fetch_state->pending_mutex);
+        fetch_state->pending_fetch =
+            std::make_shared<FetchOutcome>(std::move(outcome));
+    } else {
+        commitFetchOutcomeCache(outcome);
+    }
+    return content;
 }
 
 std::shared_future<std::string> fetchFileAsync(
@@ -197,4 +204,30 @@ std::shared_future<std::string> fetchFileAsync(
 std::string fetchFile(const std::string &path, const ProxyPolicy &proxy, int cache_ttl, bool find_local, FetchContext context)
 {
     return fetchFileAsync(path, proxy, cache_ttl, find_local, false, context).get();
+}
+
+void commitRulesetFetchCache(
+    const std::shared_ptr<RulesetFetchState> &fetch_state) {
+    if (!fetch_state)
+        return;
+    std::shared_ptr<FetchOutcome> outcome;
+    {
+        std::lock_guard<std::mutex> lock(fetch_state->pending_mutex);
+        outcome = std::move(fetch_state->pending_fetch);
+    }
+    if (outcome)
+        commitFetchOutcomeCache(*outcome);
+}
+
+void discardRulesetFetchCache(
+    const std::shared_ptr<RulesetFetchState> &fetch_state) {
+    if (!fetch_state)
+        return;
+    std::shared_ptr<FetchOutcome> outcome;
+    {
+        std::lock_guard<std::mutex> lock(fetch_state->pending_mutex);
+        outcome = std::move(fetch_state->pending_fetch);
+    }
+    if (outcome)
+        discardFetchOutcomeCache(*outcome);
 }

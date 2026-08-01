@@ -146,8 +146,35 @@ std::string template_webGet(inja::Arguments &args)
     std::string data = args.at(0)->get<std::string>();
     ProxyPolicy proxy = parseProxy(global.proxyConfig);
     writeLog(0, "模板调用 fetch，URL：'" + data + "'。", LOG_LEVEL_INFO);
-    return webGet(data, proxy, global.cacheConfig, nullptr, nullptr,
-                  current_template_fetch_context);
+    FetchArgument argument{HTTP_GET,
+                           data,
+                           proxy,
+                           nullptr,
+                           nullptr,
+                           nullptr,
+                           static_cast<unsigned int>(std::max(0, global.cacheConfig)),
+                           false,
+                           current_template_fetch_context,
+                           true};
+    FetchOutcome outcome;
+    fetchRemote(argument, outcome);
+    if (!outcome.success)
+        return {};
+
+    const std::string trimmed = trimWhitespace(outcome.content, true, true);
+    const std::string lower = toLower(trimmed);
+    if (trimmed.empty() || startsWith(lower, "<!doctype html") ||
+        startsWith(lower, "<html")) {
+        discardFetchOutcomeCache(outcome);
+        return {};
+    }
+
+    std::string content = outcome.content;
+    // Keep template dependencies provisional until render_template() succeeds.
+    // If this function owns the render transaction, deferFetchOutcomeCache
+    // commits here only after the transaction scope is finalized below.
+    deferFetchOutcomeCache(std::move(outcome));
+    return content;
 }
 #endif // NO_WEBGET
 
@@ -155,6 +182,22 @@ int render_template(const std::string &content, const template_args &vars,
                     std::string &output, const std::string &include_scope,
                     FetchContext context)
 {
+    FetchCacheTransaction local_transaction;
+    std::unique_ptr<FetchCacheTransactionScope> local_scope;
+    const bool owns_transaction = currentFetchCacheTransaction() == nullptr;
+    if (owns_transaction)
+        local_scope = std::make_unique<FetchCacheTransactionScope>(
+            local_transaction);
+
+    auto finish_transaction = [&](bool success) {
+        if (!owns_transaction)
+            return;
+        if (success)
+            commitFetchCacheTransaction(local_transaction);
+        else
+            discardFetchCacheTransaction(local_transaction);
+    };
+
     struct TemplateFetchContextGuard
     {
         FetchContext previous;
@@ -339,12 +382,16 @@ int render_template(const std::string &content, const template_args &vars,
         std::stringstream out;
         env.render_to(out, env.parse(content), data);
         output = out.str();
-        return 0;
+        const bool valid_output =
+            !trimWhitespace(output, true, true).empty();
+        finish_transaction(valid_output);
+        return valid_output ? 0 : -1;
     }
     catch (std::exception &e)
     {
         output = "模板渲染失败。原因：" + std::string(e.what());
         writeLog(0, output, LOG_LEVEL_ERROR);
+        finish_transaction(false);
         return -1;
     }
     return -2;

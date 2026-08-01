@@ -52,6 +52,7 @@ using CacheFetchResult = FetchOutcome;
 
 static std::mutex cache_fetch_mutex;
 static std::map<std::string, std::shared_future<CacheFetchResult>> cache_fetches;
+thread_local FetchCacheTransaction *active_fetch_cache_transaction = nullptr;
 
 class CacheFetchOwnerCleanup
 {
@@ -1124,15 +1125,44 @@ static FetchOutcome perform_fetch(const FetchArgument &argument) {
 
 } // namespace
 
+FetchCacheTransactionScope::FetchCacheTransactionScope(
+    FetchCacheTransaction &transaction)
+    : previous_(active_fetch_cache_transaction) {
+    active_fetch_cache_transaction = &transaction;
+}
+
+FetchCacheTransactionScope::~FetchCacheTransactionScope() {
+    active_fetch_cache_transaction = previous_;
+}
+
+FetchCacheTransaction *currentFetchCacheTransaction() {
+    return active_fetch_cache_transaction;
+}
+
+void deferFetchOutcomeCache(FetchOutcome outcome) {
+    if (!outcome.cache_commit_pending || !outcome.success)
+        return;
+    if (active_fetch_cache_transaction != nullptr) {
+        active_fetch_cache_transaction->pending.emplace_back(std::move(outcome));
+        return;
+    }
+    commitFetchOutcomeCache(outcome);
+}
+
 bool commitFetchOutcomeCache(const FetchOutcome &outcome) {
+    bool committed = false;
+    for (const FetchOutcome &dependency : outcome.deferred_dependencies)
+        committed = commitFetchOutcomeCache(dependency) || committed;
     if (!outcome.cache_commit_pending || !outcome.success ||
         outcome.cache_path.empty())
-        return false;
+        return committed;
     write_cache_candidate(outcome);
     return true;
 }
 
 void discardFetchOutcomeCache(const FetchOutcome &outcome) {
+    for (const FetchOutcome &dependency : outcome.deferred_dependencies)
+        discardFetchOutcomeCache(dependency);
     // Deferred network responses are held in memory and are never written to
     // the final cache path until commitFetchOutcomeCache is called. Discarding
     // therefore preserves any older stale entry; a semantically invalid fresh
@@ -1144,6 +1174,18 @@ void discardFetchOutcomeCache(const FetchOutcome &outcome) {
     remove(outcome.cache_path.c_str());
     if (!outcome.cache_header_path.empty())
         remove(outcome.cache_header_path.c_str());
+}
+
+void commitFetchCacheTransaction(FetchCacheTransaction &transaction) {
+    for (const FetchOutcome &outcome : transaction.pending)
+        commitFetchOutcomeCache(outcome);
+    transaction.pending.clear();
+}
+
+void discardFetchCacheTransaction(FetchCacheTransaction &transaction) {
+    for (const FetchOutcome &outcome : transaction.pending)
+        discardFetchOutcomeCache(outcome);
+    transaction.pending.clear();
 }
 
 int fetchRemote(const FetchArgument &argument, FetchOutcome &outcome) {
