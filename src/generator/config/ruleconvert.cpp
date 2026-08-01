@@ -218,6 +218,16 @@ static bool validRuleAddress(const std::string &value, bool ipv6_only,
 static bool validRuleLine(const std::string &line,
                           const string_array &known_types);
 
+static bool validClashRegexPattern(const std::string &value)
+{
+    std::string pattern = trimWhitespace(value, true, true);
+    if(pattern.size() >= 2 &&
+       ((pattern.front() == '"' && pattern.back() == '"') ||
+        (pattern.front() == '\'' && pattern.back() == '\'')))
+        pattern = pattern.substr(1, pattern.size() - 2);
+    return !pattern.empty() && regValid(pattern);
+}
+
 static bool unwrapRuleExpression(const std::string &value,
                                  std::string &inner)
 {
@@ -305,6 +315,12 @@ static bool validRuleLine(const std::string &line,
     if(std::none_of(known_types.begin(), known_types.end(),
                     [&](const std::string &known) { return type == known; }))
         return false;
+    if(type == "SUB-RULE")
+        // RulesetConfig supplies a proxy policy as the third field. A
+        // SUB-RULE third field is a sub-rule name instead, and its sub-rules
+        // cannot travel with a server-side ruleset, so reject it here rather
+        // than silently rewriting its meaning.
+        return false;
     for(size_t index = 1; index < fields.size(); ++index)
     {
         if(fields[index].empty())
@@ -331,6 +347,10 @@ static bool validRuleLine(const std::string &line,
     if((type == "SUB-RULE" || type == "DOMAIN-REGEX" ||
         type == "PROCESS-NAME-REGEX" || type == "PROCESS-PATH-REGEX") &&
        fields.size() != 2 && fields.size() != 3)
+        return false;
+    if((type == "DOMAIN-REGEX" || type == "PROCESS-NAME-REGEX" ||
+        type == "PROCESS-PATH-REGEX") &&
+       !validClashRegexPattern(fields[1]))
         return false;
     return true;
 }
@@ -441,7 +461,7 @@ static bool isClashRegexRule(const std::string &rule_type)
 
 static bool isClashStructuredPayloadRule(const std::string &rule_type)
 {
-    return rule_type == "SUB-RULE" || isClashRegexRule(rule_type);
+    return isClashRegexRule(rule_type);
 }
 
 static bool isNoResolveOption(const std::string &value)
@@ -470,11 +490,25 @@ std::string appendClashRuleTarget(const std::string &rule, const std::string &ta
         return output;
     }
 
+    if(rule_type == "SUB-RULE")
+    {
+        string_array fields;
+        std::string expression;
+        if(!splitRuleFieldsStrict(strLine, fields) || fields.size() != 3 ||
+           !unwrapRuleExpression(fields[1], expression) ||
+           !validRuleLine(expression, ClashRuleTypes))
+            return {};
+        // The third field is a sub-rule name, not a proxy policy. Preserve
+        // the complete valid base rule instead of injecting RulesetConfig's
+        // proxy group into it.
+        return strLine;
+    }
+
     if(isClashStructuredPayloadRule(rule_type))
     {
         string_array fields;
-        // SUB-RULE is type, sub-rule name/expression, policy. Regex rules
-        // have the same optional policy field; quoted commas stay in field 2.
+        // Regex rules are type, pattern, optional policy; quoted commas stay
+        // in field 2.
         // An unquoted comma is ambiguous, so do not guess at its meaning.
         if(!splitRuleFieldsStrict(strLine, fields) ||
            (fields.size() != 2 && fields.size() != 3))

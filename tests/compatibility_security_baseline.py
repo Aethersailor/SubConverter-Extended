@@ -47,7 +47,6 @@ STRICT_VALID_RULESET = (
     "DOMAIN-REGEX,^example\\.com$,OldPolicy\n"
     "PROCESS-NAME-REGEX,\"^chrome,helper$\",OldPolicy\n"
     "PROCESS-PATH-REGEX,^/usr/bin/example$,OldPolicy\n"
-    "SUB-RULE,sub-rule-name,OldPolicy\n"
 )
 DISABLE_RULEGEN_CONFIG = "data:,enable_rule_generator=false"
 
@@ -143,6 +142,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
                     b"DOMAIN-SUFFIX,example.com,Proxy\n"
                     b"IP-CIDR,not-a-cidr,Proxy\n"
                     b"PROCESS-NAME-REGEX,^chrome,helper$,Proxy\n"
+                    b"DOMAIN-REGEX,[a-z,Proxy\n"
+                    b"SUB-RULE,(NETWORK,tcp),sub-rule-name\n"
                     b"[]garbage\n"
                 )
             elif request_number == 2:
@@ -152,6 +153,25 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 )
             else:
                 body = STRICT_VALID_RULESET.encode()
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/ruleset-regex-probe"):
+            if request_number == 1:
+                body = (
+                    b"DOMAIN-REGEX,[a-z,Proxy\n"
+                    b"PROCESS-NAME-REGEX,\"(chrome\",Proxy\n"
+                )
+            else:
+                body = (
+                    b"DOMAIN-REGEX,^example\\.com$,OldPolicy\n"
+                    b"PROCESS-NAME-REGEX,\"^chrome,helper$\",OldPolicy\n"
+                    b"PROCESS-PATH-REGEX,^/usr/bin/example$,OldPolicy\n"
+                )
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/ruleset-sub-rule-probe"):
+            if request_number == 1:
+                body = b"SUB-RULE,(NETWORK,tcp),sub-rule-name\n"
+            else:
+                body = RULESET.encode()
             content_type = "text/plain; charset=utf-8"
         elif self.path.startswith("/http-get-204-probe"):
             if request_number == 1:
@@ -192,6 +212,15 @@ class FixtureHandler(BaseHTTPRequestHandler):
         elif self.path.startswith("/singbox-base-scalar"):
             body = b"true"
             content_type = "application/json"
+        elif self.path.startswith("/clash-base-sub-rule-probe"):
+            body = (
+                b"mixed-port: 7890\n"
+                b"proxies: []\n"
+                b"proxy-groups: []\n"
+                b"rules:\n"
+                b"  - SUB-RULE,(NETWORK,TCP),sub-rule-name\n"
+            )
+            content_type = "text/plain; charset=utf-8"
         elif self.path.startswith("/clash-base-transaction-probe"):
             if request_number == 1:
                 body = b"mixed-port: [\n"
@@ -1243,7 +1272,6 @@ def external_ruleset_strict_validation_baseline(
             b"DOMAIN-REGEX,^example\\.com$,Proxy",
             b'PROCESS-NAME-REGEX,"^chrome,helper$",Proxy',
             b"PROCESS-PATH-REGEX,^/usr/bin/example$,Proxy",
-            b"SUB-RULE,sub-rule-name,Proxy",
         ):
             if expected_rule not in body:
                 raise AssertionError(
@@ -1260,6 +1288,97 @@ def external_ruleset_strict_validation_baseline(
         raise AssertionError(
             "strict ruleset validation cached an invalid mixed or nested response"
         )
+
+
+def external_ruleset_regex_validation_baseline(
+    binary: Path, fixture_base: str
+) -> None:
+    probe_url = fixture_base + "/ruleset-regex-probe?nonce=" + str(time.time_ns())
+    config = (
+        "[custom]\n"
+        "enable_rule_generator=true\n"
+        "overwrite_original_rules=true\n"
+        f"ruleset=Proxy,clash-classic:{probe_url}\n"
+    )
+    config_url = "data:text/plain;base64," + base64.urlsafe_b64encode(
+        config.encode()
+    ).decode()
+    common = {
+        "target": "clash",
+        "url": fixture_base + "/subscription.txt",
+        "expand": "true",
+    }
+
+    FixtureHandler.reset_counters()
+    with running_service(binary) as base_url:
+        status, _, headers = request(
+            base_url, "/sub", {**common, "config": config_url}
+        )
+        if status != 502 or "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError("invalid regex ruleset was not rejected")
+        status, body, _ = request(
+            base_url, "/sub", {**common, "config": config_url}
+        )
+        if status != 200 or b"proxy-groups:" not in body:
+            raise AssertionError("valid regex ruleset did not recover")
+        for expected_rule in (
+            b"DOMAIN-REGEX,^example\\.com$,Proxy",
+            b'PROCESS-NAME-REGEX,"^chrome,helper$",Proxy',
+            b"PROCESS-PATH-REGEX,^/usr/bin/example$,Proxy",
+        ):
+            if expected_rule not in body:
+                raise AssertionError(
+                    "valid regex rule was not preserved: " + expected_rule.decode()
+                )
+        if b"OldPolicy" in body:
+            raise AssertionError("regex rule policy was duplicated instead of replaced")
+        status, body, _ = request(
+            base_url, "/sub", {**common, "config": config_url}
+        )
+        if status != 200 or b"proxy-groups:" not in body:
+            raise AssertionError("valid regex ruleset did not remain cached")
+
+    if FixtureHandler.request_counts.get("/ruleset-regex-probe") != 2:
+        raise AssertionError("invalid regex ruleset was cached")
+
+
+def external_ruleset_sub_rule_baseline(binary: Path, fixture_base: str) -> None:
+    probe_url = fixture_base + "/ruleset-sub-rule-probe?nonce=" + str(time.time_ns())
+    config = (
+        "[custom]\n"
+        "enable_rule_generator=true\n"
+        "overwrite_original_rules=true\n"
+        f"ruleset=Proxy,clash-classic:{probe_url}\n"
+    )
+    config_url = "data:text/plain;base64," + base64.urlsafe_b64encode(
+        config.encode()
+    ).decode()
+    common = {
+        "target": "clash",
+        "url": fixture_base + "/subscription.txt",
+        "expand": "true",
+    }
+
+    FixtureHandler.reset_counters()
+    with running_service(binary) as base_url:
+        status, _, headers = request(
+            base_url, "/sub", {**common, "config": config_url}
+        )
+        if status != 502 or "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError("server-side SUB-RULE was not rejected")
+        status, body, _ = request(
+            base_url, "/sub", {**common, "config": config_url}
+        )
+        if status != 200 or b"proxy-groups:" not in body:
+            raise AssertionError("valid ruleset did not recover after SUB-RULE rejection")
+        status, body, _ = request(
+            base_url, "/sub", {**common, "config": config_url}
+        )
+        if status != 200 or b"proxy-groups:" not in body:
+            raise AssertionError("valid ruleset did not remain cached after recovery")
+
+    if FixtureHandler.request_counts.get("/ruleset-sub-rule-probe") != 2:
+        raise AssertionError("rejected SUB-RULE ruleset was cached")
 
 
 def json_base_shape_baseline(binary: Path, fixture_base: str) -> None:
@@ -1315,6 +1434,34 @@ def json_base_shape_baseline(binary: Path, fixture_base: str) -> None:
         status, body, _ = request(base_url, "/healthz")
         if status != 200 or body.strip() != b"ok":
             raise AssertionError("non-object JSON base caused the service to stop")
+
+
+def clash_base_sub_rule_baseline(binary: Path, fixture_base: str) -> None:
+    config = (
+        "[custom]\n"
+        "enable_rule_generator=false\n"
+        f"clash_rule_base={fixture_base}/clash-base-sub-rule-probe?nonce={time.time_ns()}\n"
+    )
+    config_url = "data:text/plain;base64," + base64.urlsafe_b64encode(
+        config.encode()
+    ).decode()
+    common = {"target": "clash", "url": fixture_base + "/subscription.txt"}
+
+    FixtureHandler.reset_counters()
+    with running_service(binary) as base_url:
+        status, body, _ = request(
+            base_url, "/sub", {**common, "config": config_url}
+        )
+        if status != 200 or b"SUB-RULE,(NETWORK,TCP),sub-rule-name" not in body:
+            raise AssertionError("valid base SUB-RULE was rewritten or rejected")
+        status, body, _ = request(
+            base_url, "/sub", {**common, "config": config_url}
+        )
+        if status != 200 or b"SUB-RULE,(NETWORK,TCP),sub-rule-name" not in body:
+            raise AssertionError("valid base SUB-RULE did not remain cached")
+
+    if FixtureHandler.request_counts.get("/clash-base-sub-rule-probe") != 1:
+        raise AssertionError("valid base SUB-RULE was not cached")
 
 
 def external_get_status_baseline(binary: Path, fixture_base: str) -> None:
@@ -1642,7 +1789,10 @@ def main() -> int:
         external_ruleset_semantic_cache_baseline(binary, fixture_base)
         external_ruleset_structure_baseline(binary, fixture_base)
         external_ruleset_strict_validation_baseline(binary, fixture_base)
+        external_ruleset_regex_validation_baseline(binary, fixture_base)
+        external_ruleset_sub_rule_baseline(binary, fixture_base)
         json_base_shape_baseline(binary, fixture_base)
+        clash_base_sub_rule_baseline(binary, fixture_base)
         external_get_status_baseline(binary, fixture_base)
         semantic_cache_concurrency_baseline(binary, fixture_base)
         template_dependency_cache_baseline(binary, fixture_base)
