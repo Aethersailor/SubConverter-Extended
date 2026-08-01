@@ -11,8 +11,6 @@
 extern "C" {
 char *ConvertSubscription(char *data);
 int ValidateMihomoRegex(char *pattern);
-char *ParseMihomoRegexRule(char *rule);
-char *ValidateMihomoRuleConfig(char *data);
 char *ResolveAgeRecipient(char *key);
 char *EncryptAgeArmored(char *data, char *recipient);
 void ReleaseUnusedMemory();
@@ -177,26 +175,6 @@ bool isMihomoParserAvailable() {
 
 bool isMihomoRegexValid(const std::string &pattern) {
   return ValidateMihomoRegex(const_cast<char *>(pattern.c_str())) != 0;
-}
-
-std::string validateMihomoRuleConfig(const std::string &config) {
-  char *raw_result =
-      ValidateMihomoRuleConfig(const_cast<char *>(config.c_str()));
-  if (!raw_result)
-    return "Mihomo config validator returned no result";
-  std::string result(raw_result);
-  FreeString(raw_result);
-  return result;
-}
-
-std::string parseMihomoRegexRule(const std::string &rule) {
-  char *raw_result =
-      ParseMihomoRegexRule(const_cast<char *>(rule.c_str()));
-  if (!raw_result)
-    return "{\"error\":\"Mihomo rule parser returned no result\"}";
-  std::string result(raw_result);
-  FreeString(raw_result);
-  return result;
 }
 
 AgeRecipient resolveAgeRecipient(const std::string &key) {
