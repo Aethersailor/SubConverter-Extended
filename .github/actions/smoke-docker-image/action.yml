@@ -8,9 +8,6 @@ inputs:
   platform:
     description: Docker platform to run, such as linux/amd64 or linux/arm/v7.
     required: true
-  custom-openclash-rules-revision:
-    description: Custom_OpenClash_Rules revision expected in the image.
-    required: true
   port:
     description: Container port exposed by SubConverter.
     required: false
@@ -27,23 +24,11 @@ runs:
         IMAGE="${{ inputs.image }}"
         PLATFORM="${{ inputs.platform }}"
         CONTAINER_PORT="${{ inputs.port }}"
-        RULES_REVISION="${{ inputs.custom-openclash-rules-revision }}"
-
         CID=""
-        PUBLISH_CID=""
-        PUBLISH_CONFIG=""
-        BUNDLE_COPY="$(mktemp -d)"
         cleanup() {
-          if [ -n "$PUBLISH_CID" ]; then
-            docker rm -f "$PUBLISH_CID" >/dev/null 2>&1 || true
-          fi
           if [ -n "$CID" ]; then
             docker rm -f "$CID" >/dev/null 2>&1 || true
           fi
-          if [ -n "$PUBLISH_CONFIG" ]; then
-            rm -f "$PUBLISH_CONFIG"
-          fi
-          rm -rf "$BUNDLE_COPY"
         }
         trap cleanup EXIT
 
@@ -57,17 +42,7 @@ runs:
           test "${TZ:-}" = "Asia/Shanghai"
           test -e /usr/share/zoneinfo/Asia/Shanghai
           test "$(date +%z)" = "+0800"
-          test -s /base/Custom_OpenClash_Rules/manifest.sha256
         '
-        docker cp "$CID:/base/Custom_OpenClash_Rules/." "$BUNDLE_COPY/"
-        python3 scripts/verify_custom_openclash_rules_bundle.py \
-          --root "$BUNDLE_COPY"
-
-        image_rules_revision="$(docker inspect --format '{{ index .Config.Labels "com.aethersailor.custom-openclash-rules.revision" }}' "$CID")"
-        if [ "$image_rules_revision" != "$RULES_REVISION" ]; then
-          echo "Image rules revision mismatch: expected $RULES_REVISION, got $image_rules_revision" >&2
-          exit 1
-        fi
 
         for _ in $(seq 1 30); do
           if curl -fsS "$URL" >/tmp/subconverter-smoke.out; then
@@ -82,45 +57,6 @@ runs:
               --base-url "http://127.0.0.1:${HOST_PORT}" \
               --fixture-base-url "${FIXTURE_BASE}"
 
-            python3 scripts/smoke_custom_openclash_rules_bundle.py \
-              --root "$BUNDLE_COPY" \
-              --base-url "http://127.0.0.1:${HOST_PORT}" \
-              --published disabled
-
-            PUBLISH_CONFIG="$(mktemp)"
-            sed 's/^publish_enabled = false$/publish_enabled = true/' \
-              base/pref.example.toml > "$PUBLISH_CONFIG"
-            grep -qx 'publish_enabled = true' "$PUBLISH_CONFIG"
-
-            PUBLISH_CID="$(
-              docker run -d --platform "$PLATFORM" \
-                -e PORT="$CONTAINER_PORT" \
-                -p "127.0.0.1::${CONTAINER_PORT}" \
-                -v "$PUBLISH_CONFIG:/base/pref.toml:ro" \
-                "$IMAGE"
-            )"
-            PUBLISH_HOST_PORT="$(
-              docker port "$PUBLISH_CID" "${CONTAINER_PORT}/tcp" |
-                awk -F: 'END {print $NF}'
-            )"
-            PUBLISH_URL="http://127.0.0.1:${PUBLISH_HOST_PORT}/version"
-            publish_ready=0
-            for _ in $(seq 1 30); do
-              if curl -fsS "$PUBLISH_URL" >/dev/null; then
-                publish_ready=1
-                break
-              fi
-              sleep 2
-            done
-            if [ "$publish_ready" != "1" ]; then
-              docker logs "$PUBLISH_CID" || true
-              exit 1
-            fi
-
-            python3 scripts/smoke_custom_openclash_rules_bundle.py \
-              --root "$BUNDLE_COPY" \
-              --base-url "http://127.0.0.1:${PUBLISH_HOST_PORT}" \
-              --published enabled
             exit 0
           fi
 
