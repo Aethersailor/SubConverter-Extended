@@ -1,78 +1,239 @@
-# TOML equivalent of rulesets.txt used by the INI/YAML examples.
-# Keep the format samples aligned without restoring the removed bundled COCR chain.
+# 与 Custom_OpenClash_Rules/cfg/Custom_Clash.ini 的 ruleset 顺序和行为保持一致。
+# 内置 GEOSITE/GEOIP/FINAL 规则显式使用 interval = 0，以匹配 INI 解析结果。
 
 [[rulesets]]
 group = "🎯 全球直连"
-ruleset = "rules/LocalAreaNetwork.list"
-
-[[rulesets]]
-group = "Ⓜ️ 微软服务"
-ruleset = "rules/MSServices.list"
+ruleset = "[]GEOSITE,private"
+interval = 0
 
 [[rulesets]]
 group = "🎯 全球直连"
-ruleset = "rules/DivineEngine/Surge/Ruleset/Unbreak.list"
+ruleset = "[]GEOIP,private,no-resolve"
+interval = 0
 
 [[rulesets]]
-group = "🛑 全球拦截"
-ruleset = "rules/NobyDa/Surge/AdRule.list"
+group = "🎯 全球直连"
+ruleset = "https://testingcf.jsdelivr.net/gh/Aethersailor/Custom_OpenClash_Rules@main/rule/Custom_Direct_Domain.mrs"
+type = "clash-domain"
+interval = 28800
 
 [[rulesets]]
-group = "🛑 全球拦截"
-ruleset = "rules/DivineEngine/Surge/Ruleset/Guard/Hijacking.list"
+group = "🎯 全球直连"
+ruleset = "https://testingcf.jsdelivr.net/gh/Aethersailor/Custom_OpenClash_Rules@main/rule/Custom_Direct_Classical_IP.yaml"
+type = "clash-classic"
+interval = 28800
 
 [[rulesets]]
-group = "🌍 国外媒体"
-ruleset = "rules/DivineEngine/Surge/Ruleset/StreamingMedia/Streaming.list"
+group = "🚀 手动选择"
+ruleset = "https://testingcf.jsdelivr.net/gh/Aethersailor/Custom_OpenClash_Rules@main/rule/Custom_Proxy_Domain.mrs"
+type = "clash-domain"
+interval = 28800
 
 [[rulesets]]
-group = "🌏 国内媒体"
-ruleset = "rules/lhie1/Surge/Surge 3/Provider/Media/Bilibili.list"
+group = "🚀 手动选择"
+ruleset = "https://testingcf.jsdelivr.net/gh/Aethersailor/Custom_OpenClash_Rules@main/rule/Custom_Proxy_Classical_IP.yaml"
+type = "clash-classic"
+interval = 28800
 
 [[rulesets]]
-group = "🌏 国内媒体"
-ruleset = "rules/lhie1/Surge/Surge 3/Provider/Media/iQiyi.list"
+group = "🎯 全球直连"
+ruleset = "[]GEOSITE,google-cn"
+interval = 0
 
 [[rulesets]]
-group = "🌏 国内媒体"
-ruleset = "rules/lhie1/Surge/Surge 3/Provider/Media/Letv.list"
+group = "🎯 全球直连"
+ruleset = "[]GEOSITE,category-games@cn"
+interval = 0
 
 [[rulesets]]
-group = "🌏 国内媒体"
-ruleset = "rules/lhie1/Surge/Surge 3/Provider/Media/MOO.list"
+group = "🎯 全球直连"
+ruleset = "https://testingcf.jsdelivr.net/gh/Aethersailor/Custom_OpenClash_Rules@main/rule/Steam_CDN_Domain.mrs"
+type = "clash-domain"
+interval = 28800
 
 [[rulesets]]
-group = "🌏 国内媒体"
-ruleset = "rules/lhie1/Surge/Surge 3/Provider/Media/Tencent Video.list"
+group = "🎯 全球直连"
+ruleset = "https://testingcf.jsdelivr.net/gh/Aethersailor/Custom_OpenClash_Rules@main/rule/Steam_CDN_Classical_IP.yaml"
+type = "clash-classic"
+interval = 28800
 
 [[rulesets]]
-group = "🌏 国内媒体"
-ruleset = "rules/lhie1/Surge/Surge 3/Provider/Media/Youku.list"
+group = "🎯 全球直连"
+ruleset = "[]GEOSITE,category-game-platforms-download"
+interval = 0
 
 [[rulesets]]
-group = "📲 电报信息"
-ruleset = "rules/DivineEngine/Surge/Ruleset/Extra/Telegram/Telegram.list"
+group = "🎯 全球直连"
+ruleset = "[]GEOSITE,category-public-tracker"
+interval = 0
 
 [[rulesets]]
-group = "🔰 节点选择"
-ruleset = "rules/DivineEngine/Surge/Ruleset/Global.list"
+group = "💬 即时通讯"
+ruleset = "[]GEOSITE,category-communication"
+interval = 0
+
+[[rulesets]]
+group = "🌐 社交媒体"
+ruleset = "[]GEOSITE,category-social-media-!cn"
+interval = 0
+
+[[rulesets]]
+group = "🤖 ChatGPT"
+ruleset = "[]GEOSITE,openai"
+interval = 0
+
+[[rulesets]]
+group = "🤖 AI服务"
+ruleset = "[]GEOSITE,category-ai-!cn"
+interval = 0
+
+[[rulesets]]
+group = "🚀 GitHub"
+ruleset = "[]GEOSITE,github"
+interval = 0
+
+[[rulesets]]
+group = "🚀 测速工具"
+ruleset = "[]GEOSITE,category-speedtest"
+interval = 0
+
+[[rulesets]]
+group = "🎮 Steam"
+ruleset = "[]GEOSITE,steam"
+interval = 0
+
+[[rulesets]]
+group = "📹 YouTube"
+ruleset = "[]GEOSITE,youtube"
+interval = 0
+
+[[rulesets]]
+group = "🎥 AppleTV+"
+ruleset = "[]GEOSITE,apple-tvplus"
+interval = 0
 
 [[rulesets]]
 group = "🍎 苹果服务"
-ruleset = "rules/DivineEngine/Surge/Ruleset/Extra/Apple/Apple.list"
+ruleset = "[]GEOSITE,apple"
+interval = 0
+
+[[rulesets]]
+group = "Ⓜ️ 微软服务"
+ruleset = "[]GEOSITE,microsoft"
+interval = 0
+
+[[rulesets]]
+group = "📢 谷歌FCM"
+ruleset = "[]GEOSITE,googlefcm"
+interval = 0
+
+[[rulesets]]
+group = "🇬 谷歌服务"
+ruleset = "[]GEOSITE,google"
+interval = 0
+
+[[rulesets]]
+group = "🎶 TikTok"
+ruleset = "[]GEOSITE,tiktok"
+interval = 0
+
+[[rulesets]]
+group = "🎥 Netflix"
+ruleset = "[]GEOSITE,netflix"
+interval = 0
+
+[[rulesets]]
+group = "🎥 DisneyPlus"
+ruleset = "[]GEOSITE,disney"
+interval = 0
+
+[[rulesets]]
+group = "🎥 HBO"
+ruleset = "[]GEOSITE,hbo"
+interval = 0
+
+[[rulesets]]
+group = "🎥 PrimeVideo"
+ruleset = "[]GEOSITE,primevideo"
+interval = 0
+
+[[rulesets]]
+group = "🎥 Emby"
+ruleset = "[]GEOSITE,category-emby"
+interval = 0
+
+[[rulesets]]
+group = "🎻 Spotify"
+ruleset = "[]GEOSITE,spotify"
+interval = 0
+
+[[rulesets]]
+group = "📺 Bahamut"
+ruleset = "[]GEOSITE,bahamut"
+interval = 0
+
+[[rulesets]]
+group = "🎮 游戏平台"
+ruleset = "[]GEOSITE,category-games"
+interval = 0
+
+[[rulesets]]
+group = "🌎 国外媒体"
+ruleset = "[]GEOSITE,category-entertainment"
+interval = 0
+
+[[rulesets]]
+group = "🛒 国外电商"
+ruleset = "[]GEOSITE,category-ecommerce"
+interval = 0
+
+[[rulesets]]
+group = "🚀 手动选择"
+ruleset = "[]GEOSITE,gfw"
+interval = 0
+
+[[rulesets]]
+group = "💬 即时通讯"
+ruleset = "[]GEOIP,telegram,no-resolve"
+interval = 0
+
+[[rulesets]]
+group = "🌐 社交媒体"
+ruleset = "[]GEOIP,twitter,no-resolve"
+interval = 0
+
+[[rulesets]]
+group = "🌐 社交媒体"
+ruleset = "[]GEOIP,facebook,no-resolve"
+interval = 0
+
+[[rulesets]]
+group = "🇬 谷歌服务"
+ruleset = "[]GEOIP,google,no-resolve"
+interval = 0
+
+[[rulesets]]
+group = "🎥 Netflix"
+ruleset = "[]GEOIP,netflix,no-resolve"
+interval = 0
 
 [[rulesets]]
 group = "🎯 全球直连"
-ruleset = "rules/DivineEngine/Surge/Ruleset/China.list"
+ruleset = "[]GEOSITE,cn"
+interval = 0
 
 [[rulesets]]
 group = "🎯 全球直连"
-ruleset = "rules/NobyDa/Surge/Download.list"
+ruleset = "[]GEOIP,cn,no-resolve"
+interval = 0
 
 [[rulesets]]
-group = "🎯 全球直连"
-ruleset = "[]GEOIP,CN"
+group = "🔀 非标端口"
+ruleset = "https://testingcf.jsdelivr.net/gh/Aethersailor/Custom_OpenClash_Rules@main/rule/Custom_Port_Direct.yaml"
+type = "clash-classic"
+interval = 28800
 
 [[rulesets]]
 group = "🐟 漏网之鱼"
 ruleset = "[]FINAL"
+interval = 0
