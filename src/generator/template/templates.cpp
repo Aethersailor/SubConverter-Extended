@@ -22,6 +22,7 @@ extern string_array ClashRuleTypes;
 
 static thread_local FetchContext current_template_fetch_context =
     FetchContext::TrustedConfig;
+static thread_local bool current_template_dependency_failed = false;
 
 namespace inja
 {
@@ -155,16 +156,21 @@ std::string template_webGet(inja::Arguments &args)
                            static_cast<unsigned int>(std::max(0, global.cacheConfig)),
                            false,
                            current_template_fetch_context,
-                           true};
+                           true,
+                           FetchCacheSemantic::TemplateDependency};
     FetchOutcome outcome;
     fetchRemote(argument, outcome);
-    if (!outcome.success)
+    if (!outcome.success) {
+        current_template_dependency_failed = true;
+        discardFetchOutcomeCache(outcome);
         return {};
+    }
 
     const std::string trimmed = trimWhitespace(outcome.content, true, true);
     const std::string lower = toLower(trimmed);
     if (trimmed.empty() || startsWith(lower, "<!doctype html") ||
         startsWith(lower, "<html")) {
+        current_template_dependency_failed = true;
         discardFetchOutcomeCache(outcome);
         return {};
     }
@@ -211,6 +217,20 @@ int render_template(const std::string &content, const template_args &vars,
             current_template_fetch_context = previous;
         }
     } guard(context);
+
+    struct TemplateDependencyStateGuard
+    {
+        bool previous;
+        TemplateDependencyStateGuard()
+            : previous(current_template_dependency_failed)
+        {
+            current_template_dependency_failed = false;
+        }
+        ~TemplateDependencyStateGuard()
+        {
+            current_template_dependency_failed = previous;
+        }
+    } dependency_guard;
 
     std::string absolute_scope;
     try
@@ -383,7 +403,8 @@ int render_template(const std::string &content, const template_args &vars,
         env.render_to(out, env.parse(content), data);
         output = out.str();
         const bool valid_output =
-            !trimWhitespace(output, true, true).empty();
+            !trimWhitespace(output, true, true).empty() &&
+            !current_template_dependency_failed;
         finish_transaction(valid_output);
         return valid_output ? 0 : -1;
     }

@@ -1,5 +1,7 @@
 #include <string>
 
+#include <cctype>
+
 #include "handler/settings.h"
 #include "utils/logger.h"
 #include "utils/concurrent_lru_cache.h"
@@ -123,18 +125,138 @@ std::string convertRuleset(const std::string &content, int type)
         });
 }
 
-static bool hasKnownRuleType(const std::string &line,
-                             const string_array &known_types)
+static bool splitRuleFieldsStrict(const std::string &line,
+                                  string_array &fields)
 {
-    const std::string::size_type separator = line.find(',');
-    if (separator == std::string::npos)
+    fields.clear();
+    std::string field;
+    int parentheses = 0;
+    char quote = '\0';
+    bool escaped = false;
+    for(char character : line)
+    {
+        if(quote != '\0')
+        {
+            field += character;
+            if(escaped)
+                escaped = false;
+            else if(character == '\\')
+                escaped = true;
+            else if(character == quote)
+                quote = '\0';
+            continue;
+        }
+        if(character == '\'' || character == '"')
+        {
+            quote = character;
+            field += character;
+        }
+        else if(character == '(')
+        {
+            ++parentheses;
+            field += character;
+        }
+        else if(character == ')')
+        {
+            if(parentheses == 0)
+                return false;
+            --parentheses;
+            field += character;
+        }
+        else if(character == ',' && parentheses == 0)
+        {
+            fields.emplace_back(trimWhitespace(field, true, true));
+            field.clear();
+        }
+        else
+            field += character;
+    }
+    if(quote != '\0' || parentheses != 0)
         return false;
-    const std::string type =
-        toUpper(trimWhitespace(line.substr(0, separator), true, true));
-    return std::any_of(known_types.begin(), known_types.end(),
-                       [&](const std::string &known) {
-                           return type == known;
-                       });
+    fields.emplace_back(trimWhitespace(field, true, true));
+    return !fields.empty();
+}
+
+static bool parseRuleInteger(const std::string &value, unsigned int maximum,
+                             unsigned int &result)
+{
+    const std::string normalized = trimWhitespace(value, true, true);
+    if(normalized.empty())
+        return false;
+    unsigned int parsed = 0;
+    for(unsigned char character : normalized)
+    {
+        if(!std::isdigit(character))
+            return false;
+        const unsigned int digit = character - '0';
+        if(parsed > (maximum - digit) / 10)
+            return false;
+        parsed = parsed * 10 + digit;
+    }
+    result = parsed;
+    return true;
+}
+
+static bool validRuleAddress(const std::string &value, bool ipv6_only,
+                             bool ipv4_only)
+{
+    const std::string normalized = trimWhitespace(value, true, true);
+    const std::string::size_type slash = normalized.find('/');
+    const std::string address =
+        slash == std::string::npos ? normalized : normalized.substr(0, slash);
+    const bool ipv4 = isIPv4(address);
+    const bool ipv6 = isIPv6(address);
+    if((ipv6_only && !ipv6) || (ipv4_only && !ipv4) || (!ipv4 && !ipv6))
+        return false;
+    if(slash == std::string::npos)
+        return true;
+    unsigned int prefix = 0;
+    const unsigned int maximum = ipv6 ? 128U : 32U;
+    return parseRuleInteger(normalized.substr(slash + 1), maximum, prefix);
+}
+
+static bool validRuleLine(const std::string &line,
+                          const string_array &known_types)
+{
+    string_array fields;
+    if(!splitRuleFieldsStrict(line, fields) || fields.size() < 2)
+        return false;
+    const std::string type = toUpper(fields.front());
+    if(std::none_of(known_types.begin(), known_types.end(),
+                    [&](const std::string &known) { return type == known; }))
+        return false;
+    for(size_t index = 1; index < fields.size(); ++index)
+    {
+        if(fields[index].empty())
+            return false;
+    }
+    if(type == "IP-CIDR" &&
+       !validRuleAddress(fields[1], false, true))
+        return false;
+    if(type == "IP-CIDR6" &&
+       !validRuleAddress(fields[1], true, false))
+        return false;
+    if(type == "SRC-IP-CIDR" &&
+       !validRuleAddress(fields[1], false, false))
+        return false;
+    if(type == "AND" || type == "OR" || type == "NOT")
+    {
+        if(fields.size() < 3)
+            return false;
+        for(size_t index = 1; index + 1 < fields.size(); ++index)
+        {
+            const std::string &expression = fields[index];
+            if(expression.front() != '(' || expression.back() != ')')
+                return false;
+            string_array nested;
+            if(!splitRuleFieldsStrict(
+                   expression.substr(1, expression.size() - 2), nested) ||
+               nested.size() < 2 || nested.front().empty() ||
+               nested[1].empty())
+                return false;
+        }
+    }
+    return true;
 }
 
 size_t countValidRulesetEntries(const std::string &content,
@@ -176,7 +298,7 @@ size_t countValidRulesetEntries(const std::string &content,
         const std::string::size_type comment = line.find("//");
         if (comment != std::string::npos)
             line = trimWhitespace(line.substr(0, comment), true, true);
-        if (hasKnownRuleType(line, *known_types))
+        if (validRuleLine(line, *known_types))
             ++valid;
     }
     return valid;

@@ -85,13 +85,17 @@ static CURLcode curl_init()
 static std::string build_cache_key(const std::string &url, const ProxyPolicy &proxy,
                                    const string_icase_map *request_headers,
                                    FetchContext context = FetchContext::TrustedConfig,
-                                   bool cocr_fallback = false)
+                                   bool cocr_fallback = false,
+                                   FetchCacheSemantic semantic =
+                                       FetchCacheSemantic::Immediate)
 {
-    std::string identity = "remote-fetch-v2\nurl:" + std::to_string(url.size()) + ":" + url;
+    std::string identity = "remote-fetch-v3\nurl:" + std::to_string(url.size()) + ":" + url;
     const std::string proxy_identity = proxy.cacheIdentity();
     identity += "\nproxy:" + std::to_string(proxy_identity.size()) + ":" + proxy_identity;
     identity += "\ncontext:" + std::to_string(static_cast<int>(context));
     identity += "\ncocr-fallback:" + std::to_string(cocr_fallback ? 1 : 0);
+    identity += "\nsemantic:" +
+                std::to_string(static_cast<int>(semantic));
     identity += "\nheaders:";
     if(request_headers)
     {
@@ -902,19 +906,16 @@ static std::string cache_path_for(const FetchArgument &argument,
                                   const remote_source::FetchCandidate &candidate) {
     const std::string key = build_cache_key(
         candidate.url, argument.proxy, argument.request_headers,
-        argument.context, global.customOpenClashRulesFallback);
+        argument.context, global.customOpenClashRulesFallback,
+        argument.cache_semantic);
     return "cache/" + key;
 }
 
-// A caller that is still validating the response must never join an
-// immediate-commit fetch for the same resource.  The persistent cache key
-// remains shared, but the in-flight network result is isolated by commit
-// mode so an immediate owner cannot publish a response on behalf of a
-// deferred semantic consumer.
 static std::string fetch_singleflight_key(const FetchArgument &argument) {
     std::string key = build_cache_key(
         argument.url, argument.proxy, argument.request_headers,
-        argument.context, global.customOpenClashRulesFallback);
+        argument.context, global.customOpenClashRulesFallback,
+        argument.cache_semantic);
     key += "\ndefer-cache-commit:";
     key += argument.defer_cache_commit ? '1' : '0';
     return key;
@@ -1066,7 +1067,8 @@ static FetchOutcome perform_fetch(const FetchArgument &argument) {
                               argument.cache_ttl,
                               argument.keep_resp_on_fail,
                               argument.context,
-                              argument.defer_cache_commit};
+                              argument.defer_cache_commit,
+                              argument.cache_semantic};
         CURLcode curl_code = CURLE_OK;
         const int returned_status = curlGet(request, result, &curl_code);
         status = returned_status;

@@ -14,6 +14,7 @@
 #include "utils/concurrent_lru_cache.h"
 #include "utils/md5/md5_interface.h"
 #include "utils/network.h"
+#include "utils/regexp.h"
 #include "utils/system.h"
 
 // multi-thread lock
@@ -198,7 +199,8 @@ static bool fetchImportedContent(const std::string &path, bool scope_limit,
                          static_cast<unsigned int>(std::max(0, global.cacheConfig)),
                          true,
                          context,
-                         true};
+                         true,
+                         FetchCacheSemantic::Import};
   FetchOutcome outcome;
   fetchRemote(argument, outcome);
   if (fetch_outcome)
@@ -308,6 +310,11 @@ int importItems(std::vector<toml::value> &root, const std::string &import_key,
       try {
         auto items = parseToml(content, path);
         auto list = toml::find<std::vector<toml::value>>(items, import_key);
+        if (list.empty()) {
+          discardFetchOutcomeCache(fetched);
+          writeLog(0, "TOML 导入项目为空：" + path, LOG_LEVEL_ERROR);
+          return -1;
+        }
         count += list.size();
         std::move(list.begin(), list.end(), std::back_inserter(newRoot));
         deferFetchOutcomeCache(std::move(fetched));
@@ -1576,6 +1583,22 @@ static bool validImportedRegex(const string_array &items,
     const std::string::size_type pos = item.rfind(delimiter);
     if (pos == std::string::npos || pos == 0 || pos >= item.size() - 1)
       return false;
+    if (!regValid(trimWhitespace(item.substr(0, pos), true, true)))
+      return false;
+  }
+  return true;
+}
+
+static bool validImportedRegexConfigs(const RegexMatchConfigs &configs) {
+  for (const RegexMatchConfig &config : configs) {
+    if (!config.Script.empty()) {
+      if (trimWhitespace(config.Script, true, true).empty())
+        return false;
+      continue;
+    }
+    if (trimWhitespace(config.Match, true, true).empty() ||
+        config.Replace.empty() || !regValid(config.Match))
+      return false;
   }
   return true;
 }
@@ -1706,7 +1729,14 @@ int loadExternalTOML(toml::value &root, ExternalConfig &ext,
   if (importItems(groups, "custom_groups", import_scope_limit, context,
                   request_rejected) != 0)
     return -1;
-  ext.custom_proxy_group = toml::get<ProxyGroupConfigs>(toml::value(groups));
+  try {
+    ext.custom_proxy_group =
+        toml::get<ProxyGroupConfigs>(toml::value(groups));
+  } catch (const std::exception &e) {
+    writeLog(0, "TOML 自定义代理组无效：" + std::string(e.what()),
+             LOG_LEVEL_ERROR);
+    return -1;
+  }
 
   auto rulesets = toml::find_or<std::vector<toml::value>>(root, "rulesets", {});
   if (importItems(rulesets, "rulesets", import_scope_limit, context,
@@ -1718,20 +1748,42 @@ int loadExternalTOML(toml::value &root, ExternalConfig &ext,
              LOG_LEVEL_WARNING);
     return -1;
   }
-  ext.surge_ruleset = toml::get<RulesetConfigs>(toml::value(rulesets));
+  try {
+    ext.surge_ruleset = toml::get<RulesetConfigs>(toml::value(rulesets));
+  } catch (const std::exception &e) {
+    writeLog(0, "TOML 规则集无效：" + std::string(e.what()),
+             LOG_LEVEL_ERROR);
+    return -1;
+  }
 
   auto emojiconfs = toml::find_or<std::vector<toml::value>>(root, "emoji", {});
   if (importItems(emojiconfs, "emoji", import_scope_limit, context,
                   request_rejected) != 0)
     return -1;
-  ext.emoji = toml::get<RegexMatchConfigs>(toml::value(emojiconfs));
+  try {
+    ext.emoji = toml::get<RegexMatchConfigs>(toml::value(emojiconfs));
+  } catch (const std::exception &e) {
+    writeLog(0, "TOML emoji 配置无效：" + std::string(e.what()),
+             LOG_LEVEL_ERROR);
+    return -1;
+  }
+  if (!validImportedRegexConfigs(ext.emoji))
+    return -1;
 
   auto renameconfs =
       toml::find_or<std::vector<toml::value>>(root, "rename_node", {});
   if (importItems(renameconfs, "rename_node", import_scope_limit, context,
                   request_rejected) != 0)
     return -1;
-  ext.rename = toml::get<RegexMatchConfigs>(toml::value(renameconfs));
+  try {
+    ext.rename = toml::get<RegexMatchConfigs>(toml::value(renameconfs));
+  } catch (const std::exception &e) {
+    writeLog(0, "TOML rename 配置无效：" + std::string(e.what()),
+             LOG_LEVEL_ERROR);
+    return -1;
+  }
+  if (!validImportedRegexConfigs(ext.rename))
+    return -1;
 
   return 0;
 }
@@ -1967,7 +2019,8 @@ int loadExternalConfigWithOutcome(std::string &path, ExternalConfig &ext,
                            static_cast<unsigned int>(std::max(0, global.cacheConfig)),
                            true,
                            context,
-                           fetch_outcome != nullptr};
+                           fetch_outcome != nullptr,
+                           FetchCacheSemantic::ExternalConfig};
     fetchRemote(argument, fetched);
     if (fetch_outcome)
       *fetch_outcome = fetched;

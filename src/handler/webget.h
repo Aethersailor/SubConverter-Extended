@@ -18,6 +18,18 @@ enum http_method
     HTTP_PATCH
 };
 
+// Persistent fetch entries are reusable only within the semantic contract
+// that validated them.
+enum class FetchCacheSemantic
+{
+    Immediate,
+    ExternalConfig,
+    Import,
+    Ruleset,
+    TemplateDependency,
+    ExternalBase
+};
+
 struct FetchArgument
 {
     const http_method method;
@@ -32,6 +44,7 @@ struct FetchArgument
     // When true, a successful network response is returned but is not written
     // to the persistent fetch cache until the caller validates the content.
     const bool defer_cache_commit = false;
+    const FetchCacheSemantic cache_semantic = FetchCacheSemantic::Immediate;
 };
 
 struct FetchResult
