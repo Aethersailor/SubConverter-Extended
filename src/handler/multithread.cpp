@@ -131,12 +131,15 @@ static std::string fetchFileWithState(
                !startsWith(lower, "<html");
     };
 
-    if (find_local && fileExist(path, true)) {
+    const bool trusted_local = isTrustedLocalResourcePath(path);
+    const bool local_exists =
+        fileExist(path, true) || (trusted_local && fileExist(path, false));
+    if (find_local && local_exists) {
         if (!canReadLocalFetchPath(path, context)) {
             record(403, true);
             return {};
         }
-        std::string content = fileGet(path, true);
+        std::string content = fileGet(path, trusted_local ? false : true);
         if (!validContent(content)) {
             record(422, false);
             return {};

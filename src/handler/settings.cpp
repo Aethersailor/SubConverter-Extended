@@ -165,13 +165,16 @@ static bool fetchImportedContent(const std::string &path, bool scope_limit,
                                  FetchContext context, std::string &content,
                                  bool *request_rejected) {
   content.clear();
-  if (fileExist(path, scope_limit)) {
+  const bool trusted_local = isTrustedLocalResourcePath(path);
+  const bool local_exists =
+      fileExist(path, scope_limit) || (trusted_local && fileExist(path, false));
+  if (local_exists) {
     if (!canImportLocalPath(path, context)) {
       if (request_rejected)
         *request_rejected = true;
       return false;
     }
-    content = fileGet(path, scope_limit);
+    content = fileGet(path, trusted_local ? false : scope_limit);
     return !content.empty();
   }
 
@@ -1846,7 +1849,10 @@ int loadExternalConfigWithOutcome(std::string &path, ExternalConfig &ext,
   std::string base_content;
   std::string config;
   FetchOutcome fetched;
-  if (fileExist(path, true)) {
+  const bool trusted_local = isTrustedLocalResourcePath(path);
+  const bool local_exists =
+      fileExist(path, true) || (trusted_local && fileExist(path, false));
+  if (local_exists) {
     if (!canImportLocalPath(path, context)) {
       if (fetch_outcome) {
         fetch_outcome->status_code = 403;
@@ -1855,7 +1861,7 @@ int loadExternalConfigWithOutcome(std::string &path, ExternalConfig &ext,
       }
       return -1;
     }
-    config = fileGet(path, true);
+    config = fileGet(path, trusted_local ? false : true);
   } else if (isLink(path)) {
     ProxyPolicy proxy = parseProxy(global.proxyConfig);
     FetchArgument argument{HTTP_GET,

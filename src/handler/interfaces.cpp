@@ -595,7 +595,7 @@ bool checkExternalBase(const std::string &path, std::string &dest,
     dest = path;
     return true;
   }
-  if (fileExist(path, true) && isTrustedLocalResourcePath(path)) {
+  if (isTrustedLocalResourcePath(path) && fileExist(path, false)) {
     dest = path;
     return true;
   }
@@ -2752,8 +2752,8 @@ static std::string subconverter_impl(Request &request, Response &response,
       return failure(state.request_rejected);
     std::string fetched;
     FetchOutcome fetch_outcome;
-    if (fileExist(path, true) && isTrustedLocalResourcePath(path)) {
-      fetched = fileGet(path, true);
+    if (isTrustedLocalResourcePath(path) && fileExist(path, false)) {
+      fetched = fileGet(path, false);
     } else {
       FetchArgument fetch_argument{HTTP_GET,
                                    path,
