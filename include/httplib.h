@@ -2452,7 +2452,8 @@ protected:
   std::thread::id socket_requests_are_from_thread_ = std::thread::id();
   bool socket_should_be_closed_when_request_is_done_ = false;
 
-  // Hostname-IP map
+  // Hostname to connection target map. The value is an IP literal or another
+  // hostname; only the connection target changes, never the identity.
   std::map<std::string, std::string> addr_map_;
 
   // Default headers
@@ -4021,7 +4022,8 @@ private:
   time_t connection_timeout_usec_ = CPPHTTPLIB_CONNECTION_TIMEOUT_USECOND;
   std::string interface_;
 
-  // Hostname-IP map
+  // Hostname to connection target map. The value is an IP literal or another
+  // hostname; only the connection target changes, never the identity.
   std::map<std::string, std::string> addr_map_;
 
 #ifdef CPPHTTPLIB_SSL_ENABLED
@@ -9074,17 +9076,59 @@ inline bool perform_websocket_handshake(Stream &strm, Request &req,
   req.headers.emplace("Sec-WebSocket-Key", client_key);
   req.headers.emplace("Sec-WebSocket-Version", "13");
 
-  if (write_request_line(strm, req.method, req.path) < 0) { return false; }
+  // Build the request in memory first, like ClientImpl::write_request does.
+  // Writing straight to the socket would leak a request line onto the wire
+  // before check_and_write_headers gets a chance to reject an invalid header,
+  // and would emit one small write per header.
+  BufferStream bstrm;
+
+  if (write_request_line(bstrm, req.method, req.path) < 0) { return false; }
 
   auto error = Error::Success;
-  if (!check_and_write_headers(strm, req.headers, write_headers, error)) {
+  if (!check_and_write_headers(bstrm, req.headers, write_headers, error)) {
     return false;
   }
+
+  const auto &data = bstrm.get_buffer();
+  if (!write_data(strm, data.data(), data.size())) { return false; }
 
   // Verify 101 response and Sec-WebSocket-Accept header
   auto expected_accept = websocket_accept_key(client_key);
   return read_websocket_upgrade_response(strm, expected_accept,
                                          selected_subprotocol);
+}
+
+inline bool is_ip_address(const std::string &host) {
+  struct in_addr addr4;
+  struct in6_addr addr6;
+  return inet_pton(AF_INET, host.c_str(), &addr4) == 1 ||
+         inet_pton(AF_INET6, host.c_str(), &addr6) == 1;
+}
+
+// Resolve where a client should connect for `host`, honoring a user-supplied
+// hostname-to-address map. `host` itself is never rewritten, so it keeps
+// supplying the Host header and SNI; only the connection target changes.
+//
+// A mapped IP literal goes to `ip`, which keeps create_socket's AI_NUMERICHOST
+// path. Anything else goes to `connect_host`, which create_socket resolves as
+// a name, or uses as the socket path when the address family is AF_UNIX. An
+// absent or empty mapping leaves `host` as the connection target; without the
+// empty check the value would reach getaddrinfo as a null node and silently
+// resolve to loopback.
+inline void apply_addr_map(const std::map<std::string, std::string> &addr_map,
+                           const std::string &host, std::string &connect_host,
+                           std::string &ip) {
+  connect_host = host;
+  ip.clear();
+
+  auto it = addr_map.find(host);
+  if (it == addr_map.end() || it->second.empty()) { return; }
+
+  if (is_ip_address(it->second)) {
+    ip = it->second;
+  } else {
+    connect_host = it->second;
+  }
 }
 
 } // namespace detail
@@ -9269,13 +9313,6 @@ inline std::string SHA_512(const std::string &s) {
   return hash_to_hex(hash);
 }
 #endif
-
-inline bool is_ip_address(const std::string &host) {
-  struct in_addr addr4;
-  struct in6_addr addr6;
-  return inet_pton(AF_INET, host.c_str(), &addr4) == 1 ||
-         inet_pton(AF_INET6, host.c_str(), &addr6) == 1;
-}
 
 template <typename T>
 inline bool process_server_socket_ssl(
@@ -12982,13 +13019,13 @@ inline socket_t ClientImpl::create_client_socket(Error &error) const {
         write_timeout_sec_, write_timeout_usec_, interface_, error);
   }
 
-  // Check is custom IP specified for host_
+  // Check is custom IP or hostname specified for host_
+  std::string connect_host;
   std::string ip;
-  auto it = addr_map_.find(host_);
-  if (it != addr_map_.end()) { ip = it->second; }
+  detail::apply_addr_map(addr_map_, host_, connect_host, ip);
 
   return detail::create_client_socket(
-      host_, ip, port_, address_family_, tcp_nodelay_, ipv6_v6only_,
+      connect_host, ip, port_, address_family_, tcp_nodelay_, ipv6_v6only_,
       socket_options_, connection_timeout_sec_, connection_timeout_usec_,
       read_timeout_sec_, read_timeout_usec_, write_timeout_sec_,
       write_timeout_usec_, interface_, error);
@@ -20850,16 +20887,14 @@ inline bool WebSocketClient::connect() {
   if (!is_valid_) { return false; }
   shutdown_and_close();
 
-  // Check is custom IP specified for host_.
-  // host_ stays the identity used for the Host header and for SNI, while ip
-  // only redirects where the socket connects.
+  // Check is custom IP or hostname specified for host_
+  std::string connect_host;
   std::string ip;
-  auto it = addr_map_.find(host_);
-  if (it != addr_map_.end()) { ip = it->second; }
+  detail::apply_addr_map(addr_map_, host_, connect_host, ip);
 
   Error error;
   sock_ = detail::create_client_socket(
-      host_, ip, port_, address_family_, tcp_nodelay_, ipv6_v6only_,
+      connect_host, ip, port_, address_family_, tcp_nodelay_, ipv6_v6only_,
       socket_options_, connection_timeout_sec_, connection_timeout_usec_,
       read_timeout_sec_, read_timeout_usec_, write_timeout_sec_,
       write_timeout_usec_, interface_, error);
