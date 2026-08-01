@@ -120,6 +120,57 @@ class FixtureHandler(BaseHTTPRequestHandler):
             else:
                 body = RULESET.encode()
             content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/ruleset-strict-probe"):
+            if request_number == 1:
+                body = (
+                    b"DOMAIN-SUFFIX,example.com,Proxy\n"
+                    b"IP-CIDR,not-a-cidr,Proxy\n"
+                    b"[]garbage\n"
+                )
+            elif request_number == 2:
+                body = (
+                    b"AND,((DOMAIN-SUFFIX,example.com),"
+                    b"(IP-CIDR,not-a-cidr)),Proxy\n"
+                )
+            else:
+                body = RULESET.encode()
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/clash-base-transaction-probe"):
+            if request_number == 1:
+                body = b"mixed-port: [\n"
+            else:
+                body = (
+                    b"mixed-port: 7890\n"
+                    b"proxies: []\n"
+                    b"proxy-groups: []\n"
+                    b"rules:\n  - MATCH,DIRECT\n"
+                )
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/ini-base-transaction-probe"):
+            if request_number == 1:
+                body = b"[General]\nfoo=bar\n[General]\nbaz=qux\n"
+            else:
+                body = b"[General]\nfoo=bar\n"
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/base-template-transaction-probe"):
+            dependency = (
+                f"http://127.0.0.1:{self.server.server_port}"
+                "/base-template-dependency"
+            )
+            if request_number == 1:
+                body = f'{{{{ fetch("{dependency}") }}}}\nnot: [\n'.encode()
+            else:
+                body = (
+                    f'{{{{ fetch("{dependency}") }}}}\n'
+                    "mixed-port: 7890\n"
+                    "proxies: []\n"
+                    "proxy-groups: []\n"
+                    "rules:\n  - MATCH,DIRECT\n"
+                ).encode()
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/base-template-dependency"):
+            body = b"# dependency fetched during base rendering\n"
+            content_type = "text/plain; charset=utf-8"
         elif self.path.startswith("/cross-semantic-probe"):
             with FixtureHandler.cross_semantic_condition:
                 FixtureHandler.cross_semantic_waiters += 1
@@ -1089,6 +1140,99 @@ def external_ruleset_structure_baseline(binary: Path, fixture_base: str) -> None
         )
 
 
+def external_ruleset_strict_validation_baseline(
+    binary: Path, fixture_base: str
+) -> None:
+    probe_url = fixture_base + "/ruleset-strict-probe?nonce=" + str(time.time_ns())
+    config = (
+        "[custom]\n"
+        "enable_rule_generator=true\n"
+        "overwrite_original_rules=true\n"
+        f"ruleset=Proxy,surge:{probe_url}\n"
+    )
+    config_url = "data:text/plain;base64," + base64.urlsafe_b64encode(
+        config.encode()
+    ).decode()
+    common = {"target": "clash", "url": fixture_base + "/subscription.txt"}
+
+    FixtureHandler.reset_counters()
+    with running_service(binary) as base_url:
+        status, _, headers = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 502 or "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError(
+                "mixed valid/invalid or malformed inline rules were not rejected"
+            )
+        status, _, headers = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 502 or "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError("invalid nested compound rules were not rejected")
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or b"proxy-groups:" not in body:
+            raise AssertionError("fully valid ruleset did not recover")
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or b"proxy-groups:" not in body:
+            raise AssertionError("fully valid ruleset did not remain cached")
+
+    if FixtureHandler.request_counts.get("/ruleset-strict-probe") != 3:
+        raise AssertionError(
+            "strict ruleset validation cached an invalid mixed or nested response"
+        )
+
+
+def external_base_cache_transaction_baseline(
+    binary: Path,
+    fixture_base: str,
+    *,
+    target: str,
+    config_key: str,
+    endpoint: str,
+    marker: bytes,
+) -> None:
+    probe_url = fixture_base + endpoint + "?nonce=" + str(time.time_ns())
+    config = (
+        "[custom]\n"
+        "enable_rule_generator=false\n"
+        f"{config_key}={probe_url}\n"
+    )
+    config_url = "data:text/plain;base64," + base64.urlsafe_b64encode(
+        config.encode()
+    ).decode()
+    common = {"target": target, "url": fixture_base + "/subscription.txt"}
+
+    FixtureHandler.reset_counters()
+    with running_service(binary) as base_url:
+        status, _, headers = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 502 or "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError(f"invalid {target} base was not fail-closed")
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or marker not in body:
+            raise AssertionError(f"valid {target} base did not recover")
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or marker not in body:
+            raise AssertionError(f"valid {target} base did not remain cached")
+
+    if FixtureHandler.request_counts.get(endpoint) != 2:
+        raise AssertionError(
+            f"invalid {target} base was cached or valid retry missed the fixture"
+        )
+
+
+def external_base_template_transaction_baseline(
+    binary: Path, fixture_base: str
+) -> None:
+    external_base_cache_transaction_baseline(
+        binary,
+        fixture_base,
+        target="clash",
+        config_key="clash_rule_base",
+        endpoint="/base-template-transaction-probe",
+        marker=b"proxy-groups:",
+    )
+    if FixtureHandler.request_counts.get("/base-template-dependency") != 2:
+        raise AssertionError(
+            "template dependency was committed before the final base format validated"
+        )
+
+
 def semantic_cache_concurrency_baseline(binary: Path, fixture_base: str) -> None:
     probe_url = fixture_base + "/cross-semantic-probe?nonce=" + str(time.time_ns())
     strict_config = (
@@ -1317,9 +1461,27 @@ def main() -> int:
         external_import_semantic_cache_baseline(binary, fixture_base)
         external_ruleset_semantic_cache_baseline(binary, fixture_base)
         external_ruleset_structure_baseline(binary, fixture_base)
+        external_ruleset_strict_validation_baseline(binary, fixture_base)
         semantic_cache_concurrency_baseline(binary, fixture_base)
         template_dependency_cache_baseline(binary, fixture_base)
         template_static_dependency_failure_baseline(binary, fixture_base)
+        external_base_cache_transaction_baseline(
+            binary,
+            fixture_base,
+            target="clash",
+            config_key="clash_rule_base",
+            endpoint="/clash-base-transaction-probe",
+            marker=b"proxy-groups:",
+        )
+        external_base_cache_transaction_baseline(
+            binary,
+            fixture_base,
+            target="surge",
+            config_key="surge_rule_base",
+            endpoint="/ini-base-transaction-probe",
+            marker=b"[Proxy]",
+        )
+        external_base_template_transaction_baseline(binary, fixture_base)
         external_regex_import_baseline(binary, fixture_base, yaml=False)
         external_regex_import_baseline(binary, fixture_base, yaml=True)
         toml_import_semantic_baseline(

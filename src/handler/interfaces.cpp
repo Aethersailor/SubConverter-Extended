@@ -15,6 +15,7 @@
 #include <unordered_set>
 
 #include <inja.hpp>
+#include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 #include <yaml-cpp/yaml.h>
@@ -61,6 +62,32 @@ static void markExternalConfigContentInvalid(FetchOutcome &outcome) {
   outcome.failure_reason = "content_invalid";
   if (outcome.status_code == 0 || outcome.status_code == 200)
     outcome.status_code = 422;
+}
+
+static bool validateGeneratedTargetOutput(const std::string &target,
+                                          const std::string &content) {
+  if (trimWhitespace(content, true, true).empty())
+    return false;
+  try {
+    if (target == "clash" || target == "clashr") {
+      YAML::Node yaml = YAML::Load(content);
+      return yaml.IsMap();
+    }
+    if (target == "surge" || target == "surfboard" || target == "mellow" ||
+        target == "quan" || target == "quanx" || target == "loon") {
+      INIReader ini;
+      ini.store_any_line = true;
+      return ini.parse(content) == 0;
+    }
+    if (target == "sssub" || target == "singbox") {
+      rapidjson::Document json;
+      json.Parse(content.data());
+      return !json.HasParseError() && json.IsObject();
+    }
+  } catch (...) {
+    return false;
+  }
+  return true;
 }
 
 static std::vector<std::string>
@@ -442,7 +469,9 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS) {
   bool invalid_ruleset = false;
   for (RulesetContent &x : rca) {
     std::string content = x.rule_content.get();
-    if (content.empty() || countValidRulesetEntries(content, x.rule_type) == 0)
+    const RulesetValidationResult validation =
+        validateRulesetEntries(content, x.rule_type);
+    if (content.empty() || !validation.valid())
       invalid_ruleset = true;
     output_content += convertRuleset(content, x.rule_type);
   }
@@ -2366,8 +2395,9 @@ static std::string subconverter_impl(Request &request, Response &response,
           discardRulesetFetchCache(ruleset.fetch_state);
           continue;
         }
-        if (content.empty() ||
-            countValidRulesetEntries(content, ruleset.rule_type) == 0) {
+        const RulesetValidationResult validation =
+            validateRulesetEntries(content, ruleset.rule_type);
+        if (content.empty() || !validation.valid()) {
           ruleset_content_invalid = true;
           continue;
         }
@@ -2792,6 +2822,20 @@ static std::string subconverter_impl(Request &request, Response &response,
 
   // std::cerr<<"Generate target: ";
   proxy = parseProxy(global.proxyConfig);
+  FetchOutcome rendered_base_outcome;
+  bool rendered_base_outcome_active = false;
+  auto discardRenderedBase = [&]() {
+    if (!rendered_base_outcome_active)
+      return;
+    discardFetchOutcomeCache(rendered_base_outcome);
+    rendered_base_outcome_active = false;
+  };
+  auto commitRenderedBase = [&]() {
+    if (!rendered_base_outcome_active)
+      return;
+    commitFetchOutcomeCache(rendered_base_outcome);
+    rendered_base_outcome_active = false;
+  };
   auto renderExternalBase =
       [&](const std::string &path, const ExternalBaseState &state,
           const char *target_name) -> std::string {
@@ -2834,16 +2878,27 @@ static std::string subconverter_impl(Request &request, Response &response,
       discardFetchOutcomeCache(fetch_outcome);
       return failure(rejected);
     }
-    if (render_template(fetched, tpl_args, base_content,
-                        global.templatePath, baseFetchContext) != 0) {
-        discardFetchOutcomeCache(fetch_outcome);
-        return failure(false);
-      }
-    if (trimWhitespace(base_content, true, true).empty()) {
+    FetchCacheTransaction dependency_transaction;
+    int render_result = 0;
+    {
+      FetchCacheTransactionScope dependency_scope(dependency_transaction);
+      render_result = render_template(fetched, tpl_args, base_content,
+                                      global.templatePath, baseFetchContext);
+    }
+    if (render_result != 0) {
+      discardFetchCacheTransaction(dependency_transaction);
       discardFetchOutcomeCache(fetch_outcome);
       return failure(false);
     }
-    commitFetchOutcomeCache(fetch_outcome);
+    if (trimWhitespace(base_content, true, true).empty()) {
+      discardFetchCacheTransaction(dependency_transaction);
+      discardFetchOutcomeCache(fetch_outcome);
+      return failure(false);
+    }
+    fetch_outcome.deferred_dependencies =
+        std::move(dependency_transaction.pending);
+    rendered_base_outcome = std::move(fetch_outcome);
+    rendered_base_outcome_active = true;
     return "";
   };
   switch (hash_(argTarget)) {
@@ -2869,6 +2924,7 @@ static std::string subconverter_impl(Request &request, Response &response,
           proxyToClash(nodes, base_content, lRulesetContent, lCustomProxyGroups,
                        argTarget == "clashr", ext);
       if (!ext.external_rule_error.empty()) {
+        discardRenderedBase();
         return externalDependencyFailure(response, 502, ext.external_rule_error);
       }
     }
@@ -3067,6 +3123,16 @@ static std::string subconverter_impl(Request &request, Response &response,
            "Please report this request to the service maintainer.\n"
            "请将该请求反馈给服务维护者。";
   }
+  if (rendered_base_outcome_active &&
+      !validateGeneratedTargetOutput(argTarget, output_content)) {
+    discardRenderedBase();
+    return externalDependencyFailure(
+        response, 502,
+        "External " + argTarget +
+            " base generated an invalid or empty target configuration.\n"
+            "外部基础配置生成的目标配置无效或为空，已拒绝提交缓存。\n");
+  }
+  commitRenderedBase();
   writeLog(0, "生成完成。", LOG_LEVEL_INFO);
   if (argTarget == "clash" && explain.proxy_provider_mode)
     appendVaryHeader(response, "User-Agent");
