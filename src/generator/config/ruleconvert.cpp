@@ -314,6 +314,7 @@ static bool parseClashRegexRule(const std::string &line,
     {
         const char quote = body.front();
         bool escaped = false;
+        bool closed = false;
         for(size_t index = 1; index < body.size(); ++index)
         {
             const char character = body[index];
@@ -329,13 +330,17 @@ static bool parseClashRegexRule(const std::string &line,
             }
             if(character == quote)
             {
+                closed = true;
                 const std::string suffix = trimWhitespace(
                     body.substr(index + 1), true, true);
-                if(suffix.empty() || suffix.front() == ',')
-                    outer_quote_end = index;
+                if(!suffix.empty() && suffix.front() != ',')
+                    return false;
+                outer_quote_end = index;
                 break;
             }
         }
+        if(!closed)
+            return false;
     }
 
     std::vector<size_t> separators;
