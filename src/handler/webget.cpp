@@ -906,6 +906,20 @@ static std::string cache_path_for(const FetchArgument &argument,
     return "cache/" + key;
 }
 
+// A caller that is still validating the response must never join an
+// immediate-commit fetch for the same resource.  The persistent cache key
+// remains shared, but the in-flight network result is isolated by commit
+// mode so an immediate owner cannot publish a response on behalf of a
+// deferred semantic consumer.
+static std::string fetch_singleflight_key(const FetchArgument &argument) {
+    std::string key = build_cache_key(
+        argument.url, argument.proxy, argument.request_headers,
+        argument.context, global.customOpenClashRulesFallback);
+    key += "\ndefer-cache-commit:";
+    key += argument.defer_cache_commit ? '1' : '0';
+    return key;
+}
+
 static bool read_cache_candidate(const std::string &path,
                                  const std::string &header_path,
                                  unsigned int cache_ttl,
@@ -1194,9 +1208,7 @@ int fetchRemote(const FetchArgument &argument, FetchOutcome &outcome) {
         return outcome.status_code;
     }
 
-    const std::string key = build_cache_key(
-        argument.url, argument.proxy, argument.request_headers,
-        argument.context, global.customOpenClashRulesFallback);
+    const std::string key = fetch_singleflight_key(argument);
     std::shared_future<CacheFetchResult> fetch_future;
     std::shared_ptr<std::promise<CacheFetchResult>> fetch_promise;
     bool owner = false;
