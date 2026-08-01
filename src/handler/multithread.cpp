@@ -163,16 +163,18 @@ static std::string fetchFileWithState(
                            static_cast<unsigned int>(std::max(cache_ttl, 0)),
                            false,
                            context,
-                           false};
+                           true};
     FetchOutcome outcome;
     fetchRemote(argument, outcome);
     record(outcome.status_code,
            outcome.failure == FetchFailureCategory::RequestRejected);
     if (!outcome.success || !validContent(outcome.content)) {
+        discardFetchOutcomeCache(outcome);
         if (outcome.success)
             record(422, false);
         return {};
     }
+    commitFetchOutcomeCache(outcome);
     return outcome.content;
 }
 
@@ -180,33 +182,6 @@ std::shared_future<std::string> fetchFileAsync(
     const std::string &path, const ProxyPolicy &proxy, int cache_ttl,
     bool find_local, bool async, FetchContext context,
     std::shared_ptr<RulesetFetchState> fetch_state) {
-    if (!fetch_state) {
-        if (!async) {
-            if (find_local && fileExist(path, true) &&
-                canReadLocalFetchPath(path, context))
-                return makeReadyStringFuture(fileGet(path, true));
-            if (isLink(path))
-                return makeReadyStringFuture(
-                    webGet(path, proxy, cache_ttl, nullptr, nullptr, context));
-            return makeReadyStringFuture(std::string());
-        }
-
-        std::future<std::string> retVal;
-        if (find_local && fileExist(path, true) &&
-            canReadLocalFetchPath(path, context))
-            retVal = rulesetExecutor().submit(
-                [path]() { return fileGet(path, true); });
-        else if (isLink(path))
-            retVal = rulesetExecutor().submit(
-                [path, proxy, cache_ttl, context]() {
-                    return webGet(path, proxy, cache_ttl, nullptr, nullptr,
-                                  context);
-                });
-        else
-            return makeReadyStringFuture(std::string());
-        return retVal.share();
-    }
-
     if (!async)
         return makeReadyStringFuture(fetchFileWithState(
             path, proxy, cache_ttl, find_local, context, fetch_state));

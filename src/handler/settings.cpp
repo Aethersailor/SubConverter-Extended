@@ -163,7 +163,8 @@ static bool canImportLocalPath(const std::string &path, FetchContext context) {
 
 static bool fetchImportedContent(const std::string &path, bool scope_limit,
                                  FetchContext context, std::string &content,
-                                 bool *request_rejected) {
+                                 bool *request_rejected,
+                                 FetchOutcome *fetch_outcome = nullptr) {
   content.clear();
   const bool trusted_local = isTrustedLocalResourcePath(path);
   const bool local_exists =
@@ -197,10 +198,13 @@ static bool fetchImportedContent(const std::string &path, bool scope_limit,
                          static_cast<unsigned int>(std::max(0, global.cacheConfig)),
                          true,
                          context,
-                         false};
+                         true};
   FetchOutcome outcome;
   fetchRemote(argument, outcome);
+  if (fetch_outcome)
+    *fetch_outcome = outcome;
   if (!outcome.success) {
+    discardFetchOutcomeCache(outcome);
     if (request_rejected &&
         outcome.failure == FetchFailureCategory::RequestRejected)
       *request_rejected = true;
@@ -212,8 +216,11 @@ static bool fetchImportedContent(const std::string &path, bool scope_limit,
   if (trimmed.empty() || startsWith(lower, "<!doctype html") ||
       startsWith(lower, "<html")) {
     content.clear();
+    discardFetchOutcomeCache(outcome);
     return false;
   }
+  if (!fetch_outcome)
+    commitFetchOutcomeCache(outcome);
   return true;
 }
 
@@ -230,8 +237,10 @@ int importItems(string_array &target, bool scope_limit, FetchContext context,
     }
     path = x.substr(x.find(":") + 1);
     writeLog(0, "正在导入项目：" + path);
+    const unsigned int imported_before = itemCount;
+    FetchOutcome fetched;
     if (!fetchImportedContent(path, scope_limit, context, content,
-                              request_rejected)) {
+                              request_rejected, &fetched)) {
       writeLog(0, "文件不存在、被拒绝或不是有效 URL：" + path,
                LOG_LEVEL_ERROR);
       return -1;
@@ -252,6 +261,10 @@ int importItems(string_array &target, bool scope_limit, FetchContext context,
       itemCount++;
     }
     ss.clear();
+    if (itemCount > imported_before)
+      commitFetchOutcomeCache(fetched);
+    else
+      discardFetchOutcomeCache(fetched);
   }
   target.swap(result);
   writeLog(0, "已导入 " + std::to_string(itemCount) + " 个项目。");
@@ -282,8 +295,9 @@ int importItems(std::vector<toml::value> &root, const std::string &import_key,
     else {
       const std::string &path = toml::get<std::string>(table.at("import"));
       writeLog(0, "正在导入项目：" + path);
+      FetchOutcome fetched;
       if (!fetchImportedContent(path, scope_limit, context, content,
-                                request_rejected)) {
+                                request_rejected, &fetched)) {
         writeLog(0, "文件不存在、被拒绝或不是有效 URL：" + path,
                  LOG_LEVEL_ERROR);
         if (request_rejected)
@@ -291,10 +305,16 @@ int importItems(std::vector<toml::value> &root, const std::string &import_key,
         iter++;
         continue;
       }
-      auto items = parseToml(content, path);
-      auto list = toml::find<std::vector<toml::value>>(items, import_key);
-      count += list.size();
-      std::move(list.begin(), list.end(), std::back_inserter(newRoot));
+      try {
+        auto items = parseToml(content, path);
+        auto list = toml::find<std::vector<toml::value>>(items, import_key);
+        count += list.size();
+        std::move(list.begin(), list.end(), std::back_inserter(newRoot));
+        commitFetchOutcomeCache(fetched);
+      } catch (const toml::exception &) {
+        discardFetchOutcomeCache(fetched);
+        throw;
+      }
     }
     iter++;
   }

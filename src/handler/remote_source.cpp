@@ -190,8 +190,9 @@ bool parseGithub(const std::string &scheme, const std::string &host,
                              resource.owner + "/" + resource.repository +
                              "/" + resource.ref + "/" + resource.path;
   parsed.canonical_jsdelivr_url = scheme + "://cdn.jsdelivr.net/gh/" +
-                                  resource.owner + "/" + resource.repository +
-                                  "@" + resource.ref + "/" + resource.path;
+                                   resource.owner + "/" + resource.repository +
+                                   "@" + resource.ref + "/" + resource.path;
+  parsed.rewritten_url = buildCocrRewrite(resource);
   return true;
 }
 
@@ -234,8 +235,9 @@ bool parseJsDelivr(const std::string &scheme, const std::string &host,
                              resource.owner + "/" + resource.repository +
                              "/" + resource.ref + "/" + resource.path;
   parsed.canonical_jsdelivr_url = scheme + "://cdn.jsdelivr.net/gh/" +
-                                  resource.owner + "/" + resource.repository +
-                                  "@" + resource.ref + "/" + resource.path;
+                                   resource.owner + "/" + resource.repository +
+                                   "@" + resource.ref + "/" + resource.path;
+  parsed.rewritten_url = buildCocrRewrite(resource);
   return true;
 }
 
@@ -330,6 +332,52 @@ std::string buildCocrRewrite(const LogicalResource &resource) {
     return "";
   return "https://git.asailor.org/Custom_OpenClash_Rules/" + resource.ref +
          "/" + resource.path;
+}
+
+FetchPlan buildFetchPlan(const std::string &requested_url,
+                         const ParsedUrl &parsed,
+                         bool cocr_fallback_enabled,
+                         bool is_get) {
+  FetchPlan plan;
+  plan.logical_resource = parsed.resource.key();
+
+  if (!parsed.valid || !is_get) {
+    plan.candidates.push_back({requested_url, "generic"});
+    return plan;
+  }
+
+  if (parsed.isCocr() && cocr_fallback_enabled) {
+    const std::string target = parsed.kind == Kind::GitAsailor
+                                   ? parsed.normalized_url
+                                   : buildCocrRewrite(parsed.resource);
+    if (target.empty()) {
+      plan.cocr_rewrite_failed = true;
+      return plan;
+    }
+    plan.candidates.push_back({target, kindName(Kind::GitAsailor)});
+    plan.cocr_rewrite_used = parsed.kind != Kind::GitAsailor;
+    return plan;
+  }
+
+  if (parsed.isGithubSource()) {
+    plan.candidates.push_back({parsed.canonical_raw_url, "github_raw"});
+    plan.candidates.push_back({parsed.canonical_jsdelivr_url, "jsdelivr"});
+    return plan;
+  }
+
+  if (parsed.isJsDelivrSource()) {
+    // A direct jsDelivr request never creates a Raw candidate.
+    plan.candidates.push_back({parsed.normalized_url, "jsdelivr"});
+    return plan;
+  }
+
+  if (parsed.kind == Kind::GitAsailor) {
+    plan.candidates.push_back({parsed.normalized_url, "git_asailor"});
+    return plan;
+  }
+
+  plan.candidates.push_back({requested_url, "generic"});
+  return plan;
 }
 
 std::string redactForLog(const std::string &url) {

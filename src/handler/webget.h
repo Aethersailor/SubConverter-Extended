@@ -74,6 +74,7 @@ struct FetchOutcome
     FetchFailureCategory failure = FetchFailureCategory::None;
     bool cocr_rewrite_used = false;
     bool raw_to_jsdelivr_used = false;
+    std::string effective_source;
     bool fresh_cache_used = false;
     bool stale_cache_used = false;
     bool cache_commit_pending = false;

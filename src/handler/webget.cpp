@@ -840,11 +840,6 @@ std::string webGetLegacy(const std::string &url, const ProxyPolicy &proxy, unsig
 
 namespace {
 
-struct FetchCandidate {
-    std::string url;
-    std::string source_kind;
-};
-
 struct StaleCacheCandidate {
     std::string path;
     std::string header_path;
@@ -903,7 +898,7 @@ static std::string failure_name(FetchFailureCategory failure) {
 }
 
 static std::string cache_path_for(const FetchArgument &argument,
-                                  const FetchCandidate &candidate) {
+                                  const remote_source::FetchCandidate &candidate) {
     const std::string key = build_cache_key(
         candidate.url, argument.proxy, argument.request_headers,
         argument.context, global.customOpenClashRulesFallback);
@@ -944,48 +939,6 @@ static void write_cache_candidate(const FetchOutcome &outcome) {
         fileWrite(outcome.cache_header_path, outcome.response_headers, true);
 }
 
-static std::vector<FetchCandidate>
-build_fetch_candidates(const FetchArgument &argument,
-                       const remote_source::ParsedUrl &parsed,
-                       bool &cocr_rewrite_used,
-                       std::string &logical_resource) {
-    cocr_rewrite_used = false;
-    logical_resource = parsed.resource.key();
-    std::vector<FetchCandidate> candidates;
-    if (!parsed.valid || argument.method != HTTP_GET) {
-        candidates.push_back({argument.url, "generic"});
-        return candidates;
-    }
-
-    if (parsed.isCocr() && global.customOpenClashRulesFallback) {
-        const std::string target = parsed.kind == remote_source::Kind::GitAsailor
-                                        ? parsed.normalized_url
-                                        : parsed.rewritten_url;
-        candidates.push_back({target.empty() ? parsed.normalized_url : target,
-                              remote_source::kindName(remote_source::Kind::GitAsailor)});
-        cocr_rewrite_used = parsed.kind != remote_source::Kind::GitAsailor;
-        return candidates;
-    }
-    if (parsed.isGithubSource()) {
-        candidates.push_back({parsed.canonical_raw_url, "github_raw"});
-        candidates.push_back({parsed.canonical_jsdelivr_url, "jsdelivr"});
-        return candidates;
-    }
-    if (parsed.isJsDelivrSource()) {
-        // Preserve the caller's jsDelivr mirror while stripping query,
-        // fragment, credentials, and non-canonical ref spelling in the parser.
-        // A direct jsDelivr request never creates a Raw candidate.
-        candidates.push_back({parsed.normalized_url, "jsdelivr"});
-        return candidates;
-    }
-    if (parsed.kind == remote_source::Kind::GitAsailor) {
-        candidates.push_back({parsed.normalized_url, "git_asailor"});
-        return candidates;
-    }
-    candidates.push_back({argument.url, "generic"});
-    return candidates;
-}
-
 static FetchOutcome perform_fetch(const FetchArgument &argument) {
     FetchOutcome outcome;
     outcome.requested_url = argument.url;
@@ -996,6 +949,7 @@ static FetchOutcome perform_fetch(const FetchArgument &argument) {
         outcome.status_code = outcome.content.empty() ? 400 : 200;
         outcome.success = outcome.status_code == 200;
         outcome.effective_url = argument.url;
+        outcome.effective_source = "generic";
         outcome.failure = outcome.success ? FetchFailureCategory::None
                                            : FetchFailureCategory::RequestRejected;
         outcome.failure_reason = failure_name(outcome.failure);
@@ -1017,13 +971,18 @@ static FetchOutcome perform_fetch(const FetchArgument &argument) {
         return outcome;
     }
 
-    bool cocr_rewrite_used = false;
-    std::string logical_resource;
-    const auto candidates = build_fetch_candidates(argument, parsed,
-                                                   cocr_rewrite_used,
-                                                   logical_resource);
-    outcome.cocr_rewrite_used = cocr_rewrite_used;
-    outcome.logical_resource = logical_resource;
+    const auto plan = remote_source::buildFetchPlan(
+        argument.url, parsed, global.customOpenClashRulesFallback,
+        argument.method == HTTP_GET);
+    outcome.cocr_rewrite_used = plan.cocr_rewrite_used;
+    outcome.logical_resource = plan.logical_resource;
+    if (plan.cocr_rewrite_failed) {
+        outcome.status_code = 502;
+        outcome.failure = FetchFailureCategory::Internal;
+        outcome.failure_reason = "cocr_rewrite_failed";
+        return outcome;
+    }
+    const auto &candidates = plan.candidates;
     outcome.raw_to_jsdelivr_used = false;
 
     const bool cache_enabled = argument.cache_ttl > 0 && is_http_get(argument);
@@ -1033,6 +992,8 @@ static FetchOutcome perform_fetch(const FetchArgument &argument) {
 
     for (size_t index = 0; index < candidates.size(); ++index) {
         const auto &candidate = candidates[index];
+        outcome.effective_url = candidate.url;
+        outcome.effective_source = candidate.source_kind;
         if (index > 0 && candidate.source_kind == "jsdelivr")
             outcome.raw_to_jsdelivr_used = true;
         if (!isFetchUrlAllowed(candidate.url, argument.context)) {
@@ -1059,6 +1020,7 @@ static FetchOutcome perform_fetch(const FetchArgument &argument) {
                 outcome.content = std::move(cached_content);
                 outcome.response_headers = std::move(cached_headers);
                 outcome.effective_url = candidate.url;
+                outcome.effective_source = candidate.source_kind;
                 outcome.fresh_cache_used = true;
                 outcome.cache_path = cache_path;
                 outcome.cache_header_path = cache_header_path;
@@ -1106,6 +1068,7 @@ static FetchOutcome perform_fetch(const FetchArgument &argument) {
             outcome.response_headers = std::move(headers);
             outcome.cookies = std::move(cookies);
             outcome.effective_url = candidate.url;
+            outcome.effective_source = candidate.source_kind;
             outcome.failure = FetchFailureCategory::None;
             if (cache_enabled) {
                 outcome.cache_path = cache_path;
@@ -1141,6 +1104,7 @@ static FetchOutcome perform_fetch(const FetchArgument &argument) {
         outcome.content = fileGet(stale_iter->path, true);
         outcome.response_headers = fileGet(stale_iter->header_path, true);
         outcome.effective_url = stale_iter->url;
+        outcome.effective_source = stale_iter->source_kind;
         outcome.stale_cache_used = !outcome.content.empty();
         if (outcome.stale_cache_used) {
             outcome.failure = FetchFailureCategory::None;

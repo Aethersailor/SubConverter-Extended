@@ -2,8 +2,20 @@
 
 #include <cassert>
 #include <iostream>
+#include <map>
 
 using remote_source::Kind;
+
+static void assert_rewritten_plan(const std::string &url) {
+  const auto parsed = remote_source::parse(url);
+  const auto plan = remote_source::buildFetchPlan(url, parsed, true, true);
+  assert(!plan.cocr_rewrite_failed);
+  assert(plan.cocr_rewrite_used);
+  assert(plan.candidates.size() == 1);
+  assert(plan.candidates[0].source_kind == "git_asailor");
+  assert(plan.candidates[0].url ==
+         "https://git.asailor.org/Custom_OpenClash_Rules/main/rule/a.yaml");
+}
 
 int main() {
   {
@@ -15,6 +27,8 @@ int main() {
     assert(parsed.isCocr());
     assert(parsed.resource.ref == "main");
     assert(parsed.resource.path == "rule/a.yaml");
+    assert(parsed.rewritten_url ==
+           "https://git.asailor.org/Custom_OpenClash_Rules/main/rule/a.yaml");
     assert(parsed.canonical_jsdelivr_url ==
            "https://cdn.jsdelivr.net/gh/Aethersailor/"
            "Custom_OpenClash_Rules@main/rule/a.yaml");
@@ -39,6 +53,8 @@ int main() {
         "Custom_OpenClash_Rules@refs/heads/main/rule/a.yaml");
     assert(parsed.valid);
     assert(parsed.kind == Kind::JsDelivr);
+    assert(parsed.rewritten_url ==
+           "https://git.asailor.org/Custom_OpenClash_Rules/main/rule/a.yaml");
     assert(parsed.resource.key() ==
            "aethersailor/custom_openclash_rules\nmain\nrule/a.yaml");
   }
@@ -51,6 +67,57 @@ int main() {
     assert(parsed.isCocr());
     assert(parsed.rewritten_url ==
            "https://git.asailor.org/Custom_OpenClash_Rules/main/rule/a.yaml");
+  }
+
+  assert_rewritten_plan(
+      "https://raw.githubusercontent.com/Aethersailor/"
+      "Custom_OpenClash_Rules/main/rule/a.yaml");
+  assert_rewritten_plan(
+      "https://github.com/Aethersailor/Custom_OpenClash_Rules/blob/main/"
+      "rule/a.yaml");
+  assert_rewritten_plan(
+      "https://cdn.jsdelivr.net/gh/Aethersailor/"
+      "Custom_OpenClash_Rules@main/rule/a.yaml");
+
+  {
+    const std::string url =
+        "https://raw.githubusercontent.com/Aethersailor/"
+        "Custom_OpenClash_Rules/main/rule/a.yaml";
+    const auto plan = remote_source::buildFetchPlan(
+        url, remote_source::parse(url), false, true);
+    assert(!plan.cocr_rewrite_used);
+    assert(plan.candidates.size() == 2);
+    assert(plan.candidates[0].source_kind == "github_raw");
+    assert(plan.candidates[1].source_kind == "jsdelivr");
+    assert(plan.candidates[0].url.find("raw.githubusercontent.com") !=
+           std::string::npos);
+    assert(plan.candidates[1].url.find("cdn.jsdelivr.net") !=
+           std::string::npos);
+  }
+
+  {
+    const std::string url =
+        "https://cdn.jsdelivr.net/gh/Aethersailor/"
+        "Custom_OpenClash_Rules@main/rule/a.yaml";
+    const auto plan = remote_source::buildFetchPlan(
+        url, remote_source::parse(url), false, true);
+    assert(plan.candidates.size() == 1);
+    assert(plan.candidates[0].source_kind == "jsdelivr");
+    assert(plan.candidates[0].url == url);
+  }
+
+  {
+    const std::string url =
+        "https://raw.githubusercontent.com/Aethersailor/"
+        "Custom_OpenClash_Rules/main/rule/a.yaml";
+    const auto plan = remote_source::buildFetchPlan(
+        url, remote_source::parse(url), true, true);
+    std::map<std::string, int> calls;
+    for (const auto &candidate : plan.candidates)
+      ++calls[candidate.source_kind];
+    assert(calls["git_asailor"] == 1);
+    assert(calls["github_raw"] == 0);
+    assert(calls["jsdelivr"] == 0);
   }
 
   for (const std::string url : {

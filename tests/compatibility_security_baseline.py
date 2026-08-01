@@ -36,7 +36,20 @@ DISABLE_RULEGEN_CONFIG = "data:,enable_rule_generator=false"
 
 
 class FixtureHandler(BaseHTTPRequestHandler):
+    request_counts: dict[str, int] = {}
+
+    @classmethod
+    def reset_counters(cls) -> None:
+        cls.request_counts = {}
+
+    @classmethod
+    def record_request(cls, path: str) -> int:
+        key = path.split("?", 1)[0]
+        cls.request_counts[key] = cls.request_counts.get(key, 0) + 1
+        return cls.request_counts[key]
+
     def do_GET(self) -> None:  # noqa: N802
+        request_number = self.record_request(self.path)
         if self.path == "/subscription.txt":
             body = SUBSCRIPTION.encode()
             content_type = "text/plain; charset=utf-8"
@@ -55,6 +68,23 @@ class FixtureHandler(BaseHTTPRequestHandler):
         elif self.path == "/rules.list":
             body = RULESET.encode()
             content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/import-cache-probe"):
+            if request_number == 1:
+                body = b"<!doctype html><html><body>transient error</body></html>"
+                content_type = "text/html; charset=utf-8"
+            else:
+                body = b"Proxy`select`[]DIRECT\n"
+                content_type = "text/plain; charset=utf-8"
+        elif self.path == "/fallback-default.ini":
+            missing = (
+                f"http://127.0.0.1:{self.server.server_port}"
+                "/fallback-default-missing"
+            )
+            body = (
+                "[custom]\n"
+                f"custom_proxy_group=!!import:{missing}\n"
+            ).encode()
+            content_type = "text/plain; charset=utf-8"
         else:
             self.send_error(404)
             return
@@ -70,6 +100,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
 
 @contextlib.contextmanager
 def fixture_server():
+    FixtureHandler.reset_counters()
     server = ThreadingHTTPServer(("127.0.0.1", 0), FixtureHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -615,6 +646,8 @@ def external_config_policy_baseline(binary: Path, fixture_base: str) -> None:
         external = report.get("external_config", {})
         if not external.get("fallback_used") or not external.get("attempts"):
             raise AssertionError("explain response omitted external source attempts")
+        if external.get("effective_source") != "generic":
+            raise AssertionError("explain response omitted the effective source")
 
         broken_base_content = (
             "[custom]\n"
@@ -750,6 +783,69 @@ def external_config_policy_baseline(binary: Path, fixture_base: str) -> None:
             )
 
 
+def external_import_cache_baseline(binary: Path, fixture_base: str) -> None:
+    probe_url = fixture_base + "/import-cache-probe?nonce=" + str(time.time_ns())
+    config = (
+        "[custom]\n"
+        f"custom_proxy_group=!!import:{probe_url}\n"
+    )
+    config_url = "data:text/plain;base64," + base64.urlsafe_b64encode(
+        config.encode()
+    ).decode()
+    common = {"target": "clash", "url": fixture_base + "/subscription.txt", "list": "true"}
+
+    FixtureHandler.reset_counters()
+    with running_service(binary) as base_url:
+        status, _, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 502:
+            raise AssertionError("invalid imported HTML did not fail closed")
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or b"proxies:" not in body:
+            raise AssertionError(
+                "valid imported content was not fetched after rejection: "
+                f"status={status}, body={body[:500]!r}"
+            )
+
+    if FixtureHandler.request_counts.get("/import-cache-probe") != 2:
+        raise AssertionError(
+            "invalid imported HTML was cached or the valid retry did not reach the fixture"
+        )
+
+
+def default_dependency_single_execution_baseline(
+    binary: Path, fixture_base: str
+) -> None:
+    user_missing = fixture_base + "/fallback-user-missing"
+    user_config = (
+        "[custom]\n"
+        f"custom_proxy_group=!!import:{user_missing}\n"
+    )
+    user_config_url = "data:text/plain;base64," + base64.urlsafe_b64encode(
+        user_config.encode()
+    ).decode()
+    common = {"target": "clash", "url": fixture_base + "/subscription.txt", "list": "true"}
+
+    FixtureHandler.reset_counters()
+    with running_service(
+        binary,
+        default_external_config=fixture_base + "/fallback-default.ini",
+        fallback_to_default_external_config=True,
+    ) as base_url:
+        status, _, headers = request(
+            base_url, "/sub", {**common, "config": user_config_url}
+        )
+        if status != 502 or "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError("failed default dependency chain was not fail-closed")
+
+    if FixtureHandler.request_counts.get("/fallback-default.ini") != 1:
+        raise AssertionError(
+            "default external config was executed more than once: "
+            f"counts={FixtureHandler.request_counts!r}"
+        )
+    if FixtureHandler.request_counts.get("/fallback-default-missing") != 1:
+        raise AssertionError("default external dependency was retried more than once")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, required=True)
@@ -794,6 +890,8 @@ def main() -> int:
         persistence_degradation_baseline(binary, fixture_base)
         public_request_baseline(binary, fixture_base)
         external_config_policy_baseline(binary, fixture_base)
+        external_import_cache_baseline(binary, fixture_base)
+        default_dependency_single_execution_baseline(binary, fixture_base)
 
     print("compatibility and security baselines passed")
     return 0

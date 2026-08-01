@@ -1026,6 +1026,7 @@ struct SubExplainReport {
   bool fallback_config_used = false;
   bool external_cocr_rewrite_used = false;
   bool external_raw_to_jsdelivr_used = false;
+  std::string external_effective_source;
   bool external_fresh_cache_used = false;
   bool external_stale_cache_used = false;
   std::string external_logical_resource;
@@ -1191,6 +1192,7 @@ static std::string serializeSubExplainReport(const SubExplainReport &report,
   writer.Bool(report.external_cocr_rewrite_used);
   writer.Key("raw_to_jsdelivr_used");
   writer.Bool(report.external_raw_to_jsdelivr_used);
+  writeJsonString(writer, "effective_source", report.external_effective_source);
   writer.Key("fresh_cache_used");
   writer.Bool(report.external_fresh_cache_used);
   writer.Key("stale_cache_used");
@@ -1460,7 +1462,7 @@ static void storeCachedSubResponse(const std::string &key,
 
 static bool shouldUseDefaultDependencyFallback(const Request &request,
                                                const Response &response) {
-  if (request.internal_default_config ||
+  if (request.internal_default_config || request.default_config_already_used ||
       !global.fallbackToDefaultExternalConfig ||
       !response.headers.contains(kExternalDependencyFailureHeader))
     return false;
@@ -1504,7 +1506,7 @@ static std::string runSubconverterImplWithRetry(const Request &original,
   std::string body = subconverter_impl(first_request, first_response,
                                        stats ? &first_stats : nullptr);
 
-  if (shouldUseDefaultDependencyFallback(original, first_response)) {
+  if (shouldUseDefaultDependencyFallback(first_request, first_response)) {
     writeLog(0,
              "用户模板依赖加载失败，正在尝试显式允许的默认模板。",
              LOG_LEVEL_WARNING);
@@ -2017,6 +2019,8 @@ static std::string subconverter_impl(Request &request, Response &response,
     explain.external_stale_cache_used |= outcome.stale_cache_used;
     if (!outcome.logical_resource.empty())
       explain.external_logical_resource = outcome.logical_resource;
+    if (!outcome.effective_source.empty())
+      explain.external_effective_source = outcome.effective_source;
     if (!outcome.failure_reason.empty())
       explain.external_failure_reason = outcome.failure_reason;
     explain.external_attempts.insert(explain.external_attempts.end(),
@@ -2120,6 +2124,12 @@ static std::string subconverter_impl(Request &request, Response &response,
       writeLog(
           0, "加载用户提供的配置失败，正在尝试显式允许的默认配置...",
           LOG_LEVEL_WARNING);
+
+      // The default config and all of its dependencies form one resolution
+      // attempt. Remember that attempt on the mutable request so the outer
+      // retry layer cannot start the same chain again after a dependency
+      // failure.
+      request.default_config_already_used = true;
 
       for (std::string fallbackConfig : fallbackConfigs) {
         writeLog(0, "正在尝试加载显式允许的默认配置。", LOG_LEVEL_INFO);
