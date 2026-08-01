@@ -259,12 +259,6 @@ static void stripClashInlineComment(std::string &line)
         line = trimWhitespace(line.substr(0, comment), true, true);
 }
 
-enum class ClashRegexParseMode
-{
-    SourceRule,
-    FinalRule,
-};
-
 static bool normalizeClashRegexPattern(const std::string &value,
                                         std::string &pattern)
 {
@@ -284,8 +278,7 @@ static bool normalizeClashRegexPattern(const std::string &value,
 
 static bool parseClashRegexRule(const std::string &line,
                                 string_array &fields,
-                                std::string &pattern,
-                                ClashRegexParseMode mode)
+                                std::string &pattern)
 {
     fields.clear();
     const std::string::size_type type_separator = line.find(',');
@@ -299,11 +292,12 @@ static bool parseClashRegexRule(const std::string &line,
 
     // Regex payloads are not generic compound-rule fields. Parentheses,
     // quotes, //, and escaped commas are regex syntax and must not be
-    // interpreted by splitRuleFieldsStrict(). Only a paired outer quote may
-    // introduce an explicit source-side target. In source mode every other
-    // comma belongs to the payload; this removes the ambiguity between a
-    // native Mihomo payload comma and an old policy delimiter. Final rules
-    // retain the Mihomo first-type/last-target convention.
+    // interpreted by splitRuleFieldsStrict(). A paired outer quote explicitly
+    // bounds a payload that contains commas. Otherwise retain Mihomo's native
+    // first-type/last-target convention so a standard rule such as
+    // DOMAIN-REGEX,^example\.com$,OldPolicy replaces (rather than absorbs)
+    // the existing target. Targetless payloads with literal unescaped commas
+    // must therefore use outer quotes to remove the inherent ambiguity.
     const std::string body = trimWhitespace(
         line.substr(type_separator + 1), true, true);
     if(body.empty())
@@ -366,27 +360,22 @@ static bool parseClashRegexRule(const std::string &line,
 
     std::string raw_pattern = body;
     std::string target;
-    if(mode == ClashRegexParseMode::SourceRule)
+    if(outer_quote_end != std::string::npos)
     {
-        if(outer_quote_end != std::string::npos)
+        const std::string suffix = trimWhitespace(
+            body.substr(outer_quote_end + 1), true, true);
+        raw_pattern = body.substr(0, outer_quote_end + 1);
+        if(!suffix.empty())
         {
-            const std::string suffix = trimWhitespace(
-                body.substr(outer_quote_end + 1), true, true);
-            if(!suffix.empty())
-            {
-                if(suffix.front() != ',' || separators.size() != 1)
-                    return false;
-                raw_pattern = body.substr(0, outer_quote_end + 1);
-                target = trimWhitespace(suffix.substr(1), true, true);
-                if(target.empty())
-                    return false;
-            }
+            if(suffix.front() != ',' || separators.size() != 1)
+                return false;
+            target = trimWhitespace(suffix.substr(1), true, true);
+            if(target.empty())
+                return false;
         }
     }
-    else
+    else if(!separators.empty())
     {
-        if(separators.empty())
-            return false;
         const size_t target_separator = separators.back();
         raw_pattern = body.substr(0, target_separator);
         target = trimWhitespace(body.substr(target_separator + 1), true, true);
@@ -491,8 +480,7 @@ static bool validRuleLine(const std::string &line,
             return false;
         string_array fields;
         std::string pattern;
-        return parseClashRegexRule(line, fields, pattern,
-                                   ClashRegexParseMode::SourceRule);
+        return parseClashRegexRule(line, fields, pattern);
     }
 
     string_array fields;
@@ -544,8 +532,7 @@ static bool validInlineRuleLine(const std::string &line,
     {
         string_array fields;
         std::string pattern;
-        return parseClashRegexRule(payload, fields, pattern,
-                                   ClashRegexParseMode::SourceRule);
+        return parseClashRegexRule(payload, fields, pattern);
     }
     string_array fields;
     if(!splitRuleFieldsStrict(payload, fields))
@@ -686,8 +673,7 @@ std::string appendClashRuleTarget(const std::string &rule, const std::string &ta
     {
         string_array fields;
         std::string pattern;
-        if(!parseClashRegexRule(strLine, fields, pattern,
-                                ClashRegexParseMode::SourceRule))
+        if(!parseClashRegexRule(strLine, fields, pattern))
             return {};
         // The normalized pattern is also the value validated above. Outer
         // quotes are input-side disambiguation only and must not reach

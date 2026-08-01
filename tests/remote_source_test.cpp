@@ -24,6 +24,9 @@ int main() {
         "Custom_OpenClash_Rules/refs/heads/main/rule/a.yaml?token=secret#x");
     assert(parsed.valid);
     assert(parsed.kind == Kind::GithubRaw);
+    assert(parsed.normalized_url ==
+           "https://raw.githubusercontent.com/Aethersailor/"
+           "Custom_OpenClash_Rules/refs/heads/main/rule/a.yaml?token=secret");
     assert(parsed.isCocr());
     assert(parsed.resource.ref == "main");
     assert(parsed.resource.path == "rule/a.yaml");
@@ -97,13 +100,68 @@ int main() {
 
   {
     const std::string url =
+        "https://raw.githubusercontent.com/example/project/main/file.yaml"
+        "?token=secret#fragment";
+    const auto plan = remote_source::buildFetchPlan(
+        url, remote_source::parse(url), false, true);
+    assert(plan.candidates.size() == 2);
+    assert(plan.candidates[0].url ==
+           "https://raw.githubusercontent.com/example/project/main/file.yaml"
+           "?token=secret");
+    assert(plan.candidates[1].url ==
+           "https://cdn.jsdelivr.net/gh/example/project@main/file.yaml");
+    assert(plan.candidates[1].url.find("secret") == std::string::npos);
+  }
+
+  {
+    const std::string url =
         "https://cdn.jsdelivr.net/gh/Aethersailor/"
-        "Custom_OpenClash_Rules@main/rule/a.yaml";
+        "Custom_OpenClash_Rules@main/rule/a.yaml?v=42#fragment";
     const auto plan = remote_source::buildFetchPlan(
         url, remote_source::parse(url), false, true);
     assert(plan.candidates.size() == 1);
     assert(plan.candidates[0].source_kind == "jsdelivr");
-    assert(plan.candidates[0].url == url);
+    assert(plan.candidates[0].url ==
+           "https://cdn.jsdelivr.net/gh/Aethersailor/"
+           "Custom_OpenClash_Rules@main/rule/a.yaml?v=42");
+  }
+
+  {
+    const std::string url =
+        "https://raw.githubusercontent.com/Aethersailor/"
+        "Custom_OpenClash_Rules/main/rule/a.yaml?token=secret";
+    const auto plan = remote_source::buildFetchPlan(
+        url, remote_source::parse(url), true, true);
+    assert(plan.candidates.size() == 1);
+    assert(plan.candidates[0].url ==
+           "https://git.asailor.org/Custom_OpenClash_Rules/main/rule/a.yaml");
+    assert(plan.candidates[0].url.find("secret") == std::string::npos);
+  }
+
+  {
+    const std::string url =
+        "https://github.com/example/project/raw/main/file.yaml?token=secret";
+    const auto plan = remote_source::buildFetchPlan(
+        url, remote_source::parse(url), false, true);
+    assert(plan.candidates.size() == 2);
+    assert(plan.candidates[0].url ==
+           "https://raw.githubusercontent.com/example/project/main/file.yaml");
+    assert(plan.candidates[1].url ==
+           "https://cdn.jsdelivr.net/gh/example/project@main/file.yaml");
+    assert(plan.candidates[0].url.find("secret") == std::string::npos);
+    assert(plan.candidates[1].url.find("secret") == std::string::npos);
+  }
+
+  {
+    const std::string url =
+        "https://git.asailor.org/Custom_OpenClash_Rules/main/rule/a.yaml"
+        "?v=42#fragment";
+    const auto plan = remote_source::buildFetchPlan(
+        url, remote_source::parse(url), false, true);
+    assert(plan.candidates.size() == 1);
+    assert(plan.candidates[0].url ==
+           "https://git.asailor.org/Custom_OpenClash_Rules/main/rule/a.yaml"
+           "?v=42");
   }
 
   {
