@@ -28,9 +28,15 @@ bool hasControl(const std::string &value) {
   return false;
 }
 
-std::string withoutQueryFragment(const std::string &url) {
-  const std::string::size_type end = url.find_first_of("?#");
+std::string withoutFragment(const std::string &url) {
+  const std::string::size_type end = url.find('#');
   return end == std::string::npos ? url : url.substr(0, end);
+}
+
+std::string withoutQueryFragment(const std::string &url) {
+  const std::string no_fragment = withoutFragment(url);
+  const std::string::size_type end = no_fragment.find('?');
+  return end == std::string::npos ? no_fragment : no_fragment.substr(0, end);
 }
 
 bool splitPath(const std::string &path, std::vector<std::string> &segments) {
@@ -287,9 +293,10 @@ bool ParsedUrl::isCocr() const { return resource.isCocr(); }
 
 ParsedUrl parse(const std::string &url) {
   ParsedUrl parsed;
-  const std::string clean = withoutQueryFragment(url);
-  parsed.normalized_url = clean;
-  if (clean.empty() || hasControl(clean))
+  const std::string no_fragment = withoutFragment(url);
+  const std::string clean = withoutQueryFragment(no_fragment);
+  parsed.normalized_url = no_fragment;
+  if (clean.empty() || hasControl(no_fragment))
     return parsed;
 
   std::string scheme, host, path;
@@ -300,30 +307,38 @@ ParsedUrl parse(const std::string &url) {
     parsed.recognized_host = true;
     if (!parseGithub(scheme, host, path, Kind::GithubRaw, parsed))
       parsed.valid = false;
+    else
+      parsed.normalized_url = no_fragment;
     return parsed;
   }
   if (host == "github.com") {
     parsed.recognized_host = true;
     if (!parseGithub(scheme, host, path, Kind::GithubFile, parsed))
       parsed.valid = false;
+    else
+      parsed.normalized_url = no_fragment;
     return parsed;
   }
   if (isJsDelivrHost(host)) {
     parsed.recognized_host = true;
     if (!parseJsDelivr(scheme, host, path, parsed))
       parsed.valid = false;
+    else
+      parsed.normalized_url = no_fragment;
     return parsed;
   }
   if (host == "git.asailor.org") {
     parsed.recognized_host = true;
     if (!parseGitAsailor(scheme, host, path, parsed))
       parsed.valid = false;
+    else
+      parsed.normalized_url = no_fragment;
     return parsed;
   }
 
   parsed.kind = Kind::Generic;
   parsed.valid = true;
-  parsed.normalized_url = clean;
+  parsed.normalized_url = no_fragment;
   return parsed;
 }
 
@@ -360,7 +375,13 @@ FetchPlan buildFetchPlan(const std::string &requested_url,
   }
 
   if (parsed.isGithubSource()) {
-    plan.candidates.push_back({parsed.canonical_raw_url, "github_raw"});
+    // Preserve query parameters only for a same-origin Raw request. They may
+    // carry authorization or versioning state and are part of that request's
+    // cache identity. Never forward them to a different host or CDN mirror.
+    const std::string raw_url = parsed.kind == Kind::GithubRaw
+                                    ? parsed.normalized_url
+                                    : parsed.canonical_raw_url;
+    plan.candidates.push_back({raw_url, "github_raw"});
     plan.candidates.push_back({parsed.canonical_jsdelivr_url, "jsdelivr"});
     return plan;
   }

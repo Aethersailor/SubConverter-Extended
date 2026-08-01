@@ -45,6 +45,7 @@ STRICT_VALID_RULESET = (
     "OR,((DOMAIN,old-one.example),(DOMAIN,old-two.example)),OldPolicy\n"
     "NOT,((DOMAIN,old-not.example)),OldPolicy\n"
     "DOMAIN-REGEX,\"^example\\.com$\",OldPolicy\n"
+    "DOMAIN-REGEX,^standard\\.example$,OldPolicy\n"
     "PROCESS-NAME-REGEX,\"^chrome,helper$\",OldPolicy\n"
     "PROCESS-PATH-REGEX,\"^/usr/bin/example$\",OldPolicy\n"
     "DOMAIN-REGEX,\"^example\\,comma$\",OldPolicy\n"
@@ -170,10 +171,11 @@ class FixtureHandler(BaseHTTPRequestHandler):
             else:
                 body = (
                     b"DOMAIN-REGEX,\"^example\\.com$\",OldPolicy\n"
+                    b"DOMAIN-REGEX,^standard\\.example$,OldPolicy\n"
                     b"PROCESS-NAME-REGEX,\"^chrome,helper$\",OldPolicy\n"
                     b"PROCESS-PATH-REGEX,\"^/usr/bin/example$\",OldPolicy\n"
                     b"DOMAIN-REGEX,\"^example\\,comma$\",OldPolicy\n"
-                    b"DOMAIN-REGEX,^foo,bar,baz$\n"
+                    b"DOMAIN-REGEX,\"^foo,bar,baz$\"\n"
                     b"PROCESS-NAME-REGEX,\"^\\($\",OldPolicy\n"
                     b"PROCESS-NAME-REGEX,\"^foo\\\"bar$\",OldPolicy\n"
                     b"PROCESS-PATH-REGEX,\"^//server/share$\",OldPolicy\n"
@@ -1289,6 +1291,7 @@ def external_ruleset_strict_validation_baseline(
             b"OR,((DOMAIN,old-one.example),(DOMAIN,old-two.example)),Proxy",
             b"NOT,((DOMAIN,old-not.example)),Proxy",
             b"DOMAIN-REGEX,^example\\.com$,Proxy",
+            b"DOMAIN-REGEX,^standard\\.example$,Proxy",
             b"PROCESS-NAME-REGEX,^chrome,helper$,Proxy",
             b"PROCESS-PATH-REGEX,^/usr/bin/example$,Proxy",
             b"DOMAIN-REGEX,^example\\,comma$,Proxy",
@@ -1402,6 +1405,7 @@ def external_ruleset_regex_validation_baseline(
             raise AssertionError("valid regex ruleset did not recover")
         for expected_rule in (
             b"DOMAIN-REGEX,^example\\.com$,Proxy",
+            b"DOMAIN-REGEX,^standard\\.example$,Proxy",
             b"PROCESS-NAME-REGEX,^chrome,helper$,Proxy",
             b"PROCESS-PATH-REGEX,^/usr/bin/example$,Proxy",
             b"DOMAIN-REGEX,^example\\,comma$,Proxy",
@@ -1415,6 +1419,7 @@ def external_ruleset_regex_validation_baseline(
             raise AssertionError("regex input quotes leaked into Mihomo output")
         for rule, payload in (
             ("DOMAIN-REGEX,^example\\.com$,Proxy", r"^example\.com$"),
+            ("DOMAIN-REGEX,^standard\\.example$,Proxy", r"^standard\.example$"),
             ("PROCESS-NAME-REGEX,^chrome,helper$,Proxy", "^chrome,helper$"),
             ("PROCESS-PATH-REGEX,^/usr/bin/example$,Proxy", r"^/usr/bin/example$"),
             ("DOMAIN-REGEX,^example\\,comma$,Proxy", r"^example\,comma$"),
@@ -1897,6 +1902,17 @@ def main() -> int:
     ]
     if snapshots[1:] != snapshots[:1] * 2:
         raise AssertionError("INI/YAML/TOML SettingsSnapshot values differ")
+    example_ruleset_counts = [
+        load_settings_snapshot(
+            settings_snapshot_helper, REPOSITORY / "base" / name
+        )["rules"]["ruleset_count"]
+        for name in ("pref.example.ini", "pref.example.yml", "pref.example.toml")
+    ]
+    if example_ruleset_counts != [19, 19, 19]:
+        raise AssertionError(
+            "official INI/YAML/TOML ruleset examples differ: "
+            f"{example_ruleset_counts}"
+        )
     if "publish_enabled" in snapshots[0]["custom_openclash_rules"]:
         raise AssertionError("removed publish_enabled leaked into SettingsSnapshot")
     if snapshots[0]["common"]["fallback_to_default_external_config"]:
