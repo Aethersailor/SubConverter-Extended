@@ -163,6 +163,9 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 body = (
                     b"DOMAIN-REGEX,[a-z,Proxy\n"
                     b"PROCESS-NAME-REGEX,\"(chrome\",Proxy\n"
+                    b"PROCESS-NAME-REGEX,\"chrome,helper$\n"
+                    b"PROCESS-NAME-REGEX,\"chrome\"junk,OldPolicy\n"
+                    b"PROCESS-NAME-REGEX,\"chrome\",\n"
                 )
             else:
                 body = (
