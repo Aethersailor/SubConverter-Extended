@@ -161,7 +161,61 @@ static bool canImportLocalPath(const std::string &path, FetchContext context) {
   return false;
 }
 
-int importItems(string_array &target, bool scope_limit, FetchContext context) {
+static bool fetchImportedContent(const std::string &path, bool scope_limit,
+                                 FetchContext context, std::string &content,
+                                 bool *request_rejected) {
+  content.clear();
+  if (fileExist(path, scope_limit)) {
+    if (!canImportLocalPath(path, context)) {
+      if (request_rejected)
+        *request_rejected = true;
+      return false;
+    }
+    content = fileGet(path, scope_limit);
+    return !content.empty();
+  }
+
+  if (!isLink(path)) {
+    if (isPublicFetchRestricted(context) && fileExist(path, true) &&
+        !canImportLocalPath(path, context)) {
+      if (request_rejected)
+        *request_rejected = true;
+    }
+    return false;
+  }
+
+  ProxyPolicy proxy = parseProxy(global.proxyConfig);
+  FetchArgument argument{HTTP_GET,
+                         path,
+                         proxy,
+                         nullptr,
+                         nullptr,
+                         nullptr,
+                         static_cast<unsigned int>(std::max(0, global.cacheConfig)),
+                         true,
+                         context,
+                         false};
+  FetchOutcome outcome;
+  fetchRemote(argument, outcome);
+  if (!outcome.success) {
+    if (request_rejected &&
+        outcome.failure == FetchFailureCategory::RequestRejected)
+      *request_rejected = true;
+    return false;
+  }
+  content = std::move(outcome.content);
+  const std::string trimmed = trimWhitespace(content, true, true);
+  const std::string lower = toLower(trimmed);
+  if (trimmed.empty() || startsWith(lower, "<!doctype html") ||
+      startsWith(lower, "<html")) {
+    content.clear();
+    return false;
+  }
+  return true;
+}
+
+int importItems(string_array &target, bool scope_limit, FetchContext context,
+                bool *request_rejected) {
   string_array result;
   std::stringstream ss;
   std::string path, content, strLine;
@@ -173,20 +227,12 @@ int importItems(string_array &target, bool scope_limit, FetchContext context) {
     }
     path = x.substr(x.find(":") + 1);
     writeLog(0, "正在导入项目：" + path);
-    content.clear();
-
-    ProxyPolicy proxy = parseProxy(global.proxyConfig);
-
-    if (fileExist(path, scope_limit) && canImportLocalPath(path, context))
-      content = fileGet(path, scope_limit);
-    else if (isLink(path))
-      content = webGet(path, proxy, global.cacheConfig, nullptr, nullptr,
-                       context);
-    else
-      writeLog(0, "文件不存在或不是有效 URL：" + path,
+    if (!fetchImportedContent(path, scope_limit, context, content,
+                              request_rejected)) {
+      writeLog(0, "文件不存在、被拒绝或不是有效 URL：" + path,
                LOG_LEVEL_ERROR);
-    if (content.empty())
       return -1;
+    }
 
     ss << content;
     char delimiter = getLineBreak(content);
@@ -209,20 +255,23 @@ int importItems(string_array &target, bool scope_limit, FetchContext context) {
   return 0;
 }
 
+int importItems(string_array &target, bool scope_limit, FetchContext context) {
+  return importItems(target, scope_limit, context, nullptr);
+}
+
 toml::value parseToml(const std::string &content, const std::string &fname) {
   std::istringstream is(content);
   return toml::parse(is, fname);
 }
 
-void importItems(std::vector<toml::value> &root, const std::string &import_key,
-                 bool scope_limit = true,
-                 FetchContext context = FetchContext::TrustedConfig) {
+int importItems(std::vector<toml::value> &root, const std::string &import_key,
+                bool scope_limit, FetchContext context,
+                bool *request_rejected) {
   std::string content;
   std::vector<toml::value> newRoot;
   auto iter = root.begin();
   size_t count = 0;
 
-  ProxyPolicy proxy = parseProxy(global.proxyConfig);
   while (iter != root.end()) {
     auto &table = iter->as_table();
     if (table.find("import") == table.end())
@@ -230,31 +279,41 @@ void importItems(std::vector<toml::value> &root, const std::string &import_key,
     else {
       const std::string &path = toml::get<std::string>(table.at("import"));
       writeLog(0, "正在导入项目：" + path);
-      content.clear();
-      if (fileExist(path, scope_limit) && canImportLocalPath(path, context))
-        content = fileGet(path, scope_limit);
-      else if (isLink(path))
-        content = webGet(path, proxy, global.cacheConfig, nullptr, nullptr,
-                         context);
-      else
-        writeLog(0, "文件不存在或不是有效 URL：" + path,
+      if (!fetchImportedContent(path, scope_limit, context, content,
+                                request_rejected)) {
+        writeLog(0, "文件不存在、被拒绝或不是有效 URL：" + path,
                  LOG_LEVEL_ERROR);
-      if (!content.empty()) {
-        auto items = parseToml(content, path);
-        auto list = toml::find<std::vector<toml::value>>(items, import_key);
-        count += list.size();
-        std::move(list.begin(), list.end(), std::back_inserter(newRoot));
+        if (request_rejected)
+          return -1;
+        iter++;
+        continue;
       }
+      auto items = parseToml(content, path);
+      auto list = toml::find<std::vector<toml::value>>(items, import_key);
+      count += list.size();
+      std::move(list.begin(), list.end(), std::back_inserter(newRoot));
     }
     iter++;
   }
   root.swap(newRoot);
   writeLog(0, "已导入 " + std::to_string(count) + " 个项目。");
+  return 0;
 }
 
-void readRegexMatch(YAML::Node node, const std::string &delimiter,
-                    string_array &dest, bool scope_limit = true,
-                    FetchContext context = FetchContext::TrustedConfig) {
+int importItems(std::vector<toml::value> &root, const std::string &import_key,
+                bool scope_limit, FetchContext context) {
+  return importItems(root, import_key, scope_limit, context, nullptr);
+}
+
+int importItems(std::vector<toml::value> &root, const std::string &import_key,
+                bool scope_limit) {
+  return importItems(root, import_key, scope_limit,
+                     FetchContext::TrustedConfig, nullptr);
+}
+
+int readRegexMatchWithFailure(
+    YAML::Node node, const std::string &delimiter, string_array &dest,
+    bool scope_limit, FetchContext context, bool *request_rejected) {
   for (auto &&object : node) {
     std::string script, url, match, rep, strLine;
     object["script"] >>= script;
@@ -275,11 +334,19 @@ void readRegexMatch(YAML::Node node, const std::string &delimiter,
       continue;
     dest.emplace_back(std::move(strLine));
   }
-  importItems(dest, scope_limit, context);
+  return importItems(dest, scope_limit, context, request_rejected);
 }
 
-void readEmoji(YAML::Node node, string_array &dest, bool scope_limit = true,
-               FetchContext context = FetchContext::TrustedConfig) {
+int readRegexMatch(YAML::Node node, const std::string &delimiter,
+                   string_array &dest, bool scope_limit = true,
+                   FetchContext context = FetchContext::TrustedConfig) {
+  return readRegexMatchWithFailure(node, delimiter, dest, scope_limit, context,
+                                   nullptr);
+}
+
+int readEmojiWithFailure(YAML::Node node, string_array &dest,
+                         bool scope_limit, FetchContext context,
+                         bool *request_rejected) {
   for (auto &&object : node) {
     std::string script, url, match, rep, strLine;
     object["script"] >>= script;
@@ -301,11 +368,17 @@ void readEmoji(YAML::Node node, string_array &dest, bool scope_limit = true,
       continue;
     dest.emplace_back(std::move(strLine));
   }
-  importItems(dest, scope_limit, context);
+  return importItems(dest, scope_limit, context, request_rejected);
 }
 
-void readGroup(YAML::Node node, string_array &dest, bool scope_limit = true,
-               FetchContext context = FetchContext::TrustedConfig) {
+int readEmoji(YAML::Node node, string_array &dest, bool scope_limit = true,
+              FetchContext context = FetchContext::TrustedConfig) {
+  return readEmojiWithFailure(node, dest, scope_limit, context, nullptr);
+}
+
+int readGroupWithFailure(YAML::Node node, string_array &dest,
+                         bool scope_limit, FetchContext context,
+                         bool *request_rejected) {
   for (YAML::Node &&object : node) {
     string_array tempArray;
     std::string name, type;
@@ -345,11 +418,17 @@ void readGroup(YAML::Node node, string_array &dest, bool scope_limit = true,
     std::string strLine = join(tempArray, "`");
     dest.emplace_back(std::move(strLine));
   }
-  importItems(dest, scope_limit, context);
+  return importItems(dest, scope_limit, context, request_rejected);
 }
 
-void readRuleset(YAML::Node node, string_array &dest, bool scope_limit = true,
-                 FetchContext context = FetchContext::TrustedConfig) {
+int readGroup(YAML::Node node, string_array &dest, bool scope_limit = true,
+              FetchContext context = FetchContext::TrustedConfig) {
+  return readGroupWithFailure(node, dest, scope_limit, context, nullptr);
+}
+
+int readRulesetWithFailure(YAML::Node node, string_array &dest,
+                           bool scope_limit, FetchContext context,
+                           bool *request_rejected) {
   for (auto &&object : node) {
     std::string strLine, name, url, group, interval;
     string_array options;
@@ -378,7 +457,12 @@ void readRuleset(YAML::Node node, string_array &dest, bool scope_limit = true,
       continue;
     dest.emplace_back(std::move(strLine));
   }
-  importItems(dest, scope_limit, context);
+  return importItems(dest, scope_limit, context, request_rejected);
+}
+
+int readRuleset(YAML::Node node, string_array &dest, bool scope_limit = true,
+                FetchContext context = FetchContext::TrustedConfig) {
+  return readRulesetWithFailure(node, dest, scope_limit, context, nullptr);
 }
 
 void refreshRulesets(RulesetConfigs &ruleset_list,
@@ -406,7 +490,9 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
             RULESET_SURGE,
             makeReadyStringFuture(rule_url.substr(pos)),
             0,
-            x.Options};
+            x.Options,
+            false,
+            nullptr};
     } else {
       ruleset_type type = RULESET_SURGE;
       rule_url_typed = rule_url;
@@ -423,6 +509,8 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
                      rule_group + "' 安全忽略。",
                  LOG_LEVEL_WARNING);
 
+      auto fetch_state = std::make_shared<RulesetFetchState>();
+
       writeLog(0,
                "正在更新规则集 URL：'" + rule_url + "'，策略组：'" +
                    rule_group + "'。",
@@ -430,11 +518,16 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
       rc = {rule_group,
             rule_url,
             rule_url_typed,
-            type,
-            fetchFileAsync(rule_url, proxy, global.cacheRuleset, true,
-                           global.asyncFetchRuleset, context),
-            x.Interval,
-            x.Options};
+             type,
+             fetchFileAsync(rule_url, proxy, global.cacheRuleset, true,
+                            global.asyncFetchRuleset, context,
+                            fetch_state),
+             x.Interval,
+             x.Options,
+             false,
+             nullptr};
+      rc.request_rejected = !isFetchUrlAllowed(rule_url, context);
+      rc.fetch_state = std::move(fetch_state);
     }
     ruleset_content_array.emplace_back(std::move(rc));
   }
@@ -1431,7 +1524,7 @@ bool readConf() {
 }
 
 int loadExternalYAML(YAML::Node &node, ExternalConfig &ext,
-                     FetchContext context) {
+                     FetchContext context, bool *request_rejected = nullptr) {
   YAML::Node section = node["custom"], object;
   std::string name, type, url, interval;
   std::string group, strLine;
@@ -1452,11 +1545,13 @@ int loadExternalYAML(YAML::Node &node, ExternalConfig &ext,
   section["ruleappend"] >> ext.rule_append_sources;
 
   const char *group_name = section["proxy_groups"].IsDefined()
-                               ? "proxy_groups"
-                               : "custom_proxy_group";
+                                ? "proxy_groups"
+                                : "custom_proxy_group";
   if (section[group_name].size()) {
     string_array vArray;
-    readGroup(section[group_name], vArray, global.APIMode, context);
+    if (readGroupWithFailure(section[group_name], vArray, global.APIMode,
+                             context, request_rejected) != 0)
+      return -1;
     ext.custom_proxy_group =
         INIBinding::from<ProxyGroupConfig>::from_ini(vArray);
   }
@@ -1465,7 +1560,9 @@ int loadExternalYAML(YAML::Node &node, ExternalConfig &ext,
       section["rulesets"].IsDefined() ? "rulesets" : "surge_ruleset";
   if (section[ruleset_name].size()) {
     string_array vArray;
-    readRuleset(section[ruleset_name], vArray, global.APIMode, context);
+    if (readRulesetWithFailure(section[ruleset_name], vArray, global.APIMode,
+                               context, request_rejected) != 0)
+      return -1;
     if (global.maxAllowedRulesets &&
         vArray.size() > global.maxAllowedRulesets) {
       writeLog(0, "外部配置中的规则集数量已超过限制。",
@@ -1477,8 +1574,10 @@ int loadExternalYAML(YAML::Node &node, ExternalConfig &ext,
 
   if (section["rename_node"].size()) {
     string_array vArray;
-    readRegexMatch(section["rename_node"], "@", vArray, global.APIMode,
-                   context);
+    if (readRegexMatchWithFailure(section["rename_node"], "@", vArray,
+                                  global.APIMode, context,
+                                  request_rejected) != 0)
+      return -1;
     ext.rename = INIBinding::from<RegexMatchConfig>::from_ini(vArray, "@");
   }
 
@@ -1487,7 +1586,9 @@ int loadExternalYAML(YAML::Node &node, ExternalConfig &ext,
   const char *emoji_name = section["emojis"].IsDefined() ? "emojis" : "emoji";
   if (section[emoji_name].size()) {
     string_array vArray;
-    readEmoji(section[emoji_name], vArray, global.APIMode, context);
+    if (readEmojiWithFailure(section[emoji_name], vArray, global.APIMode,
+                             context, request_rejected) != 0)
+      return -1;
     ext.emoji = INIBinding::from<RegexMatchConfig>::from_ini(vArray, ",");
   }
 
@@ -1507,7 +1608,7 @@ int loadExternalYAML(YAML::Node &node, ExternalConfig &ext,
 }
 
 int loadExternalTOML(toml::value &root, ExternalConfig &ext,
-                     FetchContext context) {
+                     FetchContext context, bool *request_rejected = nullptr) {
   auto section = toml::find(root, "custom");
   bool import_scope_limit = isPublicFetchRestricted(context) ? global.APIMode
                                                             : false;
@@ -1536,11 +1637,15 @@ int loadExternalTOML(toml::value &root, ExternalConfig &ext,
 
   auto groups =
       toml::find_or<std::vector<toml::value>>(root, "custom_groups", {});
-  importItems(groups, "custom_groups", import_scope_limit, context);
+  if (importItems(groups, "custom_groups", import_scope_limit, context,
+                  request_rejected) != 0)
+    return -1;
   ext.custom_proxy_group = toml::get<ProxyGroupConfigs>(toml::value(groups));
 
   auto rulesets = toml::find_or<std::vector<toml::value>>(root, "rulesets", {});
-  importItems(rulesets, "rulesets", import_scope_limit, context);
+  if (importItems(rulesets, "rulesets", import_scope_limit, context,
+                  request_rejected) != 0)
+    return -1;
   if (global.maxAllowedRulesets &&
       rulesets.size() > global.maxAllowedRulesets) {
     writeLog(0, "外部配置中的规则集数量已超过限制。",
@@ -1550,12 +1655,16 @@ int loadExternalTOML(toml::value &root, ExternalConfig &ext,
   ext.surge_ruleset = toml::get<RulesetConfigs>(toml::value(rulesets));
 
   auto emojiconfs = toml::find_or<std::vector<toml::value>>(root, "emoji", {});
-  importItems(emojiconfs, "emoji", import_scope_limit, context);
+  if (importItems(emojiconfs, "emoji", import_scope_limit, context,
+                  request_rejected) != 0)
+    return -1;
   ext.emoji = toml::get<RegexMatchConfigs>(toml::value(emojiconfs));
 
   auto renameconfs =
       toml::find_or<std::vector<toml::value>>(root, "rename_node", {});
-  importItems(renameconfs, "rename_node", import_scope_limit, context);
+  if (importItems(renameconfs, "rename_node", import_scope_limit, context,
+                  request_rejected) != 0)
+    return -1;
   ext.rename = toml::get<RegexMatchConfigs>(toml::value(renameconfs));
 
   return 0;
@@ -1564,15 +1673,16 @@ int loadExternalTOML(toml::value &root, ExternalConfig &ext,
 static int parseExternalConfigContent(const std::string &path,
                                       const std::string &base_content,
                                       ExternalConfig &ext,
-                                      FetchContext context) {
+                                      FetchContext context,
+                                      bool *request_rejected = nullptr) {
   ext.rule_sources_context = context;
   try {
     YAML::Node yaml = YAML::Load(base_content);
     if (yaml.size() && yaml["custom"].IsDefined())
-      return loadExternalYAML(yaml, ext, context);
+      return loadExternalYAML(yaml, ext, context, request_rejected);
     toml::value conf = parseToml(base_content, path);
     if (!conf.is_empty() && toml::find_or<int>(conf, "version", 0))
-      return loadExternalTOML(conf, ext, context);
+      return loadExternalTOML(conf, ext, context, request_rejected);
   } catch (YAML::Exception &e) {
     // ignore
   } catch (toml::exception &e) {
@@ -1596,7 +1706,8 @@ static int parseExternalConfigContent(const std::string &path,
   if (ini.item_prefix_exist("custom_proxy_group")) {
     string_array vArray;
     ini.get_all("custom_proxy_group", vArray);
-    importItems(vArray, global.APIMode, context);
+    if (importItems(vArray, global.APIMode, context, request_rejected) != 0)
+      return -1;
     ext.custom_proxy_group =
         INIBinding::from<ProxyGroupConfig>::from_ini(vArray);
   }
@@ -1605,7 +1716,8 @@ static int parseExternalConfigContent(const std::string &path,
   if (ini.item_prefix_exist(ruleset_name)) {
     string_array vArray;
     ini.get_all(ruleset_name, vArray);
-    importItems(vArray, global.APIMode, context);
+    if (importItems(vArray, global.APIMode, context, request_rejected) != 0)
+      return -1;
     if (global.maxAllowedRulesets &&
         vArray.size() > global.maxAllowedRulesets) {
       writeLog(0, "外部配置中的规则集数量已超过限制。",
@@ -1634,7 +1746,8 @@ static int parseExternalConfigContent(const std::string &path,
   if (ini.item_prefix_exist("rename")) {
     string_array vArray;
     ini.get_all("rename", vArray);
-    importItems(vArray, global.APIMode, context);
+    if (importItems(vArray, global.APIMode, context, request_rejected) != 0)
+      return -1;
     ext.rename = INIBinding::from<RegexMatchConfig>::from_ini(vArray, "@");
   }
   ext.add_emoji = ini.get("add_emoji");
@@ -1642,7 +1755,8 @@ static int parseExternalConfigContent(const std::string &path,
   if (ini.item_prefix_exist("emoji")) {
     string_array vArray;
     ini.get_all("emoji", vArray);
-    importItems(vArray, global.APIMode, context);
+    if (importItems(vArray, global.APIMode, context, request_rejected) != 0)
+      return -1;
     ext.emoji = INIBinding::from<RegexMatchConfig>::from_ini(vArray, ",");
   }
   if (ini.item_prefix_exist("include_remarks"))
@@ -1670,6 +1784,7 @@ constexpr const char *kExternalConfigParserIdentity =
 
 struct CachedExternalConfig {
   int result = -1;
+  bool request_rejected = false;
   ExternalConfig config;
   string_map local_vars;
   size_t cache_bytes = 0;
@@ -1810,8 +1925,8 @@ int loadExternalConfigWithOutcome(std::string &path, ExternalConfig &ext,
         parsed_tpl_args.local_vars.clear();
         ExternalConfig parsed;
         parsed.tpl_args = &parsed_tpl_args;
-        value.result =
-            parseExternalConfigContent(path, base_content, parsed, context);
+        value.result = parseExternalConfigContent(
+            path, base_content, parsed, context, &value.request_rejected);
         value.local_vars = std::move(parsed_tpl_args.local_vars);
         parsed.tpl_args = nullptr;
         value.config = std::move(parsed);
@@ -1831,8 +1946,16 @@ int loadExternalConfigWithOutcome(std::string &path, ExternalConfig &ext,
   ext.tpl_args = request_tpl_args;
   for (const auto &[name, value] : cached.local_vars)
     request_tpl_args->local_vars[name] = value;
-  if (fetch_outcome && cached.result != 0)
-    markExternalConfigContentInvalid(fetch_outcome);
+  if (fetch_outcome && cached.result != 0) {
+    if (cached.request_rejected) {
+      fetch_outcome->success = false;
+      fetch_outcome->status_code = 403;
+      fetch_outcome->failure = FetchFailureCategory::RequestRejected;
+      fetch_outcome->failure_reason = "request_rejected";
+    } else {
+      markExternalConfigContentInvalid(fetch_outcome);
+    }
+  }
   return cached.result;
 }
 

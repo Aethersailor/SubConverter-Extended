@@ -601,7 +601,7 @@ def external_config_policy_baseline(binary: Path, fixture_base: str) -> None:
             raise AssertionError("explicit default external fallback did not apply")
 
         status, _, headers = request(base_url, "/sub", {**common, "config": forbidden})
-        if status != 502 or "no-store" not in headers.get("cache-control", ""):
+        if status != 403 or "no-store" not in headers.get("cache-control", ""):
             raise AssertionError("permission-denied user config incorrectly used default fallback")
 
         status, body, _ = request(
@@ -615,6 +615,139 @@ def external_config_policy_baseline(binary: Path, fixture_base: str) -> None:
         external = report.get("external_config", {})
         if not external.get("fallback_used") or not external.get("attempts"):
             raise AssertionError("explain response omitted external source attempts")
+
+        broken_base_content = (
+            "[custom]\n"
+            "enable_rule_generator=false\n"
+            f"clash_rule_base={fixture_base}/missing-base.yml\n"
+        )
+        broken_base = "data:text/plain;base64," + base64.urlsafe_b64encode(
+            broken_base_content.encode()
+        ).decode()
+        conversion_common = {key: value for key, value in common.items() if key != "list"}
+        status, body, _ = request(
+            base_url, "/sub", {**conversion_common, "config": broken_base}
+        )
+        if status != 200 or b"proxy-providers:" not in body:
+            raise AssertionError(
+                "default fallback did not recover an external base failure"
+            )
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {**conversion_common, "config": broken_base, "explain": "true"},
+        )
+        if status != 200 or not json.loads(body).get("external_config", {}).get(
+            "fallback_used"
+        ):
+            raise AssertionError(
+                "external base fallback was not recorded in explain output"
+            )
+
+        broken_import_content = (
+            "[custom]\n"
+            "enable_rule_generator=false\n"
+            f"custom_proxy_group=!!import:{fixture_base}/missing-import.ini\n"
+        )
+        broken_import = "data:text/plain;base64," + base64.urlsafe_b64encode(
+            broken_import_content.encode()
+        ).decode()
+        status, body, _ = request(
+            base_url, "/sub", {**conversion_common, "config": broken_import}
+        )
+        if status != 200 or b"proxy-providers:" not in body:
+            raise AssertionError(
+                "default fallback did not recover an external import failure"
+            )
+        rejected_import_content = (
+            "[custom]\n"
+            "enable_rule_generator=false\n"
+            f"custom_proxy_group=!!import:{fixture_base}/external-forbidden.ini\n"
+        )
+        rejected_import = "data:text/plain;base64," + base64.urlsafe_b64encode(
+            rejected_import_content.encode()
+        ).decode()
+        status, _, headers = request(
+            base_url, "/sub", {**conversion_common, "config": rejected_import}
+        )
+        if status != 403 or "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError(
+                "request-rejected external import incorrectly used default fallback"
+            )
+
+        rejected_base_content = (
+            "[custom]\n"
+            "enable_rule_generator=false\n"
+            f"clash_rule_base={fixture_base}/external-forbidden.ini\n"
+        )
+        rejected_base = "data:text/plain;base64," + base64.urlsafe_b64encode(
+            rejected_base_content.encode()
+        ).decode()
+        status, _, headers = request(
+            base_url, "/sub", {**conversion_common, "config": rejected_base}
+        )
+        if status != 403 or "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError(
+                "request-rejected external base incorrectly used default fallback"
+            )
+
+        broken_ruleset_content = (
+            "[custom]\n"
+            "enable_rule_generator=true\n"
+            "overwrite_original_rules=true\n"
+            f"ruleset=Proxy,clash-domain:{fixture_base}/missing-rules.yml\n"
+        )
+        broken_ruleset = "data:text/plain;base64," + base64.urlsafe_b64encode(
+            broken_ruleset_content.encode()
+        ).decode()
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {**conversion_common, "config": broken_ruleset, "expand": "true"},
+        )
+        if status != 200 or b"proxy-providers:" not in body:
+            raise AssertionError(
+                "default fallback did not recover an external ruleset failure"
+            )
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {
+                **conversion_common,
+                "config": broken_ruleset,
+                "expand": "true",
+                "explain": "true",
+            },
+        )
+        if status != 200 or not json.loads(body).get("external_config", {}).get(
+            "fallback_used"
+        ):
+            raise AssertionError(
+                "external ruleset fallback was not recorded in explain output"
+            )
+
+        rejected_ruleset_content = (
+            "[custom]\n"
+            "enable_rule_generator=true\n"
+            "overwrite_original_rules=true\n"
+            f"ruleset=Proxy,clash-domain:{fixture_base}/external-forbidden.ini\n"
+        )
+        rejected_ruleset = "data:text/plain;base64," + base64.urlsafe_b64encode(
+            rejected_ruleset_content.encode()
+        ).decode()
+        status, _, headers = request(
+            base_url,
+            "/sub",
+            {
+                **conversion_common,
+                "config": rejected_ruleset,
+                "expand": "true",
+            },
+        )
+        if status != 403 or "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError(
+                "request-rejected external ruleset incorrectly used default fallback"
+            )
 
 
 def main() -> int:

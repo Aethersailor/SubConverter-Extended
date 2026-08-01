@@ -6,12 +6,19 @@
 #include <future>
 #include <cstdint>
 #include <cstddef>
+#include <atomic>
+#include <memory>
 
 #include <yaml-cpp/yaml.h>
 #include <rapidjson/document.h>
 
 #include "config/ruleset.h"
 #include "utils/ini_reader/ini_reader.h"
+
+struct RulesetFetchState {
+    std::atomic<int> status_code{0};
+    std::atomic<bool> request_rejected{false};
+};
 
 struct RulesetContent
 {
@@ -22,6 +29,8 @@ struct RulesetContent
     std::shared_future<std::string> rule_content;
     int update_interval = 0;
     RulesetOptions options;
+    bool request_rejected = false;
+    std::shared_ptr<RulesetFetchState> fetch_state;
 };
 
 struct RuleConversionStats
