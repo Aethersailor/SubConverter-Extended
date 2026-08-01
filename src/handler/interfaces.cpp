@@ -2172,7 +2172,19 @@ static std::string subconverter_impl(Request &request, Response &response,
         lRulesetContent = global.rulesetsContent;
     }
     for (const RulesetContent &ruleset : lRulesetContent) {
-      if (!ruleset.rule_path.empty() && ruleset.rule_content.get().empty()) {
+      const bool provider_rule_type =
+          ruleset.rule_type == RULESET_CLASH_DOMAIN ||
+          ruleset.rule_type == RULESET_CLASH_IPCIDR ||
+          ruleset.rule_type == RULESET_CLASH_CLASSICAL;
+      const bool provider_mode =
+          !argExpandRulesets.get(false) &&
+          (ext.clash_script || !ext.managed_config_prefix.empty()) &&
+          provider_rule_type;
+      // Provider-mode Clash rule sets are intentionally client-side pulls;
+      // they do not require the server to download their content. All other
+      // rule-set paths are server-side inputs and remain fail-closed.
+      if (!ruleset.rule_path.empty() && !provider_mode &&
+          ruleset.rule_content.get().empty()) {
         *status_code = 502;
         response.headers["Cache-Control"] = "no-store";
         response.headers["X-Subconverter-No-Retry"] = "1";
