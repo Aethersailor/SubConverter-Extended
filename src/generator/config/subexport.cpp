@@ -2014,11 +2014,14 @@ std::string proxyToSSSub(std::string base_conf, std::vector<Proxy> &nodes,
     base_conf = "{}";
   rapidjson::ParseResult result = base.Parse(base_conf.data());
   if (!result)
+  {
     writeLog(0,
              std::string("SIP008 基础配置加载失败：") +
                  rapidjson::GetParseError_En(result.Code()) + " (" +
                  std::to_string(result.Offset()) + ")",
              LOG_LEVEL_ERROR);
+    return "";
+  }
 
   rapidjson::Value proxies(rapidjson::kArrayType);
   for (Proxy &x : nodes) {

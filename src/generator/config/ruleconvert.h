@@ -47,7 +47,21 @@ struct RuleConversionStats
     }
 };
 
+struct RulesetValidationResult
+{
+    size_t valid_count = 0;
+    size_t invalid_count = 0;
+    std::string failure_reason;
+
+    bool valid() const
+    {
+        return valid_count > 0 && invalid_count == 0;
+    }
+};
+
 std::string convertRuleset(const std::string &content, int type);
+RulesetValidationResult validateRulesetEntries(const std::string &content,
+                                               ruleset_type type);
 size_t countValidRulesetEntries(const std::string &content,
                                 ruleset_type type);
 size_t rulesetConversionCacheMaxEntries();

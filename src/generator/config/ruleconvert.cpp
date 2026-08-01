@@ -216,6 +216,82 @@ static bool validRuleAddress(const std::string &value, bool ipv6_only,
 }
 
 static bool validRuleLine(const std::string &line,
+                          const string_array &known_types);
+
+static bool unwrapRuleExpression(const std::string &value,
+                                 std::string &inner)
+{
+    const std::string normalized = trimWhitespace(value, true, true);
+    if(normalized.size() < 2 || normalized.front() != '(' ||
+       normalized.back() != ')')
+        return false;
+
+    int parentheses = 0;
+    char quote = '\0';
+    bool escaped = false;
+    for(size_t index = 0; index < normalized.size(); ++index)
+    {
+        const char character = normalized[index];
+        if(quote != '\0')
+        {
+            if(escaped)
+                escaped = false;
+            else if(character == '\\')
+                escaped = true;
+            else if(character == quote)
+                quote = '\0';
+            continue;
+        }
+        if(character == '\'' || character == '"')
+        {
+            quote = character;
+            continue;
+        }
+        if(character == '(')
+            ++parentheses;
+        else if(character == ')')
+        {
+            if(parentheses == 0)
+                return false;
+            --parentheses;
+            if(parentheses == 0 && index + 1 != normalized.size())
+                return false;
+        }
+    }
+    if(quote != '\0' || parentheses != 0)
+        return false;
+    inner = normalized.substr(1, normalized.size() - 2);
+    return !trimWhitespace(inner, true, true).empty();
+}
+
+static bool validCompoundExpression(const std::string &expression,
+                                    const string_array &known_types,
+                                    size_t minimum_components)
+{
+    std::string inner;
+    if(!unwrapRuleExpression(expression, inner))
+        return false;
+    string_array components;
+    if(!splitRuleFieldsStrict(inner, components) ||
+       components.size() < minimum_components)
+        return false;
+    for(const std::string &component : components)
+    {
+        const std::string normalized = trimWhitespace(component, true, true);
+        if(normalized.empty())
+            return false;
+        if(normalized.front() == '(')
+        {
+            if(!validCompoundExpression(normalized, known_types, 1))
+                return false;
+        }
+        else if(!validRuleLine(normalized, known_types))
+            return false;
+    }
+    return true;
+}
+
+static bool validRuleLine(const std::string &line,
                           const string_array &known_types)
 {
     string_array fields;
@@ -241,32 +317,43 @@ static bool validRuleLine(const std::string &line,
         return false;
     if(type == "AND" || type == "OR" || type == "NOT")
     {
-        if(fields.size() < 3)
+        if(fields.size() != 3)
             return false;
-        for(size_t index = 1; index + 1 < fields.size(); ++index)
-        {
-            const std::string &expression = fields[index];
-            if(expression.front() != '(' || expression.back() != ')')
-                return false;
-            string_array nested;
-            if(!splitRuleFieldsStrict(
-                   expression.substr(1, expression.size() - 2), nested) ||
-               nested.size() < 2 || nested.front().empty() ||
-               nested[1].empty())
-                return false;
-        }
+        const size_t minimum_components = type == "NOT" ? 1 : 2;
+        if(!validCompoundExpression(fields[1], known_types,
+                                     minimum_components))
+            return false;
     }
     return true;
 }
 
-size_t countValidRulesetEntries(const std::string &content,
-                                ruleset_type type)
+static bool validInlineRuleLine(const std::string &line,
+                                const string_array &known_types)
 {
+    const std::string payload = trimWhitespace(line.substr(2), true, true);
+    if(payload.empty())
+        return false;
+    string_array fields;
+    if(!splitRuleFieldsStrict(payload, fields))
+        return false;
+    if(fields.size() == 1)
+    {
+        const std::string type = toUpper(fields.front());
+        return type == "FINAL" || type == "MATCH";
+    }
+    return validRuleLine(payload, known_types);
+}
+
+RulesetValidationResult validateRulesetEntries(const std::string &content,
+                                               ruleset_type type)
+{
+    RulesetValidationResult result;
     const std::string trimmed = trimWhitespace(content, true, true);
     if (trimmed.empty())
-        return 0;
-    if (startsWith(trimmed, "[]"))
-        return trimmed.size() > 2 ? 1 : 0;
+    {
+        result.failure_reason = "empty";
+        return result;
+    }
 
     const string_array *known_types = &SurgeRuleTypes;
     switch (type)
@@ -288,7 +375,6 @@ size_t countValidRulesetEntries(const std::string &content,
     std::stringstream stream(converted);
     const char delimiter = getLineBreak(converted);
     std::string line;
-    size_t valid = 0;
     while (std::getline(stream, line, delimiter))
     {
         line = trimWhitespace(line, true, true);
@@ -298,10 +384,29 @@ size_t countValidRulesetEntries(const std::string &content,
         const std::string::size_type comment = line.find("//");
         if (comment != std::string::npos)
             line = trimWhitespace(line.substr(0, comment), true, true);
-        if (validRuleLine(line, *known_types))
-            ++valid;
+        if (line.empty())
+            continue;
+        const bool valid = startsWith(line, "[]")
+                               ? validInlineRuleLine(line, *known_types)
+                               : validRuleLine(line, *known_types);
+        if (valid)
+            ++result.valid_count;
+        else
+        {
+            ++result.invalid_count;
+            if (result.failure_reason.empty())
+                result.failure_reason = "invalid_rule";
+        }
     }
-    return valid;
+    if (result.valid_count == 0 && result.invalid_count == 0)
+        result.failure_reason = "no_rules";
+    return result;
+}
+
+size_t countValidRulesetEntries(const std::string &content,
+                                ruleset_type type)
+{
+    return validateRulesetEntries(content, type).valid_count;
 }
 
 size_t rulesetConversionCacheMaxEntries()
