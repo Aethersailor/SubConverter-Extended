@@ -883,12 +883,72 @@ def external_config_policy_baseline(binary: Path, fixture_base: str) -> None:
     valid = fixture_base + "/external-valid.ini"
     common = {"target": "clash", "url": fixture_base + "/subscription.txt", "list": "true"}
     with running_service(binary) as base_url:
-        status, _, headers = request(base_url, "/sub", {**common, "config": invalid})
-        if status != 502 or "no-store" not in headers.get("cache-control", ""):
-            raise AssertionError("invalid user external config was not fail-closed")
+        status, body, headers = request(
+            base_url, "/sub", {**common, "config": invalid}
+        )
+        if (
+            status != 400
+            or "no-store" not in headers.get("cache-control", "")
+            or not headers.get("content-type", "").lower().startswith(
+                "text/plain; charset=utf-8"
+            )
+            or b"External configuration error" not in body
+            or "外部配置错误".encode() not in body
+            or b"fallback is disabled" not in body
+            or "回退已关闭".encode() not in body
+            or b"explain=true" not in body
+        ):
+            raise AssertionError(
+                "invalid user external config did not return a bilingual "
+                f"diagnostic page: status={status}, body={body[:500]!r}"
+            )
+
+        missing = fixture_base + "/missing-config.ini"
+        status, body, headers = request(
+            base_url, "/sub", {**common, "config": missing}
+        )
+        if (
+            status != 400
+            or "no-store" not in headers.get("cache-control", "")
+            or b"HTTP 404" not in body
+            or "链接及内容".encode() not in body
+        ):
+            raise AssertionError(
+                "missing user config did not return an actionable bilingual page"
+            )
         status, body, _ = request(base_url, "/sub", {**common, "config": valid})
         if status != 200 or b"Smoke" not in body:
             raise AssertionError("valid user external config did not apply")
+
+    with running_service(binary, default_external_config=invalid) as base_url:
+        status, body, headers = request(base_url, "/sub", common)
+        if (
+            status != 400
+            or "no-store" not in headers.get("cache-control", "")
+            or b"No config parameter was supplied" not in body
+            or "请求未提供 config 参数".encode() not in body
+            or b"no effective settings" not in body
+        ):
+            raise AssertionError(
+                "failed default config without a request config did not return "
+                "a bilingual diagnostic page"
+            )
+
+        status, body, headers = request(
+            base_url, "/sub", {**common, "explain": "true"}
+        )
+        if (
+            status != 400
+            or not headers.get("content-type", "").lower().startswith(
+                "application/json"
+            )
+            or json.loads(body).get("external_config", {}).get(
+                "failure_reason"
+            ) != "content_invalid"
+        ):
+            raise AssertionError(
+                "failed default config explain response lost structured diagnostics"
+            )
 
     with running_service(
         binary,
@@ -1065,7 +1125,7 @@ def external_import_cache_baseline(binary: Path, fixture_base: str) -> None:
     FixtureHandler.reset_counters()
     with running_service(binary) as base_url:
         status, _, _ = request(base_url, "/sub", {**common, "config": config_url})
-        if status != 502:
+        if status != 400:
             raise AssertionError("invalid imported HTML did not fail closed")
         status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
         if status != 200 or b"proxies:" not in body:
@@ -1099,7 +1159,7 @@ def external_import_semantic_cache_baseline(binary: Path, fixture_base: str) -> 
     FixtureHandler.reset_counters()
     with running_service(binary) as base_url:
         status, _, headers = request(base_url, "/sub", {**common, "config": config_url})
-        if status != 502 or "no-store" not in headers.get("cache-control", ""):
+        if status != 400 or "no-store" not in headers.get("cache-control", ""):
             raise AssertionError("semantically invalid imported content was not rejected")
         status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
         if status != 200 or b"proxies:" not in body:
@@ -1160,7 +1220,7 @@ def template_dependency_cache_baseline(binary: Path, fixture_base: str) -> None:
     FixtureHandler.reset_counters()
     with running_service(binary) as base_url:
         status, _, headers = request(base_url, "/sub", {**common, "config": config_url})
-        if status != 502 or "no-store" not in headers.get("cache-control", ""):
+        if status != 400 or "no-store" not in headers.get("cache-control", ""):
             raise AssertionError("invalid template dependency was not fail-closed")
         status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
         if status != 200 or b"proxies:" not in body:
@@ -1194,7 +1254,7 @@ def template_static_dependency_failure_baseline(
     FixtureHandler.reset_counters()
     with running_service(binary) as base_url:
         status, _, headers = request(base_url, "/sub", {**common, "config": config_url})
-        if status != 502 or "no-store" not in headers.get("cache-control", ""):
+        if status != 400 or "no-store" not in headers.get("cache-control", ""):
             raise AssertionError(
                 "static template content masked a failed fetch dependency"
             )
@@ -1781,7 +1841,7 @@ def external_regex_import_baseline(
     FixtureHandler.reset_counters()
     with running_service(binary) as base_url:
         status, _, headers = request(base_url, "/sub", {**common, "config": config_url})
-        if status != 502 or "no-store" not in headers.get("cache-control", ""):
+        if status != 400 or "no-store" not in headers.get("cache-control", ""):
             kind = "YAML" if yaml else "INI"
             raise AssertionError(f"invalid {kind} imported regex was not rejected")
         status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
@@ -1817,7 +1877,7 @@ def toml_import_semantic_baseline(
     FixtureHandler.reset_counters()
     with running_service(binary) as base_url:
         status, _, headers = request(base_url, "/sub", {**common, "config": config_url})
-        if status != 502 or "no-store" not in headers.get("cache-control", ""):
+        if status != 400 or "no-store" not in headers.get("cache-control", ""):
             kind = "empty" if empty else "malformed"
             raise AssertionError(f"TOML {kind} import was not rejected for {key}")
         status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
@@ -1853,7 +1913,7 @@ def default_dependency_single_execution_baseline(
         status, _, headers = request(
             base_url, "/sub", {**common, "config": user_config_url}
         )
-        if status != 502 or "no-store" not in headers.get("cache-control", ""):
+        if status != 400 or "no-store" not in headers.get("cache-control", ""):
             raise AssertionError("failed default dependency chain was not fail-closed")
 
     if FixtureHandler.request_counts.get("/fallback-default.ini") != 1:
