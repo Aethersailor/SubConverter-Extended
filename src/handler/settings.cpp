@@ -4,7 +4,6 @@
 #include <filesystem>
 
 #include "config/binding.h"
-#include "config/custom_openclash_rules.h"
 #include "handler/webget.h"
 #include "interfaces.h"
 #include "multithread.h"
@@ -30,23 +29,6 @@ const std::map<std::string, ruleset_type> RulesetTypes = {
     {"clash-classic:", RULESET_CLASH_CLASSICAL},
     {"quanx:", RULESET_QUANX},
     {"surge:", RULESET_SURGE}};
-
-static std::shared_future<std::string>
-makeReadyRulesetContent(std::string content = "") {
-  std::promise<std::string> promise;
-  promise.set_value(std::move(content));
-  return promise.get_future().share();
-}
-
-static std::string findBundledCustomOpenClashResource(
-    const custom_openclash_rules::Resource &resource) {
-  for (const std::string &candidate :
-       custom_openclash_rules::localPathCandidates(resource)) {
-    if (fileExist(candidate, true))
-      return candidate;
-  }
-  return "";
-}
 
 static bool parseBoolSetting(const std::string &value) {
   std::string normalized = toLower(trimWhitespace(value, true, true));
@@ -160,9 +142,7 @@ bool isPublicFetchRestricted(FetchContext context) {
 
 bool isTrustedLocalResourcePath(const std::string &path) {
   return pathInsideRoot(path, global.basePath) ||
-         pathInsideRoot(path, global.templatePath) ||
-         pathInsideRoot(path, "Custom_OpenClash_Rules") ||
-         pathInsideRoot(path, "base/Custom_OpenClash_Rules");
+         pathInsideRoot(path, global.templatePath);
 }
 
 bool isPublicUploadAllowed() {
@@ -430,14 +410,12 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
     } else {
       ruleset_type type = RULESET_SURGE;
       rule_url_typed = rule_url;
-      std::string type_prefix;
       auto iter = std::find_if(
           RulesetTypes.begin(), RulesetTypes.end(),
           [rule_url](auto y) { return startsWith(rule_url, y.first); });
       if (iter != RulesetTypes.end()) {
         rule_url.erase(0, iter->first.size());
         type = iter->second;
-        type_prefix = iter->first;
       }
       if (x.Options.no_resolve && type != RULESET_CLASH_IPCIDR)
         writeLog(0,
@@ -445,63 +423,6 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
                      rule_group + "' 安全忽略。",
                  LOG_LEVEL_WARNING);
 
-      if (global.customOpenClashRulesFallback) {
-        custom_openclash_rules::Resource resource =
-            custom_openclash_rules::matchRepositoryUrl(rule_url);
-        std::string bundled_path =
-            findBundledCustomOpenClashResource(resource);
-
-        if (resource.kind ==
-                custom_openclash_rules::ResourceKind::RuleList &&
-            !bundled_path.empty()) {
-          writeLog(0,
-                   "规则集命中 Custom_OpenClash_Rules 本地副本：'" +
-                       resource.repository_path + "'，策略组：'" +
-                       rule_group + "'。",
-                   LOG_LEVEL_INFO);
-          rc = {rule_group,
-                bundled_path,
-                rule_url_typed,
-                type,
-                fetchFileAsync(bundled_path, proxy, global.cacheRuleset, true,
-                               global.asyncFetchRuleset,
-                               FetchContext::TrustedConfig),
-                x.Interval,
-                x.Options};
-          ruleset_content_array.emplace_back(std::move(rc));
-          continue;
-        }
-
-        bool clash_provider =
-            type == RULESET_CLASH_DOMAIN || type == RULESET_CLASH_IPCIDR ||
-            type == RULESET_CLASH_CLASSICAL;
-        if (clash_provider &&
-            custom_openclash_rules::isDirectProvider(resource) &&
-            !bundled_path.empty()) {
-          std::string published_url =
-              custom_openclash_rules::publishedUrl(
-                  resource, global.managedConfigPrefix);
-          if (!published_url.empty()) {
-            writeLog(0,
-                     "规则集命中 Custom_OpenClash_Rules 静态发布地址：'" +
-                         published_url + "'，策略组：'" + rule_group + "'。",
-                     LOG_LEVEL_INFO);
-            rc = {rule_group,
-                  published_url,
-                  type_prefix + published_url,
-                  type,
-                  makeReadyRulesetContent(),
-                  x.Interval,
-                  x.Options};
-            ruleset_content_array.emplace_back(std::move(rc));
-            continue;
-          }
-          writeLog(0,
-                   "Custom_OpenClash_Rules 回落已开启，但 "
-                   "managed_config_prefix 为空，无法改写规则链接。",
-                   LOG_LEVEL_WARNING);
-        }
-      }
       writeLog(0,
                "正在更新规则集 URL：'" + rule_url + "'，策略组：'" +
                    rule_group + "'。",
@@ -568,12 +489,8 @@ void readYAMLConf(YAML::Node &node) {
   section["singbox_rule_base"] >> global.singBoxBase;
 
   section["default_external_config"] >> global.defaultExtConfig;
-  // Set hardcoded default if not configured or empty
-  if (global.defaultExtConfig.empty()) {
-    global.defaultExtConfig =
-        "https://gcore.jsdelivr.net/gh/Aethersailor/"
-        "Custom_OpenClash_Rules@refs/heads/main/cfg/Custom_Clash.ini";
-  }
+  section["fallback_to_default_external_config"] >>
+      global.fallbackToDefaultExternalConfig;
   section["append_proxy_type"] >> global.appendType;
   section["proxy_config"] >> global.proxyConfig;
   section["proxy_ruleset"] >> global.proxyRuleset;
@@ -584,8 +501,6 @@ void readYAMLConf(YAML::Node &node) {
     section = node["custom_openclash_rules"];
     section["fallback_enabled"] >>
         global.customOpenClashRulesFallback;
-    section["publish_enabled"] >>
-        global.customOpenClashRulesPublish;
   }
 
   if (node["userinfo"].IsDefined()) {
@@ -879,14 +794,10 @@ void readTOMLConf(toml::value &root) {
       global.SSSubBase, "singbox_rule_base", global.singBoxBase, "proxy_config",
       global.proxyConfig, "proxy_ruleset", global.proxyRuleset,
       "proxy_subscription", global.proxySubscription, "append_proxy_type",
-      global.appendType, "reload_conf_on_request", global.reloadConfOnRequest);
+      global.appendType, "reload_conf_on_request", global.reloadConfOnRequest,
+      "fallback_to_default_external_config",
+      global.fallbackToDefaultExternalConfig);
 
-  // Set hardcoded default if not configured or empty (TOML)
-  if (global.defaultExtConfig.empty()) {
-    global.defaultExtConfig =
-        "https://gcore.jsdelivr.net/gh/Aethersailor/"
-        "Custom_OpenClash_Rules@refs/heads/main/cfg/Custom_Clash.ini";
-  }
 
   if (filter)
     find_if_exist(section_common, "filter_script", global.filterScript);
@@ -898,8 +809,6 @@ void readTOMLConf(toml::value &root) {
                     toml::value(toml::table()));
   find_if_exist(section_custom_openclash, "fallback_enabled",
                 global.customOpenClashRulesFallback);
-  find_if_exist(section_custom_openclash, "publish_enabled",
-                global.customOpenClashRulesPublish);
 
   safe_set_streams(toml::find_or<RegexMatchConfigs>(
       root, "userinfo", "stream_rule", RegexMatchConfigs{}));
@@ -1127,7 +1036,7 @@ bool readConf() {
     global.dashboardAuthWindowSeconds = 300;
     global.dashboardAuthLockSeconds = 900;
     global.customOpenClashRulesFallback = false;
-    global.customOpenClashRulesPublish = false;
+    global.fallbackToDefaultExternalConfig = false;
   };
 
   std::string prefdata;
@@ -1247,12 +1156,8 @@ bool readConf() {
   ini.get_if_exist("sssub_rule_base", global.SSSubBase);
   ini.get_if_exist("singbox_rule_base", global.singBoxBase);
   ini.get_if_exist("default_external_config", global.defaultExtConfig);
-  // Set hardcoded default if not configured or empty
-  if (global.defaultExtConfig.empty()) {
-    global.defaultExtConfig =
-        "https://gcore.jsdelivr.net/gh/Aethersailor/"
-        "Custom_OpenClash_Rules@refs/heads/main/cfg/Custom_Clash.ini";
-  }
+  ini.get_bool_if_exist("fallback_to_default_external_config",
+                        global.fallbackToDefaultExternalConfig);
   ini.get_bool_if_exist("append_proxy_type", global.appendType);
   ini.get_if_exist("proxy_config", global.proxyConfig);
   ini.get_if_exist("proxy_ruleset", global.proxyRuleset);
@@ -1263,8 +1168,6 @@ bool readConf() {
     ini.enter_section("custom_openclash_rules");
     ini.get_bool_if_exist("fallback_enabled",
                           global.customOpenClashRulesFallback);
-    ini.get_bool_if_exist("publish_enabled",
-                          global.customOpenClashRulesPublish);
   }
 
   if (ini.section_exist("surge_external_proxy")) {
@@ -1791,6 +1694,16 @@ static size_t localVarsSize(const string_map &vars) {
   return bytes;
 }
 
+static void markExternalConfigContentInvalid(FetchOutcome *outcome) {
+  if (!outcome)
+    return;
+  outcome->success = false;
+  outcome->failure = FetchFailureCategory::ContentInvalid;
+  outcome->failure_reason = "content_invalid";
+  if (outcome->status_code == 0 || outcome->status_code == 200)
+    outcome->status_code = 422;
+}
+
 } // namespace
 
 bool isExternalConfigCacheableContent(const std::string &content) {
@@ -1811,15 +1724,77 @@ size_t externalConfigCacheMaxEntries() {
 
 size_t externalConfigCacheMaxBytes() { return kExternalConfigCacheBytes; }
 
-int loadExternalConfig(std::string &path, ExternalConfig &ext,
-                       FetchContext context) {
+int loadExternalConfigWithOutcome(std::string &path, ExternalConfig &ext,
+                                  FetchContext context,
+                                  FetchOutcome *fetch_outcome) {
   template_args *request_tpl_args = ext.tpl_args;
   std::string base_content;
-  ProxyPolicy proxy = parseProxy(global.proxyConfig);
-  std::string config = fetchFile(path, proxy, global.cacheConfig, true, context);
+  std::string config;
+  FetchOutcome fetched;
+  if (fileExist(path, true)) {
+    if (!canImportLocalPath(path, context)) {
+      if (fetch_outcome) {
+        fetch_outcome->status_code = 403;
+        fetch_outcome->failure = FetchFailureCategory::RequestRejected;
+        fetch_outcome->failure_reason = "request_rejected";
+      }
+      return -1;
+    }
+    config = fileGet(path, true);
+  } else if (isLink(path)) {
+    ProxyPolicy proxy = parseProxy(global.proxyConfig);
+    FetchArgument argument{HTTP_GET,
+                           path,
+                           proxy,
+                           nullptr,
+                           nullptr,
+                           nullptr,
+                           static_cast<unsigned int>(std::max(0, global.cacheConfig)),
+                           true,
+                           context,
+                           fetch_outcome != nullptr};
+    fetchRemote(argument, fetched);
+    if (fetch_outcome)
+      *fetch_outcome = fetched;
+    if (!fetched.success)
+      return -1;
+    config = fetched.content;
+  } else {
+    if (fetch_outcome) {
+      fetch_outcome->status_code = 400;
+      fetch_outcome->failure = isPublicFetchRestricted(context)
+                                  ? FetchFailureCategory::RequestRejected
+                                  : FetchFailureCategory::ContentInvalid;
+      fetch_outcome->failure_reason =
+          fetch_outcome->failure == FetchFailureCategory::RequestRejected
+              ? "request_rejected"
+              : "content_invalid";
+    }
+    return -1;
+  }
+
+  const std::string trimmed_config = trimWhitespace(config, true, true);
+  const std::string lower_config = toLower(trimmed_config);
+  if (trimmed_config.empty() || startsWith(lower_config, "<!doctype html") ||
+      startsWith(lower_config, "<html")) {
+    markExternalConfigContentInvalid(fetch_outcome);
+    return -1;
+  }
+
+  if (request_tpl_args == nullptr) {
+    markExternalConfigContentInvalid(fetch_outcome);
+    return -1;
+  }
   if (render_template(config, *request_tpl_args, base_content,
-                      global.templatePath, context) != 0)
-    base_content = config;
+                      global.templatePath, context) != 0) {
+    markExternalConfigContentInvalid(fetch_outcome);
+    return -1;
+  }
+
+  if (trimWhitespace(base_content, true, true).empty()) {
+    markExternalConfigContentInvalid(fetch_outcome);
+    return -1;
+  }
 
   bool cache_enabled =
       global.cacheConfig > 0 && isExternalConfigCacheableContent(config) &&
@@ -1856,5 +1831,19 @@ int loadExternalConfig(std::string &path, ExternalConfig &ext,
   ext.tpl_args = request_tpl_args;
   for (const auto &[name, value] : cached.local_vars)
     request_tpl_args->local_vars[name] = value;
+  if (fetch_outcome && cached.result != 0)
+    markExternalConfigContentInvalid(fetch_outcome);
   return cached.result;
+}
+
+int loadExternalConfig(std::string &path, ExternalConfig &ext,
+                       FetchContext context) {
+  FetchOutcome outcome;
+  const int result =
+      loadExternalConfigWithOutcome(path, ext, context, &outcome);
+  if (result == 0)
+    commitFetchOutcomeCache(outcome);
+  else
+    discardFetchOutcomeCache(outcome);
+  return result;
 }

@@ -6,7 +6,6 @@
 #include <string_view>
 #include <unordered_set>
 
-#include "config/custom_openclash_rules.h"
 #include "config/regmatch.h"
 #include "external_rules.h"
 #include "generator/config/subexport.h"
@@ -1226,17 +1225,6 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
     writeLog(0, std::string("Clash 基础配置加载失败：") + e.what(),
              LOG_LEVEL_ERROR);
     return "";
-  }
-
-  if (ext.custom_openclash_rules_fallback) {
-    size_t rewritten = custom_openclash_rules::rewriteRuleProviderUrls(
-        yamlnode, ext.custom_openclash_rules_base_url);
-    if (rewritten) {
-      writeLog(0,
-               "已将 " + std::to_string(rewritten) +
-                   " 个 Custom_OpenClash_Rules 规则链接改写为本地发布接口。",
-               LOG_LEVEL_INFO);
-    }
   }
 
   proxyToClash(nodes, yamlnode, extra_proxy_group, clashR, ext);

@@ -6,7 +6,6 @@
 #include <inja.hpp>
 #include <nlohmann/json.hpp>
 
-#include "config/custom_openclash_rules.h"
 #include "handler/interfaces.h"
 #include "handler/settings.h"
 #include "handler/webget.h"
@@ -606,8 +605,8 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
         std::string direct_url =
             !url.empty() && url[0] == '*' ? url.substr(1) : "";
         bool direct_mrs =
-            !direct_url.empty() &&
-            custom_openclash_rules::hasMrsExtension(direct_url);
+            direct_url.size() >= 4 &&
+            toLower(direct_url.substr(direct_url.size() - 4)) == ".mrs";
         bool group_has_domain = has_domain[x], group_has_ipcidr = has_ipcidr[x];
         int interval = ruleset_interval[x];
 

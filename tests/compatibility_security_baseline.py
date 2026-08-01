@@ -40,6 +40,18 @@ class FixtureHandler(BaseHTTPRequestHandler):
         if self.path == "/subscription.txt":
             body = SUBSCRIPTION.encode()
             content_type = "text/plain; charset=utf-8"
+        elif self.path == "/external-valid.ini":
+            body = b"[custom]\nenable_rule_generator=false\n"
+            content_type = "text/plain; charset=utf-8"
+        elif self.path == "/external-invalid.ini":
+            body = b"<!doctype html><html><body>not a config</body></html>"
+            content_type = "text/html; charset=utf-8"
+        elif self.path == "/external-forbidden.ini":
+            self.send_response(403)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"forbidden")
+            return
         elif self.path == "/rules.list":
             body = RULESET.encode()
             content_type = "text/plain; charset=utf-8"
@@ -129,6 +141,8 @@ def running_service(
     runtime_details: bool = False,
     legacy_statistics: bool = False,
     invalid_statistics_path: bool = False,
+    default_external_config: str | None = None,
+    fallback_to_default_external_config: bool = False,
 ):
     port = unused_port()
     baseline = (COMPAT_FIXTURES / "legacy-pref.toml").read_text(
@@ -149,6 +163,21 @@ def running_service(
     baseline = baseline.replace('proxy_subscription = "SYSTEM"', 'proxy_subscription = "NONE"')
     baseline = baseline.replace('enabled = true\n', f"enabled = {str(statistics).lower()}\n", 1)
     baseline = baseline.replace('profile = "lan"', f'profile = "{security_profile}"')
+    if default_external_config is not None:
+        baseline = re.sub(
+            r'default_external_config = "[^"]*"',
+            f'default_external_config = "{default_external_config}"',
+            baseline,
+        )
+    baseline = baseline.replace(
+        "fallback_to_default_external_config = false",
+        "fallback_to_default_external_config = "
+        + str(fallback_to_default_external_config).lower(),
+    )
+    if fallback_to_default_external_config and "fallback_to_default_external_config" not in baseline:
+        baseline = baseline.replace(
+            "[common]\n", "[common]\nfallback_to_default_external_config = true\n", 1
+        )
     runtime_dir = REPOSITORY / "build" / "test-baseline-runtime"
     runtime_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=runtime_dir) as temporary:
@@ -549,6 +578,45 @@ def public_request_baseline(binary: Path, fixture_base: str) -> None:
                 raise AssertionError(f"API-mode file tool {path} became reachable")
 
 
+def external_config_policy_baseline(binary: Path, fixture_base: str) -> None:
+    invalid = fixture_base + "/external-invalid.ini"
+    forbidden = fixture_base + "/external-forbidden.ini"
+    valid = fixture_base + "/external-valid.ini"
+    common = {"target": "clash", "url": fixture_base + "/subscription.txt", "list": "true"}
+    with running_service(binary) as base_url:
+        status, _, headers = request(base_url, "/sub", {**common, "config": invalid})
+        if status != 502 or "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError("invalid user external config was not fail-closed")
+        status, body, _ = request(base_url, "/sub", {**common, "config": valid})
+        if status != 200 or b"Smoke" not in body:
+            raise AssertionError("valid user external config did not apply")
+
+    with running_service(
+        binary,
+        default_external_config=valid,
+        fallback_to_default_external_config=True,
+    ) as base_url:
+        status, body, _ = request(base_url, "/sub", {**common, "config": invalid})
+        if status != 200 or b"Smoke" not in body:
+            raise AssertionError("explicit default external fallback did not apply")
+
+        status, _, headers = request(base_url, "/sub", {**common, "config": forbidden})
+        if status != 502 or "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError("permission-denied user config incorrectly used default fallback")
+
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {**common, "config": invalid, "explain": "true"},
+        )
+        if status != 200:
+            raise AssertionError("explain fallback request failed")
+        report = json.loads(body)
+        external = report.get("external_config", {})
+        if not external.get("fallback_used") or not external.get("attempts"):
+            raise AssertionError("explain response omitted external source attempts")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, required=True)
@@ -579,8 +647,10 @@ def main() -> int:
     ]
     if snapshots[1:] != snapshots[:1] * 2:
         raise AssertionError("INI/YAML/TOML SettingsSnapshot values differ")
-    if snapshots[0]["custom_openclash_rules"]["publish_enabled"]:
-        raise AssertionError("historical publish default changed from false")
+    if "publish_enabled" in snapshots[0]["custom_openclash_rules"]:
+        raise AssertionError("removed publish_enabled leaked into SettingsSnapshot")
+    if snapshots[0]["common"]["fallback_to_default_external_config"]:
+        raise AssertionError("fallback_to_default_external_config default changed")
     if snapshots[0]["security"]["profile"] != "lan":
         raise AssertionError("historical security profile default changed")
 
@@ -590,6 +660,7 @@ def main() -> int:
         dashboard_baseline(binary, fixture_base)
         persistence_degradation_baseline(binary, fixture_base)
         public_request_baseline(binary, fixture_base)
+        external_config_policy_baseline(binary, fixture_base)
 
     print("compatibility and security baselines passed")
     return 0

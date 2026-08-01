@@ -30,7 +30,9 @@ struct Settings {
       maxServerThreads = 128;
   bool prependInsert = true, skipFailedLinks = false;
   bool customOpenClashRulesFallback = false;
-  bool customOpenClashRulesPublish = false;
+  // Explicitly opt in to using the trusted default external configuration
+  // after a user-provided external configuration fails.
+  bool fallbackToDefaultExternalConfig = false;
   static constexpr bool APIMode = true; // Hardcoded for security
   bool writeManagedConfig = false, enableRuleGen = true,
        updateRulesetOnRequest = false, overwriteOriginalRules = true;
@@ -138,6 +140,8 @@ struct ExternalConfig {
   tribool remove_old_emoji;
 };
 
+struct FetchOutcome;
+
 extern Settings global;
 
 bool isPublicFetchRestricted(FetchContext context);
@@ -147,6 +151,9 @@ int importItems(string_array &target, bool scope_limit = true,
                 FetchContext context = FetchContext::TrustedConfig);
 int loadExternalConfig(std::string &path, ExternalConfig &ext,
                        FetchContext context = FetchContext::TrustedConfig);
+int loadExternalConfigWithOutcome(std::string &path, ExternalConfig &ext,
+                                  FetchContext context,
+                                  FetchOutcome *fetch_outcome);
 bool isExternalConfigCacheableContent(const std::string &content);
 size_t externalConfigCacheMaxEntries();
 size_t externalConfigCacheMaxBytes();
