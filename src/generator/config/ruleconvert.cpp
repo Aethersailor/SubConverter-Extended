@@ -430,6 +430,16 @@ static bool isClashCommaPayloadRule(const std::string &rule_type)
            rule_type == "PROCESS-NAME-REGEX" || rule_type == "PROCESS-PATH-REGEX";
 }
 
+static bool isClashCompoundRule(const std::string &rule_type)
+{
+    return rule_type == "AND" || rule_type == "OR" || rule_type == "NOT";
+}
+
+static bool isNoResolveOption(const std::string &value)
+{
+    return toUpper(trimWhitespace(value, true, true)) == "NO-RESOLVE";
+}
+
 std::string appendClashRuleTarget(const std::string &rule, const std::string &target, bool no_resolve_only)
 {
     std::string strLine = trimWhitespace(rule, true, true);
@@ -439,19 +449,33 @@ std::string appendClashRuleTarget(const std::string &rule, const std::string &ta
     if(rule_type == "FINAL" || rule_type == "MATCH")
         return "MATCH," + target;
 
+    if(isClashCompoundRule(rule_type))
+    {
+        string_array fields;
+        if(!splitRuleFieldsStrict(strLine, fields) || fields.size() < 2)
+            return strLine + "," + target;
+
+        std::string output = fields[0] + "," + fields[1] + "," + target;
+        for(size_t index = 3; index < fields.size(); ++index)
+            output += "," + fields[index];
+        return output;
+    }
+
     if(pos == std::string::npos || isClashCommaPayloadRule(rule_type))
         return strLine + "," + target;
 
-    string_view_array temp;
-    split(temp, strLine, ',');
-    if(temp.size() < 2)
+    string_array fields;
+    if(!splitRuleFieldsStrict(strLine, fields) || fields.size() < 2)
         return strLine + "," + target;
 
-    std::string output = std::string(temp[0]) + "," + std::string(temp[1]) + "," + target;
-    if(temp.size() > 2)
+    std::string output = fields[0] + "," + fields[1] + "," + target;
+    size_t option_start = 2;
+    if(fields.size() > 2 && !isNoResolveOption(fields[2]))
+        option_start = 3;
+    for(size_t index = option_start; index < fields.size(); ++index)
     {
-        std::string option = trimWhitespace(std::string(temp[2]), true, true);
-        if(!no_resolve_only || option == "no-resolve")
+        const std::string &option = fields[index];
+        if(!no_resolve_only || isNoResolveOption(option))
             output += "," + option;
     }
     return output;
