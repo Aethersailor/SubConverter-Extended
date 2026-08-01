@@ -69,7 +69,7 @@ int main(){std::to_string(0);}
 IF(NOT BUILD_STATIC_LIBRARY)
 
 SET(SUBCONVERTER_RUNTIME_SOURCES
-    src/config/custom_openclash_rules.cpp
+    src/handler/remote_source.cpp
     src/config/ruleset.cpp
     src/generator/config/external_rules.cpp
     src/generator/config/nodemanip.cpp
@@ -78,7 +78,6 @@ SET(SUBCONVERTER_RUNTIME_SOURCES
     src/generator/template/templates.cpp
     src/handler/dashboard_auth.cpp
     src/handler/dashboard_page.cpp
-    src/handler/custom_openclash_rules_endpoint.cpp
     src/handler/curl_handle_pool.cpp
     src/handler/inspect_page.cpp
     src/handler/interfaces.cpp
@@ -241,12 +240,6 @@ IF(BUILD_TESTS)
         $<TARGET_PROPERTY:${BUILD_TARGET_NAME},COMPILE_DEFINITIONS>)
 
     ADD_TEST(
-        NAME custom_openclash_rules_bundle
-        COMMAND ${Python3_EXECUTABLE}
-                ${CMAKE_SOURCE_DIR}/tests/test_custom_openclash_rules_bundle.py)
-    SET_TESTS_PROPERTIES(custom_openclash_rules_bundle PROPERTIES LABELS fast)
-
-    ADD_TEST(
         NAME compatibility_security_baseline
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/compatibility_security_baseline.py
@@ -269,24 +262,12 @@ IF(BUILD_TESTS)
     ADD_TEST(NAME proxy_policy COMMAND proxy_policy_test)
     SET_TESTS_PROPERTIES(proxy_policy PROPERTIES LABELS fast)
 
-    ADD_EXECUTABLE(custom_openclash_rules_test
-        tests/custom_openclash_rules_test.cpp
-        src/config/custom_openclash_rules.cpp
-        src/handler/custom_openclash_rules_endpoint.cpp
-        src/utils/file.cpp
-        src/utils/md5/md5.cpp
-        src/utils/urlencode.cpp)
-    TARGET_INCLUDE_DIRECTORIES(custom_openclash_rules_test PRIVATE
-        src
-        ${YAML_CPP_INCLUDE_DIRS})
-    TARGET_LINK_DIRECTORIES(custom_openclash_rules_test PRIVATE
-        ${YAML_CPP_LIBRARY_DIRS})
-    TARGET_LINK_LIBRARIES(custom_openclash_rules_test
-        ${YAML_CPP_LIBRARY})
-    ADD_TEST(NAME custom_openclash_rules COMMAND custom_openclash_rules_test)
-    SET_TESTS_PROPERTIES(custom_openclash_rules PROPERTIES
-        LABELS fast
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    ADD_EXECUTABLE(remote_source_test
+        tests/remote_source_test.cpp
+        src/handler/remote_source.cpp)
+    TARGET_INCLUDE_DIRECTORIES(remote_source_test PRIVATE src)
+    ADD_TEST(NAME remote_source COMMAND remote_source_test)
+    SET_TESTS_PROPERTIES(remote_source PROPERTIES LABELS fast)
 
     ADD_EXECUTABLE(ruleset_options_test
         tests/ruleset_options_test.cpp
@@ -378,7 +359,7 @@ ENDIF()
 ELSE() #BUILD_STATIC_LIBRARY
 
 ADD_LIBRARY(${BUILD_TARGET_NAME} STATIC
-    src/config/custom_openclash_rules.cpp
+    src/handler/remote_source.cpp
     src/config/ruleset.cpp
     src/generator/config/external_rules.cpp
     src/generator/config/ruleconvert.cpp

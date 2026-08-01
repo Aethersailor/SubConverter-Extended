@@ -20,7 +20,6 @@
 #include <yaml-cpp/yaml.h>
 
 #include "config/binding.h"
-#include "config/custom_openclash_rules.h"
 #include "generator/config/external_rules.h"
 #include "generator/config/nodemanip.h"
 #include "generator/config/ruleconvert.h"
@@ -34,67 +33,44 @@
 #include "script/script_quickjs.h"
 #include "server/webserver.h"
 #include "settings.h"
+#include "handler/remote_source.h"
 #include "statistics.h"
 #include "sub_request_key.h"
 #include "upload.h"
 #include "webget.h"
 #include "utils/time_compat.h"
 
-const std::vector<std::string> DEFAULT_REMOTE_CONFIG_FALLBACKS = {
-    "https://gcore.jsdelivr.net/gh/Aethersailor/Custom_OpenClash_Rules@refs/"
-    "heads/main/cfg/Custom_Clash.ini",
-    "https://testingcf.jsdelivr.net/gh/Aethersailor/"
-    "Custom_OpenClash_Rules@refs/heads/main/cfg/Custom_Clash.ini",
-    "https://cdn.jsdelivr.net/gh/Aethersailor/Custom_OpenClash_Rules@refs/"
-    "heads/main/cfg/Custom_Clash.ini",
-    "https://raw.githubusercontent.com/Aethersailor/Custom_OpenClash_Rules/"
-    "main/cfg/Custom_Clash.ini"};
-
 static void appendUniqueConfig(std::vector<std::string> &configs,
                                std::unordered_set<std::string> &seen,
                                const std::string &config) {
-  if (!config.empty() && seen.insert(config).second)
+  const remote_source::ParsedUrl parsed = remote_source::parse(config);
+  const std::string identity = parsed.resource.valid
+                                   ? "logical:" + parsed.resource.key()
+                                   : "url:" + config;
+  if (!config.empty() && seen.insert(identity).second)
     configs.emplace_back(config);
 }
 
-static void appendBundledConfig(
-    std::vector<std::string> &configs,
-    std::unordered_set<std::string> &seen,
-    const custom_openclash_rules::Resource &resource) {
-  if (!resource.matched())
-    return;
-  for (const std::string &path :
-       custom_openclash_rules::localPathCandidates(resource))
-    appendUniqueConfig(configs, seen, path);
+static void markExternalConfigContentInvalid(FetchOutcome &outcome) {
+  outcome.success = false;
+  outcome.failure = FetchFailureCategory::ContentInvalid;
+  outcome.failure_reason = "content_invalid";
+  if (outcome.status_code == 0 || outcome.status_code == 200)
+    outcome.status_code = 422;
 }
 
 static std::vector<std::string>
 buildExternalConfigFallbacks(const std::string &failedConfig,
-                             bool enhancedFallback,
+                             bool allowDefaultFallback,
                              bool legacyRemoteFallback) {
   std::vector<std::string> configs;
   std::unordered_set<std::string> seen;
-  seen.insert(failedConfig);
-
-  if (enhancedFallback) {
-    custom_openclash_rules::Resource same_name =
-        custom_openclash_rules::matchRepositoryUrl(failedConfig);
-    if (same_name.kind ==
-        custom_openclash_rules::ResourceKind::ConfigIni)
-      appendBundledConfig(configs, seen, same_name);
-  }
-
-  if (enhancedFallback || legacyRemoteFallback) {
-    for (const std::string &remote : DEFAULT_REMOTE_CONFIG_FALLBACKS)
-      appendUniqueConfig(configs, seen, remote);
-  }
-
-  if (enhancedFallback) {
-    appendBundledConfig(
-        configs, seen,
-        custom_openclash_rules::matchPublishedPath(
-            "/Custom_OpenClash_Rules/main/cfg/Custom_Clash.ini"));
-  }
+  const remote_source::ParsedUrl parsed = remote_source::parse(failedConfig);
+  seen.insert(parsed.resource.valid ? "logical:" + parsed.resource.key()
+                                    : "url:" + failedConfig);
+  if (allowDefaultFallback && legacyRemoteFallback &&
+      !global.defaultExtConfig.empty())
+    appendUniqueConfig(configs, seen, global.defaultExtConfig);
   return configs;
 }
 
@@ -120,6 +96,10 @@ static string_icase_map buildSubscriptionRequestHeaders() {
 #include "webget.h"
 
 extern WebServer webServer;
+
+static constexpr const char *kImplicitDefaultExternalConfig =
+    "https://gcore.jsdelivr.net/gh/Aethersailor/"
+    "Custom_OpenClash_Rules@refs/heads/main/cfg/Custom_Clash.ini";
 
 string_array gRegexBlacklist = {"(.*)*"};
 
@@ -670,9 +650,10 @@ static bool fetchExternalRuleSources(const string_array &sources,
     if (fetch_status < 200 || fetch_status >= 300 || content.empty()) {
       writeLog(0,
                "外部规则来源 " + source_identifier +
-                   " 拉取失败、HTTP 状态异常或内容为空，已跳过。",
+                   " 拉取失败、HTTP 状态异常或内容为空，已拒绝继续。",
                LOG_LEVEL_WARNING);
-      continue;
+      error = "External rule source could not be loaded.";
+      return false;
     }
 
     ExternalRuleParseResult parsed =
@@ -1001,6 +982,13 @@ struct SubExplainReport {
   bool external_config_provided = false;
   bool external_config_loaded = false;
   bool fallback_config_used = false;
+  bool external_cocr_rewrite_used = false;
+  bool external_raw_to_jsdelivr_used = false;
+  bool external_fresh_cache_used = false;
+  bool external_stale_cache_used = false;
+  std::string external_logical_resource;
+  std::string external_failure_reason;
+  std::vector<FetchAttempt> external_attempts;
   bool rule_generator_enabled = false;
   bool expand_rulesets = false;
   bool proxy_provider_mode = false;
@@ -1157,6 +1145,31 @@ static std::string serializeSubExplainReport(const SubExplainReport &report,
   writer.Bool(report.external_config_loaded);
   writer.Key("fallback_used");
   writer.Bool(report.fallback_config_used);
+  writer.Key("cocr_rewrite_used");
+  writer.Bool(report.external_cocr_rewrite_used);
+  writer.Key("raw_to_jsdelivr_used");
+  writer.Bool(report.external_raw_to_jsdelivr_used);
+  writer.Key("fresh_cache_used");
+  writer.Bool(report.external_fresh_cache_used);
+  writer.Key("stale_cache_used");
+  writer.Bool(report.external_stale_cache_used);
+  writeJsonString(writer, "logical_resource", report.external_logical_resource);
+  writeJsonString(writer, "failure_reason", report.external_failure_reason);
+  writer.Key("attempts");
+  writer.StartArray();
+  for (const FetchAttempt &attempt : report.external_attempts) {
+    writer.StartObject();
+    writeJsonString(writer, "source", attempt.source_kind);
+    writeJsonString(writer, "url", attempt.effective_url);
+    writer.Key("status_code");
+    writer.Int(attempt.status_code);
+    writer.Key("curl_code");
+    writer.Int(attempt.curl_code);
+    writer.Key("failure");
+    writer.Int(static_cast<int>(attempt.failure));
+    writer.EndObject();
+  }
+  writer.EndArray();
   writer.EndObject();
 
   writer.Key("parameters");
@@ -1411,7 +1424,9 @@ static std::string runSubconverterImplWithRetry(const Request &original,
   RuleConversionStats first_stats;
   std::string body = subconverter_impl(first_request, first_response,
                                        stats ? &first_stats : nullptr);
-  if (first_response.status_code < 500 || !global.coalesceRetryOn5xx) {
+  if (first_response.status_code < 500 || !global.coalesceRetryOn5xx ||
+      first_response.headers.contains("X-Subconverter-No-Retry")) {
+    first_response.headers.erase("X-Subconverter-No-Retry");
     if (stats)
       *stats = first_stats;
     response = first_response;
@@ -1817,9 +1832,6 @@ static std::string subconverter_impl(Request &request, Response &response,
   ext.clash_new_field_name = argClashNewField.get(global.clashUseNewField);
   ext.clash_script = argGenClashScript.get();
   ext.clash_classical_ruleset = argGenClassicalRuleProvider.get();
-  ext.custom_openclash_rules_fallback =
-      global.customOpenClashRulesFallback;
-  ext.custom_openclash_rules_base_url = global.managedConfigPrefix;
   ext.provider_proxy_direct = argProviderProxyDirect.get(true);
   // 无论 expand 取何值，均强制使用 Mihomo 新字段名（proxy-groups / rules）
   // 避免因全局配置为旧字段名而导致 Mihomo 无法识别
@@ -1854,8 +1866,26 @@ static std::string subconverter_impl(Request &request, Response &response,
   string_map tpl_args_base = tpl_args.local_vars;
   explain.external_config_provided = userProvidedExternalConfig;
 
-  if (argExternalConfig.empty())
-    argExternalConfig = global.defaultExtConfig;
+  if (argExternalConfig.empty()) {
+    argExternalConfig = global.defaultExtConfig.empty()
+                            ? kImplicitDefaultExternalConfig
+                            : global.defaultExtConfig;
+  }
+  const bool externalConfigAttempted = !argExternalConfig.empty();
+
+  auto recordExternalFetch = [&](const FetchOutcome &outcome) {
+    explain.external_cocr_rewrite_used |= outcome.cocr_rewrite_used;
+    explain.external_raw_to_jsdelivr_used |= outcome.raw_to_jsdelivr_used;
+    explain.external_fresh_cache_used |= outcome.fresh_cache_used;
+    explain.external_stale_cache_used |= outcome.stale_cache_used;
+    if (!outcome.logical_resource.empty())
+      explain.external_logical_resource = outcome.logical_resource;
+    if (!outcome.failure_reason.empty())
+      explain.external_failure_reason = outcome.failure_reason;
+    explain.external_attempts.insert(explain.external_attempts.end(),
+                                     outcome.attempts.begin(),
+                                     outcome.attempts.end());
+  };
 
   if (!argExternalConfig.empty()) {
     // std::cerr<<"External configuration file provided. Loading...\n";
@@ -1863,10 +1893,19 @@ static std::string subconverter_impl(Request &request, Response &response,
              LOG_LEVEL_INFO);
     ExternalConfig extconf;
     extconf.tpl_args = &tpl_args;
+    FetchOutcome primary_outcome;
     int load_result =
-        loadExternalConfig(argExternalConfig, extconf, externalConfigContext);
-    if (load_result == 0 &&
-        hasEffectiveExternalConfig(extconf, tpl_args, tpl_args_base)) {
+        loadExternalConfigWithOutcome(argExternalConfig, extconf,
+                                      externalConfigContext,
+                                      &primary_outcome);
+    const bool primary_effective =
+        load_result == 0 &&
+        hasEffectiveExternalConfig(extconf, tpl_args, tpl_args_base);
+    if (load_result == 0 && !primary_effective)
+      markExternalConfigContentInvalid(primary_outcome);
+    recordExternalFetch(primary_outcome);
+    if (primary_effective) {
+      commitFetchOutcomeCache(primary_outcome);
       configLoadSuccess = true;
       explain.external_config_loaded = true;
       rulePrependSources = extconf.rule_prepend_sources;
@@ -1925,6 +1964,7 @@ static std::string subconverter_impl(Request &request, Response &response,
       argAddEmoji.define(extconf.add_emoji);
       argRemoveEmoji.define(extconf.remove_old_emoji);
     } else {
+      discardFetchOutcomeCache(primary_outcome);
       tpl_args.local_vars = tpl_args_base;
       if (load_result == 0) {
         writeLog(
@@ -1939,30 +1979,35 @@ static std::string subconverter_impl(Request &request, Response &response,
         argExternalConfig != global.defaultExtConfig;
     std::vector<std::string> fallbackConfigs =
         buildExternalConfigFallbacks(
-            argExternalConfig, global.customOpenClashRulesFallback,
+            argExternalConfig, global.fallbackToDefaultExternalConfig,
             legacyRemoteFallback);
 
-    if (!configLoadSuccess && !fallbackConfigs.empty()) {
+    if (!configLoadSuccess && !fallbackConfigs.empty() &&
+        primary_outcome.failure != FetchFailureCategory::RequestRejected) {
       writeLog(
-          0, global.customOpenClashRulesFallback
-                 ? "加载外部配置失败，正在尝试远程及内置回退配置..."
-                 : "加载用户提供的配置失败，正在尝试默认远程配置...",
+          0, "加载用户提供的配置失败，正在尝试显式允许的默认配置...",
           LOG_LEVEL_WARNING);
 
       for (std::string fallbackConfig : fallbackConfigs) {
-        writeLog(0, "正在尝试加载配置：" + fallbackConfig,
-                 LOG_LEVEL_INFO);
+        writeLog(0, "正在尝试加载显式允许的默认配置。", LOG_LEVEL_INFO);
 
         tpl_args.local_vars = tpl_args_base;
         ExternalConfig extconf;
         extconf.tpl_args = &tpl_args;
+        FetchOutcome fallback_outcome;
         int fallback_result =
-            loadExternalConfig(fallbackConfig, extconf,
-                               FetchContext::TrustedConfig);
-        if (fallback_result == 0 &&
-            hasEffectiveExternalConfig(extconf, tpl_args, tpl_args_base)) {
-          writeLog(0, "已成功加载配置：" + fallbackConfig,
-                   LOG_LEVEL_INFO);
+            loadExternalConfigWithOutcome(fallbackConfig, extconf,
+                                          FetchContext::TrustedConfig,
+                                          &fallback_outcome);
+        const bool fallback_effective =
+            fallback_result == 0 &&
+            hasEffectiveExternalConfig(extconf, tpl_args, tpl_args_base);
+        if (fallback_result == 0 && !fallback_effective)
+          markExternalConfigContentInvalid(fallback_outcome);
+        recordExternalFetch(fallback_outcome);
+        if (fallback_effective) {
+          commitFetchOutcomeCache(fallback_outcome);
+          writeLog(0, "已成功加载显式允许的默认配置。", LOG_LEVEL_INFO);
           configLoadSuccess = true;
           explain.external_config_loaded = true;
           explain.fallback_config_used = true;
@@ -2012,28 +2057,42 @@ static std::string subconverter_impl(Request &request, Response &response,
           argRemoveEmoji.define(extconf.remove_old_emoji);
           break; // Success, stop trying other configs
         } else {
+          discardFetchOutcomeCache(fallback_outcome);
           tpl_args.local_vars = tpl_args_base;
           if (fallback_result == 0) {
             writeLog(
                 0,
-                "已从 " + fallbackConfig +
-                    " 加载配置，但未发现有效设置，跳过。",
+                "默认配置已加载，但未发现有效设置，跳过。",
                 LOG_LEVEL_WARNING);
           } else {
-            writeLog(0, "加载配置失败：" + fallbackConfig,
-                     LOG_LEVEL_WARNING);
+            writeLog(0, "加载显式允许的默认配置失败。", LOG_LEVEL_WARNING);
           }
         }
       }
 
       if (!configLoadSuccess) {
         writeLog(0,
-                 global.customOpenClashRulesFallback
-                     ? "所有远程及内置回退配置均加载失败。"
-                     : "所有默认远程回退配置均加载失败。",
+                 "显式允许的默认配置加载失败。",
                  LOG_LEVEL_ERROR);
       }
     }
+  }
+
+  if (!configLoadSuccess && externalConfigAttempted) {
+    *status_code = 502;
+    response.headers["Cache-Control"] = "no-store";
+    response.headers["X-Subconverter-No-Retry"] = "1";
+    writeLog(0, "外部配置最终加载失败，拒绝应用请求级全局回退。",
+             LOG_LEVEL_ERROR);
+    explain.effective_config_source = userProvidedExternalConfig
+                                          ? "request_failed"
+                                          : "default_failed";
+    if (explainMode) {
+      response.content_type = "application/json; charset=utf-8";
+      return serializeSubExplainReport(explain, response);
+    }
+    return "External configuration could not be loaded.\n"
+           "外部配置无法加载，未应用请求级全局回退。";
   }
 
   if (!configLoadSuccess) {
@@ -2095,7 +2154,9 @@ static std::string subconverter_impl(Request &request, Response &response,
         !fetchExternalRuleSources(ruleAppendSources, "ruleappend",
                                   externalRuleFetchContext,
                                   ext.rule_append, external_rule_error)) {
-      *status_code = 400;
+      *status_code = 502;
+      response.headers["Cache-Control"] = "no-store";
+      response.headers["X-Subconverter-No-Retry"] = "1";
       return external_rule_error;
     }
   }
@@ -2109,6 +2170,15 @@ static std::string subconverter_impl(Request &request, Response &response,
                         rulesetFetchContext);
       else
         lRulesetContent = global.rulesetsContent;
+    }
+    for (const RulesetContent &ruleset : lRulesetContent) {
+      if (!ruleset.rule_path.empty() && ruleset.rule_content.get().empty()) {
+        *status_code = 502;
+        response.headers["Cache-Control"] = "no-store";
+        response.headers["X-Subconverter-No-Retry"] = "1";
+        return "External ruleset could not be loaded.\n"
+               "外部规则集无法加载，已拒绝生成不完整配置。";
+      }
     }
   }
   explain.rule_generator_enabled = ext.enable_rule_generator;
@@ -2976,7 +3046,7 @@ static std::string subconverter_impl(Request &request, Response &response,
       explain.effective_config_source = "fallback";
     else if (explain.external_config_loaded && userProvidedExternalConfig)
       explain.effective_config_source = "request";
-    else if (explain.external_config_loaded && !global.defaultExtConfig.empty())
+    else if (explain.external_config_loaded && !userProvidedExternalConfig)
       explain.effective_config_source = "default";
     else if (userProvidedExternalConfig)
       explain.effective_config_source = "request_failed";
