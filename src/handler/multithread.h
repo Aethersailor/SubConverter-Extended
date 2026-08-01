@@ -41,5 +41,9 @@ std::shared_future<std::string> fetchFileAsync(
 std::string fetchFile(const std::string &path, const ProxyPolicy &proxy,
                       int cache_ttl, bool find_local = true,
                       FetchContext context = FetchContext::TrustedConfig);
+void commitRulesetFetchCache(
+    const std::shared_ptr<RulesetFetchState> &fetch_state);
+void discardRulesetFetchCache(
+    const std::shared_ptr<RulesetFetchState> &fetch_state);
 
 #endif // MULTITHREAD_H_INCLUDED

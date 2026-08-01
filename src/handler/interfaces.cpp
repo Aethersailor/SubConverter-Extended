@@ -439,12 +439,22 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS) {
   std::vector<RulesetContent> rca;
   RulesetConfigs confs = INIBinding::from<RulesetConfig>::from_ini(vArray);
   refreshRulesets(confs, rca, FetchContext::PublicRequest);
+  bool invalid_ruleset = false;
   for (RulesetContent &x : rca) {
     std::string content = x.rule_content.get();
+    if (content.empty() || countValidRulesetEntries(content, x.rule_type) == 0)
+      invalid_ruleset = true;
     output_content += convertRuleset(content, x.rule_type);
   }
 
-  if (output_content.empty()) {
+  for (RulesetContent &x : rca) {
+    if (invalid_ruleset)
+      discardRulesetFetchCache(x.fetch_state);
+    else
+      commitRulesetFetchCache(x.fetch_state);
+  }
+
+  if (invalid_ruleset || output_content.empty()) {
     *status_code = 400;
     return "Invalid request: no valid rules were found in the supplied "
            "ruleset source.\n"
@@ -2315,16 +2325,21 @@ static std::string subconverter_impl(Request &request, Response &response,
   }
 
   if (ext.enable_rule_generator && !ext.nodelist && !lSimpleSubscription) {
+    const bool skip_client_provider_fetch =
+        !argExpandRulesets.get(false) &&
+        (ext.clash_script || !ext.managed_config_prefix.empty());
     if (lCustomRulesets != global.customRulesets)
-      refreshRulesets(lCustomRulesets, lRulesetContent, rulesetFetchContext);
+      refreshRulesets(lCustomRulesets, lRulesetContent, rulesetFetchContext,
+                      skip_client_provider_fetch);
     else {
       if (global.updateRulesetOnRequest)
         refreshRulesets(lCustomRulesets, lRulesetContent,
-                        rulesetFetchContext);
+                        rulesetFetchContext, skip_client_provider_fetch);
       else
         lRulesetContent = global.rulesetsContent;
     }
     bool ruleset_request_rejected = false;
+    bool ruleset_content_invalid = false;
     for (const RulesetContent &ruleset : lRulesetContent) {
       const bool provider_rule_type =
           ruleset.rule_type == RULESET_CLASH_DOMAIN ||
@@ -2342,14 +2357,44 @@ static std::string subconverter_impl(Request &request, Response &response,
       if (!provider_mode && ruleset.fetch_state &&
           ruleset.fetch_state->request_rejected.load())
         ruleset_request_rejected = true;
-      if (!ruleset.rule_path.empty() && !provider_mode &&
-          ruleset.rule_content.get().empty()) {
-        return externalDependencyFailure(
-            response, ruleset_request_rejected ? 403 : 502,
-            "External ruleset could not be loaded.\n"
-            "外部规则集无法加载，已拒绝生成不完整配置。",
-            ruleset_request_rejected);
+      if (!ruleset.rule_path.empty()) {
+        const std::string content = ruleset.rule_content.get();
+        if (provider_mode) {
+          // Provider-mode rule sets are client-side pulls.  The current
+          // refresh path may still have an in-flight fetch for compatibility,
+          // but its provisional cache must never be committed here.
+          discardRulesetFetchCache(ruleset.fetch_state);
+          continue;
+        }
+        if (content.empty() ||
+            countValidRulesetEntries(content, ruleset.rule_type) == 0) {
+          ruleset_content_invalid = true;
+          continue;
+        }
       }
+    }
+    for (const RulesetContent &ruleset : lRulesetContent) {
+      const bool provider_mode =
+          !argExpandRulesets.get(false) &&
+          (ext.clash_script || !ext.managed_config_prefix.empty()) &&
+          (ruleset.rule_type == RULESET_CLASH_DOMAIN ||
+           ruleset.rule_type == RULESET_CLASH_IPCIDR ||
+           ruleset.rule_type == RULESET_CLASH_CLASSICAL);
+      if (ruleset.rule_path.empty() || provider_mode)
+        continue;
+      if (ruleset_content_invalid ||
+          (ruleset.fetch_state &&
+           ruleset.fetch_state->request_rejected.load()))
+        discardRulesetFetchCache(ruleset.fetch_state);
+      else
+        commitRulesetFetchCache(ruleset.fetch_state);
+    }
+    if (ruleset_content_invalid || ruleset_request_rejected) {
+      return externalDependencyFailure(
+          response, ruleset_request_rejected ? 403 : 502,
+          "External ruleset could not be loaded.\n"
+          "外部规则集无法加载，已拒绝生成不完整配置。",
+          ruleset_request_rejected);
     }
   }
   explain.rule_generator_enabled = ext.enable_rule_generator;

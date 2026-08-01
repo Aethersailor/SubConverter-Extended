@@ -262,7 +262,7 @@ int importItems(string_array &target, bool scope_limit, FetchContext context,
     }
     ss.clear();
     if (itemCount > imported_before)
-      commitFetchOutcomeCache(fetched);
+      deferFetchOutcomeCache(std::move(fetched));
     else
       discardFetchOutcomeCache(fetched);
   }
@@ -310,7 +310,7 @@ int importItems(std::vector<toml::value> &root, const std::string &import_key,
         auto list = toml::find<std::vector<toml::value>>(items, import_key);
         count += list.size();
         std::move(list.begin(), list.end(), std::back_inserter(newRoot));
-        commitFetchOutcomeCache(fetched);
+        deferFetchOutcomeCache(std::move(fetched));
       } catch (const toml::exception &) {
         discardFetchOutcomeCache(fetched);
         throw;
@@ -490,7 +490,8 @@ int readRuleset(YAML::Node node, string_array &dest, bool scope_limit = true,
 
 void refreshRulesets(RulesetConfigs &ruleset_list,
                      std::vector<RulesetContent> &ruleset_content_array,
-                     FetchContext context) {
+                     FetchContext context,
+                     bool skip_client_provider_fetch) {
   ruleset_content_array.clear();
   ruleset_content_array.reserve(ruleset_list.size());
   std::string rule_group, rule_url, rule_url_typed, interval;
@@ -538,19 +539,24 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
                "正在更新规则集 URL：'" + rule_url + "'，策略组：'" +
                    rule_group + "'。",
                LOG_LEVEL_INFO);
+      const bool client_provider_mode =
+          skip_client_provider_fetch &&
+          (type == RULESET_CLASH_DOMAIN || type == RULESET_CLASH_IPCIDR ||
+           type == RULESET_CLASH_CLASSICAL);
       rc = {rule_group,
             rule_url,
             rule_url_typed,
-             type,
-             fetchFileAsync(rule_url, proxy, global.cacheRuleset, true,
-                            global.asyncFetchRuleset, context,
-                            fetch_state),
-             x.Interval,
-             x.Options,
-             false,
-             nullptr};
+            type,
+            client_provider_mode
+                ? makeReadyStringFuture(std::string())
+                : fetchFileAsync(rule_url, proxy, global.cacheRuleset, true,
+                                 global.asyncFetchRuleset, context,
+                                 fetch_state),
+            x.Interval,
+            x.Options,
+            false,
+            client_provider_mode ? nullptr : std::move(fetch_state)};
       rc.request_rejected = !isFetchUrlAllowed(rule_url, context);
-      rc.fetch_state = std::move(fetch_state);
     }
     ruleset_content_array.emplace_back(std::move(rc));
   }
@@ -1546,8 +1552,37 @@ bool readConf() {
   }
 }
 
+static bool validImportedProxyGroups(const string_array &items) {
+  for (const std::string &item : items) {
+    if (INIBinding::from<ProxyGroupConfig>::from_ini({item}).empty())
+      return false;
+  }
+  return true;
+}
+
+static bool validImportedRulesets(const string_array &items) {
+  for (const std::string &item : items) {
+    if (INIBinding::from<RulesetConfig>::from_ini({item}).empty())
+      return false;
+  }
+  return true;
+}
+
+static bool validImportedRegex(const string_array &items,
+                               const std::string &delimiter) {
+  for (const std::string &item : items) {
+    if (startsWith(item, "script:") || startsWith(item, "!!script:"))
+      continue;
+    const std::string::size_type pos = item.rfind(delimiter);
+    if (pos == std::string::npos || pos == 0 || pos >= item.size() - 1)
+      return false;
+  }
+  return true;
+}
+
 int loadExternalYAML(YAML::Node &node, ExternalConfig &ext,
                      FetchContext context, bool *request_rejected = nullptr) {
+
   YAML::Node section = node["custom"], object;
   std::string name, type, url, interval;
   std::string group, strLine;
@@ -1575,6 +1610,8 @@ int loadExternalYAML(YAML::Node &node, ExternalConfig &ext,
     if (readGroupWithFailure(section[group_name], vArray, global.APIMode,
                              context, request_rejected) != 0)
       return -1;
+    if (!validImportedProxyGroups(vArray))
+      return -1;
     ext.custom_proxy_group =
         INIBinding::from<ProxyGroupConfig>::from_ini(vArray);
   }
@@ -1585,6 +1622,8 @@ int loadExternalYAML(YAML::Node &node, ExternalConfig &ext,
     string_array vArray;
     if (readRulesetWithFailure(section[ruleset_name], vArray, global.APIMode,
                                context, request_rejected) != 0)
+      return -1;
+    if (!validImportedRulesets(vArray))
       return -1;
     if (global.maxAllowedRulesets &&
         vArray.size() > global.maxAllowedRulesets) {
@@ -1601,6 +1640,8 @@ int loadExternalYAML(YAML::Node &node, ExternalConfig &ext,
                                   global.APIMode, context,
                                   request_rejected) != 0)
       return -1;
+    if (!validImportedRegex(vArray, "@"))
+      return -1;
     ext.rename = INIBinding::from<RegexMatchConfig>::from_ini(vArray, "@");
   }
 
@@ -1611,6 +1652,8 @@ int loadExternalYAML(YAML::Node &node, ExternalConfig &ext,
     string_array vArray;
     if (readEmojiWithFailure(section[emoji_name], vArray, global.APIMode,
                              context, request_rejected) != 0)
+      return -1;
+    if (!validImportedRegex(vArray, ","))
       return -1;
     ext.emoji = INIBinding::from<RegexMatchConfig>::from_ini(vArray, ",");
   }
@@ -1731,6 +1774,8 @@ static int parseExternalConfigContent(const std::string &path,
     ini.get_all("custom_proxy_group", vArray);
     if (importItems(vArray, global.APIMode, context, request_rejected) != 0)
       return -1;
+    if (!validImportedProxyGroups(vArray))
+      return -1;
     ext.custom_proxy_group =
         INIBinding::from<ProxyGroupConfig>::from_ini(vArray);
   }
@@ -1740,6 +1785,8 @@ static int parseExternalConfigContent(const std::string &path,
     string_array vArray;
     ini.get_all(ruleset_name, vArray);
     if (importItems(vArray, global.APIMode, context, request_rejected) != 0)
+      return -1;
+    if (!validImportedRulesets(vArray))
       return -1;
     if (global.maxAllowedRulesets &&
         vArray.size() > global.maxAllowedRulesets) {
@@ -1771,6 +1818,8 @@ static int parseExternalConfigContent(const std::string &path,
     ini.get_all("rename", vArray);
     if (importItems(vArray, global.APIMode, context, request_rejected) != 0)
       return -1;
+    if (!validImportedRegex(vArray, "@"))
+      return -1;
     ext.rename = INIBinding::from<RegexMatchConfig>::from_ini(vArray, "@");
   }
   ext.add_emoji = ini.get("add_emoji");
@@ -1779,6 +1828,8 @@ static int parseExternalConfigContent(const std::string &path,
     string_array vArray;
     ini.get_all("emoji", vArray);
     if (importItems(vArray, global.APIMode, context, request_rejected) != 0)
+      return -1;
+    if (!validImportedRegex(vArray, ","))
       return -1;
     ext.emoji = INIBinding::from<RegexMatchConfig>::from_ini(vArray, ",");
   }
@@ -1866,6 +1917,29 @@ int loadExternalConfigWithOutcome(std::string &path, ExternalConfig &ext,
                                   FetchContext context,
                                   FetchOutcome *fetch_outcome) {
   template_args *request_tpl_args = ext.tpl_args;
+  FetchCacheTransaction dependency_transaction;
+  FetchCacheTransactionScope dependency_scope(dependency_transaction);
+  struct DependencyTransactionGuard {
+    FetchCacheTransaction &transaction;
+    bool transferred = false;
+    ~DependencyTransactionGuard() {
+      if (!transferred)
+        discardFetchCacheTransaction(transaction);
+    }
+  } dependency_guard{dependency_transaction};
+
+  auto transferDependencies = [&]() {
+    if (dependency_guard.transferred)
+      return;
+    if (fetch_outcome != nullptr) {
+      fetch_outcome->deferred_dependencies =
+          std::move(dependency_transaction.pending);
+    } else {
+      commitFetchCacheTransaction(dependency_transaction);
+    }
+    dependency_guard.transferred = true;
+  };
+
   std::string base_content;
   std::string config;
   FetchOutcome fetched;
@@ -1972,6 +2046,8 @@ int loadExternalConfigWithOutcome(std::string &path, ExternalConfig &ext,
   ext.tpl_args = request_tpl_args;
   for (const auto &[name, value] : cached.local_vars)
     request_tpl_args->local_vars[name] = value;
+  if (cached.result == 0)
+    transferDependencies();
   if (fetch_outcome && cached.result != 0) {
     if (cached.request_rejected) {
       fetch_outcome->success = false;

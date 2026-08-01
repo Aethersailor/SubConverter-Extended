@@ -75,6 +75,25 @@ class FixtureHandler(BaseHTTPRequestHandler):
             else:
                 body = b"Proxy`select`[]DIRECT\n"
                 content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/import-semantic-probe"):
+            if request_number == 1:
+                body = b"invalid imported object\n"
+            else:
+                body = b"Proxy`select`[]DIRECT\n"
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/ruleset-semantic-probe"):
+            if request_number == 1:
+                body = b"this is not a ruleset\n"
+            else:
+                body = RULESET.encode()
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/template-cache-probe"):
+            if request_number == 1:
+                body = b"<!doctype html><html><body>transient template error</body></html>"
+                content_type = "text/html; charset=utf-8"
+            else:
+                body = b"[custom]\nenable_rule_generator=false\n"
+                content_type = "text/plain; charset=utf-8"
         elif self.path == "/fallback-default.ini":
             missing = (
                 f"http://127.0.0.1:{self.server.server_port}"
@@ -812,6 +831,101 @@ def external_import_cache_baseline(binary: Path, fixture_base: str) -> None:
         )
 
 
+def external_import_semantic_cache_baseline(binary: Path, fixture_base: str) -> None:
+    probe_url = fixture_base + "/import-semantic-probe?nonce=" + str(time.time_ns())
+    config = (
+        "[custom]\n"
+        "enable_rule_generator=false\n"
+        f"custom_proxy_group=!!import:{probe_url}\n"
+    )
+    config_url = "data:text/plain;base64," + base64.urlsafe_b64encode(
+        config.encode()
+    ).decode()
+    common = {
+        "target": "clash",
+        "url": fixture_base + "/subscription.txt",
+        "list": "true",
+    }
+
+    FixtureHandler.reset_counters()
+    with running_service(binary) as base_url:
+        status, _, headers = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 502 or "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError("semantically invalid imported content was not rejected")
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or b"proxies:" not in body:
+            raise AssertionError("valid imported content did not recover after semantic rejection")
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or b"proxies:" not in body:
+            raise AssertionError("valid imported content did not remain usable from cache")
+
+    if FixtureHandler.request_counts.get("/import-semantic-probe") != 2:
+        raise AssertionError(
+            "semantically invalid imported content was cached or valid retry was not cached"
+        )
+
+
+def external_ruleset_semantic_cache_baseline(binary: Path, fixture_base: str) -> None:
+    probe_url = fixture_base + "/ruleset-semantic-probe?nonce=" + str(time.time_ns())
+    config = (
+        "[custom]\n"
+        "enable_rule_generator=true\n"
+        "overwrite_original_rules=true\n"
+        f"ruleset=Proxy,surge:{probe_url}\n"
+    )
+    config_url = "data:text/plain;base64," + base64.urlsafe_b64encode(
+        config.encode()
+    ).decode()
+    common = {"target": "clash", "url": fixture_base + "/subscription.txt"}
+
+    FixtureHandler.reset_counters()
+    with running_service(binary) as base_url:
+        status, _, headers = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 502 or "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError("semantically invalid ruleset was not fail-closed")
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or b"proxy-groups:" not in body:
+            raise AssertionError("valid ruleset did not recover after semantic rejection")
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or b"proxy-groups:" not in body:
+            raise AssertionError("valid ruleset did not remain usable from cache")
+
+    if FixtureHandler.request_counts.get("/ruleset-semantic-probe") != 2:
+        raise AssertionError(
+            "semantically invalid ruleset was cached or valid retry was not cached"
+        )
+
+
+def template_dependency_cache_baseline(binary: Path, fixture_base: str) -> None:
+    probe_url = fixture_base + "/template-cache-probe?nonce=" + str(time.time_ns())
+    config = '{{ fetch("' + probe_url + '") }}'
+    config_url = "data:text/plain;base64," + base64.urlsafe_b64encode(
+        config.encode()
+    ).decode()
+    common = {
+        "target": "clash",
+        "url": fixture_base + "/subscription.txt",
+        "list": "true",
+    }
+
+    FixtureHandler.reset_counters()
+    with running_service(binary) as base_url:
+        status, _, headers = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 502 or "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError("invalid template dependency was not fail-closed")
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or b"proxies:" not in body:
+            raise AssertionError("valid template dependency did not recover")
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or b"proxies:" not in body:
+            raise AssertionError("valid template dependency did not remain usable from cache")
+
+    if FixtureHandler.request_counts.get("/template-cache-probe") != 2:
+        raise AssertionError(
+            "invalid template dependency was cached or valid retry was not cached"
+        )
+
+
 def default_dependency_single_execution_baseline(
     binary: Path, fixture_base: str
 ) -> None:
@@ -891,6 +1005,9 @@ def main() -> int:
         public_request_baseline(binary, fixture_base)
         external_config_policy_baseline(binary, fixture_base)
         external_import_cache_baseline(binary, fixture_base)
+        external_import_semantic_cache_baseline(binary, fixture_base)
+        external_ruleset_semantic_cache_baseline(binary, fixture_base)
+        template_dependency_cache_baseline(binary, fixture_base)
         default_dependency_single_execution_baseline(binary, fixture_base)
 
     print("compatibility and security baselines passed")

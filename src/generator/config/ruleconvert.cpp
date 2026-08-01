@@ -123,6 +123,65 @@ std::string convertRuleset(const std::string &content, int type)
         });
 }
 
+static bool hasKnownRuleType(const std::string &line,
+                             const string_array &known_types)
+{
+    const std::string::size_type separator = line.find(',');
+    if (separator == std::string::npos)
+        return false;
+    const std::string type =
+        toUpper(trimWhitespace(line.substr(0, separator), true, true));
+    return std::any_of(known_types.begin(), known_types.end(),
+                       [&](const std::string &known) {
+                           return type == known;
+                       });
+}
+
+size_t countValidRulesetEntries(const std::string &content,
+                                ruleset_type type)
+{
+    const std::string trimmed = trimWhitespace(content, true, true);
+    if (trimmed.empty())
+        return 0;
+    if (startsWith(trimmed, "[]"))
+        return trimmed.size() > 2 ? 1 : 0;
+
+    const string_array *known_types = &SurgeRuleTypes;
+    switch (type)
+    {
+    case RULESET_QUANX:
+        known_types = &QuanXRuleTypes;
+        break;
+    case RULESET_CLASH_DOMAIN:
+    case RULESET_CLASH_IPCIDR:
+    case RULESET_CLASH_CLASSICAL:
+        known_types = &ClashRuleTypes;
+        break;
+    case RULESET_SURGE:
+        known_types = &SurgeRuleTypes;
+        break;
+    }
+
+    const std::string converted = convertRuleset(content, type);
+    std::stringstream stream(converted);
+    const char delimiter = getLineBreak(converted);
+    std::string line;
+    size_t valid = 0;
+    while (std::getline(stream, line, delimiter))
+    {
+        line = trimWhitespace(line, true, true);
+        if (line.empty() || line[0] == ';' || line[0] == '#' ||
+            (line.size() >= 2 && line[0] == '/' && line[1] == '/'))
+            continue;
+        const std::string::size_type comment = line.find("//");
+        if (comment != std::string::npos)
+            line = trimWhitespace(line.substr(0, comment), true, true);
+        if (hasKnownRuleType(line, *known_types))
+            ++valid;
+    }
+    return valid;
+}
+
 size_t rulesetConversionCacheMaxEntries()
 {
     return kRulesetConversionCacheEntries;

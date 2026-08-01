@@ -12,7 +12,8 @@
 
 void refreshRulesets(RulesetConfigs &ruleset_list,
                      std::vector<RulesetContent> &rca,
-                     FetchContext context = FetchContext::TrustedConfig);
+                     FetchContext context = FetchContext::TrustedConfig,
+                     bool skip_client_provider_fetch = false);
 bool readConf();
 int simpleGenerator();
 std::string convertRuleset(const std::string &content, int type);
