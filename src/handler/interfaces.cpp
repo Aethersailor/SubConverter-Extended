@@ -2836,6 +2836,16 @@ static std::string subconverter_impl(Request &request, Response &response,
     commitFetchOutcomeCache(rendered_base_outcome);
     rendered_base_outcome_active = false;
   };
+  std::string pending_upload_name;
+  std::string pending_upload_content;
+  bool pending_upload_write_manage_url = false;
+  auto scheduleUpload = [&](const std::string &name, bool write_manage_url) {
+    if (!argUpload)
+      return;
+    pending_upload_name = name;
+    pending_upload_content = output_content;
+    pending_upload_write_manage_url = write_manage_url;
+  };
   auto renderExternalBase =
       [&](const std::string &path, const ExternalBaseState &state,
           const char *target_name) -> std::string {
@@ -2929,8 +2939,7 @@ static std::string subconverter_impl(Request &request, Response &response,
       }
     }
 
-    if (argUpload)
-      uploadGist(argTarget, argUploadPath, output_content, false);
+    scheduleUpload(argTarget, false);
     break;
   case "surge"_hash:
 
@@ -2941,9 +2950,7 @@ static std::string subconverter_impl(Request &request, Response &response,
       output_content = proxyToSurge(nodes, base_content, dummy_ruleset,
                                     dummy_group, intSurgeVer, ext);
 
-      if (argUpload)
-        uploadGist("surge" + argSurgeVer + "list", argUploadPath,
-                   output_content, true);
+      scheduleUpload("surge" + argSurgeVer + "list", true);
     } else {
       if (std::string error =
               renderExternalBase(lSurgeBase, surge_base_state, "Surge");
@@ -2952,8 +2959,7 @@ static std::string subconverter_impl(Request &request, Response &response,
       output_content = proxyToSurge(nodes, base_content, lRulesetContent,
                                     lCustomProxyGroups, intSurgeVer, ext);
 
-      if (argUpload)
-        uploadGist("surge" + argSurgeVer, argUploadPath, output_content, true);
+      scheduleUpload("surge" + argSurgeVer, true);
 
       if (global.writeManagedConfig && !global.managedConfigPrefix.empty())
         output_content =
@@ -2972,8 +2978,7 @@ static std::string subconverter_impl(Request &request, Response &response,
       return error;
     output_content = proxyToSurge(nodes, base_content, lRulesetContent,
                                   lCustomProxyGroups, -3, ext);
-    if (argUpload)
-      uploadGist("surfboard", argUploadPath, output_content, true);
+    scheduleUpload("surfboard", true);
 
     if (global.writeManagedConfig && !global.managedConfigPrefix.empty())
       output_content =
@@ -2992,8 +2997,7 @@ static std::string subconverter_impl(Request &request, Response &response,
     output_content = proxyToMellow(nodes, base_content, lRulesetContent,
                                    lCustomProxyGroups, ext);
 
-    if (argUpload)
-      uploadGist("mellow", argUploadPath, output_content, true);
+    scheduleUpload("mellow", true);
     break;
   case "sssub"_hash:
     writeLog(0, "生成目标：SS Subscription", LOG_LEVEL_INFO);
@@ -3003,50 +3007,42 @@ static std::string subconverter_impl(Request &request, Response &response,
         !error.empty())
       return error;
     output_content = proxyToSSSub(base_content, nodes, ext);
-    if (argUpload)
-      uploadGist("sssub", argUploadPath, output_content, false);
+    scheduleUpload("sssub", false);
     break;
   case "ss"_hash:
     writeLog(0, "生成目标：SS", LOG_LEVEL_INFO);
     output_content = proxyToSingle(nodes, 1, ext);
-    if (argUpload)
-      uploadGist("ss", argUploadPath, output_content, false);
+    scheduleUpload("ss", false);
     break;
   case "ssr"_hash:
     writeLog(0, "生成目标：SSR", LOG_LEVEL_INFO);
     output_content = proxyToSingle(nodes, 2, ext);
-    if (argUpload)
-      uploadGist("ssr", argUploadPath, output_content, false);
+    scheduleUpload("ssr", false);
     break;
   case "v2ray"_hash:
     writeLog(0, "生成目标：v2rayN", LOG_LEVEL_INFO);
     output_content = proxyToSingle(nodes, 4, ext);
-    if (argUpload)
-      uploadGist("v2ray", argUploadPath, output_content, false);
+    scheduleUpload("v2ray", false);
     break;
   case "trojan"_hash:
     writeLog(0, "生成目标：Trojan", LOG_LEVEL_INFO);
     output_content = proxyToSingle(nodes, 8, ext);
-    if (argUpload)
-      uploadGist("trojan", argUploadPath, output_content, false);
+    scheduleUpload("trojan", false);
     break;
   case "vless"_hash:
     writeLog(0, "生成目标：vless", LOG_LEVEL_INFO);
     output_content = proxyToSingle(nodes, 16, ext);
-    if (argUpload)
-      uploadGist("vless", argUploadPath, output_content, false);
+    scheduleUpload("vless", false);
     break;
   case "hysteria2"_hash:
     writeLog(0, "生成目标：hysteria2", LOG_LEVEL_INFO);
     output_content = proxyToSingle(nodes, 32, ext);
-    if (argUpload)
-      uploadGist("hysteria2", argUploadPath, output_content, false);
+    scheduleUpload("hysteria2", false);
     break;
   case "mixed"_hash:
     writeLog(0, "生成目标：Standard Subscription", LOG_LEVEL_INFO);
     output_content = proxyToSingle(nodes, 63, ext);
-    if (argUpload)
-      uploadGist("sub", argUploadPath, output_content, false);
+    scheduleUpload("sub", false);
     break;
   case "quan"_hash:
     writeLog(0, "生成目标：Quantumult", LOG_LEVEL_INFO);
@@ -3060,8 +3056,7 @@ static std::string subconverter_impl(Request &request, Response &response,
     output_content = proxyToQuan(nodes, base_content, lRulesetContent,
                                  lCustomProxyGroups, ext);
 
-    if (argUpload)
-      uploadGist("quan", argUploadPath, output_content, false);
+    scheduleUpload("quan", false);
     break;
   case "quanx"_hash:
     writeLog(0, "生成目标：Quantumult X", LOG_LEVEL_INFO);
@@ -3075,8 +3070,7 @@ static std::string subconverter_impl(Request &request, Response &response,
     output_content = proxyToQuanX(nodes, base_content, lRulesetContent,
                                   lCustomProxyGroups, ext);
 
-    if (argUpload)
-      uploadGist("quanx", argUploadPath, output_content, false);
+    scheduleUpload("quanx", false);
     break;
   case "loon"_hash:
     writeLog(0, "生成目标：Loon", LOG_LEVEL_INFO);
@@ -3090,14 +3084,12 @@ static std::string subconverter_impl(Request &request, Response &response,
     output_content = proxyToLoon(nodes, base_content, lRulesetContent,
                                  lCustomProxyGroups, ext);
 
-    if (argUpload)
-      uploadGist("loon", argUploadPath, output_content, false);
+    scheduleUpload("loon", false);
     break;
   case "ssd"_hash:
     writeLog(0, "生成目标：SSD", LOG_LEVEL_INFO);
     output_content = proxyToSSD(nodes, argGroupName, subInfo, ext);
-    if (argUpload)
-      uploadGist("ssd", argUploadPath, output_content, false);
+    scheduleUpload("ssd", false);
     break;
   case "singbox"_hash:
     writeLog(0, "生成目标：sing-box", LOG_LEVEL_INFO);
@@ -3111,8 +3103,7 @@ static std::string subconverter_impl(Request &request, Response &response,
     output_content = proxyToSingBox(nodes, base_content, lRulesetContent,
                                     lCustomProxyGroups, ext);
 
-    if (argUpload)
-      uploadGist("singbox", argUploadPath, output_content, false);
+    scheduleUpload("singbox", false);
     break;
   default:
     writeLog(0, "生成目标：未指定", LOG_LEVEL_INFO);
@@ -3133,6 +3124,9 @@ static std::string subconverter_impl(Request &request, Response &response,
             "外部基础配置生成的目标配置无效或为空，已拒绝提交缓存。\n");
   }
   commitRenderedBase();
+  if (argUpload && !pending_upload_name.empty())
+    uploadGist(pending_upload_name, argUploadPath, pending_upload_content,
+               pending_upload_write_manage_url);
   writeLog(0, "生成完成。", LOG_LEVEL_INFO);
   if (argTarget == "clash" && explain.proxy_provider_mode)
     appendVaryHeader(response, "User-Agent");

@@ -266,14 +266,16 @@ static bool unwrapRuleExpression(const std::string &value,
 
 static bool validCompoundExpression(const std::string &expression,
                                     const string_array &known_types,
-                                    size_t minimum_components)
+                                    size_t minimum_components,
+                                    bool exact_component_count)
 {
     std::string inner;
     if(!unwrapRuleExpression(expression, inner))
         return false;
     string_array components;
     if(!splitRuleFieldsStrict(inner, components) ||
-       components.size() < minimum_components)
+       components.size() < minimum_components ||
+       (exact_component_count && components.size() != minimum_components))
         return false;
     for(const std::string &component : components)
     {
@@ -282,7 +284,9 @@ static bool validCompoundExpression(const std::string &expression,
             return false;
         if(normalized.front() == '(')
         {
-            if(!validCompoundExpression(normalized, known_types, 1))
+            std::string nested_rule;
+            if(!unwrapRuleExpression(normalized, nested_rule) ||
+               !validRuleLine(nested_rule, known_types))
                 return false;
         }
         else if(!validRuleLine(normalized, known_types))
@@ -317,11 +321,11 @@ static bool validRuleLine(const std::string &line,
         return false;
     if(type == "AND" || type == "OR" || type == "NOT")
     {
-        if(fields.size() != 3)
+        if(fields.size() != 2 && fields.size() != 3)
             return false;
         const size_t minimum_components = type == "NOT" ? 1 : 2;
         if(!validCompoundExpression(fields[1], known_types,
-                                     minimum_components))
+                                     minimum_components, type == "NOT"))
             return false;
     }
     return true;

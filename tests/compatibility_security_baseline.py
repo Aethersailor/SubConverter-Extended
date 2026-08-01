@@ -33,6 +33,13 @@ SUBSCRIPTION = (
     "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388#Smoke\n"
 )
 RULESET = "DOMAIN-SUFFIX,example.com,Proxy\nIP-CIDR,198.51.100.0/24,Proxy\n"
+STRICT_VALID_RULESET = (
+    "AND,((DOMAIN-SUFFIX,example.com),(DOMAIN,network.example))\n"
+    "OR,((DOMAIN,one.example),(DOMAIN,two.example))\n"
+    "NOT,((DOMAIN-SUFFIX,example.net))\n"
+    "AND,((OR,((DOMAIN-SUFFIX,nested.example),(DOMAIN,inner.example))),"
+    "(DOMAIN,network.example))\n"
+)
 DISABLE_RULEGEN_CONFIG = "data:,enable_rule_generator=false"
 
 
@@ -133,7 +140,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
                     b"(IP-CIDR,not-a-cidr)),Proxy\n"
                 )
             else:
-                body = RULESET.encode()
+                body = STRICT_VALID_RULESET.encode()
             content_type = "text/plain; charset=utf-8"
         elif self.path.startswith("/clash-base-transaction-probe"):
             if request_number == 1:
@@ -1153,7 +1160,11 @@ def external_ruleset_strict_validation_baseline(
     config_url = "data:text/plain;base64," + base64.urlsafe_b64encode(
         config.encode()
     ).decode()
-    common = {"target": "clash", "url": fixture_base + "/subscription.txt"}
+    common = {
+        "target": "clash",
+        "url": fixture_base + "/subscription.txt",
+        "expand": "true",
+    }
 
     FixtureHandler.reset_counters()
     with running_service(binary) as base_url:
@@ -1168,6 +1179,18 @@ def external_ruleset_strict_validation_baseline(
         status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
         if status != 200 or b"proxy-groups:" not in body:
             raise AssertionError("fully valid ruleset did not recover")
+        for expected_rule in (
+            b"AND,((DOMAIN-SUFFIX,example.com),(DOMAIN,network.example)),Proxy",
+            b"OR,((DOMAIN,one.example),(DOMAIN,two.example)),Proxy",
+            b"NOT,((DOMAIN-SUFFIX,example.net)),Proxy",
+            b"AND,((OR,((DOMAIN-SUFFIX,nested.example),(DOMAIN,inner.example))),"
+            b"(DOMAIN,network.example)),Proxy",
+        ):
+            if expected_rule not in body:
+                raise AssertionError(
+                    "valid server-side compound rule was not preserved: "
+                    + expected_rule.decode()
+                )
         status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
         if status != 200 or b"proxy-groups:" not in body:
             raise AssertionError("fully valid ruleset did not remain cached")
