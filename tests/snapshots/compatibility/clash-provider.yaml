@@ -2,7 +2,7 @@ proxy-providers:
   Provider_FIXTURE:
     type: http
     url: http://fixture.test/subscription.txt
-    interval: 3600
+    interval: 86400
     proxy: DIRECT
     path: ./providers/Provider_FIXTURE.yaml
     health-check:
