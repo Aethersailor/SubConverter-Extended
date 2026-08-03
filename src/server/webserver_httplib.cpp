@@ -50,7 +50,13 @@ static httplib::Server::Handler makeHandler(const responseRoute &rr) {
       }
       req.headers.emplace(h.first.data(), h.second.data());
     }
-    req.argument = request.params;
+    // httplib::Params changed from std::multimap to
+    // insertion_ordered_multimap in newer releases; copy explicitly to stay
+    // compatible with both container types.
+    req.argument.clear();
+    for (const auto &p : request.params) {
+      req.argument.emplace(p.first, p.second);
+    }
     if (request.method == "POST" || request.method == "PUT" ||
         request.method == "PATCH") {
       if (request.get_header_value("Content-Type") ==
