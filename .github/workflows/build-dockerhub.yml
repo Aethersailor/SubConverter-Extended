@@ -275,19 +275,28 @@ jobs:
         env:
           VERSION: ${{ steps.mode.outputs.version }}
           MODE: ${{ steps.mode.outputs.mode }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           {
             echo 'tags<<EOF'
             if [ "$MODE" = "release" ]; then
+              # Docker Hub tags are emitted only when Hub credentials exist.
+              if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
+                printf '%s\n' \
+                  "chenglong-do/subconverter-extended:latest" \
+                  "chenglong-do/subconverter-extended:${VERSION}"
+              fi
               printf '%s\n' \
-                "aethersailor/subconverter-extended:latest" \
-                "aethersailor/subconverter-extended:${VERSION}" \
-                "ghcr.io/aethersailor/subconverter-extended:latest" \
-                "ghcr.io/aethersailor/subconverter-extended:${VERSION}"
+                "ghcr.io/chenglong-do/subconverter-extended:latest" \
+                "ghcr.io/chenglong-do/subconverter-extended:${VERSION}"
             elif [ "$MODE" = "dev" ]; then
+              if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
+                printf '%s\n' \
+                  "chenglong-do/subconverter-extended:dev"
+              fi
               printf '%s\n' \
-                "aethersailor/subconverter-extended:dev" \
-                "ghcr.io/aethersailor/subconverter-extended:dev"
+                "ghcr.io/chenglong-do/subconverter-extended:dev"
             fi
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
@@ -348,7 +357,12 @@ jobs:
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        run: echo "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
+        run: |
+          if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
+            echo "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
+          else
+            echo "::warning::DOCKERHUB_USERNAME/DOCKERHUB_TOKEN not configured; skipping Docker Hub login (GHCR only)."
+          fi
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
@@ -380,6 +394,8 @@ jobs:
         shell: bash
         env:
           BUILD_ARGS: ${{ steps.docker_args.outputs.args }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           set -euo pipefail
           args=()
@@ -394,14 +410,16 @@ jobs:
             if [ "${{ needs.prepare.outputs.mode }}" = "release" ]; then
               candidate="ci-${{ needs.prepare.outputs.version }}-${{ matrix.arch }}"
             fi
-            tags=(
-              --tag "aethersailor/subconverter-extended:${candidate}"
-              --tag "ghcr.io/aethersailor/subconverter-extended:${candidate}"
-            )
+            tags=()
+            # Docker Hub candidate is pushed only when Hub credentials exist.
+            if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
+              tags+=(--tag "chenglong-do/subconverter-extended:${candidate}")
+            fi
+            tags+=(--tag "ghcr.io/chenglong-do/subconverter-extended:${candidate}")
             output=(--push)
             cache=(
-              --cache-from "type=registry,ref=ghcr.io/aethersailor/subconverter-extended:buildcache-${{ matrix.cache_scope }}"
-              --cache-to "type=registry,ref=ghcr.io/aethersailor/subconverter-extended:buildcache-${{ matrix.cache_scope }},mode=max,ignore-error=true"
+              --cache-from "type=registry,ref=ghcr.io/chenglong-do/subconverter-extended:buildcache-${{ matrix.cache_scope }}"
+              --cache-to "type=registry,ref=ghcr.io/chenglong-do/subconverter-extended:buildcache-${{ matrix.cache_scope }},mode=max,ignore-error=true"
             )
           fi
           metadata_file="${RUNNER_TEMP}/build-metadata-${{ matrix.arch }}.json"
@@ -547,7 +565,7 @@ jobs:
         timeout-minutes: 3
         uses: ./.github/actions/smoke-docker-image
         with:
-          image: ghcr.io/aethersailor/subconverter-extended@${{ steps.build_image.outputs.digest }}
+          image: ghcr.io/chenglong-do/subconverter-extended@${{ steps.build_image.outputs.digest }}
           platform: ${{ matrix.image_platform }}
           custom-openclash-rules-revision: ${{ steps.dependencies.outputs.custom_openclash_rules_revision }}
 
@@ -737,6 +755,9 @@ jobs:
 
       - name: Promote tested candidates
         shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -751,10 +772,12 @@ jobs:
           done
 
           TAGS="${{ needs.prepare.outputs.tags }}"
-          IMAGE_NAMES=(
-            "aethersailor/subconverter-extended"
-            "ghcr.io/aethersailor/subconverter-extended"
-          )
+          IMAGE_NAMES=()
+          # Docker Hub promotion only when Hub credentials exist.
+          if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
+            IMAGE_NAMES+=("chenglong-do/subconverter-extended")
+          fi
+          IMAGE_NAMES+=("ghcr.io/chenglong-do/subconverter-extended")
 
           for IMAGE_NAME in "${IMAGE_NAMES[@]}"; do
             SOURCES=()
@@ -979,8 +1002,8 @@ jobs:
           ## Docker Images
 
           Docker images are published to:
-          - `aethersailor/subconverter-extended`
-          - `ghcr.io/aethersailor/subconverter-extended`
+          - `chenglong-do/subconverter-extended`
+          - `ghcr.io/chenglong-do/subconverter-extended`
 
           Supported Docker platforms:
           - `linux/amd64`

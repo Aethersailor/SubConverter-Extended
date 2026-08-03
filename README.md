@@ -9,9 +9,9 @@
 
 **A Modern Evolution of subconverter**
 
-![GitHub Tag](https://img.shields.io/github/v/tag/Aethersailor/SubConverter-Extended?style=flat&logo=github&label=version&color=blue)
-![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/Aethersailor/SubConverter-Extended/build-dockerhub.yml?branch=master&style=flat&label=docker%20build&logo=GitHub%20Actions)
-[![Docker Pulls](https://img.shields.io/docker/pulls/aethersailor/subconverter-extended?style=flat&logo=docker)](https://hub.docker.com/r/aethersailor/subconverter-extended)
+![GitHub Tag](https://img.shields.io/github/v/tag/chenglong-do/SubConverter-Extended?style=flat&logo=github&label=version&color=blue)
+![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/chenglong-do/SubConverter-Extended/build-dockerhub.yml?branch=master&style=flat&label=docker%20build&logo=GitHub%20Actions)
+[![Docker Pulls](https://img.shields.io/docker/pulls/chenglong-do/subconverter-extended?style=flat&logo=docker)](https://hub.docker.com/r/chenglong-do/subconverter-extended)
 [![License](https://img.shields.io/badge/license-GPL--3.0-orange?style=flat)](LICENSE)
 
 <h3>⚡ 现代化的订阅转换后端 | 深度适配 Mihomo 内核 ⚡</h3>
@@ -242,7 +242,7 @@ OpenClash 已内置该演示实例地址；在其他支持自定义后端的订�
 
 ### 🚀 自行部署
 
-推荐优先使用 Docker 部署；如果部署环境不方便运行容器，可以根据 [Release](https://github.com/Aethersailor/SubConverter-Extended/releases/latest) 中的安装包类型选择便携包或 OpenWrt APK。
+推荐优先使用 Docker 部署；如果部署环境不方便运行容器，可以根据 [Release](https://github.com/chenglong-do/SubConverter-Extended/releases/latest) 中的安装包类型选择便携包或 OpenWrt APK。
 
 > [!IMPORTANT]
 > 如果服务需要被其他设备访问，请将配置中的 `managed_config_prefix` 改为实际访问地址，例如 `http://192.168.1.10:25500` 或 `https://sub.example.com`。公网部署还建议在配置中启用 `public` 安全档位，详见下方“配置说明”。
@@ -251,7 +251,7 @@ OpenClash 已内置该演示实例地址；在其他支持自定义后端的订�
 
 | 类型 | 文件 / 镜像 | 适用场景 |
 | :--- | :--- | :--- |
-| Docker 镜像 | `aethersailor/subconverter-extended`、`ghcr.io/aethersailor/subconverter-extended` | 服务器、NAS、软路由容器环境 |
+| Docker 镜像 | `chenglong-do/subconverter-extended`、`ghcr.io/chenglong-do/subconverter-extended` | 服务器、NAS、软路由容器环境 |
 | Linux 便携包 | `SubConverter-Extended-<version>-linux-amd64.tar.gz`、`linux-arm64.tar.gz`、`linux-armv7.tar.gz` | 不使用 Docker 的 Linux 主机 |
 | Windows 便携包 | `SubConverter-Extended-<version>-windows-amd64.zip` | Windows x64 主机 |
 | OpenWrt APK | `SubConverter-Extended-<version>-openwrt-<arch>.apk` | 使用 `apk` 包管理器的 OpenWrt 25.12+ |
@@ -273,7 +273,7 @@ docker run -d \
   --name SubConverter-Extended \
   -p 25500:25500 \
   --restart unless-stopped \
-  aethersailor/subconverter-extended:latest
+  chenglong-do/subconverter-extended:latest
 ```
 
 访问 `http://localhost:25500/version` 验证服务是否正常启动。
@@ -299,7 +299,7 @@ cd /opt/SubConverter-Extended
 # 仅在配置不存在时下载默认配置，避免覆盖已有设置
 if [ ! -f base/pref.toml ]; then
   wget -O base/pref.toml \
-    https://gcore.jsdelivr.net/gh/Aethersailor/SubConverter-Extended@master/base/pref.example.toml
+    https://gcore.jsdelivr.net/gh/chenglong-do/SubConverter-Extended@master/base/pref.example.toml
 fi
 
 # 如需外部访问，请修改 base/pref.toml 中的 managed_config_prefix
@@ -312,7 +312,7 @@ docker run -d \
   -v /opt/SubConverter-Extended/base/pref.toml:/base/pref.toml:ro \
   -v /opt/SubConverter-Extended/stats:/base/stats \
   --restart unless-stopped \
-  aethersailor/subconverter-extended:latest
+  chenglong-do/subconverter-extended:latest
 ```
 
 也可以在上述 `docker run` 命令中按需加入环境变量，覆盖常用配置：
@@ -326,7 +326,7 @@ docker run -d \
 更新 Docker 镜像时，保留宿主机上的 `base/pref.toml` 和 `stats`，拉取新镜像后重新创建容器即可：
 
 ```bash
-docker pull aethersailor/subconverter-extended:latest
+docker pull chenglong-do/subconverter-extended:latest
 docker rm -f SubConverter-Extended
 # 然后重新执行上面的 docker run 命令
 ```
@@ -342,12 +342,12 @@ cd /opt/SubConverter-Extended
 # 仅在文件不存在时下载 Compose 示例和默认配置，避免覆盖已有设置
 if [ ! -f docker-compose.yml ]; then
   wget -O docker-compose.yml \
-    https://gcore.jsdelivr.net/gh/Aethersailor/SubConverter-Extended@master/docker-compose.yml
+    https://gcore.jsdelivr.net/gh/chenglong-do/SubConverter-Extended@master/docker-compose.yml
 fi
 
 if [ ! -f base/pref.toml ]; then
   wget -O base/pref.toml \
-    https://gcore.jsdelivr.net/gh/Aethersailor/SubConverter-Extended@master/base/pref.example.toml
+    https://gcore.jsdelivr.net/gh/chenglong-do/SubConverter-Extended@master/base/pref.example.toml
 fi
 
 # 如需外部访问，请修改 docker-compose.yml 中的 MANAGED_CONFIG_PREFIX，
@@ -416,8 +416,8 @@ INSTALL_DIR=/opt/SubConverter-Extended
 mkdir -p "$INSTALL_DIR"
 cd /tmp
 
-curl -fLO "https://github.com/Aethersailor/SubConverter-Extended/releases/download/${VERSION}/SubConverter-Extended-${VERSION}-linux-${ARCH}.tar.gz"
-curl -fLO "https://github.com/Aethersailor/SubConverter-Extended/releases/download/${VERSION}/SHA256SUMS"
+curl -fLO "https://github.com/chenglong-do/SubConverter-Extended/releases/download/${VERSION}/SubConverter-Extended-${VERSION}-linux-${ARCH}.tar.gz"
+curl -fLO "https://github.com/chenglong-do/SubConverter-Extended/releases/download/${VERSION}/SHA256SUMS"
 sha256sum -c SHA256SUMS --ignore-missing
 
 tar -xzf "SubConverter-Extended-${VERSION}-linux-${ARCH}.tar.gz" \
@@ -477,7 +477,7 @@ Windows 便携包适用于 Windows x64 环境，文件名为 `SubConverter-Exten
 
 #### 部署步骤
 
-1. 从 [Release](https://github.com/Aethersailor/SubConverter-Extended/releases/latest) 下载 `windows-amd64.zip`。
+1. 从 [Release](https://github.com/chenglong-do/SubConverter-Extended/releases/latest) 下载 `windows-amd64.zip`。
 2. 解压到固定目录，例如 `C:\SubConverter-Extended`。
 3. 双击运行 `start.bat`，或在 PowerShell 中运行：
 
@@ -544,7 +544,7 @@ ARCH="$(apk print-arch)"
 PKG="/tmp/SubConverter-Extended-${VERSION}-openwrt-${ARCH}.apk"
 
 wget -O "$PKG" \
-  "https://github.com/Aethersailor/SubConverter-Extended/releases/download/${VERSION}/SubConverter-Extended-${VERSION}-openwrt-${ARCH}.apk"
+  "https://github.com/chenglong-do/SubConverter-Extended/releases/download/${VERSION}/SubConverter-Extended-${VERSION}-openwrt-${ARCH}.apk"
 
 apk add --allow-untrusted "$PKG"
 ```
@@ -817,7 +817,7 @@ docker run -d \
   -e SUBCONVERTER_SECURITY_PROFILE=public \
   -e SUBCONVERTER_ALLOW_PUBLIC_UPLOAD=false \
   --restart unless-stopped \
-  aethersailor/subconverter-extended:latest
+  chenglong-do/subconverter-extended:latest
 ```
 
 | 配置项 / 环境变量 | 默认值 | 说明 |
@@ -872,9 +872,9 @@ docker run -d \
 
 <a href="https://www.star-history.com/?type=date&repos=Aethersailor%2FSubConverter-Extended">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=Aethersailor/SubConverter-Extended&type=date&theme=dark&legend=top-left&sealed_token=NKvX6WwN3no1B0JCAxO5Tkk4nqJLR5HppGP59Pp9IDkrygstiLYT8T8_MsYyG-hqMAuML_mTOU2N1PX79o9ZgwfXacAhIBKClQskYzigRVD1FQyH66FGwA" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=Aethersailor/SubConverter-Extended&type=date&legend=top-left&sealed_token=NKvX6WwN3no1B0JCAxO5Tkk4nqJLR5HppGP59Pp9IDkrygstiLYT8T8_MsYyG-hqMAuML_mTOU2N1PX79o9ZgwfXacAhIBKClQskYzigRVD1FQyH66FGwA" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=Aethersailor/SubConverter-Extended&type=date&legend=top-left&sealed_token=NKvX6WwN3no1B0JCAxO5Tkk4nqJLR5HppGP59Pp9IDkrygstiLYT8T8_MsYyG-hqMAuML_mTOU2N1PX79o9ZgwfXacAhIBKClQskYzigRVD1FQyH66FGwA" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=chenglong-do/SubConverter-Extended&type=date&theme=dark&legend=top-left&sealed_token=NKvX6WwN3no1B0JCAxO5Tkk4nqJLR5HppGP59Pp9IDkrygstiLYT8T8_MsYyG-hqMAuML_mTOU2N1PX79o9ZgwfXacAhIBKClQskYzigRVD1FQyH66FGwA" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=chenglong-do/SubConverter-Extended&type=date&legend=top-left&sealed_token=NKvX6WwN3no1B0JCAxO5Tkk4nqJLR5HppGP59Pp9IDkrygstiLYT8T8_MsYyG-hqMAuML_mTOU2N1PX79o9ZgwfXacAhIBKClQskYzigRVD1FQyH66FGwA" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=chenglong-do/SubConverter-Extended&type=date&legend=top-left&sealed_token=NKvX6WwN3no1B0JCAxO5Tkk4nqJLR5HppGP59Pp9IDkrygstiLYT8T8_MsYyG-hqMAuML_mTOU2N1PX79o9ZgwfXacAhIBKClQskYzigRVD1FQyH66FGwA" />
  </picture>
 </a>
 
