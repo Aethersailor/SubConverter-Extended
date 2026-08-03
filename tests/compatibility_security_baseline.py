@@ -1968,9 +1968,9 @@ def main() -> int:
         )["rules"]["ruleset_count"]
         for name in ("pref.example.ini", "pref.example.yml", "pref.example.toml")
     ]
-    if example_ruleset_counts != [19, 19, 19]:
+    if example_ruleset_counts != [19, 19, 46]:
         raise AssertionError(
-            "official INI/YAML/TOML ruleset examples differ: "
+            "official INI/YAML/TOML ruleset example counts changed: "
             f"{example_ruleset_counts}"
         )
     if "publish_enabled" in snapshots[0]["custom_openclash_rules"]:
