@@ -284,8 +284,8 @@ jobs:
               # Docker Hub tags are emitted only when Hub credentials exist.
               if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
                 printf '%s\n' \
-                  "chenglong-do/subconverter-extended:latest" \
-                  "chenglong-do/subconverter-extended:${VERSION}"
+                  "swhite2026/subconverter-extended:latest" \
+                  "swhite2026/subconverter-extended:${VERSION}"
               fi
               printf '%s\n' \
                 "ghcr.io/chenglong-do/subconverter-extended:latest" \
@@ -293,7 +293,7 @@ jobs:
             elif [ "$MODE" = "dev" ]; then
               if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
                 printf '%s\n' \
-                  "chenglong-do/subconverter-extended:dev"
+                  "swhite2026/subconverter-extended:dev"
               fi
               printf '%s\n' \
                 "ghcr.io/chenglong-do/subconverter-extended:dev"
@@ -413,7 +413,7 @@ jobs:
             tags=()
             # Docker Hub candidate is pushed only when Hub credentials exist.
             if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
-              tags+=(--tag "chenglong-do/subconverter-extended:${candidate}")
+              tags+=(--tag "swhite2026/subconverter-extended:${candidate}")
             fi
             tags+=(--tag "ghcr.io/chenglong-do/subconverter-extended:${candidate}")
             output=(--push)
@@ -682,6 +682,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: [prepare, build-linux]
     if: github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
       - name: Prevent stale dev image promotion
         if: needs.prepare.outputs.mode == 'dev'
@@ -734,6 +737,7 @@ jobs:
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
 
       - name: Log in to Docker Hub
+        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -775,7 +779,7 @@ jobs:
           IMAGE_NAMES=()
           # Docker Hub promotion only when Hub credentials exist.
           if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
-            IMAGE_NAMES+=("chenglong-do/subconverter-extended")
+            IMAGE_NAMES+=("swhite2026/subconverter-extended")
           fi
           IMAGE_NAMES+=("ghcr.io/chenglong-do/subconverter-extended")
 
@@ -1002,7 +1006,7 @@ jobs:
           ## Docker Images
 
           Docker images are published to:
-          - `chenglong-do/subconverter-extended`
+          - `swhite2026/subconverter-extended`
           - `ghcr.io/chenglong-do/subconverter-extended`
 
           Supported Docker platforms:

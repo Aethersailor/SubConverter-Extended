@@ -11,7 +11,7 @@
 
 ![GitHub Tag](https://img.shields.io/github/v/tag/chenglong-do/SubConverter-Extended?style=flat&logo=github&label=version&color=blue)
 ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/chenglong-do/SubConverter-Extended/build-dockerhub.yml?branch=master&style=flat&label=docker%20build&logo=GitHub%20Actions)
-[![Docker Pulls](https://img.shields.io/docker/pulls/chenglong-do/subconverter-extended?style=flat&logo=docker)](https://hub.docker.com/r/chenglong-do/subconverter-extended)
+[![Docker Pulls](https://img.shields.io/docker/pulls/swhite2026/subconverter-extended?style=flat&logo=docker)](https://hub.docker.com/r/swhite2026/subconverter-extended)
 [![License](https://img.shields.io/badge/license-GPL--3.0-orange?style=flat)](LICENSE)
 
 <h3>⚡ 现代化的订阅转换后端 | 深度适配 Mihomo 内核 ⚡</h3>
@@ -251,7 +251,7 @@ OpenClash 已内置该演示实例地址；在其他支持自定义后端的订�
 
 | 类型 | 文件 / 镜像 | 适用场景 |
 | :--- | :--- | :--- |
-| Docker 镜像 | `chenglong-do/subconverter-extended`、`ghcr.io/chenglong-do/subconverter-extended` | 服务器、NAS、软路由容器环境 |
+| Docker 镜像 | `swhite2026/subconverter-extended`、`ghcr.io/chenglong-do/subconverter-extended` | 服务器、NAS、软路由容器环境 |
 | Linux 便携包 | `SubConverter-Extended-<version>-linux-amd64.tar.gz`、`linux-arm64.tar.gz`、`linux-armv7.tar.gz` | 不使用 Docker 的 Linux 主机 |
 | Windows 便携包 | `SubConverter-Extended-<version>-windows-amd64.zip` | Windows x64 主机 |
 | OpenWrt APK | `SubConverter-Extended-<version>-openwrt-<arch>.apk` | 使用 `apk` 包管理器的 OpenWrt 25.12+ |
@@ -273,7 +273,7 @@ docker run -d \
   --name SubConverter-Extended \
   -p 25500:25500 \
   --restart unless-stopped \
-  chenglong-do/subconverter-extended:latest
+  swhite2026/subconverter-extended:latest
 ```
 
 访问 `http://localhost:25500/version` 验证服务是否正常启动。
@@ -312,7 +312,7 @@ docker run -d \
   -v /opt/SubConverter-Extended/base/pref.toml:/base/pref.toml:ro \
   -v /opt/SubConverter-Extended/stats:/base/stats \
   --restart unless-stopped \
-  chenglong-do/subconverter-extended:latest
+  swhite2026/subconverter-extended:latest
 ```
 
 也可以在上述 `docker run` 命令中按需加入环境变量，覆盖常用配置：
@@ -326,7 +326,7 @@ docker run -d \
 更新 Docker 镜像时，保留宿主机上的 `base/pref.toml` 和 `stats`，拉取新镜像后重新创建容器即可：
 
 ```bash
-docker pull chenglong-do/subconverter-extended:latest
+docker pull swhite2026/subconverter-extended:latest
 docker rm -f SubConverter-Extended
 # 然后重新执行上面的 docker run 命令
 ```
@@ -817,7 +817,7 @@ docker run -d \
   -e SUBCONVERTER_SECURITY_PROFILE=public \
   -e SUBCONVERTER_ALLOW_PUBLIC_UPLOAD=false \
   --restart unless-stopped \
-  chenglong-do/subconverter-extended:latest
+  swhite2026/subconverter-extended:latest
 ```
 
 | 配置项 / 环境变量 | 默认值 | 说明 |

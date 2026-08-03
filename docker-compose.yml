@@ -3,7 +3,7 @@
 services:
   subconverter-extended:
     container_name: SubConverter-Extended
-    image: chenglong-do/subconverter-extended:latest
+    image: swhite2026/subconverter-extended:latest
     ports:
       # 自定义映射端口号 / Customize the published port.
       - "25500:25500/tcp"
