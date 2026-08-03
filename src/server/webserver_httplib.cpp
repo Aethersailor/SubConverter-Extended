@@ -50,7 +50,9 @@ static httplib::Server::Handler makeHandler(const responseRoute &rr) {
       }
       req.headers.emplace(h.first.data(), h.second.data());
     }
-    req.argument = request.params;
+    for (const auto &param : request.params) {
+      req.argument.emplace(param.first, param.second);
+    }
     if (request.method == "POST" || request.method == "PUT" ||
         request.method == "PATCH") {
       if (request.get_header_value("Content-Type") ==
