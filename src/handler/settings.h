@@ -68,6 +68,8 @@ struct Settings {
   std::string clashProxiesStyle = "flow", clashProxyGroupsStyle = "block";
   std::string proxyConfig, proxyRuleset, proxySubscription;
   int updateInterval = 0;
+  // Mihomo/Clash proxy-provider auto-refresh interval in seconds.
+  int providerInterval = 86400;
   std::string sortScript, filterScript;
 
   std::string clashBase;

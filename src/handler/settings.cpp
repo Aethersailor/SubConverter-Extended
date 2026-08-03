@@ -641,6 +641,7 @@ void readYAMLConf(YAML::Node &node) {
     section["config_update_interval"] >> global.updateInterval;
     section["config_update_strict"] >> global.updateStrict;
     section["quanx_device_id"] >> global.quanXDevID;
+    section["provider_interval"] >> global.providerInterval;
   }
 
   if (node["surge_external_proxy"].IsDefined()) {
@@ -929,7 +930,8 @@ void readTOMLConf(toml::value &root) {
                 global.writeManagedConfig, "managed_config_prefix",
                 global.managedConfigPrefix, "config_update_interval",
                 global.updateInterval, "config_update_strict",
-                global.updateStrict, "quanx_device_id", global.quanXDevID);
+                global.updateStrict, "quanx_device_id", global.quanXDevID,
+                "provider_interval", global.providerInterval);
 
   auto section_surge_external = toml::find(root, "surge_external_proxy");
   find_if_exist(section_surge_external, "surge_ssr_path", global.surgeSSRPath,
@@ -1328,6 +1330,7 @@ bool readConf() {
   ini.get_int_if_exist("config_update_interval", global.updateInterval);
   ini.get_bool_if_exist("config_update_strict", global.updateStrict);
   ini.get_if_exist("quanx_device_id", global.quanXDevID);
+  ini.get_int_if_exist("provider_interval", global.providerInterval);
 
   ini.enter_section("emojis");
   ini.get_bool_if_exist("add_emoji", global.addEmoji);

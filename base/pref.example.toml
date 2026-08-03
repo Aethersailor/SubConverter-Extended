@@ -192,6 +192,10 @@ managed_config_prefix = "http://127.0.0.1:25500"
 # Suggested managed-config refresh interval in seconds.
 config_update_interval = 86400
 
+# Mihomo/Clash proxy-provider 自动更新间隔，单位秒；默认 86400（24 小时），0 或负值会回退到 86400。
+# Auto-refresh interval in seconds for Mihomo/Clash proxy-providers; defaults to 86400 (24 hours), and 0 or negative values fall back to 86400.
+provider_interval = 86400
+
 # true 时 Surge 在超过更新间隔后要求强制更新；false 仅按普通托管配置更新。
 # When true, Surge requires a forced update after the interval; false uses normal managed-config refresh behavior.
 config_update_strict = false
