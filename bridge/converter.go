@@ -9,7 +9,7 @@ import (
 	"runtime/debug"
 	"unsafe"
 
-	mihomoRuleCommon "github.com/metacubex/mihomo/rules/common"
+	"github.com/dlclark/regexp2"
 )
 
 // ReleaseUnusedMemory forces the embedded Go runtime to return unused heap
@@ -20,15 +20,15 @@ func ReleaseUnusedMemory() {
 	debug.FreeOSMemory()
 }
 
-// ValidateMihomoRegex compiles a regex through the same regexp2-backed rule
-// implementation used by Mihomo's DOMAIN-REGEX and PROCESS-*-REGEX rules.
+// ValidateMihomoRegex compiles a regex with the same regexp2 package and
+// IgnoreCase option used by Mihomo's DOMAIN-REGEX and PROCESS-*-REGEX rules.
 //
 //export ValidateMihomoRegex
 func ValidateMihomoRegex(pattern *C.char) C.int {
 	if pattern == nil {
 		return 0
 	}
-	_, err := mihomoRuleCommon.NewDomainRegex(C.GoString(pattern), "")
+	_, err := regexp2.Compile(C.GoString(pattern), regexp2.IgnoreCase)
 	if err != nil {
 		return 0
 	}
