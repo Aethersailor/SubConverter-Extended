@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+from concurrent.futures import ThreadPoolExecutor
 import difflib
 import json
 import os
@@ -32,21 +33,330 @@ SUBSCRIPTION = (
     "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388#Smoke\n"
 )
 RULESET = "DOMAIN-SUFFIX,example.com,Proxy\nIP-CIDR,198.51.100.0/24,Proxy\n"
+STRICT_VALID_RULESET = (
+    "AND,((DOMAIN-SUFFIX,example.com),(DOMAIN,network.example))\n"
+    "OR,((DOMAIN,one.example),(DOMAIN,two.example))\n"
+    "NOT,((DOMAIN-SUFFIX,example.net))\n"
+    "AND,((OR,((DOMAIN-SUFFIX,nested.example),(DOMAIN,inner.example))),"
+    "(DOMAIN,network.example))\n"
+    "DOMAIN-SUFFIX,existing.example,OldPolicy\n"
+    "IP-CIDR,203.0.113.0/24,OldPolicy,no-resolve\n"
+    "AND,((DOMAIN,already.example),(DOMAIN,also.example)),OldPolicy\n"
+    "OR,((DOMAIN,old-one.example),(DOMAIN,old-two.example)),OldPolicy\n"
+    "NOT,((DOMAIN,old-not.example)),OldPolicy\n"
+    "DOMAIN-REGEX,\"^example\\.com$\",OldPolicy\n"
+    "DOMAIN-REGEX,^standard\\.example$,OldPolicy\n"
+    "PROCESS-NAME-REGEX,\"^chrome,helper$\",OldPolicy\n"
+    "PROCESS-PATH-REGEX,\"^/usr/bin/example$\",OldPolicy\n"
+    "DOMAIN-REGEX,\"^example\\,comma$\",OldPolicy\n"
+    "PROCESS-NAME-REGEX,\"^\\($\",OldPolicy\n"
+    "PROCESS-NAME-REGEX,\"^foo\\\"bar$\",OldPolicy\n"
+    "PROCESS-PATH-REGEX,\"^//server/share$\",OldPolicy\n"
+)
 DISABLE_RULEGEN_CONFIG = "data:,enable_rule_generator=false"
 
 
 class FixtureHandler(BaseHTTPRequestHandler):
+    request_counts: dict[str, int] = {}
+    cross_semantic_condition = threading.Condition()
+    cross_semantic_waiters = 0
+    cross_semantic_released = False
+    cross_semantic_deliveries: list[int] = []
+
+    @classmethod
+    def reset_counters(cls) -> None:
+        cls.request_counts = {}
+        with cls.cross_semantic_condition:
+            cls.cross_semantic_waiters = 0
+            cls.cross_semantic_released = False
+            cls.cross_semantic_deliveries = []
+
+    @classmethod
+    def record_request(cls, path: str) -> int:
+        key = path.split("?", 1)[0]
+        cls.request_counts[key] = cls.request_counts.get(key, 0) + 1
+        return cls.request_counts[key]
+
     def do_GET(self) -> None:  # noqa: N802
+        request_number = self.record_request(self.path)
+        response_status = 200
         if self.path == "/subscription.txt":
             body = SUBSCRIPTION.encode()
             content_type = "text/plain; charset=utf-8"
+        elif self.path == "/external-valid.ini":
+            body = b"[custom]\nenable_rule_generator=false\n"
+            content_type = "text/plain; charset=utf-8"
+        elif self.path == "/external-invalid.ini":
+            body = b"<!doctype html><html><body>not a config</body></html>"
+            content_type = "text/html; charset=utf-8"
+        elif self.path == "/external-forbidden.ini":
+            self.send_response(403)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"forbidden")
+            return
         elif self.path == "/rules.list":
             body = RULESET.encode()
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/import-cache-probe"):
+            if request_number == 1:
+                body = b"<!doctype html><html><body>transient error</body></html>"
+                content_type = "text/html; charset=utf-8"
+            else:
+                body = b"Proxy`select`[]DIRECT\n"
+                content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/import-semantic-probe"):
+            if request_number == 1:
+                body = b"invalid imported object\n"
+            else:
+                body = b"Proxy`select`[]DIRECT\n"
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/ruleset-semantic-probe"):
+            if request_number == 1:
+                body = b"this is not a ruleset\n"
+            else:
+                body = RULESET.encode()
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/template-cache-probe"):
+            if request_number == 1:
+                body = b"<!doctype html><html><body>transient template error</body></html>"
+                content_type = "text/html; charset=utf-8"
+            else:
+                body = b"[custom]\nenable_rule_generator=false\n"
+                content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/template-static-failure-probe"):
+            if request_number == 1:
+                self.send_response(503)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"transient template failure")
+                return
+            body = b"[custom]\nenable_rule_generator=false\n"
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/ruleset-structure-probe"):
+            if request_number == 1:
+                body = b"DOMAIN-SUFFIX,\n"
+            elif request_number == 2:
+                body = b"IP-CIDR,not-a-cidr,Proxy\n"
+            else:
+                body = RULESET.encode()
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/ruleset-strict-probe"):
+            if request_number == 1:
+                body = (
+                    b"DOMAIN-SUFFIX,example.com,Proxy\n"
+                    b"IP-CIDR,not-a-cidr,Proxy\n"
+                    b"PROCESS-NAME-REGEX,^chrome,helper$,Proxy\n"
+                    b"DOMAIN-REGEX,[a-z,Proxy\n"
+                    b"SUB-RULE,(NETWORK,tcp),sub-rule-name\n"
+                    b"[]garbage\n"
+                )
+            elif request_number == 2:
+                body = (
+                    b"AND,((DOMAIN-SUFFIX,example.com),"
+                    b"(IP-CIDR,not-a-cidr)),Proxy\n"
+                )
+            else:
+                body = STRICT_VALID_RULESET.encode()
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/ruleset-regex-probe"):
+            if request_number == 1:
+                body = (
+                    b"DOMAIN-REGEX,[a-z,Proxy\n"
+                    b"PROCESS-NAME-REGEX,\"(chrome\",Proxy\n"
+                    b"PROCESS-NAME-REGEX,\"chrome,helper$\n"
+                    b"PROCESS-NAME-REGEX,\"chrome\"junk,OldPolicy\n"
+                    b"PROCESS-NAME-REGEX,\"chrome\",\n"
+                )
+            else:
+                body = (
+                    b"DOMAIN-REGEX,\"^example\\.com$\",OldPolicy\n"
+                    b"DOMAIN-REGEX,^standard\\.example$,OldPolicy\n"
+                    b"PROCESS-NAME-REGEX,\"^chrome,helper$\",OldPolicy\n"
+                    b"PROCESS-PATH-REGEX,\"^/usr/bin/example$\",OldPolicy\n"
+                    b"DOMAIN-REGEX,\"^example\\,comma$\",OldPolicy\n"
+                    b"DOMAIN-REGEX,\"^foo,bar,baz$\"\n"
+                    b"PROCESS-NAME-REGEX,\"^\\($\",OldPolicy\n"
+                    b"PROCESS-NAME-REGEX,\"^foo\\\"bar$\",OldPolicy\n"
+                    b"PROCESS-PATH-REGEX,\"^//server/share$\",OldPolicy\n"
+                )
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/ruleset-sub-rule-probe"):
+            if request_number == 1:
+                body = b"SUB-RULE,(NETWORK,tcp),sub-rule-name\n"
+            else:
+                body = RULESET.encode()
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/http-get-204-probe"):
+            if request_number == 1:
+                self.send_response(204)
+                self.end_headers()
+                return
+            body = (
+                b"mixed-port: 7890\n"
+                b"proxies: []\n"
+                b"proxy-groups: []\n"
+                b"rules:\n  - MATCH,DIRECT\n"
+            )
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/http-get-206-probe"):
+            response_status = 206 if request_number == 1 else 200
+            body = (
+                b"mixed-port: 7890\n"
+                b"proxies: []\n"
+                b"proxy-groups: []\n"
+                b"rules:\n  - MATCH,DIRECT\n"
+            )
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/sssub-base-object"):
+            body = b'{"base":"kept"}'
+            content_type = "application/json"
+        elif self.path.startswith("/sssub-base-array"):
+            body = b"[]"
+            content_type = "application/json"
+        elif self.path.startswith("/sssub-base-scalar"):
+            body = b"true"
+            content_type = "application/json"
+        elif self.path.startswith("/singbox-base-object"):
+            body = b'{"route":{"rules":[]}}'
+            content_type = "application/json"
+        elif self.path.startswith("/singbox-base-array"):
+            body = b"[]"
+            content_type = "application/json"
+        elif self.path.startswith("/singbox-base-scalar"):
+            body = b"true"
+            content_type = "application/json"
+        elif self.path.startswith("/clash-base-sub-rule-probe"):
+            body = (
+                b"mixed-port: 7890\n"
+                b"proxies: []\n"
+                b"proxy-groups:\n"
+                b"  - name: Proxy\n"
+                b"    type: select\n"
+                b"    proxies: [DIRECT]\n"
+                b"rules:\n"
+                b"  - SUB-RULE,(NETWORK,TCP),sub-rule-name\n"
+                b"sub-rules:\n"
+                b"  sub-rule-name:\n"
+                b"    - DOMAIN-SUFFIX,example.com,DIRECT\n"
+                b"    - MATCH,DIRECT\n"
+            )
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/clash-base-transaction-probe"):
+            if request_number == 1:
+                body = b"mixed-port: [\n"
+            else:
+                body = (
+                    b"mixed-port: 7890\n"
+                    b"proxies: []\n"
+                    b"proxy-groups: []\n"
+                    b"rules:\n  - MATCH,DIRECT\n"
+                )
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/ini-base-transaction-probe"):
+            if request_number == 1:
+                body = b"[General]\nfoo=bar\n[General]\nbaz=qux\n"
+            else:
+                body = b"[General]\nfoo=bar\n"
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/base-template-transaction-probe"):
+            dependency = (
+                f"http://127.0.0.1:{self.server.server_port}"
+                "/base-template-dependency"
+            )
+            if request_number == 1:
+                body = f'{{{{ fetch("{dependency}") }}}}\nnot: [\n'.encode()
+            else:
+                body = (
+                    f'{{{{ fetch("{dependency}") }}}}\n'
+                    "mixed-port: 7890\n"
+                    "proxies: []\n"
+                    "proxy-groups: []\n"
+                    "rules:\n  - MATCH,DIRECT\n"
+                ).encode()
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/base-template-dependency"):
+            body = b"# dependency fetched during base rendering\n"
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/cross-semantic-probe"):
+            with FixtureHandler.cross_semantic_condition:
+                FixtureHandler.cross_semantic_waiters += 1
+                if FixtureHandler.cross_semantic_waiters >= 2:
+                    FixtureHandler.cross_semantic_released = True
+                    FixtureHandler.cross_semantic_condition.notify_all()
+                else:
+                    FixtureHandler.cross_semantic_condition.wait_for(
+                        lambda: FixtureHandler.cross_semantic_released, timeout=10
+                    )
+                if not FixtureHandler.cross_semantic_released:
+                    self.send_error(504)
+                    return
+                FixtureHandler.cross_semantic_deliveries.append(request_number)
+            body = (
+                SUBSCRIPTION.encode() if request_number <= 2 else RULESET.encode()
+            )
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/regex-ini-probe") or self.path.startswith(
+            "/regex-yaml-probe"
+        ):
+            if request_number == 1:
+                body = b"([@replacement\n"
+            else:
+                body = b".*@Renamed\n"
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/toml-empty-groups-probe"):
+            if request_number == 1:
+                body = b"custom_groups = []\n"
+            else:
+                body = (
+                    b'custom_groups = [{ name = "Proxy", type = "select", '
+                    b'rule = ["DIRECT"] }]\n'
+                )
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/toml-invalid-groups-probe"):
+            if request_number == 1:
+                body = (
+                    b'custom_groups = [{ name = "Proxy", type = "invalid", '
+                    b'rule = ["DIRECT"] }]\n'
+                )
+            else:
+                body = (
+                    b'custom_groups = [{ name = "Proxy", type = "select", '
+                    b'rule = ["DIRECT"] }]\n'
+                )
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/toml-invalid-rulesets-probe"):
+            if request_number == 1:
+                body = (
+                    b'rulesets = [{ group = "Proxy", type = "invalid", '
+                    b'ruleset = "https://rules.example.test/list" }]\n'
+                )
+            else:
+                body = (
+                    b'rulesets = [{ group = "Proxy", type = "surge-ruleset", '
+                    b'ruleset = "https://rules.example.test/list" }]\n'
+                )
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/toml-invalid-regex-probe"):
+            if request_number == 1:
+                body = b'rename_node = [{ match = "([", replace = "x" }]\n'
+            else:
+                body = b'rename_node = [{ match = ".*", replace = "x" }]\n'
+            content_type = "text/plain; charset=utf-8"
+        elif self.path == "/fallback-default.ini":
+            missing = (
+                f"http://127.0.0.1:{self.server.server_port}"
+                "/fallback-default-missing"
+            )
+            body = (
+                "[custom]\n"
+                f"custom_proxy_group=!!import:{missing}\n"
+            ).encode()
             content_type = "text/plain; charset=utf-8"
         else:
             self.send_error(404)
             return
-        self.send_response(200)
+        self.send_response(response_status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -58,6 +368,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
 
 @contextlib.contextmanager
 def fixture_server():
+    FixtureHandler.reset_counters()
     server = ThreadingHTTPServer(("127.0.0.1", 0), FixtureHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -129,6 +440,8 @@ def running_service(
     runtime_details: bool = False,
     legacy_statistics: bool = False,
     invalid_statistics_path: bool = False,
+    default_external_config: str | None = None,
+    fallback_to_default_external_config: bool = False,
 ):
     port = unused_port()
     baseline = (COMPAT_FIXTURES / "legacy-pref.toml").read_text(
@@ -149,6 +462,21 @@ def running_service(
     baseline = baseline.replace('proxy_subscription = "SYSTEM"', 'proxy_subscription = "NONE"')
     baseline = baseline.replace('enabled = true\n', f"enabled = {str(statistics).lower()}\n", 1)
     baseline = baseline.replace('profile = "lan"', f'profile = "{security_profile}"')
+    if default_external_config is not None:
+        baseline = re.sub(
+            r'default_external_config = "[^"]*"',
+            f'default_external_config = "{default_external_config}"',
+            baseline,
+        )
+    baseline = baseline.replace(
+        "fallback_to_default_external_config = false",
+        "fallback_to_default_external_config = "
+        + str(fallback_to_default_external_config).lower(),
+    )
+    if fallback_to_default_external_config and "fallback_to_default_external_config" not in baseline:
+        baseline = baseline.replace(
+            "[common]\n", "[common]\nfallback_to_default_external_config = true\n", 1
+        )
     runtime_dir = REPOSITORY / "build" / "test-baseline-runtime"
     runtime_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=runtime_dir) as temporary:
@@ -549,12 +877,1061 @@ def public_request_baseline(binary: Path, fixture_base: str) -> None:
                 raise AssertionError(f"API-mode file tool {path} became reachable")
 
 
+def external_config_policy_baseline(binary: Path, fixture_base: str) -> None:
+    invalid = fixture_base + "/external-invalid.ini"
+    forbidden = fixture_base + "/external-forbidden.ini"
+    valid = fixture_base + "/external-valid.ini"
+    common = {"target": "clash", "url": fixture_base + "/subscription.txt", "list": "true"}
+    with running_service(binary) as base_url:
+        status, body, headers = request(
+            base_url, "/sub", {**common, "config": invalid}
+        )
+        if (
+            status != 400
+            or "no-store" not in headers.get("cache-control", "")
+            or not headers.get("content-type", "").lower().startswith(
+                "text/plain; charset=utf-8"
+            )
+            or b"External configuration error" not in body
+            or "外部配置错误".encode() not in body
+            or b"fallback is disabled" not in body
+            or "回退已关闭".encode() not in body
+            or b"explain=true" not in body
+        ):
+            raise AssertionError(
+                "invalid user external config did not return a bilingual "
+                f"diagnostic page: status={status}, body={body[:500]!r}"
+            )
+
+        missing = fixture_base + "/missing-config.ini"
+        status, body, headers = request(
+            base_url, "/sub", {**common, "config": missing}
+        )
+        if (
+            status != 400
+            or "no-store" not in headers.get("cache-control", "")
+            or b"HTTP 404" not in body
+            or "链接及内容".encode() not in body
+        ):
+            raise AssertionError(
+                "missing user config did not return an actionable bilingual page"
+            )
+        status, body, _ = request(base_url, "/sub", {**common, "config": valid})
+        if status != 200 or b"Smoke" not in body:
+            raise AssertionError("valid user external config did not apply")
+
+    with running_service(binary, default_external_config=invalid) as base_url:
+        status, body, headers = request(base_url, "/sub", common)
+        if (
+            status != 400
+            or "no-store" not in headers.get("cache-control", "")
+            or b"No config parameter was supplied" not in body
+            or "请求未提供 config 参数".encode() not in body
+            or b"no effective settings" not in body
+        ):
+            raise AssertionError(
+                "failed default config without a request config did not return "
+                "a bilingual diagnostic page"
+            )
+
+        status, body, headers = request(
+            base_url, "/sub", {**common, "explain": "true"}
+        )
+        if (
+            status != 400
+            or not headers.get("content-type", "").lower().startswith(
+                "application/json"
+            )
+            or json.loads(body).get("external_config", {}).get(
+                "failure_reason"
+            ) != "content_invalid"
+        ):
+            raise AssertionError(
+                "failed default config explain response lost structured diagnostics"
+            )
+
+    with running_service(
+        binary,
+        default_external_config=valid,
+        fallback_to_default_external_config=True,
+    ) as base_url:
+        status, body, _ = request(base_url, "/sub", {**common, "config": invalid})
+        if status != 200 or b"Smoke" not in body:
+            raise AssertionError("explicit default external fallback did not apply")
+
+        status, _, headers = request(base_url, "/sub", {**common, "config": forbidden})
+        if status != 403 or "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError("permission-denied user config incorrectly used default fallback")
+
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {**common, "config": invalid, "explain": "true"},
+        )
+        if status != 200:
+            raise AssertionError("explain fallback request failed")
+        report = json.loads(body)
+        external = report.get("external_config", {})
+        if not external.get("fallback_used") or not external.get("attempts"):
+            raise AssertionError("explain response omitted external source attempts")
+        if external.get("effective_source") != "generic":
+            raise AssertionError("explain response omitted the effective source")
+
+        broken_base_content = (
+            "[custom]\n"
+            "enable_rule_generator=false\n"
+            f"clash_rule_base={fixture_base}/missing-base.yml\n"
+        )
+        broken_base = "data:text/plain;base64," + base64.urlsafe_b64encode(
+            broken_base_content.encode()
+        ).decode()
+        conversion_common = {key: value for key, value in common.items() if key != "list"}
+        status, body, _ = request(
+            base_url, "/sub", {**conversion_common, "config": broken_base}
+        )
+        if status != 200 or b"proxy-providers:" not in body:
+            raise AssertionError(
+                "default fallback did not recover an external base failure"
+            )
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {**conversion_common, "config": broken_base, "explain": "true"},
+        )
+        if status != 200 or not json.loads(body).get("external_config", {}).get(
+            "fallback_used"
+        ):
+            raise AssertionError(
+                "external base fallback was not recorded in explain output"
+            )
+
+        broken_import_content = (
+            "[custom]\n"
+            "enable_rule_generator=false\n"
+            f"custom_proxy_group=!!import:{fixture_base}/missing-import.ini\n"
+        )
+        broken_import = "data:text/plain;base64," + base64.urlsafe_b64encode(
+            broken_import_content.encode()
+        ).decode()
+        status, body, _ = request(
+            base_url, "/sub", {**conversion_common, "config": broken_import}
+        )
+        if status != 200 or b"proxy-providers:" not in body:
+            raise AssertionError(
+                "default fallback did not recover an external import failure"
+            )
+        rejected_import_content = (
+            "[custom]\n"
+            "enable_rule_generator=false\n"
+            f"custom_proxy_group=!!import:{fixture_base}/external-forbidden.ini\n"
+        )
+        rejected_import = "data:text/plain;base64," + base64.urlsafe_b64encode(
+            rejected_import_content.encode()
+        ).decode()
+        status, _, headers = request(
+            base_url, "/sub", {**conversion_common, "config": rejected_import}
+        )
+        if status != 403 or "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError(
+                "request-rejected external import incorrectly used default fallback"
+            )
+
+        rejected_base_content = (
+            "[custom]\n"
+            "enable_rule_generator=false\n"
+            f"clash_rule_base={fixture_base}/external-forbidden.ini\n"
+        )
+        rejected_base = "data:text/plain;base64," + base64.urlsafe_b64encode(
+            rejected_base_content.encode()
+        ).decode()
+        status, _, headers = request(
+            base_url, "/sub", {**conversion_common, "config": rejected_base}
+        )
+        if status != 403 or "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError(
+                "request-rejected external base incorrectly used default fallback"
+            )
+
+        broken_ruleset_content = (
+            "[custom]\n"
+            "enable_rule_generator=true\n"
+            "overwrite_original_rules=true\n"
+            f"ruleset=Proxy,clash-domain:{fixture_base}/missing-rules.yml\n"
+        )
+        broken_ruleset = "data:text/plain;base64," + base64.urlsafe_b64encode(
+            broken_ruleset_content.encode()
+        ).decode()
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {**conversion_common, "config": broken_ruleset, "expand": "true"},
+        )
+        if status != 200 or b"proxy-providers:" not in body:
+            raise AssertionError(
+                "default fallback did not recover an external ruleset failure"
+            )
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {
+                **conversion_common,
+                "config": broken_ruleset,
+                "expand": "true",
+                "explain": "true",
+            },
+        )
+        if status != 200 or not json.loads(body).get("external_config", {}).get(
+            "fallback_used"
+        ):
+            raise AssertionError(
+                "external ruleset fallback was not recorded in explain output"
+            )
+
+        rejected_ruleset_content = (
+            "[custom]\n"
+            "enable_rule_generator=true\n"
+            "overwrite_original_rules=true\n"
+            f"ruleset=Proxy,clash-domain:{fixture_base}/external-forbidden.ini\n"
+        )
+        rejected_ruleset = "data:text/plain;base64," + base64.urlsafe_b64encode(
+            rejected_ruleset_content.encode()
+        ).decode()
+        status, _, headers = request(
+            base_url,
+            "/sub",
+            {
+                **conversion_common,
+                "config": rejected_ruleset,
+                "expand": "true",
+            },
+        )
+        if status != 403 or "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError(
+                "request-rejected external ruleset incorrectly used default fallback"
+            )
+
+
+def external_import_cache_baseline(binary: Path, fixture_base: str) -> None:
+    probe_url = fixture_base + "/import-cache-probe?nonce=" + str(time.time_ns())
+    config = (
+        "[custom]\n"
+        f"custom_proxy_group=!!import:{probe_url}\n"
+    )
+    config_url = "data:text/plain;base64," + base64.urlsafe_b64encode(
+        config.encode()
+    ).decode()
+    common = {"target": "clash", "url": fixture_base + "/subscription.txt", "list": "true"}
+
+    FixtureHandler.reset_counters()
+    with running_service(binary) as base_url:
+        status, _, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 400:
+            raise AssertionError("invalid imported HTML did not fail closed")
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or b"proxies:" not in body:
+            raise AssertionError(
+                "valid imported content was not fetched after rejection: "
+                f"status={status}, body={body[:500]!r}"
+            )
+
+    if FixtureHandler.request_counts.get("/import-cache-probe") != 2:
+        raise AssertionError(
+            "invalid imported HTML was cached or the valid retry did not reach the fixture"
+        )
+
+
+def external_import_semantic_cache_baseline(binary: Path, fixture_base: str) -> None:
+    probe_url = fixture_base + "/import-semantic-probe?nonce=" + str(time.time_ns())
+    config = (
+        "[custom]\n"
+        "enable_rule_generator=false\n"
+        f"custom_proxy_group=!!import:{probe_url}\n"
+    )
+    config_url = "data:text/plain;base64," + base64.urlsafe_b64encode(
+        config.encode()
+    ).decode()
+    common = {
+        "target": "clash",
+        "url": fixture_base + "/subscription.txt",
+        "list": "true",
+    }
+
+    FixtureHandler.reset_counters()
+    with running_service(binary) as base_url:
+        status, _, headers = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 400 or "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError("semantically invalid imported content was not rejected")
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or b"proxies:" not in body:
+            raise AssertionError("valid imported content did not recover after semantic rejection")
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or b"proxies:" not in body:
+            raise AssertionError("valid imported content did not remain usable from cache")
+
+    if FixtureHandler.request_counts.get("/import-semantic-probe") != 2:
+        raise AssertionError(
+            "semantically invalid imported content was cached or valid retry was not cached"
+        )
+
+
+def external_ruleset_semantic_cache_baseline(binary: Path, fixture_base: str) -> None:
+    probe_url = fixture_base + "/ruleset-semantic-probe?nonce=" + str(time.time_ns())
+    config = (
+        "[custom]\n"
+        "enable_rule_generator=true\n"
+        "overwrite_original_rules=true\n"
+        f"ruleset=Proxy,surge:{probe_url}\n"
+    )
+    config_url = "data:text/plain;base64," + base64.urlsafe_b64encode(
+        config.encode()
+    ).decode()
+    common = {"target": "clash", "url": fixture_base + "/subscription.txt"}
+
+    FixtureHandler.reset_counters()
+    with running_service(binary) as base_url:
+        status, _, headers = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 502 or "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError("semantically invalid ruleset was not fail-closed")
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or b"proxy-groups:" not in body:
+            raise AssertionError("valid ruleset did not recover after semantic rejection")
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or b"proxy-groups:" not in body:
+            raise AssertionError("valid ruleset did not remain usable from cache")
+
+    if FixtureHandler.request_counts.get("/ruleset-semantic-probe") != 2:
+        raise AssertionError(
+            "semantically invalid ruleset was cached or valid retry was not cached"
+        )
+
+
+def template_dependency_cache_baseline(binary: Path, fixture_base: str) -> None:
+    probe_url = fixture_base + "/template-cache-probe?nonce=" + str(time.time_ns())
+    config = '{{ fetch("' + probe_url + '") }}'
+    config_url = "data:text/plain;base64," + base64.urlsafe_b64encode(
+        config.encode()
+    ).decode()
+    common = {
+        "target": "clash",
+        "url": fixture_base + "/subscription.txt",
+        "list": "true",
+    }
+
+    FixtureHandler.reset_counters()
+    with running_service(binary) as base_url:
+        status, _, headers = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 400 or "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError("invalid template dependency was not fail-closed")
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or b"proxies:" not in body:
+            raise AssertionError("valid template dependency did not recover")
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or b"proxies:" not in body:
+            raise AssertionError("valid template dependency did not remain usable from cache")
+
+    if FixtureHandler.request_counts.get("/template-cache-probe") != 2:
+        raise AssertionError(
+            "invalid template dependency was cached or valid retry was not cached"
+        )
+
+
+def template_static_dependency_failure_baseline(
+    binary: Path, fixture_base: str
+) -> None:
+    probe_url = fixture_base + "/template-static-failure-probe?nonce=" + str(
+        time.time_ns()
+    )
+    config = '[custom]\nenable_rule_generator=false\n{{ fetch("' + probe_url + '") }}\n'
+    config_url = "data:text/plain;base64," + base64.urlsafe_b64encode(
+        config.encode()
+    ).decode()
+    common = {
+        "target": "clash",
+        "url": fixture_base + "/subscription.txt",
+        "list": "true",
+    }
+
+    FixtureHandler.reset_counters()
+    with running_service(binary) as base_url:
+        status, _, headers = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 400 or "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError(
+                "static template content masked a failed fetch dependency"
+            )
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or b"proxies:" not in body:
+            raise AssertionError("valid static template dependency did not recover")
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or b"proxies:" not in body:
+            raise AssertionError("valid static template dependency did not remain cached")
+
+    if FixtureHandler.request_counts.get("/template-static-failure-probe") != 2:
+        raise AssertionError(
+            "failed static template dependency was cached or valid retry missed the fixture"
+        )
+
+
+def external_ruleset_structure_baseline(binary: Path, fixture_base: str) -> None:
+    probe_url = fixture_base + "/ruleset-structure-probe?nonce=" + str(time.time_ns())
+    config = (
+        "[custom]\n"
+        "enable_rule_generator=true\n"
+        "overwrite_original_rules=true\n"
+        f"ruleset=Proxy,surge:{probe_url}\n"
+    )
+    config_url = "data:text/plain;base64," + base64.urlsafe_b64encode(
+        config.encode()
+    ).decode()
+    common = {"target": "clash", "url": fixture_base + "/subscription.txt"}
+
+    FixtureHandler.reset_counters()
+    with running_service(binary) as base_url:
+        for invalid_description in ("empty field", "invalid CIDR"):
+            status, _, headers = request(
+                base_url, "/sub", {**common, "config": config_url}
+            )
+            if status != 502 or "no-store" not in headers.get("cache-control", ""):
+                raise AssertionError(
+                    f"ruleset with {invalid_description} was not rejected"
+                )
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or b"proxy-groups:" not in body:
+            raise AssertionError("valid structurally checked ruleset did not recover")
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or b"proxy-groups:" not in body:
+            raise AssertionError("valid structurally checked ruleset did not remain cached")
+
+    if FixtureHandler.request_counts.get("/ruleset-structure-probe") != 3:
+        raise AssertionError(
+            "invalid ruleset content was cached or valid ruleset cache was not reused"
+        )
+
+
+def external_ruleset_strict_validation_baseline(
+    binary: Path, fixture_base: str
+) -> None:
+    probe_url = fixture_base + "/ruleset-strict-probe?nonce=" + str(time.time_ns())
+    config = (
+        "[custom]\n"
+        "enable_rule_generator=true\n"
+        "overwrite_original_rules=true\n"
+        f"ruleset=Proxy,clash-classic:{probe_url}\n"
+    )
+    config_url = "data:text/plain;base64," + base64.urlsafe_b64encode(
+        config.encode()
+    ).decode()
+    common = {
+        "target": "clash",
+        "url": fixture_base + "/subscription.txt",
+        "expand": "true",
+    }
+
+    FixtureHandler.reset_counters()
+    with running_service(binary) as base_url:
+        status, _, headers = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 502 or "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError(
+                "mixed valid/invalid or malformed inline rules were not rejected"
+            )
+        status, _, headers = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 502 or "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError("invalid nested compound rules were not rejected")
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or b"proxy-groups:" not in body:
+            raise AssertionError("fully valid ruleset did not recover")
+        for expected_rule in (
+            b"AND,((DOMAIN-SUFFIX,example.com),(DOMAIN,network.example)),Proxy",
+            b"OR,((DOMAIN,one.example),(DOMAIN,two.example)),Proxy",
+            b"NOT,((DOMAIN-SUFFIX,example.net)),Proxy",
+            b"AND,((OR,((DOMAIN-SUFFIX,nested.example),(DOMAIN,inner.example))),"
+            b"(DOMAIN,network.example)),Proxy",
+            b"DOMAIN-SUFFIX,existing.example,Proxy",
+            b"IP-CIDR,203.0.113.0/24,Proxy,no-resolve",
+            b"AND,((DOMAIN,already.example),(DOMAIN,also.example)),Proxy",
+            b"OR,((DOMAIN,old-one.example),(DOMAIN,old-two.example)),Proxy",
+            b"NOT,((DOMAIN,old-not.example)),Proxy",
+            b"DOMAIN-REGEX,^example\\.com$,Proxy",
+            b"DOMAIN-REGEX,^standard\\.example$,Proxy",
+            b"PROCESS-NAME-REGEX,^chrome,helper$,Proxy",
+            b"PROCESS-PATH-REGEX,^/usr/bin/example$,Proxy",
+            b"DOMAIN-REGEX,^example\\,comma$,Proxy",
+            b"PROCESS-NAME-REGEX,^\\($,Proxy",
+            b"PROCESS-NAME-REGEX,^foo\\\"bar$,Proxy",
+            b"PROCESS-PATH-REGEX,^//server/share$,Proxy",
+        ):
+            if expected_rule not in body:
+                raise AssertionError(
+                    "valid server-side compound rule was not preserved: "
+                    + expected_rule.decode()
+                )
+        if b"OldPolicy" in body:
+            raise AssertionError("existing rule policy was duplicated instead of replaced")
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or b"proxy-groups:" not in body:
+            raise AssertionError("fully valid ruleset did not remain cached")
+
+    if FixtureHandler.request_counts.get("/ruleset-strict-probe") != 3:
+        raise AssertionError(
+            "strict ruleset validation cached an invalid mixed or nested response"
+        )
+
+
+def assert_mihomo_config(validator: Path, body: bytes, description: str) -> None:
+    with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False) as handle:
+        handle.write(body)
+        config_path = Path(handle.name)
+    try:
+        completed = subprocess.run(
+            [str(validator), str(config_path)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    finally:
+        config_path.unlink(missing_ok=True)
+    if completed.returncode != 0:
+        raise AssertionError(
+            f"Mihomo rejected {description}: "
+            f"{completed.stderr.strip() or completed.stdout.strip()}"
+        )
+
+
+def assert_mihomo_regex_rule(
+    validator: Path,
+    rule: str,
+    expected_type: str,
+    expected_payload: str,
+    expected_target: str,
+) -> None:
+    completed = subprocess.run(
+        [str(validator), "--regex", rule],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(
+            f"Mihomo rejected final regex rule {rule!r}: "
+            f"{completed.stderr.strip() or completed.stdout.strip()}"
+        )
+    try:
+        parsed = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            f"Mihomo regex helper returned invalid JSON for {rule!r}: "
+            f"{completed.stdout!r}"
+        ) from exc
+    expected = {
+        "type": expected_type,
+        "payload": expected_payload,
+        "target": expected_target,
+    }
+    if parsed != expected:
+        raise AssertionError(
+            f"Mihomo parsed {rule!r} as {parsed!r}, expected {expected!r}"
+        )
+
+
+def external_ruleset_regex_validation_baseline(
+    binary: Path, fixture_base: str, mihomo_config_validator: Path
+) -> None:
+    probe_url = fixture_base + "/ruleset-regex-probe?nonce=" + str(time.time_ns())
+    config = (
+        "[custom]\n"
+        "enable_rule_generator=true\n"
+        "overwrite_original_rules=true\n"
+        f"ruleset=Proxy,clash-classic:{probe_url}\n"
+    )
+    config_url = "data:text/plain;base64," + base64.urlsafe_b64encode(
+        config.encode()
+    ).decode()
+    common = {
+        "target": "clash",
+        "url": fixture_base + "/subscription.txt",
+        "expand": "true",
+    }
+
+    FixtureHandler.reset_counters()
+    with running_service(binary) as base_url:
+        status, _, headers = request(
+            base_url, "/sub", {**common, "config": config_url}
+        )
+        if status != 502 or "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError("invalid regex ruleset was not rejected")
+        status, body, _ = request(
+            base_url, "/sub", {**common, "config": config_url}
+        )
+        if status != 200 or b"proxy-groups:" not in body:
+            raise AssertionError("valid regex ruleset did not recover")
+        for expected_rule in (
+            b"DOMAIN-REGEX,^example\\.com$,Proxy",
+            b"DOMAIN-REGEX,^standard\\.example$,Proxy",
+            b"PROCESS-NAME-REGEX,^chrome,helper$,Proxy",
+            b"PROCESS-PATH-REGEX,^/usr/bin/example$,Proxy",
+            b"DOMAIN-REGEX,^example\\,comma$,Proxy",
+            b"DOMAIN-REGEX,^foo,bar,baz$,Proxy",
+        ):
+            if expected_rule not in body:
+                raise AssertionError(
+                    "valid regex rule was not preserved: " + expected_rule.decode()
+                )
+        if b'PROCESS-NAME-REGEX,"' in body:
+            raise AssertionError("regex input quotes leaked into Mihomo output")
+        for rule, payload in (
+            ("DOMAIN-REGEX,^example\\.com$,Proxy", r"^example\.com$"),
+            ("DOMAIN-REGEX,^standard\\.example$,Proxy", r"^standard\.example$"),
+            ("PROCESS-NAME-REGEX,^chrome,helper$,Proxy", "^chrome,helper$"),
+            ("PROCESS-PATH-REGEX,^/usr/bin/example$,Proxy", r"^/usr/bin/example$"),
+            ("DOMAIN-REGEX,^example\\,comma$,Proxy", r"^example\,comma$"),
+            (r"DOMAIN-REGEX,^foo,bar,baz$,Proxy", r"^foo,bar,baz$"),
+            (r"PROCESS-NAME-REGEX,^\($,Proxy", r"^\($"),
+            (r'PROCESS-NAME-REGEX,^foo\"bar$,Proxy', r'^foo\"bar$'),
+            (r"PROCESS-PATH-REGEX,^//server/share$,Proxy", r"^//server/share$"),
+        ):
+            assert_mihomo_regex_rule(
+                mihomo_config_validator,
+                rule,
+                rule.split(",", 1)[0],
+                payload,
+                "Proxy",
+            )
+        if b"OldPolicy" in body:
+            raise AssertionError("regex rule policy was duplicated instead of replaced")
+        assert_mihomo_config(
+            mihomo_config_validator, body, "the generated regex ruleset configuration"
+        )
+        status, body, _ = request(
+            base_url, "/sub", {**common, "config": config_url}
+        )
+        if status != 200 or b"proxy-groups:" not in body:
+            raise AssertionError("valid regex ruleset did not remain cached")
+
+    if FixtureHandler.request_counts.get("/ruleset-regex-probe") != 2:
+        raise AssertionError("invalid regex ruleset was cached")
+
+
+def external_ruleset_sub_rule_baseline(binary: Path, fixture_base: str) -> None:
+    probe_url = fixture_base + "/ruleset-sub-rule-probe?nonce=" + str(time.time_ns())
+    config = (
+        "[custom]\n"
+        "enable_rule_generator=true\n"
+        "overwrite_original_rules=true\n"
+        f"ruleset=Proxy,clash-classic:{probe_url}\n"
+    )
+    config_url = "data:text/plain;base64," + base64.urlsafe_b64encode(
+        config.encode()
+    ).decode()
+    common = {
+        "target": "clash",
+        "url": fixture_base + "/subscription.txt",
+        "expand": "true",
+    }
+
+    FixtureHandler.reset_counters()
+    with running_service(binary) as base_url:
+        status, _, headers = request(
+            base_url, "/sub", {**common, "config": config_url}
+        )
+        if status != 502 or "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError("server-side SUB-RULE was not rejected")
+        status, body, _ = request(
+            base_url, "/sub", {**common, "config": config_url}
+        )
+        if status != 200 or b"proxy-groups:" not in body:
+            raise AssertionError("valid ruleset did not recover after SUB-RULE rejection")
+        status, body, _ = request(
+            base_url, "/sub", {**common, "config": config_url}
+        )
+        if status != 200 or b"proxy-groups:" not in body:
+            raise AssertionError("valid ruleset did not remain cached after recovery")
+
+    if FixtureHandler.request_counts.get("/ruleset-sub-rule-probe") != 2:
+        raise AssertionError("rejected SUB-RULE ruleset was cached")
+
+
+def json_base_shape_baseline(binary: Path, fixture_base: str) -> None:
+    subscription_url = fixture_base + "/subscription.txt"
+
+    def config_url(key: str, endpoint: str) -> str:
+        config = (
+            "[custom]\n"
+            "enable_rule_generator=false\n"
+            f"{key}={fixture_base}{endpoint}?nonce={time.time_ns()}\n"
+        )
+        return "data:text/plain;base64," + base64.urlsafe_b64encode(
+            config.encode()
+        ).decode()
+
+    def request_target(
+        base_url: str, target: str, config: str
+    ) -> tuple[int, bytes, dict[str, str]]:
+        return request(
+            base_url,
+            "/sub",
+            {"target": target, "url": subscription_url, "config": config},
+        )
+
+    with running_service(binary) as base_url:
+        status, body, _ = request_target(
+            base_url, "sssub", config_url("sssub_rule_base", "/sssub-base-object")
+        )
+        if status != 200 or not isinstance(json.loads(body), list):
+            raise AssertionError("valid SSSUB object base did not produce a JSON array")
+
+        status, body, _ = request_target(
+            base_url,
+            "singbox",
+            config_url("singbox_rule_base", "/singbox-base-object"),
+        )
+        if status != 200 or not isinstance(json.loads(body), dict):
+            raise AssertionError("valid sing-box object base did not produce a JSON object")
+
+        for target, key, endpoint in (
+            ("sssub", "sssub_rule_base", "/sssub-base-array"),
+            ("sssub", "sssub_rule_base", "/sssub-base-scalar"),
+            ("singbox", "singbox_rule_base", "/singbox-base-array"),
+            ("singbox", "singbox_rule_base", "/singbox-base-scalar"),
+        ):
+            status, _, headers = request_target(
+                base_url, target, config_url(key, endpoint)
+            )
+            if status != 502 or "no-store" not in headers.get("cache-control", ""):
+                raise AssertionError(
+                    f"non-object {target} base was not rejected with no-store: {status}"
+                )
+        status, body, _ = request(base_url, "/healthz")
+        if status != 200 or body.strip() != b"ok":
+            raise AssertionError("non-object JSON base caused the service to stop")
+
+
+def clash_base_sub_rule_baseline(
+    binary: Path, fixture_base: str, mihomo_config_validator: Path
+) -> None:
+    config = (
+        "[custom]\n"
+        "enable_rule_generator=true\n"
+        f"ruleset=Proxy,clash-classic:{fixture_base}/rules.list\n"
+        f"clash_rule_base={fixture_base}/clash-base-sub-rule-probe?nonce={time.time_ns()}\n"
+    )
+    config_url = "data:text/plain;base64," + base64.urlsafe_b64encode(
+        config.encode()
+    ).decode()
+    common = {
+        "target": "clash",
+        "url": fixture_base + "/subscription.txt",
+        "expand": "true",
+    }
+
+    FixtureHandler.reset_counters()
+    with running_service(binary) as base_url:
+        status, body, _ = request(
+            base_url, "/sub", {**common, "config": config_url}
+        )
+        if status != 200 or b"SUB-RULE,(NETWORK,TCP),sub-rule-name" not in body:
+            raise AssertionError("valid base SUB-RULE was rewritten or rejected")
+        if b"sub-rules:" not in body:
+            raise AssertionError("base SUB-RULE definition was not preserved")
+        if (
+            b"rules:\n  - SUB-RULE,(NETWORK,TCP),sub-rule-name\n"
+            b"  - DOMAIN-SUFFIX,example.com,Proxy" not in body
+        ):
+            raise AssertionError("rule generation did not append after base SUB-RULE")
+        assert_mihomo_config(
+            mihomo_config_validator, body, "the generated base SUB-RULE configuration"
+        )
+        status, body, _ = request(
+            base_url, "/sub", {**common, "config": config_url}
+        )
+        if status != 200 or b"SUB-RULE,(NETWORK,TCP),sub-rule-name" not in body:
+            raise AssertionError("valid base SUB-RULE did not remain cached")
+
+    if FixtureHandler.request_counts.get("/clash-base-sub-rule-probe") != 1:
+        raise AssertionError("valid base SUB-RULE was not cached")
+
+
+def external_get_status_baseline(binary: Path, fixture_base: str) -> None:
+    subscription_url = fixture_base + "/subscription.txt"
+
+    def config_url(endpoint: str) -> str:
+        config = (
+            "[custom]\n"
+            "enable_rule_generator=false\n"
+            f"clash_rule_base={fixture_base}{endpoint}?nonce={time.time_ns()}\n"
+        )
+        return "data:text/plain;base64," + base64.urlsafe_b64encode(
+            config.encode()
+        ).decode()
+
+    common = {"target": "clash", "url": subscription_url}
+    with running_service(binary) as base_url:
+        for endpoint in ("/http-get-204-probe", "/http-get-206-probe"):
+            FixtureHandler.reset_counters()
+            params = {**common, "config": config_url(endpoint)}
+            status, _, headers = request(base_url, "/sub", params)
+            if status != 502 or "no-store" not in headers.get(
+                "cache-control", ""
+            ):
+                raise AssertionError(
+                    f"GET {endpoint} non-200 2xx response was accepted or cached"
+                )
+            status, body, _ = request(base_url, "/sub", params)
+            if status != 200 or b"proxy-groups:" not in body:
+                raise AssertionError(
+                    f"GET {endpoint} did not recover on a later 200 response"
+                )
+            status, body, _ = request(base_url, "/sub", params)
+            if status != 200 or b"proxy-groups:" not in body:
+                raise AssertionError(
+                    f"GET {endpoint} valid 200 response was not cached"
+                )
+            if FixtureHandler.request_counts.get(endpoint) != 2:
+                raise AssertionError(
+                    f"GET {endpoint} non-200 2xx response was cached"
+                )
+
+
+def external_base_cache_transaction_baseline(
+    binary: Path,
+    fixture_base: str,
+    *,
+    target: str,
+    config_key: str,
+    endpoint: str,
+    marker: bytes,
+) -> None:
+    probe_url = fixture_base + endpoint + "?nonce=" + str(time.time_ns())
+    config = (
+        "[custom]\n"
+        "enable_rule_generator=false\n"
+        f"{config_key}={probe_url}\n"
+    )
+    config_url = "data:text/plain;base64," + base64.urlsafe_b64encode(
+        config.encode()
+    ).decode()
+    common = {"target": target, "url": fixture_base + "/subscription.txt"}
+
+    FixtureHandler.reset_counters()
+    with running_service(binary) as base_url:
+        status, _, headers = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 502 or "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError(f"invalid {target} base was not fail-closed")
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or marker not in body:
+            raise AssertionError(f"valid {target} base did not recover")
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or marker not in body:
+            raise AssertionError(f"valid {target} base did not remain cached")
+
+    if FixtureHandler.request_counts.get(endpoint) != 2:
+        raise AssertionError(
+            f"invalid {target} base was cached or valid retry missed the fixture"
+        )
+
+
+def external_base_template_transaction_baseline(
+    binary: Path, fixture_base: str
+) -> None:
+    external_base_cache_transaction_baseline(
+        binary,
+        fixture_base,
+        target="clash",
+        config_key="clash_rule_base",
+        endpoint="/base-template-transaction-probe",
+        marker=b"proxy-groups:",
+    )
+    if FixtureHandler.request_counts.get("/base-template-dependency") != 2:
+        raise AssertionError(
+            "template dependency was committed before the final base format validated"
+        )
+
+
+def semantic_cache_concurrency_baseline(binary: Path, fixture_base: str) -> None:
+    probe_url = fixture_base + "/cross-semantic-probe?nonce=" + str(time.time_ns())
+    strict_config = (
+        "[custom]\n"
+        "enable_rule_generator=true\n"
+        "overwrite_original_rules=true\n"
+        f"ruleset=Proxy,surge:{probe_url}\n"
+    )
+    strict_config_url = "data:text/plain;base64," + base64.urlsafe_b64encode(
+        strict_config.encode()
+    ).decode()
+    immediate_params = {
+        "target": "clash",
+        "url": probe_url,
+        "list": "true",
+        "config": DISABLE_RULEGEN_CONFIG,
+    }
+    strict_params = {
+        "target": "clash",
+        "url": fixture_base + "/subscription.txt",
+        "config": strict_config_url,
+    }
+
+    FixtureHandler.reset_counters()
+    with running_service(binary) as base_url:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            immediate_future = executor.submit(
+                request, base_url, "/sub", immediate_params
+            )
+            strict_future = executor.submit(request, base_url, "/sub", strict_params)
+            immediate_status, immediate_body, _ = immediate_future.result(timeout=30)
+            strict_status, strict_body, strict_headers = strict_future.result(timeout=30)
+        if immediate_status != 200:
+            raise AssertionError(
+                "immediate semantic consumer failed during concurrency test: "
+                f"{immediate_status}, body={immediate_body[:500]!r}, "
+                f"deliveries={FixtureHandler.cross_semantic_deliveries!r}, "
+                f"counts={FixtureHandler.request_counts!r}"
+            )
+        if strict_status != 502 or "no-store" not in strict_headers.get(
+            "cache-control", ""
+        ):
+            raise AssertionError(
+                "strict semantic consumer did not reject the concurrently returned invalid ruleset: "
+                f"status={strict_status}, body={strict_body[:500]!r}"
+            )
+        status, body, _ = request(base_url, "/sub", strict_params)
+        if status != 200 or b"proxy-groups:" not in body:
+            raise AssertionError(
+                "strict consumer reused the immediate consumer cache instead of refetching"
+            )
+        status, body, _ = request(base_url, "/sub", strict_params)
+        if status != 200 or b"proxy-groups:" not in body:
+            raise AssertionError("strict semantic cache was not reusable after validation")
+
+    if FixtureHandler.request_counts.get("/cross-semantic-probe") != 3:
+        raise AssertionError(
+            "semantic cache isolation concurrency count did not show two invalid/one valid network fetches"
+        )
+    if sorted(FixtureHandler.cross_semantic_deliveries[:2]) != [1, 2]:
+        raise AssertionError(
+            "semantic cache isolation fixture did not release two concurrent first fetches: "
+            f"deliveries={FixtureHandler.cross_semantic_deliveries!r}"
+        )
+
+
+def external_regex_import_baseline(
+    binary: Path, fixture_base: str, *, yaml: bool
+) -> None:
+    endpoint = "/regex-yaml-probe" if yaml else "/regex-ini-probe"
+    probe_url = fixture_base + endpoint + "?nonce=" + str(time.time_ns())
+    if yaml:
+        config = (
+            "custom:\n"
+            "  enable_rule_generator: false\n"
+            "  rename_node:\n"
+            f'    - import: "{probe_url}"\n'
+        )
+    else:
+        config = (
+            "[custom]\n"
+            "enable_rule_generator=false\n"
+            f"rename=!!import:{probe_url}\n"
+        )
+    config_url = "data:text/plain;base64," + base64.urlsafe_b64encode(
+        config.encode()
+    ).decode()
+    common = {
+        "target": "clash",
+        "url": fixture_base + "/subscription.txt",
+        "list": "true",
+    }
+
+    FixtureHandler.reset_counters()
+    with running_service(binary) as base_url:
+        status, _, headers = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 400 or "no-store" not in headers.get("cache-control", ""):
+            kind = "YAML" if yaml else "INI"
+            raise AssertionError(f"invalid {kind} imported regex was not rejected")
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or b"proxies:" not in body:
+            raise AssertionError("valid imported regex did not recover")
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or b"proxies:" not in body:
+            raise AssertionError("valid imported regex did not remain cached")
+
+    if FixtureHandler.request_counts.get(endpoint) != 2:
+        raise AssertionError("invalid imported regex was cached")
+
+
+def toml_import_semantic_baseline(
+    binary: Path, fixture_base: str, endpoint: str, key: str, *, empty: bool = False
+) -> None:
+    probe_url = fixture_base + endpoint + "?nonce=" + str(time.time_ns())
+    config = (
+        "version=1\n"
+        f'{key}=[{{ import = "{probe_url}" }}]\n'
+        "[custom]\n"
+        "enable_rule_generator=false\n"
+    )
+    config_url = "data:text/plain;base64," + base64.urlsafe_b64encode(
+        config.encode()
+    ).decode()
+    common = {
+        "target": "clash",
+        "url": fixture_base + "/subscription.txt",
+        "list": "true",
+    }
+
+    FixtureHandler.reset_counters()
+    with running_service(binary) as base_url:
+        status, _, headers = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 400 or "no-store" not in headers.get("cache-control", ""):
+            kind = "empty" if empty else "malformed"
+            raise AssertionError(f"TOML {kind} import was not rejected for {key}")
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or b"proxies:" not in body:
+            raise AssertionError(f"valid TOML import did not recover for {key}")
+        status, body, _ = request(base_url, "/sub", {**common, "config": config_url})
+        if status != 200 or b"proxies:" not in body:
+            raise AssertionError(f"valid TOML import did not remain cached for {key}")
+
+    if FixtureHandler.request_counts.get(endpoint) != 2:
+        raise AssertionError(f"invalid TOML import was cached for {key}")
+
+
+def default_dependency_single_execution_baseline(
+    binary: Path, fixture_base: str
+) -> None:
+    user_missing = fixture_base + "/fallback-user-missing"
+    user_config = (
+        "[custom]\n"
+        f"custom_proxy_group=!!import:{user_missing}\n"
+    )
+    user_config_url = "data:text/plain;base64," + base64.urlsafe_b64encode(
+        user_config.encode()
+    ).decode()
+    common = {"target": "clash", "url": fixture_base + "/subscription.txt", "list": "true"}
+
+    FixtureHandler.reset_counters()
+    with running_service(
+        binary,
+        default_external_config=fixture_base + "/fallback-default.ini",
+        fallback_to_default_external_config=True,
+    ) as base_url:
+        status, _, headers = request(
+            base_url, "/sub", {**common, "config": user_config_url}
+        )
+        if status != 400 or "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError("failed default dependency chain was not fail-closed")
+
+    if FixtureHandler.request_counts.get("/fallback-default.ini") != 1:
+        raise AssertionError(
+            "default external config was executed more than once: "
+            f"counts={FixtureHandler.request_counts!r}"
+        )
+    if FixtureHandler.request_counts.get("/fallback-default-missing") != 1:
+        raise AssertionError("default external dependency was retried more than once")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument(
         "--settings-snapshot-helper", type=Path, required=True
     )
+    parser.add_argument("--mihomo-config-validator", type=Path, required=True)
     parser.add_argument("--update-golden", action="store_true")
     args = parser.parse_args()
     binary = args.binary.resolve()
@@ -570,6 +1947,12 @@ def main() -> int:
         parser.error(
             "settings snapshot helper must be separate from the runtime binary"
         )
+    mihomo_config_validator = args.mihomo_config_validator.resolve()
+    if not mihomo_config_validator.is_file():
+        parser.error(
+            "Mihomo config validator does not exist: "
+            f"{mihomo_config_validator}"
+        )
 
     runtime_cli_isolation_baseline(binary)
 
@@ -579,8 +1962,21 @@ def main() -> int:
     ]
     if snapshots[1:] != snapshots[:1] * 2:
         raise AssertionError("INI/YAML/TOML SettingsSnapshot values differ")
-    if snapshots[0]["custom_openclash_rules"]["publish_enabled"]:
-        raise AssertionError("historical publish default changed from false")
+    example_ruleset_counts = [
+        load_settings_snapshot(
+            settings_snapshot_helper, REPOSITORY / "base" / name
+        )["rules"]["ruleset_count"]
+        for name in ("pref.example.ini", "pref.example.yml", "pref.example.toml")
+    ]
+    if example_ruleset_counts != [19, 19, 46]:
+        raise AssertionError(
+            "official INI/YAML/TOML ruleset example counts changed: "
+            f"{example_ruleset_counts}"
+        )
+    if "publish_enabled" in snapshots[0]["custom_openclash_rules"]:
+        raise AssertionError("removed publish_enabled leaked into SettingsSnapshot")
+    if snapshots[0]["common"]["fallback_to_default_external_config"]:
+        raise AssertionError("fallback_to_default_external_config default changed")
     if snapshots[0]["security"]["profile"] != "lan":
         raise AssertionError("historical security profile default changed")
 
@@ -590,6 +1986,56 @@ def main() -> int:
         dashboard_baseline(binary, fixture_base)
         persistence_degradation_baseline(binary, fixture_base)
         public_request_baseline(binary, fixture_base)
+        external_config_policy_baseline(binary, fixture_base)
+        external_import_cache_baseline(binary, fixture_base)
+        external_import_semantic_cache_baseline(binary, fixture_base)
+        external_ruleset_semantic_cache_baseline(binary, fixture_base)
+        external_ruleset_structure_baseline(binary, fixture_base)
+        external_ruleset_strict_validation_baseline(binary, fixture_base)
+        external_ruleset_regex_validation_baseline(
+            binary, fixture_base, mihomo_config_validator
+        )
+        external_ruleset_sub_rule_baseline(binary, fixture_base)
+        json_base_shape_baseline(binary, fixture_base)
+        clash_base_sub_rule_baseline(
+            binary, fixture_base, mihomo_config_validator
+        )
+        external_get_status_baseline(binary, fixture_base)
+        semantic_cache_concurrency_baseline(binary, fixture_base)
+        template_dependency_cache_baseline(binary, fixture_base)
+        template_static_dependency_failure_baseline(binary, fixture_base)
+        external_base_cache_transaction_baseline(
+            binary,
+            fixture_base,
+            target="clash",
+            config_key="clash_rule_base",
+            endpoint="/clash-base-transaction-probe",
+            marker=b"proxy-groups:",
+        )
+        external_base_cache_transaction_baseline(
+            binary,
+            fixture_base,
+            target="surge",
+            config_key="surge_rule_base",
+            endpoint="/ini-base-transaction-probe",
+            marker=b"[Proxy]",
+        )
+        external_base_template_transaction_baseline(binary, fixture_base)
+        external_regex_import_baseline(binary, fixture_base, yaml=False)
+        external_regex_import_baseline(binary, fixture_base, yaml=True)
+        toml_import_semantic_baseline(
+            binary, fixture_base, "/toml-empty-groups-probe", "custom_groups", empty=True
+        )
+        toml_import_semantic_baseline(
+            binary, fixture_base, "/toml-invalid-groups-probe", "custom_groups"
+        )
+        toml_import_semantic_baseline(
+            binary, fixture_base, "/toml-invalid-rulesets-probe", "rulesets"
+        )
+        toml_import_semantic_baseline(
+            binary, fixture_base, "/toml-invalid-regex-probe", "rename_node"
+        )
+        default_dependency_single_execution_baseline(binary, fixture_base)
 
     print("compatibility and security baselines passed")
     return 0

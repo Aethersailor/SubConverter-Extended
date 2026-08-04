@@ -7,7 +7,6 @@
 #include <sys/types.h>
 
 #include "config/ruleset.h"
-#include "handler/custom_openclash_rules_endpoint.h"
 #include "handler/curl_handle_pool.h"
 #include "handler/dashboard_auth.h"
 #include "handler/dashboard_page.h"
@@ -318,13 +317,6 @@ int main(int argc, char *argv[]) {
   webServer.append_response("HEAD", "/sub", "text/plain",
                             global.statisticsEnabled ? subconverterTracked
                                                      : subconverter);
-
-  if (global.customOpenClashRulesPublish) {
-    webServer.append_response(
-        "GET", R"(/Custom_OpenClash_Rules/main(/.*)?)",
-        "application/octet-stream",
-        custom_openclash_rules_endpoint::serve);
-  }
 
   /*
   webServer.append_response("GET", "/sub2clashr", "text/plain;charset=utf-8",

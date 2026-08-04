@@ -6,12 +6,24 @@
 #include <future>
 #include <cstdint>
 #include <cstddef>
+#include <atomic>
+#include <memory>
+#include <mutex>
 
 #include <yaml-cpp/yaml.h>
 #include <rapidjson/document.h>
 
 #include "config/ruleset.h"
 #include "utils/ini_reader/ini_reader.h"
+
+struct FetchOutcome;
+
+struct RulesetFetchState {
+    std::atomic<int> status_code{0};
+    std::atomic<bool> request_rejected{false};
+    mutable std::mutex pending_mutex;
+    std::shared_ptr<FetchOutcome> pending_fetch;
+};
 
 struct RulesetContent
 {
@@ -22,6 +34,8 @@ struct RulesetContent
     std::shared_future<std::string> rule_content;
     int update_interval = 0;
     RulesetOptions options;
+    bool request_rejected = false;
+    std::shared_ptr<RulesetFetchState> fetch_state;
 };
 
 struct RuleConversionStats
@@ -33,7 +47,23 @@ struct RuleConversionStats
     }
 };
 
+struct RulesetValidationResult
+{
+    size_t valid_count = 0;
+    size_t invalid_count = 0;
+    std::string failure_reason;
+
+    bool valid() const
+    {
+        return valid_count > 0 && invalid_count == 0;
+    }
+};
+
 std::string convertRuleset(const std::string &content, int type);
+RulesetValidationResult validateRulesetEntries(const std::string &content,
+                                               ruleset_type type);
+size_t countValidRulesetEntries(const std::string &content,
+                                ruleset_type type);
 size_t rulesetConversionCacheMaxEntries();
 size_t rulesetConversionCacheMaxBytes();
 std::string appendClashRuleTarget(const std::string &rule, const std::string &target, bool no_resolve_only = false);

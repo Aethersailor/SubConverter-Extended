@@ -192,15 +192,6 @@ jobs:
           fi
           echo "Build mode: $MODE; version: $VERSION"
 
-      - name: Verify runtime rule assets are not tracked
-        shell: bash
-        run: |
-          set -euo pipefail
-          if git ls-files -- base/Custom_OpenClash_Rules | grep -q .; then
-            echo "::error::Custom_OpenClash_Rules runtime assets must be fetched at build time, not committed."
-            exit 1
-          fi
-
       - name: Refresh dependency snapshot on dev
         if: steps.mode.outputs.mode == 'dev'
         shell: bash
@@ -228,7 +219,6 @@ jobs:
             echo
             echo "Mode: \`${{ steps.mode.outputs.mode }}\`"
             echo "Snapshot SHA-256: \`${{ steps.dependencies.outputs.dependency_snapshot_sha }}\`"
-            echo "Custom_OpenClash_Rules: \`${{ steps.dependencies.outputs.custom_openclash_rules_revision }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload dependency snapshot
@@ -322,15 +312,6 @@ jobs:
           python3 scripts/ci/dependency_snapshot.py emit \
             --github-output "$GITHUB_OUTPUT" \
             --github-env "$GITHUB_ENV"
-
-      - name: Fetch pinned Custom_OpenClash_Rules assets
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/sync_custom_openclash_rules.py --ref "$CUSTOM_OPENCLASH_RULES_REVISION"
-          test -s base/Custom_OpenClash_Rules/manifest.sha256
-          python3 scripts/verify_custom_openclash_rules_bundle.py \
-            --root base/Custom_OpenClash_Rules
 
       - name: Run Python regression baselines
         shell: bash
@@ -549,7 +530,6 @@ jobs:
         with:
           image: ghcr.io/aethersailor/subconverter-extended@${{ steps.build_image.outputs.digest }}
           platform: ${{ matrix.image_platform }}
-          custom-openclash-rules-revision: ${{ steps.dependencies.outputs.custom_openclash_rules_revision }}
 
       - name: Commit and push generated development files
         if: steps.check_changes.outputs.changed == 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/dev'
@@ -597,16 +577,6 @@ jobs:
           Copy-Item dependency-snapshot/dependencies.lock.json scripts/ci/dependencies.lock.json -Force
           python scripts/ci/dependency_snapshot.py check
           python scripts/ci/dependency_snapshot.py emit --github-env $env:GITHUB_ENV
-
-      - name: Fetch pinned Custom_OpenClash_Rules assets
-        shell: pwsh
-        run: |
-          python scripts/sync_custom_openclash_rules.py --ref $env:CUSTOM_OPENCLASH_RULES_REVISION
-          if (!(Test-Path "base/Custom_OpenClash_Rules/manifest.sha256")) {
-            throw "Custom_OpenClash_Rules manifest was not generated."
-          }
-          python scripts/verify_custom_openclash_rules_bundle.py `
-            --root base/Custom_OpenClash_Rules
 
       - name: Set up Go
         uses: actions/setup-go@v6
