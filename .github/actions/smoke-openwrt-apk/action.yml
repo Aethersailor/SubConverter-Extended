@@ -40,11 +40,23 @@ runs:
               test -d /tmp/apk-root/etc/subconverter
               test -x /tmp/apk-root/opt/subconverter-extended/subconverter
               test -f /tmp/apk-root/opt/subconverter-extended/base/pref.example.toml
-              python3 /work/scripts/verify_custom_openclash_rules_bundle.py \
-                --root /tmp/apk-root/opt/subconverter-extended/base/Custom_OpenClash_Rules
               test -f /tmp/apk-root/usr/share/doc/subconverter-extended/README.OpenWrt
               grep -q "/etc/subconverter/pref.toml" /tmp/apk-root/usr/share/doc/subconverter-extended/README.OpenWrt
               grep -q "CONFIG_DIR=\"/etc/subconverter\"" /tmp/apk-root/usr/bin/subconverter-extended
+              unexpected_owner="$(
+                find \
+                  /tmp/apk-root/etc/init.d/subconverter-extended \
+                  /tmp/apk-root/usr/bin/subconverter-extended \
+                  /tmp/apk-root/etc/subconverter \
+                  /tmp/apk-root/opt/subconverter-extended \
+                  /tmp/apk-root/usr/share/doc/subconverter-extended \
+                  -exec stat -c "%u:%g %n" {} \; |
+                  awk "\$1 != \"0:0\" { print; exit }"
+              )"
+              if [ -n "$unexpected_owner" ]; then
+                echo "APK contains a path not owned by root:root: $unexpected_owner" >&2
+                exit 1
+              fi
               apk info --root /tmp/apk-root subconverter-extended
             '
         done

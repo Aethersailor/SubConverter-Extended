@@ -6,7 +6,6 @@
 #include <inja.hpp>
 #include <nlohmann/json.hpp>
 
-#include "config/custom_openclash_rules.h"
 #include "handler/interfaces.h"
 #include "handler/settings.h"
 #include "handler/webget.h"
@@ -23,6 +22,7 @@ extern string_array ClashRuleTypes;
 
 static thread_local FetchContext current_template_fetch_context =
     FetchContext::TrustedConfig;
+static thread_local bool current_template_dependency_failed = false;
 
 namespace inja
 {
@@ -147,8 +147,40 @@ std::string template_webGet(inja::Arguments &args)
     std::string data = args.at(0)->get<std::string>();
     ProxyPolicy proxy = parseProxy(global.proxyConfig);
     writeLog(0, "模板调用 fetch，URL：'" + data + "'。", LOG_LEVEL_INFO);
-    return webGet(data, proxy, global.cacheConfig, nullptr, nullptr,
-                  current_template_fetch_context);
+    FetchArgument argument{HTTP_GET,
+                           data,
+                           proxy,
+                           nullptr,
+                           nullptr,
+                           nullptr,
+                           static_cast<unsigned int>(std::max(0, global.cacheConfig)),
+                           false,
+                           current_template_fetch_context,
+                           true,
+                           FetchCacheSemantic::TemplateDependency};
+    FetchOutcome outcome;
+    fetchRemote(argument, outcome);
+    if (!outcome.success) {
+        current_template_dependency_failed = true;
+        discardFetchOutcomeCache(outcome);
+        return {};
+    }
+
+    const std::string trimmed = trimWhitespace(outcome.content, true, true);
+    const std::string lower = toLower(trimmed);
+    if (trimmed.empty() || startsWith(lower, "<!doctype html") ||
+        startsWith(lower, "<html")) {
+        current_template_dependency_failed = true;
+        discardFetchOutcomeCache(outcome);
+        return {};
+    }
+
+    std::string content = outcome.content;
+    // Keep template dependencies provisional until render_template() succeeds.
+    // If this function owns the render transaction, deferFetchOutcomeCache
+    // commits here only after the transaction scope is finalized below.
+    deferFetchOutcomeCache(std::move(outcome));
+    return content;
 }
 #endif // NO_WEBGET
 
@@ -156,6 +188,22 @@ int render_template(const std::string &content, const template_args &vars,
                     std::string &output, const std::string &include_scope,
                     FetchContext context)
 {
+    FetchCacheTransaction local_transaction;
+    std::unique_ptr<FetchCacheTransactionScope> local_scope;
+    const bool owns_transaction = currentFetchCacheTransaction() == nullptr;
+    if (owns_transaction)
+        local_scope = std::make_unique<FetchCacheTransactionScope>(
+            local_transaction);
+
+    auto finish_transaction = [&](bool success) {
+        if (!owns_transaction)
+            return;
+        if (success)
+            commitFetchCacheTransaction(local_transaction);
+        else
+            discardFetchCacheTransaction(local_transaction);
+    };
+
     struct TemplateFetchContextGuard
     {
         FetchContext previous;
@@ -169,6 +217,20 @@ int render_template(const std::string &content, const template_args &vars,
             current_template_fetch_context = previous;
         }
     } guard(context);
+
+    struct TemplateDependencyStateGuard
+    {
+        bool previous;
+        TemplateDependencyStateGuard()
+            : previous(current_template_dependency_failed)
+        {
+            current_template_dependency_failed = false;
+        }
+        ~TemplateDependencyStateGuard()
+        {
+            current_template_dependency_failed = previous;
+        }
+    } dependency_guard;
 
     std::string absolute_scope;
     try
@@ -340,12 +402,17 @@ int render_template(const std::string &content, const template_args &vars,
         std::stringstream out;
         env.render_to(out, env.parse(content), data);
         output = out.str();
-        return 0;
+        const bool valid_output =
+            !trimWhitespace(output, true, true).empty() &&
+            !current_template_dependency_failed;
+        finish_transaction(valid_output);
+        return valid_output ? 0 : -1;
     }
     catch (std::exception &e)
     {
         output = "模板渲染失败。原因：" + std::string(e.what());
         writeLog(0, output, LOG_LEVEL_ERROR);
+        finish_transaction(false);
         return -1;
     }
     return -2;
@@ -442,6 +509,8 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
             if(startsWith(strLine, "FINAL"))
                 strLine = "MATCH";
             strLine = appendClashRuleTarget(strLine, rule_group);
+            if(strLine.empty())
+                continue;
             rules.emplace_back(std::move(strLine));
             local_stats.add();
             continue;
@@ -606,8 +675,8 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
         std::string direct_url =
             !url.empty() && url[0] == '*' ? url.substr(1) : "";
         bool direct_mrs =
-            !direct_url.empty() &&
-            custom_openclash_rules::hasMrsExtension(direct_url);
+            direct_url.size() >= 4 &&
+            toLower(direct_url.substr(direct_url.size() - 4)) == ".mrs";
         bool group_has_domain = has_domain[x], group_has_ipcidr = has_ipcidr[x];
         int interval = ruleset_interval[x];
 

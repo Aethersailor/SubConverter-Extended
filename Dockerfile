@@ -26,6 +26,7 @@ COPY bridge/converter.go ./
 COPY bridge/age.go ./
 COPY bridge/parser.go ./
 COPY bridge/preprocess.go ./
+COPY bridge/testhelper ./testhelper
 
 RUN set -xe && \
     if [ "${REFRESH_GO_DEPS}" = "true" ]; then \
@@ -52,9 +53,14 @@ RUN echo "==> Building for $TARGETARCH with c-shared mode (musl compatible)" && 
     CGO_ENABLED=1 \
     go build \
     -trimpath \
+    -ldflags="-s -w" \
     -buildmode=c-shared \
     -o libmihomo.so \
     .
+
+# Build the Mihomo-only compatibility validator separately so the production
+# bridge does not pull the complete rules package into libmihomo.so.
+RUN CGO_ENABLED=0 go build -trimpath -o mihomo_config_test_helper ./testhelper
 
 # Verify build output
 RUN ls -lh libmihomo.so libmihomo.h
@@ -144,6 +150,7 @@ COPY --from=go-builder /build/bridge/go.sum /src/bridge/go.sum
 COPY --from=go-builder /build/bridge/proxy_validation_generated.go /src/bridge/proxy_validation_generated.go
 COPY --from=go-builder /build/bridge/mihomo_schemes.h /src/src/parser/mihomo_schemes.h
 COPY --from=go-builder /build/bridge/param_compat.h /src/src/parser/param_compat.h
+COPY --from=go-builder /build/bridge/mihomo_config_test_helper /src/mihomo_config_test_helper
 
 RUN set -xe && \
     if [ "${REFRESH_HEADERS}" = "true" ]; then \
@@ -224,7 +231,6 @@ FROM ${ALPINE_IMAGE}
 ARG VERSION="dev"
 ARG SHA=""
 ARG BUILD_DATE=""
-ARG CUSTOM_OPENCLASH_RULES_REVISION=""
 ARG DEPENDENCY_SNAPSHOT_SHA=""
 LABEL \
   org.opencontainers.image.title="SubConverter-Extended" \
@@ -235,7 +241,6 @@ LABEL \
   org.opencontainers.image.version="${VERSION}" \
   org.opencontainers.image.revision="${SHA}" \
   org.opencontainers.image.created="${BUILD_DATE}" \
-  com.aethersailor.custom-openclash-rules.revision="${CUSTOM_OPENCLASH_RULES_REVISION}" \
   com.aethersailor.dependency-snapshot.sha256="${DEPENDENCY_SNAPSHOT_SHA}" \
   maintainer="Aethersailor"
 

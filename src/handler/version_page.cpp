@@ -893,8 +893,8 @@ std::string page(Request &request, Response &response) {
             <p class="description" data-lang="zh">SubConverter-Extended 是适配 <a href="https://github.com/MetaCubeX/mihomo/tree/Meta" target="_blank" rel="noopener noreferrer">Mihomo</a> <a href="https://wiki.metacubex.one/config/" target="_blank" rel="noopener noreferrer">配置规范</a>的增强实现。</p>
             <p class="description" data-lang="en">Primarily for <a href="https://github.com/vernesong/OpenClash" target="_blank" rel="noopener noreferrer">OpenClash</a>, while compatible with other Clash clients.</p>
             <p class="description" data-lang="zh">主要面向 <a href="https://github.com/vernesong/OpenClash" target="_blank" rel="noopener noreferrer">OpenClash</a>，同时兼容其他 Clash 客户端。</p>
-            <p class="description" data-lang="en">Dedicated companion backend for the <a href="https://github.com/Aethersailor/Custom_OpenClash_Rules" target="_blank" rel="noopener noreferrer">Custom_OpenClash_Rules</a> project.</p>
-            <p class="description" data-lang="zh">作为 <a href="https://github.com/Aethersailor/Custom_OpenClash_Rules" target="_blank" rel="noopener noreferrer">Custom_OpenClash_Rules</a> 项目的专用配套后端。</p>
+            <p class="description" data-lang="en">A security-focused subscription conversion service with explicit remote-source policies.</p>
+            <p class="description" data-lang="zh">具备显式远程来源策略的安全订阅转换服务。</p>
         </div>
 
         <div class="section">

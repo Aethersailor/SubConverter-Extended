@@ -114,34 +114,121 @@ static bool canReadLocalFetchPath(const std::string &path,
     return false;
 }
 
-std::shared_future<std::string> fetchFileAsync(const std::string &path, const ProxyPolicy &proxy, int cache_ttl, bool find_local, bool async, FetchContext context)
-{
-    if(!async)
-    {
-        if(find_local && fileExist(path, true) && canReadLocalFetchPath(path, context))
-            return makeReadyStringFuture(fileGet(path, true));
-        if(isLink(path))
-            return makeReadyStringFuture(webGet(path, proxy, cache_ttl, nullptr, nullptr, context));
-        return makeReadyStringFuture(std::string());
+static std::string fetchFileWithState(
+    const std::string &path, const ProxyPolicy &proxy, int cache_ttl,
+    bool find_local, FetchContext context,
+    const std::shared_ptr<RulesetFetchState> &fetch_state) {
+    auto record = [&](int status_code, bool request_rejected) {
+        if (!fetch_state)
+            return;
+        fetch_state->status_code.store(status_code);
+        fetch_state->request_rejected.store(request_rejected);
+    };
+    auto validContent = [](const std::string &content) {
+        const std::string trimmed = trimWhitespace(content, true, true);
+        const std::string lower = toLower(trimmed);
+        return !trimmed.empty() && !startsWith(lower, "<!doctype html") &&
+               !startsWith(lower, "<html");
+    };
+
+    const bool trusted_local = isTrustedLocalResourcePath(path);
+    const bool local_exists =
+        fileExist(path, true) || (trusted_local && fileExist(path, false));
+    if (find_local && local_exists) {
+        if (!canReadLocalFetchPath(path, context)) {
+            record(403, true);
+            return {};
+        }
+        std::string content = fileGet(path, trusted_local ? false : true);
+        if (!validContent(content)) {
+            record(422, false);
+            return {};
+        }
+        record(200, false);
+        return content;
     }
 
-    std::future<std::string> retVal;
-    if(find_local && fileExist(path, true) &&
-       canReadLocalFetchPath(path, context))
-        retVal = rulesetExecutor().submit(
-            [path](){ return fileGet(path, true); });
-    else if(isLink(path))
-        retVal = rulesetExecutor().submit(
-            [path, proxy, cache_ttl, context](){
-                return webGet(path, proxy, cache_ttl, nullptr, nullptr,
-                              context);
-            });
-    else
-        return makeReadyStringFuture(std::string());
-    return retVal.share();
+    if (!isLink(path)) {
+        record(isPublicFetchRestricted(context) ? 403 : 400,
+               isPublicFetchRestricted(context));
+        return {};
+    }
+
+    FetchArgument argument{HTTP_GET,
+                           path,
+                           proxy,
+                           nullptr,
+                           nullptr,
+                           nullptr,
+                           static_cast<unsigned int>(std::max(cache_ttl, 0)),
+                           false,
+                           context,
+                           true,
+                           FetchCacheSemantic::Ruleset};
+    FetchOutcome outcome;
+    fetchRemote(argument, outcome);
+    record(outcome.status_code,
+           outcome.failure == FetchFailureCategory::RequestRejected);
+    if (!outcome.success || !validContent(outcome.content)) {
+        discardFetchOutcomeCache(outcome);
+        if (outcome.success)
+            record(422, false);
+        return {};
+    }
+    std::string content = outcome.content;
+    if (fetch_state && outcome.cache_commit_pending) {
+        std::lock_guard<std::mutex> lock(fetch_state->pending_mutex);
+        fetch_state->pending_fetch =
+            std::make_shared<FetchOutcome>(std::move(outcome));
+    } else {
+        commitFetchOutcomeCache(outcome);
+    }
+    return content;
+}
+
+std::shared_future<std::string> fetchFileAsync(
+    const std::string &path, const ProxyPolicy &proxy, int cache_ttl,
+    bool find_local, bool async, FetchContext context,
+    std::shared_ptr<RulesetFetchState> fetch_state) {
+    if (!async)
+        return makeReadyStringFuture(fetchFileWithState(
+            path, proxy, cache_ttl, find_local, context, fetch_state));
+
+    return rulesetExecutor()
+        .submit([path, proxy, cache_ttl, find_local, context, fetch_state]() {
+            return fetchFileWithState(path, proxy, cache_ttl, find_local,
+                                      context, fetch_state);
+        })
+        .share();
 }
 
 std::string fetchFile(const std::string &path, const ProxyPolicy &proxy, int cache_ttl, bool find_local, FetchContext context)
 {
     return fetchFileAsync(path, proxy, cache_ttl, find_local, false, context).get();
+}
+
+void commitRulesetFetchCache(
+    const std::shared_ptr<RulesetFetchState> &fetch_state) {
+    if (!fetch_state)
+        return;
+    std::shared_ptr<FetchOutcome> outcome;
+    {
+        std::lock_guard<std::mutex> lock(fetch_state->pending_mutex);
+        outcome = std::move(fetch_state->pending_fetch);
+    }
+    if (outcome)
+        commitFetchOutcomeCache(*outcome);
+}
+
+void discardRulesetFetchCache(
+    const std::shared_ptr<RulesetFetchState> &fetch_state) {
+    if (!fetch_state)
+        return;
+    std::shared_ptr<FetchOutcome> outcome;
+    {
+        std::lock_guard<std::mutex> lock(fetch_state->pending_mutex);
+        outcome = std::move(fetch_state->pending_fetch);
+    }
+    if (outcome)
+        discardFetchOutcomeCache(*outcome);
 }

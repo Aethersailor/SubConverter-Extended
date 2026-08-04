@@ -36,6 +36,8 @@ std::string sanitizedSettingsSnapshot(const Settings &settings) {
            {"insert_urls", sensitiveState(settings.insertUrls)},
            {"default_external_config",
             sensitiveState(settings.defaultExtConfig)},
+           {"fallback_to_default_external_config",
+            settings.fallbackToDefaultExternalConfig},
            {"enable_insert", settings.enableInsert.get(false)},
            {"prepend_insert", settings.prependInsert},
            {"append_proxy_type", settings.appendType},
@@ -96,7 +98,6 @@ std::string sanitizedSettingsSnapshot(const Settings &settings) {
       {"custom_openclash_rules",
        {
            {"fallback_enabled", settings.customOpenClashRulesFallback},
-           {"publish_enabled", settings.customOpenClashRulesPublish},
        }},
       {"proxies",
        {

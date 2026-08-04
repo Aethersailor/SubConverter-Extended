@@ -10,6 +10,7 @@
 // Go library functions (generated from libconvert.h)
 extern "C" {
 char *ConvertSubscription(char *data);
+int ValidateMihomoRegex(char *pattern);
 char *ResolveAgeRecipient(char *key);
 char *EncryptAgeArmored(char *data, char *recipient);
 void ReleaseUnusedMemory();
@@ -170,6 +171,10 @@ bool isMihomoParserAvailable() {
     return false;
   }
   return false;
+}
+
+bool isMihomoRegexValid(const std::string &pattern) {
+  return ValidateMihomoRegex(const_cast<char *>(pattern.c_str())) != 0;
 }
 
 AgeRecipient resolveAgeRecipient(const std::string &key) {

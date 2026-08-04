@@ -33,6 +33,8 @@ Refresh them only after reviewing the output change:
 ```bash
 python3 tests/compatibility_security_baseline.py \
   --binary build/subconverter \
+  --settings-snapshot-helper build/settings_snapshot_test_helper \
+  --mihomo-config-validator build/mihomo_config_test_helper \
   --update-golden
 ```
 

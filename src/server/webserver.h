@@ -19,6 +19,16 @@ struct Request
     string_multimap argument;
     string_icase_map headers;
     std::string postdata;
+
+    // Internal marker used when the server deliberately evaluates the
+    // administrator-selected default external config after an explicitly
+    // supplied config's dependency fails. It is never populated from HTTP.
+    bool internal_default_config = false;
+
+    // Set once the request has already executed the administrator-selected
+    // default external-config chain. This prevents the outer 5xx retry path
+    // from evaluating the same default chain a second time.
+    bool default_config_already_used = false;
 };
 
 struct Response
