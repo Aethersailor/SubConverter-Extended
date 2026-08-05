@@ -12,7 +12,7 @@ require (
 	github.com/ericlagergren/polyval v0.0.0-20230805202542-18692a1b76f9 // indirect
 	github.com/ericlagergren/siv v0.0.0-20220507050439-0b757b3aa5f1 // indirect
 	github.com/ericlagergren/subtle v0.0.0-20220507045147-890d697da010 // indirect
-	github.com/gofrs/uuid/v5 v5.4.0 // indirect
+	github.com/gofrs/uuid/v5 v5.5.1 // indirect
 	github.com/kr/pretty v0.1.0 // indirect
 	github.com/metacubex/age v0.0.0-20260603010618-28d156b4ea78 // indirect
 	github.com/metacubex/ascon v0.1.0 // indirect
