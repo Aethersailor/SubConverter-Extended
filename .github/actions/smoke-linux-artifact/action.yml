@@ -34,6 +34,8 @@ runs:
 
         tar -xzf "$ARTIFACT" -C "$WORKDIR"
         cd "$WORKDIR/SubConverter-Extended"
+        test ! -e base/Custom_OpenClash_Rules
+
         PORT="$PORT" PREF_PATH="$PWD/base/pref.toml" ./start.sh >"$WORKDIR/stdout.log" 2>"$WORKDIR/stderr.log" &
         PID="$!"
 
@@ -42,6 +44,9 @@ runs:
           if curl -fsS "$URL" >"$WORKDIR/response.out"; then
             head -c 200 "$WORKDIR/response.out"
             python3 "$GITHUB_WORKSPACE/scripts/run-subconverter-smoke.py" --base-url "http://127.0.0.1:${PORT}"
+            route_status="$(curl -sS -o /dev/null -w '%{http_code}' \
+              "http://127.0.0.1:${PORT}/Custom_OpenClash_Rules/main/rule/example.yaml")"
+            test "$route_status" = "404"
             exit 0
           fi
 

@@ -4,6 +4,7 @@
 build
 cmake-build-*
 stats
+base/Custom_OpenClash_Rules/
 **/__pycache__
 *.pyc
 *.pyo

@@ -134,13 +134,10 @@ for OPENWRT_ARCH in "${ARCH_ARRAY[@]}"; do
   create_launcher "${PKG_ROOT}/usr/bin/subconverter-extended"
   create_init_script "${PKG_ROOT}/etc/init.d/subconverter-extended"
   create_readme "${PKG_ROOT}/usr/share/doc/${PACKAGE_NAME}/README.OpenWrt"
-  PKG_OWNER="$(stat -c '%u:%g' "${PKG_ROOT}")"
 
   cat > "${MKPKG_SCRIPT}" <<EOF
 #!/bin/sh
 set -eu
-trap 'chown -R "${PKG_OWNER}" "${PKG_ROOT}"' EXIT
-chown -R 0:0 "${PKG_ROOT}"
 apk mkpkg \\
   --compat 3.0.0_pre1 \\
   --files "${PKG_ROOT}" \\

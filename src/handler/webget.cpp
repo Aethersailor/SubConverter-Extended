@@ -13,9 +13,9 @@
 
 #include <curl/curl.h>
 
-#include "handler/settings.h"
+#include "handler/cocr_source_url.h"
 #include "handler/curl_handle_pool.h"
-#include "handler/remote_source.h"
+#include "handler/settings.h"
 #include "utils/base64/base64.h"
 #include "utils/defer.h"
 #include "utils/file_extra.h"
@@ -48,11 +48,23 @@ struct curl_progress_data
     long size_limit = 0L;
 };
 
-using CacheFetchResult = FetchOutcome;
+struct CacheFetchResult
+{
+    int status_code = 0;
+    std::string content;
+    std::string response_headers;
+};
+
+struct GitHubFileRef
+{
+    std::string owner;
+    std::string repo;
+    std::string ref;
+    std::string path;
+};
 
 static std::mutex cache_fetch_mutex;
 static std::map<std::string, std::shared_future<CacheFetchResult>> cache_fetches;
-thread_local FetchCacheTransaction *active_fetch_cache_transaction = nullptr;
 
 class CacheFetchOwnerCleanup
 {
@@ -83,19 +95,14 @@ static CURLcode curl_init()
 }
 
 static std::string build_cache_key(const std::string &url, const ProxyPolicy &proxy,
-                                   const string_icase_map *request_headers,
-                                   FetchContext context = FetchContext::TrustedConfig,
-                                   bool cocr_fallback = false,
-                                   FetchCacheSemantic semantic =
-                                       FetchCacheSemantic::Immediate)
+                                   const string_icase_map *request_headers)
 {
-    std::string identity = "remote-fetch-v3\nurl:" + std::to_string(url.size()) + ":" + url;
+    if(proxy.mode == ProxyMode::Direct && (!request_headers || request_headers->empty()))
+        return getMD5(url);
+
+    std::string identity = "url:" + std::to_string(url.size()) + ":" + url;
     const std::string proxy_identity = proxy.cacheIdentity();
     identity += "\nproxy:" + std::to_string(proxy_identity.size()) + ":" + proxy_identity;
-    identity += "\ncontext:" + std::to_string(static_cast<int>(context));
-    identity += "\ncocr-fallback:" + std::to_string(cocr_fallback ? 1 : 0);
-    identity += "\nsemantic:" +
-                std::to_string(static_cast<int>(semantic));
     identity += "\nheaders:";
     if(request_headers)
     {
@@ -115,6 +122,114 @@ static std::string build_cache_key(const std::string &url, const ProxyPolicy &pr
     return getMD5(identity);
 }
 
+static std::string strip_url_query_fragment(const std::string &url)
+{
+    std::string::size_type pos = url.find_first_of("?#");
+    if(pos == std::string::npos)
+        return url;
+    return url.substr(0, pos);
+}
+
+static std::string join_path_segments(const string_array &segments, size_t start,
+                                      size_t end)
+{
+    std::string result;
+    for(size_t i = start; i < end; i++)
+    {
+        if(!result.empty())
+            result += "/";
+        result += segments[i];
+    }
+    return result;
+}
+
+static bool split_github_ref_path(const string_array &segments, size_t ref_start,
+                                  std::string &ref, std::string &path)
+{
+    if(segments.size() <= ref_start + 1)
+        return false;
+
+    size_t path_start = ref_start + 1;
+    if(segments[ref_start] == "refs" &&
+       (segments[ref_start + 1] == "heads" ||
+        segments[ref_start + 1] == "tags"))
+    {
+        if(segments.size() <= ref_start + 3)
+            return false;
+        ref = join_path_segments(segments, ref_start, ref_start + 3);
+        path_start = ref_start + 3;
+    }
+    else
+        ref = segments[ref_start];
+
+    if(path_start >= segments.size())
+        return false;
+
+    path = join_path_segments(segments, path_start, segments.size());
+    return !ref.empty() && !path.empty();
+}
+
+static bool parse_raw_githubusercontent_url(const std::string &url,
+                                            GitHubFileRef &file_ref)
+{
+    const std::string https_prefix = "https://raw.githubusercontent.com/";
+    const std::string http_prefix = "http://raw.githubusercontent.com/";
+    std::string content_path;
+
+    if(startsWith(url, https_prefix))
+        content_path = url.substr(https_prefix.size());
+    else if(startsWith(url, http_prefix))
+        content_path = url.substr(http_prefix.size());
+    else
+        return false;
+
+    string_array segments = split(content_path, "/");
+    if(segments.size() < 4)
+        return false;
+
+    file_ref.owner = segments[0];
+    file_ref.repo = segments[1];
+    return split_github_ref_path(segments, 2, file_ref.ref, file_ref.path);
+}
+
+static bool parse_github_file_url(const std::string &url, GitHubFileRef &file_ref)
+{
+    const std::string https_prefix = "https://github.com/";
+    const std::string http_prefix = "http://github.com/";
+    std::string content_path;
+
+    if(startsWith(url, https_prefix))
+        content_path = url.substr(https_prefix.size());
+    else if(startsWith(url, http_prefix))
+        content_path = url.substr(http_prefix.size());
+    else
+        return false;
+
+    string_array segments = split(content_path, "/");
+    if(segments.size() < 5)
+        return false;
+    if(segments[2] != "raw" && segments[2] != "blob")
+        return false;
+
+    file_ref.owner = segments[0];
+    file_ref.repo = segments[1];
+    return split_github_ref_path(segments, 3, file_ref.ref, file_ref.path);
+}
+
+static bool build_jsdelivr_github_url(const std::string &url,
+                                      std::string &fallback_url)
+{
+    GitHubFileRef file_ref;
+    std::string clean_url = strip_url_query_fragment(url);
+    if(!parse_raw_githubusercontent_url(clean_url, file_ref) &&
+       !parse_github_file_url(clean_url, file_ref))
+        return false;
+
+    const std::string scheme = startsWith(clean_url, "http://") ? "http" : "https";
+    fallback_url = scheme + "://cdn.jsdelivr.net/gh/" + file_ref.owner + "/" +
+                   file_ref.repo + "@" + file_ref.ref + "/" + file_ref.path;
+    return true;
+}
 
 static bool parse_ipv4_address(const std::string &address, uint32_t &value)
 {
@@ -207,6 +322,25 @@ static bool is_blocked_hostname(const std::string &host)
     return false;
 }
 
+static std::string escape_log_value(const std::string &value)
+{
+    std::string escaped;
+    escaped.reserve(value.size());
+    static const char hex[] = "0123456789ABCDEF";
+    for(unsigned char ch : value)
+    {
+        if(ch < 0x20 || ch == 0x7F)
+        {
+            escaped += "\\x";
+            escaped += hex[ch >> 4];
+            escaped += hex[ch & 0x0F];
+        }
+        else
+            escaped.push_back(static_cast<char>(ch));
+    }
+    return escaped;
+}
+
 static bool has_control_character(const std::string &value)
 {
     for(unsigned char ch : value)
@@ -222,28 +356,10 @@ bool isFetchUrlAllowed(const std::string &url, FetchContext context)
     if(!isPublicFetchRestricted(context))
         return true;
     std::string checked_url = trimWhitespace(url, true, true);
-    std::string log_url = remote_source::redactForLog(checked_url);
+    std::string log_url = escape_log_value(checked_url);
     if(checked_url.empty() || checked_url != url || has_control_character(checked_url))
     {
         writeLog(0, "已阻止公开请求获取格式异常的 URL：" + log_url,
-                 LOG_LEVEL_WARNING);
-        return false;
-    }
-
-    const size_t scheme_end = checked_url.find("://");
-    const size_t authority_begin = scheme_end == std::string::npos
-                                       ? std::string::npos
-                                       : scheme_end + 3;
-    const size_t authority_end = authority_begin == std::string::npos
-                                     ? std::string::npos
-                                     : checked_url.find_first_of("/?#", authority_begin);
-    if (authority_begin != std::string::npos &&
-        checked_url.substr(authority_begin,
-                           authority_end == std::string::npos
-                               ? std::string::npos
-                               : authority_end - authority_begin)
-                .find('@') != std::string::npos) {
-        writeLog(0, "已阻止公开请求使用带凭据的 URL：" + log_url,
                  LOG_LEVEL_WARNING);
         return false;
     }
@@ -300,6 +416,37 @@ static int public_fetch_prereq_callback(void *clientp, char *conn_primary_ip,
     return CURL_PREREQFUNC_OK;
 }
 #endif
+
+static bool should_try_jsdelivr_fallback(CURLcode ret_code, int status_code)
+{
+    if(ret_code != CURLE_OK)
+    {
+        switch(ret_code)
+        {
+        case CURLE_UNSUPPORTED_PROTOCOL:
+        case CURLE_URL_MALFORMAT:
+        case CURLE_FAILED_INIT:
+        case CURLE_OUT_OF_MEMORY:
+        case CURLE_ABORTED_BY_CALLBACK:
+        case CURLE_FILESIZE_EXCEEDED:
+            return false;
+        default:
+            return true;
+        }
+    }
+
+    return status_code == 0 || status_code == 429 || status_code >= 500;
+}
+
+static void clear_fetch_output(FetchResult &result)
+{
+    if(result.content)
+        result.content->clear();
+    if(result.response_headers)
+        result.response_headers->clear();
+    if(result.cookies)
+        result.cookies->clear();
+}
 
 static int writer(char *data, size_t size, size_t nmemb, std::string *writerData)
 {
@@ -680,6 +827,58 @@ static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode 
     return *result.status_code;
 }
 
+static int curlGetWithGitHubFallback(const FetchArgument &argument, FetchResult &result)
+{
+    CURLcode original_code = CURLE_OK;
+    int original_status = curlGet(argument, result, &original_code);
+
+    std::string fallback_url;
+    if(argument.method != HTTP_GET || argument.keep_resp_on_fail ||
+       original_status == 200 ||
+       !should_try_jsdelivr_fallback(original_code, original_status) ||
+       !build_jsdelivr_github_url(argument.url, fallback_url))
+        return original_status;
+
+    std::string original_headers, original_cookies;
+    if(result.response_headers)
+        original_headers = *result.response_headers;
+    if(result.cookies)
+        original_cookies = *result.cookies;
+
+    writeLog(0,
+             "GitHub Raw 获取失败，正在尝试 jsDelivr 回退源：" +
+                 fallback_url,
+             LOG_LEVEL_WARNING);
+    clear_fetch_output(result);
+
+    FetchArgument fallback_argument {HTTP_GET, fallback_url, argument.proxy,
+                                     nullptr, argument.request_headers,
+                                     argument.cookies, argument.cache_ttl,
+                                     argument.keep_resp_on_fail,
+                                     argument.context};
+    CURLcode fallback_code = CURLE_OK;
+    int fallback_status = curlGet(fallback_argument, result, &fallback_code);
+    if(fallback_code == CURLE_OK && fallback_status == 200)
+    {
+        writeLog(0,
+                 "GitHub Raw 已通过 jsDelivr 回退源获取成功：" +
+                     fallback_url,
+                 LOG_LEVEL_INFO);
+        return fallback_status;
+    }
+
+    writeLog(0,
+             "GitHub Raw 通过 jsDelivr 回退源获取失败：" + fallback_url,
+             LOG_LEVEL_WARNING);
+    clear_fetch_output(result);
+    if(result.response_headers)
+        *result.response_headers = original_headers;
+    if(result.cookies)
+        *result.cookies = original_cookies;
+    *result.status_code = original_status;
+    return original_status;
+}
+
 // data:[<mediatype>][;base64],<data>
 static std::string dataGet(const std::string &url)
 {
@@ -719,8 +918,7 @@ std::string buildSocks5ProxyString(const std::string &addr, int port, const std:
     return proxystr;
 }
 
-/* Legacy cache wrapper removed; retained below only as historical context.
-std::string webGetLegacy(const std::string &url, const ProxyPolicy &proxy, unsigned int cache_ttl, std::string *response_headers, string_icase_map *request_headers, FetchContext context)
+std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned int cache_ttl, std::string *response_headers, string_icase_map *request_headers, FetchContext context)
 {
     int return_code = 0;
     std::string content;
@@ -728,17 +926,27 @@ std::string webGetLegacy(const std::string &url, const ProxyPolicy &proxy, unsig
     if (!isFetchUrlAllowed(url, context))
         return "";
 
-    FetchArgument argument {HTTP_GET, url, proxy, nullptr, request_headers,
-                            nullptr, cache_ttl, false, context};
+    CocrSourceResolution source =
+        resolveCocrSourceUrl(url, global.customOpenClashRulesSourceSwitch);
+    const std::string &effective_url = source.effective_url;
+    if(source.rewritten && shouldLog(LOG_LEVEL_VERBOSE))
+        writeLog(0, "COCR 服务端取源切换：'" + url + "' -> '" +
+                        effective_url + "'。",
+                 LOG_LEVEL_VERBOSE);
+
+    FetchArgument argument {HTTP_GET, effective_url, proxy, nullptr,
+                            request_headers, nullptr, cache_ttl, false,
+                            context};
     FetchResult fetch_res {&return_code, &content, response_headers, nullptr};
 
-    if (startsWith(url, "data:"))
-        return dataGet(url);
+    if (startsWith(effective_url, "data:"))
+        return dataGet(effective_url);
     // cache system
     if(cache_ttl > 0)
     {
         md("cache");
-        const std::string url_md5 = build_cache_key(url, proxy, request_headers);
+        const std::string url_md5 =
+            build_cache_key(effective_url, proxy, request_headers);
         const std::string path = "cache/" + url_md5, path_header = path + "_header";
         struct stat result {};
         if(stat(path.data(), &result) == 0) // cache exist
@@ -747,7 +955,7 @@ std::string webGetLegacy(const std::string &url, const ProxyPolicy &proxy, unsig
             if(difftime(now, mtime) <= cache_ttl) // within TTL
             {
                 if(shouldLog(LOG_LEVEL_VERBOSE))
-                    writeLog(0, "缓存命中：'" + url + "'，使用本地缓存。");
+                    writeLog(0, "缓存命中：'" + effective_url + "'，使用本地缓存。");
                 //guarded_mutex guard(cache_rw_lock);
                 cache_rw_lock.readLock();
                 defer(cache_rw_lock.readUnlock();)
@@ -756,12 +964,12 @@ std::string webGetLegacy(const std::string &url, const ProxyPolicy &proxy, unsig
                 return fileGet(path, true);
             }
             if(shouldLog(LOG_LEVEL_VERBOSE))
-                writeLog(0, "缓存过期：'" + url + "'，正在创建新缓存。"); // out of TTL
+                writeLog(0, "缓存过期：'" + effective_url + "'，正在创建新缓存。"); // out of TTL
         }
         else
         {
             if(shouldLog(LOG_LEVEL_VERBOSE))
-                writeLog(0, "缓存不存在：'" + url + "'，正在创建新缓存。");
+                writeLog(0, "缓存不存在：'" + effective_url + "'，正在创建新缓存。");
         }
         std::shared_future<CacheFetchResult> fetch_future;
         std::shared_ptr<std::promise<CacheFetchResult>> fetch_promise;
@@ -841,424 +1049,6 @@ std::string webGetLegacy(const std::string &url, const ProxyPolicy &proxy, unsig
     curlGetWithGitHubFallback(argument, fetch_res);
     return content;
 }
-*/
-
-namespace {
-
-struct StaleCacheCandidate {
-    std::string path;
-    std::string header_path;
-    time_t mtime = 0;
-    std::string url;
-    std::string source_kind;
-};
-
-static bool is_http_get(const FetchArgument &argument) {
-    return argument.method == HTTP_GET;
-}
-
-static bool is_success_status(http_method method, int status) {
-    if (status < 200 || status >= 300)
-        return false;
-    if (method == HTTP_GET)
-        return status == 200;
-    return method == HTTP_HEAD || method == HTTP_POST || method == HTTP_PATCH;
-}
-
-static FetchFailureCategory classify_fetch_failure(CURLcode code, int status,
-                                                   http_method method) {
-    if (code != CURLE_OK) {
-        switch (code) {
-        case CURLE_UNSUPPORTED_PROTOCOL:
-        case CURLE_URL_MALFORMAT:
-        case CURLE_FAILED_INIT:
-        case CURLE_OUT_OF_MEMORY:
-        case CURLE_FILESIZE_EXCEEDED:
-            return FetchFailureCategory::Internal;
-        case CURLE_ABORTED_BY_CALLBACK:
-            return FetchFailureCategory::RequestRejected;
-        default:
-            return FetchFailureCategory::SourceUnavailable;
-        }
-    }
-    if (status == 404)
-        return FetchFailureCategory::NotFound;
-    if (status == 0 || status == 408 || status == 429 || status >= 500)
-        return FetchFailureCategory::SourceUnavailable;
-    // Authentication and permission failures are request-level decisions. Do
-    // not mirror them, serve stale data, or replace the request with a
-    // different default template.
-    if (status == 401 || status == 403 || (status >= 400 && status < 500))
-        return FetchFailureCategory::RequestRejected;
-    if (is_success_status(method, status))
-        return FetchFailureCategory::None;
-    if (status >= 200 && status < 300 && method == HTTP_GET)
-        return FetchFailureCategory::ContentInvalid;
-    return FetchFailureCategory::RequestRejected;
-}
-
-static bool can_try_next_source(FetchFailureCategory failure) {
-    return failure == FetchFailureCategory::SourceUnavailable ||
-           failure == FetchFailureCategory::NotFound;
-}
-
-static std::string failure_name(FetchFailureCategory failure) {
-    switch (failure) {
-    case FetchFailureCategory::RequestRejected: return "request_rejected";
-    case FetchFailureCategory::SourceUnavailable: return "source_unavailable";
-    case FetchFailureCategory::NotFound: return "not_found";
-    case FetchFailureCategory::ContentInvalid: return "content_invalid";
-    case FetchFailureCategory::Internal: return "internal";
-    case FetchFailureCategory::None: default: return "none";
-    }
-}
-
-static std::string cache_path_for(const FetchArgument &argument,
-                                  const remote_source::FetchCandidate &candidate) {
-    const std::string key = build_cache_key(
-        candidate.url, argument.proxy, argument.request_headers,
-        argument.context, global.customOpenClashRulesFallback,
-        argument.cache_semantic);
-    return "cache/" + key;
-}
-
-static std::string fetch_singleflight_key(const FetchArgument &argument) {
-    std::string key = build_cache_key(
-        argument.url, argument.proxy, argument.request_headers,
-        argument.context, global.customOpenClashRulesFallback,
-        argument.cache_semantic);
-    key += "\ndefer-cache-commit:";
-    key += argument.defer_cache_commit ? '1' : '0';
-    return key;
-}
-
-static bool read_cache_candidate(const std::string &path,
-                                 const std::string &header_path,
-                                 unsigned int cache_ttl,
-                                 std::string &content,
-                                 std::string &headers,
-                                 time_t *mtime_out = nullptr) {
-    struct stat st {};
-    if (stat(path.c_str(), &st) != 0)
-        return false;
-    content = fileGet(path, true);
-    // An empty cached config is never a valid fresh source. This also keeps a
-    // partially-created file from suppressing the source chain.
-    if (content.empty())
-        return false;
-    if (mtime_out)
-        *mtime_out = st.st_mtime;
-    if (cache_ttl > 0 &&
-        difftime(time(nullptr), st.st_mtime) > cache_ttl)
-        return false;
-    headers = fileGet(header_path, true);
-    return true;
-}
-
-static void write_cache_candidate(const FetchOutcome &outcome) {
-    if (outcome.cache_path.empty() || !outcome.success || outcome.stale_cache_used)
-        return;
-    md("cache");
-    cache_rw_lock.writeLock();
-    defer(cache_rw_lock.writeUnlock();)
-    fileWrite(outcome.cache_path, outcome.content, true);
-    if (!outcome.response_headers.empty())
-        fileWrite(outcome.cache_header_path, outcome.response_headers, true);
-}
-
-static FetchOutcome perform_fetch(const FetchArgument &argument) {
-    FetchOutcome outcome;
-    outcome.requested_url = argument.url;
-
-    const std::string lower_url = toLower(trimWhitespace(argument.url, true, true));
-    if (startsWith(lower_url, "data:")) {
-        outcome.content = dataGet(argument.url);
-        outcome.status_code = outcome.content.empty() ? 400 : 200;
-        outcome.success = outcome.status_code == 200;
-        outcome.effective_url = argument.url;
-        outcome.effective_source = "generic";
-        outcome.failure = outcome.success ? FetchFailureCategory::None
-                                           : FetchFailureCategory::RequestRejected;
-        outcome.failure_reason = failure_name(outcome.failure);
-        return outcome;
-    }
-
-    if (!isFetchUrlAllowed(argument.url, argument.context)) {
-        outcome.status_code = 403;
-        outcome.failure = FetchFailureCategory::RequestRejected;
-        outcome.failure_reason = failure_name(outcome.failure);
-        return outcome;
-    }
-
-    const remote_source::ParsedUrl parsed = remote_source::parse(argument.url);
-    if (!parsed.valid && parsed.recognized_host) {
-        outcome.status_code = 400;
-        outcome.failure = FetchFailureCategory::RequestRejected;
-        outcome.failure_reason = failure_name(outcome.failure);
-        return outcome;
-    }
-
-    const auto plan = remote_source::buildFetchPlan(
-        argument.url, parsed, global.customOpenClashRulesFallback,
-        argument.method == HTTP_GET);
-    outcome.cocr_rewrite_used = plan.cocr_rewrite_used;
-    outcome.logical_resource = plan.logical_resource;
-    if (plan.cocr_rewrite_failed) {
-        outcome.status_code = 502;
-        outcome.failure = FetchFailureCategory::Internal;
-        outcome.failure_reason = "cocr_rewrite_failed";
-        return outcome;
-    }
-    const auto &candidates = plan.candidates;
-    outcome.raw_to_jsdelivr_used = false;
-
-    const bool cache_enabled = argument.cache_ttl > 0 && is_http_get(argument);
-    std::vector<StaleCacheCandidate> stale;
-    FetchFailureCategory last_failure = FetchFailureCategory::SourceUnavailable;
-    int last_status = 0;
-
-    for (size_t index = 0; index < candidates.size(); ++index) {
-        const auto &candidate = candidates[index];
-        outcome.effective_url = candidate.url;
-        outcome.effective_source = candidate.source_kind;
-        if (index > 0 && candidate.source_kind == "jsdelivr")
-            outcome.raw_to_jsdelivr_used = true;
-        if (!isFetchUrlAllowed(candidate.url, argument.context)) {
-            outcome.status_code = 403;
-            outcome.effective_url = candidate.url;
-            outcome.failure = FetchFailureCategory::RequestRejected;
-            outcome.failure_reason = failure_name(outcome.failure);
-            outcome.attempts.push_back({candidate.source_kind,
-                                        remote_source::redactForLog(candidate.url),
-                                        outcome.status_code, 0, outcome.failure});
-            break;
-        }
-
-        std::string cache_path, cache_header_path;
-        if (cache_enabled) {
-            cache_path = cache_path_for(argument, candidate);
-            cache_header_path = cache_path + "_header";
-            std::string cached_content, cached_headers;
-            if (read_cache_candidate(cache_path, cache_header_path,
-                                     argument.cache_ttl, cached_content,
-                                     cached_headers)) {
-                outcome.success = true;
-                outcome.status_code = 200;
-                outcome.content = std::move(cached_content);
-                outcome.response_headers = std::move(cached_headers);
-                outcome.effective_url = candidate.url;
-                outcome.effective_source = candidate.source_kind;
-                outcome.fresh_cache_used = true;
-                outcome.cache_path = cache_path;
-                outcome.cache_header_path = cache_header_path;
-                outcome.failure = FetchFailureCategory::None;
-                outcome.attempts.push_back({candidate.source_kind, "cache", 200, 0,
-                                            FetchFailureCategory::None});
-                return outcome;
-            }
-            time_t stale_mtime = 0;
-            std::string stale_content, stale_headers;
-            if (read_cache_candidate(cache_path, cache_header_path, 0,
-                                     stale_content, stale_headers,
-                                     &stale_mtime)) {
-                stale.push_back({cache_path, cache_header_path, stale_mtime,
-                                 candidate.url, candidate.source_kind});
-            }
-        }
-
-        int status = 0;
-        std::string content, headers, cookies;
-        FetchResult result{&status, &content, &headers, &cookies};
-        FetchArgument request{argument.method,
-                              candidate.url,
-                              argument.proxy,
-                              argument.post_data,
-                              argument.request_headers,
-                              argument.cookies,
-                              argument.cache_ttl,
-                              argument.keep_resp_on_fail,
-                              argument.context,
-                              argument.defer_cache_commit,
-                              argument.cache_semantic};
-        CURLcode curl_code = CURLE_OK;
-        const int returned_status = curlGet(request, result, &curl_code);
-        status = returned_status;
-        const auto failure = classify_fetch_failure(curl_code, status,
-                                                    argument.method);
-        outcome.attempts.push_back({candidate.source_kind,
-                                    remote_source::redactForLog(candidate.url),
-                                    status, static_cast<int>(curl_code), failure});
-        if (failure == FetchFailureCategory::None) {
-            outcome.success = true;
-            outcome.status_code = status;
-            outcome.content = std::move(content);
-            outcome.response_headers = std::move(headers);
-            outcome.cookies = std::move(cookies);
-            outcome.effective_url = candidate.url;
-            outcome.effective_source = candidate.source_kind;
-            outcome.failure = FetchFailureCategory::None;
-            if (cache_enabled) {
-                outcome.cache_path = cache_path;
-                outcome.cache_header_path = cache_header_path;
-                if (argument.defer_cache_commit)
-                    outcome.cache_commit_pending = true;
-                else
-                    write_cache_candidate(outcome);
-            }
-            return outcome;
-        }
-
-        last_failure = failure;
-        last_status = status;
-        if (!can_try_next_source(failure) || index + 1 >= candidates.size())
-            break;
-        writeLog(0, "远程来源失败，尝试下一允许来源：" +
-                         remote_source::redactForLog(candidate.url),
-                 LOG_LEVEL_WARNING);
-    }
-
-    if (!stale.empty() && global.serveCacheOnFetchFail &&
-        can_try_next_source(last_failure)) {
-        const auto stale_iter = std::max_element(
-            stale.begin(), stale.end(),
-            [](const StaleCacheCandidate &lhs, const StaleCacheCandidate &rhs) {
-                return lhs.mtime < rhs.mtime;
-            });
-        cache_rw_lock.readLock();
-        defer(cache_rw_lock.readUnlock();)
-        outcome.success = true;
-        outcome.status_code = 200;
-        outcome.content = fileGet(stale_iter->path, true);
-        outcome.response_headers = fileGet(stale_iter->header_path, true);
-        outcome.effective_url = stale_iter->url;
-        outcome.effective_source = stale_iter->source_kind;
-        outcome.stale_cache_used = !outcome.content.empty();
-        if (outcome.stale_cache_used) {
-            outcome.failure = FetchFailureCategory::None;
-            outcome.failure_reason = "stale_cache";
-            return outcome;
-        }
-    }
-
-    outcome.success = false;
-    outcome.status_code = last_status == 0
-                              ? (last_failure == FetchFailureCategory::RequestRejected ? 403 : 502)
-                              : last_status;
-    outcome.failure = last_failure;
-    outcome.failure_reason = failure_name(last_failure);
-    return outcome;
-}
-
-} // namespace
-
-FetchCacheTransactionScope::FetchCacheTransactionScope(
-    FetchCacheTransaction &transaction)
-    : previous_(active_fetch_cache_transaction) {
-    active_fetch_cache_transaction = &transaction;
-}
-
-FetchCacheTransactionScope::~FetchCacheTransactionScope() {
-    active_fetch_cache_transaction = previous_;
-}
-
-FetchCacheTransaction *currentFetchCacheTransaction() {
-    return active_fetch_cache_transaction;
-}
-
-void deferFetchOutcomeCache(FetchOutcome outcome) {
-    if (!outcome.cache_commit_pending || !outcome.success)
-        return;
-    if (active_fetch_cache_transaction != nullptr) {
-        active_fetch_cache_transaction->pending.emplace_back(std::move(outcome));
-        return;
-    }
-    commitFetchOutcomeCache(outcome);
-}
-
-bool commitFetchOutcomeCache(const FetchOutcome &outcome) {
-    bool committed = false;
-    for (const FetchOutcome &dependency : outcome.deferred_dependencies)
-        committed = commitFetchOutcomeCache(dependency) || committed;
-    if (!outcome.cache_commit_pending || !outcome.success ||
-        outcome.cache_path.empty())
-        return committed;
-    write_cache_candidate(outcome);
-    return true;
-}
-
-void discardFetchOutcomeCache(const FetchOutcome &outcome) {
-    for (const FetchOutcome &dependency : outcome.deferred_dependencies)
-        discardFetchOutcomeCache(dependency);
-    // Deferred network responses are held in memory and are never written to
-    // the final cache path until commitFetchOutcomeCache is called. Discarding
-    // therefore preserves any older stale entry; a semantically invalid fresh
-    // cache entry is removed so it cannot poison later requests.
-    if (!outcome.fresh_cache_used || outcome.cache_path.empty())
-        return;
-    cache_rw_lock.writeLock();
-    defer(cache_rw_lock.writeUnlock();)
-    remove(outcome.cache_path.c_str());
-    if (!outcome.cache_header_path.empty())
-        remove(outcome.cache_header_path.c_str());
-}
-
-void commitFetchCacheTransaction(FetchCacheTransaction &transaction) {
-    for (const FetchOutcome &outcome : transaction.pending)
-        commitFetchOutcomeCache(outcome);
-    transaction.pending.clear();
-}
-
-void discardFetchCacheTransaction(FetchCacheTransaction &transaction) {
-    for (const FetchOutcome &outcome : transaction.pending)
-        discardFetchOutcomeCache(outcome);
-    transaction.pending.clear();
-}
-
-int fetchRemote(const FetchArgument &argument, FetchOutcome &outcome) {
-    if (argument.cache_ttl == 0 || argument.method != HTTP_GET) {
-        outcome = perform_fetch(argument);
-        return outcome.status_code;
-    }
-
-    const std::string key = fetch_singleflight_key(argument);
-    std::shared_future<CacheFetchResult> fetch_future;
-    std::shared_ptr<std::promise<CacheFetchResult>> fetch_promise;
-    bool owner = false;
-    {
-        std::lock_guard<std::mutex> lock(cache_fetch_mutex);
-        const auto iter = cache_fetches.find(key);
-        if (iter == cache_fetches.end()) {
-            fetch_promise = std::make_shared<std::promise<CacheFetchResult>>();
-            fetch_future = fetch_promise->get_future().share();
-            cache_fetches.emplace(key, fetch_future);
-            owner = true;
-        } else {
-            fetch_future = iter->second;
-        }
-    }
-    CacheFetchOwnerCleanup owner_cleanup(owner, key);
-    if (owner) {
-        try {
-            fetch_promise->set_value(perform_fetch(argument));
-        } catch (...) {
-            fetch_promise->set_exception(std::current_exception());
-        }
-    }
-    outcome = fetch_future.get();
-    return outcome.status_code;
-}
-
-std::string webGet(const std::string &url, const ProxyPolicy &proxy,
-                   unsigned int cache_ttl, std::string *response_headers,
-                   string_icase_map *request_headers, FetchContext context) {
-    FetchArgument argument{HTTP_GET, url, proxy, nullptr, request_headers,
-                           nullptr, cache_ttl, false, context};
-    FetchOutcome outcome;
-    fetchRemote(argument, outcome);
-    if (response_headers)
-        *response_headers = outcome.response_headers;
-    return outcome.success ? outcome.content : "";
-}
 
 void flushCache()
 {
@@ -1305,15 +1095,34 @@ string_array headers_map_to_array(const string_map &headers)
 
 int webGet(const FetchArgument& argument, FetchResult &result)
 {
-    FetchOutcome outcome;
-    const int status = fetchRemote(argument, outcome);
-    if (result.status_code)
-        *result.status_code = status;
-    if (result.content)
-        *result.content = outcome.success ? outcome.content : "";
-    if (result.response_headers)
-        *result.response_headers = outcome.response_headers;
-    if (result.cookies)
-        *result.cookies = outcome.cookies;
-    return status;
+    if (!isFetchUrlAllowed(argument.url, argument.context)) {
+        *result.status_code = 403;
+        if (result.content)
+            result.content->clear();
+        return 403;
+    }
+    CocrSourceResolution source =
+        argument.method == HTTP_GET
+            ? resolveCocrSourceUrl(argument.url,
+                                   global.customOpenClashRulesSourceSwitch)
+            : CocrSourceResolution{argument.url, false};
+    if (startsWith(source.effective_url, "data:")) {
+        if (result.content)
+            *result.content = dataGet(source.effective_url);
+        *result.status_code =
+            result.content && !result.content->empty() ? 200 : 400;
+        return *result.status_code;
+    }
+    if (!source.rewritten)
+        return curlGetWithGitHubFallback(argument, result);
+
+    if(shouldLog(LOG_LEVEL_VERBOSE))
+        writeLog(0, "COCR 服务端取源切换：'" + argument.url + "' -> '" +
+                        source.effective_url + "'。",
+                 LOG_LEVEL_VERBOSE);
+    FetchArgument effective_argument {
+        argument.method, source.effective_url, argument.proxy,
+        argument.post_data, argument.request_headers, argument.cookies,
+        argument.cache_ttl, argument.keep_resp_on_fail, argument.context};
+    return curlGetWithGitHubFallback(effective_argument, result);
 }
