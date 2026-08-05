@@ -52,6 +52,13 @@ Remote TLS certificate and hostname verification are enabled by default. The
 should be removed again after a controlled compatibility investigation; it is
 not a retry or fallback mechanism.
 
+Official Windows portable builds use the Windows native certificate stores for
+both destination HTTPS and HTTPS-proxy TLS verification. Private or enterprise
+roots therefore belong in the appropriate Windows trust store; the archive
+does not require an MSYS2 CA bundle or a launcher-specific environment
+variable. This changes only the source of trust and does not disable
+certificate or hostname verification.
+
 For idempotent GET/HEAD transfers only, one 200 ms retry is made after a
 recoverable DNS/connect/timeout/send/receive/partial-transfer error. It never
 retries authentication failures, TLS verification failures, policy/security

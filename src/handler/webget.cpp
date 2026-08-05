@@ -520,6 +520,33 @@ static int logger(CURL *handle, curl_infotype type, char *data, size_t size, voi
     return 0;
 }
 
+static CURLcode curl_set_platform_tls_trust(CURL *curl_handle)
+{
+#if defined(_WIN32) && LIBCURL_VERSION_NUM >= 0x074700
+    // Official Windows artifacts use libcurl with OpenSSL.  Ask libcurl to
+    // consult the Windows certificate stores in addition to any build-time CA
+    // locations so a portable archive does not depend on an MSYS2 path that is
+    // absent on the target machine.  Keep the runtime guard for installations
+    // that provide an older libcurl DLL than the headers used to compile us.
+    const curl_version_info_data *version = curl_version_info(CURLVERSION_NOW);
+    if(version == nullptr || version->version_num < 0x074700)
+        return CURLE_OK;
+
+    const long ssl_options = static_cast<long>(CURLSSLOPT_NATIVE_CA);
+    CURLcode result = curl_easy_setopt(curl_handle, CURLOPT_SSL_OPTIONS,
+                                       ssl_options);
+    if(result != CURLE_OK)
+        return result;
+
+    // HTTPS proxies have an independent TLS connection and option set.
+    return curl_easy_setopt(curl_handle, CURLOPT_PROXY_SSL_OPTIONS,
+                            ssl_options);
+#else
+    (void)curl_handle;
+    return CURLE_OK;
+#endif
+}
+
 static inline void curl_set_common_options(CURL *curl_handle, const char *url, curl_progress_data *data)
 {
     curl_easy_setopt(curl_handle, CURLOPT_URL, url);
@@ -608,6 +635,8 @@ static const char *classify_curl_error(CURLcode code)
     case CURLE_SSL_CONNECT_ERROR:
     case CURLE_PEER_FAILED_VERIFICATION:
         return "tls";
+    case CURLE_SSL_CACERT_BADFILE:
+        return "tls_trust_store";
     case CURLE_LOGIN_DENIED:
         return "authentication";
     default:
@@ -685,6 +714,18 @@ static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode 
     curl_progress_data limit;
     limit.size_limit = global.maxAllowedDownloadSize;
     curl_set_common_options(curl_handle, new_url.data(), &limit);
+    retVal = curl_set_platform_tls_trust(curl_handle);
+    if(retVal != CURLE_OK)
+    {
+        *result.status_code = 0;
+        if(return_code)
+            *return_code = retVal;
+        writeLog(0,
+                 "Windows 原生 TLS 信任库配置失败：" +
+                     std::string(curl_easy_strerror(retVal)),
+                 LOG_LEVEL_ERROR);
+        return 0;
+    }
 #if LIBCURL_VERSION_NUM >= 0x075000
     FetchContext prereq_context = argument.context;
     if(isPublicFetchRestricted(argument.context) &&
@@ -800,6 +841,15 @@ static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode 
         writeLog(0, "出站请求错误类别：" +
                         std::string(classify_curl_error(retVal)) + "。",
                  LOG_LEVEL_VERBOSE);
+    if(retVal == CURLE_SSL_CACERT_BADFILE)
+    {
+        static std::atomic<bool> trust_store_warning_logged {false};
+        bool expected = false;
+        if(trust_store_warning_logged.compare_exchange_strong(expected, true))
+            writeLog(0,
+                     "TLS 信任源不可用，无法验证远程证书；请检查当前系统的受信任根证书配置。",
+                     LOG_LEVEL_WARNING);
+    }
 
     if(result.cookies)
     {
