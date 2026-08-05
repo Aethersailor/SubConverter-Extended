@@ -2013,17 +2013,12 @@ std::string proxyToSSSub(std::string base_conf, std::vector<Proxy> &nodes,
   if (base_conf.empty())
     base_conf = "{}";
   rapidjson::ParseResult result = base.Parse(base_conf.data());
-  if (!result || !base.IsObject())
-  {
+  if (!result)
     writeLog(0,
-             result
-                 ? "SIP008 基础配置必须是 JSON 对象。"
-                 : std::string("SIP008 基础配置加载失败：") +
-                       rapidjson::GetParseError_En(result.Code()) + " (" +
-                       std::to_string(result.Offset()) + ")",
+             std::string("SIP008 基础配置加载失败：") +
+                 rapidjson::GetParseError_En(result.Code()) + " (" +
+                 std::to_string(result.Offset()) + ")",
              LOG_LEVEL_ERROR);
-    return "";
-  }
 
   rapidjson::Value proxies(rapidjson::kArrayType);
   for (Proxy &x : nodes) {
@@ -3814,10 +3809,6 @@ std::string proxyToSingBox(std::vector<Proxy> &nodes,
           "sing-box 基础配置加载失败：" +
               std::string(rapidjson::GetParseError_En(json.GetParseError())),
           LOG_LEVEL_ERROR);
-      return "";
-    }
-    if (!json.IsObject()) {
-      writeLog(0, "sing-box 基础配置必须是 JSON 对象。", LOG_LEVEL_ERROR);
       return "";
     }
   } else {
