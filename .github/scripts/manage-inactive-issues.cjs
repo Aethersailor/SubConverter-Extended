@@ -30,7 +30,7 @@ function evaluateIssue({ issue, comments, now, waitDays }) {
 async function run({ github, context, core }) {
   const owner = context.repo.owner;
   const repo = context.repo.repo;
-  const waitDays = Number(process.env.INACTIVE_ISSUE_WAIT_DAYS || 60);
+  const waitDays = Number(process.env.INACTIVE_ISSUE_WAIT_DAYS || 14);
   const dryRun = process.env.INACTIVE_ISSUE_DRY_RUN === 'true';
   const now = new Date();
   const results = [];

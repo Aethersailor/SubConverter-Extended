@@ -192,6 +192,16 @@ jobs:
           fi
           echo "Build mode: $MODE; version: $VERSION"
 
+      - name: Verify COCR runtime assets are absent
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -e base/Custom_OpenClash_Rules ] || \
+             git ls-files -- base/Custom_OpenClash_Rules | grep -q .; then
+            echo "::error::Custom_OpenClash_Rules runtime assets must not exist in this project."
+            exit 1
+          fi
+
       - name: Refresh dependency snapshot on dev
         if: steps.mode.outputs.mode == 'dev'
         shell: bash

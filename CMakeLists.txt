@@ -69,7 +69,6 @@ int main(){std::to_string(0);}
 IF(NOT BUILD_STATIC_LIBRARY)
 
 SET(SUBCONVERTER_RUNTIME_SOURCES
-    src/handler/remote_source.cpp
     src/config/ruleset.cpp
     src/generator/config/external_rules.cpp
     src/generator/config/nodemanip.cpp
@@ -78,6 +77,7 @@ SET(SUBCONVERTER_RUNTIME_SOURCES
     src/generator/template/templates.cpp
     src/handler/dashboard_auth.cpp
     src/handler/dashboard_page.cpp
+    src/handler/cocr_source_url.cpp
     src/handler/curl_handle_pool.cpp
     src/handler/inspect_page.cpp
     src/handler/interfaces.cpp
@@ -174,7 +174,7 @@ TARGET_LINK_LIBRARIES(${BUILD_TARGET_NAME} ${LIBCRON_LIBRARIES})
 # Mihomo Go Parser Bridge
 # 支持 c-shared (.so) 和 c-archive (.a) 两种模式
 # c-shared 模式：解决 musl/Alpine 环境下 Go runtime 初始化问题
-IF(EXISTS "${CMAKE_SOURCE_DIR}/bridge/libmihomo.so" AND NOT WIN32)
+IF(EXISTS "${CMAKE_SOURCE_DIR}/bridge/libmihomo.so")
     MESSAGE(STATUS "Found mihomo Go shared library (.so), enabling native parser support")
     TARGET_INCLUDE_DIRECTORIES(${BUILD_TARGET_NAME} PRIVATE "${CMAKE_SOURCE_DIR}/bridge")
     TARGET_COMPILE_DEFINITIONS(${BUILD_TARGET_NAME} PRIVATE USE_MIHOMO_PARSER)
@@ -239,63 +239,13 @@ IF(BUILD_TESTS)
     TARGET_COMPILE_DEFINITIONS(settings_snapshot_test_helper PRIVATE
         $<TARGET_PROPERTY:${BUILD_TARGET_NAME},COMPILE_DEFINITIONS>)
 
-    SET(MIHOMO_CONFIG_VALIDATOR_PATH "")
-    FOREACH(candidate
-        "${CMAKE_SOURCE_DIR}/mihomo_config_test_helper"
-        "${CMAKE_SOURCE_DIR}/mihomo_config_test_helper.exe"
-        "${CMAKE_SOURCE_DIR}/bridge/mihomo_config_test_helper"
-        "${CMAKE_SOURCE_DIR}/bridge/mihomo_config_test_helper.exe")
-        IF(EXISTS "${candidate}")
-            SET(MIHOMO_CONFIG_VALIDATOR_PATH "${candidate}")
-            BREAK()
-        ENDIF()
-    ENDFOREACH()
-
-    IF(NOT MIHOMO_CONFIG_VALIDATOR_PATH)
-        FIND_PROGRAM(GO_EXECUTABLE go)
-        IF(GO_EXECUTABLE)
-            SET(MIHOMO_CONFIG_VALIDATOR_PATH
-                "${CMAKE_BINARY_DIR}/mihomo_config_test_helper${CMAKE_EXECUTABLE_SUFFIX}")
-            ADD_CUSTOM_COMMAND(
-                OUTPUT "${MIHOMO_CONFIG_VALIDATOR_PATH}"
-                COMMAND "${GO_EXECUTABLE}" build -trimpath
-                        -o "${MIHOMO_CONFIG_VALIDATOR_PATH}" ./testhelper
-                WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/bridge"
-                DEPENDS
-                    "${CMAKE_SOURCE_DIR}/bridge/testhelper/main.go"
-                    "${CMAKE_SOURCE_DIR}/bridge/go.mod"
-                    "${CMAKE_SOURCE_DIR}/bridge/go.sum"
-                VERBATIM)
-            ADD_CUSTOM_TARGET(mihomo_config_test_helper_build ALL
-                DEPENDS "${MIHOMO_CONFIG_VALIDATOR_PATH}")
-        ELSE()
-            MESSAGE(FATAL_ERROR
-                "BUILD_TESTS=ON requires mihomo_config_test_helper or a Go compiler")
-        ENDIF()
-    ENDIF()
-
-    SET(MIHOMO_CONFIG_VALIDATOR_ARGUMENT
-        --mihomo-config-validator
-        "${MIHOMO_CONFIG_VALIDATOR_PATH}")
-
-    ADD_TEST(
-        NAME mihomo_config_helper_smoke
-        COMMAND ${Python3_EXECUTABLE}
-                ${CMAKE_SOURCE_DIR}/tests/mihomo_config_helper_smoke.py
-                --validator "${MIHOMO_CONFIG_VALIDATOR_PATH}")
-    SET_TESTS_PROPERTIES(mihomo_config_helper_smoke PROPERTIES
-        LABELS full
-        TIMEOUT 60
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-
     ADD_TEST(
         NAME compatibility_security_baseline
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/compatibility_security_baseline.py
                 --binary $<TARGET_FILE:${BUILD_TARGET_NAME}>
                 --settings-snapshot-helper
-                $<TARGET_FILE:settings_snapshot_test_helper>
-                ${MIHOMO_CONFIG_VALIDATOR_ARGUMENT})
+                $<TARGET_FILE:settings_snapshot_test_helper>)
     SET_TESTS_PROPERTIES(compatibility_security_baseline PROPERTIES
         LABELS full
         TIMEOUT 120
@@ -312,12 +262,12 @@ IF(BUILD_TESTS)
     ADD_TEST(NAME proxy_policy COMMAND proxy_policy_test)
     SET_TESTS_PROPERTIES(proxy_policy PROPERTIES LABELS fast)
 
-    ADD_EXECUTABLE(remote_source_test
-        tests/remote_source_test.cpp
-        src/handler/remote_source.cpp)
-    TARGET_INCLUDE_DIRECTORIES(remote_source_test PRIVATE src)
-    ADD_TEST(NAME remote_source COMMAND remote_source_test)
-    SET_TESTS_PROPERTIES(remote_source PROPERTIES LABELS fast)
+    ADD_EXECUTABLE(cocr_source_url_test
+        tests/cocr_source_url_test.cpp
+        src/handler/cocr_source_url.cpp)
+    TARGET_INCLUDE_DIRECTORIES(cocr_source_url_test PRIVATE src)
+    ADD_TEST(NAME cocr_source_url COMMAND cocr_source_url_test)
+    SET_TESTS_PROPERTIES(cocr_source_url PROPERTIES LABELS fast)
 
     ADD_EXECUTABLE(ruleset_options_test
         tests/ruleset_options_test.cpp
@@ -409,7 +359,6 @@ ENDIF()
 ELSE() #BUILD_STATIC_LIBRARY
 
 ADD_LIBRARY(${BUILD_TARGET_NAME} STATIC
-    src/handler/remote_source.cpp
     src/config/ruleset.cpp
     src/generator/config/external_rules.cpp
     src/generator/config/ruleconvert.cpp

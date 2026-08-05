@@ -40,9 +40,11 @@ enable_filter = false
 #}
 #'''
 
-# 请求未指定 config 时加载的默认外部配置；支持本地文件或 URL，空值仅使用兼容的隐式默认地址。
-# Default external configuration loaded when the request omits config; supports a local file or URL. An empty value uses the compatibility implicit default only for requests without config.
+# 请求未指定 config 时加载的默认外部配置；支持本地文件或 URL，空值使用程序默认的远程 Custom_OpenClash_Rules 地址。
+# Default external configuration loaded when the request omits config; supports a local file or URL. An empty value uses the program's default remote Custom_OpenClash_Rules URL.
 default_external_config = "https://testingcf.jsdelivr.net/gh/Aethersailor/Custom_OpenClash_Rules@refs/heads/main/cfg/Custom_Clash.ini"
+# 用户显式选择的 config 失败后，是否允许改用 default_external_config。缺失或 false 时失败请求直接返回错误。
+# Whether a failed user-selected config may fall back to default_external_config. Missing or false fails the request directly.
 fallback_to_default_external_config = false
 
 # 外部配置中 rule_base 可访问的本地文件根目录，也是公开安全档位下的受信任资源根之一。
@@ -95,8 +97,8 @@ append_proxy_type = false
 reload_conf_on_request = false
 
 [custom_openclash_rules]
-# 是否在请求 COCR 官方 URL 时将其改写到 git.asailor.org；仅影响请求前的来源选择，不提供本地资源。
-# Rewrite official COCR URLs to git.asailor.org before fetching; this only selects a remote source and never serves local assets.
+# 是否在服务端发起请求前，将可识别的官方 COCR 主分支 GitHub/jsDelivr 取源地址切换到 git.asailor.org。不会改写生成结果中的 URL。
+# Whether server-side fetches of recognized official COCR main-branch GitHub/jsDelivr URLs use git.asailor.org instead. Generated output URLs are not rewritten.
 fallback_enabled = false
 
 [[userinfo.stream_rule]]
