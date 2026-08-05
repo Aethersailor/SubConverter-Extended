@@ -42,7 +42,12 @@ runs:
           test "${TZ:-}" = "Asia/Shanghai"
           test -e /usr/share/zoneinfo/Asia/Shanghai
           test "$(date +%z)" = "+0800"
+          test ! -e /base/Custom_OpenClash_Rules
         '
+        if [ "$(docker inspect --format '{{ if index .Config.Labels "com.aethersailor.custom-openclash-rules.revision" }}present{{ end }}' "$CID")" = "present" ]; then
+          echo "Image still contains the removed Custom_OpenClash_Rules revision label." >&2
+          exit 1
+        fi
 
         for _ in $(seq 1 30); do
           if curl -fsS "$URL" >/tmp/subconverter-smoke.out; then
@@ -56,7 +61,9 @@ runs:
             python3 scripts/run-no-resolve-smoke.py \
               --base-url "http://127.0.0.1:${HOST_PORT}" \
               --fixture-base-url "${FIXTURE_BASE}"
-
+            route_status="$(curl -sS -o /dev/null -w '%{http_code}' \
+              "http://127.0.0.1:${HOST_PORT}/Custom_OpenClash_Rules/main/rule/example.yaml")"
+            test "$route_status" = "404"
             exit 0
           fi
 

@@ -22,7 +22,18 @@ extern string_array ClashRuleTypes;
 
 static thread_local FetchContext current_template_fetch_context =
     FetchContext::TrustedConfig;
-static thread_local bool current_template_dependency_failed = false;
+static thread_local bool *current_template_fetch_failed = nullptr;
+
+static bool hasMrsExtension(const std::string &path_or_url)
+{
+    size_t path_end = path_or_url.find_first_of("?#");
+    std::string path = path_or_url.substr(0, path_end);
+    size_t slash = path.rfind('/');
+    size_t dot = path.rfind('.');
+    return dot != std::string::npos &&
+           (slash == std::string::npos || dot > slash) &&
+           toLower(path.substr(dot)) == ".mrs";
+}
 
 namespace inja
 {
@@ -147,90 +158,39 @@ std::string template_webGet(inja::Arguments &args)
     std::string data = args.at(0)->get<std::string>();
     ProxyPolicy proxy = parseProxy(global.proxyConfig);
     writeLog(0, "模板调用 fetch，URL：'" + data + "'。", LOG_LEVEL_INFO);
-    FetchArgument argument{HTTP_GET,
-                           data,
-                           proxy,
-                           nullptr,
-                           nullptr,
-                           nullptr,
-                           static_cast<unsigned int>(std::max(0, global.cacheConfig)),
-                           false,
-                           current_template_fetch_context,
-                           true,
-                           FetchCacheSemantic::TemplateDependency};
-    FetchOutcome outcome;
-    fetchRemote(argument, outcome);
-    if (!outcome.success) {
-        current_template_dependency_failed = true;
-        discardFetchOutcomeCache(outcome);
-        return {};
-    }
-
-    const std::string trimmed = trimWhitespace(outcome.content, true, true);
-    const std::string lower = toLower(trimmed);
-    if (trimmed.empty() || startsWith(lower, "<!doctype html") ||
-        startsWith(lower, "<html")) {
-        current_template_dependency_failed = true;
-        discardFetchOutcomeCache(outcome);
-        return {};
-    }
-
-    std::string content = outcome.content;
-    // Keep template dependencies provisional until render_template() succeeds.
-    // If this function owns the render transaction, deferFetchOutcomeCache
-    // commits here only after the transaction scope is finalized below.
-    deferFetchOutcomeCache(std::move(outcome));
+    std::string content =
+        webGet(data, proxy, global.cacheConfig, nullptr, nullptr,
+               current_template_fetch_context);
+    if(content.empty() && current_template_fetch_failed)
+        *current_template_fetch_failed = true;
     return content;
 }
 #endif // NO_WEBGET
 
 int render_template(const std::string &content, const template_args &vars,
                     std::string &output, const std::string &include_scope,
-                    FetchContext context)
+                    FetchContext context, bool *fetch_failed)
 {
-    FetchCacheTransaction local_transaction;
-    std::unique_ptr<FetchCacheTransactionScope> local_scope;
-    const bool owns_transaction = currentFetchCacheTransaction() == nullptr;
-    if (owns_transaction)
-        local_scope = std::make_unique<FetchCacheTransactionScope>(
-            local_transaction);
-
-    auto finish_transaction = [&](bool success) {
-        if (!owns_transaction)
-            return;
-        if (success)
-            commitFetchCacheTransaction(local_transaction);
-        else
-            discardFetchCacheTransaction(local_transaction);
-    };
-
     struct TemplateFetchContextGuard
     {
         FetchContext previous;
-        explicit TemplateFetchContextGuard(FetchContext context)
-            : previous(current_template_fetch_context)
+        bool *previous_fetch_failed;
+        TemplateFetchContextGuard(FetchContext context, bool *fetch_failed)
+            : previous(current_template_fetch_context),
+              previous_fetch_failed(current_template_fetch_failed)
         {
             current_template_fetch_context = context;
+            current_template_fetch_failed = fetch_failed;
         }
         ~TemplateFetchContextGuard()
         {
             current_template_fetch_context = previous;
+            current_template_fetch_failed = previous_fetch_failed;
         }
-    } guard(context);
+    } guard(context, fetch_failed);
 
-    struct TemplateDependencyStateGuard
-    {
-        bool previous;
-        TemplateDependencyStateGuard()
-            : previous(current_template_dependency_failed)
-        {
-            current_template_dependency_failed = false;
-        }
-        ~TemplateDependencyStateGuard()
-        {
-            current_template_dependency_failed = previous;
-        }
-    } dependency_guard;
+    if(fetch_failed)
+        *fetch_failed = false;
 
     std::string absolute_scope;
     try
@@ -402,17 +362,12 @@ int render_template(const std::string &content, const template_args &vars,
         std::stringstream out;
         env.render_to(out, env.parse(content), data);
         output = out.str();
-        const bool valid_output =
-            !trimWhitespace(output, true, true).empty() &&
-            !current_template_dependency_failed;
-        finish_transaction(valid_output);
-        return valid_output ? 0 : -1;
+        return 0;
     }
     catch (std::exception &e)
     {
         output = "模板渲染失败。原因：" + std::string(e.what());
         writeLog(0, output, LOG_LEVEL_ERROR);
-        finish_transaction(false);
         return -1;
     }
     return -2;
@@ -509,8 +464,6 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
             if(startsWith(strLine, "FINAL"))
                 strLine = "MATCH";
             strLine = appendClashRuleTarget(strLine, rule_group);
-            if(strLine.empty())
-                continue;
             rules.emplace_back(std::move(strLine));
             local_stats.add();
             continue;
@@ -674,9 +627,7 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
         std::string url = urls[x], keyword = keywords[x], name = names[x];
         std::string direct_url =
             !url.empty() && url[0] == '*' ? url.substr(1) : "";
-        bool direct_mrs =
-            direct_url.size() >= 4 &&
-            toLower(direct_url.substr(direct_url.size() - 4)) == ".mrs";
+        bool direct_mrs = !direct_url.empty() && hasMrsExtension(direct_url);
         bool group_has_domain = has_domain[x], group_has_ipcidr = has_ipcidr[x];
         int interval = ruleset_interval[x];
 

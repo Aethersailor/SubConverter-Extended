@@ -30,6 +30,10 @@ runs:
           $stdout = Join-Path $workDir "stdout.log"
           $stderr = Join-Path $workDir "stderr.log"
 
+          if (Test-Path (Join-Path $root "base\Custom_OpenClash_Rules")) {
+            throw "Windows artifact still contains removed Custom_OpenClash_Rules assets."
+          }
+
           Remove-Item (Join-Path $root "base\pref.toml") -ErrorAction SilentlyContinue
           Remove-Item (Join-Path $root "base\pref.yml") -ErrorAction SilentlyContinue
           Remove-Item (Join-Path $root "base\pref.ini") -ErrorAction SilentlyContinue
@@ -75,6 +79,15 @@ runs:
           }
 
           python "$env:GITHUB_WORKSPACE\scripts\run-subconverter-smoke.py" --base-url "http://127.0.0.1:$port"
+
+          $removedRoute = Invoke-WebRequest `
+            -UseBasicParsing `
+            -SkipHttpErrorCheck `
+            -Uri "http://127.0.0.1:$port/Custom_OpenClash_Rules/main/rule/example.yaml" `
+            -TimeoutSec 5
+          if ($removedRoute.StatusCode -ne 404) {
+            throw "Removed Custom_OpenClash_Rules route returned HTTP $($removedRoute.StatusCode)."
+          }
 
           if (-not (Test-Path $pref)) {
             throw "Windows launcher did not create base\pref.toml on first start."

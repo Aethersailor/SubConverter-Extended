@@ -97,7 +97,7 @@ std::string sanitizedSettingsSnapshot(const Settings &settings) {
        }},
       {"custom_openclash_rules",
        {
-           {"fallback_enabled", settings.customOpenClashRulesFallback},
+           {"fallback_enabled", settings.customOpenClashRulesSourceSwitch},
        }},
       {"proxies",
        {

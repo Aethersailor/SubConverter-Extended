@@ -88,7 +88,6 @@ extern "C" {
 #endif
 
 extern void ReleaseUnusedMemory(void);
-extern int ValidateMihomoRegex(char* pattern);
 extern char* ResolveAgeRecipient(char* key);
 extern char* EncryptAgeArmored(char* data, char* recipient);
 extern char* ConvertSubscription(char* data);

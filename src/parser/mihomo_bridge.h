@@ -38,11 +38,6 @@ std::vector<ProxyNode> parseSubscription(const std::string &subscription);
  */
 bool isMihomoParserAvailable();
 
-/**
- * @brief Compile a regex through Mihomo's regexp2-backed rule implementation.
- */
-bool isMihomoRegexValid(const std::string &pattern);
-
 struct AgeRecipient {
   std::string recipient;
   std::string fingerprint;
