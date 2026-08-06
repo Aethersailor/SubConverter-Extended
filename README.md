@@ -745,7 +745,25 @@ password = "change-this-password"
 max_failures = 5
 window_seconds = 300
 lock_seconds = 900
+
+# 可选：仅当后端只允许本机 Nginx/Caddy 访问，且代理覆盖 X-Forwarded-For 时启用。
+[statistics.dashboard_auth.client_ip]
+header = "x-forwarded-for"
+trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128"]
 ```
+
+Dashboard 防爆破默认只使用服务端观察到的 TCP socket peer。`CF-Connecting-IP`、`True-Client-IP`、`X-Real-IP`、`X-Forwarded-For`、`Forwarded` 和 `X-Client-IP` 等客户端自带头不会改变默认分桶，因此直连客户端无法通过轮换这些头绕过失败计数。
+
+只有 `client_ip.header` 与 `trusted_proxy_cidrs` 同时有效时，服务才会解析所选的**一个**头；peer 不在可信 CIDR、头缺失/重复/非法/过长、XFF/Forwarded 链超过 16 跳时都会安全降级到 socket peer。IP 会严格解析并规范化，IPv4-mapped IPv6 与对应 IPv4 共用一个桶；桶数量固定有上限，达到上限后的新来源进入共享溢出桶，不会驱逐已有攻击状态。
+
+代理部署边界：
+
+* 直连、Docker `ports` 直接暴露或 Compose 未设独立入口代理：保持 `header="none"`，不要填写可信网段。
+* 单层 Nginx/Caddy：只加入实际连接后端的代理地址/CIDR，并让代理先删除客户端同名头、再写入选定头。不要把整个 Docker 宿主网或可被其他容器加入的宽泛网段视为可信。
+* 多层代理/CDN：每一层都必须覆盖或按约定追加所选头；`X-Forwarded-For` 与 `Forwarded` 从右向左跳过可信 hop，取第一个不可信地址。所有 hop 都可信或整条链有任一非法项时回退 peer。
+* Cloudflare/CDN：仅当源站防火墙保证只能由该 CDN 官方出口访问，并持续维护对应 CIDR 时，才可选择 `cf-connecting-ip`、`true-client-ip` 等单 IP 头。不要为了省事配置 `0.0.0.0/0` 或 `::/0`；程序会拒绝启动/拒绝热重载该配置。
+
+地理统计使用的国家/地区头仍是独立功能；启用 Dashboard 客户端 IP 策略不会扩大地理头的信任范围，也不会改变 `/sub`、Basic Auth 或统计数据格式。
 
 ### 新增配置项说明
 
@@ -763,8 +781,10 @@ lock_seconds = 900
 | `statistics.dashboard_auth.max_failures` | `dashboard_auth_max_failures` | `5` | 在统计窗口内允许的失败登录次数。 |
 | `statistics.dashboard_auth.window_seconds` | `dashboard_auth_window_seconds` | `300` | 失败登录统计窗口，单位为秒。 |
 | `statistics.dashboard_auth.lock_seconds` | `dashboard_auth_lock_seconds` | `900` | 超过失败次数后的锁定时长，单位为秒。 |
+| `statistics.dashboard_auth.client_ip.header` | `dashboard_auth_client_ip_header` | `none` | Dashboard 防爆破使用的单一代理头；支持 `x-forwarded-for`、`forwarded`、`x-real-ip`、`cf-connecting-ip`、`true-client-ip`。不支持 `X-Client-IP`。 |
+| `statistics.dashboard_auth.client_ip.trusted_proxy_cidrs` | `dashboard_auth_trusted_proxy_cidrs` | 空 | 允许提供所选客户端 IP 头的 socket peer CIDR；最多 64 项，不允许 `/0`。INI 与环境变量使用逗号分隔。 |
 
-**提示：** `pref.yml` 使用同名嵌套字段；`pref.ini` 的上述 INI 配置项均写在 `[statistics]` 段内。
+**提示：** `pref.yml` 使用同名嵌套字段；`pref.ini` 的上述 INI 配置项均写在 `[statistics]` 段内。环境变量 `SUBCONVERTER_DASHBOARD_CLIENT_IP_HEADER` 与 `SUBCONVERTER_DASHBOARD_TRUSTED_PROXY_CIDRS` 可覆盖文件配置。升级后默认行为是只按 socket peer 分桶；需要区分代理后的客户端时再显式启用。回滚时先恢复 `header=none`/清空可信 CIDR 并重载或重启，再回退程序版本。
 
 </details>
 

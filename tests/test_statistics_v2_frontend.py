@@ -19,6 +19,9 @@ class StatisticsV2FrontendTest(unittest.TestCase):
         cls.auth = (
             REPOSITORY / "src" / "handler" / "dashboard_auth.cpp"
         ).read_text(encoding="utf-8")
+        cls.auth_limiter = (
+            REPOSITORY / "src" / "handler" / "dashboard_auth_limiter.cpp"
+        ).read_text(encoding="utf-8")
         cls.statistics = (
             REPOSITORY / "src" / "handler" / "statistics.cpp"
         ).read_text(encoding="utf-8")
@@ -47,8 +50,10 @@ class StatisticsV2FrontendTest(unittest.TestCase):
         self.assertIn("kDashboardCacheLifetime", self.statistics)
         self.assertIn("g_cache_mutex", self.statistics)
         self.assertIn("static const std::string expected", self.auth)
-        self.assertIn("g_next_cleanup_at = now + 45", self.auth)
-        self.assertIn("while (g_failures.size() > 4096)", self.auth)
+        self.assertIn("FailureLimiter g_failure_limiter", self.auth)
+        self.assertIn("next_cleanup_ = now + std::chrono::seconds(45)", self.auth_limiter)
+        self.assertIn("failures_.size() < capacity_", self.auth_limiter)
+        self.assertIn("overflow_", self.auth_limiter)
 
 
 if __name__ == "__main__":

@@ -198,6 +198,14 @@ statistics:
     max_failures: 5
     window_seconds: 300
     lock_seconds: 900
+    client_ip:
+      # 默认 none：只按 TCP socket peer 分桶；仅在明确的可信代理会覆盖/清洗所选头时启用。
+      # Default none uses only the TCP socket peer; enable a header only behind explicit proxies that overwrite/sanitize it.
+      # 可选值 / Values: none, x-forwarded-for, forwarded, x-real-ip, cf-connecting-ip, true-client-ip.
+      header: none
+      # 必须使用 CIDR，最多 64 项，且不允许 IPv4/IPv6 的 /0。
+      # CIDR notation is required, with at most 64 entries; IPv4/IPv6 /0 is rejected.
+      trusted_proxy_cidrs: []
 
 emojis:
   # 是否按 rules 为节点名称添加 Emoji。

@@ -130,6 +130,10 @@ std::string sanitizedSettingsSnapshot(const Settings &settings) {
            {"dashboard_window_seconds",
             settings.dashboardAuthWindowSeconds},
            {"dashboard_lock_seconds", settings.dashboardAuthLockSeconds},
+           {"dashboard_client_ip_header",
+            settings.dashboardAuthClientIpHeader},
+           {"dashboard_trusted_proxy_count",
+            settings.dashboardAuthTrustedProxyCidrs.size()},
        }},
   };
   return snapshot.dump(2) + "\n";

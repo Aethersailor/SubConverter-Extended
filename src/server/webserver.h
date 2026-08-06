@@ -4,8 +4,10 @@
 #include <string>
 #include <map>
 #include <atomic>
+#include <mutex>
 #include <curl/curlver.h>
 
+#include "server/client_ip.h"
 #include "utils/map_extra.h"
 #include "utils/string.h"
 #include "version.h"
@@ -16,6 +18,7 @@ struct Request
     std::string url;
     std::string remote_addr;
     int remote_port = 0;
+    client_ip::Address client_address;
     string_multimap argument;
     string_icase_map headers;
     std::string postdata;
@@ -88,9 +91,15 @@ public:
 
     int start_web_server(listener_args *args);
     int start_web_server_multi(listener_args *args);
+    void set_client_ip_policy(const client_ip::Policy &policy);
+    client_ip::Policy client_ip_policy() const;
 
     std::vector<responseRoute> responses;
     string_map redirect_map;
+
+private:
+    mutable std::mutex client_ip_policy_mutex_;
+    client_ip::Policy client_ip_policy_;
 };
 
 #endif // WEBSERVER_H_INCLUDED

@@ -261,6 +261,18 @@ max_failures = 5
 window_seconds = 300
 lock_seconds = 900
 
+[statistics.dashboard_auth.client_ip]
+# 默认 none：Dashboard 防爆破只按 TCP socket peer 分桶，客户端提供的转发头全部忽略。
+# Default none: Dashboard brute-force buckets use only the TCP socket peer and ignore client-supplied forwarding headers.
+# 仅当服务只能由明确列出的反向代理网段访问，且代理会覆盖/清洗该请求头时，才选择一个头名。
+# Select one header only when the service is reachable solely through explicitly listed proxies that overwrite/sanitize it.
+# 可选值：none、x-forwarded-for、forwarded、x-real-ip、cf-connecting-ip、true-client-ip。
+# Values: none, x-forwarded-for, forwarded, x-real-ip, cf-connecting-ip, true-client-ip.
+header = "none"
+# 必须使用 CIDR，最多 64 项；为避免把所有来源都变成可信代理，IPv4/IPv6 的 /0 会被拒绝。
+# CIDR notation is required, with at most 64 entries; IPv4/IPv6 /0 is rejected to avoid trusting every source.
+trusted_proxy_cidrs = []
+
 [emojis]
 # 是否按 emoji 数组规则为节点名称添加 Emoji。
 # Whether to add emoji to node remarks according to the emoji array.

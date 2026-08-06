@@ -15,6 +15,10 @@ services:
       # MANAGED_CONFIG_PREFIX: "http://your-domain-or-ip:25500"
       # SUBCONVERTER_SECURITY_PROFILE: public
       # SUBCONVERTER_ALLOW_PUBLIC_UPLOAD: "false"
+      # Dashboard 防爆破默认只信任 socket peer。只有容器端口不对外直通、且入口代理会覆盖所选头时才同时配置以下两项。
+      # Dashboard brute-force protection trusts only the socket peer by default. Set both only when the container is not directly reachable and the edge proxy overwrites the selected header.
+      # SUBCONVERTER_DASHBOARD_CLIENT_IP_HEADER: x-forwarded-for
+      # SUBCONVERTER_DASHBOARD_TRUSTED_PROXY_CIDRS: "172.18.0.0/16"
     volumes:
       # 启动前请先创建 ./base/pref.toml；不要将整个 ./base 挂载到 /base，
       # 否则会遮盖镜像内随版本更新的规则和模板。
