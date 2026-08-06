@@ -56,8 +56,9 @@ These settings are intentionally not changed by repository code:
 - set the repository default workflow token to read-only where practical. The
   workflows declare their own minimal `contents`/`packages` permissions.
 
-The formal workflow checks the first two settings and fails before building if
-they are absent. Tag and branch rules remain an administrative prerequisite.
+The sync workflow checks the first two settings before it creates a formal tag,
+and the formal workflow checks them again before building. Tag and branch rules
+remain an administrative prerequisite.
 
 ## Rollback boundary
 
