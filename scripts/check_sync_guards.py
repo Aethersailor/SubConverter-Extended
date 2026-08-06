@@ -58,8 +58,26 @@ CHECKS = [
     {
         "id": "provider-direct-option",
         "file": "src/generator/config/subexport.h",
-        "pattern": r"provider_proxy_direct",
-        "message": "provider_proxy_direct option is missing.",
+        "pattern": r"bool\s+provider_proxy_direct\s*=\s*true",
+        "message": "The request-level provider DIRECT default is missing.",
+    },
+    {
+        "id": "provider-direct-output",
+        "file": "src/generator/config/subexport.cpp",
+        "pattern": r"if\s*\(p\.proxy_direct\)\s*\n\s*single_provider\[\"proxy\"\]\s*=\s*\"DIRECT\"",
+        "message": "Per-provider proxy: DIRECT emission is missing.",
+    },
+    {
+        "id": "provider-direct-prefix",
+        "file": "src/handler/interfaces.cpp",
+        "pattern": r"item\.has_proxy_direct\s*\?\s*item\.proxy_direct\s*:\s*ext\.provider_proxy_direct",
+        "message": "Per-provider proxy_direct override support is missing.",
+    },
+    {
+        "id": "provider-direct-default",
+        "file": "src/config/proxy_provider_direct.h",
+        "pattern": r"kDefaultProxyProviderDirect\s*=\s*true",
+        "message": "The backward-compatible provider DIRECT default is missing.",
     },
     {
         "id": "provider-name-override",
@@ -72,6 +90,18 @@ CHECKS = [
         "file": "src/handler/interfaces.cpp",
         "pattern": r"ProxyProvider\s+provider",
         "message": "provider creation path is missing from request handling.",
+    },
+    {
+        "id": "provider-interval-prefix",
+        "file": "src/handler/interfaces.cpp",
+        "pattern": r"item\.has_interval\s*\?\s*item\.interval\s*:\s*global\.proxyProviderInterval",
+        "message": "Per-provider interval override support is missing.",
+    },
+    {
+        "id": "provider-interval-default",
+        "file": "src/config/proxy_provider_interval.h",
+        "pattern": r"kDefaultProxyProviderInterval\s*=\s*3600",
+        "message": "The backward-compatible provider interval default is missing.",
     },
     {
         "id": "openclash-age-response",

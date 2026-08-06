@@ -58,6 +58,11 @@ std::string sanitizedSettingsSnapshot(const Settings &settings) {
            {"clash_proxies_style", settings.clashProxiesStyle},
            {"singbox_add_clash_modes", settings.singBoxAddClashModes},
        }},
+      {"proxy_provider",
+       {
+           {"interval", settings.proxyProviderInterval},
+           {"proxy_direct", settings.proxyProviderDirect},
+       }},
       {"rules",
        {
            {"enabled", settings.enableRuleGen},
@@ -97,7 +102,7 @@ std::string sanitizedSettingsSnapshot(const Settings &settings) {
        }},
       {"custom_openclash_rules",
        {
-           {"fallback_enabled", settings.customOpenClashRulesFallback},
+           {"fallback_enabled", settings.customOpenClashRulesSourceSwitch},
        }},
       {"proxies",
        {

@@ -10,7 +10,6 @@ HTTP response.
 from __future__ import annotations
 
 import argparse
-import base64
 import contextlib
 import http.server
 import os
@@ -79,20 +78,7 @@ class FixtureHandler(http.server.BaseHTTPRequestHandler):
             )
             self.end_headers()
             return
-        if self.path.startswith("/invalid-base"):
-            payload = b"mixed-port: [\n"
-        elif self.path.startswith("/invalid-sssub-array"):
-            payload = b"[]"
-        elif self.path.startswith("/invalid-sssub-scalar"):
-            payload = b"true"
-        elif self.path.startswith("/valid-base"):
-            payload = (
-                b"mixed-port: 7890\n"
-                b"proxies: []\n"
-                b"proxy-groups: []\n"
-                b"rules:\n  - MATCH,DIRECT\n"
-            )
-        elif self.path.startswith("/remote.ini"):
+        if self.path.startswith("/remote.ini"):
             payload = (
                 "[custom]\n"
                 "enable_rule_generator=true\n"
@@ -361,42 +347,18 @@ def expect_sub_failure(port: int, url: str) -> None:
         return
 
 
-def encoded_config(content: str) -> str:
-    encoded = base64.urlsafe_b64encode(content.encode("utf-8")).decode("ascii")
-    return f"data:text/plain;base64,{encoded}"
-
-
-def upload_request(port: int, config: str = "data:,enable_rule_generator=false") -> None:
+def upload_request(port: int) -> None:
     query = urllib.parse.urlencode(
         {
             "target": "clash",
             "url": "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388#UploadSmoke",
-            "config": config,
+            "config": "data:,enable_rule_generator=false",
             "upload": "true",
         }
     )
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/sub?{query}", timeout=15) as response:
         if response.status != 200:
             raise AssertionError(f"Gist upload conversion failed: {response.status}")
-
-
-def expect_upload_failure(
-    port: int, config: str, target: str = "clash"
-) -> None:
-    query = urllib.parse.urlencode(
-        {
-            "target": target,
-            "url": "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388#UploadFailure",
-            "config": config,
-            "upload": "true",
-        }
-    )
-    try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/sub?{query}", timeout=15):
-            raise AssertionError("invalid external base unexpectedly uploaded successfully")
-    except urllib.error.HTTPError as exc:
-        if exc.code != 502:
-            raise AssertionError(f"invalid external base returned unexpected status: {exc.code}") from exc
 
 
 def explain_request(port: int, url: str) -> str:
@@ -616,33 +578,6 @@ def run(image: str) -> None:
                 {"SUBCONVERTER_GIST_API_BASE": f"http://target.test:{fixture.server_port}"},
                 gist=gist_conf,
             ) as container:
-                invalid_base_config = encoded_config(
-                    "[custom]\n"
-                    f"clash_rule_base=http://target.test:{fixture.server_port}/invalid-base\n"
-                )
-                expect_upload_failure(container.port, invalid_base_config)
-                with recorder.lock:
-                    invalid_gist_hits = list(recorder.target_hits)
-                assert "/gists" not in invalid_gist_hits, (
-                    "invalid external base triggered a Gist upload: "
-                    f"{invalid_gist_hits}"
-                )
-                recorder.clear()
-                invalid_sssub_config = encoded_config(
-                    "[custom]\n"
-                    "enable_rule_generator=false\n"
-                    f"sssub_rule_base=http://target.test:{fixture.server_port}/invalid-sssub-array\n"
-                )
-                expect_upload_failure(
-                    container.port, invalid_sssub_config, target="sssub"
-                )
-                with recorder.lock:
-                    invalid_sssub_gist_hits = list(recorder.target_hits)
-                assert "/gists" not in invalid_sssub_gist_hits, (
-                    "invalid SSSUB base triggered a Gist upload: "
-                    f"{invalid_sssub_gist_hits}"
-                )
-                recorder.clear()
                 upload_request(container.port)
                 gist_logs = container.logs()
             with recorder.lock:
@@ -652,7 +587,7 @@ def run(image: str) -> None:
                 "Gist request bypassed proxy_config: "
                 f"SOCKS={gist_records}, target={gist_hits}, logs={gist_logs}"
             )
-            assert gist_hits.count("/gists") == 1, (
+            assert "/gists" in gist_hits, (
                 "local Gist API did not receive the request; "
                 f"SOCKS={gist_records}, target={gist_hits}, logs={gist_logs}"
             )

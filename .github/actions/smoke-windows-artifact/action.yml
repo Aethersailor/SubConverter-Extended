@@ -30,6 +30,10 @@ runs:
           $stdout = Join-Path $workDir "stdout.log"
           $stderr = Join-Path $workDir "stderr.log"
 
+          if (Test-Path (Join-Path $root "base\Custom_OpenClash_Rules")) {
+            throw "Windows artifact still contains removed Custom_OpenClash_Rules assets."
+          }
+
           Remove-Item (Join-Path $root "base\pref.toml") -ErrorAction SilentlyContinue
           Remove-Item (Join-Path $root "base\pref.yml") -ErrorAction SilentlyContinue
           Remove-Item (Join-Path $root "base\pref.ini") -ErrorAction SilentlyContinue
@@ -75,6 +79,39 @@ runs:
           }
 
           python "$env:GITHUB_WORKSPACE\scripts\run-subconverter-smoke.py" --base-url "http://127.0.0.1:$port"
+
+          # The portable archive deliberately contains no CA bundle. Fetch a
+          # pinned HTTPS external config to prove that the packaged OpenSSL
+          # libcurl can use the Windows native trust store. Do not import a
+          # test root certificate or weaken certificate verification here.
+          $caBundle = Join-Path $workDir "etc\ssl\certs\ca-bundle.crt"
+          if (Test-Path -LiteralPath $caBundle) {
+            throw "Windows artifact smoke unexpectedly found a relocated CA bundle."
+          }
+          $subscription = [uri]::EscapeDataString(
+            "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388#NativeCA"
+          )
+          $externalConfig = [uri]::EscapeDataString(
+            "https://raw.githubusercontent.com/Aethersailor/SubConverter-Extended/3bc7f09aeeafe4c823b47723915d039d064c4b67/base/config/example_external_config.toml"
+          )
+          $nativeCaResponse = Invoke-WebRequest `
+            -UseBasicParsing `
+            -SkipHttpErrorCheck `
+            -Uri "http://127.0.0.1:$port/sub?target=clash&url=$subscription&config=$externalConfig" `
+            -TimeoutSec 30
+          if ($nativeCaResponse.StatusCode -ne 200 -or
+              -not $nativeCaResponse.Content.Contains("NativeCA")) {
+            throw "Windows native CA smoke returned HTTP $($nativeCaResponse.StatusCode)."
+          }
+
+          $removedRoute = Invoke-WebRequest `
+            -UseBasicParsing `
+            -SkipHttpErrorCheck `
+            -Uri "http://127.0.0.1:$port/Custom_OpenClash_Rules/main/rule/example.yaml" `
+            -TimeoutSec 5
+          if ($removedRoute.StatusCode -ne 404) {
+            throw "Removed Custom_OpenClash_Rules route returned HTTP $($removedRoute.StatusCode)."
+          }
 
           if (-not (Test-Path $pref)) {
             throw "Windows launcher did not create base\pref.toml on first start."
