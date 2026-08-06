@@ -35,14 +35,38 @@ static inline bool is_request_header_blacklisted(const std::string &header) {
 
 void WebServer::stop_web_server() { SERVER_EXIT_FLAG = true; }
 
-static httplib::Server::Handler makeHandler(const responseRoute &rr) {
-  return [rr](const httplib::Request &request, httplib::Response &response) {
+void WebServer::set_client_ip_policy(const client_ip::Policy &policy) {
+  std::lock_guard<std::mutex> lock(client_ip_policy_mutex_);
+  client_ip_policy_ = policy;
+}
+
+client_ip::Policy WebServer::client_ip_policy() const {
+  std::lock_guard<std::mutex> lock(client_ip_policy_mutex_);
+  return client_ip_policy_;
+}
+
+static httplib::Server::Handler makeHandler(const responseRoute &rr,
+                                            const WebServer *web_server) {
+  return [rr, web_server](const httplib::Request &request,
+                          httplib::Response &response) {
     Request req;
     Response resp;
     req.method = request.method;
     req.url = request.path;
     req.remote_addr = request.remote_addr;
     req.remote_port = request.remote_port;
+    req.client_address = client_ip::parseAddress(request.remote_addr);
+    const client_ip::Policy policy = web_server->client_ip_policy();
+    if (policy.enabled()) {
+      std::vector<std::string> values;
+      const char *name = client_ip::headerName(policy.header);
+      const std::size_t count = request.get_header_value_count(name);
+      values.reserve(count);
+      for (std::size_t index = 0; index < count; ++index)
+        values.push_back(request.get_header_value(name, "", index));
+      req.client_address =
+          client_ip::resolve(req.client_address, values, policy).address;
+    }
     for (auto &h : request.headers) {
       if (startsWith(h.first, "LOCAL_") || startsWith(h.first, "REMOTE_") ||
           is_request_header_blacklisted(h.first)) {
@@ -95,19 +119,19 @@ int WebServer::start_web_server_multi(listener_args *args) {
     switch (hash_(x.method)) {
     case "GET"_hash:
     case "HEAD"_hash:
-      server.Get(x.path, makeHandler(x));
+      server.Get(x.path, makeHandler(x, this));
       break;
     case "POST"_hash:
-      server.Post(x.path, makeHandler(x));
+      server.Post(x.path, makeHandler(x, this));
       break;
     case "PUT"_hash:
-      server.Put(x.path, makeHandler(x));
+      server.Put(x.path, makeHandler(x, this));
       break;
     case "DELETE"_hash:
-      server.Delete(x.path, makeHandler(x));
+      server.Delete(x.path, makeHandler(x, this));
       break;
     case "PATCH"_hash:
-      server.Patch(x.path, makeHandler(x));
+      server.Patch(x.path, makeHandler(x, this));
       break;
     }
   }

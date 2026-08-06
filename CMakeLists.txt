@@ -76,6 +76,7 @@ SET(SUBCONVERTER_RUNTIME_SOURCES
     src/generator/config/subexport.cpp
     src/generator/template/templates.cpp
     src/handler/dashboard_auth.cpp
+    src/handler/dashboard_auth_limiter.cpp
     src/handler/dashboard_page.cpp
     src/handler/cocr_source_url.cpp
     src/handler/curl_handle_pool.cpp
@@ -96,6 +97,7 @@ SET(SUBCONVERTER_RUNTIME_SOURCES
     src/script/cron.cpp
     src/script/script_quickjs.cpp
 #    src/server/webserver_libevent.cpp
+    src/server/client_ip.cpp
     src/server/webserver_httplib.cpp
     src/utils/base64/base64.cpp
     src/utils/codepage.cpp
@@ -261,6 +263,31 @@ IF(BUILD_TESTS)
     TARGET_LINK_LIBRARIES(proxy_policy_test ${CMAKE_THREAD_LIBS_INIT})
     ADD_TEST(NAME proxy_policy COMMAND proxy_policy_test)
     SET_TESTS_PROPERTIES(proxy_policy PROPERTIES LABELS fast)
+
+    ADD_EXECUTABLE(client_ip_test
+        tests/client_ip_test.cpp
+        src/server/client_ip.cpp)
+    TARGET_INCLUDE_DIRECTORIES(client_ip_test PRIVATE src)
+    IF(WIN32)
+        TARGET_LINK_LIBRARIES(client_ip_test ws2_32)
+    ENDIF()
+    ADD_TEST(NAME client_ip COMMAND client_ip_test)
+    SET_TESTS_PROPERTIES(client_ip PROPERTIES LABELS fast)
+
+    ADD_EXECUTABLE(dashboard_auth_limiter_test
+        tests/dashboard_auth_limiter_test.cpp
+        src/handler/dashboard_auth_limiter.cpp
+        src/server/client_ip.cpp)
+    TARGET_INCLUDE_DIRECTORIES(dashboard_auth_limiter_test PRIVATE src)
+    TARGET_COMPILE_DEFINITIONS(dashboard_auth_limiter_test PRIVATE
+        DASHBOARD_AUTH_LIMITER_TESTING)
+    TARGET_LINK_LIBRARIES(dashboard_auth_limiter_test
+        ${CMAKE_THREAD_LIBS_INIT})
+    IF(WIN32)
+        TARGET_LINK_LIBRARIES(dashboard_auth_limiter_test ws2_32)
+    ENDIF()
+    ADD_TEST(NAME dashboard_auth_limiter COMMAND dashboard_auth_limiter_test)
+    SET_TESTS_PROPERTIES(dashboard_auth_limiter PROPERTIES LABELS fast)
 
     ADD_EXECUTABLE(cocr_source_url_test
         tests/cocr_source_url_test.cpp

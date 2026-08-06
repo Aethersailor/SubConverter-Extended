@@ -142,6 +142,31 @@ def request(
         )
 
 
+def request_with_raw_headers(
+    base_url: str, path: str, headers: list[tuple[str, str]]
+) -> int:
+    parsed = urllib.parse.urlsplit(base_url)
+    with socket.create_connection((parsed.hostname, parsed.port), timeout=20) as sock:
+        request_lines = [
+            f"GET {path} HTTP/1.1",
+            f"Host: {parsed.hostname}:{parsed.port}",
+            "Connection: close",
+        ]
+        request_lines.extend(f"{name}: {value}" for name, value in headers)
+        sock.sendall(("\r\n".join(request_lines) + "\r\n\r\n").encode("ascii"))
+        response = b""
+        while b"\r\n" not in response:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            response += chunk
+    status_line = response.split(b"\r\n", 1)[0].decode("ascii", "replace")
+    try:
+        return int(status_line.split(" ", 2)[1])
+    except (IndexError, ValueError) as error:
+        raise AssertionError(f"invalid raw HTTP response: {status_line!r}") from error
+
+
 def wait_ready(base_url: str, process: subprocess.Popen[bytes]) -> None:
     for _ in range(100):
         if process.poll() is not None:
@@ -173,6 +198,8 @@ def running_service(
     legacy_publish_enabled: bool = False,
     proxy_provider_interval: int | None = None,
     proxy_provider_direct: bool | None = None,
+    dashboard_client_ip_header: str | None = None,
+    dashboard_trusted_proxy_cidrs: tuple[str, ...] = (),
 ):
     port = unused_port()
     baseline = (COMPAT_FIXTURES / "legacy-pref.toml").read_text(
@@ -222,6 +249,16 @@ def running_service(
             "append_proxy_type = false",
             1,
         )
+    if dashboard_client_ip_header is not None or dashboard_trusted_proxy_cidrs:
+        header = dashboard_client_ip_header or "none"
+        client_ip_section = (
+            "lock_seconds = 60\n\n"
+            "[statistics.dashboard_auth.client_ip]\n"
+            f"header = {json.dumps(header)}\n"
+            "trusted_proxy_cidrs = "
+            f"{json.dumps(list(dashboard_trusted_proxy_cidrs))}"
+        )
+        baseline = baseline.replace("lock_seconds = 60", client_ip_section, 1)
     baseline = baseline.replace('proxy_subscription = "SYSTEM"', 'proxy_subscription = "NONE"')
     baseline = baseline.replace('enabled = true\n', f"enabled = {str(statistics).lower()}\n", 1)
     baseline = baseline.replace('profile = "lan"', f'profile = "{security_profile}"')
@@ -245,6 +282,8 @@ def running_service(
         stdout = (temporary_path / "stdout.log").open("wb")
         stderr = (temporary_path / "stderr.log").open("wb")
         env = os.environ.copy()
+        env.pop("SUBCONVERTER_DASHBOARD_CLIENT_IP_HEADER", None)
+        env.pop("SUBCONVERTER_DASHBOARD_TRUSTED_PROXY_CIDRS", None)
         env["PORT"] = str(port)
         env["NO_PROXY"] = "127.0.0.1,localhost"
         env["no_proxy"] = "127.0.0.1,localhost"
@@ -274,7 +313,15 @@ def running_service(
             stderr.close()
 
 
-def load_settings_snapshot(helper: Path, fixture: Path) -> dict[str, object]:
+def load_settings_snapshot(
+    helper: Path,
+    fixture: Path,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    env = os.environ.copy() if environment is None else environment.copy()
+    if environment is None:
+        env.pop("SUBCONVERTER_DASHBOARD_CLIENT_IP_HEADER", None)
+        env.pop("SUBCONVERTER_DASHBOARD_TRUSTED_PROXY_CIDRS", None)
     completed = subprocess.run(
         [str(helper), str(fixture)],
         cwd=REPOSITORY,
@@ -283,6 +330,7 @@ def load_settings_snapshot(helper: Path, fixture: Path) -> dict[str, object]:
         text=True,
         encoding="utf-8",
         errors="replace",
+        env=env,
     )
     if "fixture-secret" in completed.stdout or "fixture-dashboard-secret" in completed.stdout:
         raise AssertionError("SettingsSnapshot leaked a fixture secret")
@@ -307,6 +355,15 @@ def reload_settings_snapshot(
         text=True,
         encoding="utf-8",
         errors="replace",
+        env={
+            key: value
+            for key, value in os.environ.items()
+            if key
+            not in {
+                "SUBCONVERTER_DASHBOARD_CLIENT_IP_HEADER",
+                "SUBCONVERTER_DASHBOARD_TRUSTED_PROXY_CIDRS",
+            }
+        },
     )
     return json.loads(completed.stdout)
 
@@ -328,6 +385,147 @@ def add_proxy_provider_interval(
     if marker not in content:
         raise AssertionError(f"provider interval insertion marker missing: {suffix}")
     return content.replace(marker, section + marker, 1)
+
+
+def add_dashboard_client_ip(
+    content: str, suffix: str, header: str, cidrs: list[str]
+) -> str:
+    if suffix == ".ini":
+        marker = "\n[security]"
+        section = (
+            f"dashboard_auth_client_ip_header={header}\n"
+            "dashboard_auth_trusted_proxy_cidrs=" + ",".join(cidrs) + "\n\n"
+        )
+    elif suffix == ".yml":
+        marker = "\nsecurity:"
+        cidr_lines = "\n".join(f"        - {json.dumps(cidr)}" for cidr in cidrs)
+        section = (
+            "    client_ip:\n"
+            f"      header: {json.dumps(header)}\n"
+            "      trusted_proxy_cidrs:\n"
+            f"{cidr_lines}\n"
+        )
+    elif suffix == ".toml":
+        marker = "\n[security]"
+        section = (
+            "[statistics.dashboard_auth.client_ip]\n"
+            f"header = {json.dumps(header)}\n"
+            f"trusted_proxy_cidrs = {json.dumps(cidrs)}\n\n"
+        )
+    else:
+        raise AssertionError(f"unsupported config suffix: {suffix}")
+    if marker not in content:
+        raise AssertionError(f"dashboard client IP insertion marker missing: {suffix}")
+    return content.replace(marker, "\n" + section + marker.lstrip("\n"), 1)
+
+
+def settings_dashboard_client_ip_baseline(helper: Path) -> None:
+    runtime_dir = REPOSITORY / "build" / "test-baseline-runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    configured_snapshots: list[dict[str, object]] = []
+    with tempfile.TemporaryDirectory(dir=runtime_dir) as temporary:
+        temporary_path = Path(temporary)
+        for fixture_name in (
+            "legacy-pref.ini",
+            "legacy-pref.yml",
+            "legacy-pref.toml",
+        ):
+            original = COMPAT_FIXTURES / fixture_name
+            content = original.read_text(encoding="utf-8")
+            configured = temporary_path / ("client-ip-" + fixture_name)
+            configured.write_text(
+                add_dashboard_client_ip(
+                    content,
+                    original.suffix,
+                    "X-FoRwArDeD-FoR",
+                    ["127.0.0.1/32", "2001:db8::/32"],
+                ),
+                encoding="utf-8",
+                newline="\n",
+            )
+            snapshot = load_settings_snapshot(helper, configured)
+            configured_snapshots.append(snapshot)
+            statistics = snapshot["statistics"]
+            if (
+                statistics["dashboard_client_ip_header"] != "x-forwarded-for"
+                or statistics["dashboard_trusted_proxy_count"] != 2
+            ):
+                raise AssertionError(
+                    f"{original.suffix} did not load dashboard client-IP policy"
+                )
+
+            reloaded = reload_settings_snapshot(helper, configured, original)
+            if (
+                reloaded["statistics"]["dashboard_client_ip_header"] != "none"
+                or reloaded["statistics"]["dashboard_trusted_proxy_count"] != 0
+            ):
+                raise AssertionError(
+                    f"{original.suffix} reload retained removed client-IP settings"
+                )
+
+            for label, invalid_header, invalid_cidrs in (
+                ("header", "x-client-ip", ["127.0.0.1/32"]),
+                ("cidr", "x-forwarded-for", ["0.0.0.0/0"]),
+            ):
+                invalid = temporary_path / (f"invalid-{label}-" + fixture_name)
+                invalid.write_text(
+                    add_dashboard_client_ip(
+                        content, original.suffix, invalid_header, invalid_cidrs
+                    ),
+                    encoding="utf-8",
+                    newline="\n",
+                )
+                startup = subprocess.run(
+                    [str(helper), str(invalid)],
+                    cwd=REPOSITORY,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    env={
+                        key: value
+                        for key, value in os.environ.items()
+                        if key
+                        not in {
+                            "SUBCONVERTER_DASHBOARD_CLIENT_IP_HEADER",
+                            "SUBCONVERTER_DASHBOARD_TRUSTED_PROXY_CIDRS",
+                        }
+                    },
+                )
+                if startup.returncode == 0:
+                    raise AssertionError(
+                        f"{original.suffix} accepted invalid client-IP {label}"
+                    )
+                retained = reload_settings_snapshot(
+                    helper, configured, invalid, expect_failure=True
+                )
+                if (
+                    retained["statistics"]["dashboard_client_ip_header"]
+                    != "x-forwarded-for"
+                    or retained["statistics"]["dashboard_trusted_proxy_count"] != 2
+                ):
+                    raise AssertionError(
+                        f"{original.suffix} invalid reload replaced valid policy"
+                    )
+
+        if configured_snapshots[1:] != configured_snapshots[:1] * 2:
+            raise AssertionError("INI/YAML/TOML dashboard client-IP snapshots differ")
+
+        env = os.environ.copy()
+        env["SUBCONVERTER_DASHBOARD_CLIENT_IP_HEADER"] = "cf-connecting-ip"
+        env["SUBCONVERTER_DASHBOARD_TRUSTED_PROXY_CIDRS"] = (
+            "127.0.0.1/32, 2001:db8::/32"
+        )
+        snapshot = load_settings_snapshot(
+            helper, COMPAT_FIXTURES / "legacy-pref.toml", env
+        )
+        if (
+            snapshot["statistics"]["dashboard_client_ip_header"]
+            != "cf-connecting-ip"
+            or snapshot["statistics"]["dashboard_trusted_proxy_count"] != 2
+        ):
+            raise AssertionError("dashboard client-IP environment overrides failed")
 
 
 def settings_provider_interval_compatibility_baseline(helper: Path) -> None:
@@ -1150,6 +1348,119 @@ def dashboard_baseline(binary: Path, fixture_base: str) -> None:
                 )
 
 
+def dashboard_client_ip_security_baseline(binary: Path, fixture_base: str) -> None:
+    spoof_headers = (
+        ("CF-Connecting-IP", "198.51.100.1"),
+        ("True-Client-IP", "198.51.100.2"),
+        ("X-Real-IP", "198.51.100.3"),
+        ("X-Forwarded-For", "198.51.100.4"),
+        ("X-Client-IP", "198.51.100.5"),
+    )
+    with running_service(
+        binary,
+        statistics=True,
+        dashboard_client_ip_header="x-forwarded-for",
+        dashboard_trusted_proxy_cidrs=("10.0.0.0/8",),
+    ) as base_url:
+        for expected, rotated in zip((401, 401, 429), spoof_headers):
+            status, _, _ = request(
+                base_url,
+                "/dashboard",
+                headers={
+                    "Authorization": "Basic invalid",
+                    rotated[0]: rotated[1],
+                },
+            )
+            if status != expected:
+                raise AssertionError(
+                    "direct client bypassed peer bucket by rotating proxy "
+                    f"headers: expected {expected}, got {status}"
+                )
+
+    with running_service(
+        binary,
+        statistics=True,
+        dashboard_client_ip_header="x-forwarded-for",
+        dashboard_trusted_proxy_cidrs=("127.0.0.1/32",),
+    ) as base_url:
+        client_a = "192.0.2.10, 127.0.0.1"
+        client_b = "192.0.2.11, 127.0.0.1"
+        for value in (client_a, client_b, client_a, client_b):
+            status, _, _ = request(
+                base_url,
+                "/dashboard",
+                headers={
+                    "Authorization": "Basic invalid",
+                    "X-Forwarded-For": value,
+                },
+            )
+            if status != 401:
+                raise AssertionError(
+                    "trusted-proxy clients did not receive independent buckets"
+                )
+
+        token = base64.b64encode(
+            b"fixture-admin:fixture-dashboard-secret"
+        ).decode()
+        status, _, _ = request(
+            base_url,
+            "/dashboard",
+            headers={
+                "Authorization": "Basic " + token,
+                "X-Forwarded-For": client_a,
+            },
+        )
+        if status != 200:
+            raise AssertionError("successful auth did not clear the client bucket")
+        status, _, _ = request(
+            base_url,
+            "/dashboard",
+            headers={
+                "Authorization": "Basic invalid",
+                "X-Forwarded-For": client_a,
+            },
+        )
+        if status != 401:
+            raise AssertionError("client bucket was not reset after successful auth")
+        status, _, _ = request(
+            base_url,
+            "/dashboard",
+            headers={
+                "Authorization": "Basic invalid",
+                "X-Forwarded-For": client_b,
+            },
+        )
+        if status != 429:
+            raise AssertionError("third failure did not lock the second proxy client")
+
+        duplicate_status = request_with_raw_headers(
+            base_url,
+            "/dashboard",
+            [
+                ("Authorization", "Basic invalid"),
+                ("X-Forwarded-For", "192.0.2.20"),
+                ("x-forwarded-for", "192.0.2.21"),
+            ],
+        )
+        if duplicate_status != 401:
+            raise AssertionError(
+                "duplicate selected client-IP headers did not fail closed to peer"
+            )
+
+        status, _, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "clash",
+                "url": fixture_base + "/subscription.txt",
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+        )
+        if status != 200:
+            raise AssertionError("client-IP policy changed /sub behavior")
+
+
 def persistence_degradation_baseline(binary: Path, fixture_base: str) -> None:
     with running_service(
         binary,
@@ -1403,6 +1714,7 @@ def main() -> int:
     settings_reload_compatibility_baseline(settings_snapshot_helper)
     settings_provider_interval_compatibility_baseline(settings_snapshot_helper)
     settings_provider_direct_compatibility_baseline(settings_snapshot_helper)
+    settings_dashboard_client_ip_baseline(settings_snapshot_helper)
 
     with fixture_server() as fixture_base:
         with running_service(binary) as base_url:
@@ -1415,6 +1727,7 @@ def main() -> int:
         ) as base_url:
             provider_interval_output_baseline(base_url, fixture_base)
         dashboard_baseline(binary, fixture_base)
+        dashboard_client_ip_security_baseline(binary, fixture_base)
         persistence_degradation_baseline(binary, fixture_base)
         public_request_baseline(binary, fixture_base)
         external_config_failure_baseline(binary, fixture_base)

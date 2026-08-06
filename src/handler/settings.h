@@ -104,6 +104,8 @@ struct Settings {
       "CF-Region-Code", "cf-region-code", "X-Geo-Subdivision"};
   bool dashboardAuthEnabled = false;
   std::string dashboardAuthUsername, dashboardAuthPassword;
+  std::string dashboardAuthClientIpHeader = "none";
+  string_array dashboardAuthTrustedProxyCidrs;
   int dashboardAuthMaxFailures = 5, dashboardAuthWindowSeconds = 300,
       dashboardAuthLockSeconds = 900;
 

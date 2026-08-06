@@ -143,6 +143,35 @@ static void finalizePerformanceSettings() {
 }
 
 static void finalizeDashboardAuthSettings() {
+  std::string client_ip_header =
+      getEnv("SUBCONVERTER_DASHBOARD_CLIENT_IP_HEADER");
+  if (!client_ip_header.empty())
+    global.dashboardAuthClientIpHeader = client_ip_header;
+  std::string trusted_proxy_cidrs =
+      getEnv("SUBCONVERTER_DASHBOARD_TRUSTED_PROXY_CIDRS");
+  if (!trusted_proxy_cidrs.empty())
+    global.dashboardAuthTrustedProxyCidrs = split(trusted_proxy_cidrs, ",");
+
+  global.dashboardAuthClientIpHeader = client_ip::headerSettingName(
+      client_ip::parseHeader(global.dashboardAuthClientIpHeader));
+  for (std::string &cidr : global.dashboardAuthTrustedProxyCidrs)
+    cidr = trimWhitespace(cidr, true, true);
+  global.dashboardAuthTrustedProxyCidrs.erase(
+      std::remove_if(global.dashboardAuthTrustedProxyCidrs.begin(),
+                     global.dashboardAuthTrustedProxyCidrs.end(),
+                     [](const std::string &value) { return value.empty(); }),
+      global.dashboardAuthTrustedProxyCidrs.end());
+  (void)client_ip::makePolicy(global.dashboardAuthClientIpHeader,
+                              global.dashboardAuthTrustedProxyCidrs);
+  const bool header_configured =
+      client_ip::parseHeader(global.dashboardAuthClientIpHeader) !=
+      client_ip::Header::None;
+  if (header_configured != !global.dashboardAuthTrustedProxyCidrs.empty()) {
+    writeLog(0,
+             "Dashboard 客户端 IP 头与 trusted proxy CIDR 必须同时配置；"
+             "当前已安全降级为仅使用 socket peer。",
+             LOG_LEVEL_WARNING);
+  }
   if (global.dashboardAuthMaxFailures < 1)
     global.dashboardAuthMaxFailures = 1;
   if (global.dashboardAuthWindowSeconds < 1)
@@ -811,6 +840,13 @@ void readYAMLConf(YAML::Node &node) {
       auth["max_failures"] >> global.dashboardAuthMaxFailures;
       auth["window_seconds"] >> global.dashboardAuthWindowSeconds;
       auth["lock_seconds"] >> global.dashboardAuthLockSeconds;
+      if (auth["client_ip"].IsDefined()) {
+        YAML::Node client_ip = auth["client_ip"];
+        client_ip["header"] >> global.dashboardAuthClientIpHeader;
+        if (client_ip["trusted_proxy_cidrs"].IsSequence())
+          client_ip["trusted_proxy_cidrs"] >>
+              global.dashboardAuthTrustedProxyCidrs;
+      }
     }
   }
   if (node["security"].IsDefined()) {
@@ -1085,6 +1121,14 @@ void readTOMLConf(toml::value &root) {
                 global.dashboardAuthMaxFailures, "window_seconds",
                 global.dashboardAuthWindowSeconds, "lock_seconds",
                 global.dashboardAuthLockSeconds);
+  auto section_dashboard_client_ip =
+      toml::find_or(section_dashboard_auth, "client_ip",
+                    toml::value(toml::table()));
+  find_if_exist(section_dashboard_client_ip, "header",
+                global.dashboardAuthClientIpHeader);
+  global.dashboardAuthTrustedProxyCidrs = toml::find_or<string_array>(
+      section_dashboard_client_ip, "trusted_proxy_cidrs",
+      global.dashboardAuthTrustedProxyCidrs);
 
   auto section_security =
       toml::find_or(root, "security", toml::value(toml::table()));
@@ -1102,6 +1146,9 @@ static void applyRuntimeConfiguration() {
     webServer.append_redirect(alias.first, alias.second);
   webServer.serve_file_root = global.serveFileRoot;
   webServer.serve_file = !webServer.serve_file_root.empty();
+  webServer.set_client_ip_policy(client_ip::makePolicy(
+      global.dashboardAuthClientIpHeader,
+      global.dashboardAuthTrustedProxyCidrs));
   refresh_schedule();
 }
 
@@ -1136,6 +1183,8 @@ bool readConf() {
     global.dashboardAuthEnabled = false;
     global.dashboardAuthUsername.clear();
     global.dashboardAuthPassword.clear();
+    global.dashboardAuthClientIpHeader = "none";
+    global.dashboardAuthTrustedProxyCidrs.clear();
     global.dashboardAuthMaxFailures = 5;
     global.dashboardAuthWindowSeconds = 300;
     global.dashboardAuthLockSeconds = 900;
@@ -1539,6 +1588,12 @@ bool readConf() {
                          global.dashboardAuthWindowSeconds);
     ini.get_int_if_exist("dashboard_auth_lock_seconds",
                          global.dashboardAuthLockSeconds);
+    ini.get_if_exist("dashboard_auth_client_ip_header",
+                     global.dashboardAuthClientIpHeader);
+    if (ini.item_exist("dashboard_auth_trusted_proxy_cidrs")) {
+      global.dashboardAuthTrustedProxyCidrs =
+          split(ini.get("dashboard_auth_trusted_proxy_cidrs"), ",");
+    }
   }
 
   if (ini.section_exist("security")) {

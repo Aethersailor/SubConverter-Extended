@@ -2,11 +2,9 @@
 
 #include <algorithm>
 #include <atomic>
-#include <ctime>
-#include <map>
-#include <mutex>
 #include <string>
 
+#include "handler/dashboard_auth_limiter.h"
 #include "handler/dashboard_page.h"
 #include "handler/settings.h"
 #include "handler/statistics.h"
@@ -16,48 +14,14 @@
 
 namespace {
 
-struct FailureState {
-  int failures = 0;
-  int64_t window_start = 0;
-  int64_t locked_until = 0;
-};
-
-std::mutex g_auth_mutex;
-std::map<std::string, FailureState> g_failures;
+dashboard_auth::FailureLimiter g_failure_limiter;
 std::atomic_bool g_misconfig_logged{false};
-int64_t g_next_cleanup_at = 0;
-
-int64_t nowSeconds() { return static_cast<int64_t>(std::time(nullptr)); }
 
 std::string headerValue(const Request &request, const std::string &name) {
   auto iter = request.headers.find(name);
   if (iter == request.headers.end())
     return "";
   return trimWhitespace(iter->second, true, true);
-}
-
-std::string firstForwardedValue(std::string value) {
-  size_t comma = value.find(',');
-  if (comma != std::string::npos)
-    value = value.substr(0, comma);
-  return trimWhitespace(value, true, true);
-}
-
-std::string sourceKey(const Request &request) {
-  std::string forwarded = headerValue(request, "CF-Connecting-IP");
-  if (forwarded.empty())
-    forwarded = headerValue(request, "True-Client-IP");
-  if (forwarded.empty())
-    forwarded = headerValue(request, "X-Real-IP");
-  if (forwarded.empty())
-    forwarded = firstForwardedValue(headerValue(request, "X-Forwarded-For"));
-  if (forwarded.empty())
-    forwarded = headerValue(request, "X-Client-IP");
-  if (!forwarded.empty())
-    return forwarded;
-  if (!request.remote_addr.empty())
-    return request.remote_addr;
-  return "unknown";
 }
 
 bool constantTimeEquals(const std::string &lhs, const std::string &rhs) {
@@ -83,47 +47,6 @@ bool validBasicAuth(const Request &request) {
                               global.dashboardAuthPassword);
   return constantTimeEquals(supplied, expected);
 }
-
-void cleanupFailuresLocked(int64_t now) {
-  for (auto iter = g_failures.begin(); iter != g_failures.end();) {
-    const FailureState &state = iter->second;
-    bool lock_expired = state.locked_until <= now;
-    bool window_expired =
-        now - state.window_start > global.dashboardAuthWindowSeconds;
-    if (lock_expired && window_expired)
-      iter = g_failures.erase(iter);
-    else
-      ++iter;
-  }
-  while (g_failures.size() > 4096)
-    g_failures.erase(g_failures.begin());
-}
-
-int64_t lockedUntilLocked(const std::string &key, int64_t now) {
-  auto iter = g_failures.find(key);
-  if (iter == g_failures.end())
-    return 0;
-  if (iter->second.locked_until > now)
-    return iter->second.locked_until;
-  return 0;
-}
-
-void recordFailureLocked(const std::string &key, int64_t now) {
-  FailureState &state = g_failures[key];
-  if (state.window_start <= 0 ||
-      now - state.window_start > global.dashboardAuthWindowSeconds) {
-    state.window_start = now;
-    state.failures = 0;
-    state.locked_until = 0;
-  }
-  state.failures++;
-  if (state.failures >= global.dashboardAuthMaxFailures)
-    state.locked_until = now + global.dashboardAuthLockSeconds;
-  while (g_failures.size() > 4096)
-    g_failures.erase(g_failures.begin());
-}
-
-void recordSuccessLocked(const std::string &key) { g_failures.erase(key); }
 
 void applyNoStoreHeaders(Response &response) {
   response.headers["Cache-Control"] =
@@ -185,34 +108,15 @@ bool authorize(Request &request, Response &response, std::string &body) {
     return false;
   }
 
-  int64_t now = nowSeconds();
-  std::string key = sourceKey(request);
-
-  {
-    std::lock_guard<std::mutex> lock(g_auth_mutex);
-    if (now >= g_next_cleanup_at) {
-      cleanupFailuresLocked(now);
-      g_next_cleanup_at = now + 45;
-    }
-    int64_t locked_until = lockedUntilLocked(key, now);
-    if (locked_until > now) {
-      body = locked(response, locked_until - now);
-      return false;
-    }
-  }
-
   bool ok = validBasicAuth(request);
-
-  std::lock_guard<std::mutex> lock(g_auth_mutex);
-  if (ok) {
-    recordSuccessLocked(key);
+  const dashboard_auth::FailureLimiter::Decision decision =
+      g_failure_limiter.evaluate(
+          request.client_address, ok, global.dashboardAuthMaxFailures,
+          global.dashboardAuthWindowSeconds, global.dashboardAuthLockSeconds);
+  if (decision.result == dashboard_auth::FailureLimiter::Result::Allowed)
     return true;
-  }
-
-  recordFailureLocked(key, now);
-  int64_t locked_until = lockedUntilLocked(key, now);
-  if (locked_until > now)
-    body = locked(response, locked_until - now);
+  if (decision.result == dashboard_auth::FailureLimiter::Result::Locked)
+    body = locked(response, decision.retry_after_seconds);
   else
     body = unauthorized(response);
   return false;
