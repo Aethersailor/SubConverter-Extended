@@ -79,8 +79,9 @@ remote-only, URI-only, and mixed Clash inputs with both `list=false` and
 ## License
 
 The Mihomo parser dependency comes from
-[metacubex/mihomo](https://github.com/metacubex/mihomo), which is licensed
-under the MIT License.
+[metacubex/mihomo](https://github.com/metacubex/mihomo). Its `Meta` kernel
+branch and the release version pinned by this bridge are licensed under
+[GPL-3.0](https://github.com/MetaCubeX/mihomo/blob/Meta/LICENSE).
 
-SubConverter-Extended is licensed under GPL-3.0. MIT-licensed code can be used
-in this GPL-3.0 project, while the combined project remains GPL-3.0 licensed.
+SubConverter-Extended is also licensed under GPL-3.0, and the combined project
+remains GPL-3.0 licensed.
