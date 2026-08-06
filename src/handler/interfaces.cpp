@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cctype>
 #include <condition_variable>
@@ -66,6 +67,52 @@ extern WebServer webServer;
 string_array gRegexBlacklist = {"(.*)*"};
 
 static constexpr size_t kProviderUserAgentMaxLen = 512;
+
+struct TargetDescriptor {
+  const char *name;
+  bool simple_subscription;
+  SingleLinkTypes single_link_types;
+};
+
+static constexpr std::array<TargetDescriptor, 18> kTargetDescriptors = {{
+    {"clash", false, 0},
+    {"clashr", false, 0},
+    {"surge", false, 0},
+    {"quan", false, 0},
+    {"quanx", false, 0},
+    {"loon", false, 0},
+    {"surfboard", false, 0},
+    {"mellow", false, 0},
+    {"singbox", false, 0},
+    {"ss", true, SingleLinkType::Shadowsocks},
+    {"ssd", true, 0},
+    {"ssr", true, SingleLinkType::ShadowsocksR},
+    {"sssub", true, 0},
+    {"v2ray", true, SingleLinkType::VMess},
+    {"trojan", true, SingleLinkType::Trojan},
+    {"vless", true, SingleLinkType::VLESS},
+    {"hysteria2", true, SingleLinkType::Hysteria2},
+    {"mixed", true, SingleLinkType::Mixed},
+}};
+
+static const TargetDescriptor *findTargetDescriptor(const std::string &name) {
+  const auto found =
+      std::find_if(kTargetDescriptors.begin(), kTargetDescriptors.end(),
+                   [&](const TargetDescriptor &target) {
+                     return name == target.name;
+                   });
+  return found == kTargetDescriptors.end() ? nullptr : &*found;
+}
+
+static std::string supportedTargets(const std::string &separator) {
+  std::string result;
+  for (const TargetDescriptor &target : kTargetDescriptors) {
+    if (!result.empty())
+      result += separator;
+    result += target.name;
+  }
+  return result;
+}
 
 static std::string trimProviderUserAgentCandidate(const std::string &ua) {
   size_t begin = ua.find_first_not_of(" \t");
@@ -1716,38 +1763,16 @@ static std::string subconverter_impl(Request &request, Response &response,
   explain.target = argTarget;
 
   /// don't try to load groups or rulesets when generating simple subscriptions
-  bool lSimpleSubscription = false;
-  switch (hash_(argTarget)) {
-  case "ss"_hash:
-  case "ssd"_hash:
-  case "ssr"_hash:
-  case "sssub"_hash:
-  case "v2ray"_hash:
-  case "trojan"_hash:
-  case "mixed"_hash:
-    lSimpleSubscription = true;
-    break;
-  case "clash"_hash:
-  case "clashr"_hash:
-  case "surge"_hash:
-  case "quan"_hash:
-  case "quanx"_hash:
-  case "loon"_hash:
-  case "surfboard"_hash:
-  case "mellow"_hash:
-  case "singbox"_hash:
-    break;
-  default:
+  const TargetDescriptor *target_descriptor = findTargetDescriptor(argTarget);
+  if (!target_descriptor) {
     *status_code = 400;
     return "Invalid request: unsupported target value.\n"
            "无效请求：不支持的 target 参数值。\n"
-           "Supported targets: clash, clashr, surge, quan, quanx, loon, "
-           "surfboard, mellow, singbox, ss, ssd, ssr, sssub, v2ray, trojan, "
-           "mixed.\n"
-           "支持的 target：clash、clashr、surge、quan、quanx、loon、"
-           "surfboard、mellow、singbox、ss、ssd、ssr、sssub、v2ray、trojan、"
-           "mixed。";
+           "Supported targets: " +
+           supportedTargets(", ") + ".\n" + "支持的 target：" +
+           supportedTargets("、") + "。";
   }
+  const bool lSimpleSubscription = target_descriptor->simple_subscription;
   // check if we need to read configuration
   if (global.reloadConfOnRequest &&
       (!global.APIMode || global.CFWChildProcess) && !global.generatorMode)
@@ -2728,43 +2753,50 @@ static std::string subconverter_impl(Request &request, Response &response,
     break;
   case "ss"_hash:
     writeLog(0, "生成目标：SS", LOG_LEVEL_INFO);
-    output_content = proxyToSingle(nodes, 1, ext);
+    output_content =
+        proxyToSingle(nodes, target_descriptor->single_link_types, ext);
     if (argUpload)
       uploadGist("ss", argUploadPath, output_content, false);
     break;
   case "ssr"_hash:
     writeLog(0, "生成目标：SSR", LOG_LEVEL_INFO);
-    output_content = proxyToSingle(nodes, 2, ext);
+    output_content =
+        proxyToSingle(nodes, target_descriptor->single_link_types, ext);
     if (argUpload)
       uploadGist("ssr", argUploadPath, output_content, false);
     break;
   case "v2ray"_hash:
     writeLog(0, "生成目标：v2rayN", LOG_LEVEL_INFO);
-    output_content = proxyToSingle(nodes, 4, ext);
+    output_content =
+        proxyToSingle(nodes, target_descriptor->single_link_types, ext);
     if (argUpload)
       uploadGist("v2ray", argUploadPath, output_content, false);
     break;
   case "trojan"_hash:
     writeLog(0, "生成目标：Trojan", LOG_LEVEL_INFO);
-    output_content = proxyToSingle(nodes, 8, ext);
+    output_content =
+        proxyToSingle(nodes, target_descriptor->single_link_types, ext);
     if (argUpload)
       uploadGist("trojan", argUploadPath, output_content, false);
     break;
   case "vless"_hash:
     writeLog(0, "生成目标：vless", LOG_LEVEL_INFO);
-    output_content = proxyToSingle(nodes, 16, ext);
+    output_content =
+        proxyToSingle(nodes, target_descriptor->single_link_types, ext);
     if (argUpload)
       uploadGist("vless", argUploadPath, output_content, false);
     break;
   case "hysteria2"_hash:
     writeLog(0, "生成目标：hysteria2", LOG_LEVEL_INFO);
-    output_content = proxyToSingle(nodes, 32, ext);
+    output_content =
+        proxyToSingle(nodes, target_descriptor->single_link_types, ext);
     if (argUpload)
       uploadGist("hysteria2", argUploadPath, output_content, false);
     break;
   case "mixed"_hash:
     writeLog(0, "生成目标：Standard Subscription", LOG_LEVEL_INFO);
-    output_content = proxyToSingle(nodes, 63, ext);
+    output_content =
+        proxyToSingle(nodes, target_descriptor->single_link_types, ext);
     if (argUpload)
       uploadGist("sub", argUploadPath, output_content, false);
     break;

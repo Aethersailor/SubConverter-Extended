@@ -614,7 +614,7 @@ logread -e subconverter
 
 | 参数 | 说明 | 示例 |
 | :--- | :--- | :--- |
-| `target` | 目标格式 | `clash`, `surge`, `quanx` |
+| `target` | 目标格式；完整支持 `clash`, `clashr`, `surge`, `quan`, `quanx`, `loon`, `surfboard`, `mellow`, `singbox`, `ss`, `ssd`, `ssr`, `sssub`, `v2ray`, `trojan`, `vless`, `hysteria2`, `mixed` | `clash`, `vless`, `hysteria2` |
 | `url` | 订阅链接或节点链接（`\|` 分隔） | `https://sub.com\|vless://...` |
 | `config` | 外部配置文件 | `https://config-url` |
 | `include` | 包含节点（正则） | `香港\|台湾` |

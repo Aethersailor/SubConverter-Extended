@@ -31,6 +31,16 @@ GOLDEN_ROOT = REPOSITORY / "tests" / "snapshots" / "compatibility"
 SUBSCRIPTION = (
     "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388#Smoke\n"
 )
+VLESS_URI = (
+    "vless://11111111-1111-1111-1111-111111111111@vless.example.test:443"
+    "?security=tls&type=ws&host=vless.example.test&path=%2Fws#VLESSFixture"
+)
+HYSTERIA2_URI = (
+    "hysteria2://hy-password@hy2.example.test:8443/?insecure=1"
+    "&obfs=salamander&obfs-password=real-obfs-password"
+    "&sni=hy2.example.test#Hy2Fixture"
+)
+MIXED_PROTOCOL_SUBSCRIPTION = SUBSCRIPTION + VLESS_URI + "\n" + HYSTERIA2_URI + "\n"
 RULESET = (
     "DOMAIN-SUFFIX,example.com,Proxy\n"
     "IP-CIDR,198.51.100.0/24,Proxy\n"
@@ -47,25 +57,29 @@ class FixtureHandler(BaseHTTPRequestHandler):
     gist_request_count = 0
 
     def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/subscription.txt":
+        request_path = urllib.parse.urlsplit(self.path).path
+        if request_path == "/subscription.txt":
             body = SUBSCRIPTION.encode()
             content_type = "text/plain; charset=utf-8"
-        elif self.path == "/rules.list":
+        elif request_path == "/mixed-protocol-subscription.txt":
+            body = MIXED_PROTOCOL_SUBSCRIPTION.encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/rules.list":
             body = RULESET.encode()
             content_type = "text/plain; charset=utf-8"
-        elif self.path == "/rules-with-invalid.list":
+        elif request_path == "/rules-with-invalid.list":
             body = RULESET_WITH_INVALID_LINE.encode()
             content_type = "text/plain; charset=utf-8"
-        elif self.path == "/external-valid.ini":
+        elif request_path == "/external-valid.ini":
             body = b"[custom]\nenable_rule_generator=false\n"
             content_type = "text/plain; charset=utf-8"
-        elif self.path == "/external-empty.ini":
+        elif request_path == "/external-empty.ini":
             body = b""
             content_type = "text/plain; charset=utf-8"
-        elif self.path == "/external-template-failure.ini":
+        elif request_path == "/external-template-failure.ini":
             body = b"[custom]\nenable_rule_generator={{ invalid\n"
             content_type = "text/plain; charset=utf-8"
-        elif self.path == "/external-template-fetch-failure.ini":
+        elif request_path == "/external-template-fetch-failure.ini":
             host = self.headers.get("Host", "127.0.0.1")
             body = (
                 "[custom]\n"
@@ -73,10 +87,10 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 f"unused={{{{ fetch(\"http://{host}/missing-template-input\") }}}}\n"
             ).encode()
             content_type = "text/plain; charset=utf-8"
-        elif self.path == "/external-no-effective.ini":
+        elif request_path == "/external-no-effective.ini":
             body = b"[custom]\n"
             content_type = "text/plain; charset=utf-8"
-        elif self.path == "/external-import-failure.ini":
+        elif request_path == "/external-import-failure.ini":
             host = self.headers.get("Host", "127.0.0.1")
             body = (
                 "[custom]\n"
@@ -231,6 +245,7 @@ def running_service(
     dashboard_trusted_proxy_cidrs: tuple[str, ...] = (),
     gist_api_base: str | None = None,
     log_capture: list[str] | None = None,
+    log_level: str = "info",
 ):
     port = unused_port()
     baseline = (COMPAT_FIXTURES / "legacy-pref.toml").read_text(
@@ -291,6 +306,7 @@ def running_service(
         )
         baseline = baseline.replace("lock_seconds = 60", client_ip_section, 1)
     baseline = baseline.replace('proxy_subscription = "SYSTEM"', 'proxy_subscription = "NONE"')
+    baseline = baseline.replace('log_level = "info"', f'log_level = "{log_level}"')
     baseline = baseline.replace('enabled = true\n', f"enabled = {str(statistics).lower()}\n", 1)
     baseline = baseline.replace('profile = "lan"', f'profile = "{security_profile}"')
     baseline = baseline.replace(
@@ -1672,7 +1688,7 @@ def dashboard_client_ip_security_baseline(binary: Path, fixture_base: str) -> No
         token = base64.b64encode(
             b"fixture-admin:fixture-dashboard-secret"
         ).decode()
-        status, _, _ = request(
+        status, body, _ = request(
             base_url,
             "/dashboard",
             headers={
@@ -1729,6 +1745,152 @@ def dashboard_client_ip_security_baseline(binary: Path, fixture_base: str) -> No
         )
         if status != 200:
             raise AssertionError("client-IP policy changed /sub behavior")
+
+
+def simple_target_protocol_baseline(base_url: str, fixture_base: str) -> None:
+    source = fixture_base + "/mixed-protocol-subscription.txt"
+
+    def convert(target: str, url: str, list_mode: bool) -> str:
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": target,
+                "url": url,
+                "list": "true" if list_mode else "false",
+            },
+        )
+        if status != 200:
+            raise AssertionError(
+                f"target={target} list={list_mode} returned HTTP {status}: {body!r}"
+            )
+        if not list_mode:
+            try:
+                body = base64.b64decode(body)
+            except ValueError as error:
+                raise AssertionError(
+                    f"target={target} did not return valid Base64"
+                ) from error
+        return body.decode("utf-8").replace("\r\n", "\n")
+
+    vless = convert("vless", source, True)
+    vless_lines = [line for line in vless.splitlines() if line]
+    if not vless_lines or any(
+        not line.startswith("vless://") for line in vless_lines
+    ):
+        raise AssertionError(f"VLESS target filtering is incorrect: {vless!r}")
+    if "11111111-1111-1111-1111-111111111111" not in vless:
+        raise AssertionError("VLESS target lost the fixture UUID")
+    for expected in (
+        "security=tls",
+        "type=ws",
+        "host=vless.example.test",
+        "path=%2Fws",
+    ):
+        if expected not in vless:
+            raise AssertionError(
+                f"VLESS target lost {expected!r}: {vless!r}"
+            )
+
+    hysteria2 = convert("hysteria2", source, True)
+    hysteria2_lines = [line for line in hysteria2.splitlines() if line]
+    if not hysteria2_lines or any(
+        not line.startswith("hysteria2://") for line in hysteria2_lines
+    ):
+        raise AssertionError(
+            f"Hysteria2 target filtering is incorrect: {hysteria2!r}"
+        )
+    if "obfs=salamander" not in hysteria2:
+        raise AssertionError(f"Hysteria2 output lost the obfs type: {hysteria2!r}")
+    if "insecure=1" not in hysteria2:
+        raise AssertionError("Hysteria2 output lost skip-cert-verify semantics")
+    if "obfs-password=real-obfs-password" not in hysteria2:
+        raise AssertionError(
+            "Hysteria2 output did not preserve the real obfs password"
+        )
+    if "obfs-password=salamander" in hysteria2:
+        raise AssertionError("Hysteria2 output reused the obfs type as its password")
+
+    mixed = convert("mixed", source, True)
+    mixed_lines = [line for line in mixed.splitlines() if line]
+    if len(mixed_lines) != 3 or not all(
+        any(line.startswith(prefix) for line in mixed_lines)
+        for prefix in ("ss://", "vless://", "hysteria2://")
+    ):
+        raise AssertionError(f"mixed target lost a protocol: {mixed!r}")
+    if "obfs-password=real-obfs-password" not in mixed:
+        raise AssertionError("mixed output did not preserve Hysteria2 obfs password")
+
+    for target, uri, prefix in (
+        ("vless", VLESS_URI, "vless://"),
+        ("hysteria2", HYSTERIA2_URI, "hysteria2://"),
+    ):
+        direct = convert(target, uri, True)
+        encoded = convert(target, source, False)
+        if not direct.startswith(prefix):
+            raise AssertionError(f"single-link {target} input failed: {direct!r}")
+        if not encoded.startswith(prefix):
+            raise AssertionError(
+                f"Base64 {target} output decoded incorrectly: {encoded!r}"
+            )
+
+    status, body, _ = request(
+        base_url, "/sub", {"target": "unsupported-fixture", "url": source}
+    )
+    error = body.decode("utf-8", errors="replace")
+    if status != 400 or "vless" not in error or "hysteria2" not in error:
+        raise AssertionError(
+            "unsupported target response did not retain 400 with the current list"
+        )
+
+
+def sensitive_log_baseline(binary: Path, fixture_base: str) -> None:
+    logs: list[str] = []
+    secrets = (
+        "11111111-1111-1111-1111-111111111111",
+        "request-token-secret",
+        "request-userinfo-secret",
+        "provider-header-secret",
+        "provider-source-secret",
+        "private-config-secret",
+    )
+    with running_service(
+        binary,
+        log_capture=logs,
+        log_level="verbose",
+    ) as base_url:
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "mixed",
+                "url": (
+                    fixture_base
+                    + "/mixed-protocol-subscription.txt?token="
+                    + "provider-source-secret"
+                ),
+                "list": "true",
+                "token": "request-token-secret",
+                "userinfo": "request-userinfo-secret",
+                "config": (
+                    "data:text/plain;private-config-secret,"
+                    "enable_rule_generator=false"
+                ),
+            },
+            headers={"X-Provider-Secret": "provider-header-secret"},
+        )
+        if status != 200:
+            raise AssertionError(
+                "verbose-log fixture conversion returned "
+                f"HTTP {status}: {body!r}"
+            )
+    if not logs:
+        raise AssertionError("verbose-log fixture did not capture service logs")
+    for secret in secrets:
+        if secret in logs[0]:
+            raise AssertionError(f"verbose service log leaked fixture secret: {secret}")
+    if "parameter_count=" not in logs[0] or "X-Provider-Secret" not in logs[0]:
+        raise AssertionError("safe request diagnostics disappeared from verbose logs")
 
 
 def persistence_degradation_baseline(binary: Path, fixture_base: str) -> None:
@@ -2088,6 +2250,7 @@ def main() -> int:
     with fixture_server() as fixture_base:
         with running_service(binary) as base_url:
             conversion_baselines(base_url, fixture_base, args.update_golden)
+            simple_target_protocol_baseline(base_url, fixture_base)
             provider_direct_default_output_baseline(base_url, fixture_base)
         with running_service(
             binary,
@@ -2096,6 +2259,7 @@ def main() -> int:
         ) as base_url:
             provider_interval_output_baseline(base_url, fixture_base)
         dashboard_baseline(binary, fixture_base)
+        sensitive_log_baseline(binary, fixture_base)
         dashboard_client_ip_security_baseline(binary, fixture_base)
         persistence_degradation_baseline(binary, fixture_base)
         public_request_baseline(binary, fixture_base)

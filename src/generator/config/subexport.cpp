@@ -1813,13 +1813,15 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
   return ini.to_string();
 }
 
-std::string proxyToSingle(std::vector<Proxy> &nodes, int types,
-                          extra_settings &ext) {
-  /// types: SS=1 SSR=2 VMess=4 Trojan=8,hysteria2=16,vless=32
+std::string proxyToSingle(std::vector<Proxy> &nodes, SingleLinkTypes types,
+                           extra_settings &ext) {
   std::string proxyStr, allLinks;
-  bool ss = GETBIT(types, 1), ssr = GETBIT(types, 2), vmess = GETBIT(types, 3),
-       trojan = GETBIT(types, 4), hysteria2 = GETBIT(types, 5),
-       vless = GETBIT(types, 6);
+  const bool ss = (types & SingleLinkType::Shadowsocks) != 0;
+  const bool ssr = (types & SingleLinkType::ShadowsocksR) != 0;
+  const bool vmess = (types & SingleLinkType::VMess) != 0;
+  const bool trojan = (types & SingleLinkType::Trojan) != 0;
+  const bool hysteria2 = (types & SingleLinkType::Hysteria2) != 0;
+  const bool vless = (types & SingleLinkType::VLESS) != 0;
 
   for (Proxy &x : nodes) {
     std::string remark = x.Remark;
@@ -1896,7 +1898,7 @@ std::string proxyToSingle(std::vector<Proxy> &nodes, int types,
       if (!obfsparam.empty()) {
         proxyStr += "&obfs=" + obfsparam;
         if (!obfsPassword.empty()) {
-          proxyStr += "&obfs-password=" + obfsparam;
+          proxyStr += "&obfs-password=" + obfsPassword;
         }
       }
       if (!sni.empty()) {
