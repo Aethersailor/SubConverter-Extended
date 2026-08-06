@@ -12,6 +12,15 @@ inputs:
     description: Container port exposed by SubConverter.
     required: false
     default: "25500"
+  expected-version:
+    description: Expected OCI and compiled version value.
+    required: true
+  expected-revision:
+    description: Expected OCI and compiled short source revision.
+    required: true
+  expected-build-date:
+    description: Expected OCI build timestamp.
+    required: true
 
 runs:
   using: composite
@@ -24,6 +33,9 @@ runs:
         IMAGE="${{ inputs.image }}"
         PLATFORM="${{ inputs.platform }}"
         CONTAINER_PORT="${{ inputs.port }}"
+        EXPECTED_VERSION="${{ inputs.expected-version }}"
+        EXPECTED_REVISION="${{ inputs.expected-revision }}"
+        EXPECTED_BUILD_DATE="${{ inputs.expected-build-date }}"
         CID=""
         cleanup() {
           if [ -n "$CID" ]; then
@@ -52,6 +64,12 @@ runs:
         for _ in $(seq 1 30); do
           if curl -fsS "$URL" >/tmp/subconverter-smoke.out; then
             head -c 200 /tmp/subconverter-smoke.out
+            python3 scripts/verify_container_image_identity.py \
+              --container "$CID" \
+              --url "$URL" \
+              --expected-version "$EXPECTED_VERSION" \
+              --expected-revision "$EXPECTED_REVISION" \
+              --expected-build-date "$EXPECTED_BUILD_DATE"
             python3 scripts/run-subconverter-smoke.py \
               --base-url "http://127.0.0.1:${HOST_PORT}" \
               --remote-subscription-url "${FIXTURE_BASE}/sample-subscription.txt" \
