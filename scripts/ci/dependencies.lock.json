@@ -48,19 +48,19 @@
       "source": "mirror.gcr.io/library/alpine:latest"
     },
     "debian_builder": {
-      "pinned": "mirror.gcr.io/library/debian@sha256:fac46bff2e02f51425b6e33b0e1169f55dfb053d83511ca28aa50c09fd5ed7a4",
+      "pinned": "mirror.gcr.io/library/debian@sha256:34cd9e9fd437c0a095ec39cb2e73422c9f30821b0d0848ed74fd0d43bae4d958",
       "source": "mirror.gcr.io/library/debian:latest"
     },
     "debian_trixie": {
-      "pinned": "mirror.gcr.io/library/debian@sha256:fac46bff2e02f51425b6e33b0e1169f55dfb053d83511ca28aa50c09fd5ed7a4",
+      "pinned": "mirror.gcr.io/library/debian@sha256:34cd9e9fd437c0a095ec39cb2e73422c9f30821b0d0848ed74fd0d43bae4d958",
       "source": "mirror.gcr.io/library/debian:trixie"
     },
     "debian_trixie_slim": {
-      "pinned": "mirror.gcr.io/library/debian@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd",
+      "pinned": "mirror.gcr.io/library/debian@sha256:3a39a0592364683e6bab97937b72cad5a8fa6dcbbee90edb3bb48c7f8e94f258",
       "source": "mirror.gcr.io/library/debian:trixie-slim"
     },
     "golang": {
-      "pinned": "mirror.gcr.io/library/golang@sha256:3aff6657219a4d9c14e27fb1d8976c49c29fddb70ba835014f477e1c70636647",
+      "pinned": "mirror.gcr.io/library/golang@sha256:2005724102f45917a63e9d092fc0e4ea56ea575048ce147caad5f5f61502c365",
       "source": "mirror.gcr.io/library/golang:latest"
     }
   },

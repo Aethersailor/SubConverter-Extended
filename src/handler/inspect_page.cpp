@@ -1000,6 +1000,7 @@ std::string page(Request &request, Response &response) {
                             <th><span data-lang="en">Include</span><span data-lang="zh">包含过滤</span></th>
                             <th><span data-lang="en">Exclude</span><span data-lang="zh">排除过滤</span></th>
                             <th><span data-lang="en">Interval</span><span data-lang="zh">间隔</span></th>
+                            <th><span data-lang="en">Download route</span><span data-lang="zh">下载路径</span></th>
                         </tr>
                     </thead>
                     <tbody id="providers-body"></tbody>
@@ -1408,7 +1409,14 @@ std::string page(Request &request, Response &response) {
                         provider.path || "-",
                         provider.filter || "-",
                         provider.exclude_filter || "-",
-                        provider.interval ? String(provider.interval) + text("s", " 秒") : "-"
+                        provider.interval === 0
+                            ? text("0s (automatic updates disabled)", "0 秒（已关闭自动更新）")
+                            : provider.interval
+                                ? String(provider.interval) + text("s", " 秒")
+                                : "-",
+                        provider.proxy_direct
+                            ? text("Forced DIRECT", "强制 DIRECT")
+                            : text("Mihomo routing", "按 Mihomo 路由")
                     ].forEach(function (value) {
                         var cell = document.createElement("td");
                         cell.textContent = value;

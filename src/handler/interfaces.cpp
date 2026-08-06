@@ -15,7 +15,6 @@
 #include <unordered_set>
 
 #include <inja.hpp>
-#include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 #include <yaml-cpp/yaml.h>
@@ -34,169 +33,11 @@
 #include "script/script_quickjs.h"
 #include "server/webserver.h"
 #include "settings.h"
-#include "handler/remote_source.h"
 #include "statistics.h"
 #include "sub_request_key.h"
 #include "upload.h"
 #include "webget.h"
 #include "utils/time_compat.h"
-
-static constexpr const char *kImplicitDefaultExternalConfig =
-    "https://gcore.jsdelivr.net/gh/Aethersailor/"
-    "Custom_OpenClash_Rules@refs/heads/main/cfg/Custom_Clash.ini";
-
-static void appendUniqueConfig(std::vector<std::string> &configs,
-                               std::unordered_set<std::string> &seen,
-                               const std::string &config) {
-  const remote_source::ParsedUrl parsed = remote_source::parse(config);
-  const std::string identity = parsed.resource.valid
-                                   ? "logical:" + parsed.resource.key()
-                                   : "url:" + config;
-  if (!config.empty() && seen.insert(identity).second)
-    configs.emplace_back(config);
-}
-
-static void markExternalConfigContentInvalid(FetchOutcome &outcome) {
-  outcome.success = false;
-  outcome.failure = FetchFailureCategory::ContentInvalid;
-  outcome.failure_reason = "content_invalid";
-  if (outcome.status_code == 0 || outcome.status_code == 200)
-    outcome.status_code = 422;
-}
-
-static bool validateGeneratedTargetOutput(const std::string &target,
-                                          const std::string &content) {
-  if (trimWhitespace(content, true, true).empty())
-    return false;
-  try {
-    if (target == "clash" || target == "clashr") {
-      YAML::Node yaml = YAML::Load(content);
-      return yaml.IsMap();
-    }
-    if (target == "surge" || target == "surfboard" || target == "mellow" ||
-        target == "quan" || target == "quanx" || target == "loon") {
-      INIReader ini;
-      ini.store_any_line = true;
-      return ini.parse(content) == 0;
-    }
-    if (target == "sssub" || target == "singbox") {
-      rapidjson::Document json;
-      json.Parse(content.data());
-      if (json.HasParseError())
-        return false;
-      return target == "sssub" ? json.IsArray() : json.IsObject();
-    }
-  } catch (...) {
-    return false;
-  }
-  return true;
-}
-
-static std::vector<std::string>
-buildExternalConfigFallbacks(const std::string &failedConfig,
-                             bool allowDefaultFallback,
-                             bool legacyRemoteFallback) {
-  std::vector<std::string> configs;
-  std::unordered_set<std::string> seen;
-  const remote_source::ParsedUrl parsed = remote_source::parse(failedConfig);
-  seen.insert(parsed.resource.valid ? "logical:" + parsed.resource.key()
-                                    : "url:" + failedConfig);
-  if (allowDefaultFallback && legacyRemoteFallback) {
-    const std::string defaultConfig = global.defaultExtConfig.empty()
-                                           ? kImplicitDefaultExternalConfig
-                                           : global.defaultExtConfig;
-    appendUniqueConfig(configs, seen, defaultConfig);
-  }
-  return configs;
-}
-
-static constexpr const char *kExternalDependencyFailureHeader =
-    "X-Subconverter-External-Dependency-Failure";
-
-static void markExternalDependencyFailure(Response &response,
-                                          bool request_rejected = false) {
-  response.headers[kExternalDependencyFailureHeader] =
-      request_rejected ? "request_rejected" : "1";
-}
-
-static std::string externalDependencyFailure(Response &response,
-                                             int status_code,
-                                             std::string body,
-                                             bool request_rejected = false) {
-  response.status_code = status_code;
-  response.headers["Cache-Control"] = "no-store";
-  response.headers["X-Subconverter-No-Retry"] = "1";
-  markExternalDependencyFailure(response, request_rejected);
-  return body;
-}
-
-static std::string externalConfigFailurePage(
-    bool user_provided, bool fallback_enabled,
-    FetchFailureCategory failure) {
-  std::string body =
-      "External configuration error / 外部配置错误\n\n";
-
-  if (user_provided) {
-    body += "The supplied config could not be loaded or used.\n"
-            "用户提供的 config 无法加载或使用。\n";
-  } else {
-    body += "No config parameter was supplied, and the configured default "
-            "external config could not be loaded or used.\n"
-            "请求未提供 config 参数，且服务端配置的默认外部配置无法加载或使用。\n";
-  }
-
-  switch (failure) {
-  case FetchFailureCategory::RequestRejected:
-    body += "Reason: the source was rejected by the security policy.\n"
-            "原因：该来源被安全策略拒绝。\n";
-    break;
-  case FetchFailureCategory::NotFound:
-    body += "Reason: the config source returned HTTP 404.\n"
-            "原因：config 来源返回 HTTP 404。\n";
-    break;
-  case FetchFailureCategory::ContentInvalid:
-    body += "Reason: the downloaded content was empty, malformed, or contained "
-            "no effective settings.\n"
-            "原因：下载内容为空、格式无效，或未包含任何有效设置。\n";
-    break;
-  case FetchFailureCategory::SourceUnavailable:
-    body += "Reason: the config source was unreachable or temporarily "
-            "unavailable.\n"
-            "原因：config 来源无法访问或暂时不可用。\n";
-    break;
-  case FetchFailureCategory::Internal:
-    body += "Reason: the config source could not be resolved safely.\n"
-            "原因：无法安全解析 config 来源。\n";
-    break;
-  case FetchFailureCategory::None:
-  default:
-    body += "Reason: the config did not produce usable settings.\n"
-            "原因：config 未产生可用设置。\n";
-    break;
-  }
-
-  if (user_provided) {
-    if (fallback_enabled) {
-      body += "The configured default fallback was also unable to recover the "
-              "request.\n"
-              "配置的默认回退也未能恢复该请求。\n";
-    } else {
-      body += "Default external-config fallback is disabled, so no replacement "
-              "config was used.\n"
-              "默认外部配置回退已关闭，因此未使用替代 config。\n";
-    }
-  }
-
-  body += "Check the config URL and content, then try again. Add explain=true "
-          "for structured diagnostics.\n"
-          "请检查 config 链接及内容后重试；可添加 explain=true 查看结构化诊断。";
-  return body;
-}
-
-static void clearInternalResponseHeaders(Response &response) {
-  response.headers.erase(kExternalDependencyFailureHeader);
-  response.headers.erase("X-Subconverter-No-Retry");
-}
 
 static string_icase_map buildSubscriptionRequestHeaders() {
   string_icase_map headers;
@@ -531,24 +372,12 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS) {
   std::vector<RulesetContent> rca;
   RulesetConfigs confs = INIBinding::from<RulesetConfig>::from_ini(vArray);
   refreshRulesets(confs, rca, FetchContext::PublicRequest);
-  bool invalid_ruleset = false;
   for (RulesetContent &x : rca) {
     std::string content = x.rule_content.get();
-    const RulesetValidationResult validation =
-        validateRulesetEntries(content, x.rule_type);
-    if (content.empty() || !validation.valid())
-      invalid_ruleset = true;
     output_content += convertRuleset(content, x.rule_type);
   }
 
-  for (RulesetContent &x : rca) {
-    if (invalid_ruleset)
-      discardRulesetFetchCache(x.fetch_state);
-    else
-      commitRulesetFetchCache(x.fetch_state);
-  }
-
-  if (invalid_ruleset || output_content.empty()) {
+  if (output_content.empty()) {
     *status_code = 400;
     return "Invalid request: no valid rules were found in the supplied "
            "ruleset source.\n"
@@ -699,11 +528,53 @@ bool checkExternalBase(const std::string &path, std::string &dest,
     dest = path;
     return true;
   }
-  if (isTrustedLocalResourcePath(path) && fileExist(path, false)) {
+  if (fileExist(path, true) && isTrustedLocalResourcePath(path)) {
     dest = path;
     return true;
   }
   return false;
+}
+
+static const std::string *selectedExternalBase(const ExternalConfig &extconf,
+                                               const std::string &target,
+                                               bool simple_subscription,
+                                               bool nodelist) {
+  if (nodelist)
+    return nullptr;
+  if (target == "sssub")
+    return &extconf.sssub_rule_base;
+  if (simple_subscription)
+    return nullptr;
+  if (target == "clash" || target == "clashr")
+    return &extconf.clash_rule_base;
+  if (target == "surge")
+    return &extconf.surge_rule_base;
+  if (target == "surfboard")
+    return &extconf.surfboard_rule_base;
+  if (target == "mellow")
+    return &extconf.mellow_rule_base;
+  if (target == "quan")
+    return &extconf.quan_rule_base;
+  if (target == "quanx")
+    return &extconf.quanx_rule_base;
+  if (target == "loon")
+    return &extconf.loon_rule_base;
+  if (target == "singbox")
+    return &extconf.singbox_rule_base;
+  return nullptr;
+}
+
+static bool validateSelectedExternalBase(const ExternalConfig &extconf,
+                                         const std::string &target,
+                                         bool simple_subscription,
+                                         bool nodelist,
+                                         FetchContext context) {
+  const std::string *base = selectedExternalBase(
+      extconf, target, simple_subscription, nodelist);
+  if (!base || base->empty())
+    return true;
+  std::string validated;
+  return checkExternalBase(*base, validated, context);
 }
 
 static bool hasEffectiveExternalConfig(const ExternalConfig &extconf,
@@ -744,10 +615,7 @@ static bool fetchExternalRuleSources(const string_array &sources,
                                      const std::string &field_name,
                                      FetchContext context,
                                      string_array &destination,
-                                     std::string &error,
-                                     bool *request_rejected = nullptr) {
-  if (request_rejected)
-    *request_rejected = false;
+                                     std::string &error) {
   ProxyPolicy proxy = parseProxy(global.proxyRuleset);
   string_icase_map request_headers = {
       {"Cache-Control", "no-cache, no-store, max-age=0"},
@@ -769,14 +637,6 @@ static bool fetchExternalRuleSources(const string_array &sources,
       return false;
     }
 
-    if (!isFetchUrlAllowed(sources[i], context)) {
-      if (request_rejected)
-        *request_rejected = true;
-      error = "External rule source was rejected by the request policy.\n"
-              "外部规则来源被请求安全策略拒绝。";
-      return false;
-    }
-
     int fetch_status = 0;
     std::string content;
     FetchArgument argument{HTTP_GET,
@@ -793,13 +653,9 @@ static bool fetchExternalRuleSources(const string_array &sources,
     if (fetch_status < 200 || fetch_status >= 300 || content.empty()) {
       writeLog(0,
                "外部规则来源 " + source_identifier +
-                   " 拉取失败、HTTP 状态异常或内容为空，已拒绝继续。",
+                   " 拉取失败、HTTP 状态异常或内容为空，已跳过。",
                LOG_LEVEL_WARNING);
-      error = "External rule source could not be loaded.";
-      if (request_rejected &&
-          (fetch_status == 401 || fetch_status == 403))
-        *request_rejected = true;
-      return false;
+      continue;
     }
 
     ExternalRuleParseResult parsed =
@@ -848,12 +704,25 @@ inline std::string generateProviderHashFromDecodedUrl(
 }
 
 struct TaggedLink {
+  enum class Error {
+    None,
+    InvalidInterval,
+    DuplicateInterval,
+    InvalidProxyDirect,
+    DuplicateProxyDirect,
+  };
+
   std::string tag;
   std::string provider;
   std::string link;
+  int interval = 0;
+  bool proxy_direct = kDefaultProxyProviderDirect;
   bool has_tag = false;
   bool has_provider = false;
+  bool has_interval = false;
+  bool has_proxy_direct = false;
   bool link_decoded = false;
+  Error error = Error::None;
 };
 
 static bool extractLinkPrefix(const std::string &input,
@@ -917,7 +786,54 @@ static bool parseLinkPrefixes(const std::string &input, TaggedLink &result) {
       remainder = next;
       continue;
     }
+    if (extractLinkPrefix(remainder, "interval:", value, next,
+                          saw_bracketed)) {
+      parsed = true;
+      if (result.has_interval) {
+        result.error = TaggedLink::Error::DuplicateInterval;
+        return true;
+      }
+      if (!parseProxyProviderInterval(value, result.interval)) {
+        result.error = TaggedLink::Error::InvalidInterval;
+        return true;
+      }
+      result.has_interval = true;
+      remainder = next;
+      continue;
+    }
+    if (extractLinkPrefix(remainder, "proxy_direct:", value, next,
+                          saw_bracketed)) {
+      parsed = true;
+      if (result.has_proxy_direct) {
+        result.error = TaggedLink::Error::DuplicateProxyDirect;
+        return true;
+      }
+      if (!parseProxyProviderDirect(value, result.proxy_direct)) {
+        result.error = TaggedLink::Error::InvalidProxyDirect;
+        return true;
+      }
+      result.has_proxy_direct = true;
+      remainder = next;
+      continue;
+    }
     break;
+  }
+
+  std::string lower_remainder =
+      toLower(trimWhitespace(remainder, true, true));
+  const bool starts_interval = startsWith(lower_remainder, "interval:") ||
+                               startsWith(lower_remainder, "<interval:");
+  const bool starts_proxy_direct =
+      startsWith(lower_remainder, "proxy_direct:") ||
+      startsWith(lower_remainder, "<proxy_direct:");
+  if (starts_interval && lower_remainder.find("%2c") == std::string::npos) {
+    result.error = TaggedLink::Error::InvalidInterval;
+    return true;
+  }
+  if (starts_proxy_direct &&
+      lower_remainder.find("%2c") == std::string::npos) {
+    result.error = TaggedLink::Error::InvalidProxyDirect;
+    return true;
   }
 
   if (!parsed)
@@ -933,12 +849,22 @@ static bool parseLinkPrefixes(const std::string &input, TaggedLink &result) {
 static bool looksLikeEncodedLinkPrefix(const std::string &input) {
   std::string lower = toLower(input);
   return startsWith(lower, "tag%3a") || startsWith(lower, "provider%3a") ||
+         startsWith(lower, "interval%3a") ||
+         startsWith(lower, "proxy_direct%3a") ||
          startsWith(lower, "%3ctag%3a") ||
          startsWith(lower, "%3cprovider%3a") || startsWith(lower, "%3ctag:") ||
+         startsWith(lower, "%3cinterval%3a") ||
+         startsWith(lower, "%3cproxy_direct%3a") ||
          startsWith(lower, "%3cprovider:") ||
+         startsWith(lower, "%3cinterval:") ||
+         startsWith(lower, "%3cproxy_direct:") ||
          (startsWith(lower, "tag:") &&
           lower.find("%2c") != std::string::npos) ||
          (startsWith(lower, "provider:") &&
+          lower.find("%2c") != std::string::npos) ||
+         (startsWith(lower, "interval:") &&
+          lower.find("%2c") != std::string::npos) ||
+         (startsWith(lower, "proxy_direct:") &&
           lower.find("%2c") != std::string::npos);
 }
 
@@ -957,6 +883,53 @@ static TaggedLink parseTaggedLink(const std::string &input) {
   }
   result.link = value;
   return result;
+}
+
+static std::string providerLinkPrefixError(
+    size_t item_index, TaggedLink::Error error) {
+  const std::string item = std::to_string(item_index + 1);
+  if (error == TaggedLink::Error::DuplicateInterval) {
+    return "Invalid request: interval: is repeated for URL item #" + item +
+           ".\n"
+           "无效请求：第 " + item +
+           " 个 url 项重复设置了 interval: 前缀。";
+  }
+  if (error == TaggedLink::Error::InvalidInterval) {
+    return "Invalid request: interval: for URL item #" + item +
+           " must be a decimal integer from 0 to 2147483647.\n"
+           "无效请求：第 " + item +
+           " 个 url 项的 interval: 必须是 0 到 2147483647 之间的十进制整数。";
+  }
+  if (error == TaggedLink::Error::DuplicateProxyDirect) {
+    return "Invalid request: proxy_direct: is repeated for URL item #" + item +
+           ".\n"
+           "无效请求：第 " + item +
+           " 个 url 项重复设置了 proxy_direct: 前缀。";
+  }
+  return "Invalid request: proxy_direct: for URL item #" + item +
+         " must be true, false, 1, or 0.\n"
+         "无效请求：第 " + item +
+         " 个 url 项的 proxy_direct: 必须是 true、false、1 或 0。";
+}
+
+static std::string providerIntervalScopeError(size_t item_index) {
+  const std::string item = std::to_string(item_index + 1);
+  return "Invalid request: interval: for URL item #" + item +
+         " is only valid for subscription links that generate Clash/ClashR "
+         "proxy-providers.\n"
+         "无效请求：第 " + item +
+         " 个 url 项的 interval: 仅适用于会生成 Clash/ClashR "
+         "proxy-provider 的订阅链接。";
+}
+
+static std::string providerDirectScopeError(size_t item_index) {
+  const std::string item = std::to_string(item_index + 1);
+  return "Invalid request: proxy_direct: for URL item #" + item +
+         " is only valid for subscription links that generate Clash/ClashR "
+         "proxy-providers.\n"
+         "无效请求：第 " + item +
+         " 个 url 项的 proxy_direct: 仅适用于会生成 Clash/ClashR "
+         "proxy-provider 的订阅链接。";
 }
 
 static constexpr size_t kProviderNameMaxLen = 64;
@@ -1095,6 +1068,7 @@ struct SubExplainProvider {
   std::string exclude_filter;
   int group_id = 0;
   uint32_t interval = 0;
+  bool proxy_direct = kDefaultProxyProviderDirect;
 };
 
 struct SubExplainParameter {
@@ -1128,14 +1102,6 @@ struct SubExplainReport {
   bool external_config_provided = false;
   bool external_config_loaded = false;
   bool fallback_config_used = false;
-  bool external_cocr_rewrite_used = false;
-  bool external_raw_to_jsdelivr_used = false;
-  std::string external_effective_source;
-  bool external_fresh_cache_used = false;
-  bool external_stale_cache_used = false;
-  std::string external_logical_resource;
-  std::string external_failure_reason;
-  std::vector<FetchAttempt> external_attempts;
   bool rule_generator_enabled = false;
   bool expand_rulesets = false;
   bool proxy_provider_mode = false;
@@ -1292,32 +1258,6 @@ static std::string serializeSubExplainReport(const SubExplainReport &report,
   writer.Bool(report.external_config_loaded);
   writer.Key("fallback_used");
   writer.Bool(report.fallback_config_used);
-  writer.Key("cocr_rewrite_used");
-  writer.Bool(report.external_cocr_rewrite_used);
-  writer.Key("raw_to_jsdelivr_used");
-  writer.Bool(report.external_raw_to_jsdelivr_used);
-  writeJsonString(writer, "effective_source", report.external_effective_source);
-  writer.Key("fresh_cache_used");
-  writer.Bool(report.external_fresh_cache_used);
-  writer.Key("stale_cache_used");
-  writer.Bool(report.external_stale_cache_used);
-  writeJsonString(writer, "logical_resource", report.external_logical_resource);
-  writeJsonString(writer, "failure_reason", report.external_failure_reason);
-  writer.Key("attempts");
-  writer.StartArray();
-  for (const FetchAttempt &attempt : report.external_attempts) {
-    writer.StartObject();
-    writeJsonString(writer, "source", attempt.source_kind);
-    writeJsonString(writer, "url", attempt.effective_url);
-    writer.Key("status_code");
-    writer.Int(attempt.status_code);
-    writer.Key("curl_code");
-    writer.Int(attempt.curl_code);
-    writer.Key("failure");
-    writer.Int(static_cast<int>(attempt.failure));
-    writer.EndObject();
-  }
-  writer.EndArray();
   writer.EndObject();
 
   writer.Key("parameters");
@@ -1386,6 +1326,10 @@ static std::string serializeSubExplainReport(const SubExplainReport &report,
     writer.Int(provider.group_id);
     writer.Key("interval");
     writer.Uint(provider.interval);
+    writer.Key("proxy_direct");
+    writer.Bool(provider.proxy_direct);
+    writer.Key("proxy_field_emitted");
+    writer.Bool(provider.proxy_direct);
     writer.EndObject();
   }
   writer.EndArray();
@@ -1564,43 +1508,6 @@ static void storeCachedSubResponse(const std::string &key,
       result, now + std::chrono::seconds(ttl)};
 }
 
-static bool shouldUseDefaultDependencyFallback(const Request &request,
-                                               const Response &response) {
-  if (request.internal_default_config || request.default_config_already_used ||
-      !global.fallbackToDefaultExternalConfig ||
-      !response.headers.contains(kExternalDependencyFailureHeader))
-    return false;
-  if (response.headers.at(kExternalDependencyFailureHeader) ==
-      "request_rejected")
-    return false;
-
-  const auto config_iter = request.argument.find("config");
-  if (config_iter == request.argument.end() || config_iter->second.empty())
-    return false;
-
-  const std::string default_config =
-      global.defaultExtConfig.empty() ? kImplicitDefaultExternalConfig
-                                      : global.defaultExtConfig;
-  if (config_iter->second == default_config)
-    return false;
-
-  const remote_source::ParsedUrl requested =
-      remote_source::parse(config_iter->second);
-  const remote_source::ParsedUrl fallback =
-      remote_source::parse(default_config);
-  return !(requested.resource.valid && fallback.resource.valid &&
-           requested.resource.key() == fallback.resource.key());
-}
-
-static Request makeDefaultDependencyFallbackRequest(const Request &original) {
-  Request fallback = original;
-  fallback.internal_default_config = true;
-  fallback.argument.erase("config");
-  if (!global.defaultExtConfig.empty())
-    fallback.argument.emplace("config", global.defaultExtConfig);
-  return fallback;
-}
-
 static std::string runSubconverterImplWithRetry(const Request &original,
                                                 Response &response,
                                                 RuleConversionStats *stats) {
@@ -1609,37 +1516,7 @@ static std::string runSubconverterImplWithRetry(const Request &original,
   RuleConversionStats first_stats;
   std::string body = subconverter_impl(first_request, first_response,
                                        stats ? &first_stats : nullptr);
-
-  if (shouldUseDefaultDependencyFallback(first_request, first_response)) {
-    writeLog(0,
-             "用户模板依赖加载失败，正在尝试显式允许的默认模板。",
-             LOG_LEVEL_WARNING);
-    Request fallback_request =
-        makeDefaultDependencyFallbackRequest(original);
-    Response fallback_response;
-    RuleConversionStats fallback_stats;
-    std::string fallback_body =
-        subconverter_impl(fallback_request, fallback_response,
-                          stats ? &fallback_stats : nullptr);
-    clearInternalResponseHeaders(fallback_response);
-    if (fallback_response.status_code < 500) {
-      if (stats)
-        *stats = fallback_stats;
-      response = fallback_response;
-      return fallback_body;
-    }
-
-    // The default template was also unsuccessful. Preserve that final
-    // outcome rather than retrying the same dependency chain again.
-    if (stats)
-      *stats = fallback_stats;
-    response = fallback_response;
-    return fallback_body;
-  }
-
-  if (first_response.status_code < 500 || !global.coalesceRetryOn5xx ||
-      first_response.headers.contains("X-Subconverter-No-Retry")) {
-    clearInternalResponseHeaders(first_response);
+  if (first_response.status_code < 500 || !global.coalesceRetryOn5xx) {
     if (stats)
       *stats = first_stats;
     response = first_response;
@@ -1655,7 +1532,6 @@ static std::string runSubconverterImplWithRetry(const Request &original,
   std::string retry_body = subconverter_impl(retry_request, retry_response,
                                              stats ? &retry_stats : nullptr);
   if (retry_response.status_code < 500) {
-    clearInternalResponseHeaders(retry_response);
     if (stats)
       *stats = retry_stats;
     response = retry_response;
@@ -1664,7 +1540,6 @@ static std::string runSubconverterImplWithRetry(const Request &original,
 
   if (stats)
     *stats = first_stats;
-  clearInternalResponseHeaders(first_response);
   response = first_response;
   return body;
 }
@@ -1701,8 +1576,8 @@ static std::string subconverterEntry(Request &request, Response &response,
 
   if (!shouldCoalesceSubRequest(request)) {
     RuleConversionStats stats;
-    std::string body = runSubconverterImplWithRetry(
-        request, response, track ? &stats : nullptr);
+    std::string body =
+        subconverter_impl(request, response, track ? &stats : nullptr);
     body = finalizeSubResponse(request, response, std::move(body), age);
     recordTrackedSubRequest(track, request, response, stats.rules);
     return body;
@@ -1713,8 +1588,8 @@ static std::string subconverterEntry(Request &request, Response &response,
                          global.managedConfigPrefix);
   if (key.empty()) {
     RuleConversionStats stats;
-    std::string body = runSubconverterImplWithRetry(
-        request, response, track ? &stats : nullptr);
+    std::string body =
+        subconverter_impl(request, response, track ? &stats : nullptr);
     body = finalizeSubResponse(request, response, std::move(body), age);
     recordTrackedSubRequest(track, request, response, stats.rules);
     return body;
@@ -1775,8 +1650,7 @@ static std::string subconverterEntry(Request &request, Response &response,
       std::lock_guard<std::mutex> lock(g_sub_inflight_mutex);
       g_sub_inflight.erase(key);
     }
-    if (!age.requested && result->status_code >= 200 &&
-        result->status_code < 300)
+    if (!age.requested)
       storeCachedSubResponse(key, result);
     call->cv.notify_all();
     recordTrackedSubRequest(track, request, response,
@@ -1884,11 +1758,7 @@ static std::string subconverter_impl(Request &request, Response &response,
               argUploadPath = getUrlArg(argument, "upload_path");
   std::string argIncludeRemark = getUrlArg(argument, "include"),
               argExcludeRemark = getUrlArg(argument, "exclude");
-  std::string argCustomGroups =
-                  urlSafeBase64Decode(getUrlArg(argument, "groups")),
-              argCustomRulesets =
-                  urlSafeBase64Decode(getUrlArg(argument, "ruleset")),
-              argExternalConfig = getUrlArg(argument, "config");
+  std::string argExternalConfig = getUrlArg(argument, "config");
   std::string argDeviceID = getUrlArg(argument, "dev_id"),
               argFilename = getUrlArg(argument, "filename"),
               argUpdateInterval = getUrlArg(argument, "interval"),
@@ -1960,29 +1830,6 @@ static std::string subconverter_impl(Request &request, Response &response,
   std::string lQuanBase = global.quanBase, lQuanXBase = global.quanXBase,
               lLoonBase = global.loonBase, lSSSubBase = global.SSSubBase;
   std::string lSingBoxBase = global.singBoxBase;
-  FetchContext baseFetchContext = FetchContext::TrustedConfig;
-
-  struct ExternalBaseState {
-    bool invalid = false;
-    bool request_rejected = false;
-  };
-  ExternalBaseState clash_base_state, surge_base_state, surfboard_base_state,
-      mellow_base_state, quan_base_state, quanx_base_state, loon_base_state,
-      sssub_base_state, singbox_base_state;
-  auto applyExternalBase = [&](const std::string &path, std::string &dest,
-                               FetchContext context,
-                               ExternalBaseState &state) {
-    if (path.empty())
-      return;
-    if (checkExternalBase(path, dest, context)) {
-      baseFetchContext = context;
-      return;
-    }
-    state.invalid = true;
-    state.request_rejected =
-        isPublicFetchRestricted(context) &&
-        (!isLink(path) || !isFetchUrlAllowed(path, context));
-  };
 
   /// validate urls
   argEnableInsert.define(global.enableInsert);
@@ -2071,7 +1918,8 @@ static std::string subconverter_impl(Request &request, Response &response,
   ext.clash_new_field_name = argClashNewField.get(global.clashUseNewField);
   ext.clash_script = argGenClashScript.get();
   ext.clash_classical_ruleset = argGenClassicalRuleProvider.get();
-  ext.provider_proxy_direct = argProviderProxyDirect.get(true);
+  ext.provider_proxy_direct =
+      argProviderProxyDirect.get(global.proxyProviderDirect);
   // 无论 expand 取何值，均强制使用 Mihomo 新字段名（proxy-groups / rules）
   // 避免因全局配置为旧字段名而导致 Mihomo 无法识别
   ext.clash_new_field_name = true;
@@ -2093,280 +1941,154 @@ static std::string subconverter_impl(Request &request, Response &response,
   explain.managed_config = !ext.managed_config_prefix.empty();
 
   /// load external configuration
-  const bool internalDefaultConfig = request.internal_default_config;
-  bool userProvidedExternalConfig = !argExternalConfig.empty() &&
-                                    !internalDefaultConfig;
-  FetchContext externalConfigContext =
-      userProvidedExternalConfig ? FetchContext::PublicRequest
-                                 : FetchContext::TrustedConfig;
+  bool userProvidedExternalConfig = !argExternalConfig.empty();
   FetchContext rulesetFetchContext = FetchContext::TrustedConfig;
+  FetchContext baseFetchContext = FetchContext::TrustedConfig;
   bool configLoadSuccess = false;
-  FetchFailureCategory externalConfigFailure = FetchFailureCategory::None;
   string_array rulePrependSources, ruleAppendSources;
   FetchContext externalRuleFetchContext = FetchContext::TrustedConfig;
   string_map tpl_args_base = tpl_args.local_vars;
-  explain.external_config_provided = userProvidedExternalConfig ||
-                                     internalDefaultConfig;
-  explain.fallback_config_used = internalDefaultConfig;
+  explain.external_config_provided = userProvidedExternalConfig;
 
-  if (argExternalConfig.empty()) {
-    argExternalConfig = global.defaultExtConfig.empty()
-                            ? kImplicitDefaultExternalConfig
-                            : global.defaultExtConfig;
+  struct ExternalConfigCandidate {
+    std::string path;
+    FetchContext context;
+    bool fallback = false;
+  };
+  std::vector<ExternalConfigCandidate> config_candidates;
+  if (userProvidedExternalConfig) {
+    config_candidates.push_back(
+        {argExternalConfig, FetchContext::PublicRequest, false});
+    if (global.fallbackToDefaultExternalConfig &&
+        !global.defaultExtConfig.empty() &&
+        global.defaultExtConfig != argExternalConfig) {
+      config_candidates.push_back(
+          {global.defaultExtConfig, FetchContext::TrustedConfig, true});
+    }
+  } else if (!global.defaultExtConfig.empty()) {
+    config_candidates.push_back(
+        {global.defaultExtConfig, FetchContext::TrustedConfig, false});
   }
-  const bool externalConfigAttempted = !argExternalConfig.empty();
 
-  auto recordExternalFetch = [&](const FetchOutcome &outcome) {
-    explain.external_cocr_rewrite_used |= outcome.cocr_rewrite_used;
-    explain.external_raw_to_jsdelivr_used |= outcome.raw_to_jsdelivr_used;
-    explain.external_fresh_cache_used |= outcome.fresh_cache_used;
-    explain.external_stale_cache_used |= outcome.stale_cache_used;
-    if (!outcome.logical_resource.empty())
-      explain.external_logical_resource = outcome.logical_resource;
-    if (!outcome.effective_source.empty())
-      explain.external_effective_source = outcome.effective_source;
-    if (!outcome.failure_reason.empty())
-      explain.external_failure_reason = outcome.failure_reason;
-    explain.external_attempts.insert(explain.external_attempts.end(),
-                                     outcome.attempts.begin(),
-                                     outcome.attempts.end());
+  auto loadStatusName = [](ExternalConfigLoadStatus status) {
+    switch (status) {
+    case ExternalConfigLoadStatus::Success:
+      return "success";
+    case ExternalConfigLoadStatus::FetchFailed:
+      return "fetch_failed";
+    case ExternalConfigLoadStatus::RenderFailed:
+      return "render_failed";
+    case ExternalConfigLoadStatus::ParseFailed:
+      return "parse_failed";
+    case ExternalConfigLoadStatus::ImportFailed:
+      return "import_failed";
+    case ExternalConfigLoadStatus::ResourceLimitExceeded:
+      return "resource_limit_exceeded";
+    }
+    return "unknown";
   };
 
-  if (!argExternalConfig.empty()) {
-    // std::cerr<<"External configuration file provided. Loading...\n";
-    writeLog(0, "已提供外部配置文件，正在加载...",
-             LOG_LEVEL_INFO);
+  auto applyExternalConfig = [&](const ExternalConfig &extconf,
+                                 FetchContext context) {
+    rulePrependSources = extconf.rule_prepend_sources;
+    ruleAppendSources = extconf.rule_append_sources;
+    externalRuleFetchContext = extconf.rule_sources_context;
+    if (!ext.nodelist) {
+      if (checkExternalBase(extconf.sssub_rule_base, lSSSubBase, context))
+        baseFetchContext = context;
+      if (!lSimpleSubscription) {
+        if (checkExternalBase(extconf.clash_rule_base, lClashBase, context))
+          baseFetchContext = context;
+        if (checkExternalBase(extconf.surge_rule_base, lSurgeBase, context))
+          baseFetchContext = context;
+        if (checkExternalBase(extconf.surfboard_rule_base, lSurfboardBase,
+                              context))
+          baseFetchContext = context;
+        if (checkExternalBase(extconf.mellow_rule_base, lMellowBase, context))
+          baseFetchContext = context;
+        if (checkExternalBase(extconf.quan_rule_base, lQuanBase, context))
+          baseFetchContext = context;
+        if (checkExternalBase(extconf.quanx_rule_base, lQuanXBase, context))
+          baseFetchContext = context;
+        if (checkExternalBase(extconf.loon_rule_base, lLoonBase, context))
+          baseFetchContext = context;
+        if (checkExternalBase(extconf.singbox_rule_base, lSingBoxBase,
+                              context))
+          baseFetchContext = context;
+
+        if (!extconf.surge_ruleset.empty()) {
+          lCustomRulesets = extconf.surge_ruleset;
+          rulesetFetchContext = context;
+        }
+        if (!extconf.custom_proxy_group.empty())
+          lCustomProxyGroups = extconf.custom_proxy_group;
+        ext.enable_rule_generator = extconf.enable_rule_generator;
+        ext.overwrite_original_rules = extconf.overwrite_original_rules;
+      }
+    }
+    if (!extconf.rename.empty()) {
+      ext.rename_array = extconf.rename;
+      ext.rename_for_providers = true;
+    }
+    if (!extconf.emoji.empty())
+      ext.emoji_array = extconf.emoji;
+    if (!extconf.include.empty())
+      lIncludeRemarks = extconf.include;
+    if (!extconf.exclude.empty())
+      lExcludeRemarks = extconf.exclude;
+    argAddEmoji.define(extconf.add_emoji);
+    argRemoveEmoji.define(extconf.remove_old_emoji);
+  };
+
+  for (const ExternalConfigCandidate &candidate : config_candidates) {
+    tpl_args.local_vars = tpl_args_base;
+    writeLog(0, candidate.fallback
+                    ? "用户外部配置失败，显式尝试默认外部配置：" +
+                          candidate.path
+                    : "正在加载外部配置：" + candidate.path,
+             candidate.fallback ? LOG_LEVEL_WARNING : LOG_LEVEL_INFO);
+
     ExternalConfig extconf;
     extconf.tpl_args = &tpl_args;
-    FetchOutcome primary_outcome;
-    int load_result =
-        loadExternalConfigWithOutcome(argExternalConfig, extconf,
-                                      externalConfigContext,
-                                      &primary_outcome);
-    externalConfigFailure = primary_outcome.failure;
-    const bool primary_effective =
-        load_result == 0 &&
+    ExternalConfigLoadResult loaded =
+        loadExternalConfig(candidate.path, extconf, candidate.context);
+    bool effective =
+        loaded.ok() &&
         hasEffectiveExternalConfig(extconf, tpl_args, tpl_args_base);
-    if (load_result == 0 && !primary_effective) {
-      markExternalConfigContentInvalid(primary_outcome);
-      externalConfigFailure = primary_outcome.failure;
-    }
-    recordExternalFetch(primary_outcome);
-    if (primary_effective) {
-      commitFetchOutcomeCache(primary_outcome);
+    bool selected_base_valid =
+        effective && validateSelectedExternalBase(
+                         extconf, argTarget, lSimpleSubscription, ext.nodelist,
+                         candidate.context);
+    if (loaded.ok() && effective && selected_base_valid) {
+      applyExternalConfig(extconf, candidate.context);
       configLoadSuccess = true;
       explain.external_config_loaded = true;
-      rulePrependSources = extconf.rule_prepend_sources;
-      ruleAppendSources = extconf.rule_append_sources;
-      externalRuleFetchContext = extconf.rule_sources_context;
-      if (!ext.nodelist) {
-        applyExternalBase(extconf.sssub_rule_base, lSSSubBase,
-                          externalConfigContext, sssub_base_state);
-        if (!lSimpleSubscription) {
-          applyExternalBase(extconf.clash_rule_base, lClashBase,
-                            externalConfigContext, clash_base_state);
-          applyExternalBase(extconf.surge_rule_base, lSurgeBase,
-                            externalConfigContext, surge_base_state);
-          applyExternalBase(extconf.surfboard_rule_base, lSurfboardBase,
-                            externalConfigContext, surfboard_base_state);
-          applyExternalBase(extconf.mellow_rule_base, lMellowBase,
-                            externalConfigContext, mellow_base_state);
-          applyExternalBase(extconf.quan_rule_base, lQuanBase,
-                            externalConfigContext, quan_base_state);
-          applyExternalBase(extconf.quanx_rule_base, lQuanXBase,
-                            externalConfigContext, quanx_base_state);
-          applyExternalBase(extconf.loon_rule_base, lLoonBase,
-                            externalConfigContext, loon_base_state);
-          applyExternalBase(extconf.singbox_rule_base, lSingBoxBase,
-                            externalConfigContext, singbox_base_state);
-
-          if (!extconf.surge_ruleset.empty()) {
-            lCustomRulesets = extconf.surge_ruleset;
-            rulesetFetchContext = externalConfigContext;
-          }
-          if (!extconf.custom_proxy_group.empty())
-            lCustomProxyGroups = extconf.custom_proxy_group;
-          ext.enable_rule_generator = extconf.enable_rule_generator;
-          ext.overwrite_original_rules = extconf.overwrite_original_rules;
-        }
-      }
-      if (!extconf.rename.empty()) {
-        ext.rename_array = extconf.rename;
-        ext.rename_for_providers = true;
-      }
-      if (!extconf.emoji.empty())
-        ext.emoji_array = extconf.emoji;
-      if (!extconf.include.empty())
-        lIncludeRemarks = extconf.include;
-      if (!extconf.exclude.empty())
-        lExcludeRemarks = extconf.exclude;
-      argAddEmoji.define(extconf.add_emoji);
-      argRemoveEmoji.define(extconf.remove_old_emoji);
-    } else {
-      discardFetchOutcomeCache(primary_outcome);
-      tpl_args.local_vars = tpl_args_base;
-      if (load_result == 0) {
-        writeLog(
-            0,
-            "外部配置已加载，但未包含有效设置，按加载失败处理。",
-            LOG_LEVEL_WARNING);
-      }
+      explain.fallback_config_used = candidate.fallback;
+      break;
     }
 
-    const std::string effectiveDefaultConfig =
-        global.defaultExtConfig.empty() ? kImplicitDefaultExternalConfig
-                                        : global.defaultExtConfig;
-    bool legacyRemoteFallback =
-        userProvidedExternalConfig && argExternalConfig != effectiveDefaultConfig;
-    std::vector<std::string> fallbackConfigs =
-        buildExternalConfigFallbacks(
-            argExternalConfig, global.fallbackToDefaultExternalConfig,
-            legacyRemoteFallback);
-
-    if (!configLoadSuccess && !fallbackConfigs.empty() &&
-        primary_outcome.failure != FetchFailureCategory::RequestRejected) {
-      writeLog(
-          0, "加载用户提供的配置失败，正在尝试显式允许的默认配置...",
-          LOG_LEVEL_WARNING);
-
-      // The default config and all of its dependencies form one resolution
-      // attempt. Remember that attempt on the mutable request so the outer
-      // retry layer cannot start the same chain again after a dependency
-      // failure.
-      request.default_config_already_used = true;
-
-      for (std::string fallbackConfig : fallbackConfigs) {
-        writeLog(0, "正在尝试加载显式允许的默认配置。", LOG_LEVEL_INFO);
-
-        tpl_args.local_vars = tpl_args_base;
-        ExternalConfig extconf;
-        extconf.tpl_args = &tpl_args;
-        FetchOutcome fallback_outcome;
-        int fallback_result =
-            loadExternalConfigWithOutcome(fallbackConfig, extconf,
-                                          FetchContext::TrustedConfig,
-                                          &fallback_outcome);
-        externalConfigFailure = fallback_outcome.failure;
-        const bool fallback_effective =
-            fallback_result == 0 &&
-            hasEffectiveExternalConfig(extconf, tpl_args, tpl_args_base);
-        if (fallback_result == 0 && !fallback_effective) {
-          markExternalConfigContentInvalid(fallback_outcome);
-          externalConfigFailure = fallback_outcome.failure;
-        }
-        recordExternalFetch(fallback_outcome);
-        if (fallback_effective) {
-          commitFetchOutcomeCache(fallback_outcome);
-          writeLog(0, "已成功加载显式允许的默认配置。", LOG_LEVEL_INFO);
-          configLoadSuccess = true;
-          explain.external_config_loaded = true;
-          explain.fallback_config_used = true;
-          rulePrependSources = extconf.rule_prepend_sources;
-          ruleAppendSources = extconf.rule_append_sources;
-          externalRuleFetchContext = extconf.rule_sources_context;
-          if (!ext.nodelist) {
-            applyExternalBase(extconf.sssub_rule_base, lSSSubBase,
-                              FetchContext::TrustedConfig, sssub_base_state);
-            if (!lSimpleSubscription) {
-              applyExternalBase(extconf.clash_rule_base, lClashBase,
-                                FetchContext::TrustedConfig, clash_base_state);
-              applyExternalBase(extconf.surge_rule_base, lSurgeBase,
-                                FetchContext::TrustedConfig, surge_base_state);
-              applyExternalBase(extconf.surfboard_rule_base, lSurfboardBase,
-                                FetchContext::TrustedConfig,
-                                surfboard_base_state);
-              applyExternalBase(extconf.mellow_rule_base, lMellowBase,
-                                FetchContext::TrustedConfig, mellow_base_state);
-              applyExternalBase(extconf.quan_rule_base, lQuanBase,
-                                FetchContext::TrustedConfig, quan_base_state);
-              applyExternalBase(extconf.quanx_rule_base, lQuanXBase,
-                                FetchContext::TrustedConfig, quanx_base_state);
-              applyExternalBase(extconf.loon_rule_base, lLoonBase,
-                                FetchContext::TrustedConfig, loon_base_state);
-              applyExternalBase(extconf.singbox_rule_base, lSingBoxBase,
-                                FetchContext::TrustedConfig, singbox_base_state);
-
-              if (!extconf.surge_ruleset.empty())
-                lCustomRulesets = extconf.surge_ruleset;
-              if (!extconf.custom_proxy_group.empty())
-                lCustomProxyGroups = extconf.custom_proxy_group;
-              ext.enable_rule_generator = extconf.enable_rule_generator;
-              ext.overwrite_original_rules = extconf.overwrite_original_rules;
-            }
-          }
-          if (!extconf.rename.empty()) {
-            ext.rename_array = extconf.rename;
-            ext.rename_for_providers = true;
-          }
-          if (!extconf.emoji.empty())
-            ext.emoji_array = extconf.emoji;
-          if (!extconf.include.empty())
-            lIncludeRemarks = extconf.include;
-          if (!extconf.exclude.empty())
-            lExcludeRemarks = extconf.exclude;
-          argAddEmoji.define(extconf.add_emoji);
-          argRemoveEmoji.define(extconf.remove_old_emoji);
-          break; // Success, stop trying other configs
-        } else {
-          discardFetchOutcomeCache(fallback_outcome);
-          tpl_args.local_vars = tpl_args_base;
-          if (fallback_result == 0) {
-            writeLog(
-                0,
-                "默认配置已加载，但未发现有效设置，跳过。",
-                LOG_LEVEL_WARNING);
-          } else {
-            writeLog(0, "加载显式允许的默认配置失败。", LOG_LEVEL_WARNING);
-          }
-        }
-      }
-
-      if (!configLoadSuccess) {
-        writeLog(0,
-                 "显式允许的默认配置加载失败。",
-                 LOG_LEVEL_ERROR);
-      }
-    }
-  }
-
-  if (!configLoadSuccess && externalConfigAttempted) {
-    const bool request_rejected =
-        externalConfigFailure == FetchFailureCategory::RequestRejected;
-    writeLog(0, "外部配置最终加载失败，拒绝应用请求级全局回退。",
-             LOG_LEVEL_ERROR);
-    explain.effective_config_source = userProvidedExternalConfig
-                                           ? "request_failed"
-                                           : "default_failed";
-    response.content_type = "text/plain; charset=utf-8";
-    const std::string error = externalDependencyFailure(
-        response, request_rejected ? 403 : 400,
-        externalConfigFailurePage(userProvidedExternalConfig,
-                                  global.fallbackToDefaultExternalConfig,
-                                  externalConfigFailure),
-        request_rejected);
-    if (explainMode) {
-      response.content_type = "application/json; charset=utf-8";
-      return serializeSubExplainReport(explain, response);
-    }
-    return error;
+    tpl_args.local_vars = tpl_args_base;
+    std::string reason = !loaded.ok()
+                             ? loadStatusName(loaded.status)
+                             : (!effective ? "no_effective_settings"
+                                           : "selected_base_invalid");
+    writeLog(0, "外部配置不可用，原因：" + reason + "，来源：" +
+                    candidate.path,
+             LOG_LEVEL_WARNING);
   }
 
   if (!configLoadSuccess) {
-    if (!lSimpleSubscription) {
-      /// loading custom groups
-      if (!argCustomGroups.empty() && !ext.nodelist) {
-        string_array vArray = split(argCustomGroups, "@");
-        lCustomProxyGroups =
-            INIBinding::from<ProxyGroupConfig>::from_ini(vArray);
-      }
-
-      /// loading custom rulesets
-      if (!argCustomRulesets.empty() && !ext.nodelist) {
-        string_array vArray = split(argCustomRulesets, "@");
-        lCustomRulesets = INIBinding::from<RulesetConfig>::from_ini(vArray);
-        rulesetFetchContext = FetchContext::PublicRequest;
-      }
-    }
+    tpl_args.local_vars = tpl_args_base;
+    response.status_code = userProvidedExternalConfig ? 400 : 500;
+    response.content_type = "text/plain; charset=utf-8";
+    response.headers["Cache-Control"] = "private, no-store";
+    if (userProvidedExternalConfig)
+      return "Invalid request: selected external configuration could not be "
+             "loaded or applied.\n"
+             "无效请求：无法加载或应用用户选择的外部配置。";
+    return "Server configuration error: default external configuration could "
+           "not be loaded or applied.\n"
+           "服务器配置错误：无法加载或应用默认外部配置。";
   }
 
   const size_t externalRuleSourceCount =
@@ -2404,94 +2126,26 @@ static std::string subconverter_impl(Request &request, Response &response,
     }
 
     std::string external_rule_error;
-    bool external_rule_rejected = false;
     if (!fetchExternalRuleSources(rulePrependSources, "ruleprepend",
                                   externalRuleFetchContext,
-                                  ext.rule_prepend, external_rule_error,
-                                  &external_rule_rejected) ||
+                                  ext.rule_prepend, external_rule_error) ||
         !fetchExternalRuleSources(ruleAppendSources, "ruleappend",
                                   externalRuleFetchContext,
-                                  ext.rule_append, external_rule_error,
-                                  &external_rule_rejected)) {
-      return externalDependencyFailure(response,
-                                       external_rule_rejected ? 403 : 502,
-                                       external_rule_error,
-                                       external_rule_rejected);
+                                  ext.rule_append, external_rule_error)) {
+      *status_code = 400;
+      return external_rule_error;
     }
   }
 
   if (ext.enable_rule_generator && !ext.nodelist && !lSimpleSubscription) {
-    const bool skip_client_provider_fetch =
-        !argExpandRulesets.get(false) &&
-        (ext.clash_script || !ext.managed_config_prefix.empty());
     if (lCustomRulesets != global.customRulesets)
-      refreshRulesets(lCustomRulesets, lRulesetContent, rulesetFetchContext,
-                      skip_client_provider_fetch);
+      refreshRulesets(lCustomRulesets, lRulesetContent, rulesetFetchContext);
     else {
       if (global.updateRulesetOnRequest)
         refreshRulesets(lCustomRulesets, lRulesetContent,
-                        rulesetFetchContext, skip_client_provider_fetch);
+                        rulesetFetchContext);
       else
         lRulesetContent = global.rulesetsContent;
-    }
-    bool ruleset_request_rejected = false;
-    bool ruleset_content_invalid = false;
-    for (const RulesetContent &ruleset : lRulesetContent) {
-      const bool provider_rule_type =
-          ruleset.rule_type == RULESET_CLASH_DOMAIN ||
-          ruleset.rule_type == RULESET_CLASH_IPCIDR ||
-          ruleset.rule_type == RULESET_CLASH_CLASSICAL;
-      const bool provider_mode =
-          !argExpandRulesets.get(false) &&
-          (ext.clash_script || !ext.managed_config_prefix.empty()) &&
-          provider_rule_type;
-      // Provider-mode Clash rule sets are intentionally client-side pulls;
-      // they do not require the server to download their content. All other
-      // rule-set paths are server-side inputs and remain fail-closed.
-      ruleset_request_rejected |=
-          !provider_mode && ruleset.request_rejected;
-      if (!provider_mode && ruleset.fetch_state &&
-          ruleset.fetch_state->request_rejected.load())
-        ruleset_request_rejected = true;
-      if (!ruleset.rule_path.empty()) {
-        const std::string content = ruleset.rule_content.get();
-        if (provider_mode) {
-          // Provider-mode rule sets are client-side pulls.  The current
-          // refresh path may still have an in-flight fetch for compatibility,
-          // but its provisional cache must never be committed here.
-          discardRulesetFetchCache(ruleset.fetch_state);
-          continue;
-        }
-        const RulesetValidationResult validation =
-            validateRulesetEntries(content, ruleset.rule_type);
-        if (content.empty() || !validation.valid()) {
-          ruleset_content_invalid = true;
-          continue;
-        }
-      }
-    }
-    for (const RulesetContent &ruleset : lRulesetContent) {
-      const bool provider_mode =
-          !argExpandRulesets.get(false) &&
-          (ext.clash_script || !ext.managed_config_prefix.empty()) &&
-          (ruleset.rule_type == RULESET_CLASH_DOMAIN ||
-           ruleset.rule_type == RULESET_CLASH_IPCIDR ||
-           ruleset.rule_type == RULESET_CLASH_CLASSICAL);
-      if (ruleset.rule_path.empty() || provider_mode)
-        continue;
-      if (ruleset_content_invalid ||
-          (ruleset.fetch_state &&
-           ruleset.fetch_state->request_rejected.load()))
-        discardRulesetFetchCache(ruleset.fetch_state);
-      else
-        commitRulesetFetchCache(ruleset.fetch_state);
-    }
-    if (ruleset_content_invalid || ruleset_request_rejected) {
-      return externalDependencyFailure(
-          response, ruleset_request_rejected ? 403 : 502,
-          "External ruleset could not be loaded.\n"
-          "外部规则集无法加载，已拒绝生成不完整配置。",
-          ruleset_request_rejected);
     }
   }
   explain.rule_generator_enabled = ext.enable_rule_generator;
@@ -2591,21 +2245,50 @@ static std::string subconverter_impl(Request &request, Response &response,
   parse_set.fetch_context = FetchContext::PublicRequest;
   groupID = 0;
 
+  const bool provider_mode_eligible =
+      (argTarget == "clash" || argTarget == "clashr") && !ext.nodelist;
+  if (!provider_mode_eligible) {
+    for (size_t index = 0; index < urls.size(); ++index) {
+      TaggedLink tagged = parseTaggedLink(regTrim(urls[index]));
+      if (tagged.error != TaggedLink::Error::None) {
+        *status_code = 400;
+        return providerLinkPrefixError(index, tagged.error);
+      }
+      if (tagged.has_interval) {
+        *status_code = 400;
+        return providerIntervalScopeError(index);
+      }
+      if (tagged.has_proxy_direct) {
+        *status_code = 400;
+        return providerDirectScopeError(index);
+      }
+    }
+  }
+
   //  对于 Clash，区分节点链接和订阅链接
-  if ((argTarget == "clash" || argTarget == "clashr") && !ext.nodelist) {
+  if (provider_mode_eligible) {
     // 先区分节点链接和订阅链接
     struct SubscriptionLinkItem {
       std::string url;
       std::string tag;
       std::string provider;
+      int interval = 0;
+      bool proxy_direct = kDefaultProxyProviderDirect;
+      bool has_interval = false;
+      bool has_proxy_direct = false;
       bool url_decoded = false;
     };
     std::vector<SubscriptionLinkItem> subscription_urls; // HTTP/HTTPS 订阅链接
     std::vector<std::string> node_urls; // 节点链接（vless://, vmess:// 等）
 
-    for (std::string &x : urls) {
+    for (size_t index = 0; index < urls.size(); ++index) {
+      std::string &x = urls[index];
       x = regTrim(x);
       TaggedLink tagged = parseTaggedLink(x);
+      if (tagged.error != TaggedLink::Error::None) {
+        *status_code = 400;
+        return providerLinkPrefixError(index, tagged.error);
+      }
       std::string link = tagged.link.empty() ? x : tagged.link;
 
       // Keep HTTP(S)/data links available for proxy-provider mode. Other
@@ -2613,6 +2296,14 @@ static std::string subconverter_impl(Request &request, Response &response,
       bool isNodeLink = mihomo::isSupportedNonHttpSchemeLink(link);
 
       if (isNodeLink) {
+        if (tagged.has_interval) {
+          *status_code = 400;
+          return providerIntervalScopeError(index);
+        }
+        if (tagged.has_proxy_direct) {
+          *status_code = 400;
+          return providerDirectScopeError(index);
+        }
         std::string node_link = link;
         if (tagged.has_tag)
           node_link = "tag:" + tagged.tag + "," + link;
@@ -2626,9 +2317,19 @@ static std::string subconverter_impl(Request &request, Response &response,
             0, "检测到订阅链接：'" + link + "'，将创建 provider。",
             LOG_LEVEL_INFO);
         subscription_urls.push_back(
-            {link, tagged.tag, tagged.provider, tagged.link_decoded});
+            {link, tagged.tag, tagged.provider, tagged.interval,
+             tagged.proxy_direct, tagged.has_interval,
+             tagged.has_proxy_direct, tagged.link_decoded});
         explain.subscription_url_count++;
       } else {
+        if (tagged.has_interval) {
+          *status_code = 400;
+          return providerIntervalScopeError(index);
+        }
+        if (tagged.has_proxy_direct) {
+          *status_code = 400;
+          return providerDirectScopeError(index);
+        }
         std::string node_link = link;
         if (tagged.has_tag)
           node_link = "tag:" + tagged.tag + "," + link;
@@ -2697,7 +2398,11 @@ static std::string subconverter_impl(Request &request, Response &response,
                  LOG_LEVEL_INFO);
         provider.url = item.url_decoded ? item.url
                                         : urlDecode(item.url); // 解码 URL
-        provider.interval = 3600;    // 固定使用 3600 秒（1小时）
+        provider.interval = static_cast<uint32_t>(
+            item.has_interval ? item.interval : global.proxyProviderInterval);
+        provider.proxy_direct = item.has_proxy_direct
+                                    ? item.proxy_direct
+                                    : ext.provider_proxy_direct;
         provider.groupId = groupID;
         provider.path = "./providers/" + provider.name + ".yaml";
         provider.user_agent = provider_user_agent;
@@ -2719,6 +2424,7 @@ static std::string subconverter_impl(Request &request, Response &response,
         explain_provider.exclude_filter = provider.exclude_filter;
         explain_provider.group_id = provider.groupId;
         explain_provider.interval = provider.interval;
+        explain_provider.proxy_direct = provider.proxy_direct;
         explain.providers.push_back(std::move(explain_provider));
         groupID++;
       }
@@ -2889,95 +2595,6 @@ static std::string subconverter_impl(Request &request, Response &response,
 
   // std::cerr<<"Generate target: ";
   proxy = parseProxy(global.proxyConfig);
-  FetchOutcome rendered_base_outcome;
-  bool rendered_base_outcome_active = false;
-  auto discardRenderedBase = [&]() {
-    if (!rendered_base_outcome_active)
-      return;
-    discardFetchOutcomeCache(rendered_base_outcome);
-    rendered_base_outcome_active = false;
-  };
-  auto commitRenderedBase = [&]() {
-    if (!rendered_base_outcome_active)
-      return;
-    commitFetchOutcomeCache(rendered_base_outcome);
-    rendered_base_outcome_active = false;
-  };
-  std::string pending_upload_name;
-  std::string pending_upload_content;
-  bool pending_upload_write_manage_url = false;
-  auto scheduleUpload = [&](const std::string &name, bool write_manage_url) {
-    if (!argUpload)
-      return;
-    pending_upload_name = name;
-    pending_upload_content = output_content;
-    pending_upload_write_manage_url = write_manage_url;
-  };
-  auto renderExternalBase =
-      [&](const std::string &path, const ExternalBaseState &state,
-          const char *target_name) -> std::string {
-    auto failure = [&](bool rejected) {
-      return externalDependencyFailure(
-          response, rejected ? 403 : 502,
-          std::string("External ") + target_name +
-              " base could not be loaded.\n"
-              "外部模板基础文件无法加载，已拒绝生成不完整配置。",
-          rejected);
-    };
-    if (state.invalid)
-      return failure(state.request_rejected);
-    std::string fetched;
-    FetchOutcome fetch_outcome;
-    if (isTrustedLocalResourcePath(path) && fileExist(path, false)) {
-      fetched = fileGet(path, false);
-    } else {
-      FetchArgument fetch_argument{HTTP_GET,
-                                   path,
-                                   proxy,
-                                   nullptr,
-                                   nullptr,
-                                   nullptr,
-                                   static_cast<unsigned int>(
-                                       std::max(global.cacheConfig, 0)),
-                                   true,
-                                   baseFetchContext,
-                                   true,
-                                   FetchCacheSemantic::ExternalBase};
-      fetchRemote(fetch_argument, fetch_outcome);
-      fetched = fetch_outcome.success ? fetch_outcome.content : "";
-    }
-    const std::string trimmed_fetched = trimWhitespace(fetched, true, true);
-    const std::string lower_fetched = toLower(trimmed_fetched);
-    if (trimmed_fetched.empty() || startsWith(lower_fetched, "<!doctype html") ||
-        startsWith(lower_fetched, "<html")) {
-      const bool rejected =
-          fetch_outcome.failure == FetchFailureCategory::RequestRejected;
-      discardFetchOutcomeCache(fetch_outcome);
-      return failure(rejected);
-    }
-    FetchCacheTransaction dependency_transaction;
-    int render_result = 0;
-    {
-      FetchCacheTransactionScope dependency_scope(dependency_transaction);
-      render_result = render_template(fetched, tpl_args, base_content,
-                                      global.templatePath, baseFetchContext);
-    }
-    if (render_result != 0) {
-      discardFetchCacheTransaction(dependency_transaction);
-      discardFetchOutcomeCache(fetch_outcome);
-      return failure(false);
-    }
-    if (trimWhitespace(base_content, true, true).empty()) {
-      discardFetchCacheTransaction(dependency_transaction);
-      discardFetchOutcomeCache(fetch_outcome);
-      return failure(false);
-    }
-    fetch_outcome.deferred_dependencies =
-        std::move(dependency_transaction.pending);
-    rendered_base_outcome = std::move(fetch_outcome);
-    rendered_base_outcome_active = true;
-    return "";
-  };
   switch (hash_(argTarget)) {
   case "clash"_hash:
   case "clashr"_hash:
@@ -2993,20 +2610,24 @@ static std::string subconverter_impl(Request &request, Response &response,
       proxyToClash(nodes, yamlnode, dummy_group, argTarget == "clashr", ext);
       output_content = YAML::Dump(yamlnode);
     } else {
-      if (std::string error =
-              renderExternalBase(lClashBase, clash_base_state, "Clash");
-          !error.empty())
-        return error;
+      if (render_template(fetchFile(lClashBase, proxy, global.cacheConfig,
+                                    true, baseFetchContext),
+                          tpl_args, base_content, global.templatePath,
+                          baseFetchContext) != 0) {
+        *status_code = 400;
+        return base_content;
+      }
       output_content =
           proxyToClash(nodes, base_content, lRulesetContent, lCustomProxyGroups,
                        argTarget == "clashr", ext);
       if (!ext.external_rule_error.empty()) {
-        discardRenderedBase();
-        return externalDependencyFailure(response, 502, ext.external_rule_error);
+        *status_code = 400;
+        return ext.external_rule_error;
       }
     }
 
-    scheduleUpload(argTarget, false);
+    if (argUpload)
+      uploadGist(argTarget, argUploadPath, output_content, false);
     break;
   case "surge"_hash:
 
@@ -3017,16 +2638,22 @@ static std::string subconverter_impl(Request &request, Response &response,
       output_content = proxyToSurge(nodes, base_content, dummy_ruleset,
                                     dummy_group, intSurgeVer, ext);
 
-      scheduleUpload("surge" + argSurgeVer + "list", true);
+      if (argUpload)
+        uploadGist("surge" + argSurgeVer + "list", argUploadPath,
+                   output_content, true);
     } else {
-      if (std::string error =
-              renderExternalBase(lSurgeBase, surge_base_state, "Surge");
-          !error.empty())
-        return error;
+      if (render_template(fetchFile(lSurgeBase, proxy, global.cacheConfig,
+                                    true, baseFetchContext),
+                          tpl_args, base_content, global.templatePath,
+                          baseFetchContext) != 0) {
+        *status_code = 400;
+        return base_content;
+      }
       output_content = proxyToSurge(nodes, base_content, lRulesetContent,
                                     lCustomProxyGroups, intSurgeVer, ext);
 
-      scheduleUpload("surge" + argSurgeVer, true);
+      if (argUpload)
+        uploadGist("surge" + argSurgeVer, argUploadPath, output_content, true);
 
       if (global.writeManagedConfig && !global.managedConfigPrefix.empty())
         output_content =
@@ -3039,13 +2666,17 @@ static std::string subconverter_impl(Request &request, Response &response,
   case "surfboard"_hash:
     writeLog(0, "生成目标：Surfboard", LOG_LEVEL_INFO);
 
-    if (std::string error =
-            renderExternalBase(lSurfboardBase, surfboard_base_state, "Surfboard");
-        !error.empty())
-      return error;
+    if (render_template(fetchFile(lSurfboardBase, proxy, global.cacheConfig,
+                                  true, baseFetchContext),
+                        tpl_args, base_content, global.templatePath,
+                        baseFetchContext) != 0) {
+      *status_code = 400;
+      return base_content;
+    }
     output_content = proxyToSurge(nodes, base_content, lRulesetContent,
                                   lCustomProxyGroups, -3, ext);
-    scheduleUpload("surfboard", true);
+    if (argUpload)
+      uploadGist("surfboard", argUploadPath, output_content, true);
 
     if (global.writeManagedConfig && !global.managedConfigPrefix.empty())
       output_content =
@@ -3057,120 +2688,152 @@ static std::string subconverter_impl(Request &request, Response &response,
   case "mellow"_hash:
     writeLog(0, "生成目标：Mellow", LOG_LEVEL_INFO);
 
-    if (std::string error =
-            renderExternalBase(lMellowBase, mellow_base_state, "Mellow");
-        !error.empty())
-      return error;
+    if (render_template(fetchFile(lMellowBase, proxy, global.cacheConfig, true,
+                                  baseFetchContext),
+                        tpl_args, base_content, global.templatePath,
+                        baseFetchContext) != 0) {
+      *status_code = 400;
+      return base_content;
+    }
     output_content = proxyToMellow(nodes, base_content, lRulesetContent,
                                    lCustomProxyGroups, ext);
 
-    scheduleUpload("mellow", true);
+    if (argUpload)
+      uploadGist("mellow", argUploadPath, output_content, true);
     break;
   case "sssub"_hash:
     writeLog(0, "生成目标：SS Subscription", LOG_LEVEL_INFO);
 
-    if (std::string error =
-            renderExternalBase(lSSSubBase, sssub_base_state, "SS Subscription");
-        !error.empty())
-      return error;
+    if (render_template(fetchFile(lSSSubBase, proxy, global.cacheConfig, true,
+                                  baseFetchContext),
+                        tpl_args, base_content, global.templatePath,
+                        baseFetchContext) != 0) {
+      *status_code = 400;
+      return base_content;
+    }
     output_content = proxyToSSSub(base_content, nodes, ext);
-    scheduleUpload("sssub", false);
+    if (argUpload)
+      uploadGist("sssub", argUploadPath, output_content, false);
     break;
   case "ss"_hash:
     writeLog(0, "生成目标：SS", LOG_LEVEL_INFO);
     output_content = proxyToSingle(nodes, 1, ext);
-    scheduleUpload("ss", false);
+    if (argUpload)
+      uploadGist("ss", argUploadPath, output_content, false);
     break;
   case "ssr"_hash:
     writeLog(0, "生成目标：SSR", LOG_LEVEL_INFO);
     output_content = proxyToSingle(nodes, 2, ext);
-    scheduleUpload("ssr", false);
+    if (argUpload)
+      uploadGist("ssr", argUploadPath, output_content, false);
     break;
   case "v2ray"_hash:
     writeLog(0, "生成目标：v2rayN", LOG_LEVEL_INFO);
     output_content = proxyToSingle(nodes, 4, ext);
-    scheduleUpload("v2ray", false);
+    if (argUpload)
+      uploadGist("v2ray", argUploadPath, output_content, false);
     break;
   case "trojan"_hash:
     writeLog(0, "生成目标：Trojan", LOG_LEVEL_INFO);
     output_content = proxyToSingle(nodes, 8, ext);
-    scheduleUpload("trojan", false);
+    if (argUpload)
+      uploadGist("trojan", argUploadPath, output_content, false);
     break;
   case "vless"_hash:
     writeLog(0, "生成目标：vless", LOG_LEVEL_INFO);
     output_content = proxyToSingle(nodes, 16, ext);
-    scheduleUpload("vless", false);
+    if (argUpload)
+      uploadGist("vless", argUploadPath, output_content, false);
     break;
   case "hysteria2"_hash:
     writeLog(0, "生成目标：hysteria2", LOG_LEVEL_INFO);
     output_content = proxyToSingle(nodes, 32, ext);
-    scheduleUpload("hysteria2", false);
+    if (argUpload)
+      uploadGist("hysteria2", argUploadPath, output_content, false);
     break;
   case "mixed"_hash:
     writeLog(0, "生成目标：Standard Subscription", LOG_LEVEL_INFO);
     output_content = proxyToSingle(nodes, 63, ext);
-    scheduleUpload("sub", false);
+    if (argUpload)
+      uploadGist("sub", argUploadPath, output_content, false);
     break;
   case "quan"_hash:
     writeLog(0, "生成目标：Quantumult", LOG_LEVEL_INFO);
     if (!ext.nodelist) {
-      if (std::string error =
-              renderExternalBase(lQuanBase, quan_base_state, "Quantumult");
-          !error.empty())
-        return error;
+      if (render_template(fetchFile(lQuanBase, proxy, global.cacheConfig, true,
+                                    baseFetchContext),
+                          tpl_args, base_content, global.templatePath,
+                          baseFetchContext) != 0) {
+        *status_code = 400;
+        return base_content;
+      }
     }
 
     output_content = proxyToQuan(nodes, base_content, lRulesetContent,
                                  lCustomProxyGroups, ext);
 
-    scheduleUpload("quan", false);
+    if (argUpload)
+      uploadGist("quan", argUploadPath, output_content, false);
     break;
   case "quanx"_hash:
     writeLog(0, "生成目标：Quantumult X", LOG_LEVEL_INFO);
     if (!ext.nodelist) {
-      if (std::string error =
-              renderExternalBase(lQuanXBase, quanx_base_state, "Quantumult X");
-          !error.empty())
-        return error;
+      if (render_template(fetchFile(lQuanXBase, proxy, global.cacheConfig,
+                                    true, baseFetchContext),
+                          tpl_args, base_content, global.templatePath,
+                          baseFetchContext) != 0) {
+        *status_code = 400;
+        return base_content;
+      }
     }
 
     output_content = proxyToQuanX(nodes, base_content, lRulesetContent,
                                   lCustomProxyGroups, ext);
 
-    scheduleUpload("quanx", false);
+    if (argUpload)
+      uploadGist("quanx", argUploadPath, output_content, false);
     break;
   case "loon"_hash:
     writeLog(0, "生成目标：Loon", LOG_LEVEL_INFO);
     if (!ext.nodelist) {
-      if (std::string error =
-              renderExternalBase(lLoonBase, loon_base_state, "Loon");
-          !error.empty())
-        return error;
+      if (render_template(fetchFile(lLoonBase, proxy, global.cacheConfig, true,
+                                    baseFetchContext),
+                          tpl_args, base_content, global.templatePath,
+                          baseFetchContext) != 0) {
+        *status_code = 400;
+        return base_content;
+      }
     }
 
     output_content = proxyToLoon(nodes, base_content, lRulesetContent,
                                  lCustomProxyGroups, ext);
 
-    scheduleUpload("loon", false);
+    if (argUpload)
+      uploadGist("loon", argUploadPath, output_content, false);
     break;
   case "ssd"_hash:
     writeLog(0, "生成目标：SSD", LOG_LEVEL_INFO);
     output_content = proxyToSSD(nodes, argGroupName, subInfo, ext);
-    scheduleUpload("ssd", false);
+    if (argUpload)
+      uploadGist("ssd", argUploadPath, output_content, false);
     break;
   case "singbox"_hash:
     writeLog(0, "生成目标：sing-box", LOG_LEVEL_INFO);
     if (!ext.nodelist) {
-      if (std::string error =
-              renderExternalBase(lSingBoxBase, singbox_base_state, "sing-box");
-          !error.empty())
-        return error;
+      if (render_template(fetchFile(lSingBoxBase, proxy, global.cacheConfig,
+                                    true, baseFetchContext),
+                          tpl_args, base_content, global.templatePath,
+                          baseFetchContext) != 0) {
+        *status_code = 400;
+        return base_content;
+      }
     }
 
     output_content = proxyToSingBox(nodes, base_content, lRulesetContent,
                                     lCustomProxyGroups, ext);
 
-    scheduleUpload("singbox", false);
+    if (argUpload)
+      uploadGist("singbox", argUploadPath, output_content, false);
     break;
   default:
     writeLog(0, "生成目标：未指定", LOG_LEVEL_INFO);
@@ -3181,19 +2844,6 @@ static std::string subconverter_impl(Request &request, Response &response,
            "Please report this request to the service maintainer.\n"
            "请将该请求反馈给服务维护者。";
   }
-  if (rendered_base_outcome_active &&
-      !validateGeneratedTargetOutput(argTarget, output_content)) {
-    discardRenderedBase();
-    return externalDependencyFailure(
-        response, 502,
-        "External " + argTarget +
-            " base generated an invalid or empty target configuration.\n"
-            "外部基础配置生成的目标配置无效或为空，已拒绝提交缓存。\n");
-  }
-  commitRenderedBase();
-  if (argUpload && !pending_upload_name.empty())
-    uploadGist(pending_upload_name, argUploadPath, pending_upload_content,
-               pending_upload_write_manage_url);
   writeLog(0, "生成完成。", LOG_LEVEL_INFO);
   if (argTarget == "clash" && explain.proxy_provider_mode)
     appendVaryHeader(response, "User-Agent");
@@ -3415,7 +3065,7 @@ static std::string subconverter_impl(Request &request, Response &response,
       explain.effective_config_source = "fallback";
     else if (explain.external_config_loaded && userProvidedExternalConfig)
       explain.effective_config_source = "request";
-    else if (explain.external_config_loaded && !userProvidedExternalConfig)
+    else if (explain.external_config_loaded && !global.defaultExtConfig.empty())
       explain.effective_config_source = "default";
     else if (userProvidedExternalConfig)
       explain.effective_config_source = "request_failed";
@@ -3748,8 +3398,6 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
                               })) // remove unsupported types
           continue;
         strLine = appendClashRuleTarget(strLine, trim(strArray[2]));
-        if (strLine.empty())
-          continue;
         rule.push_back(strLine);
       }
       ss.clear();

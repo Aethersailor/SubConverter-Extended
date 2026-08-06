@@ -26,6 +26,7 @@ mkdir -p "${PACKAGE_DIR}"
 
 install -m755 subconverter "${PACKAGE_DIR}/subconverter"
 cp -a base "${PACKAGE_DIR}/"
+rm -rf "${PACKAGE_DIR}/base/Custom_OpenClash_Rules"
 
 copy_dir_contents runtime-libs
 copy_dir_contents runtime-root

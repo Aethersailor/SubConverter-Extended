@@ -16,6 +16,8 @@
 #include "utils/tribool.h"
 #include <toml.hpp>
 
+#include "config/proxy_provider_direct.h"
+#include "config/proxy_provider_interval.h"
 
 struct Settings {
   // common settings
@@ -29,10 +31,8 @@ struct Settings {
   int listenPort = 25500, maxPendingConns = 10, maxConcurThreads = 16,
       maxServerThreads = 128;
   bool prependInsert = true, skipFailedLinks = false;
-  bool customOpenClashRulesFallback = false;
-  // Explicitly opt in to using the trusted default external configuration
-  // after a user-provided external configuration fails.
   bool fallbackToDefaultExternalConfig = false;
+  bool customOpenClashRulesSourceSwitch = false;
   static constexpr bool APIMode = true; // Hardcoded for security
   bool writeManagedConfig = false, enableRuleGen = true,
        updateRulesetOnRequest = false, overwriteOriginalRules = true;
@@ -70,6 +70,8 @@ struct Settings {
   std::string clashProxiesStyle = "flow", clashProxyGroupsStyle = "block";
   std::string proxyConfig, proxyRuleset, proxySubscription;
   int updateInterval = 0;
+  int proxyProviderInterval = kDefaultProxyProviderInterval;
+  bool proxyProviderDirect = kDefaultProxyProviderDirect;
   std::string sortScript, filterScript;
 
   std::string clashBase;
@@ -140,7 +142,20 @@ struct ExternalConfig {
   tribool remove_old_emoji;
 };
 
-struct FetchOutcome;
+enum class ExternalConfigLoadStatus {
+  Success,
+  FetchFailed,
+  RenderFailed,
+  ParseFailed,
+  ImportFailed,
+  ResourceLimitExceeded,
+};
+
+struct ExternalConfigLoadResult {
+  ExternalConfigLoadStatus status = ExternalConfigLoadStatus::ParseFailed;
+
+  bool ok() const { return status == ExternalConfigLoadStatus::Success; }
+};
 
 extern Settings global;
 
@@ -149,11 +164,9 @@ bool isTrustedLocalResourcePath(const std::string &path);
 bool isPublicUploadAllowed();
 int importItems(string_array &target, bool scope_limit = true,
                 FetchContext context = FetchContext::TrustedConfig);
-int loadExternalConfig(std::string &path, ExternalConfig &ext,
-                       FetchContext context = FetchContext::TrustedConfig);
-int loadExternalConfigWithOutcome(std::string &path, ExternalConfig &ext,
-                                  FetchContext context,
-                                  FetchOutcome *fetch_outcome);
+ExternalConfigLoadResult
+loadExternalConfig(const std::string &path, ExternalConfig &ext,
+                   FetchContext context = FetchContext::TrustedConfig);
 bool isExternalConfigCacheableContent(const std::string &content);
 size_t externalConfigCacheMaxEntries();
 size_t externalConfigCacheMaxBytes();

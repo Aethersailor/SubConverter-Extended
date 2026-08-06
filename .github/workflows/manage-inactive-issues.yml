@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      INACTIVE_ISSUE_WAIT_DAYS: "60"
+      INACTIVE_ISSUE_WAIT_DAYS: "14"
       INACTIVE_ISSUE_DRY_RUN: ${{ inputs.dry_run || 'false' }}
     steps:
       - name: Check out repository automation

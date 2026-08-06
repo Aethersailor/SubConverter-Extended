@@ -20,6 +20,10 @@ Remove-Item -Force $ZipPath -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $PackageDir | Out-Null
 Copy-Item -Path $ExePath -Destination (Join-Path $PackageDir "subconverter.exe")
 Copy-Item -Path (Join-Path $Root "base") -Destination (Join-Path $PackageDir "base") -Recurse
+$BundledCocrPath = Join-Path $PackageDir "base\Custom_OpenClash_Rules"
+if (Test-Path -LiteralPath $BundledCocrPath) {
+    Remove-Item -LiteralPath $BundledCocrPath -Recurse -Force
+}
 
 Get-Content $DllListPath | ForEach-Object {
   if ($_ -and (Test-Path $_)) {

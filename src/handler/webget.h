@@ -3,7 +3,6 @@
 
 #include <string>
 #include <map>
-#include <vector>
 
 #include "handler/fetch_context.h"
 #include "handler/proxy_policy.h"
@@ -18,18 +17,6 @@ enum http_method
     HTTP_PATCH
 };
 
-// Persistent fetch entries are reusable only within the semantic contract
-// that validated them.
-enum class FetchCacheSemantic
-{
-    Immediate,
-    ExternalConfig,
-    Import,
-    Ruleset,
-    TemplateDependency,
-    ExternalBase
-};
-
 struct FetchArgument
 {
     const http_method method;
@@ -41,10 +28,6 @@ struct FetchArgument
     const unsigned int cache_ttl = 0;
     const bool keep_resp_on_fail = false;
     const FetchContext context = FetchContext::TrustedConfig;
-    // When true, a successful network response is returned but is not written
-    // to the persistent fetch cache until the caller validates the content.
-    const bool defer_cache_commit = false;
-    const FetchCacheSemantic cache_semantic = FetchCacheSemantic::Immediate;
 };
 
 struct FetchResult
@@ -55,79 +38,7 @@ struct FetchResult
     std::string *cookies = nullptr;
 };
 
-enum class FetchFailureCategory {
-    None,
-    RequestRejected,
-    SourceUnavailable,
-    NotFound,
-    ContentInvalid,
-    Internal
-};
-
-struct FetchAttempt
-{
-    std::string source_kind;
-    std::string effective_url;
-    int status_code = 0;
-    int curl_code = 0;
-    FetchFailureCategory failure = FetchFailureCategory::None;
-};
-
-struct FetchOutcome
-{
-    bool success = false;
-    int status_code = 0;
-    std::string content;
-    std::string response_headers;
-    std::string cookies;
-    std::string requested_url;
-    std::string effective_url;
-    std::string logical_resource;
-    std::string failure_reason;
-    FetchFailureCategory failure = FetchFailureCategory::None;
-    bool cocr_rewrite_used = false;
-    bool raw_to_jsdelivr_used = false;
-    std::string effective_source;
-    bool fresh_cache_used = false;
-    bool stale_cache_used = false;
-    bool cache_commit_pending = false;
-    std::string cache_path;
-    std::string cache_header_path;
-    std::vector<FetchAttempt> attempts;
-    // Fetches performed while validating this resource (for example template
-    // `fetch()` calls or imported configuration fragments).  They remain
-    // provisional until the owning resource has completed semantic
-    // validation, so a parent parse/render failure can discard the complete
-    // dependency tree atomically.
-    std::vector<FetchOutcome> deferred_dependencies;
-};
-
-struct FetchCacheTransaction
-{
-    std::vector<FetchOutcome> pending;
-};
-
-class FetchCacheTransactionScope
-{
-public:
-    explicit FetchCacheTransactionScope(FetchCacheTransaction &transaction);
-    ~FetchCacheTransactionScope();
-
-    FetchCacheTransactionScope(const FetchCacheTransactionScope &) = delete;
-    FetchCacheTransactionScope &operator=(const FetchCacheTransactionScope &) = delete;
-
-private:
-    FetchCacheTransaction *previous_;
-};
-
 int webGet(const FetchArgument& argument, FetchResult &result);
-int fetchRemote(const FetchArgument &argument, FetchOutcome &outcome);
-bool commitFetchOutcomeCache(const FetchOutcome &outcome);
-void discardFetchOutcomeCache(const FetchOutcome &outcome);
-FetchCacheTransaction *currentFetchCacheTransaction();
-void deferFetchOutcomeCache(FetchOutcome outcome);
-void commitFetchCacheTransaction(FetchCacheTransaction &transaction);
-void discardFetchCacheTransaction(FetchCacheTransaction &transaction);
 std::string webGet(const std::string &url, const ProxyPolicy &proxy,
                    unsigned int cache_ttl = 0,
                    std::string *response_headers = nullptr,
