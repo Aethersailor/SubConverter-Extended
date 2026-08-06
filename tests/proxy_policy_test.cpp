@@ -1,3 +1,6 @@
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <cassert>
 #include <string>
 
@@ -56,6 +59,43 @@ int main() {
   assert(query_url.find("fixture-token") == std::string::npos);
   assert(query_url.find("fixture-api-key") == std::string::npos);
   assert(query_url.find("mode=clash") != std::string::npos);
+  assert(query_url.find("url=<redacted>") != std::string::npos);
+
+  const std::string nested_request = redactSensitiveLogText(
+      "/sub?target=clash&url=https%3A%2F%2Fexample.test%2Fprivate-path%3F"
+      "token%3Dnested-secret&config=data%3A%2Cconfig-secret&userinfo="
+      "userinfo-secret&profile_data=profile-secret");
+  assert(nested_request.find("nested-secret") == std::string::npos);
+  assert(nested_request.find("config-secret") == std::string::npos);
+  assert(nested_request.find("userinfo-secret") == std::string::npos);
+  assert(nested_request.find("profile-secret") == std::string::npos);
+  assert(nested_request.find("target=clash") != std::string::npos);
+
+  const std::string node_uri = redactSensitiveLogText(
+      "node=vless://fixture-uuid@node.example.test:443?type=ws&path="
+      "/fixture-secret#Fixture");
+  assert(node_uri.find("fixture-uuid") == std::string::npos);
+  assert(node_uri.find("fixture-secret") == std::string::npos);
+  assert(node_uri.find("vless://<redacted>") != std::string::npos);
+
+  const std::string data_uri =
+      redactSensitiveLogText("source=data:text/plain,fixture-data-secret");
+  assert(data_uri.find("fixture-data-secret") == std::string::npos);
+
+  const std::string http_path = redactSensitiveLogText(
+      "source=https://example.test/private-path-token?mode=clash");
+  assert(http_path.find("private-path-token") == std::string::npos);
+  assert(http_path.find("example.test") != std::string::npos);
+
+  const std::string summary = summarizeUrlForLog(
+      "https://fixture-user:fixture-password@example.test/private-token");
+  assert(summary.find("fixture-user") == std::string::npos);
+  assert(summary.find("fixture-password") == std::string::npos);
+  assert(summary.find("private-token") == std::string::npos);
+  assert(summary.find("host=example.test") != std::string::npos);
+  const std::string injected_summary =
+      summarizeUrlForLog("https://example.test\nforged-log/private-token");
+  assert(injected_summary.find("forged-log") == std::string::npos);
 
   const std::string header = redactSensitiveLogText(
       "Proxy-Authorization: Basic fixture-proxy-secret");

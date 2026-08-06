@@ -264,6 +264,25 @@ IF(BUILD_TESTS)
     ADD_TEST(NAME proxy_policy COMMAND proxy_policy_test)
     SET_TESTS_PROPERTIES(proxy_policy PROPERTIES LABELS fast)
 
+    ADD_EXECUTABLE(webserver_error_test
+        tests/webserver_error_test.cpp
+        src/server/client_ip.cpp
+        src/server/webserver_httplib.cpp
+        src/utils/base64/base64.cpp
+        src/utils/logger.cpp
+        src/utils/redact.cpp
+        src/utils/string.cpp
+        src/utils/urlencode.cpp)
+    TARGET_INCLUDE_DIRECTORIES(webserver_error_test PRIVATE src)
+    TARGET_COMPILE_DEFINITIONS(webserver_error_test PRIVATE
+        $<TARGET_PROPERTY:${BUILD_TARGET_NAME},COMPILE_DEFINITIONS>)
+    TARGET_LINK_LIBRARIES(webserver_error_test ${CMAKE_THREAD_LIBS_INIT})
+    IF(WIN32)
+        TARGET_LINK_LIBRARIES(webserver_error_test ws2_32)
+    ENDIF()
+    ADD_TEST(NAME webserver_error COMMAND webserver_error_test)
+    SET_TESTS_PROPERTIES(webserver_error PROPERTIES LABELS fast TIMEOUT 30)
+
     ADD_EXECUTABLE(client_ip_test
         tests/client_ip_test.cpp
         src/server/client_ip.cpp)

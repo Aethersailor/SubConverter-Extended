@@ -16,6 +16,7 @@
 #include "utils/base64/base64.h"
 #include "utils/file_extra.h"
 #include "utils/logger.h"
+#include "utils/redact.h"
 #include "utils/stl_extra.h"
 #include "utils/string.h"
 #include "utils/urlencode.h"
@@ -114,8 +115,6 @@ static inline void buffer_cleanup(struct evbuffer *eb)
 
 static int process_request(WebServer *server, Request &request, Response &response, std::string &return_data)
 {
-    writeLog(0, "处理请求：method=" + request.method + " uri=" + request.url, LOG_LEVEL_VERBOSE);
-
     string_size pos = request.url.find('?');
     if(pos != std::string::npos)
     {
@@ -130,6 +129,10 @@ static int process_request(WebServer *server, Request &request, Response &respon
         }
         request.url.erase(pos);
     }
+    writeLog(0, "处理请求：method=" + request.method + " path=" +
+                    request.url + " parameter_count=" +
+                    std::to_string(request.argument.size()),
+             LOG_LEVEL_VERBOSE);
 
     if(request.method == "OPTIONS")
     {
@@ -152,20 +155,16 @@ static int process_request(WebServer *server, Request &request, Response &respon
             catch(std::exception &e)
             {
                 return_data = "Internal server error while processing request.\n"
-                              "处理请求时发生内部服务器错误。\n"
-                              "Path / 路径: " + request.url + "\n"
-                              "Arguments / 参数: " + joinArguments(request.argument);
-                return_data += "\n  Exception / 异常: ";
-                return_data += type(e);
-                return_data += "\n  what(): ";
-                return_data += e.what();
-                response.content_type = "text/plain";
+                              "处理请求时发生内部服务器错误。\n";
+                response.content_type = "text/plain; charset=utf-8";
                 response.status_code = 500;
+                response.headers["Cache-Control"] = "private, no-store";
                 writeLog(0,
-                         "处理请求时发生内部服务器错误。\n路径：" +
-                             request.url + "\n参数：" +
-                             joinArguments(request.argument) + "\n异常：" +
-                             type(e) + "\nwhat()：" + e.what(),
+                         "HTTP_UNEXPECTED_EXCEPTION method=" + request.method +
+                             " path=" + request.url + " parameter_count=" +
+                             std::to_string(request.argument.size()) +
+                             " exception=" + type(e) + " detail=" +
+                             summarizeUrlForLog(e.what()),
                          LOG_LEVEL_ERROR);
             }
             return 0;
@@ -275,6 +274,8 @@ static void on_request(evhttp_request *req, void *args)
 
     std::string return_data;
     int retVal = process_request(server, request, response, return_data);
+    if (response.status_code >= 500)
+        response.headers["Cache-Control"] = "private, no-store";
     std::string &content_type = response.content_type;
 
     auto *output_buffer = evhttp_request_get_output_buffer(req);

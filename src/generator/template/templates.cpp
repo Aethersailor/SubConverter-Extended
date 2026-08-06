@@ -11,6 +11,7 @@
 #include "handler/webget.h"
 #include "utils/logger.h"
 #include "utils/network.h"
+#include "utils/redact.h"
 #include "utils/regexp.h"
 #include "utils/time_compat.h"
 #include "utils/urlencode.h"
@@ -157,7 +158,8 @@ std::string template_webGet(inja::Arguments &args)
 {
     std::string data = args.at(0)->get<std::string>();
     ProxyPolicy proxy = parseProxy(global.proxyConfig);
-    writeLog(0, "模板调用 fetch，URL：'" + data + "'。", LOG_LEVEL_INFO);
+    writeLog(0, "模板调用 fetch：" + summarizeUrlForLog(data) + "。",
+             LOG_LEVEL_INFO);
     std::string content =
         webGet(data, proxy, global.cacheConfig, nullptr, nullptr,
                current_template_fetch_context);
@@ -541,7 +543,9 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
             retrieved_rules = x.rule_content.get();
             if(retrieved_rules.empty())
             {
-                writeLog(0, "获取规则集失败或规则集为空：'" + x.rule_path + "'。", LOG_LEVEL_WARNING);
+                writeLog(0, "获取规则集失败或规则集为空：" +
+                                summarizeUrlForLog(x.rule_path) + "。",
+                         LOG_LEVEL_WARNING);
                 continue;
             }
 

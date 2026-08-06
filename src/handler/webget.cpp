@@ -22,6 +22,7 @@
 #include "utils/lock.h"
 #include "utils/logger.h"
 #include "utils/network.h"
+#include "utils/redact.h"
 #include "utils/system.h"
 #include "utils/urlencode.h"
 #include "version.h"
@@ -322,25 +323,6 @@ static bool is_blocked_hostname(const std::string &host)
     return false;
 }
 
-static std::string escape_log_value(const std::string &value)
-{
-    std::string escaped;
-    escaped.reserve(value.size());
-    static const char hex[] = "0123456789ABCDEF";
-    for(unsigned char ch : value)
-    {
-        if(ch < 0x20 || ch == 0x7F)
-        {
-            escaped += "\\x";
-            escaped += hex[ch >> 4];
-            escaped += hex[ch & 0x0F];
-        }
-        else
-            escaped.push_back(static_cast<char>(ch));
-    }
-    return escaped;
-}
-
 static bool has_control_character(const std::string &value)
 {
     for(unsigned char ch : value)
@@ -356,7 +338,7 @@ bool isFetchUrlAllowed(const std::string &url, FetchContext context)
     if(!isPublicFetchRestricted(context))
         return true;
     std::string checked_url = trimWhitespace(url, true, true);
-    std::string log_url = escape_log_value(checked_url);
+    std::string log_url = summarizeUrlForLog(checked_url);
     if(checked_url.empty() || checked_url != url || has_control_character(checked_url))
     {
         writeLog(0, "已阻止公开请求获取格式异常的 URL：" + log_url,
@@ -501,20 +483,35 @@ static int logger(CURL *handle, curl_infotype type, char *data, size_t size, voi
         return 0;
     }
     std::string content(data, size);
+    auto safe_header_line = [](const std::string &line) {
+        std::string value = trimWhitespace(line);
+        if(value.empty() || startsWith(value, "HTTP/"))
+            return value;
+        const std::string::size_type colon = value.find(':');
+        if(colon != std::string::npos)
+            return value.substr(0, colon) + ": <redacted>";
+        const std::string::size_type first_space = value.find(' ');
+        const std::string::size_type last_space = value.rfind(' ');
+        if(first_space != std::string::npos && last_space > first_space)
+            return value.substr(0, first_space) + " <redacted> " +
+                   value.substr(last_space + 1);
+        return std::string("<redacted>");
+    };
     if(content.find("\r\n") != std::string::npos)
     {
         string_array lines = split(content, "\r\n");
         for(auto &x : lines)
         {
             std::string log_content = prefix;
-            log_content += x;
+            log_content += type == CURLINFO_TEXT ? x : safe_header_line(x);
             writeLog(0, log_content, LOG_LEVEL_VERBOSE);
         }
     }
     else
     {
         std::string log_content = prefix;
-        log_content += trimWhitespace(content);
+        log_content += type == CURLINFO_TEXT ? trimWhitespace(content)
+                                             : safe_header_line(content);
         writeLog(0, log_content, LOG_LEVEL_VERBOSE);
     }
     return 0;
@@ -897,7 +894,7 @@ static int curlGetWithGitHubFallback(const FetchArgument &argument, FetchResult 
 
     writeLog(0,
              "GitHub Raw 获取失败，正在尝试 jsDelivr 回退源：" +
-                 fallback_url,
+                  summarizeUrlForLog(fallback_url),
              LOG_LEVEL_WARNING);
     clear_fetch_output(result);
 
@@ -912,13 +909,14 @@ static int curlGetWithGitHubFallback(const FetchArgument &argument, FetchResult 
     {
         writeLog(0,
                  "GitHub Raw 已通过 jsDelivr 回退源获取成功：" +
-                     fallback_url,
+                      summarizeUrlForLog(fallback_url),
                  LOG_LEVEL_INFO);
         return fallback_status;
     }
 
     writeLog(0,
-             "GitHub Raw 通过 jsDelivr 回退源获取失败：" + fallback_url,
+             "GitHub Raw 通过 jsDelivr 回退源获取失败：" +
+                 summarizeUrlForLog(fallback_url),
              LOG_LEVEL_WARNING);
     clear_fetch_output(result);
     if(result.response_headers)
@@ -980,8 +978,8 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned in
         resolveCocrSourceUrl(url, global.customOpenClashRulesSourceSwitch);
     const std::string &effective_url = source.effective_url;
     if(source.rewritten && shouldLog(LOG_LEVEL_VERBOSE))
-        writeLog(0, "COCR 服务端取源切换：'" + url + "' -> '" +
-                        effective_url + "'。",
+        writeLog(0, "COCR 服务端取源切换：" + summarizeUrlForLog(url) +
+                        " -> " + summarizeUrlForLog(effective_url) + "。",
                  LOG_LEVEL_VERBOSE);
 
     FetchArgument argument {HTTP_GET, effective_url, proxy, nullptr,
@@ -1005,7 +1003,9 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned in
             if(difftime(now, mtime) <= cache_ttl) // within TTL
             {
                 if(shouldLog(LOG_LEVEL_VERBOSE))
-                    writeLog(0, "缓存命中：'" + effective_url + "'，使用本地缓存。");
+                    writeLog(0, "缓存命中：" +
+                                    summarizeUrlForLog(effective_url) +
+                                    "，使用本地缓存。");
                 //guarded_mutex guard(cache_rw_lock);
                 cache_rw_lock.readLock();
                 defer(cache_rw_lock.readUnlock();)
@@ -1014,12 +1014,16 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned in
                 return fileGet(path, true);
             }
             if(shouldLog(LOG_LEVEL_VERBOSE))
-                writeLog(0, "缓存过期：'" + effective_url + "'，正在创建新缓存。"); // out of TTL
+                writeLog(0, "缓存过期：" +
+                                summarizeUrlForLog(effective_url) +
+                                "，正在创建新缓存。"); // out of TTL
         }
         else
         {
             if(shouldLog(LOG_LEVEL_VERBOSE))
-                writeLog(0, "缓存不存在：'" + effective_url + "'，正在创建新缓存。");
+                writeLog(0, "缓存不存在：" +
+                                summarizeUrlForLog(effective_url) +
+                                "，正在创建新缓存。");
         }
         std::shared_future<CacheFetchResult> fetch_future;
         std::shared_ptr<std::promise<CacheFetchResult>> fetch_promise;
@@ -1167,8 +1171,9 @@ int webGet(const FetchArgument& argument, FetchResult &result)
         return curlGetWithGitHubFallback(argument, result);
 
     if(shouldLog(LOG_LEVEL_VERBOSE))
-        writeLog(0, "COCR 服务端取源切换：'" + argument.url + "' -> '" +
-                        source.effective_url + "'。",
+        writeLog(0, "COCR 服务端取源切换：" +
+                        summarizeUrlForLog(argument.url) + " -> " +
+                        summarizeUrlForLog(source.effective_url) + "。",
                  LOG_LEVEL_VERBOSE);
     FetchArgument effective_argument {
         argument.method, source.effective_url, argument.proxy,
