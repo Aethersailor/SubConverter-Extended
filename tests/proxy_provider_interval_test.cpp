@@ -1,35 +1,50 @@
-#include <cassert>
 #include <climits>
+#include <iostream>
 #include <string>
 
 #include "config/proxy_provider_interval.h"
 
-static void assertAccepted(const std::string &input, int expected) {
+static bool expectAccepted(const std::string &input, int expected) {
   int value = -1;
-  assert(parseProxyProviderInterval(input, value));
-  assert(value == expected);
+  if (!parseProxyProviderInterval(input, value)) {
+    std::cerr << "expected accepted provider interval: " << input << '\n';
+    return false;
+  }
+  if (value != expected) {
+    std::cerr << "unexpected provider interval for: " << input << '\n';
+    return false;
+  }
+  return true;
 }
 
-static void assertRejected(const std::string &input) {
+static bool expectRejected(const std::string &input) {
   int value = 123;
-  assert(!parseProxyProviderInterval(input, value));
-  assert(value == 123);
+  if (parseProxyProviderInterval(input, value)) {
+    std::cerr << "expected rejected provider interval: " << input << '\n';
+    return false;
+  }
+  if (value != 123) {
+    std::cerr << "rejected provider interval mutated output: " << input
+              << '\n';
+    return false;
+  }
+  return true;
 }
 
 int main() {
-  assert(kDefaultProxyProviderInterval == 3600);
-  assertAccepted("0", 0);
-  assertAccepted("3600", 3600);
-  assertAccepted(" 7200 ", 7200);
-  assertAccepted(std::to_string(INT_MAX), INT_MAX);
+  bool ok = kDefaultProxyProviderInterval == 3600;
+  ok = expectAccepted("0", 0) && ok;
+  ok = expectAccepted("3600", 3600) && ok;
+  ok = expectAccepted(" 7200 ", 7200) && ok;
+  ok = expectAccepted(std::to_string(INT_MAX), INT_MAX) && ok;
 
-  assertRejected("");
-  assertRejected(" ");
-  assertRejected("-1");
-  assertRejected("+1");
-  assertRejected("none");
-  assertRejected("1h");
-  assertRejected("1.5");
-  assertRejected("2147483648");
-  return 0;
+  ok = expectRejected("") && ok;
+  ok = expectRejected(" ") && ok;
+  ok = expectRejected("-1") && ok;
+  ok = expectRejected("+1") && ok;
+  ok = expectRejected("none") && ok;
+  ok = expectRejected("1h") && ok;
+  ok = expectRejected("1.5") && ok;
+  ok = expectRejected("2147483648") && ok;
+  return ok ? 0 : 1;
 }

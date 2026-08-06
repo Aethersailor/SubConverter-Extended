@@ -10,6 +10,7 @@
 
 #include "config/proxygroup.h"
 #include "config/proxy_provider_interval.h"
+#include "config/proxy_provider_direct.h"
 #include "config/regmatch.h"
 #include "parser/config/proxy.h"
 #include "ruleconvert.h"
@@ -22,6 +23,7 @@ struct ProxyProvider {
   std::string tag;            // 原始 tag（用于重命名映射）
   std::string url;            // 订阅链接
   uint32_t interval;          // 更新间隔（秒）
+  bool proxy_direct;          // 是否显式使用 DIRECT 下载/更新
   std::string filter;         // 过滤正则
   std::string exclude_filter; // 排除正则
   std::string path;           // 本地缓存路径
@@ -29,7 +31,9 @@ struct ProxyProvider {
   std::map<std::string, std::string> headers; // 显式允许转发的请求头
   int groupId;                // 所属组 ID
 
-  ProxyProvider() : interval(kDefaultProxyProviderInterval), groupId(0) {}
+  ProxyProvider()
+      : interval(kDefaultProxyProviderInterval),
+        proxy_direct(kDefaultProxyProviderDirect), groupId(0) {}
 };
 
 struct extra_settings {

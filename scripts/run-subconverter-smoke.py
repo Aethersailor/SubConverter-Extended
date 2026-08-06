@@ -103,21 +103,30 @@ def assert_rejected(
     raise AssertionError(f"{label} was unexpectedly accepted")
 
 
-def provider_interval_from_output(output: str, provider_name: str) -> int:
+def provider_block_from_output(output: str, provider_name: str) -> str:
     marker = f"  {provider_name}:\n"
     start = output.find(marker)
     if start < 0:
         raise AssertionError(f"provider block is missing: {provider_name}")
     following = output[start + len(marker) :]
     next_provider = re.search(r"(?m)^  [^ ].*:\s*$", following)
-    end = len(output) if next_provider is None else start + len(marker) + next_provider.start()
-    block = output[start:end]
+    end = len(following) if next_provider is None else next_provider.start()
+    return marker + following[:end]
+
+
+def provider_interval_from_output(output: str, provider_name: str) -> int:
+    block = provider_block_from_output(output, provider_name)
     interval = re.search(r"(?m)^    interval: ([0-9]+)\s*$", block)
     if interval is None:
         raise AssertionError(
             f"provider interval is missing or non-numeric: {provider_name}\n{block}"
         )
     return int(interval.group(1))
+
+
+def provider_proxy_direct_from_output(output: str, provider_name: str) -> bool:
+    block = provider_block_from_output(output, provider_name)
+    return re.search(r"(?m)^    proxy: DIRECT\s*$", block) is not None
 
 
 def assert_snapshot(name: str, content: str, snapshot_dir: Path | None, update: bool) -> None:
@@ -472,8 +481,8 @@ def run_checks(
                 **provider_params,
                 "url": "|".join(
                     (
-                        f"provider:Zero,interval:0,{remote_subscription_url}",
-                        f"interval:21600,provider:Slow,{remote_subscription_url}",
+                        f"provider:Zero,interval:0,proxy_direct:false,{remote_subscription_url}",
+                        f"proxy_direct:true,interval:21600,provider:Slow,{remote_subscription_url}",
                         f"provider:Default,{remote_subscription_url}",
                     )
                 ),
@@ -492,6 +501,16 @@ def run_checks(
                 )
         if interval_output.count("      interval: 300") != 3:
             raise AssertionError("provider health-check intervals changed")
+        for provider_name, expected in {
+            "Zero": False,
+            "Slow": True,
+            "Default": True,
+        }.items():
+            actual = provider_proxy_direct_from_output(interval_output, provider_name)
+            if actual is not expected:
+                raise AssertionError(
+                    f"{provider_name} proxy_direct mismatch: {actual} != {expected}"
+                )
 
         managed_interval_output = fetch(
             base_url,
@@ -506,6 +525,51 @@ def run_checks(
         if provider_interval_from_output(managed_interval_output, "Managed") != 3600:
             raise AssertionError(
                 "request-level interval parameter changed provider interval"
+            )
+
+        request_false_output = fetch(
+            base_url,
+            "/sub",
+            {
+                **provider_params,
+                "url": "|".join(
+                    (
+                        f"provider:RequestFalse,{remote_subscription_url}",
+                        f"provider:LinkTrue,proxy_direct:true,{remote_subscription_url}",
+                    )
+                ),
+                "provider_proxy_direct": "false",
+            },
+            timeout,
+        )
+        if provider_proxy_direct_from_output(request_false_output, "RequestFalse"):
+            raise AssertionError(
+                "provider_proxy_direct=false no longer omits proxy: DIRECT"
+            )
+        if not provider_proxy_direct_from_output(request_false_output, "LinkTrue"):
+            raise AssertionError(
+                "per-link proxy_direct=true did not override the request default"
+            )
+
+        direct_explain = fetch(
+            base_url,
+            "/sub",
+            {
+                **provider_params,
+                "url": f"provider:ExplainDirect,proxy_direct:false,{remote_subscription_url}",
+                "explain": "true",
+            },
+            timeout,
+        )
+        direct_report = json.loads(direct_explain)
+        direct_providers = direct_report.get("providers", [])
+        if (
+            len(direct_providers) != 1
+            or direct_providers[0].get("proxy_direct") is not False
+            or direct_providers[0].get("proxy_field_emitted") is not False
+        ):
+            raise AssertionError(
+                f"proxy_direct explain output is incorrect: {direct_providers!r}"
             )
 
         for label, source_value in (
@@ -528,12 +592,49 @@ def run_checks(
                 label,
             )
 
+        for label, source_value in (
+            (
+                "none provider proxy_direct",
+                "proxy_direct:none,https://example.invalid/sub",
+            ),
+            (
+                "duplicate provider proxy_direct",
+                "proxy_direct:true,proxy_direct:false,https://example.invalid/sub",
+            ),
+            (
+                "provider proxy_direct on direct node",
+                f"proxy_direct:false,{DIRECT_SS_LINK}",
+            ),
+        ):
+            assert_rejected(
+                base_url,
+                "/sub",
+                {
+                    "target": "clash",
+                    "url": source_value,
+                    "config": DISABLE_RULEGEN_CONFIG,
+                },
+                timeout,
+                label,
+            )
+
         assert_rejected(
             base_url,
             "/sub",
             {**provider_params, "url": f"interval:0,{remote_subscription_url}", "list": "true"},
             timeout,
             "provider interval with list=true",
+        )
+        assert_rejected(
+            base_url,
+            "/sub",
+            {
+                **provider_params,
+                "url": f"proxy_direct:false,{remote_subscription_url}",
+                "list": "true",
+            },
+            timeout,
+            "provider proxy_direct with list=true",
         )
         client_ua = "clash.meta/1.19.20"
         client_output, client_headers = fetch_response(

@@ -16,6 +16,7 @@
 #include "utils/tribool.h"
 #include <toml.hpp>
 
+#include "config/proxy_provider_direct.h"
 #include "config/proxy_provider_interval.h"
 
 struct Settings {
@@ -70,6 +71,7 @@ struct Settings {
   std::string proxyConfig, proxyRuleset, proxySubscription;
   int updateInterval = 0;
   int proxyProviderInterval = kDefaultProxyProviderInterval;
+  bool proxyProviderDirect = kDefaultProxyProviderDirect;
   std::string sortScript, filterScript;
 
   std::string clashBase;

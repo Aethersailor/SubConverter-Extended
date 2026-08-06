@@ -992,7 +992,7 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
       single_provider["type"] = "http";
       single_provider["url"] = p.url;
       single_provider["interval"] = p.interval;
-      if (ext.provider_proxy_direct)
+      if (p.proxy_direct)
         single_provider["proxy"] = "DIRECT";
       single_provider["path"] = p.path;
 
