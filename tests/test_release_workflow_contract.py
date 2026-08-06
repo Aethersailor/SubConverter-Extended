@@ -56,6 +56,13 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("sync_only must not carry a release version", self.sync)
         self.assertIn("Tag $VERSION already exists. Historical versions are frozen", self.sync)
 
+    def test_immutability_controls_are_checked_before_tag_creation(self):
+        controls = self.sync.index("Verify immutable release controls before tag creation")
+        tag = self.sync.index("Create the one-time formal release tag")
+        self.assertLess(controls, tag)
+        self.assertIn("GitHub immutable releases must be enabled before creating", self.sync)
+        self.assertIn("Docker Hub immutable tags must be enabled before tag creation", self.sync)
+
 
 if __name__ == "__main__":
     unittest.main()

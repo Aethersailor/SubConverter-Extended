@@ -150,6 +150,42 @@ jobs:
           fi
           gh run watch "$run_id" --repo "$repo" --exit-status
 
+      - name: Verify immutable release controls before tag creation
+        if: inputs.operation == 'new'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          VERSION: ${{ steps.request.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          immutable_enabled="$(gh api \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/immutable-releases" \
+            --jq '.enabled')"
+          if [ "$immutable_enabled" != "true" ]; then
+            echo "::error::GitHub immutable releases must be enabled before creating $VERSION."
+            exit 1
+          fi
+
+          dockerhub_settings="$(curl --fail-with-body --silent --show-error \
+            https://hub.docker.com/v2/repositories/aethersailor/subconverter-extended/)"
+          python3 - "$VERSION" "$dockerhub_settings" <<'PY'
+          import json
+          import re
+          import sys
+
+          version, raw = sys.argv[1:]
+          settings = json.loads(raw).get("immutable_tags_settings") or {}
+          rules = settings.get("rules") or []
+          if settings.get("enabled") is not True:
+              raise SystemExit("::error::Docker Hub immutable tags must be enabled before tag creation.")
+          if not any(re.fullmatch(rule, version) for rule in rules):
+              raise SystemExit(
+                  f"::error::Docker Hub immutable rules do not protect {version}: {rules}"
+              )
+          PY
+
       - name: Create the one-time formal release tag
         if: inputs.operation == 'new'
         shell: bash
