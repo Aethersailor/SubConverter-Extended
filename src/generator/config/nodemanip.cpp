@@ -4,6 +4,8 @@
 #include <utility>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "handler/settings.h"
 #include "handler/webget.h"
 #include "nodemanip.h"
@@ -54,6 +56,8 @@ static void appendMihomoNodes(std::vector<mihomo::ProxyNode> &source,
     // protocols that do not yet have a dedicated C++ ProxyType.
     node.RawParamJson["type"] = "\"" + mnode.type + "\"";
     node.RawParams["type"] = std::move(mnode.type);
+    const bool is_vless = node.Type == ProxyType::VLESS;
+    const bool is_hysteria2 = node.Type == ProxyType::Hysteria2;
 
     for (const auto &[key, value] : node.RawParams) {
       if (key == "password")
@@ -66,12 +70,82 @@ static void appendMihomoNodes(std::vector<mihomo::ProxyNode> &source,
         node.AlterId = std::stoi(value);
       else if (key == "udp")
         node.UDP = (value == "true");
+      else if (is_hysteria2 && key == "skip-cert-verify")
+        node.AllowInsecure = (value == "true");
       else if (key == "tls")
-        node.TLSStr = value;
+        node.TLSStr = is_vless && value == "true" ? "tls" : value;
       else if (key == "sni" || key == "servername")
         node.ServerName = value;
       else if (key == "network")
         node.TransferProtocol = value;
+      else if (is_vless && key == "flow")
+        node.Flow = value;
+      else if (is_vless &&
+               (key == "client-fingerprint" || key == "fingerprint"))
+        node.Fingerprint = value;
+      else if (is_vless && key == "packet-encoding")
+        node.PacketEncoding = value;
+      else if (is_hysteria2 && key == "obfs")
+        node.OBFSParam = value;
+      else if (is_hysteria2 && key == "obfs-password")
+        node.OBFSPassword = value;
+      else if (is_hysteria2 && key == "ports")
+        node.Ports = value;
+    }
+
+    auto parse_object = [&](const std::string &key) {
+      auto value = node.RawParamJson.find(key);
+      if (value == node.RawParamJson.end())
+        return nlohmann::json();
+      try {
+        nlohmann::json parsed = nlohmann::json::parse(value->second);
+        return parsed.is_object() ? parsed : nlohmann::json();
+      } catch (const nlohmann::json::exception &) {
+        return nlohmann::json();
+      }
+    };
+
+    nlohmann::json ws_options = parse_object("ws-opts");
+    if (is_vless && !ws_options.empty()) {
+      node.Path = ws_options.value("path", std::string());
+      const nlohmann::json headers = ws_options.value(
+          "headers", nlohmann::json::object());
+      if (headers.is_object()) {
+        node.Host = headers.value(
+            "Host", headers.value("host", std::string()));
+        node.Edge = headers.value(
+            "Edge", headers.value("edge", std::string()));
+      }
+    }
+
+    nlohmann::json grpc_options = parse_object("grpc-opts");
+    if (is_vless && !grpc_options.empty()) {
+      node.GRPCServiceName =
+          grpc_options.value("grpc-service-name", std::string());
+      node.Path = node.GRPCServiceName;
+      node.GRPCMode = grpc_options.value("grpc-mode", std::string());
+    }
+
+    nlohmann::json reality_options = parse_object("reality-opts");
+    if (is_vless && !reality_options.empty()) {
+      node.PublicKey = reality_options.value("public-key", std::string());
+      node.ShortId = reality_options.value("short-id", std::string());
+    }
+
+    auto alpn = node.RawParamJson.find("alpn");
+    if (is_vless && alpn != node.RawParamJson.end()) {
+      try {
+        const nlohmann::json values = nlohmann::json::parse(alpn->second);
+        if (values.is_array()) {
+          for (const auto &value : values) {
+            if (value.is_string())
+              node.AlpnList.emplace_back(value.get<std::string>());
+          }
+        } else if (values.is_string()) {
+          node.AlpnList.emplace_back(values.get<std::string>());
+        }
+      } catch (const nlohmann::json::exception &) {
+      }
     }
 
     nodes.emplace_back(std::move(node));

@@ -1,6 +1,7 @@
 #ifndef SUBEXPORT_H_INCLUDED
 #define SUBEXPORT_H_INCLUDED
 
+#include <cstdint>
 #include <map>
 #include <string>
 
@@ -35,6 +36,18 @@ struct ProxyProvider {
       : interval(kDefaultProxyProviderInterval),
         proxy_direct(kDefaultProxyProviderDirect), groupId(0) {}
 };
+
+using SingleLinkTypes = std::uint32_t;
+namespace SingleLinkType {
+constexpr SingleLinkTypes Shadowsocks = 1U << 0;
+constexpr SingleLinkTypes ShadowsocksR = 1U << 1;
+constexpr SingleLinkTypes VMess = 1U << 2;
+constexpr SingleLinkTypes Trojan = 1U << 3;
+constexpr SingleLinkTypes Hysteria2 = 1U << 4;
+constexpr SingleLinkTypes VLESS = 1U << 5;
+constexpr SingleLinkTypes Mixed = Shadowsocks | ShadowsocksR | VMess | Trojan |
+                                  Hysteria2 | VLESS;
+} // namespace SingleLinkType
 
 struct extra_settings {
   bool enable_rule_generator = true;
@@ -114,8 +127,8 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
                         extra_settings &ext);
 std::string proxyToSSSub(std::string base_conf, std::vector<Proxy> &nodes,
                          extra_settings &ext);
-std::string proxyToSingle(std::vector<Proxy> &nodes, int types,
-                          extra_settings &ext);
+std::string proxyToSingle(std::vector<Proxy> &nodes, SingleLinkTypes types,
+                           extra_settings &ext);
 std::string proxyToQuanX(std::vector<Proxy> &nodes,
                          const std::string &base_conf,
                          std::vector<RulesetContent> &ruleset_content_array,
