@@ -44,6 +44,8 @@ DISABLE_RULEGEN_CONFIG = "data:,enable_rule_generator=false"
 
 
 class FixtureHandler(BaseHTTPRequestHandler):
+    gist_request_count = 0
+
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/subscription.txt":
             body = SUBSCRIPTION.encode()
@@ -91,12 +93,37 @@ class FixtureHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _write_gist_response(self) -> None:
+        type(self).gist_request_count += 1
+        content_length = int(self.headers.get("Content-Length", "0"))
+        if content_length:
+            self.rfile.read(content_length)
+        body = b'{"id":"fixture-gist","owner":{"login":"fixture-user"}}'
+        self.send_response(201 if self.command == "POST" else 200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self) -> None:  # noqa: N802
+        if self.path != "/gists":
+            self.send_error(404)
+            return
+        self._write_gist_response()
+
+    def do_PATCH(self) -> None:  # noqa: N802
+        if not self.path.startswith("/gists/"):
+            self.send_error(404)
+            return
+        self._write_gist_response()
+
     def log_message(self, _format: str, *_args: object) -> None:
         return
 
 
 @contextlib.contextmanager
 def fixture_server():
+    FixtureHandler.gist_request_count = 0
     server = ThreadingHTTPServer(("127.0.0.1", 0), FixtureHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -189,6 +216,8 @@ def running_service(
     *,
     statistics: bool = False,
     security_profile: str = "lan",
+    allow_public_upload: bool = False,
+    listen_address: str = "127.0.0.1",
     extra_args: tuple[str, ...] = (),
     runtime_details: bool = False,
     legacy_statistics: bool = False,
@@ -200,6 +229,8 @@ def running_service(
     proxy_provider_direct: bool | None = None,
     dashboard_client_ip_header: str | None = None,
     dashboard_trusted_proxy_cidrs: tuple[str, ...] = (),
+    gist_api_base: str | None = None,
+    log_capture: list[str] | None = None,
 ):
     port = unused_port()
     baseline = (COMPAT_FIXTURES / "legacy-pref.toml").read_text(
@@ -262,6 +293,13 @@ def running_service(
     baseline = baseline.replace('proxy_subscription = "SYSTEM"', 'proxy_subscription = "NONE"')
     baseline = baseline.replace('enabled = true\n', f"enabled = {str(statistics).lower()}\n", 1)
     baseline = baseline.replace('profile = "lan"', f'profile = "{security_profile}"')
+    baseline = baseline.replace(
+        "allow_public_upload = false",
+        f"allow_public_upload = {str(allow_public_upload).lower()}",
+    )
+    baseline = baseline.replace(
+        'listen = "127.0.0.1"', f'listen = "{listen_address}"'
+    )
     runtime_dir = REPOSITORY / "build" / "test-baseline-runtime"
     runtime_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=runtime_dir) as temporary:
@@ -279,17 +317,32 @@ def running_service(
             statistics_path.write_text("not a directory", encoding="utf-8")
         pref = temporary_path / "pref.toml"
         pref.write_text(baseline, encoding="utf-8", newline="\n")
-        stdout = (temporary_path / "stdout.log").open("wb")
-        stderr = (temporary_path / "stderr.log").open("wb")
+        stdout_path = temporary_path / "stdout.log"
+        stderr_path = temporary_path / "stderr.log"
+        stdout = stdout_path.open("wb")
+        stderr = stderr_path.open("wb")
+        if gist_api_base is not None:
+            (temporary_path / "gistconf.ini").write_text(
+                "[common]\n"
+                "token=fixture-token\n"
+                "username=fixture-user\n",
+                encoding="utf-8",
+                newline="\n",
+            )
         env = os.environ.copy()
         env.pop("SUBCONVERTER_DASHBOARD_CLIENT_IP_HEADER", None)
         env.pop("SUBCONVERTER_DASHBOARD_TRUSTED_PROXY_CIDRS", None)
+        env.pop("SUBCONVERTER_SECURITY_PROFILE", None)
+        env.pop("SUBCONVERTER_ALLOW_PUBLIC_UPLOAD", None)
+        env.pop("SUBCONVERTER_GIST_API_BASE", None)
+        if gist_api_base is not None:
+            env["SUBCONVERTER_GIST_API_BASE"] = gist_api_base
         env["PORT"] = str(port)
         env["NO_PROXY"] = "127.0.0.1,localhost"
         env["no_proxy"] = "127.0.0.1,localhost"
         process = subprocess.Popen(
             [str(binary), *extra_args, "-f", str(pref)],
-            cwd=REPOSITORY,
+            cwd=temporary_path if gist_api_base is not None else REPOSITORY,
             env=env,
             stdout=stdout,
             stderr=stderr,
@@ -311,17 +364,26 @@ def running_service(
                 process.wait(timeout=5)
             stdout.close()
             stderr.close()
+            if log_capture is not None:
+                log_capture.append(
+                    stderr_path.read_text(encoding="utf-8", errors="replace")
+                )
 
 
-def load_settings_snapshot(
+def run_settings_snapshot(
     helper: Path,
     fixture: Path,
     environment: dict[str, str] | None = None,
-) -> dict[str, object]:
+) -> tuple[dict[str, object], str]:
     env = os.environ.copy() if environment is None else environment.copy()
-    if environment is None:
-        env.pop("SUBCONVERTER_DASHBOARD_CLIENT_IP_HEADER", None)
-        env.pop("SUBCONVERTER_DASHBOARD_TRUSTED_PROXY_CIDRS", None)
+    for name in (
+        "SUBCONVERTER_DASHBOARD_CLIENT_IP_HEADER",
+        "SUBCONVERTER_DASHBOARD_TRUSTED_PROXY_CIDRS",
+        "SUBCONVERTER_SECURITY_PROFILE",
+        "SUBCONVERTER_ALLOW_PUBLIC_UPLOAD",
+    ):
+        if environment is None:
+            env.pop(name, None)
     completed = subprocess.run(
         [str(helper), str(fixture)],
         cwd=REPOSITORY,
@@ -334,7 +396,16 @@ def load_settings_snapshot(
     )
     if "fixture-secret" in completed.stdout or "fixture-dashboard-secret" in completed.stdout:
         raise AssertionError("SettingsSnapshot leaked a fixture secret")
-    return json.loads(completed.stdout)
+    return json.loads(completed.stdout), completed.stderr
+
+
+def load_settings_snapshot(
+    helper: Path,
+    fixture: Path,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    snapshot, _ = run_settings_snapshot(helper, fixture, environment)
+    return snapshot
 
 
 def reload_settings_snapshot(
@@ -347,6 +418,14 @@ def reload_settings_snapshot(
     command = [str(helper), str(first), str(second)]
     if expect_failure:
         command.append("--expect-reload-failure")
+    env = os.environ.copy()
+    for name in (
+        "SUBCONVERTER_DASHBOARD_CLIENT_IP_HEADER",
+        "SUBCONVERTER_DASHBOARD_TRUSTED_PROXY_CIDRS",
+        "SUBCONVERTER_SECURITY_PROFILE",
+        "SUBCONVERTER_ALLOW_PUBLIC_UPLOAD",
+    ):
+        env.pop(name, None)
     completed = subprocess.run(
         command,
         cwd=REPOSITORY,
@@ -355,17 +434,207 @@ def reload_settings_snapshot(
         text=True,
         encoding="utf-8",
         errors="replace",
-        env={
-            key: value
-            for key, value in os.environ.items()
-            if key
-            not in {
-                "SUBCONVERTER_DASHBOARD_CLIENT_IP_HEADER",
-                "SUBCONVERTER_DASHBOARD_TRUSTED_PROXY_CIDRS",
-            }
-        },
+        env=env,
     )
     return json.loads(completed.stdout)
+
+
+def security_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    for name in (
+        "SUBCONVERTER_DASHBOARD_CLIENT_IP_HEADER",
+        "SUBCONVERTER_DASHBOARD_TRUSTED_PROXY_CIDRS",
+        "SUBCONVERTER_SECURITY_PROFILE",
+        "SUBCONVERTER_ALLOW_PUBLIC_UPLOAD",
+    ):
+        env.pop(name, None)
+    return env
+
+
+def replace_security_profile(
+    content: str, suffix: str, value: str | None
+) -> str:
+    patterns = {
+        ".ini": r"(?m)^profile=.*\n?",
+        ".yml": r"(?m)^  profile:.*\n?",
+        ".toml": r'(?m)^profile\s*=.*\n?',
+    }
+    replacements = {
+        ".ini": "" if value is None else f"profile={value}\n",
+        ".yml": "" if value is None else f"  profile: {value}\n",
+        ".toml": "" if value is None else f'profile = "{value}"\n',
+    }
+    pattern = patterns.get(suffix)
+    if pattern is None:
+        raise AssertionError(f"unsupported config suffix: {suffix}")
+    updated, count = re.subn(pattern, replacements[suffix], content, count=1)
+    if count != 1:
+        raise AssertionError(f"security profile line missing: {suffix}")
+    return updated
+
+
+def security_configuration_matrix_baseline(helper: Path) -> None:
+    runtime_dir = REPOSITORY / "build" / "test-baseline-runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=runtime_dir) as temporary:
+        temporary_path = Path(temporary)
+        fixtures = (
+            COMPAT_FIXTURES / "legacy-pref.ini",
+            COMPAT_FIXTURES / "legacy-pref.yml",
+            COMPAT_FIXTURES / "legacy-pref.toml",
+        )
+        for original in fixtures:
+            original_content = original.read_text(encoding="utf-8")
+            source = "file:yaml" if original.suffix == ".yml" else (
+                "file:" + original.suffix.removeprefix(".")
+            )
+            for configured, expected in (
+                (None, "lan"),
+                ("lan", "lan"),
+                ("public", "public"),
+                ("strict", "strict"),
+                ("publci", "lan"),
+            ):
+                label = "missing" if configured is None else configured
+                candidate = temporary_path / f"{original.stem}-{label}{original.suffix}"
+                candidate.write_text(
+                    replace_security_profile(
+                        original_content, original.suffix, configured
+                    ),
+                    encoding="utf-8",
+                    newline="\n",
+                )
+                snapshot, logs = run_settings_snapshot(helper, candidate)
+                actual = snapshot["security"]["profile"]
+                if actual != expected:
+                    raise AssertionError(
+                        f"{original.suffix} profile={label} became {actual}, "
+                        f"expected {expected}"
+                    )
+                expected_source = "builtin-default" if configured is None else source
+                event = (
+                    f"SECURITY_PROFILE_EFFECTIVE profile={expected} "
+                    f"source={expected_source}"
+                )
+                if event not in logs:
+                    raise AssertionError(
+                        f"{original.suffix} profile={label} source log missing: "
+                        f"{logs!r}"
+                    )
+                invalid_event = "SECURITY_PROFILE_INVALID_FALLBACK"
+                if configured == "publci":
+                    if (
+                        f"{invalid_event} source={source}" not in logs
+                        or "effective=lan compatibility_fallback=true" not in logs
+                    ):
+                        raise AssertionError(
+                            f"{original.suffix} invalid profile fallback was not "
+                            f"observable: {logs!r}"
+                        )
+                elif invalid_event in logs:
+                    raise AssertionError(
+                        f"{original.suffix} valid profile emitted invalid warning"
+                    )
+
+            public_file = temporary_path / f"{original.stem}-env{original.suffix}"
+            public_file.write_text(
+                replace_security_profile(
+                    original_content, original.suffix, "public"
+                ),
+                encoding="utf-8",
+                newline="\n",
+            )
+            env = security_environment()
+            env["SUBCONVERTER_SECURITY_PROFILE"] = "strict"
+            snapshot, logs = run_settings_snapshot(helper, public_file, env)
+            if snapshot["security"]["profile"] != "strict" or (
+                "SECURITY_PROFILE_EFFECTIVE profile=strict source=environment "
+                f"file_candidate={source}"
+            ) not in logs:
+                raise AssertionError(
+                    f"{original.suffix} environment profile did not override file"
+                )
+
+            env["SUBCONVERTER_SECURITY_PROFILE"] = "publci'\nforged-event\\tail"
+            snapshot, logs = run_settings_snapshot(helper, public_file, env)
+            if snapshot["security"]["profile"] != "lan" or (
+                "SECURITY_PROFILE_INVALID_FALLBACK source=environment "
+                "input='publci\\x27\\x0Aforged-event\\x5Ctail'"
+            ) not in logs:
+                raise AssertionError(
+                    f"{original.suffix} invalid environment profile fallback or "
+                    "log escaping changed"
+                )
+
+            env = security_environment()
+            env["SUBCONVERTER_SECURITY_PROFILE"] = "public"
+            env["SUBCONVERTER_ALLOW_PUBLIC_UPLOAD"] = "true"
+            snapshot, _ = run_settings_snapshot(helper, public_file, env)
+            if not snapshot["security"]["allow_public_upload"]:
+                raise AssertionError(
+                    f"{original.suffix} upload environment override was ignored"
+                )
+
+            env["SUBCONVERTER_ALLOW_PUBLIC_UPLOAD"] = "truthy"
+            snapshot, logs = run_settings_snapshot(helper, public_file, env)
+            if snapshot["security"]["allow_public_upload"] or (
+                "SECURITY_UPLOAD_VALUE_INVALID source=environment "
+                "input='truthy' effective=false"
+            ) not in logs:
+                raise AssertionError(
+                    f"{original.suffix} invalid upload environment behavior changed"
+                )
+
+            missing_file = temporary_path / f"{original.stem}-reload{original.suffix}"
+            missing_file.write_text(
+                replace_security_profile(original_content, original.suffix, None),
+                encoding="utf-8",
+                newline="\n",
+            )
+            reloaded = reload_settings_snapshot(helper, public_file, missing_file)
+            if reloaded["security"]["profile"] != "public":
+                raise AssertionError(
+                    f"{original.suffix} reload no longer retains a removed profile"
+                )
+
+
+def deployment_security_defaults_baseline() -> None:
+    expected_profile_lines = {
+        REPOSITORY / "base" / "pref.example.ini": "profile=lan",
+        REPOSITORY / "base" / "pref.example.yml": "  profile: lan",
+        REPOSITORY / "base" / "pref.example.toml": 'profile = "lan"',
+    }
+    expected_upload_lines = {
+        ".ini": "allow_public_upload=false",
+        ".yml": "  allow_public_upload: false",
+        ".toml": "allow_public_upload = false",
+    }
+    for path, profile_line in expected_profile_lines.items():
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if profile_line not in lines or expected_upload_lines[path.suffix] not in lines:
+            raise AssertionError(
+                f"deployment example defaults changed in {path.name}"
+            )
+
+    dockerfile = (REPOSITORY / "Dockerfile").read_text(encoding="utf-8")
+    if (
+        "COPY --from=builder /src/base /base/" not in dockerfile
+        or "cp /base/pref.example.toml \"$CONF\"" not in dockerfile
+    ):
+        raise AssertionError(
+            "Docker image no longer bootstraps pref.toml from the TOML example"
+        )
+
+    compose = (REPOSITORY / "docker-compose.yml").read_text(encoding="utf-8")
+    active_compose = "\n".join(
+        line for line in compose.splitlines() if not line.lstrip().startswith("#")
+    )
+    if '- "25500:25500/tcp"' not in active_compose:
+        raise AssertionError("Compose default port publication changed")
+    if re.search(
+        r"(?m)^\s*SUBCONVERTER_SECURITY_PROFILE\s*:", active_compose
+    ):
+        raise AssertionError("Compose started forcing a security profile")
 
 
 def add_proxy_provider_interval(
@@ -587,6 +856,7 @@ def settings_provider_interval_compatibility_baseline(helper: Path) -> None:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env=security_environment(),
             )
             if startup.returncode == 0:
                 raise AssertionError(
@@ -1531,6 +1801,103 @@ def public_request_baseline(binary: Path, fixture_base: str) -> None:
                 raise AssertionError(f"API-mode file tool {path} became reachable")
 
 
+def security_endpoint_matrix_baseline(binary: Path, fixture_base: str) -> None:
+    sub_params = {
+        "target": "clash",
+        "url": fixture_base + "/subscription.txt",
+        "config": DISABLE_RULEGEN_CONFIG,
+        "list": "true",
+    }
+    encoded_ruleset = base64.urlsafe_b64encode(
+        (fixture_base + "/rules.list").encode()
+    ).decode()
+
+    with running_service(binary, security_profile="lan") as base_url:
+        status, _, _ = request(base_url, "/sub", sub_params)
+        if status != 200:
+            raise AssertionError(
+                f"lan profile changed loopback /sub behavior: HTTP {status}"
+            )
+        status, _, _ = request(
+            base_url,
+            "/getruleset",
+            {"url": encoded_ruleset, "type": "6"},
+        )
+        if status != 200:
+            raise AssertionError(
+                f"lan profile changed loopback /getruleset behavior: HTTP {status}"
+            )
+
+    for profile in ("public", "strict"):
+        with running_service(binary, security_profile=profile) as base_url:
+            status, _, _ = request(base_url, "/sub", sub_params)
+            if status != 400:
+                raise AssertionError(
+                    f"{profile} profile accepted loopback /sub source: HTTP {status}"
+                )
+            status, _, _ = request(
+                base_url,
+                "/getruleset",
+                {"url": encoded_ruleset, "type": "6"},
+            )
+            if status != 400:
+                raise AssertionError(
+                    f"{profile} profile accepted loopback /getruleset source: "
+                    f"HTTP {status}"
+                )
+
+    upload_params = {
+        "target": "clash",
+        "url": SUBSCRIPTION.strip(),
+        "config": DISABLE_RULEGEN_CONFIG,
+        "list": "true",
+        "upload": "true",
+    }
+    cases = (
+        ("lan", False, 200, 1, "reason=lan-compatibility"),
+        ("public", False, 403, 0, "reason=public-upload-setting"),
+        ("public", True, 200, 1, "reason=public-upload-setting"),
+        ("strict", True, 403, 0, "reason=strict-policy"),
+    )
+    for profile, configured_allow, expected_status, gist_delta, reason in cases:
+        logs: list[str] = []
+        before = FixtureHandler.gist_request_count
+        with running_service(
+            binary,
+            security_profile=profile,
+            allow_public_upload=configured_allow,
+            listen_address="0.0.0.0" if profile == "lan" else "127.0.0.1",
+            gist_api_base=fixture_base,
+            log_capture=logs,
+        ) as base_url:
+            status, _, _ = request(base_url, "/sub", upload_params)
+        actual_delta = FixtureHandler.gist_request_count - before
+        if status != expected_status or actual_delta != gist_delta:
+            raise AssertionError(
+                f"upload policy changed for profile={profile}, "
+                f"allow_public_upload={configured_allow}: HTTP {status}, "
+                f"gist requests {actual_delta}"
+            )
+        effective = "allowed" if gist_delta else "blocked"
+        expected_log = (
+            f"SECURITY_UPLOAD_EFFECTIVE profile={profile} "
+            "configured_allow_public_upload="
+            f"{str(configured_allow).lower()} source=file:toml "
+            f"effective={effective} {reason}"
+        )
+        if not logs or expected_log not in logs[0]:
+            raise AssertionError(
+                f"effective upload policy log missing for {profile}: {logs!r}"
+            )
+        if profile == "lan" and (
+            "SECURITY_EXPOSURE_POSSIBLE profile=lan bind=0.0.0.0:" not in logs[0]
+            or "public_reachability=unknown" not in logs[0]
+        ):
+            raise AssertionError(
+                "wildcard LAN binding did not emit reachability-unknown warning"
+            )
+
+
 def settings_reload_compatibility_baseline(helper: Path) -> None:
     insertions = {
         ".ini": (
@@ -1693,6 +2060,7 @@ def main() -> int:
             "settings snapshot helper must be separate from the runtime binary"
         )
 
+    deployment_security_defaults_baseline()
     runtime_cli_isolation_baseline(binary)
 
     snapshots = [
@@ -1711,6 +2079,7 @@ def main() -> int:
         raise AssertionError("missing provider proxy_direct did not default to true")
     if snapshots[0]["security"]["profile"] != "lan":
         raise AssertionError("historical security profile default changed")
+    security_configuration_matrix_baseline(settings_snapshot_helper)
     settings_reload_compatibility_baseline(settings_snapshot_helper)
     settings_provider_interval_compatibility_baseline(settings_snapshot_helper)
     settings_provider_direct_compatibility_baseline(settings_snapshot_helper)
@@ -1730,6 +2099,7 @@ def main() -> int:
         dashboard_client_ip_security_baseline(binary, fixture_base)
         persistence_degradation_baseline(binary, fixture_base)
         public_request_baseline(binary, fixture_base)
+        security_endpoint_matrix_baseline(binary, fixture_base)
         external_config_failure_baseline(binary, fixture_base)
 
     print("compatibility and security baselines passed")
