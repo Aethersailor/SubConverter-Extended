@@ -120,12 +120,12 @@ jobs:
       - statistics-sanitizers
     if: needs.source-head.outputs.current == 'true' && github.actor != 'dependabot[bot]' && !contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '[ci skip]')
     outputs:
-      sha_short: ${{ steps.vars.outputs.sha_short }}
-      version: ${{ steps.mode.outputs.version }}
-      mode: ${{ steps.mode.outputs.mode }}
-      is_release: ${{ steps.mode.outputs.is_release }}
+      sha_short: ${{ steps.metadata.outputs.sha_short }}
+      version: ${{ steps.metadata.outputs.version }}
+      mode: ${{ steps.metadata.outputs.mode }}
+      is_release: ${{ steps.metadata.outputs.is_release }}
       tags: ${{ steps.meta.outputs.tags }}
-      build_date: ${{ steps.build_date.outputs.build_date }}
+      build_date: ${{ steps.metadata.outputs.build_date }}
       linux_matrix: ${{ steps.linux_matrix.outputs.matrix }}
     steps:
       - name: Checkout
@@ -134,63 +134,21 @@ jobs:
           token: ${{ secrets.PAT_TOKEN || github.token }}
           fetch-depth: 0
 
-      - name: Get short SHA
-        id: vars
-        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-
-      - name: Determine build mode and version
-        id: mode
+      - name: Resolve build metadata
+        id: metadata
         shell: bash
         env:
           DISPATCH_RELEASE_TAG: ${{ inputs.release_tag }}
           OVERWRITE_EXISTING_RELEASE: ${{ inputs.overwrite_existing_release }}
         run: |
           set -euo pipefail
-
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            MODE="release"
-            VERSION="${GITHUB_REF#refs/tags/}"
-          elif [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "${OVERWRITE_EXISTING_RELEASE:-false}" = "true" ]; then
-            if [ "$GITHUB_REF" != "refs/heads/master" ]; then
-              echo "::error::Existing releases may be rebuilt only from master."
-              exit 1
-            fi
-            MODE="release"
-            VERSION="${DISPATCH_RELEASE_TAG:-}"
-            VERSION="${VERSION#"${VERSION%%[![:space:]]*}"}"
-            VERSION="${VERSION%"${VERSION##*[![:space:]]}"}"
-            [[ "$VERSION" == v* ]] || VERSION="v$VERSION"
-            if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo "::error::Invalid release tag '$VERSION'. Use vX.Y.Z."
-              exit 1
-            fi
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && \
+             [ "${OVERWRITE_EXISTING_RELEASE:-false}" = "true" ]; then
             git fetch --tags --force origin
-            git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null || {
-              echo "::error::Release tag '$VERSION' does not exist."
-              exit 1
-            }
-          elif [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-            MODE="pr"
-            VERSION="pr-${{ steps.vars.outputs.sha_short }}"
-          elif [ "$GITHUB_REF" = "refs/heads/dev" ]; then
-            MODE="dev"
-            VERSION="dev"
-          elif [ "$GITHUB_REF" = "refs/heads/master" ]; then
-            MODE="master"
-            VERSION="master-${{ steps.vars.outputs.sha_short }}"
-          else
-            echo "::error::Unsupported build ref $GITHUB_REF ($GITHUB_EVENT_NAME)."
-            exit 1
           fi
-
-          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          if [ "$MODE" = "release" ]; then
-            echo "is_release=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "is_release=false" >> "$GITHUB_OUTPUT"
-          fi
-          echo "Build mode: $MODE; version: $VERSION"
+          python3 scripts/ci/build_metadata.py \
+            --validate-release-tag \
+            --github-output "$GITHUB_OUTPUT"
 
       - name: Verify COCR runtime assets are absent
         shell: bash
@@ -203,7 +161,7 @@ jobs:
           fi
 
       - name: Refresh dependency snapshot on dev
-        if: steps.mode.outputs.mode == 'dev'
+        if: steps.metadata.outputs.mode == 'dev'
         shell: bash
         run: |
           set -euo pipefail
@@ -227,7 +185,7 @@ jobs:
           {
             echo "### Dependency snapshot"
             echo
-            echo "Mode: \`${{ steps.mode.outputs.mode }}\`"
+            echo "Mode: \`${{ steps.metadata.outputs.mode }}\`"
             echo "Snapshot SHA-256: \`${{ steps.dependencies.outputs.dependency_snapshot_sha }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -239,19 +197,11 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-      - name: Set build date
-        id: build_date
-        shell: bash
-        run: |
-          commit_date="$(git show -s --format=%cI HEAD)"
-          build_date="$(date -u --date="$commit_date" +%Y-%m-%dT%H:%M:%SZ)"
-          echo "build_date=$build_date" >> "$GITHUB_OUTPUT"
-
       - name: Build Linux matrix
         id: linux_matrix
         shell: bash
         run: |
-          if [ "${{ steps.mode.outputs.mode }}" = "release" ] || [ "${{ steps.mode.outputs.mode }}" = "master" ]; then
+          if [ "${{ steps.metadata.outputs.mode }}" = "release" ] || [ "${{ steps.metadata.outputs.mode }}" = "master" ]; then
             {
               echo 'matrix<<JSON'
               cat <<'JSON'
@@ -273,8 +223,8 @@ jobs:
         id: meta
         shell: bash
         env:
-          VERSION: ${{ steps.mode.outputs.version }}
-          MODE: ${{ steps.mode.outputs.mode }}
+          VERSION: ${{ steps.metadata.outputs.version }}
+          MODE: ${{ steps.metadata.outputs.mode }}
         run: |
           {
             echo 'tags<<EOF'
@@ -540,6 +490,9 @@ jobs:
         with:
           image: ghcr.io/aethersailor/subconverter-extended@${{ steps.build_image.outputs.digest }}
           platform: ${{ matrix.image_platform }}
+          expected-version: ${{ needs.prepare.outputs.version }}
+          expected-revision: ${{ needs.prepare.outputs.sha_short }}
+          expected-build-date: ${{ needs.prepare.outputs.build_date }}
 
       - name: Commit and push generated development files
         if: steps.check_changes.outputs.changed == 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/dev'
