@@ -51,6 +51,15 @@ static int requireProxyProviderInterval(std::int64_t value) {
   return requireProxyProviderInterval(std::to_string(value));
 }
 
+static bool requireProxyProviderDirect(const std::string &value) {
+  bool proxy_direct = false;
+  if (!parseProxyProviderDirect(value, proxy_direct)) {
+    throw std::invalid_argument(
+        "proxy_provider.proxy_direct 必须是 true、false、1 或 0。");
+  }
+  return proxy_direct;
+}
+
 static bool pathInsideRoot(const std::string &path, const std::string &root) {
   if (path.empty() || root.empty())
     return false;
@@ -548,6 +557,15 @@ void readYAMLConf(YAML::Node &node) {
       global.proxyProviderInterval =
           requireProxyProviderInterval(interval.as<std::string>());
     }
+    YAML::Node proxy_direct = proxy_provider["proxy_direct"];
+    if (proxy_direct.IsDefined()) {
+      if (!proxy_direct.IsScalar()) {
+        throw std::invalid_argument(
+            "proxy_provider.proxy_direct 必须是布尔值。");
+      }
+      global.proxyProviderDirect =
+          requireProxyProviderDirect(proxy_direct.as<std::string>());
+    }
   }
 
   if (node["custom_openclash_rules"].IsDefined()) {
@@ -874,6 +892,15 @@ void readTOMLConf(toml::value &root) {
       global.proxyProviderInterval =
           requireProxyProviderInterval(interval.as_integer());
     }
+    if (section_proxy_provider.contains("proxy_direct")) {
+      const auto &proxy_direct =
+          section_proxy_provider.as_table().at("proxy_direct");
+      if (!proxy_direct.is_boolean()) {
+        throw std::invalid_argument(
+            "proxy_provider.proxy_direct 必须是 TOML 布尔值。");
+      }
+      global.proxyProviderDirect = proxy_direct.as_boolean();
+    }
   }
 
   if (filter)
@@ -1115,6 +1142,7 @@ bool readConf() {
     global.fallbackToDefaultExternalConfig = false;
     global.customOpenClashRulesSourceSwitch = false;
     global.proxyProviderInterval = kDefaultProxyProviderInterval;
+    global.proxyProviderDirect = kDefaultProxyProviderDirect;
   };
 
   std::string prefdata;
@@ -1254,6 +1282,12 @@ bool readConf() {
       std::string interval;
       ini.get_if_exist("interval", interval);
       global.proxyProviderInterval = requireProxyProviderInterval(interval);
+    }
+    if (ini.item_exist("proxy_direct")) {
+      std::string proxy_direct;
+      ini.get_if_exist("proxy_direct", proxy_direct);
+      global.proxyProviderDirect =
+          requireProxyProviderDirect(proxy_direct);
     }
   }
 

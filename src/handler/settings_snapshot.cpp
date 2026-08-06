@@ -61,6 +61,7 @@ std::string sanitizedSettingsSnapshot(const Settings &settings) {
       {"proxy_provider",
        {
            {"interval", settings.proxyProviderInterval},
+           {"proxy_direct", settings.proxyProviderDirect},
        }},
       {"rules",
        {

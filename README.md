@@ -146,7 +146,7 @@ proxy-providers:
     type: http
     url: https://your-subscription-url  # 客户端实际拉取订阅的地址
     interval: 3600  # 默认值可由部署配置设置，也可对每条订阅单独覆盖
-    proxy: DIRECT  # 默认以直连方式拉取订阅
+    proxy: DIRECT  # 默认以直连方式拉取订阅；可按部署配置或单条订阅省略
     path: ./providers/Provider_A1B2C3.yaml
     health-check:
       enable: true
@@ -617,6 +617,7 @@ logread -e subconverter
 | `exclude` | 排除节点（正则） | `过期\|剩余` |
 | `emoji` | 添加 Emoji | `true` / `false` |
 | `explain` | 返回本次转换的 JSON 诊断报告 | `true` |
+| `provider_proxy_direct` | 所有未单独覆盖的 proxy-provider 是否生成 `proxy: DIRECT` | `true` / `false` |
 
 ### 常见调用示例
 
@@ -768,7 +769,7 @@ lock_seconds = 900
 </details>
 
 <details>
-<summary><strong>Proxy-Provider 自定义名称与更新间隔</strong></summary>
+<summary><strong>Proxy-Provider 自定义名称、更新间隔与下载路径</strong></summary>
 
 ### `provider` 前缀（仅适用于 Clash/ClashR 订阅链接）
 
@@ -796,16 +797,19 @@ url=provider%3AHK%2Chttps%3A%2F%2Fexample.com%2Fsub
 ```toml
 [proxy_provider]
 interval = 3600
+proxy_direct = true
 ```
 
 ```yaml
 proxy_provider:
   interval: 3600
+  proxy_direct: true
 ```
 
 ```ini
 [proxy_provider]
 interval=3600
+proxy_direct=true
 ```
 
 用户需要为某一条订阅单独设置间隔时，在该订阅前添加 `interval:<秒数>,`。它与 `provider:`、`tag:` 前缀可以任意排序：
@@ -834,6 +838,25 @@ interval: 0
 * `interval:` 不适用于节点 URI、`list=true` 或非 Clash/ClashR 目标
 * 不提供请求级的全局 `provider_interval` 参数
 * 已有顶层请求参数 `&interval=` 仍用于托管配置的更新提示，与 `proxy-provider` 的更新周期无关
+
+### `proxy_direct` 前缀（仅适用于 Clash/ClashR 订阅链接）
+
+默认情况下，项目为每个新生成的 `proxy-provider` 显式生成 `proxy: DIRECT`，保持既有行为。部署者可以将主配置文件中的 `proxy_provider.proxy_direct` 设为 `false`；用户也可以使用已有请求参数 `&provider_proxy_direct=false`，为本次请求中所有未单独覆盖的 provider 改变默认值。
+
+需要逐条控制时，在订阅链接前添加 `proxy_direct:true,` 或 `proxy_direct:false,`。它与 `provider:`、`tag:`、`interval:` 前缀可以任意排序：
+
+```text
+url=provider:A,proxy_direct:false,https://a.example/sub|provider:B,interval:21600,proxy_direct:true,https://b.example/sub|provider:C,https://c.example/sub
+```
+
+生效优先级是：单条订阅的 `proxy_direct:` 前缀 > 请求参数 `&provider_proxy_direct=` > 主配置文件 `proxy_provider.proxy_direct` > 兼容默认值 `true`。
+
+* `proxy_direct:true` 会明确生成 `proxy: DIRECT`
+* `proxy_direct:false` 会完全省略 `proxy` 字段，不会生成 `proxy: false`、空字符串或 `null`
+* 省略 `proxy` 字段并不保证一定走代理，而是让 Mihomo 按自身规则和运行模式决定 provider 的下载路径
+* 如果代理路径本身依赖这个尚未完成初次下载的 provider，可能形成启动循环；因此本项目继续使用 `true` 作为兼容默认值
+* 接受 `true`、`false`、`1`、`0`；同一条订阅重复设置或使用其他值会返回 HTTP 400
+* `proxy_direct:` 不适用于节点 URI、`list=true` 或非 Clash/ClashR 目标
 
 </details>
 

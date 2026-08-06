@@ -58,8 +58,26 @@ CHECKS = [
     {
         "id": "provider-direct-option",
         "file": "src/generator/config/subexport.h",
-        "pattern": r"provider_proxy_direct",
-        "message": "provider_proxy_direct option is missing.",
+        "pattern": r"bool\s+provider_proxy_direct\s*=\s*true",
+        "message": "The request-level provider DIRECT default is missing.",
+    },
+    {
+        "id": "provider-direct-output",
+        "file": "src/generator/config/subexport.cpp",
+        "pattern": r"if\s*\(p\.proxy_direct\)\s*\n\s*single_provider\[\"proxy\"\]\s*=\s*\"DIRECT\"",
+        "message": "Per-provider proxy: DIRECT emission is missing.",
+    },
+    {
+        "id": "provider-direct-prefix",
+        "file": "src/handler/interfaces.cpp",
+        "pattern": r"item\.has_proxy_direct\s*\?\s*item\.proxy_direct\s*:\s*ext\.provider_proxy_direct",
+        "message": "Per-provider proxy_direct override support is missing.",
+    },
+    {
+        "id": "provider-direct-default",
+        "file": "src/config/proxy_provider_direct.h",
+        "pattern": r"kDefaultProxyProviderDirect\s*=\s*true",
+        "message": "The backward-compatible provider DIRECT default is missing.",
     },
     {
         "id": "provider-name-override",

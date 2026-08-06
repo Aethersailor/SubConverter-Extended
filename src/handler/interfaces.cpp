@@ -708,15 +708,19 @@ struct TaggedLink {
     None,
     InvalidInterval,
     DuplicateInterval,
+    InvalidProxyDirect,
+    DuplicateProxyDirect,
   };
 
   std::string tag;
   std::string provider;
   std::string link;
   int interval = 0;
+  bool proxy_direct = kDefaultProxyProviderDirect;
   bool has_tag = false;
   bool has_provider = false;
   bool has_interval = false;
+  bool has_proxy_direct = false;
   bool link_decoded = false;
   Error error = Error::None;
 };
@@ -797,6 +801,21 @@ static bool parseLinkPrefixes(const std::string &input, TaggedLink &result) {
       remainder = next;
       continue;
     }
+    if (extractLinkPrefix(remainder, "proxy_direct:", value, next,
+                          saw_bracketed)) {
+      parsed = true;
+      if (result.has_proxy_direct) {
+        result.error = TaggedLink::Error::DuplicateProxyDirect;
+        return true;
+      }
+      if (!parseProxyProviderDirect(value, result.proxy_direct)) {
+        result.error = TaggedLink::Error::InvalidProxyDirect;
+        return true;
+      }
+      result.has_proxy_direct = true;
+      remainder = next;
+      continue;
+    }
     break;
   }
 
@@ -804,8 +823,16 @@ static bool parseLinkPrefixes(const std::string &input, TaggedLink &result) {
       toLower(trimWhitespace(remainder, true, true));
   const bool starts_interval = startsWith(lower_remainder, "interval:") ||
                                startsWith(lower_remainder, "<interval:");
+  const bool starts_proxy_direct =
+      startsWith(lower_remainder, "proxy_direct:") ||
+      startsWith(lower_remainder, "<proxy_direct:");
   if (starts_interval && lower_remainder.find("%2c") == std::string::npos) {
     result.error = TaggedLink::Error::InvalidInterval;
+    return true;
+  }
+  if (starts_proxy_direct &&
+      lower_remainder.find("%2c") == std::string::npos) {
+    result.error = TaggedLink::Error::InvalidProxyDirect;
     return true;
   }
 
@@ -823,16 +850,21 @@ static bool looksLikeEncodedLinkPrefix(const std::string &input) {
   std::string lower = toLower(input);
   return startsWith(lower, "tag%3a") || startsWith(lower, "provider%3a") ||
          startsWith(lower, "interval%3a") ||
+         startsWith(lower, "proxy_direct%3a") ||
          startsWith(lower, "%3ctag%3a") ||
          startsWith(lower, "%3cprovider%3a") || startsWith(lower, "%3ctag:") ||
          startsWith(lower, "%3cinterval%3a") ||
+         startsWith(lower, "%3cproxy_direct%3a") ||
          startsWith(lower, "%3cprovider:") ||
          startsWith(lower, "%3cinterval:") ||
+         startsWith(lower, "%3cproxy_direct:") ||
          (startsWith(lower, "tag:") &&
           lower.find("%2c") != std::string::npos) ||
          (startsWith(lower, "provider:") &&
           lower.find("%2c") != std::string::npos) ||
          (startsWith(lower, "interval:") &&
+          lower.find("%2c") != std::string::npos) ||
+         (startsWith(lower, "proxy_direct:") &&
           lower.find("%2c") != std::string::npos);
 }
 
@@ -853,7 +885,7 @@ static TaggedLink parseTaggedLink(const std::string &input) {
   return result;
 }
 
-static std::string providerIntervalPrefixError(
+static std::string providerLinkPrefixError(
     size_t item_index, TaggedLink::Error error) {
   const std::string item = std::to_string(item_index + 1);
   if (error == TaggedLink::Error::DuplicateInterval) {
@@ -862,10 +894,22 @@ static std::string providerIntervalPrefixError(
            "无效请求：第 " + item +
            " 个 url 项重复设置了 interval: 前缀。";
   }
-  return "Invalid request: interval: for URL item #" + item +
-         " must be a decimal integer from 0 to 2147483647.\n"
+  if (error == TaggedLink::Error::InvalidInterval) {
+    return "Invalid request: interval: for URL item #" + item +
+           " must be a decimal integer from 0 to 2147483647.\n"
+           "无效请求：第 " + item +
+           " 个 url 项的 interval: 必须是 0 到 2147483647 之间的十进制整数。";
+  }
+  if (error == TaggedLink::Error::DuplicateProxyDirect) {
+    return "Invalid request: proxy_direct: is repeated for URL item #" + item +
+           ".\n"
+           "无效请求：第 " + item +
+           " 个 url 项重复设置了 proxy_direct: 前缀。";
+  }
+  return "Invalid request: proxy_direct: for URL item #" + item +
+         " must be true, false, 1, or 0.\n"
          "无效请求：第 " + item +
-         " 个 url 项的 interval: 必须是 0 到 2147483647 之间的十进制整数。";
+         " 个 url 项的 proxy_direct: 必须是 true、false、1 或 0。";
 }
 
 static std::string providerIntervalScopeError(size_t item_index) {
@@ -875,6 +919,16 @@ static std::string providerIntervalScopeError(size_t item_index) {
          "proxy-providers.\n"
          "无效请求：第 " + item +
          " 个 url 项的 interval: 仅适用于会生成 Clash/ClashR "
+         "proxy-provider 的订阅链接。";
+}
+
+static std::string providerDirectScopeError(size_t item_index) {
+  const std::string item = std::to_string(item_index + 1);
+  return "Invalid request: proxy_direct: for URL item #" + item +
+         " is only valid for subscription links that generate Clash/ClashR "
+         "proxy-providers.\n"
+         "无效请求：第 " + item +
+         " 个 url 项的 proxy_direct: 仅适用于会生成 Clash/ClashR "
          "proxy-provider 的订阅链接。";
 }
 
@@ -1014,6 +1068,7 @@ struct SubExplainProvider {
   std::string exclude_filter;
   int group_id = 0;
   uint32_t interval = 0;
+  bool proxy_direct = kDefaultProxyProviderDirect;
 };
 
 struct SubExplainParameter {
@@ -1271,6 +1326,10 @@ static std::string serializeSubExplainReport(const SubExplainReport &report,
     writer.Int(provider.group_id);
     writer.Key("interval");
     writer.Uint(provider.interval);
+    writer.Key("proxy_direct");
+    writer.Bool(provider.proxy_direct);
+    writer.Key("proxy_field_emitted");
+    writer.Bool(provider.proxy_direct);
     writer.EndObject();
   }
   writer.EndArray();
@@ -1859,7 +1918,8 @@ static std::string subconverter_impl(Request &request, Response &response,
   ext.clash_new_field_name = argClashNewField.get(global.clashUseNewField);
   ext.clash_script = argGenClashScript.get();
   ext.clash_classical_ruleset = argGenClassicalRuleProvider.get();
-  ext.provider_proxy_direct = argProviderProxyDirect.get(true);
+  ext.provider_proxy_direct =
+      argProviderProxyDirect.get(global.proxyProviderDirect);
   // 无论 expand 取何值，均强制使用 Mihomo 新字段名（proxy-groups / rules）
   // 避免因全局配置为旧字段名而导致 Mihomo 无法识别
   ext.clash_new_field_name = true;
@@ -2192,11 +2252,15 @@ static std::string subconverter_impl(Request &request, Response &response,
       TaggedLink tagged = parseTaggedLink(regTrim(urls[index]));
       if (tagged.error != TaggedLink::Error::None) {
         *status_code = 400;
-        return providerIntervalPrefixError(index, tagged.error);
+        return providerLinkPrefixError(index, tagged.error);
       }
       if (tagged.has_interval) {
         *status_code = 400;
         return providerIntervalScopeError(index);
+      }
+      if (tagged.has_proxy_direct) {
+        *status_code = 400;
+        return providerDirectScopeError(index);
       }
     }
   }
@@ -2209,7 +2273,9 @@ static std::string subconverter_impl(Request &request, Response &response,
       std::string tag;
       std::string provider;
       int interval = 0;
+      bool proxy_direct = kDefaultProxyProviderDirect;
       bool has_interval = false;
+      bool has_proxy_direct = false;
       bool url_decoded = false;
     };
     std::vector<SubscriptionLinkItem> subscription_urls; // HTTP/HTTPS 订阅链接
@@ -2221,7 +2287,7 @@ static std::string subconverter_impl(Request &request, Response &response,
       TaggedLink tagged = parseTaggedLink(x);
       if (tagged.error != TaggedLink::Error::None) {
         *status_code = 400;
-        return providerIntervalPrefixError(index, tagged.error);
+        return providerLinkPrefixError(index, tagged.error);
       }
       std::string link = tagged.link.empty() ? x : tagged.link;
 
@@ -2233,6 +2299,10 @@ static std::string subconverter_impl(Request &request, Response &response,
         if (tagged.has_interval) {
           *status_code = 400;
           return providerIntervalScopeError(index);
+        }
+        if (tagged.has_proxy_direct) {
+          *status_code = 400;
+          return providerDirectScopeError(index);
         }
         std::string node_link = link;
         if (tagged.has_tag)
@@ -2248,12 +2318,17 @@ static std::string subconverter_impl(Request &request, Response &response,
             LOG_LEVEL_INFO);
         subscription_urls.push_back(
             {link, tagged.tag, tagged.provider, tagged.interval,
-             tagged.has_interval, tagged.link_decoded});
+             tagged.proxy_direct, tagged.has_interval,
+             tagged.has_proxy_direct, tagged.link_decoded});
         explain.subscription_url_count++;
       } else {
         if (tagged.has_interval) {
           *status_code = 400;
           return providerIntervalScopeError(index);
+        }
+        if (tagged.has_proxy_direct) {
+          *status_code = 400;
+          return providerDirectScopeError(index);
         }
         std::string node_link = link;
         if (tagged.has_tag)
@@ -2325,6 +2400,9 @@ static std::string subconverter_impl(Request &request, Response &response,
                                         : urlDecode(item.url); // 解码 URL
         provider.interval = static_cast<uint32_t>(
             item.has_interval ? item.interval : global.proxyProviderInterval);
+        provider.proxy_direct = item.has_proxy_direct
+                                    ? item.proxy_direct
+                                    : ext.provider_proxy_direct;
         provider.groupId = groupID;
         provider.path = "./providers/" + provider.name + ".yaml";
         provider.user_agent = provider_user_agent;
@@ -2346,6 +2424,7 @@ static std::string subconverter_impl(Request &request, Response &response,
         explain_provider.exclude_filter = provider.exclude_filter;
         explain_provider.group_id = provider.groupId;
         explain_provider.interval = provider.interval;
+        explain_provider.proxy_direct = provider.proxy_direct;
         explain.providers.push_back(std::move(explain_provider));
         groupID++;
       }
