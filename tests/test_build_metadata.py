@@ -19,7 +19,7 @@ class BuildMetadataTests(unittest.TestCase):
         values = {
             "ref": "refs/heads/dev",
             "event_name": "push",
-            "sha_short": "abc1234",
+            "sha": "abc1234" + "0" * 33,
             "commit_date": "2026-08-06T12:37:18+08:00",
         }
         values.update(overrides)
@@ -31,6 +31,7 @@ class BuildMetadataTests(unittest.TestCase):
         self.assertEqual(metadata.version, "dev")
         self.assertFalse(metadata.is_release)
         self.assertEqual(metadata.sha_short, "abc1234")
+        self.assertEqual(metadata.sha, "abc1234" + "0" * 33)
         self.assertEqual(metadata.build_date, "2026-08-06T04:37:18Z")
 
     def test_master_snapshot_contract(self):
@@ -45,35 +46,30 @@ class BuildMetadataTests(unittest.TestCase):
         self.assertEqual(metadata.version, "v1.3.0")
         self.assertTrue(metadata.is_release)
 
-    def test_formal_release_rebuild_contract(self):
+    def test_dispatch_cannot_impersonate_a_release(self):
         metadata = self.resolve(
             ref="refs/heads/master",
             event_name="workflow_dispatch",
-            overwrite_existing_release=True,
-            dispatch_release_tag=" 1.3.0 ",
-            tag_exists=lambda tag: tag == "v1.3.0",
         )
-        self.assertEqual(metadata.mode, "release")
-        self.assertEqual(metadata.version, "v1.3.0")
-        self.assertTrue(metadata.is_release)
+        self.assertEqual(metadata.mode, "master")
+        self.assertFalse(metadata.is_release)
 
-    def test_release_rebuild_rejects_non_master(self):
-        with self.assertRaisesRegex(ValueError, "only from master"):
+    def test_tag_release_requires_push_event(self):
+        with self.assertRaisesRegex(ValueError, "tag push"):
             self.resolve(
+                ref="refs/tags/v1.3.0",
                 event_name="workflow_dispatch",
-                overwrite_existing_release=True,
-                dispatch_release_tag="v1.3.0",
             )
 
-    def test_release_rebuild_requires_existing_semver_tag(self):
-        with self.assertRaisesRegex(ValueError, "does not exist"):
+    def test_release_requires_exact_semver_tag(self):
+        with self.assertRaisesRegex(ValueError, "invalid release tag"):
             self.resolve(
-                ref="refs/heads/master",
-                event_name="workflow_dispatch",
-                overwrite_existing_release=True,
-                dispatch_release_tag="v1.3.0",
-                tag_exists=lambda _tag: False,
+                ref="refs/tags/v1.3",
             )
+
+    def test_requires_full_source_revision(self):
+        with self.assertRaisesRegex(ValueError, "full 40-character"):
+            self.resolve(sha="abc1234")
 
 
 if __name__ == "__main__":

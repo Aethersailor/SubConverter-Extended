@@ -16,7 +16,7 @@ inputs:
     description: Expected OCI and compiled version value.
     required: true
   expected-revision:
-    description: Expected OCI and compiled short source revision.
+    description: Expected OCI and compiled full source revision.
     required: true
   expected-build-date:
     description: Expected OCI build timestamp.

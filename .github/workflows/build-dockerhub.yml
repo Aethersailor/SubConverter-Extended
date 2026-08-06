@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - dev
-    tags:
-      - 'v*.*.*'
     paths-ignore:
       - 'README.md'
       - 'README-*.md'
@@ -15,22 +13,13 @@ on:
       - master
       - dev
   workflow_dispatch:
-    inputs:
-      release_tag:
-        description: "Existing release tag to rebuild, e.g. v1.2.3"
-        required: false
-        type: string
-      overwrite_existing_release:
-        description: "Overwrite assets/body of an existing GitHub Release"
-        required: false
-        default: false
-        type: boolean
+  workflow_call:
 permissions:
-  contents: write
+  contents: read
   packages: write
 
 concurrency:
-  group: dockerhub-${{ inputs.overwrite_existing_release && inputs.release_tag || github.ref_name }}
+  group: build-core-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -86,7 +75,7 @@ jobs:
     if: needs.source-head.outputs.current == 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Build focused sanitizer target
         shell: bash
@@ -118,8 +107,9 @@ jobs:
     needs:
       - source-head
       - statistics-sanitizers
-    if: needs.source-head.outputs.current == 'true' && github.actor != 'dependabot[bot]' && !contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '[ci skip]')
+    if: needs.source-head.outputs.current == 'true' && github.actor != 'dependabot[bot]' && (github.ref != 'refs/heads/dev' || (!contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '[ci skip]')))
     outputs:
+      sha: ${{ steps.metadata.outputs.sha }}
       sha_short: ${{ steps.metadata.outputs.sha_short }}
       version: ${{ steps.metadata.outputs.version }}
       mode: ${{ steps.metadata.outputs.mode }}
@@ -129,7 +119,7 @@ jobs:
       linux_matrix: ${{ steps.linux_matrix.outputs.matrix }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           token: ${{ secrets.PAT_TOKEN || github.token }}
           fetch-depth: 0
@@ -137,18 +127,110 @@ jobs:
       - name: Resolve build metadata
         id: metadata
         shell: bash
-        env:
-          DISPATCH_RELEASE_TAG: ${{ inputs.release_tag }}
-          OVERWRITE_EXISTING_RELEASE: ${{ inputs.overwrite_existing_release }}
         run: |
           set -euo pipefail
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && \
-             [ "${OVERWRITE_EXISTING_RELEASE:-false}" = "true" ]; then
-            git fetch --tags --force origin
-          fi
           python3 scripts/ci/build_metadata.py \
-            --validate-release-tag \
             --github-output "$GITHUB_OUTPUT"
+
+      - name: Verify immutable formal release preconditions
+        if: steps.metadata.outputs.mode == 'release'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.metadata.outputs.version }}
+          REVISION: ${{ steps.metadata.outputs.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ "$(git cat-file -t "$GITHUB_REF")" != "tag" ]; then
+            echo "::error::Formal releases require an annotated vX.Y.Z tag."
+            exit 1
+          fi
+          TAG_COMMIT="$(git rev-list -n 1 "$GITHUB_REF")"
+          python3 scripts/ci/release_guard.py \
+            --event-name "$GITHUB_EVENT_NAME" \
+            --ref "$GITHUB_REF" \
+            --github-sha "$GITHUB_SHA" \
+            --checkout-sha "$(git rev-parse HEAD)" \
+            --tag-sha "$TAG_COMMIT"
+
+          IMMUTABLE_ENABLED="$(gh api \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/immutable-releases" \
+            --jq '.enabled')"
+          if [ "$IMMUTABLE_ENABLED" != "true" ]; then
+            echo "::error::GitHub immutable releases must be enabled before a formal tag is published."
+            exit 1
+          fi
+
+          release_status="$(curl -sS -o /tmp/release.json -w '%{http_code}' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$VERSION")"
+          case "$release_status" in
+            404) ;;
+            200)
+              echo "::error::Release $VERSION already exists and is frozen. Publish a new version."
+              exit 1
+              ;;
+            *)
+              cat /tmp/release.json >&2
+              echo "::error::Could not prove that Release $VERSION is absent (HTTP $release_status)."
+              exit 1
+              ;;
+          esac
+
+          dockerhub_settings="$(curl --fail-with-body --silent --show-error \
+            https://hub.docker.com/v2/repositories/aethersailor/subconverter-extended/)"
+          python3 - "$VERSION" "$dockerhub_settings" <<'PY'
+          import json
+          import re
+          import sys
+
+          version, raw = sys.argv[1:]
+          settings = json.loads(raw).get("immutable_tags_settings") or {}
+          rules = settings.get("rules") or []
+          if settings.get("enabled") is not True:
+              raise SystemExit("::error::Docker Hub immutable tags must be enabled before release.")
+          if not any(re.fullmatch(rule, version) for rule in rules):
+              raise SystemExit(
+                  f"::error::Docker Hub immutable rules do not protect {version}: {rules}"
+              )
+          PY
+
+          assert_registry_tag_absent() {
+            local registry="$1"
+            local repository="$2"
+            local token_url="$3"
+            local token
+            local status
+            token="$(curl --fail-with-body --silent --show-error "$token_url" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
+            status="$(curl -sS -o /tmp/registry-manifest -w '%{http_code}' \
+              -H "Authorization: Bearer $token" \
+              -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \
+              "https://$registry/v2/$repository/manifests/$VERSION")"
+            case "$status" in
+              404) ;;
+              200)
+                echo "::error::$registry/$repository:$VERSION already exists and must not be overwritten."
+                exit 1
+                ;;
+              *)
+                cat /tmp/registry-manifest >&2
+                echo "::error::Could not prove $registry/$repository:$VERSION is absent (HTTP $status)."
+                exit 1
+                ;;
+            esac
+          }
+
+          assert_registry_tag_absent \
+            registry-1.docker.io \
+            aethersailor/subconverter-extended \
+            "https://auth.docker.io/token?service=registry.docker.io&scope=repository:aethersailor/subconverter-extended:pull"
+          assert_registry_tag_absent \
+            ghcr.io \
+            aethersailor/subconverter-extended \
+            "https://ghcr.io/token?service=ghcr.io&scope=repository:aethersailor/subconverter-extended:pull"
 
       - name: Verify COCR runtime assets are absent
         shell: bash
@@ -190,7 +272,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload dependency snapshot
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: dependency-snapshot
           path: scripts/ci/dependencies.lock.json
@@ -230,9 +312,7 @@ jobs:
             echo 'tags<<EOF'
             if [ "$MODE" = "release" ]; then
               printf '%s\n' \
-                "aethersailor/subconverter-extended:latest" \
                 "aethersailor/subconverter-extended:${VERSION}" \
-                "ghcr.io/aethersailor/subconverter-extended:latest" \
                 "ghcr.io/aethersailor/subconverter-extended:${VERSION}"
             elif [ "$MODE" = "dev" ]; then
               printf '%s\n' \
@@ -251,13 +331,13 @@ jobs:
       matrix: ${{ fromJSON(needs.prepare.outputs.linux_matrix) }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           token: ${{ secrets.PAT_TOKEN || github.token }}
           fetch-depth: 0
 
       - name: Download dependency snapshot
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dependency-snapshot
           path: dependency-snapshot
@@ -284,7 +364,7 @@ jobs:
           docker buildx inspect --bootstrap
 
       - name: Log in to Docker Hub
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'
         shell: bash
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -292,7 +372,7 @@ jobs:
         run: echo "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
 
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'
         shell: bash
         env:
           GHCR_USERNAME: ${{ github.actor }}
@@ -304,7 +384,7 @@ jobs:
         shell: bash
         env:
           THREADS: ${{ matrix.threads }}
-          SHA: ${{ needs.prepare.outputs.sha_short }}
+          SHA: ${{ needs.prepare.outputs.sha }}
           VERSION: ${{ needs.prepare.outputs.version }}
           BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
           REFRESH_GO_DEPS: ${{ needs.prepare.outputs.mode == 'dev' && matrix.extract_generated == 'true' }}
@@ -330,10 +410,11 @@ jobs:
           tags=(--tag "subconverter-extended:${{ matrix.arch }}-ci")
           output=(--load)
           cache=()
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
+          if [ "${{ github.event_name }}" != "pull_request" ] && \
+             [ "${{ needs.prepare.outputs.mode }}" != "master" ]; then
             candidate="ci-${{ needs.prepare.outputs.mode }}-${{ matrix.arch }}"
             if [ "${{ needs.prepare.outputs.mode }}" = "release" ]; then
-              candidate="ci-${{ needs.prepare.outputs.version }}-${{ matrix.arch }}"
+              candidate="ci-${{ needs.prepare.outputs.version }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.arch }}"
             fi
             tags=(
               --tag "aethersailor/subconverter-extended:${candidate}"
@@ -364,7 +445,9 @@ jobs:
           print(data.get("containerimage.digest", ""))
           PY
           )"
-          if [ "${{ github.event_name }}" != "pull_request" ] && [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+          if [ "${{ github.event_name }}" != "pull_request" ] && \
+             [ "${{ needs.prepare.outputs.mode }}" != "master" ] && \
+             [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "::error::Build did not return a valid candidate image digest."
             exit 1
           fi
@@ -402,6 +485,9 @@ jobs:
       - name: Package Release Artifacts (Linux ${{ matrix.arch }})
         if: needs.prepare.outputs.is_release == 'true'
         shell: bash
+        env:
+          SHA: ${{ needs.prepare.outputs.sha }}
+          BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
         run: bash scripts/ci/build-linux-release.sh "${{ needs.prepare.outputs.version }}" "${{ matrix.arch }}" "${{ matrix.openwrt_arches }}"
 
       - name: Check release size budgets (Linux ${{ matrix.arch }})
@@ -416,7 +502,7 @@ jobs:
       - name: Set up QEMU for smoke test
         if: matrix.qemu_platforms != ''
         shell: bash
-        run: docker run --privileged --rm tonistiigi/binfmt --install "${{ matrix.qemu_platforms }}"
+        run: docker run --privileged --rm tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install "${{ matrix.qemu_platforms }}"
 
       - name: Smoke test artifact (Linux ${{ matrix.arch }})
         if: needs.prepare.outputs.is_release == 'true'
@@ -424,6 +510,9 @@ jobs:
         uses: ./.github/actions/smoke-linux-artifact
         with:
           artifact: SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
+          expected-version: ${{ needs.prepare.outputs.version }}
+          expected-revision: ${{ needs.prepare.outputs.sha }}
+          expected-build-date: ${{ needs.prepare.outputs.build_date }}
 
       - name: Smoke test APKs (OpenWrt ${{ matrix.arch }})
         if: needs.prepare.outputs.is_release == 'true'
@@ -431,17 +520,20 @@ jobs:
         uses: ./.github/actions/smoke-openwrt-apk
         with:
           artifacts: SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-*.apk
+          expected-version: ${{ needs.prepare.outputs.version }}
+          expected-revision: ${{ needs.prepare.outputs.sha }}
+          expected-build-date: ${{ needs.prepare.outputs.build_date }}
 
       - name: Upload Artifact (Linux ${{ matrix.arch }})
         if: needs.prepare.outputs.is_release == 'true'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: linux-${{ matrix.arch }}
           path: SubConverter-Extended-*.tar.gz
 
       - name: Upload Artifact (OpenWrt ${{ matrix.arch }})
         if: needs.prepare.outputs.is_release == 'true'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: openwrt-${{ matrix.arch }}
           path: SubConverter-Extended-*-openwrt-*.apk
@@ -469,29 +561,29 @@ jobs:
           exit 1
 
       - name: Save image digest
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'
         shell: bash
         run: |
           mkdir -p docker-digests
           printf '%s\n' "${{ steps.build_image.outputs.digest }}" > "docker-digests/${{ matrix.arch }}.txt"
 
       - name: Upload image digest
-        if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v7
+        if: github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: docker-digest-${{ matrix.arch }}
           path: docker-digests/${{ matrix.arch }}.txt
           retention-days: 1
 
       - name: Smoke test image (${{ matrix.arch }})
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'
         timeout-minutes: 3
         uses: ./.github/actions/smoke-docker-image
         with:
           image: ghcr.io/aethersailor/subconverter-extended@${{ steps.build_image.outputs.digest }}
           platform: ${{ matrix.image_platform }}
           expected-version: ${{ needs.prepare.outputs.version }}
-          expected-revision: ${{ needs.prepare.outputs.sha_short }}
+          expected-revision: ${{ needs.prepare.outputs.sha }}
           expected-build-date: ${{ needs.prepare.outputs.build_date }}
 
       - name: Commit and push generated development files
@@ -523,13 +615,13 @@ jobs:
     if: needs.prepare.outputs.is_release == 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           token: ${{ github.event_name == 'pull_request' && github.token || secrets.PAT_TOKEN }}
           fetch-depth: 0
 
       - name: Download dependency snapshot
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dependency-snapshot
           path: dependency-snapshot
@@ -542,7 +634,7 @@ jobs:
           python scripts/ci/dependency_snapshot.py emit --github-env $env:GITHUB_ENV
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: bridge/go.mod
           cache-dependency-path: bridge/go.sum
@@ -569,12 +661,12 @@ jobs:
         run: |
           THREADS=4 bash scripts/build-windows-amd64.sh \
             "${{ needs.prepare.outputs.version }}" \
-            "${{ needs.prepare.outputs.sha_short }}" \
+            "${{ needs.prepare.outputs.sha }}" \
             "${{ needs.prepare.outputs.build_date }}"
 
       - name: Package Release Artifact (Windows amd64)
         shell: pwsh
-        run: ./scripts/package-windows-portable.ps1 -Version "${{ needs.prepare.outputs.version }}"
+        run: ./scripts/package-windows-portable.ps1 -Version "${{ needs.prepare.outputs.version }}" -Revision "${{ needs.prepare.outputs.sha }}" -BuildDate "${{ needs.prepare.outputs.build_date }}"
 
       - name: Check release size budget (Windows amd64)
         shell: pwsh
@@ -585,18 +677,24 @@ jobs:
         uses: ./.github/actions/smoke-windows-artifact
         with:
           artifact: SubConverter-Extended-${{ needs.prepare.outputs.version }}-windows-amd64.zip
+          expected-version: ${{ needs.prepare.outputs.version }}
+          expected-revision: ${{ needs.prepare.outputs.sha }}
+          expected-build-date: ${{ needs.prepare.outputs.build_date }}
 
       - name: Upload Artifact (Windows amd64)
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: windows-amd64
           path: SubConverter-Extended-*.zip
 
   merge-manifest:
-    name: "🔗 Promote Docker Images"
+    name: "🔗 Publish Version Docker Images"
     runs-on: ubuntu-latest
     needs: [prepare, build-linux]
     if: github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'
+    outputs:
+      dockerhub_digest: ${{ steps.published.outputs.dockerhub_digest }}
+      ghcr_digest: ${{ steps.published.outputs.ghcr_digest }}
     steps:
       - name: Prevent stale dev image promotion
         if: needs.prepare.outputs.mode == 'dev'
@@ -662,11 +760,55 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download image digests
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: digests
           pattern: docker-digest-*
           merge-multiple: true
+
+      - name: Re-verify formal version tags are absent
+        if: needs.prepare.outputs.mode == 'release'
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          remote_tag_commit="$(git ls-remote \
+            "https://github.com/$GITHUB_REPOSITORY.git" \
+            "refs/tags/$VERSION^{}" | awk '{print $1}')"
+          if [ "$remote_tag_commit" != "${{ needs.prepare.outputs.sha }}" ]; then
+            echo "::error::Remote annotated tag $VERSION no longer peels to the approved source SHA."
+            exit 1
+          fi
+          assert_absent() {
+            local registry="$1"
+            local repository="$2"
+            local token_url="$3"
+            local token
+            local status
+            token="$(curl --fail-with-body --silent --show-error "$token_url" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
+            status="$(curl -sS -o /tmp/manifest -w '%{http_code}' \
+              -H "Authorization: Bearer $token" \
+              -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \
+              "https://$registry/v2/$repository/manifests/$VERSION")"
+            if [ "$status" = "404" ]; then
+              return
+            fi
+            if [ "$status" = "200" ]; then
+              echo "::error::$registry/$repository:$VERSION appeared during the build; refusing overwrite."
+            else
+              echo "::error::Could not re-prove absence of $registry/$repository:$VERSION (HTTP $status)."
+            fi
+            exit 1
+          }
+          assert_absent \
+            registry-1.docker.io \
+            aethersailor/subconverter-extended \
+            "https://auth.docker.io/token?service=registry.docker.io&scope=repository:aethersailor/subconverter-extended:pull"
+          assert_absent \
+            ghcr.io \
+            aethersailor/subconverter-extended \
+            "https://ghcr.io/token?service=ghcr.io&scope=repository:aethersailor/subconverter-extended:pull"
 
       - name: Promote tested candidates
         shell: bash
@@ -694,7 +836,7 @@ jobs:
             for arch in "${ARCHES[@]}"; do
               candidate="ci-${{ needs.prepare.outputs.mode }}-${arch}"
               if [ "${{ needs.prepare.outputs.mode }}" = "release" ]; then
-                candidate="ci-${{ needs.prepare.outputs.version }}-${arch}"
+                candidate="ci-${{ needs.prepare.outputs.version }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${arch}"
               fi
               SOURCES+=("${IMAGE_NAME}:${candidate}")
             done
@@ -707,6 +849,7 @@ jobs:
           done
 
       - name: Verify manifest platforms
+        id: published
         shell: bash
         run: |
           set -euo pipefail
@@ -717,13 +860,9 @@ jobs:
             PLATFORMS=("linux/amd64" "linux/arm64" "linux/arm/v7")
           fi
           TAGS="${{ needs.prepare.outputs.tags }}"
+          DOCKERHUB_DIGEST=""
+          GHCR_DIGEST=""
           for TAG in $TAGS; do
-            if [[ "$TAG" != ghcr.io/* ]]; then
-              echo "Skipping Docker Hub platform inspection for $TAG to avoid pull rate limits."
-              echo "The manifest push step above already covered Docker Hub publication."
-              continue
-            fi
-
             echo "Inspecting $TAG"
             for attempt in $(seq 1 6); do
               if docker buildx imagetools inspect "$TAG" > manifest.txt; then
@@ -737,45 +876,65 @@ jobs:
             done
 
             cat manifest.txt
+            digest="$(awk '$1 == "Digest:" {print $2; exit}' manifest.txt)"
+            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::Could not resolve the manifest digest for $TAG."
+              exit 1
+            fi
+            if [[ "$TAG" == ghcr.io/* ]]; then
+              GHCR_DIGEST="$digest"
+              echo "ghcr_digest=$digest" >> "$GITHUB_OUTPUT"
+            else
+              DOCKERHUB_DIGEST="$digest"
+              echo "dockerhub_digest=$digest" >> "$GITHUB_OUTPUT"
+            fi
+
             for PLATFORM in "${PLATFORMS[@]}"; do
               if ! grep -Eq "Platform:[[:space:]]+${PLATFORM}$" manifest.txt; then
                 echo "Missing platform ${PLATFORM} in ${TAG}"
                 exit 1
               fi
+              docker pull --platform "$PLATFORM" "$TAG"
+              actual_revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$TAG")"
+              actual_version="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$TAG")"
+              test "$actual_revision" = "${{ needs.prepare.outputs.sha }}"
+              test "$actual_version" = "${{ needs.prepare.outputs.version }}"
             done
           done
+          test -n "$DOCKERHUB_DIGEST"
+          test -n "$GHCR_DIGEST"
+          if [ "$DOCKERHUB_DIGEST" != "$GHCR_DIGEST" ]; then
+            echo "::error::Docker Hub and GHCR manifest digests differ."
+            exit 1
+          fi
 
   create-release:
     name: "🚀 Release Artifacts"
     runs-on: ubuntu-latest
     needs: [prepare, build-linux, build-windows-amd64, merge-manifest]
-    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.overwrite_existing_release == true)
+    if: startsWith(github.ref, 'refs/tags/') && needs.prepare.outputs.is_release == 'true'
     permissions:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
 
       - name: Prepare Release Notes Context
         env:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
-          OVERWRITE_EXISTING_RELEASE: ${{ inputs.overwrite_existing_release }}
         run: |
           set -euo pipefail
 
           git fetch --tags --force origin
 
           CURRENT_TAG="$RELEASE_VERSION"
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${OVERWRITE_EXISTING_RELEASE}" = "true" ]; then
-            CURRENT_COMMIT="$(git rev-parse HEAD)"
-            TAG_COMMIT="$(git rev-list -n 1 "$CURRENT_TAG")"
-            PREVIOUS_TAG="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' "${TAG_COMMIT}^" 2>/dev/null || true)"
-          else
-            CURRENT_COMMIT="$(git rev-list -n 1 "$CURRENT_TAG")"
-            PREVIOUS_TAG="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' "${CURRENT_COMMIT}^" 2>/dev/null || true)"
-          fi
+          CURRENT_COMMIT="$(git rev-list -n 1 "$CURRENT_TAG")"
+          test "$CURRENT_COMMIT" = "${{ needs.prepare.outputs.sha }}"
+          REMOTE_COMMIT="$(git ls-remote origin "refs/tags/$CURRENT_TAG^{}" | awk '{print $1}')"
+          test "$REMOTE_COMMIT" = "$CURRENT_COMMIT"
+          PREVIOUS_TAG="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' "${CURRENT_COMMIT}^" 2>/dev/null || true)"
           EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
           if [ -n "$PREVIOUS_TAG" ]; then
@@ -844,7 +1003,7 @@ jobs:
 
       - name: Set up Node.js
         if: steps.copilot_token.outputs.available == 'true'
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
 
       - name: Generate Bilingual Release Notes with Copilot
         if: steps.copilot_token.outputs.available == 'true'
@@ -854,7 +1013,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          npm install -g @github/copilot
+          npm install -g @github/copilot@1.0.70
 
           PROMPT="$(cat <<'EOF'
           You are writing release notes for SubConverter-Extended.
@@ -941,16 +1100,8 @@ jobs:
           - `SHA256SUMS`
           EOF
 
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.overwrite_existing_release }}" = "true" ]; then
-            {
-              echo
-              echo "<!-- rebuilt-from: $(git rev-parse HEAD) -->"
-              echo "<!-- rebuilt-at: $(date -u +%Y-%m-%dT%H:%M:%SZ) -->"
-            } >> release-notes.md
-          fi
-
       - name: Download all artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: artifacts
           pattern: '*'
@@ -965,15 +1116,211 @@ jobs:
           done > SHA256SUMS
 
           cat SHA256SUMS
+          duplicate_names="$(find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.apk' \) -printf '%f\n' | sort | uniq -d)"
+          if [ -n "$duplicate_names" ]; then
+            echo "::error::Duplicate release asset names: $duplicate_names"
+            exit 1
+          fi
+          mkdir release-assets
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.apk' \) \
+            -exec cp '{}' release-assets/ \;
+          cp SHA256SUMS release-assets/SHA256SUMS
 
-      - name: Create Release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
+      - name: Generate immutable release manifest
+        shell: bash
+        run: |
+          python3 scripts/ci/release_manifest.py build \
+            --root release-assets \
+            --output release-assets/RELEASE-MANIFEST.json \
+            --version "${{ needs.prepare.outputs.version }}" \
+            --revision "${{ needs.prepare.outputs.sha }}" \
+            --build-date "${{ needs.prepare.outputs.build_date }}" \
+            --dockerhub-digest "${{ needs.merge-manifest.outputs.dockerhub_digest }}" \
+            --ghcr-digest "${{ needs.merge-manifest.outputs.ghcr_digest }}"
+          python3 scripts/ci/release_manifest.py verify \
+            --root release-assets \
+            --manifest release-assets/RELEASE-MANIFEST.json
+
+      - name: Create draft Release without overwrites
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "$VERSION" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft \
+            --verify-tag \
+            --title "$VERSION" \
+            --notes-file release-notes.md
+
+  finalize-release:
+    name: "🔒 Freeze Release and Advance latest"
+    runs-on: ubuntu-latest
+    needs: [prepare, merge-manifest, create-release]
+    if: startsWith(github.ref, 'refs/tags/') && needs.prepare.outputs.is_release == 'true'
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Checkout the tagged source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          tag_name: ${{ needs.prepare.outputs.version }}
-          files: |
-            artifacts/linux-*/*.tar.gz
-            artifacts/openwrt-*/*.apk
-            artifacts/windows-*/*.zip
-            SHA256SUMS
-          body_path: release-notes.md
-          overwrite_files: true
+          fetch-depth: 0
+
+      - name: Re-verify draft assets and tag identity
+        id: release_assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          REVISION: ${{ needs.prepare.outputs.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$REVISION"
+          test "$(git rev-list -n 1 "$VERSION")" = "$REVISION"
+          test "$(git ls-remote origin "refs/tags/$VERSION^{}" | awk '{print $1}')" = "$REVISION"
+          release_state="$(gh api \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION" \
+            --jq '[.draft, .immutable] | @tsv')"
+          if [ "$release_state" = $'true\tfalse' ]; then
+            echo "publish_needed=true" >> "$GITHUB_OUTPUT"
+          elif [ "$release_state" = $'false\ttrue' ]; then
+            echo "publish_needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Release $VERSION is neither a mutable draft nor an immutable publication: $release_state"
+            exit 1
+          fi
+
+          mkdir verified-assets
+          gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" --dir verified-assets
+          python3 scripts/ci/release_manifest.py verify \
+            --root verified-assets \
+            --manifest verified-assets/RELEASE-MANIFEST.json
+
+          python3 - "$REVISION" "${{ needs.merge-manifest.outputs.dockerhub_digest }}" "${{ needs.merge-manifest.outputs.ghcr_digest }}" <<'PY'
+          import json
+          import sys
+
+          revision, dockerhub_digest, ghcr_digest = sys.argv[1:]
+          manifest = json.load(open("verified-assets/RELEASE-MANIFEST.json", encoding="utf-8"))
+          if manifest["revision"] != revision:
+              raise SystemExit("release manifest revision changed")
+          if manifest["images"]["dockerhub"]["digest"] != dockerhub_digest:
+              raise SystemExit("Docker Hub digest changed")
+          if manifest["images"]["ghcr"]["digest"] != ghcr_digest:
+              raise SystemExit("GHCR digest changed")
+          PY
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Re-verify published version digests
+        id: version_images
+        shell: bash
+        run: |
+          set -euo pipefail
+          inspect_digest() {
+            docker buildx imagetools inspect "$1" | awk '$1 == "Digest:" {print $2; exit}'
+          }
+          test "$(inspect_digest "aethersailor/subconverter-extended:${{ needs.prepare.outputs.version }}")" = "${{ needs.merge-manifest.outputs.dockerhub_digest }}"
+          test "$(inspect_digest "ghcr.io/aethersailor/subconverter-extended:${{ needs.prepare.outputs.version }}")" = "${{ needs.merge-manifest.outputs.ghcr_digest }}"
+          dockerhub_latest="$(inspect_digest aethersailor/subconverter-extended:latest)"
+          ghcr_latest="$(inspect_digest ghcr.io/aethersailor/subconverter-extended:latest)"
+          [[ "$dockerhub_latest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$ghcr_latest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "dockerhub_latest=$dockerhub_latest" >> "$GITHUB_OUTPUT"
+          echo "ghcr_latest=$ghcr_latest" >> "$GITHUB_OUTPUT"
+
+      - name: Publish immutable GitHub Release
+        if: steps.release_assets.outputs.publish_needed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release edit "$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false
+          for attempt in $(seq 1 6); do
+            immutable="$(gh api \
+              -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION" \
+              --jq '.immutable')"
+            [ "$immutable" = "true" ] && exit 0
+            [ "$attempt" -eq 6 ] && break
+            sleep 2
+          done
+          echo "::error::Published Release $VERSION did not become immutable."
+          exit 1
+
+      - name: Verify GitHub release attestation
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 6); do
+            if gh release verify "$VERSION" --repo "$GITHUB_REPOSITORY"; then
+              exit 0
+            fi
+            [ "$attempt" -eq 6 ] && break
+            sleep 2
+          done
+          echo "::error::GitHub release attestation verification failed for $VERSION."
+          exit 1
+
+      - name: Advance latest only after full release verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.prepare.outputs.version }}"
+          inspect_digest() {
+            docker buildx imagetools inspect "$1" | awk '$1 == "Digest:" {print $2; exit}'
+          }
+          OLD_DOCKERHUB="${{ steps.version_images.outputs.dockerhub_latest }}"
+          OLD_GHCR="${{ steps.version_images.outputs.ghcr_latest }}"
+          test "$(inspect_digest aethersailor/subconverter-extended:latest)" = "$OLD_DOCKERHUB"
+          test "$(inspect_digest ghcr.io/aethersailor/subconverter-extended:latest)" = "$OLD_GHCR"
+
+          rollback_latest() {
+            echo "::warning::Restoring the pre-release latest pointers after a promotion failure."
+            docker buildx imagetools create \
+              -t aethersailor/subconverter-extended:latest \
+              "aethersailor/subconverter-extended@$OLD_DOCKERHUB" || true
+            docker buildx imagetools create \
+              -t ghcr.io/aethersailor/subconverter-extended:latest \
+              "ghcr.io/aethersailor/subconverter-extended@$OLD_GHCR" || true
+          }
+
+          if ! docker buildx imagetools create \
+            -t aethersailor/subconverter-extended:latest \
+            "aethersailor/subconverter-extended:$VERSION"; then
+            rollback_latest
+            exit 1
+          fi
+          if ! docker buildx imagetools create \
+            -t ghcr.io/aethersailor/subconverter-extended:latest \
+            "ghcr.io/aethersailor/subconverter-extended:$VERSION"; then
+            rollback_latest
+            exit 1
+          fi
+
+          if [ "$(inspect_digest aethersailor/subconverter-extended:latest)" != "${{ needs.merge-manifest.outputs.dockerhub_digest }}" ] || \
+             [ "$(inspect_digest ghcr.io/aethersailor/subconverter-extended:latest)" != "${{ needs.merge-manifest.outputs.ghcr_digest }}" ]; then
+            rollback_latest
+            echo "::error::latest digest verification failed."
+            exit 1
+          fi

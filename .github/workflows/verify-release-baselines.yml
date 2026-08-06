@@ -1,0 +1,141 @@
+name: Verify Frozen Release Baselines
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 19 * * 1'
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: verify-frozen-release-baselines
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Verify historical identities without mutation
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          registry_digest() {
+            local registry="$1"
+            local repository="$2"
+            local version="$3"
+            local token_url="$4"
+            local token
+            token="$(curl --fail-with-body --silent --show-error "$token_url" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
+            curl --fail-with-body --silent --show-error --head \
+              -H "Authorization: Bearer $token" \
+              -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \
+              "https://$registry/v2/$repository/manifests/$version" | \
+              awk 'BEGIN {IGNORECASE=1} /^docker-content-digest:/ {gsub("\r", "", $2); print $2}'
+          }
+
+          for baseline in .github/release-baselines/v*.json; do
+            version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$baseline")"
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$version" > release.json
+
+            tag_object="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$version" --jq '.object.sha')"
+            tag_type="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$version" --jq '.object.type')"
+            if [ "$tag_type" = "tag" ]; then
+              tag_commit="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object" --jq '.object.sha')"
+            elif [ "$tag_type" = "commit" ]; then
+              tag_commit="$tag_object"
+            else
+              echo "::error::Unsupported tag object type $tag_type for $version."
+              exit 1
+            fi
+
+            dockerhub_digest="$(registry_digest \
+              registry-1.docker.io \
+              aethersailor/subconverter-extended \
+              "$version" \
+              "https://auth.docker.io/token?service=registry.docker.io&scope=repository:aethersailor/subconverter-extended:pull")"
+            ghcr_digest="$(registry_digest \
+              ghcr.io \
+              aethersailor/subconverter-extended \
+              "$version" \
+              "https://ghcr.io/token?service=ghcr.io&scope=repository:aethersailor/subconverter-extended:pull")"
+
+            python3 scripts/ci/verify_release_baseline.py \
+              --baseline "$baseline" \
+              --release-json release.json \
+              --tag-commit "$tag_commit" \
+              --dockerhub-digest "$dockerhub_digest" \
+              --ghcr-digest "$ghcr_digest"
+          done
+
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' | \
+          while IFS= read -r version; do
+            has_manifest="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$version" \
+              --jq 'any(.assets[]; .name == "RELEASE-MANIFEST.json")')"
+            [ "$has_manifest" = "true" ] || continue
+
+            immutable="$(gh api \
+              -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$GITHUB_REPOSITORY/releases/tags/$version" \
+              --jq '.immutable')"
+            if [ "$immutable" != "true" ]; then
+              echo "::error::Modern formal Release $version is not immutable."
+              exit 1
+            fi
+
+            manifest_dir="$RUNNER_TEMP/release-manifests/$version"
+            mkdir -p "$manifest_dir"
+            gh release download "$version" \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern RELEASE-MANIFEST.json \
+              --dir "$manifest_dir"
+
+            tag_object="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$version" --jq '.object.sha')"
+            tag_type="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$version" --jq '.object.type')"
+            if [ "$tag_type" = "tag" ]; then
+              tag_commit="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object" --jq '.object.sha')"
+            elif [ "$tag_type" = "commit" ]; then
+              tag_commit="$tag_object"
+            else
+              echo "::error::Unsupported tag object type $tag_type for $version."
+              exit 1
+            fi
+
+            dockerhub_digest="$(registry_digest \
+              registry-1.docker.io \
+              aethersailor/subconverter-extended \
+              "$version" \
+              "https://auth.docker.io/token?service=registry.docker.io&scope=repository:aethersailor/subconverter-extended:pull")"
+            ghcr_digest="$(registry_digest \
+              ghcr.io \
+              aethersailor/subconverter-extended \
+              "$version" \
+              "https://ghcr.io/token?service=ghcr.io&scope=repository:aethersailor/subconverter-extended:pull")"
+
+            python3 - "$manifest_dir/RELEASE-MANIFEST.json" "$version" "$tag_commit" "$dockerhub_digest" "$ghcr_digest" <<'PY'
+          import json
+          import sys
+
+          path, version, tag_commit, dockerhub_digest, ghcr_digest = sys.argv[1:]
+          manifest = json.load(open(path, encoding="utf-8"))
+          expected = (
+              manifest.get("version") == version
+              and manifest.get("tag") == version
+              and manifest.get("revision") == tag_commit
+              and manifest["images"]["dockerhub"]["digest"] == dockerhub_digest
+              and manifest["images"]["ghcr"]["digest"] == ghcr_digest
+              and dockerhub_digest == ghcr_digest
+          )
+          if not expected:
+              raise SystemExit(f"published release identity drifted for {version}")
+          print(f"Verified immutable published identity {version} at {tag_commit}")
+          PY
+          done
