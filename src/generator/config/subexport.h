@@ -9,6 +9,7 @@
 #endif // NO_JS_RUNTIME
 
 #include "config/proxygroup.h"
+#include "config/proxy_provider_interval.h"
 #include "config/regmatch.h"
 #include "parser/config/proxy.h"
 #include "ruleconvert.h"
@@ -28,7 +29,7 @@ struct ProxyProvider {
   std::map<std::string, std::string> headers; // 显式允许转发的请求头
   int groupId;                // 所属组 ID
 
-  ProxyProvider() : interval(3600), groupId(0) {}
+  ProxyProvider() : interval(kDefaultProxyProviderInterval), groupId(0) {}
 };
 
 struct extra_settings {

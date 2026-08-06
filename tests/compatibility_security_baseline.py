@@ -171,6 +171,7 @@ def running_service(
     fallback_to_default_external_config: bool = False,
     default_external_config: str | None = None,
     legacy_publish_enabled: bool = False,
+    proxy_provider_interval: int | None = None,
 ):
     port = unused_port()
     baseline = (COMPAT_FIXTURES / "legacy-pref.toml").read_text(
@@ -191,6 +192,14 @@ def running_service(
     if legacy_publish_enabled:
         baseline = baseline.replace(
             "publish_enabled = false", "publish_enabled = true"
+        )
+    if proxy_provider_interval is not None:
+        baseline = baseline.replace(
+            "[custom_openclash_rules]",
+            "[proxy_provider]\n"
+            f"interval = {proxy_provider_interval}\n\n"
+            "[custom_openclash_rules]",
+            1,
         )
     if default_external_config is not None:
         baseline = baseline.replace(
@@ -273,10 +282,17 @@ def load_settings_snapshot(helper: Path, fixture: Path) -> dict[str, object]:
 
 
 def reload_settings_snapshot(
-    helper: Path, first: Path, second: Path
+    helper: Path,
+    first: Path,
+    second: Path,
+    *,
+    expect_failure: bool = False,
 ) -> dict[str, object]:
+    command = [str(helper), str(first), str(second)]
+    if expect_failure:
+        command.append("--expect-reload-failure")
     completed = subprocess.run(
-        [str(helper), str(first), str(second)],
+        command,
         cwd=REPOSITORY,
         check=True,
         capture_output=True,
@@ -285,6 +301,105 @@ def reload_settings_snapshot(
         errors="replace",
     )
     return json.loads(completed.stdout)
+
+
+def add_proxy_provider_interval(
+    content: str, suffix: str, value: str
+) -> str:
+    if suffix == ".ini":
+        marker = "\n[custom_openclash_rules]"
+        section = f"\n[proxy_provider]\ninterval={value}\n"
+    elif suffix == ".yml":
+        marker = "\ncustom_openclash_rules:"
+        section = f"\nproxy_provider:\n  interval: {value}\n"
+    elif suffix == ".toml":
+        marker = "\n[custom_openclash_rules]"
+        section = f"\n[proxy_provider]\ninterval = {value}\n"
+    else:
+        raise AssertionError(f"unsupported config suffix: {suffix}")
+    if marker not in content:
+        raise AssertionError(f"provider interval insertion marker missing: {suffix}")
+    return content.replace(marker, section + marker, 1)
+
+
+def settings_provider_interval_compatibility_baseline(helper: Path) -> None:
+    runtime_dir = REPOSITORY / "build" / "test-baseline-runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    configured_snapshots: dict[int, list[dict[str, object]]] = {
+        0: [],
+        7200: [],
+    }
+    with tempfile.TemporaryDirectory(dir=runtime_dir) as temporary:
+        temporary_path = Path(temporary)
+        for fixture_name in (
+            "legacy-pref.ini",
+            "legacy-pref.yml",
+            "legacy-pref.toml",
+        ):
+            original = COMPAT_FIXTURES / fixture_name
+            content = original.read_text(encoding="utf-8")
+            for expected in configured_snapshots:
+                configured = temporary_path / (
+                    f"configured-{expected}-" + fixture_name
+                )
+                configured.write_text(
+                    add_proxy_provider_interval(
+                        content, original.suffix, str(expected)
+                    ),
+                    encoding="utf-8",
+                    newline="\n",
+                )
+                configured_snapshot = load_settings_snapshot(helper, configured)
+                configured_snapshots[expected].append(configured_snapshot)
+                if configured_snapshot["proxy_provider"]["interval"] != expected:
+                    raise AssertionError(
+                        f"{original.suffix} did not load "
+                        f"proxy_provider.interval={expected}"
+                    )
+
+                reloaded = reload_settings_snapshot(helper, configured, original)
+                if reloaded["proxy_provider"]["interval"] != 3600:
+                    raise AssertionError(
+                        f"{original.suffix} hot reload retained a removed "
+                        "provider interval"
+                    )
+
+            invalid = temporary_path / ("invalid-" + fixture_name)
+            invalid_value = '"none"' if original.suffix == ".toml" else "none"
+            invalid.write_text(
+                add_proxy_provider_interval(
+                    content, original.suffix, invalid_value
+                ),
+                encoding="utf-8",
+                newline="\n",
+            )
+            startup = subprocess.run(
+                [str(helper), str(invalid)],
+                cwd=REPOSITORY,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if startup.returncode == 0:
+                raise AssertionError(
+                    f"{original.suffix} accepted an invalid provider interval"
+                )
+            retained = reload_settings_snapshot(
+                helper, original, invalid, expect_failure=True
+            )
+            if retained["proxy_provider"]["interval"] != 3600:
+                raise AssertionError(
+                    f"{original.suffix} invalid reload replaced valid settings"
+                )
+
+    for expected, snapshots in configured_snapshots.items():
+        if snapshots[1:] != snapshots[:1] * 2:
+            raise AssertionError(
+                "INI/YAML/TOML provider interval snapshots differ for "
+                f"interval={expected}"
+            )
 
 
 def runtime_cli_isolation_baseline(binary: Path) -> None:
@@ -452,6 +567,159 @@ def conversion_baselines(
             raise AssertionError(
                 "a single unsupported ruleset line was not skipped "
                 f"independently for type={ruleset_type}: {converted!r}"
+            )
+
+
+def provider_interval_from_output(output: str, provider_name: str) -> int:
+    marker = f"  {provider_name}:\n"
+    start = output.find(marker)
+    if start < 0:
+        raise AssertionError(f"provider block is missing: {provider_name}")
+    following = output[start + len(marker) :]
+    next_provider = re.search(r"(?m)^  [^ ].*:\s*$", following)
+    end = len(output) if next_provider is None else start + len(marker) + next_provider.start()
+    block = output[start:end]
+    interval = re.search(r"(?m)^    interval: ([0-9]+)\s*$", block)
+    if interval is None:
+        raise AssertionError(
+            f"provider interval is missing or non-numeric: {provider_name}\n{block}"
+        )
+    return int(interval.group(1))
+
+
+def provider_interval_output_baseline(base_url: str, fixture_base: str) -> None:
+    source = fixture_base + "/subscription.txt"
+    multi_url = "|".join(
+        (
+            f"provider:Zero,interval:0,{source}?case=zero",
+            f"interval:21600,provider:Slow,{source}?case=slow",
+            f"tag:Tagged,interval:1800,provider:Ordered,{source}?case=ordered",
+            f"provider:Default,{source}?case=default",
+        )
+    )
+    status, body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "clash",
+            "url": multi_url,
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    output = body.decode("utf-8", errors="replace")
+    if status != 200:
+        raise AssertionError(
+            f"multi-provider interval request returned HTTP {status}: {output!r}"
+        )
+    for provider_name, expected in {
+        "Zero": 0,
+        "Slow": 21600,
+        "Ordered": 1800,
+        "Default": 7200,
+    }.items():
+        actual = provider_interval_from_output(output, provider_name)
+        if actual != expected:
+            raise AssertionError(
+                f"{provider_name} interval mismatch: {actual} != {expected}"
+            )
+    if output.count("      interval: 300") != 4:
+        raise AssertionError("provider health-check intervals changed")
+
+    encoded_value = urllib.parse.quote(
+        f"provider:Encoded,interval:0,{source}?case=encoded", safe=""
+    )
+    status, body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "clash",
+            "url": encoded_value,
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    encoded_output = body.decode("utf-8", errors="replace")
+    if status != 200 or provider_interval_from_output(
+        encoded_output, "Encoded"
+    ) != 0:
+        raise AssertionError(
+            f"encoded interval prefix failed: status={status}, body={encoded_output!r}"
+        )
+
+    status, body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "clash",
+            "url": f"provider:Managed,{source}?case=managed",
+            "config": DISABLE_RULEGEN_CONFIG,
+            "interval": "17",
+        },
+    )
+    managed_output = body.decode("utf-8", errors="replace")
+    if status != 200 or provider_interval_from_output(
+        managed_output, "Managed"
+    ) != 7200:
+        raise AssertionError(
+            "the existing request-level interval parameter changed provider interval"
+        )
+
+    status, body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "clashr",
+            "url": f"provider:ClashR,interval:0,{source}?case=clashr",
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    clashr_output = body.decode("utf-8", errors="replace")
+    if status != 200 or provider_interval_from_output(
+        clashr_output, "ClashR"
+    ) != 0:
+        raise AssertionError(
+            f"ClashR provider interval failed: status={status}, body={clashr_output!r}"
+        )
+
+    secret = "private-token-issue-90"
+    rejected_cases = (
+        ("none", f"interval:none,https://example.invalid/sub?token={secret}"),
+        ("negative", f"interval:-1,https://example.invalid/sub?token={secret}"),
+        ("empty", f"interval:,https://example.invalid/sub?token={secret}"),
+        ("overflow", f"interval:2147483648,https://example.invalid/sub?token={secret}"),
+        ("duplicate", f"interval:0,interval:1,https://example.invalid/sub?token={secret}"),
+        ("missing delimiter", f"interval:0https://example.invalid/sub?token={secret}"),
+    )
+    for label, source_value in rejected_cases:
+        status, body, _ = request(
+            base_url, "/sub", {"target": "clash", "url": source_value}
+        )
+        response = body.decode("utf-8", errors="replace")
+        if status != 400:
+            raise AssertionError(
+                f"{label} interval returned HTTP {status}: {response!r}"
+            )
+        if secret in response:
+            raise AssertionError(f"{label} interval leaked the subscription token")
+
+    scope_cases = (
+        (
+            "direct node",
+            {"target": "clash", "url": f"interval:0,{SUBSCRIPTION.strip()}"},
+        ),
+        (
+            "list=true",
+            {"target": "clash", "url": f"interval:0,{source}", "list": "true"},
+        ),
+        (
+            "non-Clash target",
+            {"target": "surge", "url": f"interval:0,{source}", "list": "true"},
+        ),
+    )
+    for label, params in scope_cases:
+        status, body, _ = request(base_url, "/sub", params)
+        if status != 400:
+            raise AssertionError(
+                f"interval on {label} returned HTTP {status}: {body!r}"
             )
 
 
@@ -820,13 +1088,18 @@ def main() -> int:
         raise AssertionError("removed publish setting remains in runtime state")
     if snapshots[0]["common"]["fallback_to_default_external_config"]:
         raise AssertionError("new default fallback switch did not default false")
+    if snapshots[0]["proxy_provider"]["interval"] != 3600:
+        raise AssertionError("missing provider interval did not default to 3600")
     if snapshots[0]["security"]["profile"] != "lan":
         raise AssertionError("historical security profile default changed")
     settings_reload_compatibility_baseline(settings_snapshot_helper)
+    settings_provider_interval_compatibility_baseline(settings_snapshot_helper)
 
     with fixture_server() as fixture_base:
         with running_service(binary) as base_url:
             conversion_baselines(base_url, fixture_base, args.update_golden)
+        with running_service(binary, proxy_provider_interval=7200) as base_url:
+            provider_interval_output_baseline(base_url, fixture_base)
         dashboard_baseline(binary, fixture_base)
         persistence_degradation_baseline(binary, fixture_base)
         public_request_baseline(binary, fixture_base)

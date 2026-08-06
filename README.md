@@ -145,7 +145,7 @@ proxy-providers:
   Provider_A1B2C3:  # provider 名称可通过参数自定义
     type: http
     url: https://your-subscription-url  # 客户端实际拉取订阅的地址
-    interval: 3600
+    interval: 3600  # 默认值可由部署配置设置，也可对每条订阅单独覆盖
     proxy: DIRECT  # 默认以直连方式拉取订阅
     path: ./providers/Provider_A1B2C3.yaml
     health-check:
@@ -768,7 +768,7 @@ lock_seconds = 900
 </details>
 
 <details>
-<summary><strong>Proxy-Provider 自定义名称</strong></summary>
+<summary><strong>Proxy-Provider 自定义名称与更新间隔</strong></summary>
 
 ### `provider` 前缀（仅适用于 Clash/ClashR 订阅链接）
 
@@ -788,6 +788,52 @@ url=provider%3AHK%2Chttps%3A%2F%2Fexample.com%2Fsub
 
 * 支持中文名称；非法字符或空值会回退为默认 `Provider_<MD5>`
 * 重名时会自动追加 `_1`、`_2` 等后缀
+
+### `interval` 前缀（仅适用于 Clash/ClashR 订阅链接）
+
+部署者可以在主配置文件中设置所有新生成 `proxy-provider` 的默认订阅更新间隔，单位为秒。该配置节完全可选；现有配置文件缺少它时仍可正常启动，并继续使用 `3600`：
+
+```toml
+[proxy_provider]
+interval = 3600
+```
+
+```yaml
+proxy_provider:
+  interval: 3600
+```
+
+```ini
+[proxy_provider]
+interval=3600
+```
+
+用户需要为某一条订阅单独设置间隔时，在该订阅前添加 `interval:<秒数>,`。它与 `provider:`、`tag:` 前缀可以任意排序：
+
+```text
+url=provider:A,interval:0,https://a.example/sub|provider:B,interval:21600,https://b.example/sub|provider:C,https://c.example/sub
+```
+
+以上示例中，A 明确生成 `interval: 0`，B 生成 `interval: 21600`，C 使用主配置文件中的默认值。未配置主配置节时，C 使用 `3600`。
+
+`interval:0` 不会省略 YAML 字段，而是明确生成：
+
+```yaml
+interval: 0
+```
+
+在 Mihomo 中，这表示关闭该 provider 的周期订阅更新：没有有效缓存时仍会在初始化时拉取一次；已有有效缓存时直接使用缓存；通过控制器或客户端界面发起的手动刷新仍然有效。`health-check.interval` 是节点健康检查周期，不受此设置影响，项目仍默认生成 `300`。
+
+> [!WARNING]
+> 使用固定自定义 provider 名称时，缓存路径也会保持不变。更换订阅 URL 后，如果同时使用 `interval:0`，Mihomo 可能继续使用已有缓存，直到用户手动刷新或清理对应缓存文件。
+
+补充说明：
+
+* 有效范围是 `0` 到 `2147483647` 的十进制整数；不支持 `none`、负数或 `1h` 等单位写法
+* 同一条订阅重复设置 `interval:` 会返回 HTTP 400
+* `interval:` 不适用于节点 URI、`list=true` 或非 Clash/ClashR 目标
+* 不提供请求级的全局 `provider_interval` 参数
+* 已有顶层请求参数 `&interval=` 仍用于托管配置的更新提示，与 `proxy-provider` 的更新周期无关
 
 </details>
 

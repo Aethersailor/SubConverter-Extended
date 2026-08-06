@@ -103,6 +103,23 @@ def assert_rejected(
     raise AssertionError(f"{label} was unexpectedly accepted")
 
 
+def provider_interval_from_output(output: str, provider_name: str) -> int:
+    marker = f"  {provider_name}:\n"
+    start = output.find(marker)
+    if start < 0:
+        raise AssertionError(f"provider block is missing: {provider_name}")
+    following = output[start + len(marker) :]
+    next_provider = re.search(r"(?m)^  [^ ].*:\s*$", following)
+    end = len(output) if next_provider is None else start + len(marker) + next_provider.start()
+    block = output[start:end]
+    interval = re.search(r"(?m)^    interval: ([0-9]+)\s*$", block)
+    if interval is None:
+        raise AssertionError(
+            f"provider interval is missing or non-numeric: {provider_name}\n{block}"
+        )
+    return int(interval.group(1))
+
+
 def assert_snapshot(name: str, content: str, snapshot_dir: Path | None, update: bool) -> None:
     if snapshot_dir is None:
         return
@@ -448,6 +465,76 @@ def run_checks(
             "url": remote_subscription_url,
             "config": DISABLE_RULEGEN_CONFIG,
         }
+        interval_output = fetch(
+            base_url,
+            "/sub",
+            {
+                **provider_params,
+                "url": "|".join(
+                    (
+                        f"provider:Zero,interval:0,{remote_subscription_url}",
+                        f"interval:21600,provider:Slow,{remote_subscription_url}",
+                        f"provider:Default,{remote_subscription_url}",
+                    )
+                ),
+            },
+            timeout,
+        )
+        for provider_name, expected in {
+            "Zero": 0,
+            "Slow": 21600,
+            "Default": 3600,
+        }.items():
+            actual = provider_interval_from_output(interval_output, provider_name)
+            if actual != expected:
+                raise AssertionError(
+                    f"{provider_name} interval mismatch: {actual} != {expected}"
+                )
+        if interval_output.count("      interval: 300") != 3:
+            raise AssertionError("provider health-check intervals changed")
+
+        managed_interval_output = fetch(
+            base_url,
+            "/sub",
+            {
+                **provider_params,
+                "url": f"provider:Managed,{remote_subscription_url}",
+                "interval": "17",
+            },
+            timeout,
+        )
+        if provider_interval_from_output(managed_interval_output, "Managed") != 3600:
+            raise AssertionError(
+                "request-level interval parameter changed provider interval"
+            )
+
+        for label, source_value in (
+            ("none provider interval", "interval:none,https://example.invalid/sub"),
+            (
+                "duplicate provider interval",
+                "interval:0,interval:1,https://example.invalid/sub",
+            ),
+            ("provider interval on direct node", f"interval:0,{DIRECT_SS_LINK}"),
+        ):
+            assert_rejected(
+                base_url,
+                "/sub",
+                {
+                    "target": "clash",
+                    "url": source_value,
+                    "config": DISABLE_RULEGEN_CONFIG,
+                },
+                timeout,
+                label,
+            )
+
+        assert_rejected(
+            base_url,
+            "/sub",
+            {**provider_params, "url": f"interval:0,{remote_subscription_url}", "list": "true"},
+            timeout,
+            "provider interval with list=true",
+        )
         client_ua = "clash.meta/1.19.20"
         client_output, client_headers = fetch_response(
             base_url,

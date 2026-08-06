@@ -10,9 +10,12 @@
 WebServer webServer;
 
 int main(int argc, char *argv[]) {
-  if (argc != 2 && argc != 3) {
+  const bool expect_reload_failure =
+      argc == 4 && std::string(argv[3]) == "--expect-reload-failure";
+  if ((argc != 2 && argc != 3 && argc != 4) ||
+      (argc == 4 && !expect_reload_failure)) {
     std::cerr << "usage: settings_snapshot_test_helper <config> "
-                 "[reload-config]\n";
+                 "[reload-config [--expect-reload-failure]]\n";
     return 2;
   }
 
@@ -28,7 +31,7 @@ int main(int argc, char *argv[]) {
   if (!readConf())
     return 1;
 
-  if (argc == 3) {
+  if (argc >= 3) {
     const std::filesystem::path reload_config =
         std::filesystem::absolute(argv[2]).lexically_normal();
     if (!reload_config.has_filename()) {
@@ -37,8 +40,13 @@ int main(int argc, char *argv[]) {
     }
     std::filesystem::current_path(reload_config.parent_path());
     global.prefPath = reload_config.filename().string();
-    if (!readConf())
+    const bool reloaded = readConf();
+    if (expect_reload_failure ? reloaded : !reloaded) {
+      std::cerr << (expect_reload_failure
+                        ? "reload unexpectedly succeeded\n"
+                        : "reload failed\n");
       return 1;
+    }
   }
 
   std::cout << sanitizedSettingsSnapshot(global);

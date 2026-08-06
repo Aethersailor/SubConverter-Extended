@@ -1408,7 +1408,11 @@ std::string page(Request &request, Response &response) {
                         provider.path || "-",
                         provider.filter || "-",
                         provider.exclude_filter || "-",
-                        provider.interval ? String(provider.interval) + text("s", " 秒") : "-"
+                        provider.interval === 0
+                            ? text("0s (automatic updates disabled)", "0 秒（已关闭自动更新）")
+                            : provider.interval
+                                ? String(provider.interval) + text("s", " 秒")
+                                : "-"
                     ].forEach(function (value) {
                         var cell = document.createElement("td");
                         cell.textContent = value;
