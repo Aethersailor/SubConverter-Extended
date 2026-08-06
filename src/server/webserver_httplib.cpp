@@ -14,6 +14,7 @@
 
 #include "utils/base64/base64.h"
 #include "utils/logger.h"
+#include "utils/redact.h"
 #include "utils/stl_extra.h"
 #include "utils/string_hash.h"
 #include "utils/urlencode.h"
@@ -88,6 +89,8 @@ static httplib::Server::Handler makeHandler(const responseRoute &rr,
     }
     auto result = rr.rc(req, resp);
     response.status = resp.status_code;
+    if (resp.status_code >= 500)
+      resp.headers["Cache-Control"] = "private, no-store";
     for (auto &h : resp.headers) {
       response.set_header(h.first, h.second);
     }
@@ -104,13 +107,17 @@ static std::string dump(const httplib::Headers &headers) {
   for (auto &x : headers) {
     if (startsWith(x.first, "LOCAL_") || startsWith(x.first, "REMOTE_"))
       continue;
-    if (strcasecmp(x.first.c_str(), "Authorization") == 0) {
-      s += x.first + ": [redacted]|";
-      continue;
-    }
-    s += x.first + ": " + x.second + "|";
+    s += x.first + "|";
   }
   return s;
+}
+
+static void setUnhandledExceptionResponse(httplib::Response &response) {
+  response.status = 500;
+  response.set_header("Cache-Control", "private, no-store");
+  response.set_content("Internal server error while processing request.\n"
+                       "处理请求时发生内部服务器错误。\n",
+                       "text/plain; charset=utf-8");
 }
 
 int WebServer::start_web_server_multi(listener_args *args) {
@@ -165,10 +172,10 @@ int WebServer::start_web_server_multi(listener_args *args) {
     }
     if (shouldLog(LOG_LEVEL_VERBOSE)) {
       writeLog(0,
-               "处理请求：method=" + req.method + " uri=" +
-                   req.target,
+               "处理请求：method=" + req.method + " path=" + req.path +
+                   " parameter_count=" + std::to_string(req.params.size()),
                LOG_LEVEL_VERBOSE);
-      writeLog(0, "请求头：" + dump(req.headers), LOG_LEVEL_VERBOSE);
+      writeLog(0, "请求头名称：" + dump(req.headers), LOG_LEVEL_VERBOSE);
     }
 
     if (req.has_header("SubConverter-Request")) {
@@ -178,7 +185,8 @@ int WebServer::start_web_server_multi(listener_args *args) {
                       "Please check subscription URLs and proxy settings to "
                       "avoid routing the service back to itself.\n"
                       "请检查订阅链接和代理设置，避免服务请求回到自身。",
-                      "text/plain");
+                       "text/plain");
+      res.set_header("Cache-Control", "private, no-store");
       return httplib::Server::HandlerResponse::Handled;
     }
     res.set_header("Server",
@@ -222,28 +230,28 @@ int WebServer::start_web_server_multi(listener_args *args) {
                });
   }
   server.set_exception_handler([](const httplib::Request &req,
-                                  httplib::Response &res,
-                                  const std::exception_ptr &e) {
+                                   httplib::Response &res,
+                                   const std::exception_ptr &e) {
     try {
       if (e)
         std::rethrow_exception(e);
-    } catch (const httplib::Error &err) {
-      res.set_content(to_string(err), "text/plain");
     } catch (const std::exception &ex) {
-      std::string return_data =
-          "Internal server error while processing request.\n"
-          "处理请求时发生内部服务器错误。\n"
-          "Request / 请求: " +
-          req.target + "\n";
-      return_data += "\n  Exception / 异常: ";
-      return_data += type(ex);
-      return_data += "\n  what(): ";
-      return_data += ex.what();
-      res.status = 500;
-      res.set_content(return_data, "text/plain");
+      writeLog(0,
+               "HTTP_UNEXPECTED_EXCEPTION method=" + req.method +
+                   " path=" + req.path +
+                   " parameter_count=" + std::to_string(req.params.size()) +
+                   " exception=" + type(ex) +
+                   " detail=" + summarizeUrlForLog(ex.what()),
+               LOG_LEVEL_ERROR);
     } catch (...) {
-      res.status = 500;
+      writeLog(0,
+               "HTTP_UNEXPECTED_EXCEPTION method=" + req.method +
+                   " path=" + req.path +
+                   " parameter_count=" + std::to_string(req.params.size()) +
+                   " exception=unknown",
+               LOG_LEVEL_ERROR);
     }
+    setUnhandledExceptionResponse(res);
   });
   if (serve_file) {
     server.set_mount_point("/", serve_file_root);

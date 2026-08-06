@@ -20,6 +20,7 @@
 #include "utils/network.h"
 #include "parser/config/proxy_utils.h"
 #include "utils/regexp.h"
+#include "utils/redact.h"
 #include "utils/string.h"
 #include "utils/urlencode.h"
 
@@ -272,7 +273,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
       isSubscription = true;
       writeLog(LOG_TYPE_INFO,
                "检测到无协议头链接，按订阅处理：" +
-                   link);
+                   summarizeUrlForLog(link));
     }
     // 规则 3: 在 SUPPORTED_SCHEMES 中 = 节点链接
     // 例如: trojan://..., vmess://..., hysteria2://...
@@ -285,7 +286,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
         isNodeLink = true;
         writeLog(LOG_TYPE_INFO,
                  "检测到未知协议，交给 Mihomo 解析器处理：" +
-                     link);
+                     summarizeUrlForLog(link));
       }
     }
 
@@ -357,7 +358,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
         if (nodes.empty()) {
           writeLog(LOG_TYPE_WARN,
                    "Mihomo 解析器未从链接中解析到有效节点，将回退到旧解析器：'" +
-                       link + "'。");
+                       summarizeUrlForLog(link) + "'。");
         } else {
           parsed_by_mihomo = true;
         }
@@ -376,12 +377,14 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
       if (!parsed_by_mihomo) {
         if (parse_set.mihomo_only) {
           writeLog(LOG_TYPE_ERROR,
-                   "Mihomo 专用解析模式拒绝使用旧解析器：'" + link + "'。");
+                   "Mihomo 专用解析模式拒绝使用旧解析器：'" +
+                       summarizeUrlForLog(link) + "'。");
           return -1;
         }
         nodes.clear();
         if (explodeConfContent(strSub, nodes) == 0) {
-          writeLog(LOG_TYPE_ERROR, "无效订阅：'" + link + "'！");
+          writeLog(LOG_TYPE_ERROR,
+                   "无效订阅：'" + summarizeUrlForLog(link) + "'！");
           return -1;
         }
       }
@@ -392,7 +395,8 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
         return -1;
       }
       if (explodeConfContent(strSub, nodes) == 0) {
-        writeLog(LOG_TYPE_ERROR, "无效订阅：'" + link + "'！");
+        writeLog(LOG_TYPE_ERROR,
+                 "无效订阅：'" + summarizeUrlForLog(link) + "'！");
         return -1;
       }
 #endif

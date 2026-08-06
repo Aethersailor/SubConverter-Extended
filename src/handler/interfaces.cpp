@@ -51,6 +51,7 @@ static string_icase_map buildSubscriptionRequestHeaders() {
 #include "utils/logger.h"
 #include "utils/md5/md5_interface.h"
 #include "utils/network.h"
+#include "utils/redact.h"
 #include "utils/regexp.h"
 #include "utils/stl_extra.h"
 #include "utils/string.h"
@@ -2043,9 +2044,10 @@ static std::string subconverter_impl(Request &request, Response &response,
   for (const ExternalConfigCandidate &candidate : config_candidates) {
     tpl_args.local_vars = tpl_args_base;
     writeLog(0, candidate.fallback
-                    ? "用户外部配置失败，显式尝试默认外部配置：" +
-                          candidate.path
-                    : "正在加载外部配置：" + candidate.path,
+                 ? "用户外部配置失败，显式尝试默认外部配置：" +
+                           summarizeUrlForLog(candidate.path)
+                     : "正在加载外部配置：" +
+                           summarizeUrlForLog(candidate.path),
              candidate.fallback ? LOG_LEVEL_WARNING : LOG_LEVEL_INFO);
 
     ExternalConfig extconf;
@@ -2073,7 +2075,7 @@ static std::string subconverter_impl(Request &request, Response &response,
                              : (!effective ? "no_effective_settings"
                                            : "selected_base_invalid");
     writeLog(0, "外部配置不可用，原因：" + reason + "，来源：" +
-                    candidate.path,
+                    summarizeUrlForLog(candidate.path),
              LOG_LEVEL_WARNING);
   }
 
@@ -2219,7 +2221,8 @@ static std::string subconverter_impl(Request &request, Response &response,
     importItems(urls, true);
     for (std::string &x : urls) {
       x = regTrim(x);
-      writeLog(0, "正在从 URL 获取节点数据：'" + x + "'。", LOG_LEVEL_INFO);
+      writeLog(0, "正在从 URL 获取节点数据：" + summarizeUrlForLog(x) + "。",
+               LOG_LEVEL_INFO);
       if (addNodes(x, insert_nodes, groupID, parse_set) == -1) {
         if (global.skipFailedLinks)
           writeLog(
@@ -2307,14 +2310,16 @@ static std::string subconverter_impl(Request &request, Response &response,
         std::string node_link = link;
         if (tagged.has_tag)
           node_link = "tag:" + tagged.tag + "," + link;
-        writeLog(0, "检测到节点链接：'" + link + "'，将直接解析。",
+        writeLog(0, "检测到节点链接：" + summarizeUrlForLog(link) +
+                        "，将直接解析。",
                  LOG_LEVEL_INFO);
         node_urls.push_back(node_link);
         explain.node_link_count++;
       } else if (isLink(link) || mihomo::isHttpSchemeLink(link)) {
         // HTTP/HTTPS 订阅链接
         writeLog(
-            0, "检测到订阅链接：'" + link + "'，将创建 provider。",
+            0, "检测到订阅链接：" + summarizeUrlForLog(link) +
+                   "，将创建 provider。",
             LOG_LEVEL_INFO);
         subscription_urls.push_back(
             {link, tagged.tag, tagged.provider, tagged.interval,
@@ -2333,7 +2338,8 @@ static std::string subconverter_impl(Request &request, Response &response,
         std::string node_link = link;
         if (tagged.has_tag)
           node_link = "tag:" + tagged.tag + "," + link;
-        writeLog(0, "未知 URL 类型：'" + link + "'，按节点链接处理。",
+        writeLog(0, "未知 URL 类型：" + summarizeUrlForLog(link) +
+                        "，按节点链接处理。",
                  LOG_LEVEL_WARNING);
         node_urls.push_back(node_link);
         explain.node_link_count++;
@@ -2394,7 +2400,7 @@ static std::string subconverter_impl(Request &request, Response &response,
         provider.tag = item.tag;
         writeLog(0,
                  "已生成 provider：" + provider.name + "，URL：" +
-                     item.url,
+                     summarizeUrlForLog(item.url),
                  LOG_LEVEL_INFO);
         provider.url = item.url_decoded ? item.url
                                         : urlDecode(item.url); // 解码 URL
@@ -2444,11 +2450,14 @@ static std::string subconverter_impl(Request &request, Response &response,
       importItems(node_urls, true, FetchContext::PublicRequest);
       // 关键：实际添加节点到 nodes 列表
       for (std::string &x : node_urls) {
-        writeLog(0, "正在从 URL 获取节点数据：'" + x + "'。", LOG_LEVEL_INFO);
+        writeLog(0, "正在从 URL 获取节点数据：" + summarizeUrlForLog(x) +
+                        "。",
+                 LOG_LEVEL_INFO);
         if (addNodes(x, nodes, groupID, parse_set) == -1) {
           // 跳过无法解析的节点链接，记录警告后继续处理其他节点
           writeLog(0,
-                   "已跳过无效节点链接：'" + x + "'，继续处理其他节点。",
+                   "已跳过无效节点链接：" + summarizeUrlForLog(x) +
+                       "，继续处理其他节点。",
                    LOG_LEVEL_WARNING);
         }
         groupID++;
@@ -2461,11 +2470,13 @@ static std::string subconverter_impl(Request &request, Response &response,
     for (std::string &x : urls) {
       x = regTrim(x);
       // std::cerr<<"Fetching node data from url '"<<x<<"'."<<std::endl;
-      writeLog(0, "正在从 URL 获取节点数据：'" + x + "'。", LOG_LEVEL_INFO);
+      writeLog(0, "正在从 URL 获取节点数据：" + summarizeUrlForLog(x) + "。",
+               LOG_LEVEL_INFO);
       if (addNodes(x, nodes, groupID, parse_set) == -1) {
         // 跳过无法解析的节点链接，记录警告后继续处理其他节点
         writeLog(0,
-                 "已跳过无效节点链接：'" + x + "'，继续处理其他节点。",
+                 "已跳过无效节点链接：" + summarizeUrlForLog(x) +
+                     "，继续处理其他节点。",
                  LOG_LEVEL_WARNING);
       }
       groupID++;
@@ -3195,7 +3206,7 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
            "parameter.\n"
            "请在 link 参数中提供真实 Surge 配置链接。";
   }
-  writeLog(0, "SurgeConfToClash 调用，URL：'" + url + "'。",
+  writeLog(0, "SurgeConfToClash 调用，URL：" + summarizeUrlForLog(url) + "。",
            LOG_LEVEL_INFO);
 
   ProxyPolicy proxy = parseProxy(global.proxyConfig);
@@ -3293,7 +3304,8 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
   parse_set.authorized = !global.APIMode;
   for (std::string &x : links) {
     // std::cerr<<"Fetching node data from url '"<<x<<"'."<<std::endl;
-    writeLog(0, "正在从 URL 获取节点数据：'" + x + "'。", LOG_LEVEL_INFO);
+    writeLog(0, "正在从 URL 获取节点数据：" + summarizeUrlForLog(x) + "。",
+             LOG_LEVEL_INFO);
     if (addNodes(x, nodes, 0, parse_set) == -1) {
       if (global.skipFailedLinks)
         writeLog(0,
