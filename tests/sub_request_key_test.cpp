@@ -23,6 +23,12 @@ int main() {
   Request private_b = baseRequest("data:,ss://private-b");
   assert(key(private_a) != key(private_b));
 
+  Request interval_zero =
+      baseRequest("interval:0,https://provider.example/sub");
+  Request interval_hour =
+      baseRequest("interval:3600,https://provider.example/sub");
+  assert(key(interval_zero) != key(interval_hour));
+
   Request transport_a = private_a;
   transport_a.headers["CF-Ray"] = "ray-a";
   transport_a.headers["X-Forwarded-For"] = "198.51.100.1";

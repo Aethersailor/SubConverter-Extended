@@ -74,6 +74,18 @@ CHECKS = [
         "message": "provider creation path is missing from request handling.",
     },
     {
+        "id": "provider-interval-prefix",
+        "file": "src/handler/interfaces.cpp",
+        "pattern": r"item\.has_interval\s*\?\s*item\.interval\s*:\s*global\.proxyProviderInterval",
+        "message": "Per-provider interval override support is missing.",
+    },
+    {
+        "id": "provider-interval-default",
+        "file": "src/config/proxy_provider_interval.h",
+        "pattern": r"kDefaultProxyProviderInterval\s*=\s*3600",
+        "message": "The backward-compatible provider interval default is missing.",
+    },
+    {
         "id": "openclash-age-response",
         "file": "src/handler/interfaces.cpp",
         "pattern": r"consumeAgeResponseContext",

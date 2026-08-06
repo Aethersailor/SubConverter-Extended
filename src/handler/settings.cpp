@@ -1,5 +1,7 @@
 #include <algorithm>
+#include <cstdint>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <filesystem>
 
@@ -34,6 +36,19 @@ static bool parseBoolSetting(const std::string &value) {
   std::string normalized = toLower(trimWhitespace(value, true, true));
   return normalized == "1" || normalized == "true" || normalized == "yes" ||
          normalized == "on";
+}
+
+static int requireProxyProviderInterval(const std::string &value) {
+  int interval = 0;
+  if (!parseProxyProviderInterval(value, interval)) {
+    throw std::invalid_argument(
+        "proxy_provider.interval 必须是 0 到 2147483647 之间的十进制整数。");
+  }
+  return interval;
+}
+
+static int requireProxyProviderInterval(std::int64_t value) {
+  return requireProxyProviderInterval(std::to_string(value));
 }
 
 static bool pathInsideRoot(const std::string &path, const std::string &root) {
@@ -128,6 +143,10 @@ static void finalizeDashboardAuthSettings() {
 }
 
 static void finalizeRuntimeSettings() {
+  if (global.proxyProviderInterval < 0) {
+    throw std::invalid_argument(
+        "proxy_provider.interval 必须是非负整数。");
+  }
   finalizeSecuritySettings();
   finalizePerformanceSettings();
   finalizeDashboardAuthSettings();
@@ -515,6 +534,22 @@ void readYAMLConf(YAML::Node &node) {
   section["proxy_subscription"] >> global.proxySubscription;
   section["reload_conf_on_request"] >> global.reloadConfOnRequest;
 
+  YAML::Node proxy_provider = node["proxy_provider"];
+  if (proxy_provider.IsDefined() && !proxy_provider.IsNull()) {
+    if (!proxy_provider.IsMap()) {
+      throw std::invalid_argument("proxy_provider 必须是配置映射。");
+    }
+    YAML::Node interval = proxy_provider["interval"];
+    if (interval.IsDefined()) {
+      if (!interval.IsScalar()) {
+        throw std::invalid_argument(
+            "proxy_provider.interval 必须是十进制整数。");
+      }
+      global.proxyProviderInterval =
+          requireProxyProviderInterval(interval.as<std::string>());
+    }
+  }
+
   if (node["custom_openclash_rules"].IsDefined()) {
     section = node["custom_openclash_rules"];
     section["fallback_enabled"] >>
@@ -823,6 +858,24 @@ void readTOMLConf(toml::value &root) {
         "Custom_OpenClash_Rules@refs/heads/main/cfg/Custom_Clash.ini";
   }
 
+  if (root.contains("proxy_provider")) {
+    const auto &section_proxy_provider =
+        root.as_table().at("proxy_provider");
+    if (!section_proxy_provider.is_table()) {
+      throw std::invalid_argument("proxy_provider 必须是 TOML 表。");
+    }
+    if (section_proxy_provider.contains("interval")) {
+      const auto &interval =
+          section_proxy_provider.as_table().at("interval");
+      if (!interval.is_integer()) {
+        throw std::invalid_argument(
+            "proxy_provider.interval 必须是 TOML 整数。");
+      }
+      global.proxyProviderInterval =
+          requireProxyProviderInterval(interval.as_integer());
+    }
+  }
+
   if (filter)
     find_if_exist(section_common, "filter_script", global.filterScript);
   else
@@ -1061,6 +1114,7 @@ bool readConf() {
     global.dashboardAuthLockSeconds = 900;
     global.fallbackToDefaultExternalConfig = false;
     global.customOpenClashRulesSourceSwitch = false;
+    global.proxyProviderInterval = kDefaultProxyProviderInterval;
   };
 
   std::string prefdata;
@@ -1193,6 +1247,15 @@ bool readConf() {
   ini.get_if_exist("proxy_ruleset", global.proxyRuleset);
   ini.get_if_exist("proxy_subscription", global.proxySubscription);
   ini.get_bool_if_exist("reload_conf_on_request", global.reloadConfOnRequest);
+
+  if (ini.section_exist("proxy_provider")) {
+    ini.enter_section("proxy_provider");
+    if (ini.item_exist("interval")) {
+      std::string interval;
+      ini.get_if_exist("interval", interval);
+      global.proxyProviderInterval = requireProxyProviderInterval(interval);
+    }
+  }
 
   if (ini.section_exist("custom_openclash_rules")) {
     ini.enter_section("custom_openclash_rules");

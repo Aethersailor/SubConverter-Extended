@@ -58,6 +58,10 @@ std::string sanitizedSettingsSnapshot(const Settings &settings) {
            {"clash_proxies_style", settings.clashProxiesStyle},
            {"singbox_add_clash_modes", settings.singBoxAddClashModes},
        }},
+      {"proxy_provider",
+       {
+           {"interval", settings.proxyProviderInterval},
+       }},
       {"rules",
        {
            {"enabled", settings.enableRuleGen},

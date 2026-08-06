@@ -704,12 +704,21 @@ inline std::string generateProviderHashFromDecodedUrl(
 }
 
 struct TaggedLink {
+  enum class Error {
+    None,
+    InvalidInterval,
+    DuplicateInterval,
+  };
+
   std::string tag;
   std::string provider;
   std::string link;
+  int interval = 0;
   bool has_tag = false;
   bool has_provider = false;
+  bool has_interval = false;
   bool link_decoded = false;
+  Error error = Error::None;
 };
 
 static bool extractLinkPrefix(const std::string &input,
@@ -773,7 +782,31 @@ static bool parseLinkPrefixes(const std::string &input, TaggedLink &result) {
       remainder = next;
       continue;
     }
+    if (extractLinkPrefix(remainder, "interval:", value, next,
+                          saw_bracketed)) {
+      parsed = true;
+      if (result.has_interval) {
+        result.error = TaggedLink::Error::DuplicateInterval;
+        return true;
+      }
+      if (!parseProxyProviderInterval(value, result.interval)) {
+        result.error = TaggedLink::Error::InvalidInterval;
+        return true;
+      }
+      result.has_interval = true;
+      remainder = next;
+      continue;
+    }
     break;
+  }
+
+  std::string lower_remainder =
+      toLower(trimWhitespace(remainder, true, true));
+  const bool starts_interval = startsWith(lower_remainder, "interval:") ||
+                               startsWith(lower_remainder, "<interval:");
+  if (starts_interval && lower_remainder.find("%2c") == std::string::npos) {
+    result.error = TaggedLink::Error::InvalidInterval;
+    return true;
   }
 
   if (!parsed)
@@ -789,12 +822,17 @@ static bool parseLinkPrefixes(const std::string &input, TaggedLink &result) {
 static bool looksLikeEncodedLinkPrefix(const std::string &input) {
   std::string lower = toLower(input);
   return startsWith(lower, "tag%3a") || startsWith(lower, "provider%3a") ||
+         startsWith(lower, "interval%3a") ||
          startsWith(lower, "%3ctag%3a") ||
          startsWith(lower, "%3cprovider%3a") || startsWith(lower, "%3ctag:") ||
+         startsWith(lower, "%3cinterval%3a") ||
          startsWith(lower, "%3cprovider:") ||
+         startsWith(lower, "%3cinterval:") ||
          (startsWith(lower, "tag:") &&
           lower.find("%2c") != std::string::npos) ||
          (startsWith(lower, "provider:") &&
+          lower.find("%2c") != std::string::npos) ||
+         (startsWith(lower, "interval:") &&
           lower.find("%2c") != std::string::npos);
 }
 
@@ -813,6 +851,31 @@ static TaggedLink parseTaggedLink(const std::string &input) {
   }
   result.link = value;
   return result;
+}
+
+static std::string providerIntervalPrefixError(
+    size_t item_index, TaggedLink::Error error) {
+  const std::string item = std::to_string(item_index + 1);
+  if (error == TaggedLink::Error::DuplicateInterval) {
+    return "Invalid request: interval: is repeated for URL item #" + item +
+           ".\n"
+           "无效请求：第 " + item +
+           " 个 url 项重复设置了 interval: 前缀。";
+  }
+  return "Invalid request: interval: for URL item #" + item +
+         " must be a decimal integer from 0 to 2147483647.\n"
+         "无效请求：第 " + item +
+         " 个 url 项的 interval: 必须是 0 到 2147483647 之间的十进制整数。";
+}
+
+static std::string providerIntervalScopeError(size_t item_index) {
+  const std::string item = std::to_string(item_index + 1);
+  return "Invalid request: interval: for URL item #" + item +
+         " is only valid for subscription links that generate Clash/ClashR "
+         "proxy-providers.\n"
+         "无效请求：第 " + item +
+         " 个 url 项的 interval: 仅适用于会生成 Clash/ClashR "
+         "proxy-provider 的订阅链接。";
 }
 
 static constexpr size_t kProviderNameMaxLen = 64;
@@ -2122,21 +2185,44 @@ static std::string subconverter_impl(Request &request, Response &response,
   parse_set.fetch_context = FetchContext::PublicRequest;
   groupID = 0;
 
+  const bool provider_mode_eligible =
+      (argTarget == "clash" || argTarget == "clashr") && !ext.nodelist;
+  if (!provider_mode_eligible) {
+    for (size_t index = 0; index < urls.size(); ++index) {
+      TaggedLink tagged = parseTaggedLink(regTrim(urls[index]));
+      if (tagged.error != TaggedLink::Error::None) {
+        *status_code = 400;
+        return providerIntervalPrefixError(index, tagged.error);
+      }
+      if (tagged.has_interval) {
+        *status_code = 400;
+        return providerIntervalScopeError(index);
+      }
+    }
+  }
+
   //  对于 Clash，区分节点链接和订阅链接
-  if ((argTarget == "clash" || argTarget == "clashr") && !ext.nodelist) {
+  if (provider_mode_eligible) {
     // 先区分节点链接和订阅链接
     struct SubscriptionLinkItem {
       std::string url;
       std::string tag;
       std::string provider;
+      int interval = 0;
+      bool has_interval = false;
       bool url_decoded = false;
     };
     std::vector<SubscriptionLinkItem> subscription_urls; // HTTP/HTTPS 订阅链接
     std::vector<std::string> node_urls; // 节点链接（vless://, vmess:// 等）
 
-    for (std::string &x : urls) {
+    for (size_t index = 0; index < urls.size(); ++index) {
+      std::string &x = urls[index];
       x = regTrim(x);
       TaggedLink tagged = parseTaggedLink(x);
+      if (tagged.error != TaggedLink::Error::None) {
+        *status_code = 400;
+        return providerIntervalPrefixError(index, tagged.error);
+      }
       std::string link = tagged.link.empty() ? x : tagged.link;
 
       // Keep HTTP(S)/data links available for proxy-provider mode. Other
@@ -2144,6 +2230,10 @@ static std::string subconverter_impl(Request &request, Response &response,
       bool isNodeLink = mihomo::isSupportedNonHttpSchemeLink(link);
 
       if (isNodeLink) {
+        if (tagged.has_interval) {
+          *status_code = 400;
+          return providerIntervalScopeError(index);
+        }
         std::string node_link = link;
         if (tagged.has_tag)
           node_link = "tag:" + tagged.tag + "," + link;
@@ -2157,9 +2247,14 @@ static std::string subconverter_impl(Request &request, Response &response,
             0, "检测到订阅链接：'" + link + "'，将创建 provider。",
             LOG_LEVEL_INFO);
         subscription_urls.push_back(
-            {link, tagged.tag, tagged.provider, tagged.link_decoded});
+            {link, tagged.tag, tagged.provider, tagged.interval,
+             tagged.has_interval, tagged.link_decoded});
         explain.subscription_url_count++;
       } else {
+        if (tagged.has_interval) {
+          *status_code = 400;
+          return providerIntervalScopeError(index);
+        }
         std::string node_link = link;
         if (tagged.has_tag)
           node_link = "tag:" + tagged.tag + "," + link;
@@ -2228,7 +2323,8 @@ static std::string subconverter_impl(Request &request, Response &response,
                  LOG_LEVEL_INFO);
         provider.url = item.url_decoded ? item.url
                                         : urlDecode(item.url); // 解码 URL
-        provider.interval = 3600;    // 固定使用 3600 秒（1小时）
+        provider.interval = static_cast<uint32_t>(
+            item.has_interval ? item.interval : global.proxyProviderInterval);
         provider.groupId = groupID;
         provider.path = "./providers/" + provider.name + ".yaml";
         provider.user_agent = provider_user_agent;

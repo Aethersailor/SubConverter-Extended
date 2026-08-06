@@ -16,6 +16,7 @@
 #include "utils/tribool.h"
 #include <toml.hpp>
 
+#include "config/proxy_provider_interval.h"
 
 struct Settings {
   // common settings
@@ -68,6 +69,7 @@ struct Settings {
   std::string clashProxiesStyle = "flow", clashProxyGroupsStyle = "block";
   std::string proxyConfig, proxyRuleset, proxySubscription;
   int updateInterval = 0;
+  int proxyProviderInterval = kDefaultProxyProviderInterval;
   std::string sortScript, filterScript;
 
   std::string clashBase;

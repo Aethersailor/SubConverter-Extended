@@ -329,6 +329,12 @@ IF(BUILD_TESTS)
     ADD_TEST(NAME sub_request_key COMMAND sub_request_key_test)
     SET_TESTS_PROPERTIES(sub_request_key PROPERTIES LABELS fast)
 
+    ADD_EXECUTABLE(proxy_provider_interval_test
+        tests/proxy_provider_interval_test.cpp)
+    TARGET_INCLUDE_DIRECTORIES(proxy_provider_interval_test PRIVATE src)
+    ADD_TEST(NAME proxy_provider_interval COMMAND proxy_provider_interval_test)
+    SET_TESTS_PROPERTIES(proxy_provider_interval PROPERTIES LABELS fast)
+
     ADD_EXECUTABLE(curl_handle_pool_test
         tests/curl_handle_pool_test.cpp
         src/handler/curl_handle_pool.cpp)
