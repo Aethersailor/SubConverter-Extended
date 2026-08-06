@@ -408,6 +408,7 @@ IF(BUILD_TESTS)
         src/utils/file.cpp
         src/utils/string.cpp)
     TARGET_INCLUDE_DIRECTORIES(file_scope_test PRIVATE src)
+    TARGET_COMPILE_DEFINITIONS(file_scope_test PRIVATE FILE_IO_TESTING)
     ADD_TEST(NAME file_scope COMMAND file_scope_test)
     SET_TESTS_PROPERTIES(file_scope PROPERTIES
         LABELS fast

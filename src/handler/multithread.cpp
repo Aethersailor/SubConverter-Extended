@@ -116,20 +116,23 @@ static bool canReadLocalFetchPath(const std::string &path,
 
 std::shared_future<std::string> fetchFileAsync(const std::string &path, const ProxyPolicy &proxy, int cache_ttl, bool find_local, bool async, FetchContext context)
 {
+    const bool trusted_local_path = isTrustedLocalResourcePath(path);
+    const bool scope_limit = !trusted_local_path;
     if(!async)
     {
-        if(find_local && fileExist(path, true) && canReadLocalFetchPath(path, context))
-            return makeReadyStringFuture(fileGet(path, true));
+        if(find_local && fileExist(path, scope_limit) &&
+           canReadLocalFetchPath(path, context))
+            return makeReadyStringFuture(fileGet(path, scope_limit));
         if(isLink(path))
             return makeReadyStringFuture(webGet(path, proxy, cache_ttl, nullptr, nullptr, context));
         return makeReadyStringFuture(std::string());
     }
 
     std::future<std::string> retVal;
-    if(find_local && fileExist(path, true) &&
+    if(find_local && fileExist(path, scope_limit) &&
        canReadLocalFetchPath(path, context))
         retVal = rulesetExecutor().submit(
-            [path](){ return fileGet(path, true); });
+            [path, scope_limit](){ return fileGet(path, scope_limit); });
     else if(isLink(path))
         retVal = rulesetExecutor().submit(
             [path, proxy, cache_ttl, context](){

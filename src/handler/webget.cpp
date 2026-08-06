@@ -9,6 +9,7 @@
 #include <utility>
 #include <atomic>
 #include <cctype>
+#include <cstdio>
 #include <cstdint>
 
 #include <curl/curl.h>
@@ -1073,9 +1074,18 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned in
                 //guarded_mutex guard(cache_rw_lock);
                 cache_rw_lock.writeLock();
                 defer(cache_rw_lock.writeUnlock();)
-                fileWrite(path, content, true);
-                if(!fetched.response_headers.empty())
-                    fileWrite(path_header, fetched.response_headers, true);
+                bool cache_write_ok = fileWrite(path, content, true) == 0;
+                if(cache_write_ok && !fetched.response_headers.empty())
+                    cache_write_ok =
+                        fileWrite(path_header, fetched.response_headers, true) == 0;
+                if(!cache_write_ok)
+                {
+                    std::remove(path.c_str());
+                    std::remove(path_header.c_str());
+                    writeLog(0,
+                             "缓存写入失败，本次已获取内容仍将直接返回；失败缓存已丢弃。",
+                             LOG_LEVEL_WARNING);
+                }
             }
         }
         else

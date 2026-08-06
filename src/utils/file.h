@@ -19,8 +19,20 @@
 std::string fileGet(const std::string &path, bool scope_limit = false);
 bool fileExist(const std::string &path, bool scope_limit = false);
 bool isInScope(const std::string &path);
+bool isPathInScope(const std::string &path, const std::string &root);
 bool fileCopy(const std::string &source, const std::string &dest);
 int fileWrite(const std::string &path, const std::string &content, bool overwrite);
+
+#ifdef FILE_IO_TESTING
+enum class FileIoTestFailure {
+    None,
+    Open,
+    ShortWrite,
+    Flush,
+    Close,
+};
+void setFileIoTestFailure(FileIoTestFailure failure);
+#endif
 
 template<typename F>
 int operateFiles(const std::string &path, F &&op)

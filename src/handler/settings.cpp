@@ -103,23 +103,7 @@ static bool requireProxyProviderDirect(const std::string &value) {
 }
 
 static bool pathInsideRoot(const std::string &path, const std::string &root) {
-  if (path.empty() || root.empty())
-    return false;
-  try {
-    std::filesystem::path absolute_path =
-        std::filesystem::weakly_canonical(std::filesystem::absolute(path));
-    std::filesystem::path absolute_root =
-        std::filesystem::weakly_canonical(std::filesystem::absolute(root));
-    std::filesystem::path relative =
-        std::filesystem::relative(absolute_path, absolute_root);
-    std::string rel = relative.generic_string();
-    return rel == "." ||
-           (!relative.is_absolute() && rel != ".." &&
-            !startsWith(rel, "../"));
-  } catch (std::exception &e) {
-    writeLog(0, e.what(), LOG_LEVEL_DEBUG);
-    return false;
-  }
+  return isPathInScope(path, root);
 }
 
 static void finalizeSecuritySettings() {
@@ -346,6 +330,17 @@ static bool canImportLocalPath(const std::string &path, FetchContext context) {
   return false;
 }
 
+static bool readImportLocalPath(const std::string &path, bool scope_limit,
+                                FetchContext context, std::string &content) {
+  const bool trusted = isTrustedLocalResourcePath(path);
+  const bool effective_scope_limit = scope_limit && !trusted;
+  if (!fileExist(path, effective_scope_limit) ||
+      !canImportLocalPath(path, context))
+    return false;
+  content = fileGet(path, effective_scope_limit);
+  return true;
+}
+
 int importItems(string_array &target, bool scope_limit, FetchContext context) {
   string_array result;
   std::stringstream ss;
@@ -362,9 +357,9 @@ int importItems(string_array &target, bool scope_limit, FetchContext context) {
 
     ProxyPolicy proxy = parseProxy(global.proxyConfig);
 
-    if (fileExist(path, scope_limit) && canImportLocalPath(path, context))
-      content = fileGet(path, scope_limit);
-    else if (isLink(path))
+    if (readImportLocalPath(path, scope_limit, context, content)) {
+      // Local content was loaded through the effective scoped/trusted policy.
+    } else if (isLink(path))
       content = webGet(path, proxy, global.cacheConfig, nullptr, nullptr,
                        context);
     else
@@ -417,9 +412,9 @@ int importItems(std::vector<toml::value> &root, const std::string &import_key,
       const std::string &path = toml::get<std::string>(table.at("import"));
       writeLog(0, "正在导入项目：" + path);
       content.clear();
-      if (fileExist(path, scope_limit) && canImportLocalPath(path, context))
-        content = fileGet(path, scope_limit);
-      else if (isLink(path))
+      if (readImportLocalPath(path, scope_limit, context, content)) {
+        // Local content was loaded through the effective scoped/trusted policy.
+      } else if (isLink(path))
         content = webGet(path, proxy, global.cacheConfig, nullptr, nullptr,
                          context);
       else
