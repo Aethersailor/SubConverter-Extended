@@ -17,10 +17,10 @@ IMAGE_ID = "sha256:" + "a" * 64
 OLD_IMAGE_ID = "sha256:" + "b" * 64
 EXPECTED_LABELS = {
     IDENTITY.OCI_VERSION: "dev",
-    IDENTITY.OCI_REVISION: "abc1234",
+    IDENTITY.OCI_REVISION: "abc1234" + "0" * 33,
     IDENTITY.OCI_CREATED: "2026-08-06T04:37:18Z",
 }
-VERSION_BODY = "SubConverter-Extended dev-abc1234 backend\n"
+VERSION_BODY = "SubConverter-Extended dev-" + "abc1234" + "0" * 33 + " backend\n"
 
 
 def image(labels=None):
@@ -38,14 +38,14 @@ class ContainerImageIdentityTests(unittest.TestCase):
             image=image_document or image(),
             version_body=body,
             expected_version="dev",
-            expected_revision="abc1234",
+            expected_revision="abc1234" + "0" * 33,
             expected_build_date="2026-08-06T04:37:18Z",
         )
 
     def test_fresh_container_matches_image_and_runtime(self):
         result = self.verify()
         self.assertEqual(result["image_id"], IMAGE_ID)
-        self.assertEqual(result["revision"], "abc1234")
+        self.assertEqual(result["revision"], "abc1234" + "0" * 33)
 
     def test_rejects_incorrect_new_image_label(self):
         labels = dict(EXPECTED_LABELS)

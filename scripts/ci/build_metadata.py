@@ -10,10 +10,8 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
-
-
 RELEASE_RE = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$")
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 @dataclass(frozen=True)
@@ -21,12 +19,9 @@ class BuildMetadata:
     mode: str
     version: str
     is_release: bool
+    sha: str
     sha_short: str
     build_date: str
-
-
-def _is_true(value: str) -> bool:
-    return value.strip().lower() == "true"
 
 
 def normalize_build_date(value: str) -> str:
@@ -40,26 +35,17 @@ def resolve_build_metadata(
     *,
     ref: str,
     event_name: str,
-    sha_short: str,
+    sha: str,
     commit_date: str,
-    dispatch_release_tag: str = "",
-    overwrite_existing_release: bool = False,
-    tag_exists: Optional[Callable[[str], bool]] = None,
 ) -> BuildMetadata:
+    sha = sha.strip().lower()
+    if not SHA_RE.fullmatch(sha):
+        raise ValueError("source revision must be a full 40-character Git SHA")
+    sha_short = sha[:7]
+
     if ref.startswith("refs/tags/"):
         mode = "release"
         version = ref.removeprefix("refs/tags/")
-    elif event_name == "workflow_dispatch" and overwrite_existing_release:
-        if ref != "refs/heads/master":
-            raise ValueError("existing releases may be rebuilt only from master")
-        mode = "release"
-        version = dispatch_release_tag.strip()
-        if not version.startswith("v"):
-            version = f"v{version}"
-        if not RELEASE_RE.fullmatch(version):
-            raise ValueError(f"invalid release tag {version!r}; use vX.Y.Z")
-        if tag_exists is not None and not tag_exists(version):
-            raise ValueError(f"release tag {version!r} does not exist")
     elif event_name == "pull_request":
         mode = "pr"
         version = f"pr-{sha_short}"
@@ -72,10 +58,17 @@ def resolve_build_metadata(
     else:
         raise ValueError(f"unsupported build ref {ref} ({event_name})")
 
+    if mode == "release":
+        if event_name != "push":
+            raise ValueError("formal releases require a tag push event")
+        if not RELEASE_RE.fullmatch(version):
+            raise ValueError(f"invalid release tag {version!r}; use vX.Y.Z")
+
     return BuildMetadata(
         mode=mode,
         version=version,
         is_release=mode == "release",
+        sha=sha,
         sha_short=sha_short,
         build_date=normalize_build_date(commit_date),
     )
@@ -87,21 +80,12 @@ def _git(*args: str) -> str:
     ).strip()
 
 
-def _tag_exists(tag: str) -> bool:
-    result = subprocess.run(
-        ["git", "rev-parse", "-q", "--verify", f"refs/tags/{tag}"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    return result.returncode == 0
-
-
 def _write_github_output(path: Path, metadata: BuildMetadata) -> None:
     values = {
         "mode": metadata.mode,
         "version": metadata.version,
         "is_release": str(metadata.is_release).lower(),
+        "sha": metadata.sha,
         "sha_short": metadata.sha_short,
         "build_date": metadata.build_date,
     }
@@ -114,17 +98,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ref", default=os.environ.get("GITHUB_REF", ""))
     parser.add_argument("--event-name", default=os.environ.get("GITHUB_EVENT_NAME", ""))
-    parser.add_argument("--sha-short")
+    parser.add_argument("--sha")
     parser.add_argument("--commit-date")
-    parser.add_argument(
-        "--dispatch-release-tag",
-        default=os.environ.get("DISPATCH_RELEASE_TAG", ""),
-    )
-    parser.add_argument(
-        "--overwrite-existing-release",
-        default=os.environ.get("OVERWRITE_EXISTING_RELEASE", "false"),
-    )
-    parser.add_argument("--validate-release-tag", action="store_true")
     parser.add_argument("--github-output", type=Path)
     args = parser.parse_args()
 
@@ -134,18 +109,15 @@ def main() -> int:
     metadata = resolve_build_metadata(
         ref=args.ref,
         event_name=args.event_name,
-        sha_short=args.sha_short or _git("rev-parse", "--short", "HEAD"),
+        sha=args.sha or _git("rev-parse", "HEAD"),
         commit_date=args.commit_date or _git("show", "-s", "--format=%cI", "HEAD"),
-        dispatch_release_tag=args.dispatch_release_tag,
-        overwrite_existing_release=_is_true(args.overwrite_existing_release),
-        tag_exists=_tag_exists if args.validate_release_tag else None,
     )
 
     if args.github_output:
         _write_github_output(args.github_output, metadata)
     print(
         f"Build mode: {metadata.mode}; version: {metadata.version}; "
-        f"revision: {metadata.sha_short}; build date: {metadata.build_date}"
+        f"revision: {metadata.sha}; build date: {metadata.build_date}"
     )
     return 0
 

@@ -1,0 +1,22 @@
+name: Formal Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+# Formal versions are serialized. A newer tag must never cancel an older
+# version while its immutable identity is still being finalized.
+concurrency:
+  group: formal-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    name: Immutable tag release
+    uses: ./.github/workflows/build-dockerhub.yml
+    secrets: inherit

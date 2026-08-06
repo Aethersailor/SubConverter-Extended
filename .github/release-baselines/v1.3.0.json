@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "version": "v1.3.0",
+  "tag_commit": "f9d7a6f4ecb48c6dcefbd86e58b602b4cff1276d",
+  "release_id": 365979846,
+  "assets": {
+    "SHA256SUMS": {"size": 2089, "digest": "sha256:94ca8bcbd6f05dcc3a20c88112dc19dcf96d62de22532be17e6d9b97b72f669f"},
+    "SubConverter-Extended-v1.3.0-linux-amd64.tar.gz": {"size": 18167986, "digest": "sha256:394413e529d0878d3cf17561514001f1d6445b006e4c569c61a04d858ede86cc"},
+    "SubConverter-Extended-v1.3.0-linux-arm64.tar.gz": {"size": 17302191, "digest": "sha256:1a6b850e063391e0e3a53565fcc5560df0f7c4b27e10d9f46a57775986e7b3b1"},
+    "SubConverter-Extended-v1.3.0-linux-armv7.tar.gz": {"size": 15397982, "digest": "sha256:4ece81af122a82f25b1805033f38333fda48a2b42389ad8fcbb099f3eacc84e6"},
+    "SubConverter-Extended-v1.3.0-openwrt-aarch64_cortex-a53.apk": {"size": 17201235, "digest": "sha256:55159322136255b74da8d563bdd86904c0cda064d51c3ffca632af22501baba4"},
+    "SubConverter-Extended-v1.3.0-openwrt-aarch64_cortex-a72.apk": {"size": 17201236, "digest": "sha256:ed61b5ca4361bf8a7eed2020d9ce79a433789a617d5000da4b4ab9c548a7a10d"},
+    "SubConverter-Extended-v1.3.0-openwrt-aarch64_generic.apk": {"size": 17201235, "digest": "sha256:72d30f6744405ebd57bca7f459836e3ba8024a9917b0945712e98d775c73cacd"},
+    "SubConverter-Extended-v1.3.0-openwrt-arm_cortex-a15_neon-vfpv4.apk": {"size": 15319625, "digest": "sha256:a059e650f1a8607061d0cf7f8f9fa37fa1ab2811e29886aa895b84388f080426"},
+    "SubConverter-Extended-v1.3.0-openwrt-arm_cortex-a5_vfpv4.apk": {"size": 15319621, "digest": "sha256:6d8eaefd5676c8381f0cdb0a96290895afed226480eecc37d8e5d7db83a4e7f4"},
+    "SubConverter-Extended-v1.3.0-openwrt-arm_cortex-a7.apk": {"size": 15319617, "digest": "sha256:1abcbc8aa7eb2d8c95777f4c8a2567406151615dd83576591793bf4fb01d2d8a"},
+    "SubConverter-Extended-v1.3.0-openwrt-arm_cortex-a7_neon-vfpv4.apk": {"size": 15319669, "digest": "sha256:64c28803f32032cbb154ab7973a1826d0783d9f337d7e7e4fc787c77bb7c053e"},
+    "SubConverter-Extended-v1.3.0-openwrt-arm_cortex-a7_vfpv4.apk": {"size": 15319615, "digest": "sha256:0aa3a6e6a7549e4f173049ed5bb450ef956c343fd083d9a0eecdfbc1205f43fa"},
+    "SubConverter-Extended-v1.3.0-openwrt-arm_cortex-a8_vfpv3.apk": {"size": 15319614, "digest": "sha256:49438b92c99fce47c7f6a8a24a7028386b2f52c38d1a5fd48b3ba94f13681a47"},
+    "SubConverter-Extended-v1.3.0-openwrt-arm_cortex-a9.apk": {"size": 15319624, "digest": "sha256:70872a24f2040cb9b23ef361be626539d1aac749d8caeaa4f2e0c70258d84527"},
+    "SubConverter-Extended-v1.3.0-openwrt-arm_cortex-a9_neon.apk": {"size": 15319614, "digest": "sha256:a96ff9514a29c84c0f0852f6ed813f921d8d619bfc87e502adce2568d4df7712"},
+    "SubConverter-Extended-v1.3.0-openwrt-arm_cortex-a9_vfpv3-d16.apk": {"size": 15319669, "digest": "sha256:0dbeaf40685bb0f333e44c360d0c42264ea5562d89cb4d34d15e60a54524a8d4"},
+    "SubConverter-Extended-v1.3.0-openwrt-x86_64.apk": {"size": 18057390, "digest": "sha256:63f93855c51e85cc9ddf43d365979e6ef0002062a1d8046f1bd84ef1abf0b7c6"},
+    "SubConverter-Extended-v1.3.0-windows-amd64.zip": {"size": 13636123, "digest": "sha256:380dfbe0865a8a1f1b2b1b10c36d2406a21fbcc9d8bac34c7f621cb72d6d5331"}
+  },
+  "images": {
+    "dockerhub": {"digest": "sha256:d539a3f2e50060394ece15055728080ec0376383276f554660a130662bb4a068", "legacy_oci_revision": "f9d7a6f"},
+    "ghcr": {"digest": "sha256:d539a3f2e50060394ece15055728080ec0376383276f554660a130662bb4a068", "legacy_oci_revision": "f9d7a6f"}
+  }
+}
