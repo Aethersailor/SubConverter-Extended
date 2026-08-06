@@ -3636,6 +3636,7 @@ int simpleGenerator() {
   ProxyPolicy proxy = parseProxy(global.proxySubscription);
   Request request;
   Response response;
+  bool write_failed = false;
   for (std::string &x : sections) {
     response.status_code = 200;
     // std::cerr<<"Generating artifact '"<<x<<"'...\n";
@@ -3669,7 +3670,13 @@ int simpleGenerator() {
             return -1;
         }
         // add UTF-8 BOM
-        fileWrite(path, "\xEF\xBB\xBF" + content, true);
+        if (fileWrite(path, "\xEF\xBB\xBF" + content, true) != 0) {
+          writeLog(0, "生成项 '" + x + "' 写入失败：'" + path + "'。",
+                   LOG_LEVEL_ERROR);
+          write_failed = true;
+          if (sections.size() == 1)
+            return -1;
+        }
         continue;
       }
       ini.get_items(allItems);
@@ -3691,7 +3698,14 @@ int simpleGenerator() {
         return -1;
       continue;
     }
-    fileWrite(path, content, true);
+    if (fileWrite(path, content, true) != 0) {
+      writeLog(0, "生成项 '" + x + "' 写入失败：'" + path + "'。",
+               LOG_LEVEL_ERROR);
+      write_failed = true;
+      if (sections.size() == 1)
+        return -1;
+      continue;
+    }
     auto iter =
         std::find_if(response.headers.begin(), response.headers.end(),
                      [](auto y) { return y.first == "Subscription-UserInfo"; });
@@ -3704,6 +3718,11 @@ int simpleGenerator() {
     eraseElements(response.headers);
   }
   // std::cerr<<"All artifact generated. Exiting...\n";
+  if (write_failed) {
+    writeLog(0, "部分生成项写入失败，正在以失败状态退出...",
+             LOG_LEVEL_ERROR);
+    return -1;
+  }
   writeLog(0, "所有生成项已生成，正在退出...", LOG_LEVEL_INFO);
   return 0;
 }
