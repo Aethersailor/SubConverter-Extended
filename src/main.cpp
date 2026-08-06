@@ -368,6 +368,7 @@ int main(int argc, char *argv[]) {
              "security.profile=public。",
              LOG_LEVEL_WARNING);
   }
+  logSecurityPosture();
   listener_args args = {global.listenAddress,   global.listenPort,
                         global.maxPendingConns, global.maxConcurThreads,
                         cron_tick_caller,       200};

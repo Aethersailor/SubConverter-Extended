@@ -219,8 +219,8 @@ resolve_hostname = true
 [security]
 # 安全档位：lan 保留局域网兼容行为并允许本地/私网/fake-ip 资源；public 限制公开请求控制的不受信任抓取；strict 另行强制禁止公开上传。
 # Security profile: lan preserves LAN-compatible access to local/private/fake-IP resources; public restricts untrusted request-controlled fetches; strict also forbids public upload.
-# 环境变量 SUBCONVERTER_SECURITY_PROFILE=lan|public|strict 优先于文件；无效值会回退到 lan。
-# SUBCONVERTER_SECURITY_PROFILE=lan|public|strict overrides the file; invalid values fall back to lan.
+# 环境变量 SUBCONVERTER_SECURITY_PROFILE=lan|public|strict 优先于文件；无效值为兼容旧部署仍回退到 lan，并输出 SECURITY_PROFILE_INVALID_FALLBACK 告警，不代表适合公网暴露。
+# SUBCONVERTER_SECURITY_PROFILE=lan|public|strict overrides the file; invalid values still fall back to lan for compatibility and emit SECURITY_PROFILE_INVALID_FALLBACK, which does not imply Internet-safe exposure.
 profile = "lan"
 # 仅决定 public 档位是否允许公开上传；lan 始终保留旧上传行为，strict 始终禁止。环境变量 SUBCONVERTER_ALLOW_PUBLIC_UPLOAD 优先。
 # Controls public upload only for the public profile; lan always keeps legacy upload behavior and strict always blocks it. SUBCONVERTER_ALLOW_PUBLIC_UPLOAD overrides this value.
@@ -455,8 +455,8 @@ target = "/render?path=templates/test.tpl"
 #timeout = 3
 
 [server]
-# Web 服务监听地址；0.0.0.0 监听所有 IPv4 接口。若暴露公网，请配合 public/strict 安全档位和反向代理访问控制。
-# Web-server bind address; 0.0.0.0 listens on all IPv4 interfaces. For Internet exposure, combine it with public/strict security and reverse-proxy access controls.
+# Web 服务监听地址；0.0.0.0 监听所有 IPv4 接口，但不等于已暴露公网。启动日志会报告“可能暴露/公网可达性未知”；若确认公网可达，请配合 public/strict 和反向代理访问控制。
+# Web-server bind address; 0.0.0.0 listens on all IPv4 interfaces but does not prove Internet exposure. Startup logs report possible exposure with unknown public reachability; confirmed Internet deployments should use public/strict plus reverse-proxy controls.
 listen = "0.0.0.0"
 # Web 服务监听端口；PORT 环境变量存在时优先于本值。
 # Web-server port; the PORT environment variable overrides this value when set.

@@ -38,6 +38,48 @@ static bool parseBoolSetting(const std::string &value) {
          normalized == "on";
 }
 
+static bool isRecognizedBoolSetting(const std::string &value) {
+  std::string normalized = toLower(trimWhitespace(value, true, true));
+  return normalized == "1" || normalized == "true" || normalized == "yes" ||
+         normalized == "on" || normalized == "0" || normalized == "false" ||
+         normalized == "no" || normalized == "off";
+}
+
+static std::string securityLogValue(const std::string &value) {
+  static const char hex[] = "0123456789ABCDEF";
+  std::string escaped;
+  const size_t limit = std::min<size_t>(value.size(), 80);
+  escaped.reserve(limit);
+  for (size_t index = 0; index < limit; ++index) {
+    const unsigned char ch = static_cast<unsigned char>(value[index]);
+    if (ch < 0x20 || ch == 0x7f || ch == '\'' || ch == '\\') {
+      escaped += "\\x";
+      escaped += hex[ch >> 4];
+      escaped += hex[ch & 0x0f];
+    } else {
+      escaped.push_back(static_cast<char>(ch));
+    }
+  }
+  if (value.size() > limit)
+    escaped += "...";
+  return escaped;
+}
+
+static void beginSecuritySettingsLoad() {
+  auto &diagnostics = global.securityDiagnostics;
+  const bool first_load = global.configGeneration == 0;
+  diagnostics.profileSource =
+      first_load ? "builtin-default" : "reload-retained";
+  diagnostics.profileFileSource.clear();
+  diagnostics.profileInputValid = true;
+  diagnostics.profileUsedCompatibilityFallback = false;
+  diagnostics.uploadSource =
+      first_load ? "builtin-default" : "reload-retained";
+  diagnostics.uploadFileSource.clear();
+  diagnostics.uploadInput.clear();
+  diagnostics.uploadInputValid = true;
+}
+
 static int requireProxyProviderInterval(const std::string &value) {
   int interval = 0;
   if (!parseProxyProviderInterval(value, interval)) {
@@ -82,12 +124,19 @@ static bool pathInsideRoot(const std::string &path, const std::string &root) {
 
 static void finalizeSecuritySettings() {
   std::string profile_override = getEnv("SUBCONVERTER_SECURITY_PROFILE");
-  if (!profile_override.empty())
+  if (!profile_override.empty()) {
     global.securityProfile = profile_override;
+    global.securityDiagnostics.profileSource = "environment";
+  }
 
   std::string upload_override = getEnv("SUBCONVERTER_ALLOW_PUBLIC_UPLOAD");
-  if (!upload_override.empty())
+  if (!upload_override.empty()) {
     global.allowPublicUpload = parseBoolSetting(upload_override);
+    global.securityDiagnostics.uploadSource = "environment";
+    global.securityDiagnostics.uploadInput = upload_override;
+    global.securityDiagnostics.uploadInputValid =
+        isRecognizedBoolSetting(upload_override);
+  }
 
   global.securityProfile =
       toLower(trimWhitespace(global.securityProfile, true, true));
@@ -97,10 +146,46 @@ static void finalizeSecuritySettings() {
              "security.profile 的值无效：'" + global.securityProfile +
                  "'，已回退为 lan。",
              LOG_LEVEL_WARNING);
+    global.securityDiagnostics.profileInputValid = false;
+    global.securityDiagnostics.profileUsedCompatibilityFallback = true;
+    writeLog(0,
+             "SECURITY_PROFILE_INVALID_FALLBACK source=" +
+                 global.securityDiagnostics.profileSource + " input='" +
+                 securityLogValue(global.securityProfile) +
+                 "' effective=lan compatibility_fallback=true；该回退仅用于"
+                 "兼容，不代表实例适合公网暴露。",
+             LOG_LEVEL_WARNING);
     global.securityProfile = "lan";
   }
 
+  if (!global.securityDiagnostics.uploadInputValid) {
+    writeLog(0,
+             "SECURITY_UPLOAD_VALUE_INVALID source=" +
+                 global.securityDiagnostics.uploadSource + " input='" +
+                 securityLogValue(global.securityDiagnostics.uploadInput) +
+                 "' effective=" +
+                 (global.allowPublicUpload ? "true" : "false") +
+                 " compatibility_behavior=preserved。",
+             LOG_LEVEL_WARNING);
+  }
+
   writeLog(0, "当前安全档位：" + global.securityProfile, LOG_LEVEL_INFO);
+  writeLog(0,
+           "SECURITY_PROFILE_EFFECTIVE profile=" + global.securityProfile +
+               " source=" + global.securityDiagnostics.profileSource +
+               (global.securityDiagnostics.profileSource != "environment" ||
+                        global.securityDiagnostics.profileFileSource.empty()
+                    ? ""
+                    : " file_candidate=" +
+                          global.securityDiagnostics.profileFileSource) +
+               " input_valid=" +
+               (global.securityDiagnostics.profileInputValid ? "true"
+                                                               : "false") +
+               " compatibility_fallback=" +
+               (global.securityDiagnostics.profileUsedCompatibilityFallback
+                    ? "true"
+                    : "false"),
+           LOG_LEVEL_INFO);
 }
 
 static void finalizePerformanceSettings() {
@@ -210,6 +295,47 @@ bool isPublicUploadAllowed() {
   if (global.securityProfile == "strict")
     return false;
   return global.allowPublicUpload;
+}
+
+void logSecurityPosture() {
+  const bool upload_allowed = isPublicUploadAllowed();
+  writeLog(0,
+           "SECURITY_UPLOAD_EFFECTIVE profile=" + global.securityProfile +
+               " configured_allow_public_upload=" +
+               (global.allowPublicUpload ? "true" : "false") + " source=" +
+               global.securityDiagnostics.uploadSource +
+               (global.securityDiagnostics.uploadSource != "environment" ||
+                        global.securityDiagnostics.uploadFileSource.empty()
+                    ? ""
+                    : " file_candidate=" +
+                          global.securityDiagnostics.uploadFileSource) +
+               " effective=" +
+               (upload_allowed ? "allowed" : "blocked") +
+               (global.securityProfile == "lan"
+                    ? " reason=lan-compatibility"
+                    : global.securityProfile == "strict"
+                          ? " reason=strict-policy"
+                          : " reason=public-upload-setting"),
+           LOG_LEVEL_INFO);
+
+  const bool wildcard_bind = global.listenAddress == "0.0.0.0" ||
+                             global.listenAddress == "::" ||
+                             global.listenAddress == "[::]";
+  if (global.securityProfile == "lan" && wildcard_bind) {
+    std::string bind_endpoint = global.listenAddress;
+    if (bind_endpoint.find(':') != std::string::npos &&
+        !startsWith(bind_endpoint, "[")) {
+      bind_endpoint = "[" + bind_endpoint + "]";
+    }
+    writeLog(0,
+             "SECURITY_EXPOSURE_POSSIBLE profile=lan bind=" +
+                 bind_endpoint + ":" +
+                 std::to_string(global.listenPort) +
+                 " public_reachability=unknown；监听所有本地接口不等于已暴露"
+                 "公网，请同时检查端口发布、宿主防火墙、云安全组、NAT 和"
+                 "反向代理。公网部署请显式使用 public 或 strict。",
+             LOG_LEVEL_WARNING);
+  }
 }
 
 static bool canImportLocalPath(const std::string &path, FetchContext context) {
@@ -850,8 +976,16 @@ void readYAMLConf(YAML::Node &node) {
     }
   }
   if (node["security"].IsDefined()) {
-    node["security"]["profile"] >> global.securityProfile;
-    node["security"]["allow_public_upload"] >> global.allowPublicUpload;
+    if (node["security"]["profile"].IsDefined()) {
+      global.securityDiagnostics.profileSource = "file:yaml";
+      global.securityDiagnostics.profileFileSource = "file:yaml";
+      node["security"]["profile"] >> global.securityProfile;
+    }
+    if (node["security"]["allow_public_upload"].IsDefined()) {
+      global.securityDiagnostics.uploadSource = "file:yaml";
+      global.securityDiagnostics.uploadFileSource = "file:yaml";
+      node["security"]["allow_public_upload"] >> global.allowPublicUpload;
+    }
   }
   finalizeRuntimeSettings();
   writeLog(0, "已加载 YAML 格式偏好设置。",
@@ -1132,6 +1266,14 @@ void readTOMLConf(toml::value &root) {
 
   auto section_security =
       toml::find_or(root, "security", toml::value(toml::table()));
+  if (section_security.contains("profile")) {
+    global.securityDiagnostics.profileSource = "file:toml";
+    global.securityDiagnostics.profileFileSource = "file:toml";
+  }
+  if (section_security.contains("allow_public_upload")) {
+    global.securityDiagnostics.uploadSource = "file:toml";
+    global.securityDiagnostics.uploadFileSource = "file:toml";
+  }
   find_if_exist(section_security, "profile", global.securityProfile,
                 "allow_public_upload", global.allowPublicUpload);
   finalizeRuntimeSettings();
@@ -1167,6 +1309,7 @@ bool readConf() {
   };
 
   auto resetReloadableSettings = []() {
+    beginSecuritySettingsLoad();
     eraseElements(global.excludeRemarks);
     eraseElements(global.includeRemarks);
     eraseElements(global.customProxyGroups);
@@ -1598,8 +1741,20 @@ bool readConf() {
 
   if (ini.section_exist("security")) {
     ini.enter_section("security");
-    ini.get_if_exist("profile", global.securityProfile);
-    ini.get_bool_if_exist("allow_public_upload", global.allowPublicUpload);
+    if (ini.item_exist("profile")) {
+      global.securityDiagnostics.profileSource = "file:ini";
+      global.securityDiagnostics.profileFileSource = "file:ini";
+      ini.get_if_exist("profile", global.securityProfile);
+    }
+    if (ini.item_exist("allow_public_upload")) {
+      global.securityDiagnostics.uploadSource = "file:ini";
+      global.securityDiagnostics.uploadFileSource = "file:ini";
+      const std::string raw_upload = ini.get("allow_public_upload");
+      global.securityDiagnostics.uploadInput = raw_upload;
+      global.securityDiagnostics.uploadInputValid =
+          raw_upload == "true" || raw_upload == "false";
+      ini.get_bool_if_exist("allow_public_upload", global.allowPublicUpload);
+    }
   }
     finalizeRuntimeSettings();
 
