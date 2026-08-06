@@ -862,7 +862,7 @@ docker run -d \
 本项目基于 [GPL-3.0](LICENSE) 协议开源。
 
 > [!TIP]
-> 内置的 Mihomo 解析器模块遵循 [MIT](https://github.com/MetaCubeX/mihomo/blob/Meta/LICENSE) 协议。
+> 内置的 Mihomo 解析器模块来自 [MetaCubeX/mihomo 的 `Meta` 内核分支](https://github.com/MetaCubeX/mihomo/tree/Meta)，遵循 [GPL-3.0](https://github.com/MetaCubeX/mihomo/blob/Meta/LICENSE) 协议。
 
 ---
 
