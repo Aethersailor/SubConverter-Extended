@@ -2708,13 +2708,321 @@ static SubStageResponse processSubscriptionNodes(
   return {};
 }
 
+struct TargetGenerationState {
+  std::string output;
+  std::string managed_url;
+};
+
+static SubStageResponse dispatchTargetGenerator(
+    Request &request, Response &response, const Settings &settings,
+    ParsedSubRequest &parsed, EffectiveSubPolicy &policy,
+    ExternalConfigFetchPlan &fetch_plan,
+    SubscriptionNodeState &subscription, TargetGenerationState &generation) {
+  auto &argument = request.argument;
+  int *status_code = &response.status_code;
+  auto &target = parsed.target;
+  auto &surge_version_text = parsed.surge_version_text;
+  auto &group_name = parsed.group_name;
+  auto &upload_path = parsed.upload_path;
+  auto &upload = parsed.upload;
+  auto &ext = policy.generator;
+  auto &template_arguments = policy.template_arguments;
+  auto &proxy = policy.subscription_proxy;
+  auto &nodes = subscription.nodes;
+  auto &subscription_info = subscription.subscription_info;
+  auto &ruleset_content = fetch_plan.ruleset_content;
+  const FetchContext base_context = fetch_plan.base_fetch_context;
+  std::string base_content;
+  std::string &output = generation.output;
+  ProxyGroupConfigs dummy_group;
+  std::vector<RulesetContent> dummy_ruleset;
+
+  std::string &managed_url = generation.managed_url;
+  managed_url = base64Decode(getUrlArg(argument, "profile_data"));
+  if (managed_url.empty())
+    managed_url =
+        settings.managedConfigPrefix + "/sub?" + joinArguments(argument);
+
+  bool upload_failed = false;
+  auto recordUpload = [&](const std::string &name, const std::string &path,
+                          const std::string &content, bool write_manage_url) {
+    if (uploadGist(name, path, content, write_manage_url) != 0)
+      upload_failed = true;
+  };
+
+  proxy = parseProxy(settings.proxyConfig);
+  switch (hash_(target)) {
+  case "clash"_hash:
+  case "clashr"_hash:
+    writeLog(0, target == "clashr" ? "生成目标：ClashR" : "生成目标：Clash",
+             LOG_LEVEL_INFO);
+    template_arguments.local_vars["clash.new_field_name"] =
+        ext.clash_new_field_name ? "true" : "false";
+    response.headers["profile-update-interval"] =
+        std::to_string(policy.update_interval / 3600);
+    if (ext.nodelist) {
+      YAML::Node yamlnode;
+      proxyToClash(nodes, yamlnode, dummy_group, target == "clashr", ext);
+      output = YAML::Dump(yamlnode);
+    } else {
+      if (render_template(fetchFile(policy.clash_base, proxy,
+                                    settings.cacheConfig, true, base_context),
+                          template_arguments, base_content,
+                          settings.templatePath, base_context) != 0) {
+        *status_code = 400;
+        return {true, base_content};
+      }
+      output = proxyToClash(nodes, base_content, ruleset_content,
+                            policy.custom_proxy_groups, target == "clashr",
+                            ext);
+      if (!ext.external_rule_error.empty()) {
+        *status_code = 400;
+        return {true, ext.external_rule_error};
+      }
+    }
+    if (upload)
+      recordUpload(target, upload_path, output, false);
+    break;
+
+  case "surge"_hash:
+    writeLog(0, "生成目标：Surge " + std::to_string(parsed.surge_version),
+             LOG_LEVEL_INFO);
+    if (ext.nodelist) {
+      output = proxyToSurge(nodes, base_content, dummy_ruleset, dummy_group,
+                            parsed.surge_version, ext);
+      if (upload)
+        recordUpload("surge" + surge_version_text + "list", upload_path,
+                     output, true);
+    } else {
+      if (render_template(fetchFile(policy.surge_base, proxy,
+                                    settings.cacheConfig, true, base_context),
+                          template_arguments, base_content,
+                          settings.templatePath, base_context) != 0) {
+        *status_code = 400;
+        return {true, base_content};
+      }
+      output = proxyToSurge(nodes, base_content, ruleset_content,
+                            policy.custom_proxy_groups, parsed.surge_version,
+                            ext);
+      if (upload)
+        recordUpload("surge" + surge_version_text, upload_path, output, true);
+      if (settings.writeManagedConfig && !settings.managedConfigPrefix.empty())
+        output = "#!MANAGED-CONFIG " + managed_url +
+                 (policy.update_interval
+                      ? " interval=" +
+                            std::to_string(policy.update_interval)
+                      : "") +
+                 " strict=" +
+                 std::string(policy.update_strict ? "true" : "false") +
+                 "\n\n" + output;
+    }
+    break;
+
+  case "surfboard"_hash:
+    writeLog(0, "生成目标：Surfboard", LOG_LEVEL_INFO);
+    if (render_template(fetchFile(policy.surfboard_base, proxy,
+                                  settings.cacheConfig, true, base_context),
+                        template_arguments, base_content, settings.templatePath,
+                        base_context) != 0) {
+      *status_code = 400;
+      return {true, base_content};
+    }
+    output = proxyToSurge(nodes, base_content, ruleset_content,
+                          policy.custom_proxy_groups, -3, ext);
+    if (upload)
+      recordUpload("surfboard", upload_path, output, true);
+    if (settings.writeManagedConfig && !settings.managedConfigPrefix.empty())
+      output = "#!MANAGED-CONFIG " + managed_url +
+               (policy.update_interval
+                    ? " interval=" + std::to_string(policy.update_interval)
+                    : "") +
+               " strict=" +
+               std::string(policy.update_strict ? "true" : "false") +
+               "\n\n" + output;
+    break;
+
+  case "mellow"_hash:
+    writeLog(0, "生成目标：Mellow", LOG_LEVEL_INFO);
+    if (render_template(fetchFile(policy.mellow_base, proxy,
+                                  settings.cacheConfig, true, base_context),
+                        template_arguments, base_content, settings.templatePath,
+                        base_context) != 0) {
+      *status_code = 400;
+      return {true, base_content};
+    }
+    output = proxyToMellow(nodes, base_content, ruleset_content,
+                           policy.custom_proxy_groups, ext);
+    if (upload)
+      recordUpload("mellow", upload_path, output, true);
+    break;
+
+  case "sssub"_hash:
+    writeLog(0, "生成目标：SS Subscription", LOG_LEVEL_INFO);
+    if (render_template(fetchFile(policy.sssub_base, proxy,
+                                  settings.cacheConfig, true, base_context),
+                        template_arguments, base_content, settings.templatePath,
+                        base_context) != 0) {
+      *status_code = 400;
+      return {true, base_content};
+    }
+    output = proxyToSSSub(base_content, nodes, ext);
+    if (upload)
+      recordUpload("sssub", upload_path, output, false);
+    break;
+
+  case "ss"_hash:
+    writeLog(0, "生成目标：SS", LOG_LEVEL_INFO);
+    output = proxyToSingle(nodes, parsed.target_descriptor->single_link_types,
+                           ext);
+    if (upload)
+      recordUpload("ss", upload_path, output, false);
+    break;
+  case "ssr"_hash:
+    writeLog(0, "生成目标：SSR", LOG_LEVEL_INFO);
+    output = proxyToSingle(nodes, parsed.target_descriptor->single_link_types,
+                           ext);
+    if (upload)
+      recordUpload("ssr", upload_path, output, false);
+    break;
+  case "v2ray"_hash:
+    writeLog(0, "生成目标：v2rayN", LOG_LEVEL_INFO);
+    output = proxyToSingle(nodes, parsed.target_descriptor->single_link_types,
+                           ext);
+    if (upload)
+      recordUpload("v2ray", upload_path, output, false);
+    break;
+  case "trojan"_hash:
+    writeLog(0, "生成目标：Trojan", LOG_LEVEL_INFO);
+    output = proxyToSingle(nodes, parsed.target_descriptor->single_link_types,
+                           ext);
+    if (upload)
+      recordUpload("trojan", upload_path, output, false);
+    break;
+  case "vless"_hash:
+    writeLog(0, "生成目标：vless", LOG_LEVEL_INFO);
+    output = proxyToSingle(nodes, parsed.target_descriptor->single_link_types,
+                           ext);
+    if (upload)
+      recordUpload("vless", upload_path, output, false);
+    break;
+  case "hysteria2"_hash:
+    writeLog(0, "生成目标：hysteria2", LOG_LEVEL_INFO);
+    output = proxyToSingle(nodes, parsed.target_descriptor->single_link_types,
+                           ext);
+    if (upload)
+      recordUpload("hysteria2", upload_path, output, false);
+    break;
+  case "mixed"_hash:
+    writeLog(0, "生成目标：Standard Subscription", LOG_LEVEL_INFO);
+    output = proxyToSingle(nodes, parsed.target_descriptor->single_link_types,
+                           ext);
+    if (upload)
+      recordUpload("sub", upload_path, output, false);
+    break;
+
+  case "quan"_hash:
+    writeLog(0, "生成目标：Quantumult", LOG_LEVEL_INFO);
+    if (!ext.nodelist) {
+      if (render_template(fetchFile(policy.quan_base, proxy,
+                                    settings.cacheConfig, true, base_context),
+                          template_arguments, base_content,
+                          settings.templatePath, base_context) != 0) {
+        *status_code = 400;
+        return {true, base_content};
+      }
+    }
+    output = proxyToQuan(nodes, base_content, ruleset_content,
+                         policy.custom_proxy_groups, ext);
+    if (upload)
+      recordUpload("quan", upload_path, output, false);
+    break;
+
+  case "quanx"_hash:
+    writeLog(0, "生成目标：Quantumult X", LOG_LEVEL_INFO);
+    if (!ext.nodelist) {
+      if (render_template(fetchFile(policy.quanx_base, proxy,
+                                    settings.cacheConfig, true, base_context),
+                          template_arguments, base_content,
+                          settings.templatePath, base_context) != 0) {
+        *status_code = 400;
+        return {true, base_content};
+      }
+    }
+    output = proxyToQuanX(nodes, base_content, ruleset_content,
+                          policy.custom_proxy_groups, ext);
+    if (upload)
+      recordUpload("quanx", upload_path, output, false);
+    break;
+
+  case "loon"_hash:
+    writeLog(0, "生成目标：Loon", LOG_LEVEL_INFO);
+    if (!ext.nodelist) {
+      if (render_template(fetchFile(policy.loon_base, proxy,
+                                    settings.cacheConfig, true, base_context),
+                          template_arguments, base_content,
+                          settings.templatePath, base_context) != 0) {
+        *status_code = 400;
+        return {true, base_content};
+      }
+    }
+    output = proxyToLoon(nodes, base_content, ruleset_content,
+                         policy.custom_proxy_groups, ext);
+    if (upload)
+      recordUpload("loon", upload_path, output, false);
+    break;
+
+  case "ssd"_hash:
+    writeLog(0, "生成目标：SSD", LOG_LEVEL_INFO);
+    output = proxyToSSD(nodes, group_name, subscription_info, ext);
+    if (upload)
+      recordUpload("ssd", upload_path, output, false);
+    break;
+
+  case "singbox"_hash:
+    writeLog(0, "生成目标：sing-box", LOG_LEVEL_INFO);
+    if (!ext.nodelist) {
+      if (render_template(fetchFile(policy.singbox_base, proxy,
+                                    settings.cacheConfig, true, base_context),
+                          template_arguments, base_content,
+                          settings.templatePath, base_context) != 0) {
+        *status_code = 400;
+        return {true, base_content};
+      }
+    }
+    output = proxyToSingBox(nodes, base_content, ruleset_content,
+                            policy.custom_proxy_groups, ext);
+    if (upload)
+      recordUpload("singbox", upload_path, output, false);
+    break;
+
+  default:
+    writeLog(0, "生成目标：未指定", LOG_LEVEL_INFO);
+    *status_code = 500;
+    return {true,
+            "Internal error: target passed validation but no generator handled "
+            "it.\n"
+            "内部错误：target 已通过校验，但没有对应的生成器处理它。\n"
+            "Please report this request to the service maintainer.\n"
+            "请将该请求反馈给服务维护者。"};
+  }
+
+  if (upload_failed) {
+    *status_code = 500;
+    return {true,
+            "Remote upload completed or failed, but the upload operation did "
+            "not complete locally. Check server logs.\n"
+            "远端上传或本地状态持久化未完整完成，请检查服务端日志。"};
+  }
+  writeLog(0, "生成完成。", LOG_LEVEL_INFO);
+  return {};
+}
+
 } // namespace
 
 static std::string subconverter_impl(Request &request, Response &response,
                                      const Settings &settings,
                                      RuleConversionStats *rule_stats) {
   auto &argument = request.argument;
-  int *status_code = &response.status_code;
 
   ParsedSubRequest parsed_request;
   std::string parse_error =
@@ -2723,12 +3031,10 @@ static std::string subconverter_impl(Request &request, Response &response,
     return parse_error;
 
   std::string &argTarget = parsed_request.target;
-  std::string &argSurgeVer = parsed_request.surge_version_text;
   bool explainMode = parsed_request.explain_mode;
   SubExplainReport &explain = parsed_request.explain;
   tribool &argClashNewField = parsed_request.clash_new_field;
   int intSurgeVer = parsed_request.surge_version;
-  const TargetDescriptor *target_descriptor = parsed_request.target_descriptor;
 
   std::string &argGroupName = parsed_request.group_name;
   std::string &argUploadPath = parsed_request.upload_path;
@@ -2753,7 +3059,6 @@ static std::string subconverter_impl(Request &request, Response &response,
       parsed_request.generate_classical_rule_provider;
   tribool &argProviderProxyDirect = parsed_request.provider_proxy_direct;
 
-  std::string base_content, output_content;
   EffectiveSubPolicy effective_policy;
   std::string policy_error = buildEffectiveSubPolicy(
       request, response, settings, rule_stats, parsed_request, effective_policy);
@@ -2765,22 +3070,10 @@ static std::string subconverter_impl(Request &request, Response &response,
   string_array &lIncludeRemarks = effective_policy.include_remarks;
   string_array &lExcludeRemarks = effective_policy.exclude_remarks;
   extra_settings &ext = effective_policy.generator;
-  std::string dummy;
   int interval = effective_policy.update_interval;
   bool strict = effective_policy.update_strict;
-  std::string &lClashBase = effective_policy.clash_base;
-  std::string &lSurgeBase = effective_policy.surge_base;
-  std::string &lMellowBase = effective_policy.mellow_base;
-  std::string &lSurfboardBase = effective_policy.surfboard_base;
-  std::string &lQuanBase = effective_policy.quan_base;
-  std::string &lQuanXBase = effective_policy.quanx_base;
-  std::string &lLoonBase = effective_policy.loon_base;
-  std::string &lSSSubBase = effective_policy.sssub_base;
-  std::string &lSingBoxBase = effective_policy.singbox_base;
   std::map<std::string, std::string> &provider_headers =
       effective_policy.provider_headers;
-  template_args &tpl_args = effective_policy.template_arguments;
-  ProxyPolicy &proxy = effective_policy.subscription_proxy;
 
   ExternalConfigFetchPlan fetch_plan;
   std::string fetch_plan_error = buildExternalConfigFetchPlan(
@@ -2790,7 +3083,6 @@ static std::string subconverter_impl(Request &request, Response &response,
   bool userProvidedExternalConfig =
       fetch_plan.user_provided_external_config;
   bool configLoadSuccess = fetch_plan.config_load_success;
-  FetchContext baseFetchContext = fetch_plan.base_fetch_context;
   std::vector<RulesetContent> &lRulesetContent = fetch_plan.ruleset_content;
 
   SubscriptionNodeState subscription_state;
@@ -2799,288 +3091,14 @@ static std::string subconverter_impl(Request &request, Response &response,
       subscription_state);
   if (subscription_response.complete)
     return subscription_response.body;
-  std::vector<Proxy> &nodes = subscription_state.nodes;
-  std::string &subInfo = subscription_state.subscription_info;
-  ProxyGroupConfigs dummy_group;
-  std::vector<RulesetContent> dummy_ruleset;
-  std::string managed_url = base64Decode(getUrlArg(argument, "profile_data"));
-  if (managed_url.empty())
-    managed_url =
-        settings.managedConfigPrefix + "/sub?" + joinArguments(argument);
-
-  bool upload_failed = false;
-  auto recordUpload = [&](const std::string &name, const std::string &path,
-                          const std::string &content, bool write_manage_url) {
-    if (uploadGist(name, path, content, write_manage_url) != 0)
-      upload_failed = true;
-  };
-
-  // std::cerr<<"Generate target: ";
-  proxy = parseProxy(settings.proxyConfig);
-  switch (hash_(argTarget)) {
-  case "clash"_hash:
-  case "clashr"_hash:
-    writeLog(0,
-             argTarget == "clashr" ? "生成目标：ClashR" : "生成目标：Clash",
-             LOG_LEVEL_INFO);
-    tpl_args.local_vars["clash.new_field_name"] =
-        ext.clash_new_field_name ? "true" : "false";
-    response.headers["profile-update-interval"] =
-        std::to_string(interval / 3600);
-    if (ext.nodelist) {
-      YAML::Node yamlnode;
-      proxyToClash(nodes, yamlnode, dummy_group, argTarget == "clashr", ext);
-      output_content = YAML::Dump(yamlnode);
-    } else {
-      if (render_template(fetchFile(lClashBase, proxy, settings.cacheConfig,
-                                    true, baseFetchContext),
-                          tpl_args, base_content, settings.templatePath,
-                          baseFetchContext) != 0) {
-        *status_code = 400;
-        return base_content;
-      }
-      output_content =
-          proxyToClash(nodes, base_content, lRulesetContent, lCustomProxyGroups,
-                       argTarget == "clashr", ext);
-      if (!ext.external_rule_error.empty()) {
-        *status_code = 400;
-        return ext.external_rule_error;
-      }
-    }
-
-    if (argUpload)
-      recordUpload(argTarget, argUploadPath, output_content, false);
-    break;
-  case "surge"_hash:
-
-    writeLog(0, "生成目标：Surge " + std::to_string(intSurgeVer),
-             LOG_LEVEL_INFO);
-
-    if (ext.nodelist) {
-      output_content = proxyToSurge(nodes, base_content, dummy_ruleset,
-                                    dummy_group, intSurgeVer, ext);
-
-      if (argUpload)
-        recordUpload("surge" + argSurgeVer + "list", argUploadPath,
-                     output_content, true);
-    } else {
-      if (render_template(fetchFile(lSurgeBase, proxy, settings.cacheConfig,
-                                    true, baseFetchContext),
-                          tpl_args, base_content, settings.templatePath,
-                          baseFetchContext) != 0) {
-        *status_code = 400;
-        return base_content;
-      }
-      output_content = proxyToSurge(nodes, base_content, lRulesetContent,
-                                    lCustomProxyGroups, intSurgeVer, ext);
-
-      if (argUpload)
-        recordUpload("surge" + argSurgeVer, argUploadPath, output_content,
-                     true);
-
-      if (settings.writeManagedConfig && !settings.managedConfigPrefix.empty())
-        output_content =
-            "#!MANAGED-CONFIG " + managed_url +
-            (interval ? " interval=" + std::to_string(interval) : "") +
-            " strict=" + std::string(strict ? "true" : "false") + "\n\n" +
-            output_content;
-    }
-    break;
-  case "surfboard"_hash:
-    writeLog(0, "生成目标：Surfboard", LOG_LEVEL_INFO);
-
-    if (render_template(fetchFile(lSurfboardBase, proxy, settings.cacheConfig,
-                                  true, baseFetchContext),
-                        tpl_args, base_content, settings.templatePath,
-                        baseFetchContext) != 0) {
-      *status_code = 400;
-      return base_content;
-    }
-    output_content = proxyToSurge(nodes, base_content, lRulesetContent,
-                                  lCustomProxyGroups, -3, ext);
-    if (argUpload)
-      recordUpload("surfboard", argUploadPath, output_content, true);
-
-    if (settings.writeManagedConfig && !settings.managedConfigPrefix.empty())
-      output_content =
-          "#!MANAGED-CONFIG " + managed_url +
-          (interval ? " interval=" + std::to_string(interval) : "") +
-          " strict=" + std::string(strict ? "true" : "false") + "\n\n" +
-          output_content;
-    break;
-  case "mellow"_hash:
-    writeLog(0, "生成目标：Mellow", LOG_LEVEL_INFO);
-
-    if (render_template(fetchFile(lMellowBase, proxy, settings.cacheConfig, true,
-                                  baseFetchContext),
-                        tpl_args, base_content, settings.templatePath,
-                        baseFetchContext) != 0) {
-      *status_code = 400;
-      return base_content;
-    }
-    output_content = proxyToMellow(nodes, base_content, lRulesetContent,
-                                   lCustomProxyGroups, ext);
-
-    if (argUpload)
-      recordUpload("mellow", argUploadPath, output_content, true);
-    break;
-  case "sssub"_hash:
-    writeLog(0, "生成目标：SS Subscription", LOG_LEVEL_INFO);
-
-    if (render_template(fetchFile(lSSSubBase, proxy, settings.cacheConfig, true,
-                                  baseFetchContext),
-                        tpl_args, base_content, settings.templatePath,
-                        baseFetchContext) != 0) {
-      *status_code = 400;
-      return base_content;
-    }
-    output_content = proxyToSSSub(base_content, nodes, ext);
-    if (argUpload)
-      recordUpload("sssub", argUploadPath, output_content, false);
-    break;
-  case "ss"_hash:
-    writeLog(0, "生成目标：SS", LOG_LEVEL_INFO);
-    output_content =
-        proxyToSingle(nodes, target_descriptor->single_link_types, ext);
-    if (argUpload)
-      recordUpload("ss", argUploadPath, output_content, false);
-    break;
-  case "ssr"_hash:
-    writeLog(0, "生成目标：SSR", LOG_LEVEL_INFO);
-    output_content =
-        proxyToSingle(nodes, target_descriptor->single_link_types, ext);
-    if (argUpload)
-      recordUpload("ssr", argUploadPath, output_content, false);
-    break;
-  case "v2ray"_hash:
-    writeLog(0, "生成目标：v2rayN", LOG_LEVEL_INFO);
-    output_content =
-        proxyToSingle(nodes, target_descriptor->single_link_types, ext);
-    if (argUpload)
-      recordUpload("v2ray", argUploadPath, output_content, false);
-    break;
-  case "trojan"_hash:
-    writeLog(0, "生成目标：Trojan", LOG_LEVEL_INFO);
-    output_content =
-        proxyToSingle(nodes, target_descriptor->single_link_types, ext);
-    if (argUpload)
-      recordUpload("trojan", argUploadPath, output_content, false);
-    break;
-  case "vless"_hash:
-    writeLog(0, "生成目标：vless", LOG_LEVEL_INFO);
-    output_content =
-        proxyToSingle(nodes, target_descriptor->single_link_types, ext);
-    if (argUpload)
-      recordUpload("vless", argUploadPath, output_content, false);
-    break;
-  case "hysteria2"_hash:
-    writeLog(0, "生成目标：hysteria2", LOG_LEVEL_INFO);
-    output_content =
-        proxyToSingle(nodes, target_descriptor->single_link_types, ext);
-    if (argUpload)
-      recordUpload("hysteria2", argUploadPath, output_content, false);
-    break;
-  case "mixed"_hash:
-    writeLog(0, "生成目标：Standard Subscription", LOG_LEVEL_INFO);
-    output_content =
-        proxyToSingle(nodes, target_descriptor->single_link_types, ext);
-    if (argUpload)
-      recordUpload("sub", argUploadPath, output_content, false);
-    break;
-  case "quan"_hash:
-    writeLog(0, "生成目标：Quantumult", LOG_LEVEL_INFO);
-    if (!ext.nodelist) {
-      if (render_template(fetchFile(lQuanBase, proxy, settings.cacheConfig, true,
-                                    baseFetchContext),
-                          tpl_args, base_content, settings.templatePath,
-                          baseFetchContext) != 0) {
-        *status_code = 400;
-        return base_content;
-      }
-    }
-
-    output_content = proxyToQuan(nodes, base_content, lRulesetContent,
-                                 lCustomProxyGroups, ext);
-
-    if (argUpload)
-      recordUpload("quan", argUploadPath, output_content, false);
-    break;
-  case "quanx"_hash:
-    writeLog(0, "生成目标：Quantumult X", LOG_LEVEL_INFO);
-    if (!ext.nodelist) {
-      if (render_template(fetchFile(lQuanXBase, proxy, settings.cacheConfig,
-                                    true, baseFetchContext),
-                          tpl_args, base_content, settings.templatePath,
-                          baseFetchContext) != 0) {
-        *status_code = 400;
-        return base_content;
-      }
-    }
-
-    output_content = proxyToQuanX(nodes, base_content, lRulesetContent,
-                                  lCustomProxyGroups, ext);
-
-    if (argUpload)
-      recordUpload("quanx", argUploadPath, output_content, false);
-    break;
-  case "loon"_hash:
-    writeLog(0, "生成目标：Loon", LOG_LEVEL_INFO);
-    if (!ext.nodelist) {
-      if (render_template(fetchFile(lLoonBase, proxy, settings.cacheConfig, true,
-                                    baseFetchContext),
-                          tpl_args, base_content, settings.templatePath,
-                          baseFetchContext) != 0) {
-        *status_code = 400;
-        return base_content;
-      }
-    }
-
-    output_content = proxyToLoon(nodes, base_content, lRulesetContent,
-                                 lCustomProxyGroups, ext);
-
-    if (argUpload)
-      recordUpload("loon", argUploadPath, output_content, false);
-    break;
-  case "ssd"_hash:
-    writeLog(0, "生成目标：SSD", LOG_LEVEL_INFO);
-    output_content = proxyToSSD(nodes, argGroupName, subInfo, ext);
-    if (argUpload)
-      recordUpload("ssd", argUploadPath, output_content, false);
-    break;
-  case "singbox"_hash:
-    writeLog(0, "生成目标：sing-box", LOG_LEVEL_INFO);
-    if (!ext.nodelist) {
-      if (render_template(fetchFile(lSingBoxBase, proxy, settings.cacheConfig,
-                                    true, baseFetchContext),
-                          tpl_args, base_content, settings.templatePath,
-                          baseFetchContext) != 0) {
-        *status_code = 400;
-        return base_content;
-      }
-    }
-
-    output_content = proxyToSingBox(nodes, base_content, lRulesetContent,
-                                    lCustomProxyGroups, ext);
-
-    if (argUpload)
-      recordUpload("singbox", argUploadPath, output_content, false);
-    break;
-  default:
-    writeLog(0, "生成目标：未指定", LOG_LEVEL_INFO);
-    *status_code = 500;
-    return "Internal error: target passed validation but no generator handled "
-           "it.\n"
-           "内部错误：target 已通过校验，但没有对应的生成器处理它。\n"
-           "Please report this request to the service maintainer.\n"
-           "请将该请求反馈给服务维护者。";
-  }
-  if (upload_failed) {
-    *status_code = 500;
-    return "Remote upload completed or failed, but the upload operation did "
-           "not complete locally. Check server logs.\n"
-           "远端上传或本地状态持久化未完整完成，请检查服务端日志。";
-  }
-  writeLog(0, "生成完成。", LOG_LEVEL_INFO);
+  TargetGenerationState generation_state;
+  SubStageResponse generation_response = dispatchTargetGenerator(
+      request, response, settings, parsed_request, effective_policy,
+      fetch_plan, subscription_state, generation_state);
+  if (generation_response.complete)
+    return generation_response.body;
+  std::string &output_content = generation_state.output;
+  std::string &managed_url = generation_state.managed_url;
   if (argTarget == "clash" && explain.proxy_provider_mode)
     appendVaryHeader(response, "User-Agent");
   for (const auto &[name, value] : provider_headers) {
