@@ -101,11 +101,10 @@ ADD_CUSTOM_COMMAND(
         "${CMAKE_SOURCE_DIR}/cmake/embed_dashboard.cmake"
     COMMENT "Embedding Dashboard HTML"
     VERBATIM)
-SET_SOURCE_FILES_PROPERTIES(
-    "${DASHBOARD_HTML_GENERATED}" PROPERTIES GENERATED TRUE)
+ADD_CUSTOM_TARGET(dashboard_resource
+    DEPENDS "${DASHBOARD_HTML_GENERATED}")
 
 SET(SUBCONVERTER_RUNTIME_SOURCES
-    "${DASHBOARD_HTML_GENERATED}"
     src/config/preference_file.cpp
     src/config/ruleset.cpp
     src/generator/config/external_rules.cpp
@@ -153,6 +152,7 @@ SET(SUBCONVERTER_RUNTIME_SOURCES
 ADD_EXECUTABLE(${BUILD_TARGET_NAME}
     ${SUBCONVERTER_RUNTIME_SOURCES}
     src/main.cpp)
+ADD_DEPENDENCIES(${BUILD_TARGET_NAME} dashboard_resource)
 TARGET_INCLUDE_DIRECTORIES(${BUILD_TARGET_NAME} PRIVATE
     src
     "${CMAKE_CURRENT_BINARY_DIR}")
@@ -267,6 +267,7 @@ IF(BUILD_TESTS)
         ${SUBCONVERTER_RUNTIME_SOURCES}
         src/handler/settings_snapshot.cpp
         tests/settings_snapshot_test_helper.cpp)
+    ADD_DEPENDENCIES(settings_snapshot_test_helper dashboard_resource)
     TARGET_INCLUDE_DIRECTORIES(settings_snapshot_test_helper PRIVATE
         $<TARGET_PROPERTY:${BUILD_TARGET_NAME},INCLUDE_DIRECTORIES>)
     TARGET_LINK_DIRECTORIES(settings_snapshot_test_helper PRIVATE
