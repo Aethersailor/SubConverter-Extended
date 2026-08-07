@@ -2329,100 +2329,43 @@ static std::string buildExternalConfigFetchPlan(
   return "";
 }
 
-} // namespace
+struct SubscriptionNodeState {
+  std::vector<Proxy> nodes;
+  std::string subscription_info;
+};
 
-static std::string subconverter_impl(Request &request, Response &response,
-                                     const Settings &settings,
-                                     RuleConversionStats *rule_stats) {
-  auto &argument = request.argument;
+struct SubStageResponse {
+  bool complete = false;
+  std::string body;
+};
+
+static SubStageResponse processSubscriptionNodes(
+    Request &request, Response &response, const Settings &settings,
+    ParsedSubRequest &parsed, EffectiveSubPolicy &policy,
+    SubscriptionNodeState &state) {
   int *status_code = &response.status_code;
-
-  ParsedSubRequest parsed_request;
-  std::string parse_error =
-      parseSubRequestArguments(request, response, settings, parsed_request);
-  if (!parse_error.empty())
-    return parse_error;
-
-  std::string &argTarget = parsed_request.target;
-  std::string &argSurgeVer = parsed_request.surge_version_text;
-  bool explainMode = parsed_request.explain_mode;
-  SubExplainReport &explain = parsed_request.explain;
-  tribool &argClashNewField = parsed_request.clash_new_field;
-  int intSurgeVer = parsed_request.surge_version;
-  const TargetDescriptor *target_descriptor = parsed_request.target_descriptor;
-
-  std::string &argUrl = parsed_request.url;
-  std::string &argGroupName = parsed_request.group_name;
-  std::string &argUploadPath = parsed_request.upload_path;
-  std::string &argIncludeRemark = parsed_request.include_remark;
-  std::string &argExcludeRemark = parsed_request.exclude_remark;
-  std::string &argFilename = parsed_request.filename;
-  std::string &argRenames = parsed_request.renames;
-  std::string &argProviderHeaders = parsed_request.provider_headers;
-
-  tribool &argUpload = parsed_request.upload;
-  tribool &argAddEmoji = parsed_request.add_emoji;
-  tribool &argRemoveEmoji = parsed_request.remove_emoji;
-  tribool &argAppendType = parsed_request.append_type;
-  tribool &argSort = parsed_request.sort;
-  tribool &argUseSortScript = parsed_request.use_sort_script;
-  tribool &argGenClashScript = parsed_request.generate_clash_script;
-  tribool &argEnableInsert = parsed_request.enable_insert;
-  tribool &argFilterDeprecated = parsed_request.filter_deprecated;
-  tribool &argExpandRulesets = parsed_request.expand_rulesets;
-  tribool &argAppendUserinfo = parsed_request.append_userinfo;
-  tribool &argPrependInsert = parsed_request.prepend_insert;
-  tribool &argGenClassicalRuleProvider =
-      parsed_request.generate_classical_rule_provider;
-  tribool &argProviderProxyDirect = parsed_request.provider_proxy_direct;
-
-  std::string base_content, output_content;
-  EffectiveSubPolicy effective_policy;
-  std::string policy_error = buildEffectiveSubPolicy(
-      request, response, settings, rule_stats, parsed_request, effective_policy);
-  if (!policy_error.empty())
-    return policy_error;
-
-  ProxyGroupConfigs &lCustomProxyGroups =
-      effective_policy.custom_proxy_groups;
-  string_array &lIncludeRemarks = effective_policy.include_remarks;
-  string_array &lExcludeRemarks = effective_policy.exclude_remarks;
-  extra_settings &ext = effective_policy.generator;
-  std::string subInfo, dummy;
-  int interval = effective_policy.update_interval;
-  bool strict = effective_policy.update_strict;
-  std::string &lClashBase = effective_policy.clash_base;
-  std::string &lSurgeBase = effective_policy.surge_base;
-  std::string &lMellowBase = effective_policy.mellow_base;
-  std::string &lSurfboardBase = effective_policy.surfboard_base;
-  std::string &lQuanBase = effective_policy.quan_base;
-  std::string &lQuanXBase = effective_policy.quanx_base;
-  std::string &lLoonBase = effective_policy.loon_base;
-  std::string &lSSSubBase = effective_policy.sssub_base;
-  std::string &lSingBoxBase = effective_policy.singbox_base;
+  std::string &argTarget = parsed.target;
+  std::string &argUrl = parsed.url;
+  std::string &argGroupName = parsed.group_name;
+  std::string &argProviderHeaders = parsed.provider_headers;
+  tribool &argUpload = parsed.upload;
+  tribool &argEnableInsert = parsed.enable_insert;
+  tribool &argAppendUserinfo = parsed.append_userinfo;
+  tribool &argPrependInsert = parsed.prepend_insert;
+  SubExplainReport &explain = parsed.explain;
+  string_array &lIncludeRemarks = policy.include_remarks;
+  string_array &lExcludeRemarks = policy.exclude_remarks;
   std::map<std::string, std::string> &provider_headers =
-      effective_policy.provider_headers;
-  template_args &tpl_args = effective_policy.template_arguments;
-  ProxyPolicy &proxy = effective_policy.subscription_proxy;
+      policy.provider_headers;
+  ProxyPolicy &proxy = policy.subscription_proxy;
+  extra_settings &ext = policy.generator;
 
-  ExternalConfigFetchPlan fetch_plan;
-  std::string fetch_plan_error = buildExternalConfigFetchPlan(
-      response, settings, parsed_request, effective_policy, fetch_plan);
-  if (!fetch_plan_error.empty())
-    return fetch_plan_error;
-  bool userProvidedExternalConfig =
-      fetch_plan.user_provided_external_config;
-  bool configLoadSuccess = fetch_plan.config_load_success;
-  FetchContext baseFetchContext = fetch_plan.base_fetch_context;
-  std::vector<RulesetContent> &lRulesetContent = fetch_plan.ruleset_content;
-
-  // start parsing urls
   RegexMatchConfigs stream_temp = settings.streamNodeRules,
                     time_temp = settings.timeNodeRules;
-
-  // loading urls
   string_array urls;
-  std::vector<Proxy> nodes, insert_nodes;
+  std::vector<Proxy> &nodes = state.nodes;
+  std::vector<Proxy> insert_nodes;
+  std::string &subInfo = state.subscription_info;
   int groupID = 0;
 
   parse_settings parse_set;
@@ -2455,19 +2398,19 @@ static std::string subconverter_impl(Request &request, Response &response,
                LOG_LEVEL_INFO);
       if (addNodes(x, insert_nodes, groupID, parse_set) == -1) {
         if (settings.skipFailedLinks)
-          writeLog(
-              0, "以下链接不包含任何有效节点信息：" + x,
-              LOG_LEVEL_WARNING);
+          writeLog(0, "以下链接不包含任何有效节点信息：" + x,
+                   LOG_LEVEL_WARNING);
         else {
           *status_code = 400;
-          return "Invalid request: this link does not contain any supported "
-                 "proxy nodes.\n"
-                 "无效请求：该链接不包含任何受支持的代理节点。\n"
-                 "Please check whether the link is reachable and the node URI "
-                 "format is supported.\n"
-                 "请检查链接是否可访问，以及节点 URI 格式是否受支持。\n"
-                 "Link / 链接: " +
-                 x;
+          return {true,
+                  "Invalid request: this link does not contain any supported "
+                  "proxy nodes.\n"
+                  "无效请求：该链接不包含任何受支持的代理节点。\n"
+                  "Please check whether the link is reachable and the node "
+                  "URI format is supported.\n"
+                  "请检查链接是否可访问，以及节点 URI 格式是否受支持。\n"
+                  "Link / 链接: " +
+                      x};
         }
       }
       groupID--;
@@ -2485,22 +2428,20 @@ static std::string subconverter_impl(Request &request, Response &response,
       TaggedLink tagged = parseTaggedLink(regTrim(urls[index]));
       if (tagged.error != TaggedLink::Error::None) {
         *status_code = 400;
-        return providerLinkPrefixError(index, tagged.error);
+        return {true, providerLinkPrefixError(index, tagged.error)};
       }
       if (tagged.has_interval) {
         *status_code = 400;
-        return providerIntervalScopeError(index);
+        return {true, providerIntervalScopeError(index)};
       }
       if (tagged.has_proxy_direct) {
         *status_code = 400;
-        return providerDirectScopeError(index);
+        return {true, providerDirectScopeError(index)};
       }
     }
   }
 
-  //  对于 Clash，区分节点链接和订阅链接
   if (provider_mode_eligible) {
-    // 先区分节点链接和订阅链接
     struct SubscriptionLinkItem {
       std::string url;
       std::string tag;
@@ -2511,8 +2452,8 @@ static std::string subconverter_impl(Request &request, Response &response,
       bool has_proxy_direct = false;
       bool url_decoded = false;
     };
-    std::vector<SubscriptionLinkItem> subscription_urls; // HTTP/HTTPS 订阅链接
-    std::vector<std::string> node_urls; // 节点链接（vless://, vmess:// 等）
+    std::vector<SubscriptionLinkItem> subscription_urls;
+    std::vector<std::string> node_urls;
 
     for (size_t index = 0; index < urls.size(); ++index) {
       std::string &x = urls[index];
@@ -2520,22 +2461,19 @@ static std::string subconverter_impl(Request &request, Response &response,
       TaggedLink tagged = parseTaggedLink(x);
       if (tagged.error != TaggedLink::Error::None) {
         *status_code = 400;
-        return providerLinkPrefixError(index, tagged.error);
+        return {true, providerLinkPrefixError(index, tagged.error)};
       }
       std::string link = tagged.link.empty() ? x : tagged.link;
-
-      // Keep HTTP(S)/data links available for proxy-provider mode. Other
-      // Mihomo-supported schemes are direct node links.
       bool isNodeLink = mihomo::isSupportedNonHttpSchemeLink(link);
 
       if (isNodeLink) {
         if (tagged.has_interval) {
           *status_code = 400;
-          return providerIntervalScopeError(index);
+          return {true, providerIntervalScopeError(index)};
         }
         if (tagged.has_proxy_direct) {
           *status_code = 400;
-          return providerDirectScopeError(index);
+          return {true, providerDirectScopeError(index)};
         }
         std::string node_link = link;
         if (tagged.has_tag)
@@ -2546,24 +2484,22 @@ static std::string subconverter_impl(Request &request, Response &response,
         node_urls.push_back(node_link);
         explain.node_link_count++;
       } else if (isLink(link) || mihomo::isHttpSchemeLink(link)) {
-        // HTTP/HTTPS 订阅链接
-        writeLog(
-            0, "检测到订阅链接：" + summarizeUrlForLog(link) +
-                   "，将创建 provider。",
-            LOG_LEVEL_INFO);
+        writeLog(0, "检测到订阅链接：" + summarizeUrlForLog(link) +
+                        "，将创建 provider。",
+                 LOG_LEVEL_INFO);
         subscription_urls.push_back(
             {link, tagged.tag, tagged.provider, tagged.interval,
-             tagged.proxy_direct, tagged.has_interval,
-             tagged.has_proxy_direct, tagged.link_decoded});
+             tagged.proxy_direct, tagged.has_interval, tagged.has_proxy_direct,
+             tagged.link_decoded});
         explain.subscription_url_count++;
       } else {
         if (tagged.has_interval) {
           *status_code = 400;
-          return providerIntervalScopeError(index);
+          return {true, providerIntervalScopeError(index)};
         }
         if (tagged.has_proxy_direct) {
           *status_code = 400;
-          return providerDirectScopeError(index);
+          return {true, providerDirectScopeError(index)};
         }
         std::string node_link = link;
         if (tagged.has_tag)
@@ -2577,7 +2513,6 @@ static std::string subconverter_impl(Request &request, Response &response,
       }
     }
 
-    // 只有当有订阅链接时才启用 proxy-provider 模式
     if (!subscription_urls.empty()) {
       writeLog(0, "检测到订阅 URL，启用 proxy-provider 模式。",
                LOG_LEVEL_INFO);
@@ -2610,12 +2545,8 @@ static std::string subconverter_impl(Request &request, Response &response,
         }
       };
 
-      // 为订阅链接创建 proxy-provider
       for (const SubscriptionLinkItem &item : subscription_urls) {
         ProxyProvider provider;
-        // 使用 URL 的 MD5 哈希前 10 位作为唯一特征码
-        // 这样相同的订阅链接会生成相同的 provider 名称
-        // 不同的订阅链接会生成不同的名称，触发客户端自动更新
         std::string urlHash =
             item.url_decoded ? generateProviderHashFromDecodedUrl(item.url)
                              : generateProviderHash(item.url);
@@ -2632,20 +2563,16 @@ static std::string subconverter_impl(Request &request, Response &response,
                  "已生成 provider：" + provider.name + "，URL：" +
                      summarizeUrlForLog(item.url),
                  LOG_LEVEL_INFO);
-        provider.url = item.url_decoded ? item.url
-                                        : urlDecode(item.url); // 解码 URL
+        provider.url = item.url_decoded ? item.url : urlDecode(item.url);
         provider.interval = static_cast<uint32_t>(
             item.has_interval ? item.interval : settings.proxyProviderInterval);
-        provider.proxy_direct = item.has_proxy_direct
-                                    ? item.proxy_direct
-                                    : ext.provider_proxy_direct;
+        provider.proxy_direct =
+            item.has_proxy_direct ? item.proxy_direct
+                                  : ext.provider_proxy_direct;
         provider.groupId = groupID;
         provider.path = "./providers/" + provider.name + ".yaml";
         provider.user_agent = provider_user_agent;
         provider.headers = provider_headers;
-
-        // Provider mode cannot filter expanded nodes locally, so pass the
-        // final effective remark filters through to Mihomo.
         provider.filter = buildProviderRemarkFilter(lIncludeRemarks);
         provider.exclude_filter =
             buildProviderRemarkFilter(lExcludeRemarks);
@@ -2665,26 +2592,22 @@ static std::string subconverter_impl(Request &request, Response &response,
         groupID++;
       }
     } else {
-      // 没有订阅链接，禁用 proxy-provider 模式
       writeLog(0, "未检测到订阅 URL，禁用 proxy-provider 模式。",
                LOG_LEVEL_INFO);
       ext.use_proxy_provider = false;
     }
 
-    // 节点链接使用原有逻辑直接解析
     if (!node_urls.empty()) {
       writeLog(0,
                "正在直接解析 " + std::to_string(node_urls.size()) +
                    " 个节点链接。",
                LOG_LEVEL_INFO);
       importItems(node_urls, true, FetchContext::PublicRequest);
-      // 关键：实际添加节点到 nodes 列表
       for (std::string &x : node_urls) {
         writeLog(0, "正在从 URL 获取节点数据：" + summarizeUrlForLog(x) +
                         "。",
                  LOG_LEVEL_INFO);
         if (addNodes(x, nodes, groupID, parse_set) == -1) {
-          // 跳过无法解析的节点链接，记录警告后继续处理其他节点
           writeLog(0,
                    "已跳过无效节点链接：" + summarizeUrlForLog(x) +
                        "，继续处理其他节点。",
@@ -2694,16 +2617,12 @@ static std::string subconverter_impl(Request &request, Response &response,
       }
     }
   } else {
-    // 其他格式保持原有逻辑，完全展开节点
-    importItems(urls, true,
-                FetchContext::PublicRequest); // 只为非 proxy-provider 模式处理 import 语法
+    importItems(urls, true, FetchContext::PublicRequest);
     for (std::string &x : urls) {
       x = regTrim(x);
-      // std::cerr<<"Fetching node data from url '"<<x<<"'."<<std::endl;
       writeLog(0, "正在从 URL 获取节点数据：" + summarizeUrlForLog(x) + "。",
                LOG_LEVEL_INFO);
       if (addNodes(x, nodes, groupID, parse_set) == -1) {
-        // 跳过无法解析的节点链接，记录警告后继续处理其他节点
         writeLog(0,
                  "已跳过无效节点链接：" + summarizeUrlForLog(x) +
                      "，继续处理其他节点。",
@@ -2712,41 +2631,43 @@ static std::string subconverter_impl(Request &request, Response &response,
       groupID++;
     }
   }
-  // exit if found nothing
-  // 对于 proxy-provider 模式，允许 nodes 为空（节点从 provider 获取）
+
   explain.provider_count = ext.providers.size();
   explain.proxy_provider_mode = ext.use_proxy_provider && !ext.providers.empty();
   explain.insert_node_count = insert_nodes.size();
   explain.direct_node_count = nodes.size();
   if (!argProviderHeaders.empty() && !ext.nodelist && ext.providers.empty()) {
     *status_code = 400;
-    return "Invalid request: provider_headers was selected, but no "
-           "proxy-provider was generated.\n"
-           "无效请求：已选择 provider_headers，但没有生成 proxy-provider。";
+    return {true,
+            "Invalid request: provider_headers was selected, but no "
+            "proxy-provider was generated.\n"
+            "无效请求：已选择 provider_headers，但没有生成 proxy-provider。"};
   }
   if (nodes.empty() && insert_nodes.empty() && ext.providers.empty()) {
     *status_code = 400;
-    return "Invalid request: no valid proxy nodes or proxy providers were "
-           "found.\n"
-           "无效请求：未找到有效的代理节点或代理提供者。\n"
-           "Please check whether the subscription URL or node URI format is "
-           "supported, and whether filters excluded all nodes.\n"
-           "请检查订阅链接或节点 URI 格式是否受支持，以及过滤规则是否排除了所有节点。";
+    return {true,
+            "Invalid request: no valid proxy nodes or proxy providers were "
+            "found.\n"
+            "无效请求：未找到有效的代理节点或代理提供者。\n"
+            "Please check whether the subscription URL or node URI format is "
+            "supported, and whether filters excluded all nodes.\n"
+            "请检查订阅链接或节点 URI 格式是否受支持，以及过滤规则是否排除了所有节点。"};
   }
   if (!subInfo.empty() && argAppendUserinfo.get(settings.appendUserinfo))
     response.headers.emplace("Subscription-UserInfo", subInfo);
 
   if (request.method == "HEAD")
-    return "";
+    return {true, ""};
 
   if (argUpload && !isPublicUploadAllowed()) {
     *status_code = 403;
-    return "Upload is disabled for the current security profile.\n"
-           "当前安全档位已禁用公开请求上传。\n"
-           "Use security.profile=lan for private deployments, or explicitly "
-           "enable security.allow_public_upload in public profile.\n"
-           "内网私有部署请使用 security.profile=lan；公网档位如确需上传，"
-           "请显式开启 security.allow_public_upload。";
+    return {true,
+            "Upload is disabled for the current security profile.\n"
+            "当前安全档位已禁用公开请求上传。\n"
+            "Use security.profile=lan for private deployments, or explicitly "
+            "enable security.allow_public_upload in public profile.\n"
+            "内网私有部署请使用 security.profile=lan；公网档位如确需上传，"
+            "请显式开启 security.allow_public_upload。"};
   }
 
   argPrependInsert.define(settings.prependInsert);
@@ -2757,35 +2678,11 @@ static std::string subconverter_impl(Request &request, Response &response,
     std::move(insert_nodes.begin(), insert_nodes.end(),
               std::back_inserter(nodes));
   }
-  // run filter script
+
   std::string filterScript = settings.filterScript;
   if (!filterScript.empty()) {
     if (startsWith(filterScript, "path:"))
       filterScript = fileGet(filterScript.substr(5), false);
-    /*
-    duk_context *ctx = duktape_init();
-    if(ctx)
-    {
-        defer(duk_destroy_heap(ctx);)
-        if(duktape_peval(ctx, filterScript) == 0)
-        {
-            auto filter = [&](const Proxy &x)
-            {
-                duk_get_global_string(ctx, "filter");
-                duktape_push_Proxy(ctx, x);
-                duk_pcall(ctx, 1);
-                return !duktape_get_res_bool(ctx);
-            };
-            nodes.erase(std::remove_if(nodes.begin(), nodes.end(), filter),
-    nodes.end());
-        }
-        else
-        {
-            writeLog(0, "解析脚本时发生错误：\n" +
-    duktape_get_err_stack(ctx), LOG_LEVEL_ERROR); duk_pop(ctx); /// pop err
-        }
-    }
-    */
     script_safe_runner(
         ext.js_runtime, ext.js_context,
         [&](qjs::Context &ctx) {
@@ -2802,29 +2699,108 @@ static std::string subconverter_impl(Request &request, Response &response,
         settings.scriptCleanContext);
   }
 
-  // check custom group name
   if (!argGroupName.empty())
-    for (Proxy &x : nodes)
-      x.Group = argGroupName;
+    for (Proxy &node : nodes)
+      node.Group = argGroupName;
 
-  // do pre-process now
   preprocessNodes(nodes, ext);
   explain.total_node_count = nodes.size();
+  return {};
+}
 
-  /*
-  //insert node info to template
-  int index = 0;
-  std::string template_node_prefix;
-  for(Proxy &x : nodes)
-  {
-      template_node_prefix = std::to_string(index) + ".";
-      tpl_args.node_list[template_node_prefix + "remarks"] = x.remarks;
-      tpl_args.node_list[template_node_prefix + "group"] = x.Group;
-      tpl_args.node_list[template_node_prefix + "groupid"] =
-  std::to_string(x.GroupId); index++;
-  }
-  */
+} // namespace
 
+static std::string subconverter_impl(Request &request, Response &response,
+                                     const Settings &settings,
+                                     RuleConversionStats *rule_stats) {
+  auto &argument = request.argument;
+  int *status_code = &response.status_code;
+
+  ParsedSubRequest parsed_request;
+  std::string parse_error =
+      parseSubRequestArguments(request, response, settings, parsed_request);
+  if (!parse_error.empty())
+    return parse_error;
+
+  std::string &argTarget = parsed_request.target;
+  std::string &argSurgeVer = parsed_request.surge_version_text;
+  bool explainMode = parsed_request.explain_mode;
+  SubExplainReport &explain = parsed_request.explain;
+  tribool &argClashNewField = parsed_request.clash_new_field;
+  int intSurgeVer = parsed_request.surge_version;
+  const TargetDescriptor *target_descriptor = parsed_request.target_descriptor;
+
+  std::string &argGroupName = parsed_request.group_name;
+  std::string &argUploadPath = parsed_request.upload_path;
+  std::string &argIncludeRemark = parsed_request.include_remark;
+  std::string &argExcludeRemark = parsed_request.exclude_remark;
+  std::string &argFilename = parsed_request.filename;
+  std::string &argRenames = parsed_request.renames;
+
+  tribool &argUpload = parsed_request.upload;
+  tribool &argAddEmoji = parsed_request.add_emoji;
+  tribool &argRemoveEmoji = parsed_request.remove_emoji;
+  tribool &argAppendType = parsed_request.append_type;
+  tribool &argSort = parsed_request.sort;
+  tribool &argUseSortScript = parsed_request.use_sort_script;
+  tribool &argGenClashScript = parsed_request.generate_clash_script;
+  tribool &argEnableInsert = parsed_request.enable_insert;
+  tribool &argFilterDeprecated = parsed_request.filter_deprecated;
+  tribool &argExpandRulesets = parsed_request.expand_rulesets;
+  tribool &argAppendUserinfo = parsed_request.append_userinfo;
+  tribool &argPrependInsert = parsed_request.prepend_insert;
+  tribool &argGenClassicalRuleProvider =
+      parsed_request.generate_classical_rule_provider;
+  tribool &argProviderProxyDirect = parsed_request.provider_proxy_direct;
+
+  std::string base_content, output_content;
+  EffectiveSubPolicy effective_policy;
+  std::string policy_error = buildEffectiveSubPolicy(
+      request, response, settings, rule_stats, parsed_request, effective_policy);
+  if (!policy_error.empty())
+    return policy_error;
+
+  ProxyGroupConfigs &lCustomProxyGroups =
+      effective_policy.custom_proxy_groups;
+  string_array &lIncludeRemarks = effective_policy.include_remarks;
+  string_array &lExcludeRemarks = effective_policy.exclude_remarks;
+  extra_settings &ext = effective_policy.generator;
+  std::string dummy;
+  int interval = effective_policy.update_interval;
+  bool strict = effective_policy.update_strict;
+  std::string &lClashBase = effective_policy.clash_base;
+  std::string &lSurgeBase = effective_policy.surge_base;
+  std::string &lMellowBase = effective_policy.mellow_base;
+  std::string &lSurfboardBase = effective_policy.surfboard_base;
+  std::string &lQuanBase = effective_policy.quan_base;
+  std::string &lQuanXBase = effective_policy.quanx_base;
+  std::string &lLoonBase = effective_policy.loon_base;
+  std::string &lSSSubBase = effective_policy.sssub_base;
+  std::string &lSingBoxBase = effective_policy.singbox_base;
+  std::map<std::string, std::string> &provider_headers =
+      effective_policy.provider_headers;
+  template_args &tpl_args = effective_policy.template_arguments;
+  ProxyPolicy &proxy = effective_policy.subscription_proxy;
+
+  ExternalConfigFetchPlan fetch_plan;
+  std::string fetch_plan_error = buildExternalConfigFetchPlan(
+      response, settings, parsed_request, effective_policy, fetch_plan);
+  if (!fetch_plan_error.empty())
+    return fetch_plan_error;
+  bool userProvidedExternalConfig =
+      fetch_plan.user_provided_external_config;
+  bool configLoadSuccess = fetch_plan.config_load_success;
+  FetchContext baseFetchContext = fetch_plan.base_fetch_context;
+  std::vector<RulesetContent> &lRulesetContent = fetch_plan.ruleset_content;
+
+  SubscriptionNodeState subscription_state;
+  SubStageResponse subscription_response = processSubscriptionNodes(
+      request, response, settings, parsed_request, effective_policy,
+      subscription_state);
+  if (subscription_response.complete)
+    return subscription_response.body;
+  std::vector<Proxy> &nodes = subscription_state.nodes;
+  std::string &subInfo = subscription_state.subscription_info;
   ProxyGroupConfigs dummy_group;
   std::vector<RulesetContent> dummy_ruleset;
   std::string managed_url = base64Decode(getUrlArg(argument, "profile_data"));
