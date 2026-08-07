@@ -1,6 +1,8 @@
 import importlib.util
+import json
 import pathlib
 import sys
+import tempfile
 import unittest
 
 
@@ -15,74 +17,130 @@ SPEC.loader.exec_module(EVENTS)
 
 
 class CiEventContractTests(unittest.TestCase):
-    def test_current_dev_push_runs_all_dev_gates(self):
-        result = EVENTS.simulate(event_name="push", ref="refs/heads/dev")
-        self.assertEqual(result.source_head, "current")
-        self.assertTrue(result.request_sanitizers)
-        self.assertTrue(result.prepare)
-        self.assertTrue(result.registry_publish)
-        self.assertTrue(result.codeql_analyze)
-        self.assertFalse(result.create_release)
+    @classmethod
+    def setUpClass(cls):
+        cls.cases = {case["name"]: case for case in EVENTS.load_fixtures()}
 
-    def test_generated_child_skip_ci_keeps_existing_skip_semantics(self):
-        result = EVENTS.simulate(
-            event_name="push",
-            ref="refs/heads/dev",
-            head_message="chore: generated [skip ci]",
-        )
-        self.assertTrue(result.request_sanitizers)
-        self.assertFalse(result.prepare)
-        self.assertFalse(result.registry_publish)
-        self.assertTrue(result.codeql_analyze)
+    def outcome(self, name):
+        case = self.cases[name]
+        actual = EVENTS.simulate_fixture(case)
+        self.assertEqual(actual, case["expected"])
+        return actual
 
-    def test_stale_push_skips_and_stale_dispatch_fails(self):
-        push = EVENTS.simulate(
-            event_name="push", ref="refs/heads/dev", current_head=False
-        )
-        dispatch = EVENTS.simulate(
-            event_name="workflow_dispatch",
-            ref="refs/heads/dev",
-            current_head=False,
-        )
-        self.assertEqual(push.source_head, "skip")
-        self.assertEqual(dispatch.source_head, "fail")
-        self.assertFalse(push.build_linux)
-        self.assertFalse(dispatch.build_linux)
+    def test_all_frozen_event_payloads_match(self):
+        for name in self.cases:
+            with self.subTest(name=name):
+                self.outcome(name)
 
-    def test_pull_request_and_fork_paths_do_not_publish(self):
-        for base in ("dev", "master"):
-            result = EVENTS.simulate(
-                event_name="pull_request", ref=f"refs/heads/{base}"
+    def test_generated_child_is_native_no_run_not_job_skip(self):
+        case = self.cases["generated_child_skip_ci"]
+        result = self.outcome("generated_child_skip_ci")
+        self.assertEqual(case["observed"]["actions_api_total_count"], 0)
+        self.assertEqual(result["native_enqueue"], "suppressed")
+        self.assertFalse(result["build"]["workflow_created"])
+        self.assertFalse(result["codeql"]["workflow_created"])
+        self.assertEqual(result["build"]["source_head"], "not-created")
+        self.assertEqual(result["codeql"]["analyze"], "not-created")
+
+    def test_negative_native_skip_cannot_be_reported_as_job_skip(self):
+        case = json.loads(json.dumps(self.cases["generated_child_skip_ci"]))
+        case["expected"]["build"]["workflow_created"] = True
+        case["expected"]["build"]["source_head"] = "skipped-stale"
+        self.assertNotEqual(EVENTS.simulate_fixture(case), case["expected"])
+
+    def test_pull_request_payloads_use_merge_refs_and_real_base_fields(self):
+        for name in ("same_repository_pr", "fork_pr", "dependabot_pr"):
+            case = self.cases[name]
+            github = case["github"]
+            self.assertRegex(github["ref"], r"^refs/pull/[0-9]+/merge$")
+            self.assertEqual(
+                github["base_ref"],
+                github["event"]["pull_request"]["base"]["ref"],
             )
-            self.assertTrue(result.build_linux)
-            self.assertFalse(result.registry_publish)
-            self.assertFalse(result.create_release)
+            self.assertEqual(
+                github["head_ref"],
+                github["event"]["pull_request"]["head"]["ref"],
+            )
 
-    def test_dependabot_stops_after_sanitizers_and_skips_codeql(self):
-        result = EVENTS.simulate(
-            event_name="pull_request",
-            ref="refs/heads/dev",
-            actor="dependabot[bot]",
-        )
-        self.assertTrue(result.request_sanitizers)
-        self.assertFalse(result.prepare)
-        self.assertFalse(result.codeql_analyze)
+    def test_fork_and_dependabot_capabilities_are_restricted(self):
+        for name, source in (("fork_pr", "None"), ("dependabot_pr", "Dependabot")):
+            capabilities = self.outcome(name)["capabilities"]
+            self.assertFalse(capabilities["repository_actions_secrets"])
+            self.assertEqual(capabilities["github_token_permissions"], "read-only")
+            self.assertEqual(capabilities["secret_source"], source)
+        same_repo = self.outcome("same_repository_pr")["capabilities"]
+        self.assertTrue(same_repo["repository_actions_secrets"])
 
-    def test_master_dispatch_validates_without_publishing(self):
-        result = EVENTS.simulate(
-            event_name="workflow_dispatch", ref="refs/heads/master"
-        )
-        self.assertTrue(result.build_linux)
-        self.assertFalse(result.registry_publish)
-        self.assertFalse(result.create_release)
+    def test_workflow_dispatch_only_models_the_selected_workflow(self):
+        build = self.outcome("build_dispatch_dev")
+        codeql = self.outcome("codeql_dispatch_stale_dev")
+        self.assertTrue(build["build"]["workflow_created"])
+        self.assertFalse(build["codeql"]["workflow_created"])
+        self.assertFalse(codeql["build"]["workflow_created"])
+        self.assertTrue(codeql["codeql"]["workflow_created"])
 
-    def test_tag_push_is_the_only_release_path(self):
-        tag = EVENTS.simulate(event_name="push", ref="refs/tags/v1.3.1")
-        manual = EVENTS.simulate(
-            event_name="workflow_dispatch", ref="refs/tags/v1.3.1"
+    def test_stale_build_dispatch_fails_but_stale_codeql_dispatch_skips(self):
+        build = self.outcome("build_dispatch_stale_dev")
+        codeql = self.outcome("codeql_dispatch_stale_dev")
+        self.assertEqual(build["build"]["source_head"], "failed-stale")
+        self.assertEqual(codeql["codeql"]["source_head"], "skipped-stale")
+
+    def test_tag_push_uses_release_wrapper_but_tag_dispatch_fails_metadata(self):
+        push = self.outcome("release_tag_push")
+        dispatch = self.outcome("build_dispatch_tag")
+        self.assertTrue(push["formal_release_workflow_created"])
+        self.assertEqual(push["build"]["entrypoint"], "release-reusable")
+        self.assertTrue(push["build"]["create_release"])
+        self.assertFalse(dispatch["formal_release_workflow_created"])
+        self.assertEqual(dispatch["build"]["prepare"], "failed-metadata")
+        self.assertFalse(dispatch["build"]["create_release"])
+
+    def test_skip_check_trailer_is_native_suppression(self):
+        case = json.loads(json.dumps(self.cases["normal_dev_push"]))
+        case["github"]["event"]["head_commit"]["message"] = (
+            "generated\n\nskip-checks: true"
         )
-        self.assertTrue(tag.create_release)
-        self.assertFalse(manual.create_release)
+        result = EVENTS.simulate_fixture(case)
+        self.assertEqual(result["native_skip_directive"], "skip-checks:true")
+        self.assertFalse(result["build"]["workflow_created"])
+        self.assertFalse(result["codeql"]["workflow_created"])
+
+    def test_model_is_bound_to_the_current_workflow_gates(self):
+        build = (ROOT / ".github" / "workflows" / "build-dockerhub.yml").read_text(
+            encoding="utf-8"
+        )
+        codeql = (ROOT / ".github" / "workflows" / "codeql.yml").read_text(
+            encoding="utf-8"
+        )
+        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("paths-ignore:", build)
+        self.assertIn("workflow_dispatch:", build)
+        self.assertIn("workflow_call:", build)
+        self.assertIn("github.event_name != 'pull_request'", build)
+        self.assertIn("github.actor != 'dependabot[bot]'", build)
+        self.assertIn("Refusing stale workflow_dispatch event", build)
+        self.assertIn('branches: [ "dev" ]', codeql)
+        self.assertIn('branches: [ "dev", "master" ]', codeql)
+        self.assertNotIn("Refusing stale workflow_dispatch event", codeql)
+        self.assertIn("uses: ./.github/workflows/build-dockerhub.yml", release)
+        self.assertIn("secrets: inherit", release)
+
+    def test_fixture_check_fails_after_expected_contract_mutation(self):
+        document = json.loads(EVENTS.FIXTURE.read_text(encoding="utf-8"))
+        document["cases"][0]["expected"]["native_enqueue"] = "suppressed"
+        with tempfile.TemporaryDirectory() as temporary:
+            path = pathlib.Path(temporary) / "events.json"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                self._check(path)
+
+    @staticmethod
+    def _check(path):
+        for case in EVENTS.load_fixtures(path):
+            if EVENTS.simulate_fixture(case) != case["expected"]:
+                raise SystemExit(case["name"])
 
 
 if __name__ == "__main__":
