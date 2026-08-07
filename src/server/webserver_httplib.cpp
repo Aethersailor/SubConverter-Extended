@@ -89,7 +89,7 @@ static httplib::Server::Handler makeHandler(const responseRoute &rr,
     }
     auto result = rr.rc(req, resp);
     response.status = resp.status_code;
-    if (resp.status_code >= 500)
+    if (resp.status_code >= 400)
       resp.headers["Cache-Control"] = "private, no-store";
     for (auto &h : resp.headers) {
       response.set_header(h.first, h.second);
@@ -241,7 +241,7 @@ int WebServer::start_web_server_multi(listener_args *args) {
                    " path=" + req.path +
                    " parameter_count=" + std::to_string(req.params.size()) +
                    " exception=" + type(ex) +
-                   " detail=" + summarizeUrlForLog(ex.what()),
+                    " detail=" + summarizeSensitiveTextForLog(ex.what()),
                LOG_LEVEL_ERROR);
     } catch (...) {
       writeLog(0,
@@ -252,6 +252,13 @@ int WebServer::start_web_server_multi(listener_args *args) {
                LOG_LEVEL_ERROR);
     }
     setUnhandledExceptionResponse(res);
+  });
+  server.set_post_routing_handler([](const httplib::Request &,
+                                     httplib::Response &res) {
+    // This also covers errors produced before a route callback (authentication,
+    // OPTIONS and the built-in 404 path), which do not pass through makeHandler.
+    if (res.status >= 400)
+      res.set_header("Cache-Control", "private, no-store");
   });
   if (serve_file) {
     server.set_mount_point("/", serve_file_root);

@@ -1074,16 +1074,29 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned in
                 //guarded_mutex guard(cache_rw_lock);
                 cache_rw_lock.writeLock();
                 defer(cache_rw_lock.writeUnlock();)
-                bool cache_write_ok = fileWrite(path, content, true) == 0;
-                if(cache_write_ok && !fetched.response_headers.empty())
-                    cache_write_ok =
-                        fileWrite(path_header, fetched.response_headers, true) == 0;
-                if(!cache_write_ok)
+                const bool content_write_ok =
+                    fileWrite(path, content, true) == 0;
+                if(!content_write_ok)
                 {
-                    std::remove(path.c_str());
+                    writeLog(0,
+                             "缓存正文写入失败，本次已获取内容仍将直接返回；原有缓存保持不变。",
+                             LOG_LEVEL_WARNING);
+                }
+                else if(fetched.response_headers.empty())
+                {
+                    // The new response has no reusable headers. Remove only a
+                    // stale header sidecar after the complete body is durable.
+                    std::remove(path_header.c_str());
+                }
+                else if(fileWrite(path_header, fetched.response_headers, true) !=
+                        0)
+                {
+                    // The body is already complete and usable. A stale header
+                    // sidecar is less safe than serving the body without
+                    // cached response headers.
                     std::remove(path_header.c_str());
                     writeLog(0,
-                             "缓存写入失败，本次已获取内容仍将直接返回；失败缓存已丢弃。",
+                             "缓存响应头写入失败，本次已获取内容仍将直接返回；已移除旧响应头缓存。",
                              LOG_LEVEL_WARNING);
                 }
             }

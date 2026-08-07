@@ -87,6 +87,17 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 f"unused={{{{ fetch(\"http://{host}/missing-template-input\") }}}}\n"
             ).encode()
             content_type = "text/plain; charset=utf-8"
+        elif request_path == "/external-malicious-base.ini":
+            host = self.headers.get("Host", "127.0.0.1")
+            body = (
+                "[custom]\n"
+                "enable_rule_generator=false\n"
+                f"clash_rule_base=http://{host}/malicious-base.yaml\n"
+            ).encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/malicious-base.yaml":
+            body = b'{% include "template-exception-cookie-secret.tpl" %}\n'
+            content_type = "text/plain; charset=utf-8"
         elif request_path == "/external-no-effective.ini":
             body = b"[custom]\n"
             content_type = "text/plain; charset=utf-8"
@@ -1893,6 +1904,72 @@ def sensitive_log_baseline(binary: Path, fixture_base: str) -> None:
         raise AssertionError("safe request diagnostics disappeared from verbose logs")
 
 
+def template_error_redaction_baseline(binary: Path, fixture_base: str) -> None:
+    secret = "template-exception-cookie-secret"
+    logs: list[str] = []
+    with running_service(
+        binary,
+        log_capture=logs,
+        log_level="verbose",
+    ) as base_url:
+        status, body, headers = request(
+            base_url,
+            "/sub",
+            {
+                "target": "clash",
+                "url": fixture_base + "/subscription.txt",
+                "config": fixture_base + "/external-malicious-base.ini",
+                "token": "query-secret",
+            },
+            headers={
+                "Authorization": "Bearer authorization-secret",
+                "Cookie": "session=cookie-secret",
+            },
+        )
+        error = body.decode("utf-8", errors="replace")
+        if status != 400:
+            raise AssertionError(
+                f"template render failure changed status: {status}, body={error!r}"
+            )
+        if "Invalid template" not in error or "模板渲染失败" not in error:
+            raise AssertionError("template render failure lost stable bilingual guidance")
+        for leaked in (
+            secret,
+            "query-secret",
+            "authorization-secret",
+            "cookie-secret",
+        ):
+            if leaked in error:
+                raise AssertionError(f"template error response leaked secret: {leaked}")
+        if "no-store" not in headers.get("cache-control", ""):
+            raise AssertionError("template render failure lost no-store policy")
+
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "clash",
+                "url": fixture_base + "/subscription.txt",
+                "config": fixture_base + "/external-valid.ini",
+            },
+        )
+        if status != 200 or not body:
+            raise AssertionError("successful template render behavior changed")
+
+    if not logs:
+        raise AssertionError("template error fixture did not capture logs")
+    for leaked in (
+        secret,
+        "query-secret",
+        "authorization-secret",
+        "cookie-secret",
+    ):
+        if leaked in logs[0]:
+            raise AssertionError(f"template error log leaked secret: {leaked}")
+    if "TEMPLATE_RENDER_FAILED" not in logs[0]:
+        raise AssertionError("template error log lost its stable event identifier")
+
+
 def persistence_degradation_baseline(binary: Path, fixture_base: str) -> None:
     with running_service(
         binary,
@@ -2260,6 +2337,7 @@ def main() -> int:
             provider_interval_output_baseline(base_url, fixture_base)
         dashboard_baseline(binary, fixture_base)
         sensitive_log_baseline(binary, fixture_base)
+        template_error_redaction_baseline(binary, fixture_base)
         dashboard_client_ip_security_baseline(binary, fixture_base)
         persistence_degradation_baseline(binary, fixture_base)
         public_request_baseline(binary, fixture_base)

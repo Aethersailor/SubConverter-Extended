@@ -74,6 +74,8 @@ int main() {
   client.set_read_timeout(2, 0);
   httplib::Result response;
   const httplib::Headers request_headers = {
+      {"Authorization", "Bearer authorization-header-secret"},
+      {"Cookie", "session=cookie-header-secret"},
       {"X-Provider-Secret", "header-secret"}};
   for (int attempt = 0; attempt < 100 && !response; ++attempt) {
     response = client.Get(
@@ -83,6 +85,9 @@ int main() {
     if (!response)
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
+
+  const httplib::Result not_found =
+      client.Get("/missing?token=missing-route-secret");
 
   server.stop_web_server();
   server_thread.join();
@@ -98,6 +103,12 @@ int main() {
           "unexpected content type");
   require(response->get_header_value("Cache-Control") == "private, no-store",
           "missing no-store response policy");
+  require(static_cast<bool>(not_found), "missing route did not receive a response");
+  require(not_found->status == 404, "missing route returned unexpected status");
+  require(not_found->get_header_value("Cache-Control") == "private, no-store",
+          "built-in 404 is missing the no-store response policy");
+  require(not_found->body.find("missing-route-secret") == std::string::npos,
+          "missing route secret leaked in body");
   require(response->body.find("Internal server error") != std::string::npos,
           "generic error body missing");
   require(response->body.find("request-secret") == std::string::npos,
@@ -122,9 +133,15 @@ int main() {
           "userinfo leaked in logs");
   require(logs.find("header-secret") == std::string::npos,
           "request header value leaked in logs");
+  require(logs.find("authorization-header-secret") == std::string::npos,
+          "Authorization value leaked in logs");
+  require(logs.find("cookie-header-secret") == std::string::npos,
+          "Cookie value leaked in logs");
   require(logs.find("exception-secret") == std::string::npos,
           "exception detail leaked in logs");
   require(logs.find("private-exception-token") == std::string::npos,
           "exception URL leaked in logs");
+  require(logs.find("missing-route-secret") == std::string::npos,
+          "missing route query leaked in logs");
   return 0;
 }

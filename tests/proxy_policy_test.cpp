@@ -100,5 +100,41 @@ int main() {
   const std::string header = redactSensitiveLogText(
       "Proxy-Authorization: Basic fixture-proxy-secret");
   assert(header.find("fixture-proxy-secret") == std::string::npos);
+
+  const std::string multiline_headers = redactSensitiveLogText(
+      "request headers:\r\n"
+      "Authorization: Bearer authorization-secret\r\n"
+      "pRoXy-AuThOrIzAtIoN: Basic proxy-authorization-secret\n"
+      "Cookie: session=cookie-secret; preference=dark\n"
+      "Authorization: Bearer folded-secret\r\n"
+      "  folded-continuation-secret\r\n"
+      "set-cookie: session=set-cookie-secret; HttpOnly\r\n"
+      "X-Diagnostic: retained-value\r\n"
+      "next=retained-parameter");
+  for (const char *secret : {"authorization-secret",
+                             "proxy-authorization-secret", "cookie-secret",
+                             "folded-secret", "folded-continuation-secret",
+                             "set-cookie-secret"})
+    assert(multiline_headers.find(secret) == std::string::npos);
+  assert(multiline_headers.find("Authorization: <redacted>") !=
+         std::string::npos);
+  assert(multiline_headers.find("pRoXy-AuThOrIzAtIoN: <redacted>") !=
+         std::string::npos);
+  assert(multiline_headers.find("Cookie: <redacted>") != std::string::npos);
+  assert(multiline_headers.find("set-cookie: <redacted>") !=
+         std::string::npos);
+  assert(multiline_headers.find("X-Diagnostic: retained-value") !=
+         std::string::npos);
+  assert(multiline_headers.find("next=retained-parameter") !=
+         std::string::npos);
+
+  const std::string cookie_parameter = redactSensitiveLogText(
+      "cookie=session-cookie-parameter&set-cookie=response-cookie-parameter"
+      "&mode=clash");
+  assert(cookie_parameter.find("session-cookie-parameter") ==
+         std::string::npos);
+  assert(cookie_parameter.find("response-cookie-parameter") ==
+         std::string::npos);
+  assert(cookie_parameter.find("mode=clash") != std::string::npos);
   return 0;
 }
