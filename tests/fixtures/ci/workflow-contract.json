@@ -31,7 +31,8 @@
           "steps": [
             {
               "id": "check",
-              "name": "Check Actor"
+              "name": "Check Actor",
+              "run": "|\n# 允许拥有者（你自己）或者特定机器人的 PR 提给 master\n# 这里把你的 GitHub username 填入（假设为 Aethersailor）\nif [[ \"${{ github.actor }}\" == \"Aethersailor\" || \"${{ github.actor }}\" == \"github-actions[bot]\" || \"${{ github.actor }}\" == \"dependabot[bot]\" ]]; then\n  echo \"is_allowed=true\" >> $GITHUB_OUTPUT\nelse\n  echo \"is_allowed=false\" >> $GITHUB_OUTPUT\nfi\n"
             },
             {
               "if": "steps.check.outputs.is_allowed == 'false'",
@@ -67,68 +68,81 @@
             {
               "id": "dependencies",
               "name": "Activate dependency snapshot",
+              "run": "|\nset -euo pipefail\ncp dependency-snapshot/dependencies.lock.json scripts/ci/dependencies.lock.json\npython3 scripts/ci/dependency_snapshot.py check\npython3 scripts/ci/dependency_snapshot.py emit \\\n  --github-output \"$GITHUB_OUTPUT\" \\\n  --github-env \"$GITHUB_ENV\"\n",
               "shell": "bash"
             },
             {
               "name": "Run Python regression baselines",
+              "run": "python3 -m unittest discover -s tests -p 'test_*.py' -v",
               "shell": "bash"
             },
             {
               "name": "Set up Docker Buildx",
+              "run": "|\ndocker buildx create --name sce-builder --driver docker-container --use\ndocker buildx inspect --bootstrap\n",
               "shell": "bash"
             },
             {
               "env": "DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}\nDOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}",
               "if": "github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'",
               "name": "Log in to Docker Hub",
+              "run": "echo \"$DOCKERHUB_TOKEN\" | docker login --username \"$DOCKERHUB_USERNAME\" --password-stdin",
               "shell": "bash"
             },
             {
               "env": "GHCR_USERNAME: ${{ github.actor }}\nGHCR_TOKEN: ${{ github.token }}",
               "if": "github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'",
               "name": "Log in to GHCR",
+              "run": "echo \"$GHCR_TOKEN\" | docker login ghcr.io --username \"$GHCR_USERNAME\" --password-stdin",
               "shell": "bash"
             },
             {
               "env": "THREADS: ${{ matrix.threads }}\nSHA: ${{ needs.prepare.outputs.sha }}\nVERSION: ${{ needs.prepare.outputs.version }}\nBUILD_DATE: ${{ needs.prepare.outputs.build_date }}\nREFRESH_GO_DEPS: ${{ needs.prepare.outputs.mode == 'dev' && matrix.extract_generated == 'true' }}\nREFRESH_HEADERS: ${{ needs.prepare.outputs.mode == 'dev' && matrix.extract_generated == 'true' }}",
               "id": "docker_args",
               "name": "Prepare Docker build args",
+              "run": "|\n{\n  echo 'args<<EOF'\n  bash scripts/ci/docker-build-args.sh\n  echo 'EOF'\n} >> \"$GITHUB_OUTPUT\"\n",
               "shell": "bash"
             },
             {
               "env": "BUILD_ARGS: ${{ steps.docker_args.outputs.args }}",
               "id": "build_image",
               "name": "Build candidate image once",
+              "run": "|\nbash scripts/ci/build-candidate-image.sh \\\n  \"${{ matrix.arch }}\" \\\n  \"${{ matrix.dockerfile }}\" \\\n  \"${{ matrix.image_platform }}\" \\\n  \"${{ matrix.cache_scope }}\" \\\n  \"${{ github.event_name }}\" \\\n  \"${{ needs.prepare.outputs.mode }}\" \\\n  \"${{ needs.prepare.outputs.version }}\"\n",
               "shell": "bash"
             },
             {
               "env": "BUILD_ARGS: ${{ steps.docker_args.outputs.args }}",
               "name": "Export CI artifacts from the existing cache",
+              "run": "|\nbash scripts/ci/export-ci-image.sh \\\n  \"${{ matrix.dockerfile }}\" \\\n  \"${{ matrix.builder_tag }}\" \\\n  \"${{ matrix.builder_platform }}\"\n",
               "shell": "bash"
             },
             {
               "env": "EXTRACT_GENERATED: ${{ matrix.extract_generated }}",
               "name": "Extract builder output",
+              "run": "bash scripts/ci/extract-builder-output.sh \"${{ matrix.builder_tag }}\" \"${{ matrix.extract_mode }}\"",
               "shell": "bash"
             },
             {
               "name": "Check bridge size budget (${{ matrix.arch }})",
+              "run": "python3 scripts/ci/check_file_size.py --budget \"${{ matrix.bridge_budget }}\" \"build/bridge-output/libmihomo.*\"",
               "shell": "bash"
             },
             {
               "env": "SHA: ${{ needs.prepare.outputs.sha }}\nBUILD_DATE: ${{ needs.prepare.outputs.build_date }}",
               "if": "needs.prepare.outputs.is_release == 'true'",
               "name": "Package Release Artifacts (Linux ${{ matrix.arch }})",
+              "run": "bash scripts/ci/build-linux-release.sh \"${{ needs.prepare.outputs.version }}\" \"${{ matrix.arch }}\" \"${{ matrix.openwrt_arches }}\"",
               "shell": "bash"
             },
             {
               "if": "needs.prepare.outputs.is_release == 'true'",
               "name": "Check release size budgets (Linux ${{ matrix.arch }})",
+              "run": "|\npython3 scripts/ci/check_file_size.py --budget release-linux \\\n  \"SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-${{ matrix.arch }}.tar.gz\"\npython3 scripts/ci/check_file_size.py --budget release-openwrt \\\n  \"SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-*.apk\"\n",
               "shell": "bash"
             },
             {
               "if": "matrix.qemu_platforms != ''",
               "name": "Set up QEMU for smoke test",
+              "run": "docker run --privileged --rm tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install \"${{ matrix.qemu_platforms }}\"",
               "shell": "bash"
             },
             {
@@ -160,22 +174,26 @@
             {
               "if": "needs.prepare.outputs.is_release == 'true'",
               "name": "Clean release packaging files",
+              "run": "rm -rf SubConverter-Extended SubConverter-Extended-*.tar.gz SubConverter-Extended-*.apk subconverter runtime-libs runtime-root libmihomo.so build/openwrt-apk",
               "shell": "bash"
             },
             {
               "id": "check_changes",
               "if": "matrix.extract_generated == 'true'",
               "name": "Check for file changes",
+              "run": "|\nif [ -n \"$(git status --porcelain -- scripts/ci/dependencies.lock.json bridge/go.mod bridge/go.sum bridge/libmihomo.h bridge/proxy_validation_generated.go src/parser/mihomo_schemes.h src/parser/param_compat.h include/httplib.h include/nlohmann/json.hpp include/inja.hpp include/jpcre2.hpp include/quickjspp.hpp include/libcron include/date include/toml.hpp include/toml11)\" ]; then\n  echo \"changed=true\" >> $GITHUB_OUTPUT\nfi\n",
               "shell": "bash"
             },
             {
               "if": "steps.check_changes.outputs.changed == 'true' && needs.prepare.outputs.mode != 'dev'",
               "name": "Verify frozen generated inputs outside dev",
+              "run": "|\ngit status --short -- scripts/ci/dependencies.lock.json bridge/go.mod bridge/go.sum bridge/libmihomo.h bridge/proxy_validation_generated.go src/parser/mihomo_schemes.h src/parser/param_compat.h include/httplib.h include/nlohmann/json.hpp include/inja.hpp include/jpcre2.hpp include/quickjspp.hpp include/libcron include/date include/toml.hpp include/toml11\necho \"::error::Frozen dependency/generated inputs are stale. Refresh and commit them on dev before building master or a release.\"\nexit 1\n",
               "shell": "bash"
             },
             {
               "if": "github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'",
               "name": "Save image digest",
+              "run": "|\nmkdir -p docker-digests\nprintf '%s\\n' \"${{ steps.build_image.outputs.digest }}\" > \"docker-digests/${{ matrix.arch }}.txt\"\n",
               "shell": "bash"
             },
             {
@@ -195,6 +213,7 @@
               "env": "SOURCE_REVISION: ${{ github.sha }}",
               "if": "steps.check_changes.outputs.changed == 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/dev'",
               "name": "Commit and push generated development files",
+              "run": "|\nset -euo pipefail\nBRANCH_NAME=\"dev\"\n\ngit fetch --no-tags origin \"refs/heads/$BRANCH_NAME:refs/remotes/origin/$BRANCH_NAME\"\nremote_revision=\"$(git rev-parse \"origin/$BRANCH_NAME\")\"\nif [ \"$remote_revision\" != \"$SOURCE_REVISION\" ]; then\n  echo \"::warning::dev advanced from $SOURCE_REVISION to $remote_revision; skipping stale generated-file writeback.\"\n  exit 0\nfi\n\ngit config user.name \"github-actions[bot]\"\ngit config user.email \"github-actions[bot]@users.noreply.github.com\"\ngit add scripts/ci/dependencies.lock.json bridge/go.mod bridge/go.sum bridge/libmihomo.h bridge/proxy_validation_generated.go src/parser/mihomo_schemes.h src/parser/param_compat.h include/httplib.h include/nlohmann/json.hpp include/inja.hpp include/jpcre2.hpp include/quickjspp.hpp include/libcron include/date include/toml.hpp include/toml11\ngit commit -m \"chore: update generated development inputs after build [skip ci]\"\ngit push origin \"HEAD:refs/heads/$BRANCH_NAME\"\n",
               "shell": "bash"
             }
           ],
@@ -218,6 +237,7 @@
             },
             {
               "name": "Activate dependency snapshot",
+              "run": "|\nCopy-Item dependency-snapshot/dependencies.lock.json scripts/ci/dependencies.lock.json -Force\npython scripts/ci/dependency_snapshot.py check\npython scripts/ci/dependency_snapshot.py emit --github-env $env:GITHUB_ENV\n",
               "shell": "pwsh"
             },
             {
@@ -232,14 +252,17 @@
             },
             {
               "name": "Build Windows amd64",
+              "run": "|\nTHREADS=4 bash scripts/build-windows-amd64.sh \\\n  \"${{ needs.prepare.outputs.version }}\" \\\n  \"${{ needs.prepare.outputs.sha }}\" \\\n  \"${{ needs.prepare.outputs.build_date }}\"\n",
               "shell": "msys2 {0}"
             },
             {
               "name": "Package Release Artifact (Windows amd64)",
+              "run": "./scripts/package-windows-portable.ps1 -Version \"${{ needs.prepare.outputs.version }}\" -Revision \"${{ needs.prepare.outputs.sha }}\" -BuildDate \"${{ needs.prepare.outputs.build_date }}\"",
               "shell": "pwsh"
             },
             {
               "name": "Check release size budget (Windows amd64)",
+              "run": "python scripts/ci/check_file_size.py --budget release-windows-amd64 \"SubConverter-Extended-${{ needs.prepare.outputs.version }}-windows-amd64.zip\"",
               "shell": "pwsh"
             },
             {
@@ -269,12 +292,14 @@
             },
             {
               "env": "RELEASE_VERSION: ${{ needs.prepare.outputs.version }}",
-              "name": "Prepare Release Notes Context"
+              "name": "Prepare Release Notes Context",
+              "run": "|\nset -euo pipefail\n\ngit fetch --tags --force origin\n\nCURRENT_TAG=\"$RELEASE_VERSION\"\nCURRENT_COMMIT=\"$(git rev-list -n 1 \"$CURRENT_TAG\")\"\ntest \"$CURRENT_COMMIT\" = \"${{ needs.prepare.outputs.sha }}\"\nREMOTE_COMMIT=\"$(git ls-remote origin \"refs/tags/$CURRENT_TAG^{}\" | awk '{print $1}')\"\ntest \"$REMOTE_COMMIT\" = \"$CURRENT_COMMIT\"\nPREVIOUS_TAG=\"$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' \"${CURRENT_COMMIT}^\" 2>/dev/null || true)\"\nEMPTY_TREE=\"4b825dc642cb6eb9a060e54bf8d69288fbee4904\"\n\nif [ -n \"$PREVIOUS_TAG\" ]; then\n  RANGE_LABEL=\"$PREVIOUS_TAG..$CURRENT_COMMIT\"\n  git log --pretty=format:'- %h %s' \"$PREVIOUS_TAG..$CURRENT_COMMIT\" > commits.md\n  git diff --name-only \"$PREVIOUS_TAG\" \"$CURRENT_COMMIT\" > changed-files.md\n  git diff --stat \"$PREVIOUS_TAG\" \"$CURRENT_COMMIT\" > diffstat.md\nelse\n  RANGE_LABEL=\"$CURRENT_COMMIT\"\n  git log --pretty=format:'- %h %s' \"$CURRENT_COMMIT\" > commits.md\n  git diff --name-only \"$EMPTY_TREE\" \"$CURRENT_COMMIT^{tree}\" > changed-files.md\n  git diff --stat \"$EMPTY_TREE\" \"$CURRENT_COMMIT^{tree}\" > diffstat.md\nfi\n\n{\n  echo \"# Release Context\"\n  echo\n  echo \"Current tag: $CURRENT_TAG\"\n  echo \"Current commit: $CURRENT_COMMIT\"\n  echo \"Previous tag: ${PREVIOUS_TAG:-none}\"\n  echo \"Range: $RANGE_LABEL\"\n  echo\n  echo \"## Commits\"\n  cat commits.md\n  echo\n  echo\n  echo \"## Changed files\"\n  sed 's/^/- /' changed-files.md\n  echo\n  echo\n  echo \"## Diff stat\"\n  cat diffstat.md\n} > release-context.md\n\n{\n  echo \"## English\"\n  echo\n  echo \"### Changes\"\n  if [ -s commits.md ]; then\n    cat commits.md\n  else\n    echo \"- No commit summary was available.\"\n  fi\n  echo\n  echo \"## 中文\"\n  echo\n  echo \"### 变更\"\n  echo \"本次发布包含以下提交：\"\n  if [ -s commits.md ]; then\n    cat commits.md\n  else\n    echo \"- 未获取到提交摘要。\"\n  fi\n} > release-notes.fallback.md\n"
             },
             {
               "env": "COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}",
               "id": "copilot_token",
-              "name": "Check Copilot Token"
+              "name": "Check Copilot Token",
+              "run": "|\nif [ -n \"${COPILOT_GITHUB_TOKEN:-}\" ]; then\n  echo \"available=true\" >> \"$GITHUB_OUTPUT\"\nelse\n  echo \"available=false\" >> \"$GITHUB_OUTPUT\"\nfi\n"
             },
             {
               "if": "steps.copilot_token.outputs.available == 'true'",
@@ -285,10 +310,12 @@
               "continue-on-error": "true",
               "env": "COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}",
               "if": "steps.copilot_token.outputs.available == 'true'",
-              "name": "Generate Bilingual Release Notes with Copilot"
+              "name": "Generate Bilingual Release Notes with Copilot",
+              "run": "|\nset -euo pipefail\n\nnpm install -g @github/copilot@1.0.70\n\nPROMPT=\"$(cat <<'EOF'\nYou are writing release notes for SubConverter-Extended.\n\nUse only the release context provided below. Do not invent features, fixes, platforms, or compatibility claims.\nSummarize user-visible changes first. Mention maintenance or dependency changes only when relevant.\nIgnore auto-generated files unless the context shows they affect users.\n\nReturn only Markdown. Do not wrap the answer in a code fence.\nDo not include a downloads section; it will be appended by the workflow.\n\nRequired format:\n\n## English\n\n### Highlights\n- ...\n\n### Changes\n- ...\n\n## 中文\n\n### 亮点\n- ...\n\n### 变更\n- ...\n\nOmit empty sections. Keep each language concise and accurate.\nEOF\n)\"\n\nPROMPT=\"$PROMPT\n\n$(cat release-context.md)\"\n\ncopilot -p \"$PROMPT\" --no-ask-user > release-notes.ai.md\ngrep -q '[[:alnum:]]' release-notes.ai.md\n"
             },
             {
-              "name": "Assemble Release Notes"
+              "name": "Assemble Release Notes",
+              "run": "|\nset -euo pipefail\n\nif [ -s release-notes.ai.md ]; then\n  cp release-notes.ai.md release-notes.md\n  echo \"Using Copilot-generated release notes.\"\nelse\n  cp release-notes.fallback.md release-notes.md\n  echo \"Using fallback release notes.\"\nfi\n\ncat >> release-notes.md <<'EOF'\n\n## Docker Images\n\nDocker images are published to:\n- `aethersailor/subconverter-extended`\n- `ghcr.io/aethersailor/subconverter-extended`\n\nSupported Docker platforms:\n- `linux/amd64`\n- `linux/arm64`\n- `linux/arm/v7`\n\n## Downloads\n\n### Linux (portable, glibc runtime bundled)\n- **amd64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-amd64.tar.gz`\n- **arm64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-arm64.tar.gz`\n- **armv7**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-armv7.tar.gz`\n\n### Windows (portable)\n- **amd64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-windows-amd64.zip`\n\n### OpenWrt 25.12+ APK (unsigned)\nInstall with `apk add --allow-untrusted ./<package>.apk`. Choose the APK whose OpenWrt architecture suffix matches `apk print-arch`.\nUser configuration is created at `/etc/subconverter/pref.toml` on first start and is not overwritten by upgrades.\n- **x86_64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-x86_64.apk`\n- **aarch64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-aarch64_generic.apk`, `...-aarch64_cortex-a53.apk`, `...-aarch64_cortex-a72.apk`\n- **armv7**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-arm_cortex-*.apk`\n\n### Checksums\n- `SHA256SUMS`\nEOF\n"
             },
             {
               "name": "Download all artifacts",
@@ -296,15 +323,18 @@
               "with": "path: artifacts\npattern: '*'\nmerge-multiple: false"
             },
             {
-              "name": "Generate checksums"
+              "name": "Generate checksums",
+              "run": "|\nset -euo pipefail\n\nfind artifacts -type f \\( -name '*.tar.gz' -o -name '*.zip' -o -name '*.apk' \\) -print | sort | while read -r file; do\n  sha256sum \"$file\" | sed 's#  artifacts/[^/]*/#  #'\ndone > SHA256SUMS\n\ncat SHA256SUMS\nduplicate_names=\"$(find artifacts -type f \\( -name '*.tar.gz' -o -name '*.zip' -o -name '*.apk' \\) -printf '%f\\n' | sort | uniq -d)\"\nif [ -n \"$duplicate_names\" ]; then\n  echo \"::error::Duplicate release asset names: $duplicate_names\"\n  exit 1\nfi\nmkdir release-assets\nfind artifacts -type f \\( -name '*.tar.gz' -o -name '*.zip' -o -name '*.apk' \\) \\\n  -exec cp '{}' release-assets/ \\;\ncp SHA256SUMS release-assets/SHA256SUMS\n"
             },
             {
               "name": "Generate immutable release manifest",
+              "run": "|\npython3 scripts/ci/release_manifest.py build \\\n  --root release-assets \\\n  --output release-assets/RELEASE-MANIFEST.json \\\n  --version \"${{ needs.prepare.outputs.version }}\" \\\n  --revision \"${{ needs.prepare.outputs.sha }}\" \\\n  --build-date \"${{ needs.prepare.outputs.build_date }}\" \\\n  --dockerhub-digest \"${{ needs.merge-manifest.outputs.dockerhub_digest }}\" \\\n  --ghcr-digest \"${{ needs.merge-manifest.outputs.ghcr_digest }}\"\npython3 scripts/ci/release_manifest.py verify \\\n  --root release-assets \\\n  --manifest release-assets/RELEASE-MANIFEST.json\n",
               "shell": "bash"
             },
             {
               "env": "GH_TOKEN: ${{ github.token }}\nVERSION: ${{ needs.prepare.outputs.version }}",
               "name": "Create draft Release without overwrites",
+              "run": "|\nset -euo pipefail\ngh release create \"$VERSION\" release-assets/* \\\n  --repo \"$GITHUB_REPOSITORY\" \\\n  --draft \\\n  --verify-tag \\\n  --title \"$VERSION\" \\\n  --notes-file release-notes.md\n",
               "shell": "bash"
             }
           ]
@@ -325,6 +355,7 @@
               "env": "GH_TOKEN: ${{ github.token }}\nVERSION: ${{ needs.prepare.outputs.version }}\nREVISION: ${{ needs.prepare.outputs.sha }}",
               "id": "release_assets",
               "name": "Re-verify draft assets and tag identity",
+              "run": "|\nset -euo pipefail\ntest \"$(git rev-parse HEAD)\" = \"$REVISION\"\ntest \"$(git rev-list -n 1 \"$VERSION\")\" = \"$REVISION\"\ntest \"$(git ls-remote origin \"refs/tags/$VERSION^{}\" | awk '{print $1}')\" = \"$REVISION\"\nrelease_state=\"$(gh api \\\n  -H 'X-GitHub-Api-Version: 2026-03-10' \\\n  \"repos/$GITHUB_REPOSITORY/releases/tags/$VERSION\" \\\n  --jq '[.draft, .immutable] | @tsv')\"\nif [ \"$release_state\" = $'true\\tfalse' ]; then\n  echo \"publish_needed=true\" >> \"$GITHUB_OUTPUT\"\nelif [ \"$release_state\" = $'false\\ttrue' ]; then\n  echo \"publish_needed=false\" >> \"$GITHUB_OUTPUT\"\nelse\n  echo \"::error::Release $VERSION is neither a mutable draft nor an immutable publication: $release_state\"\n  exit 1\nfi\n\nmkdir verified-assets\ngh release download \"$VERSION\" --repo \"$GITHUB_REPOSITORY\" --dir verified-assets\npython3 scripts/ci/release_manifest.py verify \\\n  --root verified-assets \\\n  --manifest verified-assets/RELEASE-MANIFEST.json\n\npython3 - \"$REVISION\" \"${{ needs.merge-manifest.outputs.dockerhub_digest }}\" \"${{ needs.merge-manifest.outputs.ghcr_digest }}\" <<'PY'\nimport json\nimport sys\n\nrevision, dockerhub_digest, ghcr_digest = sys.argv[1:]\nmanifest = json.load(open(\"verified-assets/RELEASE-MANIFEST.json\", encoding=\"utf-8\"))\nif manifest[\"revision\"] != revision:\n    raise SystemExit(\"release manifest revision changed\")\nif manifest[\"images\"][\"dockerhub\"][\"digest\"] != dockerhub_digest:\n    raise SystemExit(\"Docker Hub digest changed\")\nif manifest[\"images\"][\"ghcr\"][\"digest\"] != ghcr_digest:\n    raise SystemExit(\"GHCR digest changed\")\nPY\n",
               "shell": "bash"
             },
             {
@@ -340,21 +371,25 @@
             {
               "id": "version_images",
               "name": "Re-verify published version digests",
+              "run": "|\nset -euo pipefail\ninspect_digest() {\n  docker buildx imagetools inspect \"$1\" | awk '$1 == \"Digest:\" {print $2; exit}'\n}\ntest \"$(inspect_digest \"aethersailor/subconverter-extended:${{ needs.prepare.outputs.version }}\")\" = \"${{ needs.merge-manifest.outputs.dockerhub_digest }}\"\ntest \"$(inspect_digest \"ghcr.io/aethersailor/subconverter-extended:${{ needs.prepare.outputs.version }}\")\" = \"${{ needs.merge-manifest.outputs.ghcr_digest }}\"\ndockerhub_latest=\"$(inspect_digest aethersailor/subconverter-extended:latest)\"\nghcr_latest=\"$(inspect_digest ghcr.io/aethersailor/subconverter-extended:latest)\"\n[[ \"$dockerhub_latest\" =~ ^sha256:[0-9a-f]{64}$ ]]\n[[ \"$ghcr_latest\" =~ ^sha256:[0-9a-f]{64}$ ]]\necho \"dockerhub_latest=$dockerhub_latest\" >> \"$GITHUB_OUTPUT\"\necho \"ghcr_latest=$ghcr_latest\" >> \"$GITHUB_OUTPUT\"\n",
               "shell": "bash"
             },
             {
               "env": "GH_TOKEN: ${{ github.token }}\nVERSION: ${{ needs.prepare.outputs.version }}",
               "if": "steps.release_assets.outputs.publish_needed == 'true'",
               "name": "Publish immutable GitHub Release",
+              "run": "|\nset -euo pipefail\ngh release edit \"$VERSION\" --repo \"$GITHUB_REPOSITORY\" --draft=false\nfor attempt in $(seq 1 6); do\n  immutable=\"$(gh api \\\n    -H 'X-GitHub-Api-Version: 2026-03-10' \\\n    \"repos/$GITHUB_REPOSITORY/releases/tags/$VERSION\" \\\n    --jq '.immutable')\"\n  [ \"$immutable\" = \"true\" ] && exit 0\n  [ \"$attempt\" -eq 6 ] && break\n  sleep 2\ndone\necho \"::error::Published Release $VERSION did not become immutable.\"\nexit 1\n",
               "shell": "bash"
             },
             {
               "env": "GH_TOKEN: ${{ github.token }}\nVERSION: ${{ needs.prepare.outputs.version }}",
               "name": "Verify GitHub release attestation",
+              "run": "|\nset -euo pipefail\nfor attempt in $(seq 1 6); do\n  if gh release verify \"$VERSION\" --repo \"$GITHUB_REPOSITORY\"; then\n    exit 0\n  fi\n  [ \"$attempt\" -eq 6 ] && break\n  sleep 2\ndone\necho \"::error::GitHub release attestation verification failed for $VERSION.\"\nexit 1\n",
               "shell": "bash"
             },
             {
               "name": "Advance latest only after full release verification",
+              "run": "|\nset -euo pipefail\nVERSION=\"${{ needs.prepare.outputs.version }}\"\ninspect_digest() {\n  docker buildx imagetools inspect \"$1\" | awk '$1 == \"Digest:\" {print $2; exit}'\n}\nOLD_DOCKERHUB=\"${{ steps.version_images.outputs.dockerhub_latest }}\"\nOLD_GHCR=\"${{ steps.version_images.outputs.ghcr_latest }}\"\ntest \"$(inspect_digest aethersailor/subconverter-extended:latest)\" = \"$OLD_DOCKERHUB\"\ntest \"$(inspect_digest ghcr.io/aethersailor/subconverter-extended:latest)\" = \"$OLD_GHCR\"\n\nrollback_latest() {\n  echo \"::warning::Restoring the pre-release latest pointers after a promotion failure.\"\n  docker buildx imagetools create \\\n    -t aethersailor/subconverter-extended:latest \\\n    \"aethersailor/subconverter-extended@$OLD_DOCKERHUB\" || true\n  docker buildx imagetools create \\\n    -t ghcr.io/aethersailor/subconverter-extended:latest \\\n    \"ghcr.io/aethersailor/subconverter-extended@$OLD_GHCR\" || true\n}\n\nif ! docker buildx imagetools create \\\n  -t aethersailor/subconverter-extended:latest \\\n  \"aethersailor/subconverter-extended:$VERSION\"; then\n  rollback_latest\n  exit 1\nfi\nif ! docker buildx imagetools create \\\n  -t ghcr.io/aethersailor/subconverter-extended:latest \\\n  \"ghcr.io/aethersailor/subconverter-extended:$VERSION\"; then\n  rollback_latest\n  exit 1\nfi\n\nif [ \"$(inspect_digest aethersailor/subconverter-extended:latest)\" != \"${{ needs.merge-manifest.outputs.dockerhub_digest }}\" ] || \\\n   [ \"$(inspect_digest ghcr.io/aethersailor/subconverter-extended:latest)\" != \"${{ needs.merge-manifest.outputs.ghcr_digest }}\" ]; then\n  rollback_latest\n  echo \"::error::latest digest verification failed.\"\n  exit 1\nfi",
               "shell": "bash"
             }
           ]
@@ -396,15 +431,18 @@
               "env": "VERSION: ${{ needs.prepare.outputs.version }}",
               "if": "needs.prepare.outputs.mode == 'release'",
               "name": "Re-verify formal version tags are absent",
+              "run": "|\nset -euo pipefail\nremote_tag_commit=\"$(git ls-remote \\\n  \"https://github.com/$GITHUB_REPOSITORY.git\" \\\n  \"refs/tags/$VERSION^{}\" | awk '{print $1}')\"\nif [ \"$remote_tag_commit\" != \"${{ needs.prepare.outputs.sha }}\" ]; then\n  echo \"::error::Remote annotated tag $VERSION no longer peels to the approved source SHA.\"\n  exit 1\nfi\nassert_absent() {\n  local registry=\"$1\"\n  local repository=\"$2\"\n  local token_url=\"$3\"\n  local token\n  local status\n  token=\"$(curl --fail-with-body --silent --show-error \"$token_url\" | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"token\"])')\"\n  status=\"$(curl -sS -o /tmp/manifest -w '%{http_code}' \\\n    -H \"Authorization: Bearer $token\" \\\n    -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \\\n    \"https://$registry/v2/$repository/manifests/$VERSION\")\"\n  if [ \"$status\" = \"404\" ]; then\n    return\n  fi\n  if [ \"$status\" = \"200\" ]; then\n    echo \"::error::$registry/$repository:$VERSION appeared during the build; refusing overwrite.\"\n  else\n    echo \"::error::Could not re-prove absence of $registry/$repository:$VERSION (HTTP $status).\"\n  fi\n  exit 1\n}\nassert_absent \\\n  registry-1.docker.io \\\n  aethersailor/subconverter-extended \\\n  \"https://auth.docker.io/token?service=registry.docker.io&scope=repository:aethersailor/subconverter-extended:pull\"\nassert_absent \\\n  ghcr.io \\\n  aethersailor/subconverter-extended \\\n  \"https://ghcr.io/token?service=ghcr.io&scope=repository:aethersailor/subconverter-extended:pull\"\n",
               "shell": "bash"
             },
             {
               "name": "Promote tested candidates",
+              "run": "|\nset -euo pipefail\n\nif [ \"${{ needs.prepare.outputs.mode }}\" = \"dev\" ]; then\n  ARCHES=(amd64)\nelse\n  ARCHES=(amd64 arm64 armv7)\nfi\nfor arch in \"${ARCHES[@]}\"; do\n  test -s \"digests/${arch}.txt\"\n  grep -Eq '^sha256:[0-9a-f]{64}$' \"digests/${arch}.txt\"\ndone\n\nTAGS=\"${{ needs.prepare.outputs.tags }}\"\nIMAGE_NAMES=(\n  \"aethersailor/subconverter-extended\"\n  \"ghcr.io/aethersailor/subconverter-extended\"\n)\n\nfor IMAGE_NAME in \"${IMAGE_NAMES[@]}\"; do\n  SOURCES=()\n  for arch in \"${ARCHES[@]}\"; do\n    candidate=\"ci-${{ needs.prepare.outputs.mode }}-${arch}\"\n    if [ \"${{ needs.prepare.outputs.mode }}\" = \"release\" ]; then\n      candidate=\"ci-${{ needs.prepare.outputs.version }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${arch}\"\n    fi\n    SOURCES+=(\"${IMAGE_NAME}:${candidate}\")\n  done\n  for TAG in $TAGS; do\n    if [[ \"$TAG\" == \"$IMAGE_NAME:\"* ]]; then\n      echo \"Promoting ${SOURCES[*]} to $TAG\"\n      docker buildx imagetools create -t \"$TAG\" \"${SOURCES[@]}\"\n    fi\n  done\ndone\n",
               "shell": "bash"
             },
             {
               "id": "published",
               "name": "Verify manifest platforms",
+              "run": "|\nset -euo pipefail\n\nif [ \"${{ needs.prepare.outputs.mode }}\" = \"dev\" ]; then\n  PLATFORMS=(\"linux/amd64\")\nelse\n  PLATFORMS=(\"linux/amd64\" \"linux/arm64\" \"linux/arm/v7\")\nfi\nTAGS=\"${{ needs.prepare.outputs.tags }}\"\nDOCKERHUB_DIGEST=\"\"\nGHCR_DIGEST=\"\"\nfor TAG in $TAGS; do\n  echo \"Inspecting $TAG\"\n  for attempt in $(seq 1 6); do\n    if docker buildx imagetools inspect \"$TAG\" > manifest.txt; then\n      break\n    fi\n    if [ \"$attempt\" -eq 6 ]; then\n      echo \"Failed to inspect $TAG\"\n      exit 1\n    fi\n    sleep 5\n  done\n\n  cat manifest.txt\n  digest=\"$(awk '$1 == \"Digest:\" {print $2; exit}' manifest.txt)\"\n  if [[ ! \"$digest\" =~ ^sha256:[0-9a-f]{64}$ ]]; then\n    echo \"::error::Could not resolve the manifest digest for $TAG.\"\n    exit 1\n  fi\n  if [[ \"$TAG\" == ghcr.io/* ]]; then\n    GHCR_DIGEST=\"$digest\"\n    echo \"ghcr_digest=$digest\" >> \"$GITHUB_OUTPUT\"\n  else\n    DOCKERHUB_DIGEST=\"$digest\"\n    echo \"dockerhub_digest=$digest\" >> \"$GITHUB_OUTPUT\"\n  fi\n\n  for PLATFORM in \"${PLATFORMS[@]}\"; do\n    if ! grep -Eq \"Platform:[[:space:]]+${PLATFORM}$\" manifest.txt; then\n      echo \"Missing platform ${PLATFORM} in ${TAG}\"\n      exit 1\n    fi\n    docker pull --platform \"$PLATFORM\" \"$TAG\"\n    actual_revision=\"$(docker image inspect --format '{{ index .Config.Labels \"org.opencontainers.image.revision\" }}' \"$TAG\")\"\n    actual_version=\"$(docker image inspect --format '{{ index .Config.Labels \"org.opencontainers.image.version\" }}' \"$TAG\")\"\n    test \"$actual_revision\" = \"${{ needs.prepare.outputs.sha }}\"\n    test \"$actual_version\" = \"${{ needs.prepare.outputs.version }}\"\n  done\ndone\ntest -n \"$DOCKERHUB_DIGEST\"\ntest -n \"$GHCR_DIGEST\"\nif [ \"$DOCKERHUB_DIGEST\" != \"$GHCR_DIGEST\" ]; then\n  echo \"::error::Docker Hub and GHCR manifest digests differ.\"\n  exit 1\nfi\n",
               "shell": "bash"
             }
           ]
@@ -424,34 +462,41 @@
             {
               "id": "metadata",
               "name": "Resolve build metadata",
+              "run": "|\nset -euo pipefail\npython3 scripts/ci/build_metadata.py \\\n  --github-output \"$GITHUB_OUTPUT\"\n",
               "shell": "bash"
             },
             {
               "env": "GH_TOKEN: ${{ github.token }}\nVERSION: ${{ steps.metadata.outputs.version }}\nREVISION: ${{ steps.metadata.outputs.sha }}",
               "if": "steps.metadata.outputs.mode == 'release'",
               "name": "Verify immutable formal release preconditions",
+              "run": "|\nset -euo pipefail\n\nif [ \"$(git cat-file -t \"$GITHUB_REF\")\" != \"tag\" ]; then\n  echo \"::error::Formal releases require an annotated vX.Y.Z tag.\"\n  exit 1\nfi\nTAG_COMMIT=\"$(git rev-list -n 1 \"$GITHUB_REF\")\"\npython3 scripts/ci/release_guard.py \\\n  --event-name \"$GITHUB_EVENT_NAME\" \\\n  --ref \"$GITHUB_REF\" \\\n  --github-sha \"$GITHUB_SHA\" \\\n  --checkout-sha \"$(git rev-parse HEAD)\" \\\n  --tag-sha \"$TAG_COMMIT\"\n\nIMMUTABLE_ENABLED=\"$(gh api \\\n  -H 'X-GitHub-Api-Version: 2026-03-10' \\\n  \"repos/$GITHUB_REPOSITORY/immutable-releases\" \\\n  --jq '.enabled')\"\nif [ \"$IMMUTABLE_ENABLED\" != \"true\" ]; then\n  echo \"::error::GitHub immutable releases must be enabled before a formal tag is published.\"\n  exit 1\nfi\n\nrelease_status=\"$(curl -sS -o /tmp/release.json -w '%{http_code}' \\\n  -H \"Authorization: Bearer $GH_TOKEN\" \\\n  -H 'Accept: application/vnd.github+json' \\\n  \"https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$VERSION\")\"\ncase \"$release_status\" in\n  404) ;;\n  200)\n    echo \"::error::Release $VERSION already exists and is frozen. Publish a new version.\"\n    exit 1\n    ;;\n  *)\n    cat /tmp/release.json >&2\n    echo \"::error::Could not prove that Release $VERSION is absent (HTTP $release_status).\"\n    exit 1\n    ;;\nesac\n\ndockerhub_settings=\"$(curl --fail-with-body --silent --show-error \\\n  https://hub.docker.com/v2/repositories/aethersailor/subconverter-extended/)\"\npython3 - \"$VERSION\" \"$dockerhub_settings\" <<'PY'\nimport json\nimport re\nimport sys\n\nversion, raw = sys.argv[1:]\nsettings = json.loads(raw).get(\"immutable_tags_settings\") or {}\nrules = settings.get(\"rules\") or []\nif settings.get(\"enabled\") is not True:\n    raise SystemExit(\"::error::Docker Hub immutable tags must be enabled before release.\")\nif not any(re.fullmatch(rule, version) for rule in rules):\n    raise SystemExit(\n        f\"::error::Docker Hub immutable rules do not protect {version}: {rules}\"\n    )\nPY\n\nassert_registry_tag_absent() {\n  local registry=\"$1\"\n  local repository=\"$2\"\n  local token_url=\"$3\"\n  local token\n  local status\n  token=\"$(curl --fail-with-body --silent --show-error \"$token_url\" | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"token\"])')\"\n  status=\"$(curl -sS -o /tmp/registry-manifest -w '%{http_code}' \\\n    -H \"Authorization: Bearer $token\" \\\n    -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \\\n    \"https://$registry/v2/$repository/manifests/$VERSION\")\"\n  case \"$status\" in\n    404) ;;\n    200)\n      echo \"::error::$registry/$repository:$VERSION already exists and must not be overwritten.\"\n      exit 1\n      ;;\n    *)\n      cat /tmp/registry-manifest >&2\n      echo \"::error::Could not prove $registry/$repository:$VERSION is absent (HTTP $status).\"\n      exit 1\n      ;;\n  esac\n}\n\nassert_registry_tag_absent \\\n  registry-1.docker.io \\\n  aethersailor/subconverter-extended \\\n  \"https://auth.docker.io/token?service=registry.docker.io&scope=repository:aethersailor/subconverter-extended:pull\"\nassert_registry_tag_absent \\\n  ghcr.io \\\n  aethersailor/subconverter-extended \\\n  \"https://ghcr.io/token?service=ghcr.io&scope=repository:aethersailor/subconverter-extended:pull\"\n",
               "shell": "bash"
             },
             {
               "name": "Verify COCR runtime assets are absent",
+              "run": "|\nset -euo pipefail\nif [ -e base/Custom_OpenClash_Rules ] || \\\n   git ls-files -- base/Custom_OpenClash_Rules | grep -q .; then\n  echo \"::error::Custom_OpenClash_Rules runtime assets must not exist in this project.\"\n  exit 1\nfi\n",
               "shell": "bash"
             },
             {
               "if": "steps.metadata.outputs.mode == 'dev'",
               "name": "Refresh dependency snapshot on dev",
+              "run": "|\nset -euo pipefail\npython3 scripts/ci/dependency_snapshot.py refresh\n",
               "shell": "bash"
             },
             {
               "name": "Validate dependency snapshot",
+              "run": "python3 scripts/ci/dependency_snapshot.py check",
               "shell": "bash"
             },
             {
               "id": "dependencies",
               "name": "Export dependency metadata",
+              "run": "|\npython3 scripts/ci/dependency_snapshot.py emit \\\n  --github-output \"$GITHUB_OUTPUT\" \\\n  --github-env \"$GITHUB_ENV\"\n",
               "shell": "bash"
             },
             {
               "name": "Summarize dependency snapshot",
+              "run": "|\n{\n  echo \"### Dependency snapshot\"\n  echo\n  echo \"Mode: \\`${{ steps.metadata.outputs.mode }}\\`\"\n  echo \"Snapshot SHA-256: \\`${{ steps.dependencies.outputs.dependency_snapshot_sha }}\\`\"\n} >> \"$GITHUB_STEP_SUMMARY\"\n",
               "shell": "bash"
             },
             {
@@ -462,12 +507,14 @@
             {
               "id": "linux_matrix",
               "name": "Build Linux matrix",
+              "run": "|\npython3 scripts/ci/build_plan.py matrix \\\n  --mode \"${{ steps.metadata.outputs.mode }}\" \\\n  --github-output \"$GITHUB_OUTPUT\"\n",
               "shell": "bash"
             },
             {
               "env": "VERSION: ${{ steps.metadata.outputs.version }}\nMODE: ${{ steps.metadata.outputs.mode }}",
               "id": "meta",
               "name": "Docker meta",
+              "run": "|\npython3 scripts/ci/build_plan.py tags \\\n  --mode \"$MODE\" \\\n  --version \"$VERSION\" \\\n  --github-output \"$GITHUB_OUTPUT\"\n",
               "shell": "bash"
             }
           ]
@@ -484,6 +531,7 @@
             },
             {
               "name": "Resolve pinned build inputs",
+              "run": "|\nset -euo pipefail\npython3 scripts/ci/dependency_snapshot.py check\npython3 scripts/ci/dependency_snapshot.py emit \\\n  --github-env \"$GITHUB_ENV\"\n",
               "shell": "bash"
             },
             {
@@ -492,6 +540,7 @@
             },
             {
               "name": "Build and run request sanitizer targets",
+              "run": "|\nset -euo pipefail\nexport THREADS=\"$(nproc)\"\nexport SHA=\"$GITHUB_SHA\"\nexport VERSION=\"sanitizer-${GITHUB_SHA::7}\"\nexport BUILD_DATE=\"$(git show -s --format=%cI HEAD)\"\nexport BUILD_TESTS=true\nmapfile -t build_args < <(bash scripts/ci/docker-build-args.sh)\nargs=()\nfor arg in \"${build_args[@]}\"; do\n  [ -n \"$arg\" ] && args+=(--build-arg \"$arg\")\ndone\nargs+=(--build-arg ENABLE_SANITIZERS=true)\necho \"Sanitizer CMake option: -DENABLE_SANITIZERS=true\"\necho \"Sanitizer build targets: production runtime and all BUILD_TESTS targets\"\necho \"Sanitizer run targets: settings_view, settings_view_invariant_failure, compatibility_security_baseline\"\ndocker buildx build \\\n  --file Dockerfile \\\n  --platform linux/amd64 \\\n  --target builder \\\n  --load \\\n  --tag \"subconverter-request-sanitizer:${GITHUB_SHA}\" \\\n  --cache-from type=gha,scope=request-sanitizers \\\n  --cache-to type=gha,scope=request-sanitizers,mode=max \\\n  --progress plain \\\n  \"${args[@]}\" \\\n  .\n",
               "shell": "bash"
             }
           ]
@@ -521,7 +570,8 @@
           "steps": [
             {
               "env": "GH_TOKEN: ${{ github.token }}",
-              "name": "Delete Failed, Cancelled and Skipped Workflow Runs"
+              "name": "Delete Failed, Cancelled and Skipped Workflow Runs",
+              "run": "|\necho \"🧹 Cleaning up failed, cancelled and skipped workflow runs...\"\n\n# Get all workflow runs and delete them\ngh api repos/${{ github.repository }}/actions/runs \\\n  --paginate \\\n  -q '.workflow_runs[] | select(.conclusion==\"failure\" or .conclusion==\"cancelled\" or .conclusion==\"skipped\") | .id' \\\n  | while read run_id; do\n    echo \"🗑️  Deleting run ID: $run_id\"\n    gh api repos/${{ github.repository }}/actions/runs/$run_id -X DELETE || echo \"   ⚠️  Failed to delete $run_id\"\n  done\n\necho \"\"\necho \"✅ Cleanup completed!\""
             }
           ]
         }
@@ -539,6 +589,71 @@
           "needs": "source-head",
           "permissions": "actions: read\ncontents: read\npackages: read\nsecurity-events: write",
           "runs-on": "ubuntu-latest",
+          "steps": [
+            {
+              "name": "Checkout repository",
+              "uses": "actions/checkout@v6",
+              "with": "token: ${{ secrets.PAT_TOKEN || github.token }}"
+            },
+            {
+              "id": "cache-cpp-deps",
+              "if": "matrix.language == 'c-cpp'",
+              "name": "Cache Build Artifacts",
+              "uses": "actions/cache@v5",
+              "with": "path: |\n  /usr/lib/quickjs\n  /usr/include/quickjs\n  /usr/include/quickjspp.hpp\n  quickjspp\n  /usr/local/include/libcron\n  /usr/local/lib/liblibcron.a\n  libcron\nkey: ${{ runner.os }}-cpp-deps-v2-${{ hashFiles('.github/workflows/codeql.yml') }}"
+            },
+            {
+              "if": "matrix.language == 'c-cpp'",
+              "name": "Install C++ dependencies",
+              "run": "|\nsudo apt-get update\nsudo apt-get install -y --no-install-recommends \\\n    build-essential \\\n    cmake \\\n    libpcre2-dev \\\n    rapidjson-dev \\\n    libyaml-cpp-dev \\\n    libcurl4-openssl-dev \\\n    libhowardhinnant-date-dev\n"
+            },
+            {
+              "if": "matrix.language == 'c-cpp'",
+              "name": "Setup Go",
+              "run": "|\nif ! command -v go >/dev/null 2>&1; then\n  sudo apt-get update\n  sudo apt-get install -y --no-install-recommends golang-go\nfi\ngo version\n",
+              "shell": "bash"
+            },
+            {
+              "if": "matrix.language == 'c-cpp'",
+              "name": "Build libmihomo.a",
+              "run": "|\ncd bridge\n# Ensure dependencies are downloaded (for script to find mihomo source)\ngo mod download\n# Set GOMODCACHE for the script to find mihomo source\nexport GOMODCACHE=$(go env GOMODCACHE)\necho \"GOMODCACHE=$GOMODCACHE\"\n# Generate header files\ngo run ../scripts/generate_proxy_validation.go -o proxy_validation_generated.go\ngo run ../scripts/generate_schemes.go mihomo_schemes.h\ngo run ../scripts/generate_param_compat.go -o param_compat.h\ncp mihomo_schemes.h ../src/parser/\ncp param_compat.h ../src/parser/\n# Build static library\nCGO_ENABLED=1 go build -buildmode=c-archive -ldflags=\"-s -w\" -o libmihomo.a .\n# Install to system paths\nsudo install -m644 libmihomo.a /usr/lib/\nsudo install -m644 libmihomo.h /usr/include/\n"
+            },
+            {
+              "if": "matrix.language == 'c-cpp'",
+              "name": "Install toml11",
+              "run": "|\nrm -rf toml11\ngit clone --depth=1 --branch v4.3.0 https://github.com/ToruNiina/toml11\ncmake -S toml11 -B toml11/build -DTOML11_INSTALL=ON -DTOML11_BUILD_TESTS=OFF -DTOML11_BUILD_EXAMPLES=OFF\ncmake --build toml11/build -j$(nproc)\nsudo cmake --install toml11/build\n"
+            },
+            {
+              "if": "matrix.language == 'c-cpp' && steps.cache-cpp-deps.outputs.cache-hit != 'true'",
+              "name": "Build QuickJS",
+              "run": "|\nrm -rf quickjspp\ngit clone --depth=1 https://github.com/ftk/quickjspp.git\ncd quickjspp\ngit submodule update --init\ncmake -DCMAKE_BUILD_TYPE=Release .\nmake quickjs -j$(nproc)\nsudo install -d /usr/lib/quickjs/\nsudo install -m644 quickjs/libquickjs.a /usr/lib/quickjs/\nsudo install -d /usr/include/quickjs/\nsudo install -m644 quickjs/quickjs.h quickjs/quickjs-libc.h /usr/include/quickjs/\nsudo install -m644 quickjspp.hpp /usr/include/\n"
+            },
+            {
+              "if": "matrix.language == 'c-cpp' && steps.cache-cpp-deps.outputs.cache-hit != 'true'",
+              "name": "Build LibCron",
+              "run": "|\nrm -rf libcron\ngit clone https://github.com/PerMalmberg/libcron\ncd libcron\ngit checkout v1.3.0  # Pin version for stability\n# Force disable tests by modifying CMakeLists.txt (no option provided upstream)\nsed -i '/add_subdirectory(test)/d' CMakeLists.txt\nsed -i '/add_dependencies(cron_test libcron)/d' CMakeLists.txt\ncmake -DCMAKE_BUILD_TYPE=Release .\nmake -j$(nproc)\n# Manual install (make install fails due to missing target)\nsudo install -d /usr/local/include/libcron\ncron_header=\"$(find . -type f -name Cron.h -print -quit)\"\nif [ -z \"$cron_header\" ]; then\n  echo \"libcron headers not found (Cron.h missing)\"\n  find . -maxdepth 4 -type d -name include -print\n  exit 1\nfi\ncron_include_dir=\"$(dirname \"$cron_header\")\"\nsudo cp -r \"$cron_include_dir\"/* /usr/local/include/libcron/\nlibcron_lib=\"$(find . -type f -name liblibcron.a -print -quit)\"\nif [ -z \"$libcron_lib\" ]; then\n  echo \"libcron static library not found (liblibcron.a missing)\"\n  find . -maxdepth 5 -type f -name \"*.a\" -print\n  exit 1\nfi\n# Date library is provided by apt package libhowardhinnant-date-dev\nsudo install -m644 \"$libcron_lib\" /usr/local/lib/\n"
+            },
+            {
+              "if": "matrix.language == 'c-cpp' && steps.cache-cpp-deps.outputs.cache-hit == 'true'",
+              "name": "Restore Artifacts",
+              "run": "|\necho \"Restoring artifacts from cache...\"\n\n# Restore QuickJS\ncd quickjspp\nsudo install -d /usr/lib/quickjs/\nsudo install -m644 quickjs/libquickjs.a /usr/lib/quickjs/\nsudo install -d /usr/include/quickjs/\nsudo install -m644 quickjs/quickjs.h quickjs/quickjs-libc.h /usr/include/quickjs/\nsudo install -m644 quickjspp.hpp /usr/include/\ncd ..\n\n# Restore LibCron\ncd libcron\nsudo install -d /usr/local/include/libcron\ncron_header=\"$(find . -type f -name Cron.h -print -quit)\"\nif [ -z \"$cron_header\" ]; then\n  echo \"libcron headers not found (Cron.h missing)\"\n  find . -maxdepth 4 -type d -name include -print\n  exit 1\nfi\ncron_include_dir=\"$(dirname \"$cron_header\")\"\nsudo cp -r \"$cron_include_dir\"/* /usr/local/include/libcron/\nlibcron_lib=\"$(find . -type f -name liblibcron.a -print -quit)\"\nif [ -z \"$libcron_lib\" ]; then\n  echo \"libcron static library not found (liblibcron.a missing)\"\n  find . -maxdepth 5 -type f -name \"*.a\" -print\n  exit 1\nfi\nsudo install -m644 \"$libcron_lib\" /usr/local/lib/\ncd ..\n"
+            },
+            {
+              "name": "Initialize CodeQL",
+              "uses": "github/codeql-action/init@v4",
+              "with": "languages: ${{ matrix.language }}\nbuild-mode: ${{ matrix.build-mode }}\nconfig-file: ./.github/codeql/codeql-config.yml\nqueries: security-extended\n# Disable trap caching to avoid \"No such file or directory\" error\ntrap-caching: false"
+            },
+            {
+              "if": "matrix.language == 'c-cpp'",
+              "name": "Build (manual)",
+              "run": "|\ncmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/usr/local -DBUILD_TESTS=ON\ncmake --build build -j$(nproc)\npython3 scripts/run-test-suite.py --build-dir build --mode full\n"
+            },
+            {
+              "name": "Perform CodeQL Analysis",
+              "uses": "github/codeql-action/analyze@v4",
+              "with": "category: \"/language:${{matrix.language}}\""
+            }
+          ],
           "strategy": "fail-fast: false\nmatrix:\n  include:\n    - language: c-cpp\n      build-mode: manual\n    - language: go\n      build-mode: autobuild\n    - language: python\n      build-mode: none\n    - language: actions\n      build-mode: none"
         },
         "source-head": {
@@ -570,7 +685,8 @@
               "uses": "actions/checkout@v6"
             },
             {
-              "name": "Test issue management rules"
+              "name": "Test issue management rules",
+              "run": "node --test .github/scripts/manage-inactive-issues.test.cjs"
             },
             {
               "name": "Close issues without replies for fourteen days",
@@ -613,34 +729,40 @@
               "env": "OPERATION: ${{ inputs.operation }}\nREQUESTED_VERSION: ${{ inputs.version }}\nEXPECTED_DEV_SHA: ${{ inputs.expected_dev_sha }}",
               "id": "request",
               "name": "Validate requested operation and source",
+              "run": "|\nset -euo pipefail\n\nif [[ ! \"$EXPECTED_DEV_SHA\" =~ ^[0-9a-f]{40}$ ]]; then\n  echo \"::error::expected_dev_sha must be a full 40-character Git SHA.\"\n  exit 1\nfi\n\ngit fetch --no-tags origin dev\nACTUAL_DEV_SHA=\"$(git rev-parse origin/dev)\"\nif [ \"$ACTUAL_DEV_SHA\" != \"$EXPECTED_DEV_SHA\" ]; then\n  echo \"::error::origin/dev is $ACTUAL_DEV_SHA, not approved SHA $EXPECTED_DEV_SHA.\"\n  exit 1\nfi\n\nVERSION=\"${REQUESTED_VERSION:-}\"\nVERSION=\"${VERSION#\"${VERSION%%[![:space:]]*}\"}\"\nVERSION=\"${VERSION%\"${VERSION##*[![:space:]]}\"}\"\nif [ \"$OPERATION\" = \"new\" ]; then\n  if [[ ! \"$VERSION\" =~ ^v[0-9]+\\.[0-9]+\\.[0-9]+$ ]]; then\n    echo \"::error::new requires an explicit unused vX.Y.Z version.\"\n    exit 1\n  fi\n  git fetch --tags origin\n  if git rev-parse -q --verify \"refs/tags/$VERSION\" >/dev/null || \\\n     git ls-remote --exit-code --tags origin \"refs/tags/$VERSION\" >/dev/null 2>&1; then\n    echo \"::error::Tag $VERSION already exists. Historical versions are frozen; choose a new version.\"\n    exit 1\n  fi\nelif [ -n \"$VERSION\" ]; then\n  echo \"::error::sync_only must not carry a release version.\"\n  exit 1\nfi\n\necho \"version=$VERSION\" >> \"$GITHUB_OUTPUT\"\necho \"dev_sha=$ACTUAL_DEV_SHA\" >> \"$GITHUB_OUTPUT\"\n",
               "shell": "bash"
             },
             {
               "id": "sync",
               "name": "Merge approved dev into master",
+              "run": "|\nset -euo pipefail\ngit config user.name \"github-actions[bot]\"\ngit config user.email \"github-actions[bot]@users.noreply.github.com\"\n\nif ! git merge \"${{ steps.request.outputs.dev_sha }}\" --no-commit --no-ff; then\n  conflicted_files=\"$(git diff --name-only --diff-filter=U)\"\n  for file in $conflicted_files; do\n    if [[ \"$file\" == README*.md || \"$file\" == docs/images/readme-flow-*.svg ]]; then\n      git checkout --ours \"$file\"\n    else\n      git checkout --theirs \"$file\"\n    fi\n    git add \"$file\"\n  done\nfi\n\ngit checkout HEAD -- README.md 2>/dev/null || true\ngit checkout HEAD -- 'README-*.md' 2>/dev/null || true\ngit checkout HEAD -- 'docs/images/readme-flow-*.svg' 2>/dev/null || true\ngit add README.md README-*.md docs/images/readme-flow-*.svg 2>/dev/null || true\n\nif [ -f .git/MERGE_HEAD ]; then\n  git commit -m \"chore: sync dev to master\"\nelif ! git diff --staged --quiet; then\n  git commit -m \"chore: sync dev to master\"\nfi\n\nMASTER_COMMIT=\"$(git rev-parse HEAD)\"\ngit push origin \"HEAD:refs/heads/master\"\necho \"master_commit=$MASTER_COMMIT\" >> \"$GITHUB_OUTPUT\"\n",
               "shell": "bash"
             },
             {
               "env": "GH_TOKEN: ${{ secrets.PAT_TOKEN }}\nEXPECTED_SHA: ${{ steps.sync.outputs.master_commit }}",
               "name": "Dispatch and verify master validation",
+              "run": "|\nset -euo pipefail\nrepo=\"$GITHUB_REPOSITORY\"\n\nfor attempt in 1 2 3 4 5 6; do\n  visible_sha=\"$(gh api \"repos/$repo/branches/master\" --jq '.commit.sha')\"\n  [ \"$visible_sha\" = \"$EXPECTED_SHA\" ] && break\n  if [ \"$attempt\" -eq 6 ]; then\n    echo \"::error::GitHub did not expose master at $EXPECTED_SHA.\"\n    exit 1\n  fi\n  sleep 2\ndone\n\ndispatch_output=\"$(gh workflow run build-dockerhub.yml --repo \"$repo\" --ref master)\"\nrun_id=\"$(printf '%s\\n' \"$dispatch_output\" | sed -n 's#^.*/actions/runs/\\([0-9][0-9]*\\).*$#\\1#p' | tail -n 1)\"\nif [ -z \"$run_id\" ]; then\n  echo \"::error::Could not resolve the master validation run ID.\"\n  exit 1\nfi\nactual_sha=\"$(gh run view \"$run_id\" --repo \"$repo\" --json headSha --jq '.headSha')\"\nif [ \"$actual_sha\" != \"$EXPECTED_SHA\" ]; then\n  echo \"::error::Master validation bound $actual_sha instead of $EXPECTED_SHA.\"\n  exit 1\nfi\ngh run watch \"$run_id\" --repo \"$repo\" --exit-status\n",
               "shell": "bash"
             },
             {
               "env": "GH_TOKEN: ${{ secrets.PAT_TOKEN }}\nVERSION: ${{ steps.request.outputs.version }}",
               "if": "inputs.operation == 'new'",
               "name": "Verify immutable release controls before tag creation",
+              "run": "|\nset -euo pipefail\n\nimmutable_enabled=\"$(gh api \\\n  -H 'X-GitHub-Api-Version: 2026-03-10' \\\n  \"repos/$GITHUB_REPOSITORY/immutable-releases\" \\\n  --jq '.enabled')\"\nif [ \"$immutable_enabled\" != \"true\" ]; then\n  echo \"::error::GitHub immutable releases must be enabled before creating $VERSION.\"\n  exit 1\nfi\n\ndockerhub_settings=\"$(curl --fail-with-body --silent --show-error \\\n  https://hub.docker.com/v2/repositories/aethersailor/subconverter-extended/)\"\npython3 - \"$VERSION\" \"$dockerhub_settings\" <<'PY'\nimport json\nimport re\nimport sys\n\nversion, raw = sys.argv[1:]\nsettings = json.loads(raw).get(\"immutable_tags_settings\") or {}\nrules = settings.get(\"rules\") or []\nif settings.get(\"enabled\") is not True:\n    raise SystemExit(\"::error::Docker Hub immutable tags must be enabled before tag creation.\")\nif not any(re.fullmatch(rule, version) for rule in rules):\n    raise SystemExit(\n        f\"::error::Docker Hub immutable rules do not protect {version}: {rules}\"\n    )\nPY\n",
               "shell": "bash"
             },
             {
               "env": "VERSION: ${{ steps.request.outputs.version }}\nMASTER_COMMIT: ${{ steps.sync.outputs.master_commit }}",
               "if": "inputs.operation == 'new'",
               "name": "Create the one-time formal release tag",
+              "run": "|\nset -euo pipefail\ntest \"$(git rev-parse HEAD)\" = \"$MASTER_COMMIT\"\ngit tag -a \"$VERSION\" \"$MASTER_COMMIT\" -m \"Release $VERSION\"\ngit push origin \"refs/tags/$VERSION\"\n",
               "shell": "bash"
             },
             {
               "env": "GH_TOKEN: ${{ secrets.PAT_TOKEN }}\nVERSION: ${{ steps.request.outputs.version }}\nEXPECTED_SHA: ${{ steps.sync.outputs.master_commit }}",
               "if": "inputs.operation == 'new'",
               "name": "Verify the tag-triggered formal release run",
+              "run": "|\nset -euo pipefail\nrepo=\"$GITHUB_REPOSITORY\"\nrun_id=\"\"\nfor attempt in $(seq 1 30); do\n  run_id=\"$(gh run list --repo \"$repo\" --workflow release.yml --event push --limit 20 \\\n    --json databaseId,headSha,headBranch \\\n    --jq \".[] | select(.headSha == \\\"$EXPECTED_SHA\\\" and .headBranch == \\\"$VERSION\\\") | .databaseId\" | head -n 1)\"\n  [ -n \"$run_id\" ] && break\n  sleep 2\ndone\nif [ -z \"$run_id\" ]; then\n  echo \"::error::No formal release run appeared for $VERSION at $EXPECTED_SHA.\"\n  exit 1\nfi\ngh run watch \"$run_id\" --repo \"$repo\" --exit-status\necho \"Formal release $VERSION completed from immutable tag commit $EXPECTED_SHA in run $run_id.\"",
               "shell": "bash"
             }
           ]
@@ -663,6 +785,7 @@
             {
               "env": "GH_TOKEN: ${{ github.token }}",
               "name": "Verify historical identities without mutation",
+              "run": "|\nset -euo pipefail\n\nregistry_digest() {\n  local registry=\"$1\"\n  local repository=\"$2\"\n  local version=\"$3\"\n  local token_url=\"$4\"\n  local token\n  token=\"$(curl --fail-with-body --silent --show-error \"$token_url\" | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"token\"])')\"\n  curl --fail-with-body --silent --show-error --head \\\n    -H \"Authorization: Bearer $token\" \\\n    -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \\\n    \"https://$registry/v2/$repository/manifests/$version\" | \\\n    awk 'BEGIN {IGNORECASE=1} /^docker-content-digest:/ {gsub(\"\\r\", \"\", $2); print $2}'\n}\n\nfor baseline in .github/release-baselines/v*.json; do\n  version=\"$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[\"version\"])' \"$baseline\")\"\n  gh api \"repos/$GITHUB_REPOSITORY/releases/tags/$version\" > release.json\n\n  tag_object=\"$(gh api \"repos/$GITHUB_REPOSITORY/git/ref/tags/$version\" --jq '.object.sha')\"\n  tag_type=\"$(gh api \"repos/$GITHUB_REPOSITORY/git/ref/tags/$version\" --jq '.object.type')\"\n  if [ \"$tag_type\" = \"tag\" ]; then\n    tag_commit=\"$(gh api \"repos/$GITHUB_REPOSITORY/git/tags/$tag_object\" --jq '.object.sha')\"\n  elif [ \"$tag_type\" = \"commit\" ]; then\n    tag_commit=\"$tag_object\"\n  else\n    echo \"::error::Unsupported tag object type $tag_type for $version.\"\n    exit 1\n  fi\n\n  dockerhub_digest=\"$(registry_digest \\\n    registry-1.docker.io \\\n    aethersailor/subconverter-extended \\\n    \"$version\" \\\n    \"https://auth.docker.io/token?service=registry.docker.io&scope=repository:aethersailor/subconverter-extended:pull\")\"\n  ghcr_digest=\"$(registry_digest \\\n    ghcr.io \\\n    aethersailor/subconverter-extended \\\n    \"$version\" \\\n    \"https://ghcr.io/token?service=ghcr.io&scope=repository:aethersailor/subconverter-extended:pull\")\"\n\n  python3 scripts/ci/verify_release_baseline.py \\\n    --baseline \"$baseline\" \\\n    --release-json release.json \\\n    --tag-commit \"$tag_commit\" \\\n    --dockerhub-digest \"$dockerhub_digest\" \\\n    --ghcr-digest \"$ghcr_digest\"\ndone\n\ngh api --paginate \"repos/$GITHUB_REPOSITORY/releases?per_page=100\" \\\n  --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' | \\\nwhile IFS= read -r version; do\n  has_manifest=\"$(gh api \"repos/$GITHUB_REPOSITORY/releases/tags/$version\" \\\n    --jq 'any(.assets[]; .name == \"RELEASE-MANIFEST.json\")')\"\n  [ \"$has_manifest\" = \"true\" ] || continue\n\n  immutable=\"$(gh api \\\n    -H 'X-GitHub-Api-Version: 2026-03-10' \\\n    \"repos/$GITHUB_REPOSITORY/releases/tags/$version\" \\\n    --jq '.immutable')\"\n  if [ \"$immutable\" != \"true\" ]; then\n    echo \"::error::Modern formal Release $version is not immutable.\"\n    exit 1\n  fi\n\n  manifest_dir=\"$RUNNER_TEMP/release-manifests/$version\"\n  mkdir -p \"$manifest_dir\"\n  gh release download \"$version\" \\\n    --repo \"$GITHUB_REPOSITORY\" \\\n    --pattern RELEASE-MANIFEST.json \\\n    --dir \"$manifest_dir\"\n\n  tag_object=\"$(gh api \"repos/$GITHUB_REPOSITORY/git/ref/tags/$version\" --jq '.object.sha')\"\n  tag_type=\"$(gh api \"repos/$GITHUB_REPOSITORY/git/ref/tags/$version\" --jq '.object.type')\"\n  if [ \"$tag_type\" = \"tag\" ]; then\n    tag_commit=\"$(gh api \"repos/$GITHUB_REPOSITORY/git/tags/$tag_object\" --jq '.object.sha')\"\n  elif [ \"$tag_type\" = \"commit\" ]; then\n    tag_commit=\"$tag_object\"\n  else\n    echo \"::error::Unsupported tag object type $tag_type for $version.\"\n    exit 1\n  fi\n\n  dockerhub_digest=\"$(registry_digest \\\n    registry-1.docker.io \\\n    aethersailor/subconverter-extended \\\n    \"$version\" \\\n    \"https://auth.docker.io/token?service=registry.docker.io&scope=repository:aethersailor/subconverter-extended:pull\")\"\n  ghcr_digest=\"$(registry_digest \\\n    ghcr.io \\\n    aethersailor/subconverter-extended \\\n    \"$version\" \\\n    \"https://ghcr.io/token?service=ghcr.io&scope=repository:aethersailor/subconverter-extended:pull\")\"\n\n  python3 - \"$manifest_dir/RELEASE-MANIFEST.json\" \"$version\" \"$tag_commit\" \"$dockerhub_digest\" \"$ghcr_digest\" <<'PY'\nimport json\nimport sys\n\npath, version, tag_commit, dockerhub_digest, ghcr_digest = sys.argv[1:]\nmanifest = json.load(open(path, encoding=\"utf-8\"))\nexpected = (\n    manifest.get(\"version\") == version\n    and manifest.get(\"tag\") == version\n    and manifest.get(\"revision\") == tag_commit\n    and manifest[\"images\"][\"dockerhub\"][\"digest\"] == dockerhub_digest\n    and manifest[\"images\"][\"ghcr\"][\"digest\"] == ghcr_digest\n    and dockerhub_digest == ghcr_digest\n)\nif not expected:\n    raise SystemExit(f\"published release identity drifted for {version}\")\nprint(f\"Verified immutable published identity {version} at {tag_commit}\")\nPY\ndone",
               "shell": "bash"
             }
           ]
