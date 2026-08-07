@@ -756,20 +756,100 @@ jobs:
       - name: Promote tested candidates
         shell: bash
         run: |
-          bash scripts/ci/promote-tested-images.sh \
-            "${{ needs.prepare.outputs.mode }}" \
-            "${{ needs.prepare.outputs.version }}" \
-            "${{ needs.prepare.outputs.tags }}"
+          set -euo pipefail
+
+          if [ "${{ needs.prepare.outputs.mode }}" = "dev" ]; then
+            ARCHES=(amd64)
+          else
+            ARCHES=(amd64 arm64 armv7)
+          fi
+          for arch in "${ARCHES[@]}"; do
+            test -s "digests/${arch}.txt"
+            grep -Eq '^sha256:[0-9a-f]{64}$' "digests/${arch}.txt"
+          done
+
+          TAGS="${{ needs.prepare.outputs.tags }}"
+          IMAGE_NAMES=(
+            "aethersailor/subconverter-extended"
+            "ghcr.io/aethersailor/subconverter-extended"
+          )
+
+          for IMAGE_NAME in "${IMAGE_NAMES[@]}"; do
+            SOURCES=()
+            for arch in "${ARCHES[@]}"; do
+              candidate="ci-${{ needs.prepare.outputs.mode }}-${arch}"
+              if [ "${{ needs.prepare.outputs.mode }}" = "release" ]; then
+                candidate="ci-${{ needs.prepare.outputs.version }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${arch}"
+              fi
+              SOURCES+=("${IMAGE_NAME}:${candidate}")
+            done
+            for TAG in $TAGS; do
+              if [[ "$TAG" == "$IMAGE_NAME:"* ]]; then
+                echo "Promoting ${SOURCES[*]} to $TAG"
+                docker buildx imagetools create -t "$TAG" "${SOURCES[@]}"
+              fi
+            done
+          done
 
       - name: Verify manifest platforms
         id: published
         shell: bash
         run: |
-          bash scripts/ci/verify-published-images.sh \
-            "${{ needs.prepare.outputs.mode }}" \
-            "${{ needs.prepare.outputs.tags }}" \
-            "${{ needs.prepare.outputs.sha }}" \
-            "${{ needs.prepare.outputs.version }}"
+          set -euo pipefail
+
+          if [ "${{ needs.prepare.outputs.mode }}" = "dev" ]; then
+            PLATFORMS=("linux/amd64")
+          else
+            PLATFORMS=("linux/amd64" "linux/arm64" "linux/arm/v7")
+          fi
+          TAGS="${{ needs.prepare.outputs.tags }}"
+          DOCKERHUB_DIGEST=""
+          GHCR_DIGEST=""
+          for TAG in $TAGS; do
+            echo "Inspecting $TAG"
+            for attempt in $(seq 1 6); do
+              if docker buildx imagetools inspect "$TAG" > manifest.txt; then
+                break
+              fi
+              if [ "$attempt" -eq 6 ]; then
+                echo "Failed to inspect $TAG"
+                exit 1
+              fi
+              sleep 5
+            done
+
+            cat manifest.txt
+            digest="$(awk '$1 == "Digest:" {print $2; exit}' manifest.txt)"
+            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::Could not resolve the manifest digest for $TAG."
+              exit 1
+            fi
+            if [[ "$TAG" == ghcr.io/* ]]; then
+              GHCR_DIGEST="$digest"
+              echo "ghcr_digest=$digest" >> "$GITHUB_OUTPUT"
+            else
+              DOCKERHUB_DIGEST="$digest"
+              echo "dockerhub_digest=$digest" >> "$GITHUB_OUTPUT"
+            fi
+
+            for PLATFORM in "${PLATFORMS[@]}"; do
+              if ! grep -Eq "Platform:[[:space:]]+${PLATFORM}$" manifest.txt; then
+                echo "Missing platform ${PLATFORM} in ${TAG}"
+                exit 1
+              fi
+              docker pull --platform "$PLATFORM" "$TAG"
+              actual_revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$TAG")"
+              actual_version="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$TAG")"
+              test "$actual_revision" = "${{ needs.prepare.outputs.sha }}"
+              test "$actual_version" = "${{ needs.prepare.outputs.version }}"
+            done
+          done
+          test -n "$DOCKERHUB_DIGEST"
+          test -n "$GHCR_DIGEST"
+          if [ "$DOCKERHUB_DIGEST" != "$GHCR_DIGEST" ]; then
+            echo "::error::Docker Hub and GHCR manifest digests differ."
+            exit 1
+          fi
 
   create-release:
     name: "🚀 Release Artifacts"

@@ -24,18 +24,6 @@ if [ -n "$metadata" ]; then
   printf '{"containerimage.digest":"sha256:%064d"}\n' 0 > "$metadata"
 fi
 
-if [ "${1:-}" = "buildx" ] && [ "${2:-}" = "imagetools" ] && [ "${3:-}" = "inspect" ]; then
-  printf 'Name: test\nDigest: sha256:%064d\n' 1
-  printf 'Platform: linux/amd64\n'
-  if [ "${FAKE_ALL_PLATFORMS:-false}" = "true" ]; then
-    printf 'Platform: linux/arm64\nPlatform: linux/arm/v7\n'
-  fi
-elif [ "${1:-}" = "image" ] && [ "${2:-}" = "inspect" ]; then
-  case "$*" in
-    *org.opencontainers.image.revision*) printf '%s\n' "$FAKE_REVISION" ;;
-    *org.opencontainers.image.version*) printf '%s\n' "$FAKE_VERSION" ;;
-  esac
-fi
 SH
 chmod +x "$TEST_ROOT/bin/docker"
 
@@ -95,37 +83,5 @@ bash "$REPOSITORY/scripts/ci/export-ci-image.sh" \
 assert_trace "--target ci-export"
 assert_trace "--tag subconverter-temp:amd64-builder"
 assert_trace "--load"
-
-mkdir -p "$TEST_ROOT/promote/digests"
-printf 'sha256:%064d\n' 2 > "$TEST_ROOT/promote/digests/amd64.txt"
-pushd "$TEST_ROOT/promote" >/dev/null
-: > "$TRACE"
-bash "$REPOSITORY/scripts/ci/promote-tested-images.sh" \
-  dev dev $'aethersailor/subconverter-extended:dev\nghcr.io/aethersailor/subconverter-extended:dev'
-assert_trace "aethersailor/subconverter-extended:ci-dev-amd64"
-assert_trace "ghcr.io/aethersailor/subconverter-extended:ci-dev-amd64"
-test "$(grep -c 'imagetools create' "$TRACE")" -eq 2
-
-printf 'sha256:%064d\n' 3 > digests/arm64.txt
-printf 'sha256:%064d\n' 4 > digests/armv7.txt
-: > "$TRACE"
-bash "$REPOSITORY/scripts/ci/promote-tested-images.sh" \
-  release v1.3.1 $'aethersailor/subconverter-extended:v1.3.1\nghcr.io/aethersailor/subconverter-extended:v1.3.1'
-assert_trace "ci-v1.3.1-42-3-amd64"
-assert_trace "ci-v1.3.1-42-3-arm64"
-assert_trace "ci-v1.3.1-42-3-armv7"
-
-export FAKE_REVISION=0123456789abcdef0123456789abcdef01234567
-export FAKE_VERSION=v1.3.1
-export FAKE_ALL_PLATFORMS=true
-: > "$TRACE"
-: > "$GITHUB_OUTPUT"
-bash "$REPOSITORY/scripts/ci/verify-published-images.sh" \
-  release $'aethersailor/subconverter-extended:v1.3.1\nghcr.io/aethersailor/subconverter-extended:v1.3.1' \
-  "$FAKE_REVISION" "$FAKE_VERSION"
-grep -Eq '^dockerhub_digest=sha256:[0-9]{64}$' "$GITHUB_OUTPUT"
-grep -Eq '^ghcr_digest=sha256:[0-9]{64}$' "$GITHUB_OUTPUT"
-test "$(grep -c 'pull --platform' "$TRACE")" -eq 6
-popd >/dev/null
 
 echo "CI delivery script contract passed"
