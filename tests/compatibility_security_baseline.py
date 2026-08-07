@@ -454,7 +454,16 @@ def running_service(
         )
         base_url = f"http://127.0.0.1:{port}"
         try:
-            wait_ready(base_url, process)
+            try:
+                wait_ready(base_url, process)
+            except Exception as error:
+                stderr.flush()
+                diagnostics = stderr_path.read_text(
+                    encoding="utf-8", errors="replace"
+                )
+                raise AssertionError(
+                    f"{error}; service stderr tail: {diagnostics[-8000:]!r}"
+                ) from error
             yield (
                 (base_url, statistics_path)
                 if runtime_details
@@ -492,13 +501,19 @@ def run_settings_snapshot(
     completed = subprocess.run(
         [str(helper), str(fixture)],
         cwd=REPOSITORY,
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
         env=env,
     )
+    if completed.returncode != 0:
+        raise AssertionError(
+            "settings snapshot helper failed with "
+            f"exit {completed.returncode}; stderr tail: "
+            f"{completed.stderr[-8000:]!r}"
+        )
     if "fixture-secret" in completed.stdout or "fixture-dashboard-secret" in completed.stdout:
         raise AssertionError("SettingsSnapshot leaked a fixture secret")
     return json.loads(completed.stdout), completed.stderr
@@ -534,13 +549,19 @@ def reload_settings_snapshot(
     completed = subprocess.run(
         command,
         cwd=REPOSITORY,
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
         env=env,
     )
+    if completed.returncode != 0:
+        raise AssertionError(
+            "settings reload helper failed with "
+            f"exit {completed.returncode}; stderr tail: "
+            f"{completed.stderr[-8000:]!r}"
+        )
     return json.loads(completed.stdout)
 
 
