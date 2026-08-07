@@ -1,0 +1,676 @@
+{
+  "composite_action_sha256": {
+    ".github/actions/smoke-docker-image/action.yml": "6cd40ef916c5a395e9da9e2ac46dc714383193e9a4be78ba35470cf93107d682",
+    ".github/actions/smoke-linux-artifact/action.yml": "abc193454db01fcfda3a58d1c7b43dc4dd60845957731c9ea1cb4adc06147bfd",
+    ".github/actions/smoke-openwrt-apk/action.yml": "fa75f750b7e0bd27639492342bcfa5ec8c3953c5d6e1373566e3ff0bb26cb72d",
+    ".github/actions/smoke-windows-artifact/action.yml": "397bf45c0fafeb194ab283d9c9497041d34b3710214e4fe221f457d9c0d8ddda"
+  },
+  "workflows": {
+    "auto-merge-dependabot.yml": {
+      "jobs": {
+        "auto-merge": {
+          "if": "github.actor == 'dependabot[bot]'",
+          "runs-on": "ubuntu-latest",
+          "steps": [
+            {
+              "name": "Merge Dependabot PR",
+              "uses": "actions/github-script@v9",
+              "with": "script: |\n  const pullNumber = context.payload.pull_request.number;\n  const title = context.payload.pull_request.title;\n\n  await github.rest.pulls.merge({\n    owner: context.repo.owner,\n    repo: context.repo.repo,\n    pull_number: pullNumber,\n    merge_method: 'squash',\n    commit_title: `${title} (#${pullNumber})`,\n  });\n\n  console.log('Dependabot PR merged successfully.');"
+            }
+          ]
+        }
+      },
+      "name": "Auto-merge Dependabot PRs",
+      "on": "pull_request_target:\n  types: [opened, synchronize, reopened]",
+      "permissions": "contents: write\npull-requests: write"
+    },
+    "block-master-prs.yml": {
+      "jobs": {
+        "block-master-pr": {
+          "runs-on": "ubuntu-latest",
+          "steps": [
+            {
+              "id": "check",
+              "name": "Check Actor"
+            },
+            {
+              "if": "steps.check.outputs.is_allowed == 'false'",
+              "name": "Close PR and Leave Comment",
+              "uses": "actions/github-script@v9",
+              "with": "script: |\n  const message = `\n  🚫 **自动拦截提示 (Auto-Block)** 🚫\n  \n  感谢你的提交！(Thanks for your contribution!)\n  \n  本项目严格使用双分支开发模型：\n  - \\`master\\` 分支仅用于最终发布。\n  - **所有的代码贡献和 PR 必须指向 \\`dev\\` 分支。**\n  \n  这个 PR 已经被自动关闭。请将你本地的分支目标修改为 \\`dev\\` 后再重新提交一个 PR。非常感谢你的理解与支持！\n  \n  (Please change the target branch of your PR to \\`dev\\` and resubmit. The \\`master\\` branch is for releases only.)\n  `;\n  \n  // 评论\n  await github.rest.issues.createComment({\n    owner: context.repo.owner,\n    repo: context.repo.repo,\n    issue_number: context.issue.number,\n    body: message\n  });\n  \n  // 关闭 PR\n  await github.rest.pulls.update({\n    owner: context.repo.owner,\n    repo: context.repo.repo,\n    pull_number: context.issue.number,\n    state: 'closed'\n  });"
+            }
+          ]
+        }
+      },
+      "name": "Block PRs to Master",
+      "on": "pull_request_target:\n  branches:\n    - master\n  types: [opened, reopened, synchronize]",
+      "permissions": "pull-requests: write"
+    },
+    "build-dockerhub.yml": {
+      "concurrency": "group: build-core-${{ github.ref }}\ncancel-in-progress: false",
+      "jobs": {
+        "build-linux": {
+          "name": "\"🐳 Docker Build (${{ matrix.arch }})\"",
+          "needs": "prepare",
+          "runs-on": "${{ matrix.runner }}",
+          "steps": [
+            {
+              "name": "Checkout",
+              "uses": "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6",
+              "with": "token: ${{ secrets.PAT_TOKEN || github.token }}\nfetch-depth: 0"
+            },
+            {
+              "name": "Download dependency snapshot",
+              "uses": "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8",
+              "with": "name: dependency-snapshot\npath: dependency-snapshot"
+            },
+            {
+              "id": "dependencies",
+              "name": "Activate dependency snapshot",
+              "shell": "bash"
+            },
+            {
+              "name": "Run Python regression baselines",
+              "shell": "bash"
+            },
+            {
+              "name": "Set up Docker Buildx",
+              "shell": "bash"
+            },
+            {
+              "env": "DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}\nDOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}",
+              "if": "github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'",
+              "name": "Log in to Docker Hub",
+              "shell": "bash"
+            },
+            {
+              "env": "GHCR_USERNAME: ${{ github.actor }}\nGHCR_TOKEN: ${{ github.token }}",
+              "if": "github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'",
+              "name": "Log in to GHCR",
+              "shell": "bash"
+            },
+            {
+              "env": "THREADS: ${{ matrix.threads }}\nSHA: ${{ needs.prepare.outputs.sha }}\nVERSION: ${{ needs.prepare.outputs.version }}\nBUILD_DATE: ${{ needs.prepare.outputs.build_date }}\nREFRESH_GO_DEPS: ${{ needs.prepare.outputs.mode == 'dev' && matrix.extract_generated == 'true' }}\nREFRESH_HEADERS: ${{ needs.prepare.outputs.mode == 'dev' && matrix.extract_generated == 'true' }}",
+              "id": "docker_args",
+              "name": "Prepare Docker build args",
+              "shell": "bash"
+            },
+            {
+              "env": "BUILD_ARGS: ${{ steps.docker_args.outputs.args }}",
+              "id": "build_image",
+              "name": "Build candidate image once",
+              "shell": "bash"
+            },
+            {
+              "env": "BUILD_ARGS: ${{ steps.docker_args.outputs.args }}",
+              "name": "Export CI artifacts from the existing cache",
+              "shell": "bash"
+            },
+            {
+              "env": "EXTRACT_GENERATED: ${{ matrix.extract_generated }}",
+              "name": "Extract builder output",
+              "shell": "bash"
+            },
+            {
+              "name": "Check bridge size budget (${{ matrix.arch }})",
+              "shell": "bash"
+            },
+            {
+              "env": "SHA: ${{ needs.prepare.outputs.sha }}\nBUILD_DATE: ${{ needs.prepare.outputs.build_date }}",
+              "if": "needs.prepare.outputs.is_release == 'true'",
+              "name": "Package Release Artifacts (Linux ${{ matrix.arch }})",
+              "shell": "bash"
+            },
+            {
+              "if": "needs.prepare.outputs.is_release == 'true'",
+              "name": "Check release size budgets (Linux ${{ matrix.arch }})",
+              "shell": "bash"
+            },
+            {
+              "if": "matrix.qemu_platforms != ''",
+              "name": "Set up QEMU for smoke test",
+              "shell": "bash"
+            },
+            {
+              "if": "needs.prepare.outputs.is_release == 'true'",
+              "name": "Smoke test artifact (Linux ${{ matrix.arch }})",
+              "timeout-minutes": "3",
+              "uses": "./.github/actions/smoke-linux-artifact",
+              "with": "artifact: SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-${{ matrix.arch }}.tar.gz\nexpected-version: ${{ needs.prepare.outputs.version }}\nexpected-revision: ${{ needs.prepare.outputs.sha }}\nexpected-build-date: ${{ needs.prepare.outputs.build_date }}"
+            },
+            {
+              "if": "needs.prepare.outputs.is_release == 'true'",
+              "name": "Smoke test APKs (OpenWrt ${{ matrix.arch }})",
+              "timeout-minutes": "3",
+              "uses": "./.github/actions/smoke-openwrt-apk",
+              "with": "artifacts: SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-*.apk\nexpected-version: ${{ needs.prepare.outputs.version }}\nexpected-revision: ${{ needs.prepare.outputs.sha }}\nexpected-build-date: ${{ needs.prepare.outputs.build_date }}"
+            },
+            {
+              "if": "needs.prepare.outputs.is_release == 'true'",
+              "name": "Upload Artifact (Linux ${{ matrix.arch }})",
+              "uses": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7",
+              "with": "name: linux-${{ matrix.arch }}\npath: SubConverter-Extended-*.tar.gz"
+            },
+            {
+              "if": "needs.prepare.outputs.is_release == 'true'",
+              "name": "Upload Artifact (OpenWrt ${{ matrix.arch }})",
+              "uses": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7",
+              "with": "name: openwrt-${{ matrix.arch }}\npath: SubConverter-Extended-*-openwrt-*.apk"
+            },
+            {
+              "if": "needs.prepare.outputs.is_release == 'true'",
+              "name": "Clean release packaging files",
+              "shell": "bash"
+            },
+            {
+              "id": "check_changes",
+              "if": "matrix.extract_generated == 'true'",
+              "name": "Check for file changes",
+              "shell": "bash"
+            },
+            {
+              "if": "steps.check_changes.outputs.changed == 'true' && needs.prepare.outputs.mode != 'dev'",
+              "name": "Verify frozen generated inputs outside dev",
+              "shell": "bash"
+            },
+            {
+              "if": "github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'",
+              "name": "Save image digest",
+              "shell": "bash"
+            },
+            {
+              "if": "github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'",
+              "name": "Upload image digest",
+              "uses": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7",
+              "with": "name: docker-digest-${{ matrix.arch }}\npath: docker-digests/${{ matrix.arch }}.txt\nretention-days: 1"
+            },
+            {
+              "if": "github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'",
+              "name": "Smoke test image (${{ matrix.arch }})",
+              "timeout-minutes": "3",
+              "uses": "./.github/actions/smoke-docker-image",
+              "with": "image: ghcr.io/aethersailor/subconverter-extended@${{ steps.build_image.outputs.digest }}\nplatform: ${{ matrix.image_platform }}\nexpected-version: ${{ needs.prepare.outputs.version }}\nexpected-revision: ${{ needs.prepare.outputs.sha }}\nexpected-build-date: ${{ needs.prepare.outputs.build_date }}"
+            },
+            {
+              "env": "SOURCE_REVISION: ${{ github.sha }}",
+              "if": "steps.check_changes.outputs.changed == 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/dev'",
+              "name": "Commit and push generated development files",
+              "shell": "bash"
+            }
+          ],
+          "strategy": "fail-fast: false\nmatrix: ${{ fromJSON(needs.prepare.outputs.linux_matrix) }}"
+        },
+        "build-windows-amd64": {
+          "if": "needs.prepare.outputs.is_release == 'true'",
+          "name": "\"🪟 Windows Build (amd64)\"",
+          "needs": "prepare",
+          "runs-on": "windows-latest",
+          "steps": [
+            {
+              "name": "Checkout",
+              "uses": "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6",
+              "with": "token: ${{ github.event_name == 'pull_request' && github.token || secrets.PAT_TOKEN }}\nfetch-depth: 0"
+            },
+            {
+              "name": "Download dependency snapshot",
+              "uses": "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8",
+              "with": "name: dependency-snapshot\npath: dependency-snapshot"
+            },
+            {
+              "name": "Activate dependency snapshot",
+              "shell": "pwsh"
+            },
+            {
+              "name": "Set up Go",
+              "uses": "actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6",
+              "with": "go-version-file: bridge/go.mod\ncache-dependency-path: bridge/go.sum"
+            },
+            {
+              "name": "Set up MSYS2",
+              "uses": "msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2",
+              "with": "msystem: UCRT64\npath-type: inherit\nupdate: true\ninstall: >-\n  git\n  mingw-w64-ucrt-x86_64-gcc\n  mingw-w64-ucrt-x86_64-cmake\n  mingw-w64-ucrt-x86_64-ninja\n  mingw-w64-ucrt-x86_64-pkgconf\n  mingw-w64-ucrt-x86_64-curl\n  mingw-w64-ucrt-x86_64-yaml-cpp\n  mingw-w64-ucrt-x86_64-pcre2\n  mingw-w64-ucrt-x86_64-rapidjson"
+            },
+            {
+              "name": "Build Windows amd64",
+              "shell": "msys2 {0}"
+            },
+            {
+              "name": "Package Release Artifact (Windows amd64)",
+              "shell": "pwsh"
+            },
+            {
+              "name": "Check release size budget (Windows amd64)",
+              "shell": "pwsh"
+            },
+            {
+              "name": "Smoke test artifact (Windows amd64)",
+              "timeout-minutes": "3",
+              "uses": "./.github/actions/smoke-windows-artifact",
+              "with": "artifact: SubConverter-Extended-${{ needs.prepare.outputs.version }}-windows-amd64.zip\nexpected-version: ${{ needs.prepare.outputs.version }}\nexpected-revision: ${{ needs.prepare.outputs.sha }}\nexpected-build-date: ${{ needs.prepare.outputs.build_date }}"
+            },
+            {
+              "name": "Upload Artifact (Windows amd64)",
+              "uses": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7",
+              "with": "name: windows-amd64\npath: SubConverter-Extended-*.zip"
+            }
+          ]
+        },
+        "create-release": {
+          "if": "startsWith(github.ref, 'refs/tags/') && needs.prepare.outputs.is_release == 'true'",
+          "name": "\"🚀 Release Artifacts\"",
+          "needs": "[prepare, build-linux, build-windows-amd64, merge-manifest]",
+          "permissions": "contents: write",
+          "runs-on": "ubuntu-latest",
+          "steps": [
+            {
+              "name": "Checkout",
+              "uses": "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6",
+              "with": "fetch-depth: 0"
+            },
+            {
+              "env": "RELEASE_VERSION: ${{ needs.prepare.outputs.version }}",
+              "name": "Prepare Release Notes Context"
+            },
+            {
+              "env": "COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}",
+              "id": "copilot_token",
+              "name": "Check Copilot Token"
+            },
+            {
+              "if": "steps.copilot_token.outputs.available == 'true'",
+              "name": "Set up Node.js",
+              "uses": "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6"
+            },
+            {
+              "continue-on-error": "true",
+              "env": "COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}",
+              "if": "steps.copilot_token.outputs.available == 'true'",
+              "name": "Generate Bilingual Release Notes with Copilot"
+            },
+            {
+              "name": "Assemble Release Notes"
+            },
+            {
+              "name": "Download all artifacts",
+              "uses": "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8",
+              "with": "path: artifacts\npattern: '*'\nmerge-multiple: false"
+            },
+            {
+              "name": "Generate checksums"
+            },
+            {
+              "name": "Generate immutable release manifest",
+              "shell": "bash"
+            },
+            {
+              "env": "GH_TOKEN: ${{ github.token }}\nVERSION: ${{ needs.prepare.outputs.version }}",
+              "name": "Create draft Release without overwrites",
+              "shell": "bash"
+            }
+          ]
+        },
+        "finalize-release": {
+          "if": "startsWith(github.ref, 'refs/tags/') && needs.prepare.outputs.is_release == 'true'",
+          "name": "\"🔒 Freeze Release and Advance latest\"",
+          "needs": "[prepare, merge-manifest, create-release]",
+          "permissions": "contents: write\npackages: write",
+          "runs-on": "ubuntu-latest",
+          "steps": [
+            {
+              "name": "Checkout the tagged source",
+              "uses": "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6",
+              "with": "fetch-depth: 0"
+            },
+            {
+              "env": "GH_TOKEN: ${{ github.token }}\nVERSION: ${{ needs.prepare.outputs.version }}\nREVISION: ${{ needs.prepare.outputs.sha }}",
+              "id": "release_assets",
+              "name": "Re-verify draft assets and tag identity",
+              "shell": "bash"
+            },
+            {
+              "name": "Log in to Docker Hub",
+              "uses": "docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4",
+              "with": "username: ${{ secrets.DOCKERHUB_USERNAME }}\npassword: ${{ secrets.DOCKERHUB_TOKEN }}"
+            },
+            {
+              "name": "Log in to GHCR",
+              "uses": "docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4",
+              "with": "registry: ghcr.io\nusername: ${{ github.actor }}\npassword: ${{ github.token }}"
+            },
+            {
+              "id": "version_images",
+              "name": "Re-verify published version digests",
+              "shell": "bash"
+            },
+            {
+              "env": "GH_TOKEN: ${{ github.token }}\nVERSION: ${{ needs.prepare.outputs.version }}",
+              "if": "steps.release_assets.outputs.publish_needed == 'true'",
+              "name": "Publish immutable GitHub Release",
+              "shell": "bash"
+            },
+            {
+              "env": "GH_TOKEN: ${{ github.token }}\nVERSION: ${{ needs.prepare.outputs.version }}",
+              "name": "Verify GitHub release attestation",
+              "shell": "bash"
+            },
+            {
+              "name": "Advance latest only after full release verification",
+              "shell": "bash"
+            }
+          ]
+        },
+        "merge-manifest": {
+          "if": "github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'",
+          "name": "\"🔗 Publish Version Docker Images\"",
+          "needs": "[prepare, build-linux]",
+          "outputs": "dockerhub_digest: ${{ steps.published.outputs.dockerhub_digest }}\nghcr_digest: ${{ steps.published.outputs.ghcr_digest }}",
+          "runs-on": "ubuntu-latest",
+          "steps": [
+            {
+              "env": "SOURCE_SHA: ${{ github.sha }}",
+              "if": "needs.prepare.outputs.mode == 'dev'",
+              "name": "Prevent stale dev image promotion",
+              "uses": "actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9",
+              "with": "script: |\n  const branch = context.ref.replace('refs/heads/', '');\n  const sourceSha = process.env.SOURCE_SHA;\n  const { data: branchData } = await github.rest.repos.getBranch({\n    owner: context.repo.owner,\n    repo: context.repo.repo,\n    branch,\n  });\n  const currentSha = branchData.commit.sha;\n\n  if (currentSha === sourceSha) {\n    core.info(`${sourceSha} is still the current head of ${branch}.`);\n    return;\n  }\n\n  const { data: currentCommit } = await github.rest.repos.getCommit({\n    owner: context.repo.owner,\n    repo: context.repo.repo,\n    ref: currentSha,\n  });\n  const generatedCommitTitle =\n    'chore: update generated development inputs after build [skip ci]';\n  const isExpectedGeneratedChild =\n    currentCommit.parents.length === 1 &&\n    currentCommit.parents[0].sha === sourceSha &&\n    currentCommit.commit.message.split('\\n', 1)[0] === generatedCommitTitle &&\n    currentCommit.committer?.login === 'github-actions[bot]';\n\n  if (isExpectedGeneratedChild) {\n    core.info(\n      `${currentSha} is the expected generated child of ${sourceSha}; ` +\n      'promotion remains valid.'\n    );\n    return;\n  }\n\n  core.setFailed(\n    `Refusing to promote stale image for ${sourceSha}; ` +\n    `${branch} now points to ${currentSha}.`\n  );"
+            },
+            {
+              "name": "Set up Docker Buildx",
+              "uses": "docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4"
+            },
+            {
+              "name": "Log in to Docker Hub",
+              "uses": "docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4",
+              "with": "username: ${{ secrets.DOCKERHUB_USERNAME }}\npassword: ${{ secrets.DOCKERHUB_TOKEN }}"
+            },
+            {
+              "name": "Log in to GHCR",
+              "uses": "docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4",
+              "with": "registry: ghcr.io\nusername: ${{ github.actor }}\npassword: ${{ secrets.GITHUB_TOKEN }}"
+            },
+            {
+              "name": "Download image digests",
+              "uses": "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8",
+              "with": "path: digests\npattern: docker-digest-*\nmerge-multiple: true"
+            },
+            {
+              "env": "VERSION: ${{ needs.prepare.outputs.version }}",
+              "if": "needs.prepare.outputs.mode == 'release'",
+              "name": "Re-verify formal version tags are absent",
+              "shell": "bash"
+            },
+            {
+              "name": "Promote tested candidates",
+              "shell": "bash"
+            },
+            {
+              "id": "published",
+              "name": "Verify manifest platforms",
+              "shell": "bash"
+            }
+          ]
+        },
+        "prepare": {
+          "if": "needs.source-head.outputs.current == 'true' && github.actor != 'dependabot[bot]' && (github.ref != 'refs/heads/dev' || (!contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '[ci skip]')))",
+          "name": "\"🔧 Prepare Metadata\"",
+          "needs": "- source-head\n- request-sanitizers",
+          "outputs": "sha: ${{ steps.metadata.outputs.sha }}\nsha_short: ${{ steps.metadata.outputs.sha_short }}\nversion: ${{ steps.metadata.outputs.version }}\nmode: ${{ steps.metadata.outputs.mode }}\nis_release: ${{ steps.metadata.outputs.is_release }}\ntags: ${{ steps.meta.outputs.tags }}\nbuild_date: ${{ steps.metadata.outputs.build_date }}\nlinux_matrix: ${{ steps.linux_matrix.outputs.matrix }}",
+          "runs-on": "ubuntu-latest",
+          "steps": [
+            {
+              "name": "Checkout",
+              "uses": "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6",
+              "with": "token: ${{ secrets.PAT_TOKEN || github.token }}\nfetch-depth: 0"
+            },
+            {
+              "id": "metadata",
+              "name": "Resolve build metadata",
+              "shell": "bash"
+            },
+            {
+              "env": "GH_TOKEN: ${{ github.token }}\nVERSION: ${{ steps.metadata.outputs.version }}\nREVISION: ${{ steps.metadata.outputs.sha }}",
+              "if": "steps.metadata.outputs.mode == 'release'",
+              "name": "Verify immutable formal release preconditions",
+              "shell": "bash"
+            },
+            {
+              "name": "Verify COCR runtime assets are absent",
+              "shell": "bash"
+            },
+            {
+              "if": "steps.metadata.outputs.mode == 'dev'",
+              "name": "Refresh dependency snapshot on dev",
+              "shell": "bash"
+            },
+            {
+              "name": "Validate dependency snapshot",
+              "shell": "bash"
+            },
+            {
+              "id": "dependencies",
+              "name": "Export dependency metadata",
+              "shell": "bash"
+            },
+            {
+              "name": "Summarize dependency snapshot",
+              "shell": "bash"
+            },
+            {
+              "name": "Upload dependency snapshot",
+              "uses": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7",
+              "with": "name: dependency-snapshot\npath: scripts/ci/dependencies.lock.json\nif-no-files-found: error\nretention-days: 1"
+            },
+            {
+              "id": "linux_matrix",
+              "name": "Build Linux matrix",
+              "shell": "bash"
+            },
+            {
+              "env": "VERSION: ${{ steps.metadata.outputs.version }}\nMODE: ${{ steps.metadata.outputs.mode }}",
+              "id": "meta",
+              "name": "Docker meta",
+              "shell": "bash"
+            }
+          ]
+        },
+        "request-sanitizers": {
+          "if": "needs.source-head.outputs.current == 'true'",
+          "name": "\"🧪 Request Settings ASan/UBSan\"",
+          "needs": "source-head",
+          "runs-on": "ubuntu-latest",
+          "steps": [
+            {
+              "name": "Checkout",
+              "uses": "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6"
+            },
+            {
+              "name": "Resolve pinned build inputs",
+              "shell": "bash"
+            },
+            {
+              "name": "Set up Docker Buildx",
+              "uses": "docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4"
+            },
+            {
+              "name": "Build and run request sanitizer targets",
+              "shell": "bash"
+            }
+          ]
+        },
+        "source-head": {
+          "name": "\"🧭 Verify Current Source Head\"",
+          "outputs": "current: ${{ steps.verify.outputs.current }}",
+          "runs-on": "ubuntu-latest",
+          "steps": [
+            {
+              "id": "verify",
+              "name": "Skip stale branch events",
+              "uses": "actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9",
+              "with": "script: |\n  const isBranch = context.ref.startsWith('refs/heads/');\n  const checksBranchHead =\n    isBranch &&\n    (context.eventName === 'push' || context.eventName === 'workflow_dispatch');\n\n  if (!checksBranchHead) {\n    core.setOutput('current', 'true');\n    return;\n  }\n\n  const branch = context.ref.slice('refs/heads/'.length);\n  const { data } = await github.rest.repos.getBranch({\n    owner: context.repo.owner,\n    repo: context.repo.repo,\n    branch,\n  });\n  const currentSha = data.commit.sha;\n  const isCurrent = currentSha === context.sha;\n\n  core.setOutput('current', String(isCurrent));\n  if (isCurrent) {\n    core.info(`${context.sha} is still the current head of ${branch}.`);\n  } else if (context.eventName === 'workflow_dispatch') {\n    core.setFailed(\n      `Refusing stale workflow_dispatch event for ${context.sha}; ` +\n      `${branch} now points to ${currentSha}.`\n    );\n  } else {\n    core.notice(\n      `Skipping stale ${context.eventName} event for ${context.sha}; ` +\n      `${branch} now points to ${currentSha}.`\n    );\n  }"
+            }
+          ]
+        }
+      },
+      "name": "Build and Push Docker image",
+      "on": "push:\n  branches:\n    - dev\n  paths-ignore:\n    - 'README.md'\n    - 'README-*.md'\n    - 'docker-compose.yml'\npull_request:\n  branches:\n    - master\n    - dev\nworkflow_dispatch:\nworkflow_call:",
+      "permissions": "contents: read\npackages: write"
+    },
+    "cleanup-workflows.yml": {
+      "jobs": {
+        "cleanup": {
+          "runs-on": "ubuntu-latest",
+          "steps": [
+            {
+              "env": "GH_TOKEN: ${{ github.token }}",
+              "name": "Delete Failed, Cancelled and Skipped Workflow Runs"
+            }
+          ]
+        }
+      },
+      "name": "Cleanup Failed Workflows",
+      "on": "workflow_dispatch:",
+      "permissions": "actions: write\ncontents: read"
+    },
+    "codeql.yml": {
+      "concurrency": "group: ${{ github.workflow }}-${{ github.ref }}\ncancel-in-progress: false",
+      "jobs": {
+        "analyze": {
+          "if": "needs.source-head.outputs.current == 'true' && github.actor != 'dependabot[bot]'",
+          "name": "Analyze (${{ matrix.language }})",
+          "needs": "source-head",
+          "permissions": "actions: read\ncontents: read\npackages: read\nsecurity-events: write",
+          "runs-on": "ubuntu-latest",
+          "strategy": "fail-fast: false\nmatrix:\n  include:\n    - language: c-cpp\n      build-mode: manual\n    - language: go\n      build-mode: autobuild\n    - language: python\n      build-mode: none\n    - language: actions\n      build-mode: none"
+        },
+        "source-head": {
+          "name": "Verify Current Source Head",
+          "outputs": "current: ${{ steps.verify.outputs.current }}",
+          "runs-on": "ubuntu-latest",
+          "steps": [
+            {
+              "id": "verify",
+              "name": "Skip stale branch events",
+              "uses": "actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9",
+              "with": "script: |\n  const isBranch = context.ref.startsWith('refs/heads/');\n  const checksBranchHead =\n    isBranch &&\n    (context.eventName === 'push' || context.eventName === 'workflow_dispatch');\n\n  if (!checksBranchHead) {\n    core.setOutput('current', 'true');\n    return;\n  }\n\n  const branch = context.ref.slice('refs/heads/'.length);\n  const { data } = await github.rest.repos.getBranch({\n    owner: context.repo.owner,\n    repo: context.repo.repo,\n    branch,\n  });\n  const currentSha = data.commit.sha;\n  const isCurrent = currentSha === context.sha;\n\n  core.setOutput('current', String(isCurrent));\n  if (isCurrent) {\n    core.info(`${context.sha} is still the current head of ${branch}.`);\n  } else {\n    core.notice(\n      `Skipping stale ${context.eventName} event for ${context.sha}; ` +\n      `${branch} now points to ${currentSha}.`\n    );\n  }"
+            }
+          ]
+        }
+      },
+      "name": "\"CodeQL\"",
+      "on": "workflow_dispatch:\npush:\n  branches: [ \"dev\" ]\npull_request:\n  branches: [ \"dev\", \"master\" ]"
+    },
+    "manage-inactive-issues.yml": {
+      "concurrency": "group: manage-inactive-issues\ncancel-in-progress: false",
+      "jobs": {
+        "manage": {
+          "env": "INACTIVE_ISSUE_WAIT_DAYS: \"14\"\nINACTIVE_ISSUE_DRY_RUN: ${{ inputs.dry_run || 'false' }}",
+          "runs-on": "ubuntu-latest",
+          "steps": [
+            {
+              "name": "Check out repository automation",
+              "uses": "actions/checkout@v6"
+            },
+            {
+              "name": "Test issue management rules"
+            },
+            {
+              "name": "Close issues without replies for fourteen days",
+              "uses": "actions/github-script@v9",
+              "with": "script: |\n  const manageInactiveIssues = require('./.github/scripts/manage-inactive-issues.cjs');\n  await manageInactiveIssues({ github, context, core });"
+            }
+          ],
+          "timeout-minutes": "10"
+        }
+      },
+      "name": "Close Inactive Issues",
+      "on": "schedule:\n  # 03:17 Asia/Shanghai. Avoid the busiest time at the start of an hour.\n  - cron: \"17 19 * * *\"\nworkflow_dispatch:\n  inputs:\n    dry_run:\n      description: Only report the actions that would be taken\n      required: true\n      default: true\n      type: boolean",
+      "permissions": "contents: read\nissues: write"
+    },
+    "release.yml": {
+      "concurrency": "group: formal-release\ncancel-in-progress: false",
+      "jobs": {
+        "release": {
+          "name": "Immutable tag release",
+          "secrets": "inherit",
+          "uses": "./.github/workflows/build-dockerhub.yml"
+        }
+      },
+      "name": "Formal Release",
+      "on": "push:\n  tags:\n    - 'v*.*.*'",
+      "permissions": "contents: write\npackages: write"
+    },
+    "sync-dev-to-master.yml": {
+      "concurrency": "group: sync-dev-to-master\ncancel-in-progress: false",
+      "jobs": {
+        "sync-branches": {
+          "runs-on": "ubuntu-latest",
+          "steps": [
+            {
+              "name": "Checkout master",
+              "uses": "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6",
+              "with": "ref: master\ntoken: ${{ secrets.PAT_TOKEN }}\nfetch-depth: 0"
+            },
+            {
+              "env": "OPERATION: ${{ inputs.operation }}\nREQUESTED_VERSION: ${{ inputs.version }}\nEXPECTED_DEV_SHA: ${{ inputs.expected_dev_sha }}",
+              "id": "request",
+              "name": "Validate requested operation and source",
+              "shell": "bash"
+            },
+            {
+              "id": "sync",
+              "name": "Merge approved dev into master",
+              "shell": "bash"
+            },
+            {
+              "env": "GH_TOKEN: ${{ secrets.PAT_TOKEN }}\nEXPECTED_SHA: ${{ steps.sync.outputs.master_commit }}",
+              "name": "Dispatch and verify master validation",
+              "shell": "bash"
+            },
+            {
+              "env": "GH_TOKEN: ${{ secrets.PAT_TOKEN }}\nVERSION: ${{ steps.request.outputs.version }}",
+              "if": "inputs.operation == 'new'",
+              "name": "Verify immutable release controls before tag creation",
+              "shell": "bash"
+            },
+            {
+              "env": "VERSION: ${{ steps.request.outputs.version }}\nMASTER_COMMIT: ${{ steps.sync.outputs.master_commit }}",
+              "if": "inputs.operation == 'new'",
+              "name": "Create the one-time formal release tag",
+              "shell": "bash"
+            },
+            {
+              "env": "GH_TOKEN: ${{ secrets.PAT_TOKEN }}\nVERSION: ${{ steps.request.outputs.version }}\nEXPECTED_SHA: ${{ steps.sync.outputs.master_commit }}",
+              "if": "inputs.operation == 'new'",
+              "name": "Verify the tag-triggered formal release run",
+              "shell": "bash"
+            }
+          ]
+        }
+      },
+      "name": "Sync Dev to Master",
+      "on": "workflow_dispatch:\n  inputs:\n    operation:\n      description: \"new creates one new immutable vX.Y.Z tag; sync_only only validates and syncs master.\"\n      required: true\n      default: sync_only\n      type: choice\n      options:\n        - sync_only\n        - new\n    version:\n      description: \"Required for new. Exact unused tag such as v1.3.1; never an existing version.\"\n      required: false\n      type: string\n    expected_dev_sha:\n      description: \"Required full origin/dev SHA approved for this sync.\"\n      required: true\n      type: string",
+      "permissions": "actions: read\ncontents: read"
+    },
+    "verify-release-baselines.yml": {
+      "concurrency": "group: verify-frozen-release-baselines\ncancel-in-progress: false",
+      "jobs": {
+        "verify": {
+          "runs-on": "ubuntu-latest",
+          "steps": [
+            {
+              "name": "Checkout",
+              "uses": "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6"
+            },
+            {
+              "env": "GH_TOKEN: ${{ github.token }}",
+              "name": "Verify historical identities without mutation",
+              "shell": "bash"
+            }
+          ]
+        }
+      },
+      "name": "Verify Frozen Release Baselines",
+      "on": "workflow_dispatch:\nschedule:\n  - cron: '23 19 * * 1'",
+      "permissions": "contents: read\npackages: read"
+    }
+  }
+}

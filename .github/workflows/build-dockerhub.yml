@@ -300,23 +300,9 @@ jobs:
         id: linux_matrix
         shell: bash
         run: |
-          if [ "${{ steps.metadata.outputs.mode }}" = "release" ] || [ "${{ steps.metadata.outputs.mode }}" = "master" ]; then
-            {
-              echo 'matrix<<JSON'
-              cat <<'JSON'
-          {"include":[{"arch":"amd64","runner":"ubuntu-latest","dockerfile":"./Dockerfile","builder_platform":"linux/amd64","image_platform":"linux/amd64","builder_tag":"subconverter-temp:amd64-builder","threads":"16","cache_scope":"subconverter-alpine","extract_mode":"shared","extract_generated":"true","bridge_budget":"bridge-linux-amd64","openwrt_arches":"x86_64","qemu_platforms":""},{"arch":"arm64","runner":"ubuntu-24.04-arm","dockerfile":"./Dockerfile","builder_platform":"linux/arm64","image_platform":"linux/arm64","builder_tag":"subconverter-temp:arm64-builder","threads":"4","cache_scope":"subconverter-alpine-arm64","extract_mode":"shared","extract_generated":"false","bridge_budget":"bridge-linux-arm64","openwrt_arches":"aarch64_generic,aarch64_cortex-a53,aarch64_cortex-a72","qemu_platforms":""},{"arch":"armv7","runner":"ubuntu-latest","dockerfile":"./docker/Dockerfile.armv7-cross","builder_platform":"linux/amd64","image_platform":"linux/arm/v7","builder_tag":"subconverter-temp:armv7-builder","threads":"2","cache_scope":"subconverter-armv7-cross","extract_mode":"root","extract_generated":"false","bridge_budget":"bridge-linux-armv7","openwrt_arches":"arm_cortex-a5_vfpv4,arm_cortex-a7,arm_cortex-a7_vfpv4,arm_cortex-a7_neon-vfpv4,arm_cortex-a8_vfpv3,arm_cortex-a9,arm_cortex-a9_neon,arm_cortex-a9_vfpv3-d16,arm_cortex-a15_neon-vfpv4","qemu_platforms":"arm"}]}
-          JSON
-              echo 'JSON'
-            } >> "$GITHUB_OUTPUT"
-          else
-            {
-              echo 'matrix<<JSON'
-              cat <<'JSON'
-          {"include":[{"arch":"amd64","runner":"ubuntu-latest","dockerfile":"./Dockerfile","builder_platform":"linux/amd64","image_platform":"linux/amd64","builder_tag":"subconverter-temp:amd64-builder","threads":"16","cache_scope":"subconverter-alpine","extract_mode":"shared","extract_generated":"true","bridge_budget":"bridge-linux-amd64","openwrt_arches":"x86_64","qemu_platforms":""}]}
-          JSON
-              echo 'JSON'
-            } >> "$GITHUB_OUTPUT"
-          fi
+          python3 scripts/ci/build_plan.py matrix \
+            --mode "${{ steps.metadata.outputs.mode }}" \
+            --github-output "$GITHUB_OUTPUT"
 
       - name: Docker meta
         id: meta
@@ -325,19 +311,10 @@ jobs:
           VERSION: ${{ steps.metadata.outputs.version }}
           MODE: ${{ steps.metadata.outputs.mode }}
         run: |
-          {
-            echo 'tags<<EOF'
-            if [ "$MODE" = "release" ]; then
-              printf '%s\n' \
-                "aethersailor/subconverter-extended:${VERSION}" \
-                "ghcr.io/aethersailor/subconverter-extended:${VERSION}"
-            elif [ "$MODE" = "dev" ]; then
-              printf '%s\n' \
-                "aethersailor/subconverter-extended:dev" \
-                "ghcr.io/aethersailor/subconverter-extended:dev"
-            fi
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
+          python3 scripts/ci/build_plan.py tags \
+            --mode "$MODE" \
+            --version "$VERSION" \
+            --github-output "$GITHUB_OUTPUT"
 
   build-linux:
     name: "🐳 Docker Build (${{ matrix.arch }})"
@@ -419,75 +396,24 @@ jobs:
         env:
           BUILD_ARGS: ${{ steps.docker_args.outputs.args }}
         run: |
-          set -euo pipefail
-          args=()
-          while IFS= read -r arg; do
-            [ -n "$arg" ] && args+=(--build-arg "$arg")
-          done <<< "$BUILD_ARGS"
-          tags=(--tag "subconverter-extended:${{ matrix.arch }}-ci")
-          output=(--load)
-          cache=()
-          if [ "${{ github.event_name }}" != "pull_request" ] && \
-             [ "${{ needs.prepare.outputs.mode }}" != "master" ]; then
-            candidate="ci-${{ needs.prepare.outputs.mode }}-${{ matrix.arch }}"
-            if [ "${{ needs.prepare.outputs.mode }}" = "release" ]; then
-              candidate="ci-${{ needs.prepare.outputs.version }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.arch }}"
-            fi
-            tags=(
-              --tag "aethersailor/subconverter-extended:${candidate}"
-              --tag "ghcr.io/aethersailor/subconverter-extended:${candidate}"
-            )
-            output=(--push)
-            cache=(
-              --cache-from "type=registry,ref=ghcr.io/aethersailor/subconverter-extended:buildcache-${{ matrix.cache_scope }}"
-              --cache-to "type=registry,ref=ghcr.io/aethersailor/subconverter-extended:buildcache-${{ matrix.cache_scope }},mode=max,ignore-error=true"
-            )
-          fi
-          metadata_file="${RUNNER_TEMP}/build-metadata-${{ matrix.arch }}.json"
-          docker buildx build \
-            --file "${{ matrix.dockerfile }}" \
-            --platform "${{ matrix.image_platform }}" \
-            "${output[@]}" \
-            "${tags[@]}" \
-            "${cache[@]}" \
-            "${args[@]}" \
-            --metadata-file "$metadata_file" \
-            .
-          digest="$(python3 - "$metadata_file" <<'PY'
-          import json
-          import sys
-
-          with open(sys.argv[1], "r", encoding="utf-8") as handle:
-              data = json.load(handle)
-          print(data.get("containerimage.digest", ""))
-          PY
-          )"
-          if [ "${{ github.event_name }}" != "pull_request" ] && \
-             [ "${{ needs.prepare.outputs.mode }}" != "master" ] && \
-             [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "::error::Build did not return a valid candidate image digest."
-            exit 1
-          fi
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          bash scripts/ci/build-candidate-image.sh \
+            "${{ matrix.arch }}" \
+            "${{ matrix.dockerfile }}" \
+            "${{ matrix.image_platform }}" \
+            "${{ matrix.cache_scope }}" \
+            "${{ github.event_name }}" \
+            "${{ needs.prepare.outputs.mode }}" \
+            "${{ needs.prepare.outputs.version }}"
 
       - name: Export CI artifacts from the existing cache
         shell: bash
         env:
           BUILD_ARGS: ${{ steps.docker_args.outputs.args }}
         run: |
-          set -euo pipefail
-          args=()
-          while IFS= read -r arg; do
-            [ -n "$arg" ] && args+=(--build-arg "$arg")
-          done <<< "$BUILD_ARGS"
-          docker buildx build \
-            --file "${{ matrix.dockerfile }}" \
-            --load \
-            --tag "${{ matrix.builder_tag }}" \
-            --target ci-export \
-            --platform "${{ matrix.builder_platform }}" \
-            "${args[@]}" \
-            .
+          bash scripts/ci/export-ci-image.sh \
+            "${{ matrix.dockerfile }}" \
+            "${{ matrix.builder_tag }}" \
+            "${{ matrix.builder_platform }}"
 
       - name: Extract builder output
         shell: bash
@@ -830,100 +756,20 @@ jobs:
       - name: Promote tested candidates
         shell: bash
         run: |
-          set -euo pipefail
-
-          if [ "${{ needs.prepare.outputs.mode }}" = "dev" ]; then
-            ARCHES=(amd64)
-          else
-            ARCHES=(amd64 arm64 armv7)
-          fi
-          for arch in "${ARCHES[@]}"; do
-            test -s "digests/${arch}.txt"
-            grep -Eq '^sha256:[0-9a-f]{64}$' "digests/${arch}.txt"
-          done
-
-          TAGS="${{ needs.prepare.outputs.tags }}"
-          IMAGE_NAMES=(
-            "aethersailor/subconverter-extended"
-            "ghcr.io/aethersailor/subconverter-extended"
-          )
-
-          for IMAGE_NAME in "${IMAGE_NAMES[@]}"; do
-            SOURCES=()
-            for arch in "${ARCHES[@]}"; do
-              candidate="ci-${{ needs.prepare.outputs.mode }}-${arch}"
-              if [ "${{ needs.prepare.outputs.mode }}" = "release" ]; then
-                candidate="ci-${{ needs.prepare.outputs.version }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${arch}"
-              fi
-              SOURCES+=("${IMAGE_NAME}:${candidate}")
-            done
-            for TAG in $TAGS; do
-              if [[ "$TAG" == "$IMAGE_NAME:"* ]]; then
-                echo "Promoting ${SOURCES[*]} to $TAG"
-                docker buildx imagetools create -t "$TAG" "${SOURCES[@]}"
-              fi
-            done
-          done
+          bash scripts/ci/promote-tested-images.sh \
+            "${{ needs.prepare.outputs.mode }}" \
+            "${{ needs.prepare.outputs.version }}" \
+            "${{ needs.prepare.outputs.tags }}"
 
       - name: Verify manifest platforms
         id: published
         shell: bash
         run: |
-          set -euo pipefail
-
-          if [ "${{ needs.prepare.outputs.mode }}" = "dev" ]; then
-            PLATFORMS=("linux/amd64")
-          else
-            PLATFORMS=("linux/amd64" "linux/arm64" "linux/arm/v7")
-          fi
-          TAGS="${{ needs.prepare.outputs.tags }}"
-          DOCKERHUB_DIGEST=""
-          GHCR_DIGEST=""
-          for TAG in $TAGS; do
-            echo "Inspecting $TAG"
-            for attempt in $(seq 1 6); do
-              if docker buildx imagetools inspect "$TAG" > manifest.txt; then
-                break
-              fi
-              if [ "$attempt" -eq 6 ]; then
-                echo "Failed to inspect $TAG"
-                exit 1
-              fi
-              sleep 5
-            done
-
-            cat manifest.txt
-            digest="$(awk '$1 == "Digest:" {print $2; exit}' manifest.txt)"
-            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-              echo "::error::Could not resolve the manifest digest for $TAG."
-              exit 1
-            fi
-            if [[ "$TAG" == ghcr.io/* ]]; then
-              GHCR_DIGEST="$digest"
-              echo "ghcr_digest=$digest" >> "$GITHUB_OUTPUT"
-            else
-              DOCKERHUB_DIGEST="$digest"
-              echo "dockerhub_digest=$digest" >> "$GITHUB_OUTPUT"
-            fi
-
-            for PLATFORM in "${PLATFORMS[@]}"; do
-              if ! grep -Eq "Platform:[[:space:]]+${PLATFORM}$" manifest.txt; then
-                echo "Missing platform ${PLATFORM} in ${TAG}"
-                exit 1
-              fi
-              docker pull --platform "$PLATFORM" "$TAG"
-              actual_revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$TAG")"
-              actual_version="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$TAG")"
-              test "$actual_revision" = "${{ needs.prepare.outputs.sha }}"
-              test "$actual_version" = "${{ needs.prepare.outputs.version }}"
-            done
-          done
-          test -n "$DOCKERHUB_DIGEST"
-          test -n "$GHCR_DIGEST"
-          if [ "$DOCKERHUB_DIGEST" != "$GHCR_DIGEST" ]; then
-            echo "::error::Docker Hub and GHCR manifest digests differ."
-            exit 1
-          fi
+          bash scripts/ci/verify-published-images.sh \
+            "${{ needs.prepare.outputs.mode }}" \
+            "${{ needs.prepare.outputs.tags }}" \
+            "${{ needs.prepare.outputs.sha }}" \
+            "${{ needs.prepare.outputs.version }}"
 
   create-release:
     name: "🚀 Release Artifacts"
