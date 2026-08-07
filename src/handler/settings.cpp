@@ -27,6 +27,81 @@ Settings global;
 
 extern WebServer webServer;
 
+namespace {
+
+constexpr const char *kDefaultExternalConfig =
+    "https://gcore.jsdelivr.net/gh/Aethersailor/"
+    "Custom_OpenClash_Rules@refs/heads/main/cfg/Custom_Clash.ini";
+
+struct CommonScalarSettings {
+  bool prependInsert;
+  std::string basePath;
+  std::string clashBase;
+  std::string surgeBase;
+  std::string surfboardBase;
+  std::string mellowBase;
+  std::string quanBase;
+  std::string quanXBase;
+  std::string loonBase;
+  std::string SSSubBase;
+  std::string singBoxBase;
+  std::string defaultExtConfig;
+  bool fallbackToDefaultExternalConfig;
+  bool appendType;
+  std::string proxyConfig;
+  std::string proxyRuleset;
+  std::string proxySubscription;
+  bool reloadConfOnRequest;
+};
+
+CommonScalarSettings captureCommonScalarSettings() {
+  return {global.prependInsert,
+          global.basePath,
+          global.clashBase,
+          global.surgeBase,
+          global.surfboardBase,
+          global.mellowBase,
+          global.quanBase,
+          global.quanXBase,
+          global.loonBase,
+          global.SSSubBase,
+          global.singBoxBase,
+          global.defaultExtConfig,
+          global.fallbackToDefaultExternalConfig,
+          global.appendType,
+          global.proxyConfig,
+          global.proxyRuleset,
+          global.proxySubscription,
+          global.reloadConfOnRequest};
+}
+
+void applyCommonScalarSettings(CommonScalarSettings settings) {
+  if (settings.defaultExtConfig.empty())
+    settings.defaultExtConfig = kDefaultExternalConfig;
+
+  global.prependInsert = settings.prependInsert;
+  global.basePath = std::move(settings.basePath);
+  global.clashBase = std::move(settings.clashBase);
+  global.surgeBase = std::move(settings.surgeBase);
+  global.surfboardBase = std::move(settings.surfboardBase);
+  global.mellowBase = std::move(settings.mellowBase);
+  global.quanBase = std::move(settings.quanBase);
+  global.quanXBase = std::move(settings.quanXBase);
+  global.loonBase = std::move(settings.loonBase);
+  global.SSSubBase = std::move(settings.SSSubBase);
+  global.singBoxBase = std::move(settings.singBoxBase);
+  global.defaultExtConfig = std::move(settings.defaultExtConfig);
+  global.fallbackToDefaultExternalConfig =
+      settings.fallbackToDefaultExternalConfig;
+  global.appendType = settings.appendType;
+  global.proxyConfig = std::move(settings.proxyConfig);
+  global.proxyRuleset = std::move(settings.proxyRuleset);
+  global.proxySubscription = std::move(settings.proxySubscription);
+  global.reloadConfOnRequest = settings.reloadConfOnRequest;
+}
+
+} // namespace
+
 const std::map<std::string, ruleset_type> RulesetTypes = {
     {"clash-domain:", RULESET_CLASH_DOMAIN},
     {"clash-ipcidr:", RULESET_CLASH_IPCIDR},
@@ -643,6 +718,7 @@ void readYAMLConf(YAML::Node &node) {
   YAML::Node section = node["common"];
   std::string strLine;
   string_array tempArray;
+  CommonScalarSettings common = captureCommonScalarSettings();
 
   // api_mode and api_access_token removed - hardcoded in settings.h
   if (section["default_url"].IsSequence()) {
@@ -668,7 +744,7 @@ void readYAMLConf(YAML::Node &node) {
       eraseElements(tempArray);
     }
   }
-  section["prepend_insert_url"] >> global.prependInsert;
+  section["prepend_insert_url"] >> common.prependInsert;
   if (section["exclude_remarks"].IsSequence())
     section["exclude_remarks"] >> global.excludeRemarks;
   if (section["include_remarks"].IsSequence())
@@ -676,31 +752,26 @@ void readYAMLConf(YAML::Node &node) {
   global.filterScript = safe_as<bool>(section["enable_filter"])
                             ? safe_as<std::string>(section["filter_script"])
                             : "";
-  section["base_path"] >> global.basePath;
-  section["clash_rule_base"] >> global.clashBase;
-  section["surge_rule_base"] >> global.surgeBase;
-  section["surfboard_rule_base"] >> global.surfboardBase;
-  section["mellow_rule_base"] >> global.mellowBase;
-  section["quan_rule_base"] >> global.quanBase;
-  section["quanx_rule_base"] >> global.quanXBase;
-  section["loon_rule_base"] >> global.loonBase;
-  section["sssub_rule_base"] >> global.SSSubBase;
-  section["singbox_rule_base"] >> global.singBoxBase;
+  section["base_path"] >> common.basePath;
+  section["clash_rule_base"] >> common.clashBase;
+  section["surge_rule_base"] >> common.surgeBase;
+  section["surfboard_rule_base"] >> common.surfboardBase;
+  section["mellow_rule_base"] >> common.mellowBase;
+  section["quan_rule_base"] >> common.quanBase;
+  section["quanx_rule_base"] >> common.quanXBase;
+  section["loon_rule_base"] >> common.loonBase;
+  section["sssub_rule_base"] >> common.SSSubBase;
+  section["singbox_rule_base"] >> common.singBoxBase;
 
-  section["default_external_config"] >> global.defaultExtConfig;
+  section["default_external_config"] >> common.defaultExtConfig;
   section["fallback_to_default_external_config"] >>
-      global.fallbackToDefaultExternalConfig;
-  // Set hardcoded default if not configured or empty
-  if (global.defaultExtConfig.empty()) {
-    global.defaultExtConfig =
-        "https://gcore.jsdelivr.net/gh/Aethersailor/"
-        "Custom_OpenClash_Rules@refs/heads/main/cfg/Custom_Clash.ini";
-  }
-  section["append_proxy_type"] >> global.appendType;
-  section["proxy_config"] >> global.proxyConfig;
-  section["proxy_ruleset"] >> global.proxyRuleset;
-  section["proxy_subscription"] >> global.proxySubscription;
-  section["reload_conf_on_request"] >> global.reloadConfOnRequest;
+      common.fallbackToDefaultExternalConfig;
+  section["append_proxy_type"] >> common.appendType;
+  section["proxy_config"] >> common.proxyConfig;
+  section["proxy_ruleset"] >> common.proxyRuleset;
+  section["proxy_subscription"] >> common.proxySubscription;
+  section["reload_conf_on_request"] >> common.reloadConfOnRequest;
+  applyCommonScalarSettings(std::move(common));
 
   YAML::Node proxy_provider = node["proxy_provider"];
   if (proxy_provider.IsDefined() && !proxy_provider.IsNull()) {
@@ -1018,6 +1089,7 @@ void operate_toml_kv_table(
 void readTOMLConf(toml::value &root) {
   auto section_common = toml::find(root, "common");
   string_array default_url, insert_url;
+  CommonScalarSettings common = captureCommonScalarSettings();
 
   find_if_exist(section_common, "default_url", default_url, "insert_url",
                 insert_url);
@@ -1029,26 +1101,20 @@ void readTOMLConf(toml::value &root) {
   find_if_exist(
       section_common, "exclude_remarks", global.excludeRemarks,
       "include_remarks", global.includeRemarks, "enable_insert",
-      global.enableInsert, "prepend_insert_url", global.prependInsert,
+      global.enableInsert, "prepend_insert_url", common.prependInsert,
       "enable_filter", filter, "default_external_config",
-      global.defaultExtConfig, "fallback_to_default_external_config",
-      global.fallbackToDefaultExternalConfig, "base_path", global.basePath,
+      common.defaultExtConfig, "fallback_to_default_external_config",
+      common.fallbackToDefaultExternalConfig, "base_path", common.basePath,
       "clash_rule_base",
-      global.clashBase, "surge_rule_base", global.surgeBase,
-      "surfboard_rule_base", global.surfboardBase, "mellow_rule_base",
-      global.mellowBase, "quan_rule_base", global.quanBase, "quanx_rule_base",
-      global.quanXBase, "loon_rule_base", global.loonBase, "sssub_rule_base",
-      global.SSSubBase, "singbox_rule_base", global.singBoxBase, "proxy_config",
-      global.proxyConfig, "proxy_ruleset", global.proxyRuleset,
-      "proxy_subscription", global.proxySubscription, "append_proxy_type",
-      global.appendType, "reload_conf_on_request", global.reloadConfOnRequest);
-
-  // Set hardcoded default if not configured or empty (TOML)
-  if (global.defaultExtConfig.empty()) {
-    global.defaultExtConfig =
-        "https://gcore.jsdelivr.net/gh/Aethersailor/"
-        "Custom_OpenClash_Rules@refs/heads/main/cfg/Custom_Clash.ini";
-  }
+      common.clashBase, "surge_rule_base", common.surgeBase,
+      "surfboard_rule_base", common.surfboardBase, "mellow_rule_base",
+      common.mellowBase, "quan_rule_base", common.quanBase, "quanx_rule_base",
+      common.quanXBase, "loon_rule_base", common.loonBase, "sssub_rule_base",
+      common.SSSubBase, "singbox_rule_base", common.singBoxBase, "proxy_config",
+      common.proxyConfig, "proxy_ruleset", common.proxyRuleset,
+      "proxy_subscription", common.proxySubscription, "append_proxy_type",
+      common.appendType, "reload_conf_on_request", common.reloadConfOnRequest);
+  applyCommonScalarSettings(std::move(common));
 
   if (root.contains("proxy_provider")) {
     const auto &section_proxy_provider =
@@ -1439,43 +1505,39 @@ bool readConf() {
 
   try {
     string_array tempArray;
+    CommonScalarSettings common = captureCommonScalarSettings();
 
   ini.enter_section("common");
   // api_mode and api_access_token removed - hardcoded in settings.h
   ini.get_if_exist("default_url", global.defaultUrls);
   global.enableInsert = ini.get("enable_insert");
   ini.get_if_exist("insert_url", global.insertUrls);
-  ini.get_bool_if_exist("prepend_insert_url", global.prependInsert);
+  ini.get_bool_if_exist("prepend_insert_url", common.prependInsert);
   if (ini.item_prefix_exist("exclude_remarks"))
     ini.get_all("exclude_remarks", global.excludeRemarks);
   if (ini.item_prefix_exist("include_remarks"))
     ini.get_all("include_remarks", global.includeRemarks);
   global.filterScript =
       ini.get_bool("enable_filter") ? ini.get("filter_script") : "";
-  ini.get_if_exist("base_path", global.basePath);
-  ini.get_if_exist("clash_rule_base", global.clashBase);
-  ini.get_if_exist("surge_rule_base", global.surgeBase);
-  ini.get_if_exist("surfboard_rule_base", global.surfboardBase);
-  ini.get_if_exist("mellow_rule_base", global.mellowBase);
-  ini.get_if_exist("quan_rule_base", global.quanBase);
-  ini.get_if_exist("quanx_rule_base", global.quanXBase);
-  ini.get_if_exist("loon_rule_base", global.loonBase);
-  ini.get_if_exist("sssub_rule_base", global.SSSubBase);
-  ini.get_if_exist("singbox_rule_base", global.singBoxBase);
-  ini.get_if_exist("default_external_config", global.defaultExtConfig);
+  ini.get_if_exist("base_path", common.basePath);
+  ini.get_if_exist("clash_rule_base", common.clashBase);
+  ini.get_if_exist("surge_rule_base", common.surgeBase);
+  ini.get_if_exist("surfboard_rule_base", common.surfboardBase);
+  ini.get_if_exist("mellow_rule_base", common.mellowBase);
+  ini.get_if_exist("quan_rule_base", common.quanBase);
+  ini.get_if_exist("quanx_rule_base", common.quanXBase);
+  ini.get_if_exist("loon_rule_base", common.loonBase);
+  ini.get_if_exist("sssub_rule_base", common.SSSubBase);
+  ini.get_if_exist("singbox_rule_base", common.singBoxBase);
+  ini.get_if_exist("default_external_config", common.defaultExtConfig);
   ini.get_bool_if_exist("fallback_to_default_external_config",
-                        global.fallbackToDefaultExternalConfig);
-  // Set hardcoded default if not configured or empty
-  if (global.defaultExtConfig.empty()) {
-    global.defaultExtConfig =
-        "https://gcore.jsdelivr.net/gh/Aethersailor/"
-        "Custom_OpenClash_Rules@refs/heads/main/cfg/Custom_Clash.ini";
-  }
-  ini.get_bool_if_exist("append_proxy_type", global.appendType);
-  ini.get_if_exist("proxy_config", global.proxyConfig);
-  ini.get_if_exist("proxy_ruleset", global.proxyRuleset);
-  ini.get_if_exist("proxy_subscription", global.proxySubscription);
-  ini.get_bool_if_exist("reload_conf_on_request", global.reloadConfOnRequest);
+                        common.fallbackToDefaultExternalConfig);
+  ini.get_bool_if_exist("append_proxy_type", common.appendType);
+  ini.get_if_exist("proxy_config", common.proxyConfig);
+  ini.get_if_exist("proxy_ruleset", common.proxyRuleset);
+  ini.get_if_exist("proxy_subscription", common.proxySubscription);
+  ini.get_bool_if_exist("reload_conf_on_request", common.reloadConfOnRequest);
+  applyCommonScalarSettings(std::move(common));
 
   if (ini.section_exist("proxy_provider")) {
     ini.enter_section("proxy_provider");
