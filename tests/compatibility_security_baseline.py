@@ -175,10 +175,11 @@ def request(
     path: str,
     params: dict[str, str] | None = None,
     headers: dict[str, str] | None = None,
+    method: str = "GET",
 ) -> tuple[int, bytes, dict[str, str]]:
     query = urllib.parse.urlencode(params or {})
     url = base_url + path + (f"?{query}" if query else "")
-    req = urllib.request.Request(url, headers=headers or {})
+    req = urllib.request.Request(url, headers=headers or {}, method=method)
     try:
         with direct_opener().open(req, timeout=20) as response:
             return (
@@ -2038,10 +2039,28 @@ def public_request_baseline(binary: Path, fixture_base: str) -> None:
             raise AssertionError(
                 f"PublicRequest accepted loopback HTTP source with status {status}"
             )
-        for path in ("/get", "/getlocal"):
-            status, _, _ = request(base_url, path, {"path": "../secret"})
+        legacy_routes = (
+            ("GET", "/get"),
+            ("GET", "/getlocal"),
+            ("GET", "/refreshrules"),
+            ("GET", "/readconf"),
+            ("POST", "/updateconf"),
+            ("GET", "/flushcache"),
+            ("GET", "/sub2clashr"),
+            ("GET", "/surge2clash"),
+            ("GET", "/getprofile"),
+            ("GET", "/render"),
+            ("POST", "/create-profile"),
+            ("GET", "/list-profiles"),
+        )
+        for method, path in legacy_routes:
+            status, _, _ = request(
+                base_url, path, {"path": "../secret"}, method=method
+            )
             if status != 404:
-                raise AssertionError(f"API-mode file tool {path} became reachable")
+                raise AssertionError(
+                    f"legacy route {method} {path} became reachable"
+                )
 
 
 def security_endpoint_matrix_baseline(binary: Path, fixture_base: str) -> None:
@@ -2056,10 +2075,21 @@ def security_endpoint_matrix_baseline(binary: Path, fixture_base: str) -> None:
     ).decode()
 
     with running_service(binary, security_profile="lan") as base_url:
-        status, _, _ = request(base_url, "/sub", sub_params)
+        status, baseline_body, _ = request(base_url, "/sub", sub_params)
         if status != 200:
             raise AssertionError(
                 f"lan profile changed loopback /sub behavior: HTTP {status}"
+            )
+        request_script_params = dict(sub_params)
+        request_script_params["filter_script"] = (
+            "function filter(node) { return false; }"
+        )
+        status, scripted_body, _ = request(
+            base_url, "/sub", request_script_params
+        )
+        if status != 200 or scripted_body != baseline_body:
+            raise AssertionError(
+                "public /sub request regained executable filter authorization"
             )
         status, _, _ = request(
             base_url,

@@ -1853,8 +1853,7 @@ ExternalConfigLoadStatus loadExternalTOML(toml::value &root,
                                           ExternalConfig &ext,
                                           FetchContext context) {
   auto section = toml::find(root, "custom");
-  bool import_scope_limit = isPublicFetchRestricted(context) ? global.APIMode
-                                                            : false;
+  bool import_scope_limit = isPublicFetchRestricted(context);
 
   find_if_exist(section, "enable_rule_generator", ext.enable_rule_generator,
                 "overwrite_original_rules", ext.overwrite_original_rules,

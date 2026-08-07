@@ -1774,8 +1774,8 @@ static std::string subconverter_impl(Request &request, Response &response,
   }
   const bool lSimpleSubscription = target_descriptor->simple_subscription;
   // check if we need to read configuration
-  if (global.reloadConfOnRequest &&
-      (!global.APIMode || global.CFWChildProcess) && !global.generatorMode)
+  if (global.reloadConfOnRequest && global.CFWChildProcess &&
+      !global.generatorMode)
     readConf();
 
   /// string values
@@ -1790,7 +1790,6 @@ static std::string subconverter_impl(Request &request, Response &response,
               argUpdateInterval = getUrlArg(argument, "interval"),
               argUpdateStrict = getUrlArg(argument, "strict");
   std::string argRenames = getUrlArg(argument, "rename"),
-              argFilterScript = getUrlArg(argument, "filter_script"),
               argProviderHeaders = getUrlArg(argument, "provider_headers");
 
   /// switches with default value
@@ -1832,10 +1831,8 @@ static std::string subconverter_impl(Request &request, Response &response,
   int interval = !argUpdateInterval.empty()
                      ? to_int(argUpdateInterval, global.updateInterval)
                      : global.updateInterval;
-  // Token authentication is permanently disabled for security
-  bool authorized = false, strict = !argUpdateStrict.empty()
-                                        ? argUpdateStrict == "true"
-                                        : global.updateStrict;
+  bool strict = !argUpdateStrict.empty() ? argUpdateStrict == "true"
+                                         : global.updateStrict;
   explain.simple_subscription = lSimpleSubscription;
 
   if (std::find(gRegexBlacklist.cbegin(), gRegexBlacklist.cend(),
@@ -1859,9 +1856,6 @@ static std::string subconverter_impl(Request &request, Response &response,
 
   /// validate urls
   argEnableInsert.define(global.enableInsert);
-  // default_url is permanently disabled - users must provide url parameter
-  // if (argUrl.empty() && (!global.APIMode || authorized))
-  //     argUrl = global.defaultUrls;
   if ((argUrl.empty() && !(!global.insertUrls.empty() && argEnableInsert)) ||
       argTarget.empty()) {
     *status_code = 400;
@@ -1920,7 +1914,6 @@ static std::string subconverter_impl(Request &request, Response &response,
   ProxyPolicy proxy = parseProxy(global.proxySubscription);
 
   /// check other flags
-  ext.authorized = authorized;
   ext.append_proxy_type = argAppendType.get(global.appendType);
   // 上游项目默认在 clash 目标下自动把 expand 设为 true
   // 本项目默认 expand=false（使用 rule-provider 模式不展开规则集）
@@ -2202,14 +2195,6 @@ static std::string subconverter_impl(Request &request, Response &response,
   if (!argExcludeRemark.empty() && regValid(argExcludeRemark))
     lExcludeRemarks = string_array{argExcludeRemark};
 
-  /// initialize script runtime
-  if (authorized && !global.scriptCleanContext) {
-    ext.js_runtime = new qjs::Runtime();
-    script_runtime_init(*ext.js_runtime);
-    ext.js_context = new qjs::Context(*ext.js_runtime);
-    script_context_init(*ext.js_context);
-  }
-
   // start parsing urls
   RegexMatchConfigs stream_temp = safe_get_streams(),
                     time_temp = safe_get_times();
@@ -2226,7 +2211,6 @@ static std::string subconverter_impl(Request &request, Response &response,
   parse_set.stream_rules = &stream_temp;
   parse_set.time_rules = &time_temp;
   parse_set.sub_info = &subInfo;
-  parse_set.authorized = authorized;
   parse_set.mihomo_only = argTarget == "clash" || argTarget == "clashr";
   string_icase_map subscription_headers = buildSubscriptionRequestHeaders();
   std::string selected_user_agent = providerUserAgentFromRequest(request);
@@ -2554,8 +2538,6 @@ static std::string subconverter_impl(Request &request, Response &response,
   }
   // run filter script
   std::string filterScript = global.filterScript;
-  if (authorized && !argFilterScript.empty())
-    filterScript = argFilterScript;
   if (!filterScript.empty()) {
     if (startsWith(filterScript, "path:"))
       filterScript = fileGet(filterScript.substr(5), false);
@@ -3035,12 +3017,9 @@ static std::string subconverter_impl(Request &request, Response &response,
                                " rename rule(s)",
                  argRenames.empty() ? "ignored" : "applied",
                  "Request rename rules override configured rename rules.");
-    addParameter("filter_script",
-                 authorized && !argFilterScript.empty() ? "script accepted"
-                                                        : "not used",
-                 authorized ? "applied" : "ignored",
-                  "Public requests cannot provide executable filter scripts.",
-                  true);
+    addParameter("filter_script", "not used", "ignored",
+                 "Public requests cannot provide executable filter scripts.",
+                 true);
     addParameter("provider_headers",
                  std::to_string(provider_headers.size()) +
                      " explicitly selected header(s)",
@@ -3347,7 +3326,6 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
   parse_set.stream_rules = parse_set.time_rules = &dummy_regex_array;
   parse_set.request_header = &request.headers;
   parse_set.sub_info = &subInfo;
-  parse_set.authorized = !global.APIMode;
   for (std::string &x : links) {
     // std::cerr<<"Fetching node data from url '"<<x<<"'."<<std::endl;
     writeLog(0, "正在从 URL 获取节点数据：" + summarizeUrlForLog(x) + "。",

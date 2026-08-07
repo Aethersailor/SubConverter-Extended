@@ -17,17 +17,13 @@
 #include "handler/settings.h"
 #include "handler/statistics.h"
 #include "handler/version_page.h"
-#include "handler/webget.h"
 #include "script/cron.h"
 #include "server/socket.h"
 #include "server/webserver.h"
 #include "utils/defer.h"
-#include "utils/file_extra.h"
 #include "utils/logger.h"
-#include "utils/network.h"
 #include "utils/rapidjson_extra.h"
 #include "utils/system.h"
-#include "utils/urlencode.h"
 #include "version.h"
 
 // #include "vfs.h"
@@ -198,8 +194,6 @@ int main(int argc, char *argv[]) {
   if (!global.updateRulesetOnRequest)
     refreshRulesets(global.customRulesets, global.rulesetsContent);
 
-  // API_MODE and API_TOKEN environment variables removed
-  // APIMode is hardcoded to true for security
   auto normalize_managed_prefix = [](const std::string &raw_value) {
     std::string value = trimWhitespace(raw_value, true, true);
     while (value.size() > 1 && value.back() == '/' && !endsWith(value, "://"))
@@ -226,14 +220,6 @@ int main(int argc, char *argv[]) {
 
   if (global.generatorMode)
     return simpleGenerator();
-
-  /*
-  webServer.append_response("GET", "/", "text/plain", [](RESPONSE_CALLBACK_ARGS)
-  -> std::string
-  {
-      return "SubConverter-Extended " VERSION " backend\n";
-  });
-  */
 
   webServer.append_response("GET", "/version/favicon-dark.svg",
                             "image/svg+xml; charset=utf-8",
@@ -272,60 +258,6 @@ int main(int argc, char *argv[]) {
                               return "ok\n";
                             });
 
-  /*
-  webServer.append_response("GET", "/refreshrules", "text/plain",
-                            [](RESPONSE_CALLBACK_ARGS) -> std::string {
-                              // Token authentication disabled - no
-                              // authorization required
-                              refreshRulesets(global.customRulesets,
-                                              global.rulesetsContent);
-                              return "done\n";
-                            });
-  */
-
-  /*
-  webServer.append_response("GET", "/readconf", "text/plain",
-                            [](RESPONSE_CALLBACK_ARGS) -> std::string {
-                              // Token authentication disabled - no
-                              // authorization required
-                              readConf();
-                              if (!global.updateRulesetOnRequest)
-                                refreshRulesets(global.customRulesets,
-                                                global.rulesetsContent);
-                              return "done\n";
-                            });
-  */
-
-  /*
-  webServer.append_response(
-      "POST", "/updateconf", "text/plain",
-      [](RESPONSE_CALLBACK_ARGS) -> std::string {
-        // Token authentication disabled - no authorization required
-        std::string type = getUrlArg(request.argument, "type");
-        if (type == "form" || type == "direct") {
-          fileWrite(global.prefPath, request.postdata, true);
-        } else {
-          response.status_code = 501;
-          return "Not Implemented\n";
-        }
-
-        readConf();
-        if (!global.updateRulesetOnRequest)
-          refreshRulesets(global.customRulesets, global.rulesetsContent);
-        return "done\n";
-      });
-  */
-
-  /*
-  webServer.append_response("GET", "/flushcache", "text/plain",
-                            [](RESPONSE_CALLBACK_ARGS) -> std::string {
-                              // Token authentication disabled - no
-                              // authorization required
-                              flushCache();
-                              return "done";
-                            });
-  */
-
   webServer.append_response("GET", "/sub", "text/plain;charset=utf-8",
                             global.statisticsEnabled ? subconverterTracked
                                                      : subconverter);
@@ -334,45 +266,8 @@ int main(int argc, char *argv[]) {
                             global.statisticsEnabled ? subconverterTracked
                                                      : subconverter);
 
-  /*
-  webServer.append_response("GET", "/sub2clashr", "text/plain;charset=utf-8",
-                            simpleToClashR);
-
-  webServer.append_response("GET", "/surge2clash", "text/plain;charset=utf-8",
-                            surgeConfToClash);
-  */
-
   webServer.append_response("GET", "/getruleset", "text/plain;charset=utf-8",
                             getRuleset);
-
-  /*
-  webServer.append_response("GET", "/getprofile", "text/plain;charset=utf-8",
-                            getProfile);
-
-  webServer.append_response("GET", "/render", "text/plain;charset=utf-8",
-                            renderTemplate);
-  */
-
-  if (!global.APIMode) {
-    webServer.append_response("GET", "/get", "text/plain;charset=utf-8",
-                              [](RESPONSE_CALLBACK_ARGS) -> std::string {
-                                std::string url = urlDecode(
-                                    getUrlArg(request.argument, "url"));
-                                return webGet(url, parseProxy(global.proxyConfig));
-                              });
-
-    webServer.append_response(
-        "GET", "/getlocal", "text/plain;charset=utf-8",
-        [](RESPONSE_CALLBACK_ARGS) -> std::string {
-          return fileGet(urlDecode(getUrlArg(request.argument, "path")));
-        });
-  }
-
-  // webServer.append_response("POST", "/create-profile",
-  // "text/plain;charset=utf-8", createProfile);
-
-  // webServer.append_response("GET", "/list-profiles",
-  // "text/plain;charset=utf-8", listProfiles);
 
   std::string env_port = getEnv("PORT");
   if (!env_port.empty())
