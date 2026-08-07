@@ -1,8 +1,5 @@
 #include <algorithm>
 #include <cctype>
-#include <cstdint>
-#include <iomanip>
-#include <sstream>
 
 #include "string.h"
 #include "redact.h"
@@ -46,24 +43,207 @@ std::string urlScheme(const std::string &url) {
   return toLower(url.substr(0, colon));
 }
 
-std::string shortDiagnosticHash(const std::string &value) {
-  std::uint64_t hash = 0xCBF29CE484222325ULL;
-  for (unsigned char character : value) {
-    hash ^= character;
-    hash *= 0x100000001B3ULL;
-  }
-  std::ostringstream stream;
-  stream << std::hex << std::setw(12) << std::setfill('0')
-         << (hash & 0xffffffffffffULL);
-  return stream.str();
-}
-
 bool safeAuthorityForLog(const std::string &authority) {
   return !authority.empty() &&
          std::all_of(authority.begin(), authority.end(), [](unsigned char ch) {
            return std::isalnum(ch) || ch == '.' || ch == '-' || ch == ':' ||
                   ch == '[' || ch == ']';
          });
+}
+
+bool structuredKeyCharacter(unsigned char character) {
+  return std::isalnum(character) || character == '_' || character == '-' ||
+         character == '.';
+}
+
+bool structuredKeyBoundary(const std::string &text,
+                           std::string::size_type position) {
+  if (position == 0)
+    return true;
+  const unsigned char character =
+      static_cast<unsigned char>(text[position - 1]);
+  return std::isspace(character) || character == '{' || character == '[' ||
+         character == ',' || character == '-';
+}
+
+bool escapedQuote(const std::string &text, std::string::size_type position) {
+  std::string::size_type backslashes = 0;
+  while (position > backslashes && text[position - backslashes - 1] == '\\')
+    ++backslashes;
+  return backslashes % 2 != 0;
+}
+
+bool insideStructuredContainerOnLine(const std::string &text,
+                                     std::string::size_type position) {
+  const std::string::size_type line_break = text.find_last_of("\r\n", position);
+  const std::string::size_type line_start =
+      line_break == std::string::npos ? 0 : line_break + 1;
+  unsigned int depth = 0;
+  char quote = '\0';
+  for (std::string::size_type index = line_start; index < position; ++index) {
+    const char character = text[index];
+    if (quote != '\0') {
+      if (character == quote && !escapedQuote(text, index))
+        quote = '\0';
+      continue;
+    }
+    if (character == '\'' || character == '"') {
+      quote = character;
+    } else if (character == '{' || character == '[') {
+      ++depth;
+    } else if ((character == '}' || character == ']') && depth > 0) {
+      --depth;
+    }
+  }
+  return depth > 0;
+}
+
+std::string::size_type quotedValueEnd(const std::string &text,
+                                      std::string::size_type quote_start) {
+  const char quote = text[quote_start];
+  std::string::size_type position = quote_start + 1;
+  while ((position = text.find(quote, position)) != std::string::npos) {
+    if (!escapedQuote(text, position))
+      return position;
+    ++position;
+  }
+  return text.find_first_of("\r\n", quote_start + 1);
+}
+
+std::string::size_type compositeValueEnd(const std::string &text,
+                                         std::string::size_type value_start) {
+  const char opening = text[value_start];
+  const char closing = opening == '{' ? '}' : ']';
+  unsigned int depth = 0;
+  char quote = '\0';
+  for (std::string::size_type position = value_start; position < text.size();
+       ++position) {
+    const char character = text[position];
+    if (quote != '\0') {
+      if (character == quote && !escapedQuote(text, position))
+        quote = '\0';
+      continue;
+    }
+    if (character == '\'' || character == '"') {
+      quote = character;
+      continue;
+    }
+    if (character == opening)
+      ++depth;
+    else if (character == closing && --depth == 0)
+      return position + 1;
+  }
+  const std::string::size_type line_end =
+      text.find_first_of("\r\n", value_start);
+  return line_end == std::string::npos ? text.size() : line_end;
+}
+
+std::string::size_type yamlBlockValueEnd(const std::string &text,
+                                         std::string::size_type key_start,
+                                         std::string::size_type value_start) {
+  const std::string::size_type key_line_start =
+      text.rfind('\n', key_start) == std::string::npos
+          ? 0
+          : text.rfind('\n', key_start) + 1;
+  const std::string::size_type key_indent = key_start - key_line_start;
+
+  std::string::size_type line_end = text.find('\n', value_start);
+  if (line_end == std::string::npos)
+    return text.size();
+  std::string::size_type block_end = line_end;
+  std::string::size_type line_start = line_end + 1;
+  while (line_start < text.size()) {
+    line_end = text.find('\n', line_start);
+    const std::string::size_type physical_end =
+        line_end == std::string::npos ? text.size() : line_end;
+    const std::string::size_type content_end =
+        physical_end > line_start && text[physical_end - 1] == '\r'
+            ? physical_end - 1
+            : physical_end;
+    std::string::size_type content_start = line_start;
+    while (content_start < content_end &&
+           (text[content_start] == ' ' || text[content_start] == '\t'))
+      ++content_start;
+    if (content_start != content_end &&
+        content_start - line_start <= key_indent)
+      break;
+    block_end = physical_end;
+    if (line_end == std::string::npos)
+      return text.size();
+    line_start = line_end + 1;
+  }
+  return block_end;
+}
+
+std::string redactStructuredFields(std::string text) {
+  static const std::string replacement = "<redacted>";
+  std::string::size_type colon = 0;
+  while ((colon = text.find(':', colon)) != std::string::npos) {
+    std::string::size_type key_end = colon;
+    while (key_end > 0 &&
+           std::isspace(static_cast<unsigned char>(text[key_end - 1])) &&
+           text[key_end - 1] != '\r' && text[key_end - 1] != '\n')
+      --key_end;
+
+    std::string::size_type key_start = key_end;
+    std::string key;
+    if (key_end >= 2 &&
+        (text[key_end - 1] == '\'' || text[key_end - 1] == '"')) {
+      const char quote = text[key_end - 1];
+      const std::string::size_type quote_start =
+          text.rfind(quote, key_end - 2);
+      if (quote_start != std::string::npos &&
+          structuredKeyBoundary(text, quote_start)) {
+        key_start = quote_start;
+        key = text.substr(quote_start + 1, key_end - quote_start - 2);
+      }
+    } else {
+      while (key_start > 0 && structuredKeyCharacter(
+                                  static_cast<unsigned char>(text[key_start - 1])))
+        --key_start;
+      if (structuredKeyBoundary(text, key_start))
+        key = text.substr(key_start, key_end - key_start);
+    }
+
+    if (!sensitiveParameter(key)) {
+      ++colon;
+      continue;
+    }
+
+    std::string::size_type value_start = colon + 1;
+    while (value_start < text.size() &&
+           (text[value_start] == ' ' || text[value_start] == '\t'))
+      ++value_start;
+    if (value_start >= text.size() || text[value_start] == '\r' ||
+        text[value_start] == '\n') {
+      colon = value_start;
+      continue;
+    }
+
+    std::string::size_type replace_start = value_start;
+    std::string::size_type value_end = value_start;
+    if (text[value_start] == '\'' || text[value_start] == '"') {
+      replace_start = value_start + 1;
+      value_end = quotedValueEnd(text, value_start);
+      if (value_end == std::string::npos)
+        value_end = text.size();
+    } else if (text[value_start] == '{' || text[value_start] == '[') {
+      value_end = compositeValueEnd(text, value_start);
+    } else if (text[value_start] == '|' || text[value_start] == '>') {
+      value_end = yamlBlockValueEnd(text, key_start, value_start);
+    } else {
+      value_end = text.find_first_of(",}]#\r\n", value_start);
+      if (value_end == std::string::npos)
+        value_end = text.size();
+      while (value_end > value_start &&
+             std::isspace(static_cast<unsigned char>(text[value_end - 1])))
+        --value_end;
+    }
+
+    text.replace(replace_start, value_end - replace_start, replacement);
+    colon = replace_start + replacement.size();
+  }
+  return text;
 }
 
 std::string redactNamedParameters(std::string text) {
@@ -159,10 +339,13 @@ std::string redactHeaders(std::string text) {
     std::string matched_name;
     for (const std::string &name : header_names) {
       std::string::size_type candidate = lower.find(name + ":", search_from);
-      while (candidate != std::string::npos && candidate > 0) {
-        const unsigned char before =
-            static_cast<unsigned char>(lower[candidate - 1]);
-        if (!std::isalnum(before) && before != '_' && before != '-')
+      while (candidate != std::string::npos) {
+        const bool valid_boundary =
+            candidate == 0 ||
+            (!std::isalnum(static_cast<unsigned char>(lower[candidate - 1])) &&
+             lower[candidate - 1] != '_' && lower[candidate - 1] != '-');
+        if (valid_boundary &&
+            !insideStructuredContainerOnLine(text, candidate))
           break;
         candidate = lower.find(name + ":", candidate + 1);
       }
@@ -211,7 +394,8 @@ std::string redactHeaders(std::string text) {
 } // namespace
 
 std::string redactSensitiveLogText(const std::string &text) {
-  std::string result = redactNamedParameters(redactHeaders(text));
+  std::string result =
+      redactStructuredFields(redactNamedParameters(redactHeaders(text)));
   static const string_array schemes = {
       "http://",      "https://",    "socks4://", "socks4a://",
       "socks5://",    "socks5h://",  "ss://",     "ssr://",
@@ -242,8 +426,7 @@ std::string redactSensitiveLogText(const std::string &text) {
 }
 
 std::string summarizeSensitiveTextForLog(const std::string &value) {
-  return "length=" + std::to_string(value.size()) +
-         " hash=" + shortDiagnosticHash(value);
+  return "length=" + std::to_string(value.size());
 }
 
 std::string summarizeUrlForLog(const std::string &value) {

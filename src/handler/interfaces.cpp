@@ -3274,13 +3274,13 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
   base_content = fetchFile(url, proxy, global.cacheConfig);
 
   if (ini.parse(base_content) != INIREADER_EXCEPTION_NONE) {
-    std::string errmsg = "Invalid request: failed to parse Surge "
-                         "configuration.\n"
-                         "无效请求：Surge 配置解析失败。\n"
-                         "Reason / 原因: " +
-                         ini.get_last_error();
+    const std::string parser_detail = ini.get_last_error();
+    const std::string errmsg = "Invalid request: failed to parse Surge "
+                               "configuration.\n"
+                               "无效请求：Surge 配置解析失败。";
     // std::cerr<<errmsg<<"\n";
-    writeLog(0, "Surge 配置解析失败。原因：" + ini.get_last_error(),
+    writeLog(0, "SURGE_CONFIG_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(parser_detail),
              LOG_LEVEL_ERROR);
     *status_code = 400;
     return errmsg;
@@ -3509,13 +3509,13 @@ std::string getProfile(RESPONSE_CALLBACK_ARGS) {
   if (ini.parse(profile_content) != INIREADER_EXCEPTION_NONE &&
       !ini.section_exist("Profile")) {
     // std::cerr<<"Load profile failed! Reason: "<<ini.get_last_error()<<"\n";
-    writeLog(0, "加载配置档失败！原因：" + ini.get_last_error(),
+    const std::string parser_detail = ini.get_last_error();
+    writeLog(0, "PROFILE_CONFIG_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(parser_detail),
              LOG_LEVEL_ERROR);
     *status_code = 500;
     return "Invalid profile: failed to parse profile content.\n"
-           "无效配置：profile 内容解析失败。\n"
-           "Reason / 原因: " +
-           ini.get_last_error();
+           "无效配置：profile 内容解析失败。";
   }
   // std::cerr<<"Trying to parse profile '" + name + "'.\n";
   writeLog(0, "正在解析配置档：'" + name + "'。", LOG_LEVEL_INFO);
@@ -3645,8 +3645,8 @@ int simpleGenerator() {
   if (ini.parse(config) != INIREADER_EXCEPTION_NONE) {
     // std::cerr<<"Generator configuration broken!
     // Reason:"<<ini.get_last_error()<<"\n";
-    writeLog(0,
-             "生成器配置损坏！原因：" + ini.get_last_error(),
+    writeLog(0, "GENERATOR_CONFIG_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(ini.get_last_error()),
              LOG_LEVEL_ERROR);
     return -2;
   }

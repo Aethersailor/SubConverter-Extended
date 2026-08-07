@@ -8,13 +8,14 @@
 std::string redactSensitiveLogText(const std::string &text);
 
 // Describe an arbitrary exception or parser diagnostic without retaining any
-// attacker-controlled text. This is suitable for errors whose wording may
-// contain configuration values, request data, or filesystem paths.
+// attacker-controlled text or a stable digest that could validate guesses of
+// short secrets. This is suitable for errors whose wording may contain
+// configuration values, request data, or filesystem paths.
 std::string summarizeSensitiveTextForLog(const std::string &value);
 
 // Return a stable diagnostic description without exposing the source value.
 // HTTP(S) hosts are retained when they can be extracted without credentials;
-// opaque subscription and node URIs expose only their scheme, length and hash.
+// opaque subscription and node URIs expose only their scheme and length.
 std::string summarizeUrlForLog(const std::string &value);
 
 #endif // REDACT_H_INCLUDED
