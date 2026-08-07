@@ -1765,91 +1765,202 @@ std::string subconverterTracked(RESPONSE_CALLBACK_ARGS) {
   return subconverterEntry(request, response, true);
 }
 
-static std::string subconverter_impl(Request &request, Response &response,
-                                     const Settings &settings,
-                                     RuleConversionStats *rule_stats) {
-  auto &argument = request.argument;
-  int *status_code = &response.status_code;
+namespace {
 
-  std::string argTarget = getUrlArg(argument, "target"),
-              argSurgeVer = getUrlArg(argument, "ver");
-  bool explainMode = isTruthyRequestValue(getUrlArg(argument, "explain"));
+struct ParsedSubRequest {
+  std::string target;
+  std::string surge_version_text;
+  bool explain_mode = false;
   SubExplainReport explain;
-  explain.enabled = explainMode;
-  explain.proxy_config = parseProxy(settings.proxyConfig).describe();
-  explain.proxy_ruleset = parseProxy(settings.proxyRuleset).describe();
-  explain.proxy_subscription = parseProxy(settings.proxySubscription).describe();
-  explain.requested_target = argTarget;
-  if (explainMode) {
+  tribool clash_new_field;
+  int surge_version = 3;
+  const TargetDescriptor *target_descriptor = nullptr;
+  bool simple_subscription = false;
+
+  std::string url;
+  std::string group_name;
+  std::string upload_path;
+  std::string include_remark;
+  std::string exclude_remark;
+  std::string external_config;
+  std::string device_id;
+  std::string filename;
+  std::string update_interval;
+  std::string update_strict;
+  std::string renames;
+  std::string provider_headers;
+
+  tribool upload;
+  tribool emoji;
+  tribool add_emoji;
+  tribool remove_emoji;
+  tribool append_type;
+  tribool tfo;
+  tribool udp;
+  tribool generate_node_list;
+  tribool sort;
+  tribool use_sort_script;
+  tribool generate_clash_script;
+  tribool enable_insert;
+  tribool skip_cert_verify;
+  tribool filter_deprecated;
+  tribool expand_rulesets;
+  tribool append_userinfo;
+  tribool prepend_insert;
+  tribool generate_classical_rule_provider;
+  tribool tls13;
+  tribool provider_proxy_direct;
+};
+
+static std::string parseSubRequestArguments(Request &request,
+                                            Response &response,
+                                            const Settings &settings,
+                                            ParsedSubRequest &parsed) {
+  auto &argument = request.argument;
+  parsed.target = getUrlArg(argument, "target");
+  parsed.surge_version_text = getUrlArg(argument, "ver");
+  parsed.explain_mode = isTruthyRequestValue(getUrlArg(argument, "explain"));
+  parsed.explain.enabled = parsed.explain_mode;
+  parsed.explain.proxy_config = parseProxy(settings.proxyConfig).describe();
+  parsed.explain.proxy_ruleset = parseProxy(settings.proxyRuleset).describe();
+  parsed.explain.proxy_subscription =
+      parseProxy(settings.proxySubscription).describe();
+  parsed.explain.requested_target = parsed.target;
+  if (parsed.explain_mode) {
     std::string rawUrlForLog = getUrlArg(argument, "url");
     writeLog(0,
              "收到 /sub explain JSON 诊断请求：target=" +
-                 (argTarget.empty() ? std::string("<empty>") : argTarget) +
+                 (parsed.target.empty() ? std::string("<empty>")
+                                        : parsed.target) +
                  ", 参数数量=" + std::to_string(argument.size()) +
                  ", url_hash=" +
-                 (rawUrlForLog.empty() ? std::string("-")
-                                       : shortHash(urlDecode(rawUrlForLog))) +
+                 (rawUrlForLog.empty()
+                      ? std::string("-")
+                      : shortHash(urlDecode(rawUrlForLog))) +
                  "。",
              LOG_LEVEL_INFO);
   }
-  tribool argClashNewField = getUrlArg(argument, "new_name");
-  int intSurgeVer = !argSurgeVer.empty() ? to_int(argSurgeVer, 3) : 3;
-  if (argTarget == "auto")
-    matchUserAgent(request.headers["User-Agent"], argTarget, argClashNewField,
-                   intSurgeVer);
-  explain.target = argTarget;
 
-  /// don't try to load groups or rulesets when generating simple subscriptions
-  const TargetDescriptor *target_descriptor = findTargetDescriptor(argTarget);
-  if (!target_descriptor) {
-    *status_code = 400;
+  parsed.clash_new_field = getUrlArg(argument, "new_name");
+  parsed.surge_version = !parsed.surge_version_text.empty()
+                             ? to_int(parsed.surge_version_text, 3)
+                             : 3;
+  if (parsed.target == "auto")
+    matchUserAgent(request.headers["User-Agent"], parsed.target,
+                   parsed.clash_new_field, parsed.surge_version);
+  parsed.explain.target = parsed.target;
+
+  parsed.target_descriptor = findTargetDescriptor(parsed.target);
+  if (!parsed.target_descriptor) {
+    response.status_code = 400;
     return "Invalid request: unsupported target value.\n"
            "无效请求：不支持的 target 参数值。\n"
            "Supported targets: " +
            supportedTargets(", ") + ".\n" + "支持的 target：" +
            supportedTargets("、") + "。";
   }
-  const bool lSimpleSubscription = target_descriptor->simple_subscription;
-  /// string values
-  std::string argUrl = getUrlArg(argument, "url");
-  std::string argGroupName = getUrlArg(argument, "group"),
-              argUploadPath = getUrlArg(argument, "upload_path");
-  std::string argIncludeRemark = getUrlArg(argument, "include"),
-              argExcludeRemark = getUrlArg(argument, "exclude");
-  std::string argExternalConfig = getUrlArg(argument, "config");
-  std::string argDeviceID = getUrlArg(argument, "dev_id"),
-              argFilename = getUrlArg(argument, "filename"),
-              argUpdateInterval = getUrlArg(argument, "interval"),
-              argUpdateStrict = getUrlArg(argument, "strict");
-  std::string argRenames = getUrlArg(argument, "rename"),
-              argProviderHeaders = getUrlArg(argument, "provider_headers");
+  parsed.simple_subscription = parsed.target_descriptor->simple_subscription;
 
-  /// switches with default value
-  tribool argUpload = getUrlArg(argument, "upload"),
-          argEmoji = getUrlArg(argument, "emoji"),
-          argAddEmoji = getUrlArg(argument, "add_emoji"),
-          argRemoveEmoji = getUrlArg(argument, "remove_emoji");
-  tribool argAppendType = getUrlArg(argument, "append_type"),
-          argTFO = getUrlArg(argument, "tfo"),
-          argUDP = getUrlArg(argument, "udp"),
-          argGenNodeList = getUrlArg(argument, "list");
-  tribool argSort = getUrlArg(argument, "sort"),
-          argUseSortScript = getUrlArg(argument, "sort_script");
-  tribool argGenClashScript = getUrlArg(argument, "script"),
-          argEnableInsert = getUrlArg(argument, "insert");
-  tribool argSkipCertVerify = getUrlArg(argument, "scv"),
-          argFilterDeprecated = getUrlArg(argument, "fdn"),
-          argExpandRulesets = getUrlArg(argument, "expand"),
-          argAppendUserinfo = getUrlArg(argument, "append_info");
-  tribool argPrependInsert = getUrlArg(argument, "prepend"),
-          argGenClassicalRuleProvider = getUrlArg(argument, "classic"),
-          argTLS13 = getUrlArg(argument, "tls13"),
-          argProviderProxyDirect = getUrlArg(argument, "provider_proxy_direct");
-  explain.upload_requested = argUpload.get(false);
-  if (explainMode && argUpload) {
-    argUpload = false;
-    explain.upload_suppressed = true;
+  parsed.url = getUrlArg(argument, "url");
+  parsed.group_name = getUrlArg(argument, "group");
+  parsed.upload_path = getUrlArg(argument, "upload_path");
+  parsed.include_remark = getUrlArg(argument, "include");
+  parsed.exclude_remark = getUrlArg(argument, "exclude");
+  parsed.external_config = getUrlArg(argument, "config");
+  parsed.device_id = getUrlArg(argument, "dev_id");
+  parsed.filename = getUrlArg(argument, "filename");
+  parsed.update_interval = getUrlArg(argument, "interval");
+  parsed.update_strict = getUrlArg(argument, "strict");
+  parsed.renames = getUrlArg(argument, "rename");
+  parsed.provider_headers = getUrlArg(argument, "provider_headers");
+
+  parsed.upload = getUrlArg(argument, "upload");
+  parsed.emoji = getUrlArg(argument, "emoji");
+  parsed.add_emoji = getUrlArg(argument, "add_emoji");
+  parsed.remove_emoji = getUrlArg(argument, "remove_emoji");
+  parsed.append_type = getUrlArg(argument, "append_type");
+  parsed.tfo = getUrlArg(argument, "tfo");
+  parsed.udp = getUrlArg(argument, "udp");
+  parsed.generate_node_list = getUrlArg(argument, "list");
+  parsed.sort = getUrlArg(argument, "sort");
+  parsed.use_sort_script = getUrlArg(argument, "sort_script");
+  parsed.generate_clash_script = getUrlArg(argument, "script");
+  parsed.enable_insert = getUrlArg(argument, "insert");
+  parsed.skip_cert_verify = getUrlArg(argument, "scv");
+  parsed.filter_deprecated = getUrlArg(argument, "fdn");
+  parsed.expand_rulesets = getUrlArg(argument, "expand");
+  parsed.append_userinfo = getUrlArg(argument, "append_info");
+  parsed.prepend_insert = getUrlArg(argument, "prepend");
+  parsed.generate_classical_rule_provider = getUrlArg(argument, "classic");
+  parsed.tls13 = getUrlArg(argument, "tls13");
+  parsed.provider_proxy_direct =
+      getUrlArg(argument, "provider_proxy_direct");
+  parsed.explain.upload_requested = parsed.upload.get(false);
+  if (parsed.explain_mode && parsed.upload) {
+    parsed.upload = false;
+    parsed.explain.upload_suppressed = true;
   }
+
+  return "";
+}
+
+} // namespace
+
+static std::string subconverter_impl(Request &request, Response &response,
+                                     const Settings &settings,
+                                     RuleConversionStats *rule_stats) {
+  auto &argument = request.argument;
+  int *status_code = &response.status_code;
+
+  ParsedSubRequest parsed_request;
+  std::string parse_error =
+      parseSubRequestArguments(request, response, settings, parsed_request);
+  if (!parse_error.empty())
+    return parse_error;
+
+  std::string &argTarget = parsed_request.target;
+  std::string &argSurgeVer = parsed_request.surge_version_text;
+  bool explainMode = parsed_request.explain_mode;
+  SubExplainReport &explain = parsed_request.explain;
+  tribool &argClashNewField = parsed_request.clash_new_field;
+  int intSurgeVer = parsed_request.surge_version;
+  const TargetDescriptor *target_descriptor = parsed_request.target_descriptor;
+  const bool lSimpleSubscription = parsed_request.simple_subscription;
+
+  std::string &argUrl = parsed_request.url;
+  std::string &argGroupName = parsed_request.group_name;
+  std::string &argUploadPath = parsed_request.upload_path;
+  std::string &argIncludeRemark = parsed_request.include_remark;
+  std::string &argExcludeRemark = parsed_request.exclude_remark;
+  std::string &argExternalConfig = parsed_request.external_config;
+  std::string &argDeviceID = parsed_request.device_id;
+  std::string &argFilename = parsed_request.filename;
+  std::string &argUpdateInterval = parsed_request.update_interval;
+  std::string &argUpdateStrict = parsed_request.update_strict;
+  std::string &argRenames = parsed_request.renames;
+  std::string &argProviderHeaders = parsed_request.provider_headers;
+
+  tribool &argUpload = parsed_request.upload;
+  tribool &argEmoji = parsed_request.emoji;
+  tribool &argAddEmoji = parsed_request.add_emoji;
+  tribool &argRemoveEmoji = parsed_request.remove_emoji;
+  tribool &argAppendType = parsed_request.append_type;
+  tribool &argTFO = parsed_request.tfo;
+  tribool &argUDP = parsed_request.udp;
+  tribool &argGenNodeList = parsed_request.generate_node_list;
+  tribool &argSort = parsed_request.sort;
+  tribool &argUseSortScript = parsed_request.use_sort_script;
+  tribool &argGenClashScript = parsed_request.generate_clash_script;
+  tribool &argEnableInsert = parsed_request.enable_insert;
+  tribool &argSkipCertVerify = parsed_request.skip_cert_verify;
+  tribool &argFilterDeprecated = parsed_request.filter_deprecated;
+  tribool &argExpandRulesets = parsed_request.expand_rulesets;
+  tribool &argAppendUserinfo = parsed_request.append_userinfo;
+  tribool &argPrependInsert = parsed_request.prepend_insert;
+  tribool &argGenClassicalRuleProvider =
+      parsed_request.generate_classical_rule_provider;
+  tribool &argTLS13 = parsed_request.tls13;
+  tribool &argProviderProxyDirect = parsed_request.provider_proxy_direct;
 
   std::string base_content, output_content;
   ProxyGroupConfigs lCustomProxyGroups = settings.customProxyGroups;
