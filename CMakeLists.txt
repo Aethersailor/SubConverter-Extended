@@ -55,9 +55,22 @@ OPTION(USING_MALLOC_TRIM "Call malloc_trim after processing request to lower mem
 OPTION(BUILD_STATIC_LIBRARY "Build a static library containing only the essential part." OFF)
 OPTION(BUILD_TESTS "Build focused regression tests." OFF)
 OPTION(BUILD_BENCHMARKS "Build opt-in performance benchmarks (requires BUILD_TESTS)." OFF)
+OPTION(ENABLE_SANITIZERS "Build tests and runtime with ASan and UBSan." OFF)
 
 IF(BUILD_BENCHMARKS AND NOT BUILD_TESTS)
     MESSAGE(FATAL_ERROR "BUILD_BENCHMARKS=ON requires BUILD_TESTS=ON")
+ENDIF()
+
+IF(ENABLE_SANITIZERS)
+    IF(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        MESSAGE(FATAL_ERROR "ENABLE_SANITIZERS requires GCC or Clang")
+    ENDIF()
+    ADD_COMPILE_OPTIONS(
+        -O1
+        -g
+        -fno-omit-frame-pointer
+        -fsanitize=address,undefined)
+    ADD_LINK_OPTIONS(-fsanitize=address,undefined)
 ENDIF()
 
 INCLUDE(CheckCXXSourceCompiles)
@@ -262,6 +275,7 @@ IF(BUILD_TESTS)
 
     ADD_EXECUTABLE(webserver_error_test
         tests/webserver_error_test.cpp
+        src/handler/settings_view.cpp
         src/server/client_ip.cpp
         src/server/webserver_httplib.cpp
         src/utils/base64/base64.cpp
@@ -347,6 +361,12 @@ IF(BUILD_TESTS)
     TARGET_LINK_LIBRARIES(settings_view_test ${CMAKE_THREAD_LIBS_INIT})
     ADD_TEST(NAME settings_view COMMAND settings_view_test)
     SET_TESTS_PROPERTIES(settings_view PROPERTIES LABELS fast)
+    ADD_TEST(
+        NAME settings_view_invariant_failure
+        COMMAND settings_view_test --inject-invariant-failure)
+    SET_TESTS_PROPERTIES(settings_view_invariant_failure PROPERTIES
+        LABELS fast
+        WILL_FAIL TRUE)
 
     ADD_EXECUTABLE(statistics_v2_test
         tests/statistics_v2_test.cpp

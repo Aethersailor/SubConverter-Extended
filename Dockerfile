@@ -76,6 +76,7 @@ ARG NLOHMANN_JSON_REF
 ARG INJA_REF
 ARG JPCRE2_REF
 ARG BUILD_TESTS=false
+ARG ENABLE_SANITIZERS=false
 
 WORKDIR /
 
@@ -182,6 +183,7 @@ RUN set -xe && \
     cmake -GNinja \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_TESTS=${BUILD_TESTS} \
+    -DENABLE_SANITIZERS=${ENABLE_SANITIZERS} \
     -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
     -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
     -DCMAKE_POSITION_INDEPENDENT_CODE=OFF \
@@ -189,6 +191,12 @@ RUN set -xe && \
     ninja -j ${THREADS}
 
 RUN if [ "${BUILD_TESTS}" = "true" ]; then \
+      if [ "${ENABLE_SANITIZERS}" = "true" ]; then \
+        export ASAN_OPTIONS="detect_leaks=1:strict_string_checks=1:halt_on_error=1:abort_on_error=1"; \
+        export UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1"; \
+        echo "Sanitizer targets: subconverter, settings_snapshot_test_helper, settings_view_test"; \
+        echo "Sanitizer run: python3 scripts/run-test-suite.py --build-dir . --mode full"; \
+      fi; \
       python3 scripts/run-test-suite.py --build-dir . --mode full; \
     fi
 

@@ -7,6 +7,7 @@
 #include <nlohmann/json.hpp>
 
 #include "handler/settings.h"
+#include "handler/settings_view.h"
 #include "handler/webget.h"
 #include "nodemanip.h"
 #include "parser/config/proxy.h"
@@ -225,7 +226,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
             }
           }
         },
-        global.scriptCleanContext);
+        effectiveSettings().scriptCleanContext);
   /*
   duk_context *ctx = duktape_init();
   defer(duk_destroy_heap(ctx);)
@@ -381,8 +382,8 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
         }
       }
 
-      strSub = webGet(link, proxy, global.cacheSubscription, &extra_headers,
-                      request_headers, parse_set.fetch_context);
+      strSub = webGet(link, proxy, effectiveSettings().cacheSubscription,
+                      &extra_headers, request_headers, parse_set.fetch_context);
     } else if (isNodeLink) {
       // 节点链接：直接用 mihomo 解析（不需要 webGet）
       writeLog(LOG_TYPE_INFO, "检测到节点链接，正在使用 Mihomo 解析...");
@@ -403,8 +404,8 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
         }
       }
 
-      strSub = webGet(link, proxy, global.cacheSubscription, &extra_headers,
-                      request_headers, parse_set.fetch_context);
+      strSub = webGet(link, proxy, effectiveSettings().cacheSubscription,
+                      &extra_headers, request_headers, parse_set.fetch_context);
     }
     /*
     if(strSub.size() == 0)
@@ -745,7 +746,7 @@ void nodeRename(Proxy &node, const RegexMatchConfigs &rename_array,
               script_print_stack(ctx);
             }
           },
-          global.scriptCleanContext);
+          effectiveSettings().scriptCleanContext);
       continue;
     }
     if (applyMatcher(x.Match, real_rule, node) && real_rule.size())
@@ -795,7 +796,7 @@ std::string addEmoji(const Proxy &node, const RegexMatchConfigs &emoji_array,
               script_print_stack(ctx);
             }
           },
-          global.scriptCleanContext);
+          effectiveSettings().scriptCleanContext);
       if (!result.empty())
         return result;
       continue;
@@ -847,7 +848,7 @@ void preprocessNodes(std::vector<Proxy> &nodes, extra_settings &ext) {
               script_print_stack(ctx);
             }
           },
-          global.scriptCleanContext);
+          effectiveSettings().scriptCleanContext);
     }
     if (failed)
       std::stable_sort(

@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include "handler/settings.h"
+#include "handler/settings_view.h"
 #include "defer.h"
 #include "lock.h"
 #include "logger.h"
@@ -68,7 +69,7 @@ std::mutex log_mutex;
 
 bool shouldLog(int level)
 {
-    return level <= global.logLevel;
+    return level <= effectiveSettings().logLevel;
 }
 
 void writeLog(int type, const std::string &content, int level)

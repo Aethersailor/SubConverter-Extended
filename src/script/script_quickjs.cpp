@@ -13,6 +13,7 @@
 #include "handler/multithread.h"
 #include "handler/webget.h"
 #include "handler/settings.h"
+#include "handler/settings_view.h"
 #include "parser/config/proxy.h"
 #include "utils/map_extra.h"
 #include "utils/system.h"
@@ -396,9 +397,10 @@ static qjs_fetch_Response qjs_fetch(qjs_fetch_Request request)
     }
 
     std::string response_headers;
+    const Settings &settings = effectiveSettings();
     ProxyPolicy proxy = request.proxy_specified
                             ? parseProxy(request.proxy)
-                            : parseProxy(global.proxyConfig);
+                            : parseProxy(settings.proxyConfig);
     FetchArgument argument {method, request.url, proxy, &request.postdata, &request.headers.headers, &request.cookies, 0};
     FetchResult result {&response.status_code, &response.content, &response_headers, &response.cookies};
 
@@ -415,9 +417,11 @@ static std::string qjs_getUrlArg(const std::string &url, const std::string &requ
 
 std::string getGeoIP(const std::string &address, const std::string &proxy)
 {
-    ProxyPolicy policy = proxy.empty() ? parseProxy(global.proxyConfig)
+    const Settings &settings = effectiveSettings();
+    ProxyPolicy policy = proxy.empty() ? parseProxy(settings.proxyConfig)
                                        : parseProxy(proxy);
-    return fetchFile("https://api.ip.sb/geoip/" + address, policy, global.cacheConfig);
+    return fetchFile("https://api.ip.sb/geoip/" + address, policy,
+                     settings.cacheConfig);
 }
 
 void script_runtime_init(qjs::Runtime &runtime)
