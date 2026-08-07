@@ -6,6 +6,7 @@
 #include "utils/network.h"
 #include "utils/rapidjson_extra.h"
 #include "utils/regexp.h"
+#include "utils/redact.h"
 #include "utils/string.h"
 #include "utils/string_hash.h"
 #include "utils/urlencode.h"
@@ -3349,7 +3350,10 @@ void explodeSub(std::string sub, std::vector<Proxy> &nodes) {
             }
         }
     } catch (std::exception &e) {
-        writeLog(LOG_TYPE_ERROR, e.what(), LOG_LEVEL_ERROR);
+        writeLog(LOG_TYPE_ERROR,
+                 "SINGBOX_PARSE_FAILED detail=" +
+                     summarizeSensitiveTextForLog(e.what()),
+                 LOG_LEVEL_ERROR);
         //writeLog(0, e.what(), LOG_LEVEL_DEBUG);
         //ignore
         throw;

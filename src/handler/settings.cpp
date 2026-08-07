@@ -16,6 +16,7 @@
 #include "utils/concurrent_lru_cache.h"
 #include "utils/md5/md5_interface.h"
 #include "utils/network.h"
+#include "utils/redact.h"
 #include "utils/system.h"
 
 // multi-thread lock
@@ -429,7 +430,8 @@ int importItems(std::vector<toml::value> &root, const std::string &import_key,
           count += list.size();
           std::move(list.begin(), list.end(), std::back_inserter(newRoot));
         } catch (const std::exception &e) {
-          writeLog(0, "导入项目失败：" + path + "，原因：" + e.what(),
+          writeLog(0, "导入项目失败：" + summarizeUrlForLog(path) +
+                          "，detail=" + summarizeSensitiveTextForLog(e.what()),
                    LOG_LEVEL_ERROR);
           failed = true;
         }

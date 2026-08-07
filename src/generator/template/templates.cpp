@@ -202,7 +202,10 @@ int render_template(const std::string &content, const template_args &vars,
     }
     catch(std::exception &e)
     {
-        writeLog(0, e.what(), LOG_LEVEL_ERROR);
+        writeLog(0,
+                 "TEMPLATE_SCOPE_RESOLUTION_FAILED detail=" +
+                     summarizeSensitiveTextForLog(e.what()),
+                 LOG_LEVEL_ERROR);
     }
     nlohmann::json data;
     for(auto &x : vars.global_vars)
@@ -368,8 +371,14 @@ int render_template(const std::string &content, const template_args &vars,
     }
     catch (std::exception &e)
     {
-        output = "模板渲染失败。原因：" + std::string(e.what());
-        writeLog(0, output, LOG_LEVEL_ERROR);
+        output = "Invalid template: rendering failed.\n"
+                 "无效模板：模板渲染失败。\n"
+                 "Please check the template syntax and configured resources.\n"
+                 "请检查模板语法和已配置资源。";
+        writeLog(0,
+                 "TEMPLATE_RENDER_FAILED detail=" +
+                     summarizeSensitiveTextForLog(e.what()),
+                 LOG_LEVEL_ERROR);
         return -1;
     }
     return -2;
@@ -724,7 +733,10 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
         }
         catch (std::exception &e)
         {
-            writeLog(0, "渲染时发生错误：" + std::string(e.what()), LOG_TYPE_ERROR);
+            writeLog(0,
+                     "CLASH_SCRIPT_RENDER_FAILED detail=" +
+                         summarizeSensitiveTextForLog(e.what()),
+                     LOG_TYPE_ERROR);
             if(stats)
                 stats->add(local_stats.rules);
             return -1;

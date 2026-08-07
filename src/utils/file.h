@@ -29,7 +29,9 @@ enum class FileIoTestFailure {
     Open,
     ShortWrite,
     Flush,
+    Sync,
     Close,
+    Replace,
 };
 void setFileIoTestFailure(FileIoTestFailure failure);
 #endif

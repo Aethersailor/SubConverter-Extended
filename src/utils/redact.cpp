@@ -20,6 +20,7 @@ bool sensitiveParameter(const std::string &name) {
   return lower == "token" || lower == "access_token" || lower == "api_key" ||
          lower == "apikey" || lower == "key" || lower == "secret" ||
          lower == "password" || lower == "pass" || lower == "authorization" ||
+         lower == "cookie" || lower == "set-cookie" ||
          lower == "url" || lower == "config" || lower == "userinfo" ||
          lower == "profile_data";
 }
@@ -149,14 +150,61 @@ std::string redactUrl(std::string url) {
 }
 
 std::string redactHeaders(std::string text) {
-  const std::string lower = toLower(text);
-  const std::string::size_type proxy_authorization =
-      lower.find("proxy-authorization:");
-  if (proxy_authorization != std::string::npos)
-    return text.substr(0, proxy_authorization + 20) + " <redacted>";
-  const std::string::size_type authorization = lower.find("authorization:");
-  if (authorization != std::string::npos)
-    return text.substr(0, authorization + 14) + " <redacted>";
+  static const string_array header_names = {
+      "proxy-authorization", "authorization", "set-cookie", "cookie"};
+  std::string lower = toLower(text);
+  std::string::size_type search_from = 0;
+  while (search_from < text.size()) {
+    std::string::size_type header_start = std::string::npos;
+    std::string matched_name;
+    for (const std::string &name : header_names) {
+      std::string::size_type candidate = lower.find(name + ":", search_from);
+      while (candidate != std::string::npos && candidate > 0) {
+        const unsigned char before =
+            static_cast<unsigned char>(lower[candidate - 1]);
+        if (!std::isalnum(before) && before != '_' && before != '-')
+          break;
+        candidate = lower.find(name + ":", candidate + 1);
+      }
+      if (candidate != std::string::npos &&
+          (header_start == std::string::npos || candidate < header_start)) {
+        header_start = candidate;
+        matched_name = name;
+      }
+    }
+    if (header_start == std::string::npos)
+      break;
+
+    const std::string::size_type colon = header_start + matched_name.size();
+    std::string::size_type value_end = text.find_first_of("\r\n", colon + 1);
+    if (value_end == std::string::npos)
+      value_end = text.size();
+    else {
+      // Obsolete folded HTTP headers are still seen in diagnostic dumps. A
+      // continuation line begins with whitespace and belongs to the same
+      // secret value, so redact it together with the first line.
+      std::string::size_type next_line = value_end;
+      while (next_line < text.size()) {
+        if (text[next_line] == '\r')
+          ++next_line;
+        if (next_line < text.size() && text[next_line] == '\n')
+          ++next_line;
+        if (next_line >= text.size() ||
+            (text[next_line] != ' ' && text[next_line] != '\t'))
+          break;
+        value_end = text.find_first_of("\r\n", next_line);
+        if (value_end == std::string::npos) {
+          value_end = text.size();
+          break;
+        }
+        next_line = value_end;
+      }
+    }
+    static const std::string replacement = " <redacted>";
+    text.replace(colon + 1, value_end - colon - 1, replacement);
+    lower = toLower(text);
+    search_from = colon + 1 + replacement.size();
+  }
   return text;
 }
 
@@ -193,6 +241,11 @@ std::string redactSensitiveLogText(const std::string &text) {
   return result;
 }
 
+std::string summarizeSensitiveTextForLog(const std::string &value) {
+  return "length=" + std::to_string(value.size()) +
+         " hash=" + shortDiagnosticHash(value);
+}
+
 std::string summarizeUrlForLog(const std::string &value) {
   const std::string scheme = urlScheme(value);
   std::string summary = "scheme=" + (scheme.empty() ? "opaque" : scheme);
@@ -213,7 +266,6 @@ std::string summarizeUrlForLog(const std::string &value) {
       summary += " host=" + authority;
   }
 
-  summary += " length=" + std::to_string(value.size()) +
-             " hash=" + shortDiagnosticHash(value);
+  summary += " " + summarizeSensitiveTextForLog(value);
   return summary;
 }

@@ -444,7 +444,8 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
         }
       } catch (const std::exception &e) {
         writeLog(LOG_TYPE_ERROR,
-                 "Mihomo 解析器错误：" + std::string(e.what()) +
+                 "MIHOMO_PARSER_FAILED detail=" +
+                     summarizeSensitiveTextForLog(e.what()) +
                      "，回退到旧解析器。");
       }
 
@@ -550,7 +551,8 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
         }
       } catch (const std::exception &e) {
         writeLog(LOG_TYPE_ERROR,
-                 "Mihomo 回退解析失败：" + std::string(e.what()));
+                 "MIHOMO_FALLBACK_PARSER_FAILED detail=" +
+                     summarizeSensitiveTextForLog(e.what()));
         return -1;
       }
 #else
