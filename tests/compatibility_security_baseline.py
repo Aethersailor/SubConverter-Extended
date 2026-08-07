@@ -1244,15 +1244,47 @@ def conversion_baselines(
     encoded_ruleset = base64.urlsafe_b64encode(
         (fixture_base + "/rules.list").encode()
     ).decode()
-    status, body, _ = request(
-        base_url, "/getruleset", {"url": encoded_ruleset, "type": "6"}
-    )
-    if status != 200:
-        raise AssertionError(f"/getruleset returned HTTP {status}: {body!r}")
-    ruleset_output = normalize_output(body, fixture_base)
-    assert_golden("getruleset.yaml", ruleset_output, update_golden)
-    if "payload:" not in ruleset_output or "example.com" not in ruleset_output:
-        raise AssertionError("/getruleset semantic baseline failed")
+    encoded_group = base64.urlsafe_b64encode(b"Converted").decode()
+    expected_ruleset_outputs = {
+        "1": RULESET,
+        "2": (
+            "DOMAIN-SUFFIX,example.com,Converted\n"
+            "IP-CIDR,198.51.100.0/24,Converted\n"
+        ),
+        "3": "payload:\n  - '+.example.com'\n",
+        "4": "payload:\n  - '198.51.100.0/24'\n",
+        "5": ".example.com\n",
+        "6": (
+            "payload:\n"
+            "  - DOMAIN-SUFFIX,example.com,Proxy\n"
+            "  - IP-CIDR,198.51.100.0/24,Proxy\n"
+        ),
+    }
+    for ruleset_type, expected in expected_ruleset_outputs.items():
+        params = {"url": encoded_ruleset, "type": ruleset_type}
+        if ruleset_type == "2":
+            params["group"] = encoded_group
+        status, body, _ = request(base_url, "/getruleset", params)
+        if status != 200:
+            raise AssertionError(
+                f"/getruleset type={ruleset_type} returned "
+                f"HTTP {status}: {body!r}"
+            )
+        ruleset_output = normalize_output(body, fixture_base)
+        if ruleset_output != expected:
+            diff = "".join(
+                difflib.unified_diff(
+                    expected.splitlines(keepends=True),
+                    ruleset_output.splitlines(keepends=True),
+                    fromfile=f"getruleset-type-{ruleset_type}.expected",
+                    tofile=f"getruleset-type-{ruleset_type}.actual",
+                )
+            )
+            raise AssertionError(
+                f"/getruleset type={ruleset_type} output changed:\n{diff}"
+            )
+        if ruleset_type == "6":
+            assert_golden("getruleset.yaml", ruleset_output, update_golden)
 
     encoded_mixed_ruleset = base64.urlsafe_b64encode(
         (fixture_base + "/rules-with-invalid.list").encode()
