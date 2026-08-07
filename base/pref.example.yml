@@ -1,8 +1,8 @@
 common:
   # API 模式固定开启，令牌认证已移除；调用转换接口时仍需通过 url 参数提供订阅来源。
   # API mode is always enabled and token authentication has been removed; conversion requests must still provide subscription sources through the url argument.
-  # 未提供 url 参数时使用的默认订阅来源列表；每项可为本地文件或 URL，空列表表示不设默认来源。
-  # Default subscription sources used when url is omitted; each item may be a local file or URL, and an empty list disables the fallback.
+  # 为兼容旧配置仍会解析此列表；当前 API 模式下 /sub 缺少 url 时不会回退到这里。
+  # Still parsed for configuration compatibility; current API-mode /sub requests never fall back here when url is missing.
   default_url: []
   # 是否把 insert_url 中的节点插入每次转换；关闭后 insert_url 不参与输出。
   # Whether to inject nodes from insert_url into every conversion; when false, insert_url is ignored.
@@ -318,8 +318,8 @@ advanced:
   # 是否强制输出详细调试信息；true 会覆盖 log_level 并使用 verbose 级别，可能包含敏感配置细节。
   # Whether to force verbose diagnostics; true overrides log_level with verbose and may expose sensitive configuration details.
   print_debug_info: false
-  # 监听套接字等待队列上限（libevent 后端）；不是同时处理请求数。
-  # Listening-socket backlog limit on the libevent backend; this is not the number of concurrently processed requests.
+  # 为兼容旧配置保留；当前 HTTP 后端不使用此值。
+  # Retained for configuration compatibility; the current HTTP backend does not use this value.
   max_pending_connections: 10240
   # HTTP 基础工作线程数；SUBCONVERTER_MAX_CONCURRENT_THREADS 可覆盖，最小会收敛为 1。
   # Base HTTP worker-thread count; SUBCONVERTER_MAX_CONCURRENT_THREADS overrides it and values are clamped to at least 1.
