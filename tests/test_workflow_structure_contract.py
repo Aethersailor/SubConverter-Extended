@@ -3,6 +3,7 @@ import json
 import pathlib
 import subprocess
 import sys
+import tempfile
 import unittest
 
 
@@ -20,6 +21,17 @@ class WorkflowStructureContractTests(unittest.TestCase):
     def test_structure_matches_the_pre_split_baseline(self):
         expected = json.loads(CONTRACT.FIXTURE.read_text(encoding="utf-8"))
         self.assertEqual(CONTRACT.snapshot(), expected)
+
+    def test_composite_action_hash_is_independent_of_checkout_line_endings(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            lf = pathlib.Path(temporary) / "lf.yml"
+            crlf = pathlib.Path(temporary) / "crlf.yml"
+            lf.write_bytes(b"name: test\nruns:\n  using: composite\n")
+            crlf.write_bytes(b"name: test\r\nruns:\r\n  using: composite\r\n")
+            self.assertEqual(
+                CONTRACT.canonical_text_sha256(lf),
+                CONTRACT.canonical_text_sha256(crlf),
+            )
 
     def test_extracted_shell_scripts_parse(self):
         scripts = (

@@ -128,13 +128,19 @@ def workflow_contract(path: Path) -> dict[str, object]:
     return top
 
 
+def canonical_text_sha256(path: Path) -> str:
+    """Hash text after universal-newline decoding for cross-platform checkouts."""
+    content = path.read_text(encoding="utf-8")
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
 def snapshot() -> dict[str, object]:
     workflows = {
         path.name: workflow_contract(path)
         for path in sorted(WORKFLOWS.glob("*.yml"))
     }
     actions = {
-        path.relative_to(ROOT).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        path.relative_to(ROOT).as_posix(): canonical_text_sha256(path)
         for path in sorted(ACTIONS.glob("*/action.yml"))
     }
     return {"workflows": workflows, "composite_action_sha256": actions}
