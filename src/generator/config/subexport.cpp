@@ -22,6 +22,7 @@
 #include "utils/logger.h"
 #include "utils/network.h"
 #include "utils/rapidjson_extra.h"
+#include "utils/redact.h"
 #include "utils/regexp.h"
 #include "utils/stl_extra.h"
 #include "utils/time_compat.h"
@@ -1222,7 +1223,8 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
   try {
     yamlnode = YAML::Load(base_conf);
   } catch (std::exception &e) {
-    writeLog(0, std::string("Clash 基础配置加载失败：") + e.what(),
+    writeLog(0, "CLASH_BASE_CONFIG_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(e.what()),
              LOG_LEVEL_ERROR);
     return "";
   }
@@ -1503,7 +1505,8 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
   ini.add_direct_save_section("URL Rewrite");
   ini.add_direct_save_section("Header Rewrite");
   if (ini.parse(base_conf) != 0 && !ext.nodelist) {
-    writeLog(0, "Surge 基础配置加载失败：" + ini.get_last_error(),
+    writeLog(0, "SURGE_BASE_CONFIG_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(ini.get_last_error()),
              LOG_LEVEL_ERROR);
     return "";
   }
@@ -2077,9 +2080,9 @@ std::string proxyToQuan(std::vector<Proxy> &nodes, const std::string &base_conf,
   INIReader ini;
   ini.store_any_line = true;
   if (!ext.nodelist && ini.parse(base_conf) != 0) {
-    writeLog(
-        0, "Quantumult 基础配置加载失败：" + ini.get_last_error(),
-        LOG_LEVEL_ERROR);
+    writeLog(0, "QUANTUMULT_BASE_CONFIG_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(ini.get_last_error()),
+             LOG_LEVEL_ERROR);
     return "";
   }
 
@@ -2324,9 +2327,9 @@ std::string proxyToQuanX(std::vector<Proxy> &nodes,
   ini.add_direct_save_section("mitm");
   ini.add_direct_save_section("server_remote");
   if (!ext.nodelist && ini.parse(base_conf) != 0) {
-    writeLog(
-        0, "Quantumult X 基础配置加载失败：" + ini.get_last_error(),
-        LOG_LEVEL_ERROR);
+    writeLog(0, "QUANTUMULT_X_BASE_CONFIG_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(ini.get_last_error()),
+             LOG_LEVEL_ERROR);
     return "";
   }
 
@@ -2708,7 +2711,8 @@ std::string proxyToMellow(std::vector<Proxy> &nodes,
   INIReader ini;
   ini.store_any_line = true;
   if (ini.parse(base_conf) != 0) {
-    writeLog(0, "Mellow 基础配置加载失败：" + ini.get_last_error(),
+    writeLog(0, "MELLOW_BASE_CONFIG_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(ini.get_last_error()),
              LOG_LEVEL_ERROR);
     return "";
   }
@@ -2877,7 +2881,8 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
   ini.store_any_line = true;
   ini.add_direct_save_section("Plugin");
   if (ini.parse(base_conf) != INIREADER_EXCEPTION_NONE && !ext.nodelist) {
-    writeLog(0, "Loon 基础配置加载失败：" + ini.get_last_error(),
+    writeLog(0, "LOON_BASE_CONFIG_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(ini.get_last_error()),
              LOG_LEVEL_ERROR);
     return "";
   }

@@ -22,6 +22,7 @@
 #include "handler/settings.h"
 #include "handler/statistics_v2.h"
 #include "utils/logger.h"
+#include "utils/redact.h"
 
 namespace {
 
@@ -144,8 +145,8 @@ void logPersistenceException(
   try {
     std::string message(category);
     if (detail && detail[0] != '\0') {
-      message += ": ";
-      message += detail;
+      message += " detail=";
+      message += summarizeSensitiveTextForLog(detail);
     }
     logPersistenceError(message, last_log);
   } catch (...) {

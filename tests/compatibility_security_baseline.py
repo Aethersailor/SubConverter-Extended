@@ -2223,6 +2223,44 @@ def settings_reload_compatibility_baseline(helper: Path) -> None:
                 )
 
 
+def settings_parser_diagnostic_redaction_baseline(helper: Path) -> None:
+    secret = "yaml-parser-diagnostic-secret"
+    runtime_dir = REPOSITORY / "build" / "test-baseline-runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=runtime_dir) as temporary:
+        malformed = Path(temporary) / "malformed-secret.yml"
+        malformed.write_text(
+            "common:\n"
+            f"  token: {secret}\n"
+            "  malformed: [\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        completed = subprocess.run(
+            [
+                str(helper),
+                str(COMPAT_FIXTURES / "legacy-pref.yml"),
+                str(malformed),
+                "--expect-reload-failure",
+            ],
+            cwd=REPOSITORY,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        json.loads(completed.stdout)
+        if "PREFERENCE_YAML_PARSE_FAILED detail=length=" not in completed.stderr:
+            raise AssertionError(
+                "malformed YAML did not emit the stable parser failure event"
+            )
+        if secret in completed.stderr:
+            raise AssertionError("malformed YAML secret leaked to diagnostics")
+        if "hash=" in completed.stderr:
+            raise AssertionError("parser diagnostics retained a guessable hash")
+
+
 def external_config_failure_baseline(binary: Path, fixture_base: str) -> None:
     common = {
         "target": "clash",
@@ -2356,6 +2394,7 @@ def main() -> int:
         raise AssertionError("historical security profile default changed")
     security_configuration_matrix_baseline(settings_snapshot_helper)
     settings_reload_compatibility_baseline(settings_snapshot_helper)
+    settings_parser_diagnostic_redaction_baseline(settings_snapshot_helper)
     settings_provider_interval_compatibility_baseline(settings_snapshot_helper)
     settings_provider_direct_compatibility_baseline(settings_snapshot_helper)
     settings_dashboard_client_ip_baseline(settings_snapshot_helper)

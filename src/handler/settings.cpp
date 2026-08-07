@@ -1338,8 +1338,8 @@ bool readConf() {
   try {
     prefdata = fileGet(global.prefPath, false);
   } catch (std::exception &e) {
-    return restorePreviousSettings(
-        "无法读取偏好设置。原因：" + std::string(e.what()));
+    return restorePreviousSettings("PREFERENCE_FILE_READ_FAILED detail=" +
+                                   summarizeSensitiveTextForLog(e.what()));
   }
   std::string extension =
       toLower(std::filesystem::path(global.prefPath).extension().string());
@@ -1354,8 +1354,8 @@ bool readConf() {
       applyRuntimeConfiguration();
       return true;
     } catch (std::exception &e) {
-      return restorePreviousSettings(
-          "无法按 YAML 格式加载偏好设置。原因：" + std::string(e.what()));
+      return restorePreviousSettings("PREFERENCE_YAML_APPLY_FAILED detail=" +
+                                     summarizeSensitiveTextForLog(e.what()));
     }
   };
 
@@ -1369,8 +1369,8 @@ bool readConf() {
       applyRuntimeConfiguration();
       return true;
     } catch (std::exception &e) {
-      return restorePreviousSettings(
-          "无法按 TOML 格式加载偏好设置。原因：" + std::string(e.what()));
+      return restorePreviousSettings("PREFERENCE_TOML_APPLY_FAILED detail=" +
+                                     summarizeSensitiveTextForLog(e.what()));
     }
   };
 
@@ -1379,8 +1379,8 @@ bool readConf() {
       YAML::Node yaml = YAML::Load(prefdata);
       return loadYAML(yaml);
     } catch (std::exception &e) {
-      return restorePreviousSettings(
-          "无法解析 YAML 偏好设置。原因：" + std::string(e.what()));
+      return restorePreviousSettings("PREFERENCE_YAML_PARSE_FAILED detail=" +
+                                     summarizeSensitiveTextForLog(e.what()));
     }
   }
 
@@ -1389,8 +1389,8 @@ bool readConf() {
       toml::value conf = parseToml(prefdata, global.prefPath);
       return loadTOML(conf);
     } catch (std::exception &e) {
-      return restorePreviousSettings(
-          "无法解析 TOML 偏好设置。原因：" + std::string(e.what()));
+      return restorePreviousSettings("PREFERENCE_TOML_PARSE_FAILED detail=" +
+                                     summarizeSensitiveTextForLog(e.what()));
     }
   }
 
@@ -1401,7 +1401,8 @@ bool readConf() {
         return loadYAML(yaml);
       } catch (std::exception &e) {
         return restorePreviousSettings(
-            "无法解析 YAML 偏好设置。原因：" + std::string(e.what()));
+            "PREFERENCE_YAML_PARSE_FAILED detail=" +
+            summarizeSensitiveTextForLog(e.what()));
       }
     }
     try {
@@ -1409,8 +1410,9 @@ bool readConf() {
       if (!conf.is_empty() && toml::find_or<int>(conf, "version", 0))
         return loadTOML(conf);
     } catch (std::exception &e) {
-      writeLog(0, e.what(), LOG_LEVEL_DEBUG);
-      writeLog(0, "无法按 TOML 格式加载偏好设置。", LOG_LEVEL_DEBUG);
+      writeLog(0, "PREFERENCE_TOML_PROBE_FAILED detail=" +
+                      summarizeSensitiveTextForLog(e.what()),
+               LOG_LEVEL_DEBUG);
     }
   }
 
@@ -1419,8 +1421,9 @@ bool readConf() {
   // ini.do_utf8_to_gbk = true;
   int retVal = ini.parse_file(global.prefPath);
   if (retVal != INIREADER_EXCEPTION_NONE) {
-    return restorePreviousSettings(
-        "无法按 INI 格式加载偏好设置。原因：" + ini.get_last_error());
+    return restorePreviousSettings("PREFERENCE_INI_PARSE_FAILED detail=" +
+                                   summarizeSensitiveTextForLog(
+                                       ini.get_last_error()));
   }
 
   resetReloadableSettings();
@@ -1759,8 +1762,8 @@ bool readConf() {
     applyRuntimeConfiguration();
     return true;
   } catch (std::exception &e) {
-    return restorePreviousSettings(
-        "无法按 INI 格式加载偏好设置。原因：" + std::string(e.what()));
+    return restorePreviousSettings("PREFERENCE_INI_APPLY_FAILED detail=" +
+                                   summarizeSensitiveTextForLog(e.what()));
   }
 }
 
@@ -1931,9 +1934,8 @@ parseExternalConfigContent(const std::string &path,
   if (ini.parse(base_content) != INIREADER_EXCEPTION_NONE) {
     // std::cerr<<"Load external configuration failed. Reason:
     // "<<ini.get_last_error()<<"\n";
-    writeLog(0,
-             "加载外部配置失败。原因：" +
-                 ini.get_last_error(),
+    writeLog(0, "EXTERNAL_CONFIG_INI_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(ini.get_last_error()),
              LOG_LEVEL_ERROR);
     return ExternalConfigLoadStatus::ParseFailed;
   }
