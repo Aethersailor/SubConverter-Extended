@@ -194,6 +194,36 @@ int main() {
     requireFailurePreservesFile(failure_file, failure, false);
   }
 
+  setFileIoTestFailure(FileIoTestFailure::TargetChangedBeforeReplace);
+  require(fileWrite(failure_file.string(), "our-append", false) ==
+              static_cast<int>(FileCommitResult::Failed),
+          "external append race was silently overwritten");
+  setFileIoTestFailure(FileIoTestFailure::None);
+  require(fileGet(failure_file.string(), false) == "originalexternal-append",
+          "failed append race lost the external writer's content");
+
+#ifndef _WIN32
+  setFileIoTestFailure(FileIoTestFailure::ParentDirectorySync);
+  require(fileWrite(failure_file.string(), "committed-unsynced", true) ==
+              static_cast<int>(FileCommitResult::CommittedUnsynced),
+          "parent-directory sync failure lost its committed-state result");
+  setFileIoTestFailure(FileIoTestFailure::None);
+  require(fileGet(failure_file.string(), false) == "committed-unsynced",
+          "post-commit sync failure was falsely treated as pre-commit");
+  require(temporaryFileCount(failure_file) == 0,
+          "post-commit sync failure left a temporary file");
+
+  const fs::path unsynced_create = scoped_root / "unsynced-create.txt";
+  setFileIoTestFailure(FileIoTestFailure::ParentDirectorySync);
+  require(fileWrite(unsynced_create.string(), "complete-create", true) ==
+              static_cast<int>(FileCommitResult::CommittedUnsynced),
+          "first-create directory sync failure lost committed state");
+  setFileIoTestFailure(FileIoTestFailure::None);
+  require(fileGet(unsynced_create.string(), false) == "complete-create" &&
+              temporaryFileCount(unsynced_create) == 0,
+          "first-create sync failure left incomplete state");
+#endif
+
   const fs::path first_create = scoped_root / "first-create.txt";
   require(fileWrite(first_create.string(), "created", true) == 0,
           "first atomic create failed");

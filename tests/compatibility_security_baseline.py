@@ -255,6 +255,7 @@ def running_service(
     dashboard_client_ip_header: str | None = None,
     dashboard_trusted_proxy_cidrs: tuple[str, ...] = (),
     gist_api_base: str | None = None,
+    gist_config_hardlink_failure: bool = False,
     log_capture: list[str] | None = None,
     log_level: str = "info",
 ):
@@ -349,13 +350,16 @@ def running_service(
         stdout = stdout_path.open("wb")
         stderr = stderr_path.open("wb")
         if gist_api_base is not None:
-            (temporary_path / "gistconf.ini").write_text(
+            gist_config = temporary_path / "gistconf.ini"
+            gist_config.write_text(
                 "[common]\n"
                 "token=fixture-token\n"
                 "username=fixture-user\n",
                 encoding="utf-8",
                 newline="\n",
             )
+            if gist_config_hardlink_failure:
+                os.link(gist_config, temporary_path / "gistconf-hardlink.ini")
         env = os.environ.copy()
         env.pop("SUBCONVERTER_DASHBOARD_CLIENT_IP_HEADER", None)
         env.pop("SUBCONVERTER_DASHBOARD_TRUSTED_PROXY_CIDRS", None)
@@ -2128,6 +2132,12 @@ def security_endpoint_matrix_baseline(binary: Path, fixture_base: str) -> None:
             raise AssertionError(
                 f"effective upload policy log missing for {profile}: {logs!r}"
             )
+        if gist_delta and "GIST_UPLOAD_COMPLETE" not in logs[0]:
+            raise AssertionError(
+                f"successful Gist upload lacks completion evidence: {logs!r}"
+            )
+        if logs and "fixture-token" in logs[0]:
+            raise AssertionError("Gist upload logs leaked the configured token")
         if profile == "lan" and (
             "SECURITY_EXPOSURE_POSSIBLE profile=lan bind=0.0.0.0:" not in logs[0]
             or "public_reachability=unknown" not in logs[0]
@@ -2135,6 +2145,32 @@ def security_endpoint_matrix_baseline(binary: Path, fixture_base: str) -> None:
             raise AssertionError(
                 "wildcard LAN binding did not emit reachability-unknown warning"
             )
+
+    logs = []
+    before = FixtureHandler.gist_request_count
+    with running_service(
+        binary,
+        security_profile="lan",
+        gist_api_base=fixture_base,
+        gist_config_hardlink_failure=True,
+        log_capture=logs,
+    ) as base_url:
+        status, body, _ = request(base_url, "/sub", upload_params)
+    if status != 500 or FixtureHandler.gist_request_count - before != 1:
+        raise AssertionError(
+            "local Gist persistence failure was reported as complete success: "
+            f"HTTP {status}, gist requests "
+            f"{FixtureHandler.gist_request_count - before}"
+        )
+    if not logs or (
+        "GIST_REMOTE_UPLOAD_COMPLETED_LOCAL_STATE_FAILED" not in logs[0]
+        or "GIST_UPLOAD_COMPLETE" in logs[0]
+        or b"did not complete locally" not in body
+    ):
+        raise AssertionError(
+            f"partial Gist upload diagnostics are ambiguous: logs={logs!r}, "
+            f"body={body!r}"
+        )
 
 
 def settings_reload_compatibility_baseline(helper: Path) -> None:

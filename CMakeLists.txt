@@ -69,6 +69,7 @@ int main(){std::to_string(0);}
 IF(NOT BUILD_STATIC_LIBRARY)
 
 SET(SUBCONVERTER_RUNTIME_SOURCES
+    src/config/preference_file.cpp
     src/config/ruleset.cpp
     src/generator/config/external_rules.cpp
     src/generator/config/nodemanip.cpp
@@ -79,6 +80,7 @@ SET(SUBCONVERTER_RUNTIME_SOURCES
     src/handler/dashboard_auth_limiter.cpp
     src/handler/dashboard_page.cpp
     src/handler/cocr_source_url.cpp
+    src/handler/cache_storage.cpp
     src/handler/curl_handle_pool.cpp
     src/handler/inspect_page.cpp
     src/handler/interfaces.cpp
@@ -413,6 +415,27 @@ IF(BUILD_TESTS)
     SET_TESTS_PROPERTIES(file_scope PROPERTIES
         LABELS fast
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+    ADD_EXECUTABLE(preference_file_test
+        tests/preference_file_test.cpp
+        src/config/preference_file.cpp
+        src/utils/file.cpp
+        src/utils/string.cpp)
+    TARGET_INCLUDE_DIRECTORIES(preference_file_test PRIVATE src)
+    TARGET_COMPILE_DEFINITIONS(preference_file_test PRIVATE FILE_IO_TESTING)
+    ADD_TEST(NAME preference_file COMMAND preference_file_test)
+    SET_TESTS_PROPERTIES(preference_file PROPERTIES LABELS fast)
+
+    ADD_EXECUTABLE(cache_storage_test
+        tests/cache_storage_test.cpp
+        src/handler/cache_storage.cpp
+        src/utils/file.cpp
+        src/utils/string.cpp)
+    TARGET_INCLUDE_DIRECTORIES(cache_storage_test PRIVATE src)
+    TARGET_COMPILE_DEFINITIONS(cache_storage_test PRIVATE
+        FILE_IO_TESTING CACHE_STORAGE_TESTING)
+    ADD_TEST(NAME cache_storage COMMAND cache_storage_test)
+    SET_TESTS_PROPERTIES(cache_storage PROPERTIES LABELS fast)
 ENDIF()
 
 ELSE() #BUILD_STATIC_LIBRARY
