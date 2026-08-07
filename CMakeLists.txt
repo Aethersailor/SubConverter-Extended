@@ -105,6 +105,7 @@ SET(SUBCONVERTER_RUNTIME_SOURCES
     src/handler/version_page.cpp
     src/handler/webget.cpp
     src/handler/proxy_policy.cpp
+    src/handler/ruleset_output.cpp
     src/handler/settings.cpp
     src/handler/settings_view.cpp
     src/handler/sub_request_key.cpp
@@ -332,6 +333,19 @@ IF(BUILD_TESTS)
     ADD_TEST(NAME ruleset_options COMMAND ruleset_options_test)
     SET_TESTS_PROPERTIES(ruleset_options PROPERTIES LABELS fast)
 
+    ADD_EXECUTABLE(ruleset_output_test
+        tests/ruleset_output_test.cpp
+        src/handler/ruleset_output.cpp
+        src/utils/regexp.cpp
+        src/utils/string.cpp)
+    TARGET_INCLUDE_DIRECTORIES(ruleset_output_test PRIVATE src)
+    TARGET_INCLUDE_DIRECTORIES(ruleset_output_test SYSTEM PRIVATE
+        ${PCRE2_INCLUDE_DIRS})
+    TARGET_LINK_LIBRARIES(ruleset_output_test ${PCRE2_LIBRARY})
+    TARGET_COMPILE_DEFINITIONS(ruleset_output_test PRIVATE PCRE2_STATIC)
+    ADD_TEST(NAME ruleset_output COMMAND ruleset_output_test)
+    SET_TESTS_PROPERTIES(ruleset_output PROPERTIES LABELS fast)
+
     ADD_EXECUTABLE(external_rules_test
         tests/external_rules_test.cpp
         src/generator/config/external_rules.cpp)
@@ -485,6 +499,7 @@ IF(BUILD_TESTS)
         dashboard_auth_limiter_test
         cocr_source_url_test
         ruleset_options_test
+        ruleset_output_test
         external_rules_test
         concurrency_primitives_test
         settings_view_test

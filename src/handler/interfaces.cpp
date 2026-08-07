@@ -28,6 +28,7 @@
 #include "generator/template/templates.h"
 #include "interfaces.h"
 #include "multithread.h"
+#include "ruleset_output.h"
 #include "parser/mihomo_scheme_utils.h"
 #include "parser/mihomo_bridge.h"
 #include "script/cron.h"
@@ -405,7 +406,7 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS) {
   std::string url = urlSafeBase64Decode(getUrlArg(argument, "url")),
               type = getUrlArg(argument, "type"),
               group = urlSafeBase64Decode(getUrlArg(argument, "group"));
-  std::string output_content, dummy;
+  std::string output_content;
   int type_int = to_int(type, 0);
 
   if (url.empty() || type.empty() || (type_int == 2 && group.empty()) ||
@@ -438,135 +439,9 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS) {
            "请检查链接是否可访问，以及规则集类型是否与内容匹配。";
   }
 
-  std::string strLine;
-  std::stringstream ss;
-  const std::string rule_match_regex = "^(.*?,.*?)(,.*)(,.*)$";
-
-  ss << output_content;
-  char delimiter = getLineBreak(output_content);
-  std::string::size_type lineSize, posb, pose;
-  auto filterLine = [&]() {
-    posb = 0;
-    pose = strLine.find(',');
-    if (pose == std::string::npos)
-      return 1;
-    posb = pose + 1;
-    pose = strLine.find(',', posb);
-    if (pose == std::string::npos) {
-      pose = strLine.size();
-      if (strLine[pose - 1] == '\r')
-        pose--;
-    }
-    pose -= posb;
-    return 0;
-  };
-
-  lineSize = output_content.size();
-  output_content.clear();
-  output_content.reserve(lineSize);
-
-  if (type_int == 3 || type_int == 4 || type_int == 6)
-    output_content = "payload:\n";
-
-  while (getline(ss, strLine, delimiter)) {
-    if (strFind(strLine, "//")) {
-      strLine.erase(strLine.find("//"));
-      strLine = trimWhitespace(strLine);
-    }
-    switch (type_int) {
-    case 2:
-      if (!std::any_of(QuanXRuleTypes.begin(), QuanXRuleTypes.end(),
-                       [&strLine](const std::string &type) {
-                         return startsWith(strLine, type);
-                       }))
-        continue;
-      break;
-    case 1:
-      if (!std::any_of(SurgeRuleTypes.begin(), SurgeRuleTypes.end(),
-                       [&strLine](const std::string &type) {
-                         return startsWith(strLine, type);
-                       }))
-        continue;
-      break;
-    case 3:
-      if (!startsWith(strLine, "DOMAIN-SUFFIX,") &&
-          !startsWith(strLine, "DOMAIN,"))
-        continue;
-      if (filterLine())
-        continue;
-      output_content += "  - '";
-      if (strLine[posb - 2] == 'X')
-        output_content += "+.";
-      output_content += strLine.substr(posb, pose);
-      output_content += "'\n";
-      continue;
-    case 4:
-      if (!startsWith(strLine, "IP-CIDR,") && !startsWith(strLine, "IP-CIDR6,"))
-        continue;
-      if (filterLine())
-        continue;
-      output_content += "  - '";
-      output_content += strLine.substr(posb, pose);
-      output_content += "'\n";
-      continue;
-    case 5:
-      if (!startsWith(strLine, "DOMAIN-SUFFIX,") &&
-          !startsWith(strLine, "DOMAIN,"))
-        continue;
-      if (filterLine())
-        continue;
-      if (strLine[posb - 2] == 'X')
-        output_content += '.';
-      output_content += strLine.substr(posb, pose);
-      output_content += '\n';
-      continue;
-    case 6:
-      if (!std::any_of(ClashRuleTypes.begin(), ClashRuleTypes.end(),
-                       [&strLine](const std::string &type) {
-                         return startsWith(strLine, type);
-                       }))
-        continue;
-      output_content += "  - ";
-    default:
-      break;
-    }
-
-    lineSize = strLine.size();
-    if (lineSize && strLine[lineSize - 1] == '\r') // remove line break
-      strLine.erase(--lineSize);
-
-    if (!strLine.empty() &&
-        (strLine[0] != ';' && strLine[0] != '#' &&
-         !(lineSize >= 2 && strLine[0] == '/' && strLine[1] == '/'))) {
-      if (type_int == 2) {
-        if (startsWith(strLine, "IP-CIDR6"))
-          strLine.replace(0, 8, "IP6-CIDR");
-        strLine += "," + group;
-        if (count_least(strLine, ',', 3) &&
-            regReplace(strLine, rule_match_regex, "$2") == ",no-resolve")
-          strLine = regReplace(strLine, rule_match_regex, "$1$3$2");
-        else
-          strLine = regReplace(strLine, rule_match_regex, "$1$3");
-      }
-    }
-    output_content += strLine;
-    output_content += '\n';
-  }
-
-  if (output_content == "payload:\n") {
-    switch (type_int) {
-    case 3:
-      output_content += "  - '--placeholder--'";
-      break;
-    case 4:
-      output_content += "  - '0.0.0.0/32'";
-      break;
-    case 6:
-      output_content += "  - 'DOMAIN,--placeholder--'";
-      break;
-    }
-  }
-  return output_content;
+  return formatRulesetOutput(
+      std::move(output_content), type_int, group,
+      RulesetTypeCatalogs{ClashRuleTypes, SurgeRuleTypes, QuanXRuleTypes});
 }
 
 bool checkExternalBase(const std::string &path, std::string &dest,
