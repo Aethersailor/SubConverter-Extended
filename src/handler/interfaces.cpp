@@ -2063,97 +2063,24 @@ static std::string buildEffectiveSubPolicy(Request &request,
   return "";
 }
 
-} // namespace
+struct ExternalConfigFetchPlan {
+  bool user_provided_external_config = false;
+  bool config_load_success = false;
+  FetchContext base_fetch_context = FetchContext::TrustedConfig;
+  std::vector<RulesetContent> ruleset_content;
+};
 
-static std::string subconverter_impl(Request &request, Response &response,
-                                     const Settings &settings,
-                                     RuleConversionStats *rule_stats) {
-  auto &argument = request.argument;
-  int *status_code = &response.status_code;
-
-  ParsedSubRequest parsed_request;
-  std::string parse_error =
-      parseSubRequestArguments(request, response, settings, parsed_request);
-  if (!parse_error.empty())
-    return parse_error;
-
-  std::string &argTarget = parsed_request.target;
-  std::string &argSurgeVer = parsed_request.surge_version_text;
-  bool explainMode = parsed_request.explain_mode;
-  SubExplainReport &explain = parsed_request.explain;
-  tribool &argClashNewField = parsed_request.clash_new_field;
-  int intSurgeVer = parsed_request.surge_version;
-  const TargetDescriptor *target_descriptor = parsed_request.target_descriptor;
-  const bool lSimpleSubscription = parsed_request.simple_subscription;
-
-  std::string &argUrl = parsed_request.url;
-  std::string &argGroupName = parsed_request.group_name;
-  std::string &argUploadPath = parsed_request.upload_path;
-  std::string &argIncludeRemark = parsed_request.include_remark;
-  std::string &argExcludeRemark = parsed_request.exclude_remark;
-  std::string &argExternalConfig = parsed_request.external_config;
-  std::string &argFilename = parsed_request.filename;
-  std::string &argRenames = parsed_request.renames;
-  std::string &argProviderHeaders = parsed_request.provider_headers;
-
-  tribool &argUpload = parsed_request.upload;
-  tribool &argEmoji = parsed_request.emoji;
-  tribool &argAddEmoji = parsed_request.add_emoji;
-  tribool &argRemoveEmoji = parsed_request.remove_emoji;
-  tribool &argAppendType = parsed_request.append_type;
-  tribool &argGenNodeList = parsed_request.generate_node_list;
-  tribool &argSort = parsed_request.sort;
-  tribool &argUseSortScript = parsed_request.use_sort_script;
-  tribool &argGenClashScript = parsed_request.generate_clash_script;
-  tribool &argEnableInsert = parsed_request.enable_insert;
-  tribool &argFilterDeprecated = parsed_request.filter_deprecated;
-  tribool &argExpandRulesets = parsed_request.expand_rulesets;
-  tribool &argAppendUserinfo = parsed_request.append_userinfo;
-  tribool &argPrependInsert = parsed_request.prepend_insert;
-  tribool &argGenClassicalRuleProvider =
-      parsed_request.generate_classical_rule_provider;
-  tribool &argProviderProxyDirect = parsed_request.provider_proxy_direct;
-
-  std::string base_content, output_content;
-  EffectiveSubPolicy effective_policy;
-  std::string policy_error = buildEffectiveSubPolicy(
-      request, response, settings, rule_stats, parsed_request, effective_policy);
-  if (!policy_error.empty())
-    return policy_error;
-
-  ProxyGroupConfigs &lCustomProxyGroups =
-      effective_policy.custom_proxy_groups;
-  RulesetConfigs &lCustomRulesets = effective_policy.custom_rulesets;
-  string_array &lIncludeRemarks = effective_policy.include_remarks;
-  string_array &lExcludeRemarks = effective_policy.exclude_remarks;
-  std::vector<RulesetContent> lRulesetContent;
-  extra_settings &ext = effective_policy.generator;
-  std::string subInfo, dummy;
-  int interval = effective_policy.update_interval;
-  bool strict = effective_policy.update_strict;
-  std::string &lClashBase = effective_policy.clash_base;
-  std::string &lSurgeBase = effective_policy.surge_base;
-  std::string &lMellowBase = effective_policy.mellow_base;
-  std::string &lSurfboardBase = effective_policy.surfboard_base;
-  std::string &lQuanBase = effective_policy.quan_base;
-  std::string &lQuanXBase = effective_policy.quanx_base;
-  std::string &lLoonBase = effective_policy.loon_base;
-  std::string &lSSSubBase = effective_policy.sssub_base;
-  std::string &lSingBoxBase = effective_policy.singbox_base;
-  std::map<std::string, std::string> &provider_headers =
-      effective_policy.provider_headers;
-  template_args &tpl_args = effective_policy.template_arguments;
-  ProxyPolicy &proxy = effective_policy.subscription_proxy;
-
-  /// load external configuration
-  bool userProvidedExternalConfig = !argExternalConfig.empty();
+static std::string buildExternalConfigFetchPlan(
+    Response &response, const Settings &settings, ParsedSubRequest &parsed,
+    EffectiveSubPolicy &policy, ExternalConfigFetchPlan &plan) {
+  plan.user_provided_external_config = !parsed.external_config.empty();
   FetchContext rulesetFetchContext = FetchContext::TrustedConfig;
-  FetchContext baseFetchContext = FetchContext::TrustedConfig;
   bool configLoadSuccess = false;
   string_array rulePrependSources, ruleAppendSources;
   FetchContext externalRuleFetchContext = FetchContext::TrustedConfig;
-  string_map tpl_args_base = tpl_args.local_vars;
-  explain.external_config_provided = userProvidedExternalConfig;
+  string_map tpl_args_base = policy.template_arguments.local_vars;
+  parsed.explain.external_config_provided =
+      plan.user_provided_external_config;
 
   struct ExternalConfigCandidate {
     std::string path;
@@ -2161,12 +2088,12 @@ static std::string subconverter_impl(Request &request, Response &response,
     bool fallback = false;
   };
   std::vector<ExternalConfigCandidate> config_candidates;
-  if (userProvidedExternalConfig) {
+  if (plan.user_provided_external_config) {
     config_candidates.push_back(
-        {argExternalConfig, FetchContext::PublicRequest, false});
+        {parsed.external_config, FetchContext::PublicRequest, false});
     if (settings.fallbackToDefaultExternalConfig &&
         !settings.defaultExtConfig.empty() &&
-        settings.defaultExtConfig != argExternalConfig) {
+        settings.defaultExtConfig != parsed.external_config) {
       config_candidates.push_back(
           {settings.defaultExtConfig, FetchContext::TrustedConfig, true});
     }
@@ -2198,82 +2125,92 @@ static std::string subconverter_impl(Request &request, Response &response,
     rulePrependSources = extconf.rule_prepend_sources;
     ruleAppendSources = extconf.rule_append_sources;
     externalRuleFetchContext = extconf.rule_sources_context;
-    if (!ext.nodelist) {
-      if (checkExternalBase(extconf.sssub_rule_base, lSSSubBase, context))
-        baseFetchContext = context;
-      if (!lSimpleSubscription) {
-        if (checkExternalBase(extconf.clash_rule_base, lClashBase, context))
-          baseFetchContext = context;
-        if (checkExternalBase(extconf.surge_rule_base, lSurgeBase, context))
-          baseFetchContext = context;
-        if (checkExternalBase(extconf.surfboard_rule_base, lSurfboardBase,
+    if (!policy.generator.nodelist) {
+      if (checkExternalBase(extconf.sssub_rule_base, policy.sssub_base,
+                            context))
+        plan.base_fetch_context = context;
+      if (!parsed.simple_subscription) {
+        if (checkExternalBase(extconf.clash_rule_base, policy.clash_base,
                               context))
-          baseFetchContext = context;
-        if (checkExternalBase(extconf.mellow_rule_base, lMellowBase, context))
-          baseFetchContext = context;
-        if (checkExternalBase(extconf.quan_rule_base, lQuanBase, context))
-          baseFetchContext = context;
-        if (checkExternalBase(extconf.quanx_rule_base, lQuanXBase, context))
-          baseFetchContext = context;
-        if (checkExternalBase(extconf.loon_rule_base, lLoonBase, context))
-          baseFetchContext = context;
-        if (checkExternalBase(extconf.singbox_rule_base, lSingBoxBase,
+          plan.base_fetch_context = context;
+        if (checkExternalBase(extconf.surge_rule_base, policy.surge_base,
                               context))
-          baseFetchContext = context;
+          plan.base_fetch_context = context;
+        if (checkExternalBase(extconf.surfboard_rule_base,
+                              policy.surfboard_base, context))
+          plan.base_fetch_context = context;
+        if (checkExternalBase(extconf.mellow_rule_base, policy.mellow_base,
+                              context))
+          plan.base_fetch_context = context;
+        if (checkExternalBase(extconf.quan_rule_base, policy.quan_base,
+                              context))
+          plan.base_fetch_context = context;
+        if (checkExternalBase(extconf.quanx_rule_base, policy.quanx_base,
+                              context))
+          plan.base_fetch_context = context;
+        if (checkExternalBase(extconf.loon_rule_base, policy.loon_base,
+                              context))
+          plan.base_fetch_context = context;
+        if (checkExternalBase(extconf.singbox_rule_base, policy.singbox_base,
+                              context))
+          plan.base_fetch_context = context;
 
         if (!extconf.surge_ruleset.empty()) {
-          lCustomRulesets = extconf.surge_ruleset;
+          policy.custom_rulesets = extconf.surge_ruleset;
           rulesetFetchContext = context;
         }
         if (!extconf.custom_proxy_group.empty())
-          lCustomProxyGroups = extconf.custom_proxy_group;
-        ext.enable_rule_generator = extconf.enable_rule_generator;
-        ext.overwrite_original_rules = extconf.overwrite_original_rules;
+          policy.custom_proxy_groups = extconf.custom_proxy_group;
+        policy.generator.enable_rule_generator =
+            extconf.enable_rule_generator;
+        policy.generator.overwrite_original_rules =
+            extconf.overwrite_original_rules;
       }
     }
     if (!extconf.rename.empty()) {
-      ext.rename_array = extconf.rename;
-      ext.rename_for_providers = true;
+      policy.generator.rename_array = extconf.rename;
+      policy.generator.rename_for_providers = true;
     }
     if (!extconf.emoji.empty())
-      ext.emoji_array = extconf.emoji;
+      policy.generator.emoji_array = extconf.emoji;
     if (!extconf.include.empty())
-      lIncludeRemarks = extconf.include;
+      policy.include_remarks = extconf.include;
     if (!extconf.exclude.empty())
-      lExcludeRemarks = extconf.exclude;
-    argAddEmoji.define(extconf.add_emoji);
-    argRemoveEmoji.define(extconf.remove_old_emoji);
+      policy.exclude_remarks = extconf.exclude;
+    parsed.add_emoji.define(extconf.add_emoji);
+    parsed.remove_emoji.define(extconf.remove_old_emoji);
   };
 
   for (const ExternalConfigCandidate &candidate : config_candidates) {
-    tpl_args.local_vars = tpl_args_base;
+    policy.template_arguments.local_vars = tpl_args_base;
     writeLog(0, candidate.fallback
-                 ? "用户外部配置失败，显式尝试默认外部配置：" +
-                           summarizeUrlForLog(candidate.path)
-                     : "正在加载外部配置：" +
-                           summarizeUrlForLog(candidate.path),
+                    ? "用户外部配置失败，显式尝试默认外部配置：" +
+                          summarizeUrlForLog(candidate.path)
+                    : "正在加载外部配置：" +
+                          summarizeUrlForLog(candidate.path),
              candidate.fallback ? LOG_LEVEL_WARNING : LOG_LEVEL_INFO);
 
     ExternalConfig extconf;
-    extconf.tpl_args = &tpl_args;
+    extconf.tpl_args = &policy.template_arguments;
     ExternalConfigLoadResult loaded =
         loadExternalConfig(candidate.path, extconf, candidate.context);
     bool effective =
-        loaded.ok() &&
-        hasEffectiveExternalConfig(extconf, tpl_args, tpl_args_base);
+        loaded.ok() && hasEffectiveExternalConfig(
+                           extconf, policy.template_arguments, tpl_args_base);
     bool selected_base_valid =
         effective && validateSelectedExternalBase(
-                         extconf, argTarget, lSimpleSubscription, ext.nodelist,
-                         candidate.context);
+                         extconf, parsed.target, parsed.simple_subscription,
+                         policy.generator.nodelist, candidate.context);
     if (loaded.ok() && effective && selected_base_valid) {
       applyExternalConfig(extconf, candidate.context);
       configLoadSuccess = true;
-      explain.external_config_loaded = true;
-      explain.fallback_config_used = candidate.fallback;
+      plan.config_load_success = true;
+      parsed.explain.external_config_loaded = true;
+      parsed.explain.fallback_config_used = candidate.fallback;
       break;
     }
 
-    tpl_args.local_vars = tpl_args_base;
+    policy.template_arguments.local_vars = tpl_args_base;
     std::string reason = !loaded.ok()
                              ? loadStatusName(loaded.status)
                              : (!effective ? "no_effective_settings"
@@ -2284,11 +2221,11 @@ static std::string subconverter_impl(Request &request, Response &response,
   }
 
   if (!configLoadSuccess) {
-    tpl_args.local_vars = tpl_args_base;
-    response.status_code = userProvidedExternalConfig ? 400 : 500;
+    policy.template_arguments.local_vars = tpl_args_base;
+    response.status_code = plan.user_provided_external_config ? 400 : 500;
     response.content_type = "text/plain; charset=utf-8";
     response.headers["Cache-Control"] = "private, no-store";
-    if (userProvidedExternalConfig)
+    if (plan.user_provided_external_config)
       return "Invalid request: selected external configuration could not be "
              "loaded or applied.\n"
              "无效请求：无法加载或应用用户选择的外部配置。";
@@ -2302,7 +2239,7 @@ static std::string subconverter_impl(Request &request, Response &response,
   if (externalRuleSourceCount) {
     if (settings.maxAllowedRulesets &&
         externalRuleSourceCount > settings.maxAllowedRulesets) {
-      *status_code = 400;
+      response.status_code = 400;
       return "Invalid request: ruleprepend and ruleappend contain more "
              "sources than max_allowed_rulesets (" +
              std::to_string(settings.maxAllowedRulesets) +
@@ -2311,21 +2248,21 @@ static std::string subconverter_impl(Request &request, Response &response,
              "max_allowed_rulesets 限制（" +
              std::to_string(settings.maxAllowedRulesets) + "）。";
     }
-    if (argTarget != "clash") {
-      *status_code = 400;
+    if (parsed.target != "clash") {
+      response.status_code = 400;
       return "Invalid request: ruleprepend and ruleappend are supported only "
              "for target=clash.\n"
              "无效请求：ruleprepend 与 ruleappend 第一版仅支持 "
              "target=clash。";
     }
-    if (argGenNodeList.get(false)) {
-      *status_code = 400;
+    if (parsed.generate_node_list.get(false)) {
+      response.status_code = 400;
       return "Invalid request: ruleprepend and ruleappend do not support "
              "list=true.\n"
              "无效请求：ruleprepend 与 ruleappend 不支持 list=true。";
     }
-    if (argGenClashScript.get(false)) {
-      *status_code = 400;
+    if (parsed.generate_clash_script.get(false)) {
+      response.status_code = 400;
       return "Invalid request: ruleprepend and ruleappend do not support "
              "script=true.\n"
              "无效请求：ruleprepend 与 ruleappend 不支持 script=true。";
@@ -2334,52 +2271,150 @@ static std::string subconverter_impl(Request &request, Response &response,
     std::string external_rule_error;
     if (!fetchExternalRuleSources(rulePrependSources, "ruleprepend",
                                   externalRuleFetchContext,
-                                  ext.rule_prepend, external_rule_error) ||
+                                  policy.generator.rule_prepend,
+                                  external_rule_error) ||
         !fetchExternalRuleSources(ruleAppendSources, "ruleappend",
                                   externalRuleFetchContext,
-                                  ext.rule_append, external_rule_error)) {
-      *status_code = 400;
+                                  policy.generator.rule_append,
+                                  external_rule_error)) {
+      response.status_code = 400;
       return external_rule_error;
     }
   }
 
-  if (ext.enable_rule_generator && !ext.nodelist && !lSimpleSubscription) {
-    if (lCustomRulesets != settings.customRulesets)
-      refreshRulesets(lCustomRulesets, lRulesetContent, rulesetFetchContext);
+  if (policy.generator.enable_rule_generator &&
+      !policy.generator.nodelist && !parsed.simple_subscription) {
+    if (policy.custom_rulesets != settings.customRulesets)
+      refreshRulesets(policy.custom_rulesets, plan.ruleset_content,
+                      rulesetFetchContext);
     else {
       if (settings.updateRulesetOnRequest)
-        refreshRulesets(lCustomRulesets, lRulesetContent,
+        refreshRulesets(policy.custom_rulesets, plan.ruleset_content,
                         rulesetFetchContext);
       else
-        lRulesetContent = settings.rulesetsContent;
+        plan.ruleset_content = settings.rulesetsContent;
     }
   }
-  explain.rule_generator_enabled = ext.enable_rule_generator;
-  explain.base_fetch_context = fetchContextName(baseFetchContext);
-  explain.ruleset_fetch_context = fetchContextName(rulesetFetchContext);
-  explain.ruleset_count = lRulesetContent.size();
-  explain.custom_group_count = lCustomProxyGroups.size();
+  parsed.explain.rule_generator_enabled =
+      policy.generator.enable_rule_generator;
+  parsed.explain.base_fetch_context =
+      fetchContextName(plan.base_fetch_context);
+  parsed.explain.ruleset_fetch_context =
+      fetchContextName(rulesetFetchContext);
+  parsed.explain.ruleset_count = plan.ruleset_content.size();
+  parsed.explain.custom_group_count = policy.custom_proxy_groups.size();
 
-  if (!argEmoji.is_undef()) {
-    argAddEmoji.set(argEmoji);
-    argRemoveEmoji.set(true);
+  if (!parsed.emoji.is_undef()) {
+    parsed.add_emoji.set(parsed.emoji);
+    parsed.remove_emoji.set(true);
   }
-  ext.add_emoji = argAddEmoji.get(settings.addEmoji);
-  ext.remove_emoji = argRemoveEmoji.get(settings.removeEmoji);
-  if (ext.add_emoji && ext.emoji_array.empty())
-    ext.emoji_array = settings.emojis;
-  if (!argRenames.empty()) {
-    ext.rename_array = INIBinding::from<RegexMatchConfig>::from_ini(
-        split(argRenames, "`"), "@");
-    ext.rename_for_providers = true;
-  } else if (ext.rename_array.empty())
-    ext.rename_array = settings.renames;
+  policy.generator.add_emoji = parsed.add_emoji.get(settings.addEmoji);
+  policy.generator.remove_emoji =
+      parsed.remove_emoji.get(settings.removeEmoji);
+  if (policy.generator.add_emoji && policy.generator.emoji_array.empty())
+    policy.generator.emoji_array = settings.emojis;
+  if (!parsed.renames.empty()) {
+    policy.generator.rename_array =
+        INIBinding::from<RegexMatchConfig>::from_ini(
+            split(parsed.renames, "`"), "@");
+    policy.generator.rename_for_providers = true;
+  } else if (policy.generator.rename_array.empty())
+    policy.generator.rename_array = settings.renames;
 
-  /// check custom include/exclude settings
-  if (!argIncludeRemark.empty() && regValid(argIncludeRemark))
-    lIncludeRemarks = string_array{argIncludeRemark};
-  if (!argExcludeRemark.empty() && regValid(argExcludeRemark))
-    lExcludeRemarks = string_array{argExcludeRemark};
+  if (!parsed.include_remark.empty() && regValid(parsed.include_remark))
+    policy.include_remarks = string_array{parsed.include_remark};
+  if (!parsed.exclude_remark.empty() && regValid(parsed.exclude_remark))
+    policy.exclude_remarks = string_array{parsed.exclude_remark};
+
+  return "";
+}
+
+} // namespace
+
+static std::string subconverter_impl(Request &request, Response &response,
+                                     const Settings &settings,
+                                     RuleConversionStats *rule_stats) {
+  auto &argument = request.argument;
+  int *status_code = &response.status_code;
+
+  ParsedSubRequest parsed_request;
+  std::string parse_error =
+      parseSubRequestArguments(request, response, settings, parsed_request);
+  if (!parse_error.empty())
+    return parse_error;
+
+  std::string &argTarget = parsed_request.target;
+  std::string &argSurgeVer = parsed_request.surge_version_text;
+  bool explainMode = parsed_request.explain_mode;
+  SubExplainReport &explain = parsed_request.explain;
+  tribool &argClashNewField = parsed_request.clash_new_field;
+  int intSurgeVer = parsed_request.surge_version;
+  const TargetDescriptor *target_descriptor = parsed_request.target_descriptor;
+
+  std::string &argUrl = parsed_request.url;
+  std::string &argGroupName = parsed_request.group_name;
+  std::string &argUploadPath = parsed_request.upload_path;
+  std::string &argIncludeRemark = parsed_request.include_remark;
+  std::string &argExcludeRemark = parsed_request.exclude_remark;
+  std::string &argFilename = parsed_request.filename;
+  std::string &argRenames = parsed_request.renames;
+  std::string &argProviderHeaders = parsed_request.provider_headers;
+
+  tribool &argUpload = parsed_request.upload;
+  tribool &argAddEmoji = parsed_request.add_emoji;
+  tribool &argRemoveEmoji = parsed_request.remove_emoji;
+  tribool &argAppendType = parsed_request.append_type;
+  tribool &argSort = parsed_request.sort;
+  tribool &argUseSortScript = parsed_request.use_sort_script;
+  tribool &argGenClashScript = parsed_request.generate_clash_script;
+  tribool &argEnableInsert = parsed_request.enable_insert;
+  tribool &argFilterDeprecated = parsed_request.filter_deprecated;
+  tribool &argExpandRulesets = parsed_request.expand_rulesets;
+  tribool &argAppendUserinfo = parsed_request.append_userinfo;
+  tribool &argPrependInsert = parsed_request.prepend_insert;
+  tribool &argGenClassicalRuleProvider =
+      parsed_request.generate_classical_rule_provider;
+  tribool &argProviderProxyDirect = parsed_request.provider_proxy_direct;
+
+  std::string base_content, output_content;
+  EffectiveSubPolicy effective_policy;
+  std::string policy_error = buildEffectiveSubPolicy(
+      request, response, settings, rule_stats, parsed_request, effective_policy);
+  if (!policy_error.empty())
+    return policy_error;
+
+  ProxyGroupConfigs &lCustomProxyGroups =
+      effective_policy.custom_proxy_groups;
+  string_array &lIncludeRemarks = effective_policy.include_remarks;
+  string_array &lExcludeRemarks = effective_policy.exclude_remarks;
+  extra_settings &ext = effective_policy.generator;
+  std::string subInfo, dummy;
+  int interval = effective_policy.update_interval;
+  bool strict = effective_policy.update_strict;
+  std::string &lClashBase = effective_policy.clash_base;
+  std::string &lSurgeBase = effective_policy.surge_base;
+  std::string &lMellowBase = effective_policy.mellow_base;
+  std::string &lSurfboardBase = effective_policy.surfboard_base;
+  std::string &lQuanBase = effective_policy.quan_base;
+  std::string &lQuanXBase = effective_policy.quanx_base;
+  std::string &lLoonBase = effective_policy.loon_base;
+  std::string &lSSSubBase = effective_policy.sssub_base;
+  std::string &lSingBoxBase = effective_policy.singbox_base;
+  std::map<std::string, std::string> &provider_headers =
+      effective_policy.provider_headers;
+  template_args &tpl_args = effective_policy.template_arguments;
+  ProxyPolicy &proxy = effective_policy.subscription_proxy;
+
+  ExternalConfigFetchPlan fetch_plan;
+  std::string fetch_plan_error = buildExternalConfigFetchPlan(
+      response, settings, parsed_request, effective_policy, fetch_plan);
+  if (!fetch_plan_error.empty())
+    return fetch_plan_error;
+  bool userProvidedExternalConfig =
+      fetch_plan.user_provided_external_config;
+  bool configLoadSuccess = fetch_plan.config_load_success;
+  FetchContext baseFetchContext = fetch_plan.base_fetch_context;
+  std::vector<RulesetContent> &lRulesetContent = fetch_plan.ruleset_content;
 
   // start parsing urls
   RegexMatchConfigs stream_temp = settings.streamNodeRules,
