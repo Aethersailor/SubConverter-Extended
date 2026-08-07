@@ -14,7 +14,7 @@ class StatisticsV2FrontendTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.dashboard = (
-            REPOSITORY / "src" / "handler" / "dashboard_page.cpp"
+            REPOSITORY / "resources" / "dashboard" / "index.html"
         ).read_text(encoding="utf-8")
         cls.auth = (
             REPOSITORY / "src" / "handler" / "dashboard_auth.cpp"

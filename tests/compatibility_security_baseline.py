@@ -7,6 +7,7 @@ import argparse
 import base64
 import contextlib
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -1675,11 +1676,36 @@ def dashboard_baseline(binary: Path, fixture_base: str) -> None:
         token = base64.b64encode(
             b"fixture-admin:fixture-dashboard-secret"
         ).decode()
-        status, body, _ = request(
+        status, body, page_headers = request(
             base_url, "/dashboard", headers={"Authorization": "Basic " + token}
         )
         if status != 200 or b"SubConverter-Extended Dashboard" not in body:
             raise AssertionError("Dashboard valid-auth baseline failed")
+        if (
+            len(body) != 100487
+            or hashlib.sha256(body).hexdigest()
+            != "265cbce59394ec1e966bdd137bd79e993768eaf7f95260700ee287957b503908"
+        ):
+            raise AssertionError("Dashboard HTTP response bytes changed")
+        expected_page_headers = {
+            "cache-control": (
+                "no-store, no-cache, must-revalidate, proxy-revalidate, "
+                "max-age=0, s-maxage=0"
+            ),
+            "pragma": "no-cache",
+            "expires": "0",
+            "surrogate-control": "no-store",
+            "x-accel-expires": "0",
+            "x-robots-tag": (
+                "noindex, nofollow, noarchive, nosnippet, noimageindex"
+            ),
+            "content-type": "text/html; charset=utf-8",
+        }
+        for header, expected in expected_page_headers.items():
+            if page_headers.get(header) != expected:
+                raise AssertionError(
+                    f"Dashboard {header} changed: {page_headers.get(header)!r}"
+                )
         auth_headers = {"Authorization": "Basic " + token}
         status, first_body, first_headers = request(
             base_url, "/dashboard/data", headers=auth_headers
