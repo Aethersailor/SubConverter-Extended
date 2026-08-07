@@ -6,6 +6,7 @@
 #include "utils/redact.h"
 #include "utils/system.h"
 #include "handler/settings.h"
+#include "handler/settings_view.h"
 #include "webget.h"
 
 namespace {
@@ -87,7 +88,7 @@ int uploadGist(std::string name, std::string path, std::string content, bool wri
     {
         //std::cerr<<"No gist id is provided. Creating new gist...\n";
         writeLog(0, "未提供 Gist ID，正在创建新 Gist...", LOG_LEVEL_ERROR);
-        retVal = webPost(gistApiUrl("/gists"), buildGistData(path, content), parseProxy(global.proxyConfig), {{"Authorization", "token " + token}}, &retData);
+        retVal = webPost(gistApiUrl("/gists"), buildGistData(path, content), parseProxy(effectiveSettings().proxyConfig), {{"Authorization", "token " + token}}, &retData);
         if(retVal != 201)
         {
             //std::cerr<<"Create new Gist failed! Return data:\n"<<retData<<"\n";
@@ -105,7 +106,7 @@ int uploadGist(std::string name, std::string path, std::string content, bool wri
         writeLog(0, "已提供 Gist ID，正在修改 Gist...", LOG_LEVEL_INFO);
         if(writeManageURL)
             content = "#!MANAGED-CONFIG " + url + "\n" + content;
-        retVal = webPatch(gistApiUrl("/gists/" + id), buildGistData(path, content), parseProxy(global.proxyConfig), {{"Authorization", "token " + token}}, &retData);
+        retVal = webPatch(gistApiUrl("/gists/" + id), buildGistData(path, content), parseProxy(effectiveSettings().proxyConfig), {{"Authorization", "token " + token}}, &retData);
         if(retVal != 200)
         {
             //std::cerr<<"Modify gist failed! Return data:\n"<<retData<<"\n";
