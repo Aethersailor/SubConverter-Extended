@@ -35,6 +35,12 @@ class SanitizerWorkflowContractTests(unittest.TestCase):
         self.assertIn("UBSAN_OPTIONS", self.dockerfile)
         self.assertIn("halt_on_error=1", self.dockerfile)
 
+    def test_go_bridge_uses_asan_compatible_archive(self):
+        self.assertIn('sanitizer_flags="-asan"', self.dockerfile)
+        self.assertIn("go build ${sanitizer_flags}", self.dockerfile)
+        self.assertIn("-buildmode=c-archive", self.dockerfile)
+        self.assertIn("cp /usr/lib/libmihomo.a bridge/", self.dockerfile)
+
     def test_release_invariant_fault_injection_is_in_the_full_test_graph(self):
         self.assertIn("NAME settings_view_invariant_failure", self.cmake)
         self.assertIn("WILL_FAIL TRUE", self.cmake)
