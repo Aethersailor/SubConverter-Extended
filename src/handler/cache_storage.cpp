@@ -54,7 +54,7 @@ CacheUpdateResult updateCacheFiles(const std::string &body_path,
 
     const FileCommitResult body_result =
         static_cast<FileCommitResult>(fileWrite(body_path, body, true));
-    if(body_result == FileCommitResult::Failed) {
+    if(fileCommitFailed(body_result)) {
         if(invalidation_was_present)
             return CacheUpdateResult::UnchangedHeadersInvalidated;
         return removeInvalidation(invalidation_path)

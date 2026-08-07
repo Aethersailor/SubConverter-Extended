@@ -3716,12 +3716,24 @@ int simpleGenerator() {
             return -1;
         }
         // add UTF-8 BOM
-        if (fileWrite(path, "\xEF\xBB\xBF" + content, true) != 0) {
-          writeLog(0, "生成项 '" + x + "' 写入失败：'" + path + "'。",
+        const int write_result =
+            fileWrite(path, "\xEF\xBB\xBF" + content, true);
+        if (fileCommitFailed(write_result)) {
+          writeLog(0,
+                   "生成项 '" + x + "' 写入失败：'" + path + "'。" +
+                       (fileCommitTemporaryRemaining(write_result)
+                            ? " temporary_file_remaining=true"
+                            : " temporary_file_remaining=false"),
                    LOG_LEVEL_ERROR);
           write_failed = true;
           if (sections.size() == 1)
             return -1;
+        } else if (fileCommitDurabilityUnconfirmed(write_result)) {
+          writeLog(0,
+                   "ARTIFACT_WRITE_VISIBLE target=" + x +
+                       " new_file_visible=true durability=unconfirmed "
+                       "action=continue",
+                   LOG_LEVEL_WARNING);
         }
         continue;
       }
@@ -3744,13 +3756,25 @@ int simpleGenerator() {
         return -1;
       continue;
     }
-    if (fileWrite(path, content, true) != 0) {
-      writeLog(0, "生成项 '" + x + "' 写入失败：'" + path + "'。",
+    const int write_result = fileWrite(path, content, true);
+    if (fileCommitFailed(write_result)) {
+      writeLog(0,
+               "生成项 '" + x + "' 写入失败：'" + path + "'。" +
+                   (fileCommitTemporaryRemaining(write_result)
+                        ? " temporary_file_remaining=true"
+                        : " temporary_file_remaining=false"),
                LOG_LEVEL_ERROR);
       write_failed = true;
       if (sections.size() == 1)
         return -1;
       continue;
+    }
+    if (fileCommitDurabilityUnconfirmed(write_result)) {
+      writeLog(0,
+               "ARTIFACT_WRITE_VISIBLE target=" + x +
+                   " new_file_visible=true durability=unconfirmed "
+                   "action=continue",
+               LOG_LEVEL_WARNING);
     }
     auto iter =
         std::find_if(response.headers.begin(), response.headers.end(),

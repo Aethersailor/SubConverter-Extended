@@ -6,6 +6,7 @@
 enum class PreferenceFileStatus {
     Ready,
     CopyFailed,
+    CopyFailedTemporaryRemaining,
     CopyCommittedUnsynced,
     NotFound,
 };
