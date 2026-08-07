@@ -60,6 +60,29 @@ std::atomic<std::uint64_t> temporary_file_counter {0};
 constexpr std::size_t file_lock_stripe_count = 64;
 std::array<std::mutex, file_lock_stripe_count> file_write_mutexes;
 
+bool removeTemporaryFile(const std::filesystem::path &path) {
+#ifdef FILE_IO_TESTING
+    if(file_io_failure.load() ==
+       FileIoTestFailure::ReplaceAndTemporaryCleanup)
+        return false;
+#endif
+    std::error_code error;
+    if(std::filesystem::remove(path, error) && !error)
+        return true;
+    if(error)
+        return false;
+    return !std::filesystem::exists(path, error) && !error;
+}
+
+void reportTemporaryFileRemaining(bool committed) {
+    std::fputs(committed
+                   ? "FILE_ATOMIC_COMMIT_TEMPORARY_REMAINING "
+                     "new_file_visible=true durability=unconfirmed\n"
+                   : "FILE_ATOMIC_WRITE_FAILED "
+                     "temporary_file_remaining=true new_file_visible=false\n",
+               stderr);
+}
+
 struct TargetState {
     bool exists = false;
 #ifdef _WIN32
@@ -122,11 +145,19 @@ class TemporaryFileGuard {
     ~TemporaryFileGuard() {
         if(!active_)
             return;
-        std::error_code error;
-        std::filesystem::remove(path_, error);
+        removeNow(false);
     }
 
     void dismiss() { active_ = false; }
+    bool removeNow(bool committed) {
+        if(!active_)
+            return true;
+        const bool removed = removeTemporaryFile(path_);
+        active_ = false;
+        if(!removed)
+            reportTemporaryFileRemaining(committed);
+        return removed;
+    }
 
   private:
     std::filesystem::path path_;
@@ -333,7 +364,9 @@ std::uint64_t processId() {
 }
 
 std::FILE *openUniqueTemporaryFile(const std::filesystem::path &target,
-                                   std::filesystem::path &temporary_path) {
+                                   std::filesystem::path &temporary_path,
+                                   bool &temporary_cleanup_failed) {
+    temporary_cleanup_failed = false;
 #ifdef FILE_IO_TESTING
     if(file_io_failure.load() == FileIoTestFailure::Open)
         return nullptr;
@@ -363,8 +396,10 @@ std::FILE *openUniqueTemporaryFile(const std::filesystem::path &target,
             if(file)
                 return file;
             _close(descriptor);
-            std::error_code cleanup_error;
-            std::filesystem::remove(temporary_path, cleanup_error);
+            if(!removeTemporaryFile(temporary_path)) {
+                temporary_cleanup_failed = true;
+                reportTemporaryFileRemaining(false);
+            }
             return nullptr;
         }
         if(errno != EEXIST)
@@ -378,8 +413,10 @@ std::FILE *openUniqueTemporaryFile(const std::filesystem::path &target,
             if(file)
                 return file;
             ::close(descriptor);
-            std::error_code cleanup_error;
-            std::filesystem::remove(temporary_path, cleanup_error);
+            if(!removeTemporaryFile(temporary_path)) {
+                temporary_cleanup_failed = true;
+                reportTemporaryFileRemaining(false);
+            }
             return nullptr;
         }
         if(errno != EEXIST)
@@ -515,7 +552,9 @@ ReplaceResult replaceTarget(const std::filesystem::path &temporary,
                             const std::filesystem::path &target,
                             const TargetState &state) {
 #ifdef FILE_IO_TESTING
-    if(file_io_failure.load() == FileIoTestFailure::Replace)
+    if(file_io_failure.load() == FileIoTestFailure::Replace ||
+       file_io_failure.load() ==
+           FileIoTestFailure::ReplaceAndTemporaryCleanup)
         return ReplaceResult::NotCommitted;
     if(file_io_failure.load() ==
            FileIoTestFailure::TargetChangedBeforeReplace &&
@@ -590,9 +629,13 @@ FileCommitResult atomicWriteLocked(const std::filesystem::path &target,
         return FileCommitResult::Failed;
 
     std::filesystem::path temporary_path;
-    std::FILE *file = openUniqueTemporaryFile(target, temporary_path);
+    bool open_cleanup_failed = false;
+    std::FILE *file = openUniqueTemporaryFile(
+        target, temporary_path, open_cleanup_failed);
     if(!file)
-        return FileCommitResult::Failed;
+        return open_cleanup_failed
+                   ? FileCommitResult::FailedTemporaryRemaining
+                   : FileCommitResult::Failed;
     TemporaryFileGuard cleanup(temporary_path);
 
     bool success = true;
@@ -611,22 +654,23 @@ FileCommitResult atomicWriteLocked(const std::filesystem::path &target,
     if(closeFile(file) != 0)
         success = false;
     if(!success)
-        return FileCommitResult::Failed;
+        return cleanup.removeNow(false)
+                   ? FileCommitResult::Failed
+                   : FileCommitResult::FailedTemporaryRemaining;
 
     const ReplaceResult replace_result =
         replaceTarget(temporary_path, target, target_state);
     if(replace_result == ReplaceResult::NotCommitted)
-        return FileCommitResult::Failed;
+        return cleanup.removeNow(false)
+                   ? FileCommitResult::Failed
+                   : FileCommitResult::FailedTemporaryRemaining;
 
     bool temporary_removed =
         replace_result != ReplaceResult::CommittedTemporaryLinkRemaining;
-    if(!temporary_removed) {
-        std::error_code cleanup_error;
-        temporary_removed = std::filesystem::remove(temporary_path, cleanup_error) &&
-                            !cleanup_error;
-    }
     if(temporary_removed)
         cleanup.dismiss();
+    else
+        temporary_removed = cleanup.removeNow(true);
 
     const bool directory_synced = syncParentDirectory(target) == 0;
     return temporary_removed && directory_synced

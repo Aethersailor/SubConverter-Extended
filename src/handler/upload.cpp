@@ -133,17 +133,27 @@ int uploadGist(std::string name, std::string path, std::string content, bool wri
 
     const FileCommitResult persistence_result =
         static_cast<FileCommitResult>(ini.to_file("gistconf.ini"));
-    if(persistence_result != FileCommitResult::Durable)
+    if(fileCommitFailed(persistence_result))
     {
         writeLog(0,
                  "GIST_REMOTE_UPLOAD_COMPLETED_LOCAL_STATE_FAILED target=" +
                      name + " remote=" + summarizeUrlForLog(url) +
-                     (persistence_result == FileCommitResult::CommittedUnsynced
-                          ? " local_state_visible=true durability=unconfirmed"
-                          : " local_state_visible=false") +
+                     " local_state_visible=false" +
+                     (fileCommitTemporaryRemaining(persistence_result)
+                          ? " temporary_file_remaining=true"
+                          : " temporary_file_remaining=false") +
                      " action=report-failure",
                  LOG_LEVEL_ERROR);
         return -1;
+    }
+    if(fileCommitDurabilityUnconfirmed(persistence_result))
+    {
+        writeLog(0,
+                 "GIST_UPLOAD_COMPLETE target=" + name +
+                     " remote=" + summarizeUrlForLog(url) +
+                     " local_state=visible durability=unconfirmed",
+                 LOG_LEVEL_WARNING);
+        return 0;
     }
     writeLog(0,
              "GIST_UPLOAD_COMPLETE target=" + name +

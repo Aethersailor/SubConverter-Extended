@@ -12,6 +12,9 @@ PreferenceFileSelection copyExample(const std::string &source,
     if(result == FileCommitResult::CommittedUnsynced)
         return {PreferenceFileStatus::CopyCommittedUnsynced, destination,
                 source};
+    if(result == FileCommitResult::FailedTemporaryRemaining)
+        return {PreferenceFileStatus::CopyFailedTemporaryRemaining,
+                destination, source};
     return {PreferenceFileStatus::CopyFailed, destination, source};
 }
 
@@ -39,5 +42,5 @@ bool defaultPreferenceRequiresExit(const PreferenceFileSelection &selection,
     return effective_path == selection.path &&
            (selection.status == PreferenceFileStatus::CopyFailed ||
             selection.status ==
-                PreferenceFileStatus::CopyCommittedUnsynced);
+                PreferenceFileStatus::CopyFailedTemporaryRemaining);
 }

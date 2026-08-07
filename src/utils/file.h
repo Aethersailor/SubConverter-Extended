@@ -27,11 +27,29 @@ bool fileCopy(const std::string &source, const std::string &dest);
 // temporary link cannot be conclusively cleaned). Keep that state distinct
 // from a pre-commit failure: callers must not assume the old file is still
 // present when CommittedUnsynced is returned.
+// FailedTemporaryRemaining is still a pre-commit failure and leaves the old
+// target untouched, but reports that best-effort temporary cleanup failed.
 enum class FileCommitResult : int {
+    FailedTemporaryRemaining = -2,
     Failed = -1,
     Durable = 0,
     CommittedUnsynced = 1,
 };
+inline bool fileCommitFailed(FileCommitResult result) {
+    return static_cast<int>(result) < 0;
+}
+inline bool fileCommitFailed(int result) { return result < 0; }
+inline bool fileCommitDurabilityUnconfirmed(FileCommitResult result) {
+    return static_cast<int>(result) > 0;
+}
+inline bool fileCommitDurabilityUnconfirmed(int result) { return result > 0; }
+inline bool fileCommitTemporaryRemaining(FileCommitResult result) {
+    return result == FileCommitResult::FailedTemporaryRemaining;
+}
+inline bool fileCommitTemporaryRemaining(int result) {
+    return result ==
+           static_cast<int>(FileCommitResult::FailedTemporaryRemaining);
+}
 FileCommitResult fileCopyDetailed(const std::string &source,
                                   const std::string &dest);
 int fileWrite(const std::string &path, const std::string &content, bool overwrite);
@@ -47,6 +65,7 @@ enum class FileIoTestFailure {
     Replace,
     ParentDirectorySync,
     TargetChangedBeforeReplace,
+    ReplaceAndTemporaryCleanup,
 };
 void setFileIoTestFailure(FileIoTestFailure failure);
 #endif

@@ -64,6 +64,21 @@ int main() {
   require(!defaultPreferenceRequiresExit(selection, "explicit-pref.toml"),
           "explicit -f preference no longer overrides default copy failure");
 
+  setFileIoTestFailure(FileIoTestFailure::ReplaceAndTemporaryCleanup);
+  selection = prepareDefaultPreferenceFile();
+  setFileIoTestFailure(FileIoTestFailure::None);
+  require(selection.status ==
+              PreferenceFileStatus::CopyFailedTemporaryRemaining &&
+              selection.path == "pref.yml" && !fileExist("pref.yml") &&
+              defaultPreferenceRequiresExit(selection, "pref.yml") &&
+              !defaultPreferenceRequiresExit(selection, "explicit-pref.toml"),
+          "first-start cleanup failure state was not preserved");
+  for (const auto &entry : std::filesystem::directory_iterator(".")) {
+    if (entry.path().filename().string().find(
+            ".pref.yml.subconverter-tmp-") == 0)
+      std::filesystem::remove(entry.path());
+  }
+
 #ifndef _WIN32
   setFileIoTestFailure(FileIoTestFailure::ParentDirectorySync);
   selection = prepareDefaultPreferenceFile();
@@ -71,8 +86,8 @@ int main() {
   require(selection.status ==
               PreferenceFileStatus::CopyCommittedUnsynced &&
               selection.path == "pref.yml" && fileExist("pref.yml") &&
-              defaultPreferenceRequiresExit(selection, "pref.yml"),
-          "first-start committed-unsynced copy state was lost");
+              !defaultPreferenceRequiresExit(selection, "pref.yml"),
+          "visible first-start copy would incorrectly stop startup");
   std::filesystem::remove("pref.yml");
 #endif
 

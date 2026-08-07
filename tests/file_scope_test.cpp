@@ -82,6 +82,12 @@ void requireFailurePreservesFile(const std::filesystem::path &target,
 
 int main() {
   namespace fs = std::filesystem;
+  require(fileCommitFailed(FileCommitResult::Failed) &&
+              fileCommitFailed(FileCommitResult::FailedTemporaryRemaining) &&
+              !fileCommitFailed(FileCommitResult::CommittedUnsynced) &&
+              fileCommitDurabilityUnconfirmed(
+                  FileCommitResult::CommittedUnsynced),
+          "file commit tri-state helper contract changed");
   const fs::path working_root = fs::current_path();
   const fs::path fixture = "tests/fixtures/sample-subscription.txt";
   require(isInScope(fixture.string()), "relative fixture rejected");
@@ -193,6 +199,22 @@ int main() {
     requireFailurePreservesFile(failure_file, failure, true);
     requireFailurePreservesFile(failure_file, failure, false);
   }
+
+  setFileIoTestFailure(FileIoTestFailure::ReplaceAndTemporaryCleanup);
+  require(fileWrite(failure_file.string(), "cleanup-observable", true) ==
+              static_cast<int>(FileCommitResult::FailedTemporaryRemaining),
+          "pre-commit cleanup failure was not observable by the caller");
+  setFileIoTestFailure(FileIoTestFailure::None);
+  require(fileGet(failure_file.string(), false) == "original" &&
+              temporaryFileCount(failure_file) == 1,
+          "pre-commit cleanup failure changed the target or hid the residual");
+  for (const auto &entry : fs::directory_iterator(failure_file.parent_path())) {
+    if (entry.path().filename().string().find(
+            ".failure.txt.subconverter-tmp-") == 0)
+      fs::remove(entry.path());
+  }
+  require(temporaryFileCount(failure_file) == 0,
+          "cleanup failure fixture left an unmanaged test residual");
 
   setFileIoTestFailure(FileIoTestFailure::TargetChangedBeforeReplace);
   require(fileWrite(failure_file.string(), "our-append", false) ==

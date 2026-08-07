@@ -126,19 +126,28 @@ int main(int argc, char *argv[]) {
       prepareDefaultPreferenceFile();
   global.prefPath = default_preference.path;
   chkArg(argc, argv);
-  if (defaultPreferenceRequiresExit(default_preference, global.prefPath)) {
-    const bool committed =
-        default_preference.status ==
-        PreferenceFileStatus::CopyCommittedUnsynced;
+  if (default_preference.status ==
+      PreferenceFileStatus::CopyCommittedUnsynced) {
     writeLog(0,
-             std::string(committed
-                             ? "DEFAULT_PREFERENCE_COPY_INCOMPLETE"
-                             : "DEFAULT_PREFERENCE_COPY_FAILED") +
+             "DEFAULT_PREFERENCE_COPY_VISIBLE source=" +
+                 default_preference.source +
+                 " destination=" + default_preference.path +
+                 " new_file_visible=true durability=unconfirmed "
+                 "action=continue",
+             LOG_LEVEL_WARNING);
+  }
+  if (defaultPreferenceRequiresExit(default_preference, global.prefPath)) {
+    const bool temporary_remaining =
+        default_preference.status ==
+        PreferenceFileStatus::CopyFailedTemporaryRemaining;
+    writeLog(0,
+             std::string("DEFAULT_PREFERENCE_COPY_FAILED") +
                  " source=" + default_preference.source +
                  " destination=" + default_preference.path +
-                 (committed
-                      ? " new_file_visible=true durability=unconfirmed"
-                      : " new_file_visible=false") +
+                 " new_file_visible=false" +
+                 (temporary_remaining
+                      ? " temporary_file_remaining=true"
+                      : " temporary_file_remaining=false") +
                  " action=exit",
              LOG_LEVEL_FATAL);
     return 1;

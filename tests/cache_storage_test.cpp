@@ -102,5 +102,24 @@ int main() {
   require(fileGet(body.string(), false) == "final-body" &&
               readCachedResponseHeaders(headers.string()).empty(),
           "empty-header cache pair changed");
+
+  setFileIoTestFailure(FileIoTestFailure::ReplaceAndTemporaryCleanup);
+  require(updateCacheFiles(body.string(), headers.string(), "must-not-commit",
+                           "must-not-commit") == CacheUpdateResult::Unchanged,
+          "negative cleanup result advanced the cache transaction");
+  setFileIoTestFailure(FileIoTestFailure::None);
+  require(fileGet(body.string(), false) == "final-body" &&
+              readCachedResponseHeaders(headers.string()).empty(),
+          "cleanup failure changed the cache pair");
+  bool cleanup_residual_found = false;
+  for (const auto &entry : std::filesystem::directory_iterator(temporary.path)) {
+    if (entry.path().filename().string().find(
+            ".entry_header_invalid.subconverter-tmp-") == 0) {
+      cleanup_residual_found = true;
+      std::filesystem::remove(entry.path());
+    }
+  }
+  require(cleanup_residual_found,
+          "cache cleanup residual was not observable for diagnostics");
   return 0;
 }
