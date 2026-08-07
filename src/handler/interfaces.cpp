@@ -1904,6 +1904,165 @@ static std::string parseSubRequestArguments(Request &request,
   return "";
 }
 
+struct EffectiveSubPolicy {
+  ProxyGroupConfigs custom_proxy_groups;
+  RulesetConfigs custom_rulesets;
+  string_array include_remarks;
+  string_array exclude_remarks;
+  extra_settings generator;
+  int update_interval = 0;
+  bool update_strict = false;
+
+  std::string clash_base;
+  std::string surge_base;
+  std::string mellow_base;
+  std::string surfboard_base;
+  std::string quan_base;
+  std::string quanx_base;
+  std::string loon_base;
+  std::string sssub_base;
+  std::string singbox_base;
+
+  std::map<std::string, std::string> provider_headers;
+  template_args template_arguments;
+  ProxyPolicy subscription_proxy;
+};
+
+static std::string buildEffectiveSubPolicy(Request &request,
+                                           Response &response,
+                                           const Settings &settings,
+                                           RuleConversionStats *rule_stats,
+                                           ParsedSubRequest &parsed,
+                                           EffectiveSubPolicy &policy) {
+  policy.custom_proxy_groups = settings.customProxyGroups;
+  policy.custom_rulesets = settings.customRulesets;
+  policy.include_remarks = settings.includeRemarks;
+  policy.exclude_remarks = settings.excludeRemarks;
+  policy.generator.rule_stats = rule_stats;
+  policy.update_interval =
+      !parsed.update_interval.empty()
+          ? to_int(parsed.update_interval, settings.updateInterval)
+          : settings.updateInterval;
+  policy.update_strict = !parsed.update_strict.empty()
+                             ? parsed.update_strict == "true"
+                             : settings.updateStrict;
+  parsed.explain.simple_subscription = parsed.simple_subscription;
+
+  if (std::find(gRegexBlacklist.cbegin(), gRegexBlacklist.cend(),
+                parsed.include_remark) != gRegexBlacklist.cend() ||
+      std::find(gRegexBlacklist.cbegin(), gRegexBlacklist.cend(),
+                parsed.exclude_remark) != gRegexBlacklist.cend()) {
+    response.status_code = 400;
+    return "Invalid request: include or exclude filter is not allowed.\n"
+           "无效请求：include 或 exclude 过滤条件不被允许。\n"
+           "Please remove blocked filter patterns and try again.\n"
+           "请移除被拦截的过滤表达式后重试。";
+  }
+
+  policy.clash_base = settings.clashBase;
+  policy.surge_base = settings.surgeBase;
+  policy.mellow_base = settings.mellowBase;
+  policy.surfboard_base = settings.surfboardBase;
+  policy.quan_base = settings.quanBase;
+  policy.quanx_base = settings.quanXBase;
+  policy.loon_base = settings.loonBase;
+  policy.sssub_base = settings.SSSubBase;
+  policy.singbox_base = settings.singBoxBase;
+
+  parsed.enable_insert.define(settings.enableInsert);
+  if ((parsed.url.empty() &&
+       !(!settings.insertUrls.empty() && parsed.enable_insert)) ||
+      parsed.target.empty()) {
+    response.status_code = 400;
+    return "Invalid request: missing required target or url parameter.\n"
+           "无效请求：缺少必需的 target 或 url 参数。\n"
+           "Please provide target and url; url may be omitted only when "
+           "configured insert nodes are enabled.\n"
+           "请提供 target 和 url；只有启用已配置的插入节点时才能省略 url。";
+  }
+
+  std::string provider_headers_error;
+  if (!parsed.provider_headers.empty() && parsed.target != "clash") {
+    response.status_code = 400;
+    return "Invalid request: provider_headers is supported only for target=clash.\n"
+           "无效请求：provider_headers 仅支持 target=clash。";
+  }
+  if (!providerHeadersFromRequest(request, parsed.provider_headers,
+                                  policy.provider_headers,
+                                  provider_headers_error)) {
+    response.status_code = 400;
+    return "Invalid request: " + provider_headers_error + ".\n"
+           "无效请求：proxy-provider 请求头选择失败。";
+  }
+
+  string_map req_arg_map;
+  for (auto &argument : request.argument) {
+    if (argument.first == "token")
+      continue;
+    req_arg_map[argument.first] = argument.second;
+  }
+  req_arg_map["target"] = parsed.target;
+  req_arg_map["ver"] = std::to_string(parsed.surge_version);
+  policy.template_arguments.global_vars = settings.templateVars;
+  policy.template_arguments.request_params = std::move(req_arg_map);
+
+  policy.subscription_proxy = parseProxy(settings.proxySubscription);
+  policy.generator.append_proxy_type =
+      parsed.append_type.get(settings.appendType);
+  // 上游项目默认在 clash 目标下自动把 expand 设为 true
+  // 本项目默认 expand=false（使用 rule-provider 模式不展开规则集）
+  // 若用户主动传入 expand=true，则按照用户意愿内联展开规则集
+  parsed.expand_rulesets.define(false);
+
+  policy.generator.clash_proxies_style = settings.clashProxiesStyle;
+  policy.generator.clash_proxy_groups_style = settings.clashProxyGroupsStyle;
+  policy.generator.tfo.define(parsed.tfo).define(settings.TFOFlag);
+  policy.generator.udp.define(parsed.udp).define(settings.UDPFlag);
+  policy.generator.skip_cert_verify
+      .define(parsed.skip_cert_verify)
+      .define(settings.skipCertVerify);
+  policy.generator.tls13.define(parsed.tls13).define(settings.TLS13Flag);
+
+  policy.generator.sort_flag = parsed.sort.get(settings.enableSort);
+  parsed.use_sort_script.define(!settings.sortScript.empty());
+  if (policy.generator.sort_flag && parsed.use_sort_script)
+    policy.generator.sort_script = settings.sortScript;
+  policy.generator.filter_deprecated =
+      parsed.filter_deprecated.get(settings.filterDeprecated);
+  policy.generator.clash_new_field_name =
+      parsed.clash_new_field.get(settings.clashUseNewField);
+  policy.generator.clash_script = parsed.generate_clash_script.get();
+  policy.generator.clash_classical_ruleset =
+      parsed.generate_classical_rule_provider.get();
+  policy.generator.provider_proxy_direct =
+      parsed.provider_proxy_direct.get(settings.proxyProviderDirect);
+  // 无论 expand 取何值，均强制使用 Mihomo 新字段名（proxy-groups / rules）
+  // 避免因全局配置为旧字段名而导致 Mihomo 无法识别
+  policy.generator.clash_new_field_name = true;
+  if (parsed.expand_rulesets)
+    policy.generator.clash_script = false;
+  parsed.explain.expand_rulesets = parsed.expand_rulesets.get(false);
+
+  // Clash defaults to proxy-provider mode, while an explicit list=true keeps
+  // the traditional expanded-node behavior.
+  policy.generator.nodelist = parsed.generate_node_list.get(false);
+  parsed.explain.nodelist = policy.generator.nodelist;
+  policy.generator.surge_ssr_path = settings.surgeSSRPath;
+  policy.generator.quanx_dev_id = !parsed.device_id.empty()
+                                        ? parsed.device_id
+                                        : settings.quanXDevID;
+  policy.generator.enable_rule_generator = settings.enableRuleGen;
+  policy.generator.overwrite_original_rules = settings.overwriteOriginalRules;
+  if (!parsed.expand_rulesets)
+    policy.generator.managed_config_prefix = settings.managedConfigPrefix;
+  parsed.explain.rule_generator_enabled =
+      policy.generator.enable_rule_generator;
+  parsed.explain.managed_config =
+      !policy.generator.managed_config_prefix.empty();
+
+  return "";
+}
+
 } // namespace
 
 static std::string subconverter_impl(Request &request, Response &response,
@@ -1933,10 +2092,7 @@ static std::string subconverter_impl(Request &request, Response &response,
   std::string &argIncludeRemark = parsed_request.include_remark;
   std::string &argExcludeRemark = parsed_request.exclude_remark;
   std::string &argExternalConfig = parsed_request.external_config;
-  std::string &argDeviceID = parsed_request.device_id;
   std::string &argFilename = parsed_request.filename;
-  std::string &argUpdateInterval = parsed_request.update_interval;
-  std::string &argUpdateStrict = parsed_request.update_strict;
   std::string &argRenames = parsed_request.renames;
   std::string &argProviderHeaders = parsed_request.provider_headers;
 
@@ -1945,165 +2101,49 @@ static std::string subconverter_impl(Request &request, Response &response,
   tribool &argAddEmoji = parsed_request.add_emoji;
   tribool &argRemoveEmoji = parsed_request.remove_emoji;
   tribool &argAppendType = parsed_request.append_type;
-  tribool &argTFO = parsed_request.tfo;
-  tribool &argUDP = parsed_request.udp;
   tribool &argGenNodeList = parsed_request.generate_node_list;
   tribool &argSort = parsed_request.sort;
   tribool &argUseSortScript = parsed_request.use_sort_script;
   tribool &argGenClashScript = parsed_request.generate_clash_script;
   tribool &argEnableInsert = parsed_request.enable_insert;
-  tribool &argSkipCertVerify = parsed_request.skip_cert_verify;
   tribool &argFilterDeprecated = parsed_request.filter_deprecated;
   tribool &argExpandRulesets = parsed_request.expand_rulesets;
   tribool &argAppendUserinfo = parsed_request.append_userinfo;
   tribool &argPrependInsert = parsed_request.prepend_insert;
   tribool &argGenClassicalRuleProvider =
       parsed_request.generate_classical_rule_provider;
-  tribool &argTLS13 = parsed_request.tls13;
   tribool &argProviderProxyDirect = parsed_request.provider_proxy_direct;
 
   std::string base_content, output_content;
-  ProxyGroupConfigs lCustomProxyGroups = settings.customProxyGroups;
-  RulesetConfigs lCustomRulesets = settings.customRulesets;
-  string_array lIncludeRemarks = settings.includeRemarks,
-               lExcludeRemarks = settings.excludeRemarks;
+  EffectiveSubPolicy effective_policy;
+  std::string policy_error = buildEffectiveSubPolicy(
+      request, response, settings, rule_stats, parsed_request, effective_policy);
+  if (!policy_error.empty())
+    return policy_error;
+
+  ProxyGroupConfigs &lCustomProxyGroups =
+      effective_policy.custom_proxy_groups;
+  RulesetConfigs &lCustomRulesets = effective_policy.custom_rulesets;
+  string_array &lIncludeRemarks = effective_policy.include_remarks;
+  string_array &lExcludeRemarks = effective_policy.exclude_remarks;
   std::vector<RulesetContent> lRulesetContent;
-  extra_settings ext;
-  ext.rule_stats = rule_stats;
+  extra_settings &ext = effective_policy.generator;
   std::string subInfo, dummy;
-  int interval = !argUpdateInterval.empty()
-                     ? to_int(argUpdateInterval, settings.updateInterval)
-                     : settings.updateInterval;
-  bool strict = !argUpdateStrict.empty() ? argUpdateStrict == "true"
-                                         : settings.updateStrict;
-  explain.simple_subscription = lSimpleSubscription;
-
-  if (std::find(gRegexBlacklist.cbegin(), gRegexBlacklist.cend(),
-                argIncludeRemark) != gRegexBlacklist.cend() ||
-      std::find(gRegexBlacklist.cbegin(), gRegexBlacklist.cend(),
-                argExcludeRemark) != gRegexBlacklist.cend()) {
-    *status_code = 400;
-    return "Invalid request: include or exclude filter is not allowed.\n"
-           "无效请求：include 或 exclude 过滤条件不被允许。\n"
-           "Please remove blocked filter patterns and try again.\n"
-           "请移除被拦截的过滤表达式后重试。";
-  }
-
-  /// for external configuration
-  std::string lClashBase = settings.clashBase,
-              lSurgeBase = settings.surgeBase,
-              lMellowBase = settings.mellowBase,
-              lSurfboardBase = settings.surfboardBase;
-  std::string lQuanBase = settings.quanBase,
-              lQuanXBase = settings.quanXBase,
-              lLoonBase = settings.loonBase,
-              lSSSubBase = settings.SSSubBase;
-  std::string lSingBoxBase = settings.singBoxBase;
-
-  /// validate urls
-  argEnableInsert.define(settings.enableInsert);
-  if ((argUrl.empty() && !(!settings.insertUrls.empty() && argEnableInsert)) ||
-      argTarget.empty()) {
-    *status_code = 400;
-    return "Invalid request: missing required target or url parameter.\n"
-           "无效请求：缺少必需的 target 或 url 参数。\n"
-           "Please provide target and url; url may be omitted only when "
-           "configured insert nodes are enabled.\n"
-           "请提供 target 和 url；只有启用已配置的插入节点时才能省略 url。";
-  }
-
-  std::map<std::string, std::string> provider_headers;
-  std::string provider_headers_error;
-  if (!argProviderHeaders.empty() && argTarget != "clash") {
-    *status_code = 400;
-    return "Invalid request: provider_headers is supported only for target=clash.\n"
-           "无效请求：provider_headers 仅支持 target=clash。";
-  }
-  if (!providerHeadersFromRequest(request, argProviderHeaders,
-                                  provider_headers,
-                                  provider_headers_error)) {
-    *status_code = 400;
-    return "Invalid request: " + provider_headers_error + ".\n"
-           "无效请求：proxy-provider 请求头选择失败。";
-  }
-
-  /// load request arguments as template variables
-  //    string_array req_args = split(argument, "&");
-  //    string_map req_arg_map;
-  //    for(std::string &x : req_args)
-  //    {
-  //        string_size pos = x.find("=");
-  //        if(pos == x.npos)
-  //        {
-  //            req_arg_map[x] = "";
-  //            continue;
-  //        }
-  //        if(x.substr(0, pos) == "token")
-  //            continue;
-  //        req_arg_map[x.substr(0, pos)] = x.substr(pos + 1);
-  //    }
-  string_map req_arg_map;
-  for (auto &x : argument) {
-    if (x.first == "token")
-      continue;
-    req_arg_map[x.first] = x.second;
-  }
-  req_arg_map["target"] = argTarget;
-  req_arg_map["ver"] = std::to_string(intSurgeVer);
-
-  /// save template variables
-  template_args tpl_args;
-  tpl_args.global_vars = settings.templateVars;
-  tpl_args.request_params = std::move(req_arg_map);
-
-  /// check for proxy settings
-  ProxyPolicy proxy = parseProxy(settings.proxySubscription);
-
-  /// check other flags
-  ext.append_proxy_type = argAppendType.get(settings.appendType);
-  // 上游项目默认在 clash 目标下自动把 expand 设为 true
-  // 本项目默认 expand=false（使用 rule-provider 模式不展开规则集）
-  // 若用户主动传入 expand=true，则按照用户意愿内联展开规则集
-  argExpandRulesets.define(false);
-
-  ext.clash_proxies_style = settings.clashProxiesStyle;
-  ext.clash_proxy_groups_style = settings.clashProxyGroupsStyle;
-
-  /// read preference from argument, assign global var if not in argument
-  ext.tfo.define(argTFO).define(settings.TFOFlag);
-  ext.udp.define(argUDP).define(settings.UDPFlag);
-  ext.skip_cert_verify.define(argSkipCertVerify).define(settings.skipCertVerify);
-  ext.tls13.define(argTLS13).define(settings.TLS13Flag);
-
-  ext.sort_flag = argSort.get(settings.enableSort);
-  argUseSortScript.define(!settings.sortScript.empty());
-  if (ext.sort_flag && argUseSortScript)
-    ext.sort_script = settings.sortScript;
-  ext.filter_deprecated = argFilterDeprecated.get(settings.filterDeprecated);
-  ext.clash_new_field_name = argClashNewField.get(settings.clashUseNewField);
-  ext.clash_script = argGenClashScript.get();
-  ext.clash_classical_ruleset = argGenClassicalRuleProvider.get();
-  ext.provider_proxy_direct =
-      argProviderProxyDirect.get(settings.proxyProviderDirect);
-  // 无论 expand 取何值，均强制使用 Mihomo 新字段名（proxy-groups / rules）
-  // 避免因全局配置为旧字段名而导致 Mihomo 无法识别
-  ext.clash_new_field_name = true;
-  if (argExpandRulesets)
-    ext.clash_script = false;
-  explain.expand_rulesets = argExpandRulesets.get(false);
-
-  // Clash defaults to proxy-provider mode, while an explicit list=true keeps
-  // the traditional expanded-node behavior.
-  ext.nodelist = argGenNodeList.get(false);
-  explain.nodelist = ext.nodelist;
-  ext.surge_ssr_path = settings.surgeSSRPath;
-  ext.quanx_dev_id = !argDeviceID.empty() ? argDeviceID : settings.quanXDevID;
-  ext.enable_rule_generator = settings.enableRuleGen;
-  ext.overwrite_original_rules = settings.overwriteOriginalRules;
-  if (!argExpandRulesets)
-    ext.managed_config_prefix = settings.managedConfigPrefix;
-  explain.rule_generator_enabled = ext.enable_rule_generator;
-  explain.managed_config = !ext.managed_config_prefix.empty();
+  int interval = effective_policy.update_interval;
+  bool strict = effective_policy.update_strict;
+  std::string &lClashBase = effective_policy.clash_base;
+  std::string &lSurgeBase = effective_policy.surge_base;
+  std::string &lMellowBase = effective_policy.mellow_base;
+  std::string &lSurfboardBase = effective_policy.surfboard_base;
+  std::string &lQuanBase = effective_policy.quan_base;
+  std::string &lQuanXBase = effective_policy.quanx_base;
+  std::string &lLoonBase = effective_policy.loon_base;
+  std::string &lSSSubBase = effective_policy.sssub_base;
+  std::string &lSingBoxBase = effective_policy.singbox_base;
+  std::map<std::string, std::string> &provider_headers =
+      effective_policy.provider_headers;
+  template_args &tpl_args = effective_policy.template_arguments;
+  ProxyPolicy &proxy = effective_policy.subscription_proxy;
 
   /// load external configuration
   bool userProvidedExternalConfig = !argExternalConfig.empty();
