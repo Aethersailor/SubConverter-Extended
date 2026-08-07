@@ -3017,88 +3017,53 @@ static SubStageResponse dispatchTargetGenerator(
   return {};
 }
 
-} // namespace
-
-static std::string subconverter_impl(Request &request, Response &response,
-                                     const Settings &settings,
-                                     RuleConversionStats *rule_stats) {
+static std::string assembleSubResponse(
+    Request &request, Response &response, const Settings &settings,
+    ParsedSubRequest &parsed, EffectiveSubPolicy &policy,
+    ExternalConfigFetchPlan &fetch_plan, TargetGenerationState &generation) {
   auto &argument = request.argument;
-
-  ParsedSubRequest parsed_request;
-  std::string parse_error =
-      parseSubRequestArguments(request, response, settings, parsed_request);
-  if (!parse_error.empty())
-    return parse_error;
-
-  std::string &argTarget = parsed_request.target;
-  bool explainMode = parsed_request.explain_mode;
-  SubExplainReport &explain = parsed_request.explain;
-  tribool &argClashNewField = parsed_request.clash_new_field;
-  int intSurgeVer = parsed_request.surge_version;
-
-  std::string &argGroupName = parsed_request.group_name;
-  std::string &argUploadPath = parsed_request.upload_path;
-  std::string &argIncludeRemark = parsed_request.include_remark;
-  std::string &argExcludeRemark = parsed_request.exclude_remark;
-  std::string &argFilename = parsed_request.filename;
-  std::string &argRenames = parsed_request.renames;
-
-  tribool &argUpload = parsed_request.upload;
-  tribool &argAddEmoji = parsed_request.add_emoji;
-  tribool &argRemoveEmoji = parsed_request.remove_emoji;
-  tribool &argAppendType = parsed_request.append_type;
-  tribool &argSort = parsed_request.sort;
-  tribool &argUseSortScript = parsed_request.use_sort_script;
-  tribool &argGenClashScript = parsed_request.generate_clash_script;
-  tribool &argEnableInsert = parsed_request.enable_insert;
-  tribool &argFilterDeprecated = parsed_request.filter_deprecated;
-  tribool &argExpandRulesets = parsed_request.expand_rulesets;
-  tribool &argAppendUserinfo = parsed_request.append_userinfo;
-  tribool &argPrependInsert = parsed_request.prepend_insert;
+  std::string &argTarget = parsed.target;
+  bool explainMode = parsed.explain_mode;
+  SubExplainReport &explain = parsed.explain;
+  tribool &argClashNewField = parsed.clash_new_field;
+  int intSurgeVer = parsed.surge_version;
+  std::string &argGroupName = parsed.group_name;
+  std::string &argUploadPath = parsed.upload_path;
+  std::string &argIncludeRemark = parsed.include_remark;
+  std::string &argExcludeRemark = parsed.exclude_remark;
+  std::string &argFilename = parsed.filename;
+  std::string &argRenames = parsed.renames;
+  tribool &argUpload = parsed.upload;
+  tribool &argAddEmoji = parsed.add_emoji;
+  tribool &argRemoveEmoji = parsed.remove_emoji;
+  tribool &argAppendType = parsed.append_type;
+  tribool &argSort = parsed.sort;
+  tribool &argUseSortScript = parsed.use_sort_script;
+  tribool &argGenClashScript = parsed.generate_clash_script;
+  tribool &argEnableInsert = parsed.enable_insert;
+  tribool &argFilterDeprecated = parsed.filter_deprecated;
+  tribool &argExpandRulesets = parsed.expand_rulesets;
+  tribool &argAppendUserinfo = parsed.append_userinfo;
+  tribool &argPrependInsert = parsed.prepend_insert;
   tribool &argGenClassicalRuleProvider =
-      parsed_request.generate_classical_rule_provider;
-  tribool &argProviderProxyDirect = parsed_request.provider_proxy_direct;
-
-  EffectiveSubPolicy effective_policy;
-  std::string policy_error = buildEffectiveSubPolicy(
-      request, response, settings, rule_stats, parsed_request, effective_policy);
-  if (!policy_error.empty())
-    return policy_error;
-
-  ProxyGroupConfigs &lCustomProxyGroups =
-      effective_policy.custom_proxy_groups;
-  string_array &lIncludeRemarks = effective_policy.include_remarks;
-  string_array &lExcludeRemarks = effective_policy.exclude_remarks;
-  extra_settings &ext = effective_policy.generator;
-  int interval = effective_policy.update_interval;
-  bool strict = effective_policy.update_strict;
+      parsed.generate_classical_rule_provider;
+  tribool &argProviderProxyDirect = parsed.provider_proxy_direct;
+  ProxyGroupConfigs &lCustomProxyGroups = policy.custom_proxy_groups;
+  string_array &lIncludeRemarks = policy.include_remarks;
+  string_array &lExcludeRemarks = policy.exclude_remarks;
+  extra_settings &ext = policy.generator;
+  int interval = policy.update_interval;
+  bool strict = policy.update_strict;
   std::map<std::string, std::string> &provider_headers =
-      effective_policy.provider_headers;
-
-  ExternalConfigFetchPlan fetch_plan;
-  std::string fetch_plan_error = buildExternalConfigFetchPlan(
-      response, settings, parsed_request, effective_policy, fetch_plan);
-  if (!fetch_plan_error.empty())
-    return fetch_plan_error;
+      policy.provider_headers;
   bool userProvidedExternalConfig =
       fetch_plan.user_provided_external_config;
   bool configLoadSuccess = fetch_plan.config_load_success;
-  std::vector<RulesetContent> &lRulesetContent = fetch_plan.ruleset_content;
+  std::vector<RulesetContent> &lRulesetContent =
+      fetch_plan.ruleset_content;
+  std::string &output_content = generation.output;
+  std::string &managed_url = generation.managed_url;
 
-  SubscriptionNodeState subscription_state;
-  SubStageResponse subscription_response = processSubscriptionNodes(
-      request, response, settings, parsed_request, effective_policy,
-      subscription_state);
-  if (subscription_response.complete)
-    return subscription_response.body;
-  TargetGenerationState generation_state;
-  SubStageResponse generation_response = dispatchTargetGenerator(
-      request, response, settings, parsed_request, effective_policy,
-      fetch_plan, subscription_state, generation_state);
-  if (generation_response.complete)
-    return generation_response.body;
-  std::string &output_content = generation_state.output;
-  std::string &managed_url = generation_state.managed_url;
   if (argTarget == "clash" && explain.proxy_provider_mode)
     appendVaryHeader(response, "User-Agent");
   for (const auto &[name, value] : provider_headers) {
@@ -3386,6 +3351,44 @@ static std::string subconverter_impl(Request &request, Response &response,
                                  "\"; filename*=utf-8''" +
                                  urlEncode(argFilename));
   return output_content;
+}
+
+} // namespace
+
+static std::string subconverter_impl(Request &request, Response &response,
+                                     const Settings &settings,
+                                     RuleConversionStats *rule_stats) {
+  ParsedSubRequest parsed_request;
+  std::string parse_error =
+      parseSubRequestArguments(request, response, settings, parsed_request);
+  if (!parse_error.empty())
+    return parse_error;
+
+  EffectiveSubPolicy effective_policy;
+  std::string policy_error = buildEffectiveSubPolicy(
+      request, response, settings, rule_stats, parsed_request, effective_policy);
+  if (!policy_error.empty())
+    return policy_error;
+
+  ExternalConfigFetchPlan fetch_plan;
+  std::string fetch_plan_error = buildExternalConfigFetchPlan(
+      response, settings, parsed_request, effective_policy, fetch_plan);
+  if (!fetch_plan_error.empty())
+    return fetch_plan_error;
+  SubscriptionNodeState subscription_state;
+  SubStageResponse subscription_response = processSubscriptionNodes(
+      request, response, settings, parsed_request, effective_policy,
+      subscription_state);
+  if (subscription_response.complete)
+    return subscription_response.body;
+  TargetGenerationState generation_state;
+  SubStageResponse generation_response = dispatchTargetGenerator(
+      request, response, settings, parsed_request, effective_policy,
+      fetch_plan, subscription_state, generation_state);
+  if (generation_response.complete)
+    return generation_response.body;
+  return assembleSubResponse(request, response, settings, parsed_request,
+                             effective_policy, fetch_plan, generation_state);
 }
 
 std::string simpleToClashR(RESPONSE_CALLBACK_ARGS) {
