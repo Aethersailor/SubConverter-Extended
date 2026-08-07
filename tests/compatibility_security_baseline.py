@@ -2253,6 +2253,198 @@ def settings_reload_compatibility_baseline(helper: Path) -> None:
                 )
 
 
+def common_scalar_binding_compatibility_baseline(helper: Path) -> None:
+    configured_values: dict[str, str | bool] = {
+        "prepend_insert_url": False,
+        "base_path": "stage-c-base",
+        "clash_rule_base": "stage-c/clash.tpl",
+        "surge_rule_base": "stage-c/surge.tpl",
+        "surfboard_rule_base": "stage-c/surfboard.tpl",
+        "mellow_rule_base": "stage-c/mellow.tpl",
+        "quan_rule_base": "stage-c/quan.tpl",
+        "quanx_rule_base": "stage-c/quanx.tpl",
+        "loon_rule_base": "stage-c/loon.tpl",
+        "sssub_rule_base": "stage-c/sssub.tpl",
+        "singbox_rule_base": "stage-c/singbox.tpl",
+        "default_external_config": "data:,enable_rule_generator=false",
+        "fallback_to_default_external_config": True,
+        "append_proxy_type": True,
+        "proxy_config": "NONE",
+        "proxy_ruleset": "SYSTEM",
+        "proxy_subscription": "http://127.0.0.1:8080",
+        "reload_conf_on_request": True,
+    }
+
+    def render_value(suffix: str, value: str | bool) -> str:
+        if isinstance(value, bool):
+            return str(value).lower()
+        if suffix == ".ini":
+            return value
+        return json.dumps(value)
+
+    def field_pattern(suffix: str, key: str) -> str:
+        if suffix == ".ini":
+            return rf"(?m)^{re.escape(key)}=.*$"
+        if suffix == ".yml":
+            return rf"(?m)^  {re.escape(key)}:.*$"
+        if suffix == ".toml":
+            return rf"(?m)^{re.escape(key)}\s*=.*$"
+        raise AssertionError(f"unsupported config suffix: {suffix}")
+
+    def field_line(suffix: str, key: str, value: str | bool) -> str:
+        rendered = render_value(suffix, value)
+        if suffix == ".ini":
+            return f"{key}={rendered}"
+        if suffix == ".yml":
+            return f"  {key}: {rendered}"
+        return f"{key} = {rendered}"
+
+    def configure(content: str, suffix: str) -> str:
+        for key, value in configured_values.items():
+            replacement = field_line(suffix, key, value)
+            content, count = re.subn(
+                field_pattern(suffix, key), replacement, content, count=1
+            )
+            if count == 0:
+                marker = field_pattern(suffix, "append_proxy_type")
+                match = re.search(marker, content)
+                if match is None:
+                    raise AssertionError(
+                        f"common scalar insertion marker missing: {suffix}"
+                    )
+                content = (
+                    content[: match.start()]
+                    + replacement
+                    + "\n"
+                    + content[match.start() :]
+                )
+        return content
+
+    def empty_default_external_config(content: str, suffix: str) -> str:
+        replacement = field_line(suffix, "default_external_config", "")
+        content, count = re.subn(
+            field_pattern(suffix, "default_external_config"),
+            replacement,
+            content,
+            count=1,
+        )
+        if count != 1:
+            raise AssertionError(
+                f"default external config field missing: {suffix}"
+            )
+        return content
+
+    runtime_dir = REPOSITORY / "build" / "test-baseline-runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=runtime_dir) as temporary:
+        temporary_path = Path(temporary)
+        configured_snapshots: list[dict[str, object]] = []
+        configured_paths: dict[str, Path] = {}
+        empty_snapshots: list[dict[str, object]] = []
+        for fixture_name in (
+            "legacy-pref.ini",
+            "legacy-pref.yml",
+            "legacy-pref.toml",
+        ):
+            original = COMPAT_FIXTURES / fixture_name
+            content = original.read_text(encoding="utf-8")
+            configured = temporary_path / ("common-scalars-" + fixture_name)
+            configured.write_text(
+                configure(content, original.suffix),
+                encoding="utf-8",
+                newline="\n",
+            )
+            configured_paths[original.suffix] = configured
+            configured_snapshots.append(load_settings_snapshot(helper, configured))
+
+            empty = temporary_path / ("empty-default-" + fixture_name)
+            empty.write_text(
+                empty_default_external_config(content, original.suffix),
+                encoding="utf-8",
+                newline="\n",
+            )
+            empty_snapshots.append(load_settings_snapshot(helper, empty))
+
+        if configured_snapshots[1:] != configured_snapshots[:1] * 2:
+            raise AssertionError("INI/YAML/TOML common scalar bindings differ")
+        common = configured_snapshots[0]["common"]
+        expected_rule_bases = {
+            name: f"stage-c/{name}.tpl"
+            for name in (
+                "clash",
+                "surge",
+                "surfboard",
+                "mellow",
+                "quan",
+                "quanx",
+                "loon",
+                "sssub",
+                "singbox",
+            )
+        }
+        if (
+            common["base_path"] != "stage-c-base"
+            or common["rule_bases"] != expected_rule_bases
+            or common["prepend_insert"] is not False
+            or common["append_proxy_type"] is not True
+            or common["reload_conf_on_request"] is not True
+            or common["fallback_to_default_external_config"] is not True
+        ):
+            raise AssertionError(f"common scalar values were misbound: {common!r}")
+
+        if empty_snapshots[1:] != empty_snapshots[:1] * 2 or any(
+            snapshot["common"]["default_external_config"]["configured"] is not True
+            for snapshot in empty_snapshots
+        ):
+            raise AssertionError(
+                "empty default external config no longer uses the common fallback"
+            )
+
+        invalid_ini = temporary_path / "invalid-bool-pref.ini"
+        invalid_ini.write_text(
+            re.sub(
+                field_pattern(".ini", "prepend_insert_url"),
+                "prepend_insert_url=not-a-bool",
+                (COMPAT_FIXTURES / "legacy-pref.ini").read_text(encoding="utf-8"),
+                count=1,
+            ),
+            encoding="utf-8",
+            newline="\n",
+        )
+        if load_settings_snapshot(helper, invalid_ini)["common"]["prepend_insert"]:
+            raise AssertionError("legacy INI invalid boolean handling changed")
+
+        for suffix, invalid_value in (
+            (".yml", "not-a-bool"),
+            (".toml", '"not-a-bool"'),
+        ):
+            original = COMPAT_FIXTURES / ("legacy-pref" + suffix)
+            invalid = temporary_path / ("invalid-bool-pref" + suffix)
+            invalid.write_text(
+                re.sub(
+                    field_pattern(suffix, "prepend_insert_url"),
+                    field_line(suffix, "prepend_insert_url", False).replace(
+                        "false", invalid_value
+                    ),
+                    original.read_text(encoding="utf-8"),
+                    count=1,
+                ),
+                encoding="utf-8",
+                newline="\n",
+            )
+            retained = reload_settings_snapshot(
+                helper,
+                configured_paths[suffix],
+                invalid,
+                expect_failure=True,
+            )
+            expected_index = {".ini": 0, ".yml": 1, ".toml": 2}[suffix]
+            if retained != configured_snapshots[expected_index]:
+                raise AssertionError(
+                    f"{suffix} invalid common scalar replaced previous settings"
+                )
+
+
 def settings_parser_diagnostic_redaction_baseline(helper: Path) -> None:
     secret = "yaml-parser-diagnostic-secret"
     runtime_dir = REPOSITORY / "build" / "test-baseline-runtime"
@@ -2424,6 +2616,7 @@ def main() -> int:
         raise AssertionError("historical security profile default changed")
     security_configuration_matrix_baseline(settings_snapshot_helper)
     settings_reload_compatibility_baseline(settings_snapshot_helper)
+    common_scalar_binding_compatibility_baseline(settings_snapshot_helper)
     settings_parser_diagnostic_redaction_baseline(settings_snapshot_helper)
     settings_provider_interval_compatibility_baseline(settings_snapshot_helper)
     settings_provider_direct_compatibility_baseline(settings_snapshot_helper)
