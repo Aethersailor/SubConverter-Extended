@@ -50,15 +50,31 @@ RULESET_WITH_INVALID_LINE = (
     "NOT-A-SUPPORTED-RULE,this-entry-must-be-skipped\n"
     "IP-CIDR,203.0.113.0/24,SourcePolicy\n"
 )
+GENERATION_RULESET = (
+    "DOMAIN-SUFFIX,first.snapshot.test,Proxy\n"
+    "DOMAIN-SUFFIX,second.snapshot.test,Proxy\n"
+    "DOMAIN-SUFFIX,third.snapshot.test,Proxy\n"
+)
 DISABLE_RULEGEN_CONFIG = "data:,enable_rule_generator=false"
 
 
 class FixtureHandler(BaseHTTPRequestHandler):
     gist_request_count = 0
+    slow_subscription_started = threading.Event()
+    slow_subscription_release = threading.Event()
+    slow_ruleset_started = threading.Event()
+    slow_ruleset_release = threading.Event()
 
     def do_GET(self) -> None:  # noqa: N802
         request_path = urllib.parse.urlsplit(self.path).path
         if request_path == "/subscription.txt":
+            body = SUBSCRIPTION.encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/slow-subscription.txt":
+            type(self).slow_subscription_started.set()
+            if not type(self).slow_subscription_release.wait(timeout=15):
+                self.send_error(504)
+                return
             body = SUBSCRIPTION.encode()
             content_type = "text/plain; charset=utf-8"
         elif request_path == "/mixed-protocol-subscription.txt":
@@ -69,6 +85,16 @@ class FixtureHandler(BaseHTTPRequestHandler):
             content_type = "text/plain; charset=utf-8"
         elif request_path == "/rules-with-invalid.list":
             body = RULESET_WITH_INVALID_LINE.encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/generation-rules.list":
+            body = GENERATION_RULESET.encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/slow-generation-rules.list":
+            type(self).slow_ruleset_started.set()
+            if not type(self).slow_ruleset_release.wait(timeout=15):
+                self.send_error(504)
+                return
+            body = GENERATION_RULESET.encode()
             content_type = "text/plain; charset=utf-8"
         elif request_path == "/external-valid.ini":
             body = b"[custom]\nenable_rule_generator=false\n"
@@ -108,6 +134,37 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 "enable_rule_generator=false\n"
                 f"ruleset=!!import:http://{host}/missing-import.list\n"
             ).encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path in (
+            "/external-generation.ini",
+            "/external-generation-slow.ini",
+        ):
+            host = self.headers.get("Host", "127.0.0.1")
+            rules_path = (
+                "/slow-generation-rules.list"
+                if request_path.endswith("-slow.ini")
+                else "/generation-rules.list"
+            )
+            body = (
+                "[custom]\n"
+                "enable_rule_generator=true\n"
+                f"singbox_rule_base=http://{host}/snapshot-singbox.json\n"
+                f"ruleset=Proxy,http://{host}{rules_path}\n"
+            ).encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/snapshot-singbox.json":
+            host = self.headers.get("Host", "127.0.0.1")
+            body = (
+                "{\n"
+                '  "snapshot_link": "{{ getLink("/snapshot") }}",\n'
+                f'  "template_fetch": "{{{{ fetch("http://{host}/template-marker") }}}}",\n'
+                '  "outbounds": [],\n'
+                '  "route": {"rules": []}\n'
+                "}\n"
+            ).encode()
+            content_type = "application/json; charset=utf-8"
+        elif request_path == "/template-marker":
+            body = b"template-ok"
             content_type = "text/plain; charset=utf-8"
         else:
             self.send_error(404)
@@ -149,12 +206,18 @@ class FixtureHandler(BaseHTTPRequestHandler):
 @contextlib.contextmanager
 def fixture_server():
     FixtureHandler.gist_request_count = 0
+    FixtureHandler.slow_subscription_started.clear()
+    FixtureHandler.slow_subscription_release.set()
+    FixtureHandler.slow_ruleset_started.clear()
+    FixtureHandler.slow_ruleset_release.set()
     server = ThreadingHTTPServer(("127.0.0.1", 0), FixtureHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
         yield f"http://127.0.0.1:{server.server_port}"
     finally:
+        FixtureHandler.slow_subscription_release.set()
+        FixtureHandler.slow_ruleset_release.set()
         server.shutdown()
         thread.join(timeout=5)
         server.server_close()
@@ -259,6 +322,8 @@ def running_service(
     gist_config_hardlink_failure: bool = False,
     log_capture: list[str] | None = None,
     log_level: str = "info",
+    config_replacements: tuple[tuple[str, str], ...] = (),
+    pref_path_capture: list[Path] | None = None,
 ):
     port = unused_port()
     baseline = (COMPAT_FIXTURES / "legacy-pref.toml").read_text(
@@ -329,6 +394,12 @@ def running_service(
     baseline = baseline.replace(
         'listen = "127.0.0.1"', f'listen = "{listen_address}"'
     )
+    for original, replacement in config_replacements:
+        if original not in baseline:
+            raise AssertionError(
+                f"runtime configuration replacement source is missing: {original!r}"
+            )
+        baseline = baseline.replace(original, replacement, 1)
     runtime_dir = REPOSITORY / "build" / "test-baseline-runtime"
     runtime_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=runtime_dir) as temporary:
@@ -346,6 +417,8 @@ def running_service(
             statistics_path.write_text("not a directory", encoding="utf-8")
         pref = temporary_path / "pref.toml"
         pref.write_text(baseline, encoding="utf-8", newline="\n")
+        if pref_path_capture is not None:
+            pref_path_capture.append(pref)
         stdout_path = temporary_path / "stdout.log"
         stderr_path = temporary_path / "stderr.log"
         stdout = stdout_path.open("wb")
@@ -1011,18 +1084,24 @@ def settings_provider_direct_compatibility_baseline(helper: Path) -> None:
 
 
 def runtime_cli_isolation_baseline(binary: Path) -> None:
-    marker = b"--settings-snapshot"
-    if marker in binary.read_bytes():
-        raise AssertionError(
-            "formal subconverter binary still contains --settings-snapshot"
-        )
-    with running_service(binary, extra_args=(marker.decode(),)) as base_url:
-        status, body, _ = request(base_url, "/healthz")
-        if status != 200 or body.strip() != b"ok":
+    binary_content = binary.read_bytes()
+    for marker in (
+        b"--settings-snapshot",
+        b"--inject-invariant-failure",
+    ):
+        if marker in binary_content:
             raise AssertionError(
-                "formal subconverter binary still handles --settings-snapshot "
-                "instead of preserving legacy unknown-argument behavior"
+                "formal subconverter binary contains test-only marker "
+                f"{marker.decode()}"
             )
+        with running_service(binary, extra_args=(marker.decode(),)) as base_url:
+            status, body, _ = request(base_url, "/healthz")
+            if status != 200 or body.strip() != b"ok":
+                raise AssertionError(
+                    "formal subconverter binary handles test-only marker "
+                    f"{marker.decode()} instead of preserving legacy "
+                    "unknown-argument behavior"
+                )
 
 
 def normalize_output(content: bytes, fixture_base: str) -> str:
@@ -2573,6 +2652,238 @@ def external_config_failure_baseline(binary: Path, fixture_base: str) -> None:
             )
 
 
+def request_generation_reload_baseline(binary: Path, fixture_base: str) -> None:
+    pref_paths: list[Path] = []
+    old_prefix = "https://managed-old.snapshot.test"
+    new_prefix = "https://managed-new.snapshot.test"
+    replacements = (
+        (
+            "reload_conf_on_request = false",
+            "reload_conf_on_request = true",
+        ),
+        (
+            "async_fetch_ruleset = false",
+            "async_fetch_ruleset = true",
+        ),
+        (
+            "enable_request_coalescing = true",
+            "enable_request_coalescing = false",
+        ),
+        (
+            'managed_config_prefix = "https://managed.example.test"',
+            f'managed_config_prefix = "{old_prefix}"',
+        ),
+    )
+
+    def write_config_atomically(path: Path, content: str) -> None:
+        candidate = path.with_name(path.name + ".next")
+        candidate.write_text(content, encoding="utf-8", newline="\n")
+        os.replace(candidate, path)
+
+    def stable_response(
+        result: tuple[int, bytes, dict[str, str]],
+    ) -> tuple[int, bytes, dict[str, str | None]]:
+        status, body, headers = result
+        stable_headers = {
+            name: headers.get(name)
+            for name in ("content-type", "profile-update-interval")
+        }
+        return status, body, stable_headers
+
+    dashboard_headers = {
+        "Authorization": "Basic "
+        + base64.b64encode(
+            b"fixture-admin:fixture-dashboard-secret"
+        ).decode()
+    }
+
+    def lifetime_subscription_requests(base_url: str) -> int:
+        # Dashboard snapshots are deliberately cached for one second.
+        time.sleep(1.1)
+        status, body, _ = request(
+            base_url, "/dashboard/data", headers=dashboard_headers
+        )
+        if status != 200:
+            raise AssertionError(
+                f"generation statistics query returned HTTP {status}: {body!r}"
+            )
+        return int(
+            json.loads(body)["windows"]["lifetime"]["subscription_requests"]
+        )
+
+    def require_generation(
+        result: tuple[int, bytes, dict[str, str]],
+        *,
+        prefix: str,
+        clash_modes: bool,
+        complete_ruleset: bool,
+    ) -> None:
+        status, body, _ = result
+        if status != 200:
+            raise AssertionError(
+                f"generation request returned HTTP {status}: {body!r}"
+            )
+        document = json.loads(body)
+        if document.get("snapshot_link") != prefix + "/snapshot":
+            raise AssertionError(
+                "template getLink observed the wrong settings generation: "
+                f"{document.get('snapshot_link')!r}"
+            )
+        if document.get("template_fetch") != "template-ok":
+            raise AssertionError("template fetch did not complete")
+        tags = {
+            outbound.get("tag")
+            for outbound in document.get("outbounds", [])
+            if isinstance(outbound, dict)
+        }
+        if ("GLOBAL" in tags) is not clash_modes:
+            raise AssertionError(
+                "singBoxAddClashModes came from the wrong settings generation"
+            )
+        serialized_rules = json.dumps(
+            document.get("route", {}).get("rules", []), sort_keys=True
+        )
+        has_third_rule = "third.snapshot.test" in serialized_rules
+        if has_third_rule is not complete_ruleset:
+            raise AssertionError(
+                "maxAllowedRules came from the wrong settings generation"
+            )
+
+    with running_service(
+        binary,
+        statistics=True,
+        extra_args=("-cfw",),
+        config_replacements=replacements,
+        pref_path_capture=pref_paths,
+    ) as base_url:
+        if len(pref_paths) != 1:
+            raise AssertionError("mutable runtime preference path was not captured")
+        pref = pref_paths[0]
+        old_config = pref.read_text(encoding="utf-8")
+        common = {
+            "target": "singbox",
+            "url": fixture_base + "/subscription.txt",
+            "config": fixture_base + "/external-generation.ini",
+        }
+
+        pure_old = request(base_url, "/sub", common)
+        require_generation(
+            pure_old,
+            prefix=old_prefix,
+            clash_modes=True,
+            complete_ruleset=True,
+        )
+        old_request_count = lifetime_subscription_requests(base_url)
+        if old_request_count != 1:
+            raise AssertionError(
+                "old generation statistics setup did not record exactly one request"
+            )
+
+        FixtureHandler.slow_subscription_started.clear()
+        FixtureHandler.slow_subscription_release.clear()
+        FixtureHandler.slow_ruleset_started.clear()
+        FixtureHandler.slow_ruleset_release.clear()
+        slow_result: list[tuple[int, bytes, dict[str, str]]] = []
+        slow_error: list[BaseException] = []
+
+        def run_slow_request() -> None:
+            try:
+                slow_result.append(
+                    request(
+                        base_url,
+                        "/sub",
+                        {
+                            **common,
+                            "url": fixture_base + "/slow-subscription.txt",
+                            "config": fixture_base
+                            + "/external-generation-slow.ini",
+                        },
+                    )
+                )
+            except BaseException as error:  # propagate worker diagnostics
+                slow_error.append(error)
+
+        slow_thread = threading.Thread(target=run_slow_request)
+        slow_thread.start()
+        try:
+            if not FixtureHandler.slow_subscription_started.wait(timeout=10):
+                raise AssertionError("slow request did not reach nodemanip fetch")
+            if not FixtureHandler.slow_ruleset_started.wait(timeout=10):
+                raise AssertionError("async ruleset worker did not start")
+
+            new_config = old_config.replace(
+                "singbox_add_clash_modes = true",
+                "singbox_add_clash_modes = false",
+                1,
+            ).replace(
+                "max_allowed_rules = 4096",
+                "max_allowed_rules = 1",
+                1,
+            ).replace(old_prefix, new_prefix, 1).replace(
+                "enabled = true\n",
+                "enabled = false\n",
+                1,
+            )
+            if new_config == old_config:
+                raise AssertionError("new generation configuration was not changed")
+            write_config_atomically(pref, new_config)
+            new_result = request(base_url, "/sub", common)
+        finally:
+            FixtureHandler.slow_ruleset_release.set()
+            FixtureHandler.slow_subscription_release.set()
+            slow_thread.join(timeout=20)
+
+        if slow_thread.is_alive():
+            raise AssertionError("slow request did not finish after fixture release")
+        if slow_error:
+            raise slow_error[0]
+        if len(slow_result) != 1:
+            raise AssertionError("slow request did not produce one response")
+
+        require_generation(
+            slow_result[0],
+            prefix=old_prefix,
+            clash_modes=True,
+            complete_ruleset=True,
+        )
+        if stable_response(slow_result[0]) != stable_response(pure_old):
+            raise AssertionError(
+                "request captured before reload did not remain byte-equivalent "
+                "to the old generation"
+            )
+
+        require_generation(
+            new_result,
+            prefix=new_prefix,
+            clash_modes=False,
+            complete_ruleset=False,
+        )
+        later_new = request(base_url, "/sub", common)
+        if stable_response(later_new) != stable_response(new_result):
+            raise AssertionError(
+                "request started after reload did not retain the new generation"
+            )
+
+        write_config_atomically(pref, "version = 1\n[common\n")
+        failed_reload = request(base_url, "/sub", common)
+        require_generation(
+            failed_reload,
+            prefix=new_prefix,
+            clash_modes=False,
+            complete_ruleset=False,
+        )
+        if stable_response(failed_reload) != stable_response(new_result):
+            raise AssertionError(
+                "failed reload changed the last published request generation"
+            )
+        final_request_count = lifetime_subscription_requests(base_url)
+        if final_request_count != old_request_count + 1:
+            raise AssertionError(
+                "statistics attribution crossed request generations: "
+                f"old={old_request_count}, final={final_request_count}"
+            )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, required=True)
@@ -2641,6 +2952,7 @@ def main() -> int:
         public_request_baseline(binary, fixture_base)
         security_endpoint_matrix_baseline(binary, fixture_base)
         external_config_failure_baseline(binary, fixture_base)
+        request_generation_reload_baseline(binary, fixture_base)
 
     print("compatibility and security baselines passed")
     return 0

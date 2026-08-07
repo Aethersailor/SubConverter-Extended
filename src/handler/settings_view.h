@@ -16,7 +16,14 @@ SettingsSnapshot captureSettingsSnapshot();
 // Return the snapshot bound to the current request. Code outside a request
 // keeps the legacy global Settings behavior so startup/configuration parsing is
 // unchanged.
+#ifdef NO_WEBGET
+// The static-library build intentionally excludes the request runtime and has
+// always read its caller-provided global Settings object directly.
+extern Settings global;
+inline const Settings &effectiveSettings() { return global; }
+#else
 const Settings &effectiveSettings();
+#endif
 SettingsSnapshot captureEffectiveSettingsSnapshot();
 
 class ScopedSettingsView {

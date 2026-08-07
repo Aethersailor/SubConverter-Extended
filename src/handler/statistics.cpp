@@ -20,6 +20,7 @@
 #include <rapidjson/writer.h>
 
 #include "handler/settings.h"
+#include "handler/settings_view.h"
 #include "handler/statistics_v2.h"
 #include "utils/logger.h"
 #include "utils/redact.h"
@@ -596,7 +597,7 @@ void tick() {
 
 void recordSubscriptionConversion(const Request &request,
                                   uint64_t rule_conversions) {
-  if (!global.statisticsEnabled || request.method != "GET")
+  if (!effectiveSettings().statisticsEnabled || request.method != "GET")
     return;
   const GeoLocation location = geoLocation(request, g_engine.geo);
   {

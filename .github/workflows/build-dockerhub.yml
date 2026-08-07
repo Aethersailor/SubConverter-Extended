@@ -68,8 +68,8 @@ jobs:
               );
             }
 
-  statistics-sanitizers:
-    name: "🧪 Statistics v2 ASan/UBSan"
+  request-sanitizers:
+    name: "🧪 Request Settings ASan/UBSan"
     runs-on: ubuntu-latest
     needs: source-head
     if: needs.source-head.outputs.current == 'true'
@@ -77,36 +77,53 @@ jobs:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
-      - name: Build focused sanitizer target
+      - name: Resolve pinned build inputs
         shell: bash
         run: |
           set -euo pipefail
-          g++ \
-            -std=c++20 \
-            -O1 \
-            -g \
-            -fno-omit-frame-pointer \
-            -fsanitize=address,undefined \
-            -DSTATISTICS_V2_TESTING \
-            -pthread \
-            -Isrc \
-            tests/statistics_v2_test.cpp \
-            src/handler/statistics_v2.cpp \
-            -o /tmp/statistics-v2-sanitized
+          python3 scripts/ci/dependency_snapshot.py check
+          python3 scripts/ci/dependency_snapshot.py emit \
+            --github-env "$GITHUB_ENV"
 
-      - name: Run focused sanitizer target
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
+
+      - name: Build and run request sanitizer targets
         shell: bash
-        env:
-          ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1
-          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
-        run: /tmp/statistics-v2-sanitized
+        run: |
+          set -euo pipefail
+          export THREADS="$(nproc)"
+          export SHA="$GITHUB_SHA"
+          export VERSION="sanitizer-${GITHUB_SHA::7}"
+          export BUILD_DATE="$(git show -s --format=%cI HEAD)"
+          export BUILD_TESTS=true
+          mapfile -t build_args < <(bash scripts/ci/docker-build-args.sh)
+          args=()
+          for arg in "${build_args[@]}"; do
+            [ -n "$arg" ] && args+=(--build-arg "$arg")
+          done
+          args+=(--build-arg ENABLE_SANITIZERS=true)
+          echo "Sanitizer CMake option: -DENABLE_SANITIZERS=true"
+          echo "Sanitizer build targets: production runtime and all BUILD_TESTS targets"
+          echo "Sanitizer run targets: settings_view, settings_view_invariant_failure, compatibility_security_baseline"
+          docker buildx build \
+            --file Dockerfile \
+            --platform linux/amd64 \
+            --target builder \
+            --load \
+            --tag "subconverter-request-sanitizer:${GITHUB_SHA}" \
+            --cache-from type=gha,scope=request-sanitizers \
+            --cache-to type=gha,scope=request-sanitizers,mode=max \
+            --progress plain \
+            "${args[@]}" \
+            .
 
   prepare:
     name: "🔧 Prepare Metadata"
     runs-on: ubuntu-latest
     needs:
       - source-head
-      - statistics-sanitizers
+      - request-sanitizers
     if: needs.source-head.outputs.current == 'true' && github.actor != 'dependabot[bot]' && (github.ref != 'refs/heads/dev' || (!contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '[ci skip]')))
     outputs:
       sha: ${{ steps.metadata.outputs.sha }}

@@ -11,6 +11,7 @@
 #include "generator/config/subexport.h"
 #include "generator/template/templates.h"
 #include "handler/settings.h"
+#include "handler/settings_view.h"
 #include "nodemanip.h"
 #include "parser/config/proxy.h"
 #include "parser/param_compat.h"
@@ -374,7 +375,7 @@ void groupGenerate(const std::string &rule, std::vector<Proxy> &nodelist,
             script_print_stack(ctx);
           }
         },
-        global.scriptCleanContext);
+        effectiveSettings().scriptCleanContext);
   }
 #endif // NO_JS_RUNTIME
   else {
@@ -1218,6 +1219,7 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
                          std::vector<RulesetContent> &ruleset_content_array,
                          const ProxyGroupConfigs &extra_proxy_group,
                          bool clashR, extra_settings &ext) {
+  const size_t max_allowed_rules = effectiveSettings().maxAllowedRules;
   YAML::Node yamlnode;
 
   try {
@@ -1280,14 +1282,14 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
     string_array merged;
     if (!mergeClashRulesWithinLimit(
             ext.rule_prepend, kept_original, generated_rules,
-            ext.rule_append, global.maxAllowedRules, merged)) {
+            ext.rule_append, max_allowed_rules, merged)) {
       ext.external_rule_error =
           "Invalid request: the final Clash rule count exceeds "
           "max_allowed_rules (" +
-          std::to_string(global.maxAllowedRules) +
+          std::to_string(max_allowed_rules) +
           ").\n"
           "无效请求：最终 Clash 规则数量超过 max_allowed_rules 限制（" +
-          std::to_string(global.maxAllowedRules) + "）。";
+          std::to_string(max_allowed_rules) + "）。";
       return false;
     }
     yamlnode[rules_field_name] = std::move(merged);
@@ -1487,6 +1489,7 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
                          std::vector<RulesetContent> &ruleset_content_array,
                          const ProxyGroupConfigs &extra_proxy_group,
                          int surge_ver, extra_settings &ext) {
+  const bool resolve_hostname = effectiveSettings().surgeResolveHostname;
   INIReader ini;
   std::string output_nodelist;
   std::vector<Proxy> nodelist;
@@ -1623,7 +1626,7 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
       proxy += "\", local-port=" + std::to_string(local_port);
       if (isIPv4(hostname) || isIPv6(hostname))
         proxy += ", addresses=" + hostname;
-      else if (global.surgeResolveHostname)
+      else if (resolve_hostname)
         proxy += ", addresses=" + hostnameToIPAddr(hostname);
       local_port++;
       break;
@@ -3278,6 +3281,7 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
                     std::vector<RulesetContent> &ruleset_content_array,
                     const ProxyGroupConfigs &extra_proxy_group,
                     extra_settings &ext) {
+  const bool add_clash_modes = effectiveSettings().singBoxAddClashModes;
   using namespace rapidjson_ext;
   rapidjson::Document::AllocatorType &allocator = json.GetAllocator();
   rapidjson::Value outbounds(rapidjson::kArrayType),
@@ -3783,7 +3787,7 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
     outbounds.PushBack(group, allocator);
   }
 
-  if (global.singBoxAddClashModes) {
+  if (add_clash_modes) {
     auto global_group = rapidjson::Value(rapidjson::kObjectType);
     global_group.AddMember("type", "selector", allocator);
     global_group.AddMember("tag", "GLOBAL", allocator);

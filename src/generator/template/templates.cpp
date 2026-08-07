@@ -8,6 +8,7 @@
 
 #include "handler/interfaces.h"
 #include "handler/settings.h"
+#include "handler/settings_view.h"
 #include "handler/webget.h"
 #include "utils/logger.h"
 #include "utils/network.h"
@@ -131,10 +132,11 @@ std::string parseHostname(inja::Arguments &args)
         return std::string();
 
     std::string input_content, output_content;
-    ProxyPolicy proxy = parseProxy(global.proxyConfig);
+    const Settings &settings = effectiveSettings();
+    ProxyPolicy proxy = parseProxy(settings.proxyConfig);
     for(std::string &x : urls)
     {
-        input_content = webGet(x, proxy, global.cacheConfig);
+        input_content = webGet(x, proxy, settings.cacheConfig);
         regGetMatch(input_content, matcher, 2, 0, &hostname);
         if(hostname.size())
         {
@@ -157,11 +159,12 @@ std::string parseHostname(inja::Arguments &args)
 std::string template_webGet(inja::Arguments &args)
 {
     std::string data = args.at(0)->get<std::string>();
-    ProxyPolicy proxy = parseProxy(global.proxyConfig);
+    const Settings &settings = effectiveSettings();
+    ProxyPolicy proxy = parseProxy(settings.proxyConfig);
     writeLog(0, "模板调用 fetch：" + summarizeUrlForLog(data) + "。",
              LOG_LEVEL_INFO);
     std::string content =
-        webGet(data, proxy, global.cacheConfig, nullptr, nullptr,
+        webGet(data, proxy, settings.cacheConfig, nullptr, nullptr,
                current_template_fetch_context);
     if(content.empty() && current_template_fetch_failed)
         *current_template_fetch_failed = true;
@@ -297,7 +300,8 @@ int render_template(const std::string &content, const template_args &vars,
     });
     env.add_callback("getLink", 1, [](inja::Arguments &args)
     {
-        return global.managedConfigPrefix + args.at(0)->get<std::string>();
+        return effectiveSettings().managedConfigPrefix +
+               args.at(0)->get<std::string>();
     });
     env.add_callback("startsWith", 2, [](inja::Arguments &args)
     {
