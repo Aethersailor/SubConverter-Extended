@@ -1,9 +1,9 @@
 {
   "composite_action_sha256": {
-    ".github/actions/smoke-docker-image/action.yml": "6cd40ef916c5a395e9da9e2ac46dc714383193e9a4be78ba35470cf93107d682",
-    ".github/actions/smoke-linux-artifact/action.yml": "abc193454db01fcfda3a58d1c7b43dc4dd60845957731c9ea1cb4adc06147bfd",
-    ".github/actions/smoke-openwrt-apk/action.yml": "fa75f750b7e0bd27639492342bcfa5ec8c3953c5d6e1373566e3ff0bb26cb72d",
-    ".github/actions/smoke-windows-artifact/action.yml": "397bf45c0fafeb194ab283d9c9497041d34b3710214e4fe221f457d9c0d8ddda"
+    ".github/actions/smoke-docker-image/action.yml": "4254b2c661b36799d288ba45522e16e14dc7489fa811847d685d9fd6c692ff7c",
+    ".github/actions/smoke-linux-artifact/action.yml": "520eaab6afd0b0368b2d7f3e95762586607197819af4ea7e50d422ce04be1ec5",
+    ".github/actions/smoke-openwrt-apk/action.yml": "ba803507061ad7114870e7245202752fa6b44ac827c32b398633a761d4995346",
+    ".github/actions/smoke-windows-artifact/action.yml": "86525227699163b933e96acdbae8da14157465c4229c97598817dc2a6ce56ff0"
   },
   "workflows": {
     "auto-merge-dependabot.yml": {
