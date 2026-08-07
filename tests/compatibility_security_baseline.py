@@ -2905,6 +2905,132 @@ def request_generation_reload_baseline(binary: Path, fixture_base: str) -> None:
             )
 
 
+def getruleset_generation_reload_baseline(binary: Path, fixture_base: str) -> None:
+    pref_paths: list[Path] = []
+    replacements = (
+        (
+            "reload_conf_on_request = false",
+            "reload_conf_on_request = true",
+        ),
+    )
+
+    def write_config_atomically(path: Path, content: str) -> None:
+        candidate = path.with_name(path.name + ".next")
+        candidate.write_text(content, encoding="utf-8", newline="\n")
+        os.replace(candidate, path)
+
+    slow_sources = "|".join(
+        (
+            fixture_base + "/slow-generation-rules.list",
+            fixture_base + "/generation-rules.list",
+        )
+    )
+    encoded_slow_sources = base64.urlsafe_b64encode(slow_sources.encode()).decode()
+    encoded_source = base64.urlsafe_b64encode(
+        (fixture_base + "/generation-rules.list").encode()
+    ).decode()
+    reload_request = {
+        "target": "clash",
+        "url": SUBSCRIPTION.strip(),
+        "config": DISABLE_RULEGEN_CONFIG,
+        "list": "true",
+    }
+
+    with running_service(
+        binary,
+        extra_args=("-cfw",),
+        config_replacements=replacements,
+        pref_path_capture=pref_paths,
+    ) as base_url:
+        if len(pref_paths) != 1:
+            raise AssertionError("mutable runtime preference path was not captured")
+        pref = pref_paths[0]
+        old_config = pref.read_text(encoding="utf-8")
+        new_config = old_config.replace('profile = "lan"', 'profile = "strict"', 1)
+        if new_config == old_config:
+            raise AssertionError("new getruleset generation was not changed")
+
+        FixtureHandler.slow_ruleset_started.clear()
+        FixtureHandler.slow_ruleset_release.clear()
+        slow_result: list[tuple[int, bytes, dict[str, str]]] = []
+        slow_error: list[BaseException] = []
+
+        def run_slow_getruleset() -> None:
+            try:
+                slow_result.append(
+                    request(
+                        base_url,
+                        "/getruleset",
+                        {"url": encoded_slow_sources, "type": "6"},
+                    )
+                )
+            except BaseException as error:  # propagate worker diagnostics
+                slow_error.append(error)
+
+        slow_thread = threading.Thread(target=run_slow_getruleset)
+        slow_thread.start()
+        try:
+            if not FixtureHandler.slow_ruleset_started.wait(timeout=10):
+                raise AssertionError("slow getruleset request did not reach fixture")
+            write_config_atomically(pref, new_config)
+            reload_status, reload_body, _ = request(
+                base_url, "/sub", reload_request
+            )
+            if reload_status != 200:
+                raise AssertionError(
+                    "successful getruleset generation reload trigger failed: "
+                    f"HTTP {reload_status}: {reload_body!r}"
+                )
+        finally:
+            FixtureHandler.slow_ruleset_release.set()
+            slow_thread.join(timeout=20)
+
+        if slow_thread.is_alive():
+            raise AssertionError("slow getruleset request did not finish")
+        if slow_error:
+            raise slow_error[0]
+        if len(slow_result) != 1:
+            raise AssertionError("slow getruleset request did not return once")
+        slow_status, slow_body, _ = slow_result[0]
+        slow_text = slow_body.decode("utf-8", errors="replace")
+        if slow_status != 200 or slow_text.count("first.snapshot.test") != 2:
+            raise AssertionError(
+                "getruleset request crossed settings generations: "
+                f"HTTP {slow_status}: {slow_text!r}"
+            )
+
+        new_status, _, _ = request(
+            base_url,
+            "/getruleset",
+            {"url": encoded_source, "type": "6"},
+        )
+        if new_status != 400:
+            raise AssertionError(
+                "getruleset request started after reload did not use strict generation: "
+                f"HTTP {new_status}"
+            )
+
+        write_config_atomically(pref, "version = 1\n[common\n")
+        retained_status, retained_body, _ = request(
+            base_url, "/sub", reload_request
+        )
+        if retained_status != 200:
+            raise AssertionError(
+                "failed reload did not retain the last successful generation: "
+                f"HTTP {retained_status}: {retained_body!r}"
+            )
+        retained_ruleset_status, _, _ = request(
+            base_url,
+            "/getruleset",
+            {"url": encoded_source, "type": "6"},
+        )
+        if retained_ruleset_status != 400:
+            raise AssertionError(
+                "failed reload changed the published getruleset generation: "
+                f"HTTP {retained_ruleset_status}"
+            )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, required=True)
@@ -2973,6 +3099,7 @@ def main() -> int:
         public_request_baseline(binary, fixture_base)
         security_endpoint_matrix_baseline(binary, fixture_base)
         external_config_failure_baseline(binary, fixture_base)
+        getruleset_generation_reload_baseline(binary, fixture_base)
         request_generation_reload_baseline(binary, fixture_base)
 
     print("compatibility and security baselines passed")
