@@ -6,6 +6,7 @@
 #include <dirent.h>
 #include <sys/types.h>
 
+#include "config/preference_file.h"
 #include "config/ruleset.h"
 #include "handler/curl_handle_pool.h"
 #include "handler/dashboard_auth.h"
@@ -121,21 +122,27 @@ int main(int argc, char *argv[]) {
   std::string prgpath = argv[0];
   setcd(prgpath); // first switch to program directory
 #endif            // _DEBUG
-  if (fileExist("pref.toml"))
-    global.prefPath = "pref.toml";
-  else if (fileExist("pref.yml"))
-    global.prefPath = "pref.yml";
-  else if (!fileExist("pref.ini")) {
-    if (fileExist("pref.example.toml")) {
-      fileCopy("pref.example.toml", "pref.toml");
-      global.prefPath = "pref.toml";
-    } else if (fileExist("pref.example.yml")) {
-      fileCopy("pref.example.yml", "pref.yml");
-      global.prefPath = "pref.yml";
-    } else if (fileExist("pref.example.ini"))
-      fileCopy("pref.example.ini", "pref.ini");
-  }
+  const PreferenceFileSelection default_preference =
+      prepareDefaultPreferenceFile();
+  global.prefPath = default_preference.path;
   chkArg(argc, argv);
+  if (defaultPreferenceRequiresExit(default_preference, global.prefPath)) {
+    const bool committed =
+        default_preference.status ==
+        PreferenceFileStatus::CopyCommittedUnsynced;
+    writeLog(0,
+             std::string(committed
+                             ? "DEFAULT_PREFERENCE_COPY_INCOMPLETE"
+                             : "DEFAULT_PREFERENCE_COPY_FAILED") +
+                 " source=" + default_preference.source +
+                 " destination=" + default_preference.path +
+                 (committed
+                      ? " new_file_visible=true durability=unconfirmed"
+                      : " new_file_visible=false") +
+                 " action=exit",
+             LOG_LEVEL_FATAL);
+    return 1;
+  }
   setcd(global.prefPath); // then switch to pref directory
   writeLog(0, "SubConverter-Extended " VERSION " 正在启动...", LOG_LEVEL_INFO);
 #ifdef _WIN32

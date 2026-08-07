@@ -15,6 +15,7 @@
 #include <curl/curl.h>
 
 #include "handler/cocr_source_url.h"
+#include "handler/cache_storage.h"
 #include "handler/curl_handle_pool.h"
 #include "handler/settings.h"
 #include "utils/base64/base64.h"
@@ -1011,7 +1012,8 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned in
                 cache_rw_lock.readLock();
                 defer(cache_rw_lock.readUnlock();)
                 if(response_headers)
-                    *response_headers = fileGet(path_header, true);
+                    *response_headers =
+                        readCachedResponseHeaders(path_header);
                 return fileGet(path, true);
             }
             if(shouldLog(LOG_LEVEL_VERBOSE))
@@ -1074,29 +1076,32 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned in
                 //guarded_mutex guard(cache_rw_lock);
                 cache_rw_lock.writeLock();
                 defer(cache_rw_lock.writeUnlock();)
-                const bool content_write_ok =
-                    fileWrite(path, content, true) == 0;
-                if(!content_write_ok)
-                {
+                const CacheUpdateResult cache_update = updateCacheFiles(
+                    path, path_header, content, fetched.response_headers);
+                if(cache_update == CacheUpdateResult::Unchanged) {
                     writeLog(0,
-                             "缓存正文写入失败，本次已获取内容仍将直接返回；原有缓存保持不变。",
+                             "CACHE_UPDATE_FAILED body=unchanged headers=unchanged; "
+                             "本次已获取内容仍将直接返回。",
                              LOG_LEVEL_WARNING);
                 }
-                else if(fetched.response_headers.empty())
-                {
-                    // The new response has no reusable headers. Remove only a
-                    // stale header sidecar after the complete body is durable.
-                    std::remove(path_header.c_str());
-                }
-                else if(fileWrite(path_header, fetched.response_headers, true) !=
-                        0)
-                {
-                    // The body is already complete and usable. A stale header
-                    // sidecar is less safe than serving the body without
-                    // cached response headers.
-                    std::remove(path_header.c_str());
+                else if(cache_update ==
+                        CacheUpdateResult::UnchangedHeadersInvalidated) {
                     writeLog(0,
-                             "缓存响应头写入失败，本次已获取内容仍将直接返回；已移除旧响应头缓存。",
+                             "CACHE_UPDATE_FAILED body=unchanged "
+                             "headers=invalidated; 本次已获取内容仍将直接返回。",
+                             LOG_LEVEL_WARNING);
+                }
+                else if(cache_update ==
+                        CacheUpdateResult::BodyCommittedUnsynced) {
+                    writeLog(0,
+                             "CACHE_BODY_COMMITTED durability=unconfirmed "
+                             "headers=invalidated; 本次已获取内容仍将直接返回。",
+                             LOG_LEVEL_WARNING);
+                }
+                else if(cache_update == CacheUpdateResult::HeadersInvalidated) {
+                    writeLog(0,
+                             "CACHE_BODY_COMMITTED durability=confirmed "
+                             "headers=invalidated; 本次已获取内容仍将直接返回。",
                              LOG_LEVEL_WARNING);
                 }
             }
@@ -1112,7 +1117,8 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned in
                 defer(cache_rw_lock.readUnlock();)
                 content = fileGet(path, true);
                 if(response_headers)
-                    *response_headers = fileGet(path_header, true);
+                    *response_headers =
+                        readCachedResponseHeaders(path_header);
             }
             else
             {

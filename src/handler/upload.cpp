@@ -3,6 +3,7 @@
 #include "utils/ini_reader/ini_reader.h"
 #include "utils/logger.h"
 #include "utils/rapidjson_extra.h"
+#include "utils/redact.h"
 #include "utils/system.h"
 #include "handler/settings.h"
 #include "webget.h"
@@ -90,7 +91,10 @@ int uploadGist(std::string name, std::string path, std::string content, bool wri
         if(retVal != 201)
         {
             //std::cerr<<"Create new Gist failed! Return data:\n"<<retData<<"\n";
-            writeLog(0, "创建新 Gist 失败！\n返回码：" + std::to_string(retVal) + "\n返回数据：\n" + retData, LOG_LEVEL_ERROR);
+            writeLog(0,
+                     "GIST_CREATE_FAILED status=" + std::to_string(retVal) +
+                         " detail=" + summarizeSensitiveTextForLog(retData),
+                     LOG_LEVEL_ERROR);
             return -1;
         }
     }
@@ -105,7 +109,10 @@ int uploadGist(std::string name, std::string path, std::string content, bool wri
         if(retVal != 200)
         {
             //std::cerr<<"Modify gist failed! Return data:\n"<<retData<<"\n";
-            writeLog(0, "修改 Gist 失败！\n返回码：" + std::to_string(retVal) + "\n返回数据：\n" + retData, LOG_LEVEL_ERROR);
+            writeLog(0,
+                     "GIST_UPDATE_FAILED status=" + std::to_string(retVal) +
+                         " detail=" + summarizeSensitiveTextForLog(retData),
+                     LOG_LEVEL_ERROR);
             return -1;
         }
     }
@@ -114,9 +121,6 @@ int uploadGist(std::string name, std::string path, std::string content, bool wri
     if(json.HasMember("owner"))
         GetMember(json["owner"], "login", username);
     url = "https://gist.githubusercontent.com/" + username + "/" + id + "/raw/" + path;
-    //std::cerr<<"Writing to Gist success!\nGenerator: "<<name<<"\nPath: "<<path<<"\nRaw URL: "<<url<<"\nGist owner: "<<username<<"\n";
-    writeLog(0, "写入 Gist 成功！\n生成器：" + name + "\n路径：" + path + "\n原始 URL：" + url + "\nGist 所有者：" + username, LOG_LEVEL_INFO);
-
     ini.erase_section();
     ini.set("token", token);
     ini.set("id", id);
@@ -127,6 +131,24 @@ int uploadGist(std::string name, std::string path, std::string content, bool wri
     ini.set("type", name);
     ini.set("url", url);
 
-    ini.to_file("gistconf.ini");
+    const FileCommitResult persistence_result =
+        static_cast<FileCommitResult>(ini.to_file("gistconf.ini"));
+    if(persistence_result != FileCommitResult::Durable)
+    {
+        writeLog(0,
+                 "GIST_REMOTE_UPLOAD_COMPLETED_LOCAL_STATE_FAILED target=" +
+                     name + " remote=" + summarizeUrlForLog(url) +
+                     (persistence_result == FileCommitResult::CommittedUnsynced
+                          ? " local_state_visible=true durability=unconfirmed"
+                          : " local_state_visible=false") +
+                     " action=report-failure",
+                 LOG_LEVEL_ERROR);
+        return -1;
+    }
+    writeLog(0,
+             "GIST_UPLOAD_COMPLETE target=" + name +
+                 " remote=" + summarizeUrlForLog(url) +
+                 " local_state=persisted",
+             LOG_LEVEL_INFO);
     return 0;
 }
