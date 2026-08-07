@@ -18,6 +18,7 @@
 #include "handler/cache_storage.h"
 #include "handler/curl_handle_pool.h"
 #include "handler/settings.h"
+#include "handler/settings_view.h"
 #include "utils/base64/base64.h"
 #include "utils/defer.h"
 #include "utils/file_extra.h"
@@ -556,9 +557,9 @@ static inline void curl_set_common_options(CURL *curl_handle, const char *url, c
     curl_easy_setopt(curl_handle, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl_handle, CURLOPT_MAXREDIRS, 20L);
     curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYPEER,
-                     global.allowInsecureTls ? 0L : 1L);
+                     effectiveSettings().allowInsecureTls ? 0L : 1L);
     curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYHOST,
-                     global.allowInsecureTls ? 0L : 2L);
+                     effectiveSettings().allowInsecureTls ? 0L : 2L);
     curl_easy_setopt(curl_handle, CURLOPT_TIMEOUT, 15L);
     curl_easy_setopt(curl_handle, CURLOPT_COOKIEFILE, "");
     if(data)
@@ -685,7 +686,8 @@ static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode 
 
     CurlHandleLease curl_lease =
         globalCurlHandlePool(
-            static_cast<size_t>(std::max(1, global.maxConcurThreads)))
+            static_cast<size_t>(
+                std::max(1, effectiveSettings().maxConcurThreads)))
             .acquire();
     curl_handle = curl_lease.get();
     if(curl_handle == nullptr)
@@ -711,7 +713,7 @@ static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode 
         header_list = curl_slist_append(header_list,
                                         "X-Requested-With: SubConverter-Extended " VERSION);
     curl_progress_data limit;
-    limit.size_limit = global.maxAllowedDownloadSize;
+    limit.size_limit = effectiveSettings().maxAllowedDownloadSize;
     curl_set_common_options(curl_handle, new_url.data(), &limit);
     retVal = curl_set_platform_tls_trust(curl_handle);
     if(retVal != CURLE_OK)
@@ -939,17 +941,17 @@ static std::string dataGet(const std::string &url)
         return "";
 
     std::string data = urlDecode(url.substr(comma + 1));
-    if (global.maxAllowedDownloadSize > 0 &&
-        data.size() > static_cast<size_t>(global.maxAllowedDownloadSize)) {
+    const long max_download_size = effectiveSettings().maxAllowedDownloadSize;
+    if (max_download_size > 0 &&
+        data.size() > static_cast<size_t>(max_download_size)) {
         writeLog(0, "已阻止 data URL：内容超过最大下载大小。",
                  LOG_LEVEL_WARNING);
         return "";
     }
     if (endsWith(url.substr(0, comma), ";base64")) {
         std::string decoded = urlSafeBase64Decode(data);
-        if (global.maxAllowedDownloadSize > 0 &&
-            decoded.size() >
-                static_cast<size_t>(global.maxAllowedDownloadSize)) {
+        if (max_download_size > 0 &&
+            decoded.size() > static_cast<size_t>(max_download_size)) {
             writeLog(0,
                      "已阻止解码后的 data URL：内容超过最大下载大小。",
                      LOG_LEVEL_WARNING);
@@ -977,7 +979,8 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned in
         return "";
 
     CocrSourceResolution source =
-        resolveCocrSourceUrl(url, global.customOpenClashRulesSourceSwitch);
+        resolveCocrSourceUrl(
+            url, effectiveSettings().customOpenClashRulesSourceSwitch);
     const std::string &effective_url = source.effective_url;
     if(source.rewritten && shouldLog(LOG_LEVEL_VERBOSE))
         writeLog(0, "COCR 服务端取源切换：" + summarizeUrlForLog(url) +
@@ -1108,7 +1111,7 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned in
         }
         else
         {
-            if(fileExist(path) && global.serveCacheOnFetchFail) // failed, check if cache exist
+            if(fileExist(path) && effectiveSettings().serveCacheOnFetchFail) // failed, check if cache exist
             {
                 if(shouldLog(LOG_LEVEL_VERBOSE))
                     writeLog(0, "获取失败，返回缓存内容。"); // cache exist, serving cache
@@ -1186,8 +1189,9 @@ int webGet(const FetchArgument& argument, FetchResult &result)
     }
     CocrSourceResolution source =
         argument.method == HTTP_GET
-            ? resolveCocrSourceUrl(argument.url,
-                                   global.customOpenClashRulesSourceSwitch)
+            ? resolveCocrSourceUrl(
+                  argument.url,
+                  effectiveSettings().customOpenClashRulesSourceSwitch)
             : CocrSourceResolution{argument.url, false};
     if (startsWith(source.effective_url, "data:")) {
         if (result.content)

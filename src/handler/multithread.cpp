@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "handler/settings.h"
+#include "handler/settings_view.h"
 #include "utils/network.h"
 #include "utils/bounded_executor.h"
 #include "webget.h"
@@ -16,7 +17,7 @@ std::mutex on_emoji, on_rename, on_stream, on_time;
 static size_t configuredWorkerCount()
 {
     return static_cast<size_t>(
-        std::clamp(global.maxConcurThreads / 2, 2, 8));
+        std::clamp(effectiveSettings().maxConcurThreads / 2, 2, 8));
 }
 
 static size_t configuredQueueCapacity()
@@ -51,25 +52,25 @@ size_t rulesetExecutorQueueCapacity()
 RegexMatchConfigs safe_get_emojis()
 {
     guarded_mutex guard(on_emoji);
-    return global.emojis;
+    return effectiveSettings().emojis;
 }
 
 RegexMatchConfigs safe_get_renames()
 {
     guarded_mutex guard(on_rename);
-    return global.renames;
+    return effectiveSettings().renames;
 }
 
 RegexMatchConfigs safe_get_streams()
 {
     guarded_mutex guard(on_stream);
-    return global.streamNodeRules;
+    return effectiveSettings().streamNodeRules;
 }
 
 RegexMatchConfigs safe_get_times()
 {
     guarded_mutex guard(on_time);
-    return global.timeNodeRules;
+    return effectiveSettings().timeNodeRules;
 }
 
 void safe_set_emojis(RegexMatchConfigs data)
@@ -134,11 +135,15 @@ std::shared_future<std::string> fetchFileAsync(const std::string &path, const Pr
         retVal = rulesetExecutor().submit(
             [path, scope_limit](){ return fileGet(path, scope_limit); });
     else if(isLink(path))
+    {
+        SettingsSnapshot settings = captureEffectiveSettingsSnapshot();
         retVal = rulesetExecutor().submit(
-            [path, proxy, cache_ttl, context](){
+            [path, proxy, cache_ttl, context, settings](){
+                ScopedSettingsView view(settings);
                 return webGet(path, proxy, cache_ttl, nullptr, nullptr,
                               context);
             });
+    }
     else
         return makeReadyStringFuture(std::string());
     return retVal.share();

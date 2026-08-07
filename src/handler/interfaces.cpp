@@ -34,6 +34,7 @@
 #include "script/script_quickjs.h"
 #include "server/webserver.h"
 #include "settings.h"
+#include "settings_view.h"
 #include "statistics.h"
 #include "sub_request_key.h"
 #include "upload.h"
@@ -664,7 +665,8 @@ static bool fetchExternalRuleSources(const string_array &sources,
                                      FetchContext context,
                                      string_array &destination,
                                      std::string &error) {
-  ProxyPolicy proxy = parseProxy(global.proxyRuleset);
+  const Settings &settings = effectiveSettings();
+  ProxyPolicy proxy = parseProxy(settings.proxyRuleset);
   string_icase_map request_headers = {
       {"Cache-Control", "no-cache, no-store, max-age=0"},
       {"Pragma", "no-cache"}};
@@ -1074,6 +1076,7 @@ static std::string sanitizeProviderName(const std::string &input) {
 }
 
 static std::string subconverter_impl(Request &request, Response &response,
+                                     const Settings &settings,
                                      RuleConversionStats *rule_stats = nullptr);
 
 namespace {
@@ -1477,8 +1480,9 @@ static std::string finalizeSubResponse(const Request &request,
   }
 }
 
-static bool shouldCoalesceSubRequest(const Request &request) {
-  if (!global.enableRequestCoalescing)
+static bool shouldCoalesceSubRequest(const Request &request,
+                                     const Settings &settings) {
+  if (!settings.enableRequestCoalescing)
     return false;
   if (request.method != "GET" || request.url != "/sub")
     return false;
@@ -1517,8 +1521,9 @@ static void pruneExpiredSubResponseCache(
 }
 
 static bool getCachedSubResponse(const std::string &key,
-                                 SharedCoalescedResponse &result) {
-  if (global.responseCacheTtl <= 0)
+                                 SharedCoalescedResponse &result,
+                                 const Settings &settings) {
+  if (settings.responseCacheTtl <= 0)
     return false;
 
   auto now = std::chrono::steady_clock::now();
@@ -1535,11 +1540,12 @@ static bool getCachedSubResponse(const std::string &key,
 }
 
 static void storeCachedSubResponse(const std::string &key,
-                                   const SharedCoalescedResponse &result) {
-  if (global.responseCacheTtl <= 0 || !result || result->status_code != 200)
+                                   const SharedCoalescedResponse &result,
+                                   const Settings &settings) {
+  if (settings.responseCacheTtl <= 0 || !result || result->status_code != 200)
     return;
 
-  int ttl = std::min(global.responseCacheTtl, 5);
+  int ttl = std::min(settings.responseCacheTtl, 5);
   if (ttl <= 0)
     return;
 
@@ -1558,13 +1564,14 @@ static void storeCachedSubResponse(const std::string &key,
 
 static std::string runSubconverterImplWithRetry(const Request &original,
                                                 Response &response,
+                                                const Settings &settings,
                                                 RuleConversionStats *stats) {
   Request first_request = original;
   Response first_response;
   RuleConversionStats first_stats;
-  std::string body = subconverter_impl(first_request, first_response,
+  std::string body = subconverter_impl(first_request, first_response, settings,
                                        stats ? &first_stats : nullptr);
-  if (first_response.status_code < 500 || !global.coalesceRetryOn5xx) {
+  if (first_response.status_code < 500 || !settings.coalesceRetryOn5xx) {
     if (stats)
       *stats = first_stats;
     response = first_response;
@@ -1578,6 +1585,7 @@ static std::string runSubconverterImplWithRetry(const Request &original,
   Response retry_response;
   RuleConversionStats retry_stats;
   std::string retry_body = subconverter_impl(retry_request, retry_response,
+                                             settings,
                                              stats ? &retry_stats : nullptr);
   if (retry_response.status_code < 500) {
     if (stats)
@@ -1602,6 +1610,27 @@ static void recordTrackedSubRequest(bool track, const Request &request,
   statistics::recordSubscriptionConversion(request, rule_conversions);
 }
 
+static SettingsSnapshot captureSettingsForSubRequest(Request &request) {
+  SettingsSnapshot current = captureSettingsSnapshot();
+  if (!current->reloadConfOnRequest || !current->CFWChildProcess ||
+      current->generatorMode)
+    return current;
+
+  std::string target = getUrlArg(request.argument, "target");
+  if (target == "auto") {
+    tribool clash_new_field;
+    int surge_version =
+        to_int(getUrlArg(request.argument, "ver"), 3);
+    matchUserAgent(request.headers["User-Agent"], target, clash_new_field,
+                   surge_version);
+  }
+  if (findTargetDescriptor(target)) {
+    readConf();
+    return captureSettingsSnapshot();
+  }
+  return current;
+}
+
 static std::string subconverterEntry(Request &request, Response &response,
                                      bool track) {
   AgeResponseContext age = consumeAgeResponseContext(request);
@@ -1622,29 +1651,36 @@ static std::string subconverterEntry(Request &request, Response &response,
     );
   }
 
-  if (!shouldCoalesceSubRequest(request)) {
+  // CFW's compatibility reload remains after target validation, matching the
+  // legacy control flow. The request view is captured only after that reload
+  // transaction finishes (or restores the previous generation).
+  SettingsSnapshot snapshot = captureSettingsForSubRequest(request);
+  ScopedSettingsView settings_scope(snapshot);
+  const Settings &settings = *snapshot;
+
+  if (!shouldCoalesceSubRequest(request, settings)) {
     RuleConversionStats stats;
-    std::string body =
-        subconverter_impl(request, response, track ? &stats : nullptr);
+    std::string body = subconverter_impl(request, response, settings,
+                                         track ? &stats : nullptr);
     body = finalizeSubResponse(request, response, std::move(body), age);
     recordTrackedSubRequest(track, request, response, stats.rules);
     return body;
   }
 
   std::string key =
-      buildSubRequestKey(request, age.fingerprint, global.configGeneration,
-                         global.managedConfigPrefix);
+      buildSubRequestKey(request, age.fingerprint, settings.configGeneration,
+                         settings.managedConfigPrefix);
   if (key.empty()) {
     RuleConversionStats stats;
-    std::string body =
-        subconverter_impl(request, response, track ? &stats : nullptr);
+    std::string body = subconverter_impl(request, response, settings,
+                                         track ? &stats : nullptr);
     body = finalizeSubResponse(request, response, std::move(body), age);
     recordTrackedSubRequest(track, request, response, stats.rules);
     return body;
   }
 
   SharedCoalescedResponse cached_result;
-  if (getCachedSubResponse(key, cached_result)) {
+  if (getCachedSubResponse(key, cached_result, settings)) {
     writeLog(0, "/sub 响应微缓存命中。", LOG_LEVEL_DEBUG);
     copyCoalescedToResponse(*cached_result, response);
     recordTrackedSubRequest(track, request, response,
@@ -1684,7 +1720,7 @@ static std::string subconverterEntry(Request &request, Response &response,
     Response owner_response;
     RuleConversionStats stats;
     std::string body = runSubconverterImplWithRetry(
-        request, owner_response, track ? &stats : nullptr);
+        request, owner_response, settings, track ? &stats : nullptr);
     body = finalizeSubResponse(request, owner_response, std::move(body), age);
     SharedCoalescedResponse result = makeCoalescedResult(
         std::move(body), std::move(owner_response), stats.rules);
@@ -1699,7 +1735,7 @@ static std::string subconverterEntry(Request &request, Response &response,
       g_sub_inflight.erase(key);
     }
     if (!age.requested)
-      storeCachedSubResponse(key, result);
+      storeCachedSubResponse(key, result, settings);
     call->cv.notify_all();
     recordTrackedSubRequest(track, request, response,
                             result->rule_conversions);
@@ -1730,6 +1766,7 @@ std::string subconverterTracked(RESPONSE_CALLBACK_ARGS) {
 }
 
 static std::string subconverter_impl(Request &request, Response &response,
+                                     const Settings &settings,
                                      RuleConversionStats *rule_stats) {
   auto &argument = request.argument;
   int *status_code = &response.status_code;
@@ -1739,9 +1776,9 @@ static std::string subconverter_impl(Request &request, Response &response,
   bool explainMode = isTruthyRequestValue(getUrlArg(argument, "explain"));
   SubExplainReport explain;
   explain.enabled = explainMode;
-  explain.proxy_config = parseProxy(global.proxyConfig).describe();
-  explain.proxy_ruleset = parseProxy(global.proxyRuleset).describe();
-  explain.proxy_subscription = parseProxy(global.proxySubscription).describe();
+  explain.proxy_config = parseProxy(settings.proxyConfig).describe();
+  explain.proxy_ruleset = parseProxy(settings.proxyRuleset).describe();
+  explain.proxy_subscription = parseProxy(settings.proxySubscription).describe();
   explain.requested_target = argTarget;
   if (explainMode) {
     std::string rawUrlForLog = getUrlArg(argument, "url");
@@ -1773,11 +1810,6 @@ static std::string subconverter_impl(Request &request, Response &response,
            supportedTargets("、") + "。";
   }
   const bool lSimpleSubscription = target_descriptor->simple_subscription;
-  // check if we need to read configuration
-  if (global.reloadConfOnRequest && global.CFWChildProcess &&
-      !global.generatorMode)
-    readConf();
-
   /// string values
   std::string argUrl = getUrlArg(argument, "url");
   std::string argGroupName = getUrlArg(argument, "group"),
@@ -1820,19 +1852,19 @@ static std::string subconverter_impl(Request &request, Response &response,
   }
 
   std::string base_content, output_content;
-  ProxyGroupConfigs lCustomProxyGroups = global.customProxyGroups;
-  RulesetConfigs lCustomRulesets = global.customRulesets;
-  string_array lIncludeRemarks = global.includeRemarks,
-               lExcludeRemarks = global.excludeRemarks;
+  ProxyGroupConfigs lCustomProxyGroups = settings.customProxyGroups;
+  RulesetConfigs lCustomRulesets = settings.customRulesets;
+  string_array lIncludeRemarks = settings.includeRemarks,
+               lExcludeRemarks = settings.excludeRemarks;
   std::vector<RulesetContent> lRulesetContent;
   extra_settings ext;
   ext.rule_stats = rule_stats;
   std::string subInfo, dummy;
   int interval = !argUpdateInterval.empty()
-                     ? to_int(argUpdateInterval, global.updateInterval)
-                     : global.updateInterval;
+                     ? to_int(argUpdateInterval, settings.updateInterval)
+                     : settings.updateInterval;
   bool strict = !argUpdateStrict.empty() ? argUpdateStrict == "true"
-                                         : global.updateStrict;
+                                         : settings.updateStrict;
   explain.simple_subscription = lSimpleSubscription;
 
   if (std::find(gRegexBlacklist.cbegin(), gRegexBlacklist.cend(),
@@ -1847,16 +1879,19 @@ static std::string subconverter_impl(Request &request, Response &response,
   }
 
   /// for external configuration
-  std::string lClashBase = global.clashBase, lSurgeBase = global.surgeBase,
-              lMellowBase = global.mellowBase,
-              lSurfboardBase = global.surfboardBase;
-  std::string lQuanBase = global.quanBase, lQuanXBase = global.quanXBase,
-              lLoonBase = global.loonBase, lSSSubBase = global.SSSubBase;
-  std::string lSingBoxBase = global.singBoxBase;
+  std::string lClashBase = settings.clashBase,
+              lSurgeBase = settings.surgeBase,
+              lMellowBase = settings.mellowBase,
+              lSurfboardBase = settings.surfboardBase;
+  std::string lQuanBase = settings.quanBase,
+              lQuanXBase = settings.quanXBase,
+              lLoonBase = settings.loonBase,
+              lSSSubBase = settings.SSSubBase;
+  std::string lSingBoxBase = settings.singBoxBase;
 
   /// validate urls
-  argEnableInsert.define(global.enableInsert);
-  if ((argUrl.empty() && !(!global.insertUrls.empty() && argEnableInsert)) ||
+  argEnableInsert.define(settings.enableInsert);
+  if ((argUrl.empty() && !(!settings.insertUrls.empty() && argEnableInsert)) ||
       argTarget.empty()) {
     *status_code = 400;
     return "Invalid request: missing required target or url parameter.\n"
@@ -1907,38 +1942,38 @@ static std::string subconverter_impl(Request &request, Response &response,
 
   /// save template variables
   template_args tpl_args;
-  tpl_args.global_vars = global.templateVars;
+  tpl_args.global_vars = settings.templateVars;
   tpl_args.request_params = std::move(req_arg_map);
 
   /// check for proxy settings
-  ProxyPolicy proxy = parseProxy(global.proxySubscription);
+  ProxyPolicy proxy = parseProxy(settings.proxySubscription);
 
   /// check other flags
-  ext.append_proxy_type = argAppendType.get(global.appendType);
+  ext.append_proxy_type = argAppendType.get(settings.appendType);
   // 上游项目默认在 clash 目标下自动把 expand 设为 true
   // 本项目默认 expand=false（使用 rule-provider 模式不展开规则集）
   // 若用户主动传入 expand=true，则按照用户意愿内联展开规则集
   argExpandRulesets.define(false);
 
-  ext.clash_proxies_style = global.clashProxiesStyle;
-  ext.clash_proxy_groups_style = global.clashProxyGroupsStyle;
+  ext.clash_proxies_style = settings.clashProxiesStyle;
+  ext.clash_proxy_groups_style = settings.clashProxyGroupsStyle;
 
   /// read preference from argument, assign global var if not in argument
-  ext.tfo.define(argTFO).define(global.TFOFlag);
-  ext.udp.define(argUDP).define(global.UDPFlag);
-  ext.skip_cert_verify.define(argSkipCertVerify).define(global.skipCertVerify);
-  ext.tls13.define(argTLS13).define(global.TLS13Flag);
+  ext.tfo.define(argTFO).define(settings.TFOFlag);
+  ext.udp.define(argUDP).define(settings.UDPFlag);
+  ext.skip_cert_verify.define(argSkipCertVerify).define(settings.skipCertVerify);
+  ext.tls13.define(argTLS13).define(settings.TLS13Flag);
 
-  ext.sort_flag = argSort.get(global.enableSort);
-  argUseSortScript.define(!global.sortScript.empty());
+  ext.sort_flag = argSort.get(settings.enableSort);
+  argUseSortScript.define(!settings.sortScript.empty());
   if (ext.sort_flag && argUseSortScript)
-    ext.sort_script = global.sortScript;
-  ext.filter_deprecated = argFilterDeprecated.get(global.filterDeprecated);
-  ext.clash_new_field_name = argClashNewField.get(global.clashUseNewField);
+    ext.sort_script = settings.sortScript;
+  ext.filter_deprecated = argFilterDeprecated.get(settings.filterDeprecated);
+  ext.clash_new_field_name = argClashNewField.get(settings.clashUseNewField);
   ext.clash_script = argGenClashScript.get();
   ext.clash_classical_ruleset = argGenClassicalRuleProvider.get();
   ext.provider_proxy_direct =
-      argProviderProxyDirect.get(global.proxyProviderDirect);
+      argProviderProxyDirect.get(settings.proxyProviderDirect);
   // 无论 expand 取何值，均强制使用 Mihomo 新字段名（proxy-groups / rules）
   // 避免因全局配置为旧字段名而导致 Mihomo 无法识别
   ext.clash_new_field_name = true;
@@ -1950,12 +1985,12 @@ static std::string subconverter_impl(Request &request, Response &response,
   // the traditional expanded-node behavior.
   ext.nodelist = argGenNodeList.get(false);
   explain.nodelist = ext.nodelist;
-  ext.surge_ssr_path = global.surgeSSRPath;
-  ext.quanx_dev_id = !argDeviceID.empty() ? argDeviceID : global.quanXDevID;
-  ext.enable_rule_generator = global.enableRuleGen;
-  ext.overwrite_original_rules = global.overwriteOriginalRules;
+  ext.surge_ssr_path = settings.surgeSSRPath;
+  ext.quanx_dev_id = !argDeviceID.empty() ? argDeviceID : settings.quanXDevID;
+  ext.enable_rule_generator = settings.enableRuleGen;
+  ext.overwrite_original_rules = settings.overwriteOriginalRules;
   if (!argExpandRulesets)
-    ext.managed_config_prefix = global.managedConfigPrefix;
+    ext.managed_config_prefix = settings.managedConfigPrefix;
   explain.rule_generator_enabled = ext.enable_rule_generator;
   explain.managed_config = !ext.managed_config_prefix.empty();
 
@@ -1978,15 +2013,15 @@ static std::string subconverter_impl(Request &request, Response &response,
   if (userProvidedExternalConfig) {
     config_candidates.push_back(
         {argExternalConfig, FetchContext::PublicRequest, false});
-    if (global.fallbackToDefaultExternalConfig &&
-        !global.defaultExtConfig.empty() &&
-        global.defaultExtConfig != argExternalConfig) {
+    if (settings.fallbackToDefaultExternalConfig &&
+        !settings.defaultExtConfig.empty() &&
+        settings.defaultExtConfig != argExternalConfig) {
       config_candidates.push_back(
-          {global.defaultExtConfig, FetchContext::TrustedConfig, true});
+          {settings.defaultExtConfig, FetchContext::TrustedConfig, true});
     }
-  } else if (!global.defaultExtConfig.empty()) {
+  } else if (!settings.defaultExtConfig.empty()) {
     config_candidates.push_back(
-        {global.defaultExtConfig, FetchContext::TrustedConfig, false});
+        {settings.defaultExtConfig, FetchContext::TrustedConfig, false});
   }
 
   auto loadStatusName = [](ExternalConfigLoadStatus status) {
@@ -2114,16 +2149,16 @@ static std::string subconverter_impl(Request &request, Response &response,
   const size_t externalRuleSourceCount =
       rulePrependSources.size() + ruleAppendSources.size();
   if (externalRuleSourceCount) {
-    if (global.maxAllowedRulesets &&
-        externalRuleSourceCount > global.maxAllowedRulesets) {
+    if (settings.maxAllowedRulesets &&
+        externalRuleSourceCount > settings.maxAllowedRulesets) {
       *status_code = 400;
       return "Invalid request: ruleprepend and ruleappend contain more "
              "sources than max_allowed_rulesets (" +
-             std::to_string(global.maxAllowedRulesets) +
+             std::to_string(settings.maxAllowedRulesets) +
              ").\n"
              "无效请求：ruleprepend 与 ruleappend 的来源总数超过 "
              "max_allowed_rulesets 限制（" +
-             std::to_string(global.maxAllowedRulesets) + "）。";
+             std::to_string(settings.maxAllowedRulesets) + "）。";
     }
     if (argTarget != "clash") {
       *status_code = 400;
@@ -2158,14 +2193,14 @@ static std::string subconverter_impl(Request &request, Response &response,
   }
 
   if (ext.enable_rule_generator && !ext.nodelist && !lSimpleSubscription) {
-    if (lCustomRulesets != global.customRulesets)
+    if (lCustomRulesets != settings.customRulesets)
       refreshRulesets(lCustomRulesets, lRulesetContent, rulesetFetchContext);
     else {
-      if (global.updateRulesetOnRequest)
+      if (settings.updateRulesetOnRequest)
         refreshRulesets(lCustomRulesets, lRulesetContent,
                         rulesetFetchContext);
       else
-        lRulesetContent = global.rulesetsContent;
+        lRulesetContent = settings.rulesetsContent;
     }
   }
   explain.rule_generator_enabled = ext.enable_rule_generator;
@@ -2178,16 +2213,16 @@ static std::string subconverter_impl(Request &request, Response &response,
     argAddEmoji.set(argEmoji);
     argRemoveEmoji.set(true);
   }
-  ext.add_emoji = argAddEmoji.get(global.addEmoji);
-  ext.remove_emoji = argRemoveEmoji.get(global.removeEmoji);
+  ext.add_emoji = argAddEmoji.get(settings.addEmoji);
+  ext.remove_emoji = argRemoveEmoji.get(settings.removeEmoji);
   if (ext.add_emoji && ext.emoji_array.empty())
-    ext.emoji_array = safe_get_emojis();
+    ext.emoji_array = settings.emojis;
   if (!argRenames.empty()) {
     ext.rename_array = INIBinding::from<RegexMatchConfig>::from_ini(
         split(argRenames, "`"), "@");
     ext.rename_for_providers = true;
   } else if (ext.rename_array.empty())
-    ext.rename_array = safe_get_renames();
+    ext.rename_array = settings.renames;
 
   /// check custom include/exclude settings
   if (!argIncludeRemark.empty() && regValid(argIncludeRemark))
@@ -2196,8 +2231,8 @@ static std::string subconverter_impl(Request &request, Response &response,
     lExcludeRemarks = string_array{argExcludeRemark};
 
   // start parsing urls
-  RegexMatchConfigs stream_temp = safe_get_streams(),
-                    time_temp = safe_get_times();
+  RegexMatchConfigs stream_temp = settings.streamNodeRules,
+                    time_temp = settings.timeNodeRules;
 
   // loading urls
   string_array urls;
@@ -2223,9 +2258,9 @@ static std::string subconverter_impl(Request &request, Response &response,
   parse_set.js_runtime = ext.js_runtime;
   parse_set.js_context = ext.js_context;
 
-  if (!global.insertUrls.empty() && argEnableInsert) {
+  if (!settings.insertUrls.empty() && argEnableInsert) {
     groupID = -1;
-    urls = split(global.insertUrls, "|");
+    urls = split(settings.insertUrls, "|");
     explain.insert_url_count = urls.size();
     importItems(urls, true);
     for (std::string &x : urls) {
@@ -2233,7 +2268,7 @@ static std::string subconverter_impl(Request &request, Response &response,
       writeLog(0, "正在从 URL 获取节点数据：" + summarizeUrlForLog(x) + "。",
                LOG_LEVEL_INFO);
       if (addNodes(x, insert_nodes, groupID, parse_set) == -1) {
-        if (global.skipFailedLinks)
+        if (settings.skipFailedLinks)
           writeLog(
               0, "以下链接不包含任何有效节点信息：" + x,
               LOG_LEVEL_WARNING);
@@ -2414,7 +2449,7 @@ static std::string subconverter_impl(Request &request, Response &response,
         provider.url = item.url_decoded ? item.url
                                         : urlDecode(item.url); // 解码 URL
         provider.interval = static_cast<uint32_t>(
-            item.has_interval ? item.interval : global.proxyProviderInterval);
+            item.has_interval ? item.interval : settings.proxyProviderInterval);
         provider.proxy_direct = item.has_proxy_direct
                                     ? item.proxy_direct
                                     : ext.provider_proxy_direct;
@@ -2512,7 +2547,7 @@ static std::string subconverter_impl(Request &request, Response &response,
            "supported, and whether filters excluded all nodes.\n"
            "请检查订阅链接或节点 URI 格式是否受支持，以及过滤规则是否排除了所有节点。";
   }
-  if (!subInfo.empty() && argAppendUserinfo.get(global.appendUserinfo))
+  if (!subInfo.empty() && argAppendUserinfo.get(settings.appendUserinfo))
     response.headers.emplace("Subscription-UserInfo", subInfo);
 
   if (request.method == "HEAD")
@@ -2528,7 +2563,7 @@ static std::string subconverter_impl(Request &request, Response &response,
            "请显式开启 security.allow_public_upload。";
   }
 
-  argPrependInsert.define(global.prependInsert);
+  argPrependInsert.define(settings.prependInsert);
   if (argPrependInsert) {
     std::move(nodes.begin(), nodes.end(), std::back_inserter(insert_nodes));
     nodes.swap(insert_nodes);
@@ -2537,7 +2572,7 @@ static std::string subconverter_impl(Request &request, Response &response,
               std::back_inserter(nodes));
   }
   // run filter script
-  std::string filterScript = global.filterScript;
+  std::string filterScript = settings.filterScript;
   if (!filterScript.empty()) {
     if (startsWith(filterScript, "path:"))
       filterScript = fileGet(filterScript.substr(5), false);
@@ -2578,7 +2613,7 @@ static std::string subconverter_impl(Request &request, Response &response,
             script_print_stack(ctx);
           }
         },
-        global.scriptCleanContext);
+        settings.scriptCleanContext);
   }
 
   // check custom group name
@@ -2609,7 +2644,7 @@ static std::string subconverter_impl(Request &request, Response &response,
   std::string managed_url = base64Decode(getUrlArg(argument, "profile_data"));
   if (managed_url.empty())
     managed_url =
-        global.managedConfigPrefix + "/sub?" + joinArguments(argument);
+        settings.managedConfigPrefix + "/sub?" + joinArguments(argument);
 
   bool upload_failed = false;
   auto recordUpload = [&](const std::string &name, const std::string &path,
@@ -2619,7 +2654,7 @@ static std::string subconverter_impl(Request &request, Response &response,
   };
 
   // std::cerr<<"Generate target: ";
-  proxy = parseProxy(global.proxyConfig);
+  proxy = parseProxy(settings.proxyConfig);
   switch (hash_(argTarget)) {
   case "clash"_hash:
   case "clashr"_hash:
@@ -2635,9 +2670,9 @@ static std::string subconverter_impl(Request &request, Response &response,
       proxyToClash(nodes, yamlnode, dummy_group, argTarget == "clashr", ext);
       output_content = YAML::Dump(yamlnode);
     } else {
-      if (render_template(fetchFile(lClashBase, proxy, global.cacheConfig,
+      if (render_template(fetchFile(lClashBase, proxy, settings.cacheConfig,
                                     true, baseFetchContext),
-                          tpl_args, base_content, global.templatePath,
+                          tpl_args, base_content, settings.templatePath,
                           baseFetchContext) != 0) {
         *status_code = 400;
         return base_content;
@@ -2667,9 +2702,9 @@ static std::string subconverter_impl(Request &request, Response &response,
         recordUpload("surge" + argSurgeVer + "list", argUploadPath,
                      output_content, true);
     } else {
-      if (render_template(fetchFile(lSurgeBase, proxy, global.cacheConfig,
+      if (render_template(fetchFile(lSurgeBase, proxy, settings.cacheConfig,
                                     true, baseFetchContext),
-                          tpl_args, base_content, global.templatePath,
+                          tpl_args, base_content, settings.templatePath,
                           baseFetchContext) != 0) {
         *status_code = 400;
         return base_content;
@@ -2681,7 +2716,7 @@ static std::string subconverter_impl(Request &request, Response &response,
         recordUpload("surge" + argSurgeVer, argUploadPath, output_content,
                      true);
 
-      if (global.writeManagedConfig && !global.managedConfigPrefix.empty())
+      if (settings.writeManagedConfig && !settings.managedConfigPrefix.empty())
         output_content =
             "#!MANAGED-CONFIG " + managed_url +
             (interval ? " interval=" + std::to_string(interval) : "") +
@@ -2692,9 +2727,9 @@ static std::string subconverter_impl(Request &request, Response &response,
   case "surfboard"_hash:
     writeLog(0, "生成目标：Surfboard", LOG_LEVEL_INFO);
 
-    if (render_template(fetchFile(lSurfboardBase, proxy, global.cacheConfig,
+    if (render_template(fetchFile(lSurfboardBase, proxy, settings.cacheConfig,
                                   true, baseFetchContext),
-                        tpl_args, base_content, global.templatePath,
+                        tpl_args, base_content, settings.templatePath,
                         baseFetchContext) != 0) {
       *status_code = 400;
       return base_content;
@@ -2704,7 +2739,7 @@ static std::string subconverter_impl(Request &request, Response &response,
     if (argUpload)
       recordUpload("surfboard", argUploadPath, output_content, true);
 
-    if (global.writeManagedConfig && !global.managedConfigPrefix.empty())
+    if (settings.writeManagedConfig && !settings.managedConfigPrefix.empty())
       output_content =
           "#!MANAGED-CONFIG " + managed_url +
           (interval ? " interval=" + std::to_string(interval) : "") +
@@ -2714,9 +2749,9 @@ static std::string subconverter_impl(Request &request, Response &response,
   case "mellow"_hash:
     writeLog(0, "生成目标：Mellow", LOG_LEVEL_INFO);
 
-    if (render_template(fetchFile(lMellowBase, proxy, global.cacheConfig, true,
+    if (render_template(fetchFile(lMellowBase, proxy, settings.cacheConfig, true,
                                   baseFetchContext),
-                        tpl_args, base_content, global.templatePath,
+                        tpl_args, base_content, settings.templatePath,
                         baseFetchContext) != 0) {
       *status_code = 400;
       return base_content;
@@ -2730,9 +2765,9 @@ static std::string subconverter_impl(Request &request, Response &response,
   case "sssub"_hash:
     writeLog(0, "生成目标：SS Subscription", LOG_LEVEL_INFO);
 
-    if (render_template(fetchFile(lSSSubBase, proxy, global.cacheConfig, true,
+    if (render_template(fetchFile(lSSSubBase, proxy, settings.cacheConfig, true,
                                   baseFetchContext),
-                        tpl_args, base_content, global.templatePath,
+                        tpl_args, base_content, settings.templatePath,
                         baseFetchContext) != 0) {
       *status_code = 400;
       return base_content;
@@ -2793,9 +2828,9 @@ static std::string subconverter_impl(Request &request, Response &response,
   case "quan"_hash:
     writeLog(0, "生成目标：Quantumult", LOG_LEVEL_INFO);
     if (!ext.nodelist) {
-      if (render_template(fetchFile(lQuanBase, proxy, global.cacheConfig, true,
+      if (render_template(fetchFile(lQuanBase, proxy, settings.cacheConfig, true,
                                     baseFetchContext),
-                          tpl_args, base_content, global.templatePath,
+                          tpl_args, base_content, settings.templatePath,
                           baseFetchContext) != 0) {
         *status_code = 400;
         return base_content;
@@ -2811,9 +2846,9 @@ static std::string subconverter_impl(Request &request, Response &response,
   case "quanx"_hash:
     writeLog(0, "生成目标：Quantumult X", LOG_LEVEL_INFO);
     if (!ext.nodelist) {
-      if (render_template(fetchFile(lQuanXBase, proxy, global.cacheConfig,
+      if (render_template(fetchFile(lQuanXBase, proxy, settings.cacheConfig,
                                     true, baseFetchContext),
-                          tpl_args, base_content, global.templatePath,
+                          tpl_args, base_content, settings.templatePath,
                           baseFetchContext) != 0) {
         *status_code = 400;
         return base_content;
@@ -2829,9 +2864,9 @@ static std::string subconverter_impl(Request &request, Response &response,
   case "loon"_hash:
     writeLog(0, "生成目标：Loon", LOG_LEVEL_INFO);
     if (!ext.nodelist) {
-      if (render_template(fetchFile(lLoonBase, proxy, global.cacheConfig, true,
+      if (render_template(fetchFile(lLoonBase, proxy, settings.cacheConfig, true,
                                     baseFetchContext),
-                          tpl_args, base_content, global.templatePath,
+                          tpl_args, base_content, settings.templatePath,
                           baseFetchContext) != 0) {
         *status_code = 400;
         return base_content;
@@ -2853,9 +2888,9 @@ static std::string subconverter_impl(Request &request, Response &response,
   case "singbox"_hash:
     writeLog(0, "生成目标：sing-box", LOG_LEVEL_INFO);
     if (!ext.nodelist) {
-      if (render_template(fetchFile(lSingBoxBase, proxy, global.cacheConfig,
+      if (render_template(fetchFile(lSingBoxBase, proxy, settings.cacheConfig,
                                     true, baseFetchContext),
-                          tpl_args, base_content, global.templatePath,
+                          tpl_args, base_content, settings.templatePath,
                           baseFetchContext) != 0) {
         *status_code = 400;
         return base_content;
@@ -3049,16 +3084,16 @@ static std::string subconverter_impl(Request &request, Response &response,
                  argUseSortScript ? "applied" : "ignored",
                  "Uses configured sort script when sorting is enabled.");
     addSwitchParameter("script", ext.clash_script, argGenClashScript);
-    addSwitchParameter("insert", argEnableInsert.get(global.enableInsert),
+    addSwitchParameter("insert", argEnableInsert.get(settings.enableInsert),
                        argEnableInsert);
     addSwitchParameter("scv", ext.skip_cert_verify.get(false),
                        ext.skip_cert_verify);
     addSwitchParameter("fdn", ext.filter_deprecated, argFilterDeprecated);
     addSwitchParameter("expand", explain.expand_rulesets, argExpandRulesets);
     addSwitchParameter("append_info",
-                       argAppendUserinfo.get(global.appendUserinfo),
+                       argAppendUserinfo.get(settings.appendUserinfo),
                        argAppendUserinfo);
-    addSwitchParameter("prepend", argPrependInsert.get(global.prependInsert),
+    addSwitchParameter("prepend", argPrependInsert.get(settings.prependInsert),
                        argPrependInsert);
     addSwitchParameter("classic", ext.clash_classical_ruleset,
                        argGenClassicalRuleProvider);
@@ -3101,7 +3136,7 @@ static std::string subconverter_impl(Request &request, Response &response,
       explain.effective_config_source = "fallback";
     else if (explain.external_config_loaded && userProvidedExternalConfig)
       explain.effective_config_source = "request";
-    else if (explain.external_config_loaded && !global.defaultExtConfig.empty())
+    else if (explain.external_config_loaded && !settings.defaultExtConfig.empty())
       explain.effective_config_source = "default";
     else if (userProvidedExternalConfig)
       explain.effective_config_source = "request_failed";

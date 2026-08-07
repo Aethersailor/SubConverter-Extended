@@ -93,6 +93,7 @@ SET(SUBCONVERTER_RUNTIME_SOURCES
     src/handler/webget.cpp
     src/handler/proxy_policy.cpp
     src/handler/settings.cpp
+    src/handler/settings_view.cpp
     src/handler/sub_request_key.cpp
     src/parser/infoparser.cpp
     src/parser/subparser.cpp
@@ -337,6 +338,16 @@ IF(BUILD_TESTS)
     ADD_TEST(NAME concurrency_primitives COMMAND concurrency_primitives_test)
     SET_TESTS_PROPERTIES(concurrency_primitives PROPERTIES LABELS fast)
 
+    ADD_EXECUTABLE(settings_view_test
+        tests/settings_view_test.cpp
+        src/handler/settings_view.cpp)
+    TARGET_INCLUDE_DIRECTORIES(settings_view_test PRIVATE src)
+    TARGET_COMPILE_DEFINITIONS(settings_view_test PRIVATE
+        $<TARGET_PROPERTY:${BUILD_TARGET_NAME},COMPILE_DEFINITIONS>)
+    TARGET_LINK_LIBRARIES(settings_view_test ${CMAKE_THREAD_LIBS_INIT})
+    ADD_TEST(NAME settings_view COMMAND settings_view_test)
+    SET_TESTS_PROPERTIES(settings_view PROPERTIES LABELS fast)
+
     ADD_EXECUTABLE(statistics_v2_test
         tests/statistics_v2_test.cpp
         src/handler/statistics_v2.cpp)
@@ -433,6 +444,7 @@ IF(BUILD_TESTS)
     ADD_EXECUTABLE(upload_persistence_test
         tests/upload_persistence_test.cpp
         src/handler/upload.cpp
+        src/handler/settings_view.cpp
         src/utils/codepage.cpp
         src/utils/file.cpp
         src/utils/redact.cpp
@@ -455,6 +467,7 @@ IF(BUILD_TESTS)
         ruleset_options_test
         external_rules_test
         concurrency_primitives_test
+        settings_view_test
         statistics_v2_test
         sub_request_key_test
         proxy_provider_interval_test

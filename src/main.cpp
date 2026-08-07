@@ -15,6 +15,7 @@
 #include "handler/interfaces.h"
 #include "handler/multithread.h"
 #include "handler/settings.h"
+#include "handler/settings_view.h"
 #include "handler/statistics.h"
 #include "handler/version_page.h"
 #include "script/cron.h"
@@ -217,6 +218,7 @@ int main(int argc, char *argv[]) {
   else if (!env_managed_prefix.empty())
     global.managedConfigPrefix = env_managed_prefix;
   global.templateVars["managed_config_prefix"] = global.managedConfigPrefix;
+  publishSettingsSnapshot(global);
 
   if (global.generatorMode)
     return simpleGenerator();
@@ -272,6 +274,7 @@ int main(int argc, char *argv[]) {
   std::string env_port = getEnv("PORT");
   if (!env_port.empty())
     global.listenPort = to_int(env_port, global.listenPort);
+  publishSettingsSnapshot(global);
   if (global.securityProfile == "lan" &&
       (global.listenAddress == "0.0.0.0" || global.listenAddress == "::")) {
     writeLog(0,
