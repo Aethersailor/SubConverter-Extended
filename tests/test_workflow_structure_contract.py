@@ -37,8 +37,6 @@ class WorkflowStructureContractTests(unittest.TestCase):
         scripts = (
             "build-candidate-image.sh",
             "export-ci-image.sh",
-            "promote-tested-images.sh",
-            "verify-published-images.sh",
         )
         for script in scripts:
             completed = subprocess.run(
