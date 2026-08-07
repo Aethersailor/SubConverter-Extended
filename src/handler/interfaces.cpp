@@ -395,6 +395,8 @@ void matchUserAgent(const std::string &user_agent, std::string &target,
 }
 
 std::string getRuleset(RESPONSE_CALLBACK_ARGS) {
+  SettingsSnapshot snapshot = captureEffectiveSettingsSnapshot();
+  ScopedSettingsView settings_scope(std::move(snapshot));
   auto &argument = request.argument;
   int *status_code = &response.status_code;
   /// type: 1 for Surge, 2 for Quantumult X, 3 for Clash domain rule-provider, 4
