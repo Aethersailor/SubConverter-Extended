@@ -188,7 +188,9 @@ RUN set -xe && \
     . && \
     ninja -j ${THREADS}
 
-RUN if [ "${BUILD_TESTS}" = "true" ]; then ctest --output-on-failure; fi
+RUN if [ "${BUILD_TESTS}" = "true" ]; then \
+      python3 scripts/run-test-suite.py --build-dir . --mode full; \
+    fi
 
 # 收集 glibc 运行时依赖（动态探测，避免固定版本）
 RUN set -xe && \

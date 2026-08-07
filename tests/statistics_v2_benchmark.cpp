@@ -186,10 +186,13 @@ int main() {
             << "idle_write_bytes legacy_heartbeat="
             << legacy_json.str().size() << " v2=0\n";
 
+  // Wall-clock measurements above are informational.  A single noisy timing
+  // sample must never decide correctness or block an ordinary build.  Keep
+  // only deterministic representation checks here; functional invariants are
+  // covered by statistics_v2_test.
   if (wal_bytes >= legacy_json.str().size() ||
-      checkpoint_bytes >= legacy_json.str().size() ||
-      modern_dashboard_ms >= legacy_dashboard_ms) {
-    std::cerr << "structural performance regression\n";
+      checkpoint_bytes >= legacy_json.str().size()) {
+    std::cerr << "structural storage regression\n";
     return 1;
   }
   return sink == 0 ? 1 : 0;
