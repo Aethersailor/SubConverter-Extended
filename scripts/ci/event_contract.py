@@ -168,12 +168,34 @@ def _mode(github: dict[str, Any]) -> str:
     return "unsupported"
 
 
+def _github_star_glob_matches(value: str, pattern: str) -> bool:
+    """Match the literal, ``*``, and ``**`` semantics used by tag filters.
+
+    GitHub ref filters do not let ``*`` cross ``/``; ``**`` is the form that
+    can cross path separators. The current release trigger only uses literals
+    and ``*``, but recognizing ``**`` here makes that distinction explicit.
+    """
+    expression = []
+    index = 0
+    while index < len(pattern):
+        if pattern[index : index + 2] == "**":
+            expression.append(".*")
+            index += 2
+        elif pattern[index] == "*":
+            expression.append("[^/]*")
+            index += 1
+        else:
+            expression.append(re.escape(pattern[index]))
+            index += 1
+    return re.fullmatch("".join(expression), value) is not None
+
+
 def _release_wrapper_triggered(github: dict[str, Any]) -> bool:
     ref = github["ref"]
     return (
         github["event_name"] == "push"
         and ref.startswith("refs/tags/")
-        and fnmatch.fnmatchcase(
+        and _github_star_glob_matches(
             ref.removeprefix("refs/tags/"), RELEASE_TAG_TRIGGER
         )
     )
