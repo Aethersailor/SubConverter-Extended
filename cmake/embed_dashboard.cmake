@@ -48,6 +48,7 @@ IF(EXISTS "${OUTPUT_FILE}")
 ENDIF()
 
 IF(DASHBOARD_EMBED_TEST_FAIL_BEFORE_RENAME)
+    FILE(REMOVE "${TEMPORARY_OUTPUT}")
     MESSAGE(FATAL_ERROR
         "Injected Dashboard failure before atomic output replacement")
 ENDIF()

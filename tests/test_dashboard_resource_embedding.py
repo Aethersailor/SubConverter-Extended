@@ -115,6 +115,12 @@ class DashboardResourceEmbeddingTest(unittest.TestCase):
             source.write_bytes(DASHBOARD_SOURCE.read_bytes())
             previous = b"// known-good generated output\n"
             output.write_bytes(previous)
+            stable_timestamp_ns = 1_700_000_000_123_456_700
+            os.utime(
+                output,
+                ns=(stable_timestamp_ns, stable_timestamp_ns),
+            )
+            previous_mtime_ns = output.stat().st_mtime_ns
 
             completed = self.generate(
                 source,
@@ -128,10 +134,17 @@ class DashboardResourceEmbeddingTest(unittest.TestCase):
                 completed.stdout + completed.stderr,
             )
             self.assertEqual(output.read_bytes(), previous)
+            self.assertEqual(output.stat().st_mtime_ns, previous_mtime_ns)
+            self.assertFalse(
+                list(output.parent.glob(f"{output.name}.*.tmp"))
+            )
 
             self.generate(source, output)
             self.assertEqual(
                 embedded_body(output.read_bytes()), source.read_bytes()
+            )
+            self.assertFalse(
+                list(output.parent.glob(f"{output.name}.*.tmp"))
             )
 
     def test_missing_source_fails_closed(self) -> None:
