@@ -1805,6 +1805,7 @@ enum class Error {
   HTTPParsing,
   InvalidRangeHeader,
   UnsupportedContentEncoding,
+  WebSocketHandshake,
 
   // For internal use only
   SSLPeerCouldBeClosed_,
@@ -4202,6 +4203,50 @@ enum class CloseStatus : uint16_t {
 
 enum ReadResult : int { Fail = 0, Text = 1, Binary = 2 };
 
+// Result of WebSocketClient::connect(). Truthy only when the WebSocket
+// upgrade handshake fully succeeded. On failure error() identifies the
+// failing layer; status()/headers() expose the server's upgrade response
+// when one was received (status() is -1 otherwise).
+class Result {
+public:
+  Result() = default;
+  Result(Error err, int status, Headers &&headers)
+      : err_(err), status_(status), headers_(std::move(headers)) {}
+
+  explicit operator bool() const { return err_ == Error::Success; }
+  Error error() const { return err_; }
+
+  // Upgrade response info
+  int status() const { return status_; }
+  const Headers &headers() const { return headers_; }
+  std::string get_header_value(const std::string &key,
+                               const char *def = "") const {
+    return detail::get_header_value(headers_, key, def, 0);
+  }
+  bool has_header(const std::string &key) const {
+    return headers_.find(key) != headers_.end();
+  }
+
+#ifdef CPPHTTPLIB_SSL_ENABLED
+  Result(Error err, int status, Headers &&headers, int ssl_error,
+         uint64_t ssl_backend_error)
+      : err_(err), status_(status), headers_(std::move(headers)),
+        ssl_error_(ssl_error), ssl_backend_error_(ssl_backend_error) {}
+
+  int ssl_error() const { return ssl_error_; }
+  uint64_t ssl_backend_error() const { return ssl_backend_error_; }
+#endif
+
+private:
+  Error err_ = Error::Unknown; // a default-constructed Result is falsy
+  int status_ = -1;
+  Headers headers_;
+#ifdef CPPHTTPLIB_SSL_ENABLED
+  int ssl_error_ = 0;
+  uint64_t ssl_backend_error_ = 0;
+#endif
+};
+
 class WebSocket {
 public:
   WebSocket(const WebSocket &) = delete;
@@ -4268,7 +4313,7 @@ public:
 
   bool is_valid() const;
 
-  bool connect();
+  Result connect();
   ReadResult read(std::string &msg);
   bool send(const std::string &data);
   bool send(const char *data, size_t len);
@@ -4300,17 +4345,29 @@ public:
   void set_hostname_addr_map(std::map<std::string, std::string> addr_map);
 
 #ifdef CPPHTTPLIB_SSL_ENABLED
+  struct PemMemory {
+    const char *cert_pem;
+    size_t cert_pem_len;
+    const char *key_pem;
+    size_t key_pem_len;
+    const char *private_key_password;
+  };
+  explicit WebSocketClient(const std::string &scheme_host_port_path,
+                           const PemMemory &pem, const Headers &headers = {});
+
   void set_ca_cert_path(const std::string &ca_cert_file_path,
                         const std::string &ca_cert_dir_path = std::string());
   void set_ca_cert_store(tls::ca_store_t store);
   void load_ca_cert_store(const char *ca_cert, std::size_t size);
   void enable_server_certificate_verification(bool enabled);
+  void enable_server_hostname_verification(bool enabled);
   void enable_system_ca(bool enabled);
 #endif
 
 private:
   void shutdown_and_close();
-  bool create_stream(std::unique_ptr<Stream> &strm);
+  bool create_stream(std::unique_ptr<Stream> &strm, Error &error,
+                     int &ssl_error, uint64_t &ssl_backend_error);
   void prepare_default_headers(Request &req);
 
   std::string host_;
@@ -4350,6 +4407,7 @@ private:
   bool certs_loaded_ = false;
   SystemCAMode system_ca_mode_ = SystemCAMode::Auto;
   bool server_certificate_verification_ = true;
+  bool server_hostname_verification_ = true;
 #endif
 };
 
@@ -4772,7 +4830,7 @@ void set_verify_client(ctx_t ctx, bool require);
 // Session management
 session_t create_session(ctx_t ctx, socket_t sock);
 void free_session(session_t session);
-bool set_sni(session_t session, const char *hostname);
+bool set_sni(session_t session, const char *hostname, bool verify_hostname);
 
 // Handshake (non-blocking capable)
 TlsError connect(session_t session);
@@ -7706,42 +7764,94 @@ inline bool read_headers(Stream &strm, Headers &headers) {
   return true;
 }
 
+inline bool parse_status_line(const char *line, std::string &version,
+                              int &status, std::string &reason) {
+#ifdef CPPHTTPLIB_ALLOW_LF_AS_LINE_TERMINATOR
+  thread_local const std::regex re("(HTTP/1\\.[01]) (\\d{3})(?: (.*?))?\r?\n");
+#else
+  thread_local const std::regex re("(HTTP/1\\.[01]) (\\d{3})(?: (.*?))?\r\n");
+#endif
+
+  std::cmatch m;
+  if (!std::regex_match(line, m, re)) { return false; }
+  version = std::string(m[1]);
+  status = std::stoi(std::string(m[2]));
+  reason = std::string(m[3]);
+  return true;
+}
+
+// Everything WebSocketClient::connect() reports about the upgrade exchange.
+// status stays -1 until a status line is parsed, mirroring stream::Result.
+struct WebSocketUpgradeResponse {
+  Error error = Error::Success;
+  int status = -1;
+  Headers headers;
+  std::string selected_subprotocol;
+};
+
 inline bool read_websocket_upgrade_response(Stream &strm,
                                             const std::string &expected_accept,
-                                            std::string &selected_subprotocol) {
+                                            WebSocketUpgradeResponse &upgrade) {
   // Read status line
   const auto bufsiz = 2048;
   char buf[bufsiz];
   stream_line_reader line_reader(strm, buf, bufsiz);
-  if (!line_reader.getline()) { return false; }
+  if (!line_reader.getline()) {
+    upgrade.error = Error::Read;
+    return false;
+  }
 
-  // Check for "HTTP/1.1 101"
-  auto line = std::string(line_reader.ptr(), line_reader.size());
-  if (line.find("HTTP/1.1 101") == std::string::npos) { return false; }
+  std::string version;
+  std::string reason;
+  if (!parse_status_line(line_reader.ptr(), version, upgrade.status, reason)) {
+    upgrade.error = Error::WebSocketHandshake;
+    return false;
+  }
 
-  // Parse headers using existing read_headers
-  Headers headers;
-  if (!read_headers(strm, headers)) { return false; }
+  // Read the headers even for a rejection so the caller can see why the
+  // server refused the upgrade. A non-101 response may carry a body; it is
+  // deliberately left unread since the caller closes the socket right away.
+  if (!read_headers(strm, upgrade.headers)) {
+    upgrade.error = Error::Read;
+    return false;
+  }
+
+  const auto &headers = upgrade.headers;
+
+  if (upgrade.status != StatusCode::SwitchingProtocol_101) {
+    upgrade.error = Error::WebSocketHandshake;
+    return false;
+  }
 
   // Verify Upgrade: websocket (case-insensitive)
   auto upgrade_it = headers.find("Upgrade");
-  if (upgrade_it == headers.end()) { return false; }
-  auto upgrade_val = case_ignore::to_lower(upgrade_it->second);
-  if (upgrade_val != "websocket") { return false; }
+  if (upgrade_it == headers.end() ||
+      case_ignore::to_lower(upgrade_it->second) != "websocket") {
+    upgrade.error = Error::WebSocketHandshake;
+    return false;
+  }
 
   // Verify Connection header contains "Upgrade" (case-insensitive)
   auto connection_it = headers.find("Connection");
-  if (connection_it == headers.end()) { return false; }
-  auto connection_val = case_ignore::to_lower(connection_it->second);
-  if (connection_val.find("upgrade") == std::string::npos) { return false; }
+  if (connection_it == headers.end() ||
+      case_ignore::to_lower(connection_it->second).find("upgrade") ==
+          std::string::npos) {
+    upgrade.error = Error::WebSocketHandshake;
+    return false;
+  }
 
   // Verify Sec-WebSocket-Accept header value
   auto it = headers.find("Sec-WebSocket-Accept");
-  if (it == headers.end() || it->second != expected_accept) { return false; }
+  if (it == headers.end() || it->second != expected_accept) {
+    upgrade.error = Error::WebSocketHandshake;
+    return false;
+  }
 
   // Extract negotiated subprotocol
   auto proto_it = headers.find("Sec-WebSocket-Protocol");
-  if (proto_it != headers.end()) { selected_subprotocol = proto_it->second; }
+  if (proto_it != headers.end()) {
+    upgrade.selected_subprotocol = proto_it->second;
+  }
 
   return true;
 }
@@ -9491,7 +9601,7 @@ inline bool is_field_valid(const std::string &name, const std::string &value) {
 } // namespace fields
 
 inline bool perform_websocket_handshake(Stream &strm, Request &req,
-                                        std::string &selected_subprotocol) {
+                                        WebSocketUpgradeResponse &upgrade) {
   // Generate random Sec-WebSocket-Key
   thread_local std::mt19937 rng(std::random_device{}());
   std::string key_bytes(16, '\0');
@@ -9516,20 +9626,26 @@ inline bool perform_websocket_handshake(Stream &strm, Request &req,
   // and would emit one small write per header.
   BufferStream bstrm;
 
-  if (write_request_line(bstrm, req.method, req.path) < 0) { return false; }
+  if (write_request_line(bstrm, req.method, req.path) < 0) {
+    upgrade.error = Error::Write;
+    return false;
+  }
 
   auto error = Error::Success;
   if (!check_and_write_headers(bstrm, req.headers, write_headers, error)) {
+    upgrade.error = error;
     return false;
   }
 
   const auto &data = bstrm.get_buffer();
-  if (!write_data(strm, data.data(), data.size())) { return false; }
+  if (!write_data(strm, data.data(), data.size())) {
+    upgrade.error = Error::Write;
+    return false;
+  }
 
   // Verify 101 response and Sec-WebSocket-Accept header
   auto expected_accept = websocket_accept_key(client_key);
-  return read_websocket_upgrade_response(strm, expected_accept,
-                                         selected_subprotocol);
+  return read_websocket_upgrade_response(strm, expected_accept, upgrade);
 }
 
 inline bool is_ip_address(const std::string &host) {
@@ -10023,11 +10139,12 @@ inline bool load_client_ca_config(tls::ctx_t ctx,
   return ret;
 }
 
-// The parts of session setup that only SSLClient needs. WebSocketClient takes
-// the defaults, which is what keeps the two clients on one implementation.
+// The parts of session setup that only SSLClient needs, plus the handful
+// WebSocketClient also exposes; everything else takes the defaults, which is
+// what keeps the two clients on one implementation.
 struct ClientTlsSessionOptions {
-  // SSLClient exposes this independently of certificate verification;
-  // WebSocketClient always checks the identity when it verifies the chain.
+  // Both SSLClient and WebSocketClient expose this independently of
+  // certificate verification.
   bool server_hostname_verification = true;
   std::function<SSLVerifierResponse(tls::session_t)> session_verifier;
   // When non-null, guards session creation against concurrent use of the
@@ -10089,12 +10206,12 @@ inline bool setup_client_tls_session(
   }
   if (!session) { return fail(Error::SSLConnection, 0, get_error()); }
 
-  // RFC 6066: SNI must not be set for IP addresses. On Mbed TLS and wolfSSL
-  // set_sni also turns on hostname verification during the handshake, so it
-  // must be skipped for IP hosts as well; their identity is checked
-  // post-handshake below instead.
+  // RFC 6066: SNI must not be set for IP addresses; skip it for IP hosts, so
+  // their identity is checked post-handshake below instead. On Mbed TLS and
+  // wolfSSL, set_sni also drives handshake-time hostname verification, so
+  // options.server_hostname_verification is threaded through here.
   if (!is_ip_address(host)) {
-    if (!set_sni(session, host.c_str())) {
+    if (!set_sni(session, host.c_str(), options.server_hostname_verification)) {
       return fail(Error::SSLConnection, 0, get_error());
     }
   }
@@ -10312,6 +10429,7 @@ inline std::string to_string(const Error error) {
   case Error::HTTPParsing: return "HTTP parsing failed";
   case Error::InvalidRangeHeader: return "Invalid Range header";
   case Error::UnsupportedContentEncoding: return "Unsupported Content-Encoding";
+  case Error::WebSocketHandshake: return "WebSocket handshake failed";
   default: break;
   }
 
@@ -13703,29 +13821,20 @@ inline bool ClientImpl::read_response_line(Stream &strm, const Request &req,
 
   if (!line_reader.getline()) { return false; }
 
-#ifdef CPPHTTPLIB_ALLOW_LF_AS_LINE_TERMINATOR
-  thread_local const std::regex re("(HTTP/1\\.[01]) (\\d{3})(?: (.*?))?\r?\n");
-#else
-  thread_local const std::regex re("(HTTP/1\\.[01]) (\\d{3})(?: (.*?))?\r\n");
-#endif
-
-  std::cmatch m;
-  if (!std::regex_match(line_reader.ptr(), m, re)) {
+  if (!detail::parse_status_line(line_reader.ptr(), res.version, res.status,
+                                 res.reason)) {
     return req.method == "CONNECT";
   }
-  res.version = std::string(m[1]);
-  res.status = std::stoi(std::string(m[2]));
-  res.reason = std::string(m[3]);
 
   // Ignore '100 Continue' (only when not using Expect: 100-continue explicitly)
   while (skip_100_continue && res.status == StatusCode::Continue_100) {
     if (!line_reader.getline()) { return false; } // CRLF
     if (!line_reader.getline()) { return false; } // next response line
 
-    if (!std::regex_match(line_reader.ptr(), m, re)) { return false; }
-    res.version = std::string(m[1]);
-    res.status = std::stoi(std::string(m[2]));
-    res.reason = std::string(m[3]);
+    if (!detail::parse_status_line(line_reader.ptr(), res.version, res.status,
+                                   res.reason)) {
+      return false;
+    }
   }
 
   return true;
@@ -17953,12 +18062,15 @@ inline void free_session(session_t session) {
   if (session) { SSL_free(static_cast<SSL *>(session)); }
 }
 
-inline bool set_sni(session_t session, const char *hostname) {
+inline bool set_sni(session_t session, const char *hostname,
+                    bool /*verify_hostname*/) {
   if (!session || !hostname) return false;
 
   auto ssl = static_cast<SSL *>(session);
 
-  // Set SNI (Server Name Indication) only - does not enable verification
+  // Set SNI (Server Name Indication) only - does not enable verification.
+  // OpenSSL never binds identity checking to SNI (that happens post-
+  // handshake in setup_client_tls_session()), so verify_hostname is unused.
 #if defined(OPENSSL_IS_BORINGSSL)
   return SSL_set_tlsext_host_name(ssl, hostname) == 1;
 #else
@@ -18596,6 +18708,21 @@ struct MbedTlsSession {
   unsigned char peeked_byte = 0;
   bool has_peeked_byte = false;
 
+  // Set by set_sni() when the caller disabled hostname verification, so the
+  // verify callback can clear the CN/SAN mismatch flag while still enforcing
+  // the rest of the chain (Mbed TLS ties SNI and identity checking together;
+  // OpenSSL and wolfSSL keep them independent).
+  bool suppress_hostname_mismatch = false;
+
+  // Copied from the owning MbedTlsContext at creation. set_sni() uses this to
+  // decide which verify callback to install when hostname verification is
+  // disabled: mbedtls_verify_callback() when a user callback is genuinely
+  // wired for this context, or a self-contained one otherwise, so a session
+  // that never opted into a callback never consults the process-wide
+  // set_verify_callback() slot (which some other, unrelated client may have
+  // populated).
+  bool has_verify_callback = false;
+
   MbedTlsSession() { mbedtls_ssl_init(&ssl); }
 
   ~MbedTlsSession() { mbedtls_ssl_free(&ssl); }
@@ -18612,7 +18739,8 @@ inline int &mbedtls_last_error() {
 }
 
 // Helper to map Mbed TLS error to ErrorCode
-inline ErrorCode map_mbedtls_error(int ret, int &out_errno) {
+inline ErrorCode map_mbedtls_error(int ret, int &out_errno,
+                                   uint32_t verify_flags) {
   if (ret == 0) { return ErrorCode::Success; }
   if (ret == MBEDTLS_ERR_SSL_WANT_READ) { return ErrorCode::WantRead; }
   if (ret == MBEDTLS_ERR_SSL_WANT_WRITE) { return ErrorCode::WantWrite; }
@@ -18625,9 +18753,32 @@ inline ErrorCode map_mbedtls_error(int ret, int &out_errno) {
     return ErrorCode::SyscallError;
   }
   if (ret == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED) {
+    // Unlike OpenSSL/wolfSSL, Mbed TLS folds the CN/SAN identity check into
+    // the handshake's chain verification (see set_sni()); a mismatch there
+    // is reported the same way as any other verify_flags bit. Report it as
+    // HostnameMismatch, matching the other backends and the post-handshake
+    // identity check below, but only when naming is the sole problem -
+    // if the chain itself is also untrusted/expired/etc., that takes
+    // priority over the naming detail.
+    if (verify_flags == static_cast<uint32_t>(hostname_mismatch_code())) {
+      return ErrorCode::HostnameMismatch;
+    }
     return ErrorCode::CertVerifyFailed;
   }
   return ErrorCode::Fatal;
+}
+
+// Populates a TlsError from a failed (non-zero) mbedtls_ssl_handshake()
+// return value, including the verify-flags-dependent HostnameMismatch
+// mapping; shared by connect() and connect_nonblocking() so the
+// backend_code policy for that mapping only lives in one place.
+inline void fill_mbedtls_tls_error(TlsError &err, mbedtls_ssl_context &ssl,
+                                   int ret) {
+  auto verify_flags = mbedtls_ssl_get_verify_result(&ssl);
+  err.code = map_mbedtls_error(ret, err.sys_errno, verify_flags);
+  err.backend_code = err.code == ErrorCode::HostnameMismatch
+                         ? static_cast<uint64_t>(verify_flags)
+                         : static_cast<uint64_t>(-ret);
 }
 
 // A TLS 1.3 NewSessionTicket (signaled by default on Mbed TLS 4.x) is a
@@ -18739,17 +18890,43 @@ inline int mbedtls_sni_callback(void *p_ctx, mbedtls_ssl_context *ssl,
   return 0; // Accept any SNI
 }
 
+inline void mbedtls_clear_cn_mismatch(uint32_t *flags) {
+  *flags &= ~static_cast<uint32_t>(hostname_mismatch_code());
+}
+
+// Verify callback used when hostname verification is disabled for a session
+// that has no user-supplied verify callback of its own (MbedTlsSession::
+// has_verify_callback is false). Deliberately does not consult
+// get_verify_callback(): that slot is process-wide, so reading it here would
+// pick up whatever another, unrelated client last installed there.
+inline int mbedtls_mask_hostname_mismatch_callback(void *data,
+                                                   mbedtls_x509_crt *, int,
+                                                   uint32_t *flags) {
+  (void)data;
+  mbedtls_clear_cn_mismatch(flags);
+  return 0;
+}
+
 inline int mbedtls_verify_callback(void *data, mbedtls_x509_crt *crt,
                                    int cert_depth, uint32_t *flags);
 
 // MbedTLS verify callback wrapper
 inline int mbedtls_verify_callback(void *data, mbedtls_x509_crt *crt,
                                    int cert_depth, uint32_t *flags) {
-  auto &callback = get_verify_callback();
-  if (!callback) { return 0; } // Continue with default verification
-
   // data points to the MbedTlsSession
   auto *session = static_cast<MbedTlsSession *>(data);
+
+  // set_sni() disabled hostname verification for this session: drop the
+  // CN/SAN mismatch flag so it doesn't fail the chain check below, mirroring
+  // the OpenSSL/wolfSSL backends where identity checking is independent of
+  // SNI. The final pass/fail decision still comes from the remaining flags
+  // (or, below, from the user's own verify callback).
+  if (session && session->suppress_hostname_mismatch) {
+    mbedtls_clear_cn_mismatch(flags);
+  }
+
+  auto &callback = get_verify_callback();
+  if (!callback) { return 0; } // Continue with default verification
 
   // Build context
   VerifyContext verify_ctx;
@@ -19166,6 +19343,7 @@ inline session_t create_session(ctx_t ctx, socket_t sock) {
 
   // Set per-session verify callback with session pointer if callback is
   // registered
+  session->has_verify_callback = mctx->has_verify_callback;
   if (mctx->has_verify_callback) {
     mbedtls_ssl_set_verify(&session->ssl, impl::mbedtls_verify_callback,
                            session);
@@ -19178,10 +19356,15 @@ inline void free_session(session_t session) {
   if (session) { delete static_cast<impl::MbedTlsSession *>(session); }
 }
 
-inline bool set_sni(session_t session, const char *hostname) {
+inline bool set_sni(session_t session, const char *hostname,
+                    bool verify_hostname) {
   if (!session || !hostname) { return false; }
   auto msession = static_cast<impl::MbedTlsSession *>(session);
 
+  // mbedtls_ssl_set_hostname() both sends the SNI extension and binds the
+  // handshake-time CN/SAN check to `hostname`; the two can't be requested
+  // independently, so a disabled hostname check is handled below by masking
+  // the resulting mismatch flag instead of skipping this call.
   int ret = mbedtls_ssl_set_hostname(&msession->ssl, hostname);
   if (ret != 0) {
     impl::mbedtls_last_error() = ret;
@@ -19189,6 +19372,21 @@ inline bool set_sni(session_t session, const char *hostname) {
   }
 
   msession->hostname = hostname;
+
+  if (!verify_hostname) {
+    msession->suppress_hostname_mismatch = true;
+    // If a user verify callback is already wired for this session,
+    // mbedtls_verify_callback() masks the mismatch flag itself before
+    // consulting it (see suppress_hostname_mismatch above) - reinstalling it
+    // here would be redundant. Otherwise install the self-contained masking
+    // callback, which never touches the process-wide callback slot.
+    if (!msession->has_verify_callback) {
+      mbedtls_ssl_set_verify(&msession->ssl,
+                             impl::mbedtls_mask_hostname_mismatch_callback,
+                             msession);
+    }
+  }
+
   return true;
 }
 
@@ -19208,8 +19406,7 @@ inline TlsError connect(session_t session) {
   if (ret == 0) {
     err.code = ErrorCode::Success;
   } else {
-    err.code = impl::map_mbedtls_error(ret, err.sys_errno);
-    err.backend_code = static_cast<uint64_t>(-ret);
+    impl::fill_mbedtls_tls_error(err, msession->ssl, ret);
     impl::mbedtls_last_error() = ret;
   }
 
@@ -19260,10 +19457,7 @@ inline bool connect_nonblocking(session_t session, socket_t sock,
     }
 
     // TlsError or timeout
-    if (err) {
-      err->code = impl::map_mbedtls_error(ret, err->sys_errno);
-      err->backend_code = static_cast<uint64_t>(-ret);
-    }
+    if (err) { impl::fill_mbedtls_tls_error(*err, msession->ssl, ret); }
     impl::mbedtls_last_error() = ret;
     return false;
   }
@@ -19329,7 +19523,7 @@ inline ssize_t read(session_t session, void *buf, size_t len, TlsError &err) {
     return 0;
   }
 
-  err.code = impl::map_mbedtls_error(ret, err.sys_errno);
+  err.code = impl::map_mbedtls_error(ret, err.sys_errno, 0);
   err.backend_code = static_cast<uint64_t>(-ret);
   impl::mbedtls_last_error() = ret;
   // mbedTLS signals a clean close_notify via a negative error code rather
@@ -19362,7 +19556,7 @@ inline ssize_t write(session_t session, const void *buf, size_t len,
     return 0;
   }
 
-  err.code = impl::map_mbedtls_error(ret, err.sys_errno);
+  err.code = impl::map_mbedtls_error(ret, err.sys_errno, 0);
   err.backend_code = static_cast<uint64_t>(-ret);
   impl::mbedtls_last_error() = ret;
   return -1;
@@ -20325,7 +20519,8 @@ inline void free_session(session_t session) {
   if (session) { delete static_cast<impl::WolfSSLSession *>(session); }
 }
 
-inline bool set_sni(session_t session, const char *hostname) {
+inline bool set_sni(session_t session, const char *hostname,
+                    bool verify_hostname) {
   if (!session || !hostname) { return false; }
   auto wsession = static_cast<impl::WolfSSLSession *>(session);
 
@@ -20337,8 +20532,10 @@ inline bool set_sni(session_t session, const char *hostname) {
     return false;
   }
 
-  // Also set hostname for verification
-  wolfSSL_check_domain_name(wsession->ssl, hostname);
+  // wolfSSL_check_domain_name binds identity checking to the handshake,
+  // separately from the SNI extension sent above; skip it when hostname
+  // verification is disabled so only the chain is checked, matching OpenSSL.
+  if (verify_hostname) { wolfSSL_check_domain_name(wsession->ssl, hostname); }
 
   wsession->hostname = hostname;
   return true;
@@ -21289,6 +21486,24 @@ inline WebSocketClient::WebSocketClient(
   }
 }
 
+#ifdef CPPHTTPLIB_SSL_ENABLED
+inline WebSocketClient::WebSocketClient(
+    const std::string &scheme_host_port_path, const PemMemory &pem,
+    const Headers &headers)
+    : WebSocketClient(scheme_host_port_path, headers) {
+  // For ws:// URLs the client certificate is silently ignored, consistent
+  // with the TLS-only setters such as set_ca_cert_path().
+  if (is_valid_ && is_ssl_ && pem.cert_pem && pem.key_pem) {
+    if (!tls::set_client_cert_pem(tls_ctx_, pem.cert_pem, pem.key_pem,
+                                  pem.private_key_password)) {
+      tls::free_context(tls_ctx_);
+      tls_ctx_ = nullptr;
+      is_valid_ = false;
+    }
+  }
+}
+#endif
+
 inline WebSocketClient::~WebSocketClient() {
   shutdown_and_close();
 #ifdef CPPHTTPLIB_SSL_ENABLED
@@ -21323,7 +21538,9 @@ inline void WebSocketClient::shutdown_and_close() {
   }
 }
 
-inline bool WebSocketClient::create_stream(std::unique_ptr<Stream> &strm) {
+inline bool WebSocketClient::create_stream(std::unique_ptr<Stream> &strm,
+                                           Error &error, int &ssl_error,
+                                           uint64_t &ssl_backend_error) {
 #ifdef CPPHTTPLIB_SSL_ENABLED
   if (is_ssl_) {
     // A plain flag rather than SSLClient::load_certs()'s call_once: connect()
@@ -21337,10 +21554,17 @@ inline bool WebSocketClient::create_stream(std::unique_ptr<Stream> &strm) {
       certs_loaded_ = true;
     }
 
+    detail::ClientTlsSessionOptions options;
+    options.server_hostname_verification = server_hostname_verification_;
+
+    detail::ClientTlsSessionError tls_error;
     if (!detail::setup_client_tls_session(host_, tls_ctx_, tls_session_, sock_,
                                           server_certificate_verification_,
-                                          read_timeout_sec_,
-                                          read_timeout_usec_)) {
+                                          read_timeout_sec_, read_timeout_usec_,
+                                          &tls_error, options)) {
+      error = tls_error.error;
+      ssl_error = tls_error.ssl_error;
+      ssl_backend_error = tls_error.backend_error;
       return false;
     }
 
@@ -21349,6 +21573,10 @@ inline bool WebSocketClient::create_stream(std::unique_ptr<Stream> &strm) {
         write_timeout_sec_, write_timeout_usec_));
     return true;
   }
+#else
+  (void)error;
+  (void)ssl_error;
+  (void)ssl_backend_error;
 #endif
   strm = std::unique_ptr<Stream>(
       new detail::SocketStream(sock_, read_timeout_sec_, read_timeout_usec_,
@@ -21371,8 +21599,8 @@ inline void WebSocketClient::prepare_default_headers(Request &req) {
   detail::add_default_user_agent_header(req);
 }
 
-inline bool WebSocketClient::connect() {
-  if (!is_valid_) { return false; }
+inline Result WebSocketClient::connect() {
+  if (!is_valid_) { return Result{Error::Connection, -1, Headers{}}; }
   shutdown_and_close();
 
   // Check is custom IP or hostname specified for host_
@@ -21380,19 +21608,29 @@ inline bool WebSocketClient::connect() {
   std::string ip;
   detail::apply_addr_map(addr_map_, host_, connect_host, ip);
 
-  Error error;
+  auto error = Error::Success;
   sock_ = detail::create_client_socket(
       connect_host, ip, port_, address_family_, tcp_nodelay_, ipv6_v6only_,
       socket_options_, connection_timeout_sec_, connection_timeout_usec_,
       read_timeout_sec_, read_timeout_usec_, write_timeout_sec_,
       write_timeout_usec_, interface_, error);
 
-  if (sock_ == INVALID_SOCKET) { return false; }
+  if (sock_ == INVALID_SOCKET) {
+    if (error == Error::Success) { error = Error::Connection; }
+    return Result{error, -1, Headers{}};
+  }
 
   std::unique_ptr<Stream> strm;
-  if (!create_stream(strm)) {
+  auto stream_error = Error::SSLConnection;
+  int ssl_error = 0;
+  uint64_t ssl_backend_error = 0;
+  if (!create_stream(strm, stream_error, ssl_error, ssl_backend_error)) {
     shutdown_and_close();
-    return false;
+#ifdef CPPHTTPLIB_SSL_ENABLED
+    return Result{stream_error, -1, Headers{}, ssl_error, ssl_backend_error};
+#else
+    return Result{stream_error, -1, Headers{}};
+#endif
   }
 
   Request req;
@@ -21401,17 +21639,17 @@ inline bool WebSocketClient::connect() {
   req.headers = headers_;
   prepare_default_headers(req);
 
-  std::string selected_subprotocol;
-  if (!detail::perform_websocket_handshake(*strm, req, selected_subprotocol)) {
+  detail::WebSocketUpgradeResponse upgrade;
+  if (!detail::perform_websocket_handshake(*strm, req, upgrade)) {
     shutdown_and_close();
-    return false;
+    return Result{upgrade.error, upgrade.status, std::move(upgrade.headers)};
   }
-  subprotocol_ = std::move(selected_subprotocol);
+  subprotocol_ = std::move(upgrade.selected_subprotocol);
 
   ws_ = std::unique_ptr<WebSocket>(new WebSocket(std::move(strm), req, false,
                                                  websocket_ping_interval_sec_,
                                                  websocket_max_missed_pongs_));
-  return true;
+  return Result{Error::Success, upgrade.status, std::move(upgrade.headers)};
 }
 
 inline ReadResult WebSocketClient::read(std::string &msg) {
@@ -21514,6 +21752,10 @@ inline void WebSocketClient::load_ca_cert_store(const char *ca_cert,
 inline void
 WebSocketClient::enable_server_certificate_verification(bool enabled) {
   server_certificate_verification_ = enabled;
+}
+
+inline void WebSocketClient::enable_server_hostname_verification(bool enabled) {
+  server_hostname_verification_ = enabled;
 }
 
 inline void WebSocketClient::enable_system_ca(bool enabled) {
