@@ -171,15 +171,19 @@ def _mode(github: dict[str, Any]) -> str:
 def _github_star_glob_matches(value: str, pattern: str) -> bool:
     """Match GitHub literal, ``*``, and ``**`` path-filter semantics.
 
-    ``*`` does not cross ``/``. ``**`` can cross path separators, and ``**/``
-    can consume zero or more complete directory levels. The current release
-    trigger only uses literals and ``*``; the globstar handling keeps this
-    shared matcher faithful if another frozen workflow contract uses it.
+    ``*`` does not cross ``/``. ``**`` can cross path separators, and a
+    complete ``**/`` path segment can consume zero or more directory levels.
+    The current release trigger only uses literals and ``*``; the globstar
+    handling keeps this shared matcher faithful if another frozen workflow
+    contract uses it.
     """
     expression = []
     index = 0
     while index < len(pattern):
-        if pattern[index : index + 3] == "**/":
+        if (
+            pattern[index : index + 3] == "**/"
+            and (index == 0 or pattern[index - 1] == "/")
+        ):
             expression.append("(?:.*/)?")
             index += 3
         elif pattern[index : index + 2] == "**":

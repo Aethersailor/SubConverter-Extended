@@ -151,6 +151,9 @@ class CiEventContractTests(unittest.TestCase):
             EVENTS._github_star_glob_matches("v1.2/3.4", "v*.*.*")
         )
         self.assertTrue(EVENTS._github_star_glob_matches("v1.2/3.4", "v**"))
+        self.assertFalse(EVENTS._github_star_glob_matches("abcd", "ab**/cd"))
+        self.assertTrue(EVENTS._github_star_glob_matches("ab/cd", "ab**/cd"))
+        self.assertTrue(EVENTS._github_star_glob_matches("ab/x/cd", "ab**/cd"))
         self.assertTrue(
             EVENTS._github_star_glob_matches("README.md", "**/README.md")
         )
