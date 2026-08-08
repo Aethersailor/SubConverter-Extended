@@ -45,16 +45,24 @@ def embedded_body(generated: bytes) -> bytes:
 @unittest.skipUnless(CMAKE, "cmake is required for the embedding contract")
 class DashboardResourceEmbeddingTest(unittest.TestCase):
     def generate(
-        self, source: Path, output: Path, *, expect_success: bool = True
+        self,
+        source: Path,
+        output: Path,
+        *,
+        expect_success: bool = True,
+        definitions: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        arguments = [
+            CMAKE or "cmake",
+            f"-DINPUT_FILE={source}",
+            f"-DOUTPUT_FILE={output}",
+        ]
+        arguments.extend(
+            f"-D{name}={value}" for name, value in (definitions or {}).items()
+        )
+        arguments.extend(["-P", str(EMBED_SCRIPT)])
         completed = subprocess.run(
-            [
-                CMAKE or "cmake",
-                f"-DINPUT_FILE={source}",
-                f"-DOUTPUT_FILE={output}",
-                "-P",
-                str(EMBED_SCRIPT),
-            ],
+            arguments,
             cwd=REPOSITORY,
             text=True,
             capture_output=True,
@@ -98,6 +106,33 @@ class DashboardResourceEmbeddingTest(unittest.TestCase):
             source.write_bytes(changed)
             self.generate(source, output)
             self.assertEqual(embedded_body(output.read_bytes()), changed)
+
+    def test_failure_before_atomic_replace_preserves_previous_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "dashboard.html"
+            output = root / "dashboard.inc"
+            source.write_bytes(DASHBOARD_SOURCE.read_bytes())
+            previous = b"// known-good generated output\n"
+            output.write_bytes(previous)
+
+            completed = self.generate(
+                source,
+                output,
+                expect_success=False,
+                definitions={"DASHBOARD_EMBED_TEST_FAIL_BEFORE_RENAME": "ON"},
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn(
+                "Injected Dashboard failure before atomic output replacement",
+                completed.stdout + completed.stderr,
+            )
+            self.assertEqual(output.read_bytes(), previous)
+
+            self.generate(source, output)
+            self.assertEqual(
+                embedded_body(output.read_bytes()), source.read_bytes()
+            )
 
     def test_missing_source_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -156,6 +191,11 @@ class DashboardResourceEmbeddingTest(unittest.TestCase):
         self.assertNotIn('SET(TEMPORARY_OUTPUT "${OUTPUT_FILE}.tmp")', generator)
         self.assertIn('FILE(LOCK "${OUTPUT_FILE}.lock"', generator)
         self.assertIn("STRING(RANDOM", generator)
+        self.assertNotIn('FILE(REMOVE "${OUTPUT_FILE}")', generator)
+        self.assertIn(
+            'FILE(RENAME "${TEMPORARY_OUTPUT}" "${OUTPUT_FILE}")',
+            generator,
+        )
 
     @unittest.skipUnless(NINJA, "Ninja is required for the parallel graph test")
     def test_ninja_multi_config_parallel_consumers_generate_once(self) -> None:
