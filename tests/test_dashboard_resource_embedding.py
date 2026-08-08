@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -40,6 +41,30 @@ def embedded_body(generated: bytes) -> bytes:
         int(value, 16)
         for value in re.findall(rb"0x([0-9a-f]{2})", generated[start:end])
     )
+
+
+def cmake_generator_names() -> set[str]:
+    completed = subprocess.run(
+        [CMAKE or "cmake", "-E", "capabilities"],
+        cwd=REPOSITORY,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(completed.stdout + completed.stderr)
+    try:
+        capabilities = json.loads(completed.stdout)
+        generators = capabilities["generators"]
+        return {
+            generator["name"]
+            for generator in generators
+            if isinstance(generator, dict) and "name" in generator
+        }
+    except (json.JSONDecodeError, KeyError, TypeError) as error:
+        raise RuntimeError(
+            "cmake -E capabilities did not return a generator list"
+        ) from error
 
 
 @unittest.skipUnless(CMAKE, "cmake is required for the embedding contract")
@@ -211,7 +236,7 @@ class DashboardResourceEmbeddingTest(unittest.TestCase):
         )
 
     @unittest.skipUnless(NINJA, "Ninja is required for the parallel graph test")
-    def test_ninja_multi_config_parallel_consumers_generate_once(self) -> None:
+    def test_ninja_parallel_consumers_generate_once(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "dashboard.html"
@@ -246,6 +271,8 @@ class DashboardResourceEmbeddingTest(unittest.TestCase):
                         '    DEPENDS "${CMAKE_BINARY_DIR}/${consumer}.stamp")',
                         "  add_dependencies(${consumer} dashboard_resource)",
                         "endforeach()",
+                        "add_custom_target(all_consumers)",
+                        "add_dependencies(all_consumers consumer_a consumer_b)",
                         "",
                     ]
                 ),
@@ -253,6 +280,13 @@ class DashboardResourceEmbeddingTest(unittest.TestCase):
                 newline="\n",
             )
             build = root / "build"
+            available_generators = cmake_generator_names()
+            generator = (
+                "Ninja Multi-Config"
+                if "Ninja Multi-Config" in available_generators
+                else "Ninja"
+            )
+            self.assertIn(generator, available_generators)
             configure = subprocess.run(
                 [
                     CMAKE or "cmake",
@@ -261,7 +295,7 @@ class DashboardResourceEmbeddingTest(unittest.TestCase):
                     "-B",
                     str(build),
                     "-G",
-                    "Ninja Multi-Config",
+                    generator,
                     f"-DCMAKE_MAKE_PROGRAM={NINJA}",
                 ],
                 text=True,
@@ -272,19 +306,14 @@ class DashboardResourceEmbeddingTest(unittest.TestCase):
                 self.fail(configure.stdout + configure.stderr)
 
             def build_consumers() -> subprocess.CompletedProcess[str]:
+                arguments = [CMAKE or "cmake", "--build", str(build)]
+                if generator == "Ninja Multi-Config":
+                    arguments.extend(["--config", "Release"])
+                arguments.extend(
+                    ["--target", "all_consumers", "--parallel", "2"]
+                )
                 return subprocess.run(
-                    [
-                        CMAKE or "cmake",
-                        "--build",
-                        str(build),
-                        "--config",
-                        "Release",
-                        "--target",
-                        "consumer_a",
-                        "consumer_b",
-                        "--parallel",
-                        "2",
-                    ],
+                    arguments,
                     text=True,
                     capture_output=True,
                     check=False,
@@ -297,13 +326,20 @@ class DashboardResourceEmbeddingTest(unittest.TestCase):
                 1,
             )
             self.assertEqual(embedded_body(output.read_bytes()), source.read_bytes())
+            self.assertFalse(
+                list(output.parent.glob(f"{output.name}.*.tmp"))
+            )
 
             stable_timestamp = 1_700_000_000
             os.utime(output, (stable_timestamp, stable_timestamp))
             repeat = build_consumers()
             self.assertEqual(repeat.returncode, 0, repeat.stdout + repeat.stderr)
             self.assertNotIn("Embedding Dashboard HTML", repeat.stdout + repeat.stderr)
+            self.assertIn("no work to do", (repeat.stdout + repeat.stderr).lower())
             self.assertEqual(int(output.stat().st_mtime), stable_timestamp)
+            self.assertFalse(
+                list(output.parent.glob(f"{output.name}.*.tmp"))
+            )
 
             changed = source.read_bytes() + b"\n<!-- graph-change -->"
             source.write_bytes(changed)
@@ -320,7 +356,9 @@ class DashboardResourceEmbeddingTest(unittest.TestCase):
                 1,
             )
             self.assertEqual(embedded_body(output.read_bytes()), changed)
-            self.assertFalse(list(output.parent.glob("*.tmp")))
+            self.assertFalse(
+                list(output.parent.glob(f"{output.name}.*.tmp"))
+            )
 
 
 if __name__ == "__main__":
