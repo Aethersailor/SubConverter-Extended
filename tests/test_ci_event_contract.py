@@ -142,7 +142,7 @@ class CiEventContractTests(unittest.TestCase):
         )
         self.assertNotEqual(EVENTS.simulate_fixture(case), case["expected"])
 
-    def test_github_star_glob_does_not_cross_slashes(self):
+    def test_github_star_and_globstar_path_semantics(self):
         self.assertTrue(EVENTS._github_star_glob_matches("v1.2.3", "v*.*.*"))
         self.assertTrue(
             EVENTS._github_star_glob_matches("v1.2.3-rc.1", "v*.*.*")
@@ -151,6 +151,35 @@ class CiEventContractTests(unittest.TestCase):
             EVENTS._github_star_glob_matches("v1.2/3.4", "v*.*.*")
         )
         self.assertTrue(EVENTS._github_star_glob_matches("v1.2/3.4", "v**"))
+        self.assertTrue(
+            EVENTS._github_star_glob_matches("README.md", "**/README.md")
+        )
+        self.assertTrue(
+            EVENTS._github_star_glob_matches(
+                "guides/setup/README.md", "**/README.md"
+            )
+        )
+        self.assertTrue(
+            EVENTS._github_star_glob_matches("docs/README.md", "docs/**/*.md")
+        )
+        self.assertTrue(
+            EVENTS._github_star_glob_matches(
+                "docs/guides/setup.md", "docs/**/*.md"
+            )
+        )
+        self.assertFalse(
+            EVENTS._github_star_glob_matches("README.md", "docs/**/*.md")
+        )
+        self.assertFalse(
+            EVENTS._github_star_glob_matches(
+                "documentation/README.md", "docs/**/*.md"
+            )
+        )
+        self.assertFalse(
+            EVENTS._github_star_glob_matches(
+                "docs/guides/setup.txt", "docs/**/*.md"
+            )
+        )
 
     def test_skip_check_trailer_is_native_suppression(self):
         case = json.loads(json.dumps(self.cases["normal_dev_push"]))
