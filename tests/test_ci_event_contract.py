@@ -123,6 +123,35 @@ class CiEventContractTests(unittest.TestCase):
         }
         self.assertNotEqual(EVENTS.simulate_fixture(case), case["expected"])
 
+    def test_slash_tag_is_legal_git_but_matches_no_current_workflow(self):
+        slash_tag = self.outcome("legal_slash_tag_push")
+        self.assertEqual(slash_tag["native_enqueue"], "eligible")
+        self.assertFalse(slash_tag["formal_release_workflow_created"])
+        self.assertFalse(slash_tag["build"]["workflow_created"])
+        self.assertEqual(slash_tag["build"]["prepare"], "not-created")
+        self.assertEqual(slash_tag["build"]["build_linux"], "not-created")
+        self.assertFalse(slash_tag["build"]["registry_publish"])
+        self.assertFalse(slash_tag["build"]["create_release"])
+        self.assertFalse(slash_tag["codeql"]["workflow_created"])
+
+    def test_slash_tag_cannot_regress_to_wrapper_created(self):
+        case = json.loads(json.dumps(self.cases["legal_slash_tag_push"]))
+        case["expected"]["formal_release_workflow_created"] = True
+        case["expected"]["build"] = json.loads(
+            json.dumps(self.cases["invalid_release_tag_push"]["expected"]["build"])
+        )
+        self.assertNotEqual(EVENTS.simulate_fixture(case), case["expected"])
+
+    def test_github_star_glob_does_not_cross_slashes(self):
+        self.assertTrue(EVENTS._github_star_glob_matches("v1.2.3", "v*.*.*"))
+        self.assertTrue(
+            EVENTS._github_star_glob_matches("v1.2.3-rc.1", "v*.*.*")
+        )
+        self.assertFalse(
+            EVENTS._github_star_glob_matches("v1.2/3.4", "v*.*.*")
+        )
+        self.assertTrue(EVENTS._github_star_glob_matches("v1.2/3.4", "v**"))
+
     def test_skip_check_trailer_is_native_suppression(self):
         case = json.loads(json.dumps(self.cases["normal_dev_push"]))
         case["github"]["event"]["head_commit"]["message"] = (

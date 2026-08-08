@@ -549,6 +549,57 @@
       }
     },
     {
+      "name": "legal_slash_tag_push",
+      "source": "frozen legal Git tag containing a slash that GitHub v*.*.* does not match",
+      "github": {
+        "event_name": "push",
+        "ref": "refs/tags/v1.2/3.4",
+        "base_ref": "",
+        "head_ref": "",
+        "sha": "cccccccccccccccccccccccccccccccccccccccc",
+        "actor": "maintainer",
+        "event": {
+          "head_commit": {
+            "id": "cccccccccccccccccccccccccccccccccccccccc",
+            "message": "non-release slash tag: v1.2/3.4"
+          }
+        }
+      },
+      "repository": {
+        "full_name": "Aethersailor/SubConverter-Extended",
+        "refs": {
+          "refs/tags/v1.2/3.4": "cccccccccccccccccccccccccccccccccccccccc"
+        }
+      },
+      "changed_paths": ["src/main.cpp"],
+      "expected": {
+        "native_enqueue": "eligible",
+        "native_skip_directive": "none",
+        "capabilities": {
+          "repository_actions_secrets": true,
+          "github_token_permissions": "workflow-declared",
+          "secret_source": "Actions"
+        },
+        "formal_release_workflow_created": false,
+        "build": {
+          "workflow_created": false,
+          "entrypoint": "none",
+          "mode": "none",
+          "source_head": "not-created",
+          "request_sanitizers": "not-created",
+          "prepare": "not-created",
+          "build_linux": "not-created",
+          "registry_publish": false,
+          "create_release": false
+        },
+        "codeql": {
+          "workflow_created": false,
+          "source_head": "not-created",
+          "analyze": "not-created"
+        }
+      }
+    },
+    {
       "name": "build_dispatch_dev",
       "source": "frozen build workflow_dispatch context",
       "dispatch_workflow": "build-dockerhub.yml",
