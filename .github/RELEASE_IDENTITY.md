@@ -36,11 +36,11 @@ stage, or disabled immutability control is a hard failure.
 
 ## Existing v1.3.0
 
-`v1.3.0` is frozen exactly as recorded in
-`.github/release-baselines/v1.3.0.json`. Its packages and legacy seven-character
-OCI revision are not rewritten to the new format. The read-only baseline
-workflow detects movement of its tag, GitHub assets, or version image digests.
-Any fix is released as `v1.3.1` or later.
+`v1.3.0` is frozen. Its packages and legacy seven-character OCI revision are
+not rewritten to the new format. Historical release assets are protected by
+immutable release and registry-tag controls instead of being downloaded and
+revalidated during ordinary development. Any fix is released as `v1.3.1` or
+later.
 
 ## Repository settings required before the next tag
 

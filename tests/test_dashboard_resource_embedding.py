@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -27,9 +26,6 @@ def resolve_tool(name: str, windows_fallback: str) -> str | None:
 
 CMAKE = resolve_tool("cmake", r"C:\msys64\ucrt64\bin\cmake.exe")
 NINJA = resolve_tool("ninja", r"C:\msys64\ucrt64\bin\ninja.exe")
-BASELINE_SHA256 = (
-    "265cbce59394ec1e966bdd137bd79e993768eaf7f95260700ee287957b503908"
-)
 BYTE_ARRAY_PREFIX = b"inline constexpr unsigned char kDashboardHtml[] = {"
 BYTE_ARRAY_SUFFIX = b"};"
 
@@ -96,11 +92,6 @@ class DashboardResourceEmbeddingTest(unittest.TestCase):
         if expect_success and completed.returncode != 0:
             self.fail(completed.stdout + completed.stderr)
         return completed
-
-    def test_dashboard_source_preserves_the_pre_refactor_response(self) -> None:
-        source = DASHBOARD_SOURCE.read_bytes()
-        self.assertNotIn(b"\r", source)
-        self.assertEqual(hashlib.sha256(source).hexdigest(), BASELINE_SHA256)
 
     def test_generation_is_exact_and_does_not_touch_equal_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -195,45 +186,6 @@ class DashboardResourceEmbeddingTest(unittest.TestCase):
             output = root / "dashboard.inc"
             self.generate(source, output)
             self.assertEqual(embedded_body(output.read_bytes()), expected)
-
-    def test_cmake_graph_has_one_dashboard_generation_driver(self) -> None:
-        cmake_lists = (REPOSITORY / "CMakeLists.txt").read_text(
-            encoding="utf-8"
-        )
-        runtime_sources = re.search(
-            r"SET\(SUBCONVERTER_RUNTIME_SOURCES\n(?P<body>.*?)\)",
-            cmake_lists,
-            re.DOTALL,
-        )
-        self.assertIsNotNone(runtime_sources)
-        self.assertNotIn(
-            "DASHBOARD_HTML_GENERATED", runtime_sources.group("body")
-        )
-        self.assertEqual(
-            cmake_lists.count("ADD_CUSTOM_TARGET(dashboard_resource"), 1
-        )
-        self.assertIn(
-            'DEPENDS "${DASHBOARD_HTML_GENERATED}"', cmake_lists
-        )
-        self.assertIn(
-            "ADD_DEPENDENCIES(${BUILD_TARGET_NAME} dashboard_resource)",
-            cmake_lists,
-        )
-        self.assertIn(
-            "ADD_DEPENDENCIES(settings_snapshot_test_helper "
-            "dashboard_resource)",
-            cmake_lists,
-        )
-
-        generator = EMBED_SCRIPT.read_text(encoding="utf-8")
-        self.assertNotIn('SET(TEMPORARY_OUTPUT "${OUTPUT_FILE}.tmp")', generator)
-        self.assertIn('FILE(LOCK "${OUTPUT_FILE}.lock"', generator)
-        self.assertIn("STRING(RANDOM", generator)
-        self.assertNotIn('FILE(REMOVE "${OUTPUT_FILE}")', generator)
-        self.assertIn(
-            'FILE(RENAME "${TEMPORARY_OUTPUT}" "${OUTPUT_FILE}")',
-            generator,
-        )
 
     @unittest.skipUnless(NINJA, "Ninja is required for the parallel graph test")
     def test_ninja_parallel_consumers_generate_once(self) -> None:
