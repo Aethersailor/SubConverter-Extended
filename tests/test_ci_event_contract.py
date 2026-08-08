@@ -95,6 +95,34 @@ class CiEventContractTests(unittest.TestCase):
         self.assertEqual(dispatch["build"]["prepare"], "failed-metadata")
         self.assertFalse(dispatch["build"]["create_release"])
 
+    def test_invalid_tag_glob_creates_wrapper_then_metadata_fails(self):
+        invalid = self.outcome("invalid_release_tag_push")
+        self.assertTrue(invalid["formal_release_workflow_created"])
+        self.assertTrue(invalid["build"]["workflow_created"])
+        self.assertEqual(invalid["build"]["entrypoint"], "release-reusable")
+        self.assertEqual(invalid["build"]["mode"], "release")
+        self.assertEqual(invalid["build"]["source_head"], "current")
+        self.assertEqual(invalid["build"]["prepare"], "failed-metadata")
+        self.assertEqual(invalid["build"]["build_linux"], "skipped-upstream")
+        self.assertFalse(invalid["build"]["registry_publish"])
+        self.assertFalse(invalid["build"]["create_release"])
+
+    def test_invalid_tag_cannot_regress_to_workflow_not_created(self):
+        case = json.loads(json.dumps(self.cases["invalid_release_tag_push"]))
+        case["expected"]["formal_release_workflow_created"] = False
+        case["expected"]["build"] = {
+            "workflow_created": False,
+            "entrypoint": "none",
+            "mode": "none",
+            "source_head": "not-created",
+            "request_sanitizers": "not-created",
+            "prepare": "not-created",
+            "build_linux": "not-created",
+            "registry_publish": False,
+            "create_release": False,
+        }
+        self.assertNotEqual(EVENTS.simulate_fixture(case), case["expected"])
+
     def test_skip_check_trailer_is_native_suppression(self):
         case = json.loads(json.dumps(self.cases["normal_dev_push"]))
         case["github"]["event"]["head_commit"]["message"] = (
@@ -115,6 +143,9 @@ class CiEventContractTests(unittest.TestCase):
         release = (ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
         )
+        metadata = (ROOT / "scripts" / "ci" / "build_metadata.py").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("paths-ignore:", build)
         self.assertIn("workflow_dispatch:", build)
         self.assertIn("workflow_call:", build)
@@ -126,6 +157,12 @@ class CiEventContractTests(unittest.TestCase):
         self.assertNotIn("Refusing stale workflow_dispatch event", codeql)
         self.assertIn("uses: ./.github/workflows/build-dockerhub.yml", release)
         self.assertIn("secrets: inherit", release)
+        self.assertIn("- 'v*.*.*'", release)
+        self.assertIn("python3 scripts/ci/build_metadata.py", build)
+        self.assertIn(
+            'RELEASE_RE = re.compile(r"^v[0-9]+\\.[0-9]+\\.[0-9]+$")',
+            metadata,
+        )
 
     def test_fixture_check_fails_after_expected_contract_mutation(self):
         document = json.loads(EVENTS.FIXTURE.read_text(encoding="utf-8"))

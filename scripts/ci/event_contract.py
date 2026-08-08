@@ -22,7 +22,8 @@ SKIP_TOKENS = (
     "[actions skip]",
 )
 BUILD_PATHS_IGNORE = ("README.md", "README-*.md", "docker-compose.yml")
-RELEASE_TAG = re.compile(r"^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$")
+RELEASE_TAG_TRIGGER = "v*.*.*"
+RELEASE_TAG_METADATA = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$")
 
 
 @dataclass(frozen=True)
@@ -167,6 +168,29 @@ def _mode(github: dict[str, Any]) -> str:
     return "unsupported"
 
 
+def _release_wrapper_triggered(github: dict[str, Any]) -> bool:
+    ref = github["ref"]
+    return (
+        github["event_name"] == "push"
+        and ref.startswith("refs/tags/")
+        and fnmatch.fnmatchcase(
+            ref.removeprefix("refs/tags/"), RELEASE_TAG_TRIGGER
+        )
+    )
+
+
+def _release_metadata_valid(github: dict[str, Any]) -> bool:
+    ref = github["ref"]
+    return (
+        github["event_name"] == "push"
+        and ref.startswith("refs/tags/")
+        and RELEASE_TAG_METADATA.fullmatch(
+            ref.removeprefix("refs/tags/")
+        )
+        is not None
+    )
+
+
 def _build_outcome(
     github: dict[str, Any], repository: dict[str, Any], created: bool, entrypoint: str
 ) -> BuildOutcome:
@@ -208,7 +232,7 @@ def _build_outcome(
     request_sanitizers = "selected"
     if github.get("actor") == "dependabot[bot]":
         prepare = "skipped-actor"
-    elif mode == "release" and event_name != "push":
+    elif mode == "release" and not _release_metadata_valid(github):
         prepare = "failed-metadata"
     elif mode == "unsupported":
         prepare = "failed-metadata"
@@ -272,11 +296,7 @@ def simulate(
     changed_paths = changed_paths or []
     skip_directive = native_skip_directive(github)
     native_suppressed = skip_directive != "none"
-    formal_release = (
-        not native_suppressed
-        and github["event_name"] == "push"
-        and RELEASE_TAG.fullmatch(github["ref"]) is not None
-    )
+    formal_release = not native_suppressed and _release_wrapper_triggered(github)
     direct_build = not native_suppressed and _direct_build_triggered(
         github, dispatch_workflow, changed_paths
     )

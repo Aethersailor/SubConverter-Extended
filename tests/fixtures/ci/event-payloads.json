@@ -498,6 +498,57 @@
       }
     },
     {
+      "name": "invalid_release_tag_push",
+      "source": "frozen tag push matching v*.*.* but failing exact metadata",
+      "github": {
+        "event_name": "push",
+        "ref": "refs/tags/v1.2.3-rc.1",
+        "base_ref": "",
+        "head_ref": "",
+        "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "actor": "maintainer",
+        "event": {
+          "head_commit": {
+            "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "message": "release candidate: v1.2.3-rc.1"
+          }
+        }
+      },
+      "repository": {
+        "full_name": "Aethersailor/SubConverter-Extended",
+        "refs": {
+          "refs/tags/v1.2.3-rc.1": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "changed_paths": ["src/main.cpp"],
+      "expected": {
+        "native_enqueue": "eligible",
+        "native_skip_directive": "none",
+        "capabilities": {
+          "repository_actions_secrets": true,
+          "github_token_permissions": "workflow-declared",
+          "secret_source": "Actions"
+        },
+        "formal_release_workflow_created": true,
+        "build": {
+          "workflow_created": true,
+          "entrypoint": "release-reusable",
+          "mode": "release",
+          "source_head": "current",
+          "request_sanitizers": "selected",
+          "prepare": "failed-metadata",
+          "build_linux": "skipped-upstream",
+          "registry_publish": false,
+          "create_release": false
+        },
+        "codeql": {
+          "workflow_created": false,
+          "source_head": "not-created",
+          "analyze": "not-created"
+        }
+      }
+    },
+    {
       "name": "build_dispatch_dev",
       "source": "frozen build workflow_dispatch context",
       "dispatch_workflow": "build-dockerhub.yml",
