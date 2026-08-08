@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "source_sha": "47d2399444ac6abad78185c479a09d2bc4511536",
-  "contract_sha256": "6714d876c036e877835e93dba337f686425c9a537edf7254b8e6adcbffad2fec",
-  "workflow_diff_from_source": "none",
+  "contract_sha256": "35f179bba0e522e3bb17bc9aa382e4ef95591b554f180d96b19d9ece52385121",
+  "workflow_diff_from_source": "request-sanitizer-cache-only-output",
   "run_normalization": "universal-newlines-only",
   "step_fields": [
     "continue-on-error",
