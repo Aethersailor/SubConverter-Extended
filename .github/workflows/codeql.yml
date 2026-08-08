@@ -130,7 +130,8 @@ jobs:
         # Ensure dependencies are downloaded (for script to find mihomo source)
         go mod download
         # Set GOMODCACHE for the script to find mihomo source
-        export GOMODCACHE=$(go env GOMODCACHE)
+        GOMODCACHE="$(go env GOMODCACHE)"
+        export GOMODCACHE
         echo "GOMODCACHE=$GOMODCACHE"
         # Generate header files
         go run ../scripts/generate_proxy_validation.go -o proxy_validation_generated.go
@@ -151,7 +152,7 @@ jobs:
         rm -rf toml11
         git clone --depth=1 --branch v4.3.0 https://github.com/ToruNiina/toml11
         cmake -S toml11 -B toml11/build -DTOML11_INSTALL=ON -DTOML11_BUILD_TESTS=OFF -DTOML11_BUILD_EXAMPLES=OFF
-        cmake --build toml11/build -j$(nproc)
+        cmake --build toml11/build -j"$(nproc)"
         sudo cmake --install toml11/build
 
     # [SETUP] Build QuickJS (Only if cache missed)
@@ -163,7 +164,7 @@ jobs:
         cd quickjspp
         git submodule update --init
         cmake -DCMAKE_BUILD_TYPE=Release .
-        make quickjs -j$(nproc)
+        make quickjs -j"$(nproc)"
         sudo install -d /usr/lib/quickjs/
         sudo install -m644 quickjs/libquickjs.a /usr/lib/quickjs/
         sudo install -d /usr/include/quickjs/
@@ -182,7 +183,7 @@ jobs:
         sed -i '/add_subdirectory(test)/d' CMakeLists.txt
         sed -i '/add_dependencies(cron_test libcron)/d' CMakeLists.txt
         cmake -DCMAKE_BUILD_TYPE=Release .
-        make -j$(nproc)
+        make -j"$(nproc)"
         # Manual install (make install fails due to missing target)
         sudo install -d /usr/local/include/libcron
         cron_header="$(find . -type f -name Cron.h -print -quit)"
@@ -251,7 +252,7 @@ jobs:
       if: matrix.language == 'c-cpp'
       run: |
         cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/usr/local -DBUILD_TESTS=OFF
-        cmake --build build -j$(nproc)
+        cmake --build build -j"$(nproc)"
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v4

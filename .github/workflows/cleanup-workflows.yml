@@ -15,16 +15,17 @@ jobs:
       - name: Delete Failed, Cancelled and Skipped Workflow Runs
         env:
           GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           echo "🧹 Cleaning up failed, cancelled and skipped workflow runs..."
           
           # Get all workflow runs and delete them
-          gh api repos/${{ github.repository }}/actions/runs \
+          gh api "repos/$REPOSITORY/actions/runs" \
             --paginate \
             -q '.workflow_runs[] | select(.conclusion=="failure" or .conclusion=="cancelled" or .conclusion=="skipped") | .id' \
-            | while read run_id; do
+            | while read -r run_id; do
               echo "🗑️  Deleting run ID: $run_id"
-              gh api repos/${{ github.repository }}/actions/runs/$run_id -X DELETE || echo "   ⚠️  Failed to delete $run_id"
+              gh api "repos/$REPOSITORY/actions/runs/$run_id" -X DELETE || echo "   ⚠️  Failed to delete $run_id"
             done
           
           echo ""
