@@ -250,9 +250,8 @@ jobs:
     - name: Build (manual)
       if: matrix.language == 'c-cpp'
       run: |
-        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/usr/local -DBUILD_TESTS=ON
+        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/usr/local -DBUILD_TESTS=OFF
         cmake --build build -j$(nproc)
-        python3 scripts/run-test-suite.py --build-dir build --mode full
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v4

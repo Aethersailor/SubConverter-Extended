@@ -27,10 +27,135 @@ concurrency:
 permissions:
   actions: read
   contents: read
+  packages: read
 
 jobs:
+  preflight-dev:
+    name: Verify approved dev before master changes
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.ci.outputs.source_sha }}
+    steps:
+      - name: Checkout approved dev revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.expected_dev_sha }}
+          fetch-depth: 2
+
+      - name: Verify exact dev CI provenance
+        id: ci
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          EXPECTED_DEV_SHA: ${{ inputs.expected_dev_sha }}
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          git fetch --no-tags origin dev
+          actual_dev_sha="$(git rev-parse origin/dev)"
+          if [ "$actual_dev_sha" != "$EXPECTED_DEV_SHA" ]; then
+            echo "::error::origin/dev is $actual_dev_sha, not approved SHA $EXPECTED_DEV_SHA."
+            exit 1
+          fi
+
+          source_sha="$EXPECTED_DEV_SHA"
+          build_run="$(gh run list --repo "$repo" \
+            --workflow build-dockerhub.yml --branch dev --event push \
+            --commit "$source_sha" --status success --limit 20 \
+            --json databaseId,headSha \
+            --jq ".[] | select(.headSha == \"$source_sha\") | .databaseId" | head -n 1)"
+
+          if [ -z "$build_run" ]; then
+            title="$(git show -s --format=%s "$EXPECTED_DEV_SHA")"
+            committer="$(git show -s --format=%cn "$EXPECTED_DEV_SHA")"
+            parents="$(git show -s --format=%P "$EXPECTED_DEV_SHA")"
+            if [ "$title" = "chore: update generated development inputs after build [skip ci]" ] && \
+               [ "$committer" = "github-actions[bot]" ] && \
+               [ "$(wc -w <<<"$parents")" -eq 1 ]; then
+              source_sha="$parents"
+              build_run="$(gh run list --repo "$repo" \
+                --workflow build-dockerhub.yml --branch dev --event push \
+                --commit "$source_sha" --status success --limit 20 \
+                --json databaseId,headSha \
+                --jq ".[] | select(.headSha == \"$source_sha\") | .databaseId" | head -n 1)"
+            fi
+          fi
+
+          if [ -z "$build_run" ]; then
+            echo "::error::No successful dev image build exists for $EXPECTED_DEV_SHA."
+            exit 1
+          fi
+
+          codeql_run="$(gh run list --repo "$repo" \
+            --workflow codeql.yml --branch dev --event push \
+            --commit "$source_sha" --status success --limit 20 \
+            --json databaseId,headSha \
+            --jq ".[] | select(.headSha == \"$source_sha\") | .databaseId" | head -n 1)"
+          if [ -z "$codeql_run" ]; then
+            echo "::error::No successful CodeQL run exists for approved source $source_sha."
+            exit 1
+          fi
+
+          echo "Approved dev head: $EXPECTED_DEV_SHA"
+          echo "Validated source: $source_sha"
+          echo "Build run: $build_run"
+          echo "CodeQL run: $codeql_run"
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Verify published dev image identity
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.ci.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/aethersailor/subconverter-extended:dev"
+          docker pull "$image"
+          revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")"
+          version="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$image")"
+          test "$revision" = "$SOURCE_SHA"
+          test "$version" = "dev"
+
+      - name: Resolve pinned build inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/dependency_snapshot.py check
+          python3 scripts/ci/dependency_snapshot.py emit --github-env "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
+
+      - name: Run release-readiness ASan and UBSan
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.ci.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          export THREADS="$(nproc)"
+          export SHA="$SOURCE_SHA"
+          export VERSION="sanitizer-${SOURCE_SHA::7}"
+          export BUILD_DATE="$(git show -s --format=%cI HEAD)"
+          export BUILD_TESTS=true
+          mapfile -t build_args < <(bash scripts/ci/docker-build-args.sh)
+          args=()
+          for arg in "${build_args[@]}"; do
+            [ -n "$arg" ] && args+=(--build-arg "$arg")
+          done
+          args+=(--build-arg ENABLE_SANITIZERS=true)
+          docker buildx build \
+            --file Dockerfile \
+            --platform linux/amd64 \
+            --target builder \
+            --output type=cacheonly \
+            --cache-from type=gha,scope=release-readiness-sanitizers \
+            --cache-to type=gha,scope=release-readiness-sanitizers,mode=max \
+            --progress plain \
+            "${args[@]}" \
+            .
+
   sync-branches:
     runs-on: ubuntu-latest
+    needs: preflight-dev
     steps:
       - name: Checkout master
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6

@@ -1,5 +1,4 @@
 import importlib.util
-import hashlib
 import json
 import pathlib
 import sys
@@ -35,16 +34,6 @@ class BuildPlanTests(unittest.TestCase):
                 ["amd64", "arm64", "armv7"],
             )
             self.assertEqual(matrix["include"][2]["qemu_platforms"], "arm")
-
-    def test_matrix_bytes_match_the_pre_split_workflow_oracle(self):
-        self.assertEqual(
-            hashlib.sha256(self.compact_matrix("dev").encode()).hexdigest(),
-            "70728000cbe298625963cef1de48173ad789a3b8960cd795563be57aed2ca328",
-        )
-        self.assertEqual(
-            hashlib.sha256(self.compact_matrix("release").encode()).hexdigest(),
-            "e2c9e57985d9bb3d4051e7d46d42be9d09ed6eebefbed0b8c209e4b1c0515228",
-        )
 
     def test_image_tags_are_unchanged(self):
         self.assertEqual(

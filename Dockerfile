@@ -215,10 +215,9 @@ RUN if [ "${BUILD_TESTS}" = "true" ]; then \
       if [ "${ENABLE_SANITIZERS}" = "true" ]; then \
         export ASAN_OPTIONS="detect_leaks=1:strict_string_checks=1:halt_on_error=1:abort_on_error=1"; \
         export UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1"; \
-        echo "Sanitizer targets: subconverter, settings_snapshot_test_helper, settings_view_test"; \
-        echo "Sanitizer run: python3 scripts/run-test-suite.py --build-dir . --mode full"; \
+        echo "Sanitizer targets: production runtime and the full correctness suite"; \
       fi; \
-      python3 scripts/run-test-suite.py --build-dir . --mode full; \
+      ctest --test-dir . --output-on-failure --timeout 120 --label-exclude '^benchmark$'; \
     fi
 
 # 收集 glibc 运行时依赖（动态探测，避免固定版本）
