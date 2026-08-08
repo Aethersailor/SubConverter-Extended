@@ -469,7 +469,7 @@ jobs:
         shell: bash
         run: |
           if [ -n "$(git status --porcelain -- scripts/ci/dependencies.lock.json bridge/go.mod bridge/go.sum bridge/libmihomo.h bridge/proxy_validation_generated.go src/parser/mihomo_schemes.h src/parser/param_compat.h include/httplib.h include/nlohmann/json.hpp include/inja.hpp include/jpcre2.hpp include/quickjspp.hpp include/libcron include/date include/toml.hpp include/toml11)" ]; then
-            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Verify frozen generated inputs outside dev

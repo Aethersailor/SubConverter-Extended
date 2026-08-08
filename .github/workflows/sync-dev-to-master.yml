@@ -131,10 +131,12 @@ jobs:
           SOURCE_SHA: ${{ steps.ci.outputs.source_sha }}
         run: |
           set -euo pipefail
-          export THREADS="$(nproc)"
+          THREADS="$(nproc)"
+          export THREADS
           export SHA="$SOURCE_SHA"
           export VERSION="sanitizer-${SOURCE_SHA::7}"
-          export BUILD_DATE="$(git show -s --format=%cI HEAD)"
+          BUILD_DATE="$(git show -s --format=%cI HEAD)"
+          export BUILD_DATE
           export BUILD_TESTS=true
           mapfile -t build_args < <(bash scripts/ci/docker-build-args.sh)
           args=()
@@ -334,7 +336,7 @@ jobs:
           set -euo pipefail
           repo="$GITHUB_REPOSITORY"
           run_id=""
-          for attempt in $(seq 1 30); do
+          for _ in {1..30}; do
             run_id="$(gh run list --repo "$repo" --workflow release.yml --event push --limit 20 \
               --json databaseId,headSha,headBranch \
               --jq ".[] | select(.headSha == \"$EXPECTED_SHA\" and .headBranch == \"$VERSION\") | .databaseId" | head -n 1)"
