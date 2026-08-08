@@ -25,6 +25,19 @@ class SanitizerWorkflowContractTests(unittest.TestCase):
         self.assertIn("compatibility_security_baseline", self.sanitizer_job)
         self.assertNotIn("tests/statistics_v2_test.cpp", self.sanitizer_job)
 
+    def test_job_exports_only_the_reusable_cache(self):
+        self.assertIn("--output type=cacheonly", self.sanitizer_job)
+        self.assertIn(
+            "--cache-from type=gha,scope=request-sanitizers",
+            self.sanitizer_job,
+        )
+        self.assertIn(
+            "--cache-to type=gha,scope=request-sanitizers,mode=max",
+            self.sanitizer_job,
+        )
+        self.assertNotIn("--load", self.sanitizer_job)
+        self.assertNotIn("subconverter-request-sanitizer:", self.sanitizer_job)
+
     def test_sanitizer_flags_and_fail_closed_runtime_are_explicit(self):
         for flag in (
             "-fsanitize=address,undefined",

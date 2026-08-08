@@ -110,8 +110,7 @@ jobs:
             --file Dockerfile \
             --platform linux/amd64 \
             --target builder \
-            --load \
-            --tag "subconverter-request-sanitizer:${GITHUB_SHA}" \
+            --output type=cacheonly \
             --cache-from type=gha,scope=request-sanitizers \
             --cache-to type=gha,scope=request-sanitizers,mode=max \
             --progress plain \
