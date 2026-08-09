@@ -36,9 +36,9 @@ RUN set -xe && \
     fi
 
 COPY scripts/ ../scripts/
-RUN go run ../scripts/generate_proxy_validation.go -o proxy_validation_generated.go
-RUN go run ../scripts/generate_schemes.go mihomo_schemes.h
-RUN go run ../scripts/generate_param_compat.go -o param_compat.h
+RUN go run ../scripts/generate_proxy_validation.go -o proxy_validation_generated.go -manifest mihomo_capabilities.json
+RUN go run ../scripts/generate_schemes.go -manifest mihomo_capabilities.json -o mihomo_schemes.h
+RUN go run ../scripts/generate_param_compat.go -manifest mihomo_capabilities.json -o param_compat.h
 
 RUN echo "==> Cross-compiling Go bridge for linux/arm/v7" && \
     CGO_ENABLED=1 \
