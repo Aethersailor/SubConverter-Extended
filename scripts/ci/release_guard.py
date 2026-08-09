@@ -52,7 +52,7 @@ def main() -> int:
         checkout_sha=args.checkout_sha,
         tag_sha=args.tag_sha,
     )
-    print(f"Verified immutable release source {version} at {args.github_sha.lower()}")
+    print(f"Verified formal release source {version} at {args.github_sha.lower()}")
     return 0
 
 
