@@ -838,7 +838,15 @@ jobs:
     name: "🚀 Release Artifacts"
     runs-on: ubuntu-latest
     needs: [prepare, build-linux, build-windows-amd64, merge-manifest]
-    if: startsWith(github.ref, 'refs/tags/') && needs.prepare.outputs.is_release == 'true'
+    if: >-
+      always() &&
+      !cancelled() &&
+      startsWith(github.ref, 'refs/tags/') &&
+      needs.prepare.result == 'success' &&
+      needs.build-linux.result == 'success' &&
+      needs.build-windows-amd64.result == 'success' &&
+      needs.merge-manifest.result == 'success' &&
+      needs.prepare.outputs.is_release == 'true'
     permissions:
       contents: write
     steps:
@@ -849,6 +857,7 @@ jobs:
 
       - name: Prepare Release Notes Context
         env:
+          GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
@@ -860,27 +869,33 @@ jobs:
           test "$CURRENT_COMMIT" = "${{ needs.prepare.outputs.sha }}"
           REMOTE_COMMIT="$(git ls-remote origin "refs/tags/$CURRENT_TAG^{}" | awk '{print $1}')"
           test "$REMOTE_COMMIT" = "$CURRENT_COMMIT"
-          PREVIOUS_TAG="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' "${CURRENT_COMMIT}^" 2>/dev/null || true)"
-          EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-
-          if [ -n "$PREVIOUS_TAG" ]; then
-            RANGE_LABEL="$PREVIOUS_TAG..$CURRENT_COMMIT"
-            git log --pretty=format:'- %h %s' "$PREVIOUS_TAG..$CURRENT_COMMIT" > commits.md
-            git diff --name-only "$PREVIOUS_TAG" "$CURRENT_COMMIT" > changed-files.md
-            git diff --stat "$PREVIOUS_TAG" "$CURRENT_COMMIT" > diffstat.md
-          else
-            RANGE_LABEL="$CURRENT_COMMIT"
-            git log --pretty=format:'- %h %s' "$CURRENT_COMMIT" > commits.md
-            git diff --name-only "$EMPTY_TREE" "$CURRENT_COMMIT^{tree}" > changed-files.md
-            git diff --stat "$EMPTY_TREE" "$CURRENT_COMMIT^{tree}" > diffstat.md
+          PREVIOUS_TAG="$(gh api \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/latest" \
+            --jq '.tag_name')"
+          if [ -z "$PREVIOUS_TAG" ]; then
+            echo "::error::Latest published GitHub Release returned an empty tag."
+            exit 1
           fi
+          if ! [[ "$PREVIOUS_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Latest published Release tag is not canonical SemVer: $PREVIOUS_TAG"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$PREVIOUS_TAG" "$CURRENT_COMMIT"; then
+            echo "::error::Latest published Release $PREVIOUS_TAG is not an ancestor of $CURRENT_TAG."
+            exit 1
+          fi
+          RANGE_LABEL="$PREVIOUS_TAG..$CURRENT_COMMIT"
+          git log --pretty=format:'- %h %s' "$PREVIOUS_TAG..$CURRENT_COMMIT" > commits.md
+          git diff --name-only "$PREVIOUS_TAG" "$CURRENT_COMMIT" > changed-files.md
+          git diff --stat "$PREVIOUS_TAG" "$CURRENT_COMMIT" > diffstat.md
 
           {
             echo "# Release Context"
             echo
             echo "Current tag: $CURRENT_TAG"
             echo "Current commit: $CURRENT_COMMIT"
-            echo "Previous tag: ${PREVIOUS_TAG:-none}"
+            echo "Previous tag: $PREVIOUS_TAG"
             echo "Range: $RANGE_LABEL"
             echo
             echo "## Commits"
@@ -1085,7 +1100,14 @@ jobs:
     name: "🔒 Freeze Release and Advance latest"
     runs-on: ubuntu-latest
     needs: [prepare, merge-manifest, create-release]
-    if: startsWith(github.ref, 'refs/tags/') && needs.prepare.outputs.is_release == 'true'
+    if: >-
+      always() &&
+      !cancelled() &&
+      startsWith(github.ref, 'refs/tags/') &&
+      needs.prepare.result == 'success' &&
+      needs.merge-manifest.result == 'success' &&
+      needs.create-release.result == 'success' &&
+      needs.prepare.outputs.is_release == 'true'
     permissions:
       contents: write
       packages: write
@@ -1250,3 +1272,37 @@ jobs:
             echo "::error::latest digest verification failed."
             exit 1
           fi
+
+  verify-release-complete:
+    name: "✅ Verify Formal Release Completion"
+    runs-on: ubuntu-latest
+    needs: [prepare, build-linux, build-windows-amd64, merge-manifest, create-release, finalize-release]
+    if: always() && !cancelled() && startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Require every formal release stage
+        shell: bash
+        env:
+          RELEASE_MODE: ${{ needs.prepare.outputs.mode }}
+          IS_RELEASE: ${{ needs.prepare.outputs.is_release }}
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          LINUX_RESULT: ${{ needs.build-linux.result }}
+          WINDOWS_RESULT: ${{ needs.build-windows-amd64.result }}
+          MANIFEST_RESULT: ${{ needs.merge-manifest.result }}
+          RELEASE_RESULT: ${{ needs.create-release.result }}
+          FINALIZE_RESULT: ${{ needs.finalize-release.result }}
+        run: |
+          set -euo pipefail
+          test "$RELEASE_MODE" = "release"
+          test "$IS_RELEASE" = "true"
+          for stage in \
+            "prepare=$PREPARE_RESULT" \
+            "linux=$LINUX_RESULT" \
+            "windows=$WINDOWS_RESULT" \
+            "manifest=$MANIFEST_RESULT" \
+            "release=$RELEASE_RESULT" \
+            "finalize=$FINALIZE_RESULT"; do
+            if [ "${stage#*=}" != "success" ]; then
+              echo "::error::Formal release stage did not succeed: $stage"
+              exit 1
+            fi
+          done
