@@ -2883,13 +2883,10 @@ static SubStageResponse dispatchTargetGenerator(
             "请将该请求反馈给服务维护者。"};
   }
 
-  if (upload_failed) {
-    *status_code = 500;
-    return {true,
-            "Remote upload completed or failed, but the upload operation did "
-            "not complete locally. Check server logs.\n"
-            "远端上传或本地状态持久化未完整完成，请检查服务端日志。"};
-  }
+  if (upload_failed)
+    writeLog(0,
+             "GIST_OPTIONAL_UPLOAD_FAILED action=return-conversion-result",
+             LOG_LEVEL_WARNING);
   writeLog(0, "生成完成。", LOG_LEVEL_INFO);
   return {};
 }
