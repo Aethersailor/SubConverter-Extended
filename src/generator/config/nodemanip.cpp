@@ -4,7 +4,10 @@
 #include <utility>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "handler/settings.h"
+#include "handler/settings_view.h"
 #include "handler/webget.h"
 #include "nodemanip.h"
 #include "parser/config/proxy.h"
@@ -20,6 +23,7 @@
 #include "utils/network.h"
 #include "parser/config/proxy_utils.h"
 #include "utils/regexp.h"
+#include "utils/redact.h"
 #include "utils/string.h"
 #include "utils/urlencode.h"
 
@@ -53,6 +57,8 @@ static void appendMihomoNodes(std::vector<mihomo::ProxyNode> &source,
     // protocols that do not yet have a dedicated C++ ProxyType.
     node.RawParamJson["type"] = "\"" + mnode.type + "\"";
     node.RawParams["type"] = std::move(mnode.type);
+    const bool is_vless = node.Type == ProxyType::VLESS;
+    const bool is_hysteria2 = node.Type == ProxyType::Hysteria2;
 
     for (const auto &[key, value] : node.RawParams) {
       if (key == "password")
@@ -65,12 +71,82 @@ static void appendMihomoNodes(std::vector<mihomo::ProxyNode> &source,
         node.AlterId = std::stoi(value);
       else if (key == "udp")
         node.UDP = (value == "true");
+      else if (is_hysteria2 && key == "skip-cert-verify")
+        node.AllowInsecure = (value == "true");
       else if (key == "tls")
-        node.TLSStr = value;
+        node.TLSStr = is_vless && value == "true" ? "tls" : value;
       else if (key == "sni" || key == "servername")
         node.ServerName = value;
       else if (key == "network")
         node.TransferProtocol = value;
+      else if (is_vless && key == "flow")
+        node.Flow = value;
+      else if (is_vless &&
+               (key == "client-fingerprint" || key == "fingerprint"))
+        node.Fingerprint = value;
+      else if (is_vless && key == "packet-encoding")
+        node.PacketEncoding = value;
+      else if (is_hysteria2 && key == "obfs")
+        node.OBFSParam = value;
+      else if (is_hysteria2 && key == "obfs-password")
+        node.OBFSPassword = value;
+      else if (is_hysteria2 && key == "ports")
+        node.Ports = value;
+    }
+
+    auto parse_object = [&](const std::string &key) {
+      auto value = node.RawParamJson.find(key);
+      if (value == node.RawParamJson.end())
+        return nlohmann::json();
+      try {
+        nlohmann::json parsed = nlohmann::json::parse(value->second);
+        return parsed.is_object() ? parsed : nlohmann::json();
+      } catch (const nlohmann::json::exception &) {
+        return nlohmann::json();
+      }
+    };
+
+    nlohmann::json ws_options = parse_object("ws-opts");
+    if (is_vless && !ws_options.empty()) {
+      node.Path = ws_options.value("path", std::string());
+      const nlohmann::json headers = ws_options.value(
+          "headers", nlohmann::json::object());
+      if (headers.is_object()) {
+        node.Host = headers.value(
+            "Host", headers.value("host", std::string()));
+        node.Edge = headers.value(
+            "Edge", headers.value("edge", std::string()));
+      }
+    }
+
+    nlohmann::json grpc_options = parse_object("grpc-opts");
+    if (is_vless && !grpc_options.empty()) {
+      node.GRPCServiceName =
+          grpc_options.value("grpc-service-name", std::string());
+      node.Path = node.GRPCServiceName;
+      node.GRPCMode = grpc_options.value("grpc-mode", std::string());
+    }
+
+    nlohmann::json reality_options = parse_object("reality-opts");
+    if (is_vless && !reality_options.empty()) {
+      node.PublicKey = reality_options.value("public-key", std::string());
+      node.ShortId = reality_options.value("short-id", std::string());
+    }
+
+    auto alpn = node.RawParamJson.find("alpn");
+    if (is_vless && alpn != node.RawParamJson.end()) {
+      try {
+        const nlohmann::json values = nlohmann::json::parse(alpn->second);
+        if (values.is_array()) {
+          for (const auto &value : values) {
+            if (value.is_string())
+              node.AlpnList.emplace_back(value.get<std::string>());
+          }
+        } else if (values.is_string()) {
+          node.AlpnList.emplace_back(values.get<std::string>());
+        }
+      } catch (const nlohmann::json::exception &) {
+      }
     }
 
     nodes.emplace_back(std::move(node));
@@ -150,7 +226,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
             }
           }
         },
-        global.scriptCleanContext);
+        effectiveSettings().scriptCleanContext);
   /*
   duk_context *ctx = duktape_init();
   defer(duk_destroy_heap(ctx);)
@@ -272,7 +348,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
       isSubscription = true;
       writeLog(LOG_TYPE_INFO,
                "检测到无协议头链接，按订阅处理：" +
-                   link);
+                   summarizeUrlForLog(link));
     }
     // 规则 3: 在 SUPPORTED_SCHEMES 中 = 节点链接
     // 例如: trojan://..., vmess://..., hysteria2://...
@@ -285,7 +361,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
         isNodeLink = true;
         writeLog(LOG_TYPE_INFO,
                  "检测到未知协议，交给 Mihomo 解析器处理：" +
-                     link);
+                     summarizeUrlForLog(link));
       }
     }
 
@@ -306,8 +382,8 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
         }
       }
 
-      strSub = webGet(link, proxy, global.cacheSubscription, &extra_headers,
-                      request_headers, parse_set.fetch_context);
+      strSub = webGet(link, proxy, effectiveSettings().cacheSubscription,
+                      &extra_headers, request_headers, parse_set.fetch_context);
     } else if (isNodeLink) {
       // 节点链接：直接用 mihomo 解析（不需要 webGet）
       writeLog(LOG_TYPE_INFO, "检测到节点链接，正在使用 Mihomo 解析...");
@@ -328,8 +404,8 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
         }
       }
 
-      strSub = webGet(link, proxy, global.cacheSubscription, &extra_headers,
-                      request_headers, parse_set.fetch_context);
+      strSub = webGet(link, proxy, effectiveSettings().cacheSubscription,
+                      &extra_headers, request_headers, parse_set.fetch_context);
     }
     /*
     if(strSub.size() == 0)
@@ -357,7 +433,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
         if (nodes.empty()) {
           writeLog(LOG_TYPE_WARN,
                    "Mihomo 解析器未从链接中解析到有效节点，将回退到旧解析器：'" +
-                       link + "'。");
+                       summarizeUrlForLog(link) + "'。");
         } else {
           parsed_by_mihomo = true;
         }
@@ -369,19 +445,22 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
         }
       } catch (const std::exception &e) {
         writeLog(LOG_TYPE_ERROR,
-                 "Mihomo 解析器错误：" + std::string(e.what()) +
+                 "MIHOMO_PARSER_FAILED detail=" +
+                     summarizeSensitiveTextForLog(e.what()) +
                      "，回退到旧解析器。");
       }
 
       if (!parsed_by_mihomo) {
         if (parse_set.mihomo_only) {
           writeLog(LOG_TYPE_ERROR,
-                   "Mihomo 专用解析模式拒绝使用旧解析器：'" + link + "'。");
+                   "Mihomo 专用解析模式拒绝使用旧解析器：'" +
+                       summarizeUrlForLog(link) + "'。");
           return -1;
         }
         nodes.clear();
         if (explodeConfContent(strSub, nodes) == 0) {
-          writeLog(LOG_TYPE_ERROR, "无效订阅：'" + link + "'！");
+          writeLog(LOG_TYPE_ERROR,
+                   "无效订阅：'" + summarizeUrlForLog(link) + "'！");
           return -1;
         }
       }
@@ -392,7 +471,8 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
         return -1;
       }
       if (explodeConfContent(strSub, nodes) == 0) {
-        writeLog(LOG_TYPE_ERROR, "无效订阅：'" + link + "'！");
+        writeLog(LOG_TYPE_ERROR,
+                 "无效订阅：'" + summarizeUrlForLog(link) + "'！");
         return -1;
       }
 #endif
@@ -472,7 +552,8 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
         }
       } catch (const std::exception &e) {
         writeLog(LOG_TYPE_ERROR,
-                 "Mihomo 回退解析失败：" + std::string(e.what()));
+                 "MIHOMO_FALLBACK_PARSER_FAILED detail=" +
+                     summarizeSensitiveTextForLog(e.what()));
         return -1;
       }
 #else
@@ -665,7 +746,7 @@ void nodeRename(Proxy &node, const RegexMatchConfigs &rename_array,
               script_print_stack(ctx);
             }
           },
-          global.scriptCleanContext);
+          effectiveSettings().scriptCleanContext);
       continue;
     }
     if (applyMatcher(x.Match, real_rule, node) && real_rule.size())
@@ -715,7 +796,7 @@ std::string addEmoji(const Proxy &node, const RegexMatchConfigs &emoji_array,
               script_print_stack(ctx);
             }
           },
-          global.scriptCleanContext);
+          effectiveSettings().scriptCleanContext);
       if (!result.empty())
         return result;
       continue;
@@ -767,7 +848,7 @@ void preprocessNodes(std::vector<Proxy> &nodes, extra_settings &ext) {
               script_print_stack(ctx);
             }
           },
-          global.scriptCleanContext);
+          effectiveSettings().scriptCleanContext);
     }
     if (failed)
       std::stable_sort(

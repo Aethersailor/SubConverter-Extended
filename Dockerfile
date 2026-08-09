@@ -12,6 +12,7 @@ ARG TARGETVARIANT
 ARG MIHOMO_REF="Meta"
 ARG MIHOMO_CACHE_BUST=1
 ARG REFRESH_GO_DEPS=false
+ARG ENABLE_SANITIZERS=false
 
 WORKDIR /build/bridge
 
@@ -43,21 +44,35 @@ RUN go run ../scripts/generate_proxy_validation.go -o proxy_validation_generated
 RUN go run ../scripts/generate_schemes.go mihomo_schemes.h
 RUN go run ../scripts/generate_param_compat.go -o param_compat.h
 
-# Build shared library (c-shared mode for musl compatibility)
+# Build the shared library used by the normal Alpine runtime and a glibc archive
+# for build/test consumers.  The sanitizer build instruments the Go archive so
+# its runtime cooperates with the outer C++ ASan process.  The c-shared form is
+# retained for production, but is not used in this glibc sanitizer composition.
 # 关键修改：
 # 1. 使用 c-shared 模式避免 musl 环境下 Go runtime 初始化问题
 # 2. musl libc 不向构造函数传递 argc/argv，c-archive 模式会导致 Segfault
 # 3. c-shared 模式下 Go runtime 边界清晰，初始化更稳定
-RUN echo "==> Building for $TARGETARCH with c-shared mode (musl compatible)" && \
-    CGO_ENABLED=1 \
-    go build \
+RUN set -xe && \
+    CGO_ENABLED=1 go build \
     -trimpath \
     -buildmode=c-shared \
     -o libmihomo.so \
+    . && \
+    sanitizer_flags="" && \
+    if [ "${ENABLE_SANITIZERS}" = "true" ]; then \
+      sanitizer_flags="-asan"; \
+      echo "==> Building glibc Go archive with ASan interoperability"; \
+    fi && \
+    echo "==> Building glibc archive for $TARGETARCH" && \
+    CGO_ENABLED=1 \
+    go build ${sanitizer_flags} \
+    -trimpath \
+    -buildmode=c-archive \
+    -o libmihomo.a \
     .
 
 # Verify build output
-RUN ls -lh libmihomo.so libmihomo.h
+RUN ls -lh libmihomo.so libmihomo.a libmihomo.h
 
 # ========== C++ BUILD STAGE ==========
 # 使用 Debian (glibc) 编译，运行时再搬运依赖到 Alpine
@@ -76,6 +91,7 @@ ARG NLOHMANN_JSON_REF
 ARG INJA_REF
 ARG JPCRE2_REF
 ARG BUILD_TESTS=false
+ARG ENABLE_SANITIZERS=false
 
 WORKDIR /
 
@@ -134,6 +150,7 @@ RUN set -xe && \
 
 # Copy Go shared library and module files from go-builder stage
 COPY --from=go-builder /build/bridge/libmihomo.so /usr/lib/
+COPY --from=go-builder /build/bridge/libmihomo.a /usr/lib/
 COPY --from=go-builder /build/bridge/libmihomo.h /usr/include/
 
 # build SubConverter-Extended from THIS repository source
@@ -174,7 +191,12 @@ RUN set -xe && \
     [ -n "${VERSION}" ] && sed -i "s/#define VERSION \"dev\"/#define VERSION \"${VERSION}\"/" src/version.h || true && \
     [ -n "${BUILD_DATE}" ] && sed -i "s/#define BUILD_DATE \"\"/#define BUILD_DATE \"${BUILD_DATE}\"/" src/version.h || true && \
     mkdir -p bridge && \
-    cp /usr/lib/libmihomo.so bridge/ && \
+    rm -f bridge/libmihomo.so bridge/libmihomo.a && \
+    if [ "${ENABLE_SANITIZERS}" = "true" ]; then \
+      cp /usr/lib/libmihomo.a bridge/; \
+    else \
+      cp /usr/lib/libmihomo.so bridge/; \
+    fi && \
     cp /usr/include/libmihomo.h bridge/ && \
     export PATH="/usr/lib/ccache:$PATH" && \
     export CCACHE_DIR=/tmp/ccache && \
@@ -182,13 +204,21 @@ RUN set -xe && \
     cmake -GNinja \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_TESTS=${BUILD_TESTS} \
+    -DENABLE_SANITIZERS=${ENABLE_SANITIZERS} \
     -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
     -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
     -DCMAKE_POSITION_INDEPENDENT_CODE=OFF \
     . && \
     ninja -j ${THREADS}
 
-RUN if [ "${BUILD_TESTS}" = "true" ]; then ctest --output-on-failure; fi
+RUN if [ "${BUILD_TESTS}" = "true" ]; then \
+      if [ "${ENABLE_SANITIZERS}" = "true" ]; then \
+        export ASAN_OPTIONS="detect_leaks=1:strict_string_checks=1:halt_on_error=1:abort_on_error=1"; \
+        export UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1"; \
+        echo "Sanitizer targets: production runtime and the full correctness suite"; \
+      fi; \
+      ctest --test-dir . --output-on-failure --timeout 120 --label-exclude '^benchmark$'; \
+    fi
 
 # 收集 glibc 运行时依赖（动态探测，避免固定版本）
 RUN set -xe && \

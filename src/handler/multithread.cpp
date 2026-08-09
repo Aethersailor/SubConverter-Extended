@@ -1,9 +1,11 @@
 #include <algorithm>
+#include <atomic>
 #include <future>
 #include <thread>
 #include <utility>
 
 #include "handler/settings.h"
+#include "handler/settings_view.h"
 #include "utils/network.h"
 #include "utils/bounded_executor.h"
 #include "webget.h"
@@ -16,7 +18,7 @@ std::mutex on_emoji, on_rename, on_stream, on_time;
 static size_t configuredWorkerCount()
 {
     return static_cast<size_t>(
-        std::clamp(global.maxConcurThreads / 2, 2, 8));
+        std::clamp(effectiveSettings().maxConcurThreads / 2, 2, 8));
 }
 
 static size_t configuredQueueCapacity()
@@ -24,10 +26,15 @@ static size_t configuredQueueCapacity()
     return std::max<size_t>(64, configuredWorkerCount() * 16);
 }
 
+static std::atomic<BoundedExecutor *> activeRulesetExecutor {nullptr};
+
 static BoundedExecutor &rulesetExecutor()
 {
     static BoundedExecutor executor(configuredWorkerCount(),
                                     configuredQueueCapacity());
+    static const bool registered =
+        (activeRulesetExecutor.store(&executor, std::memory_order_release), true);
+    (void)registered;
     return executor;
 }
 
@@ -48,28 +55,37 @@ size_t rulesetExecutorQueueCapacity()
     return rulesetExecutor().queueCapacity();
 }
 
+void shutdownRulesetExecutor()
+{
+    requestOutboundFetchShutdown();
+    BoundedExecutor *executor =
+        activeRulesetExecutor.load(std::memory_order_acquire);
+    if(executor)
+        executor->shutdown(true);
+}
+
 RegexMatchConfigs safe_get_emojis()
 {
     guarded_mutex guard(on_emoji);
-    return global.emojis;
+    return effectiveSettings().emojis;
 }
 
 RegexMatchConfigs safe_get_renames()
 {
     guarded_mutex guard(on_rename);
-    return global.renames;
+    return effectiveSettings().renames;
 }
 
 RegexMatchConfigs safe_get_streams()
 {
     guarded_mutex guard(on_stream);
-    return global.streamNodeRules;
+    return effectiveSettings().streamNodeRules;
 }
 
 RegexMatchConfigs safe_get_times()
 {
     guarded_mutex guard(on_time);
-    return global.timeNodeRules;
+    return effectiveSettings().timeNodeRules;
 }
 
 void safe_set_emojis(RegexMatchConfigs data)
@@ -116,26 +132,33 @@ static bool canReadLocalFetchPath(const std::string &path,
 
 std::shared_future<std::string> fetchFileAsync(const std::string &path, const ProxyPolicy &proxy, int cache_ttl, bool find_local, bool async, FetchContext context)
 {
+    const bool trusted_local_path = isTrustedLocalResourcePath(path);
+    const bool scope_limit = !trusted_local_path;
     if(!async)
     {
-        if(find_local && fileExist(path, true) && canReadLocalFetchPath(path, context))
-            return makeReadyStringFuture(fileGet(path, true));
+        if(find_local && fileExist(path, scope_limit) &&
+           canReadLocalFetchPath(path, context))
+            return makeReadyStringFuture(fileGet(path, scope_limit));
         if(isLink(path))
             return makeReadyStringFuture(webGet(path, proxy, cache_ttl, nullptr, nullptr, context));
         return makeReadyStringFuture(std::string());
     }
 
     std::future<std::string> retVal;
-    if(find_local && fileExist(path, true) &&
+    if(find_local && fileExist(path, scope_limit) &&
        canReadLocalFetchPath(path, context))
         retVal = rulesetExecutor().submit(
-            [path](){ return fileGet(path, true); });
+            [path, scope_limit](){ return fileGet(path, scope_limit); });
     else if(isLink(path))
+    {
+        SettingsSnapshot settings = captureEffectiveSettingsSnapshot();
         retVal = rulesetExecutor().submit(
-            [path, proxy, cache_ttl, context](){
+            [path, proxy, cache_ttl, context, settings](){
+                ScopedSettingsView view(settings);
                 return webGet(path, proxy, cache_ttl, nullptr, nullptr,
                               context);
             });
+    }
     else
         return makeReadyStringFuture(std::string());
     return retVal.share();

@@ -1,6 +1,7 @@
 #include <string>
 
 #include "handler/settings.h"
+#include "handler/settings_view.h"
 #include "utils/logger.h"
 #include "utils/concurrent_lru_cache.h"
 #include "utils/md5/md5_interface.h"
@@ -217,6 +218,7 @@ void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_
     std::string rule_group, retrieved_rules, strLine;
     std::stringstream strStrm;
     const std::string field_name = new_field_name ? "rules" : "Rule";
+    const size_t max_allowed_rules = effectiveSettings().maxAllowedRules;
     YAML::Node rules;
     size_t total_rules = 0;
 
@@ -225,7 +227,7 @@ void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_
 
     for(RulesetContent &x : ruleset_content_array)
     {
-        if(global.maxAllowedRules && total_rules > global.maxAllowedRules)
+        if(max_allowed_rules && total_rules > max_allowed_rules)
             break;
         rule_group = x.rule_group;
         retrieved_rules = x.rule_content.get();
@@ -251,7 +253,7 @@ void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_
         std::string::size_type lineSize;
         while(getline(strStrm, strLine, delimiter))
         {
-            if(global.maxAllowedRules && total_rules > global.maxAllowedRules)
+            if(max_allowed_rules && total_rules > max_allowed_rules)
                 break;
             strLine = trimWhitespace(strLine, true, true); //remove whitespaces
             lineSize = strLine.size();
@@ -289,6 +291,7 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent>
     std::string rule_group, retrieved_rules, strLine;
     std::stringstream strStrm;
     const std::string field_name = new_field_name ? "rules" : "Rule";
+    const size_t max_allowed_rules = effectiveSettings().maxAllowedRules;
     std::string output_content = "\n" + field_name + ":\n";
     size_t total_rules = 0;
 
@@ -301,7 +304,7 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent>
 
     for(RulesetContent &x : ruleset_content_array)
     {
-        if(global.maxAllowedRules && total_rules > global.maxAllowedRules)
+        if(max_allowed_rules && total_rules > max_allowed_rules)
             break;
         rule_group = x.rule_group;
         retrieved_rules = x.rule_content.get();
@@ -327,7 +330,7 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent>
         std::string::size_type lineSize;
         while(getline(strStrm, strLine, delimiter))
         {
-            if(global.maxAllowedRules && total_rules > global.maxAllowedRules)
+            if(max_allowed_rules && total_rules > max_allowed_rules)
                 break;
             strLine = trimWhitespace(strLine, true, true); //remove whitespaces
             lineSize = strLine.size();
@@ -361,6 +364,7 @@ void rulesetToSurge(INIReader &base_rule, std::vector<RulesetContent> &ruleset_c
     string_array allRules;
     std::string rule_group, rule_path, rule_path_typed, retrieved_rules, strLine;
     std::stringstream strStrm;
+    const size_t max_allowed_rules = effectiveSettings().maxAllowedRules;
     size_t total_rules = 0;
 
     switch(surge_ver) //other version: -3 for Surfboard, -4 for Loon
@@ -399,7 +403,7 @@ void rulesetToSurge(INIReader &base_rule, std::vector<RulesetContent> &ruleset_c
     string_view_array temp(4);
     for(RulesetContent &x : ruleset_content_array)
     {
-        if(global.maxAllowedRules && total_rules > global.maxAllowedRules)
+        if(max_allowed_rules && total_rules > max_allowed_rules)
             break;
         rule_group = x.rule_group;
         rule_path = x.rule_path;
@@ -514,7 +518,7 @@ void rulesetToSurge(INIReader &base_rule, std::vector<RulesetContent> &ruleset_c
             std::string::size_type lineSize;
             while(getline(strStrm, strLine, delimiter))
             {
-                if(global.maxAllowedRules && total_rules > global.maxAllowedRules)
+                if(max_allowed_rules && total_rules > max_allowed_rules)
                     break;
                 strLine = trimWhitespace(strLine, true, true);
                 lineSize = strLine.size();
@@ -636,6 +640,7 @@ void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent
     using namespace rapidjson_ext;
     std::string rule_group, retrieved_rules, strLine, final;
     std::stringstream strStrm;
+    const Settings &settings = effectiveSettings();
     size_t total_rules = 0;
     auto &allocator = base_rule.GetAllocator();
 
@@ -646,7 +651,7 @@ void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent
             rules.Swap(base_rule["route"]["rules"]);
     }
 
-    if (global.singBoxAddClashModes)
+    if (settings.singBoxAddClashModes)
     {
         auto global_object = buildObject(allocator, "clash_mode", "Global", "outbound", "GLOBAL");
         auto direct_object = buildObject(allocator, "clash_mode", "Direct", "outbound", "DIRECT");
@@ -660,7 +665,7 @@ void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent
     std::vector<std::string_view> temp(4);
     for(RulesetContent &x : ruleset_content_array)
     {
-        if(global.maxAllowedRules && total_rules > global.maxAllowedRules)
+        if(settings.maxAllowedRules && total_rules > settings.maxAllowedRules)
             break;
         rule_group = x.rule_group;
         retrieved_rules = x.rule_content.get();
@@ -693,7 +698,7 @@ void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent
 
         while(getline(strStrm, strLine, delimiter))
         {
-            if(global.maxAllowedRules && total_rules > global.maxAllowedRules)
+            if(settings.maxAllowedRules && total_rules > settings.maxAllowedRules)
                 break;
             strLine = trimWhitespace(strLine, true, true); //remove whitespaces
             lineSize = strLine.size();

@@ -12,10 +12,12 @@
 #include "script/cron.h"
 #include "server/webserver.h"
 #include "settings.h"
+#include "settings_view.h"
 #include "utils/logger.h"
 #include "utils/concurrent_lru_cache.h"
 #include "utils/md5/md5_interface.h"
 #include "utils/network.h"
+#include "utils/redact.h"
 #include "utils/system.h"
 
 // multi-thread lock
@@ -24,6 +26,81 @@ std::mutex gMutexConfigure;
 Settings global;
 
 extern WebServer webServer;
+
+namespace {
+
+constexpr const char *kDefaultExternalConfig =
+    "https://gcore.jsdelivr.net/gh/Aethersailor/"
+    "Custom_OpenClash_Rules@refs/heads/main/cfg/Custom_Clash.ini";
+
+struct CommonScalarSettings {
+  bool prependInsert;
+  std::string basePath;
+  std::string clashBase;
+  std::string surgeBase;
+  std::string surfboardBase;
+  std::string mellowBase;
+  std::string quanBase;
+  std::string quanXBase;
+  std::string loonBase;
+  std::string SSSubBase;
+  std::string singBoxBase;
+  std::string defaultExtConfig;
+  bool fallbackToDefaultExternalConfig;
+  bool appendType;
+  std::string proxyConfig;
+  std::string proxyRuleset;
+  std::string proxySubscription;
+  bool reloadConfOnRequest;
+};
+
+CommonScalarSettings captureCommonScalarSettings() {
+  return {global.prependInsert,
+          global.basePath,
+          global.clashBase,
+          global.surgeBase,
+          global.surfboardBase,
+          global.mellowBase,
+          global.quanBase,
+          global.quanXBase,
+          global.loonBase,
+          global.SSSubBase,
+          global.singBoxBase,
+          global.defaultExtConfig,
+          global.fallbackToDefaultExternalConfig,
+          global.appendType,
+          global.proxyConfig,
+          global.proxyRuleset,
+          global.proxySubscription,
+          global.reloadConfOnRequest};
+}
+
+void applyCommonScalarSettings(CommonScalarSettings settings) {
+  if (settings.defaultExtConfig.empty())
+    settings.defaultExtConfig = kDefaultExternalConfig;
+
+  global.prependInsert = settings.prependInsert;
+  global.basePath = std::move(settings.basePath);
+  global.clashBase = std::move(settings.clashBase);
+  global.surgeBase = std::move(settings.surgeBase);
+  global.surfboardBase = std::move(settings.surfboardBase);
+  global.mellowBase = std::move(settings.mellowBase);
+  global.quanBase = std::move(settings.quanBase);
+  global.quanXBase = std::move(settings.quanXBase);
+  global.loonBase = std::move(settings.loonBase);
+  global.SSSubBase = std::move(settings.SSSubBase);
+  global.singBoxBase = std::move(settings.singBoxBase);
+  global.defaultExtConfig = std::move(settings.defaultExtConfig);
+  global.fallbackToDefaultExternalConfig =
+      settings.fallbackToDefaultExternalConfig;
+  global.appendType = settings.appendType;
+  global.proxyConfig = std::move(settings.proxyConfig);
+  global.proxyRuleset = std::move(settings.proxyRuleset);
+  global.proxySubscription = std::move(settings.proxySubscription);
+  global.reloadConfOnRequest = settings.reloadConfOnRequest;
+}
+
+} // namespace
 
 const std::map<std::string, ruleset_type> RulesetTypes = {
     {"clash-domain:", RULESET_CLASH_DOMAIN},
@@ -36,6 +113,48 @@ static bool parseBoolSetting(const std::string &value) {
   std::string normalized = toLower(trimWhitespace(value, true, true));
   return normalized == "1" || normalized == "true" || normalized == "yes" ||
          normalized == "on";
+}
+
+static bool isRecognizedBoolSetting(const std::string &value) {
+  std::string normalized = toLower(trimWhitespace(value, true, true));
+  return normalized == "1" || normalized == "true" || normalized == "yes" ||
+         normalized == "on" || normalized == "0" || normalized == "false" ||
+         normalized == "no" || normalized == "off";
+}
+
+static std::string securityLogValue(const std::string &value) {
+  static const char hex[] = "0123456789ABCDEF";
+  std::string escaped;
+  const size_t limit = std::min<size_t>(value.size(), 80);
+  escaped.reserve(limit);
+  for (size_t index = 0; index < limit; ++index) {
+    const unsigned char ch = static_cast<unsigned char>(value[index]);
+    if (ch < 0x20 || ch == 0x7f || ch == '\'' || ch == '\\') {
+      escaped += "\\x";
+      escaped += hex[ch >> 4];
+      escaped += hex[ch & 0x0f];
+    } else {
+      escaped.push_back(static_cast<char>(ch));
+    }
+  }
+  if (value.size() > limit)
+    escaped += "...";
+  return escaped;
+}
+
+static void beginSecuritySettingsLoad() {
+  auto &diagnostics = global.securityDiagnostics;
+  const bool first_load = global.configGeneration == 0;
+  diagnostics.profileSource =
+      first_load ? "builtin-default" : "reload-retained";
+  diagnostics.profileFileSource.clear();
+  diagnostics.profileInputValid = true;
+  diagnostics.profileUsedCompatibilityFallback = false;
+  diagnostics.uploadSource =
+      first_load ? "builtin-default" : "reload-retained";
+  diagnostics.uploadFileSource.clear();
+  diagnostics.uploadInput.clear();
+  diagnostics.uploadInputValid = true;
 }
 
 static int requireProxyProviderInterval(const std::string &value) {
@@ -61,33 +180,24 @@ static bool requireProxyProviderDirect(const std::string &value) {
 }
 
 static bool pathInsideRoot(const std::string &path, const std::string &root) {
-  if (path.empty() || root.empty())
-    return false;
-  try {
-    std::filesystem::path absolute_path =
-        std::filesystem::weakly_canonical(std::filesystem::absolute(path));
-    std::filesystem::path absolute_root =
-        std::filesystem::weakly_canonical(std::filesystem::absolute(root));
-    std::filesystem::path relative =
-        std::filesystem::relative(absolute_path, absolute_root);
-    std::string rel = relative.generic_string();
-    return rel == "." ||
-           (!relative.is_absolute() && rel != ".." &&
-            !startsWith(rel, "../"));
-  } catch (std::exception &e) {
-    writeLog(0, e.what(), LOG_LEVEL_DEBUG);
-    return false;
-  }
+  return isPathInScope(path, root);
 }
 
 static void finalizeSecuritySettings() {
   std::string profile_override = getEnv("SUBCONVERTER_SECURITY_PROFILE");
-  if (!profile_override.empty())
+  if (!profile_override.empty()) {
     global.securityProfile = profile_override;
+    global.securityDiagnostics.profileSource = "environment";
+  }
 
   std::string upload_override = getEnv("SUBCONVERTER_ALLOW_PUBLIC_UPLOAD");
-  if (!upload_override.empty())
+  if (!upload_override.empty()) {
     global.allowPublicUpload = parseBoolSetting(upload_override);
+    global.securityDiagnostics.uploadSource = "environment";
+    global.securityDiagnostics.uploadInput = upload_override;
+    global.securityDiagnostics.uploadInputValid =
+        isRecognizedBoolSetting(upload_override);
+  }
 
   global.securityProfile =
       toLower(trimWhitespace(global.securityProfile, true, true));
@@ -97,10 +207,46 @@ static void finalizeSecuritySettings() {
              "security.profile 的值无效：'" + global.securityProfile +
                  "'，已回退为 lan。",
              LOG_LEVEL_WARNING);
+    global.securityDiagnostics.profileInputValid = false;
+    global.securityDiagnostics.profileUsedCompatibilityFallback = true;
+    writeLog(0,
+             "SECURITY_PROFILE_INVALID_FALLBACK source=" +
+                 global.securityDiagnostics.profileSource + " input='" +
+                 securityLogValue(global.securityProfile) +
+                 "' effective=lan compatibility_fallback=true；该回退仅用于"
+                 "兼容，不代表实例适合公网暴露。",
+             LOG_LEVEL_WARNING);
     global.securityProfile = "lan";
   }
 
+  if (!global.securityDiagnostics.uploadInputValid) {
+    writeLog(0,
+             "SECURITY_UPLOAD_VALUE_INVALID source=" +
+                 global.securityDiagnostics.uploadSource + " input='" +
+                 securityLogValue(global.securityDiagnostics.uploadInput) +
+                 "' effective=" +
+                 (global.allowPublicUpload ? "true" : "false") +
+                 " compatibility_behavior=preserved。",
+             LOG_LEVEL_WARNING);
+  }
+
   writeLog(0, "当前安全档位：" + global.securityProfile, LOG_LEVEL_INFO);
+  writeLog(0,
+           "SECURITY_PROFILE_EFFECTIVE profile=" + global.securityProfile +
+               " source=" + global.securityDiagnostics.profileSource +
+               (global.securityDiagnostics.profileSource != "environment" ||
+                        global.securityDiagnostics.profileFileSource.empty()
+                    ? ""
+                    : " file_candidate=" +
+                          global.securityDiagnostics.profileFileSource) +
+               " input_valid=" +
+               (global.securityDiagnostics.profileInputValid ? "true"
+                                                               : "false") +
+               " compatibility_fallback=" +
+               (global.securityDiagnostics.profileUsedCompatibilityFallback
+                    ? "true"
+                    : "false"),
+           LOG_LEVEL_INFO);
 }
 
 static void finalizePerformanceSettings() {
@@ -143,6 +289,35 @@ static void finalizePerformanceSettings() {
 }
 
 static void finalizeDashboardAuthSettings() {
+  std::string client_ip_header =
+      getEnv("SUBCONVERTER_DASHBOARD_CLIENT_IP_HEADER");
+  if (!client_ip_header.empty())
+    global.dashboardAuthClientIpHeader = client_ip_header;
+  std::string trusted_proxy_cidrs =
+      getEnv("SUBCONVERTER_DASHBOARD_TRUSTED_PROXY_CIDRS");
+  if (!trusted_proxy_cidrs.empty())
+    global.dashboardAuthTrustedProxyCidrs = split(trusted_proxy_cidrs, ",");
+
+  global.dashboardAuthClientIpHeader = client_ip::headerSettingName(
+      client_ip::parseHeader(global.dashboardAuthClientIpHeader));
+  for (std::string &cidr : global.dashboardAuthTrustedProxyCidrs)
+    cidr = trimWhitespace(cidr, true, true);
+  global.dashboardAuthTrustedProxyCidrs.erase(
+      std::remove_if(global.dashboardAuthTrustedProxyCidrs.begin(),
+                     global.dashboardAuthTrustedProxyCidrs.end(),
+                     [](const std::string &value) { return value.empty(); }),
+      global.dashboardAuthTrustedProxyCidrs.end());
+  (void)client_ip::makePolicy(global.dashboardAuthClientIpHeader,
+                              global.dashboardAuthTrustedProxyCidrs);
+  const bool header_configured =
+      client_ip::parseHeader(global.dashboardAuthClientIpHeader) !=
+      client_ip::Header::None;
+  if (header_configured != !global.dashboardAuthTrustedProxyCidrs.empty()) {
+    writeLog(0,
+             "Dashboard 客户端 IP 头与 trusted proxy CIDR 必须同时配置；"
+             "当前已安全降级为仅使用 socket peer。",
+             LOG_LEVEL_WARNING);
+  }
   if (global.dashboardAuthMaxFailures < 1)
     global.dashboardAuthMaxFailures = 1;
   if (global.dashboardAuthWindowSeconds < 1)
@@ -163,24 +338,68 @@ static void finalizeRuntimeSettings() {
 }
 
 bool isPublicFetchRestricted(FetchContext context) {
+  const Settings &settings = effectiveSettings();
   return context == FetchContext::PublicRequest &&
-         (global.securityProfile == "public" ||
-          global.securityProfile == "strict");
+         (settings.securityProfile == "public" ||
+          settings.securityProfile == "strict");
 }
 
 bool isTrustedLocalResourcePath(const std::string &path) {
-  return pathInsideRoot(path, global.basePath) ||
-         pathInsideRoot(path, global.templatePath) ||
+  const Settings &settings = effectiveSettings();
+  return pathInsideRoot(path, settings.basePath) ||
+         pathInsideRoot(path, settings.templatePath) ||
          pathInsideRoot(path, "Custom_OpenClash_Rules") ||
          pathInsideRoot(path, "base/Custom_OpenClash_Rules");
 }
 
 bool isPublicUploadAllowed() {
-  if (global.securityProfile == "lan")
+  const Settings &settings = effectiveSettings();
+  if (settings.securityProfile == "lan")
     return true;
-  if (global.securityProfile == "strict")
+  if (settings.securityProfile == "strict")
     return false;
-  return global.allowPublicUpload;
+  return settings.allowPublicUpload;
+}
+
+void logSecurityPosture() {
+  const bool upload_allowed = isPublicUploadAllowed();
+  writeLog(0,
+           "SECURITY_UPLOAD_EFFECTIVE profile=" + global.securityProfile +
+               " configured_allow_public_upload=" +
+               (global.allowPublicUpload ? "true" : "false") + " source=" +
+               global.securityDiagnostics.uploadSource +
+               (global.securityDiagnostics.uploadSource != "environment" ||
+                        global.securityDiagnostics.uploadFileSource.empty()
+                    ? ""
+                    : " file_candidate=" +
+                          global.securityDiagnostics.uploadFileSource) +
+               " effective=" +
+               (upload_allowed ? "allowed" : "blocked") +
+               (global.securityProfile == "lan"
+                    ? " reason=lan-compatibility"
+                    : global.securityProfile == "strict"
+                          ? " reason=strict-policy"
+                          : " reason=public-upload-setting"),
+           LOG_LEVEL_INFO);
+
+  const bool wildcard_bind = global.listenAddress == "0.0.0.0" ||
+                             global.listenAddress == "::" ||
+                             global.listenAddress == "[::]";
+  if (global.securityProfile == "lan" && wildcard_bind) {
+    std::string bind_endpoint = global.listenAddress;
+    if (bind_endpoint.find(':') != std::string::npos &&
+        !startsWith(bind_endpoint, "[")) {
+      bind_endpoint = "[" + bind_endpoint + "]";
+    }
+    writeLog(0,
+             "SECURITY_EXPOSURE_POSSIBLE profile=lan bind=" +
+                 bind_endpoint + ":" +
+                 std::to_string(global.listenPort) +
+                 " public_reachability=unknown；监听所有本地接口不等于已暴露"
+                 "公网，请同时检查端口发布、宿主防火墙、云安全组、NAT 和"
+                 "反向代理。公网部署请显式使用 public 或 strict。",
+             LOG_LEVEL_WARNING);
+  }
 }
 
 static bool canImportLocalPath(const std::string &path, FetchContext context) {
@@ -189,6 +408,17 @@ static bool canImportLocalPath(const std::string &path, FetchContext context) {
   writeLog(0, "已阻止公开请求导入本地文件：" + path,
            LOG_LEVEL_WARNING);
   return false;
+}
+
+static bool readImportLocalPath(const std::string &path, bool scope_limit,
+                                FetchContext context, std::string &content) {
+  const bool trusted = isTrustedLocalResourcePath(path);
+  const bool effective_scope_limit = scope_limit && !trusted;
+  if (!fileExist(path, effective_scope_limit) ||
+      !canImportLocalPath(path, context))
+    return false;
+  content = fileGet(path, effective_scope_limit);
+  return true;
 }
 
 int importItems(string_array &target, bool scope_limit, FetchContext context) {
@@ -205,12 +435,13 @@ int importItems(string_array &target, bool scope_limit, FetchContext context) {
     writeLog(0, "正在导入项目：" + path);
     content.clear();
 
-    ProxyPolicy proxy = parseProxy(global.proxyConfig);
+    const Settings &settings = effectiveSettings();
+    ProxyPolicy proxy = parseProxy(settings.proxyConfig);
 
-    if (fileExist(path, scope_limit) && canImportLocalPath(path, context))
-      content = fileGet(path, scope_limit);
-    else if (isLink(path))
-      content = webGet(path, proxy, global.cacheConfig, nullptr, nullptr,
+    if (readImportLocalPath(path, scope_limit, context, content)) {
+      // Local content was loaded through the effective scoped/trusted policy.
+    } else if (isLink(path))
+      content = webGet(path, proxy, settings.cacheConfig, nullptr, nullptr,
                        context);
     else
       writeLog(0, "文件不存在或不是有效 URL：" + path,
@@ -253,7 +484,8 @@ int importItems(std::vector<toml::value> &root, const std::string &import_key,
   size_t count = 0;
   bool failed = false;
 
-  ProxyPolicy proxy = parseProxy(global.proxyConfig);
+  const Settings &settings = effectiveSettings();
+  ProxyPolicy proxy = parseProxy(settings.proxyConfig);
   while (iter != root.end()) {
     auto &table = iter->as_table();
     if (table.find("import") == table.end())
@@ -262,10 +494,10 @@ int importItems(std::vector<toml::value> &root, const std::string &import_key,
       const std::string &path = toml::get<std::string>(table.at("import"));
       writeLog(0, "正在导入项目：" + path);
       content.clear();
-      if (fileExist(path, scope_limit) && canImportLocalPath(path, context))
-        content = fileGet(path, scope_limit);
-      else if (isLink(path))
-        content = webGet(path, proxy, global.cacheConfig, nullptr, nullptr,
+      if (readImportLocalPath(path, scope_limit, context, content)) {
+        // Local content was loaded through the effective scoped/trusted policy.
+      } else if (isLink(path))
+        content = webGet(path, proxy, settings.cacheConfig, nullptr, nullptr,
                          context);
       else
         writeLog(0, "文件不存在或不是有效 URL：" + path,
@@ -279,7 +511,8 @@ int importItems(std::vector<toml::value> &root, const std::string &import_key,
           count += list.size();
           std::move(list.begin(), list.end(), std::back_inserter(newRoot));
         } catch (const std::exception &e) {
-          writeLog(0, "导入项目失败：" + path + "，原因：" + e.what(),
+          writeLog(0, "导入项目失败：" + summarizeUrlForLog(path) +
+                          "，detail=" + summarizeSensitiveTextForLog(e.what()),
                    LOG_LEVEL_ERROR);
           failed = true;
         }
@@ -429,7 +662,8 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
   std::string rule_group, rule_url, rule_url_typed, interval;
   RulesetContent rc;
 
-  ProxyPolicy proxy = parseProxy(global.proxyRuleset);
+  const Settings &settings = effectiveSettings();
+  ProxyPolicy proxy = parseProxy(settings.proxyRuleset);
 
   for (RulesetConfig &x : ruleset_list) {
     rule_group = x.Group;
@@ -471,8 +705,8 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
             rule_url,
             rule_url_typed,
             type,
-            fetchFileAsync(rule_url, proxy, global.cacheRuleset, true,
-                           global.asyncFetchRuleset, context),
+            fetchFileAsync(rule_url, proxy, settings.cacheRuleset, true,
+                           settings.asyncFetchRuleset, context),
             x.Interval,
             x.Options};
     }
@@ -484,6 +718,7 @@ void readYAMLConf(YAML::Node &node) {
   YAML::Node section = node["common"];
   std::string strLine;
   string_array tempArray;
+  CommonScalarSettings common = captureCommonScalarSettings();
 
   // api_mode and api_access_token removed - hardcoded in settings.h
   if (section["default_url"].IsSequence()) {
@@ -509,7 +744,7 @@ void readYAMLConf(YAML::Node &node) {
       eraseElements(tempArray);
     }
   }
-  section["prepend_insert_url"] >> global.prependInsert;
+  section["prepend_insert_url"] >> common.prependInsert;
   if (section["exclude_remarks"].IsSequence())
     section["exclude_remarks"] >> global.excludeRemarks;
   if (section["include_remarks"].IsSequence())
@@ -517,31 +752,26 @@ void readYAMLConf(YAML::Node &node) {
   global.filterScript = safe_as<bool>(section["enable_filter"])
                             ? safe_as<std::string>(section["filter_script"])
                             : "";
-  section["base_path"] >> global.basePath;
-  section["clash_rule_base"] >> global.clashBase;
-  section["surge_rule_base"] >> global.surgeBase;
-  section["surfboard_rule_base"] >> global.surfboardBase;
-  section["mellow_rule_base"] >> global.mellowBase;
-  section["quan_rule_base"] >> global.quanBase;
-  section["quanx_rule_base"] >> global.quanXBase;
-  section["loon_rule_base"] >> global.loonBase;
-  section["sssub_rule_base"] >> global.SSSubBase;
-  section["singbox_rule_base"] >> global.singBoxBase;
+  section["base_path"] >> common.basePath;
+  section["clash_rule_base"] >> common.clashBase;
+  section["surge_rule_base"] >> common.surgeBase;
+  section["surfboard_rule_base"] >> common.surfboardBase;
+  section["mellow_rule_base"] >> common.mellowBase;
+  section["quan_rule_base"] >> common.quanBase;
+  section["quanx_rule_base"] >> common.quanXBase;
+  section["loon_rule_base"] >> common.loonBase;
+  section["sssub_rule_base"] >> common.SSSubBase;
+  section["singbox_rule_base"] >> common.singBoxBase;
 
-  section["default_external_config"] >> global.defaultExtConfig;
+  section["default_external_config"] >> common.defaultExtConfig;
   section["fallback_to_default_external_config"] >>
-      global.fallbackToDefaultExternalConfig;
-  // Set hardcoded default if not configured or empty
-  if (global.defaultExtConfig.empty()) {
-    global.defaultExtConfig =
-        "https://gcore.jsdelivr.net/gh/Aethersailor/"
-        "Custom_OpenClash_Rules@refs/heads/main/cfg/Custom_Clash.ini";
-  }
-  section["append_proxy_type"] >> global.appendType;
-  section["proxy_config"] >> global.proxyConfig;
-  section["proxy_ruleset"] >> global.proxyRuleset;
-  section["proxy_subscription"] >> global.proxySubscription;
-  section["reload_conf_on_request"] >> global.reloadConfOnRequest;
+      common.fallbackToDefaultExternalConfig;
+  section["append_proxy_type"] >> common.appendType;
+  section["proxy_config"] >> common.proxyConfig;
+  section["proxy_ruleset"] >> common.proxyRuleset;
+  section["proxy_subscription"] >> common.proxySubscription;
+  section["reload_conf_on_request"] >> common.reloadConfOnRequest;
+  applyCommonScalarSettings(std::move(common));
 
   YAML::Node proxy_provider = node["proxy_provider"];
   if (proxy_provider.IsDefined() && !proxy_provider.IsNull()) {
@@ -811,11 +1041,26 @@ void readYAMLConf(YAML::Node &node) {
       auth["max_failures"] >> global.dashboardAuthMaxFailures;
       auth["window_seconds"] >> global.dashboardAuthWindowSeconds;
       auth["lock_seconds"] >> global.dashboardAuthLockSeconds;
+      if (auth["client_ip"].IsDefined()) {
+        YAML::Node client_ip = auth["client_ip"];
+        client_ip["header"] >> global.dashboardAuthClientIpHeader;
+        if (client_ip["trusted_proxy_cidrs"].IsSequence())
+          client_ip["trusted_proxy_cidrs"] >>
+              global.dashboardAuthTrustedProxyCidrs;
+      }
     }
   }
   if (node["security"].IsDefined()) {
-    node["security"]["profile"] >> global.securityProfile;
-    node["security"]["allow_public_upload"] >> global.allowPublicUpload;
+    if (node["security"]["profile"].IsDefined()) {
+      global.securityDiagnostics.profileSource = "file:yaml";
+      global.securityDiagnostics.profileFileSource = "file:yaml";
+      node["security"]["profile"] >> global.securityProfile;
+    }
+    if (node["security"]["allow_public_upload"].IsDefined()) {
+      global.securityDiagnostics.uploadSource = "file:yaml";
+      global.securityDiagnostics.uploadFileSource = "file:yaml";
+      node["security"]["allow_public_upload"] >> global.allowPublicUpload;
+    }
   }
   finalizeRuntimeSettings();
   writeLog(0, "已加载 YAML 格式偏好设置。",
@@ -844,6 +1089,7 @@ void operate_toml_kv_table(
 void readTOMLConf(toml::value &root) {
   auto section_common = toml::find(root, "common");
   string_array default_url, insert_url;
+  CommonScalarSettings common = captureCommonScalarSettings();
 
   find_if_exist(section_common, "default_url", default_url, "insert_url",
                 insert_url);
@@ -855,26 +1101,20 @@ void readTOMLConf(toml::value &root) {
   find_if_exist(
       section_common, "exclude_remarks", global.excludeRemarks,
       "include_remarks", global.includeRemarks, "enable_insert",
-      global.enableInsert, "prepend_insert_url", global.prependInsert,
+      global.enableInsert, "prepend_insert_url", common.prependInsert,
       "enable_filter", filter, "default_external_config",
-      global.defaultExtConfig, "fallback_to_default_external_config",
-      global.fallbackToDefaultExternalConfig, "base_path", global.basePath,
+      common.defaultExtConfig, "fallback_to_default_external_config",
+      common.fallbackToDefaultExternalConfig, "base_path", common.basePath,
       "clash_rule_base",
-      global.clashBase, "surge_rule_base", global.surgeBase,
-      "surfboard_rule_base", global.surfboardBase, "mellow_rule_base",
-      global.mellowBase, "quan_rule_base", global.quanBase, "quanx_rule_base",
-      global.quanXBase, "loon_rule_base", global.loonBase, "sssub_rule_base",
-      global.SSSubBase, "singbox_rule_base", global.singBoxBase, "proxy_config",
-      global.proxyConfig, "proxy_ruleset", global.proxyRuleset,
-      "proxy_subscription", global.proxySubscription, "append_proxy_type",
-      global.appendType, "reload_conf_on_request", global.reloadConfOnRequest);
-
-  // Set hardcoded default if not configured or empty (TOML)
-  if (global.defaultExtConfig.empty()) {
-    global.defaultExtConfig =
-        "https://gcore.jsdelivr.net/gh/Aethersailor/"
-        "Custom_OpenClash_Rules@refs/heads/main/cfg/Custom_Clash.ini";
-  }
+      common.clashBase, "surge_rule_base", common.surgeBase,
+      "surfboard_rule_base", common.surfboardBase, "mellow_rule_base",
+      common.mellowBase, "quan_rule_base", common.quanBase, "quanx_rule_base",
+      common.quanXBase, "loon_rule_base", common.loonBase, "sssub_rule_base",
+      common.SSSubBase, "singbox_rule_base", common.singBoxBase, "proxy_config",
+      common.proxyConfig, "proxy_ruleset", common.proxyRuleset,
+      "proxy_subscription", common.proxySubscription, "append_proxy_type",
+      common.appendType, "reload_conf_on_request", common.reloadConfOnRequest);
+  applyCommonScalarSettings(std::move(common));
 
   if (root.contains("proxy_provider")) {
     const auto &section_proxy_provider =
@@ -1085,9 +1325,25 @@ void readTOMLConf(toml::value &root) {
                 global.dashboardAuthMaxFailures, "window_seconds",
                 global.dashboardAuthWindowSeconds, "lock_seconds",
                 global.dashboardAuthLockSeconds);
+  auto section_dashboard_client_ip =
+      toml::find_or(section_dashboard_auth, "client_ip",
+                    toml::value(toml::table()));
+  find_if_exist(section_dashboard_client_ip, "header",
+                global.dashboardAuthClientIpHeader);
+  global.dashboardAuthTrustedProxyCidrs = toml::find_or<string_array>(
+      section_dashboard_client_ip, "trusted_proxy_cidrs",
+      global.dashboardAuthTrustedProxyCidrs);
 
   auto section_security =
       toml::find_or(root, "security", toml::value(toml::table()));
+  if (section_security.contains("profile")) {
+    global.securityDiagnostics.profileSource = "file:toml";
+    global.securityDiagnostics.profileFileSource = "file:toml";
+  }
+  if (section_security.contains("allow_public_upload")) {
+    global.securityDiagnostics.uploadSource = "file:toml";
+    global.securityDiagnostics.uploadFileSource = "file:toml";
+  }
   find_if_exist(section_security, "profile", global.securityProfile,
                 "allow_public_upload", global.allowPublicUpload);
   finalizeRuntimeSettings();
@@ -1102,6 +1358,9 @@ static void applyRuntimeConfiguration() {
     webServer.append_redirect(alias.first, alias.second);
   webServer.serve_file_root = global.serveFileRoot;
   webServer.serve_file = !webServer.serve_file_root.empty();
+  webServer.set_client_ip_policy(client_ip::makePolicy(
+      global.dashboardAuthClientIpHeader,
+      global.dashboardAuthTrustedProxyCidrs));
   refresh_schedule();
 }
 
@@ -1120,6 +1379,7 @@ bool readConf() {
   };
 
   auto resetReloadableSettings = []() {
+    beginSecuritySettingsLoad();
     eraseElements(global.excludeRemarks);
     eraseElements(global.includeRemarks);
     eraseElements(global.customProxyGroups);
@@ -1136,6 +1396,8 @@ bool readConf() {
     global.dashboardAuthEnabled = false;
     global.dashboardAuthUsername.clear();
     global.dashboardAuthPassword.clear();
+    global.dashboardAuthClientIpHeader = "none";
+    global.dashboardAuthTrustedProxyCidrs.clear();
     global.dashboardAuthMaxFailures = 5;
     global.dashboardAuthWindowSeconds = 300;
     global.dashboardAuthLockSeconds = 900;
@@ -1149,8 +1411,8 @@ bool readConf() {
   try {
     prefdata = fileGet(global.prefPath, false);
   } catch (std::exception &e) {
-    return restorePreviousSettings(
-        "无法读取偏好设置。原因：" + std::string(e.what()));
+    return restorePreviousSettings("PREFERENCE_FILE_READ_FAILED detail=" +
+                                   summarizeSensitiveTextForLog(e.what()));
   }
   std::string extension =
       toLower(std::filesystem::path(global.prefPath).extension().string());
@@ -1163,10 +1425,11 @@ bool readConf() {
     try {
       readYAMLConf(yaml);
       applyRuntimeConfiguration();
+      publishSettingsSnapshot(global);
       return true;
     } catch (std::exception &e) {
-      return restorePreviousSettings(
-          "无法按 YAML 格式加载偏好设置。原因：" + std::string(e.what()));
+      return restorePreviousSettings("PREFERENCE_YAML_APPLY_FAILED detail=" +
+                                     summarizeSensitiveTextForLog(e.what()));
     }
   };
 
@@ -1178,10 +1441,11 @@ bool readConf() {
     try {
       readTOMLConf(conf);
       applyRuntimeConfiguration();
+      publishSettingsSnapshot(global);
       return true;
     } catch (std::exception &e) {
-      return restorePreviousSettings(
-          "无法按 TOML 格式加载偏好设置。原因：" + std::string(e.what()));
+      return restorePreviousSettings("PREFERENCE_TOML_APPLY_FAILED detail=" +
+                                     summarizeSensitiveTextForLog(e.what()));
     }
   };
 
@@ -1190,8 +1454,8 @@ bool readConf() {
       YAML::Node yaml = YAML::Load(prefdata);
       return loadYAML(yaml);
     } catch (std::exception &e) {
-      return restorePreviousSettings(
-          "无法解析 YAML 偏好设置。原因：" + std::string(e.what()));
+      return restorePreviousSettings("PREFERENCE_YAML_PARSE_FAILED detail=" +
+                                     summarizeSensitiveTextForLog(e.what()));
     }
   }
 
@@ -1200,8 +1464,8 @@ bool readConf() {
       toml::value conf = parseToml(prefdata, global.prefPath);
       return loadTOML(conf);
     } catch (std::exception &e) {
-      return restorePreviousSettings(
-          "无法解析 TOML 偏好设置。原因：" + std::string(e.what()));
+      return restorePreviousSettings("PREFERENCE_TOML_PARSE_FAILED detail=" +
+                                     summarizeSensitiveTextForLog(e.what()));
     }
   }
 
@@ -1212,7 +1476,8 @@ bool readConf() {
         return loadYAML(yaml);
       } catch (std::exception &e) {
         return restorePreviousSettings(
-            "无法解析 YAML 偏好设置。原因：" + std::string(e.what()));
+            "PREFERENCE_YAML_PARSE_FAILED detail=" +
+            summarizeSensitiveTextForLog(e.what()));
       }
     }
     try {
@@ -1220,8 +1485,9 @@ bool readConf() {
       if (!conf.is_empty() && toml::find_or<int>(conf, "version", 0))
         return loadTOML(conf);
     } catch (std::exception &e) {
-      writeLog(0, e.what(), LOG_LEVEL_DEBUG);
-      writeLog(0, "无法按 TOML 格式加载偏好设置。", LOG_LEVEL_DEBUG);
+      writeLog(0, "PREFERENCE_TOML_PROBE_FAILED detail=" +
+                      summarizeSensitiveTextForLog(e.what()),
+               LOG_LEVEL_DEBUG);
     }
   }
 
@@ -1230,51 +1496,48 @@ bool readConf() {
   // ini.do_utf8_to_gbk = true;
   int retVal = ini.parse_file(global.prefPath);
   if (retVal != INIREADER_EXCEPTION_NONE) {
-    return restorePreviousSettings(
-        "无法按 INI 格式加载偏好设置。原因：" + ini.get_last_error());
+    return restorePreviousSettings("PREFERENCE_INI_PARSE_FAILED detail=" +
+                                   summarizeSensitiveTextForLog(
+                                       ini.get_last_error()));
   }
 
   resetReloadableSettings();
 
   try {
     string_array tempArray;
+    CommonScalarSettings common = captureCommonScalarSettings();
 
   ini.enter_section("common");
   // api_mode and api_access_token removed - hardcoded in settings.h
   ini.get_if_exist("default_url", global.defaultUrls);
   global.enableInsert = ini.get("enable_insert");
   ini.get_if_exist("insert_url", global.insertUrls);
-  ini.get_bool_if_exist("prepend_insert_url", global.prependInsert);
+  ini.get_bool_if_exist("prepend_insert_url", common.prependInsert);
   if (ini.item_prefix_exist("exclude_remarks"))
     ini.get_all("exclude_remarks", global.excludeRemarks);
   if (ini.item_prefix_exist("include_remarks"))
     ini.get_all("include_remarks", global.includeRemarks);
   global.filterScript =
       ini.get_bool("enable_filter") ? ini.get("filter_script") : "";
-  ini.get_if_exist("base_path", global.basePath);
-  ini.get_if_exist("clash_rule_base", global.clashBase);
-  ini.get_if_exist("surge_rule_base", global.surgeBase);
-  ini.get_if_exist("surfboard_rule_base", global.surfboardBase);
-  ini.get_if_exist("mellow_rule_base", global.mellowBase);
-  ini.get_if_exist("quan_rule_base", global.quanBase);
-  ini.get_if_exist("quanx_rule_base", global.quanXBase);
-  ini.get_if_exist("loon_rule_base", global.loonBase);
-  ini.get_if_exist("sssub_rule_base", global.SSSubBase);
-  ini.get_if_exist("singbox_rule_base", global.singBoxBase);
-  ini.get_if_exist("default_external_config", global.defaultExtConfig);
+  ini.get_if_exist("base_path", common.basePath);
+  ini.get_if_exist("clash_rule_base", common.clashBase);
+  ini.get_if_exist("surge_rule_base", common.surgeBase);
+  ini.get_if_exist("surfboard_rule_base", common.surfboardBase);
+  ini.get_if_exist("mellow_rule_base", common.mellowBase);
+  ini.get_if_exist("quan_rule_base", common.quanBase);
+  ini.get_if_exist("quanx_rule_base", common.quanXBase);
+  ini.get_if_exist("loon_rule_base", common.loonBase);
+  ini.get_if_exist("sssub_rule_base", common.SSSubBase);
+  ini.get_if_exist("singbox_rule_base", common.singBoxBase);
+  ini.get_if_exist("default_external_config", common.defaultExtConfig);
   ini.get_bool_if_exist("fallback_to_default_external_config",
-                        global.fallbackToDefaultExternalConfig);
-  // Set hardcoded default if not configured or empty
-  if (global.defaultExtConfig.empty()) {
-    global.defaultExtConfig =
-        "https://gcore.jsdelivr.net/gh/Aethersailor/"
-        "Custom_OpenClash_Rules@refs/heads/main/cfg/Custom_Clash.ini";
-  }
-  ini.get_bool_if_exist("append_proxy_type", global.appendType);
-  ini.get_if_exist("proxy_config", global.proxyConfig);
-  ini.get_if_exist("proxy_ruleset", global.proxyRuleset);
-  ini.get_if_exist("proxy_subscription", global.proxySubscription);
-  ini.get_bool_if_exist("reload_conf_on_request", global.reloadConfOnRequest);
+                        common.fallbackToDefaultExternalConfig);
+  ini.get_bool_if_exist("append_proxy_type", common.appendType);
+  ini.get_if_exist("proxy_config", common.proxyConfig);
+  ini.get_if_exist("proxy_ruleset", common.proxyRuleset);
+  ini.get_if_exist("proxy_subscription", common.proxySubscription);
+  ini.get_bool_if_exist("reload_conf_on_request", common.reloadConfOnRequest);
+  applyCommonScalarSettings(std::move(common));
 
   if (ini.section_exist("proxy_provider")) {
     ini.enter_section("proxy_provider");
@@ -1539,27 +1802,47 @@ bool readConf() {
                          global.dashboardAuthWindowSeconds);
     ini.get_int_if_exist("dashboard_auth_lock_seconds",
                          global.dashboardAuthLockSeconds);
+    ini.get_if_exist("dashboard_auth_client_ip_header",
+                     global.dashboardAuthClientIpHeader);
+    if (ini.item_exist("dashboard_auth_trusted_proxy_cidrs")) {
+      global.dashboardAuthTrustedProxyCidrs =
+          split(ini.get("dashboard_auth_trusted_proxy_cidrs"), ",");
+    }
   }
 
   if (ini.section_exist("security")) {
     ini.enter_section("security");
-    ini.get_if_exist("profile", global.securityProfile);
-    ini.get_bool_if_exist("allow_public_upload", global.allowPublicUpload);
+    if (ini.item_exist("profile")) {
+      global.securityDiagnostics.profileSource = "file:ini";
+      global.securityDiagnostics.profileFileSource = "file:ini";
+      ini.get_if_exist("profile", global.securityProfile);
+    }
+    if (ini.item_exist("allow_public_upload")) {
+      global.securityDiagnostics.uploadSource = "file:ini";
+      global.securityDiagnostics.uploadFileSource = "file:ini";
+      const std::string raw_upload = ini.get("allow_public_upload");
+      global.securityDiagnostics.uploadInput = raw_upload;
+      global.securityDiagnostics.uploadInputValid =
+          raw_upload == "true" || raw_upload == "false";
+      ini.get_bool_if_exist("allow_public_upload", global.allowPublicUpload);
+    }
   }
     finalizeRuntimeSettings();
 
     writeLog(0, "已加载 INI 格式偏好设置。", LOG_LEVEL_INFO);
     applyRuntimeConfiguration();
+    publishSettingsSnapshot(global);
     return true;
   } catch (std::exception &e) {
-    return restorePreviousSettings(
-        "无法按 INI 格式加载偏好设置。原因：" + std::string(e.what()));
+    return restorePreviousSettings("PREFERENCE_INI_APPLY_FAILED detail=" +
+                                   summarizeSensitiveTextForLog(e.what()));
   }
 }
 
 ExternalConfigLoadStatus loadExternalYAML(YAML::Node &node,
                                           ExternalConfig &ext,
                                           FetchContext context) {
+  const Settings &settings = effectiveSettings();
   YAML::Node section = node["custom"], object;
   std::string name, type, url, interval;
   std::string group, strLine;
@@ -1584,7 +1867,7 @@ ExternalConfigLoadStatus loadExternalYAML(YAML::Node &node,
                                : "custom_proxy_group";
   if (section[group_name].size()) {
     string_array vArray;
-    if (readGroup(section[group_name], vArray, global.APIMode, context) != 0)
+    if (readGroup(section[group_name], vArray, settings.APIMode, context) != 0)
       return ExternalConfigLoadStatus::ImportFailed;
     ext.custom_proxy_group =
         INIBinding::from<ProxyGroupConfig>::from_ini(vArray);
@@ -1594,11 +1877,11 @@ ExternalConfigLoadStatus loadExternalYAML(YAML::Node &node,
       section["rulesets"].IsDefined() ? "rulesets" : "surge_ruleset";
   if (section[ruleset_name].size()) {
     string_array vArray;
-    if (readRuleset(section[ruleset_name], vArray, global.APIMode, context) !=
+    if (readRuleset(section[ruleset_name], vArray, settings.APIMode, context) !=
         0)
       return ExternalConfigLoadStatus::ImportFailed;
-    if (global.maxAllowedRulesets &&
-        vArray.size() > global.maxAllowedRulesets) {
+    if (settings.maxAllowedRulesets &&
+        vArray.size() > settings.maxAllowedRulesets) {
       writeLog(0, "外部配置中的规则集数量已超过限制。",
                LOG_LEVEL_WARNING);
       return ExternalConfigLoadStatus::ResourceLimitExceeded;
@@ -1608,7 +1891,7 @@ ExternalConfigLoadStatus loadExternalYAML(YAML::Node &node,
 
   if (section["rename_node"].size()) {
     string_array vArray;
-    if (readRegexMatch(section["rename_node"], "@", vArray, global.APIMode,
+    if (readRegexMatch(section["rename_node"], "@", vArray, settings.APIMode,
                        context) != 0)
       return ExternalConfigLoadStatus::ImportFailed;
     ext.rename = INIBinding::from<RegexMatchConfig>::from_ini(vArray, "@");
@@ -1619,7 +1902,7 @@ ExternalConfigLoadStatus loadExternalYAML(YAML::Node &node,
   const char *emoji_name = section["emojis"].IsDefined() ? "emojis" : "emoji";
   if (section[emoji_name].size()) {
     string_array vArray;
-    if (readEmoji(section[emoji_name], vArray, global.APIMode, context) != 0)
+    if (readEmoji(section[emoji_name], vArray, settings.APIMode, context) != 0)
       return ExternalConfigLoadStatus::ImportFailed;
     ext.emoji = INIBinding::from<RegexMatchConfig>::from_ini(vArray, ",");
   }
@@ -1643,8 +1926,7 @@ ExternalConfigLoadStatus loadExternalTOML(toml::value &root,
                                           ExternalConfig &ext,
                                           FetchContext context) {
   auto section = toml::find(root, "custom");
-  bool import_scope_limit = isPublicFetchRestricted(context) ? global.APIMode
-                                                            : false;
+  bool import_scope_limit = isPublicFetchRestricted(context);
 
   find_if_exist(section, "enable_rule_generator", ext.enable_rule_generator,
                 "overwrite_original_rules", ext.overwrite_original_rules,
@@ -1677,8 +1959,9 @@ ExternalConfigLoadStatus loadExternalTOML(toml::value &root,
   auto rulesets = toml::find_or<std::vector<toml::value>>(root, "rulesets", {});
   if (importItems(rulesets, "rulesets", import_scope_limit, context) != 0)
     return ExternalConfigLoadStatus::ImportFailed;
-  if (global.maxAllowedRulesets &&
-      rulesets.size() > global.maxAllowedRulesets) {
+  const Settings &settings = effectiveSettings();
+  if (settings.maxAllowedRulesets &&
+      rulesets.size() > settings.maxAllowedRulesets) {
     writeLog(0, "外部配置中的规则集数量已超过限制。",
              LOG_LEVEL_WARNING);
     return ExternalConfigLoadStatus::ResourceLimitExceeded;
@@ -1704,6 +1987,7 @@ static ExternalConfigLoadStatus
 parseExternalConfigContent(const std::string &path,
                            const std::string &base_content,
                            ExternalConfig &ext, FetchContext context) {
+  const Settings &settings = effectiveSettings();
   ext.rule_sources_context = context;
   try {
     YAML::Node yaml = YAML::Load(base_content);
@@ -1724,9 +2008,8 @@ parseExternalConfigContent(const std::string &path,
   if (ini.parse(base_content) != INIREADER_EXCEPTION_NONE) {
     // std::cerr<<"Load external configuration failed. Reason:
     // "<<ini.get_last_error()<<"\n";
-    writeLog(0,
-             "加载外部配置失败。原因：" +
-                 ini.get_last_error(),
+    writeLog(0, "EXTERNAL_CONFIG_INI_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(ini.get_last_error()),
              LOG_LEVEL_ERROR);
     return ExternalConfigLoadStatus::ParseFailed;
   }
@@ -1735,7 +2018,7 @@ parseExternalConfigContent(const std::string &path,
   if (ini.item_prefix_exist("custom_proxy_group")) {
     string_array vArray;
     ini.get_all("custom_proxy_group", vArray);
-    if (importItems(vArray, global.APIMode, context) != 0)
+    if (importItems(vArray, settings.APIMode, context) != 0)
       return ExternalConfigLoadStatus::ImportFailed;
     ext.custom_proxy_group =
         INIBinding::from<ProxyGroupConfig>::from_ini(vArray);
@@ -1745,10 +2028,10 @@ parseExternalConfigContent(const std::string &path,
   if (ini.item_prefix_exist(ruleset_name)) {
     string_array vArray;
     ini.get_all(ruleset_name, vArray);
-    if (importItems(vArray, global.APIMode, context) != 0)
+    if (importItems(vArray, settings.APIMode, context) != 0)
       return ExternalConfigLoadStatus::ImportFailed;
-    if (global.maxAllowedRulesets &&
-        vArray.size() > global.maxAllowedRulesets) {
+    if (settings.maxAllowedRulesets &&
+        vArray.size() > settings.maxAllowedRulesets) {
       writeLog(0, "外部配置中的规则集数量已超过限制。",
                LOG_LEVEL_WARNING);
       return ExternalConfigLoadStatus::ResourceLimitExceeded;
@@ -1775,7 +2058,7 @@ parseExternalConfigContent(const std::string &path,
   if (ini.item_prefix_exist("rename")) {
     string_array vArray;
     ini.get_all("rename", vArray);
-    if (importItems(vArray, global.APIMode, context) != 0)
+    if (importItems(vArray, settings.APIMode, context) != 0)
       return ExternalConfigLoadStatus::ImportFailed;
     ext.rename = INIBinding::from<RegexMatchConfig>::from_ini(vArray, "@");
   }
@@ -1784,7 +2067,7 @@ parseExternalConfigContent(const std::string &path,
   if (ini.item_prefix_exist("emoji")) {
     string_array vArray;
     ini.get_all("emoji", vArray);
-    if (importItems(vArray, global.APIMode, context) != 0)
+    if (importItems(vArray, settings.APIMode, context) != 0)
       return ExternalConfigLoadStatus::ImportFailed;
     ext.emoji = INIBinding::from<RegexMatchConfig>::from_ini(vArray, ",");
   }
@@ -1863,24 +2146,26 @@ ExternalConfigLoadResult loadExternalConfig(const std::string &path,
   template_args empty_tpl_args;
   template_args *request_tpl_args =
       ext.tpl_args ? ext.tpl_args : &empty_tpl_args;
+  const Settings &settings = effectiveSettings();
   std::string base_content;
-  ProxyPolicy proxy = parseProxy(global.proxyConfig);
-  std::string config = fetchFile(path, proxy, global.cacheConfig, true, context);
+  ProxyPolicy proxy = parseProxy(settings.proxyConfig);
+  std::string config =
+      fetchFile(path, proxy, settings.cacheConfig, true, context);
   if (config.empty())
     return {ExternalConfigLoadStatus::FetchFailed};
 
   bool template_fetch_failed = false;
   if (render_template(config, *request_tpl_args, base_content,
-                      global.templatePath, context,
+                      settings.templatePath, context,
                       &template_fetch_failed) != 0 ||
       template_fetch_failed)
     return {ExternalConfigLoadStatus::RenderFailed};
 
   bool cache_enabled =
-      global.cacheConfig > 0 && isExternalConfigCacheableContent(config) &&
+      settings.cacheConfig > 0 && isExternalConfigCacheableContent(config) &&
       isExternalConfigCacheableContent(base_content);
   const std::string key = buildExternalConfigCacheKey(
-      base_content, context, global.configGeneration);
+      base_content, context, settings.configGeneration);
 
   CachedExternalConfig cached = external_config_cache.getOrCompute(
       key, cache_enabled,

@@ -32,6 +32,18 @@ std::string sanitizedSettingsSnapshot(const Settings &settings) {
       {"common",
        {
            {"base_path", settings.basePath},
+           {"rule_bases",
+            {
+                {"clash", settings.clashBase},
+                {"surge", settings.surgeBase},
+                {"surfboard", settings.surfboardBase},
+                {"mellow", settings.mellowBase},
+                {"quan", settings.quanBase},
+                {"quanx", settings.quanXBase},
+                {"loon", settings.loonBase},
+                {"sssub", settings.SSSubBase},
+                {"singbox", settings.singBoxBase},
+            }},
            {"default_urls", sensitiveState(settings.defaultUrls)},
            {"insert_urls", sensitiveState(settings.insertUrls)},
            {"default_external_config",
@@ -130,6 +142,10 @@ std::string sanitizedSettingsSnapshot(const Settings &settings) {
            {"dashboard_window_seconds",
             settings.dashboardAuthWindowSeconds},
            {"dashboard_lock_seconds", settings.dashboardAuthLockSeconds},
+           {"dashboard_client_ip_header",
+            settings.dashboardAuthClientIpHeader},
+           {"dashboard_trusted_proxy_count",
+            settings.dashboardAuthTrustedProxyCidrs.size()},
        }},
   };
   return snapshot.dump(2) + "\n";

@@ -11,6 +11,7 @@
 #include "generator/config/subexport.h"
 #include "generator/template/templates.h"
 #include "handler/settings.h"
+#include "handler/settings_view.h"
 #include "nodemanip.h"
 #include "parser/config/proxy.h"
 #include "parser/param_compat.h"
@@ -22,6 +23,7 @@
 #include "utils/logger.h"
 #include "utils/network.h"
 #include "utils/rapidjson_extra.h"
+#include "utils/redact.h"
 #include "utils/regexp.h"
 #include "utils/stl_extra.h"
 #include "utils/time_compat.h"
@@ -373,7 +375,7 @@ void groupGenerate(const std::string &rule, std::vector<Proxy> &nodelist,
             script_print_stack(ctx);
           }
         },
-        global.scriptCleanContext);
+        effectiveSettings().scriptCleanContext);
   }
 #endif // NO_JS_RUNTIME
   else {
@@ -1217,12 +1219,14 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
                          std::vector<RulesetContent> &ruleset_content_array,
                          const ProxyGroupConfigs &extra_proxy_group,
                          bool clashR, extra_settings &ext) {
+  const size_t max_allowed_rules = effectiveSettings().maxAllowedRules;
   YAML::Node yamlnode;
 
   try {
     yamlnode = YAML::Load(base_conf);
   } catch (std::exception &e) {
-    writeLog(0, std::string("Clash 基础配置加载失败：") + e.what(),
+    writeLog(0, "CLASH_BASE_CONFIG_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(e.what()),
              LOG_LEVEL_ERROR);
     return "";
   }
@@ -1278,14 +1282,14 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
     string_array merged;
     if (!mergeClashRulesWithinLimit(
             ext.rule_prepend, kept_original, generated_rules,
-            ext.rule_append, global.maxAllowedRules, merged)) {
+            ext.rule_append, max_allowed_rules, merged)) {
       ext.external_rule_error =
           "Invalid request: the final Clash rule count exceeds "
           "max_allowed_rules (" +
-          std::to_string(global.maxAllowedRules) +
+          std::to_string(max_allowed_rules) +
           ").\n"
           "无效请求：最终 Clash 规则数量超过 max_allowed_rules 限制（" +
-          std::to_string(global.maxAllowedRules) + "）。";
+          std::to_string(max_allowed_rules) + "）。";
       return false;
     }
     yamlnode[rules_field_name] = std::move(merged);
@@ -1485,6 +1489,7 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
                          std::vector<RulesetContent> &ruleset_content_array,
                          const ProxyGroupConfigs &extra_proxy_group,
                          int surge_ver, extra_settings &ext) {
+  const bool resolve_hostname = effectiveSettings().surgeResolveHostname;
   INIReader ini;
   std::string output_nodelist;
   std::vector<Proxy> nodelist;
@@ -1503,7 +1508,8 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
   ini.add_direct_save_section("URL Rewrite");
   ini.add_direct_save_section("Header Rewrite");
   if (ini.parse(base_conf) != 0 && !ext.nodelist) {
-    writeLog(0, "Surge 基础配置加载失败：" + ini.get_last_error(),
+    writeLog(0, "SURGE_BASE_CONFIG_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(ini.get_last_error()),
              LOG_LEVEL_ERROR);
     return "";
   }
@@ -1620,7 +1626,7 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
       proxy += "\", local-port=" + std::to_string(local_port);
       if (isIPv4(hostname) || isIPv6(hostname))
         proxy += ", addresses=" + hostname;
-      else if (global.surgeResolveHostname)
+      else if (resolve_hostname)
         proxy += ", addresses=" + hostnameToIPAddr(hostname);
       local_port++;
       break;
@@ -1813,13 +1819,15 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
   return ini.to_string();
 }
 
-std::string proxyToSingle(std::vector<Proxy> &nodes, int types,
-                          extra_settings &ext) {
-  /// types: SS=1 SSR=2 VMess=4 Trojan=8,hysteria2=16,vless=32
+std::string proxyToSingle(std::vector<Proxy> &nodes, SingleLinkTypes types,
+                           extra_settings &ext) {
   std::string proxyStr, allLinks;
-  bool ss = GETBIT(types, 1), ssr = GETBIT(types, 2), vmess = GETBIT(types, 3),
-       trojan = GETBIT(types, 4), hysteria2 = GETBIT(types, 5),
-       vless = GETBIT(types, 6);
+  const bool ss = (types & SingleLinkType::Shadowsocks) != 0;
+  const bool ssr = (types & SingleLinkType::ShadowsocksR) != 0;
+  const bool vmess = (types & SingleLinkType::VMess) != 0;
+  const bool trojan = (types & SingleLinkType::Trojan) != 0;
+  const bool hysteria2 = (types & SingleLinkType::Hysteria2) != 0;
+  const bool vless = (types & SingleLinkType::VLESS) != 0;
 
   for (Proxy &x : nodes) {
     std::string remark = x.Remark;
@@ -1896,7 +1904,7 @@ std::string proxyToSingle(std::vector<Proxy> &nodes, int types,
       if (!obfsparam.empty()) {
         proxyStr += "&obfs=" + obfsparam;
         if (!obfsPassword.empty()) {
-          proxyStr += "&obfs-password=" + obfsparam;
+          proxyStr += "&obfs-password=" + obfsPassword;
         }
       }
       if (!sni.empty()) {
@@ -2075,9 +2083,9 @@ std::string proxyToQuan(std::vector<Proxy> &nodes, const std::string &base_conf,
   INIReader ini;
   ini.store_any_line = true;
   if (!ext.nodelist && ini.parse(base_conf) != 0) {
-    writeLog(
-        0, "Quantumult 基础配置加载失败：" + ini.get_last_error(),
-        LOG_LEVEL_ERROR);
+    writeLog(0, "QUANTUMULT_BASE_CONFIG_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(ini.get_last_error()),
+             LOG_LEVEL_ERROR);
     return "";
   }
 
@@ -2322,9 +2330,9 @@ std::string proxyToQuanX(std::vector<Proxy> &nodes,
   ini.add_direct_save_section("mitm");
   ini.add_direct_save_section("server_remote");
   if (!ext.nodelist && ini.parse(base_conf) != 0) {
-    writeLog(
-        0, "Quantumult X 基础配置加载失败：" + ini.get_last_error(),
-        LOG_LEVEL_ERROR);
+    writeLog(0, "QUANTUMULT_X_BASE_CONFIG_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(ini.get_last_error()),
+             LOG_LEVEL_ERROR);
     return "";
   }
 
@@ -2706,7 +2714,8 @@ std::string proxyToMellow(std::vector<Proxy> &nodes,
   INIReader ini;
   ini.store_any_line = true;
   if (ini.parse(base_conf) != 0) {
-    writeLog(0, "Mellow 基础配置加载失败：" + ini.get_last_error(),
+    writeLog(0, "MELLOW_BASE_CONFIG_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(ini.get_last_error()),
              LOG_LEVEL_ERROR);
     return "";
   }
@@ -2875,7 +2884,8 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
   ini.store_any_line = true;
   ini.add_direct_save_section("Plugin");
   if (ini.parse(base_conf) != INIREADER_EXCEPTION_NONE && !ext.nodelist) {
-    writeLog(0, "Loon 基础配置加载失败：" + ini.get_last_error(),
+    writeLog(0, "LOON_BASE_CONFIG_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(ini.get_last_error()),
              LOG_LEVEL_ERROR);
     return "";
   }
@@ -3271,6 +3281,7 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
                     std::vector<RulesetContent> &ruleset_content_array,
                     const ProxyGroupConfigs &extra_proxy_group,
                     extra_settings &ext) {
+  const bool add_clash_modes = effectiveSettings().singBoxAddClashModes;
   using namespace rapidjson_ext;
   rapidjson::Document::AllocatorType &allocator = json.GetAllocator();
   rapidjson::Value outbounds(rapidjson::kArrayType),
@@ -3776,7 +3787,7 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
     outbounds.PushBack(group, allocator);
   }
 
-  if (global.singBoxAddClashModes) {
+  if (add_clash_modes) {
     auto global_group = rapidjson::Value(rapidjson::kObjectType);
     global_group.AddMember("type", "selector", allocator);
     global_group.AddMember("tag", "GLOBAL", allocator);

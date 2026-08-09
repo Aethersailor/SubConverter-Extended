@@ -1,8 +1,8 @@
 common:
   # API 模式固定开启，令牌认证已移除；调用转换接口时仍需通过 url 参数提供订阅来源。
   # API mode is always enabled and token authentication has been removed; conversion requests must still provide subscription sources through the url argument.
-  # 未提供 url 参数时使用的默认订阅来源列表；每项可为本地文件或 URL，空列表表示不设默认来源。
-  # Default subscription sources used when url is omitted; each item may be a local file or URL, and an empty list disables the fallback.
+  # 为兼容旧配置仍会解析此列表；当前 API 模式下 /sub 缺少 url 时不会回退到这里。
+  # Still parsed for configuration compatibility; current API-mode /sub requests never fall back here when url is missing.
   default_url: []
   # 是否把 insert_url 中的节点插入每次转换；关闭后 insert_url 不参与输出。
   # Whether to inject nodes from insert_url into every conversion; when false, insert_url is ignored.
@@ -156,8 +156,8 @@ surge_external_proxy:
 security:
   # 安全档位：lan 保留局域网兼容行为并允许本地/私网/fake-ip 资源；public 限制公开请求控制的不受信任抓取；strict 另行强制禁止公开上传。
   # Security profile: lan preserves LAN-compatible access to local/private/fake-IP resources; public restricts untrusted request-controlled fetches; strict also forbids public upload.
-  # 环境变量 SUBCONVERTER_SECURITY_PROFILE=lan|public|strict 优先于文件；无效值会回退到 lan。
-  # SUBCONVERTER_SECURITY_PROFILE=lan|public|strict overrides the file; invalid values fall back to lan.
+  # 环境变量 SUBCONVERTER_SECURITY_PROFILE=lan|public|strict 优先于文件；无效值为兼容旧部署仍回退到 lan，并输出 SECURITY_PROFILE_INVALID_FALLBACK 告警，不代表适合公网暴露。
+  # SUBCONVERTER_SECURITY_PROFILE=lan|public|strict overrides the file; invalid values still fall back to lan for compatibility and emit SECURITY_PROFILE_INVALID_FALLBACK, which does not imply Internet-safe exposure.
   profile: lan
   # 仅决定 public 档位是否允许公开上传；lan 始终保留旧上传行为，strict 始终禁止。环境变量 SUBCONVERTER_ALLOW_PUBLIC_UPLOAD 优先。
   # Controls public upload only for the public profile; lan always keeps legacy upload behavior and strict always blocks it. SUBCONVERTER_ALLOW_PUBLIC_UPLOAD overrides this value.
@@ -198,6 +198,14 @@ statistics:
     max_failures: 5
     window_seconds: 300
     lock_seconds: 900
+    client_ip:
+      # 默认 none：只按 TCP socket peer 分桶；仅在明确的可信代理会覆盖/清洗所选头时启用。
+      # Default none uses only the TCP socket peer; enable a header only behind explicit proxies that overwrite/sanitize it.
+      # 可选值 / Values: none, x-forwarded-for, forwarded, x-real-ip, cf-connecting-ip, true-client-ip.
+      header: none
+      # 必须使用 CIDR，最多 64 项，且不允许 IPv4/IPv6 的 /0。
+      # CIDR notation is required, with at most 64 entries; IPv4/IPv6 /0 is rejected.
+      trusted_proxy_cidrs: []
 
 emojis:
   # 是否按 rules 为节点名称添加 Emoji。
@@ -293,8 +301,8 @@ tasks:
 #    timeout: 3
 
 server:
-  # Web 服务监听地址；0.0.0.0 监听所有 IPv4 接口。若暴露公网，请配合 public/strict 安全档位和反向代理访问控制。
-  # Web-server bind address; 0.0.0.0 listens on all IPv4 interfaces. For Internet exposure, combine it with public/strict security and reverse-proxy access controls.
+  # Web 服务监听地址；0.0.0.0 监听所有 IPv4 接口，但不等于已暴露公网。启动日志会报告“可能暴露/公网可达性未知”；若确认公网可达，请配合 public/strict 和反向代理访问控制。
+  # Web-server bind address; 0.0.0.0 listens on all IPv4 interfaces but does not prove Internet exposure. Startup logs report possible exposure with unknown public reachability; confirmed Internet deployments should use public/strict plus reverse-proxy controls.
   listen: 0.0.0.0
   # Web 服务监听端口；PORT 环境变量存在时优先于本值。
   # Web-server port; the PORT environment variable overrides this value when set.
@@ -310,8 +318,8 @@ advanced:
   # 是否强制输出详细调试信息；true 会覆盖 log_level 并使用 verbose 级别，可能包含敏感配置细节。
   # Whether to force verbose diagnostics; true overrides log_level with verbose and may expose sensitive configuration details.
   print_debug_info: false
-  # 监听套接字等待队列上限（libevent 后端）；不是同时处理请求数。
-  # Listening-socket backlog limit on the libevent backend; this is not the number of concurrently processed requests.
+  # 为兼容旧配置保留；当前 HTTP 后端不使用此值。
+  # Retained for configuration compatibility; the current HTTP backend does not use this value.
   max_pending_connections: 10240
   # HTTP 基础工作线程数；SUBCONVERTER_MAX_CONCURRENT_THREADS 可覆盖，最小会收敛为 1。
   # Base HTTP worker-thread count; SUBCONVERTER_MAX_CONCURRENT_THREADS overrides it and values are clamped to at least 1.

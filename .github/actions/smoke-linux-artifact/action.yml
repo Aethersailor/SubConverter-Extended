@@ -9,6 +9,15 @@ inputs:
     description: Port used for the smoke test.
     required: false
     default: "25500"
+  expected-version:
+    description: Exact formal vX.Y.Z identity.
+    required: true
+  expected-revision:
+    description: Exact full tag commit SHA.
+    required: true
+  expected-build-date:
+    description: Exact canonical UTC build timestamp.
+    required: true
 
 runs:
   using: composite
@@ -35,6 +44,11 @@ runs:
         tar -xzf "$ARTIFACT" -C "$WORKDIR"
         cd "$WORKDIR/SubConverter-Extended"
         test ! -e base/Custom_OpenClash_Rules
+        python3 "$GITHUB_WORKSPACE/scripts/ci/write_build_info.py" verify \
+          --path BUILD-INFO.json \
+          --version "${{ inputs.expected-version }}" \
+          --revision "${{ inputs.expected-revision }}" \
+          --build-date "${{ inputs.expected-build-date }}"
 
         PORT="$PORT" PREF_PATH="$PWD/base/pref.toml" ./start.sh >"$WORKDIR/stdout.log" 2>"$WORKDIR/stderr.log" &
         PID="$!"

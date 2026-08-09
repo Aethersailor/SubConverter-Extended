@@ -9,19 +9,23 @@
 #include <utility>
 #include <atomic>
 #include <cctype>
+#include <cstdio>
 #include <cstdint>
 
 #include <curl/curl.h>
 
 #include "handler/cocr_source_url.h"
+#include "handler/cache_storage.h"
 #include "handler/curl_handle_pool.h"
 #include "handler/settings.h"
+#include "handler/settings_view.h"
 #include "utils/base64/base64.h"
 #include "utils/defer.h"
 #include "utils/file_extra.h"
 #include "utils/lock.h"
 #include "utils/logger.h"
 #include "utils/network.h"
+#include "utils/redact.h"
 #include "utils/system.h"
 #include "utils/urlencode.h"
 #include "version.h"
@@ -65,6 +69,12 @@ struct GitHubFileRef
 
 static std::mutex cache_fetch_mutex;
 static std::map<std::string, std::shared_future<CacheFetchResult>> cache_fetches;
+static std::atomic_bool outbound_fetch_shutdown_requested {false};
+
+void requestOutboundFetchShutdown() noexcept
+{
+    outbound_fetch_shutdown_requested.store(true, std::memory_order_relaxed);
+}
 
 class CacheFetchOwnerCleanup
 {
@@ -322,25 +332,6 @@ static bool is_blocked_hostname(const std::string &host)
     return false;
 }
 
-static std::string escape_log_value(const std::string &value)
-{
-    std::string escaped;
-    escaped.reserve(value.size());
-    static const char hex[] = "0123456789ABCDEF";
-    for(unsigned char ch : value)
-    {
-        if(ch < 0x20 || ch == 0x7F)
-        {
-            escaped += "\\x";
-            escaped += hex[ch >> 4];
-            escaped += hex[ch & 0x0F];
-        }
-        else
-            escaped.push_back(static_cast<char>(ch));
-    }
-    return escaped;
-}
-
 static bool has_control_character(const std::string &value)
 {
     for(unsigned char ch : value)
@@ -356,7 +347,7 @@ bool isFetchUrlAllowed(const std::string &url, FetchContext context)
     if(!isPublicFetchRestricted(context))
         return true;
     std::string checked_url = trimWhitespace(url, true, true);
-    std::string log_url = escape_log_value(checked_url);
+    std::string log_url = summarizeUrlForLog(checked_url);
     if(checked_url.empty() || checked_url != url || has_control_character(checked_url))
     {
         writeLog(0, "已阻止公开请求获取格式异常的 URL：" + log_url,
@@ -467,6 +458,8 @@ static int dummy_writer(char *, size_t size, size_t nmemb, void *)
 //static int size_checker(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow)
 static int size_checker(void *clientp, curl_off_t, curl_off_t dlnow, curl_off_t, curl_off_t)
 {
+    if(outbound_fetch_shutdown_requested.load(std::memory_order_relaxed))
+        return 1;
     if(clientp)
     {
         auto *data = reinterpret_cast<curl_progress_data*>(clientp);
@@ -501,20 +494,35 @@ static int logger(CURL *handle, curl_infotype type, char *data, size_t size, voi
         return 0;
     }
     std::string content(data, size);
+    auto safe_header_line = [](const std::string &line) {
+        std::string value = trimWhitespace(line);
+        if(value.empty() || startsWith(value, "HTTP/"))
+            return value;
+        const std::string::size_type colon = value.find(':');
+        if(colon != std::string::npos)
+            return value.substr(0, colon) + ": <redacted>";
+        const std::string::size_type first_space = value.find(' ');
+        const std::string::size_type last_space = value.rfind(' ');
+        if(first_space != std::string::npos && last_space > first_space)
+            return value.substr(0, first_space) + " <redacted> " +
+                   value.substr(last_space + 1);
+        return std::string("<redacted>");
+    };
     if(content.find("\r\n") != std::string::npos)
     {
         string_array lines = split(content, "\r\n");
         for(auto &x : lines)
         {
             std::string log_content = prefix;
-            log_content += x;
+            log_content += type == CURLINFO_TEXT ? x : safe_header_line(x);
             writeLog(0, log_content, LOG_LEVEL_VERBOSE);
         }
     }
     else
     {
         std::string log_content = prefix;
-        log_content += trimWhitespace(content);
+        log_content += type == CURLINFO_TEXT ? trimWhitespace(content)
+                                             : safe_header_line(content);
         writeLog(0, log_content, LOG_LEVEL_VERBOSE);
     }
     return 0;
@@ -557,9 +565,9 @@ static inline void curl_set_common_options(CURL *curl_handle, const char *url, c
     curl_easy_setopt(curl_handle, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl_handle, CURLOPT_MAXREDIRS, 20L);
     curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYPEER,
-                     global.allowInsecureTls ? 0L : 1L);
+                     effectiveSettings().allowInsecureTls ? 0L : 1L);
     curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYHOST,
-                     global.allowInsecureTls ? 0L : 2L);
+                     effectiveSettings().allowInsecureTls ? 0L : 2L);
     curl_easy_setopt(curl_handle, CURLOPT_TIMEOUT, 15L);
     curl_easy_setopt(curl_handle, CURLOPT_COOKIEFILE, "");
     if(data)
@@ -674,6 +682,14 @@ static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode 
     defer(curl_slist_free_all(header_list);)
     CURLcode retVal;
 
+    if(outbound_fetch_shutdown_requested.load(std::memory_order_relaxed))
+    {
+        *result.status_code = 0;
+        if(return_code)
+            *return_code = CURLE_ABORTED_BY_CALLBACK;
+        return 0;
+    }
+
     retVal = curl_init();
     if(retVal != CURLE_OK)
     {
@@ -686,7 +702,8 @@ static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode 
 
     CurlHandleLease curl_lease =
         globalCurlHandlePool(
-            static_cast<size_t>(std::max(1, global.maxConcurThreads)))
+            static_cast<size_t>(
+                std::max(1, effectiveSettings().maxConcurThreads)))
             .acquire();
     curl_handle = curl_lease.get();
     if(curl_handle == nullptr)
@@ -712,7 +729,7 @@ static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode 
         header_list = curl_slist_append(header_list,
                                         "X-Requested-With: SubConverter-Extended " VERSION);
     curl_progress_data limit;
-    limit.size_limit = global.maxAllowedDownloadSize;
+    limit.size_limit = effectiveSettings().maxAllowedDownloadSize;
     curl_set_common_options(curl_handle, new_url.data(), &limit);
     retVal = curl_set_platform_tls_trust(curl_handle);
     if(retVal != CURLE_OK)
@@ -803,6 +820,7 @@ static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode 
 
     retVal = curl_easy_perform(curl_handle);
     if(retVal != CURLE_OK &&
+       !outbound_fetch_shutdown_requested.load(std::memory_order_relaxed) &&
        (argument.method == HTTP_GET || argument.method == HTTP_HEAD) &&
        is_recoverable_curl_error(retVal))
     {
@@ -813,7 +831,10 @@ static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode 
         if(result.response_headers)
             result.response_headers->clear();
         sleepMs(200);
-        retVal = curl_easy_perform(curl_handle);
+        if(outbound_fetch_shutdown_requested.load(std::memory_order_relaxed))
+            retVal = CURLE_ABORTED_BY_CALLBACK;
+        else
+            retVal = curl_easy_perform(curl_handle);
     }
 
     long code = 0;
@@ -885,6 +906,7 @@ static int curlGetWithGitHubFallback(const FetchArgument &argument, FetchResult 
     std::string fallback_url;
     if(argument.method != HTTP_GET || argument.keep_resp_on_fail ||
        original_status == 200 ||
+       outbound_fetch_shutdown_requested.load(std::memory_order_relaxed) ||
        !should_try_jsdelivr_fallback(original_code, original_status) ||
        !build_jsdelivr_github_url(argument.url, fallback_url))
         return original_status;
@@ -897,7 +919,7 @@ static int curlGetWithGitHubFallback(const FetchArgument &argument, FetchResult 
 
     writeLog(0,
              "GitHub Raw 获取失败，正在尝试 jsDelivr 回退源：" +
-                 fallback_url,
+                  summarizeUrlForLog(fallback_url),
              LOG_LEVEL_WARNING);
     clear_fetch_output(result);
 
@@ -912,13 +934,14 @@ static int curlGetWithGitHubFallback(const FetchArgument &argument, FetchResult 
     {
         writeLog(0,
                  "GitHub Raw 已通过 jsDelivr 回退源获取成功：" +
-                     fallback_url,
+                      summarizeUrlForLog(fallback_url),
                  LOG_LEVEL_INFO);
         return fallback_status;
     }
 
     writeLog(0,
-             "GitHub Raw 通过 jsDelivr 回退源获取失败：" + fallback_url,
+             "GitHub Raw 通过 jsDelivr 回退源获取失败：" +
+                 summarizeUrlForLog(fallback_url),
              LOG_LEVEL_WARNING);
     clear_fetch_output(result);
     if(result.response_headers)
@@ -939,17 +962,17 @@ static std::string dataGet(const std::string &url)
         return "";
 
     std::string data = urlDecode(url.substr(comma + 1));
-    if (global.maxAllowedDownloadSize > 0 &&
-        data.size() > static_cast<size_t>(global.maxAllowedDownloadSize)) {
+    const long max_download_size = effectiveSettings().maxAllowedDownloadSize;
+    if (max_download_size > 0 &&
+        data.size() > static_cast<size_t>(max_download_size)) {
         writeLog(0, "已阻止 data URL：内容超过最大下载大小。",
                  LOG_LEVEL_WARNING);
         return "";
     }
     if (endsWith(url.substr(0, comma), ";base64")) {
         std::string decoded = urlSafeBase64Decode(data);
-        if (global.maxAllowedDownloadSize > 0 &&
-            decoded.size() >
-                static_cast<size_t>(global.maxAllowedDownloadSize)) {
+        if (max_download_size > 0 &&
+            decoded.size() > static_cast<size_t>(max_download_size)) {
             writeLog(0,
                      "已阻止解码后的 data URL：内容超过最大下载大小。",
                      LOG_LEVEL_WARNING);
@@ -977,11 +1000,12 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned in
         return "";
 
     CocrSourceResolution source =
-        resolveCocrSourceUrl(url, global.customOpenClashRulesSourceSwitch);
+        resolveCocrSourceUrl(
+            url, effectiveSettings().customOpenClashRulesSourceSwitch);
     const std::string &effective_url = source.effective_url;
     if(source.rewritten && shouldLog(LOG_LEVEL_VERBOSE))
-        writeLog(0, "COCR 服务端取源切换：'" + url + "' -> '" +
-                        effective_url + "'。",
+        writeLog(0, "COCR 服务端取源切换：" + summarizeUrlForLog(url) +
+                        " -> " + summarizeUrlForLog(effective_url) + "。",
                  LOG_LEVEL_VERBOSE);
 
     FetchArgument argument {HTTP_GET, effective_url, proxy, nullptr,
@@ -1005,21 +1029,28 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned in
             if(difftime(now, mtime) <= cache_ttl) // within TTL
             {
                 if(shouldLog(LOG_LEVEL_VERBOSE))
-                    writeLog(0, "缓存命中：'" + effective_url + "'，使用本地缓存。");
+                    writeLog(0, "缓存命中：" +
+                                    summarizeUrlForLog(effective_url) +
+                                    "，使用本地缓存。");
                 //guarded_mutex guard(cache_rw_lock);
                 cache_rw_lock.readLock();
                 defer(cache_rw_lock.readUnlock();)
                 if(response_headers)
-                    *response_headers = fileGet(path_header, true);
+                    *response_headers =
+                        readCachedResponseHeaders(path_header);
                 return fileGet(path, true);
             }
             if(shouldLog(LOG_LEVEL_VERBOSE))
-                writeLog(0, "缓存过期：'" + effective_url + "'，正在创建新缓存。"); // out of TTL
+                writeLog(0, "缓存过期：" +
+                                summarizeUrlForLog(effective_url) +
+                                "，正在创建新缓存。"); // out of TTL
         }
         else
         {
             if(shouldLog(LOG_LEVEL_VERBOSE))
-                writeLog(0, "缓存不存在：'" + effective_url + "'，正在创建新缓存。");
+                writeLog(0, "缓存不存在：" +
+                                summarizeUrlForLog(effective_url) +
+                                "，正在创建新缓存。");
         }
         std::shared_future<CacheFetchResult> fetch_future;
         std::shared_ptr<std::promise<CacheFetchResult>> fetch_promise;
@@ -1069,14 +1100,39 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned in
                 //guarded_mutex guard(cache_rw_lock);
                 cache_rw_lock.writeLock();
                 defer(cache_rw_lock.writeUnlock();)
-                fileWrite(path, content, true);
-                if(!fetched.response_headers.empty())
-                    fileWrite(path_header, fetched.response_headers, true);
+                const CacheUpdateResult cache_update = updateCacheFiles(
+                    path, path_header, content, fetched.response_headers);
+                if(cache_update == CacheUpdateResult::Unchanged) {
+                    writeLog(0,
+                             "CACHE_UPDATE_FAILED body=unchanged headers=unchanged; "
+                             "本次已获取内容仍将直接返回。",
+                             LOG_LEVEL_WARNING);
+                }
+                else if(cache_update ==
+                        CacheUpdateResult::UnchangedHeadersInvalidated) {
+                    writeLog(0,
+                             "CACHE_UPDATE_FAILED body=unchanged "
+                             "headers=invalidated; 本次已获取内容仍将直接返回。",
+                             LOG_LEVEL_WARNING);
+                }
+                else if(cache_update ==
+                        CacheUpdateResult::BodyCommittedUnsynced) {
+                    writeLog(0,
+                             "CACHE_BODY_COMMITTED durability=unconfirmed "
+                             "headers=invalidated; 本次已获取内容仍将直接返回。",
+                             LOG_LEVEL_WARNING);
+                }
+                else if(cache_update == CacheUpdateResult::HeadersInvalidated) {
+                    writeLog(0,
+                             "CACHE_BODY_COMMITTED durability=confirmed "
+                             "headers=invalidated; 本次已获取内容仍将直接返回。",
+                             LOG_LEVEL_WARNING);
+                }
             }
         }
         else
         {
-            if(fileExist(path) && global.serveCacheOnFetchFail) // failed, check if cache exist
+            if(fileExist(path) && effectiveSettings().serveCacheOnFetchFail) // failed, check if cache exist
             {
                 if(shouldLog(LOG_LEVEL_VERBOSE))
                     writeLog(0, "获取失败，返回缓存内容。"); // cache exist, serving cache
@@ -1085,7 +1141,8 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned in
                 defer(cache_rw_lock.readUnlock();)
                 content = fileGet(path, true);
                 if(response_headers)
-                    *response_headers = fileGet(path_header, true);
+                    *response_headers =
+                        readCachedResponseHeaders(path_header);
             }
             else
             {
@@ -1153,8 +1210,9 @@ int webGet(const FetchArgument& argument, FetchResult &result)
     }
     CocrSourceResolution source =
         argument.method == HTTP_GET
-            ? resolveCocrSourceUrl(argument.url,
-                                   global.customOpenClashRulesSourceSwitch)
+            ? resolveCocrSourceUrl(
+                  argument.url,
+                  effectiveSettings().customOpenClashRulesSourceSwitch)
             : CocrSourceResolution{argument.url, false};
     if (startsWith(source.effective_url, "data:")) {
         if (result.content)
@@ -1167,8 +1225,9 @@ int webGet(const FetchArgument& argument, FetchResult &result)
         return curlGetWithGitHubFallback(argument, result);
 
     if(shouldLog(LOG_LEVEL_VERBOSE))
-        writeLog(0, "COCR 服务端取源切换：'" + argument.url + "' -> '" +
-                        source.effective_url + "'。",
+        writeLog(0, "COCR 服务端取源切换：" +
+                        summarizeUrlForLog(argument.url) + " -> " +
+                        summarizeUrlForLog(source.effective_url) + "。",
                  LOG_LEVEL_VERBOSE);
     FetchArgument effective_argument {
         argument.method, source.effective_url, argument.proxy,

@@ -6,6 +6,7 @@
 #include <dirent.h>
 #include <sys/types.h>
 
+#include "config/preference_file.h"
 #include "config/ruleset.h"
 #include "handler/curl_handle_pool.h"
 #include "handler/dashboard_auth.h"
@@ -14,19 +15,16 @@
 #include "handler/interfaces.h"
 #include "handler/multithread.h"
 #include "handler/settings.h"
+#include "handler/settings_view.h"
 #include "handler/statistics.h"
 #include "handler/version_page.h"
-#include "handler/webget.h"
 #include "script/cron.h"
 #include "server/socket.h"
 #include "server/webserver.h"
 #include "utils/defer.h"
-#include "utils/file_extra.h"
 #include "utils/logger.h"
-#include "utils/network.h"
 #include "utils/rapidjson_extra.h"
 #include "utils/system.h"
-#include "utils/urlencode.h"
 #include "version.h"
 
 // #include "vfs.h"
@@ -116,26 +114,47 @@ void cron_tick_caller() {
     statistics::tick();
 }
 
+void shutdown_runtime() {
+  shutdownRulesetExecutor();
+  statistics::shutdown();
+  shutdownGlobalCurlHandlePool();
+}
+
 int main(int argc, char *argv[]) {
 #ifndef _DEBUG
   std::string prgpath = argv[0];
   setcd(prgpath); // first switch to program directory
 #endif            // _DEBUG
-  if (fileExist("pref.toml"))
-    global.prefPath = "pref.toml";
-  else if (fileExist("pref.yml"))
-    global.prefPath = "pref.yml";
-  else if (!fileExist("pref.ini")) {
-    if (fileExist("pref.example.toml")) {
-      fileCopy("pref.example.toml", "pref.toml");
-      global.prefPath = "pref.toml";
-    } else if (fileExist("pref.example.yml")) {
-      fileCopy("pref.example.yml", "pref.yml");
-      global.prefPath = "pref.yml";
-    } else if (fileExist("pref.example.ini"))
-      fileCopy("pref.example.ini", "pref.ini");
-  }
+  const PreferenceFileSelection default_preference =
+      prepareDefaultPreferenceFile();
+  global.prefPath = default_preference.path;
   chkArg(argc, argv);
+  if (default_preference.status ==
+      PreferenceFileStatus::CopyCommittedUnsynced) {
+    writeLog(0,
+             "DEFAULT_PREFERENCE_COPY_VISIBLE source=" +
+                 default_preference.source +
+                 " destination=" + default_preference.path +
+                 " new_file_visible=true durability=unconfirmed "
+                 "action=continue",
+             LOG_LEVEL_WARNING);
+  }
+  if (defaultPreferenceRequiresExit(default_preference, global.prefPath)) {
+    const bool temporary_remaining =
+        default_preference.status ==
+        PreferenceFileStatus::CopyFailedTemporaryRemaining;
+    writeLog(0,
+             std::string("DEFAULT_PREFERENCE_COPY_FAILED") +
+                 " source=" + default_preference.source +
+                 " destination=" + default_preference.path +
+                 " new_file_visible=false" +
+                 (temporary_remaining
+                      ? " temporary_file_remaining=true"
+                      : " temporary_file_remaining=false") +
+                 " action=exit",
+             LOG_LEVEL_FATAL);
+    return 1;
+  }
   setcd(global.prefPath); // then switch to pref directory
   writeLog(0, "SubConverter-Extended " VERSION " 正在启动...", LOG_LEVEL_INFO);
 #ifdef _WIN32
@@ -145,6 +164,7 @@ int main(int argc, char *argv[]) {
     writeLog(0, "WSAStartup 初始化失败。", LOG_LEVEL_FATAL);
     return 1;
   }
+  defer(WSACleanup();)
   UINT origcp = GetConsoleOutputCP();
   defer(SetConsoleOutputCP(origcp);) SetConsoleOutputCP(65001);
 #else
@@ -177,13 +197,15 @@ int main(int argc, char *argv[]) {
           std::to_string(rulesetConversionCacheMaxEntries()) + " entries/" +
           std::to_string(rulesetConversionCacheMaxBytes()) + " bytes。",
       LOG_LEVEL_INFO);
+  // Register cleanup before any background refresh starts. The HTTP backend
+  // drains accepted requests before returning, so only then may the executor
+  // cancel unobserved work and release its curl leases before the pool stops.
+  defer(shutdown_runtime();)
   statistics::initialize();
   // vfs::vfs_read("vfs.ini");
   if (!global.updateRulesetOnRequest)
     refreshRulesets(global.customRulesets, global.rulesetsContent);
 
-  // API_MODE and API_TOKEN environment variables removed
-  // APIMode is hardcoded to true for security
   auto normalize_managed_prefix = [](const std::string &raw_value) {
     std::string value = trimWhitespace(raw_value, true, true);
     while (value.size() > 1 && value.back() == '/' && !endsWith(value, "://"))
@@ -207,17 +229,10 @@ int main(int argc, char *argv[]) {
   else if (!env_managed_prefix.empty())
     global.managedConfigPrefix = env_managed_prefix;
   global.templateVars["managed_config_prefix"] = global.managedConfigPrefix;
+  publishSettingsSnapshot(global);
 
   if (global.generatorMode)
     return simpleGenerator();
-
-  /*
-  webServer.append_response("GET", "/", "text/plain", [](RESPONSE_CALLBACK_ARGS)
-  -> std::string
-  {
-      return "SubConverter-Extended " VERSION " backend\n";
-  });
-  */
 
   webServer.append_response("GET", "/version/favicon-dark.svg",
                             "image/svg+xml; charset=utf-8",
@@ -256,60 +271,6 @@ int main(int argc, char *argv[]) {
                               return "ok\n";
                             });
 
-  /*
-  webServer.append_response("GET", "/refreshrules", "text/plain",
-                            [](RESPONSE_CALLBACK_ARGS) -> std::string {
-                              // Token authentication disabled - no
-                              // authorization required
-                              refreshRulesets(global.customRulesets,
-                                              global.rulesetsContent);
-                              return "done\n";
-                            });
-  */
-
-  /*
-  webServer.append_response("GET", "/readconf", "text/plain",
-                            [](RESPONSE_CALLBACK_ARGS) -> std::string {
-                              // Token authentication disabled - no
-                              // authorization required
-                              readConf();
-                              if (!global.updateRulesetOnRequest)
-                                refreshRulesets(global.customRulesets,
-                                                global.rulesetsContent);
-                              return "done\n";
-                            });
-  */
-
-  /*
-  webServer.append_response(
-      "POST", "/updateconf", "text/plain",
-      [](RESPONSE_CALLBACK_ARGS) -> std::string {
-        // Token authentication disabled - no authorization required
-        std::string type = getUrlArg(request.argument, "type");
-        if (type == "form" || type == "direct") {
-          fileWrite(global.prefPath, request.postdata, true);
-        } else {
-          response.status_code = 501;
-          return "Not Implemented\n";
-        }
-
-        readConf();
-        if (!global.updateRulesetOnRequest)
-          refreshRulesets(global.customRulesets, global.rulesetsContent);
-        return "done\n";
-      });
-  */
-
-  /*
-  webServer.append_response("GET", "/flushcache", "text/plain",
-                            [](RESPONSE_CALLBACK_ARGS) -> std::string {
-                              // Token authentication disabled - no
-                              // authorization required
-                              flushCache();
-                              return "done";
-                            });
-  */
-
   webServer.append_response("GET", "/sub", "text/plain;charset=utf-8",
                             global.statisticsEnabled ? subconverterTracked
                                                      : subconverter);
@@ -318,49 +279,13 @@ int main(int argc, char *argv[]) {
                             global.statisticsEnabled ? subconverterTracked
                                                      : subconverter);
 
-  /*
-  webServer.append_response("GET", "/sub2clashr", "text/plain;charset=utf-8",
-                            simpleToClashR);
-
-  webServer.append_response("GET", "/surge2clash", "text/plain;charset=utf-8",
-                            surgeConfToClash);
-  */
-
   webServer.append_response("GET", "/getruleset", "text/plain;charset=utf-8",
                             getRuleset);
-
-  /*
-  webServer.append_response("GET", "/getprofile", "text/plain;charset=utf-8",
-                            getProfile);
-
-  webServer.append_response("GET", "/render", "text/plain;charset=utf-8",
-                            renderTemplate);
-  */
-
-  if (!global.APIMode) {
-    webServer.append_response("GET", "/get", "text/plain;charset=utf-8",
-                              [](RESPONSE_CALLBACK_ARGS) -> std::string {
-                                std::string url = urlDecode(
-                                    getUrlArg(request.argument, "url"));
-                                return webGet(url, parseProxy(global.proxyConfig));
-                              });
-
-    webServer.append_response(
-        "GET", "/getlocal", "text/plain;charset=utf-8",
-        [](RESPONSE_CALLBACK_ARGS) -> std::string {
-          return fileGet(urlDecode(getUrlArg(request.argument, "path")));
-        });
-  }
-
-  // webServer.append_response("POST", "/create-profile",
-  // "text/plain;charset=utf-8", createProfile);
-
-  // webServer.append_response("GET", "/list-profiles",
-  // "text/plain;charset=utf-8", listProfiles);
 
   std::string env_port = getEnv("PORT");
   if (!env_port.empty())
     global.listenPort = to_int(env_port, global.listenPort);
+  publishSettingsSnapshot(global);
   if (global.securityProfile == "lan" &&
       (global.listenAddress == "0.0.0.0" || global.listenAddress == "::")) {
     writeLog(0,
@@ -368,6 +293,7 @@ int main(int argc, char *argv[]) {
              "security.profile=public。",
              LOG_LEVEL_WARNING);
   }
+  logSecurityPosture();
   listener_args args = {global.listenAddress,   global.listenPort,
                         global.maxPendingConns, global.maxConcurThreads,
                         cron_tick_caller,       200};
@@ -378,10 +304,5 @@ int main(int argc, char *argv[]) {
                std::to_string(global.listenPort),
            LOG_LEVEL_INFO);
   int ret = webServer.start_web_server_multi(&args);
-  statistics::shutdown();
-
-#ifdef _WIN32
-  WSACleanup();
-#endif // _WIN32
   return ret;
 }

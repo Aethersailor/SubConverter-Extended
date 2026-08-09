@@ -39,30 +39,41 @@ public:
     std::future<Result> future = task->get_future();
     std::function<void()> invoke = [task] { (*task)(); };
     bool run_inline = false;
+    bool rejected = false;
 
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (stopping_ || current_executor_ == this ||
-          tasks_.size() >= queue_capacity_) {
+      if (stopping_) {
+        rejected = true;
+      } else if (current_executor_ == this ||
+                 tasks_.size() >= queue_capacity_) {
         run_inline = true;
       } else {
         tasks_.emplace_back(std::move(invoke));
       }
     }
 
-    if (run_inline)
+    if (rejected) {
+      // Destroying the packaged task makes the returned future report a
+      // broken promise without starting new work after shutdown begins.
+      return future;
+    } else if (run_inline) {
       invoke();
-    else
+    } else {
       cv_.notify_one();
+    }
     return future;
   }
 
-  void shutdown() {
+  void shutdown(bool cancel_pending = false) {
+    std::deque<std::function<void()>> cancelled_tasks;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (stopping_)
         return;
       stopping_ = true;
+      if (cancel_pending)
+        cancelled_tasks.swap(tasks_);
     }
     cv_.notify_all();
     for (std::thread &worker : workers_) {

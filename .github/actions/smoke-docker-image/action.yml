@@ -12,6 +12,15 @@ inputs:
     description: Container port exposed by SubConverter.
     required: false
     default: "25500"
+  expected-version:
+    description: Expected OCI and compiled version value.
+    required: true
+  expected-revision:
+    description: Expected OCI and compiled full source revision.
+    required: true
+  expected-build-date:
+    description: Expected OCI build timestamp.
+    required: true
 
 runs:
   using: composite
@@ -24,8 +33,15 @@ runs:
         IMAGE="${{ inputs.image }}"
         PLATFORM="${{ inputs.platform }}"
         CONTAINER_PORT="${{ inputs.port }}"
+        EXPECTED_VERSION="${{ inputs.expected-version }}"
+        EXPECTED_REVISION="${{ inputs.expected-revision }}"
+        EXPECTED_BUILD_DATE="${{ inputs.expected-build-date }}"
         CID=""
+        POLICY_CID=""
         cleanup() {
+          if [ -n "$POLICY_CID" ]; then
+            docker rm -f "$POLICY_CID" >/dev/null 2>&1 || true
+          fi
           if [ -n "$CID" ]; then
             docker rm -f "$CID" >/dev/null 2>&1 || true
           fi
@@ -52,6 +68,12 @@ runs:
         for _ in $(seq 1 30); do
           if curl -fsS "$URL" >/tmp/subconverter-smoke.out; then
             head -c 200 /tmp/subconverter-smoke.out
+            python3 scripts/verify_container_image_identity.py \
+              --container "$CID" \
+              --url "$URL" \
+              --expected-version "$EXPECTED_VERSION" \
+              --expected-revision "$EXPECTED_REVISION" \
+              --expected-build-date "$EXPECTED_BUILD_DATE"
             python3 scripts/run-subconverter-smoke.py \
               --base-url "http://127.0.0.1:${HOST_PORT}" \
               --remote-subscription-url "${FIXTURE_BASE}/sample-subscription.txt" \
@@ -64,6 +86,40 @@ runs:
             route_status="$(curl -sS -o /dev/null -w '%{http_code}' \
               "http://127.0.0.1:${HOST_PORT}/Custom_OpenClash_Rules/main/rule/example.yaml")"
             test "$route_status" = "404"
+
+            docker logs "$CID" >/tmp/subconverter-security-default.log 2>&1
+            grep -F "SECURITY_PROFILE_EFFECTIVE profile=lan source=file:toml" \
+              /tmp/subconverter-security-default.log
+            grep -F "SECURITY_UPLOAD_EFFECTIVE profile=lan configured_allow_public_upload=false source=file:toml effective=allowed reason=lan-compatibility" \
+              /tmp/subconverter-security-default.log
+            grep -F "SECURITY_EXPOSURE_POSSIBLE profile=lan bind=0.0.0.0:${CONTAINER_PORT} public_reachability=unknown" \
+              /tmp/subconverter-security-default.log
+
+            POLICY_CID="$(docker run -d --platform "$PLATFORM" \
+              -e PORT=25501 \
+              -e SUBCONVERTER_SECURITY_PROFILE=publci \
+              -e SUBCONVERTER_ALLOW_PUBLIC_UPLOAD=truthy \
+              "$IMAGE")"
+            policy_ready=false
+            for _ in $(seq 1 20); do
+              docker logs "$POLICY_CID" >/tmp/subconverter-security-policy.log 2>&1 || true
+              if grep -Fq "SECURITY_PROFILE_INVALID_FALLBACK source=environment input='publci' effective=lan compatibility_fallback=true" \
+                  /tmp/subconverter-security-policy.log \
+                && grep -Fq "SECURITY_UPLOAD_VALUE_INVALID source=environment input='truthy' effective=false" \
+                  /tmp/subconverter-security-policy.log; then
+                policy_ready=true
+                break
+              fi
+              if ! docker ps --filter "id=$POLICY_CID" --format '{{.ID}}' | grep -q .; then
+                cat /tmp/subconverter-security-policy.log
+                exit 1
+              fi
+              sleep 1
+            done
+            if [ "$policy_ready" != true ]; then
+              cat /tmp/subconverter-security-policy.log
+              exit 1
+            fi
             exit 0
           fi
 

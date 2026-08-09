@@ -3,22 +3,21 @@ name: Sync Dev to Master
 on:
   workflow_dispatch:
     inputs:
-      release_mode:
-        description: "Release mode: new creates a tag, overwrite rebuilds an existing release, sync_only only syncs branches."
+      operation:
+        description: "new creates one new immutable vX.Y.Z tag; sync_only only validates and syncs master."
         required: true
-        default: "new"
+        default: sync_only
         type: choice
         options:
-          - new
-          - overwrite
           - sync_only
+          - new
       version:
-        description: "Release tag, e.g. v1.2.3. Empty auto bumps for new or uses latest existing tag for overwrite."
+        description: "Required for new. Exact unused tag such as v1.3.1; never an existing version."
         required: false
         type: string
-      confirm_overwrite:
-        description: "Type OVERWRITE to confirm rebuilding an existing release."
-        required: false
+      expected_dev_sha:
+        description: "Required full origin/dev SHA approved for this sync."
+        required: true
         type: string
 
 concurrency:
@@ -26,299 +25,327 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  actions: read
   contents: read
+  packages: read
 
 jobs:
+  preflight-dev:
+    name: Verify approved dev before master changes
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.ci.outputs.source_sha }}
+    steps:
+      - name: Checkout approved dev revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.expected_dev_sha }}
+          fetch-depth: 2
+
+      - name: Verify exact dev CI provenance
+        id: ci
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          EXPECTED_DEV_SHA: ${{ inputs.expected_dev_sha }}
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          git fetch --no-tags origin dev
+          actual_dev_sha="$(git rev-parse origin/dev)"
+          if [ "$actual_dev_sha" != "$EXPECTED_DEV_SHA" ]; then
+            echo "::error::origin/dev is $actual_dev_sha, not approved SHA $EXPECTED_DEV_SHA."
+            exit 1
+          fi
+
+          source_sha="$EXPECTED_DEV_SHA"
+          build_run="$(gh run list --repo "$repo" \
+            --workflow build-dockerhub.yml --branch dev --event push \
+            --commit "$source_sha" --status success --limit 20 \
+            --json databaseId,headSha \
+            --jq ".[] | select(.headSha == \"$source_sha\") | .databaseId" | head -n 1)"
+
+          if [ -z "$build_run" ]; then
+            title="$(git show -s --format=%s "$EXPECTED_DEV_SHA")"
+            committer="$(git show -s --format=%cn "$EXPECTED_DEV_SHA")"
+            parents="$(git show -s --format=%P "$EXPECTED_DEV_SHA")"
+            if [ "$title" = "chore: update generated development inputs after build [skip ci]" ] && \
+               [ "$committer" = "github-actions[bot]" ] && \
+               [ "$(wc -w <<<"$parents")" -eq 1 ]; then
+              source_sha="$parents"
+              build_run="$(gh run list --repo "$repo" \
+                --workflow build-dockerhub.yml --branch dev --event push \
+                --commit "$source_sha" --status success --limit 20 \
+                --json databaseId,headSha \
+                --jq ".[] | select(.headSha == \"$source_sha\") | .databaseId" | head -n 1)"
+            fi
+          fi
+
+          if [ -z "$build_run" ]; then
+            echo "::error::No successful dev image build exists for $EXPECTED_DEV_SHA."
+            exit 1
+          fi
+
+          codeql_run="$(gh run list --repo "$repo" \
+            --workflow codeql.yml --branch dev --event push \
+            --commit "$source_sha" --status success --limit 20 \
+            --json databaseId,headSha \
+            --jq ".[] | select(.headSha == \"$source_sha\") | .databaseId" | head -n 1)"
+          if [ -z "$codeql_run" ]; then
+            echo "::error::No successful CodeQL run exists for approved source $source_sha."
+            exit 1
+          fi
+
+          echo "Approved dev head: $EXPECTED_DEV_SHA"
+          echo "Validated source: $source_sha"
+          echo "Build run: $build_run"
+          echo "CodeQL run: $codeql_run"
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Verify published dev image identity
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.ci.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/aethersailor/subconverter-extended:dev"
+          docker pull "$image"
+          revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")"
+          version="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$image")"
+          test "$revision" = "$SOURCE_SHA"
+          test "$version" = "dev"
+
+      - name: Resolve pinned build inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/dependency_snapshot.py check
+          python3 scripts/ci/dependency_snapshot.py emit --github-env "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
+
+      - name: Run release-readiness ASan and UBSan
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.ci.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          THREADS="$(nproc)"
+          export THREADS
+          export SHA="$SOURCE_SHA"
+          export VERSION="sanitizer-${SOURCE_SHA::7}"
+          BUILD_DATE="$(git show -s --format=%cI HEAD)"
+          export BUILD_DATE
+          export BUILD_TESTS=true
+          mapfile -t build_args < <(bash scripts/ci/docker-build-args.sh)
+          args=()
+          for arg in "${build_args[@]}"; do
+            [ -n "$arg" ] && args+=(--build-arg "$arg")
+          done
+          args+=(--build-arg ENABLE_SANITIZERS=true)
+          docker buildx build \
+            --file Dockerfile \
+            --platform linux/amd64 \
+            --target builder \
+            --output type=cacheonly \
+            --cache-from type=gha,scope=release-readiness-sanitizers \
+            --cache-to type=gha,scope=release-readiness-sanitizers,mode=max \
+            --progress plain \
+            "${args[@]}" \
+            .
+
   sync-branches:
     runs-on: ubuntu-latest
+    needs: preflight-dev
     steps:
       - name: Checkout master
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: master
           token: ${{ secrets.PAT_TOKEN }}
           fetch-depth: 0
 
-      - name: Setup Git User
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Merge Dev into Master
-        id: sync
+      - name: Validate requested operation and source
+        id: request
+        shell: bash
+        env:
+          OPERATION: ${{ inputs.operation }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+          EXPECTED_DEV_SHA: ${{ inputs.expected_dev_sha }}
         run: |
           set -euo pipefail
 
-          echo "Merging dev into master..."
-          # Attempt merge; if it fails (conflicts), continue execution to resolve them
-          if ! git merge origin/dev --no-commit --no-ff; then
-            echo "Merge conflicts detected, resolving..."
-            
-            # Get list of conflicting files
-            CONFLICTED_FILES=$(git diff --name-only --diff-filter=U)
-            
-            for file in $CONFLICTED_FILES; do
+          if [[ ! "$EXPECTED_DEV_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::expected_dev_sha must be a full 40-character Git SHA."
+            exit 1
+          fi
+
+          git fetch --no-tags origin dev
+          ACTUAL_DEV_SHA="$(git rev-parse origin/dev)"
+          if [ "$ACTUAL_DEV_SHA" != "$EXPECTED_DEV_SHA" ]; then
+            echo "::error::origin/dev is $ACTUAL_DEV_SHA, not approved SHA $EXPECTED_DEV_SHA."
+            exit 1
+          fi
+
+          VERSION="${REQUESTED_VERSION:-}"
+          VERSION="${VERSION#"${VERSION%%[![:space:]]*}"}"
+          VERSION="${VERSION%"${VERSION##*[![:space:]]}"}"
+          if [ "$OPERATION" = "new" ]; then
+            if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::new requires an explicit unused vX.Y.Z version."
+              exit 1
+            fi
+            git fetch --tags origin
+            if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null || \
+               git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1; then
+              echo "::error::Tag $VERSION already exists. Historical versions are frozen; choose a new version."
+              exit 1
+            fi
+          elif [ -n "$VERSION" ]; then
+            echo "::error::sync_only must not carry a release version."
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "dev_sha=$ACTUAL_DEV_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Merge approved dev into master
+        id: sync
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if ! git merge "${{ steps.request.outputs.dev_sha }}" --no-commit --no-ff; then
+            conflicted_files="$(git diff --name-only --diff-filter=U)"
+            for file in $conflicted_files; do
               if [[ "$file" == README*.md || "$file" == docs/images/readme-flow-*.svg ]]; then
-                # For README files and their diagram assets, keep master version
-                echo "Keeping master version of $file"
                 git checkout --ours "$file"
               else
-                # For other files (code, workflows), use dev version
-                echo "Using dev version of $file"
                 git checkout --theirs "$file"
               fi
               git add "$file"
             done
           fi
-          
-          echo "Restoring master README and diagram assets..."
-          # Restore README.md and its diagram assets from HEAD (master) state, discarding changes from dev
+
           git checkout HEAD -- README.md 2>/dev/null || true
           git checkout HEAD -- 'README-*.md' 2>/dev/null || true
           git checkout HEAD -- 'docs/images/readme-flow-*.svg' 2>/dev/null || true
-          
-          # Re-add README files and diagram assets to staging if they were modified
-          git add README.md 2>/dev/null || true
-          git add README-*.md 2>/dev/null || true
-          git add docs/images/readme-flow-*.svg 2>/dev/null || true
-          
-          # Commit whenever a merge is in progress, even if protected docs made
-          # the final tree identical to master. This records dev as merged.
+          git add README.md README-*.md docs/images/readme-flow-*.svg 2>/dev/null || true
+
           if [ -f .git/MERGE_HEAD ]; then
-            echo "Committing merge..."
             git commit -m "chore: sync dev to master"
-            echo "Pushing..."
-            git push origin master
-          elif git diff --staged --quiet; then
-            echo "No changes to commit (maybe dev is already merged or only protected docs changed)"
-          else
-            echo "Committing..."
+          elif ! git diff --staged --quiet; then
             git commit -m "chore: sync dev to master"
-            echo "Pushing..."
-            git push origin master
           fi
 
           MASTER_COMMIT="$(git rev-parse HEAD)"
+          git push origin "HEAD:refs/heads/master"
           echo "master_commit=$MASTER_COMMIT" >> "$GITHUB_OUTPUT"
-          echo "Master commit selected for downstream work: $MASTER_COMMIT"
 
-      - name: Resolve Release Tag
-        id: release_tag
-        if: ${{ inputs.release_mode != 'sync_only' }}
-        env:
-          RELEASE_MODE: ${{ inputs.release_mode }}
-          REQUESTED_VERSION: ${{ inputs.version }}
-          CONFIRM_OVERWRITE: ${{ inputs.confirm_overwrite }}
-        run: |
-          set -euo pipefail
-
-          git fetch --tags --force origin
-
-          REQUESTED_VERSION="${REQUESTED_VERSION:-}"
-          REQUESTED_VERSION="${REQUESTED_VERSION#"${REQUESTED_VERSION%%[![:space:]]*}"}"
-          REQUESTED_VERSION="${REQUESTED_VERSION%"${REQUESTED_VERSION##*[![:space:]]}"}"
-
-          if [ "$RELEASE_MODE" = "overwrite" ] && [ "${CONFIRM_OVERWRITE:-}" != "OVERWRITE" ]; then
-            echo "::error::confirm_overwrite must be exactly 'OVERWRITE' when release_mode=overwrite."
-            exit 1
-          fi
-
-          if [ -n "$REQUESTED_VERSION" ]; then
-            TAG_NAME="$REQUESTED_VERSION"
-            if [[ "$TAG_NAME" != v* ]]; then
-              TAG_NAME="v$TAG_NAME"
-            fi
-            echo "Using manually requested release tag: $TAG_NAME"
-          else
-            LATEST_TAG="$(git tag --list 'v*.*.*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
-
-            if [ -z "$LATEST_TAG" ]; then
-              if [ "$RELEASE_MODE" = "new" ]; then
-                TAG_NAME="v0.1.0"
-                echo "No existing vX.Y.Z tag found. Starting at $TAG_NAME"
-              else
-                echo "::error::No existing vX.Y.Z tag found to overwrite."
-                exit 1
-              fi
-            else
-              if [ "$RELEASE_MODE" = "new" ]; then
-                VERSION="${LATEST_TAG#v}"
-                IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
-                TAG_NAME="v${MAJOR}.${MINOR}.$((PATCH + 1))"
-                echo "Auto bumped release tag from $LATEST_TAG to $TAG_NAME"
-              else
-                TAG_NAME="$LATEST_TAG"
-                echo "No release tag requested. Using latest existing release tag: $TAG_NAME"
-              fi
-            fi
-          fi
-
-          if [[ ! "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Invalid release tag '$TAG_NAME'. Use vX.Y.Z, for example v1.2.3."
-            exit 1
-          fi
-
-          if [ "$RELEASE_MODE" = "new" ]; then
-            if git rev-parse -q --verify "refs/tags/$TAG_NAME" >/dev/null; then
-              echo "::error::Tag '$TAG_NAME' already exists locally."
-              exit 1
-            fi
-
-            if git ls-remote --exit-code --tags origin "refs/tags/$TAG_NAME" >/dev/null 2>&1; then
-              echo "::error::Tag '$TAG_NAME' already exists on origin."
-              exit 1
-            fi
-          else
-            if ! git rev-parse -q --verify "refs/tags/$TAG_NAME" >/dev/null; then
-              echo "::error::Tag '$TAG_NAME' does not exist locally."
-              exit 1
-            fi
-
-            if ! git ls-remote --exit-code --tags origin "refs/tags/$TAG_NAME" >/dev/null 2>&1; then
-              echo "::error::Tag '$TAG_NAME' does not exist on origin."
-              exit 1
-            fi
-
-            TAG_COMMIT="$(git rev-list -n 1 "$TAG_NAME")"
-            MASTER_COMMIT="$(git rev-parse HEAD)"
-            echo "Overwrite release tag: $TAG_NAME"
-            echo "Tag commit: $TAG_COMMIT"
-            echo "Master commit used for rebuilt assets: $MASTER_COMMIT"
-          fi
-
-          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
-
-      - name: Create and Push Release Tag
-        if: ${{ inputs.release_mode == 'new' }}
-        env:
-          TAG_NAME: ${{ steps.release_tag.outputs.tag_name }}
-        run: |
-          set -euo pipefail
-
-          git tag -a "$TAG_NAME" -m "Release $TAG_NAME"
-          git push origin "$TAG_NAME"
-
-      - name: Dispatch and Verify Master Build
-        if: ${{ inputs.release_mode == 'overwrite' || inputs.release_mode == 'sync_only' }}
+      - name: Dispatch and verify master validation
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          RELEASE_MODE: ${{ inputs.release_mode }}
-          TAG_NAME: ${{ steps.release_tag.outputs.tag_name }}
           EXPECTED_SHA: ${{ steps.sync.outputs.master_commit }}
         run: |
           set -euo pipefail
-
           repo="$GITHUB_REPOSITORY"
-          run_id=""
 
-          for attempt in 1 2 3 4 5; do
-            branch_visible=false
-            for visibility_attempt in 1 2 3 4 5 6; do
-              visible_sha="$(gh api "repos/$repo/branches/master" --jq '.commit.sha')"
-              if [ "$visible_sha" = "$EXPECTED_SHA" ]; then
-                branch_visible=true
-                break
-              fi
-
-              echo "Waiting for GitHub API to expose master at $EXPECTED_SHA (currently $visible_sha)..."
-              sleep 2
-            done
-
-            if [ "$branch_visible" != "true" ]; then
-              echo "::warning::GitHub API did not expose master at $EXPECTED_SHA before dispatch attempt $attempt."
-              sleep "$((attempt * 2))"
-              continue
+          for attempt in 1 2 3 4 5 6; do
+            visible_sha="$(gh api "repos/$repo/branches/master" --jq '.commit.sha')"
+            [ "$visible_sha" = "$EXPECTED_SHA" ] && break
+            if [ "$attempt" -eq 6 ]; then
+              echo "::error::GitHub did not expose master at $EXPECTED_SHA."
+              exit 1
             fi
-
-            dispatch_args=(--ref master)
-            if [ "$RELEASE_MODE" = "overwrite" ]; then
-              dispatch_args+=(
-                -f "release_tag=$TAG_NAME"
-                -f overwrite_existing_release=true
-              )
-            fi
-
-            dispatch_output="$(gh workflow run build-dockerhub.yml "${dispatch_args[@]}")"
-            printf '%s\n' "$dispatch_output"
-            candidate_run_id="$(
-              printf '%s\n' "$dispatch_output" |
-                sed -n 's#^.*/actions/runs/\([0-9][0-9]*\).*$#\1#p' |
-                tail -n 1
-            )"
-
-            if [ -z "$candidate_run_id" ]; then
-              echo "::warning::Could not determine the dispatched workflow run ID on attempt $attempt."
-              sleep "$((attempt * 2))"
-              continue
-            fi
-
-            dispatched_sha="$(gh run view "$candidate_run_id" --repo "$repo" --json headSha --jq '.headSha')"
-            if [ "$dispatched_sha" = "$EXPECTED_SHA" ]; then
-              run_id="$candidate_run_id"
-              echo "Dispatched build run $run_id for expected master SHA $EXPECTED_SHA."
-              break
-            fi
-
-            echo "::warning::Dispatched run $candidate_run_id resolved stale master SHA $dispatched_sha; expected $EXPECTED_SHA."
-            gh run watch "$candidate_run_id" --repo "$repo" --exit-status || true
-            sleep "$((attempt * 2))"
+            sleep 2
           done
 
+          dispatch_output="$(gh workflow run build-dockerhub.yml --repo "$repo" --ref master)"
+          run_id="$(printf '%s\n' "$dispatch_output" | sed -n 's#^.*/actions/runs/\([0-9][0-9]*\).*$#\1#p' | tail -n 1)"
           if [ -z "$run_id" ]; then
-            echo "::error::Failed to dispatch build-dockerhub.yml for master SHA $EXPECTED_SHA after 5 attempts."
+            echo "::error::Could not resolve the master validation run ID."
+            exit 1
+          fi
+          actual_sha="$(gh run view "$run_id" --repo "$repo" --json headSha --jq '.headSha')"
+          if [ "$actual_sha" != "$EXPECTED_SHA" ]; then
+            echo "::error::Master validation bound $actual_sha instead of $EXPECTED_SHA."
+            exit 1
+          fi
+          gh run watch "$run_id" --repo "$repo" --exit-status
+
+      - name: Verify immutable release controls before tag creation
+        if: inputs.operation == 'new'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          VERSION: ${{ steps.request.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          immutable_enabled="$(gh api \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/immutable-releases" \
+            --jq '.enabled')"
+          if [ "$immutable_enabled" != "true" ]; then
+            echo "::error::GitHub immutable releases must be enabled before creating $VERSION."
             exit 1
           fi
 
-          gh run watch "$run_id" --repo "$repo" --exit-status
-
-          jobs_file="$(mktemp)"
-          trap 'rm -f "$jobs_file"' EXIT
-          gh run view "$run_id" --repo "$repo" --json jobs > "$jobs_file"
-
-          python3 - "$jobs_file" "$RELEASE_MODE" <<'PY'
+          dockerhub_settings="$(curl --fail-with-body --silent --show-error \
+            https://hub.docker.com/v2/repositories/aethersailor/subconverter-extended/)"
+          python3 - "$VERSION" "$dockerhub_settings" <<'PY'
           import json
+          import re
           import sys
 
-          jobs_path, release_mode = sys.argv[1:]
-          with open(jobs_path, encoding="utf-8") as handle:
-              jobs = {
-                  job["name"]: job["conclusion"]
-                  for job in json.load(handle)["jobs"]
-              }
-
-          required = [
-              "🧭 Verify Current Source Head",
-              "🔧 Prepare Metadata",
-              "🐳 Docker Build (amd64)",
-              "🐳 Docker Build (arm64)",
-              "🐳 Docker Build (armv7)",
-          ]
-          if release_mode == "overwrite":
-              required.extend(
-                  [
-                      "🪟 Windows Build (amd64)",
-                      "🔗 Promote Docker Images",
-                      "🚀 Release Artifacts",
-                  ]
+          version, raw = sys.argv[1:]
+          settings = json.loads(raw).get("immutable_tags_settings") or {}
+          rules = settings.get("rules") or []
+          if settings.get("enabled") is not True:
+              raise SystemExit("::error::Docker Hub immutable tags must be enabled before tag creation.")
+          if not any(re.fullmatch(rule, version) for rule in rules):
+              raise SystemExit(
+                  f"::error::Docker Hub immutable rules do not protect {version}: {rules}"
               )
-
-          failures = [
-              f"{name}: {jobs.get(name, 'missing')}"
-              for name in required
-              if jobs.get(name) != "success"
-          ]
-          if failures:
-              print(
-                  "::error::Required downstream jobs did not succeed: "
-                  + "; ".join(failures)
-              )
-              raise SystemExit(1)
-
-          print("Verified required downstream jobs: " + ", ".join(required))
           PY
 
-          if [ "$RELEASE_MODE" = "overwrite" ]; then
-            echo "Rebuilt release $TAG_NAME from master SHA $EXPECTED_SHA in run $run_id."
-          else
-            echo "Synced dev to master at $EXPECTED_SHA and verified master build run $run_id."
+      - name: Create the one-time formal release tag
+        if: inputs.operation == 'new'
+        shell: bash
+        env:
+          VERSION: ${{ steps.request.outputs.version }}
+          MASTER_COMMIT: ${{ steps.sync.outputs.master_commit }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$MASTER_COMMIT"
+          git tag -a "$VERSION" "$MASTER_COMMIT" -m "Release $VERSION"
+          git push origin "refs/tags/$VERSION"
+
+      - name: Verify the tag-triggered formal release run
+        if: inputs.operation == 'new'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          VERSION: ${{ steps.request.outputs.version }}
+          EXPECTED_SHA: ${{ steps.sync.outputs.master_commit }}
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          run_id=""
+          for _ in {1..30}; do
+            run_id="$(gh run list --repo "$repo" --workflow release.yml --event push --limit 20 \
+              --json databaseId,headSha,headBranch \
+              --jq ".[] | select(.headSha == \"$EXPECTED_SHA\" and .headBranch == \"$VERSION\") | .databaseId" | head -n 1)"
+            [ -n "$run_id" ] && break
+            sleep 2
+          done
+          if [ -z "$run_id" ]; then
+            echo "::error::No formal release run appeared for $VERSION at $EXPECTED_SHA."
+            exit 1
           fi
+          gh run watch "$run_id" --repo "$repo" --exit-status
+          echo "Formal release $VERSION completed from immutable tag commit $EXPECTED_SHA in run $run_id."

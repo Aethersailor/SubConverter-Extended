@@ -8,9 +8,11 @@
 
 #include "handler/interfaces.h"
 #include "handler/settings.h"
+#include "handler/settings_view.h"
 #include "handler/webget.h"
 #include "utils/logger.h"
 #include "utils/network.h"
+#include "utils/redact.h"
 #include "utils/regexp.h"
 #include "utils/time_compat.h"
 #include "utils/urlencode.h"
@@ -130,10 +132,11 @@ std::string parseHostname(inja::Arguments &args)
         return std::string();
 
     std::string input_content, output_content;
-    ProxyPolicy proxy = parseProxy(global.proxyConfig);
+    const Settings &settings = effectiveSettings();
+    ProxyPolicy proxy = parseProxy(settings.proxyConfig);
     for(std::string &x : urls)
     {
-        input_content = webGet(x, proxy, global.cacheConfig);
+        input_content = webGet(x, proxy, settings.cacheConfig);
         regGetMatch(input_content, matcher, 2, 0, &hostname);
         if(hostname.size())
         {
@@ -156,10 +159,12 @@ std::string parseHostname(inja::Arguments &args)
 std::string template_webGet(inja::Arguments &args)
 {
     std::string data = args.at(0)->get<std::string>();
-    ProxyPolicy proxy = parseProxy(global.proxyConfig);
-    writeLog(0, "模板调用 fetch，URL：'" + data + "'。", LOG_LEVEL_INFO);
+    const Settings &settings = effectiveSettings();
+    ProxyPolicy proxy = parseProxy(settings.proxyConfig);
+    writeLog(0, "模板调用 fetch：" + summarizeUrlForLog(data) + "。",
+             LOG_LEVEL_INFO);
     std::string content =
-        webGet(data, proxy, global.cacheConfig, nullptr, nullptr,
+        webGet(data, proxy, settings.cacheConfig, nullptr, nullptr,
                current_template_fetch_context);
     if(content.empty() && current_template_fetch_failed)
         *current_template_fetch_failed = true;
@@ -200,7 +205,10 @@ int render_template(const std::string &content, const template_args &vars,
     }
     catch(std::exception &e)
     {
-        writeLog(0, e.what(), LOG_LEVEL_ERROR);
+        writeLog(0,
+                 "TEMPLATE_SCOPE_RESOLUTION_FAILED detail=" +
+                     summarizeSensitiveTextForLog(e.what()),
+                 LOG_LEVEL_ERROR);
     }
     nlohmann::json data;
     for(auto &x : vars.global_vars)
@@ -292,7 +300,8 @@ int render_template(const std::string &content, const template_args &vars,
     });
     env.add_callback("getLink", 1, [](inja::Arguments &args)
     {
-        return global.managedConfigPrefix + args.at(0)->get<std::string>();
+        return effectiveSettings().managedConfigPrefix +
+               args.at(0)->get<std::string>();
     });
     env.add_callback("startsWith", 2, [](inja::Arguments &args)
     {
@@ -366,8 +375,14 @@ int render_template(const std::string &content, const template_args &vars,
     }
     catch (std::exception &e)
     {
-        output = "模板渲染失败。原因：" + std::string(e.what());
-        writeLog(0, output, LOG_LEVEL_ERROR);
+        output = "Invalid template: rendering failed.\n"
+                 "无效模板：模板渲染失败。\n"
+                 "Please check the template syntax and configured resources.\n"
+                 "请检查模板语法和已配置资源。";
+        writeLog(0,
+                 "TEMPLATE_RENDER_FAILED detail=" +
+                     summarizeSensitiveTextForLog(e.what()),
+                 LOG_LEVEL_ERROR);
         return -1;
     }
     return -2;
@@ -541,7 +556,9 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
             retrieved_rules = x.rule_content.get();
             if(retrieved_rules.empty())
             {
-                writeLog(0, "获取规则集失败或规则集为空：'" + x.rule_path + "'。", LOG_LEVEL_WARNING);
+                writeLog(0, "获取规则集失败或规则集为空：" +
+                                summarizeUrlForLog(x.rule_path) + "。",
+                         LOG_LEVEL_WARNING);
                 continue;
             }
 
@@ -720,7 +737,10 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
         }
         catch (std::exception &e)
         {
-            writeLog(0, "渲染时发生错误：" + std::string(e.what()), LOG_TYPE_ERROR);
+            writeLog(0,
+                     "CLASH_SCRIPT_RENDER_FAILED detail=" +
+                         summarizeSensitiveTextForLog(e.what()),
+                     LOG_TYPE_ERROR);
             if(stats)
                 stats->add(local_stats.rules);
             return -1;
