@@ -20,8 +20,10 @@
 #include <rapidjson/writer.h>
 
 #include "handler/settings.h"
+#include "handler/settings_view.h"
 #include "handler/statistics_v2.h"
 #include "utils/logger.h"
+#include "utils/redact.h"
 
 namespace {
 
@@ -144,8 +146,8 @@ void logPersistenceException(
   try {
     std::string message(category);
     if (detail && detail[0] != '\0') {
-      message += ": ";
-      message += detail;
+      message += " detail=";
+      message += summarizeSensitiveTextForLog(detail);
     }
     logPersistenceError(message, last_log);
   } catch (...) {
@@ -571,8 +573,6 @@ void initialize() {
 }
 
 void shutdown() {
-  if (!global.statisticsEnabled)
-    return;
   {
     std::lock_guard<std::mutex> lock(g_engine.mutex);
     if (!g_engine.initialized)
@@ -595,7 +595,7 @@ void tick() {
 
 void recordSubscriptionConversion(const Request &request,
                                   uint64_t rule_conversions) {
-  if (!global.statisticsEnabled || request.method != "GET")
+  if (!effectiveSettings().statisticsEnabled || request.method != "GET")
     return;
   const GeoLocation location = geoLocation(request, g_engine.geo);
   {

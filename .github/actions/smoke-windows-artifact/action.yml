@@ -9,6 +9,15 @@ inputs:
     description: Port used for the smoke test.
     required: false
     default: "25500"
+  expected-version:
+    description: Exact formal vX.Y.Z identity.
+    required: true
+  expected-revision:
+    description: Exact full tag commit SHA.
+    required: true
+  expected-build-date:
+    description: Exact canonical UTC build timestamp.
+    required: true
 
 runs:
   using: composite
@@ -32,6 +41,15 @@ runs:
 
           if (Test-Path (Join-Path $root "base\Custom_OpenClash_Rules")) {
             throw "Windows artifact still contains removed Custom_OpenClash_Rules assets."
+          }
+
+          python "$env:GITHUB_WORKSPACE\scripts\ci\write_build_info.py" verify `
+            --path (Join-Path $root "BUILD-INFO.json") `
+            --version "${{ inputs.expected-version }}" `
+            --revision "${{ inputs.expected-revision }}" `
+            --build-date "${{ inputs.expected-build-date }}"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows package identity verification failed."
           }
 
           Remove-Item (Join-Path $root "base\pref.toml") -ErrorAction SilentlyContinue

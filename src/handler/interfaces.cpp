@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cctype>
 #include <condition_variable>
@@ -27,12 +28,14 @@
 #include "generator/template/templates.h"
 #include "interfaces.h"
 #include "multithread.h"
+#include "ruleset_output.h"
 #include "parser/mihomo_scheme_utils.h"
 #include "parser/mihomo_bridge.h"
 #include "script/cron.h"
 #include "script/script_quickjs.h"
 #include "server/webserver.h"
 #include "settings.h"
+#include "settings_view.h"
 #include "statistics.h"
 #include "sub_request_key.h"
 #include "upload.h"
@@ -51,6 +54,7 @@ static string_icase_map buildSubscriptionRequestHeaders() {
 #include "utils/logger.h"
 #include "utils/md5/md5_interface.h"
 #include "utils/network.h"
+#include "utils/redact.h"
 #include "utils/regexp.h"
 #include "utils/stl_extra.h"
 #include "utils/string.h"
@@ -65,6 +69,52 @@ extern WebServer webServer;
 string_array gRegexBlacklist = {"(.*)*"};
 
 static constexpr size_t kProviderUserAgentMaxLen = 512;
+
+struct TargetDescriptor {
+  const char *name;
+  bool simple_subscription;
+  SingleLinkTypes single_link_types;
+};
+
+static constexpr std::array<TargetDescriptor, 18> kTargetDescriptors = {{
+    {"clash", false, 0},
+    {"clashr", false, 0},
+    {"surge", false, 0},
+    {"quan", false, 0},
+    {"quanx", false, 0},
+    {"loon", false, 0},
+    {"surfboard", false, 0},
+    {"mellow", false, 0},
+    {"singbox", false, 0},
+    {"ss", true, SingleLinkType::Shadowsocks},
+    {"ssd", true, 0},
+    {"ssr", true, SingleLinkType::ShadowsocksR},
+    {"sssub", true, 0},
+    {"v2ray", true, SingleLinkType::VMess},
+    {"trojan", true, SingleLinkType::Trojan},
+    {"vless", true, SingleLinkType::VLESS},
+    {"hysteria2", true, SingleLinkType::Hysteria2},
+    {"mixed", true, SingleLinkType::Mixed},
+}};
+
+static const TargetDescriptor *findTargetDescriptor(const std::string &name) {
+  const auto found =
+      std::find_if(kTargetDescriptors.begin(), kTargetDescriptors.end(),
+                   [&](const TargetDescriptor &target) {
+                     return name == target.name;
+                   });
+  return found == kTargetDescriptors.end() ? nullptr : &*found;
+}
+
+static std::string supportedTargets(const std::string &separator) {
+  std::string result;
+  for (const TargetDescriptor &target : kTargetDescriptors) {
+    if (!result.empty())
+      result += separator;
+    result += target.name;
+  }
+  return result;
+}
 
 static std::string trimProviderUserAgentCandidate(const std::string &ua) {
   size_t begin = ua.find_first_not_of(" \t");
@@ -346,6 +396,8 @@ void matchUserAgent(const std::string &user_agent, std::string &target,
 }
 
 std::string getRuleset(RESPONSE_CALLBACK_ARGS) {
+  SettingsSnapshot snapshot = captureEffectiveSettingsSnapshot();
+  ScopedSettingsView settings_scope(std::move(snapshot));
   auto &argument = request.argument;
   int *status_code = &response.status_code;
   /// type: 1 for Surge, 2 for Quantumult X, 3 for Clash domain rule-provider, 4
@@ -354,7 +406,7 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS) {
   std::string url = urlSafeBase64Decode(getUrlArg(argument, "url")),
               type = getUrlArg(argument, "type"),
               group = urlSafeBase64Decode(getUrlArg(argument, "group"));
-  std::string output_content, dummy;
+  std::string output_content;
   int type_int = to_int(type, 0);
 
   if (url.empty() || type.empty() || (type_int == 2 && group.empty()) ||
@@ -387,135 +439,9 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS) {
            "请检查链接是否可访问，以及规则集类型是否与内容匹配。";
   }
 
-  std::string strLine;
-  std::stringstream ss;
-  const std::string rule_match_regex = "^(.*?,.*?)(,.*)(,.*)$";
-
-  ss << output_content;
-  char delimiter = getLineBreak(output_content);
-  std::string::size_type lineSize, posb, pose;
-  auto filterLine = [&]() {
-    posb = 0;
-    pose = strLine.find(',');
-    if (pose == std::string::npos)
-      return 1;
-    posb = pose + 1;
-    pose = strLine.find(',', posb);
-    if (pose == std::string::npos) {
-      pose = strLine.size();
-      if (strLine[pose - 1] == '\r')
-        pose--;
-    }
-    pose -= posb;
-    return 0;
-  };
-
-  lineSize = output_content.size();
-  output_content.clear();
-  output_content.reserve(lineSize);
-
-  if (type_int == 3 || type_int == 4 || type_int == 6)
-    output_content = "payload:\n";
-
-  while (getline(ss, strLine, delimiter)) {
-    if (strFind(strLine, "//")) {
-      strLine.erase(strLine.find("//"));
-      strLine = trimWhitespace(strLine);
-    }
-    switch (type_int) {
-    case 2:
-      if (!std::any_of(QuanXRuleTypes.begin(), QuanXRuleTypes.end(),
-                       [&strLine](const std::string &type) {
-                         return startsWith(strLine, type);
-                       }))
-        continue;
-      break;
-    case 1:
-      if (!std::any_of(SurgeRuleTypes.begin(), SurgeRuleTypes.end(),
-                       [&strLine](const std::string &type) {
-                         return startsWith(strLine, type);
-                       }))
-        continue;
-      break;
-    case 3:
-      if (!startsWith(strLine, "DOMAIN-SUFFIX,") &&
-          !startsWith(strLine, "DOMAIN,"))
-        continue;
-      if (filterLine())
-        continue;
-      output_content += "  - '";
-      if (strLine[posb - 2] == 'X')
-        output_content += "+.";
-      output_content += strLine.substr(posb, pose);
-      output_content += "'\n";
-      continue;
-    case 4:
-      if (!startsWith(strLine, "IP-CIDR,") && !startsWith(strLine, "IP-CIDR6,"))
-        continue;
-      if (filterLine())
-        continue;
-      output_content += "  - '";
-      output_content += strLine.substr(posb, pose);
-      output_content += "'\n";
-      continue;
-    case 5:
-      if (!startsWith(strLine, "DOMAIN-SUFFIX,") &&
-          !startsWith(strLine, "DOMAIN,"))
-        continue;
-      if (filterLine())
-        continue;
-      if (strLine[posb - 2] == 'X')
-        output_content += '.';
-      output_content += strLine.substr(posb, pose);
-      output_content += '\n';
-      continue;
-    case 6:
-      if (!std::any_of(ClashRuleTypes.begin(), ClashRuleTypes.end(),
-                       [&strLine](const std::string &type) {
-                         return startsWith(strLine, type);
-                       }))
-        continue;
-      output_content += "  - ";
-    default:
-      break;
-    }
-
-    lineSize = strLine.size();
-    if (lineSize && strLine[lineSize - 1] == '\r') // remove line break
-      strLine.erase(--lineSize);
-
-    if (!strLine.empty() &&
-        (strLine[0] != ';' && strLine[0] != '#' &&
-         !(lineSize >= 2 && strLine[0] == '/' && strLine[1] == '/'))) {
-      if (type_int == 2) {
-        if (startsWith(strLine, "IP-CIDR6"))
-          strLine.replace(0, 8, "IP6-CIDR");
-        strLine += "," + group;
-        if (count_least(strLine, ',', 3) &&
-            regReplace(strLine, rule_match_regex, "$2") == ",no-resolve")
-          strLine = regReplace(strLine, rule_match_regex, "$1$3$2");
-        else
-          strLine = regReplace(strLine, rule_match_regex, "$1$3");
-      }
-    }
-    output_content += strLine;
-    output_content += '\n';
-  }
-
-  if (output_content == "payload:\n") {
-    switch (type_int) {
-    case 3:
-      output_content += "  - '--placeholder--'";
-      break;
-    case 4:
-      output_content += "  - '0.0.0.0/32'";
-      break;
-    case 6:
-      output_content += "  - 'DOMAIN,--placeholder--'";
-      break;
-    }
-  }
-  return output_content;
+  return formatRulesetOutput(
+      std::move(output_content), type_int, group,
+      RulesetTypeCatalogs{ClashRuleTypes, SurgeRuleTypes, QuanXRuleTypes});
 }
 
 bool checkExternalBase(const std::string &path, std::string &dest,
@@ -616,7 +542,8 @@ static bool fetchExternalRuleSources(const string_array &sources,
                                      FetchContext context,
                                      string_array &destination,
                                      std::string &error) {
-  ProxyPolicy proxy = parseProxy(global.proxyRuleset);
+  const Settings &settings = effectiveSettings();
+  ProxyPolicy proxy = parseProxy(settings.proxyRuleset);
   string_icase_map request_headers = {
       {"Cache-Control", "no-cache, no-store, max-age=0"},
       {"Pragma", "no-cache"}};
@@ -1026,6 +953,7 @@ static std::string sanitizeProviderName(const std::string &input) {
 }
 
 static std::string subconverter_impl(Request &request, Response &response,
+                                     const Settings &settings,
                                      RuleConversionStats *rule_stats = nullptr);
 
 namespace {
@@ -1429,8 +1357,9 @@ static std::string finalizeSubResponse(const Request &request,
   }
 }
 
-static bool shouldCoalesceSubRequest(const Request &request) {
-  if (!global.enableRequestCoalescing)
+static bool shouldCoalesceSubRequest(const Request &request,
+                                     const Settings &settings) {
+  if (!settings.enableRequestCoalescing)
     return false;
   if (request.method != "GET" || request.url != "/sub")
     return false;
@@ -1469,8 +1398,9 @@ static void pruneExpiredSubResponseCache(
 }
 
 static bool getCachedSubResponse(const std::string &key,
-                                 SharedCoalescedResponse &result) {
-  if (global.responseCacheTtl <= 0)
+                                 SharedCoalescedResponse &result,
+                                 const Settings &settings) {
+  if (settings.responseCacheTtl <= 0)
     return false;
 
   auto now = std::chrono::steady_clock::now();
@@ -1487,11 +1417,12 @@ static bool getCachedSubResponse(const std::string &key,
 }
 
 static void storeCachedSubResponse(const std::string &key,
-                                   const SharedCoalescedResponse &result) {
-  if (global.responseCacheTtl <= 0 || !result || result->status_code != 200)
+                                   const SharedCoalescedResponse &result,
+                                   const Settings &settings) {
+  if (settings.responseCacheTtl <= 0 || !result || result->status_code != 200)
     return;
 
-  int ttl = std::min(global.responseCacheTtl, 5);
+  int ttl = std::min(settings.responseCacheTtl, 5);
   if (ttl <= 0)
     return;
 
@@ -1510,13 +1441,14 @@ static void storeCachedSubResponse(const std::string &key,
 
 static std::string runSubconverterImplWithRetry(const Request &original,
                                                 Response &response,
+                                                const Settings &settings,
                                                 RuleConversionStats *stats) {
   Request first_request = original;
   Response first_response;
   RuleConversionStats first_stats;
-  std::string body = subconverter_impl(first_request, first_response,
+  std::string body = subconverter_impl(first_request, first_response, settings,
                                        stats ? &first_stats : nullptr);
-  if (first_response.status_code < 500 || !global.coalesceRetryOn5xx) {
+  if (first_response.status_code < 500 || !settings.coalesceRetryOn5xx) {
     if (stats)
       *stats = first_stats;
     response = first_response;
@@ -1530,6 +1462,7 @@ static std::string runSubconverterImplWithRetry(const Request &original,
   Response retry_response;
   RuleConversionStats retry_stats;
   std::string retry_body = subconverter_impl(retry_request, retry_response,
+                                             settings,
                                              stats ? &retry_stats : nullptr);
   if (retry_response.status_code < 500) {
     if (stats)
@@ -1554,6 +1487,27 @@ static void recordTrackedSubRequest(bool track, const Request &request,
   statistics::recordSubscriptionConversion(request, rule_conversions);
 }
 
+static SettingsSnapshot captureSettingsForSubRequest(Request &request) {
+  SettingsSnapshot current = captureSettingsSnapshot();
+  if (!current->reloadConfOnRequest || !current->CFWChildProcess ||
+      current->generatorMode)
+    return current;
+
+  std::string target = getUrlArg(request.argument, "target");
+  if (target == "auto") {
+    tribool clash_new_field;
+    int surge_version =
+        to_int(getUrlArg(request.argument, "ver"), 3);
+    matchUserAgent(request.headers["User-Agent"], target, clash_new_field,
+                   surge_version);
+  }
+  if (findTargetDescriptor(target)) {
+    readConf();
+    return captureSettingsSnapshot();
+  }
+  return current;
+}
+
 static std::string subconverterEntry(Request &request, Response &response,
                                      bool track) {
   AgeResponseContext age = consumeAgeResponseContext(request);
@@ -1574,29 +1528,36 @@ static std::string subconverterEntry(Request &request, Response &response,
     );
   }
 
-  if (!shouldCoalesceSubRequest(request)) {
+  // CFW's compatibility reload remains after target validation, matching the
+  // legacy control flow. The request view is captured only after that reload
+  // transaction finishes (or restores the previous generation).
+  SettingsSnapshot snapshot = captureSettingsForSubRequest(request);
+  ScopedSettingsView settings_scope(snapshot);
+  const Settings &settings = *snapshot;
+
+  if (!shouldCoalesceSubRequest(request, settings)) {
     RuleConversionStats stats;
-    std::string body =
-        subconverter_impl(request, response, track ? &stats : nullptr);
+    std::string body = subconverter_impl(request, response, settings,
+                                         track ? &stats : nullptr);
     body = finalizeSubResponse(request, response, std::move(body), age);
     recordTrackedSubRequest(track, request, response, stats.rules);
     return body;
   }
 
   std::string key =
-      buildSubRequestKey(request, age.fingerprint, global.configGeneration,
-                         global.managedConfigPrefix);
+      buildSubRequestKey(request, age.fingerprint, settings.configGeneration,
+                         settings.managedConfigPrefix);
   if (key.empty()) {
     RuleConversionStats stats;
-    std::string body =
-        subconverter_impl(request, response, track ? &stats : nullptr);
+    std::string body = subconverter_impl(request, response, settings,
+                                         track ? &stats : nullptr);
     body = finalizeSubResponse(request, response, std::move(body), age);
     recordTrackedSubRequest(track, request, response, stats.rules);
     return body;
   }
 
   SharedCoalescedResponse cached_result;
-  if (getCachedSubResponse(key, cached_result)) {
+  if (getCachedSubResponse(key, cached_result, settings)) {
     writeLog(0, "/sub 响应微缓存命中。", LOG_LEVEL_DEBUG);
     copyCoalescedToResponse(*cached_result, response);
     recordTrackedSubRequest(track, request, response,
@@ -1636,7 +1597,7 @@ static std::string subconverterEntry(Request &request, Response &response,
     Response owner_response;
     RuleConversionStats stats;
     std::string body = runSubconverterImplWithRetry(
-        request, owner_response, track ? &stats : nullptr);
+        request, owner_response, settings, track ? &stats : nullptr);
     body = finalizeSubResponse(request, owner_response, std::move(body), age);
     SharedCoalescedResponse result = makeCoalescedResult(
         std::move(body), std::move(owner_response), stats.rules);
@@ -1651,7 +1612,7 @@ static std::string subconverterEntry(Request &request, Response &response,
       g_sub_inflight.erase(key);
     }
     if (!age.requested)
-      storeCachedSubResponse(key, result);
+      storeCachedSubResponse(key, result, settings);
     call->cv.notify_all();
     recordTrackedSubRequest(track, request, response,
                             result->rule_conversions);
@@ -1681,164 +1642,215 @@ std::string subconverterTracked(RESPONSE_CALLBACK_ARGS) {
   return subconverterEntry(request, response, true);
 }
 
-static std::string subconverter_impl(Request &request, Response &response,
-                                     RuleConversionStats *rule_stats) {
-  auto &argument = request.argument;
-  int *status_code = &response.status_code;
+namespace {
 
-  std::string argTarget = getUrlArg(argument, "target"),
-              argSurgeVer = getUrlArg(argument, "ver");
-  bool explainMode = isTruthyRequestValue(getUrlArg(argument, "explain"));
+struct ParsedSubRequest {
+  std::string target;
+  std::string surge_version_text;
+  bool explain_mode = false;
   SubExplainReport explain;
-  explain.enabled = explainMode;
-  explain.proxy_config = parseProxy(global.proxyConfig).describe();
-  explain.proxy_ruleset = parseProxy(global.proxyRuleset).describe();
-  explain.proxy_subscription = parseProxy(global.proxySubscription).describe();
-  explain.requested_target = argTarget;
-  if (explainMode) {
+  tribool clash_new_field;
+  int surge_version = 3;
+  const TargetDescriptor *target_descriptor = nullptr;
+  bool simple_subscription = false;
+
+  std::string url;
+  std::string group_name;
+  std::string upload_path;
+  std::string include_remark;
+  std::string exclude_remark;
+  std::string external_config;
+  std::string device_id;
+  std::string filename;
+  std::string update_interval;
+  std::string update_strict;
+  std::string renames;
+  std::string provider_headers;
+
+  tribool upload;
+  tribool emoji;
+  tribool add_emoji;
+  tribool remove_emoji;
+  tribool append_type;
+  tribool tfo;
+  tribool udp;
+  tribool generate_node_list;
+  tribool sort;
+  tribool use_sort_script;
+  tribool generate_clash_script;
+  tribool enable_insert;
+  tribool skip_cert_verify;
+  tribool filter_deprecated;
+  tribool expand_rulesets;
+  tribool append_userinfo;
+  tribool prepend_insert;
+  tribool generate_classical_rule_provider;
+  tribool tls13;
+  tribool provider_proxy_direct;
+};
+
+static std::string parseSubRequestArguments(Request &request,
+                                            Response &response,
+                                            const Settings &settings,
+                                            ParsedSubRequest &parsed) {
+  auto &argument = request.argument;
+  parsed.target = getUrlArg(argument, "target");
+  parsed.surge_version_text = getUrlArg(argument, "ver");
+  parsed.explain_mode = isTruthyRequestValue(getUrlArg(argument, "explain"));
+  parsed.explain.enabled = parsed.explain_mode;
+  parsed.explain.proxy_config = parseProxy(settings.proxyConfig).describe();
+  parsed.explain.proxy_ruleset = parseProxy(settings.proxyRuleset).describe();
+  parsed.explain.proxy_subscription =
+      parseProxy(settings.proxySubscription).describe();
+  parsed.explain.requested_target = parsed.target;
+  if (parsed.explain_mode) {
     std::string rawUrlForLog = getUrlArg(argument, "url");
     writeLog(0,
              "收到 /sub explain JSON 诊断请求：target=" +
-                 (argTarget.empty() ? std::string("<empty>") : argTarget) +
+                 (parsed.target.empty() ? std::string("<empty>")
+                                        : parsed.target) +
                  ", 参数数量=" + std::to_string(argument.size()) +
                  ", url_hash=" +
-                 (rawUrlForLog.empty() ? std::string("-")
-                                       : shortHash(urlDecode(rawUrlForLog))) +
+                 (rawUrlForLog.empty()
+                      ? std::string("-")
+                      : shortHash(urlDecode(rawUrlForLog))) +
                  "。",
              LOG_LEVEL_INFO);
   }
-  tribool argClashNewField = getUrlArg(argument, "new_name");
-  int intSurgeVer = !argSurgeVer.empty() ? to_int(argSurgeVer, 3) : 3;
-  if (argTarget == "auto")
-    matchUserAgent(request.headers["User-Agent"], argTarget, argClashNewField,
-                   intSurgeVer);
-  explain.target = argTarget;
 
-  /// don't try to load groups or rulesets when generating simple subscriptions
-  bool lSimpleSubscription = false;
-  switch (hash_(argTarget)) {
-  case "ss"_hash:
-  case "ssd"_hash:
-  case "ssr"_hash:
-  case "sssub"_hash:
-  case "v2ray"_hash:
-  case "trojan"_hash:
-  case "mixed"_hash:
-    lSimpleSubscription = true;
-    break;
-  case "clash"_hash:
-  case "clashr"_hash:
-  case "surge"_hash:
-  case "quan"_hash:
-  case "quanx"_hash:
-  case "loon"_hash:
-  case "surfboard"_hash:
-  case "mellow"_hash:
-  case "singbox"_hash:
-    break;
-  default:
-    *status_code = 400;
+  parsed.clash_new_field = getUrlArg(argument, "new_name");
+  parsed.surge_version = !parsed.surge_version_text.empty()
+                             ? to_int(parsed.surge_version_text, 3)
+                             : 3;
+  if (parsed.target == "auto")
+    matchUserAgent(request.headers["User-Agent"], parsed.target,
+                   parsed.clash_new_field, parsed.surge_version);
+  parsed.explain.target = parsed.target;
+
+  parsed.target_descriptor = findTargetDescriptor(parsed.target);
+  if (!parsed.target_descriptor) {
+    response.status_code = 400;
     return "Invalid request: unsupported target value.\n"
            "无效请求：不支持的 target 参数值。\n"
-           "Supported targets: clash, clashr, surge, quan, quanx, loon, "
-           "surfboard, mellow, singbox, ss, ssd, ssr, sssub, v2ray, trojan, "
-           "mixed.\n"
-           "支持的 target：clash、clashr、surge、quan、quanx、loon、"
-           "surfboard、mellow、singbox、ss、ssd、ssr、sssub、v2ray、trojan、"
-           "mixed。";
+           "Supported targets: " +
+           supportedTargets(", ") + ".\n" + "支持的 target：" +
+           supportedTargets("、") + "。";
   }
-  // check if we need to read configuration
-  if (global.reloadConfOnRequest &&
-      (!global.APIMode || global.CFWChildProcess) && !global.generatorMode)
-    readConf();
+  parsed.simple_subscription = parsed.target_descriptor->simple_subscription;
 
-  /// string values
-  std::string argUrl = getUrlArg(argument, "url");
-  std::string argGroupName = getUrlArg(argument, "group"),
-              argUploadPath = getUrlArg(argument, "upload_path");
-  std::string argIncludeRemark = getUrlArg(argument, "include"),
-              argExcludeRemark = getUrlArg(argument, "exclude");
-  std::string argExternalConfig = getUrlArg(argument, "config");
-  std::string argDeviceID = getUrlArg(argument, "dev_id"),
-              argFilename = getUrlArg(argument, "filename"),
-              argUpdateInterval = getUrlArg(argument, "interval"),
-              argUpdateStrict = getUrlArg(argument, "strict");
-  std::string argRenames = getUrlArg(argument, "rename"),
-              argFilterScript = getUrlArg(argument, "filter_script"),
-              argProviderHeaders = getUrlArg(argument, "provider_headers");
+  parsed.url = getUrlArg(argument, "url");
+  parsed.group_name = getUrlArg(argument, "group");
+  parsed.upload_path = getUrlArg(argument, "upload_path");
+  parsed.include_remark = getUrlArg(argument, "include");
+  parsed.exclude_remark = getUrlArg(argument, "exclude");
+  parsed.external_config = getUrlArg(argument, "config");
+  parsed.device_id = getUrlArg(argument, "dev_id");
+  parsed.filename = getUrlArg(argument, "filename");
+  parsed.update_interval = getUrlArg(argument, "interval");
+  parsed.update_strict = getUrlArg(argument, "strict");
+  parsed.renames = getUrlArg(argument, "rename");
+  parsed.provider_headers = getUrlArg(argument, "provider_headers");
 
-  /// switches with default value
-  tribool argUpload = getUrlArg(argument, "upload"),
-          argEmoji = getUrlArg(argument, "emoji"),
-          argAddEmoji = getUrlArg(argument, "add_emoji"),
-          argRemoveEmoji = getUrlArg(argument, "remove_emoji");
-  tribool argAppendType = getUrlArg(argument, "append_type"),
-          argTFO = getUrlArg(argument, "tfo"),
-          argUDP = getUrlArg(argument, "udp"),
-          argGenNodeList = getUrlArg(argument, "list");
-  tribool argSort = getUrlArg(argument, "sort"),
-          argUseSortScript = getUrlArg(argument, "sort_script");
-  tribool argGenClashScript = getUrlArg(argument, "script"),
-          argEnableInsert = getUrlArg(argument, "insert");
-  tribool argSkipCertVerify = getUrlArg(argument, "scv"),
-          argFilterDeprecated = getUrlArg(argument, "fdn"),
-          argExpandRulesets = getUrlArg(argument, "expand"),
-          argAppendUserinfo = getUrlArg(argument, "append_info");
-  tribool argPrependInsert = getUrlArg(argument, "prepend"),
-          argGenClassicalRuleProvider = getUrlArg(argument, "classic"),
-          argTLS13 = getUrlArg(argument, "tls13"),
-          argProviderProxyDirect = getUrlArg(argument, "provider_proxy_direct");
-  explain.upload_requested = argUpload.get(false);
-  if (explainMode && argUpload) {
-    argUpload = false;
-    explain.upload_suppressed = true;
+  parsed.upload = getUrlArg(argument, "upload");
+  parsed.emoji = getUrlArg(argument, "emoji");
+  parsed.add_emoji = getUrlArg(argument, "add_emoji");
+  parsed.remove_emoji = getUrlArg(argument, "remove_emoji");
+  parsed.append_type = getUrlArg(argument, "append_type");
+  parsed.tfo = getUrlArg(argument, "tfo");
+  parsed.udp = getUrlArg(argument, "udp");
+  parsed.generate_node_list = getUrlArg(argument, "list");
+  parsed.sort = getUrlArg(argument, "sort");
+  parsed.use_sort_script = getUrlArg(argument, "sort_script");
+  parsed.generate_clash_script = getUrlArg(argument, "script");
+  parsed.enable_insert = getUrlArg(argument, "insert");
+  parsed.skip_cert_verify = getUrlArg(argument, "scv");
+  parsed.filter_deprecated = getUrlArg(argument, "fdn");
+  parsed.expand_rulesets = getUrlArg(argument, "expand");
+  parsed.append_userinfo = getUrlArg(argument, "append_info");
+  parsed.prepend_insert = getUrlArg(argument, "prepend");
+  parsed.generate_classical_rule_provider = getUrlArg(argument, "classic");
+  parsed.tls13 = getUrlArg(argument, "tls13");
+  parsed.provider_proxy_direct =
+      getUrlArg(argument, "provider_proxy_direct");
+  parsed.explain.upload_requested = parsed.upload.get(false);
+  if (parsed.explain_mode && parsed.upload) {
+    parsed.upload = false;
+    parsed.explain.upload_suppressed = true;
   }
 
-  std::string base_content, output_content;
-  ProxyGroupConfigs lCustomProxyGroups = global.customProxyGroups;
-  RulesetConfigs lCustomRulesets = global.customRulesets;
-  string_array lIncludeRemarks = global.includeRemarks,
-               lExcludeRemarks = global.excludeRemarks;
-  std::vector<RulesetContent> lRulesetContent;
-  extra_settings ext;
-  ext.rule_stats = rule_stats;
-  std::string subInfo, dummy;
-  int interval = !argUpdateInterval.empty()
-                     ? to_int(argUpdateInterval, global.updateInterval)
-                     : global.updateInterval;
-  // Token authentication is permanently disabled for security
-  bool authorized = false, strict = !argUpdateStrict.empty()
-                                        ? argUpdateStrict == "true"
-                                        : global.updateStrict;
-  explain.simple_subscription = lSimpleSubscription;
+  return "";
+}
+
+struct EffectiveSubPolicy {
+  ProxyGroupConfigs custom_proxy_groups;
+  RulesetConfigs custom_rulesets;
+  string_array include_remarks;
+  string_array exclude_remarks;
+  extra_settings generator;
+  int update_interval = 0;
+  bool update_strict = false;
+
+  std::string clash_base;
+  std::string surge_base;
+  std::string mellow_base;
+  std::string surfboard_base;
+  std::string quan_base;
+  std::string quanx_base;
+  std::string loon_base;
+  std::string sssub_base;
+  std::string singbox_base;
+
+  std::map<std::string, std::string> provider_headers;
+  template_args template_arguments;
+  ProxyPolicy subscription_proxy;
+};
+
+static std::string buildEffectiveSubPolicy(Request &request,
+                                           Response &response,
+                                           const Settings &settings,
+                                           RuleConversionStats *rule_stats,
+                                           ParsedSubRequest &parsed,
+                                           EffectiveSubPolicy &policy) {
+  policy.custom_proxy_groups = settings.customProxyGroups;
+  policy.custom_rulesets = settings.customRulesets;
+  policy.include_remarks = settings.includeRemarks;
+  policy.exclude_remarks = settings.excludeRemarks;
+  policy.generator.rule_stats = rule_stats;
+  policy.update_interval =
+      !parsed.update_interval.empty()
+          ? to_int(parsed.update_interval, settings.updateInterval)
+          : settings.updateInterval;
+  policy.update_strict = !parsed.update_strict.empty()
+                             ? parsed.update_strict == "true"
+                             : settings.updateStrict;
+  parsed.explain.simple_subscription = parsed.simple_subscription;
 
   if (std::find(gRegexBlacklist.cbegin(), gRegexBlacklist.cend(),
-                argIncludeRemark) != gRegexBlacklist.cend() ||
+                parsed.include_remark) != gRegexBlacklist.cend() ||
       std::find(gRegexBlacklist.cbegin(), gRegexBlacklist.cend(),
-                argExcludeRemark) != gRegexBlacklist.cend()) {
-    *status_code = 400;
+                parsed.exclude_remark) != gRegexBlacklist.cend()) {
+    response.status_code = 400;
     return "Invalid request: include or exclude filter is not allowed.\n"
            "无效请求：include 或 exclude 过滤条件不被允许。\n"
            "Please remove blocked filter patterns and try again.\n"
            "请移除被拦截的过滤表达式后重试。";
   }
 
-  /// for external configuration
-  std::string lClashBase = global.clashBase, lSurgeBase = global.surgeBase,
-              lMellowBase = global.mellowBase,
-              lSurfboardBase = global.surfboardBase;
-  std::string lQuanBase = global.quanBase, lQuanXBase = global.quanXBase,
-              lLoonBase = global.loonBase, lSSSubBase = global.SSSubBase;
-  std::string lSingBoxBase = global.singBoxBase;
+  policy.clash_base = settings.clashBase;
+  policy.surge_base = settings.surgeBase;
+  policy.mellow_base = settings.mellowBase;
+  policy.surfboard_base = settings.surfboardBase;
+  policy.quan_base = settings.quanBase;
+  policy.quanx_base = settings.quanXBase;
+  policy.loon_base = settings.loonBase;
+  policy.sssub_base = settings.SSSubBase;
+  policy.singbox_base = settings.singBoxBase;
 
-  /// validate urls
-  argEnableInsert.define(global.enableInsert);
-  // default_url is permanently disabled - users must provide url parameter
-  // if (argUrl.empty() && (!global.APIMode || authorized))
-  //     argUrl = global.defaultUrls;
-  if ((argUrl.empty() && !(!global.insertUrls.empty() && argEnableInsert)) ||
-      argTarget.empty()) {
-    *status_code = 400;
+  parsed.enable_insert.define(settings.enableInsert);
+  if ((parsed.url.empty() &&
+       !(!settings.insertUrls.empty() && parsed.enable_insert)) ||
+      parsed.target.empty()) {
+    response.status_code = 400;
     return "Invalid request: missing required target or url parameter.\n"
            "无效请求：缺少必需的 target 或 url 参数。\n"
            "Please provide target and url; url may be omitted only when "
@@ -1846,109 +1858,106 @@ static std::string subconverter_impl(Request &request, Response &response,
            "请提供 target 和 url；只有启用已配置的插入节点时才能省略 url。";
   }
 
-  std::map<std::string, std::string> provider_headers;
   std::string provider_headers_error;
-  if (!argProviderHeaders.empty() && argTarget != "clash") {
-    *status_code = 400;
+  if (!parsed.provider_headers.empty() && parsed.target != "clash") {
+    response.status_code = 400;
     return "Invalid request: provider_headers is supported only for target=clash.\n"
            "无效请求：provider_headers 仅支持 target=clash。";
   }
-  if (!providerHeadersFromRequest(request, argProviderHeaders,
-                                  provider_headers,
+  if (!providerHeadersFromRequest(request, parsed.provider_headers,
+                                  policy.provider_headers,
                                   provider_headers_error)) {
-    *status_code = 400;
+    response.status_code = 400;
     return "Invalid request: " + provider_headers_error + ".\n"
            "无效请求：proxy-provider 请求头选择失败。";
   }
 
-  /// load request arguments as template variables
-  //    string_array req_args = split(argument, "&");
-  //    string_map req_arg_map;
-  //    for(std::string &x : req_args)
-  //    {
-  //        string_size pos = x.find("=");
-  //        if(pos == x.npos)
-  //        {
-  //            req_arg_map[x] = "";
-  //            continue;
-  //        }
-  //        if(x.substr(0, pos) == "token")
-  //            continue;
-  //        req_arg_map[x.substr(0, pos)] = x.substr(pos + 1);
-  //    }
   string_map req_arg_map;
-  for (auto &x : argument) {
-    if (x.first == "token")
+  for (auto &argument : request.argument) {
+    if (argument.first == "token")
       continue;
-    req_arg_map[x.first] = x.second;
+    req_arg_map[argument.first] = argument.second;
   }
-  req_arg_map["target"] = argTarget;
-  req_arg_map["ver"] = std::to_string(intSurgeVer);
+  req_arg_map["target"] = parsed.target;
+  req_arg_map["ver"] = std::to_string(parsed.surge_version);
+  policy.template_arguments.global_vars = settings.templateVars;
+  policy.template_arguments.request_params = std::move(req_arg_map);
 
-  /// save template variables
-  template_args tpl_args;
-  tpl_args.global_vars = global.templateVars;
-  tpl_args.request_params = std::move(req_arg_map);
-
-  /// check for proxy settings
-  ProxyPolicy proxy = parseProxy(global.proxySubscription);
-
-  /// check other flags
-  ext.authorized = authorized;
-  ext.append_proxy_type = argAppendType.get(global.appendType);
+  policy.subscription_proxy = parseProxy(settings.proxySubscription);
+  policy.generator.append_proxy_type =
+      parsed.append_type.get(settings.appendType);
   // 上游项目默认在 clash 目标下自动把 expand 设为 true
   // 本项目默认 expand=false（使用 rule-provider 模式不展开规则集）
   // 若用户主动传入 expand=true，则按照用户意愿内联展开规则集
-  argExpandRulesets.define(false);
+  parsed.expand_rulesets.define(false);
 
-  ext.clash_proxies_style = global.clashProxiesStyle;
-  ext.clash_proxy_groups_style = global.clashProxyGroupsStyle;
+  policy.generator.clash_proxies_style = settings.clashProxiesStyle;
+  policy.generator.clash_proxy_groups_style = settings.clashProxyGroupsStyle;
+  policy.generator.tfo.define(parsed.tfo).define(settings.TFOFlag);
+  policy.generator.udp.define(parsed.udp).define(settings.UDPFlag);
+  policy.generator.skip_cert_verify
+      .define(parsed.skip_cert_verify)
+      .define(settings.skipCertVerify);
+  policy.generator.tls13.define(parsed.tls13).define(settings.TLS13Flag);
 
-  /// read preference from argument, assign global var if not in argument
-  ext.tfo.define(argTFO).define(global.TFOFlag);
-  ext.udp.define(argUDP).define(global.UDPFlag);
-  ext.skip_cert_verify.define(argSkipCertVerify).define(global.skipCertVerify);
-  ext.tls13.define(argTLS13).define(global.TLS13Flag);
-
-  ext.sort_flag = argSort.get(global.enableSort);
-  argUseSortScript.define(!global.sortScript.empty());
-  if (ext.sort_flag && argUseSortScript)
-    ext.sort_script = global.sortScript;
-  ext.filter_deprecated = argFilterDeprecated.get(global.filterDeprecated);
-  ext.clash_new_field_name = argClashNewField.get(global.clashUseNewField);
-  ext.clash_script = argGenClashScript.get();
-  ext.clash_classical_ruleset = argGenClassicalRuleProvider.get();
-  ext.provider_proxy_direct =
-      argProviderProxyDirect.get(global.proxyProviderDirect);
+  policy.generator.sort_flag = parsed.sort.get(settings.enableSort);
+  parsed.use_sort_script.define(!settings.sortScript.empty());
+  if (policy.generator.sort_flag && parsed.use_sort_script)
+    policy.generator.sort_script = settings.sortScript;
+  policy.generator.filter_deprecated =
+      parsed.filter_deprecated.get(settings.filterDeprecated);
+  policy.generator.clash_new_field_name =
+      parsed.clash_new_field.get(settings.clashUseNewField);
+  policy.generator.clash_script = parsed.generate_clash_script.get();
+  policy.generator.clash_classical_ruleset =
+      parsed.generate_classical_rule_provider.get();
+  policy.generator.provider_proxy_direct =
+      parsed.provider_proxy_direct.get(settings.proxyProviderDirect);
   // 无论 expand 取何值，均强制使用 Mihomo 新字段名（proxy-groups / rules）
   // 避免因全局配置为旧字段名而导致 Mihomo 无法识别
-  ext.clash_new_field_name = true;
-  if (argExpandRulesets)
-    ext.clash_script = false;
-  explain.expand_rulesets = argExpandRulesets.get(false);
+  policy.generator.clash_new_field_name = true;
+  if (parsed.expand_rulesets)
+    policy.generator.clash_script = false;
+  parsed.explain.expand_rulesets = parsed.expand_rulesets.get(false);
 
   // Clash defaults to proxy-provider mode, while an explicit list=true keeps
   // the traditional expanded-node behavior.
-  ext.nodelist = argGenNodeList.get(false);
-  explain.nodelist = ext.nodelist;
-  ext.surge_ssr_path = global.surgeSSRPath;
-  ext.quanx_dev_id = !argDeviceID.empty() ? argDeviceID : global.quanXDevID;
-  ext.enable_rule_generator = global.enableRuleGen;
-  ext.overwrite_original_rules = global.overwriteOriginalRules;
-  if (!argExpandRulesets)
-    ext.managed_config_prefix = global.managedConfigPrefix;
-  explain.rule_generator_enabled = ext.enable_rule_generator;
-  explain.managed_config = !ext.managed_config_prefix.empty();
+  policy.generator.nodelist = parsed.generate_node_list.get(false);
+  parsed.explain.nodelist = policy.generator.nodelist;
+  policy.generator.surge_ssr_path = settings.surgeSSRPath;
+  policy.generator.quanx_dev_id = !parsed.device_id.empty()
+                                        ? parsed.device_id
+                                        : settings.quanXDevID;
+  policy.generator.enable_rule_generator = settings.enableRuleGen;
+  policy.generator.overwrite_original_rules = settings.overwriteOriginalRules;
+  if (!parsed.expand_rulesets)
+    policy.generator.managed_config_prefix = settings.managedConfigPrefix;
+  parsed.explain.rule_generator_enabled =
+      policy.generator.enable_rule_generator;
+  parsed.explain.managed_config =
+      !policy.generator.managed_config_prefix.empty();
 
-  /// load external configuration
-  bool userProvidedExternalConfig = !argExternalConfig.empty();
+  return "";
+}
+
+struct ExternalConfigFetchPlan {
+  bool user_provided_external_config = false;
+  bool config_load_success = false;
+  FetchContext base_fetch_context = FetchContext::TrustedConfig;
+  std::vector<RulesetContent> ruleset_content;
+};
+
+static std::string buildExternalConfigFetchPlan(
+    Response &response, const Settings &settings, ParsedSubRequest &parsed,
+    EffectiveSubPolicy &policy, ExternalConfigFetchPlan &plan) {
+  plan.user_provided_external_config = !parsed.external_config.empty();
   FetchContext rulesetFetchContext = FetchContext::TrustedConfig;
-  FetchContext baseFetchContext = FetchContext::TrustedConfig;
   bool configLoadSuccess = false;
   string_array rulePrependSources, ruleAppendSources;
   FetchContext externalRuleFetchContext = FetchContext::TrustedConfig;
-  string_map tpl_args_base = tpl_args.local_vars;
-  explain.external_config_provided = userProvidedExternalConfig;
+  string_map tpl_args_base = policy.template_arguments.local_vars;
+  parsed.explain.external_config_provided =
+      plan.user_provided_external_config;
 
   struct ExternalConfigCandidate {
     std::string path;
@@ -1956,18 +1965,18 @@ static std::string subconverter_impl(Request &request, Response &response,
     bool fallback = false;
   };
   std::vector<ExternalConfigCandidate> config_candidates;
-  if (userProvidedExternalConfig) {
+  if (plan.user_provided_external_config) {
     config_candidates.push_back(
-        {argExternalConfig, FetchContext::PublicRequest, false});
-    if (global.fallbackToDefaultExternalConfig &&
-        !global.defaultExtConfig.empty() &&
-        global.defaultExtConfig != argExternalConfig) {
+        {parsed.external_config, FetchContext::PublicRequest, false});
+    if (settings.fallbackToDefaultExternalConfig &&
+        !settings.defaultExtConfig.empty() &&
+        settings.defaultExtConfig != parsed.external_config) {
       config_candidates.push_back(
-          {global.defaultExtConfig, FetchContext::TrustedConfig, true});
+          {settings.defaultExtConfig, FetchContext::TrustedConfig, true});
     }
-  } else if (!global.defaultExtConfig.empty()) {
+  } else if (!settings.defaultExtConfig.empty()) {
     config_candidates.push_back(
-        {global.defaultExtConfig, FetchContext::TrustedConfig, false});
+        {settings.defaultExtConfig, FetchContext::TrustedConfig, false});
   }
 
   auto loadStatusName = [](ExternalConfigLoadStatus status) {
@@ -1993,96 +2002,107 @@ static std::string subconverter_impl(Request &request, Response &response,
     rulePrependSources = extconf.rule_prepend_sources;
     ruleAppendSources = extconf.rule_append_sources;
     externalRuleFetchContext = extconf.rule_sources_context;
-    if (!ext.nodelist) {
-      if (checkExternalBase(extconf.sssub_rule_base, lSSSubBase, context))
-        baseFetchContext = context;
-      if (!lSimpleSubscription) {
-        if (checkExternalBase(extconf.clash_rule_base, lClashBase, context))
-          baseFetchContext = context;
-        if (checkExternalBase(extconf.surge_rule_base, lSurgeBase, context))
-          baseFetchContext = context;
-        if (checkExternalBase(extconf.surfboard_rule_base, lSurfboardBase,
+    if (!policy.generator.nodelist) {
+      if (checkExternalBase(extconf.sssub_rule_base, policy.sssub_base,
+                            context))
+        plan.base_fetch_context = context;
+      if (!parsed.simple_subscription) {
+        if (checkExternalBase(extconf.clash_rule_base, policy.clash_base,
                               context))
-          baseFetchContext = context;
-        if (checkExternalBase(extconf.mellow_rule_base, lMellowBase, context))
-          baseFetchContext = context;
-        if (checkExternalBase(extconf.quan_rule_base, lQuanBase, context))
-          baseFetchContext = context;
-        if (checkExternalBase(extconf.quanx_rule_base, lQuanXBase, context))
-          baseFetchContext = context;
-        if (checkExternalBase(extconf.loon_rule_base, lLoonBase, context))
-          baseFetchContext = context;
-        if (checkExternalBase(extconf.singbox_rule_base, lSingBoxBase,
+          plan.base_fetch_context = context;
+        if (checkExternalBase(extconf.surge_rule_base, policy.surge_base,
                               context))
-          baseFetchContext = context;
+          plan.base_fetch_context = context;
+        if (checkExternalBase(extconf.surfboard_rule_base,
+                              policy.surfboard_base, context))
+          plan.base_fetch_context = context;
+        if (checkExternalBase(extconf.mellow_rule_base, policy.mellow_base,
+                              context))
+          plan.base_fetch_context = context;
+        if (checkExternalBase(extconf.quan_rule_base, policy.quan_base,
+                              context))
+          plan.base_fetch_context = context;
+        if (checkExternalBase(extconf.quanx_rule_base, policy.quanx_base,
+                              context))
+          plan.base_fetch_context = context;
+        if (checkExternalBase(extconf.loon_rule_base, policy.loon_base,
+                              context))
+          plan.base_fetch_context = context;
+        if (checkExternalBase(extconf.singbox_rule_base, policy.singbox_base,
+                              context))
+          plan.base_fetch_context = context;
 
         if (!extconf.surge_ruleset.empty()) {
-          lCustomRulesets = extconf.surge_ruleset;
+          policy.custom_rulesets = extconf.surge_ruleset;
           rulesetFetchContext = context;
         }
         if (!extconf.custom_proxy_group.empty())
-          lCustomProxyGroups = extconf.custom_proxy_group;
-        ext.enable_rule_generator = extconf.enable_rule_generator;
-        ext.overwrite_original_rules = extconf.overwrite_original_rules;
+          policy.custom_proxy_groups = extconf.custom_proxy_group;
+        policy.generator.enable_rule_generator =
+            extconf.enable_rule_generator;
+        policy.generator.overwrite_original_rules =
+            extconf.overwrite_original_rules;
       }
     }
     if (!extconf.rename.empty()) {
-      ext.rename_array = extconf.rename;
-      ext.rename_for_providers = true;
+      policy.generator.rename_array = extconf.rename;
+      policy.generator.rename_for_providers = true;
     }
     if (!extconf.emoji.empty())
-      ext.emoji_array = extconf.emoji;
+      policy.generator.emoji_array = extconf.emoji;
     if (!extconf.include.empty())
-      lIncludeRemarks = extconf.include;
+      policy.include_remarks = extconf.include;
     if (!extconf.exclude.empty())
-      lExcludeRemarks = extconf.exclude;
-    argAddEmoji.define(extconf.add_emoji);
-    argRemoveEmoji.define(extconf.remove_old_emoji);
+      policy.exclude_remarks = extconf.exclude;
+    parsed.add_emoji.define(extconf.add_emoji);
+    parsed.remove_emoji.define(extconf.remove_old_emoji);
   };
 
   for (const ExternalConfigCandidate &candidate : config_candidates) {
-    tpl_args.local_vars = tpl_args_base;
+    policy.template_arguments.local_vars = tpl_args_base;
     writeLog(0, candidate.fallback
                     ? "用户外部配置失败，显式尝试默认外部配置：" +
-                          candidate.path
-                    : "正在加载外部配置：" + candidate.path,
+                          summarizeUrlForLog(candidate.path)
+                    : "正在加载外部配置：" +
+                          summarizeUrlForLog(candidate.path),
              candidate.fallback ? LOG_LEVEL_WARNING : LOG_LEVEL_INFO);
 
     ExternalConfig extconf;
-    extconf.tpl_args = &tpl_args;
+    extconf.tpl_args = &policy.template_arguments;
     ExternalConfigLoadResult loaded =
         loadExternalConfig(candidate.path, extconf, candidate.context);
     bool effective =
-        loaded.ok() &&
-        hasEffectiveExternalConfig(extconf, tpl_args, tpl_args_base);
+        loaded.ok() && hasEffectiveExternalConfig(
+                           extconf, policy.template_arguments, tpl_args_base);
     bool selected_base_valid =
         effective && validateSelectedExternalBase(
-                         extconf, argTarget, lSimpleSubscription, ext.nodelist,
-                         candidate.context);
+                         extconf, parsed.target, parsed.simple_subscription,
+                         policy.generator.nodelist, candidate.context);
     if (loaded.ok() && effective && selected_base_valid) {
       applyExternalConfig(extconf, candidate.context);
       configLoadSuccess = true;
-      explain.external_config_loaded = true;
-      explain.fallback_config_used = candidate.fallback;
+      plan.config_load_success = true;
+      parsed.explain.external_config_loaded = true;
+      parsed.explain.fallback_config_used = candidate.fallback;
       break;
     }
 
-    tpl_args.local_vars = tpl_args_base;
+    policy.template_arguments.local_vars = tpl_args_base;
     std::string reason = !loaded.ok()
                              ? loadStatusName(loaded.status)
                              : (!effective ? "no_effective_settings"
                                            : "selected_base_invalid");
     writeLog(0, "外部配置不可用，原因：" + reason + "，来源：" +
-                    candidate.path,
+                    summarizeUrlForLog(candidate.path),
              LOG_LEVEL_WARNING);
   }
 
   if (!configLoadSuccess) {
-    tpl_args.local_vars = tpl_args_base;
-    response.status_code = userProvidedExternalConfig ? 400 : 500;
+    policy.template_arguments.local_vars = tpl_args_base;
+    response.status_code = plan.user_provided_external_config ? 400 : 500;
     response.content_type = "text/plain; charset=utf-8";
     response.headers["Cache-Control"] = "private, no-store";
-    if (userProvidedExternalConfig)
+    if (plan.user_provided_external_config)
       return "Invalid request: selected external configuration could not be "
              "loaded or applied.\n"
              "无效请求：无法加载或应用用户选择的外部配置。";
@@ -2094,32 +2114,32 @@ static std::string subconverter_impl(Request &request, Response &response,
   const size_t externalRuleSourceCount =
       rulePrependSources.size() + ruleAppendSources.size();
   if (externalRuleSourceCount) {
-    if (global.maxAllowedRulesets &&
-        externalRuleSourceCount > global.maxAllowedRulesets) {
-      *status_code = 400;
+    if (settings.maxAllowedRulesets &&
+        externalRuleSourceCount > settings.maxAllowedRulesets) {
+      response.status_code = 400;
       return "Invalid request: ruleprepend and ruleappend contain more "
              "sources than max_allowed_rulesets (" +
-             std::to_string(global.maxAllowedRulesets) +
+             std::to_string(settings.maxAllowedRulesets) +
              ").\n"
              "无效请求：ruleprepend 与 ruleappend 的来源总数超过 "
              "max_allowed_rulesets 限制（" +
-             std::to_string(global.maxAllowedRulesets) + "）。";
+             std::to_string(settings.maxAllowedRulesets) + "）。";
     }
-    if (argTarget != "clash") {
-      *status_code = 400;
+    if (parsed.target != "clash") {
+      response.status_code = 400;
       return "Invalid request: ruleprepend and ruleappend are supported only "
              "for target=clash.\n"
              "无效请求：ruleprepend 与 ruleappend 第一版仅支持 "
              "target=clash。";
     }
-    if (argGenNodeList.get(false)) {
-      *status_code = 400;
+    if (parsed.generate_node_list.get(false)) {
+      response.status_code = 400;
       return "Invalid request: ruleprepend and ruleappend do not support "
              "list=true.\n"
              "无效请求：ruleprepend 与 ruleappend 不支持 list=true。";
     }
-    if (argGenClashScript.get(false)) {
-      *status_code = 400;
+    if (parsed.generate_clash_script.get(false)) {
+      response.status_code = 400;
       return "Invalid request: ruleprepend and ruleappend do not support "
              "script=true.\n"
              "无效请求：ruleprepend 与 ruleappend 不支持 script=true。";
@@ -2128,68 +2148,101 @@ static std::string subconverter_impl(Request &request, Response &response,
     std::string external_rule_error;
     if (!fetchExternalRuleSources(rulePrependSources, "ruleprepend",
                                   externalRuleFetchContext,
-                                  ext.rule_prepend, external_rule_error) ||
+                                  policy.generator.rule_prepend,
+                                  external_rule_error) ||
         !fetchExternalRuleSources(ruleAppendSources, "ruleappend",
                                   externalRuleFetchContext,
-                                  ext.rule_append, external_rule_error)) {
-      *status_code = 400;
+                                  policy.generator.rule_append,
+                                  external_rule_error)) {
+      response.status_code = 400;
       return external_rule_error;
     }
   }
 
-  if (ext.enable_rule_generator && !ext.nodelist && !lSimpleSubscription) {
-    if (lCustomRulesets != global.customRulesets)
-      refreshRulesets(lCustomRulesets, lRulesetContent, rulesetFetchContext);
+  if (policy.generator.enable_rule_generator &&
+      !policy.generator.nodelist && !parsed.simple_subscription) {
+    if (policy.custom_rulesets != settings.customRulesets)
+      refreshRulesets(policy.custom_rulesets, plan.ruleset_content,
+                      rulesetFetchContext);
     else {
-      if (global.updateRulesetOnRequest)
-        refreshRulesets(lCustomRulesets, lRulesetContent,
+      if (settings.updateRulesetOnRequest)
+        refreshRulesets(policy.custom_rulesets, plan.ruleset_content,
                         rulesetFetchContext);
       else
-        lRulesetContent = global.rulesetsContent;
+        plan.ruleset_content = settings.rulesetsContent;
     }
   }
-  explain.rule_generator_enabled = ext.enable_rule_generator;
-  explain.base_fetch_context = fetchContextName(baseFetchContext);
-  explain.ruleset_fetch_context = fetchContextName(rulesetFetchContext);
-  explain.ruleset_count = lRulesetContent.size();
-  explain.custom_group_count = lCustomProxyGroups.size();
+  parsed.explain.rule_generator_enabled =
+      policy.generator.enable_rule_generator;
+  parsed.explain.base_fetch_context =
+      fetchContextName(plan.base_fetch_context);
+  parsed.explain.ruleset_fetch_context =
+      fetchContextName(rulesetFetchContext);
+  parsed.explain.ruleset_count = plan.ruleset_content.size();
+  parsed.explain.custom_group_count = policy.custom_proxy_groups.size();
 
-  if (!argEmoji.is_undef()) {
-    argAddEmoji.set(argEmoji);
-    argRemoveEmoji.set(true);
+  if (!parsed.emoji.is_undef()) {
+    parsed.add_emoji.set(parsed.emoji);
+    parsed.remove_emoji.set(true);
   }
-  ext.add_emoji = argAddEmoji.get(global.addEmoji);
-  ext.remove_emoji = argRemoveEmoji.get(global.removeEmoji);
-  if (ext.add_emoji && ext.emoji_array.empty())
-    ext.emoji_array = safe_get_emojis();
-  if (!argRenames.empty()) {
-    ext.rename_array = INIBinding::from<RegexMatchConfig>::from_ini(
-        split(argRenames, "`"), "@");
-    ext.rename_for_providers = true;
-  } else if (ext.rename_array.empty())
-    ext.rename_array = safe_get_renames();
+  policy.generator.add_emoji = parsed.add_emoji.get(settings.addEmoji);
+  policy.generator.remove_emoji =
+      parsed.remove_emoji.get(settings.removeEmoji);
+  if (policy.generator.add_emoji && policy.generator.emoji_array.empty())
+    policy.generator.emoji_array = settings.emojis;
+  if (!parsed.renames.empty()) {
+    policy.generator.rename_array =
+        INIBinding::from<RegexMatchConfig>::from_ini(
+            split(parsed.renames, "`"), "@");
+    policy.generator.rename_for_providers = true;
+  } else if (policy.generator.rename_array.empty())
+    policy.generator.rename_array = settings.renames;
 
-  /// check custom include/exclude settings
-  if (!argIncludeRemark.empty() && regValid(argIncludeRemark))
-    lIncludeRemarks = string_array{argIncludeRemark};
-  if (!argExcludeRemark.empty() && regValid(argExcludeRemark))
-    lExcludeRemarks = string_array{argExcludeRemark};
+  if (!parsed.include_remark.empty() && regValid(parsed.include_remark))
+    policy.include_remarks = string_array{parsed.include_remark};
+  if (!parsed.exclude_remark.empty() && regValid(parsed.exclude_remark))
+    policy.exclude_remarks = string_array{parsed.exclude_remark};
 
-  /// initialize script runtime
-  if (authorized && !global.scriptCleanContext) {
-    ext.js_runtime = new qjs::Runtime();
-    script_runtime_init(*ext.js_runtime);
-    ext.js_context = new qjs::Context(*ext.js_runtime);
-    script_context_init(*ext.js_context);
-  }
+  return "";
+}
 
-  // start parsing urls
-  RegexMatchConfigs stream_temp = safe_get_streams(),
-                    time_temp = safe_get_times();
+struct SubscriptionNodeState {
+  std::vector<Proxy> nodes;
+  std::string subscription_info;
+};
 
-  // loading urls
+struct SubStageResponse {
+  bool complete = false;
+  std::string body;
+};
+
+static SubStageResponse processSubscriptionNodes(
+    Request &request, Response &response, const Settings &settings,
+    ParsedSubRequest &parsed, EffectiveSubPolicy &policy,
+    SubscriptionNodeState &state) {
+  int *status_code = &response.status_code;
+  std::string &argTarget = parsed.target;
+  std::string &argUrl = parsed.url;
+  std::string &argGroupName = parsed.group_name;
+  std::string &argProviderHeaders = parsed.provider_headers;
+  tribool &argUpload = parsed.upload;
+  tribool &argEnableInsert = parsed.enable_insert;
+  tribool &argAppendUserinfo = parsed.append_userinfo;
+  tribool &argPrependInsert = parsed.prepend_insert;
+  SubExplainReport &explain = parsed.explain;
+  string_array &lIncludeRemarks = policy.include_remarks;
+  string_array &lExcludeRemarks = policy.exclude_remarks;
+  std::map<std::string, std::string> &provider_headers =
+      policy.provider_headers;
+  ProxyPolicy &proxy = policy.subscription_proxy;
+  extra_settings &ext = policy.generator;
+
+  RegexMatchConfigs stream_temp = settings.streamNodeRules,
+                    time_temp = settings.timeNodeRules;
   string_array urls;
-  std::vector<Proxy> nodes, insert_nodes;
+  std::vector<Proxy> &nodes = state.nodes;
+  std::vector<Proxy> insert_nodes;
+  std::string &subInfo = state.subscription_info;
   int groupID = 0;
 
   parse_settings parse_set;
@@ -2199,7 +2252,6 @@ static std::string subconverter_impl(Request &request, Response &response,
   parse_set.stream_rules = &stream_temp;
   parse_set.time_rules = &time_temp;
   parse_set.sub_info = &subInfo;
-  parse_set.authorized = authorized;
   parse_set.mihomo_only = argTarget == "clash" || argTarget == "clashr";
   string_icase_map subscription_headers = buildSubscriptionRequestHeaders();
   std::string selected_user_agent = providerUserAgentFromRequest(request);
@@ -2212,29 +2264,30 @@ static std::string subconverter_impl(Request &request, Response &response,
   parse_set.js_runtime = ext.js_runtime;
   parse_set.js_context = ext.js_context;
 
-  if (!global.insertUrls.empty() && argEnableInsert) {
+  if (!settings.insertUrls.empty() && argEnableInsert) {
     groupID = -1;
-    urls = split(global.insertUrls, "|");
+    urls = split(settings.insertUrls, "|");
     explain.insert_url_count = urls.size();
     importItems(urls, true);
     for (std::string &x : urls) {
       x = regTrim(x);
-      writeLog(0, "正在从 URL 获取节点数据：'" + x + "'。", LOG_LEVEL_INFO);
+      writeLog(0, "正在从 URL 获取节点数据：" + summarizeUrlForLog(x) + "。",
+               LOG_LEVEL_INFO);
       if (addNodes(x, insert_nodes, groupID, parse_set) == -1) {
-        if (global.skipFailedLinks)
-          writeLog(
-              0, "以下链接不包含任何有效节点信息：" + x,
-              LOG_LEVEL_WARNING);
+        if (settings.skipFailedLinks)
+          writeLog(0, "以下链接不包含任何有效节点信息：" + x,
+                   LOG_LEVEL_WARNING);
         else {
           *status_code = 400;
-          return "Invalid request: this link does not contain any supported "
-                 "proxy nodes.\n"
-                 "无效请求：该链接不包含任何受支持的代理节点。\n"
-                 "Please check whether the link is reachable and the node URI "
-                 "format is supported.\n"
-                 "请检查链接是否可访问，以及节点 URI 格式是否受支持。\n"
-                 "Link / 链接: " +
-                 x;
+          return {true,
+                  "Invalid request: this link does not contain any supported "
+                  "proxy nodes.\n"
+                  "无效请求：该链接不包含任何受支持的代理节点。\n"
+                  "Please check whether the link is reachable and the node "
+                  "URI format is supported.\n"
+                  "请检查链接是否可访问，以及节点 URI 格式是否受支持。\n"
+                  "Link / 链接: " +
+                      x};
         }
       }
       groupID--;
@@ -2252,22 +2305,20 @@ static std::string subconverter_impl(Request &request, Response &response,
       TaggedLink tagged = parseTaggedLink(regTrim(urls[index]));
       if (tagged.error != TaggedLink::Error::None) {
         *status_code = 400;
-        return providerLinkPrefixError(index, tagged.error);
+        return {true, providerLinkPrefixError(index, tagged.error)};
       }
       if (tagged.has_interval) {
         *status_code = 400;
-        return providerIntervalScopeError(index);
+        return {true, providerIntervalScopeError(index)};
       }
       if (tagged.has_proxy_direct) {
         *status_code = 400;
-        return providerDirectScopeError(index);
+        return {true, providerDirectScopeError(index)};
       }
     }
   }
 
-  //  对于 Clash，区分节点链接和订阅链接
   if (provider_mode_eligible) {
-    // 先区分节点链接和订阅链接
     struct SubscriptionLinkItem {
       std::string url;
       std::string tag;
@@ -2278,8 +2329,8 @@ static std::string subconverter_impl(Request &request, Response &response,
       bool has_proxy_direct = false;
       bool url_decoded = false;
     };
-    std::vector<SubscriptionLinkItem> subscription_urls; // HTTP/HTTPS 订阅链接
-    std::vector<std::string> node_urls; // 节点链接（vless://, vmess:// 等）
+    std::vector<SubscriptionLinkItem> subscription_urls;
+    std::vector<std::string> node_urls;
 
     for (size_t index = 0; index < urls.size(); ++index) {
       std::string &x = urls[index];
@@ -2287,53 +2338,51 @@ static std::string subconverter_impl(Request &request, Response &response,
       TaggedLink tagged = parseTaggedLink(x);
       if (tagged.error != TaggedLink::Error::None) {
         *status_code = 400;
-        return providerLinkPrefixError(index, tagged.error);
+        return {true, providerLinkPrefixError(index, tagged.error)};
       }
       std::string link = tagged.link.empty() ? x : tagged.link;
-
-      // Keep HTTP(S)/data links available for proxy-provider mode. Other
-      // Mihomo-supported schemes are direct node links.
       bool isNodeLink = mihomo::isSupportedNonHttpSchemeLink(link);
 
       if (isNodeLink) {
         if (tagged.has_interval) {
           *status_code = 400;
-          return providerIntervalScopeError(index);
+          return {true, providerIntervalScopeError(index)};
         }
         if (tagged.has_proxy_direct) {
           *status_code = 400;
-          return providerDirectScopeError(index);
+          return {true, providerDirectScopeError(index)};
         }
         std::string node_link = link;
         if (tagged.has_tag)
           node_link = "tag:" + tagged.tag + "," + link;
-        writeLog(0, "检测到节点链接：'" + link + "'，将直接解析。",
+        writeLog(0, "检测到节点链接：" + summarizeUrlForLog(link) +
+                        "，将直接解析。",
                  LOG_LEVEL_INFO);
         node_urls.push_back(node_link);
         explain.node_link_count++;
       } else if (isLink(link) || mihomo::isHttpSchemeLink(link)) {
-        // HTTP/HTTPS 订阅链接
-        writeLog(
-            0, "检测到订阅链接：'" + link + "'，将创建 provider。",
-            LOG_LEVEL_INFO);
+        writeLog(0, "检测到订阅链接：" + summarizeUrlForLog(link) +
+                        "，将创建 provider。",
+                 LOG_LEVEL_INFO);
         subscription_urls.push_back(
             {link, tagged.tag, tagged.provider, tagged.interval,
-             tagged.proxy_direct, tagged.has_interval,
-             tagged.has_proxy_direct, tagged.link_decoded});
+             tagged.proxy_direct, tagged.has_interval, tagged.has_proxy_direct,
+             tagged.link_decoded});
         explain.subscription_url_count++;
       } else {
         if (tagged.has_interval) {
           *status_code = 400;
-          return providerIntervalScopeError(index);
+          return {true, providerIntervalScopeError(index)};
         }
         if (tagged.has_proxy_direct) {
           *status_code = 400;
-          return providerDirectScopeError(index);
+          return {true, providerDirectScopeError(index)};
         }
         std::string node_link = link;
         if (tagged.has_tag)
           node_link = "tag:" + tagged.tag + "," + link;
-        writeLog(0, "未知 URL 类型：'" + link + "'，按节点链接处理。",
+        writeLog(0, "未知 URL 类型：" + summarizeUrlForLog(link) +
+                        "，按节点链接处理。",
                  LOG_LEVEL_WARNING);
         node_urls.push_back(node_link);
         explain.node_link_count++;
@@ -2341,7 +2390,6 @@ static std::string subconverter_impl(Request &request, Response &response,
       }
     }
 
-    // 只有当有订阅链接时才启用 proxy-provider 模式
     if (!subscription_urls.empty()) {
       writeLog(0, "检测到订阅 URL，启用 proxy-provider 模式。",
                LOG_LEVEL_INFO);
@@ -2374,12 +2422,8 @@ static std::string subconverter_impl(Request &request, Response &response,
         }
       };
 
-      // 为订阅链接创建 proxy-provider
       for (const SubscriptionLinkItem &item : subscription_urls) {
         ProxyProvider provider;
-        // 使用 URL 的 MD5 哈希前 10 位作为唯一特征码
-        // 这样相同的订阅链接会生成相同的 provider 名称
-        // 不同的订阅链接会生成不同的名称，触发客户端自动更新
         std::string urlHash =
             item.url_decoded ? generateProviderHashFromDecodedUrl(item.url)
                              : generateProviderHash(item.url);
@@ -2394,22 +2438,18 @@ static std::string subconverter_impl(Request &request, Response &response,
         provider.tag = item.tag;
         writeLog(0,
                  "已生成 provider：" + provider.name + "，URL：" +
-                     item.url,
+                     summarizeUrlForLog(item.url),
                  LOG_LEVEL_INFO);
-        provider.url = item.url_decoded ? item.url
-                                        : urlDecode(item.url); // 解码 URL
+        provider.url = item.url_decoded ? item.url : urlDecode(item.url);
         provider.interval = static_cast<uint32_t>(
-            item.has_interval ? item.interval : global.proxyProviderInterval);
-        provider.proxy_direct = item.has_proxy_direct
-                                    ? item.proxy_direct
-                                    : ext.provider_proxy_direct;
+            item.has_interval ? item.interval : settings.proxyProviderInterval);
+        provider.proxy_direct =
+            item.has_proxy_direct ? item.proxy_direct
+                                  : ext.provider_proxy_direct;
         provider.groupId = groupID;
         provider.path = "./providers/" + provider.name + ".yaml";
         provider.user_agent = provider_user_agent;
         provider.headers = provider_headers;
-
-        // Provider mode cannot filter expanded nodes locally, so pass the
-        // final effective remark filters through to Mihomo.
         provider.filter = buildProviderRemarkFilter(lIncludeRemarks);
         provider.exclude_filter =
             buildProviderRemarkFilter(lExcludeRemarks);
@@ -2429,86 +2469,85 @@ static std::string subconverter_impl(Request &request, Response &response,
         groupID++;
       }
     } else {
-      // 没有订阅链接，禁用 proxy-provider 模式
       writeLog(0, "未检测到订阅 URL，禁用 proxy-provider 模式。",
                LOG_LEVEL_INFO);
       ext.use_proxy_provider = false;
     }
 
-    // 节点链接使用原有逻辑直接解析
     if (!node_urls.empty()) {
       writeLog(0,
                "正在直接解析 " + std::to_string(node_urls.size()) +
                    " 个节点链接。",
                LOG_LEVEL_INFO);
       importItems(node_urls, true, FetchContext::PublicRequest);
-      // 关键：实际添加节点到 nodes 列表
       for (std::string &x : node_urls) {
-        writeLog(0, "正在从 URL 获取节点数据：'" + x + "'。", LOG_LEVEL_INFO);
+        writeLog(0, "正在从 URL 获取节点数据：" + summarizeUrlForLog(x) +
+                        "。",
+                 LOG_LEVEL_INFO);
         if (addNodes(x, nodes, groupID, parse_set) == -1) {
-          // 跳过无法解析的节点链接，记录警告后继续处理其他节点
           writeLog(0,
-                   "已跳过无效节点链接：'" + x + "'，继续处理其他节点。",
+                   "已跳过无效节点链接：" + summarizeUrlForLog(x) +
+                       "，继续处理其他节点。",
                    LOG_LEVEL_WARNING);
         }
         groupID++;
       }
     }
   } else {
-    // 其他格式保持原有逻辑，完全展开节点
-    importItems(urls, true,
-                FetchContext::PublicRequest); // 只为非 proxy-provider 模式处理 import 语法
+    importItems(urls, true, FetchContext::PublicRequest);
     for (std::string &x : urls) {
       x = regTrim(x);
-      // std::cerr<<"Fetching node data from url '"<<x<<"'."<<std::endl;
-      writeLog(0, "正在从 URL 获取节点数据：'" + x + "'。", LOG_LEVEL_INFO);
+      writeLog(0, "正在从 URL 获取节点数据：" + summarizeUrlForLog(x) + "。",
+               LOG_LEVEL_INFO);
       if (addNodes(x, nodes, groupID, parse_set) == -1) {
-        // 跳过无法解析的节点链接，记录警告后继续处理其他节点
         writeLog(0,
-                 "已跳过无效节点链接：'" + x + "'，继续处理其他节点。",
+                 "已跳过无效节点链接：" + summarizeUrlForLog(x) +
+                     "，继续处理其他节点。",
                  LOG_LEVEL_WARNING);
       }
       groupID++;
     }
   }
-  // exit if found nothing
-  // 对于 proxy-provider 模式，允许 nodes 为空（节点从 provider 获取）
+
   explain.provider_count = ext.providers.size();
   explain.proxy_provider_mode = ext.use_proxy_provider && !ext.providers.empty();
   explain.insert_node_count = insert_nodes.size();
   explain.direct_node_count = nodes.size();
   if (!argProviderHeaders.empty() && !ext.nodelist && ext.providers.empty()) {
     *status_code = 400;
-    return "Invalid request: provider_headers was selected, but no "
-           "proxy-provider was generated.\n"
-           "无效请求：已选择 provider_headers，但没有生成 proxy-provider。";
+    return {true,
+            "Invalid request: provider_headers was selected, but no "
+            "proxy-provider was generated.\n"
+            "无效请求：已选择 provider_headers，但没有生成 proxy-provider。"};
   }
   if (nodes.empty() && insert_nodes.empty() && ext.providers.empty()) {
     *status_code = 400;
-    return "Invalid request: no valid proxy nodes or proxy providers were "
-           "found.\n"
-           "无效请求：未找到有效的代理节点或代理提供者。\n"
-           "Please check whether the subscription URL or node URI format is "
-           "supported, and whether filters excluded all nodes.\n"
-           "请检查订阅链接或节点 URI 格式是否受支持，以及过滤规则是否排除了所有节点。";
+    return {true,
+            "Invalid request: no valid proxy nodes or proxy providers were "
+            "found.\n"
+            "无效请求：未找到有效的代理节点或代理提供者。\n"
+            "Please check whether the subscription URL or node URI format is "
+            "supported, and whether filters excluded all nodes.\n"
+            "请检查订阅链接或节点 URI 格式是否受支持，以及过滤规则是否排除了所有节点。"};
   }
-  if (!subInfo.empty() && argAppendUserinfo.get(global.appendUserinfo))
+  if (!subInfo.empty() && argAppendUserinfo.get(settings.appendUserinfo))
     response.headers.emplace("Subscription-UserInfo", subInfo);
 
   if (request.method == "HEAD")
-    return "";
+    return {true, ""};
 
   if (argUpload && !isPublicUploadAllowed()) {
     *status_code = 403;
-    return "Upload is disabled for the current security profile.\n"
-           "当前安全档位已禁用公开请求上传。\n"
-           "Use security.profile=lan for private deployments, or explicitly "
-           "enable security.allow_public_upload in public profile.\n"
-           "内网私有部署请使用 security.profile=lan；公网档位如确需上传，"
-           "请显式开启 security.allow_public_upload。";
+    return {true,
+            "Upload is disabled for the current security profile.\n"
+            "当前安全档位已禁用公开请求上传。\n"
+            "Use security.profile=lan for private deployments, or explicitly "
+            "enable security.allow_public_upload in public profile.\n"
+            "内网私有部署请使用 security.profile=lan；公网档位如确需上传，"
+            "请显式开启 security.allow_public_upload。"};
   }
 
-  argPrependInsert.define(global.prependInsert);
+  argPrependInsert.define(settings.prependInsert);
   if (argPrependInsert) {
     std::move(nodes.begin(), nodes.end(), std::back_inserter(insert_nodes));
     nodes.swap(insert_nodes);
@@ -2516,37 +2555,11 @@ static std::string subconverter_impl(Request &request, Response &response,
     std::move(insert_nodes.begin(), insert_nodes.end(),
               std::back_inserter(nodes));
   }
-  // run filter script
-  std::string filterScript = global.filterScript;
-  if (authorized && !argFilterScript.empty())
-    filterScript = argFilterScript;
+
+  std::string filterScript = settings.filterScript;
   if (!filterScript.empty()) {
     if (startsWith(filterScript, "path:"))
       filterScript = fileGet(filterScript.substr(5), false);
-    /*
-    duk_context *ctx = duktape_init();
-    if(ctx)
-    {
-        defer(duk_destroy_heap(ctx);)
-        if(duktape_peval(ctx, filterScript) == 0)
-        {
-            auto filter = [&](const Proxy &x)
-            {
-                duk_get_global_string(ctx, "filter");
-                duktape_push_Proxy(ctx, x);
-                duk_pcall(ctx, 1);
-                return !duktape_get_res_bool(ctx);
-            };
-            nodes.erase(std::remove_if(nodes.begin(), nodes.end(), filter),
-    nodes.end());
-        }
-        else
-        {
-            writeLog(0, "解析脚本时发生错误：\n" +
-    duktape_get_err_stack(ctx), LOG_LEVEL_ERROR); duk_pop(ctx); /// pop err
-        }
-    }
-    */
     script_safe_runner(
         ext.js_runtime, ext.js_context,
         [&](qjs::Context &ctx) {
@@ -2560,291 +2573,371 @@ static std::string subconverter_impl(Request &request, Response &response,
             script_print_stack(ctx);
           }
         },
-        global.scriptCleanContext);
+        settings.scriptCleanContext);
   }
 
-  // check custom group name
   if (!argGroupName.empty())
-    for (Proxy &x : nodes)
-      x.Group = argGroupName;
+    for (Proxy &node : nodes)
+      node.Group = argGroupName;
 
-  // do pre-process now
   preprocessNodes(nodes, ext);
   explain.total_node_count = nodes.size();
+  return {};
+}
 
-  /*
-  //insert node info to template
-  int index = 0;
-  std::string template_node_prefix;
-  for(Proxy &x : nodes)
-  {
-      template_node_prefix = std::to_string(index) + ".";
-      tpl_args.node_list[template_node_prefix + "remarks"] = x.remarks;
-      tpl_args.node_list[template_node_prefix + "group"] = x.Group;
-      tpl_args.node_list[template_node_prefix + "groupid"] =
-  std::to_string(x.GroupId); index++;
-  }
-  */
+struct TargetGenerationState {
+  std::string output;
+  std::string managed_url;
+};
 
+static SubStageResponse dispatchTargetGenerator(
+    Request &request, Response &response, const Settings &settings,
+    ParsedSubRequest &parsed, EffectiveSubPolicy &policy,
+    ExternalConfigFetchPlan &fetch_plan,
+    SubscriptionNodeState &subscription, TargetGenerationState &generation) {
+  auto &argument = request.argument;
+  int *status_code = &response.status_code;
+  auto &target = parsed.target;
+  auto &surge_version_text = parsed.surge_version_text;
+  auto &group_name = parsed.group_name;
+  auto &upload_path = parsed.upload_path;
+  auto &upload = parsed.upload;
+  auto &ext = policy.generator;
+  auto &template_arguments = policy.template_arguments;
+  auto &proxy = policy.subscription_proxy;
+  auto &nodes = subscription.nodes;
+  auto &subscription_info = subscription.subscription_info;
+  auto &ruleset_content = fetch_plan.ruleset_content;
+  const FetchContext base_context = fetch_plan.base_fetch_context;
+  std::string base_content;
+  std::string &output = generation.output;
   ProxyGroupConfigs dummy_group;
   std::vector<RulesetContent> dummy_ruleset;
-  std::string managed_url = base64Decode(getUrlArg(argument, "profile_data"));
+
+  std::string &managed_url = generation.managed_url;
+  managed_url = base64Decode(getUrlArg(argument, "profile_data"));
   if (managed_url.empty())
     managed_url =
-        global.managedConfigPrefix + "/sub?" + joinArguments(argument);
+        settings.managedConfigPrefix + "/sub?" + joinArguments(argument);
 
-  // std::cerr<<"Generate target: ";
-  proxy = parseProxy(global.proxyConfig);
-  switch (hash_(argTarget)) {
+  bool upload_failed = false;
+  auto recordUpload = [&](const std::string &name, const std::string &path,
+                          const std::string &content, bool write_manage_url) {
+    if (uploadGist(name, path, content, write_manage_url) != 0)
+      upload_failed = true;
+  };
+
+  proxy = parseProxy(settings.proxyConfig);
+  switch (hash_(target)) {
   case "clash"_hash:
   case "clashr"_hash:
-    writeLog(0,
-             argTarget == "clashr" ? "生成目标：ClashR" : "生成目标：Clash",
+    writeLog(0, target == "clashr" ? "生成目标：ClashR" : "生成目标：Clash",
              LOG_LEVEL_INFO);
-    tpl_args.local_vars["clash.new_field_name"] =
+    template_arguments.local_vars["clash.new_field_name"] =
         ext.clash_new_field_name ? "true" : "false";
     response.headers["profile-update-interval"] =
-        std::to_string(interval / 3600);
+        std::to_string(policy.update_interval / 3600);
     if (ext.nodelist) {
       YAML::Node yamlnode;
-      proxyToClash(nodes, yamlnode, dummy_group, argTarget == "clashr", ext);
-      output_content = YAML::Dump(yamlnode);
+      proxyToClash(nodes, yamlnode, dummy_group, target == "clashr", ext);
+      output = YAML::Dump(yamlnode);
     } else {
-      if (render_template(fetchFile(lClashBase, proxy, global.cacheConfig,
-                                    true, baseFetchContext),
-                          tpl_args, base_content, global.templatePath,
-                          baseFetchContext) != 0) {
+      if (render_template(fetchFile(policy.clash_base, proxy,
+                                    settings.cacheConfig, true, base_context),
+                          template_arguments, base_content,
+                          settings.templatePath, base_context) != 0) {
         *status_code = 400;
-        return base_content;
+        return {true, base_content};
       }
-      output_content =
-          proxyToClash(nodes, base_content, lRulesetContent, lCustomProxyGroups,
-                       argTarget == "clashr", ext);
+      output = proxyToClash(nodes, base_content, ruleset_content,
+                            policy.custom_proxy_groups, target == "clashr",
+                            ext);
       if (!ext.external_rule_error.empty()) {
         *status_code = 400;
-        return ext.external_rule_error;
+        return {true, ext.external_rule_error};
       }
     }
-
-    if (argUpload)
-      uploadGist(argTarget, argUploadPath, output_content, false);
+    if (upload)
+      recordUpload(target, upload_path, output, false);
     break;
+
   case "surge"_hash:
-
-    writeLog(0, "生成目标：Surge " + std::to_string(intSurgeVer),
+    writeLog(0, "生成目标：Surge " + std::to_string(parsed.surge_version),
              LOG_LEVEL_INFO);
-
     if (ext.nodelist) {
-      output_content = proxyToSurge(nodes, base_content, dummy_ruleset,
-                                    dummy_group, intSurgeVer, ext);
-
-      if (argUpload)
-        uploadGist("surge" + argSurgeVer + "list", argUploadPath,
-                   output_content, true);
+      output = proxyToSurge(nodes, base_content, dummy_ruleset, dummy_group,
+                            parsed.surge_version, ext);
+      if (upload)
+        recordUpload("surge" + surge_version_text + "list", upload_path,
+                     output, true);
     } else {
-      if (render_template(fetchFile(lSurgeBase, proxy, global.cacheConfig,
-                                    true, baseFetchContext),
-                          tpl_args, base_content, global.templatePath,
-                          baseFetchContext) != 0) {
+      if (render_template(fetchFile(policy.surge_base, proxy,
+                                    settings.cacheConfig, true, base_context),
+                          template_arguments, base_content,
+                          settings.templatePath, base_context) != 0) {
         *status_code = 400;
-        return base_content;
+        return {true, base_content};
       }
-      output_content = proxyToSurge(nodes, base_content, lRulesetContent,
-                                    lCustomProxyGroups, intSurgeVer, ext);
-
-      if (argUpload)
-        uploadGist("surge" + argSurgeVer, argUploadPath, output_content, true);
-
-      if (global.writeManagedConfig && !global.managedConfigPrefix.empty())
-        output_content =
-            "#!MANAGED-CONFIG " + managed_url +
-            (interval ? " interval=" + std::to_string(interval) : "") +
-            " strict=" + std::string(strict ? "true" : "false") + "\n\n" +
-            output_content;
+      output = proxyToSurge(nodes, base_content, ruleset_content,
+                            policy.custom_proxy_groups, parsed.surge_version,
+                            ext);
+      if (upload)
+        recordUpload("surge" + surge_version_text, upload_path, output, true);
+      if (settings.writeManagedConfig && !settings.managedConfigPrefix.empty())
+        output = "#!MANAGED-CONFIG " + managed_url +
+                 (policy.update_interval
+                      ? " interval=" +
+                            std::to_string(policy.update_interval)
+                      : "") +
+                 " strict=" +
+                 std::string(policy.update_strict ? "true" : "false") +
+                 "\n\n" + output;
     }
     break;
+
   case "surfboard"_hash:
     writeLog(0, "生成目标：Surfboard", LOG_LEVEL_INFO);
-
-    if (render_template(fetchFile(lSurfboardBase, proxy, global.cacheConfig,
-                                  true, baseFetchContext),
-                        tpl_args, base_content, global.templatePath,
-                        baseFetchContext) != 0) {
+    if (render_template(fetchFile(policy.surfboard_base, proxy,
+                                  settings.cacheConfig, true, base_context),
+                        template_arguments, base_content, settings.templatePath,
+                        base_context) != 0) {
       *status_code = 400;
-      return base_content;
+      return {true, base_content};
     }
-    output_content = proxyToSurge(nodes, base_content, lRulesetContent,
-                                  lCustomProxyGroups, -3, ext);
-    if (argUpload)
-      uploadGist("surfboard", argUploadPath, output_content, true);
-
-    if (global.writeManagedConfig && !global.managedConfigPrefix.empty())
-      output_content =
-          "#!MANAGED-CONFIG " + managed_url +
-          (interval ? " interval=" + std::to_string(interval) : "") +
-          " strict=" + std::string(strict ? "true" : "false") + "\n\n" +
-          output_content;
+    output = proxyToSurge(nodes, base_content, ruleset_content,
+                          policy.custom_proxy_groups, -3, ext);
+    if (upload)
+      recordUpload("surfboard", upload_path, output, true);
+    if (settings.writeManagedConfig && !settings.managedConfigPrefix.empty())
+      output = "#!MANAGED-CONFIG " + managed_url +
+               (policy.update_interval
+                    ? " interval=" + std::to_string(policy.update_interval)
+                    : "") +
+               " strict=" +
+               std::string(policy.update_strict ? "true" : "false") +
+               "\n\n" + output;
     break;
+
   case "mellow"_hash:
     writeLog(0, "生成目标：Mellow", LOG_LEVEL_INFO);
-
-    if (render_template(fetchFile(lMellowBase, proxy, global.cacheConfig, true,
-                                  baseFetchContext),
-                        tpl_args, base_content, global.templatePath,
-                        baseFetchContext) != 0) {
+    if (render_template(fetchFile(policy.mellow_base, proxy,
+                                  settings.cacheConfig, true, base_context),
+                        template_arguments, base_content, settings.templatePath,
+                        base_context) != 0) {
       *status_code = 400;
-      return base_content;
+      return {true, base_content};
     }
-    output_content = proxyToMellow(nodes, base_content, lRulesetContent,
-                                   lCustomProxyGroups, ext);
-
-    if (argUpload)
-      uploadGist("mellow", argUploadPath, output_content, true);
+    output = proxyToMellow(nodes, base_content, ruleset_content,
+                           policy.custom_proxy_groups, ext);
+    if (upload)
+      recordUpload("mellow", upload_path, output, true);
     break;
+
   case "sssub"_hash:
     writeLog(0, "生成目标：SS Subscription", LOG_LEVEL_INFO);
-
-    if (render_template(fetchFile(lSSSubBase, proxy, global.cacheConfig, true,
-                                  baseFetchContext),
-                        tpl_args, base_content, global.templatePath,
-                        baseFetchContext) != 0) {
+    if (render_template(fetchFile(policy.sssub_base, proxy,
+                                  settings.cacheConfig, true, base_context),
+                        template_arguments, base_content, settings.templatePath,
+                        base_context) != 0) {
       *status_code = 400;
-      return base_content;
+      return {true, base_content};
     }
-    output_content = proxyToSSSub(base_content, nodes, ext);
-    if (argUpload)
-      uploadGist("sssub", argUploadPath, output_content, false);
+    output = proxyToSSSub(base_content, nodes, ext);
+    if (upload)
+      recordUpload("sssub", upload_path, output, false);
     break;
+
   case "ss"_hash:
     writeLog(0, "生成目标：SS", LOG_LEVEL_INFO);
-    output_content = proxyToSingle(nodes, 1, ext);
-    if (argUpload)
-      uploadGist("ss", argUploadPath, output_content, false);
+    output = proxyToSingle(nodes, parsed.target_descriptor->single_link_types,
+                           ext);
+    if (upload)
+      recordUpload("ss", upload_path, output, false);
     break;
   case "ssr"_hash:
     writeLog(0, "生成目标：SSR", LOG_LEVEL_INFO);
-    output_content = proxyToSingle(nodes, 2, ext);
-    if (argUpload)
-      uploadGist("ssr", argUploadPath, output_content, false);
+    output = proxyToSingle(nodes, parsed.target_descriptor->single_link_types,
+                           ext);
+    if (upload)
+      recordUpload("ssr", upload_path, output, false);
     break;
   case "v2ray"_hash:
     writeLog(0, "生成目标：v2rayN", LOG_LEVEL_INFO);
-    output_content = proxyToSingle(nodes, 4, ext);
-    if (argUpload)
-      uploadGist("v2ray", argUploadPath, output_content, false);
+    output = proxyToSingle(nodes, parsed.target_descriptor->single_link_types,
+                           ext);
+    if (upload)
+      recordUpload("v2ray", upload_path, output, false);
     break;
   case "trojan"_hash:
     writeLog(0, "生成目标：Trojan", LOG_LEVEL_INFO);
-    output_content = proxyToSingle(nodes, 8, ext);
-    if (argUpload)
-      uploadGist("trojan", argUploadPath, output_content, false);
+    output = proxyToSingle(nodes, parsed.target_descriptor->single_link_types,
+                           ext);
+    if (upload)
+      recordUpload("trojan", upload_path, output, false);
     break;
   case "vless"_hash:
     writeLog(0, "生成目标：vless", LOG_LEVEL_INFO);
-    output_content = proxyToSingle(nodes, 16, ext);
-    if (argUpload)
-      uploadGist("vless", argUploadPath, output_content, false);
+    output = proxyToSingle(nodes, parsed.target_descriptor->single_link_types,
+                           ext);
+    if (upload)
+      recordUpload("vless", upload_path, output, false);
     break;
   case "hysteria2"_hash:
     writeLog(0, "生成目标：hysteria2", LOG_LEVEL_INFO);
-    output_content = proxyToSingle(nodes, 32, ext);
-    if (argUpload)
-      uploadGist("hysteria2", argUploadPath, output_content, false);
+    output = proxyToSingle(nodes, parsed.target_descriptor->single_link_types,
+                           ext);
+    if (upload)
+      recordUpload("hysteria2", upload_path, output, false);
     break;
   case "mixed"_hash:
     writeLog(0, "生成目标：Standard Subscription", LOG_LEVEL_INFO);
-    output_content = proxyToSingle(nodes, 63, ext);
-    if (argUpload)
-      uploadGist("sub", argUploadPath, output_content, false);
+    output = proxyToSingle(nodes, parsed.target_descriptor->single_link_types,
+                           ext);
+    if (upload)
+      recordUpload("sub", upload_path, output, false);
     break;
+
   case "quan"_hash:
     writeLog(0, "生成目标：Quantumult", LOG_LEVEL_INFO);
     if (!ext.nodelist) {
-      if (render_template(fetchFile(lQuanBase, proxy, global.cacheConfig, true,
-                                    baseFetchContext),
-                          tpl_args, base_content, global.templatePath,
-                          baseFetchContext) != 0) {
+      if (render_template(fetchFile(policy.quan_base, proxy,
+                                    settings.cacheConfig, true, base_context),
+                          template_arguments, base_content,
+                          settings.templatePath, base_context) != 0) {
         *status_code = 400;
-        return base_content;
+        return {true, base_content};
       }
     }
-
-    output_content = proxyToQuan(nodes, base_content, lRulesetContent,
-                                 lCustomProxyGroups, ext);
-
-    if (argUpload)
-      uploadGist("quan", argUploadPath, output_content, false);
+    output = proxyToQuan(nodes, base_content, ruleset_content,
+                         policy.custom_proxy_groups, ext);
+    if (upload)
+      recordUpload("quan", upload_path, output, false);
     break;
+
   case "quanx"_hash:
     writeLog(0, "生成目标：Quantumult X", LOG_LEVEL_INFO);
     if (!ext.nodelist) {
-      if (render_template(fetchFile(lQuanXBase, proxy, global.cacheConfig,
-                                    true, baseFetchContext),
-                          tpl_args, base_content, global.templatePath,
-                          baseFetchContext) != 0) {
+      if (render_template(fetchFile(policy.quanx_base, proxy,
+                                    settings.cacheConfig, true, base_context),
+                          template_arguments, base_content,
+                          settings.templatePath, base_context) != 0) {
         *status_code = 400;
-        return base_content;
+        return {true, base_content};
       }
     }
-
-    output_content = proxyToQuanX(nodes, base_content, lRulesetContent,
-                                  lCustomProxyGroups, ext);
-
-    if (argUpload)
-      uploadGist("quanx", argUploadPath, output_content, false);
+    output = proxyToQuanX(nodes, base_content, ruleset_content,
+                          policy.custom_proxy_groups, ext);
+    if (upload)
+      recordUpload("quanx", upload_path, output, false);
     break;
+
   case "loon"_hash:
     writeLog(0, "生成目标：Loon", LOG_LEVEL_INFO);
     if (!ext.nodelist) {
-      if (render_template(fetchFile(lLoonBase, proxy, global.cacheConfig, true,
-                                    baseFetchContext),
-                          tpl_args, base_content, global.templatePath,
-                          baseFetchContext) != 0) {
+      if (render_template(fetchFile(policy.loon_base, proxy,
+                                    settings.cacheConfig, true, base_context),
+                          template_arguments, base_content,
+                          settings.templatePath, base_context) != 0) {
         *status_code = 400;
-        return base_content;
+        return {true, base_content};
       }
     }
-
-    output_content = proxyToLoon(nodes, base_content, lRulesetContent,
-                                 lCustomProxyGroups, ext);
-
-    if (argUpload)
-      uploadGist("loon", argUploadPath, output_content, false);
+    output = proxyToLoon(nodes, base_content, ruleset_content,
+                         policy.custom_proxy_groups, ext);
+    if (upload)
+      recordUpload("loon", upload_path, output, false);
     break;
+
   case "ssd"_hash:
     writeLog(0, "生成目标：SSD", LOG_LEVEL_INFO);
-    output_content = proxyToSSD(nodes, argGroupName, subInfo, ext);
-    if (argUpload)
-      uploadGist("ssd", argUploadPath, output_content, false);
+    output = proxyToSSD(nodes, group_name, subscription_info, ext);
+    if (upload)
+      recordUpload("ssd", upload_path, output, false);
     break;
+
   case "singbox"_hash:
     writeLog(0, "生成目标：sing-box", LOG_LEVEL_INFO);
     if (!ext.nodelist) {
-      if (render_template(fetchFile(lSingBoxBase, proxy, global.cacheConfig,
-                                    true, baseFetchContext),
-                          tpl_args, base_content, global.templatePath,
-                          baseFetchContext) != 0) {
+      if (render_template(fetchFile(policy.singbox_base, proxy,
+                                    settings.cacheConfig, true, base_context),
+                          template_arguments, base_content,
+                          settings.templatePath, base_context) != 0) {
         *status_code = 400;
-        return base_content;
+        return {true, base_content};
       }
     }
-
-    output_content = proxyToSingBox(nodes, base_content, lRulesetContent,
-                                    lCustomProxyGroups, ext);
-
-    if (argUpload)
-      uploadGist("singbox", argUploadPath, output_content, false);
+    output = proxyToSingBox(nodes, base_content, ruleset_content,
+                            policy.custom_proxy_groups, ext);
+    if (upload)
+      recordUpload("singbox", upload_path, output, false);
     break;
+
   default:
     writeLog(0, "生成目标：未指定", LOG_LEVEL_INFO);
     *status_code = 500;
-    return "Internal error: target passed validation but no generator handled "
-           "it.\n"
-           "内部错误：target 已通过校验，但没有对应的生成器处理它。\n"
-           "Please report this request to the service maintainer.\n"
-           "请将该请求反馈给服务维护者。";
+    return {true,
+            "Internal error: target passed validation but no generator handled "
+            "it.\n"
+            "内部错误：target 已通过校验，但没有对应的生成器处理它。\n"
+            "Please report this request to the service maintainer.\n"
+            "请将该请求反馈给服务维护者。"};
   }
+
+  if (upload_failed)
+    writeLog(0,
+             "GIST_OPTIONAL_UPLOAD_FAILED action=return-conversion-result",
+             LOG_LEVEL_WARNING);
   writeLog(0, "生成完成。", LOG_LEVEL_INFO);
+  return {};
+}
+
+static std::string assembleSubResponse(
+    Request &request, Response &response, const Settings &settings,
+    ParsedSubRequest &parsed, EffectiveSubPolicy &policy,
+    ExternalConfigFetchPlan &fetch_plan, TargetGenerationState &generation) {
+  auto &argument = request.argument;
+  std::string &argTarget = parsed.target;
+  bool explainMode = parsed.explain_mode;
+  SubExplainReport &explain = parsed.explain;
+  tribool &argClashNewField = parsed.clash_new_field;
+  int intSurgeVer = parsed.surge_version;
+  std::string &argGroupName = parsed.group_name;
+  std::string &argUploadPath = parsed.upload_path;
+  std::string &argIncludeRemark = parsed.include_remark;
+  std::string &argExcludeRemark = parsed.exclude_remark;
+  std::string &argFilename = parsed.filename;
+  std::string &argRenames = parsed.renames;
+  tribool &argUpload = parsed.upload;
+  tribool &argAddEmoji = parsed.add_emoji;
+  tribool &argRemoveEmoji = parsed.remove_emoji;
+  tribool &argAppendType = parsed.append_type;
+  tribool &argSort = parsed.sort;
+  tribool &argUseSortScript = parsed.use_sort_script;
+  tribool &argGenClashScript = parsed.generate_clash_script;
+  tribool &argEnableInsert = parsed.enable_insert;
+  tribool &argFilterDeprecated = parsed.filter_deprecated;
+  tribool &argExpandRulesets = parsed.expand_rulesets;
+  tribool &argAppendUserinfo = parsed.append_userinfo;
+  tribool &argPrependInsert = parsed.prepend_insert;
+  tribool &argGenClassicalRuleProvider =
+      parsed.generate_classical_rule_provider;
+  tribool &argProviderProxyDirect = parsed.provider_proxy_direct;
+  ProxyGroupConfigs &lCustomProxyGroups = policy.custom_proxy_groups;
+  string_array &lIncludeRemarks = policy.include_remarks;
+  string_array &lExcludeRemarks = policy.exclude_remarks;
+  extra_settings &ext = policy.generator;
+  int interval = policy.update_interval;
+  bool strict = policy.update_strict;
+  std::map<std::string, std::string> &provider_headers =
+      policy.provider_headers;
+  bool userProvidedExternalConfig =
+      fetch_plan.user_provided_external_config;
+  bool configLoadSuccess = fetch_plan.config_load_success;
+  std::vector<RulesetContent> &lRulesetContent =
+      fetch_plan.ruleset_content;
+  std::string &output_content = generation.output;
+  std::string &managed_url = generation.managed_url;
+
   if (argTarget == "clash" && explain.proxy_provider_mode)
     appendVaryHeader(response, "User-Agent");
   for (const auto &[name, value] : provider_headers) {
@@ -2978,12 +3071,9 @@ static std::string subconverter_impl(Request &request, Response &response,
                                " rename rule(s)",
                  argRenames.empty() ? "ignored" : "applied",
                  "Request rename rules override configured rename rules.");
-    addParameter("filter_script",
-                 authorized && !argFilterScript.empty() ? "script accepted"
-                                                        : "not used",
-                 authorized ? "applied" : "ignored",
-                  "Public requests cannot provide executable filter scripts.",
-                  true);
+    addParameter("filter_script", "not used", "ignored",
+                 "Public requests cannot provide executable filter scripts.",
+                 true);
     addParameter("provider_headers",
                  std::to_string(provider_headers.size()) +
                      " explicitly selected header(s)",
@@ -3013,16 +3103,16 @@ static std::string subconverter_impl(Request &request, Response &response,
                  argUseSortScript ? "applied" : "ignored",
                  "Uses configured sort script when sorting is enabled.");
     addSwitchParameter("script", ext.clash_script, argGenClashScript);
-    addSwitchParameter("insert", argEnableInsert.get(global.enableInsert),
+    addSwitchParameter("insert", argEnableInsert.get(settings.enableInsert),
                        argEnableInsert);
     addSwitchParameter("scv", ext.skip_cert_verify.get(false),
                        ext.skip_cert_verify);
     addSwitchParameter("fdn", ext.filter_deprecated, argFilterDeprecated);
     addSwitchParameter("expand", explain.expand_rulesets, argExpandRulesets);
     addSwitchParameter("append_info",
-                       argAppendUserinfo.get(global.appendUserinfo),
+                       argAppendUserinfo.get(settings.appendUserinfo),
                        argAppendUserinfo);
-    addSwitchParameter("prepend", argPrependInsert.get(global.prependInsert),
+    addSwitchParameter("prepend", argPrependInsert.get(settings.prependInsert),
                        argPrependInsert);
     addSwitchParameter("classic", ext.clash_classical_ruleset,
                        argGenClassicalRuleProvider);
@@ -3065,7 +3155,7 @@ static std::string subconverter_impl(Request &request, Response &response,
       explain.effective_config_source = "fallback";
     else if (explain.external_config_loaded && userProvidedExternalConfig)
       explain.effective_config_source = "request";
-    else if (explain.external_config_loaded && !global.defaultExtConfig.empty())
+    else if (explain.external_config_loaded && !settings.defaultExtConfig.empty())
       explain.effective_config_source = "default";
     else if (userProvidedExternalConfig)
       explain.effective_config_source = "request_failed";
@@ -3137,6 +3227,44 @@ static std::string subconverter_impl(Request &request, Response &response,
   return output_content;
 }
 
+} // namespace
+
+static std::string subconverter_impl(Request &request, Response &response,
+                                     const Settings &settings,
+                                     RuleConversionStats *rule_stats) {
+  ParsedSubRequest parsed_request;
+  std::string parse_error =
+      parseSubRequestArguments(request, response, settings, parsed_request);
+  if (!parse_error.empty())
+    return parse_error;
+
+  EffectiveSubPolicy effective_policy;
+  std::string policy_error = buildEffectiveSubPolicy(
+      request, response, settings, rule_stats, parsed_request, effective_policy);
+  if (!policy_error.empty())
+    return policy_error;
+
+  ExternalConfigFetchPlan fetch_plan;
+  std::string fetch_plan_error = buildExternalConfigFetchPlan(
+      response, settings, parsed_request, effective_policy, fetch_plan);
+  if (!fetch_plan_error.empty())
+    return fetch_plan_error;
+  SubscriptionNodeState subscription_state;
+  SubStageResponse subscription_response = processSubscriptionNodes(
+      request, response, settings, parsed_request, effective_policy,
+      subscription_state);
+  if (subscription_response.complete)
+    return subscription_response.body;
+  TargetGenerationState generation_state;
+  SubStageResponse generation_response = dispatchTargetGenerator(
+      request, response, settings, parsed_request, effective_policy,
+      fetch_plan, subscription_state, generation_state);
+  if (generation_response.complete)
+    return generation_response.body;
+  return assembleSubResponse(request, response, settings, parsed_request,
+                             effective_policy, fetch_plan, generation_state);
+}
+
 std::string simpleToClashR(RESPONSE_CALLBACK_ARGS) {
   auto argument = joinArguments(request.argument);
   int *status_code = &response.status_code;
@@ -3195,7 +3323,7 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
            "parameter.\n"
            "请在 link 参数中提供真实 Surge 配置链接。";
   }
-  writeLog(0, "SurgeConfToClash 调用，URL：'" + url + "'。",
+  writeLog(0, "SurgeConfToClash 调用，URL：" + summarizeUrlForLog(url) + "。",
            LOG_LEVEL_INFO);
 
   ProxyPolicy proxy = parseProxy(global.proxyConfig);
@@ -3217,13 +3345,13 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
   base_content = fetchFile(url, proxy, global.cacheConfig);
 
   if (ini.parse(base_content) != INIREADER_EXCEPTION_NONE) {
-    std::string errmsg = "Invalid request: failed to parse Surge "
-                         "configuration.\n"
-                         "无效请求：Surge 配置解析失败。\n"
-                         "Reason / 原因: " +
-                         ini.get_last_error();
+    const std::string parser_detail = ini.get_last_error();
+    const std::string errmsg = "Invalid request: failed to parse Surge "
+                               "configuration.\n"
+                               "无效请求：Surge 配置解析失败。";
     // std::cerr<<errmsg<<"\n";
-    writeLog(0, "Surge 配置解析失败。原因：" + ini.get_last_error(),
+    writeLog(0, "SURGE_CONFIG_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(parser_detail),
              LOG_LEVEL_ERROR);
     *status_code = 400;
     return errmsg;
@@ -3290,10 +3418,10 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
   parse_set.stream_rules = parse_set.time_rules = &dummy_regex_array;
   parse_set.request_header = &request.headers;
   parse_set.sub_info = &subInfo;
-  parse_set.authorized = !global.APIMode;
   for (std::string &x : links) {
     // std::cerr<<"Fetching node data from url '"<<x<<"'."<<std::endl;
-    writeLog(0, "正在从 URL 获取节点数据：'" + x + "'。", LOG_LEVEL_INFO);
+    writeLog(0, "正在从 URL 获取节点数据：" + summarizeUrlForLog(x) + "。",
+             LOG_LEVEL_INFO);
     if (addNodes(x, nodes, 0, parse_set) == -1) {
       if (global.skipFailedLinks)
         writeLog(0,
@@ -3451,13 +3579,13 @@ std::string getProfile(RESPONSE_CALLBACK_ARGS) {
   if (ini.parse(profile_content) != INIREADER_EXCEPTION_NONE &&
       !ini.section_exist("Profile")) {
     // std::cerr<<"Load profile failed! Reason: "<<ini.get_last_error()<<"\n";
-    writeLog(0, "加载配置档失败！原因：" + ini.get_last_error(),
+    const std::string parser_detail = ini.get_last_error();
+    writeLog(0, "PROFILE_CONFIG_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(parser_detail),
              LOG_LEVEL_ERROR);
     *status_code = 500;
     return "Invalid profile: failed to parse profile content.\n"
-           "无效配置：profile 内容解析失败。\n"
-           "Reason / 原因: " +
-           ini.get_last_error();
+           "无效配置：profile 内容解析失败。";
   }
   // std::cerr<<"Trying to parse profile '" + name + "'.\n";
   writeLog(0, "正在解析配置档：'" + name + "'。", LOG_LEVEL_INFO);
@@ -3587,8 +3715,8 @@ int simpleGenerator() {
   if (ini.parse(config) != INIREADER_EXCEPTION_NONE) {
     // std::cerr<<"Generator configuration broken!
     // Reason:"<<ini.get_last_error()<<"\n";
-    writeLog(0,
-             "生成器配置损坏！原因：" + ini.get_last_error(),
+    writeLog(0, "GENERATOR_CONFIG_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(ini.get_last_error()),
              LOG_LEVEL_ERROR);
     return -2;
   }
@@ -3624,6 +3752,7 @@ int simpleGenerator() {
   ProxyPolicy proxy = parseProxy(global.proxySubscription);
   Request request;
   Response response;
+  bool write_failed = false;
   for (std::string &x : sections) {
     response.status_code = 200;
     // std::cerr<<"Generating artifact '"<<x<<"'...\n";
@@ -3657,7 +3786,25 @@ int simpleGenerator() {
             return -1;
         }
         // add UTF-8 BOM
-        fileWrite(path, "\xEF\xBB\xBF" + content, true);
+        const int write_result =
+            fileWrite(path, "\xEF\xBB\xBF" + content, true);
+        if (fileCommitFailed(write_result)) {
+          writeLog(0,
+                   "生成项 '" + x + "' 写入失败：'" + path + "'。" +
+                       (fileCommitTemporaryRemaining(write_result)
+                            ? " temporary_file_remaining=true"
+                            : " temporary_file_remaining=false"),
+                   LOG_LEVEL_ERROR);
+          write_failed = true;
+          if (sections.size() == 1)
+            return -1;
+        } else if (fileCommitDurabilityUnconfirmed(write_result)) {
+          writeLog(0,
+                   "ARTIFACT_WRITE_VISIBLE target=" + x +
+                       " new_file_visible=true durability=unconfirmed "
+                       "action=continue",
+                   LOG_LEVEL_WARNING);
+        }
         continue;
       }
       ini.get_items(allItems);
@@ -3679,7 +3826,26 @@ int simpleGenerator() {
         return -1;
       continue;
     }
-    fileWrite(path, content, true);
+    const int write_result = fileWrite(path, content, true);
+    if (fileCommitFailed(write_result)) {
+      writeLog(0,
+               "生成项 '" + x + "' 写入失败：'" + path + "'。" +
+                   (fileCommitTemporaryRemaining(write_result)
+                        ? " temporary_file_remaining=true"
+                        : " temporary_file_remaining=false"),
+               LOG_LEVEL_ERROR);
+      write_failed = true;
+      if (sections.size() == 1)
+        return -1;
+      continue;
+    }
+    if (fileCommitDurabilityUnconfirmed(write_result)) {
+      writeLog(0,
+               "ARTIFACT_WRITE_VISIBLE target=" + x +
+                   " new_file_visible=true durability=unconfirmed "
+                   "action=continue",
+               LOG_LEVEL_WARNING);
+    }
     auto iter =
         std::find_if(response.headers.begin(), response.headers.end(),
                      [](auto y) { return y.first == "Subscription-UserInfo"; });
@@ -3692,6 +3858,11 @@ int simpleGenerator() {
     eraseElements(response.headers);
   }
   // std::cerr<<"All artifact generated. Exiting...\n";
+  if (write_failed) {
+    writeLog(0, "部分生成项写入失败，正在以失败状态退出...",
+             LOG_LEVEL_ERROR);
+    return -1;
+  }
   writeLog(0, "所有生成项已生成，正在退出...", LOG_LEVEL_INFO);
   return 0;
 }

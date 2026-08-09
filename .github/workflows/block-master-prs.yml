@@ -18,9 +18,9 @@ jobs:
           # 允许拥有者（你自己）或者特定机器人的 PR 提给 master
           # 这里把你的 GitHub username 填入（假设为 Aethersailor）
           if [[ "${{ github.actor }}" == "Aethersailor" || "${{ github.actor }}" == "github-actions[bot]" || "${{ github.actor }}" == "dependabot[bot]" ]]; then
-            echo "is_allowed=true" >> $GITHUB_OUTPUT
+            echo "is_allowed=true" >> "$GITHUB_OUTPUT"
           else
-            echo "is_allowed=false" >> $GITHUB_OUTPUT
+            echo "is_allowed=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Close PR and Leave Comment

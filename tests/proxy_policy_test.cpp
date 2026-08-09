@@ -1,3 +1,6 @@
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <cassert>
 #include <string>
 
@@ -56,9 +59,152 @@ int main() {
   assert(query_url.find("fixture-token") == std::string::npos);
   assert(query_url.find("fixture-api-key") == std::string::npos);
   assert(query_url.find("mode=clash") != std::string::npos);
+  assert(query_url.find("url=<redacted>") != std::string::npos);
+
+  const std::string nested_request = redactSensitiveLogText(
+      "/sub?target=clash&url=https%3A%2F%2Fexample.test%2Fprivate-path%3F"
+      "token%3Dnested-secret&config=data%3A%2Cconfig-secret&userinfo="
+      "userinfo-secret&profile_data=profile-secret");
+  assert(nested_request.find("nested-secret") == std::string::npos);
+  assert(nested_request.find("config-secret") == std::string::npos);
+  assert(nested_request.find("userinfo-secret") == std::string::npos);
+  assert(nested_request.find("profile-secret") == std::string::npos);
+  assert(nested_request.find("target=clash") != std::string::npos);
+
+  const std::string node_uri = redactSensitiveLogText(
+      "node=vless://fixture-uuid@node.example.test:443?type=ws&path="
+      "/fixture-secret#Fixture");
+  assert(node_uri.find("fixture-uuid") == std::string::npos);
+  assert(node_uri.find("fixture-secret") == std::string::npos);
+  assert(node_uri.find("vless://<redacted>") != std::string::npos);
+
+  const std::string data_uri =
+      redactSensitiveLogText("source=data:text/plain,fixture-data-secret");
+  assert(data_uri.find("fixture-data-secret") == std::string::npos);
+
+  const std::string http_path = redactSensitiveLogText(
+      "source=https://example.test/private-path-token?mode=clash");
+  assert(http_path.find("private-path-token") == std::string::npos);
+  assert(http_path.find("example.test") != std::string::npos);
+
+  const std::string summary = summarizeUrlForLog(
+      "https://fixture-user:fixture-password@example.test/private-token");
+  assert(summary.find("fixture-user") == std::string::npos);
+  assert(summary.find("fixture-password") == std::string::npos);
+  assert(summary.find("private-token") == std::string::npos);
+  assert(summary.find("host=example.test") != std::string::npos);
+  const std::string injected_summary =
+      summarizeUrlForLog("https://example.test\nforged-log/private-token");
+  assert(injected_summary.find("forged-log") == std::string::npos);
 
   const std::string header = redactSensitiveLogText(
       "Proxy-Authorization: Basic fixture-proxy-secret");
   assert(header.find("fixture-proxy-secret") == std::string::npos);
+
+  const std::string multiline_headers = redactSensitiveLogText(
+      "request headers:\r\n"
+      "Authorization: Bearer authorization-secret\r\n"
+      "pRoXy-AuThOrIzAtIoN: Basic proxy-authorization-secret\n"
+      "Cookie: session=cookie-secret; preference=dark\n"
+      "Authorization: Bearer folded-secret\r\n"
+      "  folded-continuation-secret\r\n"
+      "set-cookie: session=set-cookie-secret; HttpOnly\r\n"
+      "X-Diagnostic: retained-value\r\n"
+      "next=retained-parameter");
+  for (const char *secret : {"authorization-secret",
+                             "proxy-authorization-secret", "cookie-secret",
+                             "folded-secret", "folded-continuation-secret",
+                             "set-cookie-secret"})
+    assert(multiline_headers.find(secret) == std::string::npos);
+  assert(multiline_headers.find("Authorization: <redacted>") !=
+         std::string::npos);
+  assert(multiline_headers.find("pRoXy-AuThOrIzAtIoN: <redacted>") !=
+         std::string::npos);
+  assert(multiline_headers.find("Cookie: <redacted>") != std::string::npos);
+  assert(multiline_headers.find("set-cookie: <redacted>") !=
+         std::string::npos);
+  assert(multiline_headers.find("X-Diagnostic: retained-value") !=
+         std::string::npos);
+  assert(multiline_headers.find("next=retained-parameter") !=
+         std::string::npos);
+
+  const std::string cookie_parameter = redactSensitiveLogText(
+      "cookie=session-cookie-parameter&set-cookie=response-cookie-parameter"
+      "&mode=clash");
+  assert(cookie_parameter.find("session-cookie-parameter") ==
+         std::string::npos);
+  assert(cookie_parameter.find("response-cookie-parameter") ==
+         std::string::npos);
+  assert(cookie_parameter.find("mode=clash") != std::string::npos);
+
+  const std::string yaml_fields = redactSensitiveLogText(
+      "ToKeN: yaml-token-secret\n"
+      "mode: clash\n"
+      "authorization: 'yaml-authorization-secret'\n"
+      "token_count: 2\n"
+      "safe: retained-yaml-value");
+  assert(yaml_fields.find("yaml-token-secret") == std::string::npos);
+  assert(yaml_fields.find("yaml-authorization-secret") == std::string::npos);
+  assert(yaml_fields.find("mode: clash") != std::string::npos);
+  assert(yaml_fields.find("token_count: 2") != std::string::npos);
+  assert(yaml_fields.find("safe: retained-yaml-value") != std::string::npos);
+
+  const std::string json_fields = redactSensitiveLogText(
+      R"({"authorization": "json-authorization-secret", "mode": "clash", "TOKEN":"json-token-secret", "safe":"retained-json-value"})");
+  assert(json_fields.find("json-authorization-secret") == std::string::npos);
+  assert(json_fields.find("json-token-secret") == std::string::npos);
+  assert(json_fields.find(R"("mode": "clash")") != std::string::npos);
+  assert(json_fields.find(R"("safe":"retained-json-value")") !=
+         std::string::npos);
+
+  const std::string composite_json = redactSensitiveLogText(
+      R"({"config":{"token":"nested-json-secret","mode":"inside"},"safe":"retained-after-composite"})");
+  assert(composite_json.find("nested-json-secret") == std::string::npos);
+  assert(composite_json.find("retained-after-composite") != std::string::npos);
+
+  const std::string inline_yaml = redactSensitiveLogText(
+      "{ token: inline-yaml-secret, mode: rule, token_count: 7 }");
+  assert(inline_yaml.find("inline-yaml-secret") == std::string::npos);
+  assert(inline_yaml.find("mode: rule") != std::string::npos);
+  assert(inline_yaml.find("token_count: 7") != std::string::npos);
+
+  const std::string inline_header_names = redactSensitiveLogText(
+      "{ authorization: inline-authorization-secret, mode: direct, "
+      "cookie: inline-cookie-secret, safe: retained-inline-safe }");
+  assert(inline_header_names.find("inline-authorization-secret") ==
+         std::string::npos);
+  assert(inline_header_names.find("inline-cookie-secret") == std::string::npos);
+  assert(inline_header_names.find("mode: direct") != std::string::npos);
+  assert(inline_header_names.find("safe: retained-inline-safe") !=
+         std::string::npos);
+
+  const std::string yaml_block = redactSensitiveLogText(
+      "password: |-\n"
+      "  first-block-secret\n"
+      "  second-block-secret\n"
+      "safe_after: retained-after-block\n");
+  assert(yaml_block.find("first-block-secret") == std::string::npos);
+  assert(yaml_block.find("second-block-secret") == std::string::npos);
+  assert(yaml_block.find("safe_after: retained-after-block") !=
+         std::string::npos);
+
+  const std::string nested_yaml_block = redactSensitiveLogText(
+      "items:\r\n"
+      "- password: >\r\n"
+      "    nested-block-secret\r\n"
+      "\r\n"
+      "  safe: retained-nested-sibling\r\n"
+      "after: retained-root-sibling\r\n");
+  assert(nested_yaml_block.find("nested-block-secret") == std::string::npos);
+  assert(nested_yaml_block.find("safe: retained-nested-sibling") !=
+         std::string::npos);
+  assert(nested_yaml_block.find("after: retained-root-sibling") !=
+         std::string::npos);
+
+  const std::string parser_summary = summarizeSensitiveTextForLog(
+      "parser rejected token: raw-parser-secret at line 4");
+  assert(parser_summary.find("raw-parser-secret") == std::string::npos);
+  assert(parser_summary.find("length=") != std::string::npos);
+  assert(parser_summary.find("hash=") == std::string::npos);
   return 0;
 }

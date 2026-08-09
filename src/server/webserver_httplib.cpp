@@ -14,6 +14,7 @@
 
 #include "utils/base64/base64.h"
 #include "utils/logger.h"
+#include "utils/redact.h"
 #include "utils/stl_extra.h"
 #include "utils/string_hash.h"
 #include "utils/urlencode.h"
@@ -35,14 +36,38 @@ static inline bool is_request_header_blacklisted(const std::string &header) {
 
 void WebServer::stop_web_server() { SERVER_EXIT_FLAG = true; }
 
-static httplib::Server::Handler makeHandler(const responseRoute &rr) {
-  return [rr](const httplib::Request &request, httplib::Response &response) {
+void WebServer::set_client_ip_policy(const client_ip::Policy &policy) {
+  std::lock_guard<std::mutex> lock(client_ip_policy_mutex_);
+  client_ip_policy_ = policy;
+}
+
+client_ip::Policy WebServer::client_ip_policy() const {
+  std::lock_guard<std::mutex> lock(client_ip_policy_mutex_);
+  return client_ip_policy_;
+}
+
+static httplib::Server::Handler makeHandler(const responseRoute &rr,
+                                            const WebServer *web_server) {
+  return [rr, web_server](const httplib::Request &request,
+                          httplib::Response &response) {
     Request req;
     Response resp;
     req.method = request.method;
     req.url = request.path;
     req.remote_addr = request.remote_addr;
     req.remote_port = request.remote_port;
+    req.client_address = client_ip::parseAddress(request.remote_addr);
+    const client_ip::Policy policy = web_server->client_ip_policy();
+    if (policy.enabled()) {
+      std::vector<std::string> values;
+      const char *name = client_ip::headerName(policy.header);
+      const std::size_t count = request.get_header_value_count(name);
+      values.reserve(count);
+      for (std::size_t index = 0; index < count; ++index)
+        values.push_back(request.get_header_value(name, "", index));
+      req.client_address =
+          client_ip::resolve(req.client_address, values, policy).address;
+    }
     for (auto &h : request.headers) {
       if (startsWith(h.first, "LOCAL_") || startsWith(h.first, "REMOTE_") ||
           is_request_header_blacklisted(h.first)) {
@@ -64,6 +89,8 @@ static httplib::Server::Handler makeHandler(const responseRoute &rr) {
     }
     auto result = rr.rc(req, resp);
     response.status = resp.status_code;
+    if (resp.status_code >= 400)
+      resp.headers["Cache-Control"] = "private, no-store";
     for (auto &h : resp.headers) {
       response.set_header(h.first, h.second);
     }
@@ -80,13 +107,17 @@ static std::string dump(const httplib::Headers &headers) {
   for (auto &x : headers) {
     if (startsWith(x.first, "LOCAL_") || startsWith(x.first, "REMOTE_"))
       continue;
-    if (strcasecmp(x.first.c_str(), "Authorization") == 0) {
-      s += x.first + ": [redacted]|";
-      continue;
-    }
-    s += x.first + ": " + x.second + "|";
+    s += x.first + "|";
   }
   return s;
+}
+
+static void setUnhandledExceptionResponse(httplib::Response &response) {
+  response.status = 500;
+  response.set_header("Cache-Control", "private, no-store");
+  response.set_content("Internal server error while processing request.\n"
+                       "处理请求时发生内部服务器错误。\n",
+                       "text/plain; charset=utf-8");
 }
 
 int WebServer::start_web_server_multi(listener_args *args) {
@@ -95,19 +126,19 @@ int WebServer::start_web_server_multi(listener_args *args) {
     switch (hash_(x.method)) {
     case "GET"_hash:
     case "HEAD"_hash:
-      server.Get(x.path, makeHandler(x));
+      server.Get(x.path, makeHandler(x, this));
       break;
     case "POST"_hash:
-      server.Post(x.path, makeHandler(x));
+      server.Post(x.path, makeHandler(x, this));
       break;
     case "PUT"_hash:
-      server.Put(x.path, makeHandler(x));
+      server.Put(x.path, makeHandler(x, this));
       break;
     case "DELETE"_hash:
-      server.Delete(x.path, makeHandler(x));
+      server.Delete(x.path, makeHandler(x, this));
       break;
     case "PATCH"_hash:
-      server.Patch(x.path, makeHandler(x));
+      server.Patch(x.path, makeHandler(x, this));
       break;
     }
   }
@@ -141,10 +172,10 @@ int WebServer::start_web_server_multi(listener_args *args) {
     }
     if (shouldLog(LOG_LEVEL_VERBOSE)) {
       writeLog(0,
-               "处理请求：method=" + req.method + " uri=" +
-                   req.target,
+               "处理请求：method=" + req.method + " path=" + req.path +
+                   " parameter_count=" + std::to_string(req.params.size()),
                LOG_LEVEL_VERBOSE);
-      writeLog(0, "请求头：" + dump(req.headers), LOG_LEVEL_VERBOSE);
+      writeLog(0, "请求头名称：" + dump(req.headers), LOG_LEVEL_VERBOSE);
     }
 
     if (req.has_header("SubConverter-Request")) {
@@ -154,7 +185,8 @@ int WebServer::start_web_server_multi(listener_args *args) {
                       "Please check subscription URLs and proxy settings to "
                       "avoid routing the service back to itself.\n"
                       "请检查订阅链接和代理设置，避免服务请求回到自身。",
-                      "text/plain");
+                       "text/plain");
+      res.set_header("Cache-Control", "private, no-store");
       return httplib::Server::HandlerResponse::Handled;
     }
     res.set_header("Server",
@@ -198,28 +230,35 @@ int WebServer::start_web_server_multi(listener_args *args) {
                });
   }
   server.set_exception_handler([](const httplib::Request &req,
-                                  httplib::Response &res,
-                                  const std::exception_ptr &e) {
+                                   httplib::Response &res,
+                                   const std::exception_ptr &e) {
     try {
       if (e)
         std::rethrow_exception(e);
-    } catch (const httplib::Error &err) {
-      res.set_content(to_string(err), "text/plain");
     } catch (const std::exception &ex) {
-      std::string return_data =
-          "Internal server error while processing request.\n"
-          "处理请求时发生内部服务器错误。\n"
-          "Request / 请求: " +
-          req.target + "\n";
-      return_data += "\n  Exception / 异常: ";
-      return_data += type(ex);
-      return_data += "\n  what(): ";
-      return_data += ex.what();
-      res.status = 500;
-      res.set_content(return_data, "text/plain");
+      writeLog(0,
+               "HTTP_UNEXPECTED_EXCEPTION method=" + req.method +
+                   " path=" + req.path +
+                   " parameter_count=" + std::to_string(req.params.size()) +
+                   " exception=" + type(ex) +
+                    " detail=" + summarizeSensitiveTextForLog(ex.what()),
+               LOG_LEVEL_ERROR);
     } catch (...) {
-      res.status = 500;
+      writeLog(0,
+               "HTTP_UNEXPECTED_EXCEPTION method=" + req.method +
+                   " path=" + req.path +
+                   " parameter_count=" + std::to_string(req.params.size()) +
+                   " exception=unknown",
+               LOG_LEVEL_ERROR);
     }
+    setUnhandledExceptionResponse(res);
+  });
+  server.set_post_routing_handler([](const httplib::Request &,
+                                     httplib::Response &res) {
+    // This also covers errors produced before a route callback (authentication,
+    // OPTIONS and the built-in 404 path), which do not pass through makeHandler.
+    if (res.status >= 400)
+      res.set_header("Cache-Control", "private, no-store");
   });
   if (serve_file) {
     server.set_mount_point("/", serve_file_root);

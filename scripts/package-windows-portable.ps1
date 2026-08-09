@@ -2,6 +2,12 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$Version,
 
+  [Parameter(Mandatory = $true)]
+  [string]$Revision,
+
+  [Parameter(Mandatory = $true)]
+  [string]$BuildDate,
+
   [string]$BuildRoot = "build/windows-amd64"
 )
 
@@ -20,6 +26,14 @@ Remove-Item -Force $ZipPath -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $PackageDir | Out-Null
 Copy-Item -Path $ExePath -Destination (Join-Path $PackageDir "subconverter.exe")
 Copy-Item -Path (Join-Path $Root "base") -Destination (Join-Path $PackageDir "base") -Recurse
+python scripts/ci/write_build_info.py write `
+  --path (Join-Path $PackageDir "BUILD-INFO.json") `
+  --version $Version `
+  --revision $Revision `
+  --build-date $BuildDate
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to write package identity."
+}
 $BundledCocrPath = Join-Path $PackageDir "base\Custom_OpenClash_Rules"
 if (Test-Path -LiteralPath $BundledCocrPath) {
     Remove-Item -LiteralPath $BundledCocrPath -Recurse -Force

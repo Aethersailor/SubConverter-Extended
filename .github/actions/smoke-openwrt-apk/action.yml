@@ -5,6 +5,15 @@ inputs:
   artifacts:
     description: Shell glob matching APK artifacts.
     required: true
+  expected-version:
+    description: Exact formal vX.Y.Z identity.
+    required: true
+  expected-revision:
+    description: Exact full tag commit SHA.
+    required: true
+  expected-build-date:
+    description: Exact canonical UTC build timestamp.
+    required: true
 
 runs:
   using: composite
@@ -31,7 +40,10 @@ runs:
               -w /work \
               -e "APK_ARTIFACT=$artifact" \
               -e "OPENWRT_ARCH=$arch" \
-              mirror.gcr.io/library/alpine:latest \
+              -e "EXPECTED_VERSION=${{ inputs.expected-version }}" \
+              -e "EXPECTED_REVISION=${{ inputs.expected-revision }}" \
+              -e "EXPECTED_BUILD_DATE=${{ inputs.expected-build-date }}" \
+              mirror.gcr.io/library/alpine@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b \
               sh -ec '
               apk add --root /tmp/apk-root --initdb --arch "$OPENWRT_ARCH" --allow-untrusted "/work/$APK_ARTIFACT"
               test -x /tmp/apk-root/usr/bin/subconverter-extended
@@ -41,6 +53,10 @@ runs:
               test -f /tmp/apk-root/opt/subconverter-extended/base/pref.example.toml
               test ! -e /tmp/apk-root/opt/subconverter-extended/base/Custom_OpenClash_Rules
               test -f /tmp/apk-root/usr/share/doc/subconverter-extended/README.OpenWrt
+              test -f /tmp/apk-root/opt/subconverter-extended/BUILD-INFO.json
+              grep -Fq "\"version\": \"$EXPECTED_VERSION\"" /tmp/apk-root/opt/subconverter-extended/BUILD-INFO.json
+              grep -Fq "\"revision\": \"$EXPECTED_REVISION\"" /tmp/apk-root/opt/subconverter-extended/BUILD-INFO.json
+              grep -Fq "\"build_date\": \"$EXPECTED_BUILD_DATE\"" /tmp/apk-root/opt/subconverter-extended/BUILD-INFO.json
               grep -q "/etc/subconverter/pref.toml" /tmp/apk-root/usr/share/doc/subconverter-extended/README.OpenWrt
               grep -q "CONFIG_DIR=\"/etc/subconverter\"" /tmp/apk-root/usr/bin/subconverter-extended
               unexpected_owner="$(

@@ -19,6 +19,17 @@
 #include "config/proxy_provider_direct.h"
 #include "config/proxy_provider_interval.h"
 
+struct SecuritySettingsDiagnostics {
+  std::string profileSource = "builtin-default";
+  std::string profileFileSource;
+  bool profileInputValid = true;
+  bool profileUsedCompatibilityFallback = false;
+  std::string uploadSource = "builtin-default";
+  std::string uploadFileSource;
+  std::string uploadInput;
+  bool uploadInputValid = true;
+};
+
 struct Settings {
   // common settings
   std::string prefPath = "pref.ini", defaultExtConfig;
@@ -50,6 +61,7 @@ struct Settings {
   // request fetches, strict additionally disables public upload overrides.
   std::string securityProfile = "lan";
   bool allowPublicUpload = false;
+  SecuritySettingsDiagnostics securityDiagnostics;
 
   // global variables for template
   std::string templatePath = "templates";
@@ -104,6 +116,8 @@ struct Settings {
       "CF-Region-Code", "cf-region-code", "X-Geo-Subdivision"};
   bool dashboardAuthEnabled = false;
   std::string dashboardAuthUsername, dashboardAuthPassword;
+  std::string dashboardAuthClientIpHeader = "none";
+  string_array dashboardAuthTrustedProxyCidrs;
   int dashboardAuthMaxFailures = 5, dashboardAuthWindowSeconds = 300,
       dashboardAuthLockSeconds = 900;
 
@@ -162,6 +176,7 @@ extern Settings global;
 bool isPublicFetchRestricted(FetchContext context);
 bool isTrustedLocalResourcePath(const std::string &path);
 bool isPublicUploadAllowed();
+void logSecurityPosture();
 int importItems(string_array &target, bool scope_limit = true,
                 FetchContext context = FetchContext::TrustedConfig);
 ExternalConfigLoadResult

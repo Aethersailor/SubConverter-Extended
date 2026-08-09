@@ -5,7 +5,12 @@ services:
     container_name: SubConverter-Extended
     image: aethersailor/subconverter-extended:latest
     ports:
-      # 自定义映射端口号 / Customize the published port.
+      # 保留既有的全接口端口发布，方便局域网设备直接访问；这表示“可能被外部访问”，
+      # 但不能单凭该行判断服务已暴露公网，还需结合宿主防火墙、云安全组、NAT 和反代判断。
+      # 若只允许宿主机访问，可手动改为 "127.0.0.1:25500:25500/tcp"。
+      # Keep the existing all-interface publication for LAN compatibility. It
+      # indicates possible exposure, not proven Internet reachability. For
+      # host-only access, manually use "127.0.0.1:25500:25500/tcp" instead.
       - "25500:25500/tcp"
     restart: unless-stopped
     environment:
@@ -13,8 +18,15 @@ services:
       # 按需取消注释并修改；环境变量会覆盖 pref.toml 中的对应配置。
       # Uncomment and edit as needed; environment variables override pref.toml.
       # MANAGED_CONFIG_PREFIX: "http://your-domain-or-ip:25500"
+      # 默认 lan 保持既有内网行为；确认公网可达的部署请显式选择 public 或 strict。
+      # Default lan preserves existing LAN behavior. If Internet reachability is
+      # confirmed, explicitly select public or strict.
       # SUBCONVERTER_SECURITY_PROFILE: public
       # SUBCONVERTER_ALLOW_PUBLIC_UPLOAD: "false"
+      # Dashboard 防爆破默认只信任 socket peer。只有容器端口不对外直通、且入口代理会覆盖所选头时才同时配置以下两项。
+      # Dashboard brute-force protection trusts only the socket peer by default. Set both only when the container is not directly reachable and the edge proxy overwrites the selected header.
+      # SUBCONVERTER_DASHBOARD_CLIENT_IP_HEADER: x-forwarded-for
+      # SUBCONVERTER_DASHBOARD_TRUSTED_PROXY_CIDRS: "172.18.0.0/16"
     volumes:
       # 启动前请先创建 ./base/pref.toml；不要将整个 ./base 挂载到 /base，
       # 否则会遮盖镜像内随版本更新的规则和模板。
