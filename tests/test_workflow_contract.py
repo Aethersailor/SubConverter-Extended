@@ -18,28 +18,13 @@ class WorkflowContractTests(unittest.TestCase):
             raise AssertionError(f"workflow job not found: {job_id}")
         return match.group(0)
 
-    def test_formal_release_admin_check_uses_inherited_pat(self) -> None:
+    def test_formal_release_does_not_require_immutable_settings(self) -> None:
         build_workflow = (
             REPOSITORY / ".github" / "workflows" / "build-dockerhub.yml"
         ).read_text(encoding="utf-8")
-        step_marker = "      - name: "
-        step_starts = []
-        cursor = 0
-        while (start := build_workflow.find(step_marker, cursor)) >= 0:
-            step_starts.append(start)
-            cursor = start + len(step_marker)
-        steps = [
-            build_workflow[start:end]
-            for start, end in zip(step_starts, step_starts[1:] + [len(build_workflow)])
-        ]
-        admin_endpoint = '"repos/$GITHUB_REPOSITORY/immutable-releases"'
-        self.assertEqual(1, build_workflow.count(admin_endpoint))
-        admin_steps = [step for step in steps if admin_endpoint in step]
-
-        self.assertEqual(1, len(admin_steps))
-        for step in admin_steps:
-            self.assertIn("GH_TOKEN: ${{ secrets.PAT_TOKEN }}", step)
-            self.assertNotIn("GH_TOKEN: ${{ github.token }}", step)
+        self.assertNotIn("immutable-releases", build_workflow)
+        self.assertNotIn("immutable_tags_settings", build_workflow)
+        self.assertNotIn("isImmutable", build_workflow)
 
         release_workflow = (
             REPOSITORY / ".github" / "workflows" / "release.yml"
@@ -110,6 +95,35 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn(
             "Latest published Release tag is not canonical SemVer", create_release
         )
+
+    def test_finalize_reads_the_draft_release_before_publication(self) -> None:
+        workflow = (
+            REPOSITORY / ".github" / "workflows" / "build-dockerhub.yml"
+        ).read_text(encoding="utf-8")
+        finalize = self._job(workflow, "finalize-release")
+        draft_check = finalize.split(
+            "      - name: Re-verify draft assets and tag identity", maxsplit=1
+        )[1].split("      - name: Log in to Docker Hub", maxsplit=1)[0]
+
+        self.assertIn('gh release view "$VERSION"', draft_check)
+        self.assertIn('--repo "$GITHUB_REPOSITORY"', draft_check)
+        self.assertIn("--json isDraft", draft_check)
+        self.assertIn("--jq '.isDraft'", draft_check)
+        self.assertNotIn("releases/tags/$VERSION", draft_check)
+
+    def test_sync_dev_to_master_only_merges_and_tags(self) -> None:
+        workflow = (
+            REPOSITORY / ".github" / "workflows" / "sync-dev-to-master.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('git merge "$DEV_SHA" --no-commit --no-ff', workflow)
+        self.assertIn('git push --atomic origin "HEAD:refs/heads/master"', workflow)
+        self.assertNotIn("preflight-dev:", workflow)
+        self.assertNotIn("docker buildx", workflow)
+        self.assertNotIn("gh workflow run", workflow)
+        self.assertNotIn("gh run watch", workflow)
+        self.assertNotIn("ASan", workflow)
+        self.assertNotIn("UBSan", workflow)
 
 
 if __name__ == "__main__":

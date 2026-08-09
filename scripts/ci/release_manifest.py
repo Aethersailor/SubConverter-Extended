@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create and verify the immutable identity manifest for a formal release."""
+"""Create and verify the identity manifest for a formal release."""
 
 from __future__ import annotations
 
