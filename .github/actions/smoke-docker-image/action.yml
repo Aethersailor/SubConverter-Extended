@@ -77,6 +77,7 @@ runs:
             python3 scripts/run-subconverter-smoke.py \
               --base-url "http://127.0.0.1:${HOST_PORT}" \
               --remote-subscription-url "${FIXTURE_BASE}/sample-subscription.txt" \
+              --mihomo-raw-subscription-url "${FIXTURE_BASE}/mihomo-raw-subscription.txt" \
               --mihomo-yaml-subscription-url "${FIXTURE_BASE}/mihomo-provider-subscription.yml" \
               --legacy-subscription-url "${FIXTURE_BASE}/legacy-surge-subscription.conf" \
               --verify-non-clash

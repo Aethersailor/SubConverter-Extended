@@ -16,6 +16,11 @@
 #include "utils/map_extra.h"
 #include "utils/string.h"
 
+enum class NodeParserMode {
+    LegacyOnly,
+    MihomoOnly,
+};
+
 struct parse_settings
 {
     ProxyPolicy *proxy = nullptr;
@@ -25,7 +30,7 @@ struct parse_settings
     RegexMatchConfigs *time_rules = nullptr;
     std::string *sub_info = nullptr;
     bool authorized = false;
-    bool mihomo_only = false;
+    NodeParserMode parser_mode = NodeParserMode::LegacyOnly;
     FetchContext fetch_context = FetchContext::TrustedConfig;
     string_icase_map *request_header = nullptr;
 #ifndef NO_JS_RUNTIME
