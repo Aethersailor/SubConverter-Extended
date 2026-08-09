@@ -21,6 +21,7 @@
 #include <yaml-cpp/yaml.h>
 
 #include "config/binding.h"
+#include "generator/config/clash_proxy.h"
 #include "generator/config/external_rules.h"
 #include "generator/config/nodemanip.h"
 #include "generator/config/ruleconvert.h"
@@ -2640,7 +2641,7 @@ static SubStageResponse dispatchTargetGenerator(
     if (ext.nodelist) {
       YAML::Node yamlnode;
       proxyToClash(nodes, yamlnode, dummy_group, target == "clashr", ext);
-      output = YAML::Dump(yamlnode);
+      output = dumpCanonicalClashYaml(yamlnode);
     } else {
       if (render_template(fetchFile(policy.clash_base, proxy,
                                     settings.cacheConfig, true, base_context),
@@ -3542,7 +3543,7 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
   response.headers["profile-update-interval"] =
       std::to_string(global.updateInterval / 3600);
   writeLog(0, "转换完成。", LOG_LEVEL_INFO);
-  return YAML::Dump(clash);
+  return dumpCanonicalClashYaml(clash);
 }
 
 std::string getProfile(RESPONSE_CALLBACK_ARGS) {

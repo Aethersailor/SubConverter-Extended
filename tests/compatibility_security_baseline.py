@@ -47,6 +47,7 @@ RULESET = (
     "DOMAIN-SUFFIX,example.com,Proxy\n"
     "IP-CIDR,198.51.100.0/24,Proxy\n"
 )
+ISSUE_98_RULESET = "DOMAIN-SUFFIX,issue-98.example\n"
 RULESET_WITH_INVALID_LINE = (
     "DOMAIN-SUFFIX,valid-before.example,SourcePolicy\n"
     "NOT-A-SUPPORTED-RULE,this-entry-must-be-skipped\n"
@@ -63,6 +64,21 @@ GIST_FIXTURE_CONFIG = (
     "[common]\n"
     f"token={GIST_FIXTURE_TOKEN}\n"
     "username=fixture-user\n"
+)
+VLESS_REALITY_WITHOUT_SID_URI = (
+    "vless://22222222-2222-4222-8222-222222222222@reality.example.test:443"
+    "?encryption=none&security=reality&flow=xtls-rprx-vision&type=tcp"
+    "&sni=www.amazon.nl"
+    "&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "&fp=chrome#RealityWithoutSid"
+)
+VLESS_REALITY_WITH_NUMERIC_SID_URI = (
+    "vless://33333333-3333-4333-8333-333333333333@reality.example.test:443"
+    "?encryption=none&security=reality&flow=xtls-rprx-vision&type=tcp"
+    "&sni=www.amazon.nl"
+    "&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "&sid=00112233"
+    "&fp=chrome#RealityNumericSid"
 )
 GIST_REMOTE_FAILURE_SECRET = "remote-response-user-body-secret"
 GIST_REMOTE_FAILURE_BODY = (
@@ -96,6 +112,9 @@ class FixtureHandler(BaseHTTPRequestHandler):
         elif request_path == "/rules.list":
             body = RULESET.encode()
             content_type = "text/plain; charset=utf-8"
+        elif request_path == "/issue-98-rules.list":
+            body = ISSUE_98_RULESET.encode()
+            content_type = "text/plain; charset=utf-8"
         elif request_path == "/rules-with-invalid.list":
             body = RULESET_WITH_INVALID_LINE.encode()
             content_type = "text/plain; charset=utf-8"
@@ -111,6 +130,15 @@ class FixtureHandler(BaseHTTPRequestHandler):
             content_type = "text/plain; charset=utf-8"
         elif request_path == "/external-valid.ini":
             body = b"[custom]\nenable_rule_generator=false\n"
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/external-clash-generation.ini":
+            host = self.headers.get("Host", "127.0.0.1")
+            body = (
+                "[custom]\n"
+                "enable_rule_generator=true\n"
+                "custom_proxy_group=Proxy`select`.*\n"
+                f"ruleset=Proxy,http://{host}/issue-98-rules.list\n"
+            ).encode()
             content_type = "text/plain; charset=utf-8"
         elif request_path == "/external-empty.ini":
             body = b""
@@ -1285,6 +1313,120 @@ def assert_golden(name: str, content: str, update: bool) -> None:
         )
         raise AssertionError(f"golden output changed: {path}\n{diff}")
 
+
+def validate_mihomo_config(binary: Path, content: bytes) -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        runtime_dir = Path(temporary)
+        config_path = runtime_dir / "issue-98.yaml"
+        config_path.write_bytes(content)
+        completed = subprocess.run(
+            [
+                str(binary),
+                "-t",
+                "-d",
+                str(runtime_dir),
+                "-f",
+                str(config_path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=60,
+            check=False,
+        )
+        if completed.returncode != 0:
+            diagnostics = completed.stdout.decode("utf-8", errors="replace")
+            raise AssertionError(
+                "pinned Mihomo rejected the Issue #98 output: "
+                f"exit={completed.returncode}, output={diagnostics[-8000:]!r}"
+            )
+
+
+def issue_98_reality_baseline(
+    base_url: str, fixture_base: str, mihomo_binary: Path | None
+) -> None:
+    def assert_numeric_sid_output(
+        description: str, status: int, body: bytes
+    ) -> None:
+        output = body.decode("utf-8", errors="replace")
+        if status != 200:
+            raise AssertionError(
+                f"VLESS Reality {description} conversion failed: "
+                f"HTTP {status}: {output!r}"
+            )
+        if 'short-id: "00112233"' not in output:
+            raise AssertionError(
+                f"VLESS Reality {description} lost its numeric string short-id"
+            )
+        if "canonical-string" in output:
+            raise AssertionError(
+                f"VLESS Reality {description} leaked an internal string tag"
+            )
+        if mihomo_binary is not None:
+            validate_mihomo_config(mihomo_binary, body)
+
+    cases = (
+        (
+            "without sid",
+            VLESS_REALITY_WITHOUT_SID_URI,
+            'short-id: ""',
+        ),
+        (
+            "with a leading-zero numeric sid",
+            VLESS_REALITY_WITH_NUMERIC_SID_URI,
+            'short-id: "00112233"',
+        ),
+    )
+    for description, uri, expected_short_id in cases:
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "clash",
+                "url": uri,
+                "config": fixture_base + "/external-clash-generation.ini",
+            },
+        )
+        reality_output = body.decode("utf-8", errors="replace")
+        if status != 200:
+            raise AssertionError(
+                f"VLESS Reality {description} conversion failed: "
+                f"HTTP {status}: {reality_output!r}"
+            )
+        if expected_short_id not in reality_output:
+            raise AssertionError(
+                f"VLESS Reality {description} lost its string short-id: "
+                f"expected {expected_short_id!r}"
+            )
+        if 'short-id: """"' in reality_output:
+            raise AssertionError(
+                "VLESS Reality short-id regained the invalid doubled quoting"
+            )
+        if "canonical-string" in reality_output:
+            raise AssertionError(
+                "VLESS Reality output leaked an internal canonical string tag"
+            )
+        if "DOMAIN-SUFFIX,issue-98.example,Proxy,Proxy" in reality_output:
+            raise AssertionError(
+                "Issue #98 fixture generated a duplicate rule policy"
+            )
+        if "DOMAIN-SUFFIX,issue-98.example,Proxy" not in reality_output:
+            raise AssertionError(
+                "Issue #98 fixture did not generate its expected Clash rule"
+            )
+        if mihomo_binary is not None:
+            validate_mihomo_config(mihomo_binary, body)
+
+    status, body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "clash",
+            "url": VLESS_REALITY_WITH_NUMERIC_SID_URI,
+            "config": DISABLE_RULEGEN_CONFIG,
+            "list": "true",
+        },
+    )
+    assert_numeric_sid_output("list output", status, body)
 
 def conversion_baselines(
     base_url: str, fixture_base: str, update_golden: bool
@@ -3354,9 +3496,13 @@ def main() -> int:
         "--settings-snapshot-helper", type=Path, required=True
     )
     parser.add_argument("--update-golden", action="store_true")
+    parser.add_argument("--mihomo-binary", type=Path)
     args = parser.parse_args()
     binary = args.binary.resolve()
     settings_snapshot_helper = args.settings_snapshot_helper.resolve()
+    mihomo_binary = (
+        args.mihomo_binary.resolve() if args.mihomo_binary is not None else None
+    )
     if not binary.is_file():
         parser.error(f"binary does not exist: {binary}")
     if not settings_snapshot_helper.is_file():
@@ -3368,6 +3514,8 @@ def main() -> int:
         parser.error(
             "settings snapshot helper must be separate from the runtime binary"
         )
+    if mihomo_binary is not None and not mihomo_binary.is_file():
+        parser.error(f"Mihomo binary does not exist: {mihomo_binary}")
 
     deployment_security_defaults_baseline()
     runtime_cli_isolation_baseline(binary)
@@ -3401,6 +3549,16 @@ def main() -> int:
             conversion_baselines(base_url, fixture_base, args.update_golden)
             simple_target_protocol_baseline(base_url, fixture_base)
             provider_direct_default_output_baseline(base_url, fixture_base)
+        with running_service(
+            binary,
+            config_replacements=(
+                (
+                    'managed_config_prefix = "https://managed.example.test"',
+                    'managed_config_prefix = ""',
+                ),
+            ),
+        ) as base_url:
+            issue_98_reality_baseline(base_url, fixture_base, mihomo_binary)
         with running_service(
             binary,
             proxy_provider_interval=7200,
