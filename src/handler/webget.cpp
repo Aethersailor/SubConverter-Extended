@@ -69,6 +69,12 @@ struct GitHubFileRef
 
 static std::mutex cache_fetch_mutex;
 static std::map<std::string, std::shared_future<CacheFetchResult>> cache_fetches;
+static std::atomic_bool outbound_fetch_shutdown_requested {false};
+
+void requestOutboundFetchShutdown() noexcept
+{
+    outbound_fetch_shutdown_requested.store(true, std::memory_order_relaxed);
+}
 
 class CacheFetchOwnerCleanup
 {
@@ -452,6 +458,8 @@ static int dummy_writer(char *, size_t size, size_t nmemb, void *)
 //static int size_checker(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow)
 static int size_checker(void *clientp, curl_off_t, curl_off_t dlnow, curl_off_t, curl_off_t)
 {
+    if(outbound_fetch_shutdown_requested.load(std::memory_order_relaxed))
+        return 1;
     if(clientp)
     {
         auto *data = reinterpret_cast<curl_progress_data*>(clientp);
@@ -674,6 +682,14 @@ static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode 
     defer(curl_slist_free_all(header_list);)
     CURLcode retVal;
 
+    if(outbound_fetch_shutdown_requested.load(std::memory_order_relaxed))
+    {
+        *result.status_code = 0;
+        if(return_code)
+            *return_code = CURLE_ABORTED_BY_CALLBACK;
+        return 0;
+    }
+
     retVal = curl_init();
     if(retVal != CURLE_OK)
     {
@@ -804,6 +820,7 @@ static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode 
 
     retVal = curl_easy_perform(curl_handle);
     if(retVal != CURLE_OK &&
+       !outbound_fetch_shutdown_requested.load(std::memory_order_relaxed) &&
        (argument.method == HTTP_GET || argument.method == HTTP_HEAD) &&
        is_recoverable_curl_error(retVal))
     {
@@ -814,7 +831,10 @@ static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode 
         if(result.response_headers)
             result.response_headers->clear();
         sleepMs(200);
-        retVal = curl_easy_perform(curl_handle);
+        if(outbound_fetch_shutdown_requested.load(std::memory_order_relaxed))
+            retVal = CURLE_ABORTED_BY_CALLBACK;
+        else
+            retVal = curl_easy_perform(curl_handle);
     }
 
     long code = 0;
@@ -886,6 +906,7 @@ static int curlGetWithGitHubFallback(const FetchArgument &argument, FetchResult 
     std::string fallback_url;
     if(argument.method != HTTP_GET || argument.keep_resp_on_fail ||
        original_status == 200 ||
+       outbound_fetch_shutdown_requested.load(std::memory_order_relaxed) ||
        !should_try_jsdelivr_fallback(original_code, original_status) ||
        !build_jsdelivr_github_url(argument.url, fallback_url))
         return original_status;

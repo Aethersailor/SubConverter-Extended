@@ -114,6 +114,12 @@ void cron_tick_caller() {
     statistics::tick();
 }
 
+void shutdown_runtime() {
+  shutdownRulesetExecutor();
+  statistics::shutdown();
+  shutdownGlobalCurlHandlePool();
+}
+
 int main(int argc, char *argv[]) {
 #ifndef _DEBUG
   std::string prgpath = argv[0];
@@ -158,6 +164,7 @@ int main(int argc, char *argv[]) {
     writeLog(0, "WSAStartup 初始化失败。", LOG_LEVEL_FATAL);
     return 1;
   }
+  defer(WSACleanup();)
   UINT origcp = GetConsoleOutputCP();
   defer(SetConsoleOutputCP(origcp);) SetConsoleOutputCP(65001);
 #else
@@ -190,6 +197,10 @@ int main(int argc, char *argv[]) {
           std::to_string(rulesetConversionCacheMaxEntries()) + " entries/" +
           std::to_string(rulesetConversionCacheMaxBytes()) + " bytes。",
       LOG_LEVEL_INFO);
+  // Register cleanup before any background refresh starts. The HTTP backend
+  // drains accepted requests before returning, so only then may the executor
+  // cancel unobserved work and release its curl leases before the pool stops.
+  defer(shutdown_runtime();)
   statistics::initialize();
   // vfs::vfs_read("vfs.ini");
   if (!global.updateRulesetOnRequest)
@@ -293,10 +304,5 @@ int main(int argc, char *argv[]) {
                std::to_string(global.listenPort),
            LOG_LEVEL_INFO);
   int ret = webServer.start_web_server_multi(&args);
-  statistics::shutdown();
-
-#ifdef _WIN32
-  WSACleanup();
-#endif // _WIN32
   return ret;
 }

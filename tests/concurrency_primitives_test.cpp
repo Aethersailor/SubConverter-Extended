@@ -63,6 +63,21 @@ static void testBoundedExecutor() {
   }
   assert(threw);
   executor.shutdown();
+
+  bool ran_after_shutdown = false;
+  auto rejected = executor.submit([&] {
+    ran_after_shutdown = true;
+    return 9;
+  });
+  bool broken_promise = false;
+  try {
+    (void)rejected.get();
+  } catch (const std::future_error &error) {
+    broken_promise =
+        error.code() == std::make_error_code(std::future_errc::broken_promise);
+  }
+  assert(broken_promise);
+  assert(!ran_after_shutdown);
 }
 
 static void testConcurrentLruCache() {
