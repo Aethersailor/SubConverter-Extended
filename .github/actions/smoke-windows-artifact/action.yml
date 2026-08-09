@@ -96,6 +96,17 @@ runs:
             throw "Windows artifact smoke test failed."
           }
 
+          $plainResponse = Invoke-WebRequest `
+            -UseBasicParsing `
+            -Uri $url `
+            -Headers @{ Origin = "https://identity-check.invalid" } `
+            -TimeoutSec 5
+          $expectedBuildId = "${{ inputs.expected-revision }}".Substring(0, 7)
+          $expectedPlainVersion = "SubConverter-Extended ${{ inputs.expected-version }}-$expectedBuildId backend"
+          if ($plainResponse.Content.TrimEnd("`r", "`n") -cne $expectedPlainVersion) {
+            throw "Windows runtime version identity mismatch: '$($plainResponse.Content)'"
+          }
+
           python "$env:GITHUB_WORKSPACE\scripts\run-subconverter-smoke.py" --base-url "http://127.0.0.1:$port"
 
           # The portable archive deliberately contains no CA bundle. Fetch a

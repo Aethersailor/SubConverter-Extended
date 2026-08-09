@@ -4,9 +4,10 @@ A formal release has exactly one identity:
 
 `vX.Y.Z tag -> tag commit -> source tree -> packages -> SHA256SUMS -> RELEASE-MANIFEST.json -> Docker Hub/GHCR version manifests -> OCI revision`
 
-The revision is always the full 40-character tag commit SHA. A historical
-version is never rebuilt, retagged, re-uploaded, or regenerated. A correction
-requires a new version.
+The canonical revision is always the full 40-character tag commit SHA. The
+compiled `BUILD_ID` and runtime `/version` suffix are its seven-character
+prefix. A historical version is never rebuilt, retagged, re-uploaded, or
+regenerated. A correction requires a new version.
 
 ## State machine
 
@@ -22,8 +23,9 @@ requires a new version.
    Docker Hub immutable version tags are enabled, and unless the GitHub Release,
    Docker Hub version tag, and GHCR version tag are all absent.
 5. Run-scoped candidate images and all packages are built from the same tag
-   checkout. Package `BUILD-INFO.json`, runtime `/version`, OCI labels, asset
-   checksums, and registry manifests are verified against the same identity.
+   checkout. Package `BUILD-INFO.json`, OCI labels, asset checksums, and registry
+   manifests use the full revision; runtime `/version` is verified against its
+   seven-character `BUILD_ID` prefix.
 6. Version image tags are published once. A draft GitHub Release is populated
    without overwrite permission and is downloaded again for checksum and
    manifest verification.
