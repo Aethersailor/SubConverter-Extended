@@ -49,18 +49,31 @@ static void appendMihomoNodes(std::vector<mihomo::ProxyNode> &source,
     node.Type = getProxyTypeFromString(mnode.type);
     node.Hostname = std::move(mnode.server);
     node.Port = mnode.port;
+    node.CanonicalProxyJson = std::move(mnode.canonical_json);
 
-    node.RawParams = std::move(mnode.params);
-    node.RawParamJson = std::move(mnode.param_json);
+    nlohmann::json canonical;
+    try {
+      canonical = nlohmann::json::parse(node.CanonicalProxyJson);
+    } catch (const nlohmann::json::exception &) {
+      continue;
+    }
 
-    // Preserve Mihomo's canonical type for generic pass-through, including
-    // protocols that do not yet have a dedicated C++ ProxyType.
-    node.RawParamJson["type"] = "\"" + mnode.type + "\"";
-    node.RawParams["type"] = std::move(mnode.type);
     const bool is_vless = node.Type == ProxyType::VLESS;
     const bool is_hysteria2 = node.Type == ProxyType::Hysteria2;
 
-    for (const auto &[key, value] : node.RawParams) {
+    for (auto it = canonical.begin(); it != canonical.end(); ++it) {
+      const std::string &key = it.key();
+      if (!it->is_string() && !it->is_boolean() && !it->is_number())
+        continue;
+
+      std::string value;
+      if (it->is_string())
+        value = it->get<std::string>();
+      else if (it->is_boolean())
+        value = it->get<bool>() ? "true" : "false";
+      else
+        value = it->dump();
+
       if (key == "password")
         node.Password = value;
       else if (key == "cipher" || key == "method")
@@ -95,15 +108,10 @@ static void appendMihomoNodes(std::vector<mihomo::ProxyNode> &source,
     }
 
     auto parse_object = [&](const std::string &key) {
-      auto value = node.RawParamJson.find(key);
-      if (value == node.RawParamJson.end())
+      auto value = canonical.find(key);
+      if (value == canonical.end() || !value->is_object())
         return nlohmann::json();
-      try {
-        nlohmann::json parsed = nlohmann::json::parse(value->second);
-        return parsed.is_object() ? parsed : nlohmann::json();
-      } catch (const nlohmann::json::exception &) {
-        return nlohmann::json();
-      }
+      return *value;
     };
 
     nlohmann::json ws_options = parse_object("ws-opts");
@@ -133,19 +141,15 @@ static void appendMihomoNodes(std::vector<mihomo::ProxyNode> &source,
       node.ShortId = reality_options.value("short-id", std::string());
     }
 
-    auto alpn = node.RawParamJson.find("alpn");
-    if (is_vless && alpn != node.RawParamJson.end()) {
-      try {
-        const nlohmann::json values = nlohmann::json::parse(alpn->second);
-        if (values.is_array()) {
-          for (const auto &value : values) {
-            if (value.is_string())
-              node.AlpnList.emplace_back(value.get<std::string>());
-          }
-        } else if (values.is_string()) {
-          node.AlpnList.emplace_back(values.get<std::string>());
+    auto alpn = canonical.find("alpn");
+    if (is_vless && alpn != canonical.end()) {
+      if (alpn->is_array()) {
+        for (const auto &value : *alpn) {
+          if (value.is_string())
+            node.AlpnList.emplace_back(value.get<std::string>());
         }
-      } catch (const nlohmann::json::exception &) {
+      } else if (alpn->is_string()) {
+        node.AlpnList.emplace_back(alpn->get<std::string>());
       }
     }
 

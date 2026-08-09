@@ -1,7 +1,6 @@
 #ifndef MIHOMO_BRIDGE_H
 #define MIHOMO_BRIDGE_H
 
-#include <map>
 #include <string>
 #include <vector>
 
@@ -16,11 +15,9 @@ struct ProxyNode {
   std::string type;
   std::string server;
   int port;
-  std::map<std::string, std::string> params; // Additional parameters
-  std::map<std::string, std::string> param_json; // Type-preserving JSON values
-
-  // For easier access
-  std::string toYAML() const;
+  // Complete JSON object returned by Mihomo. Keeping one canonical document
+  // avoids the lossy string map/type sidecar split used by the old bridge.
+  std::string canonical_json;
 };
 
 /**

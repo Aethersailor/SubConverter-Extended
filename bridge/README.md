@@ -53,8 +53,15 @@ The generated artifacts are:
 
 The Docker build also regenerates:
 
+- `bridge/mihomo_capabilities.json`
+- `bridge/proxy_validation_generated.go`
 - `src/parser/mihomo_schemes.h`
 - `src/parser/param_compat.h`
+
+`mihomo_capabilities.json` is the single generated description of the pinned
+Mihomo module. The validation source and both C++ headers are derived from that
+manifest. Generation stops if the manifest is missing or incompatible; the
+build does not fall back to a hard-coded protocol or parameter list.
 
 ## Updating Mihomo
 
@@ -68,6 +75,23 @@ go mod tidy
 ```
 
 Then regenerate the parser compatibility headers and rebuild the Docker image.
+
+```bash
+go run ../scripts/generate_proxy_validation.go \
+  -o proxy_validation_generated.go \
+  -manifest mihomo_capabilities.json
+go run ../scripts/generate_schemes.go \
+  -manifest mihomo_capabilities.json \
+  -o ../src/parser/mihomo_schemes.h
+go run ../scripts/generate_param_compat.go \
+  -manifest mihomo_capabilities.json \
+  -o ../src/parser/param_compat.h
+```
+
+Run the commands in this order. The first command reads the pinned Mihomo
+source and writes the capability manifest. The remaining commands consume the
+same manifest, so parser validation, URI detection, and global parameter
+overlays cannot silently use different protocol snapshots.
 
 ## Testing notes
 

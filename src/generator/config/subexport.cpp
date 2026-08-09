@@ -8,13 +8,13 @@
 
 #include "config/regmatch.h"
 #include "external_rules.h"
+#include "generator/config/clash_proxy.h"
 #include "generator/config/subexport.h"
 #include "generator/template/templates.h"
 #include "handler/settings.h"
 #include "handler/settings_view.h"
 #include "nodemanip.h"
 #include "parser/config/proxy.h"
-#include "parser/param_compat.h"
 #include "ruleconvert.h"
 #include "script/script_quickjs.h"
 #include "utils/bitwise.h"
@@ -446,80 +446,21 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
     singleproxy["server"] = x.Hostname;
     singleproxy["port"] = x.Port;
 
-    // Generic Pass-Through (Phase 9 + 9.3: Smart Global Parameter Application)
-    // If RawParams are present (from Mihomo parser), use them directly.
-    // This allows supporting any new protocol without modifying SubConverter-Extended
-    // code.
-    if (!x.RawParams.empty()) {
-      // Get protocol type for compatibility check
-      std::string protocol =
-          x.RawParams.count("type") ? x.RawParams["type"] : "";
-
-      // Output all RawParams
-      for (const auto &[key, value] : x.RawParams) {
-        // Skip fields we already handled or want to override (e.g. name is
-        // handled by Remark)
-        if (key == "name" || key == "server" || key == "port")
-          continue;
-
-        auto json_value = x.RawParamJson.find(key);
-        if (json_value != x.RawParamJson.end()) {
-          try {
-            YAML::Node parsed = YAML::Load(json_value->second);
-            singleproxy[key] = parsed;
-          } catch (...) {
-            singleproxy[key] = value;
-          }
-        } else {
-          singleproxy[key] = value;
-        }
+    // Mihomo-produced nodes keep one complete typed mapping. Clash output is
+    // derived from that canonical document, while legacy target generators
+    // continue to use the compatibility projection in Proxy.
+    if (!x.CanonicalProxyJson.empty()) {
+      try {
+        singleproxy = buildCanonicalClashProxy(
+            x, ClashProxyOverlay{udp, scv, tfo, xudp});
+      } catch (const std::exception &e) {
+        writeLog(0, "MIHOMO_CANONICAL_PROXY_INVALID detail=" +
+                        summarizeSensitiveTextForLog(e.what()),
+                 LOG_LEVEL_ERROR);
+        continue;
       }
 
-      // Phase 9.3+: Smart Global Parameter Application with Hardcode Protection
-      // Apply global parameters only if:
-      // 1. Protocol supports the parameter (checked via param_compat.h)
-      // 2. Parameter not already present in RawParams (from mihomo)
-      // 3. Parameter is NOT hardcoded by Mihomo (protects Mihomo's intentional
-      // defaults)
-
-      // UDP support - override Mihomo defaults (but protect hardcoded)
-      if (!udp.is_undef()) {
-        if (mihomo::isParamSupported(protocol, "udp") &&
-            !mihomo::isParamHardcoded(protocol, "udp")) {
-          singleproxy["udp"] = udp.get();
-        }
-      }
-
-      // Skip Certificate Verification - override Mihomo defaults (but protect
-      // hardcoded)
-      if (!scv.is_undef()) {
-        if (mihomo::isParamSupported(protocol, "skip-cert-verify") &&
-            !mihomo::isParamHardcoded(protocol, "skip-cert-verify")) {
-          singleproxy["skip-cert-verify"] = scv.get();
-        }
-      }
-
-      // TCP Fast Open - override Mihomo defaults (but protect hardcoded)
-      if (!tfo.is_undef()) {
-        if (mihomo::isParamSupported(protocol, "tfo") &&
-            !mihomo::isParamHardcoded(protocol, "tfo")) {
-          singleproxy["tfo"] = tfo.get();
-        }
-      }
-
-      // XUDP support - override Mihomo defaults (but protect hardcoded)
-      if (!xudp.is_undef()) {
-        if (mihomo::isParamSupported(protocol, "xudp") &&
-            !mihomo::isParamHardcoded(protocol, "xudp")) {
-          singleproxy["xudp"] = xudp.get();
-        }
-      }
-
-      // If we did pass-through, we can skip the specific switch-case logic
-      // below to avoid double-setting or overwriting with empty defaults.
-
-      // CRITICAL: Add the node to output before continuing!
-      // Force Flow style for consistent, compact output
+      // Preserve the existing compact representation for Mihomo-parsed nodes.
       singleproxy.SetStyle(YAML::EmitterStyle::Flow);
       proxies.push_back(singleproxy);
       nodelist.emplace_back(x);
@@ -1183,37 +1124,6 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
     yamlnode["Proxy Group"] = original_groups;
 }
 
-void formatterShortId(std::string &input) {
-  std::string target = "short-id:";
-  size_t startPos = input.find(target);
-
-  while (startPos != std::string::npos) {
-    // 查找对应实例的结束位置
-    size_t endPos = input.find("}", startPos);
-
-    if (endPos != std::string::npos) {
-      // 提取原始id
-      std::string originalId = input.substr(
-          startPos + target.length(), endPos - startPos - target.length());
-
-      // 去除原始id中的空格
-      originalId.erase(
-          remove_if(originalId.begin(), originalId.end(), ::isspace),
-          originalId.end());
-
-      // 添加引号
-      std::string modifiedId = " \"" + originalId + "\" ";
-
-      // 替换原始id为修改后的id
-      input.replace(startPos + target.length(),
-                    endPos - startPos - target.length(), modifiedId);
-    }
-
-    // 继续查找下一个实例
-    startPos = input.find(target, startPos + 1);
-  }
-}
-
 std::string proxyToClash(std::vector<Proxy> &nodes,
                          const std::string &base_conf,
                          std::vector<RulesetContent> &ruleset_content_array,
@@ -1248,7 +1158,7 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
       ext.clash_new_field_name ? "proxies" : "Proxy";
   if (yamlnode[proxies_field_name].IsDefined()) {
     YAML::Node proxies_node = yamlnode[proxies_field_name];
-    proxies_yaml = YAML::Dump(proxies_node);
+    proxies_yaml = dumpCanonicalClashYaml(proxies_node);
     yamlnode.remove(proxies_field_name); // 从 yamlnode 中移除
   }
 
@@ -1262,7 +1172,7 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
       insertProxiesBeforeTarget(result, proxies_yaml,
                                 ext.clash_new_field_name);
     }
-    return result;
+    return finalizeCanonicalClashYaml(result);
   };
 
   const bool has_external_rules =
@@ -1451,8 +1361,7 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
 
   output_content.insert(0, yamlnode_str);
   replaceAll(output_content, "!<str> ", "");
-  formatterShortId(output_content);
-  return output_content;
+  return finalizeCanonicalClashYaml(output_content);
 }
 
 void replaceAll(std::string &input, const std::string &search,

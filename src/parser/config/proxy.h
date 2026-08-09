@@ -1,7 +1,6 @@
 #ifndef PROXY_H_INCLUDED
 #define PROXY_H_INCLUDED
 
-#include <map>
 #include <string>
 #include <vector>
 
@@ -147,10 +146,10 @@ struct Proxy {
   String Multiplexing;
   tribool V2rayHttpUpgrade;
 
-  // Store raw params from mihomo parser for generic pass-through
-  std::map<String, String> RawParams;
-  // JSON-encoded values preserve Mihomo scalar and nested YAML types.
-  std::map<String, String> RawParamJson;
+  // Complete type-preserving mapping returned by Mihomo. Clash output treats
+  // this JSON document as the canonical representation; the fields above are
+  // a compatibility projection for legacy target generators and scripts.
+  String CanonicalProxyJson;
 };
 
 #define SS_DEFAULT_GROUP "SSProvider"
