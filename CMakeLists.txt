@@ -253,7 +253,8 @@ ELSEIF(EXISTS "${CMAKE_SOURCE_DIR}/bridge/libmihomo.a")
         TARGET_LINK_LIBRARIES(${BUILD_TARGET_NAME} "${CMAKE_SOURCE_DIR}/bridge/libmihomo.a")
     ENDIF()
 ELSE()
-    MESSAGE(WARNING "mihomo Go library not found, parser will use fallback mode")
+    MESSAGE(WARNING
+        "mihomo Go library not found; Clash/ClashR node parsing is disabled")
 ENDIF()
 
 IF(WIN32)

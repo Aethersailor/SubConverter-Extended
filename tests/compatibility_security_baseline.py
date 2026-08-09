@@ -33,6 +33,7 @@ GOLDEN_ROOT = REPOSITORY / "tests" / "snapshots" / "compatibility"
 SUBSCRIPTION = (
     "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388#Smoke\n"
 )
+ENCODED_SUBSCRIPTION = base64.urlsafe_b64encode(SUBSCRIPTION.encode()).decode()
 VLESS_URI = (
     "vless://11111111-1111-1111-1111-111111111111@vless.example.test:443"
     "?security=tls&type=ws&host=vless.example.test&path=%2Fws#VLESSFixture"
@@ -43,6 +44,9 @@ HYSTERIA2_URI = (
     "&sni=hy2.example.test#Hy2Fixture"
 )
 MIXED_PROTOCOL_SUBSCRIPTION = SUBSCRIPTION + VLESS_URI + "\n" + HYSTERIA2_URI + "\n"
+ENCODED_MIXED_PROTOCOL_SUBSCRIPTION = base64.urlsafe_b64encode(
+    MIXED_PROTOCOL_SUBSCRIPTION.encode()
+).decode()
 RULESET = (
     "DOMAIN-SUFFIX,example.com,Proxy\n"
     "IP-CIDR,198.51.100.0/24,Proxy\n"
@@ -59,6 +63,31 @@ GENERATION_RULESET = (
     "DOMAIN-SUFFIX,third.snapshot.test,Proxy\n"
 )
 DISABLE_RULEGEN_CONFIG = "data:,enable_rule_generator=false"
+MIHOMO_ONLY_ROUTE_URI = (
+    "socks5://user:pass@socks.example.test:1080#RouteProbe"
+)
+LEGACY_ONLY_ROUTE_URI = (
+    "trojan-go://password@legacy.example.test:443"
+    "?sni=example.test#LegacyRouteProbe"
+)
+LEGACY_ONLY_TARGETS = (
+    "surge",
+    "quan",
+    "quanx",
+    "loon",
+    "surfboard",
+    "mellow",
+    "singbox",
+    "ss",
+    "ssd",
+    "ssr",
+    "sssub",
+    "v2ray",
+    "trojan",
+    "vless",
+    "hysteria2",
+    "mixed",
+)
 GIST_FIXTURE_TOKEN = "fixture-token"
 GIST_FIXTURE_CONFIG = (
     "[common]\n"
@@ -97,6 +126,9 @@ class FixtureHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         request_path = urllib.parse.urlsplit(self.path).path
         if request_path == "/subscription.txt":
+            body = ENCODED_SUBSCRIPTION.encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/mihomo-raw-subscription.txt":
             body = SUBSCRIPTION.encode()
             content_type = "text/plain; charset=utf-8"
         elif request_path == "/slow-subscription.txt":
@@ -104,10 +136,10 @@ class FixtureHandler(BaseHTTPRequestHandler):
             if not type(self).slow_subscription_release.wait(timeout=15):
                 self.send_error(504)
                 return
-            body = SUBSCRIPTION.encode()
+            body = ENCODED_SUBSCRIPTION.encode()
             content_type = "text/plain; charset=utf-8"
         elif request_path == "/mixed-protocol-subscription.txt":
-            body = MIXED_PROTOCOL_SUBSCRIPTION.encode()
+            body = ENCODED_MIXED_PROTOCOL_SUBSCRIPTION.encode()
             content_type = "text/plain; charset=utf-8"
         elif request_path == "/rules.list":
             body = RULESET.encode()
@@ -1540,6 +1572,223 @@ def conversion_baselines(
             raise AssertionError(
                 "a single unsupported ruleset line was not skipped "
                 f"independently for type={ruleset_type}: {converted!r}"
+            )
+
+
+def parser_route_isolation_baseline(base_url: str, fixture_base: str) -> None:
+    common = {
+        "url": MIHOMO_ONLY_ROUTE_URI,
+        "config": DISABLE_RULEGEN_CONFIG,
+    }
+    for target in ("clash", "clashr"):
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {"target": target, "list": "true", **common},
+        )
+        output = body.decode("utf-8", errors="replace")
+        if status != 200 or "RouteProbe" not in output:
+            raise AssertionError(
+                f"explicit {target} did not use the Mihomo-only parser: "
+                f"HTTP {status}: {output!r}"
+            )
+
+    auto_cases = (
+        ("Clash/1.0", "clash"),
+        ("ClashForAndroid/1.9R", "clashr"),
+    )
+    for user_agent, resolved_target in auto_cases:
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {"target": "auto", "explain": "true", **common},
+            {"User-Agent": user_agent},
+        )
+        if status != 200:
+            raise AssertionError(
+                f"auto {resolved_target} parser route returned HTTP {status}: {body!r}"
+            )
+        report = json.loads(body)
+        if (
+            report.get("target") != resolved_target
+            or report.get("nodes", {}).get("total", 0) < 1
+        ):
+            raise AssertionError(
+                f"auto UA {user_agent!r} did not resolve to the Mihomo-only "
+                f"{resolved_target} route: {report!r}"
+            )
+
+    for target in LEGACY_ONLY_TARGETS:
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {"target": target, **common},
+        )
+        if status != 400:
+            raise AssertionError(
+                f"legacy-only target {target} accepted a Mihomo-only URI: "
+                f"HTTP {status}: {body!r}"
+            )
+
+    status, body, _ = request(
+        base_url,
+        "/sub",
+        {"target": "auto", **common},
+        {"User-Agent": "Loon/3.2.1"},
+    )
+    if status != 400:
+        raise AssertionError(
+            "auto Loon route accepted a Mihomo-only URI: "
+            f"HTTP {status}: {body!r}"
+        )
+
+    status, body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "singbox",
+            "url": LEGACY_ONLY_ROUTE_URI,
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    if status != 200:
+        raise AssertionError(
+            f"legacy-only parser rejected its direct URI: HTTP {status}: {body!r}"
+        )
+    report = json.loads(body)
+    if not any(
+        outbound.get("tag") == "LegacyRouteProbe"
+        for outbound in report.get("outbounds", [])
+    ):
+        raise AssertionError("legacy-only direct URI was not expanded by sing-box")
+
+    status, body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "auto",
+            "url": LEGACY_ONLY_ROUTE_URI,
+            "config": DISABLE_RULEGEN_CONFIG,
+            "explain": "true",
+        },
+        {"User-Agent": "Loon/3.2.1"},
+    )
+    if status != 200:
+        raise AssertionError(
+            f"auto Loon legacy-only route returned HTTP {status}: {body!r}"
+        )
+    report = json.loads(body)
+    if report.get("target") != "loon" or report.get("nodes", {}).get("total", 0) < 1:
+        raise AssertionError(
+            f"auto Loon did not resolve to the legacy-only route: {report!r}"
+        )
+
+    status, body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "clash",
+            "url": LEGACY_ONLY_ROUTE_URI,
+            "config": DISABLE_RULEGEN_CONFIG,
+            "list": "true",
+        },
+    )
+    if status != 400:
+        raise AssertionError(
+            "Mihomo-only Clash route accepted a legacy-only URI: "
+            f"HTTP {status}: {body!r}"
+        )
+
+    status, body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "clash",
+            "url": fixture_base + "/mihomo-raw-subscription.txt",
+            "config": DISABLE_RULEGEN_CONFIG,
+            "list": "true",
+        },
+    )
+    output = body.decode("utf-8", errors="replace")
+    if status != 200 or "Smoke" not in output:
+        raise AssertionError(
+            "Mihomo-only Clash route did not expand a fetched raw URI list: "
+            f"HTTP {status}: {output!r}"
+        )
+
+
+def parser_invocation_log_baseline(binary: Path, fixture_base: str) -> None:
+    cases = (
+        (
+            "mihomo",
+            (
+                (
+                    {
+                        "target": "clash",
+                        "url": MIHOMO_ONLY_ROUTE_URI,
+                        "config": DISABLE_RULEGEN_CONFIG,
+                        "list": "true",
+                    },
+                    200,
+                ),
+                (
+                    {
+                        "target": "clash",
+                        "url": LEGACY_ONLY_ROUTE_URI,
+                        "config": DISABLE_RULEGEN_CONFIG,
+                        "list": "true",
+                    },
+                    400,
+                ),
+            ),
+        ),
+        (
+            "legacy",
+            (
+                (
+                    {
+                        "target": "singbox",
+                        "url": LEGACY_ONLY_ROUTE_URI,
+                        "config": DISABLE_RULEGEN_CONFIG,
+                    },
+                    200,
+                ),
+                (
+                    {
+                        "target": "singbox",
+                        "url": fixture_base + "/subscription.txt",
+                        "config": DISABLE_RULEGEN_CONFIG,
+                    },
+                    200,
+                ),
+            ),
+        ),
+    )
+    for expected_parser, requests in cases:
+        logs: list[str] = []
+        with running_service(
+            binary, log_capture=logs, log_level="verbose"
+        ) as base_url:
+            for params, expected_status in requests:
+                status, body, _ = request(base_url, "/sub", params)
+                if status != expected_status:
+                    raise AssertionError(
+                        f"{expected_parser} invocation probe returned HTTP {status}, "
+                        f"expected {expected_status}: {body!r}"
+                    )
+
+        diagnostics = "".join(logs)
+        for branch in ("sub", "direct"):
+            event = (
+                f"NODE_PARSER_INVOKE parser={expected_parser} branch={branch}"
+            )
+            if event not in diagnostics:
+                raise AssertionError(f"parser invocation log missing {event!r}")
+        forbidden_parser = "legacy" if expected_parser == "mihomo" else "mihomo"
+        forbidden = f"NODE_PARSER_INVOKE parser={forbidden_parser}"
+        if forbidden in diagnostics:
+            raise AssertionError(
+                f"{expected_parser}-only requests also invoked {forbidden_parser}"
             )
 
 
@@ -3545,8 +3794,10 @@ def main() -> int:
     settings_dashboard_client_ip_baseline(settings_snapshot_helper)
 
     with fixture_server() as fixture_base:
+        parser_invocation_log_baseline(binary, fixture_base)
         with running_service(binary) as base_url:
             conversion_baselines(base_url, fixture_base, args.update_golden)
+            parser_route_isolation_baseline(base_url, fixture_base)
             simple_target_protocol_baseline(base_url, fixture_base)
             provider_direct_default_output_baseline(base_url, fixture_base)
         with running_service(

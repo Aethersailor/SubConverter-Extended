@@ -263,7 +263,10 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
     return 0;
   }
 
-  bool isMihomoScheme = mihomo::isSupportedSchemeLink(link);
+  const bool use_mihomo_parser =
+      parse_set.parser_mode == NodeParserMode::MihomoOnly;
+  const bool isMihomoScheme =
+      use_mihomo_parser && mihomo::isSupportedSchemeLink(link);
 
   // Handle pipe separated links recursively
   if (link.find('|') != std::string::npos && (isLink(link) || isMihomoScheme)) {
@@ -358,13 +361,13 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
     // 例如: trojan://..., vmess://..., hysteria2://...
     else {
       isNodeLink = mihomo::isSupportedSchemeLink(link);
-      // 规则 4: 其他未知协议 = 节点链接（喂给 Mihomo 尝试）
+      // 规则 4: 其他未知协议 = 节点链接（交给当前目标的解析器尝试）
       // 例如: newproto://..., unknown://...
-      // 让 Mihomo 的静默失败机制过滤无效链接
+      // 解析器会拒绝自己不支持的协议。
       if (!isNodeLink) {
         isNodeLink = true;
         writeLog(LOG_TYPE_INFO,
-                 "检测到未知协议，交给 Mihomo 解析器处理：" +
+                 "检测到未知协议，交给当前目标的节点解析器处理：" +
                      summarizeUrlForLog(link));
       }
     }
@@ -389,8 +392,8 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
       strSub = webGet(link, proxy, effectiveSettings().cacheSubscription,
                       &extra_headers, request_headers, parse_set.fetch_context);
     } else if (isNodeLink) {
-      // 节点链接：直接用 mihomo 解析（不需要 webGet）
-      writeLog(LOG_TYPE_INFO, "检测到节点链接，正在使用 Mihomo 解析...");
+      // 节点链接不需要下载，直接交给当前目标的解析器。
+      writeLog(LOG_TYPE_INFO, "检测到节点链接，正在直接解析...");
       strSub = link; // 直接使用链接本身作为解析内容
     } else {
       // 其他情况（surge config link 等）：保持原有逻辑
@@ -425,61 +428,47 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
     }
     */
     if (!strSub.empty()) {
-      writeLog(LOG_TYPE_INFO,
-               "正在使用 Mihomo 解析器解析订阅数据...");
-
+      if (use_mihomo_parser) {
+        writeLog(LOG_TYPE_INFO,
+                 "NODE_PARSER_INVOKE parser=mihomo branch=sub；正在使用 "
+                 "Mihomo 解析器解析订阅数据...",
+                 LOG_LEVEL_VERBOSE);
 #ifdef USE_MIHOMO_PARSER
-      bool parsed_by_mihomo = false;
-      try {
-        auto mihomo_nodes = mihomo::parseSubscription(strSub);
-        appendMihomoNodes(mihomo_nodes, nodes);
-
-        if (nodes.empty()) {
-          writeLog(LOG_TYPE_WARN,
-                   "Mihomo 解析器未从链接中解析到有效节点，将回退到旧解析器：'" +
-                       summarizeUrlForLog(link) + "'。");
-        } else {
-          parsed_by_mihomo = true;
-        }
-
-        if (parsed_by_mihomo) {
-          writeLog(LOG_TYPE_INFO, "Mihomo 解析器成功解析 " +
-                                      std::to_string(nodes.size()) + " 个节点。");
-          writeLog(LOG_TYPE_INFO, "第一个节点：" + nodes[0].Remark);
-        }
-      } catch (const std::exception &e) {
-        writeLog(LOG_TYPE_ERROR,
-                 "MIHOMO_PARSER_FAILED detail=" +
-                     summarizeSensitiveTextForLog(e.what()) +
-                     "，回退到旧解析器。");
-      }
-
-      if (!parsed_by_mihomo) {
-        if (parse_set.mihomo_only) {
+        try {
+          auto mihomo_nodes = mihomo::parseSubscription(strSub);
+          appendMihomoNodes(mihomo_nodes, nodes);
+        } catch (const std::exception &e) {
           writeLog(LOG_TYPE_ERROR,
-                   "Mihomo 专用解析模式拒绝使用旧解析器：'" +
+                   "MIHOMO_PARSER_FAILED detail=" +
+                       summarizeSensitiveTextForLog(e.what()) + "。");
+          return -1;
+        }
+        if (nodes.empty()) {
+          writeLog(LOG_TYPE_ERROR,
+                   "Mihomo 解析器未从链接中解析到有效节点：'" +
                        summarizeUrlForLog(link) + "'。");
           return -1;
         }
-        nodes.clear();
+        writeLog(LOG_TYPE_INFO,
+                 "Mihomo 解析器成功解析 " + std::to_string(nodes.size()) +
+                     " 个节点。");
+        writeLog(LOG_TYPE_INFO, "第一个节点：" + nodes[0].Remark);
+#else
+        writeLog(LOG_TYPE_ERROR,
+                 "当前构建未集成 Mihomo 解析器，无法生成 Clash/Mihomo 节点列表。");
+        return -1;
+#endif
+      } else {
+        writeLog(LOG_TYPE_INFO,
+                 "NODE_PARSER_INVOKE parser=legacy branch=sub；正在使用上游"
+                 "遗留解析器解析订阅数据...",
+                 LOG_LEVEL_VERBOSE);
         if (explodeConfContent(strSub, nodes) == 0) {
           writeLog(LOG_TYPE_ERROR,
                    "无效订阅：'" + summarizeUrlForLog(link) + "'！");
           return -1;
         }
       }
-#else
-      if (parse_set.mihomo_only) {
-        writeLog(LOG_TYPE_ERROR,
-                 "当前构建未集成 Mihomo 解析器，无法生成 Clash/Mihomo 节点列表。");
-        return -1;
-      }
-      if (explodeConfContent(strSub, nodes) == 0) {
-        writeLog(LOG_TYPE_ERROR,
-                 "无效订阅：'" + summarizeUrlForLog(link) + "'！");
-        return -1;
-      }
-#endif
 
       if (startsWith(strSub, "ssd://")) {
         getSubInfoFromSSD(strSub, subInfo);
@@ -531,23 +520,21 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
     copyNodes(nodes, allNodes);
     break;
   default:
-    // 理论上不应该走到这里，因为：
-    // 1. 所有 Mihomo 协议都走 SUB case（由新分流逻辑处理）
-    // 2. HTTP(S)/SOCKS/Netch/Local 都有专门的 case
-    // 如果走到这里，说明有未处理的边缘情况
-    writeLog(LOG_TYPE_WARN,
-             "遇到非预期链接类型，理论上不应发生：" + link);
-    writeLog(LOG_TYPE_INFO, "正在尝试使用 Mihomo 作为回退解析器...");
-
-    // 作为最后的 fallback，尝试喂给 Mihomo
-    strSub = link;
-    if (!strSub.empty()) {
-      writeLog(LOG_TYPE_INFO, "正在使用 Mihomo 解析器处理回退解析...");
+    if (use_mihomo_parser) {
+      writeLog(LOG_TYPE_INFO,
+               "NODE_PARSER_INVOKE parser=mihomo branch=direct；正在使用 "
+               "Mihomo 解析器处理节点链接...",
+               LOG_LEVEL_VERBOSE);
+      strSub = link;
 #ifdef USE_MIHOMO_PARSER
       try {
         auto mihomo_nodes = mihomo::parseSubscription(strSub);
         std::vector<Proxy> parsed_nodes;
         appendMihomoNodes(mihomo_nodes, parsed_nodes);
+        if (parsed_nodes.empty()) {
+          writeLog(LOG_TYPE_ERROR, "Mihomo 解析器未解析到有效节点。");
+          return -1;
+        }
         for (auto &node : parsed_nodes) {
           node.GroupId = groupID;
           if (!custom_group.empty())
@@ -556,7 +543,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
         }
       } catch (const std::exception &e) {
         writeLog(LOG_TYPE_ERROR,
-                 "MIHOMO_FALLBACK_PARSER_FAILED detail=" +
+                 "MIHOMO_PARSER_FAILED detail=" +
                      summarizeSensitiveTextForLog(e.what()));
         return -1;
       }
@@ -566,8 +553,19 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
       return -1;
 #endif
     } else {
-      writeLog(LOG_TYPE_ERROR, "默认分支未找到有效链接。");
-      return -1;
+      writeLog(LOG_TYPE_INFO,
+               "NODE_PARSER_INVOKE parser=legacy branch=direct；正在使用上游"
+               "遗留解析器处理节点链接...",
+               LOG_LEVEL_VERBOSE);
+      explode(link, node);
+      if (node.Type == ProxyType::Unknown) {
+        writeLog(LOG_TYPE_ERROR, "未找到有效节点链接。");
+        return -1;
+      }
+      node.GroupId = groupID;
+      if (!custom_group.empty())
+        node.Group = custom_group;
+      allNodes.emplace_back(std::move(node));
     }
   }
   return 0;

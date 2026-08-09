@@ -73,29 +73,32 @@ static constexpr size_t kProviderUserAgentMaxLen = 512;
 
 struct TargetDescriptor {
   const char *name;
+  NodeParserMode parser_mode;
   bool simple_subscription;
   SingleLinkTypes single_link_types;
 };
 
 static constexpr std::array<TargetDescriptor, 18> kTargetDescriptors = {{
-    {"clash", false, 0},
-    {"clashr", false, 0},
-    {"surge", false, 0},
-    {"quan", false, 0},
-    {"quanx", false, 0},
-    {"loon", false, 0},
-    {"surfboard", false, 0},
-    {"mellow", false, 0},
-    {"singbox", false, 0},
-    {"ss", true, SingleLinkType::Shadowsocks},
-    {"ssd", true, 0},
-    {"ssr", true, SingleLinkType::ShadowsocksR},
-    {"sssub", true, 0},
-    {"v2ray", true, SingleLinkType::VMess},
-    {"trojan", true, SingleLinkType::Trojan},
-    {"vless", true, SingleLinkType::VLESS},
-    {"hysteria2", true, SingleLinkType::Hysteria2},
-    {"mixed", true, SingleLinkType::Mixed},
+    {"clash", NodeParserMode::MihomoOnly, false, 0},
+    {"clashr", NodeParserMode::MihomoOnly, false, 0},
+    {"surge", NodeParserMode::LegacyOnly, false, 0},
+    {"quan", NodeParserMode::LegacyOnly, false, 0},
+    {"quanx", NodeParserMode::LegacyOnly, false, 0},
+    {"loon", NodeParserMode::LegacyOnly, false, 0},
+    {"surfboard", NodeParserMode::LegacyOnly, false, 0},
+    {"mellow", NodeParserMode::LegacyOnly, false, 0},
+    {"singbox", NodeParserMode::LegacyOnly, false, 0},
+    {"ss", NodeParserMode::LegacyOnly, true, SingleLinkType::Shadowsocks},
+    {"ssd", NodeParserMode::LegacyOnly, true, 0},
+    {"ssr", NodeParserMode::LegacyOnly, true,
+     SingleLinkType::ShadowsocksR},
+    {"sssub", NodeParserMode::LegacyOnly, true, 0},
+    {"v2ray", NodeParserMode::LegacyOnly, true, SingleLinkType::VMess},
+    {"trojan", NodeParserMode::LegacyOnly, true, SingleLinkType::Trojan},
+    {"vless", NodeParserMode::LegacyOnly, true, SingleLinkType::VLESS},
+    {"hysteria2", NodeParserMode::LegacyOnly, true,
+     SingleLinkType::Hysteria2},
+    {"mixed", NodeParserMode::LegacyOnly, true, SingleLinkType::Mixed},
 }};
 
 static const TargetDescriptor *findTargetDescriptor(const std::string &name) {
@@ -2253,7 +2256,7 @@ static SubStageResponse processSubscriptionNodes(
   parse_set.stream_rules = &stream_temp;
   parse_set.time_rules = &time_temp;
   parse_set.sub_info = &subInfo;
-  parse_set.mihomo_only = argTarget == "clash" || argTarget == "clashr";
+  parse_set.parser_mode = parsed.target_descriptor->parser_mode;
   string_icase_map subscription_headers = buildSubscriptionRequestHeaders();
   std::string selected_user_agent = providerUserAgentFromRequest(request);
   if (!selected_user_agent.empty())
