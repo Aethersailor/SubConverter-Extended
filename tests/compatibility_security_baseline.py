@@ -58,6 +58,17 @@ GENERATION_RULESET = (
     "DOMAIN-SUFFIX,third.snapshot.test,Proxy\n"
 )
 DISABLE_RULEGEN_CONFIG = "data:,enable_rule_generator=false"
+GIST_FIXTURE_TOKEN = "fixture-token"
+GIST_FIXTURE_CONFIG = (
+    "[common]\n"
+    f"token={GIST_FIXTURE_TOKEN}\n"
+    "username=fixture-user\n"
+)
+GIST_REMOTE_FAILURE_SECRET = "remote-response-user-body-secret"
+GIST_REMOTE_FAILURE_BODY = (
+    '{"error":"' + GIST_REMOTE_FAILURE_SECRET + '",'
+    '"authorization":"token ' + GIST_FIXTURE_TOKEN + '"}'
+).encode()
 
 
 class FixtureHandler(BaseHTTPRequestHandler):
@@ -182,21 +193,34 @@ class FixtureHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", "0"))
         if content_length:
             self.rfile.read(content_length)
-        body = b'{"id":"fixture-gist","owner":{"login":"fixture-user"}}'
-        self.send_response(201 if self.command == "POST" else 200)
+        request_path = urllib.parse.urlsplit(self.path).path
+        remote_failure = request_path.startswith("/failure/")
+        body = (
+            GIST_REMOTE_FAILURE_BODY
+            if remote_failure
+            else b'{"id":"fixture-gist","owner":{"login":"fixture-user"}}'
+        )
+        self.send_response(
+            502 if remote_failure else (201 if self.command == "POST" else 200)
+        )
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/gists":
+        request_path = urllib.parse.urlsplit(self.path).path
+        if request_path not in ("/gists", "/failure/gists"):
             self.send_error(404)
             return
         self._write_gist_response()
 
     def do_PATCH(self) -> None:  # noqa: N802
-        if not self.path.startswith("/gists/"):
+        request_path = urllib.parse.urlsplit(self.path).path
+        if not (
+            request_path.startswith("/gists/")
+            or request_path.startswith("/failure/gists/")
+        ):
             self.send_error(404)
             return
         self._write_gist_response()
@@ -337,6 +361,7 @@ def running_service(
     dashboard_client_ip_header: str | None = None,
     dashboard_trusted_proxy_cidrs: tuple[str, ...] = (),
     gist_api_base: str | None = None,
+    gist_config_text: str | None = GIST_FIXTURE_CONFIG,
     gist_config_hardlink_failure: bool = False,
     log_capture: list[str] | None = None,
     log_level: str = "info",
@@ -441,15 +466,9 @@ def running_service(
         stderr_path = temporary_path / "stderr.log"
         stdout = stdout_path.open("wb")
         stderr = stderr_path.open("wb")
-        if gist_api_base is not None:
+        if gist_api_base is not None and gist_config_text is not None:
             gist_config = temporary_path / "gistconf.ini"
-            gist_config.write_text(
-                "[common]\n"
-                "token=fixture-token\n"
-                "username=fixture-user\n",
-                encoding="utf-8",
-                newline="\n",
-            )
+            gist_config.write_text(gist_config_text, encoding="utf-8", newline="\n")
             if gist_config_hardlink_failure:
                 os.link(gist_config, temporary_path / "gistconf-hardlink.ini")
         env = os.environ.copy()
@@ -2405,31 +2424,199 @@ def security_endpoint_matrix_baseline(binary: Path, fixture_base: str) -> None:
                 "wildcard LAN binding did not emit reachability-unknown warning"
             )
 
-    logs = []
-    before = FixtureHandler.gist_request_count
+
+def upload_failure_compatibility_baseline(binary: Path, fixture_base: str) -> None:
+    subscription_query_secret = "subscription-query-secret"
+    request_query_secret = "request-query-secret"
+    request_header_secret = "request-header-secret"
+    subscription_url = (
+        f"{fixture_base}/subscription.txt?private={subscription_query_secret}"
+    )
+    upload_params = {
+        "target": "clash",
+        "url": subscription_url,
+        "config": DISABLE_RULEGEN_CONFIG,
+        "list": "true",
+        "upload": "true",
+        "compat_secret": request_query_secret,
+    }
+    request_headers = {"X-Compatibility-Secret": request_header_secret}
+    diagnostic_secrets = (
+        GIST_FIXTURE_TOKEN,
+        subscription_url,
+        subscription_query_secret,
+        request_query_secret,
+        request_header_secret,
+        GIST_REMOTE_FAILURE_SECRET,
+        "invalid-section-token",
+    )
+    log_only_secrets = diagnostic_secrets + (SUBSCRIPTION.strip(),)
+    baseline_params = dict(upload_params)
+    baseline_params.pop("upload")
+
+    success_logs: list[str] = []
     with running_service(
         binary,
         security_profile="lan",
         gist_api_base=fixture_base,
-        gist_config_hardlink_failure=True,
-        log_capture=logs,
+        log_capture=success_logs,
+        log_level="verbose",
     ) as base_url:
-        status, body, _ = request(base_url, "/sub", upload_params)
-    if status != 500 or FixtureHandler.gist_request_count - before != 1:
-        raise AssertionError(
-            "local Gist persistence failure was reported as complete success: "
-            f"HTTP {status}, gist requests "
-            f"{FixtureHandler.gist_request_count - before}"
+        baseline_status, expected_body, _ = request(
+            base_url, "/sub", baseline_params, request_headers
         )
-    if not logs or (
-        "GIST_REMOTE_UPLOAD_COMPLETED_LOCAL_STATE_FAILED" not in logs[0]
-        or "GIST_UPLOAD_COMPLETE" in logs[0]
-        or b"did not complete locally" not in body
+        failed_conversion_params = dict(baseline_params)
+        failed_conversion_params["url"] = ""
+        failed_upload_params = dict(upload_params)
+        failed_upload_params["url"] = ""
+        failed_before = FixtureHandler.gist_request_count
+        failed_baseline_status, failed_baseline_body, _ = request(
+            base_url, "/sub", failed_conversion_params, request_headers
+        )
+        failed_upload_status, failed_upload_body, _ = request(
+            base_url, "/sub", failed_upload_params, request_headers
+        )
+        failed_gist_requests = FixtureHandler.gist_request_count - failed_before
+        before = FixtureHandler.gist_request_count
+        success_status, success_body, _ = request(
+            base_url, "/sub", upload_params, request_headers
+        )
+    if baseline_status != 200:
+        raise AssertionError(
+            f"upload compatibility conversion baseline failed: HTTP {baseline_status}"
+        )
+    if (
+        failed_baseline_status != 400
+        or failed_upload_status != failed_baseline_status
+        or failed_upload_body != failed_baseline_body
+        or failed_gist_requests != 0
     ):
         raise AssertionError(
-            f"partial Gist upload diagnostics are ambiguous: logs={logs!r}, "
-            f"body={body!r}"
+            "upload compatibility handling swallowed a conversion failure: "
+            f"baseline HTTP {failed_baseline_status}, upload HTTP "
+            f"{failed_upload_status}, "
+            f"body_equal={failed_upload_body == failed_baseline_body}, "
+            f"gist requests={failed_gist_requests}"
         )
+    if (
+        success_status != 200
+        or success_body != expected_body
+        or FixtureHandler.gist_request_count - before != 1
+    ):
+        raise AssertionError(
+            "successful Gist upload changed conversion response: "
+            f"HTTP {success_status}, body_equal={success_body == expected_body}, "
+            f"gist requests={FixtureHandler.gist_request_count - before}"
+        )
+    if not success_logs or (
+        "GIST_UPLOAD_COMPLETE" not in success_logs[0]
+        or "GIST_OPTIONAL_UPLOAD_FAILED" in success_logs[0]
+    ):
+        raise AssertionError(
+            f"successful Gist upload diagnostics changed: {success_logs!r}"
+        )
+
+    for secret in log_only_secrets:
+        if secret in success_logs[0]:
+            raise AssertionError(
+                f"successful Gist upload leaked diagnostic secret {secret!r}"
+            )
+    for secret in diagnostic_secrets:
+        if secret.encode() in success_body:
+            raise AssertionError(
+                f"successful Gist response leaked diagnostic secret {secret!r}"
+            )
+    if "X-Compatibility-Secret" not in success_logs[0]:
+        raise AssertionError(
+            "verbose upload regression did not exercise request-header diagnostics"
+        )
+
+    failure_cases = (
+        (
+            "missing configuration",
+            fixture_base,
+            None,
+            False,
+            0,
+            "未找到 gistconf.ini",
+        ),
+        (
+            "invalid configuration",
+            fixture_base,
+            "[invalid]\ntoken=invalid-section-token\n",
+            False,
+            0,
+            "gistconf.ini 格式不正确",
+        ),
+        (
+            "remote upload",
+            f"{fixture_base}/failure",
+            GIST_FIXTURE_CONFIG,
+            False,
+            1,
+            "GIST_CREATE_FAILED status=502 detail=length=",
+        ),
+        (
+            "local persistence",
+            fixture_base,
+            GIST_FIXTURE_CONFIG,
+            True,
+            1,
+            "GIST_REMOTE_UPLOAD_COMPLETED_LOCAL_STATE_FAILED",
+        ),
+    )
+    for (
+        label,
+        gist_api_base,
+        gist_config_text,
+        hardlink_failure,
+        expected_gist_requests,
+        expected_failure_log,
+    ) in failure_cases:
+        logs: list[str] = []
+        before = FixtureHandler.gist_request_count
+        with running_service(
+            binary,
+            security_profile="lan",
+            gist_api_base=gist_api_base,
+            gist_config_text=gist_config_text,
+            gist_config_hardlink_failure=hardlink_failure,
+            log_capture=logs,
+            log_level="verbose",
+        ) as base_url:
+            status, body, _ = request(
+                base_url, "/sub", upload_params, request_headers
+            )
+        actual_gist_requests = FixtureHandler.gist_request_count - before
+        if (
+            status != 200
+            or body != expected_body
+            or actual_gist_requests != expected_gist_requests
+        ):
+            raise AssertionError(
+                f"{label} failure replaced the v1.3.0 conversion response: "
+                f"HTTP {status}, body_equal={body == expected_body}, "
+                f"gist requests={actual_gist_requests}"
+            )
+        if not logs or (
+            expected_failure_log not in logs[0]
+            or "GIST_OPTIONAL_UPLOAD_FAILED action=return-conversion-result"
+            not in logs[0]
+            or "GIST_UPLOAD_COMPLETE" in logs[0]
+        ):
+            raise AssertionError(
+                f"{label} failure diagnostics are ambiguous: {logs!r}"
+            )
+        for secret in log_only_secrets:
+            if secret in logs[0]:
+                raise AssertionError(
+                    f"{label} failure leaked diagnostic secret {secret!r}"
+                )
+        for secret in diagnostic_secrets:
+            if secret.encode() in body:
+                raise AssertionError(
+                    f"{label} failure response leaked diagnostic secret {secret!r}"
+                )
 
 
 def settings_reload_compatibility_baseline(helper: Path) -> None:
@@ -3227,6 +3414,7 @@ def main() -> int:
         persistence_degradation_baseline(binary, fixture_base)
         public_request_baseline(binary, fixture_base)
         security_endpoint_matrix_baseline(binary, fixture_base)
+        upload_failure_compatibility_baseline(binary, fixture_base)
         external_config_failure_baseline(binary, fixture_base)
         getruleset_generation_reload_baseline(binary, fixture_base)
         request_generation_reload_baseline(binary, fixture_base)
