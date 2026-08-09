@@ -40,6 +40,7 @@ if [ "${EXTRACT_GENERATED}" = "true" ]; then
   docker cp "${CID}:/src/bridge/go.mod" bridge/go.mod
   docker cp "${CID}:/src/bridge/go.sum" bridge/go.sum
   docker cp "${CID}:/src/bridge/libmihomo.h" bridge/libmihomo.h
+  docker cp "${CID}:/src/bridge/mihomo_capabilities.json" bridge/mihomo_capabilities.json
   docker cp "${CID}:/src/bridge/proxy_validation_generated.go" bridge/proxy_validation_generated.go
 
   docker cp "${CID}:/src/src/parser/mihomo_schemes.h" src/parser/mihomo_schemes.h

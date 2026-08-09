@@ -3,7 +3,6 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
-#include <sstream>
 #include <stdexcept>
 #include <utility>
 
@@ -63,21 +62,6 @@ private:
 
 namespace mihomo {
 
-std::string ProxyNode::toYAML() const {
-  std::stringstream ss;
-  ss << "  - name: \"" << name << "\"\n";
-  ss << "    type: " << type << "\n";
-  ss << "    server: " << server << "\n";
-  ss << "    port: " << port << "\n";
-
-  // Add other parameters
-  for (const auto &[key, value] : params) {
-    ss << "    " << key << ": " << value << "\n";
-  }
-
-  return ss.str();
-}
-
 std::vector<ProxyNode> parseSubscription(const std::string &subscription) {
   std::vector<ProxyNode> nodes;
   LargeParseMemoryGuard memory_guard(subscription.size());
@@ -107,6 +91,7 @@ std::vector<ProxyNode> parseSubscription(const std::string &subscription) {
       node.name = item.value("name", "");
       node.type = item.value("type", "");
       node.server = item.value("server", "");
+      node.canonical_json = item.dump();
 
       // Port: handle both number and string
       if (item.contains("port")) {
@@ -123,28 +108,6 @@ std::vector<ProxyNode> parseSubscription(const std::string &subscription) {
         }
       } else {
         node.port = 0;
-      }
-
-      // Store all other fields in params
-      for (auto it = item.begin(); it != item.end(); ++it) {
-        const std::string &key = it.key();
-        if (key != "name" && key != "type" && key != "server" &&
-            key != "port") {
-          std::string value;
-          if (it->is_string()) {
-            value = it->get<std::string>();
-          } else if (it->is_number_integer()) {
-            value = std::to_string(it->get<int>());
-          } else if (it->is_number_float()) {
-            value = std::to_string(it->get<double>());
-          } else if (it->is_boolean()) {
-            value = it->get<bool>() ? "true" : "false";
-          } else {
-            value = it->dump(); // For complex types, serialize to JSON
-          }
-          node.params[key] = value;
-          node.param_json[key] = it->dump();
-        }
       }
 
       nodes.emplace_back(std::move(node));
