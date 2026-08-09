@@ -2,7 +2,7 @@
 set -euo pipefail
 
 VERSION="${1:?version is required}"
-SHA="${2:-}"
+REVISION="${2:-}"
 BUILD_DATE="${3:-}"
 THREADS="${THREADS:-4}"
 : "${QUICKJSPP_REF:?QUICKJSPP_REF is required}"
@@ -34,8 +34,9 @@ checkout_dependency() {
   fi
 }
 
-if [ -n "${SHA}" ]; then
-  sed -i "s/#define BUILD_ID \"\"/#define BUILD_ID \"${SHA}\"/ " src/version.h || true
+BUILD_ID="$(printf '%.7s' "${REVISION}")"
+if [ -n "${BUILD_ID}" ]; then
+  sed -i "s/#define BUILD_ID \"\"/#define BUILD_ID \"${BUILD_ID}\"/ " src/version.h || true
 fi
 if [ -n "${VERSION}" ]; then
   sed -i "s/#define VERSION \"dev\"/#define VERSION \"${VERSION}\"/" src/version.h || true
