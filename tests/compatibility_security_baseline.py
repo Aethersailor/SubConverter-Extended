@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -300,6 +301,22 @@ def wait_ready(base_url: str, process: subprocess.Popen[bytes]) -> None:
     raise AssertionError("service did not become ready")
 
 
+def describe_process_returncode(returncode: int | None) -> str:
+    if returncode is None:
+        return "running"
+    if returncode < 0:
+        try:
+            return f"{returncode} ({signal.Signals(-returncode).name})"
+        except ValueError:
+            pass
+    if returncode >= 128:
+        try:
+            return f"{returncode} (128+{signal.Signals(returncode - 128).name})"
+        except ValueError:
+            pass
+    return str(returncode)
+
+
 @contextlib.contextmanager
 def running_service(
     binary: Path,
@@ -454,6 +471,7 @@ def running_service(
             stderr=stderr,
         )
         base_url = f"http://127.0.0.1:{port}"
+        body_error: BaseException | None = None
         try:
             try:
                 wait_ready(base_url, process)
@@ -470,19 +488,72 @@ def running_service(
                 if runtime_details
                 else base_url
             )
+        except BaseException as error:
+            body_error = error
+            raise
         finally:
-            process.terminate()
+            shutdown_error: AssertionError | None = None
+            terminate_sent = False
+            if process.poll() is None:
+                try:
+                    process.terminate()
+                    terminate_sent = True
+                except ProcessLookupError:
+                    # The child exited between poll() and terminate(). wait()
+                    # below records its real exit status and reports it with
+                    # the accurate pre-cleanup phase.
+                    pass
             try:
-                process.wait(timeout=10)
+                returncode = process.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                try:
+                    cleanup_returncode = process.wait(timeout=5)
+                    cleanup_result = describe_process_returncode(cleanup_returncode)
+                except subprocess.TimeoutExpired:
+                    cleanup_result = "still running after cleanup SIGKILL"
+                shutdown_error = AssertionError(
+                    "service did not exit within 10 seconds after normal "
+                    "termination; SIGKILL was cleanup only and returned "
+                    f"{cleanup_result}"
+                )
+            else:
+                # POSIX Popen.terminate() is SIGTERM and exercises the service's
+                # graceful path. Windows TerminateProcess has no corresponding
+                # graceful-exit contract, so the dedicated signal matrix is
+                # registered only on UNIX.
+                if os.name == "posix" and returncode != 0:
+                    exit_phase = (
+                        "after SIGTERM"
+                        if terminate_sent
+                        else "before normal cleanup could send SIGTERM"
+                    )
+                    shutdown_error = AssertionError(
+                        "service returned "
+                        f"{describe_process_returncode(returncode)} {exit_phase}; "
+                        "expected exit 0"
+                    )
             stdout.close()
             stderr.close()
+            diagnostics = stderr_path.read_text(
+                encoding="utf-8", errors="replace"
+            )
             if log_capture is not None:
-                log_capture.append(
-                    stderr_path.read_text(encoding="utf-8", errors="replace")
+                log_capture.append(diagnostics)
+            if shutdown_error is not None:
+                detail = (
+                    f"{shutdown_error}; service stderr tail: "
+                    f"{diagnostics[-8000:]!r}"
                 )
+                if body_error is None:
+                    raise AssertionError(detail) from shutdown_error
+                if hasattr(body_error, "add_note"):
+                    body_error.add_note("service shutdown also failed: " + detail)
+                else:
+                    print("service shutdown also failed: " + detail, file=sys.stderr)
 
 
 def run_settings_snapshot(

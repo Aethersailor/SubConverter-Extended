@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <future>
 #include <thread>
 #include <utility>
@@ -25,10 +26,15 @@ static size_t configuredQueueCapacity()
     return std::max<size_t>(64, configuredWorkerCount() * 16);
 }
 
+static std::atomic<BoundedExecutor *> activeRulesetExecutor {nullptr};
+
 static BoundedExecutor &rulesetExecutor()
 {
     static BoundedExecutor executor(configuredWorkerCount(),
                                     configuredQueueCapacity());
+    static const bool registered =
+        (activeRulesetExecutor.store(&executor, std::memory_order_release), true);
+    (void)registered;
     return executor;
 }
 
@@ -47,6 +53,15 @@ size_t rulesetExecutorWorkerCount()
 size_t rulesetExecutorQueueCapacity()
 {
     return rulesetExecutor().queueCapacity();
+}
+
+void shutdownRulesetExecutor()
+{
+    requestOutboundFetchShutdown();
+    BoundedExecutor *executor =
+        activeRulesetExecutor.load(std::memory_order_acquire);
+    if(executor)
+        executor->shutdown(true);
 }
 
 RegexMatchConfigs safe_get_emojis()

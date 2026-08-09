@@ -289,6 +289,20 @@ IF(BUILD_TESTS)
         TIMEOUT 120
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+    IF(UNIX)
+        ADD_TEST(
+            NAME shutdown_process
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/shutdown_process_test.py
+                    --binary $<TARGET_FILE:${BUILD_TARGET_NAME}>
+                    --rounds 2)
+        SET_TESTS_PROPERTIES(shutdown_process PROPERTIES
+            LABELS full
+            RUN_SERIAL TRUE
+            TIMEOUT 120
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    ENDIF()
+
     ADD_EXECUTABLE(proxy_policy_test
         tests/proxy_policy_test.cpp
         src/handler/proxy_policy.cpp

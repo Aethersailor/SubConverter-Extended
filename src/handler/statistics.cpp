@@ -573,8 +573,6 @@ void initialize() {
 }
 
 void shutdown() {
-  if (!global.statisticsEnabled)
-    return;
   {
     std::lock_guard<std::mutex> lock(g_engine.mutex);
     if (!g_engine.initialized)

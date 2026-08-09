@@ -45,6 +45,7 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy,
                    string_icase_map *request_headers = nullptr,
                    FetchContext context = FetchContext::TrustedConfig);
 bool isFetchUrlAllowed(const std::string &url, FetchContext context);
+void requestOutboundFetchShutdown() noexcept;
 void flushCache();
 int webPost(const std::string &url, const std::string &data,
             const ProxyPolicy &proxy, const string_icase_map &request_headers,

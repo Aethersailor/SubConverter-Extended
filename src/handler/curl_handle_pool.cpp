@@ -1,7 +1,11 @@
 #include "handler/curl_handle_pool.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cassert>
 #include <utility>
+
+static std::atomic<CurlHandlePool *> activeGlobalCurlHandlePool {nullptr};
 
 CurlHandleLease::CurlHandleLease(CurlHandleLease &&other) noexcept
     : pool_(std::exchange(other.pool_, nullptr)),
@@ -31,10 +35,15 @@ CurlHandlePool::CurlHandlePool(size_t capacity)
   idle_.reserve(capacity_);
 }
 
-CurlHandlePool::~CurlHandlePool() {
+CurlHandlePool::~CurlHandlePool() { shutdown(); }
+
+void CurlHandlePool::shutdown() {
   std::vector<CURL *> handles;
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (stopping_)
+      return;
+    assert(created_ == idle_.size());
     stopping_ = true;
     handles.swap(idle_);
   }
@@ -94,9 +103,19 @@ void CurlHandlePool::release(CURL *handle) {
 
 CurlHandlePool &globalCurlHandlePool(size_t configured_capacity) {
   static CurlHandlePool pool(configured_capacity);
+  static const bool registered =
+      (activeGlobalCurlHandlePool.store(&pool, std::memory_order_release), true);
+  (void)registered;
   return pool;
 }
 
 size_t curlHandlePoolCapacity(size_t configured_capacity) {
   return globalCurlHandlePool(configured_capacity).capacity();
+}
+
+void shutdownGlobalCurlHandlePool() {
+  CurlHandlePool *pool =
+      activeGlobalCurlHandlePool.load(std::memory_order_acquire);
+  if (pool)
+    pool->shutdown();
 }

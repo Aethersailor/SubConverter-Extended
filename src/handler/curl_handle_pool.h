@@ -40,6 +40,7 @@ public:
   ~CurlHandlePool();
 
   CurlHandleLease acquire();
+  void shutdown();
   size_t capacity() const { return capacity_; }
 
 private:
@@ -56,5 +57,6 @@ private:
 
 CurlHandlePool &globalCurlHandlePool(size_t configured_capacity);
 size_t curlHandlePoolCapacity(size_t configured_capacity);
+void shutdownGlobalCurlHandlePool();
 
 #endif // CURL_HANDLE_POOL_H_INCLUDED
