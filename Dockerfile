@@ -208,7 +208,8 @@ RUN set -xe && \
 
 ARG BUILD_TESTS=false
 RUN set -xe && \
-    [ -n "${SHA}" ] && sed -i "s/#define BUILD_ID \"\"/#define BUILD_ID \"${SHA}\"/ " src/version.h || true && \
+    BUILD_ID="$(printf '%.7s' "${SHA}")" && \
+    [ -n "${BUILD_ID}" ] && sed -i "s/#define BUILD_ID \"\"/#define BUILD_ID \"${BUILD_ID}\"/ " src/version.h || true && \
     [ -n "${VERSION}" ] && sed -i "s/#define VERSION \"dev\"/#define VERSION \"${VERSION}\"/" src/version.h || true && \
     [ -n "${BUILD_DATE}" ] && sed -i "s/#define BUILD_DATE \"\"/#define BUILD_DATE \"${BUILD_DATE}\"/" src/version.h || true && \
     mkdir -p bridge && \

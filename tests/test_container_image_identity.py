@@ -20,7 +20,7 @@ EXPECTED_LABELS = {
     IDENTITY.OCI_REVISION: "abc1234" + "0" * 33,
     IDENTITY.OCI_CREATED: "2026-08-06T04:37:18Z",
 }
-VERSION_BODY = "SubConverter-Extended dev-" + "abc1234" + "0" * 33 + " backend\n"
+VERSION_BODY = "SubConverter-Extended dev-abc1234 backend\n"
 
 
 def image(labels=None):
@@ -66,9 +66,14 @@ class ContainerImageIdentityTests(unittest.TestCase):
         with self.assertRaisesRegex(IDENTITY.IdentityError, "actual image"):
             self.verify(container_document=container(labels))
 
-    def test_rejects_compiled_runtime_mismatch(self):
+    def test_rejects_full_revision_as_runtime_build_id(self):
         with self.assertRaisesRegex(IDENTITY.IdentityError, "runtime /version"):
-            self.verify(body="SubConverter-Extended dev-wrong backend\n")
+            self.verify(
+                body="SubConverter-Extended dev-"
+                + "abc1234"
+                + "0" * 33
+                + " backend\n"
+            )
 
 
 if __name__ == "__main__":

@@ -67,9 +67,10 @@ def verify_documents(
             f"container label {COMPOSE_IMAGE}={compose_image!r}; actual image is {image_id!r}"
         )
 
+    expected_build_id = expected[OCI_REVISION][:7]
     expected_body = (
         f"SubConverter-Extended {expected[OCI_VERSION]}-"
-        f"{expected[OCI_REVISION]} backend\n"
+        f"{expected_build_id} backend\n"
     )
     if version_body != expected_body:
         raise IdentityError(
