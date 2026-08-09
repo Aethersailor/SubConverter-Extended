@@ -56,6 +56,10 @@ OPTION(BUILD_STATIC_LIBRARY "Build a static library containing only the essentia
 OPTION(BUILD_TESTS "Build focused regression tests." OFF)
 OPTION(BUILD_BENCHMARKS "Build opt-in performance benchmarks (requires BUILD_TESTS)." OFF)
 OPTION(ENABLE_SANITIZERS "Build tests and runtime with ASan and UBSan." OFF)
+SET(MIHOMO_TEST_BINARY "" CACHE FILEPATH
+    "Pinned Mihomo CLI used by compatibility tests")
+OPTION(REQUIRE_MIHOMO_TEST_BINARY
+    "Fail configuration unless a Mihomo test CLI is supplied." OFF)
 
 IF(BUILD_BENCHMARKS AND NOT BUILD_TESTS)
     MESSAGE(FATAL_ERROR "BUILD_BENCHMARKS=ON requires BUILD_TESTS=ON")
@@ -107,6 +111,7 @@ ADD_CUSTOM_TARGET(dashboard_resource
 SET(SUBCONVERTER_RUNTIME_SOURCES
     src/config/preference_file.cpp
     src/config/ruleset.cpp
+    src/generator/config/clash_proxy.cpp
     src/generator/config/external_rules.cpp
     src/generator/config/nodemanip.cpp
     src/generator/config/ruleconvert.cpp
@@ -277,13 +282,27 @@ IF(BUILD_TESTS)
     TARGET_COMPILE_DEFINITIONS(settings_snapshot_test_helper PRIVATE
         $<TARGET_PROPERTY:${BUILD_TARGET_NAME},COMPILE_DEFINITIONS>)
 
+    SET(COMPATIBILITY_SECURITY_BASELINE_ARGS
+        --binary $<TARGET_FILE:${BUILD_TARGET_NAME}>
+        --settings-snapshot-helper
+        $<TARGET_FILE:settings_snapshot_test_helper>)
+    IF(MIHOMO_TEST_BINARY)
+        IF(NOT EXISTS "${MIHOMO_TEST_BINARY}")
+            MESSAGE(FATAL_ERROR
+                "MIHOMO_TEST_BINARY does not exist: ${MIHOMO_TEST_BINARY}")
+        ENDIF()
+        LIST(APPEND COMPATIBILITY_SECURITY_BASELINE_ARGS
+            --mihomo-binary "${MIHOMO_TEST_BINARY}")
+    ELSEIF(REQUIRE_MIHOMO_TEST_BINARY)
+        MESSAGE(FATAL_ERROR
+            "REQUIRE_MIHOMO_TEST_BINARY requires MIHOMO_TEST_BINARY")
+    ENDIF()
+
     ADD_TEST(
         NAME compatibility_security_baseline
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/compatibility_security_baseline.py
-                --binary $<TARGET_FILE:${BUILD_TARGET_NAME}>
-                --settings-snapshot-helper
-                $<TARGET_FILE:settings_snapshot_test_helper>)
+                ${COMPATIBILITY_SECURITY_BASELINE_ARGS})
     SET_TESTS_PROPERTIES(compatibility_security_baseline PROPERTIES
         LABELS full
         TIMEOUT 120
@@ -397,6 +416,18 @@ IF(BUILD_TESTS)
         ${YAML_CPP_LIBRARY})
     ADD_TEST(NAME external_rules COMMAND external_rules_test)
     SET_TESTS_PROPERTIES(external_rules PROPERTIES LABELS fast)
+
+    ADD_EXECUTABLE(clash_proxy_test
+        tests/clash_proxy_test.cpp
+        src/generator/config/clash_proxy.cpp)
+    TARGET_INCLUDE_DIRECTORIES(clash_proxy_test PRIVATE src)
+    TARGET_INCLUDE_DIRECTORIES(clash_proxy_test SYSTEM PRIVATE
+        ${YAML_CPP_INCLUDE_DIRS})
+    TARGET_LINK_DIRECTORIES(clash_proxy_test PRIVATE
+        ${YAML_CPP_LIBRARY_DIRS})
+    TARGET_LINK_LIBRARIES(clash_proxy_test ${YAML_CPP_LIBRARY})
+    ADD_TEST(NAME clash_proxy COMMAND clash_proxy_test)
+    SET_TESTS_PROPERTIES(clash_proxy PROPERTIES LABELS fast)
 
     ADD_EXECUTABLE(concurrency_primitives_test
         tests/concurrency_primitives_test.cpp)
@@ -541,6 +572,7 @@ IF(BUILD_TESTS)
         ruleset_options_test
         ruleset_output_test
         external_rules_test
+        clash_proxy_test
         concurrency_primitives_test
         settings_view_test
         statistics_v2_test
@@ -569,6 +601,7 @@ ELSE() #BUILD_STATIC_LIBRARY
 
 ADD_LIBRARY(${BUILD_TARGET_NAME} STATIC
     src/config/ruleset.cpp
+    src/generator/config/clash_proxy.cpp
     src/generator/config/external_rules.cpp
     src/generator/config/ruleconvert.cpp
     src/generator/config/subexport.cpp

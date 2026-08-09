@@ -52,6 +52,30 @@ func TestPreprocessKeepsStandardVmess(t *testing.T) {
 	}
 }
 
+func TestParseRealityWithoutShortIDKeepsEmptyScalar(t *testing.T) {
+	input := "vless://22222222-2222-4222-8222-222222222222@reality.example.test:443" +
+		"?encryption=none&security=reality&flow=xtls-rprx-vision&type=tcp" +
+		"&sni=www.amazon.nl" +
+		"&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" +
+		"&fp=chrome#RealityWithoutSid"
+
+	proxies, err := parseSubscriptionWithMihomo(input)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if len(proxies) != 1 {
+		t.Fatalf("got %d proxies: %#v", len(proxies), proxies)
+	}
+	realityOptions, ok := proxies[0]["reality-opts"].(map[string]any)
+	if !ok {
+		t.Fatalf("Reality options lost their object type: %#v", proxies[0]["reality-opts"])
+	}
+	shortID, ok := realityOptions["short-id"].(string)
+	if !ok || shortID != "" {
+		t.Fatalf("empty Reality short-id was not preserved: %#v", realityOptions["short-id"])
+	}
+}
+
 func TestParseNativeMihomoProviderYAML(t *testing.T) {
 	input := strings.Join([]string{
 		"proxies:",

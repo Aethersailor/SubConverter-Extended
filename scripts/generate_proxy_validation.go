@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"go/ast"
@@ -15,15 +16,24 @@ import (
 )
 
 type fieldRule struct {
-	Kind     string
-	Required bool
+	Kind     string `json:"kind"`
+	Required bool   `json:"required"`
+}
+
+type capabilityManifest struct {
+	Schema        int                             `json:"schema"`
+	Module        string                          `json:"module"`
+	ModuleVersion string                          `json:"module_version"`
+	Schemes       []string                        `json:"schemes"`
+	ProxyTypes    map[string]map[string]fieldRule `json:"proxy_types"`
 }
 
 func main() {
 	outputPath := flag.String("o", "", "output path for the generated Go source")
+	manifestPath := flag.String("manifest", "", "output path for the Mihomo capability manifest")
 	flag.Parse()
-	if *outputPath == "" {
-		fmt.Fprintln(os.Stderr, "usage: go run generate_proxy_validation.go -o <output_path>")
+	if *outputPath == "" || *manifestPath == "" {
+		fmt.Fprintln(os.Stderr, "usage: go run generate_proxy_validation.go -o <output_path> -manifest <manifest_path>")
 		os.Exit(1)
 	}
 
@@ -32,6 +42,14 @@ func main() {
 		fatal(err)
 	}
 	mihomoRoot, err := findMihomoRoot(moduleRoot)
+	if err != nil {
+		fatal(err)
+	}
+	moduleVersion, err := findMihomoVersion(moduleRoot)
+	if err != nil {
+		fatal(err)
+	}
+	schemes, err := parseSubscriptionSchemes(filepath.Join(mihomoRoot, "common", "convert", "converter.go"))
 	if err != nil {
 		fatal(err)
 	}
@@ -52,10 +70,20 @@ func main() {
 		rules[protocol] = fields
 	}
 
-	if err := writeGeneratedSource(*outputPath, rules); err != nil {
+	if err := writeGeneratedSource(*outputPath, moduleVersion, rules); err != nil {
 		fatal(err)
 	}
-	fmt.Printf("Generated %s with %d Mihomo proxy types\n", *outputPath, len(rules))
+	manifest := capabilityManifest{
+		Schema:        1,
+		Module:        "github.com/metacubex/mihomo",
+		ModuleVersion: moduleVersion,
+		Schemes:       schemes,
+		ProxyTypes:    rules,
+	}
+	if err := writeCapabilityManifest(*manifestPath, manifest); err != nil {
+		fatal(err)
+	}
+	fmt.Printf("Generated %s and %s with %d Mihomo proxy types and %d URI schemes\n", *outputPath, *manifestPath, len(rules), len(schemes))
 }
 
 func fatal(err error) {
@@ -84,6 +112,89 @@ func findMihomoRoot(moduleRoot string) (string, error) {
 		return "", fmt.Errorf("go list returned an empty Mihomo module path")
 	}
 	return root, nil
+}
+
+func findMihomoVersion(moduleRoot string) (string, error) {
+	cmd := exec.Command("go", "list", "-m", "-f", "{{.Version}}", "github.com/metacubex/mihomo")
+	cmd.Dir = moduleRoot
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("locate Mihomo module version: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	version := strings.TrimSpace(string(output))
+	if version == "" {
+		return "", fmt.Errorf("go list returned an empty Mihomo module version")
+	}
+	return version, nil
+}
+
+func parseSubscriptionSchemes(path string) ([]string, error) {
+	file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+
+	transport := map[string]bool{
+		"ws": true, "grpc": true, "h2": true, "httpupgrade": true,
+	}
+	seen := make(map[string]bool)
+	var schemes []string
+	foundConverter := false
+
+	ast.Inspect(file, func(node ast.Node) bool {
+		function, ok := node.(*ast.FuncDecl)
+		if !ok || function.Name.Name != "ConvertsV2Ray" {
+			return true
+		}
+		foundConverter = true
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			switchStatement, ok := node.(*ast.SwitchStmt)
+			if !ok {
+				return true
+			}
+			identifier, ok := switchStatement.Tag.(*ast.Ident)
+			if !ok || identifier.Name != "scheme" {
+				return true
+			}
+			for _, item := range switchStatement.Body.List {
+				clause, ok := item.(*ast.CaseClause)
+				if !ok {
+					continue
+				}
+				for _, expression := range clause.List {
+					literal, ok := expression.(*ast.BasicLit)
+					if !ok || literal.Kind != token.STRING {
+						continue
+					}
+					scheme, err := strconv.Unquote(literal.Value)
+					if err != nil || transport[scheme] || seen[scheme] {
+						continue
+					}
+					seen[scheme] = true
+					schemes = append(schemes, scheme)
+				}
+			}
+			return false
+		})
+		return false
+	})
+
+	if !foundConverter || len(schemes) == 0 {
+		return nil, fmt.Errorf("no subscription URI schemes found in %s", path)
+	}
+	return schemes, nil
+}
+
+func writeCapabilityManifest(path string, manifest capabilityManifest) error {
+	content, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal Mihomo capability manifest: %w", err)
+	}
+	content = append(content, '\n')
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		return fmt.Errorf("write Mihomo capability manifest: %w", err)
+	}
+	return nil
 }
 
 func parseProtocolOptions(path string) (map[string]string, error) {
@@ -219,7 +330,7 @@ func collectFields(typeName string, structs map[string]*ast.StructType, result m
 			continue
 		}
 		result[name] = fieldRule{
-			Kind:     fieldKind(field.Type, structs),
+			Kind: fieldKind(field.Type, structs),
 			// Endpoint fields are required unless Mihomo explicitly supports
 			// an alternate form, such as WireGuard's peer list.
 			Required: (name == "server" || name == "port") && !omitEmpty,
@@ -319,9 +430,10 @@ func fieldKind(expression ast.Expr, structs map[string]*ast.StructType) string {
 	}
 }
 
-func writeGeneratedSource(path string, rules map[string]map[string]fieldRule) error {
+func writeGeneratedSource(path, moduleVersion string, rules map[string]map[string]fieldRule) error {
 	var builder strings.Builder
 	builder.WriteString("// Code generated by scripts/generate_proxy_validation.go; DO NOT EDIT.\n\n")
+	fmt.Fprintf(&builder, "// Based on Mihomo version: %s\n\n", moduleVersion)
 	builder.WriteString("package main\n\n")
 	builder.WriteString("type proxyFieldRule struct {\n\tkind string\n\trequired bool\n}\n\n")
 	builder.WriteString("var generatedProxyRules = map[string]map[string]proxyFieldRule{\n")

@@ -134,9 +134,9 @@ jobs:
         export GOMODCACHE
         echo "GOMODCACHE=$GOMODCACHE"
         # Generate header files
-        go run ../scripts/generate_proxy_validation.go -o proxy_validation_generated.go
-        go run ../scripts/generate_schemes.go mihomo_schemes.h
-        go run ../scripts/generate_param_compat.go -o param_compat.h
+        go run ../scripts/generate_proxy_validation.go -o proxy_validation_generated.go -manifest mihomo_capabilities.json
+        go run ../scripts/generate_schemes.go -manifest mihomo_capabilities.json -o mihomo_schemes.h
+        go run ../scripts/generate_param_compat.go -manifest mihomo_capabilities.json -o param_compat.h
         cp mihomo_schemes.h ../src/parser/
         cp param_compat.h ../src/parser/
         # Build static library

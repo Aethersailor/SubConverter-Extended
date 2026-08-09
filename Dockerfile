@@ -40,9 +40,9 @@ RUN set -xe && \
 
 # Copy scripts for scheme generation
 COPY scripts/ ../scripts/
-RUN go run ../scripts/generate_proxy_validation.go -o proxy_validation_generated.go
-RUN go run ../scripts/generate_schemes.go mihomo_schemes.h
-RUN go run ../scripts/generate_param_compat.go -o param_compat.h
+RUN go run ../scripts/generate_proxy_validation.go -o proxy_validation_generated.go -manifest mihomo_capabilities.json
+RUN go run ../scripts/generate_schemes.go -manifest mihomo_capabilities.json -o mihomo_schemes.h
+RUN go run ../scripts/generate_param_compat.go -manifest mihomo_capabilities.json -o param_compat.h
 
 # Build the shared library used by the normal Alpine runtime and a glibc archive
 # for build/test consumers.  The sanitizer build instruments the Go archive so
@@ -74,6 +74,25 @@ RUN set -xe && \
 # Verify build output
 RUN ls -lh libmihomo.so libmihomo.a libmihomo.h
 
+# Build the config validator from the exact Mihomo module selected by the
+# bridge. It is test-only and never copied into the runtime or CI export image.
+ARG BUILD_TESTS=false
+RUN set -eux; \
+    mkdir -p /build/test-tools; \
+    if [ "${BUILD_TESTS}" = "true" ]; then \
+      mihomo_dir="$(GOWORK=off go list -m -mod=readonly -f '{{.Dir}}' github.com/metacubex/mihomo)"; \
+      mihomo_version="$(GOWORK=off go list -m -mod=readonly -f '{{.Version}}' github.com/metacubex/mihomo)"; \
+      echo "Building Mihomo config validator ${mihomo_version}"; \
+      (cd "${mihomo_dir}" && \
+        GOWORK=off CGO_ENABLED=1 go build \
+          -mod=readonly \
+          -trimpath \
+          -ldflags='-s -w' \
+          -o /build/test-tools/mihomo \
+          .); \
+      test -x /build/test-tools/mihomo; \
+    fi
+
 # ========== C++ BUILD STAGE ==========
 # 使用 Debian (glibc) 编译，运行时再搬运依赖到 Alpine
 FROM ${DEBIAN_IMAGE} AS builder
@@ -90,7 +109,6 @@ ARG CPP_HTTPLIB_REF
 ARG NLOHMANN_JSON_REF
 ARG INJA_REF
 ARG JPCRE2_REF
-ARG BUILD_TESTS=false
 ARG ENABLE_SANITIZERS=false
 
 WORKDIR /
@@ -152,12 +170,14 @@ RUN set -xe && \
 COPY --from=go-builder /build/bridge/libmihomo.so /usr/lib/
 COPY --from=go-builder /build/bridge/libmihomo.a /usr/lib/
 COPY --from=go-builder /build/bridge/libmihomo.h /usr/include/
+COPY --from=go-builder /build/test-tools/ /opt/subconverter-test-tools/
 
 # build SubConverter-Extended from THIS repository source
 WORKDIR /src
 COPY . /src
 COPY --from=go-builder /build/bridge/go.mod /src/bridge/go.mod
 COPY --from=go-builder /build/bridge/go.sum /src/bridge/go.sum
+COPY --from=go-builder /build/bridge/mihomo_capabilities.json /src/bridge/mihomo_capabilities.json
 COPY --from=go-builder /build/bridge/proxy_validation_generated.go /src/bridge/proxy_validation_generated.go
 COPY --from=go-builder /build/bridge/mihomo_schemes.h /src/src/parser/mihomo_schemes.h
 COPY --from=go-builder /build/bridge/param_compat.h /src/src/parser/param_compat.h
@@ -186,6 +206,7 @@ RUN set -xe && \
       echo "Using committed header libraries"; \
     fi
 
+ARG BUILD_TESTS=false
 RUN set -xe && \
     [ -n "${SHA}" ] && sed -i "s/#define BUILD_ID \"\"/#define BUILD_ID \"${SHA}\"/ " src/version.h || true && \
     [ -n "${VERSION}" ] && sed -i "s/#define VERSION \"dev\"/#define VERSION \"${VERSION}\"/" src/version.h || true && \
@@ -198,12 +219,17 @@ RUN set -xe && \
       cp /usr/lib/libmihomo.so bridge/; \
     fi && \
     cp /usr/include/libmihomo.h bridge/ && \
+    if [ "${BUILD_TESTS}" = "true" ]; then \
+      test -x /opt/subconverter-test-tools/mihomo; \
+    fi && \
     export PATH="/usr/lib/ccache:$PATH" && \
     export CCACHE_DIR=/tmp/ccache && \
     export CCACHE_COMPILERCHECK=content && \
     cmake -GNinja \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_TESTS=${BUILD_TESTS} \
+    -DREQUIRE_MIHOMO_TEST_BINARY=${BUILD_TESTS} \
+    -DMIHOMO_TEST_BINARY=/opt/subconverter-test-tools/mihomo \
     -DENABLE_SANITIZERS=${ENABLE_SANITIZERS} \
     -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
     -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \

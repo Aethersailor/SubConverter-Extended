@@ -26,7 +26,8 @@ static thread_local FetchContext current_template_fetch_context =
     FetchContext::TrustedConfig;
 static thread_local bool *current_template_fetch_failed = nullptr;
 
-static bool hasMrsExtension(const std::string &path_or_url)
+static bool hasExtension(const std::string &path_or_url,
+                         const std::string &extension)
 {
     size_t path_end = path_or_url.find_first_of("?#");
     std::string path = path_or_url.substr(0, path_end);
@@ -34,7 +35,7 @@ static bool hasMrsExtension(const std::string &path_or_url)
     size_t dot = path.rfind('.');
     return dot != std::string::npos &&
            (slash == std::string::npos || dot > slash) &&
-           toLower(path.substr(dot)) == ".mrs";
+           toLower(path.substr(dot)) == extension;
 }
 
 namespace inja
@@ -644,7 +645,12 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
         std::string url = urls[x], keyword = keywords[x], name = names[x];
         std::string direct_url =
             !url.empty() && url[0] == '*' ? url.substr(1) : "";
-        bool direct_mrs = !direct_url.empty() && hasMrsExtension(direct_url);
+        bool direct_mrs =
+            !direct_url.empty() && hasExtension(direct_url, ".mrs");
+        bool direct_txt =
+            !direct_url.empty() && hasExtension(direct_url, ".txt");
+        std::string direct_format =
+            direct_mrs ? "mrs" : direct_txt ? "text" : "";
         bool group_has_domain = has_domain[x], group_has_ipcidr = has_ipcidr[x];
         int interval = ruleset_interval[x];
 
@@ -661,9 +667,10 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                 base_rule["rule-providers"][yaml_key]["url"] = remote_path_prefix + "/getruleset?type=3&url=" + urlSafeBase64Encode(url);
             base_rule["rule-providers"][yaml_key]["path"] =
                 "./providers/" + std::to_string(hash_(url)) +
-                (direct_mrs ? "_domain.mrs" : "_domain.yaml");
-            if(direct_mrs)
-                base_rule["rule-providers"][yaml_key]["format"] = "mrs";
+                (direct_mrs ? "_domain.mrs" :
+                 direct_txt ? "_domain.txt" : "_domain.yaml");
+            if(!direct_format.empty())
+                base_rule["rule-providers"][yaml_key]["format"] = direct_format;
             if(interval)
                 base_rule["rule-providers"][yaml_key]["interval"] = interval;
         }
@@ -680,9 +687,10 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                 base_rule["rule-providers"][yaml_key]["url"] = remote_path_prefix + "/getruleset?type=4&url=" + urlSafeBase64Encode(url);
             base_rule["rule-providers"][yaml_key]["path"] =
                 "./providers/" + std::to_string(hash_(url)) +
-                (direct_mrs ? "_ipcidr.mrs" : "_ipcidr.yaml");
-            if(direct_mrs)
-                base_rule["rule-providers"][yaml_key]["format"] = "mrs";
+                (direct_mrs ? "_ipcidr.mrs" :
+                 direct_txt ? "_ipcidr.txt" : "_ipcidr.yaml");
+            if(!direct_format.empty())
+                base_rule["rule-providers"][yaml_key]["format"] = direct_format;
             if(interval)
                 base_rule["rule-providers"][yaml_key]["interval"] = interval;
         }
@@ -697,9 +705,9 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                 base_rule["rule-providers"][yaml_key]["url"] = remote_path_prefix + "/getruleset?type=6&url=" + urlSafeBase64Encode(url);
             base_rule["rule-providers"][yaml_key]["path"] =
                 "./providers/" + std::to_string(hash_(url)) +
-                (direct_mrs ? ".mrs" : ".yaml");
-            if(direct_mrs)
-                base_rule["rule-providers"][yaml_key]["format"] = "mrs";
+                (direct_mrs ? ".mrs" : direct_txt ? ".txt" : ".yaml");
+            if(!direct_format.empty())
+                base_rule["rule-providers"][yaml_key]["format"] = direct_format;
             if(interval)
                 base_rule["rule-providers"][yaml_key]["interval"] = interval;
         }
