@@ -71,6 +71,20 @@ class FixtureHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(503)
             self.end_headers()
             return
+        if self.path.startswith("/redirect-to-loopback"):
+            self.send_response(302)
+            self.send_header(
+                "Location", f"http://127.0.0.1:{self.server.server_port}/subscription"
+            )
+            self.end_headers()
+            return
+        if self.path.startswith("/redirect-to-remote"):
+            self.send_response(302)
+            self.send_header(
+                "Location", f"http://{self.target_name}:{self.server.server_port}/subscription"
+            )
+            self.end_headers()
+            return
         if self.path.startswith("/redirect"):
             self.send_response(302)
             self.send_header(
@@ -84,6 +98,8 @@ class FixtureHandler(http.server.BaseHTTPRequestHandler):
                 "enable_rule_generator=true\n"
                 f"ruleset=Proxy,http://{self.target_name}:{self.server.server_port}/rules.list\n"
             ).encode("utf-8")
+        elif self.path.startswith("/local.ini"):
+            payload = b"[custom]\nenable_rule_generator=false\n"
         elif self.path.startswith("/rules.list"):
             payload = b"DOMAIN,proxy-egress.example\n"
         elif self.path.startswith("/cron.js"):
@@ -258,7 +274,11 @@ class RunningContainer:
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def __enter__(self) -> "RunningContainer":
-        self.wait_ready()
+        try:
+            self.wait_ready()
+        except BaseException:
+            self.close()
+            raise
         return self
 
     def __exit__(self, *_: object) -> None:
@@ -271,7 +291,15 @@ def reserve_port() -> int:
         return sock.getsockname()[1]
 
 
-def write_config(path: Path, proxy_config: str, proxy_ruleset: str, proxy_subscription: str) -> None:
+def write_config(
+    path: Path,
+    proxy_config: str,
+    proxy_ruleset: str,
+    proxy_subscription: str,
+    *,
+    log_level: str = "info",
+    security_profile: str = "lan",
+) -> None:
     # Keep every required preference section in the real distribution sample;
     # this test changes only the egress knobs it is asserting.
     example = Path(__file__).resolve().parents[1] / "base" / "pref.example.toml"
@@ -288,6 +316,8 @@ def write_config(path: Path, proxy_config: str, proxy_ruleset: str, proxy_subscr
     replace("proxy_config", f'"{proxy_config}"')
     replace("proxy_ruleset", f'"{proxy_ruleset}"')
     replace("proxy_subscription", f'"{proxy_subscription}"')
+    replace("log_level", f'"{log_level}"')
+    replace("profile", f'"{security_profile}"')
     replace("enable_cache", "true")
     replace("cache_subscription", "120")
     replace("cache_config", "120")
@@ -390,6 +420,7 @@ def run(image: str) -> None:
     fixture_thread.start()
     host_map = {
         "target.test": ("127.0.0.1", fixture.server_port),
+        "proxy-only.test": ("127.0.0.1", fixture.server_port),
         "raw.githubusercontent.com": ("127.0.0.1", fixture.server_port),
         "cdn.jsdelivr.net": ("127.0.0.1", fixture.server_port),
     }
@@ -408,6 +439,17 @@ def run(image: str) -> None:
             temp = Path(temp_dir)
             remote_url = f"http://target.test:{fixture.server_port}/subscription"
             redirect_url = f"http://target.test:{fixture.server_port}/redirect"
+            loopback_config = f"http://127.0.0.1:{fixture.server_port}/local.ini"
+            loopback_to_remote = (
+                f"http://127.0.0.1:{fixture.server_port}/redirect-to-remote"
+            )
+            remote_to_loopback = (
+                f"http://target.test:{fixture.server_port}/redirect-to-loopback"
+            )
+            restricted_remote_to_loopback = (
+                f"http://proxy-only.test:{fixture.server_port}"
+                "/redirect-to-loopback"
+            )
             socks5h = f"socks5h://127.0.0.1:{proxy.port}"
             socks5 = f"socks5://127.0.0.1:{proxy.port}"
 
@@ -436,6 +478,88 @@ def run(image: str) -> None:
             exercise("system", "SYSTEM", {"ALL_PROXY": socks5h, "NO_PROXY": "", "no_proxy": ""}, remote_url, "domain")
             exercise("explicit", socks5h, {"NO_PROXY": "*", "no_proxy": "*"}, remote_url, "domain")
             exercise("socks5", socks5, {"NO_PROXY": "", "no_proxy": ""}, remote_url, "IPv4")
+
+            # An explicit proxy bypasses only an initial syntactic loopback
+            # host. The proxy remains configured so redirect routing can be
+            # reevaluated by libcurl for every destination.
+            recorder.clear()
+            loopback_config_pref = temp / "loopback-config.toml"
+            write_config(
+                loopback_config_pref,
+                socks5h,
+                "NONE",
+                "NONE",
+                log_level="verbose",
+            )
+            with RunningContainer(
+                image, loopback_config_pref, reserve_port(), {}
+            ) as container:
+                sub_request(
+                    container.port,
+                    "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388#ProxySmoke",
+                    config=loopback_config,
+                    list_mode=False,
+                )
+                loopback_logs = container.logs()
+            with recorder.lock:
+                assert not recorder.requests, (
+                    "initial loopback external config reached explicit proxy: "
+                    f"{recorder.requests}"
+                )
+                assert "/local.ini" in recorder.target_hits, recorder.target_hits
+            assert "初始回环主机直连：127.0.0.1" in loopback_logs, loopback_logs
+
+            recorder.clear()
+            local_redirect_pref = temp / "loopback-to-remote.toml"
+            write_config(local_redirect_pref, "NONE", "NONE", socks5h)
+            with RunningContainer(
+                image, local_redirect_pref, reserve_port(), {}
+            ) as container:
+                sub_request(container.port, loopback_to_remote)
+            with recorder.lock:
+                assert len(recorder.requests) == 1, recorder.requests
+                assert recorder.requests[0].host == "target.test", recorder.requests
+                assert "/redirect-to-remote" in recorder.target_hits, recorder.target_hits
+
+            recorder.clear()
+            remote_redirect_pref = temp / "remote-to-loopback.toml"
+            write_config(remote_redirect_pref, "NONE", "NONE", socks5h)
+            with RunningContainer(
+                image, remote_redirect_pref, reserve_port(), {}
+            ) as container:
+                sub_request(container.port, remote_to_loopback)
+            with recorder.lock:
+                assert len(recorder.requests) >= 2, recorder.requests
+                assert recorder.requests[0].host == "target.test", recorder.requests
+                assert recorder.requests[1].host == "127.0.0.1", recorder.requests
+
+            # Public requests using SYSTEM must not inherit NO_PROXY on a
+            # redirect. Otherwise a remote URL can redirect into loopback and
+            # silently switch from the configured proxy to a direct request.
+            recorder.clear()
+            restricted_system_pref = temp / "restricted-system-redirect.toml"
+            write_config(
+                restricted_system_pref,
+                "NONE",
+                "NONE",
+                "SYSTEM",
+                security_profile="public",
+            )
+            with RunningContainer(
+                image,
+                restricted_system_pref,
+                reserve_port(),
+                {
+                    "ALL_PROXY": socks5h,
+                    "NO_PROXY": "127.0.0.1,localhost",
+                    "no_proxy": "127.0.0.1,localhost",
+                },
+            ) as container:
+                sub_request(container.port, restricted_remote_to_loopback)
+            with recorder.lock:
+                assert len(recorder.requests) >= 2, recorder.requests
+                assert recorder.requests[0].host == "proxy-only.test", recorder.requests
+                assert recorder.requests[1].host == "127.0.0.1", recorder.requests
 
             recorder.clear()
             config = temp / "redirect.toml"
@@ -605,6 +729,9 @@ def run(image: str) -> None:
         proxy.shutdown()
         authenticated_proxy.shutdown()
         fixture.shutdown()
+        proxy.server_close()
+        authenticated_proxy.server_close()
+        fixture.server_close()
 
 
 def main() -> int:

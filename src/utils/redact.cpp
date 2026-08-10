@@ -38,6 +38,31 @@ bool sensitiveParameter(const std::string &name) {
          has_suffix("_private_key");
 }
 
+std::string redactCurlAuthUser(std::string text) {
+  static const std::string marker = " with user '";
+  std::string lower = toLower(text);
+  std::string::size_type search_from = 0;
+  while (true) {
+    const std::string::size_type marker_start =
+        lower.find(marker, search_from);
+    if (marker_start == std::string::npos)
+      break;
+    const std::string::size_type value_start = marker_start + marker.size();
+    const std::string::size_type next_marker = lower.find(marker, value_start);
+    const std::string::size_type scope_end =
+        next_marker == std::string::npos ? text.size() : next_marker;
+    std::string::size_type value_end =
+        scope_end == 0 ? std::string::npos : text.rfind('\'', scope_end - 1);
+    if (value_end == std::string::npos || value_end < value_start)
+      value_end = scope_end;
+    static const std::string replacement = "<redacted>";
+    text.replace(value_start, value_end - value_start, replacement);
+    lower.replace(value_start, value_end - value_start, replacement);
+    search_from = value_start + replacement.size();
+  }
+  return text;
+}
+
 bool opaqueSecretScheme(const std::string &scheme) {
   static const string_array schemes = {
       "data", "ss", "ssr", "ssd", "vmess", "vless", "trojan",
@@ -411,8 +436,8 @@ std::string redactHeaders(std::string text) {
 } // namespace
 
 std::string redactSensitiveLogText(const std::string &text) {
-  std::string result =
-      redactStructuredFields(redactNamedParameters(redactHeaders(text)));
+  std::string result = redactCurlAuthUser(
+      redactStructuredFields(redactNamedParameters(redactHeaders(text))));
   static const string_array schemes = {
       "http://",      "https://",    "socks4://", "socks4a://",
       "socks5://",    "socks5h://",  "ss://",     "ssr://",

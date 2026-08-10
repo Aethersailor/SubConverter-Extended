@@ -16,6 +16,31 @@ bool hasControlCharacter(const std::string &value) {
   return false;
 }
 
+int hexDigitValue(unsigned char character) {
+  if (character >= '0' && character <= '9')
+    return character - '0';
+  character = static_cast<unsigned char>(std::tolower(character));
+  return character >= 'a' && character <= 'f' ? character - 'a' + 10 : -1;
+}
+
+bool hasUnsafePercentEncoding(const std::string &value) {
+  for (size_t index = 0; index < value.size(); ++index) {
+    if (value[index] != '%')
+      continue;
+    if (index + 2 >= value.size())
+      return true;
+    const int high = hexDigitValue(value[index + 1]);
+    const int low = hexDigitValue(value[index + 2]);
+    if (high < 0 || low < 0)
+      return true;
+    const int decoded = (high << 4) | low;
+    if (decoded < 0x20 || decoded == 0x7f)
+      return true;
+    index += 2;
+  }
+  return false;
+}
+
 bool validPort(const std::string &port) {
   if (port.empty())
     return false;
@@ -29,8 +54,9 @@ bool validPort(const std::string &port) {
 
 bool validProxyEndpoint(const std::string &endpoint, bool cors,
                         std::string &error) {
-  if (endpoint.empty() || hasControlCharacter(endpoint)) {
-    error = "proxy URI is empty or contains a control character";
+  if (endpoint.empty() || hasControlCharacter(endpoint) ||
+      hasUnsafePercentEncoding(endpoint)) {
+    error = "proxy URI is empty or contains unsafe encoding";
     return false;
   }
 
@@ -174,8 +200,8 @@ ProxyPolicy ProxyPolicy::parse(const std::string &source) {
   return policy;
 }
 
-ProxyPolicy ProxyPolicy::resolved() const {
-  ProxyPolicy result = *this;
+ResolvedProxyPolicy ProxyPolicy::snapshot() const {
+  ResolvedProxyPolicy result {mode, endpoint, valid, error};
   if (result.mode != ProxyMode::System)
     return result;
 
@@ -192,23 +218,32 @@ ProxyPolicy ProxyPolicy::resolved() const {
   return result;
 }
 
-std::string ProxyPolicy::cacheIdentity() const {
-  const ProxyPolicy effective = resolved();
-  return std::string(proxyModeName(effective.mode)) + "\n" +
-         effective.endpoint + "\n" + (effective.valid ? "valid" : "invalid");
+ProxyPolicy ProxyPolicy::resolved() const {
+  const ResolvedProxyPolicy effective = snapshot();
+  return {effective.mode, effective.endpoint, effective.valid, effective.error};
 }
 
-std::string ProxyPolicy::describe() const {
-  const ProxyPolicy effective = resolved();
-  std::string description = proxyModeName(effective.mode);
-  if (!effective.valid)
+std::string ResolvedProxyPolicy::cacheIdentity() const {
+  return std::string(proxyModeName(mode)) + "\n" + endpoint + "\n" +
+         (valid ? "valid" : "invalid");
+}
+
+std::string ResolvedProxyPolicy::describe() const {
+  std::string description = proxyModeName(mode);
+  if (!valid)
     return description + " (invalid)";
-  if (!effective.endpoint.empty())
-    description += " " + redactEndpoint(effective.endpoint);
-  else if (effective.mode == ProxyMode::System)
+  if (!endpoint.empty())
+    description += " " + redactEndpoint(endpoint);
+  else if (mode == ProxyMode::System)
     description += " (no system proxy configured)";
   return description;
 }
+
+std::string ProxyPolicy::cacheIdentity() const {
+  return snapshot().cacheIdentity();
+}
+
+std::string ProxyPolicy::describe() const { return snapshot().describe(); }
 
 ProxyPolicy parseProxy(const std::string &source) {
   return ProxyPolicy::parse(source);

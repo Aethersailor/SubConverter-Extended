@@ -13,6 +13,19 @@ enum class ProxyMode {
   Cors,
 };
 
+// An immutable view of the proxy source used by one top-level fetch.  SYSTEM
+// is resolved once so cache identity, diagnostics, redirects, and transport
+// cannot observe different platform settings during the same request.
+struct ResolvedProxyPolicy {
+  ProxyMode mode = ProxyMode::Direct;
+  std::string endpoint;
+  bool valid = true;
+  std::string error;
+
+  std::string cacheIdentity() const;
+  std::string describe() const;
+};
+
 struct ProxyPolicy {
   ProxyMode mode = ProxyMode::Direct;
   std::string endpoint;
@@ -21,6 +34,8 @@ struct ProxyPolicy {
 
   static ProxyPolicy direct();
   static ProxyPolicy parse(const std::string &source);
+
+  ResolvedProxyPolicy snapshot() const;
 
   // Resolve the deterministic System source without changing its mode.  The
   // empty endpoint means that the configured system source has no proxy.

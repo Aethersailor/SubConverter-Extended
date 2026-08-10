@@ -23,10 +23,23 @@ int main() {
   assert(authenticated.valid);
   assert(authenticated.describe().find("secret") == std::string::npos);
   assert(authenticated.describe().find("user") == std::string::npos);
+  const ResolvedProxyPolicy authenticated_snapshot = authenticated.snapshot();
+  assert(authenticated_snapshot.mode == ProxyMode::Explicit);
+  assert(authenticated_snapshot.describe().find("secret") ==
+         std::string::npos);
+  assert(authenticated_snapshot.cacheIdentity().find("secret") !=
+         std::string::npos);
 
   const ProxyPolicy cors = parseProxy("cors:https://cors.example.test:8443/");
   assert(cors.mode == ProxyMode::Cors && cors.valid);
   assert(parseProxy("cors:https://cors.example.test/").valid);
+  assert(parseProxy("http://user%27tail:secret@proxy.example.test:8080")
+             .valid);
+  assert(!parseProxy(
+              "http://user%0D%0Atail:secret@proxy.example.test:8080")
+              .valid);
+  assert(!parseProxy("http://user%0Gtail:secret@proxy.example.test:8080")
+              .valid);
   assert(!parseProxy("proxy.example.test:1080").valid);
   assert(!parseProxy("socks5://proxy.example.test").valid);
   assert(!parseProxy("ftp://proxy.example.test:21").valid);
@@ -100,6 +113,24 @@ int main() {
   const std::string header = redactSensitiveLogText(
       "Proxy-Authorization: Basic fixture-proxy-secret");
   assert(header.find("fixture-proxy-secret") == std::string::npos);
+
+  const std::string curl_proxy_auth = redactSensitiveLogText(
+      "Proxy auth using Basic with user 'fixture-proxy-user'");
+  assert(curl_proxy_auth.find("fixture-proxy-user") == std::string::npos);
+  assert(curl_proxy_auth.find("with user '<redacted>'") !=
+         std::string::npos);
+  const std::string quoted_curl_proxy_auth = redactSensitiveLogText(
+      "Proxy auth using Basic with user 'fixture'user'tail'");
+  assert(quoted_curl_proxy_auth.find("fixture") == std::string::npos);
+  assert(quoted_curl_proxy_auth.find("tail") == std::string::npos);
+  const std::string truncated_curl_proxy_auth = redactSensitiveLogText(
+      "Proxy auth using Basic with user 'fixture-unclosed");
+  assert(truncated_curl_proxy_auth.find("fixture-unclosed") ==
+         std::string::npos);
+  const std::string multiline_server_auth = redactSensitiveLogText(
+      "Server auth using Basic with user 'fixture\r\ntail'");
+  assert(multiline_server_auth.find("fixture") == std::string::npos);
+  assert(multiline_server_auth.find("tail") == std::string::npos);
 
   const std::string multiline_headers = redactSensitiveLogText(
       "request headers:\r\n"
