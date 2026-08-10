@@ -557,10 +557,15 @@ def run_checks(
     if provider_report.get("output", {}).get("provider_count") != 1:
         raise AssertionError("provider explain report did not count one provider")
     provider = provider_report.get("providers", [{}])[0]
-    if provider.get("filter") != "(HK)|(JP)":
-        raise AssertionError("provider did not inherit configured include filters")
-    if provider.get("exclude_filter") != "(Expired)|(Traffic)":
-        raise AssertionError("provider did not inherit configured exclude filters")
+    if (
+        provider.get("filter") != ""
+        or provider.get("exclude_filter") != ""
+        or provider.get("filter_present") is not True
+        or provider.get("exclude_filter_present") is not True
+    ):
+        raise AssertionError(
+            "provider explain did not report configured filters without exposing them"
+        )
     provider_params = provider_report.get("parameters", {})
     provider_recognized = {
         item.get("name"): item for item in provider_params.get("recognized", [])
