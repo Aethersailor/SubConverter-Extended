@@ -350,8 +350,7 @@ bool isFetchUrlAllowed(const std::string &url, FetchContext context)
     std::string log_url = summarizeUrlForLog(checked_url);
     if(checked_url.empty() || checked_url != url || has_control_character(checked_url))
     {
-        writeLog(0, "已阻止公开请求获取格式异常的 URL：" + log_url,
-                 LOG_LEVEL_WARNING);
+        writeLog(LOG_LEVEL_WARNING, "已阻止公开请求获取格式异常的 URL：" + log_url);
         return false;
     }
 
@@ -360,8 +359,7 @@ bool isFetchUrlAllowed(const std::string &url, FetchContext context)
         return true;
     if(!startsWith(lower_url, "http://") && !startsWith(lower_url, "https://"))
     {
-        writeLog(0, "已阻止公开请求获取不支持协议的 URL：" + log_url,
-                 LOG_LEVEL_WARNING);
+        writeLog(LOG_LEVEL_WARNING, "已阻止公开请求获取不支持协议的 URL：" + log_url);
         return false;
     }
 
@@ -372,17 +370,15 @@ bool isFetchUrlAllowed(const std::string &url, FetchContext context)
     host = normalize_fetch_host(host);
     if(host.empty() || is_blocked_hostname(host) || is_blocked_ip_address(host))
     {
-        writeLog(0, "已阻止公开请求访问本地或私有主机：" + log_url,
-                 LOG_LEVEL_WARNING);
+        writeLog(LOG_LEVEL_WARNING, "已阻止公开请求访问本地或私有主机：" + log_url);
         return false;
     }
 
     std::string resolved = hostnameToIPAddr(host);
     if(!resolved.empty() && is_blocked_ip_address(resolved, true))
     {
-        writeLog(0,
-                 "已阻止公开请求：目标主机解析到本地或私有地址：" + log_url,
-                 LOG_LEVEL_WARNING);
+        writeLog(LOG_LEVEL_WARNING,
+                 "已阻止公开请求：目标主机解析到本地或私有地址：" + log_url);
         return false;
     }
     return true;
@@ -398,10 +394,9 @@ static int public_fetch_prereq_callback(void *clientp, char *conn_primary_ip,
     if(context && isPublicFetchRestricted(*context) && conn_primary_ip &&
        is_blocked_ip_address(conn_primary_ip, true))
     {
-        writeLog(0,
+        writeLog(LOG_LEVEL_WARNING,
                  "已阻止公开请求连接本地或私有地址：" +
-                     std::string(conn_primary_ip),
-                 LOG_LEVEL_WARNING);
+                     std::string(conn_primary_ip));
         return CURL_PREREQFUNC_ABORT;
     }
     return CURL_PREREQFUNC_OK;
@@ -515,7 +510,7 @@ static int logger(CURL *handle, curl_infotype type, char *data, size_t size, voi
         {
             std::string log_content = prefix;
             log_content += type == CURLINFO_TEXT ? x : safe_header_line(x);
-            writeLog(0, log_content, LOG_LEVEL_VERBOSE);
+            writeLog(LOG_LEVEL_VERBOSE, log_content);
         }
     }
     else
@@ -523,7 +518,7 @@ static int logger(CURL *handle, curl_infotype type, char *data, size_t size, voi
         std::string log_content = prefix;
         log_content += type == CURLINFO_TEXT ? trimWhitespace(content)
                                              : safe_header_line(content);
-        writeLog(0, log_content, LOG_LEVEL_VERBOSE);
+        writeLog(LOG_LEVEL_VERBOSE, log_content);
     }
     return 0;
 }
@@ -587,8 +582,7 @@ static CURLcode apply_curl_proxy_policy(CURL *curl_handle,
     effective = requested.resolved();
     if(!effective.valid)
     {
-        writeLog(0, "出站代理配置无效：" + effective.describe() + "。",
-                 LOG_LEVEL_ERROR);
+        writeLog(LOG_LEVEL_ERROR, "出站代理配置无效：" + effective.describe() + "。");
         return CURLE_URL_MALFORMAT;
     }
 
@@ -623,8 +617,7 @@ static CURLcode apply_curl_proxy_policy(CURL *curl_handle,
     }
 
     if(shouldLog(LOG_LEVEL_VERBOSE))
-        writeLog(0, "出站代理策略：" + effective.describe() + "。",
-                 LOG_LEVEL_VERBOSE);
+        writeLog(LOG_LEVEL_VERBOSE, "出站代理策略：" + effective.describe() + "。");
     return CURLE_OK;
 }
 
@@ -696,7 +689,7 @@ static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode 
         *result.status_code = 0;
         if(return_code)
             *return_code = retVal;
-        writeLog(0, "curl_global_init 失败：" + std::string(curl_easy_strerror(retVal)), LOG_LEVEL_ERROR);
+        writeLog(LOG_LEVEL_ERROR, "curl_global_init 失败：" + std::string(curl_easy_strerror(retVal)));
         return 0;
     }
 
@@ -712,7 +705,7 @@ static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode 
         *result.status_code = 0;
         if(return_code)
             *return_code = retVal;
-        writeLog(0, "curl_easy_init 失败。", LOG_LEVEL_ERROR);
+        writeLog(LOG_LEVEL_ERROR, "curl_easy_init 失败。");
         return 0;
     }
     ProxyPolicy effective_proxy;
@@ -737,10 +730,9 @@ static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode 
         *result.status_code = 0;
         if(return_code)
             *return_code = retVal;
-        writeLog(0,
+        writeLog(LOG_LEVEL_ERROR,
                  "Windows 原生 TLS 信任库配置失败：" +
-                     std::string(curl_easy_strerror(retVal)),
-                 LOG_LEVEL_ERROR);
+                     std::string(curl_easy_strerror(retVal)));
         return 0;
     }
 #if LIBCURL_VERSION_NUM >= 0x075000
@@ -824,8 +816,7 @@ static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode 
        (argument.method == HTTP_GET || argument.method == HTTP_HEAD) &&
        is_recoverable_curl_error(retVal))
     {
-        writeLog(0, "出站请求遇到可恢复网络错误，200ms 后重试一次。",
-                 LOG_LEVEL_WARNING);
+        writeLog(LOG_LEVEL_WARNING, "出站请求遇到可恢复网络错误，200ms 后重试一次。");
         if(result.content)
             result.content->clear();
         if(result.response_headers)
@@ -847,29 +838,25 @@ static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode 
     long used_proxy = 0;
     if(curl_easy_getinfo(curl_handle, CURLINFO_USED_PROXY, &used_proxy) == CURLE_OK &&
        shouldLog(LOG_LEVEL_VERBOSE))
-        writeLog(0, std::string("出站代理实际使用：") +
-                        (used_proxy ? "是" : "否") + "。",
-                 LOG_LEVEL_VERBOSE);
+        writeLog(LOG_LEVEL_VERBOSE, std::string("出站代理实际使用：") +
+                        (used_proxy ? "是" : "否") + "。");
 #endif
 #if LIBCURL_VERSION_NUM >= 0x074900
     long proxy_error = 0;
     if(curl_easy_getinfo(curl_handle, CURLINFO_PROXY_ERROR, &proxy_error) == CURLE_OK &&
        proxy_error != 0 && shouldLog(LOG_LEVEL_VERBOSE))
-        writeLog(0, "出站代理错误代码：" + std::to_string(proxy_error) + "。",
-                 LOG_LEVEL_VERBOSE);
+        writeLog(LOG_LEVEL_VERBOSE, "出站代理错误代码：" + std::to_string(proxy_error) + "。");
 #endif
     if(retVal != CURLE_OK && shouldLog(LOG_LEVEL_VERBOSE))
-        writeLog(0, "出站请求错误类别：" +
-                        std::string(classify_curl_error(retVal)) + "。",
-                 LOG_LEVEL_VERBOSE);
+        writeLog(LOG_LEVEL_VERBOSE, "出站请求错误类别：" +
+                        std::string(classify_curl_error(retVal)) + "。");
     if(retVal == CURLE_SSL_CACERT_BADFILE)
     {
         static std::atomic<bool> trust_store_warning_logged {false};
         bool expected = false;
         if(trust_store_warning_logged.compare_exchange_strong(expected, true))
-            writeLog(0,
-                     "TLS 信任源不可用，无法验证远程证书；请检查当前系统的受信任根证书配置。",
-                     LOG_LEVEL_WARNING);
+            writeLog(LOG_LEVEL_WARNING,
+                     "TLS 信任源不可用，无法验证远程证书；请检查当前系统的受信任根证书配置。");
     }
 
     if(result.cookies)
@@ -917,10 +904,9 @@ static int curlGetWithGitHubFallback(const FetchArgument &argument, FetchResult 
     if(result.cookies)
         original_cookies = *result.cookies;
 
-    writeLog(0,
+    writeLog(LOG_LEVEL_WARNING,
              "GitHub Raw 获取失败，正在尝试 jsDelivr 回退源：" +
-                  summarizeUrlForLog(fallback_url),
-             LOG_LEVEL_WARNING);
+                  summarizeUrlForLog(fallback_url));
     clear_fetch_output(result);
 
     FetchArgument fallback_argument {HTTP_GET, fallback_url, argument.proxy,
@@ -932,17 +918,15 @@ static int curlGetWithGitHubFallback(const FetchArgument &argument, FetchResult 
     int fallback_status = curlGet(fallback_argument, result, &fallback_code);
     if(fallback_code == CURLE_OK && fallback_status == 200)
     {
-        writeLog(0,
+        writeLog(LOG_LEVEL_INFO,
                  "GitHub Raw 已通过 jsDelivr 回退源获取成功：" +
-                      summarizeUrlForLog(fallback_url),
-                 LOG_LEVEL_INFO);
+                      summarizeUrlForLog(fallback_url));
         return fallback_status;
     }
 
-    writeLog(0,
+    writeLog(LOG_LEVEL_WARNING,
              "GitHub Raw 通过 jsDelivr 回退源获取失败：" +
-                 summarizeUrlForLog(fallback_url),
-             LOG_LEVEL_WARNING);
+                 summarizeUrlForLog(fallback_url));
     clear_fetch_output(result);
     if(result.response_headers)
         *result.response_headers = original_headers;
@@ -965,17 +949,15 @@ static std::string dataGet(const std::string &url)
     const long max_download_size = effectiveSettings().maxAllowedDownloadSize;
     if (max_download_size > 0 &&
         data.size() > static_cast<size_t>(max_download_size)) {
-        writeLog(0, "已阻止 data URL：内容超过最大下载大小。",
-                 LOG_LEVEL_WARNING);
+        writeLog(LOG_LEVEL_WARNING, "已阻止 data URL：内容超过最大下载大小。");
         return "";
     }
     if (endsWith(url.substr(0, comma), ";base64")) {
         std::string decoded = urlSafeBase64Decode(data);
         if (max_download_size > 0 &&
             decoded.size() > static_cast<size_t>(max_download_size)) {
-            writeLog(0,
-                     "已阻止解码后的 data URL：内容超过最大下载大小。",
-                     LOG_LEVEL_WARNING);
+            writeLog(LOG_LEVEL_WARNING,
+                     "已阻止解码后的 data URL：内容超过最大下载大小。");
             return "";
         }
         return decoded;
@@ -1004,9 +986,8 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned in
             url, effectiveSettings().customOpenClashRulesSourceSwitch);
     const std::string &effective_url = source.effective_url;
     if(source.rewritten && shouldLog(LOG_LEVEL_VERBOSE))
-        writeLog(0, "COCR 服务端取源切换：" + summarizeUrlForLog(url) +
-                        " -> " + summarizeUrlForLog(effective_url) + "。",
-                 LOG_LEVEL_VERBOSE);
+        writeLog(LOG_LEVEL_VERBOSE, "COCR 服务端取源切换：" + summarizeUrlForLog(url) +
+                        " -> " + summarizeUrlForLog(effective_url) + "。");
 
     FetchArgument argument {HTTP_GET, effective_url, proxy, nullptr,
                             request_headers, nullptr, cache_ttl, false,
@@ -1105,30 +1086,26 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned in
                 const CacheUpdateResult cache_update = updateCacheFiles(
                     path, path_header, content, fetched.response_headers);
                 if(cache_update == CacheUpdateResult::Unchanged) {
-                    writeLog(0,
+                    writeLog(LOG_LEVEL_WARNING,
                              "CACHE_UPDATE_FAILED body=unchanged headers=unchanged; "
-                             "本次已获取内容仍将直接返回。",
-                             LOG_LEVEL_WARNING);
+                             "本次已获取内容仍将直接返回。");
                 }
                 else if(cache_update ==
                         CacheUpdateResult::UnchangedHeadersInvalidated) {
-                    writeLog(0,
+                    writeLog(LOG_LEVEL_WARNING,
                              "CACHE_UPDATE_FAILED body=unchanged "
-                             "headers=invalidated; 本次已获取内容仍将直接返回。",
-                             LOG_LEVEL_WARNING);
+                             "headers=invalidated; 本次已获取内容仍将直接返回。");
                 }
                 else if(cache_update ==
                         CacheUpdateResult::BodyCommittedUnsynced) {
-                    writeLog(0,
+                    writeLog(LOG_LEVEL_WARNING,
                              "CACHE_BODY_COMMITTED durability=unconfirmed "
-                             "headers=invalidated; 本次已获取内容仍将直接返回。",
-                             LOG_LEVEL_WARNING);
+                             "headers=invalidated; 本次已获取内容仍将直接返回。");
                 }
                 else if(cache_update == CacheUpdateResult::HeadersInvalidated) {
-                    writeLog(0,
+                    writeLog(LOG_LEVEL_WARNING,
                              "CACHE_BODY_COMMITTED durability=confirmed "
-                             "headers=invalidated; 本次已获取内容仍将直接返回。",
-                             LOG_LEVEL_WARNING);
+                             "headers=invalidated; 本次已获取内容仍将直接返回。");
                 }
             }
         }
@@ -1229,10 +1206,9 @@ int webGet(const FetchArgument& argument, FetchResult &result)
         return curlGetWithGitHubFallback(argument, result);
 
     if(shouldLog(LOG_LEVEL_VERBOSE))
-        writeLog(0, "COCR 服务端取源切换：" +
+        writeLog(LOG_LEVEL_VERBOSE, "COCR 服务端取源切换：" +
                         summarizeUrlForLog(argument.url) + " -> " +
-                        summarizeUrlForLog(source.effective_url) + "。",
-                 LOG_LEVEL_VERBOSE);
+                        summarizeUrlForLog(source.effective_url) + "。");
     FetchArgument effective_argument {
         argument.method, source.effective_url, argument.proxy,
         argument.post_data, argument.request_headers, argument.cookies,

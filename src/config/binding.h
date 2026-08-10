@@ -13,8 +13,7 @@
 inline void warnUnknownRulesetOptions(const StrArray &unknown_options)
 {
     for(const String &option : unknown_options)
-        writeLog(0, "未知规则集选项 '" + option + "'，已忽略。",
-                 LOG_LEVEL_WARNING);
+        writeLog(LOG_LEVEL_WARNING, "未知规则集选项 '" + option + "'，已忽略。");
 }
 
 namespace toml

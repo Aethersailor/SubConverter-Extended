@@ -284,10 +284,9 @@ int WebServer::start_web_server_multi(listener_args *args) {
     setRequestTelemetryHeaders(res, telemetry.request_id);
     ScopedLogRequestContext request_log_scope(telemetry.request_id);
     if (shouldLog(LOG_LEVEL_DEBUG)) {
-      writeLog(0,
+      writeLog(LOG_LEVEL_DEBUG,
                "接受客户端连接：" + req.remote_addr + ":" +
-                   std::to_string(req.remote_port),
-               LOG_LEVEL_DEBUG);
+                   std::to_string(req.remote_port));
     }
 
     if (req.has_header("SubConverter-Request")) {
@@ -350,20 +349,18 @@ int WebServer::start_web_server_multi(listener_args *args) {
       if (e)
         std::rethrow_exception(e);
     } catch (const std::exception &ex) {
-      writeLog(0,
+      writeLog(LOG_LEVEL_ERROR,
                "HTTP_UNEXPECTED_EXCEPTION method=" + req.method +
                    " path=" + requestPathForLog(req.path) +
                    " parameter_count=" + std::to_string(req.params.size()) +
                    " exception=" + type(ex) +
-                    " detail=" + summarizeSensitiveTextForLog(ex.what()),
-               LOG_LEVEL_ERROR);
+                    " detail=" + summarizeSensitiveTextForLog(ex.what()));
     } catch (...) {
-      writeLog(0,
+      writeLog(LOG_LEVEL_ERROR,
                "HTTP_UNEXPECTED_EXCEPTION method=" + req.method +
                    " path=" + requestPathForLog(req.path) +
                    " parameter_count=" + std::to_string(req.params.size()) +
-                   " exception=unknown",
-               LOG_LEVEL_ERROR);
+                   " exception=unknown");
     }
     setUnhandledExceptionResponse(res);
   });
@@ -417,17 +414,15 @@ int WebServer::start_web_server_multi(listener_args *args) {
                                    global.maxServerThreads);
   };
   if (!server.bind_to_port(args->listen_address, args->port, 0)) {
-    writeLog(0,
+    writeLog(LOG_LEVEL_FATAL,
              "无法绑定 HTTP 服务地址：" + args->listen_address + ":" +
-                 std::to_string(args->port),
-             LOG_LEVEL_FATAL);
+                 std::to_string(args->port));
     return 1;
   }
 
   std::thread thread([&]() {
     if (!server.listen_after_bind() && !SERVER_EXIT_FLAG) {
-      writeLog(0, "HTTP 服务在接受请求前停止。",
-               LOG_LEVEL_ERROR);
+      writeLog(LOG_LEVEL_ERROR, "HTTP 服务在接受请求前停止。");
       SERVER_EXIT_FLAG = true;
     }
   });

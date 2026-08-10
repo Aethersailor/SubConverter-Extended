@@ -257,35 +257,32 @@ static void finalizeSecuritySettings() {
       toLower(trimWhitespace(global.securityProfile, true, true));
   if (global.securityProfile != "lan" && global.securityProfile != "public" &&
       global.securityProfile != "strict") {
-    writeLog(0,
+    writeLog(LOG_LEVEL_WARNING,
              "security.profile 的值无效：'" + global.securityProfile +
-                 "'，已回退为 lan。",
-             LOG_LEVEL_WARNING);
+                 "'，已回退为 lan。");
     global.securityDiagnostics.profileInputValid = false;
     global.securityDiagnostics.profileUsedCompatibilityFallback = true;
-    writeLog(0,
+    writeLog(LOG_LEVEL_WARNING,
              "SECURITY_PROFILE_INVALID_FALLBACK source=" +
                  global.securityDiagnostics.profileSource + " input='" +
                  securityLogValue(global.securityProfile) +
                  "' effective=lan compatibility_fallback=true；该回退仅用于"
-                 "兼容，不代表实例适合公网暴露。",
-             LOG_LEVEL_WARNING);
+                 "兼容，不代表实例适合公网暴露。");
     global.securityProfile = "lan";
   }
 
   if (!global.securityDiagnostics.uploadInputValid) {
-    writeLog(0,
+    writeLog(LOG_LEVEL_WARNING,
              "SECURITY_UPLOAD_VALUE_INVALID source=" +
                  global.securityDiagnostics.uploadSource + " input='" +
                  securityLogValue(global.securityDiagnostics.uploadInput) +
                  "' effective=" +
                  (global.allowPublicUpload ? "true" : "false") +
-                 " compatibility_behavior=preserved。",
-             LOG_LEVEL_WARNING);
+                 " compatibility_behavior=preserved。");
   }
 
-  writeLog(0, "当前安全档位：" + global.securityProfile, LOG_LEVEL_INFO);
-  writeLog(0,
+  writeLog(LOG_LEVEL_INFO, "当前安全档位：" + global.securityProfile);
+  writeLog(LOG_LEVEL_INFO,
            "SECURITY_PROFILE_EFFECTIVE profile=" + global.securityProfile +
                " source=" + global.securityDiagnostics.profileSource +
                (global.securityDiagnostics.profileSource != "environment" ||
@@ -299,8 +296,7 @@ static void finalizeSecuritySettings() {
                " compatibility_fallback=" +
                (global.securityDiagnostics.profileUsedCompatibilityFallback
                     ? "true"
-                    : "false"),
-           LOG_LEVEL_INFO);
+                    : "false"));
 }
 
 static void finalizePerformanceSettings() {
@@ -335,9 +331,8 @@ static void finalizePerformanceSettings() {
   if (global.maxServerThreads < global.maxConcurThreads)
     global.maxServerThreads = global.maxConcurThreads;
   if (global.responseCacheTtl > 5) {
-    writeLog(0,
-             "response_cache_ttl 最大允许 5 秒，已自动收敛到 5。",
-             LOG_LEVEL_WARNING);
+    writeLog(LOG_LEVEL_WARNING,
+             "response_cache_ttl 最大允许 5 秒，已自动收敛到 5。");
     global.responseCacheTtl = 5;
   }
 }
@@ -367,10 +362,9 @@ static void finalizeDashboardAuthSettings() {
       client_ip::parseHeader(global.dashboardAuthClientIpHeader) !=
       client_ip::Header::None;
   if (header_configured != !global.dashboardAuthTrustedProxyCidrs.empty()) {
-    writeLog(0,
+    writeLog(LOG_LEVEL_WARNING,
              "Dashboard 客户端 IP 头与 trusted proxy CIDR 必须同时配置；"
-             "当前已安全降级为仅使用 socket peer。",
-             LOG_LEVEL_WARNING);
+             "当前已安全降级为仅使用 socket peer。");
   }
   if (global.dashboardAuthMaxFailures < 1)
     global.dashboardAuthMaxFailures = 1;
@@ -417,7 +411,7 @@ bool isPublicUploadAllowed() {
 
 void logSecurityPosture() {
   const bool upload_allowed = isPublicUploadAllowed();
-  writeLog(0,
+  writeLog(LOG_LEVEL_INFO,
            "SECURITY_UPLOAD_EFFECTIVE profile=" + global.securityProfile +
                " configured_allow_public_upload=" +
                (global.allowPublicUpload ? "true" : "false") + " source=" +
@@ -433,8 +427,7 @@ void logSecurityPosture() {
                     ? " reason=lan-compatibility"
                     : global.securityProfile == "strict"
                           ? " reason=strict-policy"
-                          : " reason=public-upload-setting"),
-           LOG_LEVEL_INFO);
+                          : " reason=public-upload-setting"));
 
   const bool wildcard_bind = global.listenAddress == "0.0.0.0" ||
                              global.listenAddress == "::" ||
@@ -445,22 +438,20 @@ void logSecurityPosture() {
         !startsWith(bind_endpoint, "[")) {
       bind_endpoint = "[" + bind_endpoint + "]";
     }
-    writeLog(0,
+    writeLog(LOG_LEVEL_WARNING,
              "SECURITY_EXPOSURE_POSSIBLE profile=lan bind=" +
                  bind_endpoint + ":" +
                  std::to_string(global.listenPort) +
                  " public_reachability=unknown；监听所有本地接口不等于已暴露"
                  "公网，请同时检查端口发布、宿主防火墙、云安全组、NAT 和"
-                 "反向代理。公网部署请显式使用 public 或 strict。",
-             LOG_LEVEL_WARNING);
+                 "反向代理。公网部署请显式使用 public 或 strict。");
   }
 }
 
 static bool canImportLocalPath(const std::string &path, FetchContext context) {
   if (!isPublicFetchRestricted(context) || isTrustedLocalResourcePath(path))
     return true;
-  writeLog(0, "已阻止公开请求导入本地文件：" + path,
-           LOG_LEVEL_WARNING);
+  writeLog(LOG_LEVEL_WARNING, "已阻止公开请求导入本地文件：" + path);
   return false;
 }
 
@@ -498,8 +489,7 @@ int importItems(string_array &target, bool scope_limit, FetchContext context) {
       content = webGet(path, proxy, settings.cacheConfig, nullptr, nullptr,
                        context);
     else
-      writeLog(0, "文件不存在或不是有效 URL：" + path,
-               LOG_LEVEL_ERROR);
+      writeLog(LOG_LEVEL_ERROR, "文件不存在或不是有效 URL：" + path);
     if (content.empty())
       return -1;
 
@@ -555,8 +545,7 @@ int importItems(std::vector<toml::value> &root, const std::string &import_key,
         content = webGet(path, proxy, settings.cacheConfig, nullptr, nullptr,
                          context);
       else
-        writeLog(0, "文件不存在或不是有效 URL：" + path,
-                 LOG_LEVEL_ERROR);
+        writeLog(LOG_LEVEL_ERROR, "文件不存在或不是有效 URL：" + path);
       if (content.empty()) {
         failed = true;
       } else {
@@ -566,9 +555,8 @@ int importItems(std::vector<toml::value> &root, const std::string &import_key,
           count += list.size();
           std::move(list.begin(), list.end(), std::back_inserter(newRoot));
         } catch (const std::exception &e) {
-          writeLog(0, "导入项目失败：" + summarizeUrlForLog(path) +
-                          "，detail=" + summarizeSensitiveTextForLog(e.what()),
-                   LOG_LEVEL_ERROR);
+          writeLog(LOG_LEVEL_ERROR, "导入项目失败：" + summarizeUrlForLog(path) +
+                          "，detail=" + summarizeSensitiveTextForLog(e.what()));
           failed = true;
         }
       }
@@ -726,10 +714,9 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
     rule_url = x.Url;
     std::string::size_type pos = x.Url.find("[]");
     if (pos != std::string::npos) {
-      writeLog(0,
+      writeLog(LOG_LEVEL_INFO,
                "正在添加规则：'" + rule_url.substr(pos + 2) + "," +
-                   rule_group + "'。",
-               LOG_LEVEL_INFO);
+                   rule_group + "'。");
       rc = {rule_group,
             "",
             "",
@@ -748,15 +735,13 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
         type = iter->second;
       }
       if (x.Options.no_resolve && type != RULESET_CLASH_IPCIDR)
-        writeLog(0,
+        writeLog(LOG_LEVEL_WARNING,
                  "规则集选项 no-resolve 仅适用于 clash-ipcidr，已对策略组 '" +
-                     rule_group + "' 安全忽略。",
-                 LOG_LEVEL_WARNING);
+                     rule_group + "' 安全忽略。");
 
-      writeLog(0,
+      writeLog(LOG_LEVEL_INFO,
                "正在更新规则集 URL：'" + rule_url + "'，策略组：'" +
-                   rule_group + "'。",
-               LOG_LEVEL_INFO);
+                   rule_group + "'。");
       rc = {rule_group,
             rule_url,
             rule_url_typed,
@@ -1103,8 +1088,7 @@ void readYAMLConf(YAML::Node &node,
     }
   }
   finalizeRuntimeSettings();
-  writeLog(0, "已加载 YAML 格式偏好设置。",
-           LOG_LEVEL_INFO);
+  writeLog(LOG_LEVEL_INFO, "已加载 YAML 格式偏好设置。");
 }
 
 template <class T, class... U>
@@ -1366,8 +1350,7 @@ void readTOMLConf(toml::value &root,
                 "allow_public_upload", global.allowPublicUpload);
   finalizeRuntimeSettings();
 
-  writeLog(0, "已加载 TOML 格式偏好设置。",
-           LOG_LEVEL_INFO);
+  writeLog(LOG_LEVEL_INFO, "已加载 TOML 格式偏好设置。");
 }
 
 static void applyRuntimeConfiguration() {
@@ -1385,16 +1368,15 @@ static void applyRuntimeConfiguration() {
 bool readConf() {
   guarded_mutex guard(gMutexConfigure);
   ScopedLogLevelOverride log_level_scope;
-  writeLog(0, "正在加载偏好设置...", LOG_LEVEL_INFO);
+  writeLog(LOG_LEVEL_INFO, "正在加载偏好设置...");
 
   Settings previous = global;
 
   auto restorePreviousSettings = [&](const std::string &reason) {
     safe_replace_settings(std::move(previous));
     log_level_scope.set(global.logLevel);
-    writeLog(0, reason, LOG_LEVEL_FATAL);
-    writeLog(0, "偏好设置加载失败，已保留上一份有效配置。",
-             LOG_LEVEL_FATAL);
+    writeLog(LOG_LEVEL_FATAL, reason);
+    writeLog(LOG_LEVEL_FATAL, "偏好设置加载失败，已保留上一份有效配置。");
     return false;
   };
 
@@ -1507,9 +1489,8 @@ bool readConf() {
       if (!conf.is_empty() && toml::find_or<int>(conf, "version", 0))
         return loadTOML(conf);
     } catch (std::exception &e) {
-      writeLog(0, "PREFERENCE_TOML_PROBE_FAILED detail=" +
-                      summarizeSensitiveTextForLog(e.what()),
-               LOG_LEVEL_DEBUG);
+      writeLog(LOG_LEVEL_DEBUG, "PREFERENCE_TOML_PROBE_FAILED detail=" +
+                      summarizeSensitiveTextForLog(e.what()));
     }
   }
 
@@ -1835,7 +1816,7 @@ bool readConf() {
   }
     finalizeRuntimeSettings();
 
-    writeLog(0, "已加载 INI 格式偏好设置。", LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_INFO, "已加载 INI 格式偏好设置。");
     applyRuntimeConfiguration();
     publishSettingsSnapshot(global);
     return true;
@@ -1888,8 +1869,7 @@ ExternalConfigLoadStatus loadExternalYAML(YAML::Node &node,
       return ExternalConfigLoadStatus::ImportFailed;
     if (settings.maxAllowedRulesets &&
         vArray.size() > settings.maxAllowedRulesets) {
-      writeLog(0, "外部配置中的规则集数量已超过限制。",
-               LOG_LEVEL_WARNING);
+      writeLog(LOG_LEVEL_WARNING, "外部配置中的规则集数量已超过限制。");
       return ExternalConfigLoadStatus::ResourceLimitExceeded;
     }
     ext.surge_ruleset = INIBinding::from<RulesetConfig>::from_ini(vArray);
@@ -1968,8 +1948,7 @@ ExternalConfigLoadStatus loadExternalTOML(toml::value &root,
   const Settings &settings = effectiveSettings();
   if (settings.maxAllowedRulesets &&
       rulesets.size() > settings.maxAllowedRulesets) {
-    writeLog(0, "外部配置中的规则集数量已超过限制。",
-             LOG_LEVEL_WARNING);
+    writeLog(LOG_LEVEL_WARNING, "外部配置中的规则集数量已超过限制。");
     return ExternalConfigLoadStatus::ResourceLimitExceeded;
   }
   ext.surge_ruleset = toml::get<RulesetConfigs>(toml::value(rulesets));
@@ -2014,9 +1993,8 @@ parseExternalConfigContent(const std::string &path,
   if (ini.parse(base_content) != INIREADER_EXCEPTION_NONE) {
     // std::cerr<<"Load external configuration failed. Reason:
     // "<<ini.get_last_error()<<"\n";
-    writeLog(0, "EXTERNAL_CONFIG_INI_PARSE_FAILED detail=" +
-                    summarizeSensitiveTextForLog(ini.get_last_error()),
-             LOG_LEVEL_ERROR);
+    writeLog(LOG_LEVEL_ERROR, "EXTERNAL_CONFIG_INI_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(ini.get_last_error()));
     return ExternalConfigLoadStatus::ParseFailed;
   }
 
@@ -2038,8 +2016,7 @@ parseExternalConfigContent(const std::string &path,
       return ExternalConfigLoadStatus::ImportFailed;
     if (settings.maxAllowedRulesets &&
         vArray.size() > settings.maxAllowedRulesets) {
-      writeLog(0, "外部配置中的规则集数量已超过限制。",
-               LOG_LEVEL_WARNING);
+      writeLog(LOG_LEVEL_WARNING, "外部配置中的规则集数量已超过限制。");
       return ExternalConfigLoadStatus::ResourceLimitExceeded;
     }
     ext.surge_ruleset = INIBinding::from<RulesetConfig>::from_ini(vArray);

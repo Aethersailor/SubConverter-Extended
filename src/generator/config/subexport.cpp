@@ -454,9 +454,8 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
         singleproxy = buildCanonicalClashProxy(
             x, ClashProxyOverlay{udp, scv, tfo, xudp});
       } catch (const std::exception &e) {
-        writeLog(0, "MIHOMO_CANONICAL_PROXY_INVALID detail=" +
-                        summarizeSensitiveTextForLog(e.what()),
-                 LOG_LEVEL_ERROR);
+        writeLog(LOG_LEVEL_ERROR, "MIHOMO_CANONICAL_PROXY_INVALID detail=" +
+                        summarizeSensitiveTextForLog(e.what()));
         continue;
       }
 
@@ -988,10 +987,9 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
     }
 
     yamlnode["proxy-providers"] = provider_node;
-    writeLog(0,
+    writeLog(LOG_LEVEL_INFO,
              "已生成 " + std::to_string(ext.providers.size()) +
-                 " 个 proxy provider。",
-             LOG_LEVEL_INFO);
+                 " 个 proxy provider。");
   }
 
   for (const ProxyGroupConfig &x : extra_proxy_group) {
@@ -1135,9 +1133,8 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
   try {
     yamlnode = YAML::Load(base_conf);
   } catch (std::exception &e) {
-    writeLog(0, "CLASH_BASE_CONFIG_PARSE_FAILED detail=" +
-                    summarizeSensitiveTextForLog(e.what()),
-             LOG_LEVEL_ERROR);
+    writeLog(LOG_LEVEL_ERROR, "CLASH_BASE_CONFIG_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(e.what()));
     return "";
   }
 
@@ -1276,7 +1273,7 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
   // 使用之前在 998-1002 行已提取的 proxy_providers_yaml
   std::string proxy_providers_str;
   if (!proxy_providers_yaml.empty()) {
-    writeLog(0, "正在使用先前提取的 proxy-providers", LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_INFO, "正在使用先前提取的 proxy-providers");
 
     // proxy_providers_yaml 已经是 YAML::Dump 的结果
     // 需要移除可能的文档分隔符 "---"
@@ -1311,46 +1308,39 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
         proxy_providers_str += "\n";
       }
 
-      writeLog(0,
+      writeLog(LOG_LEVEL_INFO,
                "已准备待插入的 proxy-providers，长度：" +
-                   std::to_string(proxy_providers_str.length()),
-               LOG_LEVEL_INFO);
+                   std::to_string(proxy_providers_str.length()));
     }
   } else {
-    writeLog(0, "没有需要插入的 proxy-providers", LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_INFO, "没有需要插入的 proxy-providers");
   }
 
   std::string yamlnode_str = YAML::Dump(yamlnode);
 
   // 在 proxy-groups 之前插入 proxy-providers
   if (!proxy_providers_str.empty()) {
-    writeLog(
-        0,
+    writeLog(LOG_LEVEL_INFO,
         "正在尝试将 proxy-providers 插入到 proxy-groups 前，大小：" +
-            std::to_string(proxy_providers_str.length()),
-        LOG_LEVEL_INFO);
+            std::to_string(proxy_providers_str.length()));
 
     std::string proxy_groups_key =
         ext.clash_new_field_name ? "proxy-groups:" : "Proxy Group:";
     size_t groups_pos = yamlnode_str.find(proxy_groups_key);
 
     if (groups_pos != std::string::npos) {
-      writeLog(0,
-               "已在位置 " + std::to_string(groups_pos) + " 找到 proxy-groups",
-               LOG_LEVEL_INFO);
+      writeLog(LOG_LEVEL_INFO,
+               "已在位置 " + std::to_string(groups_pos) + " 找到 proxy-groups");
       // 在 proxy-groups: 这一行之前插入
       yamlnode_str.insert(groups_pos, proxy_providers_str);
-      writeLog(0, "已将 proxy-providers 插入到 proxy-groups 前",
-               LOG_LEVEL_INFO);
+      writeLog(LOG_LEVEL_INFO, "已将 proxy-providers 插入到 proxy-groups 前");
     } else {
-      writeLog(0, "未找到 proxy-groups，将追加到末尾",
-               LOG_LEVEL_WARNING);
+      writeLog(LOG_LEVEL_WARNING, "未找到 proxy-groups，将追加到末尾");
       // 如果找不到 proxy-groups，尝试在文件末尾插入
       yamlnode_str += proxy_providers_str;
     }
   } else {
-    writeLog(0, "proxy-providers 内容为空，没有内容需要插入",
-             LOG_LEVEL_WARNING);
+    writeLog(LOG_LEVEL_WARNING, "proxy-providers 内容为空，没有内容需要插入");
   }
 
   // 插入 proxies 字段（在 proxy-groups 之前）
@@ -1417,9 +1407,8 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
   ini.add_direct_save_section("URL Rewrite");
   ini.add_direct_save_section("Header Rewrite");
   if (ini.parse(base_conf) != 0 && !ext.nodelist) {
-    writeLog(0, "SURGE_BASE_CONFIG_PARSE_FAILED detail=" +
-                    summarizeSensitiveTextForLog(ini.get_last_error()),
-             LOG_LEVEL_ERROR);
+    writeLog(LOG_LEVEL_ERROR, "SURGE_BASE_CONFIG_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(ini.get_last_error()));
     return "";
   }
 
@@ -1931,11 +1920,10 @@ std::string proxyToSSSub(std::string base_conf, std::vector<Proxy> &nodes,
     base_conf = "{}";
   rapidjson::ParseResult result = base.Parse(base_conf.data());
   if (!result)
-    writeLog(0,
+    writeLog(LOG_LEVEL_ERROR,
              std::string("SIP008 基础配置加载失败：") +
                  rapidjson::GetParseError_En(result.Code()) + " (" +
-                 std::to_string(result.Offset()) + ")",
-             LOG_LEVEL_ERROR);
+                 std::to_string(result.Offset()) + ")");
 
   rapidjson::Value proxies(rapidjson::kArrayType);
   for (Proxy &x : nodes) {
@@ -1992,9 +1980,8 @@ std::string proxyToQuan(std::vector<Proxy> &nodes, const std::string &base_conf,
   INIReader ini;
   ini.store_any_line = true;
   if (!ext.nodelist && ini.parse(base_conf) != 0) {
-    writeLog(0, "QUANTUMULT_BASE_CONFIG_PARSE_FAILED detail=" +
-                    summarizeSensitiveTextForLog(ini.get_last_error()),
-             LOG_LEVEL_ERROR);
+    writeLog(LOG_LEVEL_ERROR, "QUANTUMULT_BASE_CONFIG_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(ini.get_last_error()));
     return "";
   }
 
@@ -2239,9 +2226,8 @@ std::string proxyToQuanX(std::vector<Proxy> &nodes,
   ini.add_direct_save_section("mitm");
   ini.add_direct_save_section("server_remote");
   if (!ext.nodelist && ini.parse(base_conf) != 0) {
-    writeLog(0, "QUANTUMULT_X_BASE_CONFIG_PARSE_FAILED detail=" +
-                    summarizeSensitiveTextForLog(ini.get_last_error()),
-             LOG_LEVEL_ERROR);
+    writeLog(LOG_LEVEL_ERROR, "QUANTUMULT_X_BASE_CONFIG_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(ini.get_last_error()));
     return "";
   }
 
@@ -2623,9 +2609,8 @@ std::string proxyToMellow(std::vector<Proxy> &nodes,
   INIReader ini;
   ini.store_any_line = true;
   if (ini.parse(base_conf) != 0) {
-    writeLog(0, "MELLOW_BASE_CONFIG_PARSE_FAILED detail=" +
-                    summarizeSensitiveTextForLog(ini.get_last_error()),
-             LOG_LEVEL_ERROR);
+    writeLog(LOG_LEVEL_ERROR, "MELLOW_BASE_CONFIG_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(ini.get_last_error()));
     return "";
   }
 
@@ -2793,9 +2778,8 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
   ini.store_any_line = true;
   ini.add_direct_save_section("Plugin");
   if (ini.parse(base_conf) != INIREADER_EXCEPTION_NONE && !ext.nodelist) {
-    writeLog(0, "LOON_BASE_CONFIG_PARSE_FAILED detail=" +
-                    summarizeSensitiveTextForLog(ini.get_last_error()),
-             LOG_LEVEL_ERROR);
+    writeLog(LOG_LEVEL_ERROR, "LOON_BASE_CONFIG_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(ini.get_last_error()));
     return "";
   }
 
@@ -3724,11 +3708,9 @@ std::string proxyToSingBox(std::vector<Proxy> &nodes,
   if (!ext.nodelist) {
     json.Parse(base_conf.data());
     if (json.HasParseError()) {
-      writeLog(
-          0,
+      writeLog(LOG_LEVEL_ERROR,
           "sing-box 基础配置加载失败：" +
-              std::string(rapidjson::GetParseError_En(json.GetParseError())),
-          LOG_LEVEL_ERROR);
+              std::string(rapidjson::GetParseError_En(json.GetParseError())));
       return "";
     }
   } else {
