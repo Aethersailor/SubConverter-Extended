@@ -55,8 +55,8 @@ private:
     LogLevel previous_level_ = LOG_LEVEL_INFO;
 };
 
-// Transitional wrapper for existing zero-category three-argument callers.
-// The removed default argument makes every severity intentional.
+// Source-compatibility adapter for downstream zero-category callers.
+// Project code uses the LogLevel-first overload; no default severity exists.
 inline void writeLog(int, const std::string &content, LogLevel level) {
     writeLog(level, content);
 }

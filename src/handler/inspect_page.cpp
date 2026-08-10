@@ -9,10 +9,9 @@
 namespace inspect_page {
 
 std::string page(Request &request, Response &response) {
-  writeLog(0,
+  writeLog(LOG_LEVEL_INFO,
            "收到 /inspect 诊断台访问请求：method=" + request.method +
-               ", path=" + request.url + "。",
-           LOG_LEVEL_INFO);
+               ", path=" + request.url + "。");
   response.headers["X-Robots-Tag"] =
       "noindex, nofollow, noarchive, nosnippet, noimageindex";
   std::string dashboard_link =

@@ -85,9 +85,8 @@ std::string locked(Response &response, int64_t retry_after) {
 std::string misconfigured(Response &response) {
   bool expected = false;
   if (g_misconfig_logged.compare_exchange_strong(expected, true)) {
-    writeLog(0,
-             "Dashboard 认证已启用，但用户名或密码为空，已拒绝访问。",
-             LOG_LEVEL_WARNING);
+    writeLog(LOG_LEVEL_WARNING,
+             "Dashboard 认证已启用，但用户名或密码为空，已拒绝访问。");
   }
   response.status_code = 503;
   response.content_type = "text/plain; charset=utf-8";

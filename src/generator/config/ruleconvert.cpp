@@ -203,11 +203,10 @@ static void warnNoResolveIgnoredForTarget(
     {
         if(!ruleset.options.no_resolve)
             continue;
-        writeLog(0,
+        writeLog(LOG_LEVEL_WARNING,
                  "规则集选项 no-resolve 不支持 " + target +
                      " 输出，已对策略组 '" + ruleset.rule_group +
-                     "' 安全忽略。",
-                 LOG_LEVEL_WARNING);
+                     "' 安全忽略。");
     }
 }
 
@@ -233,7 +232,7 @@ void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_
         retrieved_rules = x.rule_content.get();
         if(retrieved_rules.empty())
         {
-            writeLog(0, "获取规则集失败或规则集为空：'" + x.rule_path + "'。", LOG_LEVEL_WARNING);
+            writeLog(LOG_LEVEL_WARNING, "获取规则集失败或规则集为空：'" + x.rule_path + "'。");
             continue;
         }
         if(startsWith(retrieved_rules, "[]"))
@@ -310,7 +309,7 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent>
         retrieved_rules = x.rule_content.get();
         if(retrieved_rules.empty())
         {
-            writeLog(0, "获取规则集失败或规则集为空：'" + x.rule_path + "'。", LOG_LEVEL_WARNING);
+            writeLog(LOG_LEVEL_WARNING, "获取规则集失败或规则集为空：'" + x.rule_path + "'。");
             continue;
         }
         if(startsWith(retrieved_rules, "[]"))
@@ -506,7 +505,7 @@ void rulesetToSurge(INIReader &base_rule, std::vector<RulesetContent> &ruleset_c
             retrieved_rules = x.rule_content.get();
             if(retrieved_rules.empty())
             {
-                writeLog(0, "获取规则集失败或规则集为空：'" + x.rule_path + "'。", LOG_LEVEL_WARNING);
+                writeLog(LOG_LEVEL_WARNING, "获取规则集失败或规则集为空：'" + x.rule_path + "'。");
                 continue;
             }
 
@@ -671,7 +670,7 @@ void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent
         retrieved_rules = x.rule_content.get();
         if(retrieved_rules.empty())
         {
-            writeLog(0, "获取规则集失败或规则集为空：'" + x.rule_path + "'。", LOG_LEVEL_WARNING);
+            writeLog(LOG_LEVEL_WARNING, "获取规则集失败或规则集为空：'" + x.rule_path + "'。");
             continue;
         }
         if(startsWith(retrieved_rules, "[]"))

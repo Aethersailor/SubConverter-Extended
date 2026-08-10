@@ -125,8 +125,7 @@ static bool canReadLocalFetchPath(const std::string &path,
         return true;
     if(isTrustedLocalResourcePath(path))
         return true;
-    writeLog(0, "已阻止公开请求读取本地文件：" + path,
-             LOG_LEVEL_WARNING);
+    writeLog(LOG_LEVEL_WARNING, "已阻止公开请求读取本地文件：" + path);
     return false;
 }
 

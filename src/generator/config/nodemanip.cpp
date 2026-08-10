@@ -200,7 +200,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
         [&](qjs::Context &ctx) {
           if (startsWith(link, "script:")) /// process subscription with script
           {
-            writeLog(0, "发现脚本链接，开始执行...", LOG_LEVEL_INFO);
+            writeLog(LOG_LEVEL_INFO, "发现脚本链接，开始执行...");
             string_array args = split(link.substr(7), ",");
             if (args.size() >= 1) {
               std::string script = fileGet(args[0], false);
@@ -242,8 +242,8 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
       link = duktape_get_res_str(ctx);
   else
   {
-      writeLog(0, "执行脚本时发生错误：\n" +
-  duktape_get_err_stack(ctx), LOG_LEVEL_ERROR); duk_pop(ctx); /// pop err
+      writeLog(LOG_LEVEL_ERROR, "执行脚本时发生错误：\n" +
+  duktape_get_err_stack(ctx)); duk_pop(ctx); /// pop err
   }
   */
 

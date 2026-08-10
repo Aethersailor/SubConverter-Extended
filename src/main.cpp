@@ -205,19 +205,18 @@ int main(int argc, char *argv[]) {
   chkArg(argc, argv);
   if (default_preference.status ==
       PreferenceFileStatus::CopyCommittedUnsynced) {
-    writeLog(0,
+    writeLog(LOG_LEVEL_WARNING,
              "DEFAULT_PREFERENCE_COPY_VISIBLE source=" +
                  default_preference.source +
                  " destination=" + default_preference.path +
                  " new_file_visible=true durability=unconfirmed "
-                 "action=continue",
-             LOG_LEVEL_WARNING);
+                 "action=continue");
   }
   if (defaultPreferenceRequiresExit(default_preference, global.prefPath)) {
     const bool temporary_remaining =
         default_preference.status ==
         PreferenceFileStatus::CopyFailedTemporaryRemaining;
-    writeLog(0,
+    writeLog(LOG_LEVEL_FATAL,
              std::string("DEFAULT_PREFERENCE_COPY_FAILED") +
                  " source=" + default_preference.source +
                  " destination=" + default_preference.path +
@@ -225,17 +224,16 @@ int main(int argc, char *argv[]) {
                  (temporary_remaining
                       ? " temporary_file_remaining=true"
                       : " temporary_file_remaining=false") +
-                 " action=exit",
-             LOG_LEVEL_FATAL);
+                 " action=exit");
     return 1;
   }
   setcd(global.prefPath); // then switch to pref directory
-  writeLog(0, "SubConverter-Extended " VERSION " 正在启动...", LOG_LEVEL_INFO);
+  writeLog(LOG_LEVEL_INFO, "SubConverter-Extended " VERSION " 正在启动...");
 #ifdef _WIN32
   WSADATA wsaData;
   if (WSAStartup(MAKEWORD(1, 1), &wsaData) != 0) {
     // std::cerr<<"WSAStartup failed.\n";
-    writeLog(0, "WSAStartup 初始化失败。", LOG_LEVEL_FATAL);
+    writeLog(LOG_LEVEL_FATAL, "WSAStartup 初始化失败。");
     return 1;
   }
   defer(WSACleanup();)
@@ -251,8 +249,7 @@ int main(int argc, char *argv[]) {
   SetConsoleTitle("SubConverter-Extended " VERSION);
   if (!readConf())
     return 1;
-  writeLog(
-      0,
+  writeLog(LOG_LEVEL_INFO,
       "并发运行参数：HTTP base/max threads=" +
           std::to_string(global.maxConcurThreads) + "/" +
           std::to_string(global.maxServerThreads) +
@@ -267,8 +264,7 @@ int main(int argc, char *argv[]) {
           std::to_string(externalConfigCacheMaxBytes()) + " bytes" +
           ", ruleset conversion cache=" +
           std::to_string(rulesetConversionCacheMaxEntries()) + " entries/" +
-          std::to_string(rulesetConversionCacheMaxBytes()) + " bytes。",
-      LOG_LEVEL_INFO);
+          std::to_string(rulesetConversionCacheMaxBytes()) + " bytes。");
   // Register cleanup before any background refresh starts. The HTTP backend
   // drains accepted requests before returning, so only then may the executor
   // cancel unobserved work and release its curl leases before the pool stops.
@@ -291,10 +287,9 @@ int main(int argc, char *argv[]) {
       normalize_managed_prefix(getEnv("MANAGED_PREFIX"));
   if (!env_managed_config_prefix.empty() && !env_managed_prefix.empty() &&
       env_managed_config_prefix != env_managed_prefix) {
-    writeLog(0,
+    writeLog(LOG_LEVEL_WARNING,
              "同时设置了 MANAGED_CONFIG_PREFIX 和 MANAGED_PREFIX，使用 "
-             "MANAGED_CONFIG_PREFIX。",
-             LOG_LEVEL_WARNING);
+             "MANAGED_CONFIG_PREFIX。");
   }
   if (!env_managed_config_prefix.empty())
     global.managedConfigPrefix = env_managed_config_prefix;
@@ -360,10 +355,9 @@ int main(int argc, char *argv[]) {
   publishSettingsSnapshot(global);
   if (global.securityProfile == "lan" &&
       (global.listenAddress == "0.0.0.0" || global.listenAddress == "::")) {
-    writeLog(0,
+    writeLog(LOG_LEVEL_WARNING,
              "当前安全档位为 lan，但正在监听所有网络接口。面向公网部署请使用 "
-             "security.profile=public。",
-             LOG_LEVEL_WARNING);
+             "security.profile=public。");
   }
   logSecurityPosture();
   listener_args args = {global.listenAddress,   global.listenPort,
@@ -371,10 +365,9 @@ int main(int argc, char *argv[]) {
                         cron_tick_caller,       200};
   // std::cout<<"Serving HTTP @
   // http://"<<listen_address<<":"<<listen_port<<std::endl;
-  writeLog(0,
+  writeLog(LOG_LEVEL_INFO,
            "正在启动 HTTP 服务：http://" + global.listenAddress + ":" +
-               std::to_string(global.listenPort),
-           LOG_LEVEL_INFO);
+               std::to_string(global.listenPort));
   int ret = webServer.start_web_server_multi(&args);
   return ret;
 }
