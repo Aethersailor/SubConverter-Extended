@@ -318,37 +318,44 @@ struct UAProfile {
   int surge_ver = -1;
 };
 
+// Heads are lower-case and ordered from the most specific family to the most
+// general one. Keep ClashR markers ahead of the generic Clash rules.
 const std::vector<UAProfile> UAMatchList = {
-    {"ClashForAndroid", "\\/([0-9.]+)", "2.0", "clash", true},
-    {"ClashForAndroid", "\\/([0-9.]+)R", "", "clashr", false},
-    {"ClashForAndroid", "", "", "clash", false},
-    {"ClashforWindows", "\\/([0-9.]+)", "0.11", "clash", true},
-    {"ClashforWindows", "", "", "clash", false},
+    {"clashforandroid", "\\/([0-9.]+)[Rr][0-9]*(?:$|[^A-Za-z0-9])", "",
+     "clashr", false},
+    {"clashforandroid", "\\/([0-9.]+)", "2.0", "clash", true},
+    {"clashforandroid", "", "", "clash", false},
+    {"clashr", "", "", "clashr", false},
+    {"clashforwindows", "\\/([0-9.]+)", "0.11", "clash", true},
+    {"clashforwindows", "", "", "clash", false},
     {"clash-verge", "", "", "clash", true},
-    {"ClashX Pro", "", "", "clash", true},
-    {"ClashX", "\\/([0-9.]+)", "0.13", "clash", true},
-    {"Clash", "", "", "clash", true},
-    {"Kitsunebi", "", "", "v2ray"},
-    {"Loon", "", "", "loon"},
-    {"Pharos", "", "", "mixed"},
-    {"Potatso", "", "", "mixed"},
-    {"Quantumult%20X", "", "", "quanx"},
-    {"Quantumult", "", "", "quan"},
-    {"Qv2ray", "", "", "v2ray"},
-    {"Shadowrocket", "", "", "mixed"},
-    {"Surfboard", "", "", "surfboard"},
-    {"Surge", "\\/([0-9.]+).*x86", "906", "surge", false,
+    {"flclash", "", "", "clash", true},
+    {"mihomo", "", "", "clash", true},
+    {"openclash", "", "", "clash", true},
+    {"clashx pro", "", "", "clash", true},
+    {"clashx", "\\/([0-9.]+)", "0.13", "clash", true},
+    {"clash", "", "", "clash", true},
+    {"kitsunebi", "", "", "v2ray"},
+    {"loon", "", "", "loon"},
+    {"pharos", "", "", "mixed"},
+    {"potatso", "", "", "mixed"},
+    {"quantumult%20x", "", "", "quanx"},
+    {"quantumult", "", "", "quan"},
+    {"qv2ray", "", "", "v2ray"},
+    {"shadowrocket", "", "", "mixed"},
+    {"surfboard", "", "", "surfboard"},
+    {"surge", "\\/([0-9.]+).*x86", "906", "surge", false,
      4}, /// Surge for Mac (supports VMess)
-    {"Surge", "\\/([0-9.]+).*x86", "368", "surge", false, 3},
+    {"surge", "\\/([0-9.]+).*x86", "368", "surge", false, 3},
     /// Surge for Mac (supports new rule types and Shadowsocks without plugin)
-    {"Surge", "\\/([0-9.]+)", "1419", "surge", false,
+    {"surge", "\\/([0-9.]+)", "1419", "surge", false,
      4}, /// Surge iOS 4 (first version)
-    {"Surge", "\\/([0-9.]+)", "900", "surge", false,
+    {"surge", "\\/([0-9.]+)", "900", "surge", false,
      3},                                  /// Surge iOS 3 (approx)
-    {"Surge", "", "", "surge", false, 2}, /// any version of Surge as fallback
-    {"Trojan-Qt5", "", "", "trojan"},
-    {"V2rayU", "", "", "v2ray"},
-    {"V2RayX", "", "", "v2ray"}};
+    {"surge", "", "", "surge", false, 2}, /// any version of Surge as fallback
+    {"trojan-qt5", "", "", "trojan"},
+    {"v2rayu", "", "", "v2ray"},
+    {"v2rayx", "", "", "v2ray"}};
 
 bool verGreaterEqual(const std::string &src_ver,
                      const std::string &target_ver) {
@@ -380,8 +387,9 @@ void matchUserAgent(const std::string &user_agent, std::string &target,
                     tribool &clash_new_name, int &surge_ver) {
   if (user_agent.empty())
     return;
+  const std::string normalized_user_agent = toLower(user_agent);
   for (const UAProfile &x : UAMatchList) {
-    if (startsWith(user_agent, x.head)) {
+    if (startsWith(normalized_user_agent, x.head)) {
       if (!x.version_match.empty()) {
         std::string version;
         if (regGetMatch(user_agent, x.version_match, 2, 0, &version))
