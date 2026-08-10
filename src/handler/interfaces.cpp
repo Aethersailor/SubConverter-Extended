@@ -890,6 +890,7 @@ using SharedCoalescedResponse = std::shared_ptr<const CoalescedResponse>;
 struct InflightSubRequest {
   std::mutex mutex;
   std::condition_variable cv;
+  std::string owner_request_id;
   bool done = false;
   SharedCoalescedResponse result;
   std::exception_ptr exception;
@@ -910,9 +911,13 @@ struct SubExplainProvider {
   std::string name;
   std::string tag;
   std::string source_hash;
+  std::string source_summary;
   std::string path;
   std::string filter;
   std::string exclude_filter;
+  bool filter_present = false;
+  bool exclude_filter_present = false;
+  bool name_generated = false;
   int group_id = 0;
   uint32_t interval = 0;
   bool proxy_direct = kDefaultProxyProviderDirect;
@@ -988,26 +993,52 @@ static std::string fetchContextName(FetchContext context) {
   }
 }
 
-static std::string shortHash(const std::string &value) {
-  if (value.empty())
-    return "";
-  return getMD5(value).substr(0, 10);
-}
-
 static std::string boolString(bool value) { return value ? "true" : "false"; }
 
-static std::string previewExplainValue(const std::string &raw_value,
+static std::string previewExplainValue(const std::string &value,
                                        bool sensitive) {
-  std::string decoded = urlDecode(raw_value);
-  if (decoded.empty())
+  if (value.empty())
     return "";
   if (sensitive)
     return "[redacted]";
 
   static constexpr size_t kMaxPreview = 180;
-  if (decoded.size() <= kMaxPreview)
-    return decoded;
-  return decoded.substr(0, kMaxPreview) + "...";
+  std::string safe = sanitizeLogLine(value);
+  if (safe.size() <= kMaxPreview)
+    return safe;
+  return safe.substr(0, kMaxPreview) + "...";
+}
+
+static std::string summarizeExplainSourceList(const std::string &value) {
+  if (value.empty())
+    return "not provided";
+
+  static constexpr size_t kMaxSummarizedSources = 8;
+  const string_array sources = split(value, "|");
+  string_array summaries;
+  summaries.reserve(std::min(sources.size(), kMaxSummarizedSources) + 1);
+  for (size_t index = 0;
+       index < sources.size() && index < kMaxSummarizedSources; ++index) {
+    const TaggedLink tagged = parseTaggedLink(sources[index]);
+    summaries.emplace_back(summarizeUrlForLog(tagged.link));
+  }
+  if (sources.size() > kMaxSummarizedSources) {
+    summaries.emplace_back("... " +
+                           std::to_string(sources.size() -
+                                          kMaxSummarizedSources) +
+                           " more source(s)");
+  }
+  return join(summaries, "; ");
+}
+
+static std::string explainParameterName(const std::string &name) {
+  static constexpr size_t kMaxParameterName = 64;
+  if (!name.empty() && name.size() <= kMaxParameterName &&
+      std::all_of(name.begin(), name.end(), [](unsigned char ch) {
+        return std::isalnum(ch) || ch == '_' || ch == '-' || ch == '.';
+      }))
+    return name;
+  return "[redacted-name]";
 }
 
 static void writeJsonString(
@@ -1166,9 +1197,16 @@ static std::string serializeSubExplainReport(const SubExplainReport &report,
     writeJsonString(writer, "name", provider.name);
     writeJsonString(writer, "tag", provider.tag);
     writeJsonString(writer, "source_hash", provider.source_hash);
+    writeJsonString(writer, "source_summary", provider.source_summary);
     writeJsonString(writer, "path", provider.path);
     writeJsonString(writer, "filter", provider.filter);
     writeJsonString(writer, "exclude_filter", provider.exclude_filter);
+    writer.Key("filter_present");
+    writer.Bool(provider.filter_present);
+    writer.Key("exclude_filter_present");
+    writer.Bool(provider.exclude_filter_present);
+    writer.Key("name_generated");
+    writer.Bool(provider.name_generated);
     writer.Key("group_id");
     writer.Int(provider.group_id);
     writer.Key("interval");
@@ -1206,6 +1244,11 @@ struct AgeResponseContext {
   std::string fingerprint;
 };
 
+static void applyExplainPrivacyHeaders(Response &response) {
+  response.headers["Cache-Control"] = "private, no-store, max-age=0";
+  response.headers["Pragma"] = "no-cache";
+}
+
 static AgeResponseContext consumeAgeResponseContext(Request &request) {
   AgeResponseContext context;
   auto iter = request.headers.find("X-Age-Public-Key");
@@ -1240,6 +1283,8 @@ static std::string rejectAgeRequest(Response &response,
 static std::string finalizeSubResponse(const Request &request,
                                        Response &response, std::string body,
                                        const AgeResponseContext &age) {
+  if (isTruthyRequestValue(getUrlArg(request.argument, "explain")))
+    applyExplainPrivacyHeaders(response);
   // User-Agent can select target=auto and affects subscription/provider
   // request headers. Separate every /sub representation in shared caches.
   appendVaryHeader(response, "User-Agent");
@@ -1343,6 +1388,10 @@ static void storeCachedSubResponse(const std::string &key,
                                    const Settings &settings) {
   if (settings.responseCacheTtl <= 0 || !result || result->status_code != 200)
     return;
+  const auto cache_control = result->headers.find("Cache-Control");
+  if (cache_control != result->headers.end() &&
+      toLower(cache_control->second).find("no-store") != std::string::npos)
+    return;
 
   int ttl = std::min(settings.responseCacheTtl, 5);
   if (ttl <= 0)
@@ -1434,6 +1483,10 @@ static std::string subconverterEntry(Request &request, Response &response,
                                      bool track) {
   // Early validation failures do not pass through finalizeSubResponse.
   appendVaryHeader(response, "User-Agent");
+  const bool explain_request =
+      isTruthyRequestValue(getUrlArg(request.argument, "explain"));
+  if (explain_request)
+    applyExplainPrivacyHeaders(response);
   AgeResponseContext age = consumeAgeResponseContext(request);
   if (age.requested && !age.valid) {
     return rejectAgeRequest(
@@ -1481,7 +1534,8 @@ static std::string subconverterEntry(Request &request, Response &response,
   }
 
   SharedCoalescedResponse cached_result;
-  if (getCachedSubResponse(key, cached_result, settings)) {
+  if (!explain_request &&
+      getCachedSubResponse(key, cached_result, settings)) {
     writeLog(0, "/sub 响应微缓存命中。", LOG_LEVEL_DEBUG);
     copyCoalescedToResponse(*cached_result, response);
     recordTrackedSubRequest(track, request, response,
@@ -1496,6 +1550,7 @@ static std::string subconverterEntry(Request &request, Response &response,
     auto iter = g_sub_inflight.find(key);
     if (iter == g_sub_inflight.end()) {
       call = std::make_shared<InflightSubRequest>();
+      call->owner_request_id = currentLogRequestId();
       g_sub_inflight.emplace(key, call);
       owner = true;
     } else {
@@ -1504,8 +1559,10 @@ static std::string subconverterEntry(Request &request, Response &response,
   }
 
   if (!owner) {
-    writeLog(0, "/sub 请求已合并到正在执行的同 key 转换。",
-             LOG_LEVEL_DEBUG);
+    writeLog(LOG_LEVEL_INFO,
+             "SUB_REQUEST_COALESCED owner_request_id=" +
+                 (call->owner_request_id.empty() ? "unavailable"
+                                                 : call->owner_request_id));
     std::unique_lock<std::mutex> lock(call->mutex);
     call->cv.wait(lock, [&call] { return call->done; });
     if (call->exception)
@@ -1535,7 +1592,7 @@ static std::string subconverterEntry(Request &request, Response &response,
       std::lock_guard<std::mutex> lock(g_sub_inflight_mutex);
       g_sub_inflight.erase(key);
     }
-    if (!age.requested)
+    if (!age.requested && !explain_request)
       storeCachedSubResponse(key, result, settings);
     call->cv.notify_all();
     recordTrackedSubRequest(track, request, response,
@@ -1631,16 +1688,15 @@ static std::string parseSubRequestArguments(Request &request,
   parsed.explain.requested_target = parsed.target;
   if (parsed.explain_mode) {
     std::string rawUrlForLog = getUrlArg(argument, "url");
+    const bool target_is_known = parsed.target == "auto" ||
+                                 findTargetDescriptor(parsed.target) != nullptr;
     writeLog(0,
-             "收到 /sub explain JSON 诊断请求：target=" +
-                 (parsed.target.empty() ? std::string("<empty>")
-                                        : parsed.target) +
-                 ", 参数数量=" + std::to_string(argument.size()) +
-                 ", url_hash=" +
-                 (rawUrlForLog.empty()
-                      ? std::string("-")
-                      : shortHash(urlDecode(rawUrlForLog))) +
-                 "。",
+             "EXPLAIN_REQUEST_RECEIVED requested_target=" +
+                  (parsed.target.empty() ? std::string("<empty>")
+                   : (target_is_known ? parsed.target
+                                      : std::string("<unsupported>"))) +
+                  " parameter_count=" + std::to_string(argument.size()) +
+                  " url_length=" + std::to_string(rawUrlForLog.size()),
              LOG_LEVEL_INFO);
   }
 
@@ -2396,6 +2452,8 @@ static SubStageResponse processSubscriptionNodes(
         }
       };
 
+      size_t generated_explain_provider_index = 0;
+
       for (const SubscriptionLinkItem &item : subscription_urls) {
         ProxyProvider provider;
         std::string urlHash =
@@ -2403,6 +2461,7 @@ static SubStageResponse processSubscriptionNodes(
                              : generateProviderHash(item.url);
         std::string default_name = "Provider_" + urlHash;
         std::string sanitized_provider = sanitizeProviderName(item.provider);
+        const bool generated_provider_name = sanitized_provider.empty();
         std::string base_name =
             sanitized_provider.empty() ? default_name : sanitized_provider;
         base_name = sanitizeProviderName(base_name);
@@ -2410,10 +2469,6 @@ static SubStageResponse processSubscriptionNodes(
           base_name = default_name;
         provider.name = reserve_provider_name(base_name);
         provider.tag = item.tag;
-        writeLog(0,
-                 "已生成 provider：" + provider.name + "，URL：" +
-                     summarizeUrlForLog(item.url),
-                 LOG_LEVEL_INFO);
         provider.url = item.url_decoded ? item.url : urlDecode(item.url);
         provider.interval = static_cast<uint32_t>(
             item.has_interval ? item.interval : settings.proxyProviderInterval);
@@ -2427,15 +2482,32 @@ static SubStageResponse processSubscriptionNodes(
         provider.filter = buildProviderRemarkFilter(lIncludeRemarks);
         provider.exclude_filter =
             buildProviderRemarkFilter(lExcludeRemarks);
+        writeLog(0,
+                 "PROXY_PROVIDER_CREATED group_id=" +
+                     std::to_string(provider.groupId) + " interval=" +
+                     std::to_string(provider.interval) + " proxy_direct=" +
+                     boolString(provider.proxy_direct) + " source=" +
+                     summarizeUrlForLog(provider.url),
+                 LOG_LEVEL_INFO);
 
         ext.providers.push_back(provider);
         SubExplainProvider explain_provider;
-        explain_provider.name = provider.name;
+        explain_provider.name_generated = generated_provider_name;
+        if (generated_provider_name) {
+          const std::string safe_name =
+              "Provider_Auto_" +
+              std::to_string(++generated_explain_provider_index);
+          explain_provider.name = safe_name;
+          explain_provider.path = "./providers/" + safe_name + ".yaml";
+        } else {
+          explain_provider.name = provider.name;
+          explain_provider.path = provider.path;
+        }
         explain_provider.tag = provider.tag;
-        explain_provider.source_hash = shortHash(provider.url);
-        explain_provider.path = provider.path;
-        explain_provider.filter = provider.filter;
-        explain_provider.exclude_filter = provider.exclude_filter;
+        explain_provider.source_summary = summarizeUrlForLog(provider.url);
+        explain_provider.filter_present = !provider.filter.empty();
+        explain_provider.exclude_filter_present =
+            !provider.exclude_filter.empty();
         explain_provider.group_id = provider.groupId;
         explain_provider.interval = provider.interval;
         explain_provider.proxy_direct = provider.proxy_direct;
@@ -2567,6 +2639,8 @@ static SubStageResponse processSubscriptionNodes(
 struct TargetGenerationState {
   std::string output;
   std::string managed_url;
+  bool managed_url_from_profile_data = false;
+  bool managed_url_used = false;
 };
 
 static SubStageResponse dispatchTargetGenerator(
@@ -2595,6 +2669,7 @@ static SubStageResponse dispatchTargetGenerator(
 
   std::string &managed_url = generation.managed_url;
   managed_url = base64Decode(getUrlArg(argument, "profile_data"));
+  generation.managed_url_from_profile_data = !managed_url.empty();
   if (managed_url.empty())
     managed_url =
         settings.managedConfigPrefix + "/sub?" + joinArguments(argument);
@@ -2663,6 +2738,8 @@ static SubStageResponse dispatchTargetGenerator(
       if (upload)
         recordUpload("surge" + surge_version_text, upload_path, output, true);
       if (settings.writeManagedConfig && !settings.managedConfigPrefix.empty())
+        generation.managed_url_used = true;
+      if (generation.managed_url_used)
         output = "#!MANAGED-CONFIG " + managed_url +
                  (policy.update_interval
                       ? " interval=" +
@@ -2688,6 +2765,8 @@ static SubStageResponse dispatchTargetGenerator(
     if (upload)
       recordUpload("surfboard", upload_path, output, true);
     if (settings.writeManagedConfig && !settings.managedConfigPrefix.empty())
+      generation.managed_url_used = true;
+    if (generation.managed_url_used)
       output = "#!MANAGED-CONFIG " + managed_url +
                (policy.update_interval
                     ? " interval=" + std::to_string(policy.update_interval)
@@ -2901,7 +2980,6 @@ static std::string assembleSubResponse(
   tribool &argGenClassicalRuleProvider =
       parsed.generate_classical_rule_provider;
   tribool &argProviderProxyDirect = parsed.provider_proxy_direct;
-  ProxyGroupConfigs &lCustomProxyGroups = policy.custom_proxy_groups;
   string_array &lIncludeRemarks = policy.include_remarks;
   string_array &lExcludeRemarks = policy.exclude_remarks;
   extra_settings &ext = policy.generator;
@@ -2911,9 +2989,6 @@ static std::string assembleSubResponse(
       policy.provider_headers;
   bool userProvidedExternalConfig =
       fetch_plan.user_provided_external_config;
-  bool configLoadSuccess = fetch_plan.config_load_success;
-  std::vector<RulesetContent> &lRulesetContent =
-      fetch_plan.ruleset_content;
   std::string &output_content = generation.output;
   std::string &managed_url = generation.managed_url;
 
@@ -2938,17 +3013,16 @@ static std::string assembleSubResponse(
       if (!hasArg(name))
         return;
       std::string raw_value = rawArg(name);
-      std::string decoded_value = urlDecode(raw_value);
       SubExplainParameter parameter;
       parameter.name = name;
       parameter.present = true;
       parameter.source = source;
       parameter.status = status;
       parameter.value_preview = previewExplainValue(raw_value, sensitive);
-      parameter.value_hash = shortHash(decoded_value);
+      parameter.value_hash.clear();
       parameter.raw_length = raw_value.size();
-      parameter.value_length = decoded_value.size();
-      parameter.effective_value = effective_value;
+      parameter.value_length = raw_value.size();
+      parameter.effective_value = previewExplainValue(effective_value, false);
       parameter.note = note;
       parameter.sensitive = sensitive;
       explain.recognized_parameters.push_back(std::move(parameter));
@@ -2981,10 +3055,12 @@ static std::string assembleSubResponse(
                      " source item(s), " +
                      std::to_string(explain.subscription_url_count) +
                      " subscription(s), " +
-                     std::to_string(explain.node_link_count) + " node link(s)",
+                     std::to_string(explain.node_link_count) +
+                     " node link(s); sources: " +
+                     summarizeExplainSourceList(rawArg("url")),
                  "applied",
-                 "Sensitive values are redacted; use hash and length to "
-                 "compare inputs.",
+                 "Sensitive values are redacted; use lengths and structural "
+                 "summaries to compare inputs.",
                  true);
     addParameter("explain", "true", "applied",
                  "The request returned a JSON diagnostic report.");
@@ -2999,9 +3075,10 @@ static std::string assembleSubResponse(
     addParameter("group", argGroupName,
                  argGroupName.empty() ? "ignored" : "applied",
                  "Overrides the group name on direct nodes.");
-    addParameter("upload_path", argUploadPath,
-                 argUpload ? "applied" : "ignored",
-                 "Only used when upload is effective.", true);
+    addParameter("upload_path",
+                 argUploadPath.empty() ? "not provided" : "provided",
+                  argUpload ? "applied" : "ignored",
+                  "Only used when upload is effective.", true);
     addParameter("include", argIncludeRemark,
                  !argIncludeRemark.empty() && regValid(argIncludeRemark)
                      ? "applied"
@@ -3012,32 +3089,56 @@ static std::string assembleSubResponse(
                      ? "applied"
                      : "ignored",
                  "Used as node/provider exclude filter when valid.");
-    addParameter("groups", std::to_string(lCustomProxyGroups.size()) +
-                              " custom group(s)",
-                 configLoadSuccess ? "ignored" : "applied",
-                 configLoadSuccess
-                     ? "External config loaded; request groups were not used."
-                     : "Decoded from URL-safe base64.");
-    addParameter("ruleset", std::to_string(lRulesetContent.size()) +
-                                " loaded ruleset(s)",
-                 configLoadSuccess ? "ignored" : "applied",
-                 configLoadSuccess
-                     ? "External config loaded; request rulesets were not used."
-                     : "Decoded from URL-safe base64.");
+    addParameter("groups", "not consumed", "ignored",
+                 "This compatibility parameter is not consumed by /sub.",
+                 true);
+    addParameter("ruleset", "not consumed", "ignored",
+                 "This compatibility parameter is not consumed by /sub.",
+                 true);
+    const bool request_config_provided = !parsed.external_config.empty();
     std::string config_effective = explain.external_config_loaded
                                        ? "loaded"
                                        : "not loaded";
     if (explain.fallback_config_used)
       config_effective = "fallback loaded";
-    addParameter("config", config_effective,
-                 explain.external_config_loaded ? "applied" : "ignored",
+    if (!rawArg("config").empty())
+      config_effective +=
+          "; requested source: " + summarizeUrlForLog(rawArg("config"));
+    const std::string config_status =
+        explain.fallback_config_used
+            ? "overridden"
+            : (request_config_provided
+                   ? (explain.external_config_loaded ? "applied" : "ignored")
+                   : (explain.external_config_loaded ? "defaulted"
+                                                     : "ignored"));
+    const std::string config_source =
+        explain.fallback_config_used
+            ? "fallback"
+            : (request_config_provided
+                   ? "request"
+                   : (explain.external_config_loaded ? "default" : "request"));
+    addParameter("config", config_effective, config_status,
                  explain.fallback_config_used
                      ? "User config failed and a fallback config was loaded."
                      : "External config URL or data source.",
-                 true);
-    addParameter("dev_id", ext.quanx_dev_id,
-                 ext.quanx_dev_id.empty() ? "ignored" : "applied",
-                 "Quantumult X device id.");
+                 true, config_source);
+    const bool request_device_id_applied = !parsed.device_id.empty();
+    const bool effective_device_id_configured = !ext.quanx_dev_id.empty();
+    addParameter(
+        "dev_id",
+        effective_device_id_configured ? "configured" : "not configured",
+        request_device_id_applied
+            ? "applied"
+            : (effective_device_id_configured ? "defaulted" : "ignored"),
+        request_device_id_applied
+            ? "Quantumult X device ID."
+            : (effective_device_id_configured
+                   ? "Empty request value; the configured device ID remained "
+                     "effective."
+                   : "No effective Quantumult X device ID is configured."),
+        true, request_device_id_applied
+                  ? "request"
+                  : (effective_device_id_configured ? "default" : "request"));
     addParameter("filename", argFilename, "ignored",
                  "Content-Disposition is not emitted for explain JSON.");
     addParameter("interval", std::to_string(interval), "applied",
@@ -3046,8 +3147,9 @@ static std::string assembleSubResponse(
                  "Managed config strict flag.");
     addParameter("rename", std::to_string(ext.rename_array.size()) +
                                " rename rule(s)",
-                 argRenames.empty() ? "ignored" : "applied",
-                 "Request rename rules override configured rename rules.");
+                  argRenames.empty() ? "ignored" : "applied",
+                  "Request rename rules override configured rename rules.",
+                  true);
     addParameter("filter_script", "not used", "ignored",
                  "Public requests cannot provide executable filter scripts.",
                  true);
@@ -3096,9 +3198,29 @@ static std::string assembleSubResponse(
     addSwitchParameter("tls13", ext.tls13.get(false), ext.tls13);
     addSwitchParameter("provider_proxy_direct", ext.provider_proxy_direct,
                        argProviderProxyDirect);
-    addParameter("profile_data", managed_url.empty() ? "not used" : "provided",
-                 managed_url.empty() ? "ignored" : "applied",
-                 "Managed config URL override.", true);
+    std::string profile_effective = "not used";
+    std::string profile_status = "ignored";
+    std::string profile_source = "request";
+    std::string profile_note =
+        "This target did not emit a managed configuration URL.";
+    if (generation.managed_url_used) {
+      profile_effective = generation.managed_url_from_profile_data
+                              ? "provided"
+                              : "generated";
+      profile_effective += "; source: " + summarizeUrlForLog(managed_url);
+      profile_status = generation.managed_url_from_profile_data
+                           ? "applied"
+                           : "defaulted";
+      profile_source = generation.managed_url_from_profile_data ? "request"
+                                                                 : "global";
+      profile_note = generation.managed_url_from_profile_data
+                         ? "Managed configuration URL override."
+                         : "A managed configuration URL was generated.";
+    }
+    addParameter("profile_data", profile_effective, profile_status,
+                 profile_note, true, profile_source);
+    addParameter("token", "not used", "ignored",
+                 "Token authentication is disabled.", true);
 
     const std::unordered_set<std::string> known_parameters = {
         "target", "url", "ver", "new_name", "group", "upload_path",
@@ -3112,19 +3234,21 @@ static std::string assembleSubResponse(
     for (const auto &arg : argument) {
       if (known_parameters.find(arg.first) != known_parameters.end())
         continue;
-      std::string decoded_value = urlDecode(arg.second);
       SubExplainParameter parameter;
-      parameter.name = arg.first;
+      parameter.name = explainParameterName(arg.first);
       parameter.present = true;
       parameter.source = "request";
       parameter.status = "ignored";
-      parameter.value_preview = previewExplainValue(arg.second, false);
-      parameter.value_hash = shortHash(decoded_value);
+      parameter.value_preview = previewExplainValue(arg.second, true);
+      parameter.value_hash.clear();
       parameter.raw_length = arg.second.size();
-      parameter.value_length = decoded_value.size();
+      parameter.value_length = arg.second.size();
       parameter.effective_value = "";
-      parameter.note = "This parameter is not recognized by /sub.";
-      parameter.sensitive = false;
+      parameter.note = parameter.name == "[redacted-name]"
+                           ? "The parameter name and value were redacted."
+                           : "This parameter is not recognized by /sub; its "
+                             "value was redacted.";
+      parameter.sensitive = true;
       explain.unrecognized_parameters.push_back(std::move(parameter));
     }
 

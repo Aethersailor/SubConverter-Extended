@@ -393,9 +393,13 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
                 shutdown_started = time.monotonic()
                 shutdown_deadline = shutdown_started + SHUTDOWN_DEADLINE_SECONDS
                 process.send_signal(signal_value)
+                shutdown_event = (
+                    f"SHUTDOWN_REQUESTED signal={signal_value.name} "
+                    f"signal_code={signal_value.value} action=graceful-stop"
+                )
                 wait_for_log(
                     stderr_path,
-                    f"收到中断信号 {signal_value.value}",
+                    shutdown_event,
                     process,
                     min(shutdown_deadline, time.monotonic() + 2.0),
                 )
@@ -436,6 +440,14 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
                         f"shutdown took {elapsed:.3f}s, over the {SHUTDOWN_DEADLINE_SECONDS:.1f}s limit"
                     )
                 logs = read_log(stderr_path)
+                if f"[INFO] {shutdown_event}" not in logs:
+                    raise ShutdownFailure(
+                        "graceful shutdown event is missing its INFO severity"
+                    )
+                if f"[FATL] {shutdown_event}" in logs:
+                    raise ShutdownFailure(
+                        "normal graceful shutdown was mislabeled FATAL"
+                    )
                 if scenario == "background-retry":
                     if fixture.background_attempts < 2:
                         raise ShutdownFailure("controlled background retry was not attempted")

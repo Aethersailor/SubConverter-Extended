@@ -6,6 +6,7 @@
 #include "handler/settings.h"
 #include "handler/settings_snapshot.h"
 #include "server/webserver.h"
+#include "utils/logger.h"
 
 WebServer webServer;
 
@@ -47,6 +48,8 @@ int main(int argc, char *argv[]) {
                         : "reload failed\n");
       return 1;
     }
+    if (expect_reload_failure)
+      writeLog(LOG_LEVEL_VERBOSE, "SETTINGS_RELOAD_LEVEL_PROBE");
   }
 
   std::cout << sanitizedSettingsSnapshot(global);

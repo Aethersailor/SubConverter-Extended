@@ -1,3 +1,11 @@
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cctype>
+#include <cstdint>
+#include <iomanip>
+#include <random>
+#include <sstream>
 #include <string>
 #include <utility>
 #ifdef MALLOC_TRIM
@@ -25,6 +33,117 @@
 static const char *request_header_blacklist[] = {"host", "accept",
                                                  "accept-encoding"};
 
+namespace {
+
+constexpr const char *kRequestTelemetryKey = "subconverter.request.telemetry";
+
+struct HttpRequestTelemetry {
+  std::string request_id;
+  std::chrono::steady_clock::time_point started_at;
+};
+
+uint64_t requestProcessNonce() {
+  static const uint64_t nonce = [] {
+    uint64_t value = static_cast<uint64_t>(
+        std::chrono::high_resolution_clock::now().time_since_epoch().count());
+    value ^= static_cast<uint64_t>(getpid()) << 32;
+    try {
+      std::random_device random;
+      value ^= static_cast<uint64_t>(random()) << 32;
+      value ^= static_cast<uint64_t>(random());
+    } catch (...) {
+      // Correlation IDs are not credentials. Time, PID, and the atomic counter
+      // still provide process-local uniqueness if the random source is absent.
+    }
+    return value;
+  }();
+  return nonce;
+}
+
+std::string fixedHex(uint64_t value) {
+  std::ostringstream stream;
+  stream << std::hex << std::nouppercase << std::setfill('0') << std::setw(16)
+         << value;
+  return stream.str();
+}
+
+std::string nextRequestId() {
+  static std::atomic<uint64_t> counter{0};
+  return fixedHex(requestProcessNonce()) +
+         fixedHex(counter.fetch_add(1, std::memory_order_relaxed) + 1);
+}
+
+HttpRequestTelemetry &ensureRequestTelemetry(const httplib::Request &request,
+                                             httplib::Response &response) {
+  if (auto *existing =
+          response.user_data.get<HttpRequestTelemetry>(kRequestTelemetryKey))
+    return *existing;
+
+  HttpRequestTelemetry telemetry;
+  telemetry.request_id = nextRequestId();
+  telemetry.started_at = request.start_time_;
+  if (telemetry.started_at ==
+      std::chrono::steady_clock::time_point::min())
+    telemetry.started_at = std::chrono::steady_clock::now();
+  response.user_data.set(kRequestTelemetryKey, std::move(telemetry));
+  return *response.user_data.get<HttpRequestTelemetry>(kRequestTelemetryKey);
+}
+
+void setRequestTelemetryHeaders(httplib::Response &response,
+                                const std::string &request_id) {
+  response.headers.erase("X-Request-ID");
+  response.set_header("X-Request-ID", request_id);
+
+  const std::string current =
+      response.get_header_value("Access-Control-Expose-Headers");
+  bool request_id_exposed = false;
+  for (const std::string &token : split(current, ",")) {
+    if (toLower(trimWhitespace(token, true, true)) == "x-request-id") {
+      request_id_exposed = true;
+      break;
+    }
+  }
+  if (!request_id_exposed) {
+    response.headers.erase("Access-Control-Expose-Headers");
+    response.set_header("Access-Control-Expose-Headers",
+                        current.empty() ? "X-Request-ID"
+                                        : current + ", X-Request-ID");
+  }
+}
+
+std::string requestPathForLog(const std::string &path) {
+  static constexpr size_t kMaxVisiblePath = 256;
+  if (!path.empty() && path.size() <= kMaxVisiblePath &&
+      std::all_of(path.begin(), path.end(), [](unsigned char ch) {
+        return std::isalnum(ch) || ch == '/' || ch == '.' || ch == '_' ||
+               ch == '-' || ch == '~';
+      }))
+    return path;
+  return "<redacted> path_length=" + std::to_string(path.size());
+}
+
+bool hasNoStoreDirective(const std::string &cache_control) {
+  for (std::string directive : split(cache_control, ",")) {
+    directive = toLower(trimWhitespace(directive, true, true));
+    const std::string::size_type equals = directive.find('=');
+    if (equals != std::string::npos)
+      directive.erase(equals);
+    if (trimWhitespace(directive, true, true) == "no-store")
+      return true;
+  }
+  return false;
+}
+
+bool isExplainRequest(const httplib::Request &request) {
+  if (!request.has_param("explain"))
+    return false;
+  const std::string value = toLower(
+      trimWhitespace(request.get_param_value("explain"), true, true));
+  return value == "1" || value == "true" || value == "yes" || value == "on";
+}
+
+} // namespace
+
 static inline bool is_request_header_blacklisted(const std::string &header) {
   for (auto &x : request_header_blacklist) {
     if (strcasecmp(x, header.c_str()) == 0) {
@@ -50,6 +169,9 @@ static httplib::Server::Handler makeHandler(const responseRoute &rr,
                                             const WebServer *web_server) {
   return [rr, web_server](const httplib::Request &request,
                           httplib::Response &response) {
+    HttpRequestTelemetry &telemetry =
+        ensureRequestTelemetry(request, response);
+    ScopedLogRequestContext request_log_scope(telemetry.request_id);
     Request req;
     Response resp;
     req.method = request.method;
@@ -89,8 +211,12 @@ static httplib::Server::Handler makeHandler(const responseRoute &rr,
     }
     auto result = rr.rc(req, resp);
     response.status = resp.status_code;
-    if (resp.status_code >= 400)
-      resp.headers["Cache-Control"] = "private, no-store";
+    if (resp.status_code >= 400) {
+      const auto cache_control = resp.headers.find("Cache-Control");
+      if (cache_control == resp.headers.end() ||
+          !hasNoStoreDirective(cache_control->second))
+        resp.headers["Cache-Control"] = "private, no-store";
+    }
     for (auto &h : resp.headers) {
       response.set_header(h.first, h.second);
     }
@@ -100,16 +226,6 @@ static httplib::Server::Handler makeHandler(const responseRoute &rr,
     }
     response.set_content(std::move(result), content_type);
   };
-}
-
-static std::string dump(const httplib::Headers &headers) {
-  std::string s;
-  for (auto &x : headers) {
-    if (startsWith(x.first, "LOCAL_") || startsWith(x.first, "REMOTE_"))
-      continue;
-    s += x.first + "|";
-  }
-  return s;
 }
 
 static void setUnhandledExceptionResponse(httplib::Response &response) {
@@ -164,18 +280,14 @@ int WebServer::start_web_server_multi(listener_args *args) {
                  });
   server.set_pre_routing_handler([&](const httplib::Request &req,
                                      httplib::Response &res) {
+    HttpRequestTelemetry &telemetry = ensureRequestTelemetry(req, res);
+    setRequestTelemetryHeaders(res, telemetry.request_id);
+    ScopedLogRequestContext request_log_scope(telemetry.request_id);
     if (shouldLog(LOG_LEVEL_DEBUG)) {
       writeLog(0,
                "接受客户端连接：" + req.remote_addr + ":" +
                    std::to_string(req.remote_port),
                LOG_LEVEL_DEBUG);
-    }
-    if (shouldLog(LOG_LEVEL_VERBOSE)) {
-      writeLog(0,
-               "处理请求：method=" + req.method + " path=" + req.path +
-                   " parameter_count=" + std::to_string(req.params.size()),
-               LOG_LEVEL_VERBOSE);
-      writeLog(0, "请求头名称：" + dump(req.headers), LOG_LEVEL_VERBOSE);
     }
 
     if (req.has_header("SubConverter-Request")) {
@@ -232,13 +344,15 @@ int WebServer::start_web_server_multi(listener_args *args) {
   server.set_exception_handler([](const httplib::Request &req,
                                    httplib::Response &res,
                                    const std::exception_ptr &e) {
+    HttpRequestTelemetry &telemetry = ensureRequestTelemetry(req, res);
+    ScopedLogRequestContext request_log_scope(telemetry.request_id);
     try {
       if (e)
         std::rethrow_exception(e);
     } catch (const std::exception &ex) {
       writeLog(0,
                "HTTP_UNEXPECTED_EXCEPTION method=" + req.method +
-                   " path=" + req.path +
+                   " path=" + requestPathForLog(req.path) +
                    " parameter_count=" + std::to_string(req.params.size()) +
                    " exception=" + type(ex) +
                     " detail=" + summarizeSensitiveTextForLog(ex.what()),
@@ -246,19 +360,54 @@ int WebServer::start_web_server_multi(listener_args *args) {
     } catch (...) {
       writeLog(0,
                "HTTP_UNEXPECTED_EXCEPTION method=" + req.method +
-                   " path=" + req.path +
+                   " path=" + requestPathForLog(req.path) +
                    " parameter_count=" + std::to_string(req.params.size()) +
                    " exception=unknown",
                LOG_LEVEL_ERROR);
     }
     setUnhandledExceptionResponse(res);
   });
-  server.set_post_routing_handler([](const httplib::Request &,
+  server.set_post_routing_handler([](const httplib::Request &req,
                                      httplib::Response &res) {
+    HttpRequestTelemetry &telemetry = ensureRequestTelemetry(req, res);
+    setRequestTelemetryHeaders(res, telemetry.request_id);
+    ScopedLogRequestContext request_log_scope(telemetry.request_id);
+
     // This also covers errors produced before a route callback (authentication,
     // OPTIONS and the built-in 404 path), which do not pass through makeHandler.
-    if (res.status >= 400)
+    if (isExplainRequest(req)) {
+      res.headers.erase("Cache-Control");
+      res.set_header("Cache-Control", "private, no-store, max-age=0");
+      res.headers.erase("Pragma");
+      res.set_header("Pragma", "no-cache");
+    } else if (res.status >= 400 &&
+        !hasNoStoreDirective(res.get_header_value("Cache-Control"))) {
+      res.headers.erase("Cache-Control");
       res.set_header("Cache-Control", "private, no-store");
+    }
+
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - telemetry.started_at);
+    uint64_t response_bytes = 0;
+    bool response_bytes_known = true;
+    if (req.method != "HEAD") {
+      response_bytes = static_cast<uint64_t>(res.body.size());
+      if (response_bytes == 0 && res.has_header("Content-Length"))
+        response_bytes = res.get_header_value_u64("Content-Length", 0);
+      else if (response_bytes == 0 && res.status != 204 && res.status != 304)
+        response_bytes_known = false;
+    }
+    const LogLevel completion_level =
+        res.status >= 500 ? LOG_LEVEL_ERROR : LOG_LEVEL_INFO;
+    writeLog(completion_level,
+             "HTTP_RESPONSE_PREPARED method=" + req.method +
+                 " path=" + requestPathForLog(req.path) +
+                 " status=" + std::to_string(res.status) +
+                 " duration_ms=" +
+                 std::to_string(std::max<int64_t>(0, elapsed.count())) +
+                 " response_bytes=" + std::to_string(response_bytes) +
+                 " response_bytes_known=" +
+                 std::string(response_bytes_known ? "true" : "false"));
   });
   if (serve_file) {
     server.set_mount_point("/", serve_file_root);

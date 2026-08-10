@@ -69,6 +69,7 @@ std::string sanitizedSettingsSnapshot(const Settings &settings) {
            {"clash_new_fields", settings.clashUseNewField},
            {"clash_proxies_style", settings.clashProxiesStyle},
            {"singbox_add_clash_modes", settings.singBoxAddClashModes},
+           {"emoji_rule_count", settings.emojis.size()},
        }},
       {"proxy_provider",
        {

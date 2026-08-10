@@ -1,7 +1,6 @@
 #include <string>
 #include <cstring>
 #include <map>
-#include <iostream>
 #include <quickjspp.hpp>
 #include <utility>
 #include <quickjs/quickjs-libc.h>
@@ -16,6 +15,7 @@
 #include "handler/settings_view.h"
 #include "parser/config/proxy.h"
 #include "utils/map_extra.h"
+#include "utils/logger.h"
 #include "utils/system.h"
 #include "script_quickjs.h"
 
@@ -582,7 +582,10 @@ int script_cleanup(qjs::Context &context)
 void script_print_stack(qjs::Context &context)
 {
     auto exc = context.getException();
-    std::cerr << "脚本异常：" << (std::string) exc << std::endl;
+    writeLog(LOG_LEVEL_ERROR,
+             "SCRIPT_EXCEPTION detail=" + static_cast<std::string>(exc));
     if((bool) exc["stack"])
-        std::cerr << "脚本堆栈：" << (std::string) exc["stack"] << std::endl;
+        writeLog(LOG_LEVEL_ERROR,
+                 "SCRIPT_STACK detail=" +
+                     static_cast<std::string>(exc["stack"]));
 }
