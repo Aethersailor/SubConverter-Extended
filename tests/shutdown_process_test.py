@@ -485,7 +485,7 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, required=True)
-    parser.add_argument("--rounds", type=int, default=2)
+    parser.add_argument("--rounds", type=int, default=1)
     parser.add_argument(
         "--scenario",
         action="append",

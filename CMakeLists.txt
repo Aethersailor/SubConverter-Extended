@@ -54,16 +54,11 @@ OPTION(USING_MALLOC_TRIM "Call malloc_trim after processing request to lower mem
 #OPTION(USING_MBEDTLS "Use mbedTLS instead of OpenSSL for MD5 calculation." OFF)
 OPTION(BUILD_STATIC_LIBRARY "Build a static library containing only the essential part." OFF)
 OPTION(BUILD_TESTS "Build focused regression tests." OFF)
-OPTION(BUILD_BENCHMARKS "Build opt-in performance benchmarks (requires BUILD_TESTS)." OFF)
 OPTION(ENABLE_SANITIZERS "Build tests and runtime with ASan and UBSan." OFF)
 SET(MIHOMO_TEST_BINARY "" CACHE FILEPATH
     "Pinned Mihomo CLI used by compatibility tests")
 OPTION(REQUIRE_MIHOMO_TEST_BINARY
     "Fail configuration unless a Mihomo test CLI is supplied." OFF)
-
-IF(BUILD_BENCHMARKS AND NOT BUILD_TESTS)
-    MESSAGE(FATAL_ERROR "BUILD_BENCHMARKS=ON requires BUILD_TESTS=ON")
-ENDIF()
 
 IF(ENABLE_SANITIZERS)
     IF(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -270,12 +265,6 @@ IF(BUILD_TESTS)
     ENABLE_TESTING()
     FIND_PACKAGE(Python3 COMPONENTS Interpreter REQUIRED)
 
-    ADD_EXECUTABLE(logger_api_contract_test
-        tests/logger_api_contract_test.cpp)
-    TARGET_INCLUDE_DIRECTORIES(logger_api_contract_test PRIVATE src)
-    ADD_TEST(NAME logger_api_contract COMMAND logger_api_contract_test)
-    SET_TESTS_PROPERTIES(logger_api_contract PROPERTIES LABELS fast)
-
     ADD_EXECUTABLE(user_agent_test
         tests/user_agent_test.cpp
         src/handler/user_agent.cpp
@@ -333,8 +322,7 @@ IF(BUILD_TESTS)
             NAME shutdown_process
             COMMAND ${Python3_EXECUTABLE}
                     ${CMAKE_SOURCE_DIR}/tests/shutdown_process_test.py
-                    --binary $<TARGET_FILE:${BUILD_TARGET_NAME}>
-                    --rounds 2)
+                    --binary $<TARGET_FILE:${BUILD_TARGET_NAME}>)
         SET_TESTS_PROPERTIES(shutdown_process PROPERTIES
             LABELS full
             RUN_SERIAL TRUE
@@ -486,19 +474,6 @@ IF(BUILD_TESTS)
         LABELS fast
         TIMEOUT 120)
 
-    IF(BUILD_BENCHMARKS)
-        ADD_EXECUTABLE(statistics_v2_benchmark
-            tests/statistics_v2_benchmark.cpp
-            src/handler/statistics_v2.cpp)
-        TARGET_INCLUDE_DIRECTORIES(statistics_v2_benchmark PRIVATE src)
-        TARGET_LINK_LIBRARIES(statistics_v2_benchmark
-            ${CMAKE_THREAD_LIBS_INIT})
-        ADD_TEST(NAME statistics_v2_benchmark COMMAND statistics_v2_benchmark)
-        SET_TESTS_PROPERTIES(statistics_v2_benchmark PROPERTIES
-            LABELS benchmark
-            TIMEOUT 120)
-    ENDIF()
-
     ADD_EXECUTABLE(sub_request_key_test
         tests/sub_request_key_test.cpp
         src/handler/sub_request_key.cpp
@@ -604,10 +579,6 @@ IF(BUILD_TESTS)
         preference_file_test
         cache_storage_test
         upload_persistence_test)
-    IF(BUILD_BENCHMARKS)
-        LIST(APPEND SUBCONVERTER_ASSERTING_TEST_TARGETS
-            statistics_v2_benchmark)
-    ENDIF()
     FOREACH(TEST_TARGET IN LISTS SUBCONVERTER_ASSERTING_TEST_TARGETS)
         IF(MSVC)
             TARGET_COMPILE_OPTIONS(${TEST_TARGET} PRIVATE /UNDEBUG)

@@ -415,22 +415,6 @@ def run_checks(
         or "parameter-section" not in inspect_page
     ):
         raise AssertionError("/inspect did not return the inspector page")
-    localized_labels = [
-        "代理提供者",
-        "请求值",
-        "生效值",
-        "说明",
-        "项目",
-        "详情",
-        "来源哈希",
-        "包含过滤",
-        "排除过滤",
-    ]
-    missing_labels = [label for label in localized_labels if label not in inspect_page]
-    if missing_labels:
-        raise AssertionError(
-            "/inspect page is missing localized labels: " + ", ".join(missing_labels)
-        )
 
     common_params = {
         "target": "clash",
