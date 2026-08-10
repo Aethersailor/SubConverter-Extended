@@ -67,18 +67,40 @@ static std::string get_thread_name()
 
 std::mutex log_mutex;
 
-bool shouldLog(int level)
+bool shouldLog(LogLevel level)
 {
-    return level <= effectiveSettings().logLevel;
+    return static_cast<int>(level) <=
+           static_cast<int>(effectiveSettings().logLevel);
 }
 
-void writeLog(int type, const std::string &content, int level)
+namespace {
+
+const char *logLevelLabel(LogLevel level) {
+    switch (level) {
+    case LogLevel::Fatal:
+        return "[FATL]";
+    case LogLevel::Error:
+        return "[ERRO]";
+    case LogLevel::Warning:
+        return "[WARN]";
+    case LogLevel::Info:
+        return "[INFO]";
+    case LogLevel::Debug:
+        return "[DEBG]";
+    case LogLevel::Verbose:
+        return "[VERB]";
+    }
+    return "[UNKN]";
+}
+
+} // namespace
+
+void writeLog(LogLevel level, const std::string &content)
 {
     if(!shouldLog(level))
         return;
     std::lock_guard<std::mutex> lock(log_mutex);
-    const char *levels[] = {"[FATL]", "[ERRO]", "[WARN]", "[INFO]", "[DEBG]", "[VERB]"};
-    std::cerr<<getTime(2)<<" ["<<getpid()<<" "<<get_thread_name()<<"]"<<levels[level % 6];
+    std::cerr<<getTime(2)<<" ["<<getpid()<<" "<<get_thread_name()<<"]"<<logLevelLabel(level);
     std::cerr<<" "<<redactSensitiveLogText(content)<<"\n";
 }
 

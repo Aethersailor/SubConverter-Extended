@@ -3350,10 +3350,9 @@ void explodeSub(std::string sub, std::vector<Proxy> &nodes) {
             }
         }
     } catch (std::exception &e) {
-        writeLog(LOG_TYPE_ERROR,
+        writeLog(LOG_LEVEL_ERROR,
                  "SINGBOX_PARSE_FAILED detail=" +
-                     summarizeSensitiveTextForLog(e.what()),
-                 LOG_LEVEL_ERROR);
+                     summarizeSensitiveTextForLog(e.what()));
         //writeLog(0, e.what(), LOG_LEVEL_DEBUG);
         //ignore
         throw;

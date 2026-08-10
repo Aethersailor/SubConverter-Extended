@@ -432,7 +432,7 @@ int importItems(string_array &target, bool scope_limit, FetchContext context) {
       continue;
     }
     path = x.substr(x.find(":") + 1);
-    writeLog(0, "正在导入项目：" + path);
+    writeLog(LOG_LEVEL_VERBOSE, "正在导入项目：" + path);
     content.clear();
 
     const Settings &settings = effectiveSettings();
@@ -466,7 +466,8 @@ int importItems(string_array &target, bool scope_limit, FetchContext context) {
     ss.clear();
   }
   target.swap(result);
-  writeLog(0, "已导入 " + std::to_string(itemCount) + " 个项目。");
+  writeLog(LOG_LEVEL_VERBOSE,
+           "已导入 " + std::to_string(itemCount) + " 个项目。");
   return 0;
 }
 
@@ -492,7 +493,7 @@ int importItems(std::vector<toml::value> &root, const std::string &import_key,
       newRoot.emplace_back(std::move(*iter));
     else {
       const std::string &path = toml::get<std::string>(table.at("import"));
-      writeLog(0, "正在导入项目：" + path);
+      writeLog(LOG_LEVEL_VERBOSE, "正在导入项目：" + path);
       content.clear();
       if (readImportLocalPath(path, scope_limit, context, content)) {
         // Local content was loaded through the effective scoped/trusted policy.
@@ -521,7 +522,8 @@ int importItems(std::vector<toml::value> &root, const std::string &import_key,
     iter++;
   }
   root.swap(newRoot);
-  writeLog(0, "已导入 " + std::to_string(count) + " 个项目。");
+  writeLog(LOG_LEVEL_VERBOSE,
+           "已导入 " + std::to_string(count) + " 个项目。");
   return failed ? -1 : 0;
 }
 

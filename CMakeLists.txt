@@ -129,6 +129,7 @@ SET(SUBCONVERTER_RUNTIME_SOURCES
     src/handler/statistics.cpp
     src/handler/statistics_v2.cpp
     src/handler/upload.cpp
+    src/handler/user_agent.cpp
     src/handler/version_page.cpp
     src/handler/webget.cpp
     src/handler/proxy_policy.cpp
@@ -268,6 +269,24 @@ ENDIF()
 IF(BUILD_TESTS)
     ENABLE_TESTING()
     FIND_PACKAGE(Python3 COMPONENTS Interpreter REQUIRED)
+
+    ADD_EXECUTABLE(logger_api_contract_test
+        tests/logger_api_contract_test.cpp)
+    TARGET_INCLUDE_DIRECTORIES(logger_api_contract_test PRIVATE src)
+    ADD_TEST(NAME logger_api_contract COMMAND logger_api_contract_test)
+    SET_TESTS_PROPERTIES(logger_api_contract PROPERTIES LABELS fast)
+
+    ADD_EXECUTABLE(user_agent_test
+        tests/user_agent_test.cpp
+        src/handler/user_agent.cpp
+        src/utils/regexp.cpp)
+    TARGET_INCLUDE_DIRECTORIES(user_agent_test PRIVATE src)
+    TARGET_INCLUDE_DIRECTORIES(user_agent_test SYSTEM PRIVATE
+        ${PCRE2_INCLUDE_DIRS})
+    TARGET_LINK_LIBRARIES(user_agent_test ${PCRE2_LIBRARY})
+    TARGET_COMPILE_DEFINITIONS(user_agent_test PRIVATE PCRE2_STATIC)
+    ADD_TEST(NAME user_agent COMMAND user_agent_test)
+    SET_TESTS_PROPERTIES(user_agent PROPERTIES LABELS fast)
 
     ADD_EXECUTABLE(settings_snapshot_test_helper
         ${SUBCONVERTER_RUNTIME_SOURCES}

@@ -161,6 +161,7 @@ GIST_REMOTE_FAILURE_BODY = (
 
 class FixtureHandler(BaseHTTPRequestHandler):
     gist_request_count = 0
+    provider_never_fetch_count = 0
     slow_subscription_started = threading.Event()
     slow_subscription_release = threading.Event()
     slow_ruleset_started = threading.Event()
@@ -169,6 +170,10 @@ class FixtureHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         request_path = urllib.parse.urlsplit(self.path).path
         if request_path == "/subscription.txt":
+            body = ENCODED_SUBSCRIPTION.encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/provider-must-not-fetch.txt":
+            type(self).provider_never_fetch_count += 1
             body = ENCODED_SUBSCRIPTION.encode()
             content_type = "text/plain; charset=utf-8"
         elif request_path == "/mihomo-raw-subscription.txt":
@@ -335,6 +340,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
 @contextlib.contextmanager
 def fixture_server():
     FixtureHandler.gist_request_count = 0
+    FixtureHandler.provider_never_fetch_count = 0
     FixtureHandler.slow_subscription_started.clear()
     FixtureHandler.slow_subscription_release.set()
     FixtureHandler.slow_ruleset_started.clear()
@@ -385,6 +391,22 @@ def request(
             error.read(),
             {key.lower(): value for key, value in error.headers.items()},
         )
+
+
+def assert_vary_header(
+    headers: dict[str, str], field: str, context: str
+) -> None:
+    vary = {
+        value.strip().lower()
+        for value in headers.get("vary", "").split(",")
+        if value.strip()
+    }
+    if field.lower() not in vary:
+        raise AssertionError(f"{context} is missing Vary: {field}")
+
+
+def has_exact_log_event(diagnostics: str, event: str) -> bool:
+    return any(line.rstrip().endswith(event) for line in diagnostics.splitlines())
 
 
 def request_with_raw_headers(
@@ -1624,7 +1646,7 @@ def parser_route_isolation_baseline(base_url: str, fixture_base: str) -> None:
         "config": DISABLE_RULEGEN_CONFIG,
     }
     for target in ("clash", "clashr"):
-        status, body, _ = request(
+        status, body, headers = request(
             base_url,
             "/sub",
             {"target": target, "list": "true", **common},
@@ -1635,6 +1657,7 @@ def parser_route_isolation_baseline(base_url: str, fixture_base: str) -> None:
                 f"explicit {target} did not use the Mihomo-only parser: "
                 f"HTTP {status}: {output!r}"
             )
+        assert_vary_header(headers, "User-Agent", f"explicit {target}")
 
     auto_cases = tuple(
         (user_agent, "clash") for user_agent in CLASH_AUTO_USER_AGENTS
@@ -1643,7 +1666,7 @@ def parser_route_isolation_baseline(base_url: str, fixture_base: str) -> None:
         (user_agent, "clashr") for user_agent in CLASHR_AUTO_USER_AGENTS
     )
     for user_agent, resolved_target in auto_cases:
-        status, body, _ = request(
+        status, body, headers = request(
             base_url,
             "/sub",
             {"target": "auto", "explain": "true", **common},
@@ -1653,6 +1676,9 @@ def parser_route_isolation_baseline(base_url: str, fixture_base: str) -> None:
             raise AssertionError(
                 f"auto {resolved_target} parser route returned HTTP {status}: {body!r}"
             )
+        assert_vary_header(
+            headers, "User-Agent", f"auto {resolved_target} parser route"
+        )
         report = json.loads(body)
         if (
             report.get("target") != resolved_target
@@ -1663,7 +1689,36 @@ def parser_route_isolation_baseline(base_url: str, fixture_base: str) -> None:
                 f"{resolved_target} route: {report!r}"
             )
 
-    status, body, _ = request(
+    non_clash_auto_user_agents = (
+        "Kitsunebi/1.8.0",
+        "Loon/3.2.1",
+        "Pharos/1.0",
+        "Potatso/2.0",
+        "Quantumult%20X/1.4",
+        "Quantumult/2.0",
+        "Qv2ray/2.7",
+        "Shadowrocket/2.2.60",
+        "Surfboard/2.24",
+        "SURGE/906 X86",
+        "Trojan-Qt5/1.4",
+        "V2rayU/3.8",
+        "V2RayX/1.5",
+    )
+    for user_agent in non_clash_auto_user_agents:
+        status, body, headers = request(
+            base_url,
+            "/sub",
+            {"target": "auto", **common},
+            {"User-Agent": user_agent},
+        )
+        if status != 400:
+            raise AssertionError(
+                f"legacy auto UA {user_agent!r} accepted a Mihomo-only URI: "
+                f"HTTP {status}: {body!r}"
+            )
+        assert_vary_header(headers, "User-Agent", f"auto UA {user_agent!r}")
+
+    status, body, headers = request(
         base_url,
         "/sub",
         {"target": "auto", **common},
@@ -1674,9 +1729,10 @@ def parser_route_isolation_baseline(base_url: str, fixture_base: str) -> None:
             "browser UA was incorrectly classified as Clash: "
             f"HTTP {status}: {body!r}"
         )
+    assert_vary_header(headers, "User-Agent", "unrecognized auto target")
 
     for target in LEGACY_ONLY_TARGETS:
-        status, body, _ = request(
+        status, body, headers = request(
             base_url,
             "/sub",
             {"target": target, **common},
@@ -1686,8 +1742,9 @@ def parser_route_isolation_baseline(base_url: str, fixture_base: str) -> None:
                 f"legacy-only target {target} accepted a Mihomo-only URI: "
                 f"HTTP {status}: {body!r}"
             )
+        assert_vary_header(headers, "User-Agent", f"legacy target {target}")
 
-    status, body, _ = request(
+    status, body, headers = request(
         base_url,
         "/sub",
         {"target": "auto", **common},
@@ -1698,8 +1755,9 @@ def parser_route_isolation_baseline(base_url: str, fixture_base: str) -> None:
             "auto Loon route accepted a Mihomo-only URI: "
             f"HTTP {status}: {body!r}"
         )
+    assert_vary_header(headers, "User-Agent", "auto Loon parser error")
 
-    status, body, _ = request(
+    status, body, headers = request(
         base_url,
         "/sub",
         {
@@ -1712,6 +1770,7 @@ def parser_route_isolation_baseline(base_url: str, fixture_base: str) -> None:
         raise AssertionError(
             f"legacy-only parser rejected its direct URI: HTTP {status}: {body!r}"
         )
+    assert_vary_header(headers, "User-Agent", "legacy direct response")
     report = json.loads(body)
     if not any(
         outbound.get("tag") == "LegacyRouteProbe"
@@ -1719,7 +1778,7 @@ def parser_route_isolation_baseline(base_url: str, fixture_base: str) -> None:
     ):
         raise AssertionError("legacy-only direct URI was not expanded by sing-box")
 
-    status, body, _ = request(
+    status, body, headers = request(
         base_url,
         "/sub",
         {
@@ -1734,13 +1793,14 @@ def parser_route_isolation_baseline(base_url: str, fixture_base: str) -> None:
         raise AssertionError(
             f"auto Loon legacy-only route returned HTTP {status}: {body!r}"
         )
+    assert_vary_header(headers, "User-Agent", "auto Loon response")
     report = json.loads(body)
     if report.get("target") != "loon" or report.get("nodes", {}).get("total", 0) < 1:
         raise AssertionError(
             f"auto Loon did not resolve to the legacy-only route: {report!r}"
         )
 
-    status, body, _ = request(
+    status, body, headers = request(
         base_url,
         "/sub",
         {
@@ -1755,8 +1815,9 @@ def parser_route_isolation_baseline(base_url: str, fixture_base: str) -> None:
             "Mihomo-only Clash route accepted a legacy-only URI: "
             f"HTTP {status}: {body!r}"
         )
+    assert_vary_header(headers, "User-Agent", "Clash parser error")
 
-    status, body, _ = request(
+    status, body, headers = request(
         base_url,
         "/sub",
         {
@@ -1772,6 +1833,7 @@ def parser_route_isolation_baseline(base_url: str, fixture_base: str) -> None:
             "Mihomo-only Clash route did not expand a fetched raw URI list: "
             f"HTTP {status}: {output!r}"
         )
+    assert_vary_header(headers, "User-Agent", "Clash fetched list response")
 
 
 def parser_invocation_log_baseline(binary: Path, fixture_base: str) -> None:
@@ -1847,6 +1909,432 @@ def parser_invocation_log_baseline(binary: Path, fixture_base: str) -> None:
             raise AssertionError(
                 f"{expected_parser}-only requests also invoked {forbidden_parser}"
             )
+
+
+def provider_no_fetch_vary_and_route_log_baseline(
+    binary: Path, fixture_base: str
+) -> None:
+    FixtureHandler.provider_never_fetch_count = 0
+    with direct_opener().open(
+        fixture_base + "/provider-must-not-fetch.txt?case=counter-control",
+        timeout=20,
+    ) as response:
+        response.read()
+    if FixtureHandler.provider_never_fetch_count != 1:
+        raise AssertionError("provider fetch fixture counter control failed")
+    FixtureHandler.provider_never_fetch_count = 0
+
+    logs: list[str] = []
+    clash_ua_secret = "clash-ua-secret-must-not-reach-logs"
+    clashr_ua_secret = "clashr-ua-secret-must-not-reach-logs"
+    unknown_ua_secret = "unknown-ua-secret-must-not-reach-logs"
+    fixture_source = fixture_base + "/provider-must-not-fetch.txt"
+    cases = (
+        ("clash", {}, fixture_source + "?case=explicit-clash"),
+        ("clashr", {}, fixture_source + "?case=explicit-clashr"),
+        (
+            "auto",
+            {
+                "User-Agent": (
+                    "ClashMetaForAndroid/2.11.32.Meta " + clash_ua_secret
+                )
+            },
+            fixture_source + "?case=auto-clash",
+        ),
+        (
+            "auto",
+            {
+                "User-Agent": (
+                    "ClashForAndroid/1.3.3R2 " + clashr_ua_secret
+                )
+            },
+            fixture_source + "?case=auto-clashr",
+        ),
+        ("clash", {}, "https://127.0.0.1:1/provider-must-not-connect"),
+    )
+    with running_service(
+        binary, log_capture=logs, log_level="verbose"
+    ) as base_url:
+        for target, headers, source in cases:
+            status, body, response_headers = request(
+                base_url,
+                "/sub",
+                {
+                    "target": target,
+                    "url": source,
+                    "config": DISABLE_RULEGEN_CONFIG,
+                },
+                headers,
+            )
+            output = body.decode("utf-8", errors="replace")
+            if status != 200 or "proxy-providers:" not in output:
+                raise AssertionError(
+                    f"{target} provider-only route returned HTTP {status}: "
+                    f"{output!r}"
+                )
+            assert_vary_header(
+                response_headers, "User-Agent", f"{target} provider response"
+            )
+        head_status, head_body, head_headers = request(
+            base_url,
+            "/sub",
+            {
+                "target": "clash",
+                "url": fixture_base + "/provider-must-not-fetch.txt?case=head",
+                "config": DISABLE_RULEGEN_CONFIG,
+            },
+            method="HEAD",
+        )
+        if head_status != 200 or head_body:
+            raise AssertionError(
+                f"provider HEAD route returned HTTP {head_status}: {head_body!r}"
+            )
+        assert_vary_header(head_headers, "User-Agent", "provider HEAD response")
+
+        bad_status, _, bad_headers = request(
+            base_url,
+            "/sub",
+            {
+                "target": "auto",
+                "url": fixture_base + "/provider-must-not-fetch.txt?case=bad-auto",
+                "config": DISABLE_RULEGEN_CONFIG,
+            },
+            {"User-Agent": "Mozilla/5.0 " + unknown_ua_secret},
+        )
+        if bad_status != 400:
+            raise AssertionError(
+                f"unrecognized auto target returned HTTP {bad_status}, expected 400"
+            )
+        assert_vary_header(bad_headers, "User-Agent", "auto-target error")
+
+        dead_status, _, _ = request(base_url, "/surge2clash")
+        if dead_status != 404:
+            raise AssertionError(
+                f"unregistered /surge2clash route changed to HTTP {dead_status}"
+            )
+
+    diagnostics = "".join(logs)
+    if FixtureHandler.provider_never_fetch_count != 0:
+        raise AssertionError(
+            "provider-only /sub request downloaded its remote subscription: "
+            f"count={FixtureHandler.provider_never_fetch_count}"
+        )
+    if "NODE_PARSER_INVOKE" in diagnostics:
+        raise AssertionError("provider-only /sub request invoked a node parser")
+    for target in ("clash", "clashr"):
+        for source in ("explicit", "auto"):
+            event = (
+                f"SUB_ROUTE_RESULT target={target} source={source} "
+                "route=proxy-provider parser_policy=mihomo parser=none "
+                "provider_count=1 source_calls=0 source_failures=0 "
+                "parser_calls=0 parser_failures=0"
+            )
+            if not has_exact_log_event(diagnostics, event):
+                raise AssertionError(
+                    f"provider-only route observability is missing {event!r}"
+                )
+    if (
+        not has_exact_log_event(
+            diagnostics,
+            "AUTO_TARGET_RESOLVED target=clash parser=mihomo ua_family=clash",
+        )
+        or not has_exact_log_event(
+            diagnostics,
+            "AUTO_TARGET_RESOLVED target=clashr parser=mihomo "
+            "ua_family=clash-for-android-r",
+        )
+    ):
+        raise AssertionError("safe auto-target resolution events are incomplete")
+    for secret in (clash_ua_secret, clashr_ua_secret, unknown_ua_secret):
+        if secret in diagnostics:
+            raise AssertionError("raw User-Agent data leaked into auto-target logs")
+    if not has_exact_log_event(
+        diagnostics, "AUTO_TARGET_UNRESOLVED ua_family=unknown"
+    ):
+        raise AssertionError("unrecognized auto-target event is missing")
+
+
+def parser_failure_level_and_mixed_request_baseline(binary: Path) -> None:
+    for log_level in ("info", "error"):
+        failure_logs: list[str] = []
+        with running_service(
+            binary, log_capture=failure_logs, log_level=log_level
+        ) as base_url:
+            for target, invalid_uri in (
+                ("clash", LEGACY_ONLY_ROUTE_URI),
+                ("singbox", MIHOMO_ONLY_ROUTE_URI),
+            ):
+                status, _, headers = request(
+                    base_url,
+                    "/sub",
+                    {
+                        "target": target,
+                        "url": invalid_uri,
+                        "config": DISABLE_RULEGEN_CONFIG,
+                        **({"list": "true"} if target == "clash" else {}),
+                    },
+                )
+                if status != 400:
+                    raise AssertionError(
+                        f"{target} invalid parser probe returned HTTP {status} "
+                        f"at log_level={log_level}"
+                    )
+                assert_vary_header(
+                    headers,
+                    "User-Agent",
+                    f"{target} parser error at {log_level}",
+                )
+
+        failure_diagnostics = "".join(failure_logs)
+        for parser in ("mihomo", "legacy"):
+            if (
+                f"[ERRO] NODE_PARSER_FAILED parser={parser}"
+                not in failure_diagnostics
+            ):
+                raise AssertionError(
+                    f"{parser} parser failure is not visible at {log_level}"
+                )
+            if (
+                f"[VERB] NODE_PARSER_FAILED parser={parser}"
+                in failure_diagnostics
+            ):
+                raise AssertionError(
+                    f"{parser} parser failure is mislabeled verbose at {log_level}"
+                )
+
+    logs: list[str] = []
+    legacy_ua_secret = "legacy-ua-secret-must-not-reach-logs"
+    with running_service(binary, log_capture=logs, log_level="info") as base_url:
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "auto",
+                "url": LEGACY_ONLY_ROUTE_URI,
+                "config": DISABLE_RULEGEN_CONFIG,
+            },
+            {"User-Agent": "Loon/3.2.1 " + legacy_ua_secret},
+        )
+        if status != 200 or b"LegacyRouteProbe" not in body:
+            raise AssertionError(
+                f"safe legacy auto-target log probe failed: HTTP {status}: {body!r}"
+            )
+
+        mixed_cases = (
+            (
+                "clash",
+                MIHOMO_ONLY_ROUTE_URI + "|" + LEGACY_ONLY_ROUTE_URI,
+                "RouteProbe",
+            ),
+            (
+                "clash",
+                LEGACY_ONLY_ROUTE_URI + "|" + MIHOMO_ONLY_ROUTE_URI,
+                "RouteProbe",
+            ),
+            (
+                "singbox",
+                LEGACY_ONLY_ROUTE_URI + "|" + MIHOMO_ONLY_ROUTE_URI,
+                "LegacyRouteProbe",
+            ),
+            (
+                "singbox",
+                MIHOMO_ONLY_ROUTE_URI + "|" + LEGACY_ONLY_ROUTE_URI,
+                "LegacyRouteProbe",
+            ),
+        )
+        for target, url, marker in mixed_cases:
+            params = {
+                "target": target,
+                "url": url,
+                "config": DISABLE_RULEGEN_CONFIG,
+            }
+            if target == "clash":
+                params["list"] = "true"
+            status, body, headers = request(base_url, "/sub", params)
+            output = body.decode("utf-8", errors="replace")
+            if status != 200 or marker not in output:
+                raise AssertionError(
+                    f"{target} mixed valid/invalid request returned HTTP {status}: "
+                    f"{output!r}"
+                )
+            if target == "clash" and "LegacyRouteProbe" in output:
+                raise AssertionError("Clash mixed request fell back to legacy parser")
+            if target == "singbox":
+                report = json.loads(body)
+                tags = {
+                    outbound.get("tag")
+                    for outbound in report.get("outbounds", [])
+                    if isinstance(outbound, dict)
+                }
+                if "RouteProbe" in tags:
+                    raise AssertionError(
+                        "legacy mixed request fell back to Mihomo parser"
+                    )
+            assert_vary_header(headers, "User-Agent", f"{target} mixed response")
+
+    diagnostics = "".join(logs)
+    for parser in ("mihomo", "legacy"):
+        route_event = (
+            f"route=node-parser parser_policy={parser} parser={parser} "
+            "provider_count=0 source_calls=2 source_failures=1 "
+            "parser_calls=2 parser_failures=1"
+        )
+        if route_event not in diagnostics:
+            raise AssertionError(
+                f"mixed-request route summary is missing for {parser}"
+            )
+    if "NODE_PARSER_INVOKE" in diagnostics:
+        raise AssertionError("verbose parser invocation leaked into info logging")
+    if legacy_ua_secret in diagnostics:
+        raise AssertionError("raw legacy User-Agent leaked into logs")
+    if not has_exact_log_event(
+        diagnostics,
+        "AUTO_TARGET_RESOLVED target=loon parser=legacy ua_family=loon",
+    ):
+        raise AssertionError("safe legacy auto-target event is missing")
+
+
+def insert_url_parser_route_baseline(binary: Path, fixture_base: str) -> None:
+    logs: list[str] = []
+    replacement = (
+        'insert_url = ["' + MIHOMO_ONLY_ROUTE_URI.replace('"', '\\"') + '"]'
+    )
+    with running_service(
+        binary,
+        log_capture=logs,
+        log_level="info",
+        config_replacements=(("insert_url = []", replacement),),
+    ) as base_url:
+        status, body, headers = request(
+            base_url,
+            "/sub",
+            {
+                "target": "auto",
+                "url": fixture_base + "/provider-must-not-fetch.txt?case=insert",
+                "config": DISABLE_RULEGEN_CONFIG,
+                "insert": "true",
+            },
+            {"User-Agent": "clash.meta/1.19.29"},
+        )
+        output = body.decode("utf-8", errors="replace")
+        if (
+            status != 200
+            or "RouteProbe" not in output
+            or "proxy-providers:" not in output
+        ):
+            raise AssertionError(
+                f"auto Clash insert URL did not inherit Mihomo: HTTP {status}: "
+                f"{output!r}"
+            )
+        assert_vary_header(headers, "User-Agent", "auto Clash insert response")
+
+        status, body, headers = request(
+            base_url,
+            "/sub",
+            {
+                "target": "auto",
+                "url": LEGACY_ONLY_ROUTE_URI,
+                "config": DISABLE_RULEGEN_CONFIG,
+                "insert": "true",
+            },
+            {"User-Agent": "Loon/3.2.1"},
+        )
+        if status != 400:
+            raise AssertionError(
+                f"auto Loon insert URL unexpectedly used Mihomo: HTTP {status}: "
+                f"{body!r}"
+            )
+        assert_vary_header(headers, "User-Agent", "auto Loon insert error")
+        if MIHOMO_ONLY_ROUTE_URI.encode() in body:
+            raise AssertionError("configured insert URI leaked into an HTTP error")
+
+    diagnostics = "".join(logs)
+    if (
+        "SUB_ROUTE_RESULT target=clash source=auto route=hybrid "
+        "parser_policy=mihomo parser=mihomo provider_count=1 "
+        "source_calls=1 source_failures=0 parser_calls=1 parser_failures=0"
+        not in diagnostics
+    ):
+        raise AssertionError("auto Clash insert route summary is missing")
+    if (
+        "SUB_ROUTE_RESULT target=loon source=auto route=node-parser "
+        "parser_policy=legacy parser=legacy provider_count=0 "
+        "source_calls=1 source_failures=1 parser_calls=1 parser_failures=1"
+        not in diagnostics
+    ):
+        raise AssertionError("auto Loon insert route summary is missing")
+    if "user:pass" in diagnostics:
+        raise AssertionError("configured insert credentials leaked into logs")
+
+
+def vary_cache_and_coalesce_baseline(binary: Path, fixture_base: str) -> None:
+    logs: list[str] = []
+    with running_service(
+        binary,
+        log_capture=logs,
+        log_level="debug",
+        config_replacements=(("response_cache_ttl = 0", "response_cache_ttl = 5"),),
+    ) as base_url:
+        cached_params = {
+            "target": "clash",
+            "url": MIHOMO_ONLY_ROUTE_URI,
+            "config": DISABLE_RULEGEN_CONFIG,
+            "list": "true",
+        }
+        for label in ("cache owner", "microcache hit"):
+            status, body, headers = request(base_url, "/sub", cached_params)
+            if status != 200 or b"RouteProbe" not in body:
+                raise AssertionError(
+                    f"{label} response failed: HTTP {status}: {body!r}"
+                )
+            assert_vary_header(headers, "User-Agent", label)
+
+        FixtureHandler.slow_subscription_started.clear()
+        FixtureHandler.slow_subscription_release.clear()
+        results: list[tuple[int, bytes, dict[str, str]]] = []
+        errors: list[BaseException] = []
+        slow_params = {
+            "target": "singbox",
+            "url": fixture_base + "/slow-subscription.txt?case=coalesce-vary",
+            "config": DISABLE_RULEGEN_CONFIG,
+        }
+
+        def run_request() -> None:
+            try:
+                results.append(request(base_url, "/sub", slow_params))
+            except BaseException as error:
+                errors.append(error)
+
+        owner = threading.Thread(target=run_request)
+        waiter = threading.Thread(target=run_request)
+        owner.start()
+        if not FixtureHandler.slow_subscription_started.wait(timeout=10):
+            FixtureHandler.slow_subscription_release.set()
+            owner.join(timeout=5)
+            raise AssertionError("coalesce owner did not reach the slow fixture")
+        waiter.start()
+        time.sleep(0.2)
+        FixtureHandler.slow_subscription_release.set()
+        owner.join(timeout=20)
+        waiter.join(timeout=20)
+        if owner.is_alive() or waiter.is_alive():
+            raise AssertionError("coalesced Vary probes did not finish")
+        if errors:
+            raise errors[0]
+        if len(results) != 2:
+            raise AssertionError("coalesced Vary probe did not return two responses")
+        for status, body, headers in results:
+            if status != 200 or b"Smoke" not in body:
+                raise AssertionError(
+                    f"coalesced response failed: HTTP {status}: {body!r}"
+                )
+            assert_vary_header(headers, "User-Agent", "coalesced waiter")
+
+    diagnostics = "".join(logs)
+    if "/sub 响应微缓存命中。" not in diagnostics:
+        raise AssertionError("microcache Vary probe did not hit the response cache")
+    if "/sub 请求已合并到正在执行的同 key 转换。" not in diagnostics:
+        raise AssertionError("coalesced Vary probe did not exercise a waiter")
 
 
 def provider_block_from_output(output: str, provider_name: str) -> str:
@@ -3852,6 +4340,10 @@ def main() -> int:
 
     with fixture_server() as fixture_base:
         parser_invocation_log_baseline(binary, fixture_base)
+        provider_no_fetch_vary_and_route_log_baseline(binary, fixture_base)
+        parser_failure_level_and_mixed_request_baseline(binary)
+        insert_url_parser_route_baseline(binary, fixture_base)
+        vary_cache_and_coalesce_baseline(binary, fixture_base)
         with running_service(binary) as base_url:
             conversion_baselines(base_url, fixture_base, args.update_golden)
             parser_route_isolation_baseline(base_url, fixture_base)

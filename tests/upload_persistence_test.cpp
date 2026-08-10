@@ -64,9 +64,9 @@ struct TemporaryWorkingDirectory {
 
 } // namespace
 
-bool shouldLog(int) { return true; }
+bool shouldLog(LogLevel) { return true; }
 
-void writeLog(int, const std::string &content, int) {
+void writeLog(LogLevel, const std::string &content) {
   captured_logs += content + "\n";
 }
 

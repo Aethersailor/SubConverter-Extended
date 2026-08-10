@@ -52,7 +52,7 @@ struct Settings {
   // accessToken removed - token authentication is disabled
   std::string basePath = "base";
   std::string custom_group;
-  int logLevel = LOG_LEVEL_VERBOSE;
+  LogLevel logLevel = LOG_LEVEL_VERBOSE;
   long maxAllowedDownloadSize = 1048576L;
   string_map aliases;
   std::string serveFileRoot;

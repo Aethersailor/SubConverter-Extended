@@ -745,10 +745,9 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
         }
         catch (std::exception &e)
         {
-            writeLog(0,
+            writeLog(LOG_LEVEL_ERROR,
                      "CLASH_SCRIPT_RENDER_FAILED detail=" +
-                         summarizeSensitiveTextForLog(e.what()),
-                     LOG_TYPE_ERROR);
+                         summarizeSensitiveTextForLog(e.what()));
             if(stats)
                 stats->add(local_stats.rules);
             return -1;
