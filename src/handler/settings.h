@@ -8,6 +8,7 @@
 #include "config/regmatch.h"
 #include "config/ruleset.h"
 #include "handler/fetch_context.h"
+#include "handler/proxy_policy.h"
 #include "generator/config/ruleconvert.h"
 #include "generator/template/templates.h"
 #include "utils/logger.h"
@@ -81,7 +82,7 @@ struct Settings {
   bool clashUseNewField = false, singBoxAddClashModes = true;
   std::string clashProxiesStyle = "flow", clashProxyGroupsStyle = "block";
   std::string proxyConfig, proxyRuleset, proxySubscription;
-  std::string proxyBypass = "LOOPBACK";
+  std::string proxyBypass = kDefaultProxyBypass;
   int updateInterval = 0;
   int proxyProviderInterval = kDefaultProxyProviderInterval;
   bool proxyProviderDirect = kDefaultProxyProviderDirect;

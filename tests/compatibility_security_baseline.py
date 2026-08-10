@@ -4510,6 +4510,7 @@ def common_scalar_binding_compatibility_baseline(helper: Path) -> None:
         configured_snapshots: list[dict[str, object]] = []
         configured_paths: dict[str, Path] = {}
         empty_snapshots: list[dict[str, object]] = []
+        legacy_snapshots: list[dict[str, object]] = []
         for fixture_name in (
             "legacy-pref.ini",
             "legacy-pref.yml",
@@ -4517,6 +4518,12 @@ def common_scalar_binding_compatibility_baseline(helper: Path) -> None:
         ):
             original = COMPAT_FIXTURES / fixture_name
             content = original.read_text(encoding="utf-8")
+            if re.search(field_pattern(original.suffix, "proxy_bypass"), content):
+                raise AssertionError(
+                    f"legacy compatibility fixture unexpectedly contains "
+                    f"proxy_bypass: {fixture_name}"
+                )
+            legacy_snapshots.append(load_settings_snapshot(helper, original))
             configured = temporary_path / ("common-scalars-" + fixture_name)
             configured.write_text(
                 configure(content, original.suffix),
@@ -4536,6 +4543,16 @@ def common_scalar_binding_compatibility_baseline(helper: Path) -> None:
 
         if configured_snapshots[1:] != configured_snapshots[:1] * 2:
             raise AssertionError("INI/YAML/TOML common scalar bindings differ")
+        if legacy_snapshots[1:] != legacy_snapshots[:1] * 2:
+            raise AssertionError("legacy INI/YAML/TOML defaults differ")
+        if any(
+            snapshot["proxies"]["bypass"] != "LOOPBACK,PRIVATE"
+            for snapshot in legacy_snapshots
+        ):
+            raise AssertionError(
+                "legacy preferences without proxy_bypass did not use "
+                "the LOOPBACK+PRIVATE default"
+            )
         common = configured_snapshots[0]["common"]
         proxies = configured_snapshots[0]["proxies"]
         expected_rule_bases = {
@@ -4569,9 +4586,9 @@ def common_scalar_binding_compatibility_baseline(helper: Path) -> None:
         for suffix, configured in configured_paths.items():
             original = COMPAT_FIXTURES / ("legacy-pref" + suffix)
             reloaded = reload_settings_snapshot(helper, configured, original)
-            if reloaded["proxies"]["bypass"] != "LOOPBACK":
+            if reloaded["proxies"]["bypass"] != "LOOPBACK,PRIVATE":
                 raise AssertionError(
-                    f"{suffix} removal did not restore LOOPBACK proxy_bypass"
+                    f"{suffix} removal did not restore the default proxy_bypass"
                 )
 
             invalid_bypass = temporary_path / ("invalid-bypass-pref" + suffix)

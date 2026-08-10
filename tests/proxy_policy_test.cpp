@@ -51,6 +51,17 @@ int main() {
   assert(direct.cacheIdentity() != system.cacheIdentity());
   assert(explicit_one.cacheIdentity() != explicit_two.cacheIdentity());
   assert(direct.cacheIdentity() != explicit_one.cacheIdentity());
+  assert(explicit_one.bypass.describe() == "LOOPBACK,PRIVATE");
+  assert(explicit_one.bypass.matchHost("127.0.0.1").matched);
+  assert(explicit_one.bypass.matchHost("10.0.0.1").matched);
+  assert(explicit_one.bypass.matchHost("172.31.255.255").matched);
+  assert(explicit_one.bypass.matchHost("192.168.255.255").matched);
+  assert(explicit_one.bypass.matchHost("fd12:3456::1").matched);
+
+  const ProxyPolicy explicit_loopback =
+      parseProxy("socks5://loopback.example.test:1080", "LOOPBACK");
+  assert(explicit_loopback.bypass.describe() == "LOOPBACK");
+  assert(!explicit_loopback.bypass.matchHost("192.168.1.1").matched);
 
   const ProxyBypassPolicy loopback = ProxyBypassPolicy::parse("LOOPBACK");
   assert(loopback.valid);
