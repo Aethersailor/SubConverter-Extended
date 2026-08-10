@@ -405,6 +405,35 @@ def assert_vary_header(
         raise AssertionError(f"{context} is missing Vary: {field}")
 
 
+def assert_request_id(headers: dict[str, str], context: str) -> str:
+    request_id = headers.get("x-request-id", "")
+    if re.fullmatch(r"[0-9a-f]{32}", request_id) is None:
+        raise AssertionError(f"{context} has an invalid X-Request-ID: {request_id!r}")
+    exposed = {
+        value.strip().lower()
+        for value in headers.get("access-control-expose-headers", "").split(",")
+        if value.strip()
+    }
+    if "x-request-id" not in exposed:
+        raise AssertionError(f"{context} does not expose X-Request-ID")
+    return request_id
+
+
+def assert_coalesced_request_link(
+    diagnostics: str, response_ids: list[str], context: str
+) -> None:
+    ids = set(response_ids)
+    links = re.findall(
+        r"request_id=([0-9a-f]{32}) SUB_REQUEST_COALESCED "
+        r"owner_request_id=([0-9a-f]{32})",
+        diagnostics,
+    )
+    if not any(waiter in ids and owner in ids and waiter != owner for waiter, owner in links):
+        raise AssertionError(
+            f"{context} did not link a waiter request ID to its owner: {links!r}"
+        )
+
+
 def has_exact_log_event(diagnostics: str, event: str) -> bool:
     return any(line.rstrip().endswith(event) for line in diagnostics.splitlines())
 
@@ -744,13 +773,143 @@ def load_settings_snapshot(
     return snapshot
 
 
-def reload_settings_snapshot(
+def early_log_level_parsing_baseline(helper: Path) -> None:
+    replacements = {
+        ".ini": (("log_level=info", "log_level=error"),
+                 ("print_debug_info=false", "print_debug_info=true")),
+        ".yml": (("  log_level: info", "  log_level: error"),
+                 ("  print_debug_info: false", "  print_debug_info: true")),
+        ".toml": (('log_level = "info"', 'log_level = "error"'),
+                  ("print_debug_info = false", "print_debug_info = true")),
+    }
+    with tempfile.TemporaryDirectory(
+        dir=REPOSITORY / "build", prefix="log-level-baseline-"
+    ) as temporary:
+        temporary_path = Path(temporary)
+        text_import = temporary_path / "early-emoji.txt"
+        text_import.write_text(
+            "EarlyImport,\U0001f50e\n", encoding="utf-8", newline="\n"
+        )
+        toml_import = temporary_path / "early-emoji.toml"
+        toml_import.write_text(
+            '[[emoji]]\nmatch = "EarlyImport"\nemoji = "\U0001f50e"\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        def with_real_import(content: str, suffix: str) -> str:
+            if suffix == ".ini":
+                return (
+                    content
+                    + "\n[emojis]\nadd_emoji=false\nremove_old_emoji=false\n"
+                    + f"rule=!!import:{text_import.as_posix()}\n"
+                )
+            if suffix == ".yml":
+                return (
+                    content
+                    + "\nemojis:\n  add_emoji: false\n"
+                    + "  remove_old_emoji: false\n  rules:\n"
+                    + f"    - {{import: {json.dumps(text_import.as_posix())}}}\n"
+                )
+            if suffix == ".toml":
+                marker = "remove_old_emoji = false"
+                if marker not in content:
+                    raise AssertionError("TOML emoji insertion marker is missing")
+                return content.replace(
+                    marker,
+                    marker
+                    + "\nemoji = [{ import = "
+                    + json.dumps(toml_import.as_posix())
+                    + " }]",
+                    1,
+                )
+            raise AssertionError(f"unsupported config suffix: {suffix}")
+
+        for fixture_name in (
+            "legacy-pref.ini",
+            "legacy-pref.yml",
+            "legacy-pref.toml",
+        ):
+            fixture = COMPAT_FIXTURES / fixture_name
+            content = fixture.read_text(encoding="utf-8")
+            log_replacement, debug_replacement = replacements[fixture.suffix]
+            if log_replacement[0] not in content or debug_replacement[0] not in content:
+                raise AssertionError(
+                    f"log-level fixture fields are missing from {fixture_name}"
+                )
+
+            imported_content = with_real_import(content, fixture.suffix)
+            error_fixture = temporary_path / ("error-" + fixture_name)
+            error_fixture.write_text(
+                imported_content.replace(*log_replacement, 1),
+                encoding="utf-8",
+                newline="\n",
+            )
+            error_snapshot, error_logs = run_settings_snapshot(helper, error_fixture)
+            if error_snapshot["node_pref"]["emoji_rule_count"] != 1:
+                raise AssertionError(
+                    f"{fixture.suffix} did not execute the real pre-advanced import"
+                )
+            if "[VERB]" in error_logs or "正在导入项目：" in error_logs:
+                raise AssertionError(
+                    f"{fixture.suffix} applied log_level after import diagnostics"
+                )
+            if "已加载 " in error_logs:
+                raise AssertionError(
+                    f"{fixture.suffix} did not apply log_level=error"
+                )
+
+            debug_fixture = temporary_path / ("debug-" + fixture_name)
+            debug_fixture.write_text(
+                imported_content.replace(*log_replacement, 1).replace(
+                    *debug_replacement, 1
+                ),
+                encoding="utf-8",
+                newline="\n",
+            )
+            debug_snapshot, debug_logs = run_settings_snapshot(helper, debug_fixture)
+            if debug_snapshot["node_pref"]["emoji_rule_count"] != 1:
+                raise AssertionError(
+                    f"{fixture.suffix} debug load skipped the real import"
+                )
+            if (
+                "LOG_LEVEL_CONFIGURED level=verbose "
+                "print_debug_info=true phase=pre-import"
+                not in debug_logs
+                or "正在导入项目：" not in debug_logs
+                or "已导入 1 个项目。" not in debug_logs
+            ):
+                raise AssertionError(
+                    f"{fixture.suffix} print_debug_info did not enable early verbose logs"
+                )
+
+            invalid_value = '"none"' if fixture.suffix == ".toml" else "none"
+            invalid_fixture = temporary_path / ("invalid-reload-" + fixture_name)
+            invalid_fixture.write_text(
+                add_proxy_provider_direct(
+                    imported_content.replace(*log_replacement, 1),
+                    fixture.suffix,
+                    invalid_value,
+                ),
+                encoding="utf-8",
+                newline="\n",
+            )
+            _, reload_logs = run_reload_settings_snapshot(
+                helper, debug_fixture, invalid_fixture, expect_failure=True
+            )
+            if "SETTINGS_RELOAD_LEVEL_PROBE" not in reload_logs:
+                raise AssertionError(
+                    f"{fixture.suffix} failed reload did not restore verbose logging"
+                )
+
+
+def run_reload_settings_snapshot(
     helper: Path,
     first: Path,
     second: Path,
     *,
     expect_failure: bool = False,
-) -> dict[str, object]:
+) -> tuple[dict[str, object], str]:
     command = [str(helper), str(first), str(second)]
     if expect_failure:
         command.append("--expect-reload-failure")
@@ -778,7 +937,20 @@ def reload_settings_snapshot(
             f"exit {completed.returncode}; stderr tail: "
             f"{completed.stderr[-8000:]!r}"
         )
-    return json.loads(completed.stdout)
+    return json.loads(completed.stdout), completed.stderr
+
+
+def reload_settings_snapshot(
+    helper: Path,
+    first: Path,
+    second: Path,
+    *,
+    expect_failure: bool = False,
+) -> dict[str, object]:
+    snapshot, _ = run_reload_settings_snapshot(
+        helper, first, second, expect_failure=expect_failure
+    )
+    return snapshot
 
 
 def security_environment() -> dict[str, str]:
@@ -1339,6 +1511,47 @@ def runtime_cli_isolation_baseline(binary: Path) -> None:
                     f"{marker.decode()} instead of preserving legacy "
                     "unknown-argument behavior"
                 )
+
+
+def log_redirection_baseline(binary: Path) -> None:
+    with tempfile.TemporaryDirectory(
+        dir=REPOSITORY / "build", prefix="log-redirection-"
+    ) as temporary:
+        temporary_path = Path(temporary)
+        redirected_log = temporary_path / "service.log"
+        redirected_log.write_text("preexisting-log-line\n", encoding="utf-8")
+        with running_service(
+            binary,
+            extra_args=("-l", str(redirected_log)),
+        ) as base_url:
+            status, body, headers = request(base_url, "/healthz")
+            if status != 200 or body.strip() != b"ok":
+                raise AssertionError("service failed after log redirection")
+            assert_request_id(headers, "redirected log health response")
+        redirected = redirected_log.read_text(encoding="utf-8", errors="replace")
+        if not redirected.startswith("preexisting-log-line\n"):
+            raise AssertionError("-l did not preserve existing log content")
+        if "LOG_REDIRECT_ACTIVE mode=append rotation=external" not in redirected:
+            raise AssertionError("successful -l redirection lacks its stable event")
+        if "HTTP_RESPONSE_PREPARED" not in redirected:
+            raise AssertionError("redirected log lost HTTP diagnostics")
+
+        failed_logs: list[str] = []
+        secret_directory = temporary_path / "redirect-path-secret"
+        secret_directory.mkdir()
+        with running_service(
+            binary,
+            extra_args=("-l", str(secret_directory)),
+            log_capture=failed_logs,
+        ) as base_url:
+            status, body, _ = request(base_url, "/healthz")
+            if status != 200 or body.strip() != b"ok":
+                raise AssertionError("failed -l redirection broke stderr or startup")
+        diagnostics = "".join(failed_logs)
+        if "LOG_REDIRECT_FAILED" not in diagnostics:
+            raise AssertionError("failed -l redirection lacks its stable event")
+        if "redirect-path-secret" in diagnostics:
+            raise AssertionError("failed -l redirection leaked the configured path")
 
 
 def normalize_output(content: bytes, fixture_base: str) -> str:
@@ -1990,6 +2203,7 @@ def provider_no_fetch_vary_and_route_log_baseline(
                 f"provider HEAD route returned HTTP {head_status}: {head_body!r}"
             )
         assert_vary_header(head_headers, "User-Agent", "provider HEAD response")
+        assert_request_id(head_headers, "provider HEAD response")
 
         bad_status, _, bad_headers = request(
             base_url,
@@ -2087,16 +2301,18 @@ def parser_failure_level_and_mixed_request_baseline(binary: Path) -> None:
 
         failure_diagnostics = "".join(failure_logs)
         for parser in ("mihomo", "legacy"):
-            if (
-                f"[ERRO] NODE_PARSER_FAILED parser={parser}"
-                not in failure_diagnostics
+            if not any(
+                "[ERRO]" in line
+                and f"NODE_PARSER_FAILED parser={parser}" in line
+                for line in failure_diagnostics.splitlines()
             ):
                 raise AssertionError(
                     f"{parser} parser failure is not visible at {log_level}"
                 )
-            if (
-                f"[VERB] NODE_PARSER_FAILED parser={parser}"
-                in failure_diagnostics
+            if any(
+                "[VERB]" in line
+                and f"NODE_PARSER_FAILED parser={parser}" in line
+                for line in failure_diagnostics.splitlines()
             ):
                 raise AssertionError(
                     f"{parser} parser failure is mislabeled verbose at {log_level}"
@@ -2281,6 +2497,7 @@ def vary_cache_and_coalesce_baseline(binary: Path, fixture_base: str) -> None:
             "config": DISABLE_RULEGEN_CONFIG,
             "list": "true",
         }
+        cached_request_ids: list[str] = []
         for label in ("cache owner", "microcache hit"):
             status, body, headers = request(base_url, "/sub", cached_params)
             if status != 200 or b"RouteProbe" not in body:
@@ -2288,6 +2505,9 @@ def vary_cache_and_coalesce_baseline(binary: Path, fixture_base: str) -> None:
                     f"{label} response failed: HTTP {status}: {body!r}"
                 )
             assert_vary_header(headers, "User-Agent", label)
+            cached_request_ids.append(assert_request_id(headers, label))
+        if len(set(cached_request_ids)) != len(cached_request_ids):
+            raise AssertionError("microcache reused the owner request ID")
 
         FixtureHandler.slow_subscription_started.clear()
         FixtureHandler.slow_subscription_release.clear()
@@ -2323,18 +2543,483 @@ def vary_cache_and_coalesce_baseline(binary: Path, fixture_base: str) -> None:
             raise errors[0]
         if len(results) != 2:
             raise AssertionError("coalesced Vary probe did not return two responses")
+        coalesced_request_ids: list[str] = []
         for status, body, headers in results:
             if status != 200 or b"Smoke" not in body:
                 raise AssertionError(
                     f"coalesced response failed: HTTP {status}: {body!r}"
                 )
             assert_vary_header(headers, "User-Agent", "coalesced waiter")
+            coalesced_request_ids.append(
+                assert_request_id(headers, "coalesced waiter")
+            )
+        if len(set(coalesced_request_ids)) != len(coalesced_request_ids):
+            raise AssertionError("coalesced responses reused the owner request ID")
 
     diagnostics = "".join(logs)
     if "/sub 响应微缓存命中。" not in diagnostics:
         raise AssertionError("microcache Vary probe did not hit the response cache")
-    if "/sub 请求已合并到正在执行的同 key 转换。" not in diagnostics:
-        raise AssertionError("coalesced Vary probe did not exercise a waiter")
+    assert_coalesced_request_link(
+        diagnostics, coalesced_request_ids, "coalesced Vary probe"
+    )
+
+
+def explain_privacy_and_cache_baseline(binary: Path, fixture_base: str) -> None:
+    logs: list[str] = []
+    configured_device_secret = "configured-device-secret"
+    request_secrets = (
+        configured_device_secret,
+        "upload-path-secret",
+        "groups-secret",
+        "ruleset-secret",
+        "rename-secret",
+        "profile-secret",
+        "profile-query-secret",
+        "token-secret",
+        "unknown-secret",
+        "unicode-unknown-secret",
+        "provider-source-secret",
+        "anonymous-provider-secret",
+        "early-error-secret",
+    )
+    response_ids: list[str] = []
+    with running_service(
+        binary,
+        log_capture=logs,
+        log_level="debug",
+        config_replacements=(
+            (
+                'quanx_device_id = ""',
+                f'quanx_device_id = "{configured_device_secret}"',
+            ),
+            ("write_managed_config = false", "write_managed_config = true"),
+            ("response_cache_ttl = 0", "response_cache_ttl = 5"),
+        ),
+    ) as base_url:
+        inspect_status, inspect_body, inspect_headers = request(
+            base_url, "/inspect", {}
+        )
+        inspect_text = inspect_body.decode("utf-8", errors="replace")
+        if (
+            inspect_status != 200
+            or "Source summary" not in inspect_text
+            or "来源摘要" not in inspect_text
+            or 'response.headers.get("X-Request-ID")' not in inspect_text
+            or "Source hash" in inspect_text
+        ):
+            raise AssertionError("/inspect page diagnostics contract is stale")
+        assert_request_id(inspect_headers, "/inspect page")
+
+        params = {
+            "target": "clash",
+            "url": MIHOMO_ONLY_ROUTE_URI,
+            "config": DISABLE_RULEGEN_CONFIG,
+            "list": "true",
+            "explain": "true",
+            "dev_id": "",
+            "upload_path": "upload-path-secret",
+            "groups": "groups-secret",
+            "ruleset": "ruleset-secret",
+            "rename": "rename-secret",
+            "profile_data": "profile-secret",
+            "token": "token-secret",
+            "private_api_key": "unknown-secret",
+            "怪<script>": "unicode-unknown-secret",
+        }
+        reports: list[dict[str, object]] = []
+        for label in ("explain first", "explain repeated"):
+            status, body, headers = request(base_url, "/sub", params)
+            if status != 200:
+                raise AssertionError(
+                    f"{label} returned HTTP {status}: {body[-1000:]!r}"
+                )
+            if "no-store" not in headers.get("cache-control", ""):
+                raise AssertionError(f"{label} is missing Cache-Control: no-store")
+            if headers.get("pragma", "").lower() != "no-cache":
+                raise AssertionError(f"{label} is missing Pragma: no-cache")
+            response_ids.append(assert_request_id(headers, label))
+            decoded = body.decode("utf-8", errors="replace")
+            for secret in request_secrets:
+                if secret in decoded:
+                    raise AssertionError(f"{label} leaked secret {secret!r}")
+            reports.append(json.loads(body))
+
+        if len(set(response_ids)) != len(response_ids):
+            raise AssertionError("repeated explain responses reused a request ID")
+        independently_executed_ids = tuple(response_ids)
+
+        recognized = {
+            item["name"]: item
+            for item in reports[0].get("parameters", {}).get("recognized", [])
+        }
+        for name in (
+            "url",
+            "config",
+            "dev_id",
+            "upload_path",
+            "groups",
+            "ruleset",
+            "rename",
+            "profile_data",
+            "token",
+        ):
+            item = recognized.get(name)
+            if item is None or item.get("sensitive") is not True:
+                raise AssertionError(f"explain did not mark {name} sensitive: {item!r}")
+            if item.get("value_hash") != "":
+                raise AssertionError(f"explain retained a stable hash for {name}")
+            if item.get("value_preview") not in ("", "[redacted]"):
+                raise AssertionError(f"explain exposed a preview for {name}: {item!r}")
+        if recognized["dev_id"].get("effective_value") != "configured":
+            raise AssertionError("configured device ID lost its safe presence summary")
+        if (
+            recognized["dev_id"].get("source") != "default"
+            or recognized["dev_id"].get("status") != "defaulted"
+        ):
+            raise AssertionError(
+                "empty request device ID was not attributed to the configured default"
+            )
+        if (
+            recognized["config"].get("source") != "request"
+            or recognized["config"].get("status") != "applied"
+            or f"scheme=data length={len(DISABLE_RULEGEN_CONFIG)}"
+            not in recognized["config"].get("effective_value", "")
+        ):
+            raise AssertionError(
+                f"external config source diagnostics are inaccurate: {recognized['config']!r}"
+            )
+        if (
+            f"scheme=socks5 length={len(MIHOMO_ONLY_ROUTE_URI)}"
+            not in recognized["url"].get("effective_value", "")
+        ):
+            raise AssertionError(
+                f"direct source lost its safe URL summary: {recognized['url']!r}"
+            )
+        if (
+            recognized["profile_data"].get("status") != "ignored"
+            or recognized["profile_data"].get("effective_value") != "not used"
+        ):
+            raise AssertionError(
+                "profile_data was reported as effective for Clash output"
+            )
+
+        default_config_params = dict(params)
+        default_config_params["config"] = ""
+        default_status, default_body, default_headers = request(
+            base_url, "/sub", default_config_params
+        )
+        if default_status != 200:
+            raise AssertionError(
+                "empty config explain failed: "
+                f"HTTP {default_status}: {default_body[-1000:]!r}"
+            )
+        default_report = json.loads(default_body)
+        default_text = default_body.decode("utf-8", errors="replace")
+        for secret in request_secrets:
+            if secret in default_text:
+                raise AssertionError(
+                    f"empty config explain leaked secret {secret!r}"
+                )
+        default_parameters = {
+            item["name"]: item
+            for item in default_report.get("parameters", {}).get("recognized", [])
+        }
+        default_config = default_parameters.get("config", {})
+        if (
+            default_config.get("source") != "default"
+            or default_config.get("status") != "defaulted"
+            or default_config.get("effective_value") != "loaded"
+        ):
+            raise AssertionError(
+                f"empty config was not attributed to the default: {default_config!r}"
+            )
+        if "no-store" not in default_headers.get("cache-control", ""):
+            raise AssertionError("empty config explain lost no-store")
+        response_ids.append(
+            assert_request_id(default_headers, "empty config explain")
+        )
+        for name in ("groups", "ruleset"):
+            if (
+                recognized[name].get("status") != "ignored"
+                or recognized[name].get("effective_value") != "not consumed"
+            ):
+                raise AssertionError(
+                    f"unused compatibility parameter {name} was reported as applied"
+                )
+
+        unrecognized = reports[0].get("parameters", {}).get("unrecognized", [])
+        private_key = next(
+            (item for item in unrecognized if item.get("name") == "private_api_key"),
+            None,
+        )
+        if (
+            private_key is None
+            or private_key.get("sensitive") is not True
+            or private_key.get("value_preview") != "[redacted]"
+            or private_key.get("value_hash") != ""
+        ):
+            raise AssertionError(
+                f"unknown sensitive parameter was not fail-closed: {private_key!r}"
+            )
+        redacted_name = next(
+            (item for item in unrecognized if item.get("name") == "[redacted-name]"),
+            None,
+        )
+        if redacted_name is None or redacted_name.get("value_preview") != "[redacted]":
+            raise AssertionError(
+                f"unsafe unknown parameter name was not redacted: {redacted_name!r}"
+            )
+
+        error_status, error_body, error_headers = request(
+            base_url,
+            "/sub",
+            {
+                "target": "unsupported-target",
+                "url": "https://user:pass@example.test/sub?token=early-error-secret",
+                "explain": " true ",
+            },
+        )
+        if error_status != 400:
+            raise AssertionError(
+                f"early explain error returned HTTP {error_status}: {error_body[-1000:]!r}"
+            )
+        if (
+            "no-store" not in error_headers.get("cache-control", "")
+            or error_headers.get("pragma", "").lower() != "no-cache"
+        ):
+            raise AssertionError("early explain error lost privacy cache headers")
+        response_ids.append(assert_request_id(error_headers, "early explain error"))
+        if b"early-error-secret" in error_body:
+            raise AssertionError("early explain error leaked its source secret")
+
+        head_status, head_body, head_headers = request(
+            base_url, "/sub", params, method="HEAD"
+        )
+        if head_status != 200 or head_body:
+            raise AssertionError(
+                f"explain HEAD failed: HTTP {head_status}: {head_body[-1000:]!r}"
+            )
+        if (
+            "no-store" not in head_headers.get("cache-control", "")
+            or head_headers.get("pragma", "").lower() != "no-cache"
+        ):
+            raise AssertionError("explain HEAD lost privacy cache headers")
+        response_ids.append(assert_request_id(head_headers, "explain HEAD"))
+
+        provider_status, provider_body, provider_headers = request(
+            base_url,
+            "/sub",
+            {
+                "target": "clash",
+                "url": (
+                    "provider:ExplainPrivate,"
+                    + fixture_base
+                    + "/subscription.txt?token=provider-source-secret"
+                ),
+                "config": DISABLE_RULEGEN_CONFIG,
+                "include": "Smoke",
+                "exclude": "Expired",
+                "explain": "true",
+            },
+        )
+        if provider_status != 200:
+            raise AssertionError(
+                "provider explain failed: "
+                f"HTTP {provider_status}: {provider_body[-1000:]!r}"
+            )
+        if "no-store" not in provider_headers.get("cache-control", ""):
+            raise AssertionError("provider explain is missing no-store")
+        response_ids.append(assert_request_id(provider_headers, "provider explain"))
+        provider_text = provider_body.decode("utf-8", errors="replace")
+        if "provider-source-secret" in provider_text:
+            raise AssertionError("provider explain leaked its source query")
+        providers = json.loads(provider_body).get("providers", [])
+        if len(providers) != 1:
+            raise AssertionError(f"provider explain mismatch: {providers!r}")
+        provider = providers[0]
+        if (
+            provider.get("source_hash") != ""
+            or provider.get("filter") != ""
+            or provider.get("exclude_filter") != ""
+            or provider.get("filter_present") is not True
+            or provider.get("exclude_filter_present") is not True
+            or provider.get("name_generated") is not False
+            or "host=127.0.0.1" not in provider.get("source_summary", "")
+        ):
+            raise AssertionError(
+                f"provider explain did not retain a safe structural summary: {provider!r}"
+            )
+
+        anonymous_provider_url = (
+            fixture_base
+            + "/subscription.txt?token=anonymous-provider-secret"
+        )
+        anonymous_provider_hash = hashlib.md5(
+            urllib.parse.unquote(anonymous_provider_url).encode("utf-8")
+        ).hexdigest()[:6].upper()
+        anonymous_status, anonymous_body, anonymous_headers = request(
+            base_url,
+            "/sub",
+            {
+                "target": "clash",
+                "url": anonymous_provider_url,
+                "config": DISABLE_RULEGEN_CONFIG,
+                "explain": "true",
+            },
+        )
+        if anonymous_status != 200:
+            raise AssertionError(
+                "anonymous provider explain failed: "
+                f"HTTP {anonymous_status}: {anonymous_body[-1000:]!r}"
+            )
+        anonymous_text = anonymous_body.decode("utf-8", errors="replace")
+        if (
+            "anonymous-provider-secret" in anonymous_text
+            or f"Provider_{anonymous_provider_hash}" in anonymous_text
+        ):
+            raise AssertionError(
+                "anonymous provider explain retained its source secret or stable hash"
+            )
+        anonymous_providers = json.loads(anonymous_body).get("providers", [])
+        if len(anonymous_providers) != 1:
+            raise AssertionError(
+                f"anonymous provider explain mismatch: {anonymous_providers!r}"
+            )
+        anonymous_provider = anonymous_providers[0]
+        if (
+            anonymous_provider.get("name") != "Provider_Auto_1"
+            or anonymous_provider.get("path")
+            != "./providers/Provider_Auto_1.yaml"
+            or anonymous_provider.get("name_generated") is not True
+            or anonymous_provider.get("source_hash") != ""
+            or "host=127.0.0.1"
+            not in anonymous_provider.get("source_summary", "")
+        ):
+            raise AssertionError(
+                "anonymous provider explain did not use a request-local safe name: "
+                f"{anonymous_provider!r}"
+            )
+        response_ids.append(
+            assert_request_id(anonymous_headers, "anonymous provider explain")
+        )
+
+        decoded_profile_url = (
+            "https://managed.example.test/sub?token=profile-query-secret"
+        )
+        encoded_profile_url = base64.b64encode(
+            decoded_profile_url.encode("utf-8")
+        ).decode("ascii")
+        profile_status, profile_body, profile_headers = request(
+            base_url,
+            "/sub",
+            {
+                "target": "surge",
+                "url": fixture_base + "/subscription.txt",
+                "config": DISABLE_RULEGEN_CONFIG,
+                "profile_data": encoded_profile_url,
+                "explain": "true",
+            },
+        )
+        if profile_status != 200:
+            raise AssertionError(
+                "managed profile explain failed: "
+                f"HTTP {profile_status}: {profile_body[-1000:]!r}"
+            )
+        profile_text = profile_body.decode("utf-8", errors="replace")
+        if "profile-query-secret" in profile_text or encoded_profile_url in profile_text:
+            raise AssertionError("managed profile explain leaked profile_data")
+        profile_parameters = {
+            item["name"]: item
+            for item in json.loads(profile_body)
+            .get("parameters", {})
+            .get("recognized", [])
+        }
+        profile_parameter = profile_parameters.get("profile_data", {})
+        if (
+            profile_parameter.get("source") != "request"
+            or profile_parameter.get("status") != "applied"
+            or "scheme=https host=managed.example.test"
+            not in profile_parameter.get("effective_value", "")
+            or f"length={len(decoded_profile_url)}"
+            not in profile_parameter.get("effective_value", "")
+        ):
+            raise AssertionError(
+                "managed profile source diagnostics are inaccurate: "
+                f"{profile_parameter!r}"
+            )
+        if "no-store" not in profile_headers.get("cache-control", ""):
+            raise AssertionError("managed profile explain lost no-store")
+        response_ids.append(
+            assert_request_id(profile_headers, "managed profile explain")
+        )
+
+        FixtureHandler.slow_subscription_started.clear()
+        FixtureHandler.slow_subscription_release.clear()
+        coalesced_results: list[tuple[int, bytes, dict[str, str]]] = []
+        coalesced_errors: list[BaseException] = []
+        slow_params = {
+            "target": "singbox",
+            "url": fixture_base + "/slow-subscription.txt?case=explain-coalesce",
+            "config": DISABLE_RULEGEN_CONFIG,
+            "explain": "true",
+        }
+
+        def run_explain_request() -> None:
+            try:
+                coalesced_results.append(request(base_url, "/sub", slow_params))
+            except BaseException as error:
+                coalesced_errors.append(error)
+
+        owner = threading.Thread(target=run_explain_request)
+        waiter = threading.Thread(target=run_explain_request)
+        owner.start()
+        if not FixtureHandler.slow_subscription_started.wait(timeout=10):
+            FixtureHandler.slow_subscription_release.set()
+            owner.join(timeout=5)
+            raise AssertionError("coalesced explain owner did not reach the fixture")
+        waiter.start()
+        time.sleep(0.2)
+        FixtureHandler.slow_subscription_release.set()
+        owner.join(timeout=20)
+        waiter.join(timeout=20)
+        if owner.is_alive() or waiter.is_alive():
+            raise AssertionError("coalesced explain requests did not finish")
+        if coalesced_errors:
+            raise coalesced_errors[0]
+        if len(coalesced_results) != 2:
+            raise AssertionError("coalesced explain returned an unexpected result count")
+        coalesced_ids: list[str] = []
+        for status, body, headers in coalesced_results:
+            if status != 200 or json.loads(body).get("nodes", {}).get("total", 0) < 1:
+                raise AssertionError(
+                    f"coalesced explain failed: HTTP {status}: {body[-1000:]!r}"
+                )
+            if "no-store" not in headers.get("cache-control", ""):
+                raise AssertionError("coalesced explain response lost no-store")
+            coalesced_ids.append(assert_request_id(headers, "coalesced explain"))
+        if len(set(coalesced_ids)) != 2:
+            raise AssertionError("coalesced explain responses reused a request ID")
+        response_ids.extend(coalesced_ids)
+
+    diagnostics = "".join(logs)
+    for secret in request_secrets:
+        if secret in diagnostics:
+            raise AssertionError(f"explain service log leaked secret {secret!r}")
+    for request_id in independently_executed_ids:
+        if f"request_id={request_id} EXPLAIN_REQUEST_RECEIVED" not in diagnostics:
+            raise AssertionError(
+                "repeated explain request did not execute independently: "
+                + request_id
+            )
+    if "/sub 响应微缓存命中。" in diagnostics:
+        raise AssertionError("explain response entered the response microcache")
+    assert_coalesced_request_link(
+        diagnostics, coalesced_ids, "identical in-flight explain requests"
+    )
+    if f"Provider_{anonymous_provider_hash}" in diagnostics:
+        raise AssertionError("anonymous provider stable hash leaked into diagnostics")
+    if len(set(response_ids)) != len(response_ids):
+        raise AssertionError("explain requests reused request correlation IDs")
 
 
 def provider_block_from_output(output: str, provider_name: str) -> str:
@@ -3059,7 +3744,7 @@ def sensitive_log_baseline(binary: Path, fixture_base: str) -> None:
         log_capture=logs,
         log_level="verbose",
     ) as base_url:
-        status, body, _ = request(
+        status, body, response_headers = request(
             base_url,
             "/sub",
             {
@@ -3084,13 +3769,19 @@ def sensitive_log_baseline(binary: Path, fixture_base: str) -> None:
                 "verbose-log fixture conversion returned "
                 f"HTTP {status}: {body!r}"
             )
+        request_id = assert_request_id(response_headers, "verbose-log fixture")
     if not logs:
         raise AssertionError("verbose-log fixture did not capture service logs")
     for secret in secrets:
         if secret in logs[0]:
             raise AssertionError(f"verbose service log leaked fixture secret: {secret}")
-    if "parameter_count=" not in logs[0] or "X-Provider-Secret" not in logs[0]:
+    if (
+        f"request_id={request_id} SUB_ROUTE_RESULT" not in logs[0]
+        or f"request_id={request_id} HTTP_RESPONSE_PREPARED" not in logs[0]
+    ):
         raise AssertionError("safe request diagnostics disappeared from verbose logs")
+    if "X-Provider-Secret" in logs[0]:
+        raise AssertionError("request header names should not be copied into logs")
 
 
 def template_error_redaction_baseline(binary: Path, fixture_base: str) -> None:
@@ -3414,8 +4105,11 @@ def upload_failure_compatibility_baseline(binary: Path, fixture_base: str) -> No
         )
         failed_gist_requests = FixtureHandler.gist_request_count - failed_before
         before = FixtureHandler.gist_request_count
-        success_status, success_body, _ = request(
+        success_status, success_body, success_headers = request(
             base_url, "/sub", upload_params, request_headers
+        )
+        success_request_id = assert_request_id(
+            success_headers, "successful Gist upload"
         )
     if baseline_status != 200:
         raise AssertionError(
@@ -3462,10 +4156,15 @@ def upload_failure_compatibility_baseline(binary: Path, fixture_base: str) -> No
             raise AssertionError(
                 f"successful Gist response leaked diagnostic secret {secret!r}"
             )
-    if "X-Compatibility-Secret" not in success_logs[0]:
+    if "X-Compatibility-Secret" in success_logs[0]:
         raise AssertionError(
-            "verbose upload regression did not exercise request-header diagnostics"
+            "verbose upload diagnostics retained a request header name"
         )
+    if (
+        f"request_id={success_request_id}" not in success_logs[0]
+        or "HTTP_RESPONSE_PREPARED" not in success_logs[0]
+    ):
+        raise AssertionError("successful upload lost safe request correlation")
 
     failure_cases = (
         (
@@ -4313,6 +5012,8 @@ def main() -> int:
 
     deployment_security_defaults_baseline()
     runtime_cli_isolation_baseline(binary)
+    log_redirection_baseline(binary)
+    early_log_level_parsing_baseline(settings_snapshot_helper)
 
     snapshots = [
         load_settings_snapshot(settings_snapshot_helper, COMPAT_FIXTURES / name)
@@ -4344,6 +5045,7 @@ def main() -> int:
         parser_failure_level_and_mixed_request_baseline(binary)
         insert_url_parser_route_baseline(binary, fixture_base)
         vary_cache_and_coalesce_baseline(binary, fixture_base)
+        explain_privacy_and_cache_baseline(binary, fixture_base)
         with running_service(binary) as base_url:
             conversion_baselines(base_url, fixture_base, args.update_golden)
             parser_route_isolation_baseline(base_url, fixture_base)

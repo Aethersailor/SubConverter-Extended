@@ -206,5 +206,46 @@ int main() {
   assert(parser_summary.find("raw-parser-secret") == std::string::npos);
   assert(parser_summary.find("length=") != std::string::npos);
   assert(parser_summary.find("hash=") == std::string::npos);
+
+  std::string forged_line =
+      "event=retained private_api_key=private-api-secret\r\n"
+      "[FATL] forged\t";
+  forged_line.push_back('\x1b');
+  forged_line += "[31m";
+  forged_line.push_back('\0');
+  forged_line += "中文诊断";
+  const std::string sanitized = sanitizeLogLine(forged_line);
+  assert(sanitized.find("private-api-secret") == std::string::npos);
+  assert(sanitized.find('\r') == std::string::npos);
+  assert(sanitized.find('\n') == std::string::npos);
+  assert(sanitized.find('\t') == std::string::npos);
+  assert(sanitized.find('\x1b') == std::string::npos);
+  assert(sanitized.find('\0') == std::string::npos);
+  assert(sanitized.find("\\r\\n") != std::string::npos);
+  assert(sanitized.find("\\t") != std::string::npos);
+  assert(sanitized.find("\\x1B") != std::string::npos);
+  assert(sanitized.find("中文诊断") != std::string::npos);
+
+  const std::string oversized = sanitizeLogLine(std::string(20000, 'x'));
+  assert(oversized.size() <= 16 * 1024);
+  assert(oversized.find("...[truncated original_bytes=20000]") !=
+         std::string::npos);
+  const std::string raw_oversized = sanitizeLogLine(std::string(70000, 's'));
+  assert(raw_oversized ==
+         "<redacted oversized_log_content original_bytes=70000>");
+  const std::string oversized_script =
+      sanitizeLogLine("SCRIPT_EXCEPTION " + std::string(70000, 's'));
+  assert(oversized_script ==
+         "SCRIPT_EXCEPTION <redacted oversized_log_content "
+         "original_bytes=70017>");
+
+  const std::string known_field_aliases = sanitizeLogLine(
+      R"(SCRIPT_EXCEPTION detail={"PrivateKey":"private-key-secret","PreSharedKey":"pre-shared-key-secret","QUICSecret":"quic-secret","UserId":"user-id-secret"} X-API-Key: api-key-secret x-auth-token=auth-token-secret)");
+  for (const char *secret :
+       {"private-key-secret", "pre-shared-key-secret", "quic-secret",
+        "user-id-secret", "api-key-secret", "auth-token-secret"})
+    assert(known_field_aliases.find(secret) == std::string::npos);
+  assert(known_field_aliases.find("PrivateKey") != std::string::npos);
+  assert(known_field_aliases.find("X-API-Key") != std::string::npos);
   return 0;
 }

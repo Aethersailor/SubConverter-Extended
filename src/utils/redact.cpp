@@ -13,13 +13,29 @@ bool isUrlTerminator(char character) {
 }
 
 bool sensitiveParameter(const std::string &name) {
-  const std::string lower = toLower(name);
+  std::string lower = toLower(name);
+  std::replace(lower.begin(), lower.end(), '-', '_');
+  std::replace(lower.begin(), lower.end(), '.', '_');
+  const auto has_suffix = [&](const std::string &suffix) {
+    return lower.size() >= suffix.size() &&
+           lower.compare(lower.size() - suffix.size(), suffix.size(), suffix) ==
+               0;
+  };
   return lower == "token" || lower == "access_token" || lower == "api_key" ||
          lower == "apikey" || lower == "key" || lower == "secret" ||
          lower == "password" || lower == "pass" || lower == "authorization" ||
-         lower == "cookie" || lower == "set-cookie" ||
+         lower == "cookie" || lower == "set_cookie" ||
          lower == "url" || lower == "config" || lower == "userinfo" ||
-         lower == "profile_data";
+         lower == "profile_data" || lower == "dev_id" ||
+         lower == "upload_path" || lower == "groups" ||
+         lower == "ruleset" || lower == "rename" ||
+         lower == "filter_script" || lower == "private_key" ||
+         lower == "pre_shared_key" || lower == "privatekey" ||
+         lower == "presharedkey" || lower == "quicsecret" ||
+         lower == "userid" || has_suffix("_token") ||
+         has_suffix("_secret") || has_suffix("_password") ||
+         has_suffix("_api_key") || has_suffix("_apikey") ||
+         has_suffix("_private_key");
 }
 
 bool opaqueSecretScheme(const std::string &scheme) {
@@ -384,8 +400,9 @@ std::string redactHeaders(std::string text) {
       }
     }
     static const std::string replacement = " <redacted>";
-    text.replace(colon + 1, value_end - colon - 1, replacement);
-    lower = toLower(text);
+    const std::string::size_type value_length = value_end - colon - 1;
+    text.replace(colon + 1, value_length, replacement);
+    lower.replace(colon + 1, value_length, toLower(replacement));
     search_from = colon + 1 + replacement.size();
   }
   return text;
@@ -417,12 +434,107 @@ std::string redactSensitiveLogText(const std::string &text) {
     std::string::size_type end = start;
     while (end < result.size() && !isUrlTerminator(result[end]))
       end++;
+    const std::string::size_type url_length = end - start;
     const std::string replacement = redactUrl(result.substr(start, end - start));
-    result.replace(start, end - start, replacement);
-    lower = toLower(result);
+    result.replace(start, url_length, replacement);
+    lower.replace(start, url_length, toLower(replacement));
     position = start + replacement.size();
   }
   return result;
+}
+
+std::string sanitizeLogLine(const std::string &text) {
+  static constexpr size_t kMaxRawLogContentBytes = 64 * 1024;
+  static constexpr size_t kMaxLogContentBytes = 16 * 1024;
+  static constexpr char kHex[] = "0123456789ABCDEF";
+
+  // Avoid multiplying attacker-controlled exception or request text into
+  // several large redaction/escaping buffers. Oversized content is not useful
+  // as an operational log event and is therefore summarized fail-closed. A
+  // conventional stable event name is retained so operators still know which
+  // subsystem produced the oversized payload.
+  if (text.size() > kMaxRawLogContentBytes) {
+    std::string event_name;
+    const std::string::size_type separator = text.find(' ');
+    if (separator != std::string::npos && separator > 0 && separator <= 64 &&
+        std::all_of(text.begin(), text.begin() + separator,
+                    [](unsigned char ch) {
+                      return (ch >= 'A' && ch <= 'Z') ||
+                             (ch >= '0' && ch <= '9') || ch == '_';
+                    })) {
+      event_name = text.substr(0, separator) + " ";
+    }
+    return event_name +
+           "<redacted oversized_log_content original_bytes=" +
+           std::to_string(text.size()) + ">";
+  }
+
+  const std::string redacted = redactSensitiveLogText(text);
+  std::string escaped;
+  escaped.reserve(std::min(redacted.size(), kMaxLogContentBytes));
+  for (const unsigned char ch : redacted) {
+    switch (ch) {
+    case '\r':
+      escaped += "\\r";
+      break;
+    case '\n':
+      escaped += "\\n";
+      break;
+    case '\t':
+      escaped += "\\t";
+      break;
+    default:
+      if (ch < 0x20 || ch == 0x7f) {
+        escaped += "\\x";
+        escaped.push_back(kHex[(ch >> 4) & 0x0f]);
+        escaped.push_back(kHex[ch & 0x0f]);
+      } else {
+        escaped.push_back(static_cast<char>(ch));
+      }
+      break;
+    }
+  }
+
+  if (escaped.size() <= kMaxLogContentBytes)
+    return escaped;
+
+  const std::string suffix =
+      "...[truncated original_bytes=" + std::to_string(text.size()) + "]";
+  size_t limit = kMaxLogContentBytes > suffix.size()
+                     ? kMaxLogContentBytes - suffix.size()
+                     : 0;
+
+  // Find the last complete UTF-8 sequence inside the retained prefix. Invalid
+  // bytes are treated as single-byte data; the logger must remain available
+  // even when a dependency returns malformed text.
+  size_t cursor = 0;
+  size_t safe = 0;
+  while (cursor < escaped.size() && cursor < limit) {
+    const unsigned char lead = static_cast<unsigned char>(escaped[cursor]);
+    size_t width = 1;
+    if ((lead & 0xe0) == 0xc0)
+      width = 2;
+    else if ((lead & 0xf0) == 0xe0)
+      width = 3;
+    else if ((lead & 0xf8) == 0xf0)
+      width = 4;
+
+    bool valid = cursor + width <= escaped.size();
+    for (size_t index = 1; valid && index < width; ++index) {
+      const unsigned char continuation =
+          static_cast<unsigned char>(escaped[cursor + index]);
+      valid = (continuation & 0xc0) == 0x80;
+    }
+    if (!valid)
+      width = 1;
+    if (cursor + width > limit)
+      break;
+    cursor += width;
+    safe = cursor;
+  }
+  escaped.resize(safe);
+  escaped += suffix;
+  return escaped;
 }
 
 std::string summarizeSensitiveTextForLog(const std::string &value) {

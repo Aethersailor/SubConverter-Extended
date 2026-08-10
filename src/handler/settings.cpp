@@ -100,6 +100,60 @@ void applyCommonScalarSettings(CommonScalarSettings settings) {
   global.reloadConfOnRequest = settings.reloadConfOnRequest;
 }
 
+LogLevel configuredLogLevel(const std::string &value,
+                            bool print_debug_info) {
+  if (print_debug_info)
+    return LOG_LEVEL_VERBOSE;
+  const std::string normalized =
+      toLower(trimWhitespace(value, true, true));
+  switch (hash_(normalized)) {
+  case "warn"_hash:
+    return LOG_LEVEL_WARNING;
+  case "error"_hash:
+    return LOG_LEVEL_ERROR;
+  case "fatal"_hash:
+    return LOG_LEVEL_FATAL;
+  case "verbose"_hash:
+    return LOG_LEVEL_VERBOSE;
+  case "debug"_hash:
+    return LOG_LEVEL_DEBUG;
+  default:
+    return LOG_LEVEL_INFO;
+  }
+}
+
+const char *configuredLogLevelName(LogLevel level) {
+  switch (level) {
+  case LogLevel::Fatal:
+    return "fatal";
+  case LogLevel::Error:
+    return "error";
+  case LogLevel::Warning:
+    return "warn";
+  case LogLevel::Info:
+    return "info";
+  case LogLevel::Debug:
+    return "debug";
+  case LogLevel::Verbose:
+    return "verbose";
+  }
+  return "info";
+}
+
+void applyConfiguredLogLevel(const std::string &value,
+                             bool print_debug_info,
+                             ScopedLogLevelOverride &log_level_scope) {
+  global.printDbgInfo = print_debug_info;
+  global.logLevel = configuredLogLevel(value, print_debug_info);
+  log_level_scope.set(global.logLevel);
+  writeLog(LOG_LEVEL_DEBUG,
+           "LOG_LEVEL_CONFIGURED level=" +
+               std::string(configuredLogLevelName(global.logLevel)) +
+               " print_debug_info=" +
+               std::string(print_debug_info ? "true" : "false") +
+               " phase=pre-import");
+}
+
 } // namespace
 
 const std::map<std::string, ruleset_type> RulesetTypes = {
@@ -716,7 +770,17 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
   }
 }
 
-void readYAMLConf(YAML::Node &node) {
+void readYAMLConf(YAML::Node &node,
+                  ScopedLogLevelOverride &log_level_scope) {
+  std::string early_log_level;
+  bool early_print_debug_info = false;
+  if (node["advanced"].IsDefined()) {
+    node["advanced"]["log_level"] >> early_log_level;
+    node["advanced"]["print_debug_info"] >> early_print_debug_info;
+  }
+  applyConfiguredLogLevel(early_log_level, early_print_debug_info,
+                          log_level_scope);
+
   YAML::Node section = node["common"];
   std::string strLine;
   string_array tempArray;
@@ -962,32 +1026,6 @@ void readYAMLConf(YAML::Node &node) {
   }
 
   if (node["advanced"].IsDefined()) {
-    std::string log_level;
-    node["advanced"]["log_level"] >> log_level;
-    node["advanced"]["print_debug_info"] >> global.printDbgInfo;
-    if (global.printDbgInfo)
-      global.logLevel = LOG_LEVEL_VERBOSE;
-    else {
-      switch (hash_(log_level)) {
-      case "warn"_hash:
-        global.logLevel = LOG_LEVEL_WARNING;
-        break;
-      case "error"_hash:
-        global.logLevel = LOG_LEVEL_ERROR;
-        break;
-      case "fatal"_hash:
-        global.logLevel = LOG_LEVEL_FATAL;
-        break;
-      case "verbose"_hash:
-        global.logLevel = LOG_LEVEL_VERBOSE;
-        break;
-      case "debug"_hash:
-        global.logLevel = LOG_LEVEL_DEBUG;
-        break;
-      default:
-        global.logLevel = LOG_LEVEL_INFO;
-      }
-    }
     node["advanced"]["max_pending_connections"] >> global.maxPendingConns;
     node["advanced"]["max_concurrent_threads"] >> global.maxConcurThreads;
     node["advanced"]["max_server_threads"] >> global.maxServerThreads;
@@ -1088,8 +1126,14 @@ void operate_toml_kv_table(
   }
 }
 
-void readTOMLConf(toml::value &root) {
+void readTOMLConf(toml::value &root,
+                  ScopedLogLevelOverride &log_level_scope) {
   auto section_common = toml::find(root, "common");
+  auto section_advanced = toml::find(root, "advanced");
+  applyConfiguredLogLevel(
+      toml::find_or<std::string>(section_advanced, "log_level", ""),
+      toml::find_or<bool>(section_advanced, "print_debug_info", false),
+      log_level_scope);
   string_array default_url, insert_url;
   CommonScalarSettings common = captureCommonScalarSettings();
 
@@ -1245,16 +1289,12 @@ void readTOMLConf(toml::value &root) {
                 global.listenPort, "serve_file_root",
                 global.serveFileRoot);
 
-  auto section_advanced = toml::find(root, "advanced");
-
-  std::string log_level;
   bool enable_cache = true;
   int cache_subscription = global.cacheSubscription,
       cache_config = global.cacheConfig, cache_ruleset = global.cacheRuleset;
 
   find_if_exist(
-      section_advanced, "log_level", log_level, "print_debug_info",
-      global.printDbgInfo, "max_pending_connections", global.maxPendingConns,
+      section_advanced, "max_pending_connections", global.maxPendingConns,
       "max_concurrent_threads", global.maxConcurThreads,
       "max_server_threads", global.maxServerThreads, "max_allowed_rulesets",
       global.maxAllowedRulesets, "max_allowed_rules", global.maxAllowedRules,
@@ -1267,30 +1307,6 @@ void readTOMLConf(toml::value &root) {
       "coalesce_retry_on_5xx", global.coalesceRetryOn5xx,
       "allow_insecure_tls", global.allowInsecureTls,
       "response_cache_ttl", global.responseCacheTtl);
-
-  if (global.printDbgInfo)
-    global.logLevel = LOG_LEVEL_VERBOSE;
-  else {
-    switch (hash_(log_level)) {
-    case "warn"_hash:
-      global.logLevel = LOG_LEVEL_WARNING;
-      break;
-    case "error"_hash:
-      global.logLevel = LOG_LEVEL_ERROR;
-      break;
-    case "fatal"_hash:
-      global.logLevel = LOG_LEVEL_FATAL;
-      break;
-    case "verbose"_hash:
-      global.logLevel = LOG_LEVEL_VERBOSE;
-      break;
-    case "debug"_hash:
-      global.logLevel = LOG_LEVEL_DEBUG;
-      break;
-    default:
-      global.logLevel = LOG_LEVEL_INFO;
-    }
-  }
 
   if (enable_cache) {
     global.cacheSubscription = cache_subscription;
@@ -1368,12 +1384,14 @@ static void applyRuntimeConfiguration() {
 
 bool readConf() {
   guarded_mutex guard(gMutexConfigure);
+  ScopedLogLevelOverride log_level_scope;
   writeLog(0, "正在加载偏好设置...", LOG_LEVEL_INFO);
 
   Settings previous = global;
 
   auto restorePreviousSettings = [&](const std::string &reason) {
     safe_replace_settings(std::move(previous));
+    log_level_scope.set(global.logLevel);
     writeLog(0, reason, LOG_LEVEL_FATAL);
     writeLog(0, "偏好设置加载失败，已保留上一份有效配置。",
              LOG_LEVEL_FATAL);
@@ -1382,6 +1400,8 @@ bool readConf() {
 
   auto resetReloadableSettings = []() {
     beginSecuritySettingsLoad();
+    global.printDbgInfo = false;
+    global.logLevel = LOG_LEVEL_INFO;
     eraseElements(global.excludeRemarks);
     eraseElements(global.includeRemarks);
     eraseElements(global.customProxyGroups);
@@ -1425,7 +1445,7 @@ bool readConf() {
           "YAML 偏好设置缺少必需的 common 节。");
     resetReloadableSettings();
     try {
-      readYAMLConf(yaml);
+      readYAMLConf(yaml, log_level_scope);
       applyRuntimeConfiguration();
       publishSettingsSnapshot(global);
       return true;
@@ -1441,7 +1461,7 @@ bool readConf() {
           "TOML 偏好设置缺少有效的 version 字段。");
     resetReloadableSettings();
     try {
-      readTOMLConf(conf);
+      readTOMLConf(conf, log_level_scope);
       applyRuntimeConfiguration();
       publishSettingsSnapshot(global);
       return true;
@@ -1508,6 +1528,16 @@ bool readConf() {
   try {
     string_array tempArray;
     CommonScalarSettings common = captureCommonScalarSettings();
+
+    std::string early_log_level;
+    bool early_print_debug_info = false;
+    if (ini.section_exist("advanced")) {
+      ini.enter_section("advanced");
+      ini.get_if_exist("log_level", early_log_level);
+      ini.get_bool_if_exist("print_debug_info", early_print_debug_info);
+    }
+    applyConfiguredLogLevel(early_log_level, early_print_debug_info,
+                            log_level_scope);
 
   ini.enter_section("common");
   // api_mode and api_access_token removed - hardcoded in settings.h
@@ -1708,32 +1738,6 @@ bool readConf() {
   global.serveFileRoot = ini.get("serve_file_root");
 
   ini.enter_section("advanced");
-  std::string log_level;
-  ini.get_if_exist("log_level", log_level);
-  ini.get_bool_if_exist("print_debug_info", global.printDbgInfo);
-  if (global.printDbgInfo)
-    global.logLevel = LOG_LEVEL_VERBOSE;
-  else {
-    switch (hash_(log_level)) {
-    case "warn"_hash:
-      global.logLevel = LOG_LEVEL_WARNING;
-      break;
-    case "error"_hash:
-      global.logLevel = LOG_LEVEL_ERROR;
-      break;
-    case "fatal"_hash:
-      global.logLevel = LOG_LEVEL_FATAL;
-      break;
-    case "verbose"_hash:
-      global.logLevel = LOG_LEVEL_VERBOSE;
-      break;
-    case "debug"_hash:
-      global.logLevel = LOG_LEVEL_DEBUG;
-      break;
-    default:
-      global.logLevel = LOG_LEVEL_INFO;
-    }
-  }
   ini.get_int_if_exist("max_pending_connections", global.maxPendingConns);
   ini.get_int_if_exist("max_concurrent_threads", global.maxConcurThreads);
   ini.get_int_if_exist("max_server_threads", global.maxServerThreads);

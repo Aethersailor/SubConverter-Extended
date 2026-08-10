@@ -1,4 +1,7 @@
+#include <cerrno>
 #include <csignal>
+#include <cstdio>
+#include <fcntl.h>
 #include <iostream>
 #include <string>
 #include <unistd.h>
@@ -64,6 +67,35 @@ void setcd(std::string &file) {
   chdir(path.data());
 }
 
+struct LogRedirectResult {
+  bool success = false;
+  const char *stage = "open";
+  int error_number = 0;
+};
+
+LogRedirectResult redirectStderrToAppendFile(const char *path) {
+  std::fflush(stderr);
+  int flags = O_WRONLY | O_CREAT | O_APPEND;
+#ifdef _WIN32
+  // Preserve the text-mode line endings of the previous freopen("a") path.
+  flags |= O_TEXT;
+#endif
+  const int file_descriptor = open(path, flags, 0644);
+  if (file_descriptor < 0)
+    return {false, "open", errno};
+  if (file_descriptor != STDERR_FILENO &&
+      dup2(file_descriptor, STDERR_FILENO) < 0) {
+    const int error_number = errno;
+    close(file_descriptor);
+    return {false, "dup2", error_number};
+  }
+  if (file_descriptor != STDERR_FILENO)
+    close(file_descriptor);
+  clearerr(stderr);
+  std::cerr.clear();
+  return {true, "none", 0};
+}
+
 void chkArg(int argc, char *argv[]) {
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "-cfw") == 0) {
@@ -78,10 +110,41 @@ void chkArg(int argc, char *argv[]) {
       if (i < argc - 1)
         global.generateProfiles.assign(argv[++i]);
     } else if (strcmp(argv[i], "-l") == 0 || strcmp(argv[i], "--log") == 0) {
-      if (i < argc - 1)
-        if (freopen(argv[++i], "a", stderr) == nullptr)
-          std::cerr << "无法将输出重定向到日志文件。\n";
+      if (i < argc - 1) {
+        const char *log_path = argv[++i];
+        const LogRedirectResult result = redirectStderrToAppendFile(log_path);
+        if (result.success) {
+          writeLog(LOG_LEVEL_INFO,
+                   "LOG_REDIRECT_ACTIVE mode=append rotation=external");
+        } else {
+          writeLog(LOG_LEVEL_ERROR,
+                   "LOG_REDIRECT_FAILED stage=" + std::string(result.stage) +
+                       " errno=" + std::to_string(result.error_number) +
+                       " action=continue-with-stderr");
+        }
+      } else {
+        writeLog(LOG_LEVEL_ERROR,
+                 "LOG_REDIRECT_FAILED reason=missing-path "
+                 "action=continue-with-stderr");
+      }
     }
+  }
+}
+
+const char *shutdownSignalName(std::sig_atomic_t signal) {
+  switch (signal) {
+#ifndef _WIN32
+  case SIGHUP:
+    return "SIGHUP";
+  case SIGQUIT:
+    return "SIGQUIT";
+#endif
+  case SIGTERM:
+    return "SIGTERM";
+  case SIGINT:
+    return "SIGINT";
+  default:
+    return "UNKNOWN";
   }
 }
 
@@ -102,9 +165,11 @@ void cron_tick_caller() {
   const std::sig_atomic_t signal = pendingShutdownSignal;
   if (signal != 0) {
     pendingShutdownSignal = 0;
-    writeLog(0,
-             "收到中断信号 " + std::to_string(signal) + "，正在退出...",
-             LOG_LEVEL_FATAL);
+    writeLog(LOG_LEVEL_INFO,
+             "SHUTDOWN_REQUESTED signal=" +
+                 std::string(shutdownSignalName(signal)) +
+                 " signal_code=" + std::to_string(signal) +
+                 " action=graceful-stop");
     webServer.stop_web_server();
     return;
   }
@@ -121,6 +186,15 @@ void shutdown_runtime() {
 }
 
 int main(int argc, char *argv[]) {
+#ifdef _WIN32
+  const UINT original_console_output_code_page = GetConsoleOutputCP();
+  const bool console_output_code_page_changed =
+      original_console_output_code_page != 0 &&
+      original_console_output_code_page != CP_UTF8 &&
+      SetConsoleOutputCP(CP_UTF8) != 0;
+  defer(if (console_output_code_page_changed)
+            SetConsoleOutputCP(original_console_output_code_page);)
+#endif
 #ifndef _DEBUG
   std::string prgpath = argv[0];
   setcd(prgpath); // first switch to program directory
@@ -165,8 +239,6 @@ int main(int argc, char *argv[]) {
     return 1;
   }
   defer(WSACleanup();)
-  UINT origcp = GetConsoleOutputCP();
-  defer(SetConsoleOutputCP(origcp);) SetConsoleOutputCP(65001);
 #else
   signal(SIGPIPE, SIG_IGN);
   signal(SIGABRT, SIG_IGN);

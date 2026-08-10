@@ -995,7 +995,7 @@ std::string page(Request &request, Response &response) {
                     <thead>
                         <tr>
                             <th><span data-lang="en">Name</span><span data-lang="zh">名称</span></th>
-                            <th><span data-lang="en">Source hash</span><span data-lang="zh">来源哈希</span></th>
+                            <th><span data-lang="en">Source summary</span><span data-lang="zh">来源摘要</span></th>
                             <th><span data-lang="en">Path</span><span data-lang="zh">路径</span></th>
                             <th><span data-lang="en">Include</span><span data-lang="zh">包含过滤</span></th>
                             <th><span data-lang="en">Exclude</span><span data-lang="zh">排除过滤</span></th>
@@ -1057,6 +1057,7 @@ std::string page(Request &request, Response &response) {
             var jsonOutput = document.getElementById("json-output");
             var stateLine = document.getElementById("state-line");
             var lastReport = null;
+            var lastRequestId = "";
 
             var sampleQuery = "target=clash&url=provider%3AHK%2Chttps%3A%2F%2Fexample.com%2Fsub&config=data%3A%2Cenable_rule_generator%3Dfalse";
 
@@ -1115,7 +1116,9 @@ std::string page(Request &request, Response &response) {
                     classic: "classic / classical 规则",
                     tls13: "tls13 / TLS 1.3",
                     provider_proxy_direct: "provider_proxy_direct / Provider 直连",
+                    provider_headers: "provider_headers / Provider 请求头",
                     profile_data: "profile_data / 托管配置数据",
+                    token: "token / 访问令牌",
                     external_config: "external_config / 外部配置",
                     base_template: "base_template / 基础模板",
                     rulesets: "rulesets / 规则集",
@@ -1152,10 +1155,21 @@ std::string page(Request &request, Response &response) {
                     none: "无",
                     public_request: "公开请求",
                     trusted_config: "可信配置",
-                    effective: "生效配置",
-                    configured: "已配置",
-                    global: "全局配置"
-                });
+                     effective: "生效配置",
+                     configured: "已配置",
+                     global: "全局配置"
+                 });
+             }
+
+            function localizeSourceSummary(value) {
+                if (!isZh() || value === undefined || value === null) {
+                    return value;
+                }
+                return String(value)
+                    .replace(/\bscheme=/g, "协议=")
+                    .replace(/\bhost=/g, "主机=")
+                    .replace(/\blength=/g, "长度=")
+                    .replace(/\bmore source\(s\)/g, "个其他来源");
             }
 
             function localizeEffectiveValue(value) {
@@ -1166,18 +1180,32 @@ std::string page(Request &request, Response &response) {
                     loaded: "已加载",
                     "not loaded": "未加载",
                     "fallback loaded": "已加载回退配置",
-                    "script accepted": "脚本已接受",
-                    "not used": "未使用",
-                    enabled: "已启用",
-                    disabled: "已禁用",
-                    provided: "已提供"
+                     "script accepted": "脚本已接受",
+                     "not used": "未使用",
+                     "not provided": "未提供",
+                     "not configured": "未配置",
+                     "not consumed": "未被 /sub 使用",
+                     configured: "已配置",
+                     generated: "已生成",
+                     enabled: "已启用",
+                     disabled: "已禁用",
+                     provided: "已提供"
                 });
                 if (mapped !== value) {
                     return mapped;
                 }
-                var match = /^(\d+) source item\(s\), (\d+) subscription\(s\), (\d+) node link\(s\)$/.exec(String(value));
+                var match = /^(\d+) source item\(s\), (\d+) subscription\(s\), (\d+) node link\(s\)(?:; sources: (.+))?$/.exec(String(value));
                 if (match) {
-                    return match[1] + " 个来源项，" + match[2] + " 个订阅，" + match[3] + " 个节点链接";
+                    return match[1] + " 个来源项，" + match[2] + " 个订阅，" + match[3] + " 个节点链接" +
+                        (match[4] ? "；来源：" + localizeSourceSummary(match[4]) : "");
+                }
+                match = /^(loaded|not loaded|fallback loaded); requested source: (.+)$/.exec(String(value));
+                if (match) {
+                    return localizeEffectiveValue(match[1]) + "；请求来源：" + localizeSourceSummary(match[2]);
+                }
+                match = /^(provided|generated); source: (.+)$/.exec(String(value));
+                if (match) {
+                    return localizeEffectiveValue(match[1]) + "；来源：" + localizeSourceSummary(match[2]);
                 }
                 match = /^(\d+) custom group\(s\)$/.exec(String(value));
                 if (match) {
@@ -1200,7 +1228,7 @@ std::string page(Request &request, Response &response) {
                 }
                 var mapped = localize(value, {
                     "target=auto was resolved from the User-Agent": "target=auto 已根据 User-Agent 解析为实际目标。",
-                    "Sensitive values are redacted; use hash and length to compare inputs.": "敏感值已隐藏，可通过哈希和长度比对输入。",
+                    "Sensitive values are redacted; use lengths and structural summaries to compare inputs.": "敏感值已隐藏；可使用长度和结构摘要比较输入。",
                     "The request returned a JSON diagnostic report.": "该请求返回 JSON 诊断报告。",
                     "Surge-compatible target version.": "Surge 兼容目标版本。",
                     "Mihomo-compatible field names are forced for Clash output.": "Clash 输出会强制使用 Mihomo 兼容字段名。",
@@ -1208,12 +1236,12 @@ std::string page(Request &request, Response &response) {
                     "Only used when upload is effective.": "仅在上传生效时使用。",
                     "Used as node/provider include filter when valid.": "有效时作为节点和 Provider 的包含过滤器。",
                     "Used as node/provider exclude filter when valid.": "有效时作为节点和 Provider 的排除过滤器。",
-                    "External config loaded; request groups were not used.": "外部配置已加载，请求中的自定义组未使用。",
-                    "Decoded from URL-safe base64.": "已从 URL-safe base64 解码。",
-                    "External config loaded; request rulesets were not used.": "外部配置已加载，请求中的规则集未使用。",
+                    "This compatibility parameter is not consumed by /sub.": "该兼容参数不会被 /sub 使用。",
                     "User config failed and a fallback config was loaded.": "用户配置加载失败，已加载回退配置。",
                     "External config URL or data source.": "外部配置 URL 或数据源。",
-                    "Quantumult X device id.": "Quantumult X 设备 ID。",
+                    "Quantumult X device ID.": "Quantumult X 设备 ID。",
+                    "Empty request value; the configured device ID remained effective.": "请求值为空，继续使用已配置的设备 ID。",
+                    "No effective Quantumult X device ID is configured.": "当前未配置有效的 Quantumult X 设备 ID。",
                     "Content-Disposition is not emitted for explain JSON.": "explain JSON 不输出 Content-Disposition。",
                     "Effective update interval in seconds.": "实际更新间隔，单位为秒。",
                     "Managed config strict flag.": "托管配置 strict 标记。",
@@ -1221,10 +1249,15 @@ std::string page(Request &request, Response &response) {
                     "Public requests cannot provide executable filter scripts.": "公开请求不能提供可执行过滤脚本。",
                     "Uploads are disabled in explain mode.": "explain 模式下上传会被禁用。",
                     "Sets add_emoji and remove_emoji together.": "同时设置 add_emoji 和 remove_emoji。",
-                    "This project forces provider mode for Clash-compatible output.": "本项目对 Clash 兼容输出强制使用 Provider 模式。",
+                    "Explicit node-list mode expands subscription sources.": "显式节点列表模式会展开订阅来源。",
+                    "Clash-compatible output defaults to provider mode.": "Clash 兼容输出默认使用 Provider 模式。",
                     "Uses configured sort script when sorting is enabled.": "启用排序时使用已配置排序脚本。",
-                    "Managed config URL override.": "托管配置 URL 覆盖值。",
-                    "This parameter is not recognized by /sub.": "该参数不是 /sub 可识别参数。",
+                    "Managed configuration URL override.": "托管配置 URL 覆盖值。",
+                    "A managed configuration URL was generated.": "已生成托管配置 URL。",
+                    "This target did not emit a managed configuration URL.": "该目标输出未使用托管配置 URL。",
+                    "Token authentication is disabled.": "Token 认证已禁用。",
+                    "This parameter is not recognized by /sub; its value was redacted.": "该参数不被 /sub 识别，其值已隐藏。",
+                    "The parameter name and value were redacted.": "参数名和参数值均已隐藏。",
                     "Fallback config was used.": "已使用回退配置。",
                     "User-provided config was evaluated.": "已评估用户提供的配置。",
                     "Default external config was evaluated.": "已评估默认外部配置。",
@@ -1321,15 +1354,18 @@ std::string page(Request &request, Response &response) {
                 return el;
             }
 
-            function showError(message, detail) {
+            function showError(message, detail, requestId) {
                 lastReport = null;
+                lastRequestId = requestId || "";
                 summarySection.hidden = true;
                 parameterSection.hidden = true;
                 configSection.hidden = true;
                 providerSection.hidden = true;
                 jsonSection.hidden = false;
                 emptySection.hidden = true;
-                jsonOutput.textContent = detail ? message + "\n\n" + detail : message;
+                var requestDetail = lastRequestId ? "request_id: " + lastRequestId : "";
+                var bodyDetail = detail || "";
+                jsonOutput.textContent = [message, requestDetail, bodyDetail].filter(Boolean).join("\n\n");
             }
 
             function valueSummary(item) {
@@ -1405,10 +1441,14 @@ std::string page(Request &request, Response &response) {
                     var row = document.createElement("tr");
                     [
                         provider.name || "-",
-                        provider.source_hash || "-",
+                        localizeSourceSummary(provider.source_summary || provider.source_hash || "-"),
                         provider.path || "-",
-                        provider.filter || "-",
-                        provider.exclude_filter || "-",
+                        provider.filter_present
+                            ? text("Configured", "已配置")
+                            : "-",
+                        provider.exclude_filter_present
+                            ? text("Configured", "已配置")
+                            : "-",
                         provider.interval === 0
                             ? text("0s (automatic updates disabled)", "0 秒（已关闭自动更新）")
                             : provider.interval
@@ -1427,8 +1467,11 @@ std::string page(Request &request, Response &response) {
                 providerSection.hidden = false;
             }
 
-            function renderReport(report) {
+            function renderReport(report, requestId) {
                 lastReport = report;
+                if (requestId !== undefined) {
+                    lastRequestId = requestId || "";
+                }
                 var mode = report.mode || {};
                 var inputs = report.inputs || {};
                 var nodes = report.nodes || {};
@@ -1459,6 +1502,9 @@ std::string page(Request &request, Response &response) {
                 stateLine.appendChild(tag(text("rulesets ", "规则集 ") + (resources.ruleset_count || 0)));
                 stateLine.appendChild(tag(text("subscriptions ", "订阅 ") + (inputs.subscription_url_count || 0)));
                 stateLine.appendChild(tag(text("params ", "参数 ") + recognized.length));
+                if (lastRequestId) {
+                    stateLine.appendChild(tag("request_id " + lastRequestId));
+                }
                 if (changedParameters) {
                     stateLine.appendChild(tag(text("changed ", "变更 ") + changedParameters, "warn"));
                 }
@@ -1494,14 +1540,15 @@ std::string page(Request &request, Response &response) {
                         cache: "no-store"
                     });
                     var textBody = await response.text();
+                    var requestId = response.headers.get("X-Request-ID") || "";
                     var report;
                     try {
                         report = JSON.parse(textBody);
                     } catch (error) {
-                        showError(text("Response is not JSON", "响应不是 JSON"), textBody);
+                        showError(text("Response is not JSON", "响应不是 JSON"), textBody, requestId);
                         return;
                     }
-                    renderReport(report);
+                    renderReport(report, requestId);
                 } catch (error) {
                     showError(text("Request failed", "请求失败"), String(error && error.message || error));
                 } finally {

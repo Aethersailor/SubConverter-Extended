@@ -24,6 +24,37 @@ std::string getTime(int type);
 bool shouldLog(LogLevel level);
 void writeLog(LogLevel level, const std::string &content);
 
+// Attach a server-generated request identifier to every log emitted in the
+// current synchronous request scope. Nested scopes restore the previous value.
+class ScopedLogRequestContext {
+public:
+    explicit ScopedLogRequestContext(const std::string &request_id);
+    ~ScopedLogRequestContext();
+    ScopedLogRequestContext(const ScopedLogRequestContext &) = delete;
+    ScopedLogRequestContext &operator=(const ScopedLogRequestContext &) = delete;
+
+private:
+    std::string previous_request_id_;
+};
+
+std::string currentLogRequestId();
+
+// Keep a candidate configuration's log threshold local to the loader thread
+// until the corresponding immutable Settings snapshot is published. Other
+// request and worker threads continue using their own/published snapshot.
+class ScopedLogLevelOverride {
+public:
+    ScopedLogLevelOverride();
+    ~ScopedLogLevelOverride();
+    void set(LogLevel level);
+    ScopedLogLevelOverride(const ScopedLogLevelOverride &) = delete;
+    ScopedLogLevelOverride &operator=(const ScopedLogLevelOverride &) = delete;
+
+private:
+    bool previous_active_ = false;
+    LogLevel previous_level_ = LOG_LEVEL_INFO;
+};
+
 // Transitional wrapper for existing zero-category three-argument callers.
 // The removed default argument makes every severity intentional.
 inline void writeLog(int, const std::string &content, LogLevel level) {

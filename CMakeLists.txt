@@ -633,6 +633,7 @@ ADD_LIBRARY(${BUILD_TARGET_NAME} STATIC
     src/utils/logger.cpp
     src/utils/md5/md5.cpp
     src/utils/network.cpp
+    src/utils/redact.cpp
     src/utils/regexp.cpp
     src/utils/string.cpp
     src/utils/urlencode.cpp)
