@@ -19,6 +19,7 @@
 #include "handler/curl_handle_pool.h"
 #include "handler/settings.h"
 #include "handler/settings_view.h"
+#include "server/client_ip.h"
 #include "utils/base64/base64.h"
 #include "utils/defer.h"
 #include "utils/file_extra.h"
@@ -67,6 +68,313 @@ struct GitHubFileRef
     std::string path;
 };
 
+struct HttpUrlTarget
+{
+    bool valid = false;
+    std::string host;
+};
+
+static CURLcode curl_init();
+
+static bool has_control_character(const std::string &value)
+{
+    for(unsigned char ch : value)
+    {
+        if(std::iscntrl(ch))
+            return true;
+    }
+    return false;
+}
+
+static std::string normalize_http_host(std::string host)
+{
+    host = toLower(host);
+    // A single trailing dot is the DNS absolute-name spelling of the same
+    // host. Repeated dots remain distinct and are never granted a bypass.
+    if(host.size() > 1 && host.back() == '.' && host[host.size() - 2] != '.')
+        host.pop_back();
+    return host;
+}
+
+static bool valid_http_port(const std::string &port)
+{
+    if(port.empty())
+        return false;
+    unsigned int value = 0;
+    for(unsigned char ch : port)
+    {
+        if(!std::isdigit(ch))
+            return false;
+        value = value * 10u + static_cast<unsigned int>(ch - '0');
+        if(value > 65535u)
+            return false;
+    }
+    return value != 0;
+}
+
+static bool has_invalid_http_host_character(const std::string &host)
+{
+    for(unsigned char ch : host)
+    {
+        if(std::iscntrl(ch) || std::isspace(ch) || ch == '/' || ch == '?' ||
+           ch == '#' || ch == '@' || ch == '[' || ch == ']' || ch == '%')
+            return true;
+    }
+    return false;
+}
+
+#if LIBCURL_VERSION_NUM >= 0x073e00
+static bool get_curl_url_part(CURLU *handle, CURLUPart part,
+                              unsigned int flags, std::string &value)
+{
+    char *raw = nullptr;
+    if(curl_url_get(handle, part, &raw, flags) != CURLUE_OK)
+        return false;
+    value.assign(raw);
+    curl_free(raw);
+    return true;
+}
+#endif
+
+static HttpUrlTarget parse_http_url_target(const std::string &url)
+{
+    HttpUrlTarget result;
+    if(url.empty() || has_control_character(url))
+        return result;
+
+#if LIBCURL_VERSION_NUM >= 0x073e00
+    if(curl_init() != CURLE_OK)
+        return result;
+    CURLU *handle = curl_url();
+    if(handle == nullptr)
+        return result;
+    const CURLUcode set_result =
+        curl_url_set(handle, CURLUPART_URL, url.c_str(), 0);
+    std::string scheme;
+    std::string host;
+    bool valid = set_result == CURLUE_OK &&
+                 get_curl_url_part(handle, CURLUPART_SCHEME, 0, scheme) &&
+                 get_curl_url_part(handle, CURLUPART_HOST, 0, host);
+    if(valid)
+    {
+        scheme = toLower(scheme);
+        valid = scheme == "http" || scheme == "https";
+    }
+    if(valid && host.size() >= 2 && host.front() == '[' && host.back() == ']')
+        host = host.substr(1, host.size() - 2);
+    if(valid && (host.empty() || has_invalid_http_host_character(host)))
+        valid = false;
+
+    char *raw_port = nullptr;
+    if(valid)
+    {
+        const CURLUcode port_result =
+            curl_url_get(handle, CURLUPART_PORT, &raw_port, 0);
+        if(port_result == CURLUE_OK)
+        {
+            const std::string port(raw_port);
+            curl_free(raw_port);
+            raw_port = nullptr;
+            valid = valid_http_port(port);
+        }
+        else if(port_result != CURLUE_NO_PORT)
+            valid = false;
+    }
+    if(raw_port != nullptr)
+        curl_free(raw_port);
+    curl_url_cleanup(handle);
+    if(!valid)
+        return result;
+    result.host = normalize_http_host(host);
+#else
+    // curl's URL API was introduced in 7.62. Older supported builds use a
+    // deliberately conservative parser: ambiguous or encoded hosts are not
+    // eligible for a loopback bypass and restricted requests reject them.
+    const size_t scheme_end = url.find("://");
+    if(scheme_end == std::string::npos || scheme_end == 0)
+        return result;
+    const std::string scheme = toLower(url.substr(0, scheme_end));
+    if(scheme != "http" && scheme != "https")
+        return result;
+    const size_t authority_start = scheme_end + 3;
+    const size_t authority_end = url.find_first_of("/?#", authority_start);
+    std::string authority = url.substr(
+        authority_start, authority_end == std::string::npos
+                             ? std::string::npos
+                             : authority_end - authority_start);
+    const size_t userinfo_end = authority.rfind('@');
+    if(userinfo_end != std::string::npos)
+        authority.erase(0, userinfo_end + 1);
+    if(authority.empty())
+        return result;
+
+    std::string host;
+    std::string port;
+    if(authority.front() == '[')
+    {
+        const size_t close = authority.find(']');
+        if(close == std::string::npos || close == 1)
+            return result;
+        host = authority.substr(1, close - 1);
+        if(close + 1 < authority.size())
+        {
+            if(authority[close + 1] != ':')
+                return result;
+            port = authority.substr(close + 2);
+        }
+    }
+    else
+    {
+        const size_t colon = authority.rfind(':');
+        if(colon != std::string::npos)
+        {
+            if(authority.find(':') != colon)
+                return result;
+            host = authority.substr(0, colon);
+            port = authority.substr(colon + 1);
+        }
+        else
+            host = authority;
+    }
+    if(host.empty() || has_invalid_http_host_character(host) ||
+       (!port.empty() && !valid_http_port(port)) || authority.back() == ':')
+        return result;
+    result.host = normalize_http_host(host);
+#endif
+
+    result.valid = !result.host.empty();
+    return result;
+}
+
+enum class LoopbackKind
+{
+    None,
+    Hostname,
+    Ipv4,
+    Ipv6,
+};
+
+static LoopbackKind classify_loopback_host(const std::string &host)
+{
+    if(host == "localhost" || endsWith(host, ".localhost"))
+        return LoopbackKind::Hostname;
+
+    const client_ip::Address address = client_ip::parseAddress(host);
+    if(address.family == client_ip::Family::IPv4 && address.bytes[0] == 127)
+        return host.find(':') == std::string::npos ? LoopbackKind::Ipv4
+                                                   : LoopbackKind::Ipv6;
+    if(address.family != client_ip::Family::IPv6 || address.bytes[15] != 1)
+        return LoopbackKind::None;
+    for(size_t index = 0; index < 15; ++index)
+    {
+        if(address.bytes[index] != 0)
+            return LoopbackKind::None;
+    }
+    return LoopbackKind::Ipv6;
+}
+
+static std::string loopback_no_proxy_pattern(const std::string &host)
+{
+    const LoopbackKind kind = classify_loopback_host(host);
+    if(kind == LoopbackKind::None)
+        return "";
+    if(kind == LoopbackKind::Hostname)
+        // libcurl uses domain-suffix matching for hostnames. Any expansion of
+        // a .localhost name remains inside the reserved localhost family.
+        return host;
+
+#if LIBCURL_VERSION_NUM >= 0x075600
+    const curl_version_info_data *version = curl_version_info(CURLVERSION_NOW);
+    if(version != nullptr && version->version_num >= 0x075600)
+        return host + (kind == LoopbackKind::Ipv4 ? "/32" : "/128");
+#endif
+    // Before 7.86 libcurl cannot express an exact numeric NOPROXY match. A
+    // plain IP entry also matches hostname suffixes, so fail closed instead.
+    return "";
+}
+
+enum class NoProxyDirective
+{
+    None,
+    InheritEnvironment,
+    ForceProxy,
+    LoopbackBypass,
+};
+
+struct ResolvedProxyRoute
+{
+    ResolvedProxyPolicy proxy;
+    NoProxyDirective no_proxy = NoProxyDirective::None;
+    std::string loopback_host;
+    std::string no_proxy_pattern;
+    std::string inherited_no_proxy;
+
+    std::string cacheIdentity() const
+    {
+        std::string identity = "routing-v2\n" + proxy.cacheIdentity() +
+                               "\nnoproxy=";
+        switch(no_proxy)
+        {
+        case NoProxyDirective::None:
+            identity += "none";
+            break;
+        case NoProxyDirective::InheritEnvironment:
+            identity += "inherit:" + inherited_no_proxy;
+            break;
+        case NoProxyDirective::ForceProxy:
+            identity += "force";
+            break;
+        case NoProxyDirective::LoopbackBypass:
+            identity += "loopback:" + no_proxy_pattern;
+            break;
+        }
+        return identity;
+    }
+};
+
+static ResolvedProxyRoute resolveProxyRoute(
+    const ResolvedProxyPolicy &snapshot, const std::string &url,
+    FetchContext context)
+{
+    ResolvedProxyRoute route;
+    route.proxy = snapshot;
+    switch(snapshot.mode)
+    {
+    case ProxyMode::Direct:
+    case ProxyMode::Cors:
+        break;
+    case ProxyMode::System:
+        if(isPublicFetchRestricted(context) && !snapshot.endpoint.empty())
+            // A public request must not inherit a redirect-time bypass that
+            // can turn a proxied remote URL into a direct loopback request.
+            route.no_proxy = NoProxyDirective::ForceProxy;
+        else
+        {
+            route.no_proxy = NoProxyDirective::InheritEnvironment;
+            route.inherited_no_proxy = getEnv("no_proxy");
+            if(route.inherited_no_proxy.empty())
+                route.inherited_no_proxy = getEnv("NO_PROXY");
+        }
+        break;
+    case ProxyMode::Explicit:
+        route.no_proxy = NoProxyDirective::ForceProxy;
+        if(!isPublicFetchRestricted(context))
+        {
+            const HttpUrlTarget target = parse_http_url_target(url);
+            const std::string pattern =
+                target.valid ? loopback_no_proxy_pattern(target.host) : "";
+            if(!pattern.empty())
+            {
+                route.no_proxy = NoProxyDirective::LoopbackBypass;
+                route.loopback_host = target.host;
+                route.no_proxy_pattern = pattern;
+            }
+        }
+        break;
+    }
+    return route;
+}
+
 static std::mutex cache_fetch_mutex;
 static std::map<std::string, std::shared_future<CacheFetchResult>> cache_fetches;
 static std::atomic_bool outbound_fetch_shutdown_requested {false};
@@ -104,14 +412,16 @@ static CURLcode curl_init()
     return init_result;
 }
 
-static std::string build_cache_key(const std::string &url, const ProxyPolicy &proxy,
+static std::string build_cache_key(const std::string &url,
+                                   const ResolvedProxyRoute &route,
                                    const string_icase_map *request_headers)
 {
-    if(proxy.mode == ProxyMode::Direct && (!request_headers || request_headers->empty()))
+    if(route.proxy.mode == ProxyMode::Direct &&
+       (!request_headers || request_headers->empty()))
         return getMD5(url);
 
     std::string identity = "url:" + std::to_string(url.size()) + ":" + url;
-    const std::string proxy_identity = proxy.cacheIdentity();
+    const std::string proxy_identity = route.cacheIdentity();
     identity += "\nproxy:" + std::to_string(proxy_identity.size()) + ":" + proxy_identity;
     identity += "\nheaders:";
     if(request_headers)
@@ -314,14 +624,6 @@ static bool is_blocked_ip_address(const std::string &address,
     return is_blocked_ipv4(address) || is_blocked_ipv6(address);
 }
 
-static std::string normalize_fetch_host(std::string host)
-{
-    host = toLower(trimWhitespace(host, true, true));
-    while(!host.empty() && host.back() == '.')
-        host.pop_back();
-    return host;
-}
-
 static bool is_blocked_hostname(const std::string &host)
 {
     if(host == "localhost" || endsWith(host, ".localhost"))
@@ -329,16 +631,6 @@ static bool is_blocked_hostname(const std::string &host)
     if(endsWith(host, ".local") || endsWith(host, ".localdomain") ||
        endsWith(host, ".home.arpa"))
         return true;
-    return false;
-}
-
-static bool has_control_character(const std::string &value)
-{
-    for(unsigned char ch : value)
-    {
-        if(std::iscntrl(ch))
-            return true;
-    }
     return false;
 }
 
@@ -363,12 +655,18 @@ bool isFetchUrlAllowed(const std::string &url, FetchContext context)
         return false;
     }
 
-    std::string parsed_url = checked_url, host, path;
-    int port = 0;
-    bool is_tls = false;
-    urlParse(parsed_url, host, path, port, is_tls);
-    host = normalize_fetch_host(host);
-    if(host.empty() || is_blocked_hostname(host) || is_blocked_ip_address(host))
+    const HttpUrlTarget target = parse_http_url_target(checked_url);
+    if(!target.valid)
+    {
+        writeLog(LOG_LEVEL_WARNING,
+                 "已阻止公开请求获取格式异常的 HTTP(S) URL：" + log_url);
+        return false;
+    }
+
+    const std::string &host = target.host;
+    if(classify_loopback_host(host) != LoopbackKind::None ||
+       is_blocked_hostname(host) ||
+       is_blocked_ip_address(host))
     {
         writeLog(LOG_LEVEL_WARNING, "已阻止公开请求访问本地或私有主机：" + log_url);
         return false;
@@ -489,6 +787,10 @@ static int logger(CURL *handle, curl_infotype type, char *data, size_t size, voi
         return 0;
     }
     std::string content(data, size);
+    if(type == CURLINFO_TEXT)
+        // Redact the complete callback before splitting physical lines. Curl
+        // can decode escaped userinfo into CR/LF inside its auth diagnostic.
+        content = redactSensitiveLogText(content);
     auto safe_header_line = [](const std::string &line) {
         std::string value = trimWhitespace(line);
         if(value.empty() || startsWith(value, "HTTP/"))
@@ -559,6 +861,12 @@ static inline void curl_set_common_options(CURL *curl_handle, const char *url, c
     curl_easy_setopt(curl_handle, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl_handle, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl_handle, CURLOPT_MAXREDIRS, 20L);
+#if LIBCURL_VERSION_NUM >= 0x075500
+    curl_easy_setopt(curl_handle, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
+#else
+    curl_easy_setopt(curl_handle, CURLOPT_REDIR_PROTOCOLS,
+                     static_cast<long>(CURLPROTO_HTTP | CURLPROTO_HTTPS));
+#endif
     curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYPEER,
                      effectiveSettings().allowInsecureTls ? 0L : 1L);
     curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYHOST,
@@ -575,11 +883,10 @@ static inline void curl_set_common_options(CURL *curl_handle, const char *url, c
 }
 
 static CURLcode apply_curl_proxy_policy(CURL *curl_handle,
-                                        const ProxyPolicy &requested,
-                                        std::string &url,
-                                        ProxyPolicy &effective)
+                                         const ResolvedProxyRoute &route,
+                                         std::string &url)
 {
-    effective = requested.resolved();
+    const ResolvedProxyPolicy &effective = route.proxy;
     if(!effective.valid)
     {
         writeLog(LOG_LEVEL_ERROR, "出站代理配置无效：" + effective.describe() + "。");
@@ -599,14 +906,23 @@ static CURLcode apply_curl_proxy_policy(CURL *curl_handle,
         else
             curl_easy_setopt(curl_handle, CURLOPT_PROXY,
                              effective.endpoint.c_str());
-        // Do not set CURLOPT_NOPROXY here: System intentionally preserves the
-        // platform's NO_PROXY/no_proxy behaviour.
+        if(route.no_proxy == NoProxyDirective::ForceProxy)
+            curl_easy_setopt(curl_handle, CURLOPT_NOPROXY, "");
+        else if(route.no_proxy == NoProxyDirective::InheritEnvironment)
+            // Apply the value captured with the proxy snapshot so the cache
+            // identity and actual transfer cannot observe different state.
+            curl_easy_setopt(curl_handle, CURLOPT_NOPROXY,
+                             route.inherited_no_proxy.c_str());
         break;
     case ProxyMode::Explicit:
         curl_easy_setopt(curl_handle, CURLOPT_PROXY, effective.endpoint.c_str());
-        // An explicitly configured proxy is fail-closed and must not be
-        // bypassed by an inherited NO_PROXY/no_proxy environment variable.
-        curl_easy_setopt(curl_handle, CURLOPT_NOPROXY, "");
+        if(route.no_proxy == NoProxyDirective::LoopbackBypass)
+            curl_easy_setopt(curl_handle, CURLOPT_NOPROXY,
+                             route.no_proxy_pattern.c_str());
+        else
+            // An explicitly configured proxy is fail-closed and must not be
+            // bypassed by an inherited NO_PROXY/no_proxy environment variable.
+            curl_easy_setopt(curl_handle, CURLOPT_NOPROXY, "");
         break;
     case ProxyMode::Cors:
         // cors: names an HTTP relay URL, not a libcurl network proxy.  Its
@@ -617,7 +933,12 @@ static CURLcode apply_curl_proxy_policy(CURL *curl_handle,
     }
 
     if(shouldLog(LOG_LEVEL_VERBOSE))
-        writeLog(LOG_LEVEL_VERBOSE, "出站代理策略：" + effective.describe() + "。");
+    {
+        std::string description = "出站代理策略：" + effective.describe();
+        if(route.no_proxy == NoProxyDirective::LoopbackBypass)
+            description += "；初始回环主机直连：" + route.loopback_host;
+        writeLog(LOG_LEVEL_VERBOSE, description + "。");
+    }
     return CURLE_OK;
 }
 
@@ -667,7 +988,9 @@ static bool is_recoverable_curl_error(CURLcode code)
 }
 
 //static std::string curlGet(const std::string &url, const std::string &proxy, std::string &response_headers, CURLcode &return_code, const string_map &request_headers)
-static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode *return_code = nullptr)
+static int curlGet(const FetchArgument &argument,
+                   const ResolvedProxyRoute &route, FetchResult &result,
+                   CURLcode *return_code = nullptr)
 {
     CURL *curl_handle;
     std::string *data = result.content, new_url = argument.url;
@@ -708,9 +1031,7 @@ static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode 
         writeLog(LOG_LEVEL_ERROR, "curl_easy_init 失败。");
         return 0;
     }
-    ProxyPolicy effective_proxy;
-    retVal = apply_curl_proxy_policy(curl_handle, argument.proxy, new_url,
-                                     effective_proxy);
+    retVal = apply_curl_proxy_policy(curl_handle, route, new_url);
     if(retVal != CURLE_OK)
     {
         *result.status_code = 0;
@@ -718,7 +1039,7 @@ static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode 
             *return_code = retVal;
         return 0;
     }
-    if(effective_proxy.mode == ProxyMode::Cors)
+    if(route.proxy.mode == ProxyMode::Cors)
         header_list = curl_slist_append(header_list,
                                         "X-Requested-With: SubConverter-Extended " VERSION);
     curl_progress_data limit;
@@ -738,9 +1059,9 @@ static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode 
 #if LIBCURL_VERSION_NUM >= 0x075000
     FetchContext prereq_context = argument.context;
     if(isPublicFetchRestricted(argument.context) &&
-       (effective_proxy.mode == ProxyMode::Direct ||
-        (effective_proxy.mode == ProxyMode::System &&
-         effective_proxy.endpoint.empty())))
+       (route.proxy.mode == ProxyMode::Direct ||
+        (route.proxy.mode == ProxyMode::System &&
+         route.proxy.endpoint.empty())))
     {
         curl_easy_setopt(curl_handle, CURLOPT_PREREQFUNCTION,
                          public_fetch_prereq_callback);
@@ -885,10 +1206,13 @@ static int curlGet(const FetchArgument &argument, FetchResult &result, CURLcode 
     return *result.status_code;
 }
 
-static int curlGetWithGitHubFallback(const FetchArgument &argument, FetchResult &result)
+static int curlGetWithGitHubFallback(
+    const FetchArgument &argument, const ResolvedProxyPolicy &snapshot,
+    const ResolvedProxyRoute &initial_route, FetchResult &result)
 {
     CURLcode original_code = CURLE_OK;
-    int original_status = curlGet(argument, result, &original_code);
+    int original_status =
+        curlGet(argument, initial_route, result, &original_code);
 
     std::string fallback_url;
     if(argument.method != HTTP_GET || argument.keep_resp_on_fail ||
@@ -913,9 +1237,12 @@ static int curlGetWithGitHubFallback(const FetchArgument &argument, FetchResult 
                                      nullptr, argument.request_headers,
                                      argument.cookies, argument.cache_ttl,
                                      argument.keep_resp_on_fail,
-                                     argument.context};
+                                      argument.context};
+    const ResolvedProxyRoute fallback_route =
+        resolveProxyRoute(snapshot, fallback_url, argument.context);
     CURLcode fallback_code = CURLE_OK;
-    int fallback_status = curlGet(fallback_argument, result, &fallback_code);
+    int fallback_status =
+        curlGet(fallback_argument, fallback_route, result, &fallback_code);
     if(fallback_code == CURLE_OK && fallback_status == 200)
     {
         writeLog(LOG_LEVEL_INFO,
@@ -934,6 +1261,15 @@ static int curlGetWithGitHubFallback(const FetchArgument &argument, FetchResult 
         *result.cookies = original_cookies;
     *result.status_code = original_status;
     return original_status;
+}
+
+static int executeNetworkFetch(const FetchArgument &argument,
+                               FetchResult &result)
+{
+    const ResolvedProxyPolicy snapshot = argument.proxy.snapshot();
+    const ResolvedProxyRoute route =
+        resolveProxyRoute(snapshot, argument.url, argument.context);
+    return curlGetWithGitHubFallback(argument, snapshot, route, result);
 }
 
 // data:[<mediatype>][;base64],<data>
@@ -996,12 +1332,16 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned in
 
     if (startsWith(effective_url, "data:"))
         return dataGet(effective_url);
+
+    const ResolvedProxyPolicy proxy_snapshot = proxy.snapshot();
+    const ResolvedProxyRoute initial_route =
+        resolveProxyRoute(proxy_snapshot, effective_url, context);
     // cache system
     if(cache_ttl > 0)
     {
         md("cache");
         const std::string url_md5 =
-            build_cache_key(effective_url, proxy, request_headers);
+            build_cache_key(effective_url, initial_route, request_headers);
         const std::string path = "cache/" + url_md5, path_header = path + "_header";
         struct stat result {};
         if(stat(path.data(), &result) == 0) // cache exist
@@ -1062,7 +1402,8 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned in
                 FetchResult fetch_result {
                     &result.status_code, &result.content,
                     &result.response_headers, nullptr};
-                curlGetWithGitHubFallback(argument, fetch_result);
+                curlGetWithGitHubFallback(argument, proxy_snapshot,
+                                          initial_route, fetch_result);
                 fetch_promise->set_value(std::move(result));
             }
             catch(...)
@@ -1134,7 +1475,8 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned in
         return content;
     }
     //return curlGet(url, proxy, response_headers, return_code);
-    curlGetWithGitHubFallback(argument, fetch_res);
+    curlGetWithGitHubFallback(argument, proxy_snapshot, initial_route,
+                              fetch_res);
     return content;
 }
 
@@ -1203,7 +1545,7 @@ int webGet(const FetchArgument& argument, FetchResult &result)
         return *result.status_code;
     }
     if (!source.rewritten)
-        return curlGetWithGitHubFallback(argument, result);
+        return executeNetworkFetch(argument, result);
 
     if(shouldLog(LOG_LEVEL_VERBOSE))
         writeLog(LOG_LEVEL_VERBOSE, "COCR 服务端取源切换：" +
@@ -1213,5 +1555,5 @@ int webGet(const FetchArgument& argument, FetchResult &result)
         argument.method, source.effective_url, argument.proxy,
         argument.post_data, argument.request_headers, argument.cookies,
         argument.cache_ttl, argument.keep_resp_on_fail, argument.context};
-    return curlGetWithGitHubFallback(effective_argument, result);
+    return executeNetworkFetch(effective_argument, result);
 }

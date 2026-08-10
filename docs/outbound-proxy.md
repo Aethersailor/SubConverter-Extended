@@ -8,10 +8,38 @@ whitespace is ignored.
 | --- | --- | --- |
 | empty or `NONE` | Direct | Explicitly disables libcurl proxy environment variables for that request. `NONE` is case-insensitive. |
 | `SYSTEM` | System | Resolves the platform system proxy. On Unix-like systems the first present value is `all_proxy`, `ALL_PROXY`, `http_proxy`, `HTTP_PROXY`, `https_proxy`, then `HTTPS_PROXY`; `NO_PROXY`/`no_proxy` is respected. Windows uses enabled Internet Settings proxy data. |
-| `http://…`, `https://…`, `socks4://…`, `socks4a://…`, `socks5://…`, `socks5h://…` | Explicit | Uses that proxy only. `NO_PROXY` and `no_proxy` cannot bypass it, so a failed explicit proxy fails closed instead of retrying direct. URI validation requires a supported scheme, host, and port. |
+| `http://…`, `https://…`, `socks4://…`, `socks4a://…`, `socks5://…`, `socks5h://…` | Explicit | Uses that proxy for non-loopback destinations. `NO_PROXY` and `no_proxy` cannot change the policy. An initial syntactic loopback target is handled as described below. URI validation requires a supported scheme, host, and port. |
 | `cors:https://…` | Cors | Compatibility HTTP CORS relay. It prefixes the requested URL and is transported directly; it is not a libcurl proxy. |
 
 Malformed non-empty policies are rejected. They never become direct requests.
+
+### Explicit proxy and loopback targets
+
+For trusted configuration fetches and requests accepted by the `lan` security
+profile, an explicit proxy bypasses only an initial target whose URL host is
+syntactically `localhost`, a subdomain of `localhost`, an address in
+`127.0.0.0/8`, or the IPv6 loopback address. Hostnames use the reserved
+`.localhost` family. Numeric addresses use a single-address `/32` or `/128`
+match, not a wildcard or private-network range.
+
+This is a request-level routing decision rather than inherited `NO_PROXY`
+state. A redirect from that loopback host to a remote host therefore resumes
+using the explicit proxy. Conversely, a request whose initial host is remote
+continues to use the proxy if it redirects to a loopback address. Arbitrary
+hostnames are not resolved to decide whether to bypass, and RFC 1918,
+carrier-grade NAT, and link-local ranges are not bypassed automatically.
+
+Numeric single-address matching requires libcurl 7.86 or newer and is
+available in the official Windows build. A custom build using an older libcurl
+keeps numeric loopback targets on the proxy (fail closed); the `localhost`
+family is still handled directly.
+
+The `public` and `strict` profiles reject public-request loopback targets before
+transport and never enable this bypass. `SYSTEM` normally inherits the platform
+`NO_PROXY`/`no_proxy` behavior. When a public request resolves `SYSTEM` to a
+proxy, bypass inheritance is disabled so a redirect cannot switch that request
+to a direct loopback connection. `cors:` remains an HTTP relay rather than a
+libcurl proxy.
 
 ## Which setting applies
 
@@ -64,6 +92,7 @@ recoverable DNS/connect/timeout/send/receive/partial-transfer error. It never
 retries authentication failures, TLS verification failures, policy/security
 rejections, malformed URLs, HTTP status responses, POST, or PATCH; a retry
 therefore cannot turn an explicit-proxy failure into a direct request.
+Redirects are limited to HTTP and HTTPS.
 
 ## Diagnostics and secrets
 

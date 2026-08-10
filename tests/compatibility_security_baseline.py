@@ -8,6 +8,7 @@ import base64
 import contextlib
 import difflib
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -162,12 +163,17 @@ GIST_REMOTE_FAILURE_BODY = (
 class FixtureHandler(BaseHTTPRequestHandler):
     gist_request_count = 0
     provider_never_fetch_count = 0
+    external_valid_count = 0
+    get_request_count = 0
+    counter_lock = threading.Lock()
     slow_subscription_started = threading.Event()
     slow_subscription_release = threading.Event()
     slow_ruleset_started = threading.Event()
     slow_ruleset_release = threading.Event()
 
     def do_GET(self) -> None:  # noqa: N802
+        with type(self).counter_lock:
+            type(self).get_request_count += 1
         request_path = urllib.parse.urlsplit(self.path).path
         if request_path == "/subscription.txt":
             body = ENCODED_SUBSCRIPTION.encode()
@@ -208,7 +214,36 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 return
             body = GENERATION_RULESET.encode()
             content_type = "text/plain; charset=utf-8"
+        elif request_path == "/redirect-loopback-to-remote.ini":
+            self.send_response(302)
+            self.send_header(
+                "Location",
+                f"http://target.test:{self.server.server_port}"
+                "/external-valid.ini?route=loopback-to-remote",
+            )
+            self.end_headers()
+            return
+        elif request_path == "/redirect-loopback-to-suffix.ini":
+            self.send_response(302)
+            self.send_header(
+                "Location",
+                f"http://foo.127.0.0.1:{self.server.server_port}"
+                "/external-valid.ini?route=loopback-to-suffix",
+            )
+            self.end_headers()
+            return
+        elif request_path == "/redirect-remote-to-loopback.ini":
+            self.send_response(302)
+            self.send_header(
+                "Location",
+                f"http://127.0.0.1:{self.server.server_port}"
+                "/external-valid.ini?route=remote-to-loopback",
+            )
+            self.end_headers()
+            return
         elif request_path == "/external-valid.ini":
+            with type(self).counter_lock:
+                type(self).external_valid_count += 1
             body = b"[custom]\nenable_rule_generator=false\n"
             content_type = "text/plain; charset=utf-8"
         elif request_path == "/external-clash-generation.ini":
@@ -337,10 +372,92 @@ class FixtureHandler(BaseHTTPRequestHandler):
         return
 
 
+class AuthenticatedProxyHandler(BaseHTTPRequestHandler):
+    expected_authorization = ""
+    request_hosts: list[str] = []
+    request_lock = threading.Lock()
+
+    def do_GET(self) -> None:  # noqa: N802
+        if self.headers.get("Proxy-Authorization", "") != type(
+            self
+        ).expected_authorization:
+            self.send_response(407)
+            self.send_header("Proxy-Authenticate", 'Basic realm="fixture"')
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        target = urllib.parse.urlsplit(self.path)
+        if target.scheme != "http" or target.hostname is None or target.port is None:
+            self.send_error(400)
+            return
+        with type(self).request_lock:
+            type(self).request_hosts.append(target.hostname)
+
+        forwarded_path = urllib.parse.urlunsplit(
+            ("", "", target.path or "/", target.query, "")
+        )
+        try:
+            connection = http.client.HTTPConnection(
+                "127.0.0.1", target.port, timeout=10
+            )
+            connection.request(
+                "GET", forwarded_path, headers={"Host": target.netloc}
+            )
+            response = connection.getresponse()
+            body = response.read()
+        except OSError:
+            self.send_error(502)
+            return
+        finally:
+            if "connection" in locals():
+                connection.close()
+
+        self.send_response(response.status)
+        for name, value in response.getheaders():
+            if name.lower() not in {
+                "connection",
+                "content-length",
+                "proxy-authenticate",
+                "transfer-encoding",
+            }:
+                self.send_header(name, value)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+
+@contextlib.contextmanager
+def authenticated_proxy_server(username: str, password: str):
+    authorization = base64.b64encode(
+        f"{username}:{password}".encode("utf-8")
+    ).decode("ascii")
+    AuthenticatedProxyHandler.expected_authorization = "Basic " + authorization
+    AuthenticatedProxyHandler.request_hosts = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), AuthenticatedProxyHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield (
+            f"http://{username}:{password}@127.0.0.1:{server.server_port}",
+            AuthenticatedProxyHandler,
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
 @contextlib.contextmanager
 def fixture_server():
     FixtureHandler.gist_request_count = 0
     FixtureHandler.provider_never_fetch_count = 0
+    FixtureHandler.external_valid_count = 0
+    FixtureHandler.get_request_count = 0
     FixtureHandler.slow_subscription_started.clear()
     FixtureHandler.slow_subscription_release.set()
     FixtureHandler.slow_ruleset_started.clear()
@@ -4624,6 +4741,200 @@ def external_config_failure_baseline(binary: Path, fixture_base: str) -> None:
             )
 
 
+def loopback_proxy_route_baseline(binary: Path, fixture_base: str) -> None:
+    proxy_secret = "loopback-proxy-secret"
+    unavailable_proxy = (
+        "http://loopback-user:"
+        + proxy_secret
+        + f"@127.0.0.1:{unused_port()}"
+    )
+    replacements = (
+        ('proxy_config = "NONE"', f'proxy_config = "{unavailable_proxy}"'),
+        ("cache_config = 300", "cache_config = 0"),
+    )
+    common = {
+        "target": "clash",
+        "url": (
+            "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388"
+            "#LoopbackProxy"
+        ),
+        "list": "true",
+    }
+
+    lan_logs: list[str] = []
+    parsed_fixture = urllib.parse.urlsplit(fixture_base)
+    fixture_port = parsed_fixture.port
+    if fixture_port is None:
+        raise AssertionError("loopback fixture URL is missing a port")
+    lan_config_urls = (
+        fixture_base + "/external-valid.ini?route=explicit-loopback",
+        f"http://127.1:{fixture_port}/external-valid.ini?route=short-ipv4",
+        f"http://0x7f000001:{fixture_port}/external-valid.ini?route=hex-ipv4",
+        f"http://0177.0.0.1:{fixture_port}/external-valid.ini?route=octal-ipv4",
+        f"http://%31%32%37.0.0.1:{fixture_port}"
+        "/external-valid.ini?route=encoded-ipv4",
+        f"http://localhost.:{fixture_port}"
+        "/external-valid.ini?route=absolute-localhost",
+    )
+    with FixtureHandler.counter_lock:
+        before = FixtureHandler.external_valid_count
+    with running_service(
+        binary,
+        security_profile="lan",
+        config_replacements=replacements,
+        log_capture=lan_logs,
+        log_level="verbose",
+    ) as base_url:
+        for config_url in lan_config_urls:
+            status, _, _ = request(
+                base_url, "/sub", {**common, "config": config_url}
+            )
+            if status != 200:
+                raise AssertionError(
+                    "lan explicit-proxy loopback config returned HTTP "
+                    f"{status}: {config_url!r}"
+                )
+    with FixtureHandler.counter_lock:
+        after = FixtureHandler.external_valid_count
+    if after != before + len(lan_config_urls):
+        raise AssertionError(
+            "loopback external configs did not each connect directly once"
+        )
+    lan_diagnostics = "\n".join(lan_logs)
+    if "初始回环主机直连：127.0.0.1" not in lan_diagnostics:
+        raise AssertionError("loopback proxy bypass was not diagnosed")
+    if proxy_secret in lan_diagnostics or "loopback-user" in lan_diagnostics:
+        raise AssertionError("loopback proxy credentials leaked to diagnostics")
+
+    userinfo_config = (
+        f"{parsed_fixture.scheme}://fixture-user@{parsed_fixture.netloc}"
+        "/external-valid.ini?route=userinfo-loopback"
+    )
+    restricted_config_urls = (
+        *lan_config_urls,
+        userinfo_config,
+        f"http://127.0.0.1:{fixture_port}"
+        "?route=query-without-path-loopback",
+    )
+    for profile in ("public", "strict"):
+        restricted_logs: list[str] = []
+        with FixtureHandler.counter_lock:
+            before = FixtureHandler.external_valid_count
+            before_requests = FixtureHandler.get_request_count
+        with running_service(
+            binary,
+            security_profile=profile,
+            config_replacements=replacements,
+            log_capture=restricted_logs,
+            log_level="verbose",
+        ) as base_url:
+            for config_url in restricted_config_urls:
+                status, _, _ = request(
+                    base_url, "/sub", {**common, "config": config_url}
+                )
+                if status != 400:
+                    raise AssertionError(
+                        f"{profile} loopback external config returned HTTP "
+                        f"{status}, expected 400"
+                    )
+        with FixtureHandler.counter_lock:
+            after = FixtureHandler.external_valid_count
+            after_requests = FixtureHandler.get_request_count
+        if after != before:
+            raise AssertionError(
+                f"{profile} loopback security rejection reached the fixture"
+            )
+        if after_requests != before_requests:
+            raise AssertionError(
+                f"{profile} loopback security rejection made a network request"
+            )
+        restricted_diagnostics = "\n".join(restricted_logs)
+        if "初始回环主机直连" in restricted_diagnostics:
+            raise AssertionError(
+                f"{profile} security rejection enabled proxy bypass"
+            )
+        if restricted_diagnostics.count(
+            "已阻止公开请求访问本地或私有主机"
+        ) < len(restricted_config_urls):
+            raise AssertionError(
+                f"{profile} did not reject every loopback URL spelling"
+            )
+
+
+def loopback_redirect_route_baseline(binary: Path, fixture_base: str) -> None:
+    parsed_fixture = urllib.parse.urlsplit(fixture_base)
+    fixture_port = parsed_fixture.port
+    if fixture_port is None:
+        raise AssertionError("redirect fixture URL is missing a port")
+
+    proxy_username = "redirect-proxy-user"
+    proxy_secret = "redirect-proxy-secret"
+    logs: list[str] = []
+    with authenticated_proxy_server(proxy_username, proxy_secret) as (
+        proxy_url,
+        proxy_handler,
+    ):
+        replacements = (
+            ('proxy_config = "NONE"', f'proxy_config = "{proxy_url}"'),
+            ("cache_config = 300", "cache_config = 0"),
+        )
+        common = {
+            "target": "clash",
+            "url": (
+                "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388"
+                "#RedirectProxy"
+            ),
+            "list": "true",
+        }
+
+        with running_service(
+            binary,
+            security_profile="lan",
+            config_replacements=replacements,
+            log_capture=logs,
+            log_level="verbose",
+        ) as base_url:
+
+            def assert_route(
+                label: str, config_url: str, expected_hosts: list[str]
+            ) -> None:
+                with proxy_handler.request_lock:
+                    before = len(proxy_handler.request_hosts)
+                status, _, _ = request(
+                    base_url, "/sub", {**common, "config": config_url}
+                )
+                with proxy_handler.request_lock:
+                    actual_hosts = proxy_handler.request_hosts[before:]
+                if status != 200 or actual_hosts != expected_hosts:
+                    raise AssertionError(
+                        f"{label} route changed: HTTP {status}, "
+                        f"proxy hosts={actual_hosts!r}"
+                    )
+
+            assert_route(
+                "loopback-to-remote redirect",
+                fixture_base + "/redirect-loopback-to-remote.ini",
+                ["target.test"],
+            )
+            assert_route(
+                "numeric-suffix redirect",
+                fixture_base + "/redirect-loopback-to-suffix.ini",
+                ["foo.127.0.0.1"],
+            )
+            assert_route(
+                "remote-to-loopback redirect",
+                f"http://target.test:{fixture_port}"
+                "/redirect-remote-to-loopback.ini",
+                ["target.test", "127.0.0.1"],
+            )
+
+    diagnostics = "\n".join(logs)
+    if "初始回环主机直连：127.0.0.1" not in diagnostics:
+        raise AssertionError("redirect baseline did not diagnose loopback bypass")
+    if proxy_username in diagnostics or proxy_secret in diagnostics:
+        raise AssertionError("redirect proxy credentials leaked to diagnostics")
+
+
 def request_generation_reload_baseline(binary: Path, fixture_base: str) -> None:
     pref_paths: list[Path] = []
     old_prefix = "https://managed-old.snapshot.test"
@@ -5076,6 +5387,8 @@ def main() -> int:
         security_endpoint_matrix_baseline(binary, fixture_base)
         upload_failure_compatibility_baseline(binary, fixture_base)
         external_config_failure_baseline(binary, fixture_base)
+        loopback_proxy_route_baseline(binary, fixture_base)
+        loopback_redirect_route_baseline(binary, fixture_base)
         getruleset_generation_reload_baseline(binary, fixture_base)
         request_generation_reload_baseline(binary, fixture_base)
 
