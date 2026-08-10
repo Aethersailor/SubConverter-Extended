@@ -32,6 +32,49 @@ LEGACY_ONLY_ROUTE_URI = (
     "trojan-go://password@legacy.example.test:443"
     "?sni=example.test#LegacyRouteProbe"
 )
+VERIFIED_CLASH_AUTO_USER_AGENTS = (
+    "clash.meta/1.19.29",  # Mihomo
+    "clash.meta/mihomo",  # GUI.for.Clash
+    "clash.meta/alpha-e89af72",  # Sparkle fallback
+    "clash.meta/1.19.5",  # ClashBox default
+    "clash-verge/v2.5.3",  # Clash Verge Rev
+    "clash-verge/v2.4.5",  # OpenClash default
+    "mihomo.party/v2.0.0 (clash.meta)",  # Clash/Mihomo Party
+    "FlClash/v0.8.94 clash-verge Platform/windows",
+    "clash-nyanpasu/v2.0.0",
+    "ClashMetaForAndroid/2.11.32.Meta",
+    "ClashMeta/1.19.29; mihomo/1.19.29",  # ClashMi default
+    "ClashForAndroid/2.5.12",
+    "ClashforWindows/0.20.39",
+    (
+        "ClashX/1.91.1 (com.west2online.ClashX; build:1.91.1; "
+        "macOS 12.4.0) Alamofire/5.5.0"
+    ),
+)
+CLASH_AUTO_COMPATIBILITY_ALIASES = (
+    "mihomo/1.19.29",
+    "clash-party/v1.7.5",
+    "ClashMi/1.0.6 platform/android ClashMeta/1.19.29; mihomo/1.19.29",
+    "ClashForWindows/0.20.39",
+    "ClashX Meta/1.4.1",
+    "OpenClash/0.46.075",
+)
+CLASH_AUTO_USER_AGENTS = (
+    VERIFIED_CLASH_AUTO_USER_AGENTS + CLASH_AUTO_COMPATIBILITY_ALIASES
+)
+VERIFIED_CLASHR_AUTO_USER_AGENTS = (
+    "ClashForAndroid/1.3.4R",
+    "ClashForAndroid/1.3.3R2",
+    "ClashForAndroid/1.1.10R3",
+)
+CLASHR_AUTO_COMPATIBILITY_ALIASES = (
+    "ClashForAndroid/2.5.12R",
+    "ClashR/1.0",
+    "clashr/1.0",
+)
+CLASHR_AUTO_USER_AGENTS = (
+    VERIFIED_CLASHR_AUTO_USER_AGENTS + CLASHR_AUTO_COMPATIBILITY_ALIASES
+)
 DISABLE_RULEGEN_CONFIG = "data:,enable_rule_generator=false"
 PROVIDER_FILTER_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
     b"\n".join(
@@ -178,10 +221,13 @@ def assert_parser_route_isolation(base_url: str, timeout: int) -> None:
                 f"explicit {target} did not use the Mihomo-only parser"
             )
 
-    for user_agent, resolved_target in (
-        ("Clash/1.0", "clash"),
-        ("ClashForAndroid/1.9R", "clashr"),
-    ):
+    auto_cases = tuple(
+        (user_agent, "clash") for user_agent in CLASH_AUTO_USER_AGENTS
+    )
+    auto_cases += tuple(
+        (user_agent, "clashr") for user_agent in CLASHR_AUTO_USER_AGENTS
+    )
+    for user_agent, resolved_target in auto_cases:
         report = json.loads(
             fetch(
                 base_url,
@@ -199,6 +245,15 @@ def assert_parser_route_isolation(base_url: str, timeout: int) -> None:
                 f"auto UA {user_agent!r} did not resolve to the Mihomo-only "
                 f"{resolved_target} route"
             )
+
+    assert_rejected(
+        base_url,
+        "/sub",
+        {"target": "auto", **common},
+        timeout,
+        "browser UA must not be classified as Clash",
+        {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+    )
 
     assert_rejected(
         base_url,
