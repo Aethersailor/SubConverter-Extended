@@ -333,11 +333,15 @@ IF(BUILD_TESTS)
     ADD_EXECUTABLE(proxy_policy_test
         tests/proxy_policy_test.cpp
         src/handler/proxy_policy.cpp
+        src/server/client_ip.cpp
         src/utils/redact.cpp
         src/utils/string.cpp
         src/utils/system.cpp)
     TARGET_INCLUDE_DIRECTORIES(proxy_policy_test PRIVATE src)
     TARGET_LINK_LIBRARIES(proxy_policy_test ${CMAKE_THREAD_LIBS_INIT})
+    IF(WIN32)
+        TARGET_LINK_LIBRARIES(proxy_policy_test ws2_32)
+    ENDIF()
     ADD_TEST(NAME proxy_policy COMMAND proxy_policy_test)
     SET_TESTS_PROPERTIES(proxy_policy PROPERTIES LABELS fast)
 

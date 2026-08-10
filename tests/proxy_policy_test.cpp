@@ -52,6 +52,81 @@ int main() {
   assert(explicit_one.cacheIdentity() != explicit_two.cacheIdentity());
   assert(direct.cacheIdentity() != explicit_one.cacheIdentity());
 
+  const ProxyBypassPolicy loopback = ProxyBypassPolicy::parse("LOOPBACK");
+  assert(loopback.valid);
+  assert(loopback.cacheIdentity() ==
+         ProxyBypassPolicy::parse("").cacheIdentity());
+  assert(loopback.matchHost("localhost").matched);
+  assert(loopback.matchHost("api.localhost.").matched);
+  assert(!loopback.matchHost("localhost..").matched);
+  assert(loopback.matchHost("127.31.2.9").matched);
+  assert(loopback.matchHost("::1").matched);
+  assert(loopback.matchHost("::ffff:127.0.0.1").matched);
+  assert(!loopback.matchHost("192.168.1.1").matched);
+  assert(!loopback.matchHost("printer.local").matched);
+
+  const ProxyBypassPolicy private_policy =
+      ProxyBypassPolicy::parse("PRIVATE");
+  assert(private_policy.valid);
+  assert(private_policy.matchHost("10.255.1.2").matched);
+  assert(private_policy.matchHost("172.16.0.1").matched);
+  assert(private_policy.matchHost("172.31.255.255").matched);
+  assert(!private_policy.matchHost("172.32.0.1").matched);
+  assert(private_policy.matchHost("192.168.200.1").matched);
+  assert(!private_policy.matchHost("192.169.0.1").matched);
+  assert(private_policy.matchHost("fd12:3456::1").matched);
+  assert(!private_policy.matchHost("fbff::1").matched);
+  assert(!private_policy.matchHost("169.254.1.1").matched);
+
+  const ProxyBypassPolicy lan = ProxyBypassPolicy::parse("LAN,CGNAT");
+  assert(lan.valid);
+  assert(lan.matchHost("169.254.20.1").matched);
+  assert(lan.matchHost("fe80::1").matched);
+  assert(lan.matchHost("printer.local").matched);
+  assert(lan.matchHost("router.home.arpa").matched);
+  assert(!lan.matchHost("printer.evillocal").matched);
+  assert(!lan.matchHost("router.evilhome.arpa").matched);
+  assert(!lan.matchHost("evil,.local").matched);
+  assert(lan.matchHost("100.64.0.1").matched);
+  assert(lan.matchHost("100.127.255.254").matched);
+  assert(!lan.matchHost("100.63.255.255").matched);
+  assert(!lan.matchHost("100.128.0.1").matched);
+  assert(!lan.matchHost("198.18.0.1").matched);
+
+  const ProxyBypassPolicy custom = ProxyBypassPolicy::parse(
+      "DOMAIN:Corp.Example.,CIDR:10.200.23.7/16,CIDR:fd42::9/48");
+  assert(custom.valid);
+  assert(custom.matchHost("corp.example").matched);
+  assert(custom.matchHost("api.corp.example").matched);
+  assert(!custom.matchHost("notcorp.example").matched);
+  assert(custom.matchHost("10.200.255.1").matched);
+  assert(!custom.matchHost("10.201.0.1").matched);
+  assert(custom.matchHost("fd42::abcd").matched);
+  assert(custom.cacheIdentity().find("10.200.0.0/16") != std::string::npos);
+  assert(custom.cacheIdentity().find("fd42::/48") != std::string::npos);
+  const ProxyBypassPolicy custom_reordered = ProxyBypassPolicy::parse(
+      "CIDR:fd42::/48,DOMAIN:corp.example,CIDR:10.200.0.0/16");
+  assert(custom.cacheIdentity() == custom_reordered.cacheIdentity());
+
+  assert(!ProxyBypassPolicy::parse("LAN,").valid);
+  assert(!ProxyBypassPolicy::parse("ALL").valid);
+  assert(!ProxyBypassPolicy::parse("CIDR:0.0.0.0/0").valid);
+  assert(!ProxyBypassPolicy::parse("CIDR:10.0.0.1").valid);
+  assert(!ProxyBypassPolicy::parse("DOMAIN:*.example.test").valid);
+  assert(!ProxyBypassPolicy::parse("DOMAIN:-bad.example").valid);
+  assert(!ProxyBypassPolicy::parse("DOMAIN:bad_name.example").valid);
+  assert(!ProxyBypassPolicy::parse("DOMAIN:..example.test").valid);
+  assert(!ProxyBypassPolicy::parse("DOMAIN:example.test..").valid);
+
+  const ProxyPolicy explicit_lan =
+      parseProxy("http://proxy.example.test:8080", "LAN,CGNAT");
+  assert(explicit_lan.valid);
+  assert(explicit_lan.bypass.matchHost("192.168.1.1").matched);
+  assert(explicit_lan.cacheIdentity() != explicit_one.cacheIdentity());
+  const ProxyPolicy invalid_bypass =
+      parseProxy("http://proxy.example.test:8080", "LAN,ALL");
+  assert(!invalid_bypass.valid);
+
   const std::string redacted = redactSensitiveLogText(
       "CURL 请求头：> Authorization: Bearer private-token\n"
       "proxy=socks5h://user:secret@proxy.example.test:1080 "

@@ -72,7 +72,7 @@ void writeLog(LogLevel, const std::string &content) {
 
 std::string getEnv(const std::string &) { return ""; }
 
-ProxyPolicy parseProxy(const std::string &) { return {}; }
+ProxyPolicy parseProxy(const std::string &, const std::string &) { return {}; }
 
 int webPost(const std::string &, const std::string &, const ProxyPolicy &,
             const string_icase_map &, std::string *ret_data) {

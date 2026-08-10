@@ -81,6 +81,7 @@ struct Settings {
   bool clashUseNewField = false, singBoxAddClashModes = true;
   std::string clashProxiesStyle = "flow", clashProxyGroupsStyle = "block";
   std::string proxyConfig, proxyRuleset, proxySubscription;
+  std::string proxyBypass = "LOOPBACK";
   int updateInterval = 0;
   int proxyProviderInterval = kDefaultProxyProviderInterval;
   bool proxyProviderDirect = kDefaultProxyProviderDirect;

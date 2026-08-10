@@ -51,6 +51,7 @@ struct CommonScalarSettings {
   std::string proxyConfig;
   std::string proxyRuleset;
   std::string proxySubscription;
+  std::string proxyBypass;
   bool reloadConfOnRequest;
 };
 
@@ -72,10 +73,15 @@ CommonScalarSettings captureCommonScalarSettings() {
           global.proxyConfig,
           global.proxyRuleset,
           global.proxySubscription,
+          global.proxyBypass,
           global.reloadConfOnRequest};
 }
 
 void applyCommonScalarSettings(CommonScalarSettings settings) {
+  const ProxyBypassPolicy bypass =
+      ProxyBypassPolicy::parse(settings.proxyBypass);
+  if (!bypass.valid)
+    throw std::invalid_argument("proxy_bypass 配置无效：" + bypass.error + "。");
   if (settings.defaultExtConfig.empty())
     settings.defaultExtConfig = kDefaultExternalConfig;
 
@@ -97,6 +103,7 @@ void applyCommonScalarSettings(CommonScalarSettings settings) {
   global.proxyConfig = std::move(settings.proxyConfig);
   global.proxyRuleset = std::move(settings.proxyRuleset);
   global.proxySubscription = std::move(settings.proxySubscription);
+  global.proxyBypass = std::move(settings.proxyBypass);
   global.reloadConfOnRequest = settings.reloadConfOnRequest;
 }
 
@@ -481,7 +488,7 @@ int importItems(string_array &target, bool scope_limit, FetchContext context) {
     content.clear();
 
     const Settings &settings = effectiveSettings();
-    ProxyPolicy proxy = parseProxy(settings.proxyConfig);
+    ProxyPolicy proxy = parseProxy(settings.proxyConfig, settings.proxyBypass);
 
     if (readImportLocalPath(path, scope_limit, context, content)) {
       // Local content was loaded through the effective scoped/trusted policy.
@@ -530,7 +537,7 @@ int importItems(std::vector<toml::value> &root, const std::string &import_key,
   bool failed = false;
 
   const Settings &settings = effectiveSettings();
-  ProxyPolicy proxy = parseProxy(settings.proxyConfig);
+  ProxyPolicy proxy = parseProxy(settings.proxyConfig, settings.proxyBypass);
   while (iter != root.end()) {
     auto &table = iter->as_table();
     if (table.find("import") == table.end())
@@ -707,7 +714,7 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
   RulesetContent rc;
 
   const Settings &settings = effectiveSettings();
-  ProxyPolicy proxy = parseProxy(settings.proxyRuleset);
+  ProxyPolicy proxy = parseProxy(settings.proxyRuleset, settings.proxyBypass);
 
   for (RulesetConfig &x : ruleset_list) {
     rule_group = x.Group;
@@ -821,6 +828,7 @@ void readYAMLConf(YAML::Node &node,
   section["proxy_config"] >> common.proxyConfig;
   section["proxy_ruleset"] >> common.proxyRuleset;
   section["proxy_subscription"] >> common.proxySubscription;
+  section["proxy_bypass"] >> common.proxyBypass;
   section["reload_conf_on_request"] >> common.reloadConfOnRequest;
   applyCommonScalarSettings(std::move(common));
 
@@ -1142,7 +1150,8 @@ void readTOMLConf(toml::value &root,
       common.quanXBase, "loon_rule_base", common.loonBase, "sssub_rule_base",
       common.SSSubBase, "singbox_rule_base", common.singBoxBase, "proxy_config",
       common.proxyConfig, "proxy_ruleset", common.proxyRuleset,
-      "proxy_subscription", common.proxySubscription, "append_proxy_type",
+      "proxy_subscription", common.proxySubscription, "proxy_bypass",
+      common.proxyBypass, "append_proxy_type",
       common.appendType, "reload_conf_on_request", common.reloadConfOnRequest);
   applyCommonScalarSettings(std::move(common));
 
@@ -1407,6 +1416,9 @@ bool readConf() {
     global.dashboardAuthLockSeconds = 900;
     global.fallbackToDefaultExternalConfig = false;
     global.customOpenClashRulesSourceSwitch = false;
+    // A removed proxy_bypass setting must return to the conservative default
+    // on reload instead of retaining a previous broad LAN policy.
+    global.proxyBypass = "LOOPBACK";
     global.proxyProviderInterval = kDefaultProxyProviderInterval;
     global.proxyProviderDirect = kDefaultProxyProviderDirect;
   };
@@ -1549,6 +1561,7 @@ bool readConf() {
   ini.get_if_exist("proxy_config", common.proxyConfig);
   ini.get_if_exist("proxy_ruleset", common.proxyRuleset);
   ini.get_if_exist("proxy_subscription", common.proxySubscription);
+  ini.get_if_exist("proxy_bypass", common.proxyBypass);
   ini.get_bool_if_exist("reload_conf_on_request", common.reloadConfOnRequest);
   applyCommonScalarSettings(std::move(common));
 
@@ -2131,7 +2144,7 @@ ExternalConfigLoadResult loadExternalConfig(const std::string &path,
       ext.tpl_args ? ext.tpl_args : &empty_tpl_args;
   const Settings &settings = effectiveSettings();
   std::string base_content;
-  ProxyPolicy proxy = parseProxy(settings.proxyConfig);
+  ProxyPolicy proxy = parseProxy(settings.proxyConfig, settings.proxyBypass);
   std::string config =
       fetchFile(path, proxy, settings.cacheConfig, true, context);
   if (config.empty())

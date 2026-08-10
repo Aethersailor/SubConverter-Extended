@@ -399,8 +399,9 @@ static qjs_fetch_Response qjs_fetch(qjs_fetch_Request request)
     std::string response_headers;
     const Settings &settings = effectiveSettings();
     ProxyPolicy proxy = request.proxy_specified
-                            ? parseProxy(request.proxy)
-                            : parseProxy(settings.proxyConfig);
+                            ? parseProxy(request.proxy, settings.proxyBypass)
+                            : parseProxy(settings.proxyConfig,
+                                         settings.proxyBypass);
     FetchArgument argument {method, request.url, proxy, &request.postdata, &request.headers.headers, &request.cookies, 0};
     FetchResult result {&response.status_code, &response.content, &response_headers, &response.cookies};
 
@@ -418,8 +419,9 @@ static std::string qjs_getUrlArg(const std::string &url, const std::string &requ
 std::string getGeoIP(const std::string &address, const std::string &proxy)
 {
     const Settings &settings = effectiveSettings();
-    ProxyPolicy policy = proxy.empty() ? parseProxy(settings.proxyConfig)
-                                       : parseProxy(proxy);
+    ProxyPolicy policy =
+        proxy.empty() ? parseProxy(settings.proxyConfig, settings.proxyBypass)
+                      : parseProxy(proxy, settings.proxyBypass);
     return fetchFile("https://api.ip.sb/geoip/" + address, policy,
                      settings.cacheConfig);
 }
