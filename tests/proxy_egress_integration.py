@@ -297,6 +297,7 @@ def write_config(
     proxy_ruleset: str,
     proxy_subscription: str,
     *,
+    proxy_bypass: str = "LOOPBACK",
     log_level: str = "info",
     security_profile: str = "lan",
 ) -> None:
@@ -316,6 +317,7 @@ def write_config(
     replace("proxy_config", f'"{proxy_config}"')
     replace("proxy_ruleset", f'"{proxy_ruleset}"')
     replace("proxy_subscription", f'"{proxy_subscription}"')
+    replace("proxy_bypass", f'"{proxy_bypass}"')
     replace("log_level", f'"{log_level}"')
     replace("profile", f'"{security_profile}"')
     replace("enable_cache", "true")
@@ -453,10 +455,24 @@ def run(image: str) -> None:
             socks5h = f"socks5h://127.0.0.1:{proxy.port}"
             socks5 = f"socks5://127.0.0.1:{proxy.port}"
 
-            def exercise(label: str, config_proxy: str, env: dict[str, str], url: str, expected_type: str | None) -> None:
+            def exercise(
+                label: str,
+                config_proxy: str,
+                env: dict[str, str],
+                url: str,
+                expected_type: str | None,
+                *,
+                proxy_bypass: str = "LOOPBACK",
+            ) -> None:
                 recorder.clear()
                 config = temp / f"{label}.toml"
-                write_config(config, config_proxy, config_proxy, config_proxy)
+                write_config(
+                    config,
+                    config_proxy,
+                    config_proxy,
+                    config_proxy,
+                    proxy_bypass=proxy_bypass,
+                )
                 with RunningContainer(image, config, reserve_port(), env) as container:
                     sub_request(container.port, url)
                 with recorder.lock:
@@ -478,6 +494,14 @@ def run(image: str) -> None:
             exercise("system", "SYSTEM", {"ALL_PROXY": socks5h, "NO_PROXY": "", "no_proxy": ""}, remote_url, "domain")
             exercise("explicit", socks5h, {"NO_PROXY": "*", "no_proxy": "*"}, remote_url, "domain")
             exercise("socks5", socks5, {"NO_PROXY": "", "no_proxy": ""}, remote_url, "IPv4")
+            exercise(
+                "custom-domain-bypass",
+                socks5h,
+                {"NO_PROXY": "", "no_proxy": ""},
+                remote_url,
+                None,
+                proxy_bypass="DOMAIN:target.test",
+            )
 
             # An explicit proxy bypasses only an initial syntactic loopback
             # host. The proxy remains configured so redirect routing can be
@@ -507,7 +531,29 @@ def run(image: str) -> None:
                     f"{recorder.requests}"
                 )
                 assert "/local.ini" in recorder.target_hits, recorder.target_hits
-            assert "初始回环主机直连：127.0.0.1" in loopback_logs, loopback_logs
+            assert (
+                "初始主机按 proxy_bypass 直连：127.0.0.1；匹配规则：LOOPBACK"
+                in loopback_logs
+            ), loopback_logs
+
+            # A bypass applies to the initial host only. A redirect outside the
+            # matched domain subtree resumes the explicit proxy.
+            recorder.clear()
+            custom_domain_redirect_pref = temp / "custom-domain-redirect.toml"
+            write_config(
+                custom_domain_redirect_pref,
+                "NONE",
+                "NONE",
+                socks5h,
+                proxy_bypass="DOMAIN:target.test",
+            )
+            with RunningContainer(
+                image, custom_domain_redirect_pref, reserve_port(), {}
+            ) as container:
+                sub_request(container.port, remote_to_loopback)
+            with recorder.lock:
+                assert len(recorder.requests) == 1, recorder.requests
+                assert recorder.requests[0].host == "127.0.0.1", recorder.requests
 
             recorder.clear()
             local_redirect_pref = temp / "loopback-to-remote.toml"

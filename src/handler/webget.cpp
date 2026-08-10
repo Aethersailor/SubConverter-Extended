@@ -273,20 +273,19 @@ static LoopbackKind classify_loopback_host(const std::string &host)
     return LoopbackKind::Ipv6;
 }
 
-static std::string loopback_no_proxy_pattern(const std::string &host)
+static std::string initial_bypass_no_proxy_pattern(const std::string &host)
 {
-    const LoopbackKind kind = classify_loopback_host(host);
-    if(kind == LoopbackKind::None)
-        return "";
-    if(kind == LoopbackKind::Hostname)
-        // libcurl uses domain-suffix matching for hostnames. Any expansion of
-        // a .localhost name remains inside the reserved localhost family.
+    const client_ip::Address address = client_ip::parseAddress(host);
+    if(!address.valid())
+        // Hostname bypass rules use label-boundary matching before this point.
+        // Passing only the actual initial host keeps redirect-time expansion
+        // inside that already-authorized domain subtree.
         return host;
 
 #if LIBCURL_VERSION_NUM >= 0x075600
     const curl_version_info_data *version = curl_version_info(CURLVERSION_NOW);
     if(version != nullptr && version->version_num >= 0x075600)
-        return host + (kind == LoopbackKind::Ipv4 ? "/32" : "/128");
+        return host + (host.find(':') == std::string::npos ? "/32" : "/128");
 #endif
     // Before 7.86 libcurl cannot express an exact numeric NOPROXY match. A
     // plain IP entry also matches hostname suffixes, so fail closed instead.
@@ -298,20 +297,21 @@ enum class NoProxyDirective
     None,
     InheritEnvironment,
     ForceProxy,
-    LoopbackBypass,
+    InitialBypass,
 };
 
 struct ResolvedProxyRoute
 {
     ResolvedProxyPolicy proxy;
     NoProxyDirective no_proxy = NoProxyDirective::None;
-    std::string loopback_host;
+    std::string bypass_host;
+    std::string bypass_rule;
     std::string no_proxy_pattern;
     std::string inherited_no_proxy;
 
     std::string cacheIdentity() const
     {
-        std::string identity = "routing-v2\n" + proxy.cacheIdentity() +
+        std::string identity = "routing-v3\n" + proxy.cacheIdentity() +
                                "\nnoproxy=";
         switch(no_proxy)
         {
@@ -324,8 +324,8 @@ struct ResolvedProxyRoute
         case NoProxyDirective::ForceProxy:
             identity += "force";
             break;
-        case NoProxyDirective::LoopbackBypass:
-            identity += "loopback:" + no_proxy_pattern;
+        case NoProxyDirective::InitialBypass:
+            identity += "bypass:" + no_proxy_pattern + ":" + bypass_rule;
             break;
         }
         return identity;
@@ -361,12 +361,18 @@ static ResolvedProxyRoute resolveProxyRoute(
         if(!isPublicFetchRestricted(context))
         {
             const HttpUrlTarget target = parse_http_url_target(url);
-            const std::string pattern =
-                target.valid ? loopback_no_proxy_pattern(target.host) : "";
+            const ProxyBypassMatch match =
+                target.valid ? snapshot.bypass.matchHost(target.host)
+                             : ProxyBypassMatch {};
+            const std::string pattern = match.matched
+                                            ? initial_bypass_no_proxy_pattern(
+                                                  target.host)
+                                            : "";
             if(!pattern.empty())
             {
-                route.no_proxy = NoProxyDirective::LoopbackBypass;
-                route.loopback_host = target.host;
+                route.no_proxy = NoProxyDirective::InitialBypass;
+                route.bypass_host = target.host;
+                route.bypass_rule = match.rule;
                 route.no_proxy_pattern = pattern;
             }
         }
@@ -916,7 +922,7 @@ static CURLcode apply_curl_proxy_policy(CURL *curl_handle,
         break;
     case ProxyMode::Explicit:
         curl_easy_setopt(curl_handle, CURLOPT_PROXY, effective.endpoint.c_str());
-        if(route.no_proxy == NoProxyDirective::LoopbackBypass)
+        if(route.no_proxy == NoProxyDirective::InitialBypass)
             curl_easy_setopt(curl_handle, CURLOPT_NOPROXY,
                              route.no_proxy_pattern.c_str());
         else
@@ -935,8 +941,13 @@ static CURLcode apply_curl_proxy_policy(CURL *curl_handle,
     if(shouldLog(LOG_LEVEL_VERBOSE))
     {
         std::string description = "出站代理策略：" + effective.describe();
-        if(route.no_proxy == NoProxyDirective::LoopbackBypass)
-            description += "；初始回环主机直连：" + route.loopback_host;
+        if(effective.mode == ProxyMode::Explicit)
+            description += "；proxy_bypass：" +
+                           effective.bypass.describe();
+        if(route.no_proxy == NoProxyDirective::InitialBypass)
+            description += "；初始主机按 proxy_bypass 直连：" +
+                           route.bypass_host + "；匹配规则：" +
+                           route.bypass_rule;
         writeLog(LOG_LEVEL_VERBOSE, description + "。");
     }
     return CURLE_OK;

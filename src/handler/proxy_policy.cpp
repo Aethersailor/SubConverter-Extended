@@ -1,5 +1,7 @@
+#include <algorithm>
 #include <charconv>
 #include <cctype>
+#include <stdexcept>
 #include <system_error>
 
 #include "utils/string.h"
@@ -7,6 +9,8 @@
 #include "proxy_policy.h"
 
 namespace {
+
+constexpr size_t kMaxProxyBypassCustomRules = 64;
 
 bool hasControlCharacter(const std::string &value) {
   for (unsigned char character : value) {
@@ -177,31 +181,299 @@ std::string normalizeSystemEndpoint(std::string endpoint) {
   return endpoint;
 }
 
+bool matchesDomain(const std::string &host, const std::string &domain) {
+  return host == domain ||
+         (host.size() > domain.size() &&
+          host.compare(host.size() - domain.size(), domain.size(), domain) ==
+              0 &&
+          host[host.size() - domain.size() - 1] == '.');
+}
+
+bool validBypassDomain(const std::string &domain) {
+  if (domain.empty() || domain.size() > 253 || domain.front() == '.' ||
+      domain.back() == '.' ||
+      domain.find('*') != std::string::npos)
+    return false;
+  size_t label_start = 0;
+  while (label_start < domain.size()) {
+    const size_t label_end = domain.find('.', label_start);
+    const size_t length =
+        (label_end == std::string::npos ? domain.size() : label_end) -
+        label_start;
+    if (length == 0 || length > 63 || domain[label_start] == '-' ||
+        domain[label_start + length - 1] == '-')
+      return false;
+    for (size_t index = label_start; index < label_start + length; ++index) {
+      const unsigned char character = domain[index];
+      const bool ascii_letter =
+          (character >= 'a' && character <= 'z') ||
+          (character >= 'A' && character <= 'Z');
+      const bool digit = character >= '0' && character <= '9';
+      if (!ascii_letter && !digit && character != '-')
+        return false;
+    }
+    if (label_end == std::string::npos)
+      break;
+    label_start = label_end + 1;
+  }
+  return true;
+}
+
+std::string normalizeBypassDomain(std::string value) {
+  value = toLower(trimWhitespace(value, true, true));
+  if (!value.empty() && value.front() == '.')
+    value.erase(value.begin());
+  if (!value.empty() && value.back() == '.')
+    value.pop_back();
+  return value;
+}
+
+bool isLoopback(const client_ip::Address &address) {
+  if (address.family == client_ip::Family::IPv4)
+    return address.bytes[0] == 127;
+  if (address.family != client_ip::Family::IPv6 || address.bytes[15] != 1)
+    return false;
+  return std::all_of(address.bytes.begin(), address.bytes.begin() + 15,
+                     [](uint8_t byte) { return byte == 0; });
+}
+
+bool isPrivate(const client_ip::Address &address) {
+  if (address.family == client_ip::Family::IPv4) {
+    return address.bytes[0] == 10 ||
+           (address.bytes[0] == 172 && address.bytes[1] >= 16 &&
+            address.bytes[1] <= 31) ||
+           (address.bytes[0] == 192 && address.bytes[1] == 168);
+  }
+  return address.family == client_ip::Family::IPv6 &&
+         (address.bytes[0] & 0xfe) == 0xfc;
+}
+
+bool isLinkLocal(const client_ip::Address &address) {
+  if (address.family == client_ip::Family::IPv4)
+    return address.bytes[0] == 169 && address.bytes[1] == 254;
+  return address.family == client_ip::Family::IPv6 &&
+         address.bytes[0] == 0xfe && (address.bytes[1] & 0xc0) == 0x80;
+}
+
+bool isCgnat(const client_ip::Address &address) {
+  return address.family == client_ip::Family::IPv4 &&
+         address.bytes[0] == 100 && address.bytes[1] >= 64 &&
+         address.bytes[1] <= 127;
+}
+
+std::string canonicalCidrName(const client_ip::Cidr &cidr) {
+  return client_ip::toString(cidr.network) + "/" +
+         std::to_string(static_cast<unsigned int>(cidr.prefix_length));
+}
+
+void sortUnique(std::vector<std::string> &values) {
+  std::sort(values.begin(), values.end());
+  values.erase(std::unique(values.begin(), values.end()), values.end());
+}
+
 } // namespace
+
+ProxyBypassPolicy ProxyBypassPolicy::parse(const std::string &source) {
+  ProxyBypassPolicy policy;
+  const std::string value = trimWhitespace(source, true, true);
+  if (value.empty())
+    return policy;
+
+  size_t start = 0;
+  size_t custom_rule_count = 0;
+  while (start <= value.size()) {
+    const size_t comma = value.find(',', start);
+    const std::string token = trimWhitespace(
+        value.substr(start, comma == std::string::npos
+                                ? std::string::npos
+                                : comma - start),
+        true, true);
+    if (token.empty()) {
+      policy.valid = false;
+      policy.error = "proxy_bypass contains an empty rule";
+      return policy;
+    }
+
+    const std::string keyword = toUpper(token);
+    if (keyword == "LOOPBACK") {
+      // Loopback is always enabled, so this token is intentionally idempotent.
+    } else if (keyword == "PRIVATE") {
+      policy.privateNetworks = true;
+    } else if (keyword == "LAN") {
+      policy.privateNetworks = true;
+      policy.linkLocal = true;
+      policy.localNames = true;
+    } else if (keyword == "CGNAT") {
+      policy.cgnat = true;
+    } else if (startsWith(keyword, "CIDR:")) {
+      if (++custom_rule_count > kMaxProxyBypassCustomRules) {
+        policy.valid = false;
+        policy.error = "proxy_bypass exceeds 64 custom rules";
+        return policy;
+      }
+      const std::string raw_cidr =
+          trimWhitespace(token.substr(5), true, true);
+      try {
+        const client_ip::Cidr cidr = client_ip::parseCidr(raw_cidr);
+        policy.customCidrs.push_back(cidr);
+        policy.customCidrNames.push_back(canonicalCidrName(cidr));
+      } catch (const std::invalid_argument &) {
+        policy.valid = false;
+        policy.error = "proxy_bypass has an invalid CIDR rule";
+        return policy;
+      }
+    } else if (startsWith(keyword, "DOMAIN:")) {
+      if (++custom_rule_count > kMaxProxyBypassCustomRules) {
+        policy.valid = false;
+        policy.error = "proxy_bypass exceeds 64 custom rules";
+        return policy;
+      }
+      const std::string domain = normalizeBypassDomain(token.substr(7));
+      if (!validBypassDomain(domain)) {
+        policy.valid = false;
+        policy.error = "proxy_bypass has an invalid DOMAIN rule";
+        return policy;
+      }
+      policy.customDomains.push_back(domain);
+    } else {
+      policy.valid = false;
+      policy.error = "proxy_bypass has an unsupported rule";
+      return policy;
+    }
+
+    if (comma == std::string::npos)
+      break;
+    start = comma + 1;
+  }
+
+  sortUnique(policy.customCidrNames);
+  sortUnique(policy.customDomains);
+  policy.customCidrs.clear();
+  for (const std::string &cidr : policy.customCidrNames)
+    policy.customCidrs.push_back(client_ip::parseCidr(cidr));
+  return policy;
+}
+
+ProxyBypassMatch ProxyBypassPolicy::matchHost(const std::string &raw_host) const {
+  if (!valid)
+    return {};
+  std::string host = toLower(trimWhitespace(raw_host, true, true));
+  if (host.size() > 1 && host.back() == '.' &&
+      host[host.size() - 2] != '.')
+    host.pop_back();
+
+  // CURLOPT_NOPROXY is a comma-separated grammar. Only a validated DNS name
+  // may reach a hostname pattern; URL reg-name punctuation must not become a
+  // second, unintended bypass entry.
+  if (validBypassDomain(host)) {
+    if (loopback &&
+        (host == "localhost" || matchesDomain(host, "localhost")))
+      return {true, "LOOPBACK"};
+    if (localNames &&
+        (matchesDomain(host, "local") || matchesDomain(host, "home.arpa")))
+      return {true, "LAN"};
+    for (const std::string &domain : customDomains) {
+      if (matchesDomain(host, domain))
+        return {true, "DOMAIN"};
+    }
+  }
+
+  const client_ip::Address address = client_ip::parseAddress(host);
+  if (!address.valid())
+    return {};
+  if (loopback && isLoopback(address))
+    return {true, "LOOPBACK"};
+  if (privateNetworks && isPrivate(address))
+    return {true, "PRIVATE"};
+  if (linkLocal && isLinkLocal(address))
+    return {true, "LAN"};
+  if (cgnat && isCgnat(address))
+    return {true, "CGNAT"};
+  for (size_t index = 0; index < customCidrs.size(); ++index) {
+    if (customCidrs[index].contains(address))
+      return {true, "CIDR"};
+  }
+  return {};
+}
+
+std::string ProxyBypassPolicy::cacheIdentity() const {
+  std::string identity = valid ? "valid" : "invalid:" + error;
+  identity += "\nloopback=1\nprivate=" +
+              std::string(privateNetworks ? "1" : "0") +
+              "\nlinklocal=" + std::string(linkLocal ? "1" : "0") +
+              "\nlocalnames=" + std::string(localNames ? "1" : "0") +
+              "\ncgnat=" + std::string(cgnat ? "1" : "0");
+  for (const std::string &cidr : customCidrNames)
+    identity += "\ncidr=" + cidr;
+  for (const std::string &domain : customDomains)
+    identity += "\ndomain=" + domain;
+  return identity;
+}
+
+std::string ProxyBypassPolicy::describe() const {
+  if (!valid)
+    return "invalid";
+  std::string description = "LOOPBACK";
+  if (privateNetworks && linkLocal && localNames)
+    description += ",LAN";
+  else if (privateNetworks)
+    description += ",PRIVATE";
+  if (cgnat)
+    description += ",CGNAT";
+  if (!customCidrs.empty())
+    description += ",CIDR(" + std::to_string(customCidrs.size()) + ")";
+  if (!customDomains.empty())
+    description += ",DOMAIN(" + std::to_string(customDomains.size()) + ")";
+  return description;
+}
 
 ProxyPolicy ProxyPolicy::direct() { return {}; }
 
-ProxyPolicy ProxyPolicy::parse(const std::string &source) {
+ProxyPolicy ProxyPolicy::parse(const std::string &source,
+                               const std::string &bypassSource) {
+  const ProxyBypassPolicy bypass = ProxyBypassPolicy::parse(bypassSource);
   const std::string value = trimWhitespace(source, true, true);
   const std::string keyword = toUpper(value);
+  ProxyPolicy policy;
+  policy.bypass = bypass;
+  if (!bypass.valid) {
+    policy.valid = false;
+    policy.error = bypass.error;
+  }
   if (value.empty() || keyword == "NONE")
-    return direct();
-  if (keyword == "SYSTEM")
-    return {ProxyMode::System, "", true, ""};
-
-  if (startsWith(toLower(value), "cors:")) {
-    ProxyPolicy policy {ProxyMode::Cors, value.substr(5), true, ""};
-    policy.valid = validProxyEndpoint(policy.endpoint, true, policy.error);
+    return policy;
+  if (keyword == "SYSTEM") {
+    policy.mode = ProxyMode::System;
     return policy;
   }
 
-  ProxyPolicy policy {ProxyMode::Explicit, value, true, ""};
-  policy.valid = validProxyEndpoint(policy.endpoint, false, policy.error);
+  if (startsWith(toLower(value), "cors:")) {
+    policy.mode = ProxyMode::Cors;
+    policy.endpoint = value.substr(5);
+    std::string endpoint_error;
+    const bool endpoint_valid =
+        validProxyEndpoint(policy.endpoint, true, endpoint_error);
+    if (!endpoint_valid) {
+      policy.valid = false;
+      policy.error = endpoint_error;
+    }
+    return policy;
+  }
+
+  policy.mode = ProxyMode::Explicit;
+  policy.endpoint = value;
+  std::string endpoint_error;
+  const bool endpoint_valid =
+      validProxyEndpoint(policy.endpoint, false, endpoint_error);
+  if (!endpoint_valid) {
+    policy.valid = false;
+    policy.error = endpoint_error;
+  }
   return policy;
 }
 
 ResolvedProxyPolicy ProxyPolicy::snapshot() const {
-  ResolvedProxyPolicy result {mode, endpoint, valid, error};
+  ResolvedProxyPolicy result {mode, endpoint, valid, error, bypass};
   if (result.mode != ProxyMode::System)
     return result;
 
@@ -220,12 +492,14 @@ ResolvedProxyPolicy ProxyPolicy::snapshot() const {
 
 ProxyPolicy ProxyPolicy::resolved() const {
   const ResolvedProxyPolicy effective = snapshot();
-  return {effective.mode, effective.endpoint, effective.valid, effective.error};
+  return {effective.mode, effective.endpoint, effective.valid, effective.error,
+          effective.bypass};
 }
 
 std::string ResolvedProxyPolicy::cacheIdentity() const {
   return std::string(proxyModeName(mode)) + "\n" + endpoint + "\n" +
-         (valid ? "valid" : "invalid");
+         (valid ? "valid" : "invalid") + "\nbypass=" +
+         bypass.cacheIdentity();
 }
 
 std::string ResolvedProxyPolicy::describe() const {
@@ -245,8 +519,9 @@ std::string ProxyPolicy::cacheIdentity() const {
 
 std::string ProxyPolicy::describe() const { return snapshot().describe(); }
 
-ProxyPolicy parseProxy(const std::string &source) {
-  return ProxyPolicy::parse(source);
+ProxyPolicy parseProxy(const std::string &source,
+                       const std::string &bypassSource) {
+  return ProxyPolicy::parse(source, bypassSource);
 }
 
 const char *proxyModeName(ProxyMode mode) {

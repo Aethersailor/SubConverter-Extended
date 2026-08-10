@@ -45,7 +45,7 @@ void refresh_schedule() {
         script_runtime_init(runtime);
         script_context_init(context);
         defer(script_cleanup(context);) ProxyPolicy proxy =
-            parseProxy(global.proxyConfig);
+            parseProxy(global.proxyConfig, global.proxyBypass);
         std::string script = fetchFile(x.Path, proxy, global.cacheConfig);
         if (script.empty()) {
           writeLog(LOG_LEVEL_WARNING,

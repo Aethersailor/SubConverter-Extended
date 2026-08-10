@@ -134,7 +134,7 @@ std::string parseHostname(inja::Arguments &args)
 
     std::string input_content, output_content;
     const Settings &settings = effectiveSettings();
-    ProxyPolicy proxy = parseProxy(settings.proxyConfig);
+    ProxyPolicy proxy = parseProxy(settings.proxyConfig, settings.proxyBypass);
     for(std::string &x : urls)
     {
         input_content = webGet(x, proxy, settings.cacheConfig);
@@ -161,7 +161,7 @@ std::string template_webGet(inja::Arguments &args)
 {
     std::string data = args.at(0)->get<std::string>();
     const Settings &settings = effectiveSettings();
-    ProxyPolicy proxy = parseProxy(settings.proxyConfig);
+    ProxyPolicy proxy = parseProxy(settings.proxyConfig, settings.proxyBypass);
     writeLog(LOG_LEVEL_INFO, "模板调用 fetch：" + summarizeUrlForLog(data) + "。");
     std::string content =
         webGet(data, proxy, settings.cacheConfig, nullptr, nullptr,

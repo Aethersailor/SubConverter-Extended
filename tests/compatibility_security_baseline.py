@@ -4440,6 +4440,7 @@ def common_scalar_binding_compatibility_baseline(helper: Path) -> None:
         "proxy_config": "NONE",
         "proxy_ruleset": "SYSTEM",
         "proxy_subscription": "http://127.0.0.1:8080",
+        "proxy_bypass": "LAN,CGNAT,CIDR:10.200.0.0/16,DOMAIN:corp.example",
         "reload_conf_on_request": True,
     }
 
@@ -4536,6 +4537,7 @@ def common_scalar_binding_compatibility_baseline(helper: Path) -> None:
         if configured_snapshots[1:] != configured_snapshots[:1] * 2:
             raise AssertionError("INI/YAML/TOML common scalar bindings differ")
         common = configured_snapshots[0]["common"]
+        proxies = configured_snapshots[0]["proxies"]
         expected_rule_bases = {
             name: f"stage-c/{name}.tpl"
             for name in (
@@ -4559,6 +4561,41 @@ def common_scalar_binding_compatibility_baseline(helper: Path) -> None:
             or common["fallback_to_default_external_config"] is not True
         ):
             raise AssertionError(f"common scalar values were misbound: {common!r}")
+        if proxies["bypass"] != "LOOPBACK,LAN,CGNAT,CIDR(1),DOMAIN(1)":
+            raise AssertionError(
+                f"proxy_bypass common scalar was misbound: {proxies!r}"
+            )
+
+        for suffix, configured in configured_paths.items():
+            original = COMPAT_FIXTURES / ("legacy-pref" + suffix)
+            reloaded = reload_settings_snapshot(helper, configured, original)
+            if reloaded["proxies"]["bypass"] != "LOOPBACK":
+                raise AssertionError(
+                    f"{suffix} removal did not restore LOOPBACK proxy_bypass"
+                )
+
+            invalid_bypass = temporary_path / ("invalid-bypass-pref" + suffix)
+            invalid_bypass.write_text(
+                configure(original.read_text(encoding="utf-8"), suffix).replace(
+                    field_line(
+                        suffix,
+                        "proxy_bypass",
+                        configured_values["proxy_bypass"],
+                    ),
+                    field_line(suffix, "proxy_bypass", "LAN,ALL"),
+                    1,
+                ),
+                encoding="utf-8",
+                newline="\n",
+            )
+            retained = reload_settings_snapshot(
+                helper, configured, invalid_bypass, expect_failure=True
+            )
+            expected_index = {".ini": 0, ".yml": 1, ".toml": 2}[suffix]
+            if retained != configured_snapshots[expected_index]:
+                raise AssertionError(
+                    f"{suffix} invalid proxy_bypass replaced previous settings"
+                )
 
         if empty_snapshots[1:] != empty_snapshots[:1] * 2 or any(
             snapshot["common"]["default_external_config"]["configured"] is not True
@@ -4749,7 +4786,12 @@ def loopback_proxy_route_baseline(binary: Path, fixture_base: str) -> None:
         + f"@127.0.0.1:{unused_port()}"
     )
     replacements = (
-        ('proxy_config = "NONE"', f'proxy_config = "{unavailable_proxy}"'),
+        (
+            'proxy_config = "NONE"',
+            f'proxy_config = "{unavailable_proxy}"\n'
+            'proxy_bypass = "LAN,CGNAT,CIDR:10.200.0.0/16,'
+            'DOMAIN:corp.example"',
+        ),
         ("cache_config = 300", "cache_config = 0"),
     )
     common = {
@@ -4801,7 +4843,10 @@ def loopback_proxy_route_baseline(binary: Path, fixture_base: str) -> None:
             "loopback external configs did not each connect directly once"
         )
     lan_diagnostics = "\n".join(lan_logs)
-    if "初始回环主机直连：127.0.0.1" not in lan_diagnostics:
+    if (
+        "初始主机按 proxy_bypass 直连：127.0.0.1；匹配规则：LOOPBACK"
+        not in lan_diagnostics
+    ):
         raise AssertionError("loopback proxy bypass was not diagnosed")
     if proxy_secret in lan_diagnostics or "loopback-user" in lan_diagnostics:
         raise AssertionError("loopback proxy credentials leaked to diagnostics")
@@ -4849,7 +4894,7 @@ def loopback_proxy_route_baseline(binary: Path, fixture_base: str) -> None:
                 f"{profile} loopback security rejection made a network request"
             )
         restricted_diagnostics = "\n".join(restricted_logs)
-        if "初始回环主机直连" in restricted_diagnostics:
+        if "初始主机按 proxy_bypass 直连" in restricted_diagnostics:
             raise AssertionError(
                 f"{profile} security rejection enabled proxy bypass"
             )
@@ -4929,7 +4974,10 @@ def loopback_redirect_route_baseline(binary: Path, fixture_base: str) -> None:
             )
 
     diagnostics = "\n".join(logs)
-    if "初始回环主机直连：127.0.0.1" not in diagnostics:
+    if (
+        "初始主机按 proxy_bypass 直连：127.0.0.1；匹配规则：LOOPBACK"
+        not in diagnostics
+    ):
         raise AssertionError("redirect baseline did not diagnose loopback bypass")
     if proxy_username in diagnostics or proxy_secret in diagnostics:
         raise AssertionError("redirect proxy credentials leaked to diagnostics")

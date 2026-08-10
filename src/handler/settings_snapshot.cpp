@@ -119,10 +119,14 @@ std::string sanitizedSettingsSnapshot(const Settings &settings) {
        }},
       {"proxies",
        {
-           {"config", parseProxy(settings.proxyConfig).describe()},
-           {"ruleset", parseProxy(settings.proxyRuleset).describe()},
+           {"config",
+            parseProxy(settings.proxyConfig, settings.proxyBypass).describe()},
+           {"ruleset",
+            parseProxy(settings.proxyRuleset, settings.proxyBypass).describe()},
            {"subscription",
-            parseProxy(settings.proxySubscription).describe()},
+            parseProxy(settings.proxySubscription, settings.proxyBypass)
+                .describe()},
+           {"bypass", ProxyBypassPolicy::parse(settings.proxyBypass).describe()},
        }},
       {"statistics",
        {

@@ -8,38 +8,76 @@ whitespace is ignored.
 | --- | --- | --- |
 | empty or `NONE` | Direct | Explicitly disables libcurl proxy environment variables for that request. `NONE` is case-insensitive. |
 | `SYSTEM` | System | Resolves the platform system proxy. On Unix-like systems the first present value is `all_proxy`, `ALL_PROXY`, `http_proxy`, `HTTP_PROXY`, `https_proxy`, then `HTTPS_PROXY`; `NO_PROXY`/`no_proxy` is respected. Windows uses enabled Internet Settings proxy data. |
-| `http://…`, `https://…`, `socks4://…`, `socks4a://…`, `socks5://…`, `socks5h://…` | Explicit | Uses that proxy for non-loopback destinations. `NO_PROXY` and `no_proxy` cannot change the policy. An initial syntactic loopback target is handled as described below. URI validation requires a supported scheme, host, and port. |
+| `http://…`, `https://…`, `socks4://…`, `socks4a://…`, `socks5://…`, `socks5h://…` | Explicit | Uses that proxy unless the initial syntactic host matches `proxy_bypass`. `NO_PROXY` and `no_proxy` cannot change the policy. URI validation requires a supported scheme, host, and port. |
 | `cors:https://…` | Cors | Compatibility HTTP CORS relay. It prefixes the requested URL and is transported directly; it is not a libcurl proxy. |
 
 Malformed non-empty policies are rejected. They never become direct requests.
 
-### Explicit proxy and loopback targets
+### Explicit proxy bypass
 
-For trusted configuration fetches and requests accepted by the `lan` security
-profile, an explicit proxy bypasses only an initial target whose URL host is
-syntactically `localhost`, a subdomain of `localhost`, an address in
-`127.0.0.0/8`, or the IPv6 loopback address. Hostnames use the reserved
-`.localhost` family. Numeric addresses use a single-address `/32` or `/128`
-match, not a wildcard or private-network range.
+`proxy_bypass` is one comma-separated setting shared by `proxy_config`,
+`proxy_ruleset`, and `proxy_subscription` when those settings contain an
+explicit proxy URI. It does not replace the existing preference file and does
+not alter `SYSTEM`, `NONE`, or `cors:` routing.
+
+`LOOPBACK` is always retained and is the default. Other presets are additive:
+
+| Rule | Direct initial targets |
+| --- | --- |
+| `LOOPBACK` | `localhost`, the `.localhost` family, `127.0.0.0/8`, and `::1/128`. |
+| `PRIVATE` | `LOOPBACK` plus RFC 1918 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) and IPv6 ULA (`fc00::/7`). |
+| `LAN` | `PRIVATE` plus IPv4 link-local (`169.254.0.0/16`), IPv6 link-local (`fe80::/10`), `.local`, and `.home.arpa`. |
+| `CGNAT` | Adds the shared address range `100.64.0.0/10`; normally used as `LAN,CGNAT`. |
+| `CIDR:address/prefix` | Adds one explicit IPv4 or IPv6 range. `/0` is rejected. |
+| `DOMAIN:name` | Adds the named domain and its label-boundary subdomains. Use ASCII or Punycode; wildcards are rejected. |
+
+For example:
+
+```ini
+; Safe compatibility default
+proxy_bypass=LOOPBACK
+
+; Broad coverage for common home and enterprise intranets
+proxy_bypass=LAN,CGNAT
+
+; Add deployment-specific routed networks and internal DNS trees
+proxy_bypass=LAN,CGNAT,CIDR:10.200.0.0/16,CIDR:fd42:1234::/48,DOMAIN:corp.example
+```
+
+At most 64 custom `CIDR:` and `DOMAIN:` rules may be configured. Unknown,
+empty, wildcard, malformed, and over-broad `/0` rules make configuration
+loading fail instead of silently changing routing.
+
+The presets deliberately do not include every IANA special-purpose range.
+In particular, benchmark/fake-IP (`198.18.0.0/15`), documentation, multicast,
+reserved, transition, and NAT64 ranges are not assumed to be an intranet.
+Deployments that route other address space internally must list that space with
+`CIDR:` or `DOMAIN:`. Hostnames are matched syntactically; the application does
+not resolve an arbitrary name and then decide to bypass from its resolved IP.
 
 This is a request-level routing decision rather than inherited `NO_PROXY`
-state. A redirect from that loopback host to a remote host therefore resumes
-using the explicit proxy. Conversely, a request whose initial host is remote
-continues to use the proxy if it redirects to a loopback address. Arbitrary
-hostnames are not resolved to decide whether to bypass, and RFC 1918,
-carrier-grade NAT, and link-local ranges are not bypassed automatically.
+state. A redirect from a bypassed initial host to a host outside its authorized
+domain subtree therefore resumes using the explicit proxy. Conversely, a
+request whose initial host does not match continues to use the proxy if it
+redirects into a bypass range. Numeric addresses use a single-address `/32` or
+`/128` transport pattern after the application has matched the configured
+range; the full private range is never handed to libcurl for redirects.
 
 Numeric single-address matching requires libcurl 7.86 or newer and is
 available in the official Windows build. A custom build using an older libcurl
-keeps numeric loopback targets on the proxy (fail closed); the `localhost`
-family is still handled directly.
+keeps numeric bypass targets on the proxy (fail closed); matching hostname
+rules remain available.
 
 The `public` and `strict` profiles reject public-request loopback targets before
-transport and never enable this bypass. `SYSTEM` normally inherits the platform
-`NO_PROXY`/`no_proxy` behavior. When a public request resolves `SYSTEM` to a
-proxy, bypass inheritance is disabled so a redirect cannot switch that request
-to a direct loopback connection. `cors:` remains an HTTP relay rather than a
-libcurl proxy.
+transport and ignore `proxy_bypass` for all public requests. Trusted
+configuration fetches may use the configured bypass under every profile;
+requests accepted by the `lan` profile may also use it. Enabling `LAN` or custom
+rules therefore grants those accepted requests direct access to the listed
+targets and should be treated as an explicit trust decision. `SYSTEM` normally
+inherits the platform `NO_PROXY`/`no_proxy` behavior. When a public request
+resolves `SYSTEM` to a proxy, bypass inheritance is disabled so a redirect
+cannot switch that request to a direct loopback connection. `cors:` remains an
+HTTP relay rather than a libcurl proxy.
 
 ## Which setting applies
 
@@ -51,8 +89,8 @@ libcurl proxy.
   `list=true` or a non-Clash output.
 
 QuickJS `fetch({url})` inherits `proxy_config`. An own `proxy` property may
-override it with `NONE`, `SYSTEM`, or an explicit URI. An empty own value is
-Direct, not inherited.
+override it with `NONE`, `SYSTEM`, or an explicit URI. An own explicit URI uses
+the same `proxy_bypass`; an empty own value is Direct, not inherited.
 
 For a default Clash Proxy-Provider request, SubConverter-Extended emits a
 provider URL and does **not** download the subscription itself. Mihomo later

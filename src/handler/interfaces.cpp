@@ -462,7 +462,7 @@ static bool fetchExternalRuleSources(const string_array &sources,
                                      string_array &destination,
                                      std::string &error) {
   const Settings &settings = effectiveSettings();
-  ProxyPolicy proxy = parseProxy(settings.proxyRuleset);
+  ProxyPolicy proxy = parseProxy(settings.proxyRuleset, settings.proxyBypass);
   string_icase_map request_headers = {
       {"Cache-Control", "no-cache, no-store, max-age=0"},
       {"Pragma", "no-cache"}};
@@ -961,6 +961,7 @@ struct SubExplainReport {
   std::string proxy_config;
   std::string proxy_ruleset;
   std::string proxy_subscription;
+  std::string proxy_bypass;
   std::string base_fetch_context = "trusted_config";
   std::string ruleset_fetch_context = "trusted_config";
   size_t raw_url_count = 0;
@@ -1167,6 +1168,7 @@ static std::string serializeSubExplainReport(const SubExplainReport &report,
   writeJsonString(writer, "config", report.proxy_config);
   writeJsonString(writer, "ruleset", report.proxy_ruleset);
   writeJsonString(writer, "subscription", report.proxy_subscription);
+  writeJsonString(writer, "bypass", report.proxy_bypass);
   writer.EndObject();
 
   writer.Key("resources");
@@ -1678,10 +1680,14 @@ static std::string parseSubRequestArguments(Request &request,
   parsed.surge_version_text = getUrlArg(argument, "ver");
   parsed.explain_mode = isTruthyRequestValue(getUrlArg(argument, "explain"));
   parsed.explain.enabled = parsed.explain_mode;
-  parsed.explain.proxy_config = parseProxy(settings.proxyConfig).describe();
-  parsed.explain.proxy_ruleset = parseProxy(settings.proxyRuleset).describe();
+  parsed.explain.proxy_config =
+      parseProxy(settings.proxyConfig, settings.proxyBypass).describe();
+  parsed.explain.proxy_ruleset =
+      parseProxy(settings.proxyRuleset, settings.proxyBypass).describe();
   parsed.explain.proxy_subscription =
-      parseProxy(settings.proxySubscription).describe();
+      parseProxy(settings.proxySubscription, settings.proxyBypass).describe();
+  parsed.explain.proxy_bypass =
+      ProxyBypassPolicy::parse(settings.proxyBypass).describe();
   parsed.explain.requested_target = parsed.target;
   if (parsed.explain_mode) {
     std::string rawUrlForLog = getUrlArg(argument, "url");
@@ -1873,7 +1879,8 @@ static std::string buildEffectiveSubPolicy(Request &request,
   policy.template_arguments.global_vars = settings.templateVars;
   policy.template_arguments.request_params = std::move(req_arg_map);
 
-  policy.subscription_proxy = parseProxy(settings.proxySubscription);
+  policy.subscription_proxy =
+      parseProxy(settings.proxySubscription, settings.proxyBypass);
   policy.generator.append_proxy_type =
       parsed.append_type.get(settings.appendType);
   // 上游项目默认在 clash 目标下自动把 expand 设为 true
@@ -2663,7 +2670,7 @@ static SubStageResponse dispatchTargetGenerator(
       upload_failed = true;
   };
 
-  proxy = parseProxy(settings.proxyConfig);
+  proxy = parseProxy(settings.proxyConfig, settings.proxyBypass);
   switch (hash_(target)) {
   case "clash"_hash:
   case "clashr"_hash:
@@ -3404,7 +3411,7 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
   }
   writeLog(LOG_LEVEL_INFO, "SurgeConfToClash 调用，URL：" + summarizeUrlForLog(url) + "。");
 
-  ProxyPolicy proxy = parseProxy(global.proxyConfig);
+  ProxyPolicy proxy = parseProxy(global.proxyConfig, global.proxyBypass);
   YAML::Node clash;
   template_args tpl_args;
   tpl_args.global_vars = global.templateVars;
@@ -3483,7 +3490,7 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
     clash[proxygroup_name].push_back(singlegroup);
   }
 
-  proxy = parseProxy(global.proxySubscription);
+  proxy = parseProxy(global.proxySubscription, global.proxyBypass);
   eraseElements(dummy_str_array);
 
   RegexMatchConfigs dummy_regex_array;
@@ -3720,7 +3727,7 @@ std::string getProfile(RESPONSE_CALLBACK_ARGS) {
 /*
 std::string jinja2_webGet(const std::string &url)
 {
-    ProxyPolicy proxy = parseProxy(global.proxyConfig);
+    ProxyPolicy proxy = parseProxy(global.proxyConfig, global.proxyBypass);
     writeLog(LOG_LEVEL_INFO, "模板调用 fetch，URL：'" + url + "'。");
     return webGet(url, proxy, global.cacheConfig);
 }*/
@@ -3814,7 +3821,7 @@ int simpleGenerator() {
     writeLog(LOG_LEVEL_INFO, "正在生成所有生成项...");
 
   string_multimap allItems;
-  ProxyPolicy proxy = parseProxy(global.proxySubscription);
+  ProxyPolicy proxy = parseProxy(global.proxySubscription, global.proxyBypass);
   Request request;
   Response response;
   bool write_failed = false;
@@ -3938,7 +3945,8 @@ std::string renderTemplate(RESPONSE_CALLBACK_ARGS) {
            "请提供位于已配置模板目录下的路径。";
   }
   std::string template_content =
-      fetchFile(path, parseProxy(global.proxyConfig), global.cacheConfig);
+      fetchFile(path, parseProxy(global.proxyConfig, global.proxyBypass),
+                global.cacheConfig);
   if (template_content.empty()) {
     *status_code = 400;
     return "Invalid template: file is empty or cannot be read within the "
