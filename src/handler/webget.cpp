@@ -1029,9 +1029,10 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned in
             if(difftime(now, mtime) <= cache_ttl) // within TTL
             {
                 if(shouldLog(LOG_LEVEL_VERBOSE))
-                    writeLog(0, "缓存命中：" +
-                                    summarizeUrlForLog(effective_url) +
-                                    "，使用本地缓存。");
+                    writeLog(LOG_LEVEL_VERBOSE,
+                             "缓存命中：" +
+                                 summarizeUrlForLog(effective_url) +
+                                 "，使用本地缓存。");
                 //guarded_mutex guard(cache_rw_lock);
                 cache_rw_lock.readLock();
                 defer(cache_rw_lock.readUnlock();)
@@ -1041,16 +1042,17 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned in
                 return fileGet(path, true);
             }
             if(shouldLog(LOG_LEVEL_VERBOSE))
-                writeLog(0, "缓存过期：" +
-                                summarizeUrlForLog(effective_url) +
-                                "，正在创建新缓存。"); // out of TTL
+                writeLog(LOG_LEVEL_VERBOSE,
+                         "缓存过期：" + summarizeUrlForLog(effective_url) +
+                             "，正在创建新缓存。"); // out of TTL
         }
         else
         {
             if(shouldLog(LOG_LEVEL_VERBOSE))
-                writeLog(0, "缓存不存在：" +
-                                summarizeUrlForLog(effective_url) +
-                                "，正在创建新缓存。");
+                writeLog(LOG_LEVEL_VERBOSE,
+                         "缓存不存在：" +
+                             summarizeUrlForLog(effective_url) +
+                             "，正在创建新缓存。");
         }
         std::shared_future<CacheFetchResult> fetch_future;
         std::shared_ptr<std::promise<CacheFetchResult>> fetch_promise;
@@ -1135,7 +1137,8 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned in
             if(fileExist(path) && effectiveSettings().serveCacheOnFetchFail) // failed, check if cache exist
             {
                 if(shouldLog(LOG_LEVEL_VERBOSE))
-                    writeLog(0, "获取失败，返回缓存内容。"); // cache exist, serving cache
+                    writeLog(LOG_LEVEL_VERBOSE,
+                             "获取失败，返回缓存内容。"); // cache exist, serving cache
                 //guarded_mutex guard(cache_rw_lock);
                 cache_rw_lock.readLock();
                 defer(cache_rw_lock.readUnlock();)
@@ -1147,7 +1150,8 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned in
             else
             {
                 if(shouldLog(LOG_LEVEL_VERBOSE))
-                    writeLog(0, "获取失败，且没有可用的本地缓存。"); // cache not exist or not allow to serve cache, serving nothing
+                    writeLog(LOG_LEVEL_VERBOSE,
+                             "获取失败，且没有可用的本地缓存。"); // cache not exist or not allow to serve cache, serving nothing
             }
         }
         return content;

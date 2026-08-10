@@ -40,6 +40,7 @@
 #include "statistics.h"
 #include "sub_request_key.h"
 #include "upload.h"
+#include "user_agent.h"
 #include "webget.h"
 #include "utils/time_compat.h"
 
@@ -108,6 +109,10 @@ static const TargetDescriptor *findTargetDescriptor(const std::string &name) {
                      return name == target.name;
                    });
   return found == kTargetDescriptors.end() ? nullptr : &*found;
+}
+
+static const char *nodeParserModeName(NodeParserMode mode) {
+  return mode == NodeParserMode::MihomoOnly ? "mihomo" : "legacy";
 }
 
 static std::string supportedTargets(const std::string &separator) {
@@ -308,104 +313,6 @@ static std::string buildProviderRemarkFilter(const string_array &rules) {
 }
 
 extern string_array ClashRuleTypes, SurgeRuleTypes, QuanXRuleTypes;
-
-struct UAProfile {
-  std::string head;
-  std::string version_match;
-  std::string version_target;
-  std::string target;
-  tribool clash_new_name = tribool();
-  int surge_ver = -1;
-};
-
-// Heads are lower-case and ordered from the most specific family to the most
-// general one. Keep ClashR markers ahead of the generic Clash rules.
-const std::vector<UAProfile> UAMatchList = {
-    {"clashforandroid", "\\/([0-9.]+)[Rr][0-9]*(?:$|[^A-Za-z0-9])", "",
-     "clashr", false},
-    {"clashforandroid", "\\/([0-9.]+)", "2.0", "clash", true},
-    {"clashforandroid", "", "", "clash", false},
-    {"clashr", "", "", "clashr", false},
-    {"clashforwindows", "\\/([0-9.]+)", "0.11", "clash", true},
-    {"clashforwindows", "", "", "clash", false},
-    {"clash-verge", "", "", "clash", true},
-    {"flclash", "", "", "clash", true},
-    {"mihomo", "", "", "clash", true},
-    {"openclash", "", "", "clash", true},
-    {"clashx pro", "", "", "clash", true},
-    {"clashx", "\\/([0-9.]+)", "0.13", "clash", true},
-    {"clash", "", "", "clash", true},
-    {"kitsunebi", "", "", "v2ray"},
-    {"loon", "", "", "loon"},
-    {"pharos", "", "", "mixed"},
-    {"potatso", "", "", "mixed"},
-    {"quantumult%20x", "", "", "quanx"},
-    {"quantumult", "", "", "quan"},
-    {"qv2ray", "", "", "v2ray"},
-    {"shadowrocket", "", "", "mixed"},
-    {"surfboard", "", "", "surfboard"},
-    {"surge", "\\/([0-9.]+).*x86", "906", "surge", false,
-     4}, /// Surge for Mac (supports VMess)
-    {"surge", "\\/([0-9.]+).*x86", "368", "surge", false, 3},
-    /// Surge for Mac (supports new rule types and Shadowsocks without plugin)
-    {"surge", "\\/([0-9.]+)", "1419", "surge", false,
-     4}, /// Surge iOS 4 (first version)
-    {"surge", "\\/([0-9.]+)", "900", "surge", false,
-     3},                                  /// Surge iOS 3 (approx)
-    {"surge", "", "", "surge", false, 2}, /// any version of Surge as fallback
-    {"trojan-qt5", "", "", "trojan"},
-    {"v2rayu", "", "", "v2ray"},
-    {"v2rayx", "", "", "v2ray"}};
-
-bool verGreaterEqual(const std::string &src_ver,
-                     const std::string &target_ver) {
-  std::istringstream src_stream(src_ver), target_stream(target_ver);
-  int src_part, target_part;
-  char dot;
-  while (src_stream >> src_part) {
-    if (target_stream >> target_part) {
-      if (src_part < target_part) {
-        return false;
-      } else if (src_part > target_part) {
-        return true;
-      }
-      // Skip the dot separator in both streams
-      src_stream >> dot;
-      target_stream >> dot;
-    } else {
-      // If we run out of target parts, the source version is greater only if it
-      // has more parts
-      return true;
-    }
-  }
-  // If we get here, the common parts are equal, so check if target_ver has more
-  // parts
-  return !bool(target_stream >> target_part);
-}
-
-void matchUserAgent(const std::string &user_agent, std::string &target,
-                    tribool &clash_new_name, int &surge_ver) {
-  if (user_agent.empty())
-    return;
-  const std::string normalized_user_agent = toLower(user_agent);
-  for (const UAProfile &x : UAMatchList) {
-    if (startsWith(normalized_user_agent, x.head)) {
-      if (!x.version_match.empty()) {
-        std::string version;
-        if (regGetMatch(user_agent, x.version_match, 2, 0, &version))
-          continue;
-        if (!x.version_target.empty() &&
-            !verGreaterEqual(version, x.version_target))
-          continue;
-      }
-      target = x.target;
-      clash_new_name = x.clash_new_name;
-      if (x.surge_ver != -1)
-        surge_ver = x.surge_ver;
-      return;
-    }
-  }
-}
 
 std::string getRuleset(RESPONSE_CALLBACK_ARGS) {
   SettingsSnapshot snapshot = captureEffectiveSettingsSnapshot();
@@ -1333,6 +1240,9 @@ static std::string rejectAgeRequest(Response &response,
 static std::string finalizeSubResponse(const Request &request,
                                        Response &response, std::string body,
                                        const AgeResponseContext &age) {
+  // User-Agent can select target=auto and affects subscription/provider
+  // request headers. Separate every /sub representation in shared caches.
+  appendVaryHeader(response, "User-Agent");
   // Every /sub representation varies on this header, including the plaintext
   // variant, so shared caches cannot serve plaintext to an encrypted request.
   appendVaryHeader(response, "X-Age-Public-Key");
@@ -1522,6 +1432,8 @@ static SettingsSnapshot captureSettingsForSubRequest(Request &request) {
 
 static std::string subconverterEntry(Request &request, Response &response,
                                      bool track) {
+  // Early validation failures do not pass through finalizeSubResponse.
+  appendVaryHeader(response, "User-Agent");
   AgeResponseContext age = consumeAgeResponseContext(request);
   if (age.requested && !age.valid) {
     return rejectAgeRequest(
@@ -1659,6 +1571,8 @@ namespace {
 struct ParsedSubRequest {
   std::string target;
   std::string surge_version_text;
+  bool target_was_auto = false;
+  UserAgentMatch user_agent_match;
   bool explain_mode = false;
   SubExplainReport explain;
   tribool clash_new_field;
@@ -1734,13 +1648,18 @@ static std::string parseSubRequestArguments(Request &request,
   parsed.surge_version = !parsed.surge_version_text.empty()
                              ? to_int(parsed.surge_version_text, 3)
                              : 3;
-  if (parsed.target == "auto")
-    matchUserAgent(request.headers["User-Agent"], parsed.target,
-                   parsed.clash_new_field, parsed.surge_version);
+  parsed.target_was_auto = parsed.target == "auto";
+  if (parsed.target_was_auto)
+    parsed.user_agent_match =
+        matchUserAgent(request.headers["User-Agent"], parsed.target,
+                       parsed.clash_new_field, parsed.surge_version);
   parsed.explain.target = parsed.target;
 
   parsed.target_descriptor = findTargetDescriptor(parsed.target);
   if (!parsed.target_descriptor) {
+    if (parsed.target_was_auto)
+      writeLog(LOG_LEVEL_WARNING,
+               "AUTO_TARGET_UNRESOLVED ua_family=unknown");
     response.status_code = 400;
     return "Invalid request: unsupported target value.\n"
            "无效请求：不支持的 target 参数值。\n"
@@ -1749,6 +1668,13 @@ static std::string parseSubRequestArguments(Request &request,
            supportedTargets("、") + "。";
   }
   parsed.simple_subscription = parsed.target_descriptor->simple_subscription;
+  if (parsed.target_was_auto) {
+    writeLog(LOG_LEVEL_INFO,
+             "AUTO_TARGET_RESOLVED target=" + parsed.target +
+                 " parser=" +
+                 nodeParserModeName(parsed.target_descriptor->parser_mode) +
+                 " ua_family=" + parsed.user_agent_match.family);
+  }
 
   parsed.url = getUrlArg(argument, "url");
   parsed.group_name = getUrlArg(argument, "group");
@@ -2256,6 +2182,9 @@ static SubStageResponse processSubscriptionNodes(
   std::vector<Proxy> insert_nodes;
   std::string &subInfo = state.subscription_info;
   int groupID = 0;
+  size_t source_calls = 0;
+  size_t source_failures = 0;
+  NodeParserStats parser_stats;
 
   parse_settings parse_set;
   parse_set.proxy = &proxy;
@@ -2265,6 +2194,7 @@ static SubStageResponse processSubscriptionNodes(
   parse_set.time_rules = &time_temp;
   parse_set.sub_info = &subInfo;
   parse_set.parser_mode = parsed.target_descriptor->parser_mode;
+  parse_set.parser_stats = &parser_stats;
   string_icase_map subscription_headers = buildSubscriptionRequestHeaders();
   std::string selected_user_agent = providerUserAgentFromRequest(request);
   if (!selected_user_agent.empty())
@@ -2276,6 +2206,35 @@ static SubStageResponse processSubscriptionNodes(
   parse_set.js_runtime = ext.js_runtime;
   parse_set.js_context = ext.js_context;
 
+  auto logRouteSelection = [&]() {
+    const size_t provider_count = ext.providers.size();
+    std::string route = "none";
+    if (provider_count && source_calls)
+      route = "hybrid";
+    else if (provider_count)
+      route = "proxy-provider";
+    else if (parser_stats.invocations)
+      route = "node-parser";
+    else if (source_calls)
+      route = "node-source";
+    writeLog(LOG_LEVEL_INFO,
+             "SUB_ROUTE_RESULT target=" + parsed.target +
+                 " source=" +
+                 std::string(parsed.target_was_auto ? "auto" : "explicit") +
+                 " route=" + route + " parser_policy=" +
+                 nodeParserModeName(parse_set.parser_mode) + " parser=" +
+                 (parser_stats.invocations
+                      ? std::string(nodeParserModeName(parse_set.parser_mode))
+                      : std::string("none")) +
+                 " provider_count=" + std::to_string(provider_count) +
+                 " source_calls=" + std::to_string(source_calls) +
+                 " source_failures=" + std::to_string(source_failures) +
+                 " parser_calls=" +
+                 std::to_string(parser_stats.invocations) +
+                 " parser_failures=" +
+                 std::to_string(parser_stats.failures));
+  };
+
   if (!settings.insertUrls.empty() && argEnableInsert) {
     groupID = -1;
     urls = split(settings.insertUrls, "|");
@@ -2285,11 +2244,16 @@ static SubStageResponse processSubscriptionNodes(
       x = regTrim(x);
       writeLog(0, "正在从 URL 获取节点数据：" + summarizeUrlForLog(x) + "。",
                LOG_LEVEL_INFO);
+      source_calls++;
       if (addNodes(x, insert_nodes, groupID, parse_set) == -1) {
+        source_failures++;
         if (settings.skipFailedLinks)
-          writeLog(0, "以下链接不包含任何有效节点信息：" + x,
+          writeLog(0,
+                   "以下链接不包含任何有效节点信息：" +
+                       summarizeUrlForLog(x),
                    LOG_LEVEL_WARNING);
         else {
+          logRouteSelection();
           *status_code = 400;
           return {true,
                   "Invalid request: this link does not contain any supported "
@@ -2297,9 +2261,7 @@ static SubStageResponse processSubscriptionNodes(
                   "无效请求：该链接不包含任何受支持的代理节点。\n"
                   "Please check whether the link is reachable and the node "
                   "URI format is supported.\n"
-                  "请检查链接是否可访问，以及节点 URI 格式是否受支持。\n"
-                  "Link / 链接: " +
-                      x};
+                  "请检查链接是否可访问，以及节点 URI 格式是否受支持。"};
         }
       }
       groupID--;
@@ -2496,7 +2458,9 @@ static SubStageResponse processSubscriptionNodes(
         writeLog(0, "正在从 URL 获取节点数据：" + summarizeUrlForLog(x) +
                         "。",
                  LOG_LEVEL_INFO);
+        source_calls++;
         if (addNodes(x, nodes, groupID, parse_set) == -1) {
+          source_failures++;
           writeLog(0,
                    "已跳过无效节点链接：" + summarizeUrlForLog(x) +
                        "，继续处理其他节点。",
@@ -2511,7 +2475,9 @@ static SubStageResponse processSubscriptionNodes(
       x = regTrim(x);
       writeLog(0, "正在从 URL 获取节点数据：" + summarizeUrlForLog(x) + "。",
                LOG_LEVEL_INFO);
+      source_calls++;
       if (addNodes(x, nodes, groupID, parse_set) == -1) {
+        source_failures++;
         writeLog(0,
                  "已跳过无效节点链接：" + summarizeUrlForLog(x) +
                      "，继续处理其他节点。",
@@ -2525,6 +2491,7 @@ static SubStageResponse processSubscriptionNodes(
   explain.proxy_provider_mode = ext.use_proxy_provider && !ext.providers.empty();
   explain.insert_node_count = insert_nodes.size();
   explain.direct_node_count = nodes.size();
+  logRouteSelection();
   if (!argProviderHeaders.empty() && !ext.nodelist && ext.providers.empty()) {
     *status_code = 400;
     return {true,
@@ -2950,8 +2917,6 @@ static std::string assembleSubResponse(
   std::string &output_content = generation.output;
   std::string &managed_url = generation.managed_url;
 
-  if (argTarget == "clash" && explain.proxy_provider_mode)
-    appendVaryHeader(response, "User-Agent");
   for (const auto &[name, value] : provider_headers) {
     (void)value;
     appendVaryHeader(response, name);
@@ -3620,8 +3585,7 @@ std::string getProfile(RESPONSE_CALLBACK_ARGS) {
   // }
   /// check if more than one profile is provided
   if (profiles.size() > 1) {
-    writeLog(0, "检测到多个配置档，正在合并...",
-             LOG_TYPE_INFO);
+    writeLog(LOG_LEVEL_INFO, "检测到多个配置档，正在合并...");
     std::string all_urls, url;
     auto iter = contents.find("url");
     if (iter != contents.end())

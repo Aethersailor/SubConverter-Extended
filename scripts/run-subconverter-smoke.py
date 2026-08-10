@@ -446,6 +446,23 @@ def run_checks(
         raise AssertionError("direct Clash conversion did not include expected node output")
     assert_snapshot("direct-clash.yaml", direct_config, snapshot_dir, update)
 
+    auto_config, auto_headers = fetch_response(
+        base_url,
+        "/sub",
+        {**common_params, "target": "auto"},
+        timeout,
+        {"User-Agent": "clash.meta/1.19.29"},
+    )
+    if "Smoke" not in auto_config or "proxies:" not in auto_config:
+        raise AssertionError("auto Clash conversion did not select Mihomo output")
+    auto_vary = {
+        value.strip().lower()
+        for value in auto_headers.get("vary", "").split(",")
+        if value.strip()
+    }
+    if "user-agent" not in auto_vary:
+        raise AssertionError("auto Clash response is missing Vary: User-Agent")
+
     _, plaintext_headers = fetch_response(
         base_url, "/sub", common_params, timeout
     )
@@ -454,8 +471,11 @@ def run_checks(
         for value in plaintext_headers.get("vary", "").split(",")
         if value.strip()
     }
-    if "x-age-public-key" not in plaintext_vary:
-        raise AssertionError("plaintext /sub response is missing Vary: X-Age-Public-Key")
+    for expected in ("x-age-public-key", "user-agent"):
+        if expected not in plaintext_vary:
+            raise AssertionError(
+                f"plaintext /sub response is missing Vary: {expected}"
+            )
 
     age_config, age_headers = fetch_response(
         base_url,
@@ -477,8 +497,9 @@ def run_checks(
         for value in age_headers.get("vary", "").split(",")
         if value.strip()
     }
-    if "x-age-public-key" not in age_vary:
-        raise AssertionError("Age response is missing Vary: X-Age-Public-Key")
+    for expected in ("x-age-public-key", "user-agent"):
+        if expected not in age_vary:
+            raise AssertionError(f"Age response is missing Vary: {expected}")
 
     plaintext_after_age = fetch(base_url, "/sub", common_params, timeout)
     if plaintext_after_age.startswith("-----BEGIN AGE ENCRYPTED FILE-----"):
@@ -870,7 +891,12 @@ def run_checks(
             for value in selected_header_response_headers.get("vary", "").split(",")
             if value.strip()
         }
-        for expected in ("x-hwid", "authorization", "x-age-public-key"):
+        for expected in (
+            "x-hwid",
+            "authorization",
+            "x-age-public-key",
+            "user-agent",
+        ):
             if expected not in selected_vary:
                 raise AssertionError(
                     f"selected provider response Vary is missing {expected}"
