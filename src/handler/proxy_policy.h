@@ -6,6 +6,10 @@
 
 #include "server/client_ip.h"
 
+// A missing proxy_bypass setting must remain upgrade-compatible while keeping
+// loopback and ordinary private networks off the explicit proxy path.
+inline constexpr char kDefaultProxyBypass[] = "PRIVATE";
+
 // Keep the user's proxy intent until the request reaches libcurl.  An empty
 // string is deliberately Direct, not an implicit request to read curl's
 // environment variables.
@@ -67,7 +71,8 @@ struct ProxyPolicy {
 
   static ProxyPolicy direct();
   static ProxyPolicy parse(const std::string &source,
-                           const std::string &bypassSource = "LOOPBACK");
+                           const std::string &bypassSource =
+                               kDefaultProxyBypass);
 
   ResolvedProxyPolicy snapshot() const;
 
@@ -84,7 +89,7 @@ struct ProxyPolicy {
 // Compatibility name used by the existing settings call sites.  Unlike the
 // historical helper it returns a policy, not an ambiguous string.
 ProxyPolicy parseProxy(const std::string &source,
-                       const std::string &bypassSource = "LOOPBACK");
+                       const std::string &bypassSource = kDefaultProxyBypass);
 
 const char *proxyModeName(ProxyMode mode);
 

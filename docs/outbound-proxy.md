@@ -20,7 +20,10 @@ Malformed non-empty policies are rejected. They never become direct requests.
 explicit proxy URI. It does not replace the existing preference file and does
 not alter `SYSTEM`, `NONE`, or `cors:` routing.
 
-`LOOPBACK` is always retained and is the default. Other presets are additive:
+`LOOPBACK` is always retained. When `proxy_bypass` is absent, the default is
+`PRIVATE`, which includes both loopback and ordinary private networks. Existing
+INI, YAML, and TOML preference files therefore continue to start without adding
+the field. Other presets are additive:
 
 | Rule | Direct initial targets |
 | --- | --- |
@@ -34,7 +37,10 @@ not alter `SYSTEM`, `NONE`, or `cors:` routing.
 For example:
 
 ```ini
-; Safe compatibility default
+; Upgrade-compatible default: LOOPBACK + RFC 1918 + IPv6 ULA
+proxy_bypass=PRIVATE
+
+; Explicitly keep only the narrower loopback behavior
 proxy_bypass=LOOPBACK
 
 ; Broad coverage for common home and enterprise intranets

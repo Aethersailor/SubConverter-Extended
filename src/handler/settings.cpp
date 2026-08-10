@@ -1416,9 +1416,9 @@ bool readConf() {
     global.dashboardAuthLockSeconds = 900;
     global.fallbackToDefaultExternalConfig = false;
     global.customOpenClashRulesSourceSwitch = false;
-    // A removed proxy_bypass setting must return to the conservative default
-    // on reload instead of retaining a previous broad LAN policy.
-    global.proxyBypass = "LOOPBACK";
+    // A removed proxy_bypass setting must return to the upgrade-compatible
+    // default on reload instead of retaining a previous custom policy.
+    global.proxyBypass = kDefaultProxyBypass;
     global.proxyProviderInterval = kDefaultProxyProviderInterval;
     global.proxyProviderDirect = kDefaultProxyProviderDirect;
   };
