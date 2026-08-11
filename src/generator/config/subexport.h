@@ -37,6 +37,17 @@ struct ProxyProvider {
         proxy_direct(kDefaultProxyProviderDirect), groupId(0) {}
 };
 
+struct QuanXServerRemote {
+  std::string resource_tag;
+  std::string requested_resource_tag;
+  std::string selection_resource_tag;
+  std::string source_tag;
+  std::string url;
+  int update_interval = 0;
+  bool has_update_interval = false;
+  int group_id = 0;
+};
+
 using SingleLinkTypes = std::uint32_t;
 namespace SingleLinkType {
 constexpr SingleLinkTypes Shadowsocks = 1U << 0;
@@ -81,6 +92,7 @@ struct extra_settings {
   bool use_proxy_provider = true;       // 默认启用 proxy-provider 模式
   bool provider_proxy_direct = true;    // proxy-provider 默认使用 DIRECT 更新
   std::vector<ProxyProvider> providers; // provider 列表
+  std::vector<QuanXServerRemote> quanx_server_remotes;
   bool authorized = false;
   RuleConversionStats *rule_stats = nullptr;
 

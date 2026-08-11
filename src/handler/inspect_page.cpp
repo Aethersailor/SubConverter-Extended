@@ -1496,7 +1496,13 @@ std::string page(Request &request, Response &response) {
 
                 stateLine.textContent = "";
                 stateLine.appendChild(tag((report.ok ? "HTTP " : "HTTP ") + (report.status_code || "-"), report.ok ? "" : "error"));
-                stateLine.appendChild(tag(mode.proxy_provider ? "proxy-provider" : "direct nodes", mode.proxy_provider ? "" : "warn"));
+                var remoteBackend = mode.remote_subscription_backend || "server-side-parse";
+                var hasRemoteResources = Number(resources.remote_subscription_count || 0) > 0;
+                var routeLabel = mode.proxy_provider ? "proxy-provider" : (remoteBackend === "quanx-server-remote" && hasRemoteResources ? "server_remote" : "direct nodes");
+                stateLine.appendChild(tag(routeLabel, routeLabel === "direct nodes" ? "warn" : ""));
+                if (resources.remote_subscription_count) {
+                    stateLine.appendChild(tag(text("remote resources ", "远程资源 ") + resources.remote_subscription_count));
+                }
                 stateLine.appendChild(tag(external.loaded ? text("config loaded", "配置已加载") : text("config not loaded", "配置未加载"), external.loaded ? "" : "warn"));
                 stateLine.appendChild(tag(text("rulesets ", "规则集 ") + (resources.ruleset_count || 0)));
                 stateLine.appendChild(tag(text("subscriptions ", "订阅 ") + (inputs.subscription_url_count || 0)));

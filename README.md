@@ -793,11 +793,11 @@ Dashboard 防爆破默认只使用服务端观察到的 TCP socket peer。`CF-Co
 </details>
 
 <details>
-<summary><strong>Proxy-Provider 自定义名称、更新间隔与下载路径</strong></summary>
+<summary><strong>客户端远程订阅资源：Clash Proxy-Provider 与 Quantumult X server_remote</strong></summary>
 
-### `provider` 前缀（仅适用于 Clash/ClashR 订阅链接）
+### `provider` 前缀
 
-`provider` 不是独立参数，而是写在 `url=` 列表中、放在订阅链接前，并以逗号分隔，用于自定义 `proxy-providers` 名称；对节点链接不生效。
+`provider` 不是独立参数，而是写在 `url=` 列表中、放在订阅链接前，并以逗号分隔。Clash/ClashR 使用它自定义 `proxy-providers` 名称；Quantumult X 使用它自定义 `[server_remote]` 资源标签。该前缀对节点链接不生效。
 
 示例：
 
@@ -814,7 +814,7 @@ url=provider%3AHK%2Chttps%3A%2F%2Fexample.com%2Fsub
 * 支持中文名称；非法字符或空值会回退为默认 `Provider_<MD5>`
 * 重名时会自动追加 `_1`、`_2` 等后缀
 
-### `interval` 前缀（仅适用于 Clash/ClashR 订阅链接）
+### `interval` 前缀
 
 部署者可以在主配置文件中设置所有新生成 `proxy-provider` 的默认订阅更新间隔，单位为秒。该配置节完全可选；现有配置文件缺少它时仍可正常启动，并继续使用 `3600`：
 
@@ -842,7 +842,7 @@ proxy_direct=true
 url=provider:A,interval:0,https://a.example/sub|provider:B,interval:21600,https://b.example/sub|provider:C,https://c.example/sub
 ```
 
-以上示例中，A 明确生成 `interval: 0`，B 生成 `interval: 21600`，C 使用主配置文件中的默认值。未配置主配置节时，C 使用 `3600`。
+对于 Clash/ClashR，以上示例中的 A 明确生成 `interval: 0`，B 生成 `interval: 21600`，C 使用主配置文件中的默认值。未配置主配置节时，C 使用 `3600`。
 
 `interval:0` 不会省略 YAML 字段，而是明确生成：
 
@@ -859,9 +859,27 @@ interval: 0
 
 * 有效范围是 `0` 到 `2147483647` 的十进制整数；不支持 `none`、负数或 `1h` 等单位写法
 * 同一条订阅重复设置 `interval:` 会返回 HTTP 400
-* `interval:` 不适用于节点 URI、`list=true` 或非 Clash/ClashR 目标
+* `interval:` 不适用于节点 URI、`list=true`，也不适用于 Clash/ClashR 与 Quantumult X 之外的目标
 * 不提供请求级的全局 `provider_interval` 参数
 * 已有顶层请求参数 `&interval=` 仍用于托管配置的更新提示，与 `proxy-provider` 的更新周期无关
+
+### Quantumult X `[server_remote]`
+
+`target=quanx` 生成完整配置时，HTTP(S) 订阅默认写入 `[server_remote]`，由 Quantumult X 下载和解析；SubConverter-Extended 不会预先下载这些订阅。节点 URI 仍由 Legacy 解析器处理并写入 `[server_local]`，两类输入可以混用。
+
+```text
+url=provider:Airport-A,https://a.example/sub|ss://example-node
+```
+
+逐条提供 `interval:` 时，Quantumult X 输出使用 `update-interval`。正整数保持原值；`interval:0` 会转换为 `update-interval=-1`，表示关闭自动同步。省略时不生成该字段，由 Quantumult X 使用客户端默认同步间隔。
+
+为避免静默丢失旧功能，只要最终有效配置仍要求服务端处理节点，例如 `include`/`exclude`、`filter_script`、节点改名、Emoji 增删、排序、弃用节点过滤、UDP/TFO/证书/TLS 选项覆盖，或策略组、`!!import:` 无法等价下放，请求就会在下载前确定为旧版 Legacy 路径。`list=true` 也继续由服务端展开订阅。以上判断不是远程解析失败后的回退。
+
+新版示例配置默认不再启用节点改名与旧 Emoji 清理，使新部署可以直接使用 `[server_remote]`。已有配置文件不会被改写；其中已启用的节点预处理会继续触发 Legacy，保持原有结果。部署者确认不再需要这些处理后，可自行关闭对应选项以启用客户端远程读取。
+
+`[server_remote]` 不会自动启用 `opt-parser`，也不会注入第三方 `resource_parser_url`。上游需要根据 Quantumult X 的 User-Agent 返回客户端可识别的节点资源；需要自定义资源解析器时，应由部署者在 Quantumult X 基础配置中自行配置并评估脚本来源。
+
+该能力不增加主配置文件字段，旧版 `pref.ini`、`pref.yml` 和 `pref.toml` 无需迁移，也不会因缺少新参数而启动失败。
 
 ### `proxy_direct` 前缀（仅适用于 Clash/ClashR 订阅链接）
 

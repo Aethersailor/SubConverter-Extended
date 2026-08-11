@@ -87,6 +87,9 @@ PROVIDER_FILTER_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
         )
     )
 ).decode("ascii")
+QUANX_REMOTE_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
+    b"enable_rule_generator=false\ncustom_proxy_group=Remote`select`.*\n"
+).decode("ascii")
 AGE_PUBLIC_KEY = (
     "age1xh86kh9v23vattr58yedspm3f57sxvnswu9krr6ns438amekx5gsd09uma"
 )
@@ -575,6 +578,129 @@ def run_checks(
     assert_snapshot("provider-explain.json", provider_explain, snapshot_dir, update)
 
     if remote_subscription_url:
+        dead_quanx_source = (
+            "https://127.0.0.1:1/quanx-must-not-fetch"
+            "?token=quanx-smoke-source-secret"
+        )
+        quanx_output, quanx_headers = fetch_response(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": f"provider:QXSmoke,interval:0,{dead_quanx_source}",
+                "config": QUANX_REMOTE_CONFIG,
+            },
+            timeout,
+        )
+        for expected in (
+            "[server_remote]",
+            dead_quanx_source,
+            "tag=QXSmoke",
+            "update-interval=-1",
+            "enabled=true",
+            "resource-tag-regex=^QXSmoke$",
+            "server-tag-regex=.*",
+        ):
+            if expected not in quanx_output:
+                raise AssertionError(
+                    f"Quantumult X server_remote output is missing {expected!r}\n"
+                    f"{quanx_output}"
+                )
+        if "opt-parser=" in quanx_output:
+            raise AssertionError("Quantumult X smoke output enabled opt-parser implicitly")
+        if "user-agent" not in quanx_headers.get("vary", "").lower():
+            raise AssertionError(
+                "Quantumult X server_remote response did not emit Vary: User-Agent"
+            )
+
+        quanx_explain = json.loads(
+            fetch(
+                base_url,
+                "/sub",
+                {
+                    "target": "quanx",
+                    "url": f"provider:QXExplain,{dead_quanx_source}",
+                    "config": QUANX_REMOTE_CONFIG,
+                    "explain": "true",
+                },
+                timeout,
+            )
+        )
+        if (
+            quanx_explain.get("mode", {}).get("remote_subscription_backend")
+            != "quanx-server-remote"
+            or quanx_explain.get("mode", {}).get("remote_subscription_reason")
+            != "native-capable"
+            or quanx_explain.get("output", {}).get("remote_subscription_count") != 1
+        ):
+            raise AssertionError(
+                f"Quantumult X explain route mismatch: {quanx_explain!r}"
+            )
+        if "quanx-smoke-source-secret" in json.dumps(quanx_explain):
+            raise AssertionError("Quantumult X explain leaked its source credential")
+
+        auto_quanx = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "auto",
+                "url": f"provider:QXAuto,{dead_quanx_source}",
+                "config": QUANX_REMOTE_CONFIG,
+            },
+            timeout,
+            {"User-Agent": "Quantumult%20X/1.4"},
+        )
+        if "tag=QXAuto" not in auto_quanx or dead_quanx_source not in auto_quanx:
+            raise AssertionError("auto Quantumult X did not select server_remote")
+
+        mixed_quanx = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": f"provider:QXMixed,{dead_quanx_source}|{DIRECT_SS_LINK}",
+                "config": QUANX_REMOTE_CONFIG,
+            },
+            timeout,
+        )
+        for expected in ("tag=QXMixed", "DirectSmoke", "[server_local]"):
+            if expected not in mixed_quanx:
+                raise AssertionError(
+                    f"mixed Quantumult X output is missing {expected!r}\n{mixed_quanx}"
+                )
+
+        quanx_list = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": remote_subscription_url,
+                "config": QUANX_REMOTE_CONFIG,
+                "list": "true",
+            },
+            timeout,
+        )
+        if "Smoke" not in quanx_list or remote_subscription_url in quanx_list:
+            raise AssertionError(
+                "Quantumult X list=true did not retain Legacy expansion"
+            )
+
+        quanx_fallback = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": f"provider:QXLegacy,{remote_subscription_url}",
+                "config": QUANX_REMOTE_CONFIG,
+                "tfo": "true",
+            },
+            timeout,
+        )
+        if "Smoke" not in quanx_fallback or remote_subscription_url in quanx_fallback:
+            raise AssertionError(
+                "Quantumult X explicit node override did not select Legacy"
+            )
+
         mixed_url = f"{remote_subscription_url}|{DIRECT_SS_LINK}"
         clash_cases = (
             (

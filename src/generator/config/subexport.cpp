@@ -2211,6 +2211,198 @@ void proxyToQuan(std::vector<Proxy> &nodes, INIReader &ini,
                    "", ext.rule_stats);
 }
 
+static std::string escapeQuanXRegexLiteral(const std::string &value) {
+  std::string escaped;
+  escaped.reserve(value.size() * 2);
+  for (char ch : value) {
+    switch (ch) {
+    case '\\':
+    case '.':
+    case '^':
+    case '$':
+    case '|':
+    case '(':
+    case ')':
+    case '[':
+    case ']':
+    case '{':
+    case '}':
+    case '*':
+    case '+':
+    case '?':
+      escaped.push_back('\\');
+      break;
+    default:
+      break;
+    }
+    escaped.push_back(ch);
+  }
+  return escaped;
+}
+
+static std::string quanxResourceTagRegex(
+    const std::vector<const QuanXServerRemote *> &resources) {
+  string_array alternatives;
+  alternatives.reserve(resources.size());
+  for (const QuanXServerRemote *resource : resources)
+    alternatives.emplace_back(escapeQuanXRegexLiteral(resource->resource_tag));
+  if (alternatives.size() == 1)
+    return "^" + alternatives.front() + "$";
+  return "^(?:" + join(alternatives, "|") + ")$";
+}
+
+static bool parseQuanXSourceGroupRule(const std::string &rule,
+                                      std::string &source_pattern,
+                                      std::string &server_pattern) {
+  static const std::string group_regex =
+      R"(^!!GROUP=(.+?)(?:!!(.*))?$)";
+  if (!startsWith(rule, "!!GROUP="))
+    return false;
+  source_pattern.clear();
+  server_pattern.clear();
+  return regGetMatch(rule, group_regex, 3,
+                     static_cast<std::string *>(nullptr), &source_pattern,
+                     &server_pattern) == 0 &&
+         !source_pattern.empty();
+}
+
+struct QuanXRemoteSelector {
+  std::vector<const QuanXServerRemote *> resources;
+  std::string server_pattern;
+};
+
+static QuanXRemoteSelector quanxRemoteSelectorForGroup(
+    const ProxyGroupConfig &group,
+    const std::vector<QuanXServerRemote> &resources) {
+  QuanXRemoteSelector selector;
+  if (resources.empty() || group.Type == ProxyGroupType::SSID)
+    return selector;
+
+  for (const QuanXServerRemote &resource : resources)
+    selector.resources.emplace_back(&resource);
+
+  if (!group.UsingProvider.empty()) {
+    selector.resources.erase(
+        std::remove_if(selector.resources.begin(), selector.resources.end(),
+                       [&](const QuanXServerRemote *resource) {
+                         return std::find(group.UsingProvider.begin(),
+                                          group.UsingProvider.end(),
+                                          resource->resource_tag) ==
+                                    group.UsingProvider.end() &&
+                                std::find(group.UsingProvider.begin(),
+                                          group.UsingProvider.end(),
+                                          resource->requested_resource_tag) ==
+                                    group.UsingProvider.end() &&
+                                std::find(group.UsingProvider.begin(),
+                                          group.UsingProvider.end(),
+                                          resource->selection_resource_tag) ==
+                                    group.UsingProvider.end();
+                       }),
+        selector.resources.end());
+    selector.server_pattern = ".*";
+  }
+
+  for (const std::string &rule : group.Proxies) {
+    if (startsWith(rule, "[]") || rule == "DIRECT" || rule == "REJECT")
+      continue;
+
+    std::string target, server_pattern;
+    if (parseProviderGroupIdMatcher(rule, target, server_pattern)) {
+      selector.resources.erase(
+          std::remove_if(selector.resources.begin(), selector.resources.end(),
+                         [&](const QuanXServerRemote *resource) {
+                           return !matchRange(target, resource->group_id);
+                         }),
+          selector.resources.end());
+      selector.server_pattern =
+          server_pattern.empty() ? ".*" : server_pattern;
+    } else if (parseQuanXSourceGroupRule(rule, target, server_pattern)) {
+      selector.resources.erase(
+          std::remove_if(selector.resources.begin(), selector.resources.end(),
+                         [&](const QuanXServerRemote *resource) {
+                           return resource->source_tag.empty() ||
+                                  !regFind(resource->source_tag, target);
+                         }),
+          selector.resources.end());
+      selector.server_pattern =
+          server_pattern.empty() ? ".*" : server_pattern;
+    } else if (!startsWith(rule, "!!") && !startsWith(rule, "script:")) {
+      selector.server_pattern = rule;
+    }
+    break;
+  }
+
+  if (selector.server_pattern.empty())
+    selector.resources.clear();
+  return selector;
+}
+
+static std::string quanxRemoteTagFromLine(const std::string &line) {
+  std::string trimmed = trimWhitespace(line, true, true);
+  if (trimmed.empty() || startsWith(trimmed, ";") ||
+      startsWith(trimmed, "#") || startsWith(trimmed, "//"))
+    return "";
+  for (std::string item : split(trimmed, ",")) {
+    item = trimWhitespace(item, true, true);
+    std::string lower = toLower(item);
+    if (startsWith(lower, "tag="))
+      return trimWhitespace(item.substr(4), true, true);
+  }
+  return "";
+}
+
+static std::string clampQuanXResourceTag(const std::string &tag,
+                                         size_t max_length) {
+  if (tag.size() <= max_length)
+    return tag;
+  std::string result = tag.substr(0, max_length);
+  while (!result.empty() && !isStrUTF8(result))
+    result.pop_back();
+  return result;
+}
+
+static void appendQuanXServerRemotes(INIReader &ini, extra_settings &ext) {
+  if (ext.quanx_server_remotes.empty())
+    return;
+
+  std::unordered_set<std::string> used_tags;
+  string_array existing_lines;
+  ini.get_all("server_remote", "{NONAME}", existing_lines);
+  for (const std::string &line : existing_lines) {
+    std::string tag = quanxRemoteTagFromLine(line);
+    if (!tag.empty())
+      used_tags.emplace(std::move(tag));
+  }
+
+  ini.set_current_section("server_remote");
+  for (QuanXServerRemote &remote : ext.quanx_server_remotes) {
+    std::string base_tag = remote.resource_tag;
+    std::string candidate = base_tag;
+    int suffix_index = 1;
+    while (!used_tags.insert(candidate).second) {
+      const std::string suffix = "_" + std::to_string(suffix_index++);
+      const size_t max_base = 64 > suffix.size() ? 64 - suffix.size() : 0;
+      candidate = clampQuanXResourceTag(base_tag, max_base) + suffix;
+    }
+    if (candidate != remote.resource_tag) {
+      remote.resource_tag = candidate;
+      writeLog(LOG_LEVEL_INFO,
+               "QUANX_REMOTE_TAG_RENAMED group_id=" +
+                   std::to_string(remote.group_id));
+    }
+
+    std::string safe_url = replaceAllDistinct(remote.url, ",", "%2C");
+    std::string line = safe_url + ", tag=" + remote.resource_tag;
+    if (remote.has_update_interval) {
+      const int interval =
+          remote.update_interval == 0 ? -1 : remote.update_interval;
+      line += ", update-interval=" + std::to_string(interval);
+    }
+    line += ", enabled=true";
+    ini.set("{NONAME}", std::move(line));
+  }
+}
+
 std::string proxyToQuanX(std::vector<Proxy> &nodes,
                          const std::string &base_conf,
                          std::vector<RulesetContent> &ruleset_content_array,
@@ -2231,6 +2423,8 @@ std::string proxyToQuanX(std::vector<Proxy> &nodes,
     return "";
   }
 
+  if (!ext.nodelist)
+    appendQuanXServerRemotes(ini, ext);
   proxyToQuanX(nodes, ini, ruleset_content_array, extra_proxy_group, ext);
 
   if (ext.nodelist) {
@@ -2430,6 +2624,7 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini,
   for (const ProxyGroupConfig &x : extra_proxy_group) {
     std::string type;
     string_array filtered_nodelist;
+    bool has_remote_selector = false;
 
     switch (x.Type) {
     case ProxyGroupType::Select:
@@ -2457,10 +2652,22 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini,
       for (const auto &y : x.Proxies)
         groupGenerate(y, nodelist, filtered_nodelist, true, ext);
 
-      if (filtered_nodelist.empty())
+      QuanXRemoteSelector remote_selector =
+          quanxRemoteSelectorForGroup(x, ext.quanx_server_remotes);
+      if (!remote_selector.resources.empty()) {
+        filtered_nodelist.emplace_back(
+            "resource-tag-regex=" +
+            quanxResourceTagRegex(remote_selector.resources));
+        filtered_nodelist.emplace_back("server-tag-regex=" +
+                                       remote_selector.server_pattern);
+        has_remote_selector = true;
+      }
+
+      if (filtered_nodelist.empty() && !has_remote_selector)
         filtered_nodelist.emplace_back("direct");
 
-      if (filtered_nodelist.size() < 2) // force groups with 1 node to be static
+      if (filtered_nodelist.size() < 2 &&
+          !has_remote_selector) // force groups with 1 node to be static
         type = "static";
     }
 

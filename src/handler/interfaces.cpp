@@ -32,6 +32,7 @@
 #include "ruleset_output.h"
 #include "parser/mihomo_scheme_utils.h"
 #include "parser/mihomo_bridge.h"
+#include "parser/subparser.h"
 #include "script/cron.h"
 #include "script/script_quickjs.h"
 #include "server/webserver.h"
@@ -72,34 +73,60 @@ string_array gRegexBlacklist = {"(.*)*"};
 
 static constexpr size_t kProviderUserAgentMaxLen = 512;
 
+enum class RemoteSubscriptionMode {
+  ServerSideParse,
+  ClashProxyProvider,
+  QuanXServerRemote,
+};
+
 struct TargetDescriptor {
   const char *name;
   NodeParserMode parser_mode;
+  RemoteSubscriptionMode remote_subscription_mode;
   bool simple_subscription;
   SingleLinkTypes single_link_types;
 };
 
 static constexpr std::array<TargetDescriptor, 18> kTargetDescriptors = {{
-    {"clash", NodeParserMode::MihomoOnly, false, 0},
-    {"clashr", NodeParserMode::MihomoOnly, false, 0},
-    {"surge", NodeParserMode::LegacyOnly, false, 0},
-    {"quan", NodeParserMode::LegacyOnly, false, 0},
-    {"quanx", NodeParserMode::LegacyOnly, false, 0},
-    {"loon", NodeParserMode::LegacyOnly, false, 0},
-    {"surfboard", NodeParserMode::LegacyOnly, false, 0},
-    {"mellow", NodeParserMode::LegacyOnly, false, 0},
-    {"singbox", NodeParserMode::LegacyOnly, false, 0},
-    {"ss", NodeParserMode::LegacyOnly, true, SingleLinkType::Shadowsocks},
-    {"ssd", NodeParserMode::LegacyOnly, true, 0},
-    {"ssr", NodeParserMode::LegacyOnly, true,
+    {"clash", NodeParserMode::MihomoOnly,
+     RemoteSubscriptionMode::ClashProxyProvider, false, 0},
+    {"clashr", NodeParserMode::MihomoOnly,
+     RemoteSubscriptionMode::ClashProxyProvider, false, 0},
+    {"surge", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, false, 0},
+    {"quan", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, false, 0},
+    {"quanx", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::QuanXServerRemote, false, 0},
+    {"loon", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, false, 0},
+    {"surfboard", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, false, 0},
+    {"mellow", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, false, 0},
+    {"singbox", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, false, 0},
+    {"ss", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, true,
+     SingleLinkType::Shadowsocks},
+    {"ssd", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, true, 0},
+    {"ssr", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, true,
      SingleLinkType::ShadowsocksR},
-    {"sssub", NodeParserMode::LegacyOnly, true, 0},
-    {"v2ray", NodeParserMode::LegacyOnly, true, SingleLinkType::VMess},
-    {"trojan", NodeParserMode::LegacyOnly, true, SingleLinkType::Trojan},
-    {"vless", NodeParserMode::LegacyOnly, true, SingleLinkType::VLESS},
-    {"hysteria2", NodeParserMode::LegacyOnly, true,
+    {"sssub", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, true, 0},
+    {"v2ray", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, true, SingleLinkType::VMess},
+    {"trojan", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, true, SingleLinkType::Trojan},
+    {"vless", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, true, SingleLinkType::VLESS},
+    {"hysteria2", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, true,
      SingleLinkType::Hysteria2},
-    {"mixed", NodeParserMode::LegacyOnly, true, SingleLinkType::Mixed},
+    {"mixed", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, true, SingleLinkType::Mixed},
 }};
 
 static const TargetDescriptor *findTargetDescriptor(const std::string &name) {
@@ -113,6 +140,18 @@ static const TargetDescriptor *findTargetDescriptor(const std::string &name) {
 
 static const char *nodeParserModeName(NodeParserMode mode) {
   return mode == NodeParserMode::MihomoOnly ? "mihomo" : "legacy";
+}
+
+static const char *remoteSubscriptionModeName(RemoteSubscriptionMode mode) {
+  switch (mode) {
+  case RemoteSubscriptionMode::ClashProxyProvider:
+    return "clash-proxy-provider";
+  case RemoteSubscriptionMode::QuanXServerRemote:
+    return "quanx-server-remote";
+  case RemoteSubscriptionMode::ServerSideParse:
+  default:
+    return "server-side-parse";
+  }
 }
 
 static std::string supportedTargets(const std::string &separator) {
@@ -761,10 +800,10 @@ static std::string providerIntervalScopeError(size_t item_index) {
   const std::string item = std::to_string(item_index + 1);
   return "Invalid request: interval: for URL item #" + item +
          " is only valid for subscription links that generate Clash/ClashR "
-         "proxy-providers.\n"
+         "proxy-providers or Quantumult X server_remote resources.\n"
          "无效请求：第 " + item +
          " 个 url 项的 interval: 仅适用于会生成 Clash/ClashR "
-         "proxy-provider 的订阅链接。";
+         "proxy-provider 或 Quantumult X server_remote 资源的订阅链接。";
 }
 
 static std::string providerDirectScopeError(size_t item_index) {
@@ -775,6 +814,14 @@ static std::string providerDirectScopeError(size_t item_index) {
          "无效请求：第 " + item +
          " 个 url 项的 proxy_direct: 仅适用于会生成 Clash/ClashR "
          "proxy-provider 的订阅链接。";
+}
+
+static std::string quanxRemoteSourceError(size_t item_index) {
+  const std::string item = std::to_string(item_index + 1);
+  return "Invalid request: Quantumult X remote subscription item #" + item +
+         " contains an unescaped space or control character.\n"
+         "无效请求：第 " + item +
+         " 个 Quantumult X 远程订阅项包含未转义空格或控制字符。";
 }
 
 static constexpr size_t kProviderNameMaxLen = 64;
@@ -870,6 +917,41 @@ static std::string sanitizeProviderName(const std::string &input) {
   return cleaned;
 }
 
+static std::string sanitizeQuanXResourceTag(const std::string &input) {
+  std::string tag = sanitizeProviderName(input);
+  std::replace(tag.begin(), tag.end(), ',', '_');
+  std::replace(tag.begin(), tag.end(), '=', '_');
+  tag = trimWhitespace(tag, true, true);
+  return tag;
+}
+
+static bool hasUnsafeQuanXRemoteUrlChar(const std::string &url) {
+  return std::any_of(url.begin(), url.end(), [](unsigned char ch) {
+    return ch <= 0x20 || ch == 0x7f;
+  });
+}
+
+static bool isHttpSubscriptionLink(const std::string &link,
+                                   bool explicitly_remote) {
+  if (!mihomo::isHttpSchemeLink(link))
+    return false;
+  const std::string lower_link = toLower(link);
+  if (startsWith(lower_link, "https://t.me/socks") ||
+      startsWith(lower_link, "https://t.me/http"))
+    return false;
+  if (isLegacyHttpProxyUri(link))
+    return false;
+  if (explicitly_remote)
+    return true;
+  const size_t protocol_end = link.find("://") + 3;
+  const size_t query_start = link.find('?', protocol_end);
+  if (query_start != std::string::npos)
+    return true;
+  const size_t path_start = link.find('/', protocol_end);
+  return path_start != std::string::npos &&
+         link.size() - path_start > 1;
+}
+
 static std::string subconverter_impl(Request &request, Response &response,
                                      const Settings &settings,
                                      RuleConversionStats *rule_stats = nullptr);
@@ -956,6 +1038,8 @@ struct SubExplainReport {
   bool rule_generator_enabled = false;
   bool expand_rulesets = false;
   bool proxy_provider_mode = false;
+  std::string remote_subscription_backend = "server-side-parse";
+  std::string remote_subscription_reason = "target-default";
   bool nodelist = false;
   bool managed_config = false;
   std::string proxy_config;
@@ -970,6 +1054,7 @@ struct SubExplainReport {
   size_t node_link_count = 0;
   size_t unknown_node_link_count = 0;
   size_t provider_count = 0;
+  size_t remote_subscription_count = 0;
   size_t insert_node_count = 0;
   size_t direct_node_count = 0;
   size_t total_node_count = 0;
@@ -1100,6 +1185,10 @@ static std::string serializeSubExplainReport(const SubExplainReport &report,
   writer.Bool(report.simple_subscription);
   writer.Key("proxy_provider");
   writer.Bool(report.proxy_provider_mode);
+  writeJsonString(writer, "remote_subscription_backend",
+                  report.remote_subscription_backend);
+  writeJsonString(writer, "remote_subscription_reason",
+                  report.remote_subscription_reason);
   writer.Key("nodelist");
   writer.Bool(report.nodelist);
   writer.Key("expand_rulesets");
@@ -1179,6 +1268,8 @@ static std::string serializeSubExplainReport(const SubExplainReport &report,
   writer.Uint64(report.ruleset_count);
   writer.Key("custom_group_count");
   writer.Uint64(report.custom_group_count);
+  writer.Key("remote_subscription_count");
+  writer.Uint64(report.remote_subscription_count);
   writer.EndObject();
 
   writer.Key("nodes");
@@ -1226,6 +1317,8 @@ static std::string serializeSubExplainReport(const SubExplainReport &report,
   writer.Uint64(report.output_bytes);
   writer.Key("provider_count");
   writer.Uint64(report.provider_count);
+  writer.Key("remote_subscription_count");
+  writer.Uint64(report.remote_subscription_count);
   writer.EndObject();
 
   writer.EndObject();
@@ -1726,6 +1819,8 @@ static std::string parseSubRequestArguments(Request &request,
            supportedTargets("、") + "。";
   }
   parsed.simple_subscription = parsed.target_descriptor->simple_subscription;
+  parsed.explain.remote_subscription_backend = remoteSubscriptionModeName(
+      parsed.target_descriptor->remote_subscription_mode);
   if (parsed.target_was_auto) {
     writeLog(LOG_LEVEL_INFO,
              "AUTO_TARGET_RESOLVED target=" + parsed.target +
@@ -2212,6 +2307,107 @@ struct SubStageResponse {
   std::string body;
 };
 
+static bool parseQuanXSourceGroupRule(const std::string &rule,
+                                      std::string &source_pattern,
+                                      std::string &server_pattern) {
+  static const std::string group_regex =
+      R"(^!!GROUP=(.+?)(?:!!(.*))?$)";
+  if (!startsWith(rule, "!!GROUP="))
+    return false;
+  source_pattern.clear();
+  server_pattern.clear();
+  return regGetMatch(rule, group_regex, 3,
+                     static_cast<std::string *>(nullptr), &source_pattern,
+                     &server_pattern) == 0 &&
+         !source_pattern.empty();
+}
+
+static bool parseQuanXGroupIdRule(const std::string &rule,
+                                  std::string &group_id_pattern,
+                                  std::string &server_pattern) {
+  static const std::string group_id_regex =
+      R"(^!!GROUPID=([\d\-+!,]+)(?:!!(.*))?$)";
+  if (!startsWith(rule, "!!GROUPID="))
+    return false;
+  group_id_pattern.clear();
+  server_pattern.clear();
+  return regGetMatch(rule, group_id_regex, 3,
+                     static_cast<std::string *>(nullptr), &group_id_pattern,
+                     &server_pattern) == 0 &&
+         !group_id_pattern.empty();
+}
+
+static bool quanxPolicyRegexIsSafe(const std::string &pattern) {
+  return pattern.find(',') == std::string::npos &&
+         std::none_of(pattern.begin(), pattern.end(), [](unsigned char ch) {
+           return ch < 0x20 || ch == 0x7f;
+         });
+}
+
+static std::string quanxRemoteCapabilityReason(
+    const ParsedSubRequest &parsed, const EffectiveSubPolicy &policy,
+    const Settings &settings) {
+  const extra_settings &ext = policy.generator;
+  if (ext.nodelist)
+    return "list-mode";
+  for (const std::string &raw_item : split(parsed.url, "|")) {
+    const TaggedLink tagged = parseTaggedLink(regTrim(raw_item));
+    const std::string link = tagged.link.empty() ? raw_item : tagged.link;
+    if (startsWith(regTrim(link), "!!import:"))
+      return "imported-source-list";
+  }
+  if (!policy.include_remarks.empty() || !policy.exclude_remarks.empty())
+    return "node-filters";
+  if (!ext.rename_array.empty())
+    return "provider-rename";
+  if (!parsed.group_name.empty())
+    return "group-override";
+  if (ext.add_emoji || ext.remove_emoji || ext.append_proxy_type ||
+      ext.sort_flag || ext.filter_deprecated || !settings.filterScript.empty())
+    return "node-transform";
+  if (!ext.udp.is_undef() || !ext.tfo.is_undef() ||
+      !ext.skip_cert_verify.is_undef() || !ext.tls13.is_undef())
+    return "node-option-override";
+
+  for (const ProxyGroupConfig &group : policy.custom_proxy_groups) {
+    if (group.Type == ProxyGroupType::SSID ||
+        group.Type == ProxyGroupType::Relay ||
+        group.Type == ProxyGroupType::Smart)
+      continue;
+
+    size_t dynamic_rule_count = 0;
+    for (const std::string &rule : group.Proxies) {
+      if (startsWith(rule, "[]") || rule == "DIRECT" || rule == "REJECT")
+        continue;
+      if (startsWith(rule, "script:") || startsWith(rule, "!!INSERT=") ||
+          startsWith(rule, "!!TYPE=") || startsWith(rule, "!!PORT=") ||
+          startsWith(rule, "!!SERVER="))
+        return "unsupported-group-selector";
+
+      std::string selector, server_pattern;
+      if (parseQuanXGroupIdRule(rule, selector, server_pattern) ||
+          parseQuanXSourceGroupRule(rule, selector, server_pattern)) {
+        if (startsWith(rule, "!!GROUP=") && !regValid(selector))
+          return "invalid-group-regex";
+        if (!server_pattern.empty() &&
+            (!quanxPolicyRegexIsSafe(server_pattern) ||
+             !regValid(server_pattern)))
+          return "unsafe-group-regex";
+      } else if (startsWith(rule, "!!")) {
+        return "unsupported-group-selector";
+      } else if (!quanxPolicyRegexIsSafe(rule) || !regValid(rule)) {
+        return "unsafe-group-regex";
+      }
+
+      if (++dynamic_rule_count > 1)
+        return "multiple-group-selectors";
+    }
+    if (!group.UsingProvider.empty() && dynamic_rule_count)
+      return "provider-and-rule-selectors";
+  }
+  return "native-capable";
+}
+
 static SubStageResponse processSubscriptionNodes(
     Request &request, Response &response, const Settings &settings,
     ParsedSubRequest &parsed, EffectiveSubPolicy &policy,
@@ -2244,6 +2440,20 @@ static SubStageResponse processSubscriptionNodes(
   size_t source_failures = 0;
   NodeParserStats parser_stats;
 
+  RemoteSubscriptionMode remote_mode =
+      parsed.target_descriptor->remote_subscription_mode;
+  std::string remote_reason = "target-default";
+  if (ext.nodelist) {
+    remote_mode = RemoteSubscriptionMode::ServerSideParse;
+    remote_reason = "list-mode";
+  } else if (remote_mode == RemoteSubscriptionMode::QuanXServerRemote) {
+    remote_reason = quanxRemoteCapabilityReason(parsed, policy, settings);
+    if (remote_reason != "native-capable")
+      remote_mode = RemoteSubscriptionMode::ServerSideParse;
+  }
+  explain.remote_subscription_backend = remoteSubscriptionModeName(remote_mode);
+  explain.remote_subscription_reason = remote_reason;
+
   parse_settings parse_set;
   parse_set.proxy = &proxy;
   parse_set.exclude_remarks = &lExcludeRemarks;
@@ -2266,31 +2476,40 @@ static SubStageResponse processSubscriptionNodes(
 
   auto logRouteSelection = [&]() {
     const size_t provider_count = ext.providers.size();
+    const size_t remote_count = ext.quanx_server_remotes.size();
     std::string route = "none";
-    if (provider_count && source_calls)
+    if ((provider_count || remote_count) && source_calls)
       route = "hybrid";
     else if (provider_count)
       route = "proxy-provider";
+    else if (remote_count)
+      route = "quanx-server-remote";
     else if (parser_stats.invocations)
       route = "node-parser";
     else if (source_calls)
       route = "node-source";
-    writeLog(LOG_LEVEL_INFO,
-             "SUB_ROUTE_RESULT target=" + parsed.target +
-                 " source=" +
-                 std::string(parsed.target_was_auto ? "auto" : "explicit") +
-                 " route=" + route + " parser_policy=" +
-                 nodeParserModeName(parse_set.parser_mode) + " parser=" +
-                 (parser_stats.invocations
-                      ? std::string(nodeParserModeName(parse_set.parser_mode))
-                      : std::string("none")) +
-                 " provider_count=" + std::to_string(provider_count) +
-                 " source_calls=" + std::to_string(source_calls) +
-                 " source_failures=" + std::to_string(source_failures) +
-                 " parser_calls=" +
-                 std::to_string(parser_stats.invocations) +
-                 " parser_failures=" +
-                 std::to_string(parser_stats.failures));
+    std::string event =
+        "SUB_ROUTE_RESULT target=" + parsed.target +
+        " source=" +
+        std::string(parsed.target_was_auto ? "auto" : "explicit") +
+        " route=" + route + " parser_policy=" +
+        nodeParserModeName(parse_set.parser_mode) + " parser=" +
+        (parser_stats.invocations
+             ? std::string(nodeParserModeName(parse_set.parser_mode))
+             : std::string("none")) +
+        " provider_count=" + std::to_string(provider_count) +
+        " source_calls=" + std::to_string(source_calls) +
+        " source_failures=" + std::to_string(source_failures) +
+        " parser_calls=" + std::to_string(parser_stats.invocations) +
+        " parser_failures=" + std::to_string(parser_stats.failures);
+    if (parsed.target_descriptor->remote_subscription_mode ==
+        RemoteSubscriptionMode::QuanXServerRemote) {
+      event += " remote_backend=" +
+               std::string(remoteSubscriptionModeName(remote_mode)) +
+               " remote_reason=" + remote_reason +
+               " remote_count=" + std::to_string(remote_count);
+    }
+    writeLog(LOG_LEVEL_INFO, event);
   };
 
   if (!settings.insertUrls.empty() && argEnableInsert) {
@@ -2329,8 +2548,13 @@ static SubStageResponse processSubscriptionNodes(
   groupID = 0;
 
   const bool provider_mode_eligible =
-      (argTarget == "clash" || argTarget == "clashr") && !ext.nodelist;
-  if (!provider_mode_eligible) {
+      remote_mode == RemoteSubscriptionMode::ClashProxyProvider;
+  const bool quanx_remote_eligible =
+      remote_mode == RemoteSubscriptionMode::QuanXServerRemote;
+  if (!provider_mode_eligible && !quanx_remote_eligible) {
+    const bool quanx_legacy_fallback =
+        parsed.target_descriptor->remote_subscription_mode ==
+        RemoteSubscriptionMode::QuanXServerRemote;
     for (size_t index = 0; index < urls.size(); ++index) {
       TaggedLink tagged = parseTaggedLink(regTrim(urls[index]));
       if (tagged.error != TaggedLink::Error::None) {
@@ -2344,6 +2568,12 @@ static SubStageResponse processSubscriptionNodes(
       if (tagged.has_proxy_direct) {
         *status_code = 400;
         return {true, providerDirectScopeError(index)};
+      }
+      if (quanx_legacy_fallback && tagged.has_provider) {
+        std::string normalized = tagged.link;
+        if (tagged.has_tag)
+          normalized = "tag:" + tagged.tag + "," + normalized;
+        urls[index] = std::move(normalized);
       }
     }
   }
@@ -2532,6 +2762,148 @@ static SubStageResponse processSubscriptionNodes(
         groupID++;
       }
     }
+  } else if (quanx_remote_eligible) {
+    struct QuanXRemoteLinkItem {
+      std::string url;
+      std::string source_tag;
+      std::string resource_tag;
+      int interval = 0;
+      bool has_interval = false;
+      int group_id = 0;
+    };
+    struct QuanXNodeLinkItem {
+      std::string url;
+      int group_id = 0;
+      bool force_direct_link = false;
+    };
+    std::vector<QuanXRemoteLinkItem> subscription_urls;
+    std::vector<QuanXNodeLinkItem> node_urls;
+
+    for (size_t index = 0; index < urls.size(); ++index) {
+      std::string &x = urls[index];
+      x = regTrim(x);
+      TaggedLink tagged = parseTaggedLink(x);
+      if (tagged.error != TaggedLink::Error::None) {
+        *status_code = 400;
+        return {true, providerLinkPrefixError(index, tagged.error)};
+      }
+      std::string link = tagged.link.empty() ? x : tagged.link;
+      const bool is_remote_subscription = isHttpSubscriptionLink(
+          link, tagged.has_provider || tagged.has_interval);
+      const int item_group_id = groupID++;
+
+      if (is_remote_subscription) {
+        if (tagged.has_proxy_direct) {
+          *status_code = 400;
+          return {true, providerDirectScopeError(index)};
+        }
+        const std::string decoded_link = link;
+        if (hasUnsafeQuanXRemoteUrlChar(decoded_link)) {
+          *status_code = 400;
+          return {true, quanxRemoteSourceError(index)};
+        }
+        writeLog(LOG_LEVEL_INFO,
+                 "检测到 Quantumult X 远程订阅：" +
+                     summarizeUrlForLog(decoded_link) +
+                     "，将由客户端更新。");
+        subscription_urls.push_back(
+            {decoded_link, tagged.tag, tagged.provider, tagged.interval,
+             tagged.has_interval, item_group_id});
+        explain.subscription_url_count++;
+        continue;
+      }
+
+      if (tagged.has_interval) {
+        *status_code = 400;
+        return {true, providerIntervalScopeError(index)};
+      }
+      if (tagged.has_proxy_direct) {
+        *status_code = 400;
+        return {true, providerDirectScopeError(index)};
+      }
+      std::string node_link = link;
+      if (tagged.has_tag)
+        node_link = "tag:" + tagged.tag + "," + link;
+      node_urls.push_back(
+          {std::move(node_link), item_group_id, isLegacyHttpProxyUri(link)});
+      explain.node_link_count++;
+    }
+
+    std::unordered_set<std::string> resource_tags;
+    auto reserve_resource_tag = [&](const std::string &base) {
+      std::string base_tag =
+          clampProviderNameLength(base, kProviderNameMaxLen);
+      if (base_tag.empty())
+        base_tag = "Provider";
+      if (resource_tags.insert(base_tag).second)
+        return base_tag;
+      int suffix_index = 1;
+      while (true) {
+        const std::string suffix = "_" + std::to_string(suffix_index++);
+        const size_t max_base = kProviderNameMaxLen > suffix.size()
+                                    ? kProviderNameMaxLen - suffix.size()
+                                    : 0;
+        std::string candidate =
+            clampProviderNameLength(base_tag, max_base) + suffix;
+        if (resource_tags.insert(candidate).second)
+          return candidate;
+      }
+    };
+
+    for (const QuanXRemoteLinkItem &item : subscription_urls) {
+      const std::string default_tag =
+          "Provider_" + generateProviderHashFromDecodedUrl(item.url);
+      std::string requested_tag = sanitizeQuanXResourceTag(item.resource_tag);
+      if (requested_tag.empty())
+        requested_tag = default_tag;
+
+      QuanXServerRemote remote;
+      remote.resource_tag = reserve_resource_tag(requested_tag);
+      remote.requested_resource_tag = item.resource_tag;
+      remote.selection_resource_tag = remote.resource_tag;
+      remote.source_tag = item.source_tag;
+      remote.url = item.url;
+      remote.update_interval = item.interval;
+      remote.has_update_interval = item.has_interval;
+      remote.group_id = item.group_id;
+      writeLog(LOG_LEVEL_INFO,
+               "QUANX_REMOTE_RESOURCE_CREATED group_id=" +
+                   std::to_string(remote.group_id) + " interval=" +
+                   (remote.has_update_interval
+                        ? std::to_string(remote.update_interval)
+                        : std::string("client-default")) +
+                   " source=" + summarizeUrlForLog(remote.url));
+      ext.quanx_server_remotes.push_back(std::move(remote));
+    }
+
+    if (!node_urls.empty()) {
+      for (const QuanXNodeLinkItem &item : node_urls) {
+        string_array import_urls{item.url};
+        if (importItems(import_urls, true, FetchContext::PublicRequest) != 0) {
+          source_calls++;
+          source_failures++;
+          continue;
+        }
+        for (std::string &x : import_urls) {
+          source_calls++;
+          parse_settings item_parse_set = parse_set;
+          item_parse_set.force_direct_link = item.force_direct_link;
+          if (addNodes(x, nodes, item.group_id, item_parse_set) == -1) {
+            source_failures++;
+            writeLog(LOG_LEVEL_WARNING,
+                     "已跳过无效节点链接：" + summarizeUrlForLog(x) +
+                         "，继续处理其他节点。");
+          }
+        }
+      }
+    }
+    if (subscription_urls.empty()) {
+      remote_mode = RemoteSubscriptionMode::ServerSideParse;
+      remote_reason = "no-remote-subscription";
+      explain.remote_subscription_backend =
+          remoteSubscriptionModeName(remote_mode);
+      explain.remote_subscription_reason = remote_reason;
+    }
   } else {
     importItems(urls, true, FetchContext::PublicRequest);
     for (std::string &x : urls) {
@@ -2549,6 +2921,7 @@ static SubStageResponse processSubscriptionNodes(
   }
 
   explain.provider_count = ext.providers.size();
+  explain.remote_subscription_count = ext.quanx_server_remotes.size();
   explain.proxy_provider_mode = ext.use_proxy_provider && !ext.providers.empty();
   explain.insert_node_count = insert_nodes.size();
   explain.direct_node_count = nodes.size();
@@ -2560,12 +2933,13 @@ static SubStageResponse processSubscriptionNodes(
             "proxy-provider was generated.\n"
             "无效请求：已选择 provider_headers，但没有生成 proxy-provider。"};
   }
-  if (nodes.empty() && insert_nodes.empty() && ext.providers.empty()) {
+  if (nodes.empty() && insert_nodes.empty() && ext.providers.empty() &&
+      ext.quanx_server_remotes.empty()) {
     *status_code = 400;
     return {true,
-            "Invalid request: no valid proxy nodes or proxy providers were "
+            "Invalid request: no valid proxy nodes or remote resources were "
             "found.\n"
-            "无效请求：未找到有效的代理节点或代理提供者。\n"
+            "无效请求：未找到有效的代理节点或远程资源。\n"
             "Please check whether the subscription URL or node URI format is "
             "supported, and whether filters excluded all nodes.\n"
             "请检查订阅链接或节点 URI 格式是否受支持，以及过滤规则是否排除了所有节点。"};
@@ -3159,9 +3533,13 @@ static std::string assembleSubResponse(
     addSwitchParameter("tfo", ext.tfo.get(false), ext.tfo);
     addSwitchParameter("udp", ext.udp.get(false), ext.udp);
     addParameter("list", boolString(ext.nodelist), "applied",
-                 ext.nodelist
-                     ? "Explicit node-list mode expands subscription sources."
-                     : "Clash-compatible output defaults to provider mode.");
+                  ext.nodelist
+                      ? "Explicit node-list mode expands subscription sources."
+                      : (argTarget == "quanx"
+                             ? "Quantumult X full-config output uses client-managed "
+                               "server_remote resources when the request can be "
+                               "represented without losing advanced semantics."
+                             : "Clash-compatible output defaults to provider mode."));
     addSwitchParameter("sort", ext.sort_flag, argSort);
     addParameter("sort_script",
                  argUseSortScript ? "enabled" : "disabled",
@@ -3288,6 +3666,11 @@ static std::string assembleSubResponse(
       addConfigSection("proxy_providers", "request", "generated",
                        std::to_string(explain.provider_count) +
                            " provider(s).");
+    if (explain.remote_subscription_count)
+      addConfigSection("quanx_server_remote", "request", "generated",
+                       std::to_string(explain.remote_subscription_count) +
+                           " remote resource(s); node-name transformations run "
+                           "only in the client or its configured resource parser.");
     if (explain.managed_config)
       addConfigSection("managed_config", "global", "enabled",
                        "Managed config prefix is available.");
@@ -3297,6 +3680,8 @@ static std::string assembleSubResponse(
              "已生成 /sub explain JSON 诊断结果：target=" + argTarget +
                  ", status=" + std::to_string(response.status_code) +
                  ", providers=" + std::to_string(explain.provider_count) +
+                 ", remote_resources=" +
+                 std::to_string(explain.remote_subscription_count) +
                  ", nodes=" + std::to_string(explain.total_node_count) +
                  ", recognized_params=" +
                  std::to_string(explain.recognized_parameters.size()) +

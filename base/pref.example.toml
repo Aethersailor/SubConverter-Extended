@@ -187,9 +187,9 @@ singbox_add_clash_modes = true
 
 # 节点重命名规则按数组顺序执行；match/replace 为正则替换，也可改用 script 或 import 表项。
 # Node-renaming rules run in array order; match/replace performs regex replacement, and script or import entries may be used instead.
-[[node_pref.rename_node]]
-match = '\(?((x|X)?(\d+)(\.?\d+)?)((\s?倍率?)|(x|X))\)?'
-replace = "$1x"
+#[[node_pref.rename_node]]
+#match = '\(?((x|X)?(\d+)(\.?\d+)?)((\s?倍率?)|(x|X))\)?'
+#replace = "$1x"
 
 [managed_config]
 # 是否在 Surge 输出中写入 #!MANAGED-CONFIG 元信息。
@@ -281,9 +281,9 @@ trusted_proxy_cidrs = []
 # 是否按 emoji 数组规则为节点名称添加 Emoji。
 # Whether to add emoji to node remarks according to the emoji array.
 add_emoji = false
-# 添加新 Emoji 前是否移除节点名称中已有的 Emoji，避免重复标记。
-# Whether to remove existing emoji from node remarks before applying new ones, avoiding duplicate markers.
-remove_old_emoji = true
+# 添加新 Emoji 前是否移除节点名称中已有的 Emoji；启用节点预处理时，Quantumult X 远程订阅会保留 Legacy 路径。
+# Whether to remove existing emoji before applying new ones. Enabling node preprocessing keeps Quantumult X remote subscriptions on the Legacy route.
+remove_old_emoji = false
 
 # Emoji 规则按数组顺序处理：match/emoji 为正则映射，也可使用 script 或 import 表项。
 # Emoji rules run in array order: match/emoji defines a regex mapping, while script or import entries are also supported.

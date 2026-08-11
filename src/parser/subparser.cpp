@@ -911,6 +911,37 @@ void explodeHTTPSub(std::string link, Proxy &node) {
     httpConstruct(node, group, remarks, server, port, username, password, tls);
 }
 
+bool isLegacyHttpProxyUri(const std::string &link) {
+    if (!startsWith(link, "http://") && !startsWith(link, "https://"))
+        return false;
+
+    const size_t scheme_end = link.find("://") + 3;
+    const size_t query_start = link.find('?', scheme_end);
+    const size_t fragment_start = link.find('#', scheme_end);
+    if (fragment_start != std::string::npos)
+        return false;
+
+    const size_t authority_end = query_start == std::string::npos ? link.size() : query_start;
+    if (authority_end == scheme_end || link.find('/', scheme_end) < authority_end)
+        return false;
+
+    if (query_start != std::string::npos) {
+        for (const std::string &item : split(link.substr(query_start + 1), "&")) {
+            if (item.empty())
+                continue;
+            const size_t equals = item.find('=');
+            const std::string key = item.substr(0, equals);
+            if (key != "remarks" && key != "group")
+                return false;
+        }
+    }
+
+    Proxy candidate;
+    explodeHTTPSub(link, candidate);
+    return (candidate.Type == ProxyType::HTTP || candidate.Type == ProxyType::HTTPS) &&
+           !candidate.Hostname.empty() && candidate.Port != 0;
+}
+
 void explodeTrojan(std::string trojan, Proxy &node) {
     std::string server, port, psk, addition, group, remark, host, path, network, fp, sni;
     tribool tfo, scv;
