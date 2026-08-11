@@ -890,9 +890,11 @@ url=provider:Airport-A,https://a.example/sub|ss://example-node
 Proxy = select,policy-path=https://example.com/surge.conf,policy-regex-filter=".*"
 ```
 
-节点 URI 仍由 Legacy 解析器处理。Surge 生成器能够表示的节点会写入 `[Proxy]`；例如 VLESS 等 Surge 不能表示的协议会被统计并跳过。请求只包含不受支持的节点且没有 `policy-path` 时，接口返回 HTTP 400。远程订阅与节点 URI 混用时，`policy-path` 继续生成，不受支持的本地节点不会进入 `[Proxy]`；日志事件 `SURGE_NODE_GENERATION` 和 Explain 报告会列出数量及协议。
+节点 URI 仍由 Legacy 解析器处理。Surge 生成器能够表示的节点会写入 `[Proxy]`；例如 VLESS 等 Surge 不能表示的协议会被统计并跳过。请求只包含不受支持的节点且没有 `policy-path` 时，接口返回 HTTP 400。远程订阅与节点 URI 混用时，`policy-path` 继续生成，不受支持的本地节点不会进入 `[Proxy]`；日志事件 `SURGE_NODE_GENERATION` 和 Explain 报告会列出数量及协议。旧配置仍含全局节点处理选项时，`SURGE_POLICY_PATH_TRANSFORM_SCOPE` 会用数量说明远程节点由客户端处理、服务端处理只作用于直连节点，不记录规则正文或节点名称。
 
-第一版仅对一个远程订阅启用 `policy-path`。多个远程订阅、`list=true`、`!!import:`、服务端节点过滤或改名、Emoji 增删、排序、节点选项覆盖，以及无法准确转换的策略组选择器，会在下载订阅前确定使用 Legacy。该行为不是远程解析失败后的再次尝试，不会先调用 Surge 再回退。
+第一版仅对一个远程订阅启用 `policy-path`。多个远程订阅、`list=true`、`!!import:`、本次请求或用户显式外部配置要求的服务端节点过滤、改名、Emoji 增删、排序、节点选项覆盖，以及无法准确转换的策略组选择器，会在下载订阅前确定使用 Legacy。该行为不是远程解析失败后的再次尝试，不会先调用 Surge 再回退。
+
+主配置中已有的全局节点整理选项不会阻止 Surge 使用 `policy-path`，也不会作用于 Surge 自行下载的远程节点；它们仍作用于本项目实际解析的直连节点。这样旧配置无需关闭全局重命名、Emoji 清理或排序即可进入客户端远程读取，同时请求中明确提出的节点处理要求仍不会被静默忽略。
 
 逐条提供正数 `interval:` 时，Surge 输出使用 `update-interval`。省略时不生成该字段，由客户端使用默认值。Surge 的 `interval:0` 返回 HTTP 400；需要客户端默认更新行为时，应省略该前缀。
 
@@ -903,7 +905,7 @@ Proxy = select,policy-path=https://example.com/surge.conf,policy-regex-filter=".
 surge_policy_path = false
 ```
 
-YAML 使用 `remote_subscription.surge_policy_path`，INI 使用 `[remote_subscription]` 下的 `surge_policy_path`。缺少整个配置节或字段时，默认值为 `true`。旧配置文件无需增加字段即可启动；配置热重载时，删除该字段也会恢复为默认值。旧配置中已经启用节点预处理或复杂策略组时，请求继续使用 Legacy，避免静默忽略原有处理。
+YAML 使用 `remote_subscription.surge_policy_path`，INI 使用 `[remote_subscription]` 下的 `surge_policy_path`。缺少整个配置节或字段时，默认值为 `true`。旧配置文件无需增加字段即可启动；配置热重载时，删除该字段也会恢复为默认值。无法准确表达的复杂策略组仍使用 Legacy；需要强制保留全部服务端节点预处理时，可将该开关设为 `false`。
 
 `target=clash` 和 `target=clashr` 的 Mihomo 解析与 `proxy-provider` 分流不读取这个开关。Quantumult X 的 `[server_remote]` 分流也不读取这个开关。
 
