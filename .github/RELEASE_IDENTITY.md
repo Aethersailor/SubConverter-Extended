@@ -11,7 +11,7 @@ regenerated. A correction requires a new version.
 
 ## State machine
 
-1. Run `同步 dev 到 master` with `operation=sync_only` to merge without creating a
+1. Run `Sync Dev to Master` with `operation=sync_only` to merge without creating a
    release, or use `operation=new`. For `new`, leave `version` empty to increment
    the patch component of the highest existing `vX.Y.Z` tag, or provide an unused
    `vX.Y.Z` explicitly.
