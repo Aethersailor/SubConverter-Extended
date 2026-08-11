@@ -11,9 +11,10 @@ regenerated. A correction requires a new version.
 
 ## State machine
 
-1. Run `Sync Dev to Master` with `operation=sync_only` to validate and merge
-   without creating a release, or use `operation=new` with an explicit unused
-   `vX.Y.Z` and the approved full `origin/dev` SHA.
+1. Run `同步 dev 到 master` with `operation=sync_only` to merge without creating a
+   release, or use `operation=new`. For `new`, leave `version` empty to increment
+   the patch component of the highest existing `vX.Y.Z` tag, or provide an unused
+   `vX.Y.Z` explicitly.
 2. The sync workflow validates the exact resulting master commit before it may
    create one annotated tag. It never dispatches a release build with a version
    input.
