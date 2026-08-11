@@ -1352,10 +1352,6 @@ class ReleaseNotesTests(unittest.TestCase):
             workflow.index("Assemble and Validate Chinese Release Notes"),
             workflow.index("Create or verify the GitHub Release"),
         )
-        self.assertLess(
-            workflow.index('gh release create "$VERSION"'),
-            workflow.index('created=true\n          gh release upload "$VERSION"'),
-        )
         self.assertGreaterEqual(workflow.count("release_notes.py verify-body"), 2)
         self.assertIn("Resolve formal version tag state", workflow)
         self.assertIn("Assemble tested release candidate manifests", workflow)
@@ -1457,6 +1453,10 @@ class ReleaseNotesTests(unittest.TestCase):
             "previous_tag: ${{ steps.release_context.outputs.previous_tag }}",
             create_header,
         )
+        self.assertIn(
+            "release_id: ${{ steps.release_gate.outputs.release_id }}",
+            create_header,
+        )
         context_start = create_job.index("Prepare Release Notes Context")
         context_block = create_job[
             context_start : create_job.index("Check Copilot Token", context_start)
@@ -1490,7 +1490,128 @@ class ReleaseNotesTests(unittest.TestCase):
         )
         self.assertLess(
             draft_block.index("Replacing the stale verified-tag draft"),
-            draft_block.index('gh release delete "$VERSION"'),
+            draft_block.index(
+                '"repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID"'
+            ),
+        )
+        self.assertLess(
+            draft_block.index(
+                '"repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID"'
+            ),
+            draft_block.index("wait_for_release_absence"),
+        )
+
+        find_start = create_block.index("find_release_by_tag() {")
+        wait_start = create_block.index("wait_for_release_by_tag() {")
+        absence_start = create_block.index("wait_for_release_absence() {")
+        validate_start = create_block.index("validate_release_identity() {")
+        cleanup_start = create_block.index("cleanup_failed_draft() {")
+        trap_start = create_block.index("trap cleanup_failed_draft ERR")
+        find_block = create_block[find_start:wait_start]
+        wait_block = create_block[wait_start:absence_start]
+        validate_block = create_block[validate_start:cleanup_start]
+        cleanup_block = create_block[cleanup_start:trap_start]
+
+        self.assertIn(
+            '"repos/$GITHUB_REPOSITORY/releases?per_page=100"', find_block
+        )
+        self.assertIn(
+            'matches = [release for release in releases if '
+            'release.get("tag_name") == version]',
+            find_block,
+        )
+        self.assertIn("if len(matches) != 1:", find_block)
+        self.assertIn(
+            "if type(release_id) is not int or release_id <= 0:", find_block
+        )
+        self.assertIn("for attempt in $(seq 1 6); do", wait_block)
+        self.assertIn('if find_release_by_tag "$output"; then', wait_block)
+        self.assertIn("sleep $((attempt * 2))", wait_block)
+        self.assertIn('github-actions[bot]', validate_block)
+        self.assertIn(
+            'release.get("tag_name") != version or '
+            'release.get("name") != version',
+            validate_block,
+        )
+        self.assertIn('release.get("draft") is not expected', validate_block)
+
+        self.assertIn('cleanup_release_id=""', validate_block)
+        self.assertIn(
+            'if ! [[ "$cleanup_release_id" =~ ^[1-9][0-9]*$ ]]; then',
+            cleanup_block,
+        )
+        self.assertIn(
+            '"repos/$GITHUB_REPOSITORY/releases/$cleanup_release_id"',
+            cleanup_block,
+        )
+        cleanup_identity = cleanup_block.index(
+            "validate_release_identity cleanup-release.json true"
+        )
+        cleanup_body = cleanup_block.index("release_notes.py verify-body")
+        cleanup_delete = cleanup_block.rindex(
+            '"repos/$GITHUB_REPOSITORY/releases/$cleanup_release_id"'
+        )
+        cleanup_readback = cleanup_block.index(
+            '"repos/$GITHUB_REPOSITORY/releases/$cleanup_release_id"'
+        )
+        self.assertLess(cleanup_readback, cleanup_identity)
+        self.assertLess(cleanup_identity, cleanup_body)
+        self.assertLess(cleanup_body, cleanup_delete)
+        for expected_flag in (
+            '--expected-version "$VERSION"',
+            '--expected-revision "$REVISION"',
+            '--expected-context-sha256 "$CONTEXT_SHA256"',
+        ):
+            self.assertIn(expected_flag, cleanup_block)
+        self.assertIn("--method DELETE", cleanup_block)
+        self.assertNotIn("wait_for_release_by_tag", cleanup_block)
+        self.assertEqual(create_block.count("set +e"), 1)
+        self.assertIn("(\n              set +e", cleanup_block)
+        self.assertGreaterEqual(cleanup_block.count('return "$failed_status"'), 2)
+
+        combined_create = create_block.index(
+            'gh release create "$VERSION" release-assets/*', draft_start
+        )
+        new_draft_end = create_block.index("trap - ERR", combined_create)
+        new_draft_block = create_block[combined_create:new_draft_end]
+        release_wait = new_draft_block.index(
+            "wait_for_release_by_tag created-release-list-entry.json"
+        )
+        release_readback = new_draft_block.index(
+            '"repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID"'
+        )
+        release_identity = new_draft_block.index(
+            "validate_release_identity created-release.json true"
+        )
+        cleanup_id_assignment = new_draft_block.index(
+            'cleanup_release_id="$RELEASE_ID"'
+        )
+        release_body = new_draft_block.index("release_notes.py verify-body")
+        release_output = new_draft_block.index(
+            'echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"'
+        )
+        self.assertLess(
+            new_draft_block.index(
+                'gh release create "$VERSION" release-assets/*'
+            ),
+            release_wait,
+        )
+        self.assertLess(release_wait, release_readback)
+        self.assertLess(release_readback, release_identity)
+        self.assertLess(release_identity, cleanup_id_assignment)
+        self.assertLess(cleanup_id_assignment, release_body)
+        self.assertLess(release_body, release_output)
+        self.assertEqual(
+            create_block.count('cleanup_release_id="$RELEASE_ID"'), 1
+        )
+        self.assertIn('[[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]', new_draft_block)
+        self.assertNotIn('gh release upload "$VERSION"', create_block)
+        self.assertNotIn("releases/tags/$VERSION", new_draft_block)
+        self.assertGreaterEqual(
+            create_block.count(
+                'echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"'
+            ),
+            2,
         )
 
         finalize_job_start = workflow.index("\n  finalize-release:")
@@ -1502,9 +1623,32 @@ class ReleaseNotesTests(unittest.TestCase):
         self.assertIn("group: formal-release-finalization", finalize_header)
         self.assertIn("cancel-in-progress: false", finalize_header)
 
+        reverify_start = finalize_job.index(
+            "Re-verify Release assets and tag identity"
+        )
         stale_gate_start = finalize_job.index(
             "Refuse stale formal release finalization"
         )
+        reverify_block = finalize_job[reverify_start:stale_gate_start]
+        self.assertIn(
+            "RELEASE_ID: ${{ needs.create-release.outputs.release_id }}",
+            reverify_block,
+        )
+        self.assertIn('[[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]', reverify_block)
+        release_by_id = reverify_block.index(
+            '"repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID"'
+        )
+        body_verification = reverify_block.index("release_notes.py verify-body")
+        self.assertLess(release_by_id, body_verification)
+        self.assertNotIn("releases/tags/$VERSION", reverify_block)
+        for identity_check in (
+            'release.get("id") != int(expected_id)',
+            'release.get("author", {}).get("login") != "github-actions[bot]"',
+            'release.get("tag_name") != version or '
+            'release.get("name") != version',
+        ):
+            self.assertIn(identity_check, reverify_block)
+
         advance_gate_start = finalize_job.index(
             "Advance latest only after full release verification"
         )
@@ -1568,14 +1712,38 @@ class ReleaseNotesTests(unittest.TestCase):
                 self.assertIn('!= "$OLD_DOCKERHUB"', block)
                 self.assertIn('!= "$OLD_GHCR"', block)
 
-        self.assertIn("read_release_state() {", publish_block)
-        self.assertIn("for attempt in $(seq 1 6); do", publish_block)
-        publication_call = publish_block.index(
-            'gh release edit "$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false'
+        self.assertIn(
+            "RELEASE_ID: ${{ needs.create-release.outputs.release_id }}",
+            publish_block,
         )
+        self.assertIn('[[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]', publish_block)
+        read_state_start = publish_block.index("read_release_state() {")
+        publication_call = publish_block.index("if ! gh api --method PATCH")
+        read_state_block = publish_block[read_state_start:publication_call]
+        self.assertIn("for attempt in $(seq 1 6); do", read_state_block)
+        self.assertIn(
+            '"repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID"',
+            read_state_block,
+        )
+        for identity_check in (
+            'release.get("id") != int(expected_id)',
+            'release.get("author", {}).get("login") != "github-actions[bot]"',
+            'release.get("tag_name") != version or '
+            'release.get("name") != version',
+        ):
+            self.assertIn(identity_check, read_state_block)
         state_readback = publish_block.index(
             'published_state="$(read_release_state)"', publication_call
         )
+        publication_block = publish_block[publication_call:state_readback]
+        self.assertIn(
+            '"repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID"',
+            publication_block,
+        )
+        self.assertIn("-F draft=false", publication_block)
+        self.assertIn("-F prerelease=false", publication_block)
+        self.assertNotIn("gh release edit", publish_block)
+        self.assertNotIn("gh release view", finalize_job)
         self.assertLess(publication_call, state_readback)
         unknown_state_end = publish_block.index(
             'if [ "$published_state" = "true" ]; then', state_readback
