@@ -19,7 +19,7 @@ permissions:
   packages: write
 
 concurrency:
-  group: ${{ startsWith(github.ref, 'refs/tags/') && 'formal-release-pipeline' || format('build-core-{0}', github.ref) }}
+  group: build-core-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -126,7 +126,8 @@ jobs:
           case "$release_status" in
             404) ;;
             200)
-              echo "Release $VERSION already exists and will be verified before reuse."
+              echo "::error::Release $VERSION already exists."
+              exit 1
               ;;
             *)
               cat /tmp/release.json >&2
@@ -135,7 +136,7 @@ jobs:
               ;;
           esac
 
-          probe_registry_tag() {
+          assert_registry_tag_absent() {
             local registry="$1"
             local repository="$2"
             local token_url="$3"
@@ -149,7 +150,8 @@ jobs:
             case "$status" in
               404) ;;
               200)
-                echo "$registry/$repository:$VERSION already exists and will be verified before reuse."
+                echo "::error::$registry/$repository:$VERSION already exists and must not be overwritten."
+                exit 1
                 ;;
               *)
                 cat /tmp/registry-manifest >&2
@@ -159,11 +161,11 @@ jobs:
             esac
           }
 
-          probe_registry_tag \
+          assert_registry_tag_absent \
             registry-1.docker.io \
             aethersailor/subconverter-extended \
             "https://auth.docker.io/token?service=registry.docker.io&scope=repository:aethersailor/subconverter-extended:pull"
-          probe_registry_tag \
+          assert_registry_tag_absent \
             ghcr.io \
             aethersailor/subconverter-extended \
             "https://ghcr.io/token?service=ghcr.io&scope=repository:aethersailor/subconverter-extended:pull"
@@ -214,7 +216,6 @@ jobs:
           path: scripts/ci/dependencies.lock.json
           if-no-files-found: error
           retention-days: 1
-          overwrite: true
 
       - name: Build Linux matrix
         id: linux_matrix
@@ -422,7 +423,6 @@ jobs:
         with:
           name: linux-${{ matrix.arch }}
           path: SubConverter-Extended-*.tar.gz
-          overwrite: true
 
       - name: Upload Artifact (OpenWrt ${{ matrix.arch }})
         if: needs.prepare.outputs.is_release == 'true'
@@ -430,7 +430,6 @@ jobs:
         with:
           name: openwrt-${{ matrix.arch }}
           path: SubConverter-Extended-*-openwrt-*.apk
-          overwrite: true
 
       - name: Clean release packaging files
         if: needs.prepare.outputs.is_release == 'true'
@@ -467,8 +466,7 @@ jobs:
         with:
           name: docker-digest-${{ matrix.arch }}
           path: docker-digests/${{ matrix.arch }}.txt
-          retention-days: 30
-          overwrite: true
+          retention-days: 1
 
       - name: Smoke test image (${{ matrix.arch }})
         if: github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'
@@ -581,7 +579,6 @@ jobs:
         with:
           name: windows-amd64
           path: SubConverter-Extended-*.zip
-          overwrite: true
 
   merge-manifest:
     name: "🔗 Publish Version Docker Images"
@@ -668,72 +665,11 @@ jobs:
           pattern: docker-digest-*
           merge-multiple: true
 
-      - name: Assemble tested release candidate manifests
-        id: release_candidate
+      - name: Re-verify formal version tags are absent
         if: needs.prepare.outputs.mode == 'release'
         shell: bash
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
-          REVISION: ${{ needs.prepare.outputs.sha }}
-          BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
-        run: |
-          set -euo pipefail
-          ARCHES=(amd64 arm64 armv7)
-          PLATFORMS=(linux/amd64 linux/arm64 linux/arm/v7)
-          for arch in "${ARCHES[@]}"; do
-            test -s "digests/${arch}.txt"
-            grep -Eq '^sha256:[0-9a-f]{64}$' "digests/${arch}.txt"
-          done
-          inspect_digest() {
-            docker buildx imagetools inspect "$1" |
-              awk '$1 == "Digest:" && digest == "" {digest = $2} END {if (digest == "") exit 1; print digest}'
-          }
-          dockerhub_candidate="aethersailor/subconverter-extended:ci-${VERSION}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-manifest"
-          ghcr_candidate="ghcr.io/aethersailor/subconverter-extended:ci-${VERSION}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-manifest"
-          for candidate in "$dockerhub_candidate" "$ghcr_candidate"; do
-            sources=()
-            for arch in "${ARCHES[@]}"; do
-              source="${candidate%%:ci-*}@$(cat "digests/${arch}.txt")"
-              sources+=("$source")
-            done
-            docker buildx imagetools create -t "$candidate" "${sources[@]}"
-            for attempt in $(seq 1 6); do
-              if docker buildx imagetools inspect "$candidate" > candidate-manifest.txt; then
-                break
-              fi
-              if [ "$attempt" -eq 6 ]; then
-                echo "::error::Could not inspect tested candidate $candidate."
-                exit 1
-              fi
-              sleep 5
-            done
-            for platform in "${PLATFORMS[@]}"; do
-              if ! grep -Eq "Platform:[[:space:]]+${platform}$" candidate-manifest.txt; then
-                echo "::error::Tested candidate $candidate is missing $platform."
-                exit 1
-              fi
-              docker pull --platform "$platform" "$candidate"
-              test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$candidate")" = "$VERSION"
-              test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$candidate")" = "$REVISION"
-              test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.created" }}' "$candidate")" = "$BUILD_DATE"
-            done
-          done
-          dockerhub_digest="$(inspect_digest "$dockerhub_candidate")"
-          ghcr_digest="$(inspect_digest "$ghcr_candidate")"
-          if [[ ! "$dockerhub_digest" =~ ^sha256:[0-9a-f]{64}$ ]] ||
-             [ "$dockerhub_digest" != "$ghcr_digest" ]; then
-            echo "::error::Tested release candidate manifests do not share one digest."
-            exit 1
-          fi
-          echo "digest=$dockerhub_digest" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve formal version tag state
-        id: version_tag_state
-        if: needs.prepare.outputs.mode == 'release'
-        shell: bash
-        env:
-          VERSION: ${{ needs.prepare.outputs.version }}
-          CANDIDATE_DIGEST: ${{ steps.release_candidate.outputs.digest }}
         run: |
           set -euo pipefail
           remote_tag_commit="$(git ls-remote \
@@ -743,7 +679,7 @@ jobs:
             echo "::error::Remote annotated tag $VERSION no longer peels to the approved source SHA."
             exit 1
           fi
-          probe_state() {
+          assert_absent() {
             local registry="$1"
             local repository="$2"
             local token_url="$3"
@@ -755,56 +691,28 @@ jobs:
               -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \
               "https://$registry/v2/$repository/manifests/$VERSION")"
             if [ "$status" = "404" ]; then
-              echo absent
-              return 0
+              return
             fi
             if [ "$status" = "200" ]; then
-              echo present
-              return 0
+              echo "::error::$registry/$repository:$VERSION appeared during the build; refusing overwrite."
+            else
+              echo "::error::Could not re-prove absence of $registry/$repository:$VERSION (HTTP $status)."
             fi
-            echo "::error::Could not resolve $registry/$repository:$VERSION (HTTP $status)." >&2
             exit 1
           }
-          dockerhub_state="$(probe_state \
+          assert_absent \
             registry-1.docker.io \
             aethersailor/subconverter-extended \
-            "https://auth.docker.io/token?service=registry.docker.io&scope=repository:aethersailor/subconverter-extended:pull")"
-          ghcr_state="$(probe_state \
+            "https://auth.docker.io/token?service=registry.docker.io&scope=repository:aethersailor/subconverter-extended:pull"
+          assert_absent \
             ghcr.io \
             aethersailor/subconverter-extended \
-            "https://ghcr.io/token?service=ghcr.io&scope=repository:aethersailor/subconverter-extended:pull")"
-          inspect_digest() {
-            docker buildx imagetools inspect "$1" |
-              awk '$1 == "Digest:" && digest == "" {digest = $2} END {if (digest == "") exit 1; print digest}'
-          }
-          if [ "$dockerhub_state" = present ]; then
-            dockerhub_digest="$(inspect_digest "aethersailor/subconverter-extended:$VERSION")"
-            if [ "$dockerhub_digest" != "$CANDIDATE_DIGEST" ]; then
-              echo "::error::Existing Docker Hub version tag differs from the tested candidate."
-              exit 1
-            fi
-          fi
-          if [ "$ghcr_state" = present ]; then
-            ghcr_digest="$(inspect_digest "ghcr.io/aethersailor/subconverter-extended:$VERSION")"
-            if [ "$ghcr_digest" != "$CANDIDATE_DIGEST" ]; then
-              echo "::error::Existing GHCR version tag differs from the tested candidate."
-              exit 1
-            fi
-          fi
-          echo "dockerhub_present=$([ "$dockerhub_state" = present ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-          echo "ghcr_present=$([ "$ghcr_state" = present ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-          echo "Any existing formal version tag exactly matches the tested candidate digest."
+            "https://ghcr.io/token?service=ghcr.io&scope=repository:aethersailor/subconverter-extended:pull"
 
       - name: Promote tested candidates
         shell: bash
         run: |
           set -euo pipefail
-          VERSION="${{ needs.prepare.outputs.version }}"
-          RELEASE_CANDIDATE_DIGEST="${{ steps.release_candidate.outputs.digest }}"
-          inspect_digest() {
-            docker buildx imagetools inspect "$1" |
-              awk '$1 == "Digest:" && digest == "" {digest = $2} END {if (digest == "") exit 1; print digest}'
-          }
 
           if [ "${{ needs.prepare.outputs.mode }}" = "dev" ]; then
             ARCHES=(amd64)
@@ -824,34 +732,17 @@ jobs:
 
           for IMAGE_NAME in "${IMAGE_NAMES[@]}"; do
             SOURCES=()
-            if [ "${{ needs.prepare.outputs.mode }}" = "release" ]; then
-              SOURCES+=("${IMAGE_NAME}:ci-${VERSION}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-manifest@${RELEASE_CANDIDATE_DIGEST}")
-            else
-              for arch in "${ARCHES[@]}"; do
-                SOURCES+=("${IMAGE_NAME}@$(cat "digests/${arch}.txt")")
-              done
-            fi
+            for arch in "${ARCHES[@]}"; do
+              candidate="ci-${{ needs.prepare.outputs.mode }}-${arch}"
+              if [ "${{ needs.prepare.outputs.mode }}" = "release" ]; then
+                candidate="ci-${{ needs.prepare.outputs.version }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${arch}"
+              fi
+              SOURCES+=("${IMAGE_NAME}:${candidate}")
+            done
             for TAG in $TAGS; do
               if [[ "$TAG" == "$IMAGE_NAME:"* ]]; then
-                if [ "${{ needs.prepare.outputs.mode }}" = "release" ]; then
-                  if [[ "$IMAGE_NAME" == ghcr.io/* ]] &&
-                     [ "${{ steps.version_tag_state.outputs.ghcr_present }}" = true ]; then
-                    echo "Keeping verified existing $TAG"
-                    continue
-                  fi
-                  if [[ "$IMAGE_NAME" != ghcr.io/* ]] &&
-                     [ "${{ steps.version_tag_state.outputs.dockerhub_present }}" = true ]; then
-                    echo "Keeping verified existing $TAG"
-                    continue
-                  fi
-                fi
                 echo "Promoting ${SOURCES[*]} to $TAG"
                 docker buildx imagetools create -t "$TAG" "${SOURCES[@]}"
-                if [ "${{ needs.prepare.outputs.mode }}" = "release" ] && \
-                   [ "$(inspect_digest "$TAG")" != "$RELEASE_CANDIDATE_DIGEST" ]; then
-                  echo "::error::Formal version tag does not match the tested candidate digest."
-                  exit 1
-                fi
               fi
             done
           done
@@ -920,11 +811,6 @@ jobs:
     name: "🚀 Release Artifacts"
     runs-on: ubuntu-latest
     needs: [prepare, build-linux, build-windows-amd64, merge-manifest]
-    outputs:
-      release_notes_sha256: ${{ steps.release_gate.outputs.release_notes_sha256 }}
-      release_notes_source: ${{ steps.release_notes.outputs.release_notes_source }}
-      previous_tag: ${{ steps.release_context.outputs.previous_tag }}
-      release_id: ${{ steps.release_gate.outputs.release_id }}
     if: >-
       always() &&
       !cancelled() &&
@@ -943,7 +829,6 @@ jobs:
           fetch-depth: 0
 
       - name: Prepare Release Notes Context
-        id: release_context
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
@@ -961,31 +846,6 @@ jobs:
             -H 'X-GitHub-Api-Version: 2026-03-10' \
             "repos/$GITHUB_REPOSITORY/releases/latest" \
             --jq '.tag_name')"
-          if [ "$PREVIOUS_TAG" = "$CURRENT_TAG" ]; then
-            gh api \
-              -H 'X-GitHub-Api-Version: 2026-03-10' \
-              "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-              > published-releases.json
-            PREVIOUS_TAG="$(python3 - "$CURRENT_TAG" <<'PY'
-          import json
-          import sys
-
-          current = sys.argv[1]
-          releases = json.load(open("published-releases.json", encoding="utf-8"))
-          previous = next(
-              (
-                  release["tag_name"]
-                  for release in releases
-                  if not release["draft"]
-                  and not release["prerelease"]
-                  and release["tag_name"] != current
-              ),
-              "",
-          )
-          print(previous)
-          PY
-            )"
-          fi
           if [ -z "$PREVIOUS_TAG" ]; then
             echo "::error::Latest published GitHub Release returned an empty tag."
             exit 1
@@ -998,15 +858,51 @@ jobs:
             echo "::error::Latest published Release $PREVIOUS_TAG is not an ancestor of $CURRENT_TAG."
             exit 1
           fi
+          RANGE_LABEL="$PREVIOUS_TAG..$CURRENT_COMMIT"
+          git log --pretty=format:'- %h %s' "$PREVIOUS_TAG..$CURRENT_COMMIT" > commits.md
+          git diff --name-only "$PREVIOUS_TAG" "$CURRENT_COMMIT" > changed-files.md
+          git diff --stat "$PREVIOUS_TAG" "$CURRENT_COMMIT" > diffstat.md
 
-          rm -f release-notes.ai.json release-notes.status.json
-          python3 scripts/ci/release_notes.py context \
-            --repository "$GITHUB_REPOSITORY" \
-            --previous-tag "$PREVIOUS_TAG" \
-            --current-tag "$CURRENT_TAG" \
-            --current-commit "$CURRENT_COMMIT" \
-            --output release-context.json
-          echo "previous_tag=$PREVIOUS_TAG" >> "$GITHUB_OUTPUT"
+          {
+            echo "# Release Context"
+            echo
+            echo "Current tag: $CURRENT_TAG"
+            echo "Current commit: $CURRENT_COMMIT"
+            echo "Previous tag: $PREVIOUS_TAG"
+            echo "Range: $RANGE_LABEL"
+            echo
+            echo "## Commits"
+            cat commits.md
+            echo
+            echo
+            echo "## Changed files"
+            sed 's/^/- /' changed-files.md
+            echo
+            echo
+            echo "## Diff stat"
+            cat diffstat.md
+          } > release-context.md
+
+          {
+            echo "## English"
+            echo
+            echo "### Changes"
+            if [ -s commits.md ]; then
+              cat commits.md
+            else
+              echo "- No commit summary was available."
+            fi
+            echo
+            echo "## 中文"
+            echo
+            echo "### 变更"
+            echo "本次发布包含以下提交："
+            if [ -s commits.md ]; then
+              cat commits.md
+            else
+              echo "- 未获取到提交摘要。"
+            fi
+          } > release-notes.fallback.md
 
       - name: Check Copilot Token
         id: copilot_token
@@ -1020,55 +916,103 @@ jobs:
           fi
 
       - name: Set up Node.js
-        id: setup_node
         if: steps.copilot_token.outputs.available == 'true'
-        continue-on-error: true
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
 
-      - name: Install and Verify Copilot CLI
-        id: copilot_cli
+      - name: Generate Bilingual Release Notes with Copilot
+        if: steps.copilot_token.outputs.available == 'true'
         continue-on-error: true
-        timeout-minutes: 3
-        if: >-
-          steps.copilot_token.outputs.available == 'true' &&
-          steps.setup_node.outcome == 'success'
-        run: |
-          set -euo pipefail
-
-          echo "available=false" >> "$GITHUB_OUTPUT"
-          if ! timeout --signal=TERM 120s npm install -g @github/copilot@1.0.70; then
-            echo "::warning::Copilot CLI installation failed; the deterministic Chinese summary will be used."
-            exit 0
-          fi
-          COPILOT_VERSION="$(timeout --signal=TERM 15s copilot --no-auto-update --version 2>/dev/null || true)"
-          COPILOT_VERSION="${COPILOT_VERSION%%$'\n'*}"
-          case "$COPILOT_VERSION" in
-            'GitHub Copilot CLI 1.0.70'|'GitHub Copilot CLI 1.0.70.') ;;
-            *)
-              echo "::warning::The installed Copilot CLI identity is unexpected; the deterministic Chinese summary will be used."
-              exit 0
-              ;;
-          esac
-          echo "available=true" >> "$GITHUB_OUTPUT"
-
-      - name: Generate and Review Chinese Release Notes with Copilot
-        if: >-
-          steps.copilot_token.outputs.available == 'true' &&
-          steps.copilot_cli.outputs.available == 'true'
         env:
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
-          rm -f release-notes.ai.json release-notes.status.json
-          if ! python3 scripts/ci/release_notes.py generate \
-            --context release-context.json \
-            --output release-notes.ai.json \
-            --status release-notes.status.json \
-            --runner-temp "$RUNNER_TEMP"; then
-            rm -f release-notes.ai.json
-            echo "::warning::Copilot generation could not be validated; the deterministic Chinese summary will be used."
+          npm install -g @github/copilot@1.0.70
+
+          PROMPT="$(cat <<'EOF'
+          You are writing release notes for SubConverter-Extended.
+
+          Use only the release context provided below. Do not invent features, fixes, platforms, or compatibility claims.
+          Summarize user-visible changes first. Mention maintenance or dependency changes only when relevant.
+          Ignore auto-generated files unless the context shows they affect users.
+
+          Return only Markdown. Do not wrap the answer in a code fence.
+          Do not include a downloads section; it will be appended by the workflow.
+
+          Required format:
+
+          ## English
+
+          ### Highlights
+          - ...
+
+          ### Changes
+          - ...
+
+          ## 中文
+
+          ### 亮点
+          - ...
+
+          ### 变更
+          - ...
+
+          Omit empty sections. Keep each language concise and accurate.
+          EOF
+          )"
+
+          PROMPT="$PROMPT
+
+          $(cat release-context.md)"
+
+          copilot -p "$PROMPT" --no-ask-user > release-notes.ai.md
+          grep -q '[[:alnum:]]' release-notes.ai.md
+
+      - name: Assemble Release Notes
+        run: |
+          set -euo pipefail
+
+          if [ -s release-notes.ai.md ]; then
+            cp release-notes.ai.md release-notes.md
+            echo "Using Copilot-generated release notes."
+          else
+            cp release-notes.fallback.md release-notes.md
+            echo "Using fallback release notes."
           fi
+
+          cat >> release-notes.md <<'EOF'
+
+          ## Docker Images
+
+          Docker images are published to:
+          - `aethersailor/subconverter-extended`
+          - `ghcr.io/aethersailor/subconverter-extended`
+
+          Supported Docker platforms:
+          - `linux/amd64`
+          - `linux/arm64`
+          - `linux/arm/v7`
+
+          ## Downloads
+
+          ### Linux (portable, glibc runtime bundled)
+          - **amd64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-amd64.tar.gz`
+          - **arm64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-arm64.tar.gz`
+          - **armv7**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-armv7.tar.gz`
+
+          ### Windows (portable)
+          - **amd64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-windows-amd64.zip`
+
+          ### OpenWrt 25.12+ APK (unsigned)
+          Install with `apk add --allow-untrusted ./<package>.apk`. Choose the APK whose OpenWrt architecture suffix matches `apk print-arch`.
+          User configuration is created at `/etc/subconverter/pref.toml` on first start and is not overwritten by upgrades.
+          - **x86_64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-x86_64.apk`
+          - **aarch64**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-aarch64_generic.apk`, `...-aarch64_cortex-a53.apk`, `...-aarch64_cortex-a72.apk`
+          - **armv7**: `SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-arm_cortex-*.apk`
+
+          ### Checksums
+          - `SHA256SUMS`
+          EOF
 
       - name: Download all artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -1111,245 +1055,23 @@ jobs:
             --root release-assets \
             --manifest release-assets/RELEASE-MANIFEST.json
 
-      - name: Assemble and Validate Chinese Release Notes
-        id: release_notes
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/ci/release_notes.py assemble \
-            --context release-context.json \
-            --candidate release-notes.ai.json \
-            --status release-notes.status.json \
-            --manifest release-assets/RELEASE-MANIFEST.json \
-            --output release-notes.md \
-            --github-output "$GITHUB_OUTPUT" \
-            --github-summary "$GITHUB_STEP_SUMMARY"
-
-      - name: Create or verify the GitHub Release
-        id: release_gate
+      - name: Create draft Release without overwrites
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.prepare.outputs.version }}
-          REVISION: ${{ needs.prepare.outputs.sha }}
         run: |
           set -euo pipefail
-          CONTEXT_SHA256="$(python3 -c 'import json; print(json.load(open("release-context.json", encoding="utf-8"))["context_sha256"])')"
-          [[ "$CONTEXT_SHA256" =~ ^[0-9a-f]{64}$ ]]
-
-          find_release_by_tag() {
-            local output="$1"
-            local listing
-            listing="$(mktemp "$RUNNER_TEMP/releases.XXXXXX.json")"
-            if ! gh api \
-              -H 'X-GitHub-Api-Version: 2026-03-10' \
-              "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-              > "$listing"; then
-              rm -f "$listing"
-              return 2
-            fi
-            python3 - "$listing" "$output" "$VERSION" <<'PY'
-          import json
-          import sys
-
-          listing_path, output_path, version = sys.argv[1:]
-          releases = json.load(open(listing_path, encoding="utf-8"))
-          matches = [release for release in releases if release.get("tag_name") == version]
-          if not matches:
-              raise SystemExit(4)
-          if len(matches) != 1:
-              raise SystemExit(f"expected one Release for {version}, found {len(matches)}")
-          release = matches[0]
-          release_id = release.get("id")
-          if type(release_id) is not int or release_id <= 0:
-              raise SystemExit("Release ID is not a positive integer")
-          with open(output_path, "w", encoding="utf-8", newline="\n") as handle:
-              json.dump(release, handle, ensure_ascii=False, sort_keys=True)
-              handle.write("\n")
-          PY
-            local status=$?
-            rm -f "$listing"
-            return "$status"
-          }
-
-          wait_for_release_by_tag() {
-            local output="$1"
-            local status=1
-            for attempt in $(seq 1 6); do
-              if find_release_by_tag "$output"; then
-                return 0
-              else
-                status=$?
-              fi
-              echo "Waiting for Release $VERSION to become list-visible (attempt $attempt/6)."
-              sleep $((attempt * 2))
-            done
-            return "$status"
-          }
-
-          wait_for_release_absence() {
-            local probe
-            local status
-            probe="$(mktemp "$RUNNER_TEMP/release-probe.XXXXXX.json")"
-            for attempt in $(seq 1 6); do
-              if find_release_by_tag "$probe"; then
-                sleep $((attempt * 2))
-                continue
-              else
-                status=$?
-              fi
-              rm -f "$probe"
-              if [ "$status" -eq 4 ]; then
-                return 0
-              fi
-              return "$status"
-            done
-            rm -f "$probe"
-            return 1
-          }
-
-          validate_release_identity() {
-            local release_json="$1"
-            local expected_draft="$2"
-            python3 - "$release_json" "$VERSION" "$expected_draft" <<'PY'
-          import json
-          import sys
-
-          path, version, expected_draft = sys.argv[1:]
-          release = json.load(open(path, encoding="utf-8"))
-          if release.get("author", {}).get("login") != "github-actions[bot]":
-              raise SystemExit("existing Release is not owned by github-actions[bot]")
-          if release.get("tag_name") != version or release.get("name") != version:
-              raise SystemExit("existing Release identity does not match the formal version")
-          release_id = release.get("id")
-          if type(release_id) is not int or release_id <= 0:
-              raise SystemExit("Release ID is not a positive integer")
-          if expected_draft != "any":
-              expected = expected_draft == "true"
-              if release.get("draft") is not expected:
-                  raise SystemExit("existing Release draft state changed")
-          PY
-          }
-
-          cleanup_release_id=""
-          cleanup_failed_draft() {
-            local failed_status=$?
-            trap - ERR
-            if ! [[ "$cleanup_release_id" =~ ^[1-9][0-9]*$ ]]; then
-              return "$failed_status"
-            fi
-            (
-              set +e
-              if gh api \
-                   -H 'X-GitHub-Api-Version: 2026-03-10' \
-                   "repos/$GITHUB_REPOSITORY/releases/$cleanup_release_id" \
-                   > cleanup-release.json && \
-                 validate_release_identity cleanup-release.json true && \
-                 python3 scripts/ci/release_notes.py verify-body \
-                   --release-json cleanup-release.json \
-                   --validate-only \
-                   --expected-version "$VERSION" \
-                   --expected-revision "$REVISION" \
-                   --expected-context-sha256 "$CONTEXT_SHA256"; then
-                if gh api --method DELETE \
-                  -H 'X-GitHub-Api-Version: 2026-03-10' \
-                  "repos/$GITHUB_REPOSITORY/releases/$cleanup_release_id"; then
-                  echo "Removed the verified incomplete draft Release $VERSION (ID $cleanup_release_id)."
-                else
-                  echo "::warning::Could not remove the verified incomplete draft Release $VERSION (ID $cleanup_release_id)."
-                fi
-              else
-                echo "::warning::An incomplete Release could not be proven safe to delete; leaving it for a verified retry."
-              fi
-            )
-            return "$failed_status"
-          }
-          trap cleanup_failed_draft ERR
-
-          existing_release=false
-          if find_release_by_tag existing-release.json; then
-            existing_release=true
-          else
-            lookup_status=$?
-            if [ "$lookup_status" -ne 4 ]; then
-              echo "::error::Could not determine whether Release $VERSION already exists."
-              exit "$lookup_status"
-            fi
-          fi
-
-          if [ "$existing_release" = true ]; then
-            validate_release_identity existing-release.json any
-            is_draft="$(python3 -c 'import json; print(str(json.load(open("existing-release.json", encoding="utf-8"))["draft"]).lower())')"
-            RELEASE_ID="$(python3 -c 'import json; print(json.load(open("existing-release.json", encoding="utf-8"))["id"])')"
-            [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
-            if [ "$is_draft" = false ]; then
-              python3 scripts/ci/release_notes.py verify-body \
-                --release-json existing-release.json \
-                --validate-only \
-                --expected-version "$VERSION" \
-                --expected-revision "$REVISION" \
-                --expected-context-sha256 "$CONTEXT_SHA256" \
-                --github-output "$GITHUB_OUTPUT"
-              mkdir existing-release-assets
-              gh release download "$VERSION" \
-                --repo "$GITHUB_REPOSITORY" \
-                --dir existing-release-assets
-              python3 scripts/ci/release_manifest.py verify \
-                --root existing-release-assets \
-                --manifest existing-release-assets/RELEASE-MANIFEST.json
-              echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
-              echo "Existing published Release $VERSION passed body and asset verification."
-              trap - ERR
-              exit 0
-            fi
-            if [ "$is_draft" != true ]; then
-              echo "::error::Existing Release $VERSION has an invalid draft state."
-              exit 1
-            fi
-            python3 scripts/ci/release_notes.py verify-body \
-              --release-json existing-release.json \
-              --validate-only \
-              --expected-version "$VERSION" \
-              --expected-revision "$REVISION" \
-              --expected-context-sha256 "$CONTEXT_SHA256"
-            echo "Replacing the stale verified-tag draft for idempotent continuation."
-            gh api --method DELETE \
-              -H 'X-GitHub-Api-Version: 2026-03-10' \
-              "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID"
-            wait_for_release_absence
-          fi
-
           gh release create "$VERSION" release-assets/* \
             --repo "$GITHUB_REPOSITORY" \
             --draft \
             --verify-tag \
             --title "$VERSION" \
             --notes-file release-notes.md
-          wait_for_release_by_tag created-release-list-entry.json
-          RELEASE_ID="$(python3 -c 'import json; print(json.load(open("created-release-list-entry.json", encoding="utf-8"))["id"])')"
-          [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
-          gh api \
-            -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
-            > created-release.json
-          validate_release_identity created-release.json true
-          cleanup_release_id="$RELEASE_ID"
-          python3 scripts/ci/release_notes.py verify-body \
-            --release-json created-release.json \
-            --expected release-notes.md \
-            --expected-version "$VERSION" \
-            --expected-revision "$REVISION" \
-            --expected-context-sha256 "$CONTEXT_SHA256" \
-            --github-output "$GITHUB_OUTPUT"
-          echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
-          trap - ERR
 
   finalize-release:
-    name: "🔒 Verify, Advance latest, and Publish Release"
+    name: "🔒 Freeze Release and Advance latest"
     runs-on: ubuntu-latest
-    concurrency:
-      group: formal-release-finalization
-      cancel-in-progress: false
     needs: [prepare, merge-manifest, create-release]
     if: >-
       always() &&
@@ -1368,50 +1090,25 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Re-verify Release assets and tag identity
-        id: release_state
+      - name: Re-verify draft assets and tag identity
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.prepare.outputs.version }}
           REVISION: ${{ needs.prepare.outputs.sha }}
-          BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
-          RELEASE_NOTES_SHA256: ${{ needs.create-release.outputs.release_notes_sha256 }}
-          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$REVISION"
           test "$(git rev-list -n 1 "$VERSION")" = "$REVISION"
           test "$(git ls-remote origin "refs/tags/$VERSION^{}" | awk '{print $1}')" = "$REVISION"
-          [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
-          gh api \
-            -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
-            > verified-release.json
-          is_draft="$(python3 - "$VERSION" "$RELEASE_ID" <<'PY'
-          import json
-          import sys
-
-          version, expected_id = sys.argv[1:]
-          release = json.load(open("verified-release.json", encoding="utf-8"))
-          if release.get("id") != int(expected_id):
-              raise SystemExit("Release ID changed")
-          if release.get("author", {}).get("login") != "github-actions[bot]":
-              raise SystemExit("Release owner changed")
-          if release.get("tag_name") != version or release.get("name") != version:
-              raise SystemExit("Release version identity changed")
-          print(str(release.get("draft")).lower())
-          PY
-          )"
-          if [ "$is_draft" != "true" ] && [ "$is_draft" != "false" ]; then
-            echo "::error::Release $VERSION has an invalid draft state."
+          is_draft="$(gh release view "$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json isDraft \
+            --jq '.isDraft')"
+          if [ "$is_draft" != "true" ]; then
+            echo "::error::Release $VERSION is not a draft."
             exit 1
           fi
-          echo "was_draft=$is_draft" >> "$GITHUB_OUTPUT"
-
-          python3 scripts/ci/release_notes.py verify-body \
-            --release-json verified-release.json \
-            --expected-sha256 "$RELEASE_NOTES_SHA256"
 
           mkdir verified-assets
           gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" --dir verified-assets
@@ -1419,23 +1116,14 @@ jobs:
             --root verified-assets \
             --manifest verified-assets/RELEASE-MANIFEST.json
 
-          python3 - \
-            "$VERSION" \
-            "$REVISION" \
-            "$BUILD_DATE" \
-            "${{ needs.merge-manifest.outputs.dockerhub_digest }}" \
-            "${{ needs.merge-manifest.outputs.ghcr_digest }}" <<'PY'
+          python3 - "$REVISION" "${{ needs.merge-manifest.outputs.dockerhub_digest }}" "${{ needs.merge-manifest.outputs.ghcr_digest }}" <<'PY'
           import json
           import sys
 
-          version, revision, build_date, dockerhub_digest, ghcr_digest = sys.argv[1:]
+          revision, dockerhub_digest, ghcr_digest = sys.argv[1:]
           manifest = json.load(open("verified-assets/RELEASE-MANIFEST.json", encoding="utf-8"))
-          if manifest["version"] != version or manifest["tag"] != version:
-              raise SystemExit("release manifest version identity changed")
           if manifest["revision"] != revision:
               raise SystemExit("release manifest revision changed")
-          if manifest["build_date"] != build_date:
-              raise SystemExit("release manifest build date changed")
           if manifest["images"]["dockerhub"]["digest"] != dockerhub_digest:
               raise SystemExit("Docker Hub digest changed")
           if manifest["images"]["ghcr"]["digest"] != ghcr_digest:
@@ -1472,45 +1160,18 @@ jobs:
           echo "dockerhub_latest=$dockerhub_latest" >> "$GITHUB_OUTPUT"
           echo "ghcr_latest=$ghcr_latest" >> "$GITHUB_OUTPUT"
 
-      - name: Refuse stale formal release finalization
+      - name: Publish GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.prepare.outputs.version }}
-          RELEASE_BASE_TAG: ${{ needs.create-release.outputs.previous_tag }}
         run: |
           set -euo pipefail
-          latest_tag="$(gh api \
-            -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$GITHUB_REPOSITORY/releases/latest" \
-            --jq '.tag_name')"
-          python3 - "$VERSION" "$latest_tag" <<'PY'
-          import re
-          import sys
-
-          pattern = re.compile(r"^v([0-9]+)\.([0-9]+)\.([0-9]+)$")
-          current_match = pattern.fullmatch(sys.argv[1])
-          latest_match = pattern.fullmatch(sys.argv[2])
-          if current_match is None or latest_match is None:
-              raise SystemExit("formal Release ordering requires canonical SemVer tags")
-          current = tuple(map(int, current_match.groups()))
-          latest = tuple(map(int, latest_match.groups()))
-          if latest > current:
-              raise SystemExit(
-                  f"refusing to finalize stale {sys.argv[1]} after newer {sys.argv[2]}"
-              )
-          PY
-          if [ "$latest_tag" != "$VERSION" ] && [ "$latest_tag" != "$RELEASE_BASE_TAG" ]; then
-            echo "::error::Release Note base $RELEASE_BASE_TAG no longer matches latest published Release $latest_tag."
-            exit 1
-          fi
-          if [ "$latest_tag" != "$VERSION" ]; then
-            git fetch --tags --force origin
-            if ! git merge-base --is-ancestor "$latest_tag" "$VERSION"; then
-              echo "::error::Latest published Release $latest_tag is not an ancestor of $VERSION."
-              exit 1
-            fi
-          fi
+          gh release edit "$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false
+          test "$(gh release view "$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json isDraft \
+            --jq '.isDraft')" = "false"
 
       - name: Advance latest only after full release verification
         shell: bash
@@ -1527,154 +1188,32 @@ jobs:
 
           rollback_latest() {
             echo "::warning::Restoring the pre-release latest pointers after a promotion failure."
-            local failed=false
-            if ! docker buildx imagetools create \
+            docker buildx imagetools create \
               -t aethersailor/subconverter-extended:latest \
-              "aethersailor/subconverter-extended@$OLD_DOCKERHUB"; then
-              failed=true
-            fi
-            if ! docker buildx imagetools create \
+              "aethersailor/subconverter-extended@$OLD_DOCKERHUB" || true
+            docker buildx imagetools create \
               -t ghcr.io/aethersailor/subconverter-extended:latest \
-              "ghcr.io/aethersailor/subconverter-extended@$OLD_GHCR"; then
-              failed=true
-            fi
-            if [ "$(inspect_digest aethersailor/subconverter-extended:latest 2>/dev/null || true)" != "$OLD_DOCKERHUB" ] || \
-               [ "$(inspect_digest ghcr.io/aethersailor/subconverter-extended:latest 2>/dev/null || true)" != "$OLD_GHCR" ]; then
-              failed=true
-            fi
-            if [ "$failed" = true ]; then
-              echo "::error::Could not fully restore the pre-release latest pointers."
-              return 1
-            fi
-            echo "Both latest pointers were restored and verified."
-          }
-
-          fail_after_latest() {
-            local message="$1"
-            if ! rollback_latest; then
-              echo "::error::Manual registry inspection may be required before retrying."
-            fi
-            echo "::error::$message"
-            exit 1
+              "ghcr.io/aethersailor/subconverter-extended@$OLD_GHCR" || true
           }
 
           if ! docker buildx imagetools create \
             -t aethersailor/subconverter-extended:latest \
             "aethersailor/subconverter-extended:$VERSION"; then
-            fail_after_latest "Docker Hub latest promotion failed."
+            rollback_latest
+            exit 1
           fi
           if ! docker buildx imagetools create \
             -t ghcr.io/aethersailor/subconverter-extended:latest \
             "ghcr.io/aethersailor/subconverter-extended:$VERSION"; then
-            fail_after_latest "GHCR latest promotion failed."
+            rollback_latest
+            exit 1
           fi
 
           if [ "$(inspect_digest aethersailor/subconverter-extended:latest)" != "${{ needs.merge-manifest.outputs.dockerhub_digest }}" ] || \
              [ "$(inspect_digest ghcr.io/aethersailor/subconverter-extended:latest)" != "${{ needs.merge-manifest.outputs.ghcr_digest }}" ]; then
-            fail_after_latest "latest digest verification failed."
-          fi
-
-      - name: Publish GitHub Release after latest is verified
-        if: steps.release_state.outputs.was_draft == 'true'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
-          OLD_DOCKERHUB: ${{ steps.version_images.outputs.dockerhub_latest }}
-          OLD_GHCR: ${{ steps.version_images.outputs.ghcr_latest }}
-        run: |
-          set -euo pipefail
-          [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
-          inspect_digest() {
-            docker buildx imagetools inspect "$1" |
-              awk '$1 == "Digest:" && digest == "" {digest = $2} END {if (digest == "") exit 1; print digest}'
-          }
-          rollback_latest() {
-            local failed=false
-            echo "::warning::Release publication failed; restoring both latest pointers."
-            if ! docker buildx imagetools create \
-              -t aethersailor/subconverter-extended:latest \
-              "aethersailor/subconverter-extended@$OLD_DOCKERHUB"; then
-              failed=true
-            fi
-            if ! docker buildx imagetools create \
-              -t ghcr.io/aethersailor/subconverter-extended:latest \
-              "ghcr.io/aethersailor/subconverter-extended@$OLD_GHCR"; then
-              failed=true
-            fi
-            if [ "$(inspect_digest aethersailor/subconverter-extended:latest 2>/dev/null || true)" != "$OLD_DOCKERHUB" ] || \
-               [ "$(inspect_digest ghcr.io/aethersailor/subconverter-extended:latest 2>/dev/null || true)" != "$OLD_GHCR" ]; then
-              failed=true
-            fi
-            if [ "$failed" = true ]; then
-              echo "::error::Could not fully restore latest after Release publication failed."
-              return 1
-            fi
-            echo "Both latest pointers were restored and verified."
-          }
-          fail_publication() {
-            local message="$1"
-            if ! rollback_latest; then
-              echo "::error::Manual registry inspection may be required before retrying."
-            fi
-            echo "::error::$message"
+            rollback_latest
+            echo "::error::latest digest verification failed."
             exit 1
-          }
-          read_release_state() {
-            local state
-            local saw_draft=false
-            for attempt in $(seq 1 6); do
-              if gh api \
-                -H 'X-GitHub-Api-Version: 2026-03-10' \
-                "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
-                > publication-readback.json 2>/dev/null && \
-                state="$(python3 - "$VERSION" "$RELEASE_ID" <<'PY'
-          import json
-          import sys
-
-          version, expected_id = sys.argv[1:]
-          release = json.load(open("publication-readback.json", encoding="utf-8"))
-          if release.get("id") != int(expected_id):
-              raise SystemExit("Release ID changed during publication")
-          if release.get("author", {}).get("login") != "github-actions[bot]":
-              raise SystemExit("Release owner changed during publication")
-          if release.get("tag_name") != version or release.get("name") != version:
-              raise SystemExit("Release version identity changed during publication")
-          print(str(release.get("draft")).lower())
-          PY
-                )"; then
-                if [ "$state" = "false" ]; then
-                  printf '%s\n' false
-                  return 0
-                fi
-                if [ "$state" = "true" ]; then
-                  saw_draft=true
-                fi
-              fi
-              sleep 5
-            done
-            if [ "$saw_draft" = true ]; then
-              printf '%s\n' true
-              return 0
-            fi
-            return 1
-          }
-
-          if ! gh api --method PATCH \
-            -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
-            -F draft=false \
-            -F prerelease=false \
-            > publication-response.json; then
-            echo "::warning::The publication response was inconclusive; checking the server state."
-          fi
-          if ! published_state="$(read_release_state)"; then
-            echo "::error::Could not determine whether the GitHub Release was published; keeping verified latest pointers for a safe retry."
-            exit 1
-          fi
-          if [ "$published_state" = "true" ]; then
-            fail_publication "GitHub Release remained a draft after publication."
           fi
 
   verify-release-complete:
