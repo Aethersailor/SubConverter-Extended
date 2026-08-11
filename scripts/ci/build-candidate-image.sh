@@ -11,7 +11,7 @@ fi
 CI_ARCH="$1"
 DOCKERFILE="$2"
 IMAGE_PLATFORM="$3"
-CACHE_SCOPE="$4"
+_CACHE_SCOPE="$4"
 EVENT_NAME="$5"
 BUILD_MODE="$6"
 BUILD_VERSION="$7"
@@ -23,7 +23,7 @@ done <<< "$BUILD_ARGS"
 
 tags=(--tag "subconverter-extended:${CI_ARCH}-ci")
 output=(--load)
-cache=()
+provenance=()
 if [ "$EVENT_NAME" != "pull_request" ] && [ "$BUILD_MODE" != "master" ]; then
   candidate="ci-${BUILD_MODE}-${CI_ARCH}"
   if [ "$BUILD_MODE" = "release" ]; then
@@ -34,10 +34,7 @@ if [ "$EVENT_NAME" != "pull_request" ] && [ "$BUILD_MODE" != "master" ]; then
     --tag "ghcr.io/aethersailor/subconverter-extended:${candidate}"
   )
   output=(--push)
-  cache=(
-    --cache-from "type=registry,ref=ghcr.io/aethersailor/subconverter-extended:buildcache-${CACHE_SCOPE}"
-    --cache-to "type=registry,ref=ghcr.io/aethersailor/subconverter-extended:buildcache-${CACHE_SCOPE},mode=max,ignore-error=true"
-  )
+  provenance=(--provenance=false)
 fi
 
 metadata_file="${RUNNER_TEMP}/build-metadata-${CI_ARCH}.json"
@@ -46,7 +43,7 @@ docker buildx build \
   --platform "$IMAGE_PLATFORM" \
   "${output[@]}" \
   "${tags[@]}" \
-  "${cache[@]}" \
+  "${provenance[@]}" \
   "${args[@]}" \
   --metadata-file "$metadata_file" \
   .

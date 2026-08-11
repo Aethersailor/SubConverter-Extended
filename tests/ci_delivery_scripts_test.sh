@@ -57,7 +57,8 @@ bash "$REPOSITORY/scripts/ci/build-candidate-image.sh" \
   amd64 ./Dockerfile linux/amd64 subconverter-alpine push dev dev
 assert_trace "--push"
 assert_trace "aethersailor/subconverter-extended:ci-dev-amd64"
-assert_trace "ghcr.io/aethersailor/subconverter-extended:buildcache-subconverter-alpine"
+assert_trace "--provenance=false"
+deny_trace "buildcache-"
 assert_trace "--build-arg THREADS=16"
 grep -Eq '^digest=sha256:[0-9]{64}$' "$GITHUB_OUTPUT"
 
@@ -68,6 +69,7 @@ bash "$REPOSITORY/scripts/ci/build-candidate-image.sh" \
 assert_trace "--load"
 assert_trace "subconverter-extended:amd64-ci"
 deny_trace "--push"
+deny_trace "--provenance=false"
 deny_trace "buildcache-"
 
 : > "$TRACE"
@@ -76,6 +78,7 @@ bash "$REPOSITORY/scripts/ci/build-candidate-image.sh" \
   arm64 ./Dockerfile linux/arm64 subconverter-alpine-arm64 push release v1.3.1
 assert_trace "ci-v1.3.1-42-3-arm64"
 assert_trace "--platform linux/arm64"
+assert_trace "--provenance=false"
 
 : > "$TRACE"
 bash "$REPOSITORY/scripts/ci/export-ci-image.sh" \
