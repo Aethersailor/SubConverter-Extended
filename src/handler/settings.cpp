@@ -924,6 +924,12 @@ void readYAMLConf(YAML::Node &node,
         global.surgeResolveHostname;
   }
 
+  if (node["remote_subscription"].IsDefined() &&
+      node["remote_subscription"].IsMap()) {
+    node["remote_subscription"]["surge_policy_path"] >>
+        global.surgePolicyPath;
+  }
+
   if (node["emojis"].IsDefined()) {
     section = node["emojis"];
     section["add_emoji"] >> global.addEmoji;
@@ -1227,6 +1233,15 @@ void readTOMLConf(toml::value &root,
   find_if_exist(section_surge_external, "surge_ssr_path", global.surgeSSRPath,
                 "resolve_hostname", global.surgeResolveHostname);
 
+  if (root.contains("remote_subscription")) {
+    const auto &section_remote_subscription =
+        root.as_table().at("remote_subscription");
+    if (section_remote_subscription.is_table()) {
+      find_if_exist(section_remote_subscription, "surge_policy_path",
+                    global.surgePolicyPath);
+    }
+  }
+
   auto section_emojis = toml::find(root, "emojis");
 
   find_if_exist(section_emojis, "add_emoji", global.addEmoji,
@@ -1421,6 +1436,7 @@ bool readConf() {
     global.proxyBypass = kDefaultProxyBypass;
     global.proxyProviderInterval = kDefaultProxyProviderInterval;
     global.proxyProviderDirect = kDefaultProxyProviderDirect;
+    global.surgePolicyPath = true;
   };
 
   std::string prefdata;
@@ -1590,6 +1606,11 @@ bool readConf() {
     ini.enter_section("surge_external_proxy");
     ini.get_if_exist("surge_ssr_path", global.surgeSSRPath);
     ini.get_bool_if_exist("resolve_hostname", global.surgeResolveHostname);
+  }
+
+  if (ini.section_exist("remote_subscription")) {
+    ini.enter_section("remote_subscription");
+    ini.get_bool_if_exist("surge_policy_path", global.surgePolicyPath);
   }
 
   if (ini.section_exist("node_pref")) {

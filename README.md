@@ -121,14 +121,14 @@ SubConverter-Extended 因此诞生。它是一款更贴合 Mihomo 使用场景�
 | 功能 | 原版 Subconverter | SubConverter-Extended |
 | :--- | :--- | :--- |
 | **节点链接解析** | 🛠️ 人工维护解析器，支持有限 | 🤖 **集成 Mihomo 内核解析模块，自动对齐协议支持** |
-| **订阅链接处理** | 📥 拉取并解析订阅，容易被屏蔽 | 🔗 **生成 `proxy-provider`，由客户端 Mihomo 内核直接拉取订阅** |
+| **订阅链接处理** | 📥 拉取并解析订阅，容易被屏蔽 | 🔗 **Mihomo 使用 `proxy-provider`；兼容的其他客户端使用各自的远程资源机制** |
 | **协议维护方式** | ⏳ 依赖人工新增和维护 | 🔄 **编译时自动扫描 Mihomo 源码，跟进新协议支持** |
 | **全局参数维护** | 📝 人工维护节点参数列表 | 🔍 **编译时自动识别硬编码参数和可覆写参数** |  
 
 > [!WARNING]
-> 1. 本项目优先适配 OpenClash，其次是各类 Clash 客户端；对其他客户端的支持不作保证。
-> 2. 非 Mihomo 内核的客户端连接本项目，将继续调用继承自上游项目的人工维护解析器。
-> 3. 开发者仅确保完美支持 Mihomo 内核，因代码调整造成的对其他内核客户端的支持范围缩减，原则上不单独回补。
+> 1. 本项目优先保证 Mihomo 路径。`target=clash`、`target=clashr` 及 `target=auto` 识别为二者时，远程订阅只生成 `proxy-provider`，节点链接只调用 Mihomo 解析模块。
+> 2. Quantumult X 和 Surge 的完整配置可以使用客户端原生远程资源；其节点链接仍调用继承自上游项目的 Legacy 解析器。
+> 3. 其他非 Mihomo 目标仍使用 Legacy 解析器。协议和参数支持范围以对应生成器能够表示的内容为准。
 
 ### 🔥 独特功能
 
@@ -793,11 +793,11 @@ Dashboard 防爆破默认只使用服务端观察到的 TCP socket peer。`CF-Co
 </details>
 
 <details>
-<summary><strong>客户端远程订阅资源：Clash Proxy-Provider 与 Quantumult X server_remote</strong></summary>
+<summary><strong>客户端远程订阅资源：Clash Proxy-Provider、Quantumult X server_remote 与 Surge policy-path</strong></summary>
 
 ### `provider` 前缀
 
-`provider` 不是独立参数，而是写在 `url=` 列表中、放在订阅链接前，并以逗号分隔。Clash/ClashR 使用它自定义 `proxy-providers` 名称；Quantumult X 使用它自定义 `[server_remote]` 资源标签。该前缀对节点链接不生效。
+`provider` 不是独立参数，而是写在 `url=` 列表中、放在订阅链接前，并以逗号分隔。Clash/ClashR 使用它自定义 `proxy-providers` 名称；Quantumult X 使用它自定义 `[server_remote]` 资源标签；Surge 使用它匹配自定义策略组中的 `!!PROVIDER` 选择器。该前缀对节点链接不生效。
 
 示例：
 
@@ -859,7 +859,7 @@ interval: 0
 
 * 有效范围是 `0` 到 `2147483647` 的十进制整数；不支持 `none`、负数或 `1h` 等单位写法
 * 同一条订阅重复设置 `interval:` 会返回 HTTP 400
-* `interval:` 不适用于节点 URI、`list=true`，也不适用于 Clash/ClashR 与 Quantumult X 之外的目标
+* `interval:` 不适用于节点 URI 或 `list=true`；当前支持 Clash/ClashR、Quantumult X 与 Surge 远程订阅
 * 不提供请求级的全局 `provider_interval` 参数
 * 已有顶层请求参数 `&interval=` 仍用于托管配置的更新提示，与 `proxy-provider` 的更新周期无关
 
@@ -880,6 +880,32 @@ url=provider:Airport-A,https://a.example/sub|ss://example-node
 `[server_remote]` 不会自动启用 `opt-parser`，也不会注入第三方 `resource_parser_url`。上游需要根据 Quantumult X 的 User-Agent 返回客户端可识别的节点资源；需要自定义资源解析器时，应由部署者在 Quantumult X 基础配置中自行配置并评估脚本来源。
 
 该能力不增加主配置文件字段，旧版 `pref.ini`、`pref.yml` 和 `pref.toml` 无需迁移，也不会因缺少新参数而启动失败。
+
+### Surge `policy-path`
+
+`target=surge` 生成 Surge 3 或更高版本的完整配置时，符合条件的单个 HTTP(S) 订阅会写入策略组的 `policy-path`，由 Surge 下载和解析。SubConverter-Extended 不会下载或检查远程订阅内容；订阅服务商需要直接返回 Surge 可读取的代理列表或完整 Surge 配置。Surge 2 输出继续使用 Legacy。
+
+```ini
+[Proxy Group]
+Proxy = select,policy-path=https://example.com/surge.conf,policy-regex-filter=".*"
+```
+
+节点 URI 仍由 Legacy 解析器处理。Surge 生成器能够表示的节点会写入 `[Proxy]`；例如 VLESS 等 Surge 不能表示的协议会被统计并跳过。请求只包含不受支持的节点且没有 `policy-path` 时，接口返回 HTTP 400。远程订阅与节点 URI 混用时，`policy-path` 继续生成，不受支持的本地节点不会进入 `[Proxy]`；日志事件 `SURGE_NODE_GENERATION` 和 Explain 报告会列出数量及协议。
+
+第一版仅对一个远程订阅启用 `policy-path`。多个远程订阅、`list=true`、`!!import:`、服务端节点过滤或改名、Emoji 增删、排序、节点选项覆盖，以及无法准确转换的策略组选择器，会在下载订阅前确定使用 Legacy。该行为不是远程解析失败后的再次尝试，不会先调用 Surge 再回退。
+
+逐条提供正数 `interval:` 时，Surge 输出使用 `update-interval`。省略时不生成该字段，由客户端使用默认值。Surge 的 `interval:0` 返回 HTTP 400；需要客户端默认更新行为时，应省略该前缀。
+
+部署者可以使用以下可选配置关闭 Surge 原生远程订阅：
+
+```toml
+[remote_subscription]
+surge_policy_path = false
+```
+
+YAML 使用 `remote_subscription.surge_policy_path`，INI 使用 `[remote_subscription]` 下的 `surge_policy_path`。缺少整个配置节或字段时，默认值为 `true`。旧配置文件无需增加字段即可启动；配置热重载时，删除该字段也会恢复为默认值。旧配置中已经启用节点预处理或复杂策略组时，请求继续使用 Legacy，避免静默忽略原有处理。
+
+`target=clash` 和 `target=clashr` 的 Mihomo 解析与 `proxy-provider` 分流不读取这个开关。Quantumult X 的 `[server_remote]` 分流也不读取这个开关。
 
 ### `proxy_direct` 前缀（仅适用于 Clash/ClashR 订阅链接）
 

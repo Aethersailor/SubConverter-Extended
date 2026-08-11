@@ -1203,9 +1203,16 @@ def run_checks(
                 },
                 timeout,
             )
-            if "Smoke" not in surge_config or "example.com" not in surge_config:
+            if (
+                f"policy-path={remote_subscription_url}" not in surge_config
+                or "policy-regex-filter=" not in surge_config
+            ):
                 raise AssertionError(
-                    "remote Surge conversion did not expand the subscription"
+                    "remote Surge conversion did not emit policy-path"
+                )
+            if "Smoke" in surge_config or "example.com" in surge_config:
+                raise AssertionError(
+                    "remote Surge conversion unexpectedly expanded the subscription"
                 )
 
     if mihomo_yaml_subscription_url:
