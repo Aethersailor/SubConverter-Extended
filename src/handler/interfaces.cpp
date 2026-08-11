@@ -1927,6 +1927,16 @@ struct EffectiveSubPolicy {
   std::map<std::string, std::string> provider_headers;
   template_args template_arguments;
   ProxyPolicy subscription_proxy;
+
+  // Client-managed remote resources cannot consume server-side node
+  // transformations. Preserve explicit request semantics by selecting the
+  // Legacy route, while configured defaults remain applicable to direct
+  // nodes without disabling native remote subscriptions for existing
+  // deployments.
+  bool requested_remote_node_filter = false;
+  bool requested_remote_node_rename = false;
+  bool requested_remote_node_transform = false;
+  bool requested_remote_node_option_override = false;
 };
 
 static std::string buildEffectiveSubPolicy(Request &request,
@@ -2009,6 +2019,16 @@ static std::string buildEffectiveSubPolicy(Request &request,
 
   policy.subscription_proxy =
       parseProxy(settings.proxySubscription, settings.proxyBypass);
+  policy.requested_remote_node_filter =
+      !parsed.include_remark.empty() || !parsed.exclude_remark.empty();
+  policy.requested_remote_node_rename = !parsed.renames.empty();
+  policy.requested_remote_node_transform =
+      !parsed.emoji.is_undef() || parsed.add_emoji.get(false) ||
+      parsed.remove_emoji.get(false) || parsed.append_type.get(false) ||
+      parsed.sort.get(false) || parsed.filter_deprecated.get(false);
+  policy.requested_remote_node_option_override =
+      !parsed.tfo.is_undef() || !parsed.udp.is_undef() ||
+      !parsed.skip_cert_verify.is_undef() || !parsed.tls13.is_undef();
   policy.generator.append_proxy_type =
       parsed.append_type.get(settings.appendType);
   // 上游项目默认在 clash 目标下自动把 expand 设为 true
@@ -2124,6 +2144,7 @@ static std::string buildExternalConfigFetchPlan(
 
   auto applyExternalConfig = [&](const ExternalConfig &extconf,
                                  FetchContext context) {
+    const bool requested_config = context == FetchContext::PublicRequest;
     rulePrependSources = extconf.rule_prepend_sources;
     ruleAppendSources = extconf.rule_append_sources;
     externalRuleFetchContext = extconf.rule_sources_context;
@@ -2172,13 +2193,25 @@ static std::string buildExternalConfigFetchPlan(
     if (!extconf.rename.empty()) {
       policy.generator.rename_array = extconf.rename;
       policy.generator.rename_for_providers = true;
+      if (requested_config)
+        policy.requested_remote_node_rename = true;
     }
     if (!extconf.emoji.empty())
       policy.generator.emoji_array = extconf.emoji;
-    if (!extconf.include.empty())
+    if (!extconf.include.empty()) {
       policy.include_remarks = extconf.include;
-    if (!extconf.exclude.empty())
+      if (requested_config)
+        policy.requested_remote_node_filter = true;
+    }
+    if (!extconf.exclude.empty()) {
       policy.exclude_remarks = extconf.exclude;
+      if (requested_config)
+        policy.requested_remote_node_filter = true;
+    }
+    if (requested_config &&
+        (extconf.add_emoji.get(false) ||
+         extconf.remove_old_emoji.get(false)))
+      policy.requested_remote_node_transform = true;
     parsed.add_emoji.define(extconf.add_emoji);
     parsed.remove_emoji.define(extconf.remove_old_emoji);
   };
@@ -2484,17 +2517,15 @@ static std::string surgePolicyPathCapabilityReason(
   if (remote_subscription_count > 1)
     return "multiple-remote-subscriptions";
 
-  if (!policy.include_remarks.empty() || !policy.exclude_remarks.empty())
+  if (policy.requested_remote_node_filter)
     return "node-filters";
-  if (!ext.rename_array.empty())
+  if (policy.requested_remote_node_rename)
     return "provider-rename";
   if (!parsed.group_name.empty())
     return "group-override";
-  if (ext.add_emoji || ext.remove_emoji || ext.append_proxy_type ||
-      ext.sort_flag || ext.filter_deprecated || !settings.filterScript.empty())
+  if (policy.requested_remote_node_transform)
     return "node-transform";
-  if (!ext.udp.is_undef() || !ext.tfo.is_undef() ||
-      !ext.skip_cert_verify.is_undef() || !ext.tls13.is_undef())
+  if (policy.requested_remote_node_option_override)
     return "node-option-override";
 
   bool selects_remote_subscription = false;
@@ -2606,6 +2637,38 @@ static SubStageResponse processSubscriptionNodes(
   }
   explain.remote_subscription_backend = remoteSubscriptionModeName(remote_mode);
   explain.remote_subscription_reason = remote_reason;
+
+  if (remote_mode == RemoteSubscriptionMode::SurgePolicyPath) {
+    const size_t configured_filter_count =
+        policy.include_remarks.size() + policy.exclude_remarks.size();
+    const size_t configured_node_transform_count =
+        static_cast<size_t>(policy.generator.add_emoji) +
+        static_cast<size_t>(policy.generator.remove_emoji) +
+        static_cast<size_t>(policy.generator.append_proxy_type) +
+        static_cast<size_t>(policy.generator.sort_flag) +
+        static_cast<size_t>(policy.generator.filter_deprecated) +
+        static_cast<size_t>(!settings.filterScript.empty());
+    const size_t configured_node_option_count =
+        static_cast<size_t>(!policy.generator.udp.is_undef()) +
+        static_cast<size_t>(!policy.generator.tfo.is_undef()) +
+        static_cast<size_t>(
+            !policy.generator.skip_cert_verify.is_undef()) +
+        static_cast<size_t>(!policy.generator.tls13.is_undef());
+    if (configured_filter_count || !policy.generator.rename_array.empty() ||
+        configured_node_transform_count || configured_node_option_count) {
+      writeLog(
+          LOG_LEVEL_INFO,
+          "SURGE_POLICY_PATH_TRANSFORM_SCOPE remote_nodes=client "
+          "direct_nodes=server configured_filters=" +
+              std::to_string(configured_filter_count) +
+              " configured_rename_rules=" +
+              std::to_string(policy.generator.rename_array.size()) +
+              " configured_node_transforms=" +
+              std::to_string(configured_node_transform_count) +
+              " configured_node_option_overrides=" +
+              std::to_string(configured_node_option_count));
+    }
+  }
 
   parse_settings parse_set;
   parse_set.proxy = &proxy;
