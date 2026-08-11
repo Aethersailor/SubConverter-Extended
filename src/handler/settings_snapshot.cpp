@@ -69,6 +69,7 @@ std::string sanitizedSettingsSnapshot(const Settings &settings) {
            {"clash_new_fields", settings.clashUseNewField},
            {"clash_proxies_style", settings.clashProxiesStyle},
            {"singbox_add_clash_modes", settings.singBoxAddClashModes},
+           {"emoji_rule_count", settings.emojis.size()},
        }},
       {"proxy_provider",
        {
@@ -118,10 +119,14 @@ std::string sanitizedSettingsSnapshot(const Settings &settings) {
        }},
       {"proxies",
        {
-           {"config", parseProxy(settings.proxyConfig).describe()},
-           {"ruleset", parseProxy(settings.proxyRuleset).describe()},
+           {"config",
+            parseProxy(settings.proxyConfig, settings.proxyBypass).describe()},
+           {"ruleset",
+            parseProxy(settings.proxyRuleset, settings.proxyBypass).describe()},
            {"subscription",
-            parseProxy(settings.proxySubscription).describe()},
+            parseProxy(settings.proxySubscription, settings.proxyBypass)
+                .describe()},
+           {"bypass", ProxyBypassPolicy::parse(settings.proxyBypass).describe()},
        }},
       {"statistics",
        {

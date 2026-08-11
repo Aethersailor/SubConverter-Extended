@@ -476,7 +476,7 @@ void explodeVmessConf(std::string content, std::vector<Proxy> &nodes) {
             return;
         }
     } catch (std::exception &e) {
-        //writeLog(0, "VMessConf parser throws an error. Leaving...", LOG_LEVEL_WARNING);
+        //writeLog(LOG_LEVEL_WARNING, "VMessConf parser throws an error. Leaving...");
         //return;
         //ignore
         throw;
@@ -999,7 +999,7 @@ void explodeMierus(std::string mierus, Proxy &node) {
 }
 
 void explodeHysteria(std::string hysteria, Proxy &node) {
-    writeLog(0, "正在解析 Hysteria 节点。", LOG_LEVEL_DEBUG);
+    writeLog(LOG_LEVEL_DEBUG, "正在解析 Hysteria 节点。");
     hysteria = regReplace(hysteria, "(hysteria|hy)://", "hysteria://");
     if (regMatch(hysteria, "hysteria://(.*?)[:](.*)")) {
         explodeStdHysteria(hysteria, node);
@@ -1478,7 +1478,7 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes) {
                     host = singleproxy["sni"].IsDefined()
                                ? safe_as<std::string>(singleproxy["sni"])
                                : safe_as<std::string>(singleproxy["servername"]);
-                    writeLog(0, "Reality 主机：" + host, LOG_LEVEL_DEBUG);
+                    writeLog(LOG_LEVEL_DEBUG, "Reality 主机：" + host);
                     singleproxy["reality-opts"]["public-key"] >>= pbk;
                     singleproxy["reality-opts"]["short-id"] >>= sid;
                 }
@@ -3325,7 +3325,7 @@ void explodeSub(std::string sub, std::vector<Proxy> &nodes) {
             }
         }
     } catch (std::exception &e) {
-        //writeLog(0, e.what(), LOG_LEVEL_DEBUG);
+        //writeLog(LOG_LEVEL_DEBUG, e.what());
         //ignore
         throw;
     }
@@ -3350,11 +3350,10 @@ void explodeSub(std::string sub, std::vector<Proxy> &nodes) {
             }
         }
     } catch (std::exception &e) {
-        writeLog(LOG_TYPE_ERROR,
+        writeLog(LOG_LEVEL_ERROR,
                  "SINGBOX_PARSE_FAILED detail=" +
-                     summarizeSensitiveTextForLog(e.what()),
-                 LOG_LEVEL_ERROR);
-        //writeLog(0, e.what(), LOG_LEVEL_DEBUG);
+                     summarizeSensitiveTextForLog(e.what()));
+        //writeLog(LOG_LEVEL_DEBUG, e.what());
         //ignore
         throw;
     }

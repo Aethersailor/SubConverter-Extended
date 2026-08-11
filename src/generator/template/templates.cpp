@@ -134,7 +134,7 @@ std::string parseHostname(inja::Arguments &args)
 
     std::string input_content, output_content;
     const Settings &settings = effectiveSettings();
-    ProxyPolicy proxy = parseProxy(settings.proxyConfig);
+    ProxyPolicy proxy = parseProxy(settings.proxyConfig, settings.proxyBypass);
     for(std::string &x : urls)
     {
         input_content = webGet(x, proxy, settings.cacheConfig);
@@ -161,9 +161,8 @@ std::string template_webGet(inja::Arguments &args)
 {
     std::string data = args.at(0)->get<std::string>();
     const Settings &settings = effectiveSettings();
-    ProxyPolicy proxy = parseProxy(settings.proxyConfig);
-    writeLog(0, "模板调用 fetch：" + summarizeUrlForLog(data) + "。",
-             LOG_LEVEL_INFO);
+    ProxyPolicy proxy = parseProxy(settings.proxyConfig, settings.proxyBypass);
+    writeLog(LOG_LEVEL_INFO, "模板调用 fetch：" + summarizeUrlForLog(data) + "。");
     std::string content =
         webGet(data, proxy, settings.cacheConfig, nullptr, nullptr,
                current_template_fetch_context);
@@ -206,10 +205,9 @@ int render_template(const std::string &content, const template_args &vars,
     }
     catch(std::exception &e)
     {
-        writeLog(0,
+        writeLog(LOG_LEVEL_ERROR,
                  "TEMPLATE_SCOPE_RESOLUTION_FAILED detail=" +
-                     summarizeSensitiveTextForLog(e.what()),
-                 LOG_LEVEL_ERROR);
+                     summarizeSensitiveTextForLog(e.what()));
     }
     nlohmann::json data;
     for(auto &x : vars.global_vars)
@@ -380,10 +378,9 @@ int render_template(const std::string &content, const template_args &vars,
                  "无效模板：模板渲染失败。\n"
                  "Please check the template syntax and configured resources.\n"
                  "请检查模板语法和已配置资源。";
-        writeLog(0,
+        writeLog(LOG_LEVEL_ERROR,
                  "TEMPLATE_RENDER_FAILED detail=" +
-                     summarizeSensitiveTextForLog(e.what()),
-                 LOG_LEVEL_ERROR);
+                     summarizeSensitiveTextForLog(e.what()));
         return -1;
     }
     return -2;
@@ -512,11 +509,10 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                 }
                 if(script && x.rule_type == RULESET_CLASH_IPCIDR &&
                    x.options.no_resolve)
-                    writeLog(0,
+                    writeLog(LOG_LEVEL_WARNING,
                              "Clash Script 模式不支持规则集选项 "
                              "no-resolve，已对策略组 '" +
-                                 rule_group + "' 安全忽略。",
-                             LOG_LEVEL_WARNING);
+                                 rule_group + "' 安全忽略。");
                 if(!script)
                 {
                     rules.emplace_back(buildClashRuleSetReference(
@@ -557,9 +553,8 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
             retrieved_rules = x.rule_content.get();
             if(retrieved_rules.empty())
             {
-                writeLog(0, "获取规则集失败或规则集为空：" +
-                                summarizeUrlForLog(x.rule_path) + "。",
-                         LOG_LEVEL_WARNING);
+                writeLog(LOG_LEVEL_WARNING, "获取规则集失败或规则集为空：" +
+                                summarizeUrlForLog(x.rule_path) + "。");
                 continue;
             }
 
@@ -745,10 +740,9 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
         }
         catch (std::exception &e)
         {
-            writeLog(0,
+            writeLog(LOG_LEVEL_ERROR,
                      "CLASH_SCRIPT_RENDER_FAILED detail=" +
-                         summarizeSensitiveTextForLog(e.what()),
-                     LOG_TYPE_ERROR);
+                         summarizeSensitiveTextForLog(e.what()));
             if(stats)
                 stats->add(local_stats.rules);
             return -1;

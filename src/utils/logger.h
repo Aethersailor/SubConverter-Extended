@@ -4,34 +4,63 @@
 #include <string>
 #include <typeinfo>
 
-enum
-{
-    LOG_TYPE_INFO,
-    LOG_TYPE_ERROR,
-    LOG_TYPE_RAW,
-    LOG_TYPE_WARN,
-    LOG_TYPE_TCPING,
-    LOG_TYPE_FILEDL,
-    LOG_TYPE_GEOIP,
-    LOG_TYPE_RULES,
-    LOG_TYPE_GPING,
-    LOG_TYPE_RENDER,
-    LOG_TYPE_FILEUL
+enum class LogLevel : int {
+    Fatal,
+    Error,
+    Warning,
+    Info,
+    Debug,
+    Verbose,
 };
 
-enum
-{
-    LOG_LEVEL_FATAL,
-    LOG_LEVEL_ERROR,
-    LOG_LEVEL_WARNING,
-    LOG_LEVEL_INFO,
-    LOG_LEVEL_DEBUG,
-    LOG_LEVEL_VERBOSE
-};
+inline constexpr LogLevel LOG_LEVEL_FATAL = LogLevel::Fatal;
+inline constexpr LogLevel LOG_LEVEL_ERROR = LogLevel::Error;
+inline constexpr LogLevel LOG_LEVEL_WARNING = LogLevel::Warning;
+inline constexpr LogLevel LOG_LEVEL_INFO = LogLevel::Info;
+inline constexpr LogLevel LOG_LEVEL_DEBUG = LogLevel::Debug;
+inline constexpr LogLevel LOG_LEVEL_VERBOSE = LogLevel::Verbose;
 
 std::string getTime(int type);
-bool shouldLog(int level);
-void writeLog(int type, const std::string &content, int level = LOG_LEVEL_VERBOSE);
+bool shouldLog(LogLevel level);
+void writeLog(LogLevel level, const std::string &content);
+
+// Attach a server-generated request identifier to every log emitted in the
+// current synchronous request scope. Nested scopes restore the previous value.
+class ScopedLogRequestContext {
+public:
+    explicit ScopedLogRequestContext(const std::string &request_id);
+    ~ScopedLogRequestContext();
+    ScopedLogRequestContext(const ScopedLogRequestContext &) = delete;
+    ScopedLogRequestContext &operator=(const ScopedLogRequestContext &) = delete;
+
+private:
+    std::string previous_request_id_;
+};
+
+std::string currentLogRequestId();
+
+// Keep a candidate configuration's log threshold local to the loader thread
+// until the corresponding immutable Settings snapshot is published. Other
+// request and worker threads continue using their own/published snapshot.
+class ScopedLogLevelOverride {
+public:
+    ScopedLogLevelOverride();
+    ~ScopedLogLevelOverride();
+    void set(LogLevel level);
+    ScopedLogLevelOverride(const ScopedLogLevelOverride &) = delete;
+    ScopedLogLevelOverride &operator=(const ScopedLogLevelOverride &) = delete;
+
+private:
+    bool previous_active_ = false;
+    LogLevel previous_level_ = LOG_LEVEL_INFO;
+};
+
+// Source-compatibility adapter for downstream zero-category callers.
+// Project code uses the LogLevel-first overload; no default severity exists.
+inline void writeLog(int, const std::string &content, LogLevel level) {
+    writeLog(level, content);
+}
+void writeLog(int, const std::string &) = delete;
 std::string demangle(const char* name);
 
 template <class T>

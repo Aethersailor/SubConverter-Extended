@@ -45,13 +45,17 @@ common:
   loon_rule_base: base/all_base.tpl
   sssub_rule_base: base/all_base.tpl
   singbox_rule_base: base/all_base.tpl
-  # 分别控制下载外部配置、规则集和订阅时使用的代理。NONE（不区分大小写）和空值强制直连并忽略环境代理；SYSTEM 按系统代理来源解析；显式 http/https/socks4/socks4a/socks5/socks5h URI 不会被 NO_PROXY 绕过。
-  # Proxies used when downloading external configs, rulesets, and subscriptions. NONE (case-insensitive) and an empty value force direct connections and ignore proxy environment variables. SYSTEM resolves the documented system source. Explicit http/https/socks4/socks4a/socks5/socks5h URIs are never bypassed by NO_PROXY.
+  # 分别控制下载外部配置、规则集和订阅时使用的代理。NONE（不区分大小写）和空值强制直连并忽略环境代理；SYSTEM 按系统代理来源解析；显式 http/https/socks4/socks4a/socks5/socks5h URI 不受环境 NO_PROXY 影响，但官方构建会在受信任请求和 lan 模式下直连初始回环主机。
+  # Proxies used when downloading external configs, rulesets, and subscriptions. NONE (case-insensitive) and an empty value force direct connections and ignore proxy environment variables. SYSTEM resolves the documented system source. Explicit http/https/socks4/socks4a/socks5/socks5h URIs ignore ambient NO_PROXY, while official builds directly reach an initial loopback host for trusted requests and lan mode.
   # socks5 本地解析域名，socks5h 由 SOCKS 服务端解析。cors:https://relay.example/ 是兼容的 HTTP CORS 中继，而不是网络代理。
   # socks5 resolves names locally; socks5h lets the SOCKS server resolve them. cors:https://relay.example/ is a compatible HTTP CORS relay, not a network proxy.
   proxy_config: SYSTEM
   proxy_ruleset: SYSTEM
   proxy_subscription: NONE
+  # proxy_bypass 统一控制上述显式 URI 的直连目标。默认 PRIVATE 覆盖 LOOPBACK、RFC 1918 和 IPv6 ULA；旧配置缺少此字段时也使用该默认值。LAN 额外覆盖链路本地地址、.local 和 .home.arpa；CGNAT 额外覆盖 100.64.0.0/10。也可追加 CIDR:10.200.0.0/16 或 DOMAIN:corp.example。public/strict 的公开请求忽略此旁路。
+  # proxy_bypass controls direct targets for all explicit proxy URIs above. PRIVATE is the default and includes LOOPBACK, RFC 1918, and IPv6 ULA; legacy configurations without this field use the same default. LAN additionally covers link-local addresses, .local, and .home.arpa; CGNAT adds 100.64.0.0/10. CIDR:10.200.0.0/16 and DOMAIN:corp.example add custom ranges or domain trees. Public requests under public/strict ignore this bypass.
+  proxy_bypass: PRIVATE
+  # 广泛覆盖常见内网时可改为 LAN,CGNAT。/ For broad common intranet coverage, use LAN,CGNAT.
   # 是否在节点名称后附加协议类型标签，例如 [SS]、[SSR]、[VMess]。
   # Whether to append a protocol tag such as [SS], [SSR], or [VMess] to each node remark.
   append_proxy_type: false
