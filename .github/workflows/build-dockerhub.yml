@@ -924,6 +924,7 @@ jobs:
       release_notes_sha256: ${{ steps.release_gate.outputs.release_notes_sha256 }}
       release_notes_source: ${{ steps.release_notes.outputs.release_notes_source }}
       previous_tag: ${{ steps.release_context.outputs.previous_tag }}
+      release_id: ${{ steps.release_gate.outputs.release_id }}
     if: >-
       always() &&
       !cancelled() &&
@@ -1135,30 +1136,152 @@ jobs:
           set -euo pipefail
           CONTEXT_SHA256="$(python3 -c 'import json; print(json.load(open("release-context.json", encoding="utf-8"))["context_sha256"])')"
           [[ "$CONTEXT_SHA256" =~ ^[0-9a-f]{64}$ ]]
-          created=false
-          cleanup_failed_draft() {
-            if [ "$created" = true ]; then
-              gh release delete "$VERSION" --repo "$GITHUB_REPOSITORY" --yes || true
-            fi
-          }
-          trap cleanup_failed_draft ERR
 
-          if gh api \
-            -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION" \
-            > existing-release.json 2>/dev/null; then
-            is_draft="$(python3 -c 'import json; print(str(json.load(open("existing-release.json", encoding="utf-8"))["draft"]).lower())')"
-            python3 - "$VERSION" <<'PY'
+          find_release_by_tag() {
+            local output="$1"
+            local listing
+            listing="$(mktemp "$RUNNER_TEMP/releases.XXXXXX.json")"
+            if ! gh api \
+              -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              > "$listing"; then
+              rm -f "$listing"
+              return 2
+            fi
+            python3 - "$listing" "$output" "$VERSION" <<'PY'
           import json
           import sys
 
-          version = sys.argv[1]
-          release = json.load(open("existing-release.json", encoding="utf-8"))
+          listing_path, output_path, version = sys.argv[1:]
+          releases = json.load(open(listing_path, encoding="utf-8"))
+          matches = [release for release in releases if release.get("tag_name") == version]
+          if not matches:
+              raise SystemExit(4)
+          if len(matches) != 1:
+              raise SystemExit(f"expected one Release for {version}, found {len(matches)}")
+          release = matches[0]
+          release_id = release.get("id")
+          if type(release_id) is not int or release_id <= 0:
+              raise SystemExit("Release ID is not a positive integer")
+          with open(output_path, "w", encoding="utf-8", newline="\n") as handle:
+              json.dump(release, handle, ensure_ascii=False, sort_keys=True)
+              handle.write("\n")
+          PY
+            local status=$?
+            rm -f "$listing"
+            return "$status"
+          }
+
+          wait_for_release_by_tag() {
+            local output="$1"
+            local status=1
+            for attempt in $(seq 1 6); do
+              if find_release_by_tag "$output"; then
+                return 0
+              else
+                status=$?
+              fi
+              echo "Waiting for Release $VERSION to become list-visible (attempt $attempt/6)."
+              sleep $((attempt * 2))
+            done
+            return "$status"
+          }
+
+          wait_for_release_absence() {
+            local probe
+            local status
+            probe="$(mktemp "$RUNNER_TEMP/release-probe.XXXXXX.json")"
+            for attempt in $(seq 1 6); do
+              if find_release_by_tag "$probe"; then
+                sleep $((attempt * 2))
+                continue
+              else
+                status=$?
+              fi
+              rm -f "$probe"
+              if [ "$status" -eq 4 ]; then
+                return 0
+              fi
+              return "$status"
+            done
+            rm -f "$probe"
+            return 1
+          }
+
+          validate_release_identity() {
+            local release_json="$1"
+            local expected_draft="$2"
+            python3 - "$release_json" "$VERSION" "$expected_draft" <<'PY'
+          import json
+          import sys
+
+          path, version, expected_draft = sys.argv[1:]
+          release = json.load(open(path, encoding="utf-8"))
           if release.get("author", {}).get("login") != "github-actions[bot]":
               raise SystemExit("existing Release is not owned by github-actions[bot]")
           if release.get("tag_name") != version or release.get("name") != version:
               raise SystemExit("existing Release identity does not match the formal version")
+          release_id = release.get("id")
+          if type(release_id) is not int or release_id <= 0:
+              raise SystemExit("Release ID is not a positive integer")
+          if expected_draft != "any":
+              expected = expected_draft == "true"
+              if release.get("draft") is not expected:
+                  raise SystemExit("existing Release draft state changed")
           PY
+          }
+
+          cleanup_release_id=""
+          cleanup_failed_draft() {
+            local failed_status=$?
+            trap - ERR
+            if ! [[ "$cleanup_release_id" =~ ^[1-9][0-9]*$ ]]; then
+              return "$failed_status"
+            fi
+            (
+              set +e
+              if gh api \
+                   -H 'X-GitHub-Api-Version: 2026-03-10' \
+                   "repos/$GITHUB_REPOSITORY/releases/$cleanup_release_id" \
+                   > cleanup-release.json && \
+                 validate_release_identity cleanup-release.json true && \
+                 python3 scripts/ci/release_notes.py verify-body \
+                   --release-json cleanup-release.json \
+                   --validate-only \
+                   --expected-version "$VERSION" \
+                   --expected-revision "$REVISION" \
+                   --expected-context-sha256 "$CONTEXT_SHA256"; then
+                if gh api --method DELETE \
+                  -H 'X-GitHub-Api-Version: 2026-03-10' \
+                  "repos/$GITHUB_REPOSITORY/releases/$cleanup_release_id"; then
+                  echo "Removed the verified incomplete draft Release $VERSION (ID $cleanup_release_id)."
+                else
+                  echo "::warning::Could not remove the verified incomplete draft Release $VERSION (ID $cleanup_release_id)."
+                fi
+              else
+                echo "::warning::An incomplete Release could not be proven safe to delete; leaving it for a verified retry."
+              fi
+            )
+            return "$failed_status"
+          }
+          trap cleanup_failed_draft ERR
+
+          existing_release=false
+          if find_release_by_tag existing-release.json; then
+            existing_release=true
+          else
+            lookup_status=$?
+            if [ "$lookup_status" -ne 4 ]; then
+              echo "::error::Could not determine whether Release $VERSION already exists."
+              exit "$lookup_status"
+            fi
+          fi
+
+          if [ "$existing_release" = true ]; then
+            validate_release_identity existing-release.json any
+            is_draft="$(python3 -c 'import json; print(str(json.load(open("existing-release.json", encoding="utf-8"))["draft"]).lower())')"
+            RELEASE_ID="$(python3 -c 'import json; print(json.load(open("existing-release.json", encoding="utf-8"))["id"])')"
+            [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
             if [ "$is_draft" = false ]; then
               python3 scripts/ci/release_notes.py verify-body \
                 --release-json existing-release.json \
@@ -1174,6 +1297,7 @@ jobs:
               python3 scripts/ci/release_manifest.py verify \
                 --root existing-release-assets \
                 --manifest existing-release-assets/RELEASE-MANIFEST.json
+              echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
               echo "Existing published Release $VERSION passed body and asset verification."
               trap - ERR
               exit 0
@@ -1189,22 +1313,27 @@ jobs:
               --expected-revision "$REVISION" \
               --expected-context-sha256 "$CONTEXT_SHA256"
             echo "Replacing the stale verified-tag draft for idempotent continuation."
-            gh release delete "$VERSION" --repo "$GITHUB_REPOSITORY" --yes
+            gh api --method DELETE \
+              -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID"
+            wait_for_release_absence
           fi
 
-          gh release create "$VERSION" \
+          gh release create "$VERSION" release-assets/* \
             --repo "$GITHUB_REPOSITORY" \
             --draft \
             --verify-tag \
             --title "$VERSION" \
             --notes-file release-notes.md
-          created=true
-          gh release upload "$VERSION" release-assets/* \
-            --repo "$GITHUB_REPOSITORY"
+          wait_for_release_by_tag created-release-list-entry.json
+          RELEASE_ID="$(python3 -c 'import json; print(json.load(open("created-release-list-entry.json", encoding="utf-8"))["id"])')"
+          [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
           gh api \
             -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION" \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
             > created-release.json
+          validate_release_identity created-release.json true
+          cleanup_release_id="$RELEASE_ID"
           python3 scripts/ci/release_notes.py verify-body \
             --release-json created-release.json \
             --expected release-notes.md \
@@ -1212,6 +1341,7 @@ jobs:
             --expected-revision "$REVISION" \
             --expected-context-sha256 "$CONTEXT_SHA256" \
             --github-output "$GITHUB_OUTPUT"
+          echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
           trap - ERR
 
   finalize-release:
@@ -1247,25 +1377,38 @@ jobs:
           REVISION: ${{ needs.prepare.outputs.sha }}
           BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
           RELEASE_NOTES_SHA256: ${{ needs.create-release.outputs.release_notes_sha256 }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$REVISION"
           test "$(git rev-list -n 1 "$VERSION")" = "$REVISION"
           test "$(git ls-remote origin "refs/tags/$VERSION^{}" | awk '{print $1}')" = "$REVISION"
-          is_draft="$(gh release view "$VERSION" \
-            --repo "$GITHUB_REPOSITORY" \
-            --json isDraft \
-            --jq '.isDraft')"
+          [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
+          gh api \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            > verified-release.json
+          is_draft="$(python3 - "$VERSION" "$RELEASE_ID" <<'PY'
+          import json
+          import sys
+
+          version, expected_id = sys.argv[1:]
+          release = json.load(open("verified-release.json", encoding="utf-8"))
+          if release.get("id") != int(expected_id):
+              raise SystemExit("Release ID changed")
+          if release.get("author", {}).get("login") != "github-actions[bot]":
+              raise SystemExit("Release owner changed")
+          if release.get("tag_name") != version or release.get("name") != version:
+              raise SystemExit("Release version identity changed")
+          print(str(release.get("draft")).lower())
+          PY
+          )"
           if [ "$is_draft" != "true" ] && [ "$is_draft" != "false" ]; then
             echo "::error::Release $VERSION has an invalid draft state."
             exit 1
           fi
           echo "was_draft=$is_draft" >> "$GITHUB_OUTPUT"
 
-          gh api \
-            -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION" \
-            > verified-release.json
           python3 scripts/ci/release_notes.py verify-body \
             --release-json verified-release.json \
             --expected-sha256 "$RELEASE_NOTES_SHA256"
@@ -1437,10 +1580,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
           OLD_DOCKERHUB: ${{ steps.version_images.outputs.dockerhub_latest }}
           OLD_GHCR: ${{ steps.version_images.outputs.ghcr_latest }}
         run: |
           set -euo pipefail
+          [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
           inspect_digest() {
             docker buildx imagetools inspect "$1" |
               awk '$1 == "Digest:" && digest == "" {digest = $2} END {if (digest == "") exit 1; print digest}'
@@ -1480,10 +1625,25 @@ jobs:
             local state
             local saw_draft=false
             for attempt in $(seq 1 6); do
-              if state="$(gh release view "$VERSION" \
-                --repo "$GITHUB_REPOSITORY" \
-                --json isDraft \
-                --jq '.isDraft')"; then
+              if gh api \
+                -H 'X-GitHub-Api-Version: 2026-03-10' \
+                "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+                > publication-readback.json 2>/dev/null && \
+                state="$(python3 - "$VERSION" "$RELEASE_ID" <<'PY'
+          import json
+          import sys
+
+          version, expected_id = sys.argv[1:]
+          release = json.load(open("publication-readback.json", encoding="utf-8"))
+          if release.get("id") != int(expected_id):
+              raise SystemExit("Release ID changed during publication")
+          if release.get("author", {}).get("login") != "github-actions[bot]":
+              raise SystemExit("Release owner changed during publication")
+          if release.get("tag_name") != version or release.get("name") != version:
+              raise SystemExit("Release version identity changed during publication")
+          print(str(release.get("draft")).lower())
+          PY
+                )"; then
                 if [ "$state" = "false" ]; then
                   printf '%s\n' false
                   return 0
@@ -1501,7 +1661,12 @@ jobs:
             return 1
           }
 
-          if ! gh release edit "$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false; then
+          if ! gh api --method PATCH \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -F draft=false \
+            -F prerelease=false \
+            > publication-response.json; then
             echo "::warning::The publication response was inconclusive; checking the server state."
           fi
           if ! published_state="$(read_release_state)"; then

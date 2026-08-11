@@ -1,0 +1,848 @@
+name: Recover v1.4.2 GitHub Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+  packages: write
+
+concurrency:
+  group: formal-release-pipeline
+  cancel-in-progress: false
+
+env:
+  VERSION: v1.4.2
+  REVISION: 46d5cf8e89e586c3af27a3d17b3e485dc88ce804
+  PREVIOUS_TAG: v1.4.1
+  SOURCE_RUN_ID: '31463809493'
+  VERSION_IMAGE_DIGEST: sha256:b1ce0e6e2bcd4f59a68c373580f11d2cd3971084e222facc3247a436ace3ca33
+  PREVIOUS_IMAGE_DIGEST: sha256:59f6ea8ce4b399070867a536b5a2daa7555268e23ff01972a20833bff3baaaee
+
+jobs:
+  recover:
+    name: Recover and verify v1.4.2
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout the immutable v1.4.2 source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: refs/tags/v1.4.2
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify recovery provenance and immutable inputs
+        id: provenance
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "Aethersailor/SubConverter-Extended"
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$VERSION" = "v1.4.2"
+          test "$REVISION" = "46d5cf8e89e586c3af27a3d17b3e485dc88ce804"
+          test "$SOURCE_RUN_ID" = "31463809493"
+
+          git fetch --force --tags origin
+          test "$(git rev-parse HEAD)" = "$REVISION"
+          test "$(git cat-file -t "refs/tags/$VERSION")" = "tag"
+          test "$(git rev-list -n 1 "refs/tags/$VERSION")" = "$REVISION"
+          test "$(git ls-remote origin "refs/tags/$VERSION^{}" | awk '{print $1}')" = "$REVISION"
+          git merge-base --is-ancestor "$PREVIOUS_TAG" "$REVISION"
+
+          gh api \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" \
+            > source-run.json
+          gh api \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100" \
+            > source-artifacts.json
+          gh api \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/jobs?per_page=100" \
+            > source-jobs.json
+          gh api \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION" \
+            > remote-tag-ref.json
+
+          python3 - <<'PY'
+          import collections
+          import json
+          import os
+
+          version = os.environ["VERSION"]
+          revision = os.environ["REVISION"]
+          run_id = int(os.environ["SOURCE_RUN_ID"])
+          run = json.load(open("source-run.json", encoding="utf-8"))
+          expected_run = {
+              "id": run_id,
+              "head_sha": revision,
+              "head_branch": version,
+              "run_attempt": 1,
+              "event": "push",
+              "status": "completed",
+              "conclusion": "failure",
+          }
+          for key, expected in expected_run.items():
+              if run.get(key) != expected:
+                  raise SystemExit(
+                      f"source run {key} changed: expected {expected!r}, got {run.get(key)!r}"
+                  )
+
+          required_successful_jobs = {
+              "Tag release / 🧭 Verify Current Source Head",
+              "Tag release / 🔧 Prepare Metadata",
+              "Tag release / 🐳 Docker Build (amd64)",
+              "Tag release / 🐳 Docker Build (arm64)",
+              "Tag release / 🐳 Docker Build (armv7)",
+              "Tag release / 🪟 Windows Build (amd64)",
+              "Tag release / 🔗 Publish Version Docker Images",
+          }
+          jobs = json.load(open("source-jobs.json", encoding="utf-8"))["jobs"]
+          job_counts = collections.Counter(job.get("name") for job in jobs)
+          for name in required_successful_jobs:
+              if job_counts[name] != 1:
+                  raise SystemExit(f"source run job identity changed for {name!r}")
+              job = next(item for item in jobs if item.get("name") == name)
+              if job.get("conclusion") != "success":
+                  raise SystemExit(f"required source run job did not succeed: {name}")
+
+          expected_artifacts = {
+              "linux-amd64",
+              "linux-arm64",
+              "linux-armv7",
+              "windows-amd64",
+              "openwrt-amd64",
+              "openwrt-arm64",
+              "openwrt-armv7",
+          }
+          artifacts = json.load(open("source-artifacts.json", encoding="utf-8"))["artifacts"]
+          selected = [
+              artifact
+              for artifact in artifacts
+              if artifact.get("name", "").startswith(("linux-", "windows-", "openwrt-"))
+          ]
+          counts = collections.Counter(artifact["name"] for artifact in selected)
+          if set(counts) != expected_artifacts or any(count != 1 for count in counts.values()):
+              raise SystemExit(
+                  f"source run release artifacts changed: expected {sorted(expected_artifacts)}, "
+                  f"got {sorted(counts.elements())}"
+              )
+          if any(artifact.get("expired") is not False for artifact in selected):
+              raise SystemExit("one or more source run release artifacts have expired")
+          for artifact in selected:
+              workflow_run = artifact.get("workflow_run", {})
+              if (
+                  workflow_run.get("id") != run_id
+                  or workflow_run.get("head_sha") != revision
+                  or workflow_run.get("head_branch") != version
+              ):
+                  raise SystemExit(
+                      f"artifact {artifact['name']} no longer points to the expected source run"
+                  )
+
+          tag_ref = json.load(open("remote-tag-ref.json", encoding="utf-8"))
+          if tag_ref.get("object", {}).get("type") != "tag":
+              raise SystemExit("remote v1.4.2 is no longer an annotated tag")
+          PY
+
+          python3 scripts/ci/build_metadata.py \
+            --ref "refs/tags/$VERSION" \
+            --event-name push \
+            --sha "$REVISION" \
+            --commit-date "$(git show -s --format=%cI "$REVISION")" \
+            --github-output "$GITHUB_OUTPUT"
+
+          latest_release="$(gh api \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/latest" \
+            --jq '.tag_name')"
+          if [ "$latest_release" != "$PREVIOUS_TAG" ] && [ "$latest_release" != "$VERSION" ]; then
+            echo "::error::Latest published Release is $latest_release, not $PREVIOUS_TAG or $VERSION."
+            exit 1
+          fi
+
+      - name: Download Linux artifacts from the failed source run
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          repository: Aethersailor/SubConverter-Extended
+          run-id: 31463809493
+          github-token: ${{ github.token }}
+          pattern: linux-*
+          path: artifacts
+
+      - name: Download OpenWrt artifacts from the failed source run
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          repository: Aethersailor/SubConverter-Extended
+          run-id: 31463809493
+          github-token: ${{ github.token }}
+          pattern: openwrt-*
+          path: artifacts
+
+      - name: Download the Windows artifact from the failed source run
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          repository: Aethersailor/SubConverter-Extended
+          run-id: 31463809493
+          github-token: ${{ github.token }}
+          name: windows-amd64
+          path: artifacts/windows-amd64
+
+      - name: Reconstruct and verify the 19 Release assets
+        shell: bash
+        env:
+          BUILD_DATE: ${{ steps.provenance.outputs.build_date }}
+        run: |
+          set -euo pipefail
+          mkdir release-assets
+
+          duplicate_names="$(find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.apk' \) \
+            -printf '%f\n' | sort | uniq -d)"
+          if [ -n "$duplicate_names" ]; then
+            echo "::error::Duplicate package names in source run artifacts: $duplicate_names"
+            exit 1
+          fi
+
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.apk' \) \
+            -print | sort | while IFS= read -r file; do
+              sha256sum "$file" | sed 's#  artifacts/[^/]*/#  #'
+            done > SHA256SUMS
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.apk' \) \
+            -exec cp '{}' release-assets/ \;
+          cp SHA256SUMS release-assets/SHA256SUMS
+          (cd release-assets && sha256sum -c SHA256SUMS)
+
+          python3 scripts/ci/release_manifest.py build \
+            --root release-assets \
+            --output release-assets/RELEASE-MANIFEST.json \
+            --version "$VERSION" \
+            --revision "$REVISION" \
+            --build-date "$BUILD_DATE" \
+            --dockerhub-digest "$VERSION_IMAGE_DIGEST" \
+            --ghcr-digest "$VERSION_IMAGE_DIGEST"
+          python3 scripts/ci/release_manifest.py verify \
+            --root release-assets \
+            --manifest release-assets/RELEASE-MANIFEST.json
+
+          asset_count="$(find release-assets -maxdepth 1 -type f | wc -l)"
+          test "$asset_count" -eq 19
+
+      - name: Reconstruct deterministic Chinese Release notes
+        id: notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor "$PREVIOUS_TAG" "$VERSION"
+          python3 scripts/ci/release_notes.py context \
+            --repository "$GITHUB_REPOSITORY" \
+            --previous-tag "$PREVIOUS_TAG" \
+            --current-tag "$VERSION" \
+            --current-commit "$REVISION" \
+            --output release-context.json
+          rm -f recovery-release-notes.ai.json recovery-release-notes.status.json
+          python3 scripts/ci/release_notes.py assemble \
+            --context release-context.json \
+            --candidate recovery-release-notes.ai.json \
+            --status recovery-release-notes.status.json \
+            --manifest release-assets/RELEASE-MANIFEST.json \
+            --output release-notes.md \
+            --github-output "$GITHUB_OUTPUT" \
+            --github-summary "$GITHUB_STEP_SUMMARY"
+          context_sha256="$(python3 -c 'import json; print(json.load(open("release-context.json", encoding="utf-8"))["context_sha256"])')"
+          [[ "$context_sha256" =~ ^[0-9a-f]{64}$ ]]
+          echo "context_sha256=$context_sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Verify immutable v1.4.2 images and current latest state
+        shell: bash
+        env:
+          BUILD_DATE: ${{ steps.provenance.outputs.build_date }}
+        run: |
+          set -euo pipefail
+          inspect_digest() {
+            docker buildx imagetools inspect "$1" |
+              awk '$1 == "Digest:" && digest == "" {digest = $2} END {if (digest == "") exit 1; print digest}'
+          }
+          for image in \
+            "aethersailor/subconverter-extended:$VERSION" \
+            "ghcr.io/aethersailor/subconverter-extended:$VERSION"; do
+            test "$(inspect_digest "$image")" = "$VERSION_IMAGE_DIGEST"
+            docker buildx imagetools inspect "$image" > image-manifest.txt
+            for platform in linux/amd64 linux/arm64 linux/arm/v7; do
+              grep -Eq "Platform:[[:space:]]+${platform}$" image-manifest.txt
+              docker pull --platform "$platform" "$image"
+              test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$image")" = "$VERSION"
+              test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")" = "$REVISION"
+              test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.created" }}' "$image")" = "$BUILD_DATE"
+            done
+          done
+
+          for image in \
+            aethersailor/subconverter-extended:latest \
+            ghcr.io/aethersailor/subconverter-extended:latest; do
+            digest="$(inspect_digest "$image")"
+            if [ "$digest" != "$PREVIOUS_IMAGE_DIGEST" ] && [ "$digest" != "$VERSION_IMAGE_DIGEST" ]; then
+              echo "::error::$image moved to unexpected digest $digest."
+              exit 1
+            fi
+          done
+
+      - name: Create a clean draft and upload assets by Release ID
+        id: release
+        timeout-minutes: 20
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTEXT_SHA256: ${{ steps.notes.outputs.context_sha256 }}
+        run: |
+          set -euo pipefail
+
+          list_releases() {
+            gh api --paginate --slurp \
+              -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$GITHUB_REPOSITORY/releases?per_page=100"
+          }
+
+          list_releases > all-releases.json
+          release_id="$(python3 - <<'PY'
+          import json
+          import os
+
+          raw = json.load(open("all-releases.json", encoding="utf-8"))
+          releases = [item for page in raw for item in page] if raw and isinstance(raw[0], list) else raw
+          matches = [release for release in releases if release.get("tag_name") == os.environ["VERSION"]]
+          if len(matches) > 1:
+              raise SystemExit("multiple Releases use the v1.4.2 tag")
+          print(matches[0]["id"] if matches else "")
+          PY
+          )"
+
+          if [ -n "$release_id" ]; then
+            gh api \
+              -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+              > existing-release.json
+            python3 - <<'PY'
+          import json
+          import os
+
+          release = json.load(open("existing-release.json", encoding="utf-8"))
+          if release.get("author", {}).get("login") != "github-actions[bot]":
+              raise SystemExit("existing Release is not owned by github-actions[bot]")
+          if release.get("tag_name") != os.environ["VERSION"] or release.get("name") != os.environ["VERSION"]:
+              raise SystemExit("existing Release identity does not match v1.4.2")
+          if release.get("prerelease") is not False or type(release.get("draft")) is not bool:
+              raise SystemExit("existing Release has an invalid publication state")
+          PY
+            python3 scripts/ci/release_notes.py verify-body \
+              --release-json existing-release.json \
+              --validate-only \
+              --expected-version "$VERSION" \
+              --expected-revision "$REVISION" \
+              --expected-context-sha256 "$CONTEXT_SHA256"
+            existing_draft="$(python3 -c 'import json; print(str(json.load(open("existing-release.json", encoding="utf-8"))["draft"]).lower())')"
+            if [ "$existing_draft" = false ]; then
+              echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+              echo "state=published" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo "Deleting the verified bot-owned recovery draft before deterministic reconstruction."
+            gh api --method DELETE \
+              -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$GITHUB_REPOSITORY/releases/$release_id"
+            deleted=false
+            for attempt in $(seq 1 6); do
+              status="$(curl --silent --show-error \
+                -o deleted-release-readback.json \
+                -w '%{http_code}' \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H 'Accept: application/vnd.github+json' \
+                -H 'X-GitHub-Api-Version: 2026-03-10' \
+                "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/$release_id")"
+              if [ "$status" = 404 ]; then
+                deleted=true
+                break
+              fi
+              if [ "$status" != 200 ]; then
+                cat deleted-release-readback.json >&2
+                echo "::error::Draft deletion readback returned HTTP $status."
+                exit 1
+              fi
+              sleep 5
+            done
+            test "$deleted" = true
+          fi
+
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          payload = {
+              "tag_name": os.environ["VERSION"],
+              "name": os.environ["VERSION"],
+              "body": Path("release-notes.md").read_text(encoding="utf-8"),
+              "draft": True,
+              "prerelease": False,
+              "generate_release_notes": False,
+          }
+          Path("create-release.json").write_text(
+              json.dumps(payload, ensure_ascii=False), encoding="utf-8", newline="\n"
+          )
+          PY
+
+          if ! gh api --method POST \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases" \
+            --input create-release.json \
+            > created-release.json; then
+            echo "::warning::Release creation response was inconclusive; resolving the exact draft from the list endpoint."
+            : > created-release.json
+          fi
+
+          release_id="$(python3 - <<'PY'
+          import json
+
+          try:
+              release = json.load(open("created-release.json", encoding="utf-8"))
+              value = release.get("id", "")
+          except (json.JSONDecodeError, OSError):
+              value = ""
+          print(value if isinstance(value, int) else "")
+          PY
+          )"
+          if [ -z "$release_id" ]; then
+            for attempt in $(seq 1 6); do
+              list_releases > creation-readback.json
+              if release_id="$(python3 - <<'PY'
+          import json
+          import os
+
+          raw = json.load(open("creation-readback.json", encoding="utf-8"))
+          releases = [item for page in raw for item in page] if raw and isinstance(raw[0], list) else raw
+          matches = [
+              release for release in releases
+              if release.get("tag_name") == os.environ["VERSION"]
+              and release.get("name") == os.environ["VERSION"]
+              and release.get("author", {}).get("login") == "github-actions[bot]"
+              and release.get("draft") is True
+          ]
+          if len(matches) > 1:
+              raise SystemExit("multiple matching recovery drafts were found")
+          print(matches[0]["id"] if matches else "")
+          PY
+              )" && [ -n "$release_id" ]; then
+                break
+              fi
+              sleep 5
+            done
+          fi
+          if ! [[ "$release_id" =~ ^[0-9]+$ ]]; then
+            echo "::error::Could not resolve the newly created draft by numeric Release ID."
+            exit 1
+          fi
+
+          created=true
+          cleanup_created_draft() {
+            local failed_status=$?
+            trap - ERR
+            if [ "$created" != true ]; then
+              return "$failed_status"
+            fi
+            (
+              set +e
+              if ! gh api \
+                -H 'X-GitHub-Api-Version: 2026-03-10' \
+                "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+                > cleanup-release.json 2>/dev/null; then
+                exit 0
+              fi
+              if ! python3 - "$release_id" <<'PY'
+          import json
+          import os
+          import sys
+
+          release = json.load(open("cleanup-release.json", encoding="utf-8"))
+          expected_id = int(sys.argv[1])
+          valid = (
+              release.get("id") == expected_id
+              and release.get("draft") is True
+              and release.get("author", {}).get("login") == "github-actions[bot]"
+              and release.get("tag_name") == os.environ["VERSION"]
+              and release.get("name") == os.environ["VERSION"]
+          )
+          raise SystemExit(0 if valid else 1)
+          PY
+              then
+                exit 0
+              fi
+              if ! python3 scripts/ci/release_notes.py verify-body \
+                --release-json cleanup-release.json \
+                --expected release-notes.md \
+                --expected-version "$VERSION" \
+                --expected-revision "$REVISION" \
+                --expected-context-sha256 "$CONTEXT_SHA256"; then
+                exit 0
+              fi
+              gh api --method DELETE \
+                -H 'X-GitHub-Api-Version: 2026-03-10' \
+                "repos/$GITHUB_REPOSITORY/releases/$release_id" >/dev/null || true
+            )
+            return "$failed_status"
+          }
+          trap cleanup_created_draft ERR
+
+          gh api \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+            > created-release-readback.json
+          python3 scripts/ci/release_notes.py verify-body \
+            --release-json created-release-readback.json \
+            --expected release-notes.md \
+            --expected-version "$VERSION" \
+            --expected-revision "$REVISION" \
+            --expected-context-sha256 "$CONTEXT_SHA256"
+
+          while IFS= read -r asset; do
+            name="${asset##*/}"
+            [[ "$name" =~ ^[A-Za-z0-9._+-]+$ ]]
+            response="upload-${name}.json"
+            curl --fail-with-body --silent --show-error \
+              --request POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2026-03-10' \
+              -H 'Content-Type: application/octet-stream' \
+              --data-binary "@$asset" \
+              "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$release_id/assets?name=$name" \
+              > "$response"
+            python3 - "$name" "$asset" "$response" <<'PY'
+          import json
+          import os
+          import sys
+
+          name, path, response_path = sys.argv[1:]
+          response = json.load(open(response_path, encoding="utf-8"))
+          if response.get("name") != name or response.get("state") != "uploaded":
+              raise SystemExit(f"asset upload response is invalid for {name}")
+          if response.get("size") != os.path.getsize(path):
+              raise SystemExit(f"asset upload size changed for {name}")
+          PY
+          done < <(find release-assets -maxdepth 1 -type f -print | sort)
+
+          trap - ERR
+          created=false
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+          echo "state=draft" >> "$GITHUB_OUTPUT"
+
+      - name: Download and verify the remote Release by numeric ID
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
+          RELEASE_STATE: ${{ steps.release.outputs.state }}
+          CONTEXT_SHA256: ${{ steps.notes.outputs.context_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_ID" =~ ^[0-9]+$ ]]
+          gh api \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            > verified-release.json
+          python3 - <<'PY'
+          import json
+          import os
+
+          release = json.load(open("verified-release.json", encoding="utf-8"))
+          expected_draft = os.environ["RELEASE_STATE"] == "draft"
+          valid = (
+              release.get("id") == int(os.environ["RELEASE_ID"])
+              and release.get("tag_name") == os.environ["VERSION"]
+              and release.get("name") == os.environ["VERSION"]
+              and release.get("author", {}).get("login") == "github-actions[bot]"
+              and release.get("draft") is expected_draft
+              and release.get("prerelease") is False
+          )
+          if not valid:
+              raise SystemExit("remote Release identity or state changed")
+          PY
+          if [ "$RELEASE_STATE" = draft ]; then
+            python3 scripts/ci/release_notes.py verify-body \
+              --release-json verified-release.json \
+              --expected release-notes.md \
+              --expected-version "$VERSION" \
+              --expected-revision "$REVISION" \
+              --expected-context-sha256 "$CONTEXT_SHA256"
+          else
+            python3 scripts/ci/release_notes.py verify-body \
+              --release-json verified-release.json \
+              --validate-only \
+              --expected-version "$VERSION" \
+              --expected-revision "$REVISION" \
+              --expected-context-sha256 "$CONTEXT_SHA256"
+          fi
+
+          gh api \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?per_page=100" \
+            > remote-assets.json
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          assets = json.load(open("remote-assets.json", encoding="utf-8"))
+          expected = {path.name: path.stat().st_size for path in Path("release-assets").iterdir() if path.is_file()}
+          if len(assets) != len(expected) or len({asset.get("name") for asset in assets}) != len(assets):
+              raise SystemExit("remote Release asset count or uniqueness changed")
+          lines = []
+          for asset in assets:
+              name = asset.get("name")
+              if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9._+-]+", name):
+                  raise SystemExit("remote Release contains an unsafe asset name")
+              if name not in expected or asset.get("size") != expected[name] or asset.get("state") != "uploaded":
+                  raise SystemExit(f"remote Release asset metadata changed for {name}")
+              lines.append(f"{asset['id']}\t{name}")
+          if {asset["name"] for asset in assets} != set(expected):
+              raise SystemExit("remote Release asset names differ from the reconstructed set")
+          Path("remote-assets.tsv").write_text("\n".join(sorted(lines)) + "\n", encoding="utf-8", newline="\n")
+          PY
+
+          mkdir verified-assets
+          while IFS=$'\t' read -r asset_id name; do
+            [[ "$asset_id" =~ ^[0-9]+$ ]]
+            [[ "$name" =~ ^[A-Za-z0-9._+-]+$ ]]
+            gh api \
+              -H 'Accept: application/octet-stream' \
+              -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
+              > "verified-assets/$name.tmp"
+            mv "verified-assets/$name.tmp" "verified-assets/$name"
+            cmp "release-assets/$name" "verified-assets/$name"
+          done < remote-assets.tsv
+          test "$(find verified-assets -maxdepth 1 -type f | wc -l)" -eq 19
+          python3 scripts/ci/release_manifest.py verify \
+            --root verified-assets \
+            --manifest verified-assets/RELEASE-MANIFEST.json
+
+      - name: Refuse stale recovery immediately before publication
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_STATE: ${{ steps.release.outputs.state }}
+        run: |
+          set -euo pipefail
+          latest_release="$(gh api \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/latest" \
+            --jq '.tag_name')"
+          if [ "$RELEASE_STATE" = draft ]; then
+            test "$latest_release" = "$PREVIOUS_TAG"
+          else
+            test "$latest_release" = "$VERSION"
+          fi
+          git merge-base --is-ancestor "$PREVIOUS_TAG" "$VERSION"
+
+      - name: Advance both latest pointers to the verified v1.4.2 digest
+        shell: bash
+        env:
+          RELEASE_STATE: ${{ steps.release.outputs.state }}
+        run: |
+          set -euo pipefail
+          inspect_digest() {
+            docker buildx imagetools inspect "$1" |
+              awk '$1 == "Digest:" && digest == "" {digest = $2} END {if (digest == "") exit 1; print digest}'
+          }
+          rollback_digest="$PREVIOUS_IMAGE_DIGEST"
+          if [ "$RELEASE_STATE" = published ]; then
+            rollback_digest="$VERSION_IMAGE_DIGEST"
+          fi
+          rollback_latest() {
+            local failed=false
+            for image in \
+              aethersailor/subconverter-extended \
+              ghcr.io/aethersailor/subconverter-extended; do
+              if ! docker buildx imagetools create -t "$image:latest" "$image@$rollback_digest"; then
+                failed=true
+              fi
+            done
+            if [ "$(inspect_digest aethersailor/subconverter-extended:latest 2>/dev/null || true)" != "$rollback_digest" ] || \
+               [ "$(inspect_digest ghcr.io/aethersailor/subconverter-extended:latest 2>/dev/null || true)" != "$rollback_digest" ]; then
+              failed=true
+            fi
+            [ "$failed" = false ]
+          }
+          fail_promotion() {
+            local message="$1"
+            if ! rollback_latest; then
+              echo "::error::Could not restore both latest pointers to $rollback_digest."
+            fi
+            echo "::error::$message"
+            exit 1
+          }
+
+          for image in \
+            aethersailor/subconverter-extended:latest \
+            ghcr.io/aethersailor/subconverter-extended:latest; do
+            current="$(inspect_digest "$image")"
+            if [ "$current" != "$PREVIOUS_IMAGE_DIGEST" ] && [ "$current" != "$VERSION_IMAGE_DIGEST" ]; then
+              echo "::error::$image changed immediately before promotion; refusing to overwrite $current."
+              exit 1
+            fi
+          done
+          if ! docker buildx imagetools create \
+            -t aethersailor/subconverter-extended:latest \
+            "aethersailor/subconverter-extended@$VERSION_IMAGE_DIGEST"; then
+            fail_promotion "Docker Hub latest promotion failed."
+          fi
+          if ! docker buildx imagetools create \
+            -t ghcr.io/aethersailor/subconverter-extended:latest \
+            "ghcr.io/aethersailor/subconverter-extended@$VERSION_IMAGE_DIGEST"; then
+            fail_promotion "GHCR latest promotion failed."
+          fi
+          if [ "$(inspect_digest aethersailor/subconverter-extended:latest)" != "$VERSION_IMAGE_DIGEST" ] || \
+             [ "$(inspect_digest ghcr.io/aethersailor/subconverter-extended:latest)" != "$VERSION_IMAGE_DIGEST" ]; then
+            fail_promotion "latest digest readback failed."
+          fi
+
+      - name: Publish the verified draft by numeric Release ID
+        if: steps.release.outputs.state == 'draft'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          inspect_digest() {
+            docker buildx imagetools inspect "$1" |
+              awk '$1 == "Digest:" && digest == "" {digest = $2} END {if (digest == "") exit 1; print digest}'
+          }
+          rollback_latest() {
+            local failed=false
+            for image in \
+              aethersailor/subconverter-extended \
+              ghcr.io/aethersailor/subconverter-extended; do
+              if ! docker buildx imagetools create -t "$image:latest" "$image@$PREVIOUS_IMAGE_DIGEST"; then
+                failed=true
+              fi
+            done
+            if [ "$(inspect_digest aethersailor/subconverter-extended:latest 2>/dev/null || true)" != "$PREVIOUS_IMAGE_DIGEST" ] || \
+               [ "$(inspect_digest ghcr.io/aethersailor/subconverter-extended:latest 2>/dev/null || true)" != "$PREVIOUS_IMAGE_DIGEST" ]; then
+              failed=true
+            fi
+            [ "$failed" = false ]
+          }
+          fail_unpublished() {
+            local message="$1"
+            if ! rollback_latest; then
+              echo "::error::Could not restore both latest pointers after an explicit publication failure."
+            fi
+            echo "::error::$message"
+            exit 1
+          }
+
+          printf '%s\n' '{"draft":false,"prerelease":false}' > publish-release.json
+          if ! gh api --method PATCH \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            --input publish-release.json \
+            > publish-response.json; then
+            echo "::warning::Publication response was inconclusive; checking numeric Release state."
+          fi
+
+          published_state=""
+          for attempt in $(seq 1 6); do
+            if gh api \
+              -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+              > publication-readback.json 2>/dev/null; then
+              published_state="$(python3 -c 'import json; print(str(json.load(open("publication-readback.json", encoding="utf-8"))["draft"]).lower())')"
+              if [ "$published_state" = false ]; then
+                break
+              fi
+            fi
+            sleep 5
+          done
+          if [ "$published_state" = true ]; then
+            fail_unpublished "GitHub Release remained a draft after publication."
+          fi
+          if [ "$published_state" != false ]; then
+            echo "::error::Publication state is unknown; keeping verified latest pointers for a safe retry."
+            exit 1
+          fi
+
+      - name: Verify the published Release and final registry state
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
+          CONTEXT_SHA256: ${{ steps.notes.outputs.context_sha256 }}
+        run: |
+          set -euo pipefail
+          published=false
+          for attempt in $(seq 1 6); do
+            if gh api \
+              -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION" \
+              > final-release.json 2>/dev/null; then
+              actual_id="$(python3 -c 'import json; print(json.load(open("final-release.json", encoding="utf-8"))["id"])')"
+              if [ "$actual_id" = "$RELEASE_ID" ]; then
+                published=true
+                break
+              fi
+              echo "::error::Published tag endpoint resolved a different Release ID."
+              exit 1
+            fi
+            sleep 5
+          done
+          test "$published" = true
+          python3 scripts/ci/release_notes.py verify-body \
+            --release-json final-release.json \
+            --validate-only \
+            --expected-version "$VERSION" \
+            --expected-revision "$REVISION" \
+            --expected-context-sha256 "$CONTEXT_SHA256"
+          test "$(python3 -c 'import json; print(str(json.load(open("final-release.json", encoding="utf-8"))["draft"]).lower())')" = false
+          test "$(gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.id')" = "$RELEASE_ID"
+
+          inspect_digest() {
+            docker buildx imagetools inspect "$1" |
+              awk '$1 == "Digest:" && digest == "" {digest = $2} END {if (digest == "") exit 1; print digest}'
+          }
+          test "$(inspect_digest aethersailor/subconverter-extended:latest)" = "$VERSION_IMAGE_DIGEST"
+          test "$(inspect_digest ghcr.io/aethersailor/subconverter-extended:latest)" = "$VERSION_IMAGE_DIGEST"
+
+          {
+            echo '### v1.4.2 recovery completed'
+            echo
+            echo "- Source run: \`$SOURCE_RUN_ID\`"
+            echo "- Source revision: \`$REVISION\`"
+            echo "- Release ID: \`$RELEASE_ID\`"
+            echo '- Assets: `19` reconstructed and byte-for-byte read back'
+            echo "- Docker Hub / GHCR digest: \`$VERSION_IMAGE_DIGEST\`"
+            echo '- Release notes: deterministic Chinese fallback with validated provenance'
+          } >> "$GITHUB_STEP_SUMMARY"
