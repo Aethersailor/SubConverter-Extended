@@ -37,6 +37,7 @@ struct parse_settings
     std::string *sub_info = nullptr;
     bool authorized = false;
     NodeParserMode parser_mode = NodeParserMode::LegacyOnly;
+    bool force_direct_link = false;
     NodeParserStats *parser_stats = nullptr;
     FetchContext fetch_context = FetchContext::TrustedConfig;
     string_icase_map *request_header = nullptr;

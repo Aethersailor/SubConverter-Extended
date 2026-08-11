@@ -132,6 +132,8 @@ void explodeHysteria2(std::string hysteria2, Proxy &node);
 
 void explodeAnyTLS(std::string anytls, Proxy &node);
 
+bool isLegacyHttpProxyUri(const std::string &link);
+
 /// Parse a link
 void explode(const std::string &link, Proxy &node);
 

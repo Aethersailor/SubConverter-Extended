@@ -163,6 +163,7 @@ GIST_REMOTE_FAILURE_BODY = (
 class FixtureHandler(BaseHTTPRequestHandler):
     gist_request_count = 0
     provider_never_fetch_count = 0
+    quanx_remote_fetch_count = 0
     external_valid_count = 0
     get_request_count = 0
     counter_lock = threading.Lock()
@@ -180,6 +181,10 @@ class FixtureHandler(BaseHTTPRequestHandler):
             content_type = "text/plain; charset=utf-8"
         elif request_path == "/provider-must-not-fetch.txt":
             type(self).provider_never_fetch_count += 1
+            body = ENCODED_SUBSCRIPTION.encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/quanx-remote.txt":
+            type(self).quanx_remote_fetch_count += 1
             body = ENCODED_SUBSCRIPTION.encode()
             content_type = "text/plain; charset=utf-8"
         elif request_path == "/mihomo-raw-subscription.txt":
@@ -456,6 +461,7 @@ def authenticated_proxy_server(username: str, password: str):
 def fixture_server():
     FixtureHandler.gist_request_count = 0
     FixtureHandler.provider_never_fetch_count = 0
+    FixtureHandler.quanx_remote_fetch_count = 0
     FixtureHandler.external_valid_count = 0
     FixtureHandler.get_request_count = 0
     FixtureHandler.slow_subscription_started.clear()
@@ -2385,6 +2391,442 @@ def provider_no_fetch_vary_and_route_log_baseline(
         raise AssertionError("unrecognized auto-target event is missing")
 
 
+def quanx_server_remote_baseline(binary: Path, fixture_base: str) -> None:
+    def data_url(content: str) -> str:
+        encoded = base64.urlsafe_b64encode(content.encode()).decode()
+        return "data:text/plain;base64," + encoded
+
+    def section_lines(output: str, name: str) -> list[str]:
+        marker = f"[{name}]"
+        lines = output.splitlines()
+        try:
+            start = lines.index(marker) + 1
+        except ValueError as error:
+            raise AssertionError(f"missing [{name}] section\n{output}") from error
+        result: list[str] = []
+        for line in lines[start:]:
+            if line.startswith("[") and line.endswith("]"):
+                break
+            if line.strip():
+                result.append(line.strip())
+        return result
+
+    group_config = data_url(
+        "enable_rule_generator=false\n"
+        "custom_proxy_group=Remote`select`.*\n"
+    )
+    native_config = (
+        ("udp_flag = false", "# udp_flag intentionally left unset"),
+        ("tcp_fast_open_flag = true", "# tcp_fast_open_flag intentionally left unset"),
+        ("skip_cert_verify_flag = false", "# skip_cert_verify_flag intentionally left unset"),
+        ("tls13_flag = true", "# tls13_flag intentionally left unset"),
+    )
+    source_secret = "quanx-source-secret-must-not-reach-logs"
+    source_a = (
+        fixture_base
+        + "/quanx-remote.txt?case=native-a&token="
+        + source_secret
+        + "+literal-plus%252F"
+    )
+    source_b = fixture_base + "/quanx-remote.txt?case=native-b"
+    FixtureHandler.quanx_remote_fetch_count = 0
+    logs: list[str] = []
+
+    with running_service(
+        binary,
+        log_capture=logs,
+        log_level="verbose",
+        config_replacements=native_config,
+    ) as base_url:
+        status, body, headers = request(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": "|".join(
+                    (
+                        f"interval:0,provider:Airport/A,{source_a}",
+                        f"provider:Airport/A,interval:21600,{source_b}",
+                        SUBSCRIPTION.strip(),
+                    )
+                ),
+                "config": group_config,
+            },
+        )
+        output = body.decode("utf-8", errors="replace")
+        if status != 200:
+            raise AssertionError(
+                f"Quantumult X native remote request returned HTTP {status}: {output!r}"
+            )
+        assert_vary_header(headers, "User-Agent", "Quantumult X native response")
+        assert_request_id(headers, "Quantumult X native response")
+        remote_lines = section_lines(output, "server_remote")
+        expected_remote_fragments = (
+            (source_a, "tag=Airport_A", "update-interval=-1", "enabled=true"),
+            (source_b, "tag=Airport_A_1", "update-interval=21600", "enabled=true"),
+        )
+        if len(remote_lines) != 2:
+            raise AssertionError(
+                f"Quantumult X remote resources mismatch: {remote_lines!r}"
+            )
+        for line, fragments in zip(remote_lines, expected_remote_fragments):
+            missing = [fragment for fragment in fragments if fragment not in line]
+            if missing:
+                raise AssertionError(
+                    f"Quantumult X remote line is missing {missing!r}: {line!r}"
+                )
+        if "opt-parser=" in output:
+            raise AssertionError("Quantumult X output enabled opt-parser implicitly")
+        local_lines = section_lines(output, "server_local")
+        if not any("tag=Smoke" in line for line in local_lines):
+            raise AssertionError(
+                f"mixed Quantumult X request lost its direct node: {local_lines!r}"
+            )
+        policy_lines = section_lines(output, "policy")
+        if not any(
+            "static=Remote" in line
+            and "resource-tag-regex=^(?:Airport_A|Airport_A_1)$" in line
+            and "server-tag-regex=.*" in line
+            for line in policy_lines
+        ):
+            raise AssertionError(
+                f"Quantumult X policy does not reference remote resources: {policy_lines!r}"
+            )
+        if FixtureHandler.quanx_remote_fetch_count != 0:
+            raise AssertionError(
+                "Quantumult X native route downloaded a client-managed resource: "
+                f"count={FixtureHandler.quanx_remote_fetch_count}"
+            )
+
+        existing_base = data_url(
+            "[general]\n"
+            "[policy]\n"
+            "[server_remote]\n"
+            "https://existing.example.test/sub, tag=Airport_A, enabled=true\n"
+            "[server_local]\n"
+        )
+        collision_config = data_url(
+            "enable_rule_generator=false\n"
+            f"quanx_rule_base={existing_base}\n"
+            "custom_proxy_group=Remote`select`!!PROVIDER=Airport/A\n"
+        )
+        collision_status, collision_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": f"provider:Airport/A,{source_a}",
+                "config": collision_config,
+            },
+        )
+        collision_output = collision_body.decode("utf-8", errors="replace")
+        collision_lines = section_lines(collision_output, "server_remote")
+        if (
+            collision_status != 200
+            or not any("tag=Airport_A," in line for line in collision_lines)
+            or not any("tag=Airport_A_1," in line for line in collision_lines)
+            or "resource-tag-regex=^Airport_A_1$" not in collision_output
+        ):
+            raise AssertionError(
+                "Quantumult X custom base resource preservation/collision failed: "
+                f"HTTP {collision_status}: {collision_output!r}"
+            )
+        if FixtureHandler.quanx_remote_fetch_count != 0:
+            raise AssertionError("custom Quantumult X base caused a remote source fetch")
+
+        root_source = "https://root-subscription.example.test"
+        root_status, root_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": f"provider:RootRemote,{root_source}",
+                "config": group_config,
+            },
+        )
+        root_output = root_body.decode("utf-8", errors="replace")
+        if (
+            root_status != 200
+            or root_source not in root_output
+            or "tag=RootRemote" not in root_output
+        ):
+            raise AssertionError(
+                "explicit root Quantumult X subscription was not treated as remote: "
+                f"HTTP {root_status}: {root_output!r}"
+            )
+
+        explain_status, explain_body, explain_headers = request(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": f"provider:ExplainRemote,{source_a}",
+                "config": group_config,
+                "explain": "true",
+            },
+        )
+        if explain_status != 200:
+            raise AssertionError(
+                "Quantumult X explain failed: "
+                f"HTTP {explain_status}: {explain_body[-1000:]!r}"
+            )
+        if "no-store" not in explain_headers.get("cache-control", ""):
+            raise AssertionError("Quantumult X explain is missing no-store")
+        explain_text = explain_body.decode("utf-8", errors="replace")
+        if source_secret in explain_text:
+            raise AssertionError("Quantumult X explain leaked a source credential")
+        report = json.loads(explain_body)
+        if (
+            report.get("mode", {}).get("remote_subscription_backend")
+            != "quanx-server-remote"
+            or report.get("mode", {}).get("remote_subscription_reason")
+            != "native-capable"
+            or report.get("resources", {}).get("remote_subscription_count") != 1
+            or report.get("output", {}).get("remote_subscription_count") != 1
+        ):
+            raise AssertionError(
+                f"Quantumult X explain route metadata mismatch: {report!r}"
+            )
+
+        direct_explain_status, direct_explain_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": SUBSCRIPTION.strip(),
+                "config": group_config,
+                "explain": "true",
+            },
+        )
+        direct_report = json.loads(direct_explain_body)
+        if (
+            direct_explain_status != 200
+            or direct_report.get("mode", {}).get("remote_subscription_backend")
+            != "server-side-parse"
+            or direct_report.get("mode", {}).get("remote_subscription_reason")
+            != "no-remote-subscription"
+            or direct_report.get("resources", {}).get("remote_subscription_count") != 0
+        ):
+            raise AssertionError(
+                f"direct-only Quantumult X route metadata mismatch: {direct_report!r}"
+            )
+
+        imported_uri = "!!import:" + data_url(SUBSCRIPTION)
+        imported_status, imported_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": imported_uri,
+                "config": group_config,
+                "explain": "true",
+            },
+        )
+        imported_report = json.loads(imported_body)
+        if (
+            imported_status != 200
+            or imported_report.get("mode", {}).get("remote_subscription_backend")
+            != "server-side-parse"
+            or imported_report.get("mode", {}).get("remote_subscription_reason")
+            != "imported-source-list"
+        ):
+            raise AssertionError(
+                f"imported Quantumult X source did not preserve Legacy: {imported_report!r}"
+            )
+
+        combined_group_config = data_url(
+            "enable_rule_generator=false\n"
+            "custom_proxy_group=Remote`select`!!PROVIDER=Only`.*\n"
+        )
+        combined_status, combined_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": f"provider:Only,{fixture_base}/subscription.txt",
+                "config": combined_group_config,
+                "explain": "true",
+            },
+        )
+        combined_report = json.loads(combined_body)
+        if (
+            combined_status != 200
+            or combined_report.get("mode", {}).get("remote_subscription_backend")
+            != "server-side-parse"
+            or combined_report.get("mode", {}).get("remote_subscription_reason")
+            != "provider-and-rule-selectors"
+        ):
+            raise AssertionError(
+                "combined provider/rule Quantumult X group did not preserve Legacy: "
+                f"{combined_report!r}"
+            )
+
+        auto_status, auto_body, auto_headers = request(
+            base_url,
+            "/sub",
+            {
+                "target": "auto",
+                "url": "https://127.0.0.1:1/quanx-dead-sub?case=auto",
+                "config": group_config,
+            },
+            {"User-Agent": "Quantumult%20X/1.4"},
+        )
+        auto_output = auto_body.decode("utf-8", errors="replace")
+        if auto_status != 200 or "quanx-dead-sub" not in auto_output:
+            raise AssertionError(
+                f"auto Quantumult X did not select server_remote: HTTP {auto_status}: "
+                f"{auto_output!r}"
+            )
+        assert_vary_header(auto_headers, "User-Agent", "auto Quantumult X response")
+
+        http_proxy_payload = (
+            "cHJveHktdXNlcjpwcm94eS1wYXNzQHByb3h5LmV4YW1wbGUudGVzdDo4MDgw"
+        )
+        for proxy_uri in (
+            f"http://{http_proxy_payload}",
+            f"https://{http_proxy_payload}?remarks=NamedHTTP&group=NamedGroup",
+            f"provider:Ignored,http://{http_proxy_payload}?remarks=NamedHTTP",
+        ):
+            proxy_status, proxy_body, _ = request(
+                base_url,
+                "/sub",
+                {
+                    "target": "quanx",
+                    "url": proxy_uri,
+                    "config": group_config,
+                },
+            )
+            proxy_output = proxy_body.decode("utf-8", errors="replace")
+            local_proxy_lines = section_lines(proxy_output, "server_local")
+            remote_proxy_lines = section_lines(proxy_output, "server_remote")
+            if (
+                proxy_status != 200
+                or not any("proxy.example.test" in line for line in local_proxy_lines)
+                or any(http_proxy_payload in line for line in remote_proxy_lines)
+            ):
+                raise AssertionError(
+                    "Legacy HTTP proxy URI was misclassified as a remote subscription: "
+                    f"HTTP {proxy_status}: {proxy_output!r}"
+                )
+
+        interval_proxy_status, interval_proxy_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": f"interval:3600,http://{http_proxy_payload}",
+                "config": group_config,
+            },
+        )
+        if interval_proxy_status != 400 or b"interval:" not in interval_proxy_body:
+            raise AssertionError(
+                "Quantumult X accepted interval: for an HTTP proxy node: "
+                f"HTTP {interval_proxy_status}: {interval_proxy_body!r}"
+            )
+
+        telegram_status, telegram_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": (
+                    "https://t.me/http?server=telegram.example.test&port=8080"
+                    "&user=telegram-user&pass=telegram-pass&remarks=TelegramHTTP"
+                ),
+                "config": group_config,
+            },
+        )
+        telegram_output = telegram_body.decode("utf-8", errors="replace")
+        if (
+            telegram_status != 200
+            or not any(
+                "telegram.example.test" in line
+                for line in section_lines(telegram_output, "server_local")
+            )
+            or any(
+                "t.me/http" in line
+                for line in section_lines(telegram_output, "server_remote")
+            )
+        ):
+            raise AssertionError(
+                "Telegram HTTP node was misclassified as Quantumult X remote: "
+                f"HTTP {telegram_status}: {telegram_output!r}"
+            )
+
+        if FixtureHandler.quanx_remote_fetch_count != 0:
+            raise AssertionError("a native Quantumult X request fetched the remote source")
+
+        list_status, list_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": source_b,
+                "config": group_config,
+                "list": "true",
+            },
+        )
+        if list_status != 200 or b"Smoke" not in list_body:
+            raise AssertionError(
+                f"Quantumult X list=true no longer uses Legacy: HTTP {list_status}: {list_body!r}"
+            )
+        if FixtureHandler.quanx_remote_fetch_count != 1:
+            raise AssertionError("Quantumult X list=true did not fetch exactly once")
+
+    diagnostics = "".join(logs)
+    if source_secret in diagnostics:
+        raise AssertionError("Quantumult X source credential leaked into logs")
+    if "NODE_PARSER_INVOKE parser=mihomo" in diagnostics:
+        raise AssertionError("Quantumult X route invoked Mihomo")
+    if (
+        "SUB_ROUTE_RESULT target=quanx source=explicit route=hybrid "
+        "parser_policy=legacy parser=legacy provider_count=0 source_calls=1 "
+        "source_failures=0 parser_calls=1 parser_failures=0 "
+        "remote_backend=quanx-server-remote remote_reason=native-capable "
+        "remote_count=2"
+        not in diagnostics
+    ):
+        raise AssertionError("Quantumult X native route summary is missing")
+    if (
+        "AUTO_TARGET_RESOLVED target=quanx parser=legacy ua_family=quantumult-x"
+        not in diagnostics
+    ):
+        raise AssertionError("Quantumult X auto-target event is missing")
+
+    FixtureHandler.quanx_remote_fetch_count = 0
+    fallback_logs: list[str] = []
+    with running_service(
+        binary, log_capture=fallback_logs, log_level="info"
+    ) as base_url:
+        fallback_status, fallback_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": f"provider:IgnoredOnFallback,{source_b}",
+                "config": group_config,
+            },
+        )
+        fallback_output = fallback_body.decode("utf-8", errors="replace")
+        if fallback_status != 200 or "tag=Smoke" not in fallback_output:
+            raise AssertionError(
+                "legacy preferences no longer preserve Quantumult X Legacy behavior: "
+                f"HTTP {fallback_status}: {fallback_output!r}"
+            )
+        if any(source_b in line for line in section_lines(fallback_output, "server_remote")):
+            raise AssertionError("capability-gated Quantumult X request emitted server_remote")
+        if FixtureHandler.quanx_remote_fetch_count != 1:
+            raise AssertionError(
+                "capability-gated Quantumult X request did not use Legacy exactly once"
+            )
+
+    fallback_diagnostics = "".join(fallback_logs)
+    if (
+        "remote_backend=server-side-parse remote_reason=node-option-override "
+        "remote_count=0"
+        not in fallback_diagnostics
+    ):
+        raise AssertionError("Quantumult X Legacy capability reason is missing")
 def parser_failure_level_and_mixed_request_baseline(binary: Path) -> None:
     for log_level in ("info", "error"):
         failure_logs: list[str] = []
@@ -5418,6 +5860,7 @@ def main() -> int:
     with fixture_server() as fixture_base:
         parser_invocation_log_baseline(binary, fixture_base)
         provider_no_fetch_vary_and_route_log_baseline(binary, fixture_base)
+        quanx_server_remote_baseline(binary, fixture_base)
         parser_failure_level_and_mixed_request_baseline(binary)
         insert_url_parser_route_baseline(binary, fixture_base)
         vary_cache_and_coalesce_baseline(binary, fixture_base)
