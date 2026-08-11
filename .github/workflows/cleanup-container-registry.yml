@@ -1,0 +1,71 @@
+name: 清理容器注册表临时镜像
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  packages: write
+
+concurrency:
+  group: container-registry-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: "🧹 清理 Docker Hub 与 GHCR"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: 拒绝与镜像发布并发执行
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        with:
+          script: |
+            const statuses = ['queued', 'in_progress'];
+            const protectedWorkflows = new Set([
+              'Build and Push Docker image',
+              'Formal Release',
+            ]);
+            const blockers = [];
+            for (const status of statuses) {
+              const runs = await github.paginate(
+                github.rest.actions.listWorkflowRunsForRepo,
+                {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  status,
+                  per_page: 100,
+                }
+              );
+              for (const run of runs) {
+                if (run.id !== context.runId && protectedWorkflows.has(run.name)) {
+                  blockers.push(`${run.name} #${run.id} (${run.status})`);
+                }
+              }
+            }
+            if (blockers.length) {
+              core.setFailed(
+                `存在尚未结束的镜像发布任务，拒绝清理：${blockers.join(', ')}`
+              );
+            }
+
+      - name: 检出代码
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: 配置 Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
+
+      - name: 登录 GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: 清理临时标签和孤立清单
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: python3 scripts/ci/cleanup_container_registry.py --prune-all --apply
