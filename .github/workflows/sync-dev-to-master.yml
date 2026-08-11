@@ -1,4 +1,4 @@
-name: 同步 dev 到 master
+name: Sync Dev to Master
 
 on:
   workflow_dispatch:
