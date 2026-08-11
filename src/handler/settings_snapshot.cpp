@@ -76,6 +76,10 @@ std::string sanitizedSettingsSnapshot(const Settings &settings) {
            {"interval", settings.proxyProviderInterval},
            {"proxy_direct", settings.proxyProviderDirect},
        }},
+      {"remote_subscription",
+       {
+           {"surge_policy_path", settings.surgePolicyPath},
+       }},
       {"rules",
        {
            {"enabled", settings.enableRuleGen},

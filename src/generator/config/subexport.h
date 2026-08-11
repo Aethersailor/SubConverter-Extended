@@ -1,6 +1,7 @@
 #ifndef SUBEXPORT_H_INCLUDED
 #define SUBEXPORT_H_INCLUDED
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -48,6 +49,31 @@ struct QuanXServerRemote {
   int group_id = 0;
 };
 
+struct SurgePolicyPathResource {
+  std::string url;
+  std::string source_tag;
+  std::string requested_name;
+  int update_interval = 0;
+  bool has_update_interval = false;
+  int group_id = 0;
+};
+
+struct TargetGenerationStats {
+  size_t input_nodes = 0;
+  size_t emitted_nodes = 0;
+  size_t remote_references_emitted = 0;
+  std::map<ProxyType, size_t> unsupported_by_type;
+
+  size_t unsupported_nodes() const {
+    size_t count = 0;
+    for (const auto &[type, type_count] : unsupported_by_type) {
+      (void)type;
+      count += type_count;
+    }
+    return count;
+  }
+};
+
 using SingleLinkTypes = std::uint32_t;
 namespace SingleLinkType {
 constexpr SingleLinkTypes Shadowsocks = 1U << 0;
@@ -93,6 +119,8 @@ struct extra_settings {
   bool provider_proxy_direct = true;    // proxy-provider 默认使用 DIRECT 更新
   std::vector<ProxyProvider> providers; // provider 列表
   std::vector<QuanXServerRemote> quanx_server_remotes;
+  std::vector<SurgePolicyPathResource> surge_policy_paths;
+  TargetGenerationStats surge_generation_stats;
   bool authorized = false;
   RuleConversionStats *rule_stats = nullptr;
 
@@ -110,6 +138,8 @@ struct extra_settings {
   }
 #endif // NO_JS_RUNTIME
 };
+
+bool matchRange(const std::string &range, int target);
 
 std::string proxyToClash(std::vector<Proxy> &nodes,
                          const std::string &base_conf,

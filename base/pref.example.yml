@@ -157,6 +157,11 @@ surge_external_proxy:
   # Whether to resolve server hostnames while generating Surge external-proxy configuration.
   resolve_hostname: true
 
+remote_subscription:
+  # Surge 完整配置默认使用 policy-path 让客户端直接更新兼容的远程订阅；设为 false 可强制保留服务端 Legacy 解析。
+  # Surge full profiles use policy-path for compatible remote subscriptions by default; set false to force legacy server-side parsing.
+  surge_policy_path: true
+
 security:
   # 安全档位：lan 保留局域网兼容行为并允许本地/私网/fake-ip 资源；public 限制公开请求控制的不受信任抓取；strict 另行强制禁止公开上传。
   # Security profile: lan preserves LAN-compatible access to local/private/fake-IP resources; public restricts untrusted request-controlled fetches; strict also forbids public upload.

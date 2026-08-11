@@ -86,6 +86,7 @@ struct Settings {
   int updateInterval = 0;
   int proxyProviderInterval = kDefaultProxyProviderInterval;
   bool proxyProviderDirect = kDefaultProxyProviderDirect;
+  bool surgePolicyPath = true;
   std::string sortScript, filterScript;
 
   std::string clashBase;

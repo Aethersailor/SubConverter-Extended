@@ -77,6 +77,7 @@ enum class RemoteSubscriptionMode {
   ServerSideParse,
   ClashProxyProvider,
   QuanXServerRemote,
+  SurgePolicyPath,
 };
 
 struct TargetDescriptor {
@@ -93,7 +94,7 @@ static constexpr std::array<TargetDescriptor, 18> kTargetDescriptors = {{
     {"clashr", NodeParserMode::MihomoOnly,
      RemoteSubscriptionMode::ClashProxyProvider, false, 0},
     {"surge", NodeParserMode::LegacyOnly,
-     RemoteSubscriptionMode::ServerSideParse, false, 0},
+     RemoteSubscriptionMode::SurgePolicyPath, false, 0},
     {"quan", NodeParserMode::LegacyOnly,
      RemoteSubscriptionMode::ServerSideParse, false, 0},
     {"quanx", NodeParserMode::LegacyOnly,
@@ -148,6 +149,8 @@ static const char *remoteSubscriptionModeName(RemoteSubscriptionMode mode) {
     return "clash-proxy-provider";
   case RemoteSubscriptionMode::QuanXServerRemote:
     return "quanx-server-remote";
+  case RemoteSubscriptionMode::SurgePolicyPath:
+    return "surge-policy-path";
   case RemoteSubscriptionMode::ServerSideParse:
   default:
     return "server-side-parse";
@@ -800,10 +803,12 @@ static std::string providerIntervalScopeError(size_t item_index) {
   const std::string item = std::to_string(item_index + 1);
   return "Invalid request: interval: for URL item #" + item +
          " is only valid for subscription links that generate Clash/ClashR "
-         "proxy-providers or Quantumult X server_remote resources.\n"
+         "proxy-providers, Quantumult X server_remote resources, or Surge "
+         "policy-path resources.\n"
          "无效请求：第 " + item +
          " 个 url 项的 interval: 仅适用于会生成 Clash/ClashR "
-         "proxy-provider 或 Quantumult X server_remote 资源的订阅链接。";
+         "proxy-provider、Quantumult X server_remote 或 Surge policy-path "
+         "资源的订阅链接。";
 }
 
 static std::string providerDirectScopeError(size_t item_index) {
@@ -822,6 +827,22 @@ static std::string quanxRemoteSourceError(size_t item_index) {
          " contains an unescaped space or control character.\n"
          "无效请求：第 " + item +
          " 个 Quantumult X 远程订阅项包含未转义空格或控制字符。";
+}
+
+static std::string surgePolicyPathSourceError(size_t item_index) {
+  const std::string item = std::to_string(item_index + 1);
+  return "Invalid request: Surge policy-path subscription item #" + item +
+         " contains an unescaped space or control character.\n"
+         "无效请求：第 " + item +
+         " 个 Surge policy-path 订阅项包含未转义空格或控制字符。";
+}
+
+static std::string surgePolicyPathIntervalError(size_t item_index) {
+  const std::string item = std::to_string(item_index + 1);
+  return "Invalid request: interval: for Surge policy-path item #" + item +
+         " must be greater than zero. Omit it to use the client default.\n"
+         "无效请求：第 " + item +
+         " 个 Surge policy-path 项的 interval: 必须大于 0；省略该前缀可使用客户端默认值。";
 }
 
 static constexpr size_t kProviderNameMaxLen = 64;
@@ -1058,6 +1079,9 @@ struct SubExplainReport {
   size_t insert_node_count = 0;
   size_t direct_node_count = 0;
   size_t total_node_count = 0;
+  size_t generated_node_count = 0;
+  size_t unsupported_node_count = 0;
+  string_array unsupported_protocols;
   size_t ruleset_count = 0;
   size_t custom_group_count = 0;
   size_t output_bytes = 0;
@@ -1280,6 +1304,15 @@ static std::string serializeSubExplainReport(const SubExplainReport &report,
   writer.Uint64(report.direct_node_count);
   writer.Key("total");
   writer.Uint64(report.total_node_count);
+  writer.Key("generated");
+  writer.Uint64(report.generated_node_count);
+  writer.Key("unsupported");
+  writer.Uint64(report.unsupported_node_count);
+  writer.Key("unsupported_protocols");
+  writer.StartArray();
+  for (const std::string &protocol : report.unsupported_protocols)
+    writer.String(protocol.c_str());
+  writer.EndArray();
   writer.EndObject();
 
   writer.Key("providers");
@@ -2307,9 +2340,9 @@ struct SubStageResponse {
   std::string body;
 };
 
-static bool parseQuanXSourceGroupRule(const std::string &rule,
-                                      std::string &source_pattern,
-                                      std::string &server_pattern) {
+static bool parseSourceGroupRule(const std::string &rule,
+                                 std::string &source_pattern,
+                                 std::string &server_pattern) {
   static const std::string group_regex =
       R"(^!!GROUP=(.+?)(?:!!(.*))?$)";
   if (!startsWith(rule, "!!GROUP="))
@@ -2322,9 +2355,9 @@ static bool parseQuanXSourceGroupRule(const std::string &rule,
          !source_pattern.empty();
 }
 
-static bool parseQuanXGroupIdRule(const std::string &rule,
-                                  std::string &group_id_pattern,
-                                  std::string &server_pattern) {
+static bool parseGroupIdRule(const std::string &rule,
+                             std::string &group_id_pattern,
+                             std::string &server_pattern) {
   static const std::string group_id_regex =
       R"(^!!GROUPID=([\d\-+!,]+)(?:!!(.*))?$)";
   if (!startsWith(rule, "!!GROUPID="))
@@ -2337,8 +2370,15 @@ static bool parseQuanXGroupIdRule(const std::string &rule,
          !group_id_pattern.empty();
 }
 
-static bool quanxPolicyRegexIsSafe(const std::string &pattern) {
+static bool remotePolicyRegexIsSafe(const std::string &pattern) {
   return pattern.find(',') == std::string::npos &&
+         std::none_of(pattern.begin(), pattern.end(), [](unsigned char ch) {
+           return ch < 0x20 || ch == 0x7f;
+         });
+}
+
+static bool surgePolicyRegexIsSafe(const std::string &pattern) {
+  return pattern.find('"') == std::string::npos &&
          std::none_of(pattern.begin(), pattern.end(), [](unsigned char ch) {
            return ch < 0x20 || ch == 0x7f;
          });
@@ -2385,17 +2425,17 @@ static std::string quanxRemoteCapabilityReason(
         return "unsupported-group-selector";
 
       std::string selector, server_pattern;
-      if (parseQuanXGroupIdRule(rule, selector, server_pattern) ||
-          parseQuanXSourceGroupRule(rule, selector, server_pattern)) {
+      if (parseGroupIdRule(rule, selector, server_pattern) ||
+          parseSourceGroupRule(rule, selector, server_pattern)) {
         if (startsWith(rule, "!!GROUP=") && !regValid(selector))
           return "invalid-group-regex";
         if (!server_pattern.empty() &&
-            (!quanxPolicyRegexIsSafe(server_pattern) ||
+            (!remotePolicyRegexIsSafe(server_pattern) ||
              !regValid(server_pattern)))
           return "unsafe-group-regex";
       } else if (startsWith(rule, "!!")) {
         return "unsupported-group-selector";
-      } else if (!quanxPolicyRegexIsSafe(rule) || !regValid(rule)) {
+      } else if (!remotePolicyRegexIsSafe(rule) || !regValid(rule)) {
         return "unsafe-group-regex";
       }
 
@@ -2406,6 +2446,115 @@ static std::string quanxRemoteCapabilityReason(
       return "provider-and-rule-selectors";
   }
   return "native-capable";
+}
+
+static std::string surgePolicyPathCapabilityReason(
+    const ParsedSubRequest &parsed, const EffectiveSubPolicy &policy,
+    const Settings &settings) {
+  const extra_settings &ext = policy.generator;
+  if (!settings.surgePolicyPath)
+    return "disabled-by-config";
+  if (ext.nodelist)
+    return "list-mode";
+  if (parsed.surge_version < 3)
+    return "unsupported-target-version";
+
+  size_t remote_subscription_count = 0;
+  int remote_group_id = -1;
+  std::string remote_source_tag;
+  std::string remote_requested_name;
+  int item_group_id = 0;
+  for (const std::string &raw_item : split(parsed.url, "|")) {
+    const TaggedLink tagged = parseTaggedLink(regTrim(raw_item));
+    const std::string link = tagged.link.empty() ? raw_item : tagged.link;
+    if (startsWith(regTrim(link), "!!import:"))
+      return "imported-source-list";
+    if (tagged.error == TaggedLink::Error::None &&
+        isHttpSubscriptionLink(link,
+                               tagged.has_provider || tagged.has_interval)) {
+      remote_subscription_count++;
+      remote_group_id = item_group_id;
+      remote_source_tag = tagged.tag;
+      remote_requested_name = tagged.provider;
+    }
+    item_group_id++;
+  }
+  if (remote_subscription_count == 0)
+    return "no-remote-subscription";
+  if (remote_subscription_count > 1)
+    return "multiple-remote-subscriptions";
+
+  if (!policy.include_remarks.empty() || !policy.exclude_remarks.empty())
+    return "node-filters";
+  if (!ext.rename_array.empty())
+    return "provider-rename";
+  if (!parsed.group_name.empty())
+    return "group-override";
+  if (ext.add_emoji || ext.remove_emoji || ext.append_proxy_type ||
+      ext.sort_flag || ext.filter_deprecated || !settings.filterScript.empty())
+    return "node-transform";
+  if (!ext.udp.is_undef() || !ext.tfo.is_undef() ||
+      !ext.skip_cert_verify.is_undef() || !ext.tls13.is_undef())
+    return "node-option-override";
+
+  bool selects_remote_subscription = false;
+  for (const ProxyGroupConfig &group : policy.custom_proxy_groups) {
+    size_t dynamic_rule_count = 0;
+    for (const std::string &rule : group.Proxies) {
+      if (startsWith(rule, "[]") || rule == "DIRECT" || rule == "REJECT")
+        continue;
+      if (startsWith(rule, "script:") || startsWith(rule, "!!INSERT=") ||
+          startsWith(rule, "!!TYPE=") || startsWith(rule, "!!PORT=") ||
+          startsWith(rule, "!!SERVER="))
+        return "unsupported-group-selector";
+
+      std::string selector, server_pattern;
+      const bool group_id_selector =
+          parseGroupIdRule(rule, selector, server_pattern);
+      const bool source_selector =
+          !group_id_selector &&
+          parseSourceGroupRule(rule, selector, server_pattern);
+      if (group_id_selector || source_selector) {
+        if (startsWith(rule, "!!GROUP=") && !regValid(selector))
+          return "invalid-group-regex";
+        if (!server_pattern.empty() &&
+            (!surgePolicyRegexIsSafe(server_pattern) ||
+             !regValid(server_pattern)))
+          return "unsafe-group-regex";
+      } else if (startsWith(rule, "!!")) {
+        return "unsupported-group-selector";
+      } else if (!surgePolicyRegexIsSafe(rule) || !regValid(rule)) {
+        return "unsafe-group-regex";
+      }
+
+      if (group_id_selector && matchRange(selector, remote_group_id))
+        selects_remote_subscription = true;
+      else if (source_selector && !remote_source_tag.empty() &&
+               regFind(remote_source_tag, selector))
+        selects_remote_subscription = true;
+      else if (!group_id_selector && !source_selector)
+        selects_remote_subscription = true;
+      if (++dynamic_rule_count > 1)
+        return "multiple-group-selectors";
+    }
+
+    if (!group.UsingProvider.empty()) {
+      if (dynamic_rule_count)
+        return "provider-and-rule-selectors";
+      if (!remote_requested_name.empty() &&
+          std::find(group.UsingProvider.begin(), group.UsingProvider.end(),
+                    remote_requested_name) != group.UsingProvider.end())
+        selects_remote_subscription = true;
+    }
+    if ((group.Type == ProxyGroupType::SSID ||
+         group.Type == ProxyGroupType::Relay ||
+         group.Type == ProxyGroupType::Smart) &&
+        (dynamic_rule_count || !group.UsingProvider.empty()))
+      return "unsupported-group-type";
+  }
+
+  return selects_remote_subscription ? "native-capable"
+                                     : "no-remote-policy-group";
 }
 
 static SubStageResponse processSubscriptionNodes(
@@ -2450,6 +2599,10 @@ static SubStageResponse processSubscriptionNodes(
     remote_reason = quanxRemoteCapabilityReason(parsed, policy, settings);
     if (remote_reason != "native-capable")
       remote_mode = RemoteSubscriptionMode::ServerSideParse;
+  } else if (remote_mode == RemoteSubscriptionMode::SurgePolicyPath) {
+    remote_reason = surgePolicyPathCapabilityReason(parsed, policy, settings);
+    if (remote_reason != "native-capable")
+      remote_mode = RemoteSubscriptionMode::ServerSideParse;
   }
   explain.remote_subscription_backend = remoteSubscriptionModeName(remote_mode);
   explain.remote_subscription_reason = remote_reason;
@@ -2476,14 +2629,15 @@ static SubStageResponse processSubscriptionNodes(
 
   auto logRouteSelection = [&]() {
     const size_t provider_count = ext.providers.size();
-    const size_t remote_count = ext.quanx_server_remotes.size();
+    const size_t remote_count = ext.quanx_server_remotes.size() +
+                                ext.surge_policy_paths.size();
     std::string route = "none";
     if ((provider_count || remote_count) && source_calls)
       route = "hybrid";
     else if (provider_count)
       route = "proxy-provider";
     else if (remote_count)
-      route = "quanx-server-remote";
+      route = remoteSubscriptionModeName(remote_mode);
     else if (parser_stats.invocations)
       route = "node-parser";
     else if (source_calls)
@@ -2503,7 +2657,9 @@ static SubStageResponse processSubscriptionNodes(
         " parser_calls=" + std::to_string(parser_stats.invocations) +
         " parser_failures=" + std::to_string(parser_stats.failures);
     if (parsed.target_descriptor->remote_subscription_mode ==
-        RemoteSubscriptionMode::QuanXServerRemote) {
+            RemoteSubscriptionMode::QuanXServerRemote ||
+        parsed.target_descriptor->remote_subscription_mode ==
+            RemoteSubscriptionMode::SurgePolicyPath) {
       event += " remote_backend=" +
                std::string(remoteSubscriptionModeName(remote_mode)) +
                " remote_reason=" + remote_reason +
@@ -2551,10 +2707,15 @@ static SubStageResponse processSubscriptionNodes(
       remote_mode == RemoteSubscriptionMode::ClashProxyProvider;
   const bool quanx_remote_eligible =
       remote_mode == RemoteSubscriptionMode::QuanXServerRemote;
-  if (!provider_mode_eligible && !quanx_remote_eligible) {
-    const bool quanx_legacy_fallback =
-        parsed.target_descriptor->remote_subscription_mode ==
-        RemoteSubscriptionMode::QuanXServerRemote;
+  const bool surge_remote_eligible =
+      remote_mode == RemoteSubscriptionMode::SurgePolicyPath;
+  const bool native_remote_target =
+      parsed.target_descriptor->remote_subscription_mode ==
+          RemoteSubscriptionMode::QuanXServerRemote ||
+      parsed.target_descriptor->remote_subscription_mode ==
+          RemoteSubscriptionMode::SurgePolicyPath;
+  if (!provider_mode_eligible && !quanx_remote_eligible &&
+      !surge_remote_eligible) {
     for (size_t index = 0; index < urls.size(); ++index) {
       TaggedLink tagged = parseTaggedLink(regTrim(urls[index]));
       if (tagged.error != TaggedLink::Error::None) {
@@ -2569,7 +2730,7 @@ static SubStageResponse processSubscriptionNodes(
         *status_code = 400;
         return {true, providerDirectScopeError(index)};
       }
-      if (quanx_legacy_fallback && tagged.has_provider) {
+      if (native_remote_target && tagged.has_provider) {
         std::string normalized = tagged.link;
         if (tagged.has_tag)
           normalized = "tag:" + tagged.tag + "," + normalized;
@@ -2904,13 +3065,125 @@ static SubStageResponse processSubscriptionNodes(
           remoteSubscriptionModeName(remote_mode);
       explain.remote_subscription_reason = remote_reason;
     }
+  } else if (surge_remote_eligible) {
+    struct SurgeRemoteLinkItem {
+      std::string url;
+      std::string source_tag;
+      std::string requested_name;
+      int interval = 0;
+      bool has_interval = false;
+      int group_id = 0;
+    };
+    struct SurgeNodeLinkItem {
+      std::string url;
+      int group_id = 0;
+      bool force_direct_link = false;
+    };
+    std::vector<SurgeRemoteLinkItem> subscription_urls;
+    std::vector<SurgeNodeLinkItem> node_urls;
+
+    for (size_t index = 0; index < urls.size(); ++index) {
+      std::string &x = urls[index];
+      x = regTrim(x);
+      TaggedLink tagged = parseTaggedLink(x);
+      if (tagged.error != TaggedLink::Error::None) {
+        *status_code = 400;
+        return {true, providerLinkPrefixError(index, tagged.error)};
+      }
+
+      std::string link = tagged.link.empty() ? x : tagged.link;
+      const bool is_remote_subscription = isHttpSubscriptionLink(
+          link, tagged.has_provider || tagged.has_interval);
+      const int item_group_id = groupID++;
+      if (is_remote_subscription) {
+        if (tagged.has_proxy_direct) {
+          *status_code = 400;
+          return {true, providerDirectScopeError(index)};
+        }
+        if (tagged.has_interval && tagged.interval <= 0) {
+          *status_code = 400;
+          return {true, surgePolicyPathIntervalError(index)};
+        }
+        if (hasUnsafeQuanXRemoteUrlChar(link)) {
+          *status_code = 400;
+          return {true, surgePolicyPathSourceError(index)};
+        }
+        writeLog(LOG_LEVEL_INFO,
+                 "检测到 Surge policy-path 远程订阅：" +
+                     summarizeUrlForLog(link) + "，将由客户端更新。");
+        subscription_urls.push_back({link, tagged.tag, tagged.provider,
+                                     tagged.interval, tagged.has_interval,
+                                     item_group_id});
+        explain.subscription_url_count++;
+        continue;
+      }
+
+      if (tagged.has_interval) {
+        *status_code = 400;
+        return {true, providerIntervalScopeError(index)};
+      }
+      if (tagged.has_proxy_direct) {
+        *status_code = 400;
+        return {true, providerDirectScopeError(index)};
+      }
+      std::string node_link = link;
+      if (tagged.has_tag)
+        node_link = "tag:" + tagged.tag + "," + link;
+      node_urls.push_back(
+          {std::move(node_link), item_group_id, isLegacyHttpProxyUri(link)});
+      explain.node_link_count++;
+    }
+
+    for (const SurgeRemoteLinkItem &item : subscription_urls) {
+      SurgePolicyPathResource resource;
+      resource.url = item.url;
+      resource.source_tag = item.source_tag;
+      resource.requested_name = item.requested_name;
+      resource.update_interval = item.interval;
+      resource.has_update_interval = item.has_interval;
+      resource.group_id = item.group_id;
+      writeLog(LOG_LEVEL_INFO,
+               "SURGE_POLICY_PATH_CREATED group_id=" +
+                   std::to_string(resource.group_id) + " interval=" +
+                   (resource.has_update_interval
+                        ? std::to_string(resource.update_interval)
+                        : std::string("client-default")) +
+                   " source=" + summarizeUrlForLog(resource.url));
+      ext.surge_policy_paths.push_back(std::move(resource));
+    }
+
+    for (const SurgeNodeLinkItem &item : node_urls) {
+      string_array import_urls{item.url};
+      if (importItems(import_urls, true, FetchContext::PublicRequest) != 0) {
+        source_calls++;
+        source_failures++;
+        continue;
+      }
+      for (std::string &x : import_urls) {
+        source_calls++;
+        parse_settings item_parse_set = parse_set;
+        item_parse_set.force_direct_link = item.force_direct_link;
+        if (addNodes(x, nodes, item.group_id, item_parse_set) == -1) {
+          source_failures++;
+          writeLog(LOG_LEVEL_WARNING,
+                   "已跳过无效节点链接：" + summarizeUrlForLog(x) +
+                       "，继续处理其他节点。");
+        }
+      }
+    }
   } else {
     importItems(urls, true, FetchContext::PublicRequest);
     for (std::string &x : urls) {
       x = regTrim(x);
       writeLog(LOG_LEVEL_INFO, "正在从 URL 获取节点数据：" + summarizeUrlForLog(x) + "。");
       source_calls++;
-      if (addNodes(x, nodes, groupID, parse_set) == -1) {
+      parse_settings item_parse_set = parse_set;
+      if (native_remote_target) {
+        const TaggedLink tagged = parseTaggedLink(x);
+        item_parse_set.force_direct_link =
+            isLegacyHttpProxyUri(tagged.link.empty() ? x : tagged.link);
+      }
+      if (addNodes(x, nodes, groupID, item_parse_set) == -1) {
         source_failures++;
         writeLog(LOG_LEVEL_WARNING,
                  "已跳过无效节点链接：" + summarizeUrlForLog(x) +
@@ -2921,7 +3194,8 @@ static SubStageResponse processSubscriptionNodes(
   }
 
   explain.provider_count = ext.providers.size();
-  explain.remote_subscription_count = ext.quanx_server_remotes.size();
+  explain.remote_subscription_count = ext.quanx_server_remotes.size() +
+                                      ext.surge_policy_paths.size();
   explain.proxy_provider_mode = ext.use_proxy_provider && !ext.providers.empty();
   explain.insert_node_count = insert_nodes.size();
   explain.direct_node_count = nodes.size();
@@ -2934,7 +3208,7 @@ static SubStageResponse processSubscriptionNodes(
             "无效请求：已选择 provider_headers，但没有生成 proxy-provider。"};
   }
   if (nodes.empty() && insert_nodes.empty() && ext.providers.empty() &&
-      ext.quanx_server_remotes.empty()) {
+      ext.quanx_server_remotes.empty() && ext.surge_policy_paths.empty()) {
     *status_code = 400;
     return {true,
             "Invalid request: no valid proxy nodes or remote resources were "
@@ -3082,9 +3356,6 @@ static SubStageResponse dispatchTargetGenerator(
     if (ext.nodelist) {
       output = proxyToSurge(nodes, base_content, dummy_ruleset, dummy_group,
                             parsed.surge_version, ext);
-      if (upload)
-        recordUpload("surge" + surge_version_text + "list", upload_path,
-                     output, true);
     } else {
       if (render_template(fetchFile(policy.surge_base, proxy,
                                     settings.cacheConfig, true, base_context),
@@ -3096,8 +3367,54 @@ static SubStageResponse dispatchTargetGenerator(
       output = proxyToSurge(nodes, base_content, ruleset_content,
                             policy.custom_proxy_groups, parsed.surge_version,
                             ext);
-      if (upload)
-        recordUpload("surge" + surge_version_text, upload_path, output, true);
+    }
+
+    {
+      const TargetGenerationStats &stats = ext.surge_generation_stats;
+      string_array unsupported_protocols;
+      unsupported_protocols.reserve(stats.unsupported_by_type.size());
+      for (const auto &[type, count] : stats.unsupported_by_type) {
+        unsupported_protocols.emplace_back(toLower(getProxyTypeName(type)) +
+                                           ":" + std::to_string(count));
+      }
+      const size_t unsupported_count = stats.unsupported_nodes();
+      writeLog(unsupported_count ? LOG_LEVEL_WARNING : LOG_LEVEL_INFO,
+               "SURGE_NODE_GENERATION input=" +
+                   std::to_string(stats.input_nodes) + " emitted=" +
+                   std::to_string(stats.emitted_nodes) + " unsupported=" +
+                   std::to_string(unsupported_count) + " protocols=" +
+                   (unsupported_protocols.empty()
+                        ? std::string("none")
+                        : join(unsupported_protocols, ";")) +
+                   " remote_references=" +
+                   std::to_string(stats.remote_references_emitted));
+      parsed.explain.generated_node_count = stats.emitted_nodes;
+      parsed.explain.unsupported_node_count = unsupported_count;
+      parsed.explain.unsupported_protocols = unsupported_protocols;
+
+      if (stats.input_nodes > 0 && stats.emitted_nodes == 0 &&
+          ext.surge_policy_paths.empty()) {
+        *status_code = 400;
+        return {true,
+                "Invalid request: none of the parsed proxy nodes can be "
+                "represented by the selected Surge output version.\n"
+                "无效请求：解析到的代理节点均无法由所选 Surge 输出版本表示。"};
+      }
+      if (!ext.surge_policy_paths.empty() &&
+          stats.remote_references_emitted == 0) {
+        *status_code = 400;
+        return {true,
+                "Invalid request: the Surge policy-path subscription was not "
+                "selected by any compatible proxy group.\n"
+                "无效请求：没有兼容的策略组选择该 Surge policy-path 订阅。"};
+      }
+    }
+
+    if (upload)
+      recordUpload(ext.nodelist ? "surge" + surge_version_text + "list"
+                                : "surge" + surge_version_text,
+                   upload_path, output, true);
+    if (!ext.nodelist) {
       if (settings.writeManagedConfig && !settings.managedConfigPrefix.empty())
         generation.managed_url_used = true;
       if (generation.managed_url_used)
@@ -3666,11 +3983,16 @@ static std::string assembleSubResponse(
       addConfigSection("proxy_providers", "request", "generated",
                        std::to_string(explain.provider_count) +
                            " provider(s).");
-    if (explain.remote_subscription_count)
-      addConfigSection("quanx_server_remote", "request", "generated",
+    if (explain.remote_subscription_count) {
+      const std::string remote_section =
+          explain.remote_subscription_backend == "surge-policy-path"
+              ? "surge_policy_path"
+              : "quanx_server_remote";
+      addConfigSection(remote_section, "request", "generated",
                        std::to_string(explain.remote_subscription_count) +
                            " remote resource(s); node-name transformations run "
                            "only in the client or its configured resource parser.");
+    }
     if (explain.managed_config)
       addConfigSection("managed_config", "global", "enabled",
                        "Managed config prefix is available.");

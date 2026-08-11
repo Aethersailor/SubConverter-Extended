@@ -34,6 +34,71 @@ extern string_array ss_ciphers, ssr_ciphers;
 
 static bool splitRenameGroupRule(const std::string &match,
                                  std::string &group_pattern,
+                                 std::string &name_pattern);
+static bool parseProviderGroupIdMatcher(const std::string &rule,
+                                        std::string &target,
+                                        std::string &real_rule);
+
+namespace {
+
+struct SurgeRemoteSelector {
+  const SurgePolicyPathResource *resource = nullptr;
+  std::string policy_pattern;
+};
+
+SurgeRemoteSelector surgeRemoteSelectorForGroup(
+    const ProxyGroupConfig &group,
+    const std::vector<SurgePolicyPathResource> &resources) {
+  SurgeRemoteSelector selector;
+  if (resources.size() != 1)
+    return selector;
+
+  const SurgePolicyPathResource &resource = resources.front();
+  if (!group.UsingProvider.empty()) {
+    const bool selected =
+        std::find(group.UsingProvider.begin(), group.UsingProvider.end(),
+                  resource.requested_name) != group.UsingProvider.end();
+    if (selected) {
+      selector.resource = &resource;
+      selector.policy_pattern = ".*";
+    }
+    return selector;
+  }
+
+  for (const std::string &rule : group.Proxies) {
+    if (startsWith(rule, "[]") || rule == "DIRECT" || rule == "REJECT")
+      continue;
+
+    std::string target, policy_pattern;
+    if (parseProviderGroupIdMatcher(rule, target, policy_pattern)) {
+      if (matchRange(target, resource.group_id)) {
+        selector.resource = &resource;
+        selector.policy_pattern =
+            policy_pattern.empty() ? ".*" : policy_pattern;
+      }
+    } else if (splitRenameGroupRule(rule, target, policy_pattern)) {
+      if (!resource.source_tag.empty() && regFind(resource.source_tag, target)) {
+        selector.resource = &resource;
+        selector.policy_pattern =
+            policy_pattern.empty() ? ".*" : policy_pattern;
+      }
+    } else if (!startsWith(rule, "!!") && !startsWith(rule, "script:")) {
+      selector.resource = &resource;
+      selector.policy_pattern = rule;
+    }
+    break;
+  }
+  return selector;
+}
+
+std::string safeSurgePolicyPathUrl(const std::string &url) {
+  return replaceAllDistinct(url, ",", "%2C");
+}
+
+} // namespace
+
+static bool splitRenameGroupRule(const std::string &match,
+                                 std::string &group_pattern,
                                  std::string &name_pattern) {
   static const std::string group_regex = R"(^!!(?:GROUP)=(.+?)(?:!!(.*))?$)";
   if (!startsWith(match, "!!GROUP="))
@@ -1395,6 +1460,8 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
   unsigned short local_port = 1080;
   RemarkSet used_remarks;
   used_remarks.reserve(nodes.size());
+  ext.surge_generation_stats = TargetGenerationStats{};
+  ext.surge_generation_stats.input_nodes = nodes.size();
 
   ini.store_any_line = true;
   // filter out sections that requires direct-save
@@ -1417,6 +1484,7 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
   ini.set("{NONAME}", "DIRECT = direct");
 
   for (Proxy &x : nodes) {
+    bool supported = true;
     if (ext.append_proxy_type) {
       std::string type = getProxyTypeName(x.Type);
       x.Remark = "[" + type + "] " + x.Remark;
@@ -1468,13 +1536,16 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
             proxy += "," + replaceAllDistinct(pluginopts, ";", ",");
           break;
         default:
-          continue;
+          supported = false;
+          break;
         }
       }
       break;
     case ProxyType::VMess:
-      if (surge_ver < 4 && surge_ver != -3)
-        continue;
+      if (surge_ver < 4 && surge_ver != -3) {
+        supported = false;
+        break;
+      }
       proxy = "vmess, " + hostname + ", " + port + ", username=" + id +
               ", tls=" + (tlssecure ? "true" : "false") +
               ", vmess-aead=" + (x.AlterId == 0 ? "true" : "false");
@@ -1496,14 +1567,17 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
           proxy += ", ws-headers=" + join(headers, "|");
         break;
       default:
-        continue;
+        supported = false;
+        break;
       }
       if (!scv.is_undef())
         proxy += ", skip-cert-verify=" + scv.get_str();
       break;
     case ProxyType::ShadowsocksR:
-      if (ext.surge_ssr_path.empty() || surge_ver < 2)
-        continue;
+      if (ext.surge_ssr_path.empty() || surge_ver < 2) {
+        supported = false;
+        break;
+      }
       proxy = "external, exec=\"" + ext.surge_ssr_path + "\", args=\"";
       args = {"-l", std::to_string(local_port),
               "-s", hostname,
@@ -1557,8 +1631,10 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
         proxy += ", skip-cert-verify=" + scv.get_str();
       break;
     case ProxyType::Trojan:
-      if (surge_ver < 4 && surge_ver != -3)
-        continue;
+      if (surge_ver < 4 && surge_ver != -3) {
+        supported = false;
+        break;
+      }
       proxy = "trojan, " + hostname + ", " + port + ", password=" + password;
       if (x.SnellVersion != 0)
         proxy += ", version=" + std::to_string(x.SnellVersion);
@@ -1581,8 +1657,10 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
         proxy += ", version=" + std::to_string(x.SnellVersion);
       break;
     case ProxyType::Hysteria2:
-      if (surge_ver < 4)
-        continue;
+      if (surge_ver < 4) {
+        supported = false;
+        break;
+      }
       proxy = "hysteria2, " + hostname + ", " + port + ", password=" + password;
       if (!x.DownMbps.empty()) {
         if (!isNumeric(x.DownMbps)) {
@@ -1605,8 +1683,10 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
         proxy += ",port-hopping=" + x.Ports;
       break;
     case ProxyType::WireGuard:
-      if (surge_ver < 4 && surge_ver != -3)
-        continue;
+      if (surge_ver < 4 && surge_ver != -3) {
+        supported = false;
+        break;
+      }
       section = randomStr(5);
       real_section = "WireGuard " + section;
       proxy = "wireguard, section-name=" + section;
@@ -1627,6 +1707,12 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
       ini.set(real_section, "peer", "(" + generatePeer(x) + ")");
       break;
     default:
+      supported = false;
+      break;
+    }
+
+    if (!supported) {
+      ext.surge_generation_stats.unsupported_by_type[x.Type]++;
       continue;
     }
 
@@ -1643,6 +1729,7 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
       nodelist.emplace_back(x);
     }
     used_remarks.emplace(x.Remark);
+    ext.surge_generation_stats.emitted_nodes++;
   }
 
   if (ext.nodelist)
@@ -1653,6 +1740,8 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
   for (const ProxyGroupConfig &x : extra_proxy_group) {
     string_array filtered_nodelist;
     std::string group;
+    const SurgeRemoteSelector remote_selector =
+        surgeRemoteSelectorForGroup(x, ext.surge_policy_paths);
 
     switch (x.Type) {
     case ProxyGroupType::Select:
@@ -1676,10 +1765,10 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
     for (const auto &y : x.Proxies)
       groupGenerate(y, nodelist, filtered_nodelist, true, ext);
 
-    if (filtered_nodelist.empty())
+    if (filtered_nodelist.empty() && remote_selector.resource == nullptr)
       filtered_nodelist.emplace_back("DIRECT");
 
-    if (filtered_nodelist.size() == 1) {
+    if (filtered_nodelist.size() == 1 && remote_selector.resource == nullptr) {
       group = toLower(filtered_nodelist[0]);
       switch (hash_(group)) {
       case "direct"_hash:
@@ -1690,8 +1779,19 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
       }
     }
 
-    group = x.TypeStr() + ",";
-    group += join(filtered_nodelist, ",");
+    group = x.TypeStr();
+    if (!filtered_nodelist.empty())
+      group += "," + join(filtered_nodelist, ",");
+    if (remote_selector.resource != nullptr) {
+      const SurgePolicyPathResource &resource = *remote_selector.resource;
+      group += ",policy-path=" + safeSurgePolicyPathUrl(resource.url);
+      if (resource.has_update_interval)
+        group += ",update-interval=" +
+                 std::to_string(resource.update_interval);
+      group += ",policy-regex-filter=\"" + remote_selector.policy_pattern +
+               "\"";
+      ext.surge_generation_stats.remote_references_emitted++;
+    }
     if (x.Type == ProxyGroupType::URLTest ||
         x.Type == ProxyGroupType::Fallback ||
         x.Type == ProxyGroupType::LoadBalance) {
