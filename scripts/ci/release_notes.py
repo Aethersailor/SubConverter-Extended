@@ -1597,7 +1597,7 @@ def render_change_section(
             if len(phrases) == 1:
                 sentence = phrases[0]
             else:
-                sentence = "、".join(phrases[:-1]) + "和" + phrases[-1]
+                sentence = "、".join(phrases[:-1]) + "和 " + phrases[-1]
             lines.extend([f"按提交记录归类，本版本包含 {sentence}。", ""])
         else:
             lines.extend(["本版本未包含可单独归类的变更。", ""])
