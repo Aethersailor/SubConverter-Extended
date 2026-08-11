@@ -12,9 +12,11 @@ The bridge is integrated into the C++ build:
   URI/base64 subscriptions, including per-proxy validation.
 - `src/parser/mihomo_bridge.cpp` calls the exported Go functions and converts
   Mihomo JSON output into C++ proxy nodes.
-- `src/generator/config/nodemanip.cpp` uses the Mihomo parser when
-  `USE_MIHOMO_PARSER` is defined. Clash-compatible output fails closed on
-  Mihomo parser errors; other targets retain the legacy compatibility fallback.
+- `src/generator/config/nodemanip.cpp` selects the parser after the request
+  target has been resolved. `clash` and `clashr` use the Mihomo bridge and fail
+  closed on parser errors; every other target uses the legacy parser without
+  invoking the bridge. Consequently, `target=auto` uses Mihomo only when its
+  User-Agent resolves to `clash` or `clashr`.
 - `CMakeLists.txt` enables `USE_MIHOMO_PARSER` automatically when either
   `bridge/libmihomo.so` or `bridge/libmihomo.a` is present.
 

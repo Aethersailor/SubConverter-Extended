@@ -244,7 +244,7 @@ RUN if [ "${BUILD_TESTS}" = "true" ]; then \
         export UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1"; \
         echo "Sanitizer targets: production runtime and the full correctness suite"; \
       fi; \
-      ctest --test-dir . --output-on-failure --timeout 120 --label-exclude '^benchmark$'; \
+      ctest --test-dir . --output-on-failure --timeout 120; \
     fi
 
 # 收集 glibc 运行时依赖（动态探测，避免固定版本）

@@ -1,4 +1,7 @@
+#include <cerrno>
 #include <csignal>
+#include <cstdio>
+#include <fcntl.h>
 #include <iostream>
 #include <string>
 #include <unistd.h>
@@ -64,6 +67,35 @@ void setcd(std::string &file) {
   chdir(path.data());
 }
 
+struct LogRedirectResult {
+  bool success = false;
+  const char *stage = "open";
+  int error_number = 0;
+};
+
+LogRedirectResult redirectStderrToAppendFile(const char *path) {
+  std::fflush(stderr);
+  int flags = O_WRONLY | O_CREAT | O_APPEND;
+#ifdef _WIN32
+  // Preserve the text-mode line endings of the previous freopen("a") path.
+  flags |= O_TEXT;
+#endif
+  const int file_descriptor = open(path, flags, 0644);
+  if (file_descriptor < 0)
+    return {false, "open", errno};
+  if (file_descriptor != STDERR_FILENO &&
+      dup2(file_descriptor, STDERR_FILENO) < 0) {
+    const int error_number = errno;
+    close(file_descriptor);
+    return {false, "dup2", error_number};
+  }
+  if (file_descriptor != STDERR_FILENO)
+    close(file_descriptor);
+  clearerr(stderr);
+  std::cerr.clear();
+  return {true, "none", 0};
+}
+
 void chkArg(int argc, char *argv[]) {
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "-cfw") == 0) {
@@ -78,10 +110,41 @@ void chkArg(int argc, char *argv[]) {
       if (i < argc - 1)
         global.generateProfiles.assign(argv[++i]);
     } else if (strcmp(argv[i], "-l") == 0 || strcmp(argv[i], "--log") == 0) {
-      if (i < argc - 1)
-        if (freopen(argv[++i], "a", stderr) == nullptr)
-          std::cerr << "无法将输出重定向到日志文件。\n";
+      if (i < argc - 1) {
+        const char *log_path = argv[++i];
+        const LogRedirectResult result = redirectStderrToAppendFile(log_path);
+        if (result.success) {
+          writeLog(LOG_LEVEL_INFO,
+                   "LOG_REDIRECT_ACTIVE mode=append rotation=external");
+        } else {
+          writeLog(LOG_LEVEL_ERROR,
+                   "LOG_REDIRECT_FAILED stage=" + std::string(result.stage) +
+                       " errno=" + std::to_string(result.error_number) +
+                       " action=continue-with-stderr");
+        }
+      } else {
+        writeLog(LOG_LEVEL_ERROR,
+                 "LOG_REDIRECT_FAILED reason=missing-path "
+                 "action=continue-with-stderr");
+      }
     }
+  }
+}
+
+const char *shutdownSignalName(std::sig_atomic_t signal) {
+  switch (signal) {
+#ifndef _WIN32
+  case SIGHUP:
+    return "SIGHUP";
+  case SIGQUIT:
+    return "SIGQUIT";
+#endif
+  case SIGTERM:
+    return "SIGTERM";
+  case SIGINT:
+    return "SIGINT";
+  default:
+    return "UNKNOWN";
   }
 }
 
@@ -102,9 +165,11 @@ void cron_tick_caller() {
   const std::sig_atomic_t signal = pendingShutdownSignal;
   if (signal != 0) {
     pendingShutdownSignal = 0;
-    writeLog(0,
-             "收到中断信号 " + std::to_string(signal) + "，正在退出...",
-             LOG_LEVEL_FATAL);
+    writeLog(LOG_LEVEL_INFO,
+             "SHUTDOWN_REQUESTED signal=" +
+                 std::string(shutdownSignalName(signal)) +
+                 " signal_code=" + std::to_string(signal) +
+                 " action=graceful-stop");
     webServer.stop_web_server();
     return;
   }
@@ -121,6 +186,15 @@ void shutdown_runtime() {
 }
 
 int main(int argc, char *argv[]) {
+#ifdef _WIN32
+  const UINT original_console_output_code_page = GetConsoleOutputCP();
+  const bool console_output_code_page_changed =
+      original_console_output_code_page != 0 &&
+      original_console_output_code_page != CP_UTF8 &&
+      SetConsoleOutputCP(CP_UTF8) != 0;
+  defer(if (console_output_code_page_changed)
+            SetConsoleOutputCP(original_console_output_code_page);)
+#endif
 #ifndef _DEBUG
   std::string prgpath = argv[0];
   setcd(prgpath); // first switch to program directory
@@ -131,19 +205,18 @@ int main(int argc, char *argv[]) {
   chkArg(argc, argv);
   if (default_preference.status ==
       PreferenceFileStatus::CopyCommittedUnsynced) {
-    writeLog(0,
+    writeLog(LOG_LEVEL_WARNING,
              "DEFAULT_PREFERENCE_COPY_VISIBLE source=" +
                  default_preference.source +
                  " destination=" + default_preference.path +
                  " new_file_visible=true durability=unconfirmed "
-                 "action=continue",
-             LOG_LEVEL_WARNING);
+                 "action=continue");
   }
   if (defaultPreferenceRequiresExit(default_preference, global.prefPath)) {
     const bool temporary_remaining =
         default_preference.status ==
         PreferenceFileStatus::CopyFailedTemporaryRemaining;
-    writeLog(0,
+    writeLog(LOG_LEVEL_FATAL,
              std::string("DEFAULT_PREFERENCE_COPY_FAILED") +
                  " source=" + default_preference.source +
                  " destination=" + default_preference.path +
@@ -151,22 +224,19 @@ int main(int argc, char *argv[]) {
                  (temporary_remaining
                       ? " temporary_file_remaining=true"
                       : " temporary_file_remaining=false") +
-                 " action=exit",
-             LOG_LEVEL_FATAL);
+                 " action=exit");
     return 1;
   }
   setcd(global.prefPath); // then switch to pref directory
-  writeLog(0, "SubConverter-Extended " VERSION " 正在启动...", LOG_LEVEL_INFO);
+  writeLog(LOG_LEVEL_INFO, "SubConverter-Extended " VERSION " 正在启动...");
 #ifdef _WIN32
   WSADATA wsaData;
   if (WSAStartup(MAKEWORD(1, 1), &wsaData) != 0) {
     // std::cerr<<"WSAStartup failed.\n";
-    writeLog(0, "WSAStartup 初始化失败。", LOG_LEVEL_FATAL);
+    writeLog(LOG_LEVEL_FATAL, "WSAStartup 初始化失败。");
     return 1;
   }
   defer(WSACleanup();)
-  UINT origcp = GetConsoleOutputCP();
-  defer(SetConsoleOutputCP(origcp);) SetConsoleOutputCP(65001);
 #else
   signal(SIGPIPE, SIG_IGN);
   signal(SIGABRT, SIG_IGN);
@@ -179,8 +249,7 @@ int main(int argc, char *argv[]) {
   SetConsoleTitle("SubConverter-Extended " VERSION);
   if (!readConf())
     return 1;
-  writeLog(
-      0,
+  writeLog(LOG_LEVEL_INFO,
       "并发运行参数：HTTP base/max threads=" +
           std::to_string(global.maxConcurThreads) + "/" +
           std::to_string(global.maxServerThreads) +
@@ -195,8 +264,7 @@ int main(int argc, char *argv[]) {
           std::to_string(externalConfigCacheMaxBytes()) + " bytes" +
           ", ruleset conversion cache=" +
           std::to_string(rulesetConversionCacheMaxEntries()) + " entries/" +
-          std::to_string(rulesetConversionCacheMaxBytes()) + " bytes。",
-      LOG_LEVEL_INFO);
+          std::to_string(rulesetConversionCacheMaxBytes()) + " bytes。");
   // Register cleanup before any background refresh starts. The HTTP backend
   // drains accepted requests before returning, so only then may the executor
   // cancel unobserved work and release its curl leases before the pool stops.
@@ -219,10 +287,9 @@ int main(int argc, char *argv[]) {
       normalize_managed_prefix(getEnv("MANAGED_PREFIX"));
   if (!env_managed_config_prefix.empty() && !env_managed_prefix.empty() &&
       env_managed_config_prefix != env_managed_prefix) {
-    writeLog(0,
+    writeLog(LOG_LEVEL_WARNING,
              "同时设置了 MANAGED_CONFIG_PREFIX 和 MANAGED_PREFIX，使用 "
-             "MANAGED_CONFIG_PREFIX。",
-             LOG_LEVEL_WARNING);
+             "MANAGED_CONFIG_PREFIX。");
   }
   if (!env_managed_config_prefix.empty())
     global.managedConfigPrefix = env_managed_config_prefix;
@@ -288,10 +355,9 @@ int main(int argc, char *argv[]) {
   publishSettingsSnapshot(global);
   if (global.securityProfile == "lan" &&
       (global.listenAddress == "0.0.0.0" || global.listenAddress == "::")) {
-    writeLog(0,
+    writeLog(LOG_LEVEL_WARNING,
              "当前安全档位为 lan，但正在监听所有网络接口。面向公网部署请使用 "
-             "security.profile=public。",
-             LOG_LEVEL_WARNING);
+             "security.profile=public。");
   }
   logSecurityPosture();
   listener_args args = {global.listenAddress,   global.listenPort,
@@ -299,10 +365,9 @@ int main(int argc, char *argv[]) {
                         cron_tick_caller,       200};
   // std::cout<<"Serving HTTP @
   // http://"<<listen_address<<":"<<listen_port<<std::endl;
-  writeLog(0,
+  writeLog(LOG_LEVEL_INFO,
            "正在启动 HTTP 服务：http://" + global.listenAddress + ":" +
-               std::to_string(global.listenPort),
-           LOG_LEVEL_INFO);
+               std::to_string(global.listenPort));
   int ret = webServer.start_web_server_multi(&args);
   return ret;
 }

@@ -4,6 +4,7 @@
 #include <string>
 #include <iostream>
 #include <thread>
+#include <utility>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -66,20 +67,93 @@ static std::string get_thread_name()
 }
 
 std::mutex log_mutex;
+thread_local std::string log_request_id;
+thread_local bool log_level_override_active = false;
+thread_local LogLevel log_level_override = LOG_LEVEL_INFO;
 
-bool shouldLog(int level)
-{
-    return level <= effectiveSettings().logLevel;
+namespace {
+
+LogLevel effectiveLogThreshold() {
+#ifdef NO_WEBGET
+    return effectiveSettings().logLevel;
+#else
+    return captureEffectiveSettingsSnapshot()->logLevel;
+#endif
 }
 
-void writeLog(int type, const std::string &content, int level)
+} // namespace
+
+ScopedLogRequestContext::ScopedLogRequestContext(
+    const std::string &request_id)
+    : previous_request_id_(std::move(log_request_id)) {
+    log_request_id = request_id;
+}
+
+ScopedLogRequestContext::~ScopedLogRequestContext() {
+    log_request_id = std::move(previous_request_id_);
+}
+
+std::string currentLogRequestId() { return log_request_id; }
+
+ScopedLogLevelOverride::ScopedLogLevelOverride()
+    : previous_active_(log_level_override_active),
+      previous_level_(log_level_override) {
+    if (!previous_active_)
+        log_level_override = effectiveLogThreshold();
+    log_level_override_active = true;
+}
+
+ScopedLogLevelOverride::~ScopedLogLevelOverride() {
+    log_level_override_active = previous_active_;
+    log_level_override = previous_level_;
+}
+
+void ScopedLogLevelOverride::set(LogLevel level) {
+    log_level_override = level;
+}
+
+bool shouldLog(LogLevel level)
+{
+    const LogLevel threshold = log_level_override_active
+                                   ? log_level_override
+                                   : effectiveLogThreshold();
+    return static_cast<int>(level) <=
+           static_cast<int>(threshold);
+}
+
+namespace {
+
+const char *logLevelLabel(LogLevel level) {
+    switch (level) {
+    case LogLevel::Fatal:
+        return "[FATL]";
+    case LogLevel::Error:
+        return "[ERRO]";
+    case LogLevel::Warning:
+        return "[WARN]";
+    case LogLevel::Info:
+        return "[INFO]";
+    case LogLevel::Debug:
+        return "[DEBG]";
+    case LogLevel::Verbose:
+        return "[VERB]";
+    }
+    return "[UNKN]";
+}
+
+} // namespace
+
+void writeLog(LogLevel level, const std::string &content)
 {
     if(!shouldLog(level))
         return;
+    const std::string safe_content = sanitizeLogLine(content);
+    const std::string request_id = currentLogRequestId();
     std::lock_guard<std::mutex> lock(log_mutex);
-    const char *levels[] = {"[FATL]", "[ERRO]", "[WARN]", "[INFO]", "[DEBG]", "[VERB]"};
-    std::cerr<<getTime(2)<<" ["<<getpid()<<" "<<get_thread_name()<<"]"<<levels[level % 6];
-    std::cerr<<" "<<redactSensitiveLogText(content)<<"\n";
+    std::cerr<<getTime(2)<<" ["<<getpid()<<" "<<get_thread_name()<<"]"<<logLevelLabel(level);
+    if (!request_id.empty())
+        std::cerr<<" request_id="<<request_id;
+    std::cerr<<" "<<safe_content<<"\n";
 }
 
 

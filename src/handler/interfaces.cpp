@@ -40,6 +40,7 @@
 #include "statistics.h"
 #include "sub_request_key.h"
 #include "upload.h"
+#include "user_agent.h"
 #include "webget.h"
 #include "utils/time_compat.h"
 
@@ -73,29 +74,32 @@ static constexpr size_t kProviderUserAgentMaxLen = 512;
 
 struct TargetDescriptor {
   const char *name;
+  NodeParserMode parser_mode;
   bool simple_subscription;
   SingleLinkTypes single_link_types;
 };
 
 static constexpr std::array<TargetDescriptor, 18> kTargetDescriptors = {{
-    {"clash", false, 0},
-    {"clashr", false, 0},
-    {"surge", false, 0},
-    {"quan", false, 0},
-    {"quanx", false, 0},
-    {"loon", false, 0},
-    {"surfboard", false, 0},
-    {"mellow", false, 0},
-    {"singbox", false, 0},
-    {"ss", true, SingleLinkType::Shadowsocks},
-    {"ssd", true, 0},
-    {"ssr", true, SingleLinkType::ShadowsocksR},
-    {"sssub", true, 0},
-    {"v2ray", true, SingleLinkType::VMess},
-    {"trojan", true, SingleLinkType::Trojan},
-    {"vless", true, SingleLinkType::VLESS},
-    {"hysteria2", true, SingleLinkType::Hysteria2},
-    {"mixed", true, SingleLinkType::Mixed},
+    {"clash", NodeParserMode::MihomoOnly, false, 0},
+    {"clashr", NodeParserMode::MihomoOnly, false, 0},
+    {"surge", NodeParserMode::LegacyOnly, false, 0},
+    {"quan", NodeParserMode::LegacyOnly, false, 0},
+    {"quanx", NodeParserMode::LegacyOnly, false, 0},
+    {"loon", NodeParserMode::LegacyOnly, false, 0},
+    {"surfboard", NodeParserMode::LegacyOnly, false, 0},
+    {"mellow", NodeParserMode::LegacyOnly, false, 0},
+    {"singbox", NodeParserMode::LegacyOnly, false, 0},
+    {"ss", NodeParserMode::LegacyOnly, true, SingleLinkType::Shadowsocks},
+    {"ssd", NodeParserMode::LegacyOnly, true, 0},
+    {"ssr", NodeParserMode::LegacyOnly, true,
+     SingleLinkType::ShadowsocksR},
+    {"sssub", NodeParserMode::LegacyOnly, true, 0},
+    {"v2ray", NodeParserMode::LegacyOnly, true, SingleLinkType::VMess},
+    {"trojan", NodeParserMode::LegacyOnly, true, SingleLinkType::Trojan},
+    {"vless", NodeParserMode::LegacyOnly, true, SingleLinkType::VLESS},
+    {"hysteria2", NodeParserMode::LegacyOnly, true,
+     SingleLinkType::Hysteria2},
+    {"mixed", NodeParserMode::LegacyOnly, true, SingleLinkType::Mixed},
 }};
 
 static const TargetDescriptor *findTargetDescriptor(const std::string &name) {
@@ -105,6 +109,10 @@ static const TargetDescriptor *findTargetDescriptor(const std::string &name) {
                      return name == target.name;
                    });
   return found == kTargetDescriptors.end() ? nullptr : &*found;
+}
+
+static const char *nodeParserModeName(NodeParserMode mode) {
+  return mode == NodeParserMode::MihomoOnly ? "mihomo" : "legacy";
 }
 
 static std::string supportedTargets(const std::string &separator) {
@@ -306,96 +314,6 @@ static std::string buildProviderRemarkFilter(const string_array &rules) {
 
 extern string_array ClashRuleTypes, SurgeRuleTypes, QuanXRuleTypes;
 
-struct UAProfile {
-  std::string head;
-  std::string version_match;
-  std::string version_target;
-  std::string target;
-  tribool clash_new_name = tribool();
-  int surge_ver = -1;
-};
-
-const std::vector<UAProfile> UAMatchList = {
-    {"ClashForAndroid", "\\/([0-9.]+)", "2.0", "clash", true},
-    {"ClashForAndroid", "\\/([0-9.]+)R", "", "clashr", false},
-    {"ClashForAndroid", "", "", "clash", false},
-    {"ClashforWindows", "\\/([0-9.]+)", "0.11", "clash", true},
-    {"ClashforWindows", "", "", "clash", false},
-    {"clash-verge", "", "", "clash", true},
-    {"ClashX Pro", "", "", "clash", true},
-    {"ClashX", "\\/([0-9.]+)", "0.13", "clash", true},
-    {"Clash", "", "", "clash", true},
-    {"Kitsunebi", "", "", "v2ray"},
-    {"Loon", "", "", "loon"},
-    {"Pharos", "", "", "mixed"},
-    {"Potatso", "", "", "mixed"},
-    {"Quantumult%20X", "", "", "quanx"},
-    {"Quantumult", "", "", "quan"},
-    {"Qv2ray", "", "", "v2ray"},
-    {"Shadowrocket", "", "", "mixed"},
-    {"Surfboard", "", "", "surfboard"},
-    {"Surge", "\\/([0-9.]+).*x86", "906", "surge", false,
-     4}, /// Surge for Mac (supports VMess)
-    {"Surge", "\\/([0-9.]+).*x86", "368", "surge", false, 3},
-    /// Surge for Mac (supports new rule types and Shadowsocks without plugin)
-    {"Surge", "\\/([0-9.]+)", "1419", "surge", false,
-     4}, /// Surge iOS 4 (first version)
-    {"Surge", "\\/([0-9.]+)", "900", "surge", false,
-     3},                                  /// Surge iOS 3 (approx)
-    {"Surge", "", "", "surge", false, 2}, /// any version of Surge as fallback
-    {"Trojan-Qt5", "", "", "trojan"},
-    {"V2rayU", "", "", "v2ray"},
-    {"V2RayX", "", "", "v2ray"}};
-
-bool verGreaterEqual(const std::string &src_ver,
-                     const std::string &target_ver) {
-  std::istringstream src_stream(src_ver), target_stream(target_ver);
-  int src_part, target_part;
-  char dot;
-  while (src_stream >> src_part) {
-    if (target_stream >> target_part) {
-      if (src_part < target_part) {
-        return false;
-      } else if (src_part > target_part) {
-        return true;
-      }
-      // Skip the dot separator in both streams
-      src_stream >> dot;
-      target_stream >> dot;
-    } else {
-      // If we run out of target parts, the source version is greater only if it
-      // has more parts
-      return true;
-    }
-  }
-  // If we get here, the common parts are equal, so check if target_ver has more
-  // parts
-  return !bool(target_stream >> target_part);
-}
-
-void matchUserAgent(const std::string &user_agent, std::string &target,
-                    tribool &clash_new_name, int &surge_ver) {
-  if (user_agent.empty())
-    return;
-  for (const UAProfile &x : UAMatchList) {
-    if (startsWith(user_agent, x.head)) {
-      if (!x.version_match.empty()) {
-        std::string version;
-        if (regGetMatch(user_agent, x.version_match, 2, 0, &version))
-          continue;
-        if (!x.version_target.empty() &&
-            !verGreaterEqual(version, x.version_target))
-          continue;
-      }
-      target = x.target;
-      clash_new_name = x.clash_new_name;
-      if (x.surge_ver != -1)
-        surge_ver = x.surge_ver;
-      return;
-    }
-  }
-}
-
 std::string getRuleset(RESPONSE_CALLBACK_ARGS) {
   SettingsSnapshot snapshot = captureEffectiveSettingsSnapshot();
   ScopedSettingsView settings_scope(std::move(snapshot));
@@ -544,7 +462,7 @@ static bool fetchExternalRuleSources(const string_array &sources,
                                      string_array &destination,
                                      std::string &error) {
   const Settings &settings = effectiveSettings();
-  ProxyPolicy proxy = parseProxy(settings.proxyRuleset);
+  ProxyPolicy proxy = parseProxy(settings.proxyRuleset, settings.proxyBypass);
   string_icase_map request_headers = {
       {"Cache-Control", "no-cache, no-store, max-age=0"},
       {"Pragma", "no-cache"}};
@@ -579,10 +497,9 @@ static bool fetchExternalRuleSources(const string_array &sources,
     FetchResult result{&fetch_status, &content, nullptr, nullptr};
     webGet(argument, result);
     if (fetch_status < 200 || fetch_status >= 300 || content.empty()) {
-      writeLog(0,
+      writeLog(LOG_LEVEL_WARNING,
                "外部规则来源 " + source_identifier +
-                   " 拉取失败、HTTP 状态异常或内容为空，已跳过。",
-               LOG_LEVEL_WARNING);
+                   " 拉取失败、HTTP 状态异常或内容为空，已跳过。");
       continue;
     }
 
@@ -972,6 +889,7 @@ using SharedCoalescedResponse = std::shared_ptr<const CoalescedResponse>;
 struct InflightSubRequest {
   std::mutex mutex;
   std::condition_variable cv;
+  std::string owner_request_id;
   bool done = false;
   SharedCoalescedResponse result;
   std::exception_ptr exception;
@@ -992,9 +910,13 @@ struct SubExplainProvider {
   std::string name;
   std::string tag;
   std::string source_hash;
+  std::string source_summary;
   std::string path;
   std::string filter;
   std::string exclude_filter;
+  bool filter_present = false;
+  bool exclude_filter_present = false;
+  bool name_generated = false;
   int group_id = 0;
   uint32_t interval = 0;
   bool proxy_direct = kDefaultProxyProviderDirect;
@@ -1039,6 +961,7 @@ struct SubExplainReport {
   std::string proxy_config;
   std::string proxy_ruleset;
   std::string proxy_subscription;
+  std::string proxy_bypass;
   std::string base_fetch_context = "trusted_config";
   std::string ruleset_fetch_context = "trusted_config";
   size_t raw_url_count = 0;
@@ -1070,26 +993,52 @@ static std::string fetchContextName(FetchContext context) {
   }
 }
 
-static std::string shortHash(const std::string &value) {
-  if (value.empty())
-    return "";
-  return getMD5(value).substr(0, 10);
-}
-
 static std::string boolString(bool value) { return value ? "true" : "false"; }
 
-static std::string previewExplainValue(const std::string &raw_value,
+static std::string previewExplainValue(const std::string &value,
                                        bool sensitive) {
-  std::string decoded = urlDecode(raw_value);
-  if (decoded.empty())
+  if (value.empty())
     return "";
   if (sensitive)
     return "[redacted]";
 
   static constexpr size_t kMaxPreview = 180;
-  if (decoded.size() <= kMaxPreview)
-    return decoded;
-  return decoded.substr(0, kMaxPreview) + "...";
+  std::string safe = sanitizeLogLine(value);
+  if (safe.size() <= kMaxPreview)
+    return safe;
+  return safe.substr(0, kMaxPreview) + "...";
+}
+
+static std::string summarizeExplainSourceList(const std::string &value) {
+  if (value.empty())
+    return "not provided";
+
+  static constexpr size_t kMaxSummarizedSources = 8;
+  const string_array sources = split(value, "|");
+  string_array summaries;
+  summaries.reserve(std::min(sources.size(), kMaxSummarizedSources) + 1);
+  for (size_t index = 0;
+       index < sources.size() && index < kMaxSummarizedSources; ++index) {
+    const TaggedLink tagged = parseTaggedLink(sources[index]);
+    summaries.emplace_back(summarizeUrlForLog(tagged.link));
+  }
+  if (sources.size() > kMaxSummarizedSources) {
+    summaries.emplace_back("... " +
+                           std::to_string(sources.size() -
+                                          kMaxSummarizedSources) +
+                           " more source(s)");
+  }
+  return join(summaries, "; ");
+}
+
+static std::string explainParameterName(const std::string &name) {
+  static constexpr size_t kMaxParameterName = 64;
+  if (!name.empty() && name.size() <= kMaxParameterName &&
+      std::all_of(name.begin(), name.end(), [](unsigned char ch) {
+        return std::isalnum(ch) || ch == '_' || ch == '-' || ch == '.';
+      }))
+    return name;
+  return "[redacted-name]";
 }
 
 static void writeJsonString(
@@ -1219,6 +1168,7 @@ static std::string serializeSubExplainReport(const SubExplainReport &report,
   writeJsonString(writer, "config", report.proxy_config);
   writeJsonString(writer, "ruleset", report.proxy_ruleset);
   writeJsonString(writer, "subscription", report.proxy_subscription);
+  writeJsonString(writer, "bypass", report.proxy_bypass);
   writer.EndObject();
 
   writer.Key("resources");
@@ -1248,9 +1198,16 @@ static std::string serializeSubExplainReport(const SubExplainReport &report,
     writeJsonString(writer, "name", provider.name);
     writeJsonString(writer, "tag", provider.tag);
     writeJsonString(writer, "source_hash", provider.source_hash);
+    writeJsonString(writer, "source_summary", provider.source_summary);
     writeJsonString(writer, "path", provider.path);
     writeJsonString(writer, "filter", provider.filter);
     writeJsonString(writer, "exclude_filter", provider.exclude_filter);
+    writer.Key("filter_present");
+    writer.Bool(provider.filter_present);
+    writer.Key("exclude_filter_present");
+    writer.Bool(provider.exclude_filter_present);
+    writer.Key("name_generated");
+    writer.Bool(provider.name_generated);
     writer.Key("group_id");
     writer.Int(provider.group_id);
     writer.Key("interval");
@@ -1288,6 +1245,11 @@ struct AgeResponseContext {
   std::string fingerprint;
 };
 
+static void applyExplainPrivacyHeaders(Response &response) {
+  response.headers["Cache-Control"] = "private, no-store, max-age=0";
+  response.headers["Pragma"] = "no-cache";
+}
+
 static AgeResponseContext consumeAgeResponseContext(Request &request) {
   AgeResponseContext context;
   auto iter = request.headers.find("X-Age-Public-Key");
@@ -1322,6 +1284,11 @@ static std::string rejectAgeRequest(Response &response,
 static std::string finalizeSubResponse(const Request &request,
                                        Response &response, std::string body,
                                        const AgeResponseContext &age) {
+  if (isTruthyRequestValue(getUrlArg(request.argument, "explain")))
+    applyExplainPrivacyHeaders(response);
+  // User-Agent can select target=auto and affects subscription/provider
+  // request headers. Separate every /sub representation in shared caches.
+  appendVaryHeader(response, "User-Agent");
   // Every /sub representation varies on this header, including the plaintext
   // variant, so shared caches cannot serve plaintext to an encrypted request.
   appendVaryHeader(response, "X-Age-Public-Key");
@@ -1422,6 +1389,10 @@ static void storeCachedSubResponse(const std::string &key,
                                    const Settings &settings) {
   if (settings.responseCacheTtl <= 0 || !result || result->status_code != 200)
     return;
+  const auto cache_control = result->headers.find("Cache-Control");
+  if (cache_control != result->headers.end() &&
+      toLower(cache_control->second).find("no-store") != std::string::npos)
+    return;
 
   int ttl = std::min(settings.responseCacheTtl, 5);
   if (ttl <= 0)
@@ -1431,9 +1402,8 @@ static void storeCachedSubResponse(const std::string &key,
   std::lock_guard<std::mutex> lock(g_sub_response_cache_mutex);
   pruneExpiredSubResponseCache(now);
   if (g_sub_response_cache.size() > 2048) {
-    writeLog(0,
-             "响应微缓存条目数量过多，已清空以避免占用过多内存。",
-             LOG_LEVEL_WARNING);
+    writeLog(LOG_LEVEL_WARNING,
+             "响应微缓存条目数量过多，已清空以避免占用过多内存。");
     g_sub_response_cache.clear();
   }
   g_sub_response_cache[key] = {
@@ -1456,9 +1426,8 @@ static std::string runSubconverterImplWithRetry(const Request &original,
     return body;
   }
 
-  writeLog(0,
-           "/sub 请求首次转换返回 5xx，正在进行一次服务端内部重试。",
-           LOG_LEVEL_WARNING);
+  writeLog(LOG_LEVEL_WARNING,
+           "/sub 请求首次转换返回 5xx，正在进行一次服务端内部重试。");
   Request retry_request = original;
   Response retry_response;
   RuleConversionStats retry_stats;
@@ -1511,6 +1480,12 @@ static SettingsSnapshot captureSettingsForSubRequest(Request &request) {
 
 static std::string subconverterEntry(Request &request, Response &response,
                                      bool track) {
+  // Early validation failures do not pass through finalizeSubResponse.
+  appendVaryHeader(response, "User-Agent");
+  const bool explain_request =
+      isTruthyRequestValue(getUrlArg(request.argument, "explain"));
+  if (explain_request)
+    applyExplainPrivacyHeaders(response);
   AgeResponseContext age = consumeAgeResponseContext(request);
   if (age.requested && !age.valid) {
     return rejectAgeRequest(
@@ -1558,8 +1533,9 @@ static std::string subconverterEntry(Request &request, Response &response,
   }
 
   SharedCoalescedResponse cached_result;
-  if (getCachedSubResponse(key, cached_result, settings)) {
-    writeLog(0, "/sub 响应微缓存命中。", LOG_LEVEL_DEBUG);
+  if (!explain_request &&
+      getCachedSubResponse(key, cached_result, settings)) {
+    writeLog(LOG_LEVEL_DEBUG, "/sub 响应微缓存命中。");
     copyCoalescedToResponse(*cached_result, response);
     recordTrackedSubRequest(track, request, response,
                             cached_result->rule_conversions);
@@ -1573,6 +1549,7 @@ static std::string subconverterEntry(Request &request, Response &response,
     auto iter = g_sub_inflight.find(key);
     if (iter == g_sub_inflight.end()) {
       call = std::make_shared<InflightSubRequest>();
+      call->owner_request_id = currentLogRequestId();
       g_sub_inflight.emplace(key, call);
       owner = true;
     } else {
@@ -1581,8 +1558,10 @@ static std::string subconverterEntry(Request &request, Response &response,
   }
 
   if (!owner) {
-    writeLog(0, "/sub 请求已合并到正在执行的同 key 转换。",
-             LOG_LEVEL_DEBUG);
+    writeLog(LOG_LEVEL_INFO,
+             "SUB_REQUEST_COALESCED owner_request_id=" +
+                 (call->owner_request_id.empty() ? "unavailable"
+                                                 : call->owner_request_id));
     std::unique_lock<std::mutex> lock(call->mutex);
     call->cv.wait(lock, [&call] { return call->done; });
     if (call->exception)
@@ -1594,7 +1573,7 @@ static std::string subconverterEntry(Request &request, Response &response,
   }
 
   try {
-    writeLog(0, "/sub 请求成为同 key 转换 owner。", LOG_LEVEL_DEBUG);
+    writeLog(LOG_LEVEL_DEBUG, "/sub 请求成为同 key 转换 owner。");
     Response owner_response;
     RuleConversionStats stats;
     std::string body = runSubconverterImplWithRetry(
@@ -1612,7 +1591,7 @@ static std::string subconverterEntry(Request &request, Response &response,
       std::lock_guard<std::mutex> lock(g_sub_inflight_mutex);
       g_sub_inflight.erase(key);
     }
-    if (!age.requested)
+    if (!age.requested && !explain_request)
       storeCachedSubResponse(key, result, settings);
     call->cv.notify_all();
     recordTrackedSubRequest(track, request, response,
@@ -1648,6 +1627,8 @@ namespace {
 struct ParsedSubRequest {
   std::string target;
   std::string surge_version_text;
+  bool target_was_auto = false;
+  UserAgentMatch user_agent_match;
   bool explain_mode = false;
   SubExplainReport explain;
   tribool clash_new_field;
@@ -1699,37 +1680,44 @@ static std::string parseSubRequestArguments(Request &request,
   parsed.surge_version_text = getUrlArg(argument, "ver");
   parsed.explain_mode = isTruthyRequestValue(getUrlArg(argument, "explain"));
   parsed.explain.enabled = parsed.explain_mode;
-  parsed.explain.proxy_config = parseProxy(settings.proxyConfig).describe();
-  parsed.explain.proxy_ruleset = parseProxy(settings.proxyRuleset).describe();
+  parsed.explain.proxy_config =
+      parseProxy(settings.proxyConfig, settings.proxyBypass).describe();
+  parsed.explain.proxy_ruleset =
+      parseProxy(settings.proxyRuleset, settings.proxyBypass).describe();
   parsed.explain.proxy_subscription =
-      parseProxy(settings.proxySubscription).describe();
+      parseProxy(settings.proxySubscription, settings.proxyBypass).describe();
+  parsed.explain.proxy_bypass =
+      ProxyBypassPolicy::parse(settings.proxyBypass).describe();
   parsed.explain.requested_target = parsed.target;
   if (parsed.explain_mode) {
     std::string rawUrlForLog = getUrlArg(argument, "url");
-    writeLog(0,
-             "收到 /sub explain JSON 诊断请求：target=" +
-                 (parsed.target.empty() ? std::string("<empty>")
-                                        : parsed.target) +
-                 ", 参数数量=" + std::to_string(argument.size()) +
-                 ", url_hash=" +
-                 (rawUrlForLog.empty()
-                      ? std::string("-")
-                      : shortHash(urlDecode(rawUrlForLog))) +
-                 "。",
-             LOG_LEVEL_INFO);
+    const bool target_is_known = parsed.target == "auto" ||
+                                 findTargetDescriptor(parsed.target) != nullptr;
+    writeLog(LOG_LEVEL_INFO,
+             "EXPLAIN_REQUEST_RECEIVED requested_target=" +
+                  (parsed.target.empty() ? std::string("<empty>")
+                   : (target_is_known ? parsed.target
+                                      : std::string("<unsupported>"))) +
+                  " parameter_count=" + std::to_string(argument.size()) +
+                  " url_length=" + std::to_string(rawUrlForLog.size()));
   }
 
   parsed.clash_new_field = getUrlArg(argument, "new_name");
   parsed.surge_version = !parsed.surge_version_text.empty()
                              ? to_int(parsed.surge_version_text, 3)
                              : 3;
-  if (parsed.target == "auto")
-    matchUserAgent(request.headers["User-Agent"], parsed.target,
-                   parsed.clash_new_field, parsed.surge_version);
+  parsed.target_was_auto = parsed.target == "auto";
+  if (parsed.target_was_auto)
+    parsed.user_agent_match =
+        matchUserAgent(request.headers["User-Agent"], parsed.target,
+                       parsed.clash_new_field, parsed.surge_version);
   parsed.explain.target = parsed.target;
 
   parsed.target_descriptor = findTargetDescriptor(parsed.target);
   if (!parsed.target_descriptor) {
+    if (parsed.target_was_auto)
+      writeLog(LOG_LEVEL_WARNING,
+               "AUTO_TARGET_UNRESOLVED ua_family=unknown");
     response.status_code = 400;
     return "Invalid request: unsupported target value.\n"
            "无效请求：不支持的 target 参数值。\n"
@@ -1738,6 +1726,13 @@ static std::string parseSubRequestArguments(Request &request,
            supportedTargets("、") + "。";
   }
   parsed.simple_subscription = parsed.target_descriptor->simple_subscription;
+  if (parsed.target_was_auto) {
+    writeLog(LOG_LEVEL_INFO,
+             "AUTO_TARGET_RESOLVED target=" + parsed.target +
+                 " parser=" +
+                 nodeParserModeName(parsed.target_descriptor->parser_mode) +
+                 " ua_family=" + parsed.user_agent_match.family);
+  }
 
   parsed.url = getUrlArg(argument, "url");
   parsed.group_name = getUrlArg(argument, "group");
@@ -1884,7 +1879,8 @@ static std::string buildEffectiveSubPolicy(Request &request,
   policy.template_arguments.global_vars = settings.templateVars;
   policy.template_arguments.request_params = std::move(req_arg_map);
 
-  policy.subscription_proxy = parseProxy(settings.proxySubscription);
+  policy.subscription_proxy =
+      parseProxy(settings.proxySubscription, settings.proxyBypass);
   policy.generator.append_proxy_type =
       parsed.append_type.get(settings.appendType);
   // 上游项目默认在 clash 目标下自动把 expand 设为 true
@@ -2061,12 +2057,12 @@ static std::string buildExternalConfigFetchPlan(
 
   for (const ExternalConfigCandidate &candidate : config_candidates) {
     policy.template_arguments.local_vars = tpl_args_base;
-    writeLog(0, candidate.fallback
-                    ? "用户外部配置失败，显式尝试默认外部配置：" +
-                          summarizeUrlForLog(candidate.path)
-                    : "正在加载外部配置：" +
-                          summarizeUrlForLog(candidate.path),
-             candidate.fallback ? LOG_LEVEL_WARNING : LOG_LEVEL_INFO);
+    writeLog((candidate.fallback ? LOG_LEVEL_WARNING : LOG_LEVEL_INFO),
+             candidate.fallback
+                 ? "用户外部配置失败，显式尝试默认外部配置：" +
+                       summarizeUrlForLog(candidate.path)
+                 : "正在加载外部配置：" +
+                       summarizeUrlForLog(candidate.path));
 
     ExternalConfig extconf;
     extconf.tpl_args = &policy.template_arguments;
@@ -2093,9 +2089,8 @@ static std::string buildExternalConfigFetchPlan(
                              ? loadStatusName(loaded.status)
                              : (!effective ? "no_effective_settings"
                                            : "selected_base_invalid");
-    writeLog(0, "外部配置不可用，原因：" + reason + "，来源：" +
-                    summarizeUrlForLog(candidate.path),
-             LOG_LEVEL_WARNING);
+    writeLog(LOG_LEVEL_WARNING, "外部配置不可用，原因：" + reason + "，来源：" +
+                    summarizeUrlForLog(candidate.path));
   }
 
   if (!configLoadSuccess) {
@@ -2245,6 +2240,9 @@ static SubStageResponse processSubscriptionNodes(
   std::vector<Proxy> insert_nodes;
   std::string &subInfo = state.subscription_info;
   int groupID = 0;
+  size_t source_calls = 0;
+  size_t source_failures = 0;
+  NodeParserStats parser_stats;
 
   parse_settings parse_set;
   parse_set.proxy = &proxy;
@@ -2253,7 +2251,8 @@ static SubStageResponse processSubscriptionNodes(
   parse_set.stream_rules = &stream_temp;
   parse_set.time_rules = &time_temp;
   parse_set.sub_info = &subInfo;
-  parse_set.mihomo_only = argTarget == "clash" || argTarget == "clashr";
+  parse_set.parser_mode = parsed.target_descriptor->parser_mode;
+  parse_set.parser_stats = &parser_stats;
   string_icase_map subscription_headers = buildSubscriptionRequestHeaders();
   std::string selected_user_agent = providerUserAgentFromRequest(request);
   if (!selected_user_agent.empty())
@@ -2265,6 +2264,35 @@ static SubStageResponse processSubscriptionNodes(
   parse_set.js_runtime = ext.js_runtime;
   parse_set.js_context = ext.js_context;
 
+  auto logRouteSelection = [&]() {
+    const size_t provider_count = ext.providers.size();
+    std::string route = "none";
+    if (provider_count && source_calls)
+      route = "hybrid";
+    else if (provider_count)
+      route = "proxy-provider";
+    else if (parser_stats.invocations)
+      route = "node-parser";
+    else if (source_calls)
+      route = "node-source";
+    writeLog(LOG_LEVEL_INFO,
+             "SUB_ROUTE_RESULT target=" + parsed.target +
+                 " source=" +
+                 std::string(parsed.target_was_auto ? "auto" : "explicit") +
+                 " route=" + route + " parser_policy=" +
+                 nodeParserModeName(parse_set.parser_mode) + " parser=" +
+                 (parser_stats.invocations
+                      ? std::string(nodeParserModeName(parse_set.parser_mode))
+                      : std::string("none")) +
+                 " provider_count=" + std::to_string(provider_count) +
+                 " source_calls=" + std::to_string(source_calls) +
+                 " source_failures=" + std::to_string(source_failures) +
+                 " parser_calls=" +
+                 std::to_string(parser_stats.invocations) +
+                 " parser_failures=" +
+                 std::to_string(parser_stats.failures));
+  };
+
   if (!settings.insertUrls.empty() && argEnableInsert) {
     groupID = -1;
     urls = split(settings.insertUrls, "|");
@@ -2272,13 +2300,16 @@ static SubStageResponse processSubscriptionNodes(
     importItems(urls, true);
     for (std::string &x : urls) {
       x = regTrim(x);
-      writeLog(0, "正在从 URL 获取节点数据：" + summarizeUrlForLog(x) + "。",
-               LOG_LEVEL_INFO);
+      writeLog(LOG_LEVEL_INFO, "正在从 URL 获取节点数据：" + summarizeUrlForLog(x) + "。");
+      source_calls++;
       if (addNodes(x, insert_nodes, groupID, parse_set) == -1) {
+        source_failures++;
         if (settings.skipFailedLinks)
-          writeLog(0, "以下链接不包含任何有效节点信息：" + x,
-                   LOG_LEVEL_WARNING);
+          writeLog(LOG_LEVEL_WARNING,
+                   "以下链接不包含任何有效节点信息：" +
+                       summarizeUrlForLog(x));
         else {
+          logRouteSelection();
           *status_code = 400;
           return {true,
                   "Invalid request: this link does not contain any supported "
@@ -2286,9 +2317,7 @@ static SubStageResponse processSubscriptionNodes(
                   "无效请求：该链接不包含任何受支持的代理节点。\n"
                   "Please check whether the link is reachable and the node "
                   "URI format is supported.\n"
-                  "请检查链接是否可访问，以及节点 URI 格式是否受支持。\n"
-                  "Link / 链接: " +
-                      x};
+                  "请检查链接是否可访问，以及节点 URI 格式是否受支持。"};
         }
       }
       groupID--;
@@ -2356,15 +2385,13 @@ static SubStageResponse processSubscriptionNodes(
         std::string node_link = link;
         if (tagged.has_tag)
           node_link = "tag:" + tagged.tag + "," + link;
-        writeLog(0, "检测到节点链接：" + summarizeUrlForLog(link) +
-                        "，将直接解析。",
-                 LOG_LEVEL_INFO);
+        writeLog(LOG_LEVEL_INFO, "检测到节点链接：" + summarizeUrlForLog(link) +
+                        "，将直接解析。");
         node_urls.push_back(node_link);
         explain.node_link_count++;
       } else if (isLink(link) || mihomo::isHttpSchemeLink(link)) {
-        writeLog(0, "检测到订阅链接：" + summarizeUrlForLog(link) +
-                        "，将创建 provider。",
-                 LOG_LEVEL_INFO);
+        writeLog(LOG_LEVEL_INFO, "检测到订阅链接：" + summarizeUrlForLog(link) +
+                        "，将创建 provider。");
         subscription_urls.push_back(
             {link, tagged.tag, tagged.provider, tagged.interval,
              tagged.proxy_direct, tagged.has_interval, tagged.has_proxy_direct,
@@ -2382,9 +2409,8 @@ static SubStageResponse processSubscriptionNodes(
         std::string node_link = link;
         if (tagged.has_tag)
           node_link = "tag:" + tagged.tag + "," + link;
-        writeLog(0, "未知 URL 类型：" + summarizeUrlForLog(link) +
-                        "，按节点链接处理。",
-                 LOG_LEVEL_WARNING);
+        writeLog(LOG_LEVEL_WARNING, "未知 URL 类型：" + summarizeUrlForLog(link) +
+                        "，按节点链接处理。");
         node_urls.push_back(node_link);
         explain.node_link_count++;
         explain.unknown_node_link_count++;
@@ -2392,8 +2418,7 @@ static SubStageResponse processSubscriptionNodes(
     }
 
     if (!subscription_urls.empty()) {
-      writeLog(0, "检测到订阅 URL，启用 proxy-provider 模式。",
-               LOG_LEVEL_INFO);
+      writeLog(LOG_LEVEL_INFO, "检测到订阅 URL，启用 proxy-provider 模式。");
       ext.use_proxy_provider = true;
       std::string provider_user_agent =
           argTarget == "clash" ? providerUserAgentFromRequest(request) : "";
@@ -2423,6 +2448,8 @@ static SubStageResponse processSubscriptionNodes(
         }
       };
 
+      size_t generated_explain_provider_index = 0;
+
       for (const SubscriptionLinkItem &item : subscription_urls) {
         ProxyProvider provider;
         std::string urlHash =
@@ -2430,6 +2457,7 @@ static SubStageResponse processSubscriptionNodes(
                              : generateProviderHash(item.url);
         std::string default_name = "Provider_" + urlHash;
         std::string sanitized_provider = sanitizeProviderName(item.provider);
+        const bool generated_provider_name = sanitized_provider.empty();
         std::string base_name =
             sanitized_provider.empty() ? default_name : sanitized_provider;
         base_name = sanitizeProviderName(base_name);
@@ -2437,10 +2465,6 @@ static SubStageResponse processSubscriptionNodes(
           base_name = default_name;
         provider.name = reserve_provider_name(base_name);
         provider.tag = item.tag;
-        writeLog(0,
-                 "已生成 provider：" + provider.name + "，URL：" +
-                     summarizeUrlForLog(item.url),
-                 LOG_LEVEL_INFO);
         provider.url = item.url_decoded ? item.url : urlDecode(item.url);
         provider.interval = static_cast<uint32_t>(
             item.has_interval ? item.interval : settings.proxyProviderInterval);
@@ -2454,15 +2478,31 @@ static SubStageResponse processSubscriptionNodes(
         provider.filter = buildProviderRemarkFilter(lIncludeRemarks);
         provider.exclude_filter =
             buildProviderRemarkFilter(lExcludeRemarks);
+        writeLog(LOG_LEVEL_INFO,
+                 "PROXY_PROVIDER_CREATED group_id=" +
+                     std::to_string(provider.groupId) + " interval=" +
+                     std::to_string(provider.interval) + " proxy_direct=" +
+                     boolString(provider.proxy_direct) + " source=" +
+                     summarizeUrlForLog(provider.url));
 
         ext.providers.push_back(provider);
         SubExplainProvider explain_provider;
-        explain_provider.name = provider.name;
+        explain_provider.name_generated = generated_provider_name;
+        if (generated_provider_name) {
+          const std::string safe_name =
+              "Provider_Auto_" +
+              std::to_string(++generated_explain_provider_index);
+          explain_provider.name = safe_name;
+          explain_provider.path = "./providers/" + safe_name + ".yaml";
+        } else {
+          explain_provider.name = provider.name;
+          explain_provider.path = provider.path;
+        }
         explain_provider.tag = provider.tag;
-        explain_provider.source_hash = shortHash(provider.url);
-        explain_provider.path = provider.path;
-        explain_provider.filter = provider.filter;
-        explain_provider.exclude_filter = provider.exclude_filter;
+        explain_provider.source_summary = summarizeUrlForLog(provider.url);
+        explain_provider.filter_present = !provider.filter.empty();
+        explain_provider.exclude_filter_present =
+            !provider.exclude_filter.empty();
         explain_provider.group_id = provider.groupId;
         explain_provider.interval = provider.interval;
         explain_provider.proxy_direct = provider.proxy_direct;
@@ -2470,26 +2510,24 @@ static SubStageResponse processSubscriptionNodes(
         groupID++;
       }
     } else {
-      writeLog(0, "未检测到订阅 URL，禁用 proxy-provider 模式。",
-               LOG_LEVEL_INFO);
+      writeLog(LOG_LEVEL_INFO, "未检测到订阅 URL，禁用 proxy-provider 模式。");
       ext.use_proxy_provider = false;
     }
 
     if (!node_urls.empty()) {
-      writeLog(0,
+      writeLog(LOG_LEVEL_INFO,
                "正在直接解析 " + std::to_string(node_urls.size()) +
-                   " 个节点链接。",
-               LOG_LEVEL_INFO);
+                   " 个节点链接。");
       importItems(node_urls, true, FetchContext::PublicRequest);
       for (std::string &x : node_urls) {
-        writeLog(0, "正在从 URL 获取节点数据：" + summarizeUrlForLog(x) +
-                        "。",
-                 LOG_LEVEL_INFO);
+        writeLog(LOG_LEVEL_INFO, "正在从 URL 获取节点数据：" + summarizeUrlForLog(x) +
+                        "。");
+        source_calls++;
         if (addNodes(x, nodes, groupID, parse_set) == -1) {
-          writeLog(0,
+          source_failures++;
+          writeLog(LOG_LEVEL_WARNING,
                    "已跳过无效节点链接：" + summarizeUrlForLog(x) +
-                       "，继续处理其他节点。",
-                   LOG_LEVEL_WARNING);
+                       "，继续处理其他节点。");
         }
         groupID++;
       }
@@ -2498,13 +2536,13 @@ static SubStageResponse processSubscriptionNodes(
     importItems(urls, true, FetchContext::PublicRequest);
     for (std::string &x : urls) {
       x = regTrim(x);
-      writeLog(0, "正在从 URL 获取节点数据：" + summarizeUrlForLog(x) + "。",
-               LOG_LEVEL_INFO);
+      writeLog(LOG_LEVEL_INFO, "正在从 URL 获取节点数据：" + summarizeUrlForLog(x) + "。");
+      source_calls++;
       if (addNodes(x, nodes, groupID, parse_set) == -1) {
-        writeLog(0,
+        source_failures++;
+        writeLog(LOG_LEVEL_WARNING,
                  "已跳过无效节点链接：" + summarizeUrlForLog(x) +
-                     "，继续处理其他节点。",
-                 LOG_LEVEL_WARNING);
+                     "，继续处理其他节点。");
       }
       groupID++;
     }
@@ -2514,6 +2552,7 @@ static SubStageResponse processSubscriptionNodes(
   explain.proxy_provider_mode = ext.use_proxy_provider && !ext.providers.empty();
   explain.insert_node_count = insert_nodes.size();
   explain.direct_node_count = nodes.size();
+  logRouteSelection();
   if (!argProviderHeaders.empty() && !ext.nodelist && ext.providers.empty()) {
     *status_code = 400;
     return {true,
@@ -2589,6 +2628,8 @@ static SubStageResponse processSubscriptionNodes(
 struct TargetGenerationState {
   std::string output;
   std::string managed_url;
+  bool managed_url_from_profile_data = false;
+  bool managed_url_used = false;
 };
 
 static SubStageResponse dispatchTargetGenerator(
@@ -2617,6 +2658,7 @@ static SubStageResponse dispatchTargetGenerator(
 
   std::string &managed_url = generation.managed_url;
   managed_url = base64Decode(getUrlArg(argument, "profile_data"));
+  generation.managed_url_from_profile_data = !managed_url.empty();
   if (managed_url.empty())
     managed_url =
         settings.managedConfigPrefix + "/sub?" + joinArguments(argument);
@@ -2628,12 +2670,11 @@ static SubStageResponse dispatchTargetGenerator(
       upload_failed = true;
   };
 
-  proxy = parseProxy(settings.proxyConfig);
+  proxy = parseProxy(settings.proxyConfig, settings.proxyBypass);
   switch (hash_(target)) {
   case "clash"_hash:
   case "clashr"_hash:
-    writeLog(0, target == "clashr" ? "生成目标：ClashR" : "生成目标：Clash",
-             LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_INFO, target == "clashr" ? "生成目标：ClashR" : "生成目标：Clash");
     template_arguments.local_vars["clash.new_field_name"] =
         ext.clash_new_field_name ? "true" : "false";
     response.headers["profile-update-interval"] =
@@ -2663,8 +2704,7 @@ static SubStageResponse dispatchTargetGenerator(
     break;
 
   case "surge"_hash:
-    writeLog(0, "生成目标：Surge " + std::to_string(parsed.surge_version),
-             LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_INFO, "生成目标：Surge " + std::to_string(parsed.surge_version));
     if (ext.nodelist) {
       output = proxyToSurge(nodes, base_content, dummy_ruleset, dummy_group,
                             parsed.surge_version, ext);
@@ -2685,6 +2725,8 @@ static SubStageResponse dispatchTargetGenerator(
       if (upload)
         recordUpload("surge" + surge_version_text, upload_path, output, true);
       if (settings.writeManagedConfig && !settings.managedConfigPrefix.empty())
+        generation.managed_url_used = true;
+      if (generation.managed_url_used)
         output = "#!MANAGED-CONFIG " + managed_url +
                  (policy.update_interval
                       ? " interval=" +
@@ -2697,7 +2739,7 @@ static SubStageResponse dispatchTargetGenerator(
     break;
 
   case "surfboard"_hash:
-    writeLog(0, "生成目标：Surfboard", LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_INFO, "生成目标：Surfboard");
     if (render_template(fetchFile(policy.surfboard_base, proxy,
                                   settings.cacheConfig, true, base_context),
                         template_arguments, base_content, settings.templatePath,
@@ -2710,6 +2752,8 @@ static SubStageResponse dispatchTargetGenerator(
     if (upload)
       recordUpload("surfboard", upload_path, output, true);
     if (settings.writeManagedConfig && !settings.managedConfigPrefix.empty())
+      generation.managed_url_used = true;
+    if (generation.managed_url_used)
       output = "#!MANAGED-CONFIG " + managed_url +
                (policy.update_interval
                     ? " interval=" + std::to_string(policy.update_interval)
@@ -2720,7 +2764,7 @@ static SubStageResponse dispatchTargetGenerator(
     break;
 
   case "mellow"_hash:
-    writeLog(0, "生成目标：Mellow", LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_INFO, "生成目标：Mellow");
     if (render_template(fetchFile(policy.mellow_base, proxy,
                                   settings.cacheConfig, true, base_context),
                         template_arguments, base_content, settings.templatePath,
@@ -2735,7 +2779,7 @@ static SubStageResponse dispatchTargetGenerator(
     break;
 
   case "sssub"_hash:
-    writeLog(0, "生成目标：SS Subscription", LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_INFO, "生成目标：SS Subscription");
     if (render_template(fetchFile(policy.sssub_base, proxy,
                                   settings.cacheConfig, true, base_context),
                         template_arguments, base_content, settings.templatePath,
@@ -2749,49 +2793,49 @@ static SubStageResponse dispatchTargetGenerator(
     break;
 
   case "ss"_hash:
-    writeLog(0, "生成目标：SS", LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_INFO, "生成目标：SS");
     output = proxyToSingle(nodes, parsed.target_descriptor->single_link_types,
                            ext);
     if (upload)
       recordUpload("ss", upload_path, output, false);
     break;
   case "ssr"_hash:
-    writeLog(0, "生成目标：SSR", LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_INFO, "生成目标：SSR");
     output = proxyToSingle(nodes, parsed.target_descriptor->single_link_types,
                            ext);
     if (upload)
       recordUpload("ssr", upload_path, output, false);
     break;
   case "v2ray"_hash:
-    writeLog(0, "生成目标：v2rayN", LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_INFO, "生成目标：v2rayN");
     output = proxyToSingle(nodes, parsed.target_descriptor->single_link_types,
                            ext);
     if (upload)
       recordUpload("v2ray", upload_path, output, false);
     break;
   case "trojan"_hash:
-    writeLog(0, "生成目标：Trojan", LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_INFO, "生成目标：Trojan");
     output = proxyToSingle(nodes, parsed.target_descriptor->single_link_types,
                            ext);
     if (upload)
       recordUpload("trojan", upload_path, output, false);
     break;
   case "vless"_hash:
-    writeLog(0, "生成目标：vless", LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_INFO, "生成目标：vless");
     output = proxyToSingle(nodes, parsed.target_descriptor->single_link_types,
                            ext);
     if (upload)
       recordUpload("vless", upload_path, output, false);
     break;
   case "hysteria2"_hash:
-    writeLog(0, "生成目标：hysteria2", LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_INFO, "生成目标：hysteria2");
     output = proxyToSingle(nodes, parsed.target_descriptor->single_link_types,
                            ext);
     if (upload)
       recordUpload("hysteria2", upload_path, output, false);
     break;
   case "mixed"_hash:
-    writeLog(0, "生成目标：Standard Subscription", LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_INFO, "生成目标：Standard Subscription");
     output = proxyToSingle(nodes, parsed.target_descriptor->single_link_types,
                            ext);
     if (upload)
@@ -2799,7 +2843,7 @@ static SubStageResponse dispatchTargetGenerator(
     break;
 
   case "quan"_hash:
-    writeLog(0, "生成目标：Quantumult", LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_INFO, "生成目标：Quantumult");
     if (!ext.nodelist) {
       if (render_template(fetchFile(policy.quan_base, proxy,
                                     settings.cacheConfig, true, base_context),
@@ -2816,7 +2860,7 @@ static SubStageResponse dispatchTargetGenerator(
     break;
 
   case "quanx"_hash:
-    writeLog(0, "生成目标：Quantumult X", LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_INFO, "生成目标：Quantumult X");
     if (!ext.nodelist) {
       if (render_template(fetchFile(policy.quanx_base, proxy,
                                     settings.cacheConfig, true, base_context),
@@ -2833,7 +2877,7 @@ static SubStageResponse dispatchTargetGenerator(
     break;
 
   case "loon"_hash:
-    writeLog(0, "生成目标：Loon", LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_INFO, "生成目标：Loon");
     if (!ext.nodelist) {
       if (render_template(fetchFile(policy.loon_base, proxy,
                                     settings.cacheConfig, true, base_context),
@@ -2850,14 +2894,14 @@ static SubStageResponse dispatchTargetGenerator(
     break;
 
   case "ssd"_hash:
-    writeLog(0, "生成目标：SSD", LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_INFO, "生成目标：SSD");
     output = proxyToSSD(nodes, group_name, subscription_info, ext);
     if (upload)
       recordUpload("ssd", upload_path, output, false);
     break;
 
   case "singbox"_hash:
-    writeLog(0, "生成目标：sing-box", LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_INFO, "生成目标：sing-box");
     if (!ext.nodelist) {
       if (render_template(fetchFile(policy.singbox_base, proxy,
                                     settings.cacheConfig, true, base_context),
@@ -2874,7 +2918,7 @@ static SubStageResponse dispatchTargetGenerator(
     break;
 
   default:
-    writeLog(0, "生成目标：未指定", LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_INFO, "生成目标：未指定");
     *status_code = 500;
     return {true,
             "Internal error: target passed validation but no generator handled "
@@ -2885,10 +2929,9 @@ static SubStageResponse dispatchTargetGenerator(
   }
 
   if (upload_failed)
-    writeLog(0,
-             "GIST_OPTIONAL_UPLOAD_FAILED action=return-conversion-result",
-             LOG_LEVEL_WARNING);
-  writeLog(0, "生成完成。", LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_WARNING,
+             "GIST_OPTIONAL_UPLOAD_FAILED action=return-conversion-result");
+  writeLog(LOG_LEVEL_INFO, "生成完成。");
   return {};
 }
 
@@ -2923,7 +2966,6 @@ static std::string assembleSubResponse(
   tribool &argGenClassicalRuleProvider =
       parsed.generate_classical_rule_provider;
   tribool &argProviderProxyDirect = parsed.provider_proxy_direct;
-  ProxyGroupConfigs &lCustomProxyGroups = policy.custom_proxy_groups;
   string_array &lIncludeRemarks = policy.include_remarks;
   string_array &lExcludeRemarks = policy.exclude_remarks;
   extra_settings &ext = policy.generator;
@@ -2933,14 +2975,9 @@ static std::string assembleSubResponse(
       policy.provider_headers;
   bool userProvidedExternalConfig =
       fetch_plan.user_provided_external_config;
-  bool configLoadSuccess = fetch_plan.config_load_success;
-  std::vector<RulesetContent> &lRulesetContent =
-      fetch_plan.ruleset_content;
   std::string &output_content = generation.output;
   std::string &managed_url = generation.managed_url;
 
-  if (argTarget == "clash" && explain.proxy_provider_mode)
-    appendVaryHeader(response, "User-Agent");
   for (const auto &[name, value] : provider_headers) {
     (void)value;
     appendVaryHeader(response, name);
@@ -2962,17 +2999,16 @@ static std::string assembleSubResponse(
       if (!hasArg(name))
         return;
       std::string raw_value = rawArg(name);
-      std::string decoded_value = urlDecode(raw_value);
       SubExplainParameter parameter;
       parameter.name = name;
       parameter.present = true;
       parameter.source = source;
       parameter.status = status;
       parameter.value_preview = previewExplainValue(raw_value, sensitive);
-      parameter.value_hash = shortHash(decoded_value);
+      parameter.value_hash.clear();
       parameter.raw_length = raw_value.size();
-      parameter.value_length = decoded_value.size();
-      parameter.effective_value = effective_value;
+      parameter.value_length = raw_value.size();
+      parameter.effective_value = previewExplainValue(effective_value, false);
       parameter.note = note;
       parameter.sensitive = sensitive;
       explain.recognized_parameters.push_back(std::move(parameter));
@@ -3005,10 +3041,12 @@ static std::string assembleSubResponse(
                      " source item(s), " +
                      std::to_string(explain.subscription_url_count) +
                      " subscription(s), " +
-                     std::to_string(explain.node_link_count) + " node link(s)",
+                     std::to_string(explain.node_link_count) +
+                     " node link(s); sources: " +
+                     summarizeExplainSourceList(rawArg("url")),
                  "applied",
-                 "Sensitive values are redacted; use hash and length to "
-                 "compare inputs.",
+                 "Sensitive values are redacted; use lengths and structural "
+                 "summaries to compare inputs.",
                  true);
     addParameter("explain", "true", "applied",
                  "The request returned a JSON diagnostic report.");
@@ -3023,9 +3061,10 @@ static std::string assembleSubResponse(
     addParameter("group", argGroupName,
                  argGroupName.empty() ? "ignored" : "applied",
                  "Overrides the group name on direct nodes.");
-    addParameter("upload_path", argUploadPath,
-                 argUpload ? "applied" : "ignored",
-                 "Only used when upload is effective.", true);
+    addParameter("upload_path",
+                 argUploadPath.empty() ? "not provided" : "provided",
+                  argUpload ? "applied" : "ignored",
+                  "Only used when upload is effective.", true);
     addParameter("include", argIncludeRemark,
                  !argIncludeRemark.empty() && regValid(argIncludeRemark)
                      ? "applied"
@@ -3036,32 +3075,56 @@ static std::string assembleSubResponse(
                      ? "applied"
                      : "ignored",
                  "Used as node/provider exclude filter when valid.");
-    addParameter("groups", std::to_string(lCustomProxyGroups.size()) +
-                              " custom group(s)",
-                 configLoadSuccess ? "ignored" : "applied",
-                 configLoadSuccess
-                     ? "External config loaded; request groups were not used."
-                     : "Decoded from URL-safe base64.");
-    addParameter("ruleset", std::to_string(lRulesetContent.size()) +
-                                " loaded ruleset(s)",
-                 configLoadSuccess ? "ignored" : "applied",
-                 configLoadSuccess
-                     ? "External config loaded; request rulesets were not used."
-                     : "Decoded from URL-safe base64.");
+    addParameter("groups", "not consumed", "ignored",
+                 "This compatibility parameter is not consumed by /sub.",
+                 true);
+    addParameter("ruleset", "not consumed", "ignored",
+                 "This compatibility parameter is not consumed by /sub.",
+                 true);
+    const bool request_config_provided = !parsed.external_config.empty();
     std::string config_effective = explain.external_config_loaded
                                        ? "loaded"
                                        : "not loaded";
     if (explain.fallback_config_used)
       config_effective = "fallback loaded";
-    addParameter("config", config_effective,
-                 explain.external_config_loaded ? "applied" : "ignored",
+    if (!rawArg("config").empty())
+      config_effective +=
+          "; requested source: " + summarizeUrlForLog(rawArg("config"));
+    const std::string config_status =
+        explain.fallback_config_used
+            ? "overridden"
+            : (request_config_provided
+                   ? (explain.external_config_loaded ? "applied" : "ignored")
+                   : (explain.external_config_loaded ? "defaulted"
+                                                     : "ignored"));
+    const std::string config_source =
+        explain.fallback_config_used
+            ? "fallback"
+            : (request_config_provided
+                   ? "request"
+                   : (explain.external_config_loaded ? "default" : "request"));
+    addParameter("config", config_effective, config_status,
                  explain.fallback_config_used
                      ? "User config failed and a fallback config was loaded."
                      : "External config URL or data source.",
-                 true);
-    addParameter("dev_id", ext.quanx_dev_id,
-                 ext.quanx_dev_id.empty() ? "ignored" : "applied",
-                 "Quantumult X device id.");
+                 true, config_source);
+    const bool request_device_id_applied = !parsed.device_id.empty();
+    const bool effective_device_id_configured = !ext.quanx_dev_id.empty();
+    addParameter(
+        "dev_id",
+        effective_device_id_configured ? "configured" : "not configured",
+        request_device_id_applied
+            ? "applied"
+            : (effective_device_id_configured ? "defaulted" : "ignored"),
+        request_device_id_applied
+            ? "Quantumult X device ID."
+            : (effective_device_id_configured
+                   ? "Empty request value; the configured device ID remained "
+                     "effective."
+                   : "No effective Quantumult X device ID is configured."),
+        true, request_device_id_applied
+                  ? "request"
+                  : (effective_device_id_configured ? "default" : "request"));
     addParameter("filename", argFilename, "ignored",
                  "Content-Disposition is not emitted for explain JSON.");
     addParameter("interval", std::to_string(interval), "applied",
@@ -3070,8 +3133,9 @@ static std::string assembleSubResponse(
                  "Managed config strict flag.");
     addParameter("rename", std::to_string(ext.rename_array.size()) +
                                " rename rule(s)",
-                 argRenames.empty() ? "ignored" : "applied",
-                 "Request rename rules override configured rename rules.");
+                  argRenames.empty() ? "ignored" : "applied",
+                  "Request rename rules override configured rename rules.",
+                  true);
     addParameter("filter_script", "not used", "ignored",
                  "Public requests cannot provide executable filter scripts.",
                  true);
@@ -3120,9 +3184,29 @@ static std::string assembleSubResponse(
     addSwitchParameter("tls13", ext.tls13.get(false), ext.tls13);
     addSwitchParameter("provider_proxy_direct", ext.provider_proxy_direct,
                        argProviderProxyDirect);
-    addParameter("profile_data", managed_url.empty() ? "not used" : "provided",
-                 managed_url.empty() ? "ignored" : "applied",
-                 "Managed config URL override.", true);
+    std::string profile_effective = "not used";
+    std::string profile_status = "ignored";
+    std::string profile_source = "request";
+    std::string profile_note =
+        "This target did not emit a managed configuration URL.";
+    if (generation.managed_url_used) {
+      profile_effective = generation.managed_url_from_profile_data
+                              ? "provided"
+                              : "generated";
+      profile_effective += "; source: " + summarizeUrlForLog(managed_url);
+      profile_status = generation.managed_url_from_profile_data
+                           ? "applied"
+                           : "defaulted";
+      profile_source = generation.managed_url_from_profile_data ? "request"
+                                                                 : "global";
+      profile_note = generation.managed_url_from_profile_data
+                         ? "Managed configuration URL override."
+                         : "A managed configuration URL was generated.";
+    }
+    addParameter("profile_data", profile_effective, profile_status,
+                 profile_note, true, profile_source);
+    addParameter("token", "not used", "ignored",
+                 "Token authentication is disabled.", true);
 
     const std::unordered_set<std::string> known_parameters = {
         "target", "url", "ver", "new_name", "group", "upload_path",
@@ -3136,19 +3220,21 @@ static std::string assembleSubResponse(
     for (const auto &arg : argument) {
       if (known_parameters.find(arg.first) != known_parameters.end())
         continue;
-      std::string decoded_value = urlDecode(arg.second);
       SubExplainParameter parameter;
-      parameter.name = arg.first;
+      parameter.name = explainParameterName(arg.first);
       parameter.present = true;
       parameter.source = "request";
       parameter.status = "ignored";
-      parameter.value_preview = previewExplainValue(arg.second, false);
-      parameter.value_hash = shortHash(decoded_value);
+      parameter.value_preview = previewExplainValue(arg.second, true);
+      parameter.value_hash.clear();
       parameter.raw_length = arg.second.size();
-      parameter.value_length = decoded_value.size();
+      parameter.value_length = arg.second.size();
       parameter.effective_value = "";
-      parameter.note = "This parameter is not recognized by /sub.";
-      parameter.sensitive = false;
+      parameter.note = parameter.name == "[redacted-name]"
+                           ? "The parameter name and value were redacted."
+                           : "This parameter is not recognized by /sub; its "
+                             "value was redacted.";
+      parameter.sensitive = true;
       explain.unrecognized_parameters.push_back(std::move(parameter));
     }
 
@@ -3207,7 +3293,7 @@ static std::string assembleSubResponse(
                        "Managed config prefix is available.");
 
     explain.output_bytes = output_content.size();
-    writeLog(0,
+    writeLog(LOG_LEVEL_INFO,
              "已生成 /sub explain JSON 诊断结果：target=" + argTarget +
                  ", status=" + std::to_string(response.status_code) +
                  ", providers=" + std::to_string(explain.provider_count) +
@@ -3215,8 +3301,7 @@ static std::string assembleSubResponse(
                  ", recognized_params=" +
                  std::to_string(explain.recognized_parameters.size()) +
                  ", unrecognized_params=" +
-                 std::to_string(explain.unrecognized_parameters.size()) + "。",
-             LOG_LEVEL_INFO);
+                 std::to_string(explain.unrecognized_parameters.size()) + "。");
     response.content_type = "application/json; charset=utf-8";
     return serializeSubExplainReport(explain, response);
   }
@@ -3324,10 +3409,9 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
            "parameter.\n"
            "请在 link 参数中提供真实 Surge 配置链接。";
   }
-  writeLog(0, "SurgeConfToClash 调用，URL：" + summarizeUrlForLog(url) + "。",
-           LOG_LEVEL_INFO);
+  writeLog(LOG_LEVEL_INFO, "SurgeConfToClash 调用，URL：" + summarizeUrlForLog(url) + "。");
 
-  ProxyPolicy proxy = parseProxy(global.proxyConfig);
+  ProxyPolicy proxy = parseProxy(global.proxyConfig, global.proxyBypass);
   YAML::Node clash;
   template_args tpl_args;
   tpl_args.global_vars = global.templateVars;
@@ -3351,9 +3435,8 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
                                "configuration.\n"
                                "无效请求：Surge 配置解析失败。";
     // std::cerr<<errmsg<<"\n";
-    writeLog(0, "SURGE_CONFIG_PARSE_FAILED detail=" +
-                    summarizeSensitiveTextForLog(parser_detail),
-             LOG_LEVEL_ERROR);
+    writeLog(LOG_LEVEL_ERROR, "SURGE_CONFIG_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(parser_detail));
     *status_code = 400;
     return errmsg;
   }
@@ -3365,8 +3448,7 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
         "Required sections: [Proxy], [Proxy Group], and [Rule].\n"
         "必须包含以下配置段：[Proxy]、[Proxy Group] 和 [Rule]。";
     // std::cerr<<errmsg<<"\n";
-    writeLog(0, "Surge 配置不完整，缺少必需配置段。",
-             LOG_LEVEL_ERROR);
+    writeLog(LOG_LEVEL_ERROR, "Surge 配置不完整，缺少必需配置段。");
     *status_code = 400;
     return errmsg;
   }
@@ -3408,7 +3490,7 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
     clash[proxygroup_name].push_back(singlegroup);
   }
 
-  proxy = parseProxy(global.proxySubscription);
+  proxy = parseProxy(global.proxySubscription, global.proxyBypass);
   eraseElements(dummy_str_array);
 
   RegexMatchConfigs dummy_regex_array;
@@ -3421,13 +3503,11 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
   parse_set.sub_info = &subInfo;
   for (std::string &x : links) {
     // std::cerr<<"Fetching node data from url '"<<x<<"'."<<std::endl;
-    writeLog(0, "正在从 URL 获取节点数据：" + summarizeUrlForLog(x) + "。",
-             LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_INFO, "正在从 URL 获取节点数据：" + summarizeUrlForLog(x) + "。");
     if (addNodes(x, nodes, 0, parse_set) == -1) {
       if (global.skipFailedLinks)
-        writeLog(0,
-                 "以下链接不包含任何有效节点信息：" + x,
-                 LOG_LEVEL_WARNING);
+        writeLog(LOG_LEVEL_WARNING,
+                 "以下链接不包含任何有效节点信息：" + x);
       else {
         *status_code = 400;
         return "Invalid request: this link does not contain any supported "
@@ -3542,7 +3622,7 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS) {
 
   response.headers["profile-update-interval"] =
       std::to_string(global.updateInterval / 3600);
-  writeLog(0, "转换完成。", LOG_LEVEL_INFO);
+  writeLog(LOG_LEVEL_INFO, "转换完成。");
   return dumpCanonicalClashYaml(clash);
 }
 
@@ -3575,27 +3655,25 @@ std::string getProfile(RESPONSE_CALLBACK_ARGS) {
            name;
   }
   // std::cerr<<"Trying to load profile '" + name + "'.\n";
-  writeLog(0, "正在加载配置档：'" + name + "'。", LOG_LEVEL_INFO);
+  writeLog(LOG_LEVEL_INFO, "正在加载配置档：'" + name + "'。");
   INIReader ini;
   if (ini.parse(profile_content) != INIREADER_EXCEPTION_NONE &&
       !ini.section_exist("Profile")) {
     // std::cerr<<"Load profile failed! Reason: "<<ini.get_last_error()<<"\n";
     const std::string parser_detail = ini.get_last_error();
-    writeLog(0, "PROFILE_CONFIG_PARSE_FAILED detail=" +
-                    summarizeSensitiveTextForLog(parser_detail),
-             LOG_LEVEL_ERROR);
+    writeLog(LOG_LEVEL_ERROR, "PROFILE_CONFIG_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(parser_detail));
     *status_code = 500;
     return "Invalid profile: failed to parse profile content.\n"
            "无效配置：profile 内容解析失败。";
   }
   // std::cerr<<"Trying to parse profile '" + name + "'.\n";
-  writeLog(0, "正在解析配置档：'" + name + "'。", LOG_LEVEL_INFO);
+  writeLog(LOG_LEVEL_INFO, "正在解析配置档：'" + name + "'。");
   string_multimap contents;
   ini.get_items("Profile", contents);
   if (contents.empty()) {
     // std::cerr<<"Load profile failed! Reason: Empty Profile section\n";
-    writeLog(0, "加载配置档失败！原因：[Profile] 配置段为空。",
-             LOG_LEVEL_ERROR);
+    writeLog(LOG_LEVEL_ERROR, "加载配置档失败！原因：[Profile] 配置段为空。");
     *status_code = 500;
     return "Invalid profile: [Profile] section is empty.\n"
            "无效配置：[Profile] 配置段为空。\n"
@@ -3609,8 +3687,7 @@ std::string getProfile(RESPONSE_CALLBACK_ARGS) {
   // }
   /// check if more than one profile is provided
   if (profiles.size() > 1) {
-    writeLog(0, "检测到多个配置档，正在合并...",
-             LOG_TYPE_INFO);
+    writeLog(LOG_LEVEL_INFO, "检测到多个配置档，正在合并...");
     std::string all_urls, url;
     auto iter = contents.find("url");
     if (iter != contents.end())
@@ -3618,23 +3695,20 @@ std::string getProfile(RESPONSE_CALLBACK_ARGS) {
     for (size_t i = 1; i < profiles.size(); i++) {
       name = profiles[i];
       if (!fileExist(name)) {
-        writeLog(0, "忽略不存在的配置档：'" + name + "'。",
-                 LOG_LEVEL_WARNING);
+        writeLog(LOG_LEVEL_WARNING, "忽略不存在的配置档：'" + name + "'。");
         continue;
       }
       if (ini.parse_file(name) != INIREADER_EXCEPTION_NONE &&
           !ini.section_exist("Profile")) {
-        writeLog(0, "忽略损坏的配置档：'" + name + "'。",
-                 LOG_LEVEL_WARNING);
+        writeLog(LOG_LEVEL_WARNING, "忽略损坏的配置档：'" + name + "'。");
         continue;
       }
       url = ini.get("Profile", "url");
       if (!url.empty()) {
         all_urls += "|" + url;
-        writeLog(0, "已添加来自配置档 '" + name + "' 的 URL。", LOG_LEVEL_INFO);
+        writeLog(LOG_LEVEL_INFO, "已添加来自配置档 '" + name + "' 的 URL。");
       } else {
-        writeLog(0, "配置档 '" + name + "' 没有 url 字段，跳过。",
-                 LOG_LEVEL_INFO);
+        writeLog(LOG_LEVEL_INFO, "配置档 '" + name + "' 没有 url 字段，跳过。");
       }
     }
     iter->second = all_urls;
@@ -3653,9 +3727,9 @@ std::string getProfile(RESPONSE_CALLBACK_ARGS) {
 /*
 std::string jinja2_webGet(const std::string &url)
 {
-    ProxyPolicy proxy = parseProxy(global.proxyConfig);
-    writeLog(0, "模板调用 fetch，URL：'" + url + "'。",
-LOG_LEVEL_INFO); return webGet(url, proxy, global.cacheConfig);
+    ProxyPolicy proxy = parseProxy(global.proxyConfig, global.proxyBypass);
+    writeLog(LOG_LEVEL_INFO, "模板调用 fetch，URL：'" + url + "'。");
+    return webGet(url, proxy, global.cacheConfig);
 }*/
 
 inline std::string intToStream(unsigned long long stream) {
@@ -3704,11 +3778,11 @@ std::string subInfoToMessage(std::string subinfo) {
 
 int simpleGenerator() {
   // std::cerr<<"\nReading generator configuration...\n";
-  writeLog(0, "正在读取生成器配置...", LOG_LEVEL_INFO);
+  writeLog(LOG_LEVEL_INFO, "正在读取生成器配置...");
   std::string config = fileGet("generate.ini"), path, profile, content;
   if (config.empty()) {
     // std::cerr<<"Generator configuration not found or empty!\n";
-    writeLog(0, "未找到生成器配置，或配置为空！", LOG_LEVEL_ERROR);
+    writeLog(LOG_LEVEL_ERROR, "未找到生成器配置，或配置为空！");
     return -1;
   }
 
@@ -3716,21 +3790,19 @@ int simpleGenerator() {
   if (ini.parse(config) != INIREADER_EXCEPTION_NONE) {
     // std::cerr<<"Generator configuration broken!
     // Reason:"<<ini.get_last_error()<<"\n";
-    writeLog(0, "GENERATOR_CONFIG_PARSE_FAILED detail=" +
-                    summarizeSensitiveTextForLog(ini.get_last_error()),
-             LOG_LEVEL_ERROR);
+    writeLog(LOG_LEVEL_ERROR, "GENERATOR_CONFIG_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(ini.get_last_error()));
     return -2;
   }
   // std::cerr<<"Read generator configuration completed.\n\n";
-  writeLog(0, "生成器配置读取完成。\n", LOG_LEVEL_INFO);
+  writeLog(LOG_LEVEL_INFO, "生成器配置读取完成。\n");
 
   string_array sections = ini.get_section_names();
   if (!global.generateProfiles.empty()) {
     // std::cerr<<"Generating with specific artifacts:
     // \""<<gen_profile<<"\"...\n";
-    writeLog(0,
-             "正在按指定生成项生成：\"" + global.generateProfiles + "\"...",
-             LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_INFO,
+             "正在按指定生成项生成：\"" + global.generateProfiles + "\"...");
     string_array targets = split(global.generateProfiles, ","), new_targets;
     for (std::string &x : targets) {
       x = trim(x);
@@ -3738,8 +3810,7 @@ int simpleGenerator() {
         new_targets.emplace_back(std::move(x));
       else {
         // std::cerr<<"Artifact \""<<x<<"\" not found in generator settings!\n";
-        writeLog(0, "生成器设置中未找到生成项：\"" + x + "\"！",
-                 LOG_LEVEL_ERROR);
+        writeLog(LOG_LEVEL_ERROR, "生成器设置中未找到生成项：\"" + x + "\"！");
         return -3;
       }
     }
@@ -3747,24 +3818,23 @@ int simpleGenerator() {
     sections.shrink_to_fit();
   } else
     // std::cerr<<"Generating all artifacts...\n";
-    writeLog(0, "正在生成所有生成项...", LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_INFO, "正在生成所有生成项...");
 
   string_multimap allItems;
-  ProxyPolicy proxy = parseProxy(global.proxySubscription);
+  ProxyPolicy proxy = parseProxy(global.proxySubscription, global.proxyBypass);
   Request request;
   Response response;
   bool write_failed = false;
   for (std::string &x : sections) {
     response.status_code = 200;
     // std::cerr<<"Generating artifact '"<<x<<"'...\n";
-    writeLog(0, "正在生成生成项：'" + x + "'。", LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_INFO, "正在生成生成项：'" + x + "'。");
     ini.enter_section(x);
     if (ini.item_exist("path"))
       path = ini.get("path");
     else {
       // std::cerr<<"Artifact '"<<x<<"' output path missing! Skipping...\n\n";
-      writeLog(0, "生成项 '" + x + "' 缺少输出路径，跳过。\n",
-               LOG_LEVEL_ERROR);
+      writeLog(LOG_LEVEL_ERROR, "生成项 '" + x + "' 缺少输出路径，跳过。\n");
       continue;
     }
     if (ini.item_exist("profile")) {
@@ -3780,9 +3850,8 @@ int simpleGenerator() {
         if (content.empty()) {
           // std::cerr<<"Artifact '"<<x<<"' generate ERROR! Please check your
           // link.\n\n";
-          writeLog(0,
-                   "生成项 '" + x + "' 生成失败！请检查链接。\n",
-                   LOG_LEVEL_ERROR);
+          writeLog(LOG_LEVEL_ERROR,
+                   "生成项 '" + x + "' 生成失败！请检查链接。\n");
           if (sections.size() == 1)
             return -1;
         }
@@ -3790,21 +3859,19 @@ int simpleGenerator() {
         const int write_result =
             fileWrite(path, "\xEF\xBB\xBF" + content, true);
         if (fileCommitFailed(write_result)) {
-          writeLog(0,
+          writeLog(LOG_LEVEL_ERROR,
                    "生成项 '" + x + "' 写入失败：'" + path + "'。" +
                        (fileCommitTemporaryRemaining(write_result)
                             ? " temporary_file_remaining=true"
-                            : " temporary_file_remaining=false"),
-                   LOG_LEVEL_ERROR);
+                            : " temporary_file_remaining=false"));
           write_failed = true;
           if (sections.size() == 1)
             return -1;
         } else if (fileCommitDurabilityUnconfirmed(write_result)) {
-          writeLog(0,
+          writeLog(LOG_LEVEL_WARNING,
                    "ARTIFACT_WRITE_VISIBLE target=" + x +
                        " new_file_visible=true durability=unconfirmed "
-                       "action=continue",
-                   LOG_LEVEL_WARNING);
+                       "action=continue");
         }
         continue;
       }
@@ -3820,51 +3887,46 @@ int simpleGenerator() {
     if (response.status_code != 200) {
       // std::cerr<<"Artifact '"<<x<<"' generate ERROR! Reason:
       // "<<content<<"\n\n";
-      writeLog(0,
-               "生成项 '" + x + "' 生成失败！原因：" + content + "\n",
-               LOG_LEVEL_ERROR);
+      writeLog(LOG_LEVEL_ERROR,
+               "生成项 '" + x + "' 生成失败！原因：" + content + "\n");
       if (sections.size() == 1)
         return -1;
       continue;
     }
     const int write_result = fileWrite(path, content, true);
     if (fileCommitFailed(write_result)) {
-      writeLog(0,
+      writeLog(LOG_LEVEL_ERROR,
                "生成项 '" + x + "' 写入失败：'" + path + "'。" +
                    (fileCommitTemporaryRemaining(write_result)
                         ? " temporary_file_remaining=true"
-                        : " temporary_file_remaining=false"),
-               LOG_LEVEL_ERROR);
+                        : " temporary_file_remaining=false"));
       write_failed = true;
       if (sections.size() == 1)
         return -1;
       continue;
     }
     if (fileCommitDurabilityUnconfirmed(write_result)) {
-      writeLog(0,
+      writeLog(LOG_LEVEL_WARNING,
                "ARTIFACT_WRITE_VISIBLE target=" + x +
                    " new_file_visible=true durability=unconfirmed "
-                   "action=continue",
-               LOG_LEVEL_WARNING);
+                   "action=continue");
     }
     auto iter =
         std::find_if(response.headers.begin(), response.headers.end(),
                      [](auto y) { return y.first == "Subscription-UserInfo"; });
     if (iter != response.headers.end())
-      writeLog(0,
-               "生成项 '" + x + "' 的用户信息：" + subInfoToMessage(iter->second),
-               LOG_LEVEL_INFO);
+      writeLog(LOG_LEVEL_INFO,
+               "生成项 '" + x + "' 的用户信息：" + subInfoToMessage(iter->second));
     // std::cerr<<"Artifact '"<<x<<"' generate SUCCESS!\n\n";
-    writeLog(0, "生成项 '" + x + "' 生成成功！\n", LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_INFO, "生成项 '" + x + "' 生成成功！\n");
     eraseElements(response.headers);
   }
   // std::cerr<<"All artifact generated. Exiting...\n";
   if (write_failed) {
-    writeLog(0, "部分生成项写入失败，正在以失败状态退出...",
-             LOG_LEVEL_ERROR);
+    writeLog(LOG_LEVEL_ERROR, "部分生成项写入失败，正在以失败状态退出...");
     return -1;
   }
-  writeLog(0, "所有生成项已生成，正在退出...", LOG_LEVEL_INFO);
+  writeLog(LOG_LEVEL_INFO, "所有生成项已生成，正在退出...");
   return 0;
 }
 
@@ -3873,7 +3935,7 @@ std::string renderTemplate(RESPONSE_CALLBACK_ARGS) {
   int *status_code = &response.status_code;
 
   std::string path = getUrlArg(argument, "path");
-  writeLog(0, "正在渲染模板：'" + path + "'。", LOG_LEVEL_INFO);
+  writeLog(LOG_LEVEL_INFO, "正在渲染模板：'" + path + "'。");
 
   if (!startsWith(path, global.templatePath) || !fileExist(path)) {
     *status_code = 404;
@@ -3883,7 +3945,8 @@ std::string renderTemplate(RESPONSE_CALLBACK_ARGS) {
            "请提供位于已配置模板目录下的路径。";
   }
   std::string template_content =
-      fetchFile(path, parseProxy(global.proxyConfig), global.cacheConfig);
+      fetchFile(path, parseProxy(global.proxyConfig, global.proxyBypass),
+                global.cacheConfig);
   if (template_content.empty()) {
     *status_code = 400;
     return "Invalid template: file is empty or cannot be read within the "
@@ -3906,9 +3969,9 @@ std::string renderTemplate(RESPONSE_CALLBACK_ARGS) {
   if (render_template(template_content, tpl_args, output_content,
                       global.templatePath) != 0) {
     *status_code = 400;
-    writeLog(0, "渲染失败。", LOG_LEVEL_WARNING);
+    writeLog(LOG_LEVEL_WARNING, "渲染失败。");
   } else
-    writeLog(0, "渲染完成。", LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_INFO, "渲染完成。");
 
   return output_content;
 }

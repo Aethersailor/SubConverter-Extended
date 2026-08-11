@@ -1,9 +1,8 @@
 #include <string>
-#include <vector>
-#include <memory>
 #include <chrono>
 #include <thread>
 #include <stdlib.h>
+#include <vector>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -11,6 +10,63 @@
 #endif // _WIN32
 
 #include "string.h"
+
+#ifdef _WIN32
+namespace {
+
+class RegistryKey {
+public:
+    RegistryKey() = default;
+    ~RegistryKey()
+    {
+        if(value_ != nullptr)
+            RegCloseKey(value_);
+    }
+
+    HKEY *put() { return &value_; }
+    HKEY get() const { return value_; }
+
+    RegistryKey(const RegistryKey &) = delete;
+    RegistryKey &operator=(const RegistryKey &) = delete;
+
+private:
+    HKEY value_ = nullptr;
+};
+
+bool readRegistryDword(HKEY key, const char *name, DWORD &value)
+{
+    DWORD type = 0;
+    DWORD size = sizeof(value);
+    return RegQueryValueExA(key, name, nullptr, &type,
+                            reinterpret_cast<BYTE *>(&value), &size) ==
+               ERROR_SUCCESS &&
+           type == REG_DWORD && size == sizeof(value);
+}
+
+bool readRegistryString(HKEY key, const char *name, std::string &value)
+{
+    DWORD type = 0;
+    DWORD size = 0;
+    if(RegQueryValueExA(key, name, nullptr, &type, nullptr, &size) !=
+           ERROR_SUCCESS ||
+       type != REG_SZ || size == 0)
+        return false;
+
+    std::vector<char> buffer(static_cast<size_t>(size) + 1, '\0');
+    if(RegQueryValueExA(key, name, nullptr, &type,
+                        reinterpret_cast<BYTE *>(buffer.data()), &size) !=
+           ERROR_SUCCESS ||
+       type != REG_SZ)
+        return false;
+
+    // RegQueryValueEx does not guarantee that REG_SZ data is terminated.
+    buffer.back() = '\0';
+    value.assign(buffer.data());
+    return true;
+}
+
+} // namespace
+#endif
 
 void sleepMs(int interval)
 {
@@ -31,9 +87,20 @@ std::string getEnv(const std::string &name)
 {
     std::string retVal;
 #ifdef _WIN32
-    char chrData[1024] = {};
-    if(GetEnvironmentVariable(name.c_str(), chrData, 1023))
-        retVal.assign(chrData);
+    DWORD capacity = GetEnvironmentVariableA(name.c_str(), nullptr, 0);
+    while(capacity > 0)
+    {
+        std::vector<char> buffer(static_cast<size_t>(capacity), '\0');
+        const DWORD length = GetEnvironmentVariableA(
+            name.c_str(), buffer.data(), static_cast<DWORD>(buffer.size()));
+        if(length == 0)
+            return "";
+        if(length < buffer.size())
+            return std::string(buffer.data(), static_cast<size_t>(length));
+        // The value grew between the size query and read. Windows returns the
+        // newly required size (including the terminator), so retry exactly.
+        capacity = length;
+    }
 #else
     char *env = getenv(name.c_str());
     if(env != NULL)
@@ -45,65 +112,22 @@ std::string getEnv(const std::string &name)
 std::string getSystemProxy()
 {
 #ifdef _WIN32
-    HKEY key;
-    auto ret = RegOpenKeyEx(HKEY_CURRENT_USER, R"(Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings)", 0, KEY_ALL_ACCESS, &key);
-    if(ret != ERROR_SUCCESS)
-    {
-        //std::cout << "open failed: " << ret << std::endl;
+    RegistryKey key;
+    if(RegOpenKeyExA(
+           HKEY_CURRENT_USER,
+           R"(Software\Microsoft\Windows\CurrentVersion\Internet Settings)",
+           0, KEY_QUERY_VALUE, key.put()) != ERROR_SUCCESS)
         return "";
-    }
 
-    DWORD values_count, max_value_name_len, max_value_len;
-    ret = RegQueryInfoKey(key, NULL, NULL, NULL, NULL, NULL, NULL,
-                          &values_count, &max_value_name_len, &max_value_len, NULL, NULL);
-    if(ret != ERROR_SUCCESS)
-    {
-        //std::cout << "query failed" << std::endl;
+    DWORD proxy_enabled = 0;
+    if(!readRegistryDword(key.get(), "ProxyEnable", proxy_enabled) ||
+       proxy_enabled == 0)
         return "";
-    }
 
-    std::vector<std::tuple<std::shared_ptr<char>, DWORD, std::shared_ptr<BYTE>>> values;
-    for(DWORD i = 0; i < values_count; i++)
-    {
-        std::shared_ptr<char> value_name(new char[max_value_name_len + 1],
-                                         std::default_delete<char[]>());
-        DWORD value_name_len = max_value_name_len + 1;
-        DWORD value_type, value_len;
-        RegEnumValue(key, i, value_name.get(), &value_name_len, NULL, &value_type, NULL, &value_len);
-        std::shared_ptr<BYTE> value(new BYTE[value_len],
-                                    std::default_delete<BYTE[]>());
-        value_name_len = max_value_name_len + 1;
-        RegEnumValue(key, i, value_name.get(), &value_name_len, NULL, &value_type, value.get(), &value_len);
-        values.push_back(std::make_tuple(value_name, value_type, value));
-    }
-
-    DWORD ProxyEnable = 0;
-    for (auto x : values)
-    {
-        if (strcmp(std::get<0>(x).get(), "ProxyEnable") == 0)
-        {
-            ProxyEnable = *(DWORD*)(std::get<2>(x).get());
-        }
-    }
-
-    if (ProxyEnable)
-    {
-        for (auto x : values)
-        {
-            if (strcmp(std::get<0>(x).get(), "ProxyServer") == 0)
-            {
-                //std::cout << "ProxyServer: " << (char*)(std::get<2>(x).get()) << std::endl;
-                return std::string((char*)(std::get<2>(x).get()));
-            }
-        }
-    }
-    /*
-    else {
-    	//std::cout << "Proxy not Enabled" << std::endl;
-    }
-    */
-    //return 0;
-    return "";
+    std::string proxy_server;
+    return readRegistryString(key.get(), "ProxyServer", proxy_server)
+               ? proxy_server
+               : "";
 #else
     string_array proxy_env = {"all_proxy", "ALL_PROXY", "http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY"};
     for(std::string &x : proxy_env)

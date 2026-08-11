@@ -7,6 +7,11 @@
 // written to any diagnostic log sink.
 std::string redactSensitiveLogText(const std::string &text);
 
+// Apply the complete log-sink policy: redact known secrets, escape control
+// characters so one call produces one physical line, and cap attacker-
+// controlled output without splitting a UTF-8 code point.
+std::string sanitizeLogLine(const std::string &text);
+
 // Describe an arbitrary exception or parser diagnostic without retaining any
 // attacker-controlled text or a stable digest that could validate guesses of
 // short secrets. This is suitable for errors whose wording may contain

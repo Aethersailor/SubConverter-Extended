@@ -136,8 +136,7 @@ void logPersistenceError(const std::string &message,
       now - last_log < kErrorLogInterval)
     return;
   last_log = now;
-  writeLog(0, "Statistics v2 持久化已降级为纯内存模式：" + message,
-           LOG_LEVEL_WARNING);
+  writeLog(LOG_LEVEL_WARNING, "Statistics v2 持久化已降级为纯内存模式：" + message);
 }
 
 void logPersistenceException(
@@ -209,8 +208,7 @@ void persistenceWorker() {
             retry_delay = std::chrono::seconds(1);
             store_ready = true;
             next_heartbeat = steady_now + heartbeat_interval;
-            writeLog(0, "Statistics v2 持久化已恢复。",
-                     LOG_LEVEL_INFO);
+            writeLog(LOG_LEVEL_INFO, "Statistics v2 持久化已恢复。");
           } else {
             logPersistenceError(g_engine.store->lastError(), last_error_log);
             g_engine.store->close();
@@ -567,9 +565,8 @@ void initialize() {
   }
 
   g_engine.persistence_thread = std::thread(persistenceWorker);
-  writeLog(0, "Statistics v2 已启用，数据目录：" +
-                  global.statisticsDataDir,
-           LOG_LEVEL_INFO);
+  writeLog(LOG_LEVEL_INFO, "Statistics v2 已启用，数据目录：" +
+                  global.statisticsDataDir);
 }
 
 void shutdown() {

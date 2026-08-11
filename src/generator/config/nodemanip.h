@@ -1,6 +1,7 @@
 #ifndef NODEMANIP_H_INCLUDED
 #define NODEMANIP_H_INCLUDED
 
+#include <cstddef>
 #include <string>
 #include <vector>
 #include <limits.h>
@@ -16,6 +17,16 @@
 #include "utils/map_extra.h"
 #include "utils/string.h"
 
+enum class NodeParserMode {
+    LegacyOnly,
+    MihomoOnly,
+};
+
+struct NodeParserStats {
+    std::size_t invocations = 0;
+    std::size_t failures = 0;
+};
+
 struct parse_settings
 {
     ProxyPolicy *proxy = nullptr;
@@ -25,7 +36,8 @@ struct parse_settings
     RegexMatchConfigs *time_rules = nullptr;
     std::string *sub_info = nullptr;
     bool authorized = false;
-    bool mihomo_only = false;
+    NodeParserMode parser_mode = NodeParserMode::LegacyOnly;
+    NodeParserStats *parser_stats = nullptr;
     FetchContext fetch_context = FetchContext::TrustedConfig;
     string_icase_map *request_header = nullptr;
 #ifndef NO_JS_RUNTIME

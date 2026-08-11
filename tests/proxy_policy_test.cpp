@@ -23,10 +23,23 @@ int main() {
   assert(authenticated.valid);
   assert(authenticated.describe().find("secret") == std::string::npos);
   assert(authenticated.describe().find("user") == std::string::npos);
+  const ResolvedProxyPolicy authenticated_snapshot = authenticated.snapshot();
+  assert(authenticated_snapshot.mode == ProxyMode::Explicit);
+  assert(authenticated_snapshot.describe().find("secret") ==
+         std::string::npos);
+  assert(authenticated_snapshot.cacheIdentity().find("secret") !=
+         std::string::npos);
 
   const ProxyPolicy cors = parseProxy("cors:https://cors.example.test:8443/");
   assert(cors.mode == ProxyMode::Cors && cors.valid);
   assert(parseProxy("cors:https://cors.example.test/").valid);
+  assert(parseProxy("http://user%27tail:secret@proxy.example.test:8080")
+             .valid);
+  assert(!parseProxy(
+              "http://user%0D%0Atail:secret@proxy.example.test:8080")
+              .valid);
+  assert(!parseProxy("http://user%0Gtail:secret@proxy.example.test:8080")
+              .valid);
   assert(!parseProxy("proxy.example.test:1080").valid);
   assert(!parseProxy("socks5://proxy.example.test").valid);
   assert(!parseProxy("ftp://proxy.example.test:21").valid);
@@ -38,6 +51,92 @@ int main() {
   assert(direct.cacheIdentity() != system.cacheIdentity());
   assert(explicit_one.cacheIdentity() != explicit_two.cacheIdentity());
   assert(direct.cacheIdentity() != explicit_one.cacheIdentity());
+  assert(explicit_one.bypass.describe() == "LOOPBACK,PRIVATE");
+  assert(explicit_one.bypass.matchHost("127.0.0.1").matched);
+  assert(explicit_one.bypass.matchHost("10.0.0.1").matched);
+  assert(explicit_one.bypass.matchHost("172.31.255.255").matched);
+  assert(explicit_one.bypass.matchHost("192.168.255.255").matched);
+  assert(explicit_one.bypass.matchHost("fd12:3456::1").matched);
+
+  const ProxyPolicy explicit_loopback =
+      parseProxy("socks5://loopback.example.test:1080", "LOOPBACK");
+  assert(explicit_loopback.bypass.describe() == "LOOPBACK");
+  assert(!explicit_loopback.bypass.matchHost("192.168.1.1").matched);
+
+  const ProxyBypassPolicy loopback = ProxyBypassPolicy::parse("LOOPBACK");
+  assert(loopback.valid);
+  assert(loopback.cacheIdentity() ==
+         ProxyBypassPolicy::parse("").cacheIdentity());
+  assert(loopback.matchHost("localhost").matched);
+  assert(loopback.matchHost("api.localhost.").matched);
+  assert(!loopback.matchHost("localhost..").matched);
+  assert(loopback.matchHost("127.31.2.9").matched);
+  assert(loopback.matchHost("::1").matched);
+  assert(loopback.matchHost("::ffff:127.0.0.1").matched);
+  assert(!loopback.matchHost("192.168.1.1").matched);
+  assert(!loopback.matchHost("printer.local").matched);
+
+  const ProxyBypassPolicy private_policy =
+      ProxyBypassPolicy::parse("PRIVATE");
+  assert(private_policy.valid);
+  assert(private_policy.matchHost("10.255.1.2").matched);
+  assert(private_policy.matchHost("172.16.0.1").matched);
+  assert(private_policy.matchHost("172.31.255.255").matched);
+  assert(!private_policy.matchHost("172.32.0.1").matched);
+  assert(private_policy.matchHost("192.168.200.1").matched);
+  assert(!private_policy.matchHost("192.169.0.1").matched);
+  assert(private_policy.matchHost("fd12:3456::1").matched);
+  assert(!private_policy.matchHost("fbff::1").matched);
+  assert(!private_policy.matchHost("169.254.1.1").matched);
+
+  const ProxyBypassPolicy lan = ProxyBypassPolicy::parse("LAN,CGNAT");
+  assert(lan.valid);
+  assert(lan.matchHost("169.254.20.1").matched);
+  assert(lan.matchHost("fe80::1").matched);
+  assert(lan.matchHost("printer.local").matched);
+  assert(lan.matchHost("router.home.arpa").matched);
+  assert(!lan.matchHost("printer.evillocal").matched);
+  assert(!lan.matchHost("router.evilhome.arpa").matched);
+  assert(!lan.matchHost("evil,.local").matched);
+  assert(lan.matchHost("100.64.0.1").matched);
+  assert(lan.matchHost("100.127.255.254").matched);
+  assert(!lan.matchHost("100.63.255.255").matched);
+  assert(!lan.matchHost("100.128.0.1").matched);
+  assert(!lan.matchHost("198.18.0.1").matched);
+
+  const ProxyBypassPolicy custom = ProxyBypassPolicy::parse(
+      "DOMAIN:Corp.Example.,CIDR:10.200.23.7/16,CIDR:fd42::9/48");
+  assert(custom.valid);
+  assert(custom.matchHost("corp.example").matched);
+  assert(custom.matchHost("api.corp.example").matched);
+  assert(!custom.matchHost("notcorp.example").matched);
+  assert(custom.matchHost("10.200.255.1").matched);
+  assert(!custom.matchHost("10.201.0.1").matched);
+  assert(custom.matchHost("fd42::abcd").matched);
+  assert(custom.cacheIdentity().find("10.200.0.0/16") != std::string::npos);
+  assert(custom.cacheIdentity().find("fd42::/48") != std::string::npos);
+  const ProxyBypassPolicy custom_reordered = ProxyBypassPolicy::parse(
+      "CIDR:fd42::/48,DOMAIN:corp.example,CIDR:10.200.0.0/16");
+  assert(custom.cacheIdentity() == custom_reordered.cacheIdentity());
+
+  assert(!ProxyBypassPolicy::parse("LAN,").valid);
+  assert(!ProxyBypassPolicy::parse("ALL").valid);
+  assert(!ProxyBypassPolicy::parse("CIDR:0.0.0.0/0").valid);
+  assert(!ProxyBypassPolicy::parse("CIDR:10.0.0.1").valid);
+  assert(!ProxyBypassPolicy::parse("DOMAIN:*.example.test").valid);
+  assert(!ProxyBypassPolicy::parse("DOMAIN:-bad.example").valid);
+  assert(!ProxyBypassPolicy::parse("DOMAIN:bad_name.example").valid);
+  assert(!ProxyBypassPolicy::parse("DOMAIN:..example.test").valid);
+  assert(!ProxyBypassPolicy::parse("DOMAIN:example.test..").valid);
+
+  const ProxyPolicy explicit_lan =
+      parseProxy("http://proxy.example.test:8080", "LAN,CGNAT");
+  assert(explicit_lan.valid);
+  assert(explicit_lan.bypass.matchHost("192.168.1.1").matched);
+  assert(explicit_lan.cacheIdentity() != explicit_one.cacheIdentity());
+  const ProxyPolicy invalid_bypass =
+      parseProxy("http://proxy.example.test:8080", "LAN,ALL");
+  assert(!invalid_bypass.valid);
 
   const std::string redacted = redactSensitiveLogText(
       "CURL 请求头：> Authorization: Bearer private-token\n"
@@ -100,6 +199,24 @@ int main() {
   const std::string header = redactSensitiveLogText(
       "Proxy-Authorization: Basic fixture-proxy-secret");
   assert(header.find("fixture-proxy-secret") == std::string::npos);
+
+  const std::string curl_proxy_auth = redactSensitiveLogText(
+      "Proxy auth using Basic with user 'fixture-proxy-user'");
+  assert(curl_proxy_auth.find("fixture-proxy-user") == std::string::npos);
+  assert(curl_proxy_auth.find("with user '<redacted>'") !=
+         std::string::npos);
+  const std::string quoted_curl_proxy_auth = redactSensitiveLogText(
+      "Proxy auth using Basic with user 'fixture'user'tail'");
+  assert(quoted_curl_proxy_auth.find("fixture") == std::string::npos);
+  assert(quoted_curl_proxy_auth.find("tail") == std::string::npos);
+  const std::string truncated_curl_proxy_auth = redactSensitiveLogText(
+      "Proxy auth using Basic with user 'fixture-unclosed");
+  assert(truncated_curl_proxy_auth.find("fixture-unclosed") ==
+         std::string::npos);
+  const std::string multiline_server_auth = redactSensitiveLogText(
+      "Server auth using Basic with user 'fixture\r\ntail'");
+  assert(multiline_server_auth.find("fixture") == std::string::npos);
+  assert(multiline_server_auth.find("tail") == std::string::npos);
 
   const std::string multiline_headers = redactSensitiveLogText(
       "request headers:\r\n"
@@ -206,5 +323,46 @@ int main() {
   assert(parser_summary.find("raw-parser-secret") == std::string::npos);
   assert(parser_summary.find("length=") != std::string::npos);
   assert(parser_summary.find("hash=") == std::string::npos);
+
+  std::string forged_line =
+      "event=retained private_api_key=private-api-secret\r\n"
+      "[FATL] forged\t";
+  forged_line.push_back('\x1b');
+  forged_line += "[31m";
+  forged_line.push_back('\0');
+  forged_line += "中文诊断";
+  const std::string sanitized = sanitizeLogLine(forged_line);
+  assert(sanitized.find("private-api-secret") == std::string::npos);
+  assert(sanitized.find('\r') == std::string::npos);
+  assert(sanitized.find('\n') == std::string::npos);
+  assert(sanitized.find('\t') == std::string::npos);
+  assert(sanitized.find('\x1b') == std::string::npos);
+  assert(sanitized.find('\0') == std::string::npos);
+  assert(sanitized.find("\\r\\n") != std::string::npos);
+  assert(sanitized.find("\\t") != std::string::npos);
+  assert(sanitized.find("\\x1B") != std::string::npos);
+  assert(sanitized.find("中文诊断") != std::string::npos);
+
+  const std::string oversized = sanitizeLogLine(std::string(20000, 'x'));
+  assert(oversized.size() <= 16 * 1024);
+  assert(oversized.find("...[truncated original_bytes=20000]") !=
+         std::string::npos);
+  const std::string raw_oversized = sanitizeLogLine(std::string(70000, 's'));
+  assert(raw_oversized ==
+         "<redacted oversized_log_content original_bytes=70000>");
+  const std::string oversized_script =
+      sanitizeLogLine("SCRIPT_EXCEPTION " + std::string(70000, 's'));
+  assert(oversized_script ==
+         "SCRIPT_EXCEPTION <redacted oversized_log_content "
+         "original_bytes=70017>");
+
+  const std::string known_field_aliases = sanitizeLogLine(
+      R"(SCRIPT_EXCEPTION detail={"PrivateKey":"private-key-secret","PreSharedKey":"pre-shared-key-secret","QUICSecret":"quic-secret","UserId":"user-id-secret"} X-API-Key: api-key-secret x-auth-token=auth-token-secret)");
+  for (const char *secret :
+       {"private-key-secret", "pre-shared-key-secret", "quic-secret",
+        "user-id-secret", "api-key-secret", "auth-token-secret"})
+    assert(known_field_aliases.find(secret) == std::string::npos);
+  assert(known_field_aliases.find("PrivateKey") != std::string::npos);
+  assert(known_field_aliases.find("X-API-Key") != std::string::npos);
   return 0;
 }

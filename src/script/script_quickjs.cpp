@@ -1,7 +1,6 @@
 #include <string>
 #include <cstring>
 #include <map>
-#include <iostream>
 #include <quickjspp.hpp>
 #include <utility>
 #include <quickjs/quickjs-libc.h>
@@ -16,6 +15,7 @@
 #include "handler/settings_view.h"
 #include "parser/config/proxy.h"
 #include "utils/map_extra.h"
+#include "utils/logger.h"
 #include "utils/system.h"
 #include "script_quickjs.h"
 
@@ -399,8 +399,9 @@ static qjs_fetch_Response qjs_fetch(qjs_fetch_Request request)
     std::string response_headers;
     const Settings &settings = effectiveSettings();
     ProxyPolicy proxy = request.proxy_specified
-                            ? parseProxy(request.proxy)
-                            : parseProxy(settings.proxyConfig);
+                            ? parseProxy(request.proxy, settings.proxyBypass)
+                            : parseProxy(settings.proxyConfig,
+                                         settings.proxyBypass);
     FetchArgument argument {method, request.url, proxy, &request.postdata, &request.headers.headers, &request.cookies, 0};
     FetchResult result {&response.status_code, &response.content, &response_headers, &response.cookies};
 
@@ -418,8 +419,9 @@ static std::string qjs_getUrlArg(const std::string &url, const std::string &requ
 std::string getGeoIP(const std::string &address, const std::string &proxy)
 {
     const Settings &settings = effectiveSettings();
-    ProxyPolicy policy = proxy.empty() ? parseProxy(settings.proxyConfig)
-                                       : parseProxy(proxy);
+    ProxyPolicy policy =
+        proxy.empty() ? parseProxy(settings.proxyConfig, settings.proxyBypass)
+                      : parseProxy(proxy, settings.proxyBypass);
     return fetchFile("https://api.ip.sb/geoip/" + address, policy,
                      settings.cacheConfig);
 }
@@ -582,7 +584,10 @@ int script_cleanup(qjs::Context &context)
 void script_print_stack(qjs::Context &context)
 {
     auto exc = context.getException();
-    std::cerr << "脚本异常：" << (std::string) exc << std::endl;
+    writeLog(LOG_LEVEL_ERROR,
+             "SCRIPT_EXCEPTION detail=" + static_cast<std::string>(exc));
     if((bool) exc["stack"])
-        std::cerr << "脚本堆栈：" << (std::string) exc["stack"] << std::endl;
+        writeLog(LOG_LEVEL_ERROR,
+                 "SCRIPT_STACK detail=" +
+                     static_cast<std::string>(exc["stack"]));
 }

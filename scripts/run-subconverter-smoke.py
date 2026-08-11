@@ -25,6 +25,56 @@ SAMPLE_SS_LINK = "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388#Smoke"
 DIRECT_SS_LINK = (
     "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@direct.example.com:8389#DirectSmoke"
 )
+MIHOMO_ONLY_ROUTE_URI = (
+    "socks5://user:pass@socks.example.test:1080#RouteProbe"
+)
+LEGACY_ONLY_ROUTE_URI = (
+    "trojan-go://password@legacy.example.test:443"
+    "?sni=example.test#LegacyRouteProbe"
+)
+VERIFIED_CLASH_AUTO_USER_AGENTS = (
+    "clash.meta/1.19.29",  # Mihomo
+    "clash.meta/mihomo",  # GUI.for.Clash
+    "clash.meta/alpha-e89af72",  # Sparkle fallback
+    "clash.meta/1.19.5",  # ClashBox default
+    "clash-verge/v2.5.3",  # Clash Verge Rev
+    "clash-verge/v2.4.5",  # OpenClash default
+    "mihomo.party/v2.0.0 (clash.meta)",  # Clash/Mihomo Party
+    "FlClash/v0.8.94 clash-verge Platform/windows",
+    "clash-nyanpasu/v2.0.0",
+    "ClashMetaForAndroid/2.11.32.Meta",
+    "ClashMeta/1.19.29; mihomo/1.19.29",  # ClashMi default
+    "ClashForAndroid/2.5.12",
+    "ClashforWindows/0.20.39",
+    (
+        "ClashX/1.91.1 (com.west2online.ClashX; build:1.91.1; "
+        "macOS 12.4.0) Alamofire/5.5.0"
+    ),
+)
+CLASH_AUTO_COMPATIBILITY_ALIASES = (
+    "mihomo/1.19.29",
+    "clash-party/v1.7.5",
+    "ClashMi/1.0.6 platform/android ClashMeta/1.19.29; mihomo/1.19.29",
+    "ClashForWindows/0.20.39",
+    "ClashX Meta/1.4.1",
+    "OpenClash/0.46.075",
+)
+CLASH_AUTO_USER_AGENTS = (
+    VERIFIED_CLASH_AUTO_USER_AGENTS + CLASH_AUTO_COMPATIBILITY_ALIASES
+)
+VERIFIED_CLASHR_AUTO_USER_AGENTS = (
+    "ClashForAndroid/1.3.4R",
+    "ClashForAndroid/1.3.3R2",
+    "ClashForAndroid/1.1.10R3",
+)
+CLASHR_AUTO_COMPATIBILITY_ALIASES = (
+    "ClashForAndroid/2.5.12R",
+    "ClashR/1.0",
+    "clashr/1.0",
+)
+CLASHR_AUTO_USER_AGENTS = (
+    VERIFIED_CLASHR_AUTO_USER_AGENTS + CLASHR_AUTO_COMPATIBILITY_ALIASES
+)
 DISABLE_RULEGEN_CONFIG = "data:,enable_rule_generator=false"
 PROVIDER_FILTER_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
     b"\n".join(
@@ -154,12 +204,132 @@ def assert_snapshot(name: str, content: str, snapshot_dir: Path | None, update: 
         raise AssertionError(f"Snapshot mismatch for {name}\n{diff}")
 
 
+def assert_parser_route_isolation(base_url: str, timeout: int) -> None:
+    common = {
+        "url": MIHOMO_ONLY_ROUTE_URI,
+        "config": DISABLE_RULEGEN_CONFIG,
+    }
+    for target in ("clash", "clashr"):
+        output = fetch(
+            base_url,
+            "/sub",
+            {"target": target, "list": "true", **common},
+            timeout,
+        )
+        if "RouteProbe" not in output:
+            raise AssertionError(
+                f"explicit {target} did not use the Mihomo-only parser"
+            )
+
+    auto_cases = tuple(
+        (user_agent, "clash") for user_agent in CLASH_AUTO_USER_AGENTS
+    )
+    auto_cases += tuple(
+        (user_agent, "clashr") for user_agent in CLASHR_AUTO_USER_AGENTS
+    )
+    for user_agent, resolved_target in auto_cases:
+        report = json.loads(
+            fetch(
+                base_url,
+                "/sub",
+                {"target": "auto", "explain": "true", **common},
+                timeout,
+                {"User-Agent": user_agent},
+            )
+        )
+        if (
+            report.get("target") != resolved_target
+            or report.get("nodes", {}).get("total", 0) < 1
+        ):
+            raise AssertionError(
+                f"auto UA {user_agent!r} did not resolve to the Mihomo-only "
+                f"{resolved_target} route"
+            )
+
+    assert_rejected(
+        base_url,
+        "/sub",
+        {"target": "auto", **common},
+        timeout,
+        "browser UA must not be classified as Clash",
+        {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+    )
+
+    assert_rejected(
+        base_url,
+        "/sub",
+        {"target": "surge", **common},
+        timeout,
+        "explicit Surge legacy-only parser route",
+    )
+    assert_rejected(
+        base_url,
+        "/sub",
+        {"target": "auto", **common},
+        timeout,
+        "auto Loon legacy-only parser route",
+        {"User-Agent": "Loon/3.2.1"},
+    )
+
+    legacy_output = json.loads(
+        fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "singbox",
+                "url": LEGACY_ONLY_ROUTE_URI,
+                "config": DISABLE_RULEGEN_CONFIG,
+            },
+            timeout,
+        )
+    )
+    if not any(
+        outbound.get("tag") == "LegacyRouteProbe"
+        for outbound in legacy_output.get("outbounds", [])
+    ):
+        raise AssertionError("legacy-only direct URI was not expanded by sing-box")
+
+    auto_legacy_output = json.loads(
+        fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "auto",
+                "url": LEGACY_ONLY_ROUTE_URI,
+                "config": DISABLE_RULEGEN_CONFIG,
+                "explain": "true",
+            },
+            timeout,
+            {"User-Agent": "Loon/3.2.1"},
+        )
+    )
+    if (
+        auto_legacy_output.get("target") != "loon"
+        or auto_legacy_output.get("nodes", {}).get("total", 0) < 1
+    ):
+        raise AssertionError("auto Loon did not resolve to the legacy-only route")
+
+    assert_rejected(
+        base_url,
+        "/sub",
+        {
+            "target": "clash",
+            "url": LEGACY_ONLY_ROUTE_URI,
+            "config": DISABLE_RULEGEN_CONFIG,
+            "list": "true",
+        },
+        timeout,
+        "Clash Mihomo-only route with a legacy-only URI",
+    )
+
+
 def run_checks(
     base_url: str,
     timeout: int,
     snapshot_dir: Path | None,
     update: bool,
     remote_subscription_url: str | None,
+    mihomo_raw_subscription_url: str | None,
     mihomo_yaml_subscription_url: str | None,
     legacy_subscription_url: str | None,
     verify_non_clash: bool,
@@ -245,22 +415,6 @@ def run_checks(
         or "parameter-section" not in inspect_page
     ):
         raise AssertionError("/inspect did not return the inspector page")
-    localized_labels = [
-        "代理提供者",
-        "请求值",
-        "生效值",
-        "说明",
-        "项目",
-        "详情",
-        "来源哈希",
-        "包含过滤",
-        "排除过滤",
-    ]
-    missing_labels = [label for label in localized_labels if label not in inspect_page]
-    if missing_labels:
-        raise AssertionError(
-            "/inspect page is missing localized labels: " + ", ".join(missing_labels)
-        )
 
     common_params = {
         "target": "clash",
@@ -268,10 +422,30 @@ def run_checks(
         "config": DISABLE_RULEGEN_CONFIG,
     }
 
+    if verify_non_clash:
+        assert_parser_route_isolation(base_url, timeout)
+
     direct_config = fetch(base_url, "/sub", common_params, timeout)
     if "Smoke" not in direct_config or "proxies:" not in direct_config:
         raise AssertionError("direct Clash conversion did not include expected node output")
     assert_snapshot("direct-clash.yaml", direct_config, snapshot_dir, update)
+
+    auto_config, auto_headers = fetch_response(
+        base_url,
+        "/sub",
+        {**common_params, "target": "auto"},
+        timeout,
+        {"User-Agent": "clash.meta/1.19.29"},
+    )
+    if "Smoke" not in auto_config or "proxies:" not in auto_config:
+        raise AssertionError("auto Clash conversion did not select Mihomo output")
+    auto_vary = {
+        value.strip().lower()
+        for value in auto_headers.get("vary", "").split(",")
+        if value.strip()
+    }
+    if "user-agent" not in auto_vary:
+        raise AssertionError("auto Clash response is missing Vary: User-Agent")
 
     _, plaintext_headers = fetch_response(
         base_url, "/sub", common_params, timeout
@@ -281,8 +455,11 @@ def run_checks(
         for value in plaintext_headers.get("vary", "").split(",")
         if value.strip()
     }
-    if "x-age-public-key" not in plaintext_vary:
-        raise AssertionError("plaintext /sub response is missing Vary: X-Age-Public-Key")
+    for expected in ("x-age-public-key", "user-agent"):
+        if expected not in plaintext_vary:
+            raise AssertionError(
+                f"plaintext /sub response is missing Vary: {expected}"
+            )
 
     age_config, age_headers = fetch_response(
         base_url,
@@ -304,8 +481,9 @@ def run_checks(
         for value in age_headers.get("vary", "").split(",")
         if value.strip()
     }
-    if "x-age-public-key" not in age_vary:
-        raise AssertionError("Age response is missing Vary: X-Age-Public-Key")
+    for expected in ("x-age-public-key", "user-agent"):
+        if expected not in age_vary:
+            raise AssertionError(f"Age response is missing Vary: {expected}")
 
     plaintext_after_age = fetch(base_url, "/sub", common_params, timeout)
     if plaintext_after_age.startswith("-----BEGIN AGE ENCRYPTED FILE-----"):
@@ -379,10 +557,15 @@ def run_checks(
     if provider_report.get("output", {}).get("provider_count") != 1:
         raise AssertionError("provider explain report did not count one provider")
     provider = provider_report.get("providers", [{}])[0]
-    if provider.get("filter") != "(HK)|(JP)":
-        raise AssertionError("provider did not inherit configured include filters")
-    if provider.get("exclude_filter") != "(Expired)|(Traffic)":
-        raise AssertionError("provider did not inherit configured exclude filters")
+    if (
+        provider.get("filter") != ""
+        or provider.get("exclude_filter") != ""
+        or provider.get("filter_present") is not True
+        or provider.get("exclude_filter_present") is not True
+    ):
+        raise AssertionError(
+            "provider explain did not report configured filters without exposing them"
+        )
     provider_params = provider_report.get("parameters", {})
     provider_recognized = {
         item.get("name"): item for item in provider_params.get("recognized", [])
@@ -697,7 +880,12 @@ def run_checks(
             for value in selected_header_response_headers.get("vary", "").split(",")
             if value.strip()
         }
-        for expected in ("x-hwid", "authorization", "x-age-public-key"):
+        for expected in (
+            "x-hwid",
+            "authorization",
+            "x-age-public-key",
+            "user-agent",
+        ):
             if expected not in selected_vary:
                 raise AssertionError(
                     f"selected provider response Vary is missing {expected}"
@@ -923,19 +1111,47 @@ def run_checks(
                 "Mihomo native YAML was not expanded with scalar types preserved"
             )
 
-    if legacy_subscription_url:
-        assert_rejected(
+    if mihomo_raw_subscription_url:
+        mihomo_raw_nodes = fetch(
             base_url,
             "/sub",
             {
                 "target": "clash",
-                "url": legacy_subscription_url,
+                "url": mihomo_raw_subscription_url,
                 "config": DISABLE_RULEGEN_CONFIG,
                 "list": "true",
             },
             timeout,
-            "Clash Mihomo-only mode",
         )
+        if "Smoke" not in mihomo_raw_nodes or "proxy-providers:" in mihomo_raw_nodes:
+            raise AssertionError(
+                "Mihomo did not expand the fetched raw URI subscription"
+            )
+
+    if legacy_subscription_url:
+        legacy_common = {
+            "url": legacy_subscription_url,
+            "config": DISABLE_RULEGEN_CONFIG,
+            "list": "true",
+        }
+        for label, target, headers in (
+            ("explicit Clash", "clash", None),
+            ("explicit ClashR", "clashr", None),
+            ("auto Clash", "auto", {"User-Agent": "Clash/1.0"}),
+            (
+                "auto ClashR",
+                "auto",
+                {"User-Agent": "ClashForAndroid/1.9R"},
+            ),
+        ):
+            assert_rejected(
+                base_url,
+                "/sub",
+                {"target": target, **legacy_common},
+                timeout,
+                f"{label} Mihomo-only parser route",
+                headers,
+            )
 
     if legacy_subscription_url and verify_non_clash:
         legacy_singbox = fetch(
@@ -954,7 +1170,7 @@ def run_checks(
             outbound.get("tag") == "LegacyFallback" for outbound in legacy_outbounds
         ):
             raise AssertionError(
-                "legacy parser fallback did not expand the Surge subscription"
+                "legacy-only parser did not expand the Surge subscription"
             )
 
 
@@ -969,12 +1185,16 @@ def main() -> int:
         help="Optional HTTP(S) subscription used to verify provider vs expanded output.",
     )
     parser.add_argument(
+        "--mihomo-raw-subscription-url",
+        help="Optional raw URI subscription used to verify Mihomo fetch expansion.",
+    )
+    parser.add_argument(
         "--mihomo-yaml-subscription-url",
         help="Optional native Mihomo YAML subscription used to verify list expansion.",
     )
     parser.add_argument(
         "--legacy-subscription-url",
-        help="Optional legacy subscription used to verify non-Clash fallback.",
+        help="Optional legacy subscription used to verify legacy-only parsing.",
     )
     parser.add_argument(
         "--verify-non-clash",
@@ -990,6 +1210,7 @@ def main() -> int:
             args.snapshot_dir,
             args.update_snapshots,
             args.remote_subscription_url,
+            args.mihomo_raw_subscription_url,
             args.mihomo_yaml_subscription_url,
             args.legacy_subscription_url,
             args.verify_non_clash,

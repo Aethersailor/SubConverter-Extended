@@ -8,6 +8,7 @@
 #include "config/regmatch.h"
 #include "config/ruleset.h"
 #include "handler/fetch_context.h"
+#include "handler/proxy_policy.h"
 #include "generator/config/ruleconvert.h"
 #include "generator/template/templates.h"
 #include "utils/logger.h"
@@ -52,7 +53,7 @@ struct Settings {
   // accessToken removed - token authentication is disabled
   std::string basePath = "base";
   std::string custom_group;
-  int logLevel = LOG_LEVEL_VERBOSE;
+  LogLevel logLevel = LOG_LEVEL_INFO;
   long maxAllowedDownloadSize = 1048576L;
   string_map aliases;
   std::string serveFileRoot;
@@ -81,6 +82,7 @@ struct Settings {
   bool clashUseNewField = false, singBoxAddClashModes = true;
   std::string clashProxiesStyle = "flow", clashProxyGroupsStyle = "block";
   std::string proxyConfig, proxyRuleset, proxySubscription;
+  std::string proxyBypass = kDefaultProxyBypass;
   int updateInterval = 0;
   int proxyProviderInterval = kDefaultProxyProviderInterval;
   bool proxyProviderDirect = kDefaultProxyProviderDirect;

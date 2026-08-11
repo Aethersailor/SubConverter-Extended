@@ -51,6 +51,7 @@ struct CommonScalarSettings {
   std::string proxyConfig;
   std::string proxyRuleset;
   std::string proxySubscription;
+  std::string proxyBypass;
   bool reloadConfOnRequest;
 };
 
@@ -72,10 +73,15 @@ CommonScalarSettings captureCommonScalarSettings() {
           global.proxyConfig,
           global.proxyRuleset,
           global.proxySubscription,
+          global.proxyBypass,
           global.reloadConfOnRequest};
 }
 
 void applyCommonScalarSettings(CommonScalarSettings settings) {
+  const ProxyBypassPolicy bypass =
+      ProxyBypassPolicy::parse(settings.proxyBypass);
+  if (!bypass.valid)
+    throw std::invalid_argument("proxy_bypass 配置无效：" + bypass.error + "。");
   if (settings.defaultExtConfig.empty())
     settings.defaultExtConfig = kDefaultExternalConfig;
 
@@ -97,7 +103,62 @@ void applyCommonScalarSettings(CommonScalarSettings settings) {
   global.proxyConfig = std::move(settings.proxyConfig);
   global.proxyRuleset = std::move(settings.proxyRuleset);
   global.proxySubscription = std::move(settings.proxySubscription);
+  global.proxyBypass = std::move(settings.proxyBypass);
   global.reloadConfOnRequest = settings.reloadConfOnRequest;
+}
+
+LogLevel configuredLogLevel(const std::string &value,
+                            bool print_debug_info) {
+  if (print_debug_info)
+    return LOG_LEVEL_VERBOSE;
+  const std::string normalized =
+      toLower(trimWhitespace(value, true, true));
+  switch (hash_(normalized)) {
+  case "warn"_hash:
+    return LOG_LEVEL_WARNING;
+  case "error"_hash:
+    return LOG_LEVEL_ERROR;
+  case "fatal"_hash:
+    return LOG_LEVEL_FATAL;
+  case "verbose"_hash:
+    return LOG_LEVEL_VERBOSE;
+  case "debug"_hash:
+    return LOG_LEVEL_DEBUG;
+  default:
+    return LOG_LEVEL_INFO;
+  }
+}
+
+const char *configuredLogLevelName(LogLevel level) {
+  switch (level) {
+  case LogLevel::Fatal:
+    return "fatal";
+  case LogLevel::Error:
+    return "error";
+  case LogLevel::Warning:
+    return "warn";
+  case LogLevel::Info:
+    return "info";
+  case LogLevel::Debug:
+    return "debug";
+  case LogLevel::Verbose:
+    return "verbose";
+  }
+  return "info";
+}
+
+void applyConfiguredLogLevel(const std::string &value,
+                             bool print_debug_info,
+                             ScopedLogLevelOverride &log_level_scope) {
+  global.printDbgInfo = print_debug_info;
+  global.logLevel = configuredLogLevel(value, print_debug_info);
+  log_level_scope.set(global.logLevel);
+  writeLog(LOG_LEVEL_DEBUG,
+           "LOG_LEVEL_CONFIGURED level=" +
+               std::string(configuredLogLevelName(global.logLevel)) +
+               " print_debug_info=" +
+               std::string(print_debug_info ? "true" : "false") +
+               " phase=pre-import");
 }
 
 } // namespace
@@ -203,35 +264,32 @@ static void finalizeSecuritySettings() {
       toLower(trimWhitespace(global.securityProfile, true, true));
   if (global.securityProfile != "lan" && global.securityProfile != "public" &&
       global.securityProfile != "strict") {
-    writeLog(0,
+    writeLog(LOG_LEVEL_WARNING,
              "security.profile 的值无效：'" + global.securityProfile +
-                 "'，已回退为 lan。",
-             LOG_LEVEL_WARNING);
+                 "'，已回退为 lan。");
     global.securityDiagnostics.profileInputValid = false;
     global.securityDiagnostics.profileUsedCompatibilityFallback = true;
-    writeLog(0,
+    writeLog(LOG_LEVEL_WARNING,
              "SECURITY_PROFILE_INVALID_FALLBACK source=" +
                  global.securityDiagnostics.profileSource + " input='" +
                  securityLogValue(global.securityProfile) +
                  "' effective=lan compatibility_fallback=true；该回退仅用于"
-                 "兼容，不代表实例适合公网暴露。",
-             LOG_LEVEL_WARNING);
+                 "兼容，不代表实例适合公网暴露。");
     global.securityProfile = "lan";
   }
 
   if (!global.securityDiagnostics.uploadInputValid) {
-    writeLog(0,
+    writeLog(LOG_LEVEL_WARNING,
              "SECURITY_UPLOAD_VALUE_INVALID source=" +
                  global.securityDiagnostics.uploadSource + " input='" +
                  securityLogValue(global.securityDiagnostics.uploadInput) +
                  "' effective=" +
                  (global.allowPublicUpload ? "true" : "false") +
-                 " compatibility_behavior=preserved。",
-             LOG_LEVEL_WARNING);
+                 " compatibility_behavior=preserved。");
   }
 
-  writeLog(0, "当前安全档位：" + global.securityProfile, LOG_LEVEL_INFO);
-  writeLog(0,
+  writeLog(LOG_LEVEL_INFO, "当前安全档位：" + global.securityProfile);
+  writeLog(LOG_LEVEL_INFO,
            "SECURITY_PROFILE_EFFECTIVE profile=" + global.securityProfile +
                " source=" + global.securityDiagnostics.profileSource +
                (global.securityDiagnostics.profileSource != "environment" ||
@@ -245,8 +303,7 @@ static void finalizeSecuritySettings() {
                " compatibility_fallback=" +
                (global.securityDiagnostics.profileUsedCompatibilityFallback
                     ? "true"
-                    : "false"),
-           LOG_LEVEL_INFO);
+                    : "false"));
 }
 
 static void finalizePerformanceSettings() {
@@ -281,9 +338,8 @@ static void finalizePerformanceSettings() {
   if (global.maxServerThreads < global.maxConcurThreads)
     global.maxServerThreads = global.maxConcurThreads;
   if (global.responseCacheTtl > 5) {
-    writeLog(0,
-             "response_cache_ttl 最大允许 5 秒，已自动收敛到 5。",
-             LOG_LEVEL_WARNING);
+    writeLog(LOG_LEVEL_WARNING,
+             "response_cache_ttl 最大允许 5 秒，已自动收敛到 5。");
     global.responseCacheTtl = 5;
   }
 }
@@ -313,10 +369,9 @@ static void finalizeDashboardAuthSettings() {
       client_ip::parseHeader(global.dashboardAuthClientIpHeader) !=
       client_ip::Header::None;
   if (header_configured != !global.dashboardAuthTrustedProxyCidrs.empty()) {
-    writeLog(0,
+    writeLog(LOG_LEVEL_WARNING,
              "Dashboard 客户端 IP 头与 trusted proxy CIDR 必须同时配置；"
-             "当前已安全降级为仅使用 socket peer。",
-             LOG_LEVEL_WARNING);
+             "当前已安全降级为仅使用 socket peer。");
   }
   if (global.dashboardAuthMaxFailures < 1)
     global.dashboardAuthMaxFailures = 1;
@@ -363,7 +418,7 @@ bool isPublicUploadAllowed() {
 
 void logSecurityPosture() {
   const bool upload_allowed = isPublicUploadAllowed();
-  writeLog(0,
+  writeLog(LOG_LEVEL_INFO,
            "SECURITY_UPLOAD_EFFECTIVE profile=" + global.securityProfile +
                " configured_allow_public_upload=" +
                (global.allowPublicUpload ? "true" : "false") + " source=" +
@@ -379,8 +434,7 @@ void logSecurityPosture() {
                     ? " reason=lan-compatibility"
                     : global.securityProfile == "strict"
                           ? " reason=strict-policy"
-                          : " reason=public-upload-setting"),
-           LOG_LEVEL_INFO);
+                          : " reason=public-upload-setting"));
 
   const bool wildcard_bind = global.listenAddress == "0.0.0.0" ||
                              global.listenAddress == "::" ||
@@ -391,22 +445,20 @@ void logSecurityPosture() {
         !startsWith(bind_endpoint, "[")) {
       bind_endpoint = "[" + bind_endpoint + "]";
     }
-    writeLog(0,
+    writeLog(LOG_LEVEL_WARNING,
              "SECURITY_EXPOSURE_POSSIBLE profile=lan bind=" +
                  bind_endpoint + ":" +
                  std::to_string(global.listenPort) +
                  " public_reachability=unknown；监听所有本地接口不等于已暴露"
                  "公网，请同时检查端口发布、宿主防火墙、云安全组、NAT 和"
-                 "反向代理。公网部署请显式使用 public 或 strict。",
-             LOG_LEVEL_WARNING);
+                 "反向代理。公网部署请显式使用 public 或 strict。");
   }
 }
 
 static bool canImportLocalPath(const std::string &path, FetchContext context) {
   if (!isPublicFetchRestricted(context) || isTrustedLocalResourcePath(path))
     return true;
-  writeLog(0, "已阻止公开请求导入本地文件：" + path,
-           LOG_LEVEL_WARNING);
+  writeLog(LOG_LEVEL_WARNING, "已阻止公开请求导入本地文件：" + path);
   return false;
 }
 
@@ -432,11 +484,11 @@ int importItems(string_array &target, bool scope_limit, FetchContext context) {
       continue;
     }
     path = x.substr(x.find(":") + 1);
-    writeLog(0, "正在导入项目：" + path);
+    writeLog(LOG_LEVEL_VERBOSE, "正在导入项目：" + path);
     content.clear();
 
     const Settings &settings = effectiveSettings();
-    ProxyPolicy proxy = parseProxy(settings.proxyConfig);
+    ProxyPolicy proxy = parseProxy(settings.proxyConfig, settings.proxyBypass);
 
     if (readImportLocalPath(path, scope_limit, context, content)) {
       // Local content was loaded through the effective scoped/trusted policy.
@@ -444,8 +496,7 @@ int importItems(string_array &target, bool scope_limit, FetchContext context) {
       content = webGet(path, proxy, settings.cacheConfig, nullptr, nullptr,
                        context);
     else
-      writeLog(0, "文件不存在或不是有效 URL：" + path,
-               LOG_LEVEL_ERROR);
+      writeLog(LOG_LEVEL_ERROR, "文件不存在或不是有效 URL：" + path);
     if (content.empty())
       return -1;
 
@@ -466,7 +517,8 @@ int importItems(string_array &target, bool scope_limit, FetchContext context) {
     ss.clear();
   }
   target.swap(result);
-  writeLog(0, "已导入 " + std::to_string(itemCount) + " 个项目。");
+  writeLog(LOG_LEVEL_VERBOSE,
+           "已导入 " + std::to_string(itemCount) + " 个项目。");
   return 0;
 }
 
@@ -485,14 +537,14 @@ int importItems(std::vector<toml::value> &root, const std::string &import_key,
   bool failed = false;
 
   const Settings &settings = effectiveSettings();
-  ProxyPolicy proxy = parseProxy(settings.proxyConfig);
+  ProxyPolicy proxy = parseProxy(settings.proxyConfig, settings.proxyBypass);
   while (iter != root.end()) {
     auto &table = iter->as_table();
     if (table.find("import") == table.end())
       newRoot.emplace_back(std::move(*iter));
     else {
       const std::string &path = toml::get<std::string>(table.at("import"));
-      writeLog(0, "正在导入项目：" + path);
+      writeLog(LOG_LEVEL_VERBOSE, "正在导入项目：" + path);
       content.clear();
       if (readImportLocalPath(path, scope_limit, context, content)) {
         // Local content was loaded through the effective scoped/trusted policy.
@@ -500,8 +552,7 @@ int importItems(std::vector<toml::value> &root, const std::string &import_key,
         content = webGet(path, proxy, settings.cacheConfig, nullptr, nullptr,
                          context);
       else
-        writeLog(0, "文件不存在或不是有效 URL：" + path,
-                 LOG_LEVEL_ERROR);
+        writeLog(LOG_LEVEL_ERROR, "文件不存在或不是有效 URL：" + path);
       if (content.empty()) {
         failed = true;
       } else {
@@ -511,9 +562,8 @@ int importItems(std::vector<toml::value> &root, const std::string &import_key,
           count += list.size();
           std::move(list.begin(), list.end(), std::back_inserter(newRoot));
         } catch (const std::exception &e) {
-          writeLog(0, "导入项目失败：" + summarizeUrlForLog(path) +
-                          "，detail=" + summarizeSensitiveTextForLog(e.what()),
-                   LOG_LEVEL_ERROR);
+          writeLog(LOG_LEVEL_ERROR, "导入项目失败：" + summarizeUrlForLog(path) +
+                          "，detail=" + summarizeSensitiveTextForLog(e.what()));
           failed = true;
         }
       }
@@ -521,7 +571,8 @@ int importItems(std::vector<toml::value> &root, const std::string &import_key,
     iter++;
   }
   root.swap(newRoot);
-  writeLog(0, "已导入 " + std::to_string(count) + " 个项目。");
+  writeLog(LOG_LEVEL_VERBOSE,
+           "已导入 " + std::to_string(count) + " 个项目。");
   return failed ? -1 : 0;
 }
 
@@ -663,17 +714,16 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
   RulesetContent rc;
 
   const Settings &settings = effectiveSettings();
-  ProxyPolicy proxy = parseProxy(settings.proxyRuleset);
+  ProxyPolicy proxy = parseProxy(settings.proxyRuleset, settings.proxyBypass);
 
   for (RulesetConfig &x : ruleset_list) {
     rule_group = x.Group;
     rule_url = x.Url;
     std::string::size_type pos = x.Url.find("[]");
     if (pos != std::string::npos) {
-      writeLog(0,
+      writeLog(LOG_LEVEL_INFO,
                "正在添加规则：'" + rule_url.substr(pos + 2) + "," +
-                   rule_group + "'。",
-               LOG_LEVEL_INFO);
+                   rule_group + "'。");
       rc = {rule_group,
             "",
             "",
@@ -692,15 +742,13 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
         type = iter->second;
       }
       if (x.Options.no_resolve && type != RULESET_CLASH_IPCIDR)
-        writeLog(0,
+        writeLog(LOG_LEVEL_WARNING,
                  "规则集选项 no-resolve 仅适用于 clash-ipcidr，已对策略组 '" +
-                     rule_group + "' 安全忽略。",
-                 LOG_LEVEL_WARNING);
+                     rule_group + "' 安全忽略。");
 
-      writeLog(0,
+      writeLog(LOG_LEVEL_INFO,
                "正在更新规则集 URL：'" + rule_url + "'，策略组：'" +
-                   rule_group + "'。",
-               LOG_LEVEL_INFO);
+                   rule_group + "'。");
       rc = {rule_group,
             rule_url,
             rule_url_typed,
@@ -714,7 +762,17 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
   }
 }
 
-void readYAMLConf(YAML::Node &node) {
+void readYAMLConf(YAML::Node &node,
+                  ScopedLogLevelOverride &log_level_scope) {
+  std::string early_log_level;
+  bool early_print_debug_info = false;
+  if (node["advanced"].IsDefined()) {
+    node["advanced"]["log_level"] >> early_log_level;
+    node["advanced"]["print_debug_info"] >> early_print_debug_info;
+  }
+  applyConfiguredLogLevel(early_log_level, early_print_debug_info,
+                          log_level_scope);
+
   YAML::Node section = node["common"];
   std::string strLine;
   string_array tempArray;
@@ -770,6 +828,7 @@ void readYAMLConf(YAML::Node &node) {
   section["proxy_config"] >> common.proxyConfig;
   section["proxy_ruleset"] >> common.proxyRuleset;
   section["proxy_subscription"] >> common.proxySubscription;
+  section["proxy_bypass"] >> common.proxyBypass;
   section["reload_conf_on_request"] >> common.reloadConfOnRequest;
   applyCommonScalarSettings(std::move(common));
 
@@ -960,32 +1019,6 @@ void readYAMLConf(YAML::Node &node) {
   }
 
   if (node["advanced"].IsDefined()) {
-    std::string log_level;
-    node["advanced"]["log_level"] >> log_level;
-    node["advanced"]["print_debug_info"] >> global.printDbgInfo;
-    if (global.printDbgInfo)
-      global.logLevel = LOG_LEVEL_VERBOSE;
-    else {
-      switch (hash_(log_level)) {
-      case "warn"_hash:
-        global.logLevel = LOG_LEVEL_WARNING;
-        break;
-      case "error"_hash:
-        global.logLevel = LOG_LEVEL_ERROR;
-        break;
-      case "fatal"_hash:
-        global.logLevel = LOG_LEVEL_FATAL;
-        break;
-      case "verbose"_hash:
-        global.logLevel = LOG_LEVEL_VERBOSE;
-        break;
-      case "debug"_hash:
-        global.logLevel = LOG_LEVEL_DEBUG;
-        break;
-      default:
-        global.logLevel = LOG_LEVEL_INFO;
-      }
-    }
     node["advanced"]["max_pending_connections"] >> global.maxPendingConns;
     node["advanced"]["max_concurrent_threads"] >> global.maxConcurThreads;
     node["advanced"]["max_server_threads"] >> global.maxServerThreads;
@@ -1063,8 +1096,7 @@ void readYAMLConf(YAML::Node &node) {
     }
   }
   finalizeRuntimeSettings();
-  writeLog(0, "已加载 YAML 格式偏好设置。",
-           LOG_LEVEL_INFO);
+  writeLog(LOG_LEVEL_INFO, "已加载 YAML 格式偏好设置。");
 }
 
 template <class T, class... U>
@@ -1086,8 +1118,14 @@ void operate_toml_kv_table(
   }
 }
 
-void readTOMLConf(toml::value &root) {
+void readTOMLConf(toml::value &root,
+                  ScopedLogLevelOverride &log_level_scope) {
   auto section_common = toml::find(root, "common");
+  auto section_advanced = toml::find(root, "advanced");
+  applyConfiguredLogLevel(
+      toml::find_or<std::string>(section_advanced, "log_level", ""),
+      toml::find_or<bool>(section_advanced, "print_debug_info", false),
+      log_level_scope);
   string_array default_url, insert_url;
   CommonScalarSettings common = captureCommonScalarSettings();
 
@@ -1112,7 +1150,8 @@ void readTOMLConf(toml::value &root) {
       common.quanXBase, "loon_rule_base", common.loonBase, "sssub_rule_base",
       common.SSSubBase, "singbox_rule_base", common.singBoxBase, "proxy_config",
       common.proxyConfig, "proxy_ruleset", common.proxyRuleset,
-      "proxy_subscription", common.proxySubscription, "append_proxy_type",
+      "proxy_subscription", common.proxySubscription, "proxy_bypass",
+      common.proxyBypass, "append_proxy_type",
       common.appendType, "reload_conf_on_request", common.reloadConfOnRequest);
   applyCommonScalarSettings(std::move(common));
 
@@ -1243,16 +1282,12 @@ void readTOMLConf(toml::value &root) {
                 global.listenPort, "serve_file_root",
                 global.serveFileRoot);
 
-  auto section_advanced = toml::find(root, "advanced");
-
-  std::string log_level;
   bool enable_cache = true;
   int cache_subscription = global.cacheSubscription,
       cache_config = global.cacheConfig, cache_ruleset = global.cacheRuleset;
 
   find_if_exist(
-      section_advanced, "log_level", log_level, "print_debug_info",
-      global.printDbgInfo, "max_pending_connections", global.maxPendingConns,
+      section_advanced, "max_pending_connections", global.maxPendingConns,
       "max_concurrent_threads", global.maxConcurThreads,
       "max_server_threads", global.maxServerThreads, "max_allowed_rulesets",
       global.maxAllowedRulesets, "max_allowed_rules", global.maxAllowedRules,
@@ -1265,30 +1300,6 @@ void readTOMLConf(toml::value &root) {
       "coalesce_retry_on_5xx", global.coalesceRetryOn5xx,
       "allow_insecure_tls", global.allowInsecureTls,
       "response_cache_ttl", global.responseCacheTtl);
-
-  if (global.printDbgInfo)
-    global.logLevel = LOG_LEVEL_VERBOSE;
-  else {
-    switch (hash_(log_level)) {
-    case "warn"_hash:
-      global.logLevel = LOG_LEVEL_WARNING;
-      break;
-    case "error"_hash:
-      global.logLevel = LOG_LEVEL_ERROR;
-      break;
-    case "fatal"_hash:
-      global.logLevel = LOG_LEVEL_FATAL;
-      break;
-    case "verbose"_hash:
-      global.logLevel = LOG_LEVEL_VERBOSE;
-      break;
-    case "debug"_hash:
-      global.logLevel = LOG_LEVEL_DEBUG;
-      break;
-    default:
-      global.logLevel = LOG_LEVEL_INFO;
-    }
-  }
 
   if (enable_cache) {
     global.cacheSubscription = cache_subscription;
@@ -1348,8 +1359,7 @@ void readTOMLConf(toml::value &root) {
                 "allow_public_upload", global.allowPublicUpload);
   finalizeRuntimeSettings();
 
-  writeLog(0, "已加载 TOML 格式偏好设置。",
-           LOG_LEVEL_INFO);
+  writeLog(LOG_LEVEL_INFO, "已加载 TOML 格式偏好设置。");
 }
 
 static void applyRuntimeConfiguration() {
@@ -1366,20 +1376,23 @@ static void applyRuntimeConfiguration() {
 
 bool readConf() {
   guarded_mutex guard(gMutexConfigure);
-  writeLog(0, "正在加载偏好设置...", LOG_LEVEL_INFO);
+  ScopedLogLevelOverride log_level_scope;
+  writeLog(LOG_LEVEL_INFO, "正在加载偏好设置...");
 
   Settings previous = global;
 
   auto restorePreviousSettings = [&](const std::string &reason) {
     safe_replace_settings(std::move(previous));
-    writeLog(0, reason, LOG_LEVEL_FATAL);
-    writeLog(0, "偏好设置加载失败，已保留上一份有效配置。",
-             LOG_LEVEL_FATAL);
+    log_level_scope.set(global.logLevel);
+    writeLog(LOG_LEVEL_FATAL, reason);
+    writeLog(LOG_LEVEL_FATAL, "偏好设置加载失败，已保留上一份有效配置。");
     return false;
   };
 
   auto resetReloadableSettings = []() {
     beginSecuritySettingsLoad();
+    global.printDbgInfo = false;
+    global.logLevel = LOG_LEVEL_INFO;
     eraseElements(global.excludeRemarks);
     eraseElements(global.includeRemarks);
     eraseElements(global.customProxyGroups);
@@ -1403,6 +1416,9 @@ bool readConf() {
     global.dashboardAuthLockSeconds = 900;
     global.fallbackToDefaultExternalConfig = false;
     global.customOpenClashRulesSourceSwitch = false;
+    // A removed proxy_bypass setting must return to the upgrade-compatible
+    // default on reload instead of retaining a previous custom policy.
+    global.proxyBypass = kDefaultProxyBypass;
     global.proxyProviderInterval = kDefaultProxyProviderInterval;
     global.proxyProviderDirect = kDefaultProxyProviderDirect;
   };
@@ -1423,7 +1439,7 @@ bool readConf() {
           "YAML 偏好设置缺少必需的 common 节。");
     resetReloadableSettings();
     try {
-      readYAMLConf(yaml);
+      readYAMLConf(yaml, log_level_scope);
       applyRuntimeConfiguration();
       publishSettingsSnapshot(global);
       return true;
@@ -1439,7 +1455,7 @@ bool readConf() {
           "TOML 偏好设置缺少有效的 version 字段。");
     resetReloadableSettings();
     try {
-      readTOMLConf(conf);
+      readTOMLConf(conf, log_level_scope);
       applyRuntimeConfiguration();
       publishSettingsSnapshot(global);
       return true;
@@ -1485,9 +1501,8 @@ bool readConf() {
       if (!conf.is_empty() && toml::find_or<int>(conf, "version", 0))
         return loadTOML(conf);
     } catch (std::exception &e) {
-      writeLog(0, "PREFERENCE_TOML_PROBE_FAILED detail=" +
-                      summarizeSensitiveTextForLog(e.what()),
-               LOG_LEVEL_DEBUG);
+      writeLog(LOG_LEVEL_DEBUG, "PREFERENCE_TOML_PROBE_FAILED detail=" +
+                      summarizeSensitiveTextForLog(e.what()));
     }
   }
 
@@ -1506,6 +1521,16 @@ bool readConf() {
   try {
     string_array tempArray;
     CommonScalarSettings common = captureCommonScalarSettings();
+
+    std::string early_log_level;
+    bool early_print_debug_info = false;
+    if (ini.section_exist("advanced")) {
+      ini.enter_section("advanced");
+      ini.get_if_exist("log_level", early_log_level);
+      ini.get_bool_if_exist("print_debug_info", early_print_debug_info);
+    }
+    applyConfiguredLogLevel(early_log_level, early_print_debug_info,
+                            log_level_scope);
 
   ini.enter_section("common");
   // api_mode and api_access_token removed - hardcoded in settings.h
@@ -1536,6 +1561,7 @@ bool readConf() {
   ini.get_if_exist("proxy_config", common.proxyConfig);
   ini.get_if_exist("proxy_ruleset", common.proxyRuleset);
   ini.get_if_exist("proxy_subscription", common.proxySubscription);
+  ini.get_if_exist("proxy_bypass", common.proxyBypass);
   ini.get_bool_if_exist("reload_conf_on_request", common.reloadConfOnRequest);
   applyCommonScalarSettings(std::move(common));
 
@@ -1706,32 +1732,6 @@ bool readConf() {
   global.serveFileRoot = ini.get("serve_file_root");
 
   ini.enter_section("advanced");
-  std::string log_level;
-  ini.get_if_exist("log_level", log_level);
-  ini.get_bool_if_exist("print_debug_info", global.printDbgInfo);
-  if (global.printDbgInfo)
-    global.logLevel = LOG_LEVEL_VERBOSE;
-  else {
-    switch (hash_(log_level)) {
-    case "warn"_hash:
-      global.logLevel = LOG_LEVEL_WARNING;
-      break;
-    case "error"_hash:
-      global.logLevel = LOG_LEVEL_ERROR;
-      break;
-    case "fatal"_hash:
-      global.logLevel = LOG_LEVEL_FATAL;
-      break;
-    case "verbose"_hash:
-      global.logLevel = LOG_LEVEL_VERBOSE;
-      break;
-    case "debug"_hash:
-      global.logLevel = LOG_LEVEL_DEBUG;
-      break;
-    default:
-      global.logLevel = LOG_LEVEL_INFO;
-    }
-  }
   ini.get_int_if_exist("max_pending_connections", global.maxPendingConns);
   ini.get_int_if_exist("max_concurrent_threads", global.maxConcurThreads);
   ini.get_int_if_exist("max_server_threads", global.maxServerThreads);
@@ -1829,7 +1829,7 @@ bool readConf() {
   }
     finalizeRuntimeSettings();
 
-    writeLog(0, "已加载 INI 格式偏好设置。", LOG_LEVEL_INFO);
+    writeLog(LOG_LEVEL_INFO, "已加载 INI 格式偏好设置。");
     applyRuntimeConfiguration();
     publishSettingsSnapshot(global);
     return true;
@@ -1882,8 +1882,7 @@ ExternalConfigLoadStatus loadExternalYAML(YAML::Node &node,
       return ExternalConfigLoadStatus::ImportFailed;
     if (settings.maxAllowedRulesets &&
         vArray.size() > settings.maxAllowedRulesets) {
-      writeLog(0, "外部配置中的规则集数量已超过限制。",
-               LOG_LEVEL_WARNING);
+      writeLog(LOG_LEVEL_WARNING, "外部配置中的规则集数量已超过限制。");
       return ExternalConfigLoadStatus::ResourceLimitExceeded;
     }
     ext.surge_ruleset = INIBinding::from<RulesetConfig>::from_ini(vArray);
@@ -1962,8 +1961,7 @@ ExternalConfigLoadStatus loadExternalTOML(toml::value &root,
   const Settings &settings = effectiveSettings();
   if (settings.maxAllowedRulesets &&
       rulesets.size() > settings.maxAllowedRulesets) {
-    writeLog(0, "外部配置中的规则集数量已超过限制。",
-             LOG_LEVEL_WARNING);
+    writeLog(LOG_LEVEL_WARNING, "外部配置中的规则集数量已超过限制。");
     return ExternalConfigLoadStatus::ResourceLimitExceeded;
   }
   ext.surge_ruleset = toml::get<RulesetConfigs>(toml::value(rulesets));
@@ -2008,9 +2006,8 @@ parseExternalConfigContent(const std::string &path,
   if (ini.parse(base_content) != INIREADER_EXCEPTION_NONE) {
     // std::cerr<<"Load external configuration failed. Reason:
     // "<<ini.get_last_error()<<"\n";
-    writeLog(0, "EXTERNAL_CONFIG_INI_PARSE_FAILED detail=" +
-                    summarizeSensitiveTextForLog(ini.get_last_error()),
-             LOG_LEVEL_ERROR);
+    writeLog(LOG_LEVEL_ERROR, "EXTERNAL_CONFIG_INI_PARSE_FAILED detail=" +
+                    summarizeSensitiveTextForLog(ini.get_last_error()));
     return ExternalConfigLoadStatus::ParseFailed;
   }
 
@@ -2032,8 +2029,7 @@ parseExternalConfigContent(const std::string &path,
       return ExternalConfigLoadStatus::ImportFailed;
     if (settings.maxAllowedRulesets &&
         vArray.size() > settings.maxAllowedRulesets) {
-      writeLog(0, "外部配置中的规则集数量已超过限制。",
-               LOG_LEVEL_WARNING);
+      writeLog(LOG_LEVEL_WARNING, "外部配置中的规则集数量已超过限制。");
       return ExternalConfigLoadStatus::ResourceLimitExceeded;
     }
     ext.surge_ruleset = INIBinding::from<RulesetConfig>::from_ini(vArray);
@@ -2148,7 +2144,7 @@ ExternalConfigLoadResult loadExternalConfig(const std::string &path,
       ext.tpl_args ? ext.tpl_args : &empty_tpl_args;
   const Settings &settings = effectiveSettings();
   std::string base_content;
-  ProxyPolicy proxy = parseProxy(settings.proxyConfig);
+  ProxyPolicy proxy = parseProxy(settings.proxyConfig, settings.proxyBypass);
   std::string config =
       fetchFile(path, proxy, settings.cacheConfig, true, context);
   if (config.empty())
