@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cctype>
+#include <initializer_list>
 #include <string>
 #include <map>
 
@@ -156,6 +157,124 @@ bool parseShareUri(std::string uri, const std::string &scheme, ParsedShareUri &p
     return !parsed.user.empty() && !parsed.host.empty() && validSharePort(parsed.port);
 }
 
+bool validHysteria2PortToken(const std::string &token, uint16_t &first_port,
+                             std::string &remaining) {
+    const size_t dash = token.find('-');
+    if (dash == std::string::npos) {
+        if (!validSharePort(token))
+            return false;
+        first_port = static_cast<uint16_t>(to_int(token, 0));
+        remaining.clear();
+        return true;
+    }
+    if (dash == 0 || dash + 1 >= token.size() || token.find('-', dash + 1) != std::string::npos)
+        return false;
+    const std::string start = token.substr(0, dash);
+    const std::string end = token.substr(dash + 1);
+    if (!validSharePort(start) || !validSharePort(end))
+        return false;
+    const int first = to_int(start, 0);
+    const int last = to_int(end, 0);
+    if (first > last)
+        return false;
+    first_port = static_cast<uint16_t>(first);
+    remaining = first < last ? std::to_string(first + 1) + "-" + end : std::string();
+    return true;
+}
+
+bool parseModernShareUri(std::string uri, const std::string &scheme,
+                         bool require_user, const std::string &default_port,
+                         bool allow_hysteria2_ports, ParsedShareUri &parsed,
+                         std::string &additional_ports) {
+    const std::string prefix = scheme + "://";
+    if (!startsWith(uri, prefix))
+        return false;
+    uri.erase(0, prefix.size());
+
+    const size_t fragment_pos = uri.find('#');
+    if (fragment_pos != std::string::npos) {
+        parsed.remark = decodeShareUriUserInfo(uri.substr(fragment_pos + 1));
+        uri.erase(fragment_pos);
+    }
+    const size_t query_pos = uri.find('?');
+    if (query_pos != std::string::npos) {
+        parsed.query = uri.substr(query_pos + 1);
+        uri.erase(query_pos);
+    }
+    if (!uri.empty() && uri.back() == '/')
+        uri.pop_back();
+    if (uri.empty() || uri.find('/') != std::string::npos)
+        return false;
+
+    const size_t at = uri.rfind('@');
+    std::string authority;
+    if (at == std::string::npos) {
+        if (require_user)
+            return false;
+        authority = uri;
+    } else {
+        if (at == 0 || at + 1 >= uri.size())
+            return false;
+        parsed.user = decodeShareUriUserInfo(uri.substr(0, at));
+        authority = uri.substr(at + 1);
+    }
+
+    std::string port_spec;
+    if (!authority.empty() && authority.front() == '[') {
+        const size_t bracket = authority.find(']');
+        if (bracket == std::string::npos)
+            return false;
+        parsed.host = authority.substr(1, bracket - 1);
+        if (bracket + 1 < authority.size()) {
+            if (authority[bracket + 1] != ':' || bracket + 2 >= authority.size())
+                return false;
+            port_spec = authority.substr(bracket + 2);
+        }
+    } else {
+        const size_t colon = authority.rfind(':');
+        if (colon == std::string::npos) {
+            parsed.host = authority;
+        } else {
+            if (authority.find(':') != colon || colon == 0 || colon + 1 >= authority.size())
+                return false;
+            parsed.host = authority.substr(0, colon);
+            port_spec = authority.substr(colon + 1);
+        }
+    }
+    if (parsed.host.empty())
+        return false;
+    if (port_spec.empty())
+        port_spec = default_port;
+
+    if (!allow_hysteria2_ports) {
+        if (!validSharePort(port_spec))
+            return false;
+        parsed.port = port_spec;
+        return !require_user || !parsed.user.empty();
+    }
+
+    const string_array port_tokens = split(port_spec, ",");
+    if (port_tokens.empty())
+        return false;
+    uint16_t primary_port = 0;
+    std::string first_remaining;
+    if (!validHysteria2PortToken(port_tokens.front(), primary_port, first_remaining))
+        return false;
+    string_array remaining_ports;
+    if (!first_remaining.empty())
+        remaining_ports.emplace_back(std::move(first_remaining));
+    for (size_t i = 1; i < port_tokens.size(); ++i) {
+        uint16_t ignored_port = 0;
+        std::string ignored_remaining;
+        if (!validHysteria2PortToken(port_tokens[i], ignored_port, ignored_remaining))
+            return false;
+        remaining_ports.emplace_back(port_tokens[i]);
+    }
+    parsed.port = std::to_string(primary_port);
+    additional_ports = join(remaining_ports, ",");
+    return true;
+}
+
 bool isXrayUuid(const std::string &value) {
     static const std::string pattern =
             R"(^[\da-fA-F]{8}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{12}$)";
@@ -174,6 +293,30 @@ std::vector<std::string> getUrlAlpnList(const std::string &query) {
             result.emplace_back(std::move(item));
     }
     return result;
+}
+
+std::string decodedFirstUrlArg(const std::string &query,
+                               std::initializer_list<const char *> keys) {
+    for (const char *key : keys) {
+        std::string value = decodedUrlArg(query, key);
+        if (!value.empty())
+            return value;
+    }
+    return {};
+}
+
+uint16_t parseUint16Option(const std::string &value, uint16_t fallback,
+                           bool allow_seconds_suffix = false) {
+    std::string normalized = trim(value);
+    if (allow_seconds_suffix && normalized.size() > 1 && normalized.back() == 's')
+        normalized.pop_back();
+    if (normalized.empty() || normalized.size() > 5 ||
+        !std::all_of(normalized.begin(), normalized.end(), [](unsigned char ch) {
+            return std::isdigit(ch) != 0;
+        }))
+        return fallback;
+    const int parsed = to_int(normalized, -1);
+    return parsed >= 0 && parsed <= 65535 ? static_cast<uint16_t>(parsed) : fallback;
 }
 
 tribool getXrayAllowInsecure(const std::string &query) {
@@ -430,6 +573,7 @@ void anyTlSConstruct(Proxy &node, const std::string &group, const std::string &r
     node.Password = password;
     node.AlpnList = AlpnList;
     node.SNI = sni;
+    node.ServerName = sni;
     node.Fingerprint = fingerprint;
     node.IdleSessionCheckInterval = idleSessionCheckInterval;
     node.IdleSessionTimeout = idleSessionTimeout;
@@ -1245,13 +1389,7 @@ void explodeHysteria(std::string hysteria, Proxy &node) {
 
 void explodeHysteria2(std::string hysteria2, Proxy &node) {
     hysteria2 = regReplace(hysteria2, "(hysteria2|hy2)://", "hysteria2://");
-
-    // replace /? with ?
-    hysteria2 = regReplace(hysteria2, "/\\?", "?", true, false);
-    if (regMatch(hysteria2, "hysteria2://(.*?)[:](.*)")) {
-        explodeStdHysteria2(hysteria2, node);
-        return;
-    }
+    explodeStdHysteria2(hysteria2, node);
 }
 
 void explodeQuan(const std::string &quan, Proxy &node) {
@@ -1438,14 +1576,16 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes) {
         std::string user; //socks
         std::string ip, ipv6, private_key, public_key, mtu; //wireguard
         std::string auth, up, down, obfsParam, insecure, alpn; //hysteria
-        std::string obfsPassword; //hysteria2
+        std::string obfsPassword, certificate_fingerprint; //hysteria2
         std::string congestion_control, udp_relay_mode, token; // tuic
         string_array dns_server;
         std::vector<String> alpns;
         String alpn2;
         std::string fingerprint, multiplexing, transfer_protocol, v2ray_http_upgrade;
         tribool udp, tfo, scv;
-        bool reduceRtt, disableSni; //tuic
+        bool reduceRtt = false, disableSni = false; //tuic
+        uint16_t request_timeout = 15000; //tuic
+        uint16_t idle_check = 30, idle_timeout = 30, min_idle = 0; //anytls
         std::vector<std::string> alpnList;
         Proxy node;
         singleproxy = yamlnode[section][i];
@@ -1777,15 +1917,16 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes) {
                 singleproxy["obfs"] >>= obfsParam;
                 singleproxy["obfs-password"] >>= obfsPassword;
                 singleproxy["sni"] >>= host;
+                singleproxy["fingerprint"] >>= certificate_fingerprint;
                 singleproxy["alpn"][0] >>= alpn;
                 singleproxy["ports"] >> ports;
                 sni = host;
                 hysteria2Construct(node, group, ps, server, port, password, host, up, down, alpn, obfsParam,
                                    obfsPassword, sni, public_key, ports, udp, tfo, scv);
+                node.Fingerprint = certificate_fingerprint;
                 break;
             case "tuic"_hash:
                 group = TUIC_DEFAULT_GROUP;
-                uint16_t request_timeout;
                 singleproxy["password"] >>= password;
                 singleproxy["uuid"] >>= id;
                 singleproxy["congestion-controller"] >>= congestion_control;
@@ -1818,9 +1959,15 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes) {
                     }
                 }
                 singleproxy["client-fingerprint"] >>= fingerprint;
+                idle_check = parseUint16Option(
+                    safe_as<std::string>(singleproxy["idle-session-check-interval"]), 30, true);
+                idle_timeout = parseUint16Option(
+                    safe_as<std::string>(singleproxy["idle-session-timeout"]), 30, true);
+                min_idle = parseUint16Option(
+                    safe_as<std::string>(singleproxy["min-idle-session"]), 0);
                 anyTlSConstruct(node, ANYTLS_DEFAULT_GROUP, ps, port, password, server, alpns, fingerprint, sni,
                                 udp,
-                                tribool(), scv, tribool(), "", 30, 30, 0);
+                                tribool(), scv, tribool(), "", idle_check, idle_timeout, min_idle);
                 break;
             case "mieru"_hash:
                 group = MIERU_DEFAULT_GROUP;
@@ -1989,50 +2136,37 @@ void explodeStdMieru(std::string mieru, Proxy &node) {
 }
 
 void explodeStdHysteria2(std::string hysteria2, Proxy &node) {
-    std::string add, port, password, host, insecure, up, down, alpn, obfsParam, obfsPassword, remarks, sni, ports;
-    std::string addition;
-    tribool scv;
-    hysteria2 = hysteria2.substr(12);
-    string_size pos;
+    ParsedShareUri parsed;
+    std::string ports;
+    if (!parseModernShareUri(std::move(hysteria2), "hysteria2", false, "443", true, parsed, ports))
+        return;
 
-    extractRemark(hysteria2, remarks);
-
-    pos = hysteria2.rfind("?");
-    if (pos != hysteria2.npos) {
-        addition = hysteria2.substr(pos + 1);
-        hysteria2.erase(pos);
+    std::string password = parsed.user;
+    if (password.empty())
+        password = decodedUrlArg(parsed.query, "password");
+    std::string query_ports = decodedUrlArg(parsed.query, "ports");
+    if (!query_ports.empty()) {
+        for (const std::string &token : split(query_ports, ",")) {
+            uint16_t ignored_port = 0;
+            std::string ignored_remaining;
+            if (!validHysteria2PortToken(token, ignored_port,
+                                         ignored_remaining))
+                return;
+        }
+        ports = ports.empty() ? query_ports : ports + "," + query_ports;
     }
+    const std::string sni = decodedUrlArg(parsed.query, "sni");
+    if (parsed.remark.empty())
+        parsed.remark = parsed.host + ":" + parsed.port;
 
-    if (strFind(hysteria2, "@")) {
-        if (regGetMatch(hysteria2, R"(^(.*?)@(.*)[:](\d+)$)", 4, 0, &password, &add, &port))
-            return;
-    } else {
-        password = getUrlArg(addition, "password");
-        if (password.empty())
-            return;
-
-        if (!strFind(hysteria2, ":"))
-            return;
-
-        if (regGetMatch(hysteria2, R"(^(.*)[:](\d+)$)", 3, 0, &add, &port))
-            return;
-    }
-
-    scv = getUrlArg(addition, "insecure");
-    up = getUrlArg(addition, "up");
-    down = getUrlArg(addition, "down");
-    alpn = getUrlArg(addition, "alpn");
-    obfsParam = getUrlArg(addition, "obfs");
-    obfsPassword = getUrlArg(addition, "obfs-password");
-    host = getUrlArg(addition, "sni");
-    sni = getUrlArg(addition, "sni");
-    ports = getUrlArg(addition, "ports");
-    if (remarks.empty())
-        remarks = add + ":" + port;
-
-    hysteria2Construct(node, HYSTERIA2_DEFAULT_GROUP, remarks, add, port, password, host, up, down, alpn, obfsParam,
-                       obfsPassword, host, "", ports, tribool(), tribool(), scv);
-    return;
+    hysteria2Construct(node, HYSTERIA2_DEFAULT_GROUP, parsed.remark, parsed.host, parsed.port, password, sni,
+                       decodedUrlArg(parsed.query, "up"), decodedUrlArg(parsed.query, "down"),
+                       decodedUrlArg(parsed.query, "alpn"), decodedUrlArg(parsed.query, "obfs"),
+                       decodedUrlArg(parsed.query, "obfs-password"), sni, "", ports,
+                       tribool(), tribool(), tribool(getUrlArg(parsed.query, "insecure")));
+    node.Fingerprint = decodedFirstUrlArg(parsed.query, {"pinSHA256", "pinsha256"});
+    node.Hysteria2ECH = decodedUrlArg(parsed.query, "ech");
+    node.Hysteria2PortsAreAdditional = !ports.empty();
 }
 
 
@@ -3169,6 +3303,7 @@ void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
             std::string fingerprint;
             std::string congestion_control, udp_relay_mode; //quic
             tribool udp, tfo, scv, rrt, disableSni;
+            uint16_t idle_check = 30, idle_timeout = 30, min_idle = 0;
             rapidjson::Value singboxNode = outbounds[i].GetObject();
             if (singboxNode.HasMember("type") && singboxNode["type"].IsString()) {
                 Proxy node;
@@ -3344,23 +3479,61 @@ void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
                     case "anytls"_hash:
                         group = ANYTLS_DEFAULT_GROUP;
                         password = GetMember(singboxNode, "password");
+                        idle_check = parseUint16Option(
+                            GetMember(singboxNode, "idle_session_check_interval"), 30, true);
+                        idle_timeout = parseUint16Option(
+                            GetMember(singboxNode, "idle_session_timeout"), 30, true);
+                        min_idle = parseUint16Option(
+                            GetMember(singboxNode, "min_idle_session"), 0);
                         anyTlSConstruct(node, ANYTLS_DEFAULT_GROUP, ps, port, password, server, alpnList, fingerprint,
                                         sni,
                                         udp,
-                                        tribool(), scv, tribool(), "", 30, 30, 0);
+                                        tribool(), scv, tribool(), "", idle_check, idle_timeout, min_idle);
                         break;
                     case "hysteria2"_hash:
                         group = HYSTERIA2_DEFAULT_GROUP;
                         password = GetMember(singboxNode, "password");
                         up = GetMember(singboxNode, "up");
+                        if (up.empty())
+                            up = GetMember(singboxNode, "up_mbps");
                         down = GetMember(singboxNode, "down");
+                        if (down.empty())
+                            down = GetMember(singboxNode, "down_mbps");
+                        if (singboxNode.HasMember("server_ports") && singboxNode["server_ports"].IsArray()) {
+                            string_array port_ranges;
+                            bool valid_port_ranges = true;
+                            for (const auto &item : singboxNode["server_ports"].GetArray()) {
+                                if (!item.IsString()) {
+                                    valid_port_ranges = false;
+                                    break;
+                                }
+                                std::string range =
+                                    replaceAllDistinct(item.GetString(), ":", "-");
+                                uint16_t first_port = 0;
+                                std::string remaining;
+                                if (!validHysteria2PortToken(
+                                        range, first_port, remaining)) {
+                                    valid_port_ranges = false;
+                                    break;
+                                }
+                                port_ranges.emplace_back(std::move(range));
+                            }
+                            if (!valid_port_ranges || port_ranges.empty())
+                                continue;
+                            ports = join(port_ranges, ",");
+                            uint16_t first_port = 0;
+                            std::string remaining;
+                            validHysteria2PortToken(port_ranges.front(),
+                                                   first_port, remaining);
+                            port = std::to_string(first_port);
+                        }
                         if (singboxNode.HasMember("obfs") && singboxNode["obfs"].IsObject()) {
                             rapidjson::Value obfsOpt = singboxNode["obfs"].GetObject();
                             obfsParam = GetMember(obfsOpt, "type");
                             obfsPassword = GetMember(obfsOpt, "password");
                         }
                         hysteria2Construct(node, group, ps, server, port, password, host, up, down, alpn, obfsParam,
-                                           obfsPassword, sni, public_key, "", udp, tfo, scv);
+                                           obfsPassword, sni, public_key, ports, udp, tfo, scv);
                         break;
                     case "tuic"_hash:
                         group = TUIC_DEFAULT_GROUP;
@@ -3388,111 +3561,65 @@ void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
 }
 
 void explodeTuic(const std::string &tuic, Proxy &node) {
-    std::string add, port, password, host, insecure, alpn, remarks, sni, ports, congestion_control;
-    std::string addition;
-    tribool scv;
-    std::string link = tuic.substr(7);
-    string_size pos;
+    ParsedShareUri parsed;
+    std::string ignored_ports;
+    if (!parseModernShareUri(tuic, "tuic", true, "", false, parsed, ignored_ports))
+        return;
 
-    extractRemark(link, remarks);
-
-    pos = link.rfind("?");
-    if (pos != std::string::npos) {
-        addition = link.substr(pos + 1);
-        link.erase(pos);
+    std::string uuid, password, token;
+    const size_t credential_separator = parsed.user.find(':');
+    if (credential_separator == std::string::npos) {
+        token = parsed.user;
+    } else {
+        uuid = parsed.user.substr(0, credential_separator);
+        password = parsed.user.substr(credential_separator + 1);
+        if (!isXrayUuid(uuid) || password.empty())
+            return;
     }
+    const std::string query_token = decodedUrlArg(parsed.query, "token");
+    if (!query_token.empty())
+        token = query_token;
+    if (parsed.remark.empty())
+        parsed.remark = parsed.host + ":" + parsed.port;
 
-    std::string uuid;
-    pos = link.find(":");
-    if (pos != std::string::npos) {
-        uuid = link.substr(0, pos);
-        link = link.substr(pos + 1);
-        if (strFind(link, "@")) {
-            pos = link.find("@");
-            if (pos != std::string::npos) {
-                password = link.substr(0, pos);
-                link = link.substr(pos + 1);
-            }
-        }
-    }
+    std::string udp_relay_mode = decodedFirstUrlArg(parsed.query, {"udp_relay_mode", "udp-relay-mode"});
+    if (udp_relay_mode.empty())
+        udp_relay_mode = "native";
+    std::string insecure = decodedFirstUrlArg(parsed.query, {"insecure", "allow_insecure", "allow-insecure"});
+    std::string reduce_rtt = decodedFirstUrlArg(parsed.query,
+                                                {"zero_rtt_handshake", "zero-rtt-handshake", "reduce_rtt", "reduce-rtt"});
+    std::string disable_sni = decodedFirstUrlArg(parsed.query, {"disable_sni", "disable-sni"});
+    const uint16_t request_timeout = parseUint16Option(
+        decodedFirstUrlArg(parsed.query, {"request_timeout", "request-timeout"}), 15000);
 
-    pos = link.find(":");
-    if (pos != std::string::npos) {
-        add = link.substr(0, pos);
-        link = link.substr(pos + 1);
-        pos = link.find("?");
-        if (pos != std::string::npos) {
-            port = link.substr(0, pos);
-            addition = link.substr(pos + 1);
-        } else {
-            port = link;
-        }
-    }
-
-
-    scv = getUrlArg(addition, "insecure");
-    alpn = getUrlArg(addition, "alpn");
-    sni = getUrlArg(addition, "sni");
-    congestion_control = getUrlArg(addition, "congestion_control");
-    if (remarks.empty())
-        remarks = add + ":" + port;
-    tuicConstruct(node, TUIC_DEFAULT_GROUP, remarks, add, port, password, congestion_control, alpn, sni, uuid, "native",
-                  "",
-                  tribool(),
-                  tribool(), scv);
-
-    return;
+    tuicConstruct(node, TUIC_DEFAULT_GROUP, parsed.remark, parsed.host, parsed.port, password,
+                  decodedFirstUrlArg(parsed.query, {"congestion_control", "congestion-controller"}),
+                  decodedUrlArg(parsed.query, "alpn"), decodedUrlArg(parsed.query, "sni"), uuid,
+                  udp_relay_mode, token, tribool(), tribool(), tribool(insecure), tribool(reduce_rtt),
+                  tribool(disable_sni), request_timeout);
 }
 
 void explodeAnyTLS(std::string anytls, Proxy &node) {
-    std::string add, port, password, remarks, addition, sni, fp;
-    std::vector<std::string> alpnList;
-    tribool udp, tfo, scv;
-    anytls = anytls.substr(9);
-    string_size pos;
+    ParsedShareUri parsed;
+    std::string ignored_ports;
+    if (!parseModernShareUri(std::move(anytls), "anytls", true, "443", false, parsed, ignored_ports))
+        return;
+    if (parsed.remark.empty())
+        parsed.remark = parsed.host + ":" + parsed.port;
 
-    extractRemark(anytls, remarks);
+    const uint16_t idle_check = parseUint16Option(
+        decodedFirstUrlArg(parsed.query, {"idle_session_check_interval", "idle-session-check-interval"}), 30, true);
+    const uint16_t idle_timeout = parseUint16Option(
+        decodedFirstUrlArg(parsed.query, {"idle_session_timeout", "idle-session-timeout"}), 30, true);
+    const uint16_t min_idle = parseUint16Option(
+        decodedFirstUrlArg(parsed.query, {"min_idle_session", "min-idle-session"}), 0);
+    const std::string insecure = decodedFirstUrlArg(parsed.query, {"insecure", "allow_insecure", "allow-insecure"});
 
-    pos = anytls.rfind("?");
-    if (pos != anytls.npos) {
-        addition = anytls.substr(pos + 1);
-        anytls.erase(pos);
-    }
-
-    pos = anytls.find("@");
-    if (pos != anytls.npos) {
-        password = anytls.substr(0, pos);
-        anytls = anytls.substr(pos + 1);
-    }
-
-    pos = anytls.find(":");
-    if (pos != anytls.npos) {
-        add = anytls.substr(0, pos);
-        port = anytls.substr(pos + 1);
-    }
-
-    if (remarks.empty())
-        remarks = add + ":" + port;
-
-    std::string alpn = getUrlArg(addition, "alpn");
-    if (!alpn.empty()) {
-        auto alpns = split(alpn, ",");
-        for (auto &item : alpns) {
-            if (!item.empty())
-                alpnList.emplace_back(item);
-        }
-    }
-
-    fp = getUrlArg(addition, "fp");
-    if (fp.empty())
-        fp = getUrlArg(addition, "fingerprint");
-    sni = getUrlArg(addition, "sni");
-    udp = getUrlArg(addition, "udp");
-    tfo = getUrlArg(addition, "tfo");
-    scv = getUrlArg(addition, "insecure");
-
-    anyTlSConstruct(node, ANYTLS_DEFAULT_GROUP, remarks, port, password, add, alpnList, fp, sni, udp, tfo, scv,
-                    tribool(), "", 30, 30, 0);
+    anyTlSConstruct(node, ANYTLS_DEFAULT_GROUP, parsed.remark, parsed.port, parsed.user, parsed.host,
+                    getUrlAlpnList(parsed.query), decodedFirstUrlArg(parsed.query, {"fp", "fingerprint"}),
+                    decodedUrlArg(parsed.query, "sni"), tribool(decodedUrlArg(parsed.query, "udp")),
+                    tribool(decodedUrlArg(parsed.query, "tfo")), tribool(insecure), tribool(), "",
+                    idle_check, idle_timeout, min_idle);
 }
 
 void explode(const std::string &link, Proxy &node) {

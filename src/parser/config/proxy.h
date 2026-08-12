@@ -128,6 +128,13 @@ struct Proxy {
   String Insecure;
   String Fingerprint;
   String OBFSPassword;
+  // Hysteria 2 URI-only ECH config. It is preserved for standards-compliant
+  // single-link round trips and is not projected into clients whose legacy
+  // generators cannot represent it safely.
+  String Hysteria2ECH;
+  // URI port hopping stores the first port in Port and the remaining ranges in
+  // Ports. Native config imports generally store the complete range in Ports.
+  bool Hysteria2PortsAreAdditional = false;
   String GRPCServiceName;
   String GRPCMode;
   String ShortId;
