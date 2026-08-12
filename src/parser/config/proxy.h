@@ -117,6 +117,12 @@ struct Proxy {
   tribool TLS13;
 
   uint16_t SnellVersion = 0;
+  tribool SnellReuse;
+  String SnellMode;
+  uint16_t SnellUDPPort = 0;
+  String ShadowTLSPassword;
+  String ShadowTLSSNI;
+  uint16_t ShadowTLSVersion = 0;
   String ServerName;
 
   String SelfIP;
@@ -144,6 +150,7 @@ struct Proxy {
   String Alpn;
   String UpMbps;
   String DownMbps;
+  String HysteriaHopInterval;
   String Insecure;
   String Fingerprint;
   String OBFSPassword;
