@@ -29,6 +29,16 @@ enum class ProxyType {
   Mieru
 };
 
+struct WireGuardPeer {
+  String Hostname;
+  uint16_t Port = 0;
+  String PublicKey;
+  String PreSharedKey;
+  String AllowedIPs = "0.0.0.0/0, ::/0";
+  String Reserved;
+  uint16_t KeepAlive = 0;
+};
+
 inline String getProxyTypeName(ProxyType type) {
   switch (type) {
   case ProxyType::Shadowsocks:
@@ -120,6 +130,15 @@ struct Proxy {
   uint16_t KeepAlive = 0;
   String TestUrl;
   String ClientId;
+  // WireGuard historically projected only one peer into the fields above.
+  // Keep that projection for existing scripts and generators, while retaining
+  // the complete structured configuration for multi-peer targets.
+  std::vector<WireGuardPeer> WireGuardPeers;
+  StringArray WireGuardLocalAddresses;
+  String WireGuardInterfaceName;
+  tribool WireGuardSystem;
+  uint16_t WireGuardListenPort = 0;
+  uint16_t WireGuardWorkers = 0;
   String Ports;
   String Auth;
   String Alpn;
