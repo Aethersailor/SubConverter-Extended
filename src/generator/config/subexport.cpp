@@ -4802,7 +4802,10 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
     default:
       continue;
     }
-    if (x.TLSSecure) {
+    // Hysteria v1 builds its mandatory TLS object in the protocol-specific
+    // branch above. Adding the generic object as well would serialize a
+    // duplicate `tls` key, leaving precedence up to the JSON consumer.
+    if (x.TLSSecure && x.Type != ProxyType::Hysteria) {
       rapidjson::Value tls(rapidjson::kObjectType);
       tls.AddMember("enabled", true, allocator);
       if (!x.ServerName.empty())
