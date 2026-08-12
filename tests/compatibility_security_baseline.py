@@ -140,6 +140,31 @@ HYSTERIA2_URI = (
     "&obfs=salamander&obfs-password=real-obfs-password"
     "&sni=hy2.example.test#Hy2Fixture"
 )
+HYSTERIA2_MODERN_URI = (
+    "hy2://user%3Apass+token@[2001:db8::10]:8443,12000-12002/"
+    "?insecure=1&obfs=salamander&obfs-password=obfs%2Bsecret"
+    "&sni=hy2-tls.example.test&pinSHA256=AA%3ABB%3ACC"
+    "&ech=AE%2Bconfig%2Fvalue#Hy2%20Modern+Literal"
+)
+HYSTERIA2_SURGE_GECKO_URI = HYSTERIA2_MODERN_URI.replace(
+    "obfs=salamander", "obfs=gecko"
+)
+TUIC_MODERN_URI = (
+    "tuic://99999999-9999-4999-8999-999999999999:p%40ss+word"
+    "@[2001:db8::11]:10443?allow_insecure=1&sni=tuic-tls.example.test"
+    "&congestion_control=bbr&udp_relay_mode=quic&zero_rtt_handshake=1"
+    "&disable_sni=0&request_timeout=9000#TUIC%20Modern"
+)
+TUIC_SURGE_URI = (
+    "tuic://surge%2Btoken@[2001:db8::13]:11443?allow_insecure=1"
+    "&sni=tuic-surge.example.test&alpn=h3#TUIC%20Surge"
+)
+ANYTLS_MODERN_URI = (
+    "anytls://p%40ss+word@[2001:db8::12]/?sni=anytls-tls.example.test"
+    "&insecure=1&alpn=h2%2Chttp%2F1.1&fp=chrome"
+    "&idle_session_check_interval=45s&idle_session_timeout=60s"
+    "&min_idle_session=3#AnyTLS%20Modern"
+)
 MIXED_PROTOCOL_SUBSCRIPTION = SUBSCRIPTION + VLESS_URI + "\n" + HYSTERIA2_URI + "\n"
 ENCODED_MIXED_PROTOCOL_SUBSCRIPTION = base64.urlsafe_b64encode(
     MIXED_PROTOCOL_SUBSCRIPTION.encode()
@@ -4353,6 +4378,158 @@ def simple_target_protocol_baseline(base_url: str, fixture_base: str) -> None:
         )
     if "obfs-password=salamander" in hysteria2:
         raise AssertionError("Hysteria2 output reused the obfs type as its password")
+
+    modern_hysteria2 = convert("hysteria2", HYSTERIA2_MODERN_URI, True).strip()
+    if not modern_hysteria2.startswith(
+        "hysteria2://user%3Apass%2Btoken@[2001:db8::10]:8443,12000-12002/"
+    ):
+        raise AssertionError(
+            "modern Hysteria2 authority did not preserve IPv6, credentials, or "
+            f"port hopping: {modern_hysteria2!r}"
+        )
+    modern_hy2_parts = urllib.parse.urlsplit(modern_hysteria2)
+    modern_hy2_query = urllib.parse.parse_qs(
+        modern_hy2_parts.query, keep_blank_values=True
+    )
+    for key, expected in {
+        "insecure": ["1"],
+        "obfs": ["salamander"],
+        "obfs-password": ["obfs+secret"],
+        "sni": ["hy2-tls.example.test"],
+        "pinSHA256": ["AA:BB:CC"],
+        "ech": ["AE+config/value"],
+    }.items():
+        if modern_hy2_query.get(key) != expected:
+            raise AssertionError(
+                f"modern Hysteria2 output lost {key}: {modern_hysteria2!r}"
+            )
+    if urllib.parse.unquote(modern_hy2_parts.fragment) != "Hy2 Modern+Literal":
+        raise AssertionError("modern Hysteria2 output lost the decoded remark")
+
+    def convert_json(target: str, url: str) -> dict[str, object]:
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {"target": target, "url": url, "list": "true"},
+        )
+        if status != 200:
+            raise AssertionError(
+                f"target={target} modern protocol conversion returned HTTP "
+                f"{status}: {body!r}"
+            )
+        try:
+            result = json.loads(body)
+        except json.JSONDecodeError as error:
+            raise AssertionError(
+                f"target={target} did not return valid JSON: {body!r}"
+            ) from error
+        if not isinstance(result, dict):
+            raise AssertionError(f"target={target} JSON is not an object: {result!r}")
+        return result
+
+    modern_singbox = convert_json(
+        "singbox", "|".join((HYSTERIA2_MODERN_URI, TUIC_MODERN_URI, ANYTLS_MODERN_URI))
+    )
+    modern_outbounds = {
+        item.get("type"): item
+        for item in modern_singbox.get("outbounds", [])
+        if isinstance(item, dict)
+        and item.get("type") in {"hysteria2", "tuic", "anytls"}
+    }
+    if set(modern_outbounds) != {"hysteria2", "tuic", "anytls"}:
+        raise AssertionError(
+            f"sing-box lost a modern Legacy protocol: {modern_outbounds!r}"
+        )
+
+    hy2_outbound = modern_outbounds["hysteria2"]
+    if (
+        hy2_outbound.get("server") != "2001:db8::10"
+        or hy2_outbound.get("server_port") is not None
+        or hy2_outbound.get("server_ports") != ["8443:8443", "12000:12002"]
+        or hy2_outbound.get("password") != "user:pass+token"
+        or hy2_outbound.get("obfs")
+        != {"type": "salamander", "password": "obfs+secret"}
+        or hy2_outbound.get("tls", {}).get("server_name")
+        != "hy2-tls.example.test"
+        # The fixture runtime's explicit global scv=false remains authoritative
+        # over per-node values in generated client configs.
+        or hy2_outbound.get("tls", {}).get("insecure") is not False
+    ):
+        raise AssertionError(
+            f"sing-box Hysteria2 mapping is incomplete: {hy2_outbound!r}"
+        )
+
+    tuic_outbound = modern_outbounds["tuic"]
+    if (
+        tuic_outbound.get("server") != "2001:db8::11"
+        or tuic_outbound.get("server_port") != 10443
+        or tuic_outbound.get("uuid")
+        != "99999999-9999-4999-8999-999999999999"
+        or tuic_outbound.get("password") != "p@ss+word"
+        or tuic_outbound.get("congestion_control") != "bbr"
+        or tuic_outbound.get("udp_relay_mode") != "quic"
+        or tuic_outbound.get("zero_rtt_handshake") is not True
+        or tuic_outbound.get("tls", {}).get("server_name")
+        != "tuic-tls.example.test"
+        or tuic_outbound.get("tls", {}).get("insecure") is not False
+        or tuic_outbound.get("tls", {}).get("disable_sni") is not False
+    ):
+        raise AssertionError(f"sing-box TUIC mapping is incomplete: {tuic_outbound!r}")
+
+    anytls_outbound = modern_outbounds["anytls"]
+    if (
+        anytls_outbound.get("server") != "2001:db8::12"
+        or anytls_outbound.get("server_port") != 443
+        or anytls_outbound.get("password") != "p@ss+word"
+        or anytls_outbound.get("idle_session_check_interval") != "45s"
+        or anytls_outbound.get("idle_session_timeout") != "60s"
+        or anytls_outbound.get("min_idle_session") != 3
+        or "network" in anytls_outbound
+        or "tcp_fast_open" in anytls_outbound
+        or anytls_outbound.get("tls", {}).get("server_name")
+        != "anytls-tls.example.test"
+        or anytls_outbound.get("tls", {}).get("insecure") is not False
+        or anytls_outbound.get("tls", {}).get("alpn") != ["h2", "http/1.1"]
+        or anytls_outbound.get("tls", {}).get("utls", {}).get("fingerprint")
+        != "chrome"
+    ):
+        raise AssertionError(
+            f"sing-box AnyTLS mapping is incomplete: {anytls_outbound!r}"
+        )
+
+    surge_status, surge_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "surge",
+            "ver": "4",
+            "url": "|".join(
+                (HYSTERIA2_SURGE_GECKO_URI, TUIC_SURGE_URI, ANYTLS_MODERN_URI)
+            ),
+            "list": "true",
+        },
+    )
+    surge_text = surge_body.decode("utf-8", errors="replace")
+    if surge_status != 200 or not all(
+        expected in surge_text
+        for expected in (
+            "password=user:pass+token",
+            "sni=hy2-tls.example.test",
+            "server-cert-fingerprint-sha256=AA:BB:CC",
+            "gecko-password=obfs+secret",
+            "port-hopping=8443;12000-12002",
+            "tuic, 2001:db8::13, 11443, token=surge+token",
+            "sni=tuic-surge.example.test",
+            "alpn=h3",
+            "anytls, 2001:db8::12, 443, password=p@ss+word",
+            "sni=anytls-tls.example.test",
+            "alpn=h2",
+        )
+    ):
+        raise AssertionError(
+            f"Surge modern protocol mapping is incomplete: HTTP {surge_status} "
+            f"{surge_text!r}"
+        )
 
     mixed = convert("mixed", source, True)
     mixed_lines = [line for line in mixed.splitlines() if line]
