@@ -27,6 +27,12 @@ extern const char *_GoStringPtr(_GoString_ s);
 
 #line 1 "cgo-generated-wrapper"
 
+#line 3 "libxray.go"
+
+#include <stdlib.h>
+
+#line 1 "cgo-generated-wrapper"
+
 
 /* End of preamble from import "C" comments.  */
 
@@ -92,6 +98,8 @@ extern char* ResolveAgeRecipient(char* key);
 extern char* EncryptAgeArmored(char* data, char* recipient);
 extern char* ConvertSubscription(char* data);
 extern void FreeString(char* s);
+extern char* ConvertXraySubscription(char* data);
+extern char* XrayParserInfo(void);
 
 #ifdef __cplusplus
 }
