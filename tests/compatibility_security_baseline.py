@@ -31,6 +31,13 @@ REPOSITORY = Path(__file__).resolve().parents[1]
 FIXTURES = REPOSITORY / "tests" / "fixtures"
 COMPAT_FIXTURES = FIXTURES / "compat"
 GOLDEN_ROOT = REPOSITORY / "tests" / "snapshots" / "compatibility"
+
+
+def _urlsafe_b64(value: str | bytes) -> str:
+    raw = value.encode("utf-8") if isinstance(value, str) else value
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
 SUBSCRIPTION = (
     "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388#Smoke\n"
 )
@@ -164,6 +171,118 @@ ANYTLS_MODERN_URI = (
     "&insecure=1&alpn=h2%2Chttp%2F1.1&fp=chrome"
     "&idle_session_check_interval=45s&idle_session_timeout=60s"
     "&min_idle_session=3#AnyTLS%20Modern"
+)
+SS_SIP002_URI = (
+    "ss://"
+    + _urlsafe_b64("aes-256-gcm:p@ss+word")
+    + "@[2001:db8::21]:8388/?plugin="
+    + urllib.parse.quote(
+        "v2ray-plugin;mode=websocket;host=plugin.example.test;path=/ws;tls",
+        safe="",
+    )
+    + "#SS%20SIP002"
+)
+SS_2022_PASSWORD = base64.b64encode(
+    bytes([0xFB]) * 32
+).decode("ascii")
+SS_2022_URI = (
+    "ss://2022-blake3-aes-256-gcm:"
+    + urllib.parse.quote(SS_2022_PASSWORD, safe="")
+    + "@[2001:db8::22]:8389#SS%202022"
+)
+SSR_IPV6_URI = "ssr://" + _urlsafe_b64(
+    "[2001:db8::23]:8390:auth_sha1_v4:aes-256-cfb:tls1.2_ticket_auth:"
+    + _urlsafe_b64("legacy:p@ss")
+    + "/?group="
+    + _urlsafe_b64("SSR Fixture")
+    + "&remarks="
+    + _urlsafe_b64("SSR IPv6")
+    + "&obfsparam="
+    + _urlsafe_b64("cdn.example.test")
+    + "&protoparam="
+    + _urlsafe_b64("64:fixture")
+)
+SOCKS_CURRENT_URI = (
+    "socks://"
+    + _urlsafe_b64("current-user:p@ss+word:tail")
+    + "@[2001:db8::24]:1080#SOCKS%20Current"
+)
+SOCKS_LEGACY_URI = (
+    "socks://"
+    + _urlsafe_b64("legacy-user:legacy-pass@[2001:db8::25]:1081")
+    + "#SOCKS%20Legacy"
+)
+SOCKS_PLAIN_URI = (
+    "socks://plain-user:p%40ss%2Bword@[2001:db8::26]:1082"
+    "#SOCKS%20Plain"
+)
+SOCKS_NO_AUTH_URI = (
+    "socks://" + _urlsafe_b64("[2001:db8::27]:1083") + "#SOCKS%20NoAuth"
+)
+HTTP_LEGACY_URI = (
+    "http://"
+    + _urlsafe_b64("http-user:http-pass@[2001:db8::28]:8080")
+    + "?remarks=HTTP%20Legacy&group=HTTP%20Fixture"
+)
+HTTPS_LEGACY_URI = (
+    "https://"
+    + _urlsafe_b64("https-user:https-pass@[2001:db8::29]:8443")
+    + "?remarks=HTTPS%20Legacy&group=HTTP%20Fixture"
+)
+TELEGRAM_SOCKS_URI = (
+    "tg://socks?server=telegram-socks.example.test&port=1084"
+    "&user=tg-user&pass=tg%2Bpass&remarks=Telegram%20SOCKS"
+)
+TELEGRAM_HTTP_URI = (
+    "tg://http?server=telegram-http.example.test&port=8081"
+    "&user=tg-http&pass=tg%2Bhttp&remarks=Telegram%20HTTP"
+)
+SIP008_OBJECT = json.dumps(
+    {
+        "version": 1,
+        "remarks": "SIP008 Fixture",
+        "servers": [
+            {
+                "id": "sip008-plugin",
+                "remarks": "SIP008 Plugin",
+                "server": "2001:db8::30",
+                "server_port": 8388,
+                "password": "sip008-password",
+                "method": "aes-256-gcm",
+                "plugin": "v2ray-plugin",
+                "plugin_opts": "mode=websocket;host=sip008.example.test;tls",
+            }
+        ],
+    },
+    separators=(",", ":"),
+)
+SIP008_ARRAY = json.dumps(
+    [
+        {
+            "id": "sip008-array",
+            "remarks": "SIP008 Array",
+            "server": "2001:db8::31",
+            "server_port": 8391,
+            "password": SS_2022_PASSWORD,
+            "method": "2022-blake3-aes-256-gcm",
+        }
+    ],
+    separators=(",", ":"),
+)
+SSR_LIBEV_CONFIG = json.dumps(
+    {
+        "server": "2001:db8::32",
+        "server_port": 8392,
+        "local_address": "127.0.0.1",
+        "local_port": 1080,
+        "password": "ssr-json-password",
+        "method": "aes-256-cfb",
+        "protocol": "auth_sha1_v4",
+        "protocol_param": "32:json",
+        "obfs": "tls1.2_ticket_auth",
+        "obfs_param": "json.example.test",
+    },
+    separators=(",", ":"),
 )
 MIXED_PROTOCOL_SUBSCRIPTION = SUBSCRIPTION + VLESS_URI + "\n" + HYSTERIA2_URI + "\n"
 ENCODED_MIXED_PROTOCOL_SUBSCRIPTION = base64.urlsafe_b64encode(
@@ -324,6 +443,15 @@ class FixtureHandler(BaseHTTPRequestHandler):
         elif request_path == "/xray-protocol-subscription.txt":
             body = ENCODED_XRAY_PROTOCOL_SUBSCRIPTION.encode()
             content_type = "text/plain; charset=utf-8"
+        elif request_path == "/sip008.json":
+            body = SIP008_OBJECT.encode()
+            content_type = "application/json; charset=utf-8"
+        elif request_path == "/sip008-array.json":
+            body = SIP008_ARRAY.encode()
+            content_type = "application/json; charset=utf-8"
+        elif request_path == "/ssr-libev.json":
+            body = SSR_LIBEV_CONFIG.encode()
+            content_type = "application/json; charset=utf-8"
         elif request_path == "/rules.list":
             body = RULESET.encode()
             content_type = "text/plain; charset=utf-8"
@@ -4315,6 +4443,338 @@ def dashboard_client_ip_security_baseline(binary: Path, fixture_base: str) -> No
             raise AssertionError("client-IP policy changed /sub behavior")
 
 
+def classic_protocol_baseline(base_url: str, fixture_base: str) -> None:
+    def convert_text(target: str, source: str) -> str:
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {"target": target, "url": source, "list": "true"},
+        )
+        if status != 200:
+            raise AssertionError(
+                f"classic target={target} returned HTTP {status}: {body!r}"
+            )
+        return body.decode("utf-8").replace("\r\n", "\n")
+
+    def decode_urlsafe(value: str) -> str:
+        try:
+            return base64.urlsafe_b64decode(
+                value + "=" * (-len(value) % 4)
+            ).decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as error:
+            raise AssertionError(f"invalid URL-safe Base64: {value!r}") from error
+
+    ss_output = convert_text("ss", "|".join((SS_SIP002_URI, SS_2022_URI)))
+    ss_lines = [line for line in ss_output.splitlines() if line]
+    if len(ss_lines) != 2:
+        raise AssertionError(f"classic SS conversion lost a node: {ss_output!r}")
+    sip002_line = next(
+        (line for line in ss_lines if line.endswith("#SS%20SIP002")), ""
+    )
+    if not sip002_line:
+        raise AssertionError(f"SIP002 remark was not preserved: {ss_output!r}")
+    sip002_userinfo = sip002_line.removeprefix("ss://").split("@", 1)[0]
+    if decode_urlsafe(sip002_userinfo) != "aes-256-gcm:p@ss+word":
+        raise AssertionError(f"SIP002 userinfo changed: {sip002_line!r}")
+    sip002_parts = urllib.parse.urlsplit(sip002_line)
+    sip002_query = urllib.parse.parse_qs(
+        sip002_parts.query, keep_blank_values=True
+    )
+    expected_plugin = (
+        "v2ray-plugin;mode=websocket;host=plugin.example.test;path=/ws;tls"
+    )
+    if (
+        sip002_parts.hostname != "2001:db8::21"
+        or sip002_parts.port != 8388
+        or sip002_query.get("plugin") != [expected_plugin]
+    ):
+        raise AssertionError(
+            f"SIP002 IPv6/plugin mapping changed: {sip002_line!r}"
+        )
+
+    ss2022_line = next(
+        (line for line in ss_lines if line.endswith("#SS%202022")), ""
+    )
+    expected_2022_prefix = (
+        "ss://2022-blake3-aes-256-gcm:"
+        + urllib.parse.quote(SS_2022_PASSWORD, safe="")
+        + "@[2001:db8::22]:8389"
+    )
+    if not ss2022_line.startswith(expected_2022_prefix):
+        raise AssertionError(
+            "Shadowsocks 2022 credentials were incorrectly Base64-wrapped: "
+            f"{ss2022_line!r}"
+        )
+
+    quan_status, quan_body, _ = request(
+        base_url,
+        "/sub",
+        {"target": "quan", "url": SS_SIP002_URI, "list": "true"},
+    )
+    quan_line = decode_urlsafe(
+        quan_body.decode("utf-8", errors="replace").strip()
+    ).strip()
+    quan_parts = urllib.parse.urlsplit(quan_line)
+    quan_query = urllib.parse.parse_qs(quan_parts.query, keep_blank_values=True)
+    if (
+        quan_status != 200
+        or quan_query.get("plugin") != [expected_plugin]
+        or decode_urlsafe(quan_query.get("group", [""])[0]) != "SSProvider"
+        or ":8388&group=" in quan_line
+    ):
+        raise AssertionError(
+            f"Quantumult SS nodelist query is malformed: {quan_line!r}"
+        )
+
+    sip008_object_output = convert_text("ss", fixture_base + "/sip008.json")
+    if (
+        "@[2001:db8::30]:8388/" not in sip008_object_output
+        or "plugin=v2ray-plugin%3Bmode%3Dwebsocket" not in sip008_object_output
+        or "#SIP008%20Plugin" not in sip008_object_output
+    ):
+        raise AssertionError(
+            f"SIP008 object input was not preserved: {sip008_object_output!r}"
+        )
+
+    sip008_array_output = convert_text("ss", fixture_base + "/sip008-array.json")
+    if not sip008_array_output.startswith(
+        "ss://2022-blake3-aes-256-gcm:"
+        + urllib.parse.quote(SS_2022_PASSWORD, safe="")
+        + "@[2001:db8::31]:8391"
+    ):
+        raise AssertionError(
+            f"SIP008 root-array input was not recognized: {sip008_array_output!r}"
+        )
+
+    sssub_status, sssub_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "sssub",
+            "url": fixture_base + "/sip008.json",
+            "list": "true",
+        },
+    )
+    try:
+        sssub = json.loads(sssub_body)
+    except json.JSONDecodeError as error:
+        raise AssertionError(
+            f"SS subscription output is not JSON: {sssub_body!r}"
+        ) from error
+    if (
+        sssub_status != 200
+        or not isinstance(sssub, list)
+        or len(sssub) != 1
+        or sssub[0].get("password") != "sip008-password"
+        or sssub[0].get("plugin") != "v2ray-plugin"
+    ):
+        raise AssertionError(f"SS subscription output changed: {sssub!r}")
+
+    ssr_output = convert_text("ssr", SSR_IPV6_URI).strip()
+    if not ssr_output.startswith("ssr://"):
+        raise AssertionError(f"SSR output is not a share link: {ssr_output!r}")
+    decoded_ssr = decode_urlsafe(ssr_output.removeprefix("ssr://"))
+    for expected in (
+        "[2001:db8::23]:8390:auth_sha1_v4:aes-256-cfb:tls1.2_ticket_auth:",
+        "group=" + _urlsafe_b64("SSR Fixture"),
+        "remarks=" + _urlsafe_b64("SSR IPv6"),
+        "obfsparam=" + _urlsafe_b64("cdn.example.test"),
+        "protoparam=" + _urlsafe_b64("64:fixture"),
+    ):
+        if expected not in decoded_ssr:
+            raise AssertionError(f"SSR output lost {expected!r}: {decoded_ssr!r}")
+
+    ssr_json_output = convert_text(
+        "ssr", fixture_base + "/ssr-libev.json"
+    ).strip()
+    decoded_ssr_json = decode_urlsafe(ssr_json_output.removeprefix("ssr://"))
+    if (
+        "[2001:db8::32]:8392:auth_sha1_v4:aes-256-cfb:tls1.2_ticket_auth:"
+        not in decoded_ssr_json
+        or _urlsafe_b64("ssr-json-password") not in decoded_ssr_json
+    ):
+        raise AssertionError(
+            f"SSR libev password/IPv6 input was lost: {decoded_ssr_json!r}"
+        )
+
+    classic_nodes = "|".join(
+        (
+            SS_SIP002_URI,
+            SS_2022_URI,
+            SOCKS_CURRENT_URI,
+            SOCKS_LEGACY_URI,
+            SOCKS_PLAIN_URI,
+            SOCKS_NO_AUTH_URI,
+            HTTP_LEGACY_URI,
+            HTTPS_LEGACY_URI,
+            TELEGRAM_SOCKS_URI,
+            TELEGRAM_HTTP_URI,
+        )
+    )
+    singbox_status, singbox_body, _ = request(
+        base_url,
+        "/sub",
+        {"target": "singbox", "url": classic_nodes, "list": "true"},
+    )
+    try:
+        singbox = json.loads(singbox_body)
+    except json.JSONDecodeError as error:
+        raise AssertionError(
+            f"classic sing-box output is not JSON: {singbox_body!r}"
+        ) from error
+    if singbox_status != 200 or not isinstance(singbox, dict):
+        raise AssertionError(
+            f"classic sing-box conversion failed: HTTP {singbox_status} {singbox!r}"
+        )
+    outbounds = {
+        item.get("tag"): item
+        for item in singbox.get("outbounds", [])
+        if isinstance(item, dict) and isinstance(item.get("tag"), str)
+    }
+    expected_outbounds = {
+        "SS SIP002": {
+            "type": "shadowsocks",
+            "server": "2001:db8::21",
+            "server_port": 8388,
+            "method": "aes-256-gcm",
+            "password": "p@ss+word",
+            "plugin": "v2ray-plugin",
+            "plugin_opts": expected_plugin.removeprefix("v2ray-plugin;"),
+        },
+        "SS 2022": {
+            "type": "shadowsocks",
+            "server": "2001:db8::22",
+            "server_port": 8389,
+            "method": "2022-blake3-aes-256-gcm",
+            "password": SS_2022_PASSWORD,
+        },
+        "SOCKS Current": {
+            "type": "socks",
+            "server": "2001:db8::24",
+            "server_port": 1080,
+            "username": "current-user",
+            "password": "p@ss+word:tail",
+        },
+        "SOCKS Legacy": {
+            "type": "socks",
+            "server": "2001:db8::25",
+            "server_port": 1081,
+            "username": "legacy-user",
+            "password": "legacy-pass",
+        },
+        "SOCKS Plain": {
+            "type": "socks",
+            "server": "2001:db8::26",
+            "server_port": 1082,
+            "username": "plain-user",
+            "password": "p@ss+word",
+        },
+        "SOCKS NoAuth": {
+            "type": "socks",
+            "server": "2001:db8::27",
+            "server_port": 1083,
+            "username": "",
+            "password": "",
+        },
+        "HTTP Legacy": {
+            "type": "http",
+            "server": "2001:db8::28",
+            "server_port": 8080,
+            "username": "http-user",
+            "password": "http-pass",
+        },
+        "HTTPS Legacy": {
+            "type": "http",
+            "server": "2001:db8::29",
+            "server_port": 8443,
+            "username": "https-user",
+            "password": "https-pass",
+        },
+        "Telegram SOCKS": {
+            "type": "socks",
+            "server": "telegram-socks.example.test",
+            "server_port": 1084,
+            "username": "tg-user",
+            "password": "tg+pass",
+        },
+        "Telegram HTTP": {
+            "type": "http",
+            "server": "telegram-http.example.test",
+            "server_port": 8081,
+            "username": "tg-http",
+            "password": "tg+http",
+        },
+    }
+    for tag, expected in expected_outbounds.items():
+        actual = outbounds.get(tag)
+        if actual is None or any(actual.get(key) != value for key, value in expected.items()):
+            raise AssertionError(
+                f"classic protocol mapping for {tag!r} is incomplete: {actual!r}"
+            )
+
+    mellow_status, mellow_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "mellow",
+            "url": "|".join((SS_2022_URI, SOCKS_CURRENT_URI, HTTP_LEGACY_URI)),
+            "list": "false",
+        },
+    )
+    mellow = mellow_body.decode("utf-8", errors="replace")
+    for expected in (
+        "SS 2022, ss, ss://2022-blake3-aes-256-gcm:",
+        "SOCKS Current, builtin, socks, address=2001:db8::24, port=1080, "
+        "user=current-user, pass=p@ss+word:tail",
+        "HTTP Legacy, builtin, http, address=2001:db8::28, port=8080, "
+        "user=http-user, pass=http-pass",
+    ):
+        if expected not in mellow:
+            raise AssertionError(
+                f"Mellow classic endpoint lost {expected!r}: {mellow!r}"
+            )
+    if mellow_status != 200:
+        raise AssertionError(
+            f"Mellow classic conversion returned HTTP {mellow_status}: {mellow!r}"
+        )
+
+    unsafe_surge_uri = (
+        "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388"
+        "#Unsafe%2CInjected"
+    )
+    unsafe_surge_status, unsafe_surge_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "surge",
+            "ver": "4",
+            "url": unsafe_surge_uri,
+            "list": "true",
+        },
+    )
+    if unsafe_surge_status != 400 or b"Unsafe,Injected =" in unsafe_surge_body:
+        raise AssertionError(
+            "Surge accepted a comma-delimited Shadowsocks field: "
+            f"HTTP {unsafe_surge_status} {unsafe_surge_body!r}"
+        )
+
+    for malformed in (
+        "ss://not-base64@bad.example.test:70000#BadSS",
+        "ssr://not-base64",
+        "socks://not-base64#BadSOCKS",
+        "http://not-base64?remarks=BadHTTP",
+    ):
+        status, _, _ = request(
+            base_url,
+            "/sub",
+            {"target": "singbox", "url": malformed, "list": "true"},
+        )
+        if status != 400:
+            raise AssertionError(
+                f"malformed classic URI did not fail closed: {malformed!r} -> {status}"
+            )
+
+
 def simple_target_protocol_baseline(base_url: str, fixture_base: str) -> None:
     source = fixture_base + "/mixed-protocol-subscription.txt"
 
@@ -6418,6 +6878,7 @@ def main() -> int:
         with running_service(binary) as base_url:
             conversion_baselines(base_url, fixture_base, args.update_golden)
             parser_route_isolation_baseline(base_url, fixture_base)
+            classic_protocol_baseline(base_url, fixture_base)
             simple_target_protocol_baseline(base_url, fixture_base)
             provider_direct_default_output_baseline(base_url, fixture_base)
         with running_service(
