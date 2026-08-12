@@ -793,11 +793,11 @@ Dashboard 防爆破默认只使用服务端观察到的 TCP socket peer。`CF-Co
 </details>
 
 <details>
-<summary><strong>客户端远程订阅资源：Clash Proxy-Provider、Quantumult X server_remote 与 Surge policy-path</strong></summary>
+<summary><strong>客户端远程订阅资源：Clash Proxy-Provider、Quantumult X server_remote、Surge 与 Surfboard policy-path</strong></summary>
 
 ### `provider` 前缀
 
-`provider` 不是独立参数，而是写在 `url=` 列表中、放在订阅链接前，并以逗号分隔。Clash/ClashR 使用它自定义 `proxy-providers` 名称；Quantumult X 使用它自定义 `[server_remote]` 资源标签；Surge 使用它匹配自定义策略组中的 `!!PROVIDER` 选择器。该前缀对节点链接不生效。
+`provider` 不是独立参数，而是写在 `url=` 列表中、放在订阅链接前，并以逗号分隔。Clash/ClashR 使用它自定义 `proxy-providers` 名称；Quantumult X 使用它自定义 `[server_remote]` 资源标签；Surge 和 Surfboard 使用它匹配自定义策略组中的 `!!PROVIDER` 选择器。该前缀对节点链接不生效。
 
 示例：
 
@@ -907,7 +907,35 @@ surge_policy_path = false
 
 YAML 使用 `remote_subscription.surge_policy_path`，INI 使用 `[remote_subscription]` 下的 `surge_policy_path`。缺少整个配置节或字段时，默认值为 `true`。旧配置文件无需增加字段即可启动；配置热重载时，删除该字段也会恢复为默认值。无法准确表达的复杂策略组仍使用 Legacy；需要强制保留全部服务端节点预处理时，可将该开关设为 `false`。
 
-`target=clash` 和 `target=clashr` 的 Mihomo 解析与 `proxy-provider` 分流不读取这个开关。Quantumult X 的 `[server_remote]` 分流也不读取这个开关。
+`target=clash` 和 `target=clashr` 的 Mihomo 解析与 `proxy-provider` 分流不读取这个开关。Quantumult X 的 `[server_remote]` 与 Surfboard 的 `policy-path` 分流也不读取这个开关。
+
+### Surfboard `policy-path`
+
+`target=surfboard` 生成完整配置时，符合条件的单个 HTTP(S) 订阅会写入策略组的 `policy-path`，由 Surfboard 下载和解析。SubConverter-Extended 不会下载或检查远程订阅内容；订阅服务商需要直接返回 Surfboard 可读取的代理列表，或者包含 `[Proxy]` 的 Surfboard 配置。
+
+```ini
+[Proxy Group]
+Proxy = select,policy-path=https://example.com/surfboard.conf,policy-regex-filter=".*"
+```
+
+节点 URI 仍由 Legacy 解析器处理，并在 Surfboard 能够表示时写入 `[Proxy]`。请求只包含 Surfboard 无法表示的节点且没有 `policy-path` 时返回 HTTP 400；远程订阅和节点 URI 可以混用。日志事件 `SURFBOARD_NODE_GENERATION` 与 Explain 报告会分别说明本地节点生成结果和实际远程后端。
+
+Surfboard 的 `policy-regex-filter` 使用完整匹配。项目会把自定义组中原本按节点名称搜索的正则转换为等价的完整匹配表达式。Surfboard 策略组的测速 URL 只接受 HTTP；如果自定义组配置了 HTTPS 测速 URL，输出会改用 `http://www.gstatic.com/generate_204`，并记录不包含组名的 `SURFBOARD_TEST_URL_NORMALIZED` 日志。
+
+第一版仅对一个远程订阅启用 `policy-path`。多个远程订阅、`list=true`、`!!import:`、本次请求或用户显式外部配置要求的服务端节点过滤、改名、Emoji 增删、排序、节点选项覆盖，以及无法准确转换的策略组选择器，会在下载订阅前确定使用 Legacy。主配置中已有的全局节点整理选项不会阻止 Surfboard 使用 `policy-path`，也不会作用于 Surfboard 自行下载的远程节点；这些选项仍作用于本项目实际解析的直连节点。
+
+Surfboard 官方格式没有为 `policy-path` 定义独立的订阅更新间隔参数，因此 `interval:` 前缀不适用于 `target=surfboard`。顶层 `&interval=` 仍用于 `#!MANAGED-CONFIG` 的更新提示，单位为秒；Surfboard 要求该值至少为 900 秒。
+
+部署者可以使用以下可选配置关闭 Surfboard 原生远程订阅：
+
+```toml
+[remote_subscription]
+surfboard_policy_path = false
+```
+
+YAML 使用 `remote_subscription.surfboard_policy_path`，INI 使用 `[remote_subscription]` 下的 `surfboard_policy_path`。缺少整个配置节或字段时，默认值为 `true`；现有配置文件无需增加字段即可启动，配置热重载时删除该字段也会恢复默认值。
+
+Surfboard 开关不影响 Clash/ClashR、Quantumult X、Surge 或其他目标。
 
 ### `proxy_direct` 前缀（仅适用于 Clash/ClashR 订阅链接）
 

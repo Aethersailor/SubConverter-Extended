@@ -41,19 +41,20 @@ static bool parseProviderGroupIdMatcher(const std::string &rule,
 
 namespace {
 
-struct SurgeRemoteSelector {
-  const SurgePolicyPathResource *resource = nullptr;
+template <typename Resource> struct PolicyPathSelector {
+  const Resource *resource = nullptr;
   std::string policy_pattern;
 };
 
-SurgeRemoteSelector surgeRemoteSelectorForGroup(
+template <typename Resource>
+PolicyPathSelector<Resource> policyPathSelectorForGroup(
     const ProxyGroupConfig &group,
-    const std::vector<SurgePolicyPathResource> &resources) {
-  SurgeRemoteSelector selector;
+    const std::vector<Resource> &resources) {
+  PolicyPathSelector<Resource> selector;
   if (resources.size() != 1)
     return selector;
 
-  const SurgePolicyPathResource &resource = resources.front();
+  const Resource &resource = resources.front();
   if (!group.UsingProvider.empty()) {
     const bool selected =
         std::find(group.UsingProvider.begin(), group.UsingProvider.end(),
@@ -91,8 +92,14 @@ SurgeRemoteSelector surgeRemoteSelectorForGroup(
   return selector;
 }
 
-std::string safeSurgePolicyPathUrl(const std::string &url) {
+std::string safePolicyPathUrl(const std::string &url) {
   return replaceAllDistinct(url, ",", "%2C");
+}
+
+std::string surfboardPolicyPattern(const std::string &pattern) {
+  if (pattern == ".*")
+    return pattern;
+  return ".*(?:" + pattern + ").*";
 }
 
 } // namespace
@@ -1460,8 +1467,12 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
   unsigned short local_port = 1080;
   RemarkSet used_remarks;
   used_remarks.reserve(nodes.size());
-  ext.surge_generation_stats = TargetGenerationStats{};
-  ext.surge_generation_stats.input_nodes = nodes.size();
+  const bool surfboard = surge_ver == -3;
+  TargetGenerationStats &generation_stats =
+      surfboard ? ext.surfboard_generation_stats
+                : ext.surge_generation_stats;
+  generation_stats = TargetGenerationStats{};
+  generation_stats.input_nodes = nodes.size();
 
   ini.store_any_line = true;
   // filter out sections that requires direct-save
@@ -1712,7 +1723,7 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
     }
 
     if (!supported) {
-      ext.surge_generation_stats.unsupported_by_type[x.Type]++;
+      generation_stats.unsupported_by_type[x.Type]++;
       continue;
     }
 
@@ -1729,7 +1740,7 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
       nodelist.emplace_back(x);
     }
     used_remarks.emplace(x.Remark);
-    ext.surge_generation_stats.emitted_nodes++;
+    generation_stats.emitted_nodes++;
   }
 
   if (ext.nodelist)
@@ -1737,11 +1748,17 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
 
   ini.set_current_section("Proxy Group");
   ini.erase_section();
+  size_t surfboard_test_url_fallbacks = 0;
   for (const ProxyGroupConfig &x : extra_proxy_group) {
     string_array filtered_nodelist;
     std::string group;
-    const SurgeRemoteSelector remote_selector =
-        surgeRemoteSelectorForGroup(x, ext.surge_policy_paths);
+    const auto surge_remote_selector =
+        policyPathSelectorForGroup(x, ext.surge_policy_paths);
+    const auto surfboard_remote_selector =
+        policyPathSelectorForGroup(x, ext.surfboard_policy_paths);
+    const bool has_remote_selector =
+        surfboard ? surfboard_remote_selector.resource != nullptr
+                  : surge_remote_selector.resource != nullptr;
 
     switch (x.Type) {
     case ProxyGroupType::Select:
@@ -1765,10 +1782,10 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
     for (const auto &y : x.Proxies)
       groupGenerate(y, nodelist, filtered_nodelist, true, ext);
 
-    if (filtered_nodelist.empty() && remote_selector.resource == nullptr)
+    if (filtered_nodelist.empty() && !has_remote_selector)
       filtered_nodelist.emplace_back("DIRECT");
 
-    if (filtered_nodelist.size() == 1 && remote_selector.resource == nullptr) {
+    if (filtered_nodelist.size() == 1 && !has_remote_selector) {
       group = toLower(filtered_nodelist[0]);
       switch (hash_(group)) {
       case "direct"_hash:
@@ -1782,31 +1799,60 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
     group = x.TypeStr();
     if (!filtered_nodelist.empty())
       group += "," + join(filtered_nodelist, ",");
-    if (remote_selector.resource != nullptr) {
-      const SurgePolicyPathResource &resource = *remote_selector.resource;
-      group += ",policy-path=" + safeSurgePolicyPathUrl(resource.url);
-      if (resource.has_update_interval)
-        group += ",update-interval=" +
-                 std::to_string(resource.update_interval);
-      group += ",policy-regex-filter=\"" + remote_selector.policy_pattern +
-               "\"";
-      ext.surge_generation_stats.remote_references_emitted++;
+    if (has_remote_selector) {
+      if (surfboard) {
+        const SurfboardPolicyPathResource &resource =
+            *surfboard_remote_selector.resource;
+        group += ",policy-path=" + safePolicyPathUrl(resource.url);
+        group += ",policy-regex-filter=\"" +
+                 surfboardPolicyPattern(
+                     surfboard_remote_selector.policy_pattern) +
+                 "\"";
+      } else {
+        const SurgePolicyPathResource &resource =
+            *surge_remote_selector.resource;
+        group += ",policy-path=" + safePolicyPathUrl(resource.url);
+        if (resource.has_update_interval)
+          group += ",update-interval=" +
+                   std::to_string(resource.update_interval);
+        group += ",policy-regex-filter=\"" +
+                 surge_remote_selector.policy_pattern + "\"";
+      }
+      generation_stats.remote_references_emitted++;
     }
     if (x.Type == ProxyGroupType::URLTest ||
         x.Type == ProxyGroupType::Fallback ||
-        x.Type == ProxyGroupType::LoadBalance) {
-      group += ",url=" + x.Url + ",interval=" + std::to_string(x.Interval);
-      if (x.Tolerance > 0)
+        (!surfboard && x.Type == ProxyGroupType::LoadBalance)) {
+      std::string test_url = x.Url;
+      if (surfboard && !test_url.empty() &&
+          !startsWith(toLower(test_url), "http://")) {
+        test_url = "http://www.gstatic.com/generate_204";
+        surfboard_test_url_fallbacks++;
+      }
+      if (surfboard && !test_url.empty())
+        group += ",url=" + test_url;
+      else if (!surfboard)
+        group += ",url=" + test_url;
+      group += ",interval=" + std::to_string(x.Interval);
+      if (x.Tolerance > 0 &&
+          (!surfboard || x.Type == ProxyGroupType::URLTest))
         group += ",tolerance=" + std::to_string(x.Tolerance);
       if (x.Timeout > 0)
         group += ",timeout=" + std::to_string(x.Timeout);
-      if (!x.Persistent.is_undef())
+      if (!surfboard && !x.Persistent.is_undef())
         group += ",persistent=" + x.Persistent.get_str();
-      if (!x.EvaluateBeforeUse.is_undef())
+      if (!surfboard && !x.EvaluateBeforeUse.is_undef())
         group += ",evaluate-before-use=" + x.EvaluateBeforeUse.get_str();
     }
 
     ini.set("{NONAME}", x.Name + " = " + group); // insert order
+  }
+
+  if (surfboard_test_url_fallbacks) {
+    writeLog(LOG_LEVEL_WARNING,
+             "SURFBOARD_TEST_URL_NORMALIZED count=" +
+                 std::to_string(surfboard_test_url_fallbacks) +
+                 " fallback=http://www.gstatic.com/generate_204");
   }
 
   if (ext.enable_rule_generator)

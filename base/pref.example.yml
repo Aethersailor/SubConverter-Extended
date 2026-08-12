@@ -133,14 +133,14 @@ node_pref:
   - {import: snippets/rename_node.txt}
 
 managed_config:
-  # 是否在 Surge 输出中写入 #!MANAGED-CONFIG 元信息。
-  # Whether to write #!MANAGED-CONFIG metadata into Surge output.
+  # 是否在 Surge 与 Surfboard 输出中写入 #!MANAGED-CONFIG 元信息。
+  # Whether to write #!MANAGED-CONFIG metadata into Surge and Surfboard output.
   write_managed_config: true
   # MANAGED-CONFIG 与 /getruleset、/qx-rewrite、/qx-script 生成地址的服务前缀，不含末尾斜杠。
   # Service prefix used by MANAGED-CONFIG and generated /getruleset, /qx-rewrite, and /qx-script URLs, without a trailing slash.
   managed_config_prefix: "http://127.0.0.1:25500"
-  # 托管配置建议更新间隔，单位秒。
-  # Suggested managed-config refresh interval in seconds.
+  # 托管配置建议更新间隔，单位秒；Surfboard 要求至少 900 秒。
+  # Suggested managed-config refresh interval in seconds; Surfboard requires at least 900 seconds.
   config_update_interval: 86400
   # true 时 Surge 在超过更新间隔后要求强制更新；false 仅按普通托管配置更新。
   # When true, Surge requires a forced update after the interval; false uses normal managed-config refresh behavior.
@@ -161,6 +161,9 @@ remote_subscription:
   # Surge 完整配置默认使用 policy-path 让客户端直接更新兼容的远程订阅；设为 false 可强制保留服务端 Legacy 解析。
   # Surge full profiles use policy-path for compatible remote subscriptions by default; set false to force legacy server-side parsing.
   surge_policy_path: true
+  # Surfboard 完整配置默认使用独立的 policy-path 路径；设为 false 可强制保留服务端 Legacy 解析。
+  # Surfboard full profiles use their own policy-path route by default; set false to force legacy server-side parsing.
+  surfboard_policy_path: true
 
 security:
   # 安全档位：lan 保留局域网兼容行为并允许本地/私网/fake-ip 资源；public 限制公开请求控制的不受信任抓取；strict 另行强制禁止公开上传。

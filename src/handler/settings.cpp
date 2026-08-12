@@ -928,6 +928,8 @@ void readYAMLConf(YAML::Node &node,
       node["remote_subscription"].IsMap()) {
     node["remote_subscription"]["surge_policy_path"] >>
         global.surgePolicyPath;
+    node["remote_subscription"]["surfboard_policy_path"] >>
+        global.surfboardPolicyPath;
   }
 
   if (node["emojis"].IsDefined()) {
@@ -1238,7 +1240,8 @@ void readTOMLConf(toml::value &root,
         root.as_table().at("remote_subscription");
     if (section_remote_subscription.is_table()) {
       find_if_exist(section_remote_subscription, "surge_policy_path",
-                    global.surgePolicyPath);
+                    global.surgePolicyPath, "surfboard_policy_path",
+                    global.surfboardPolicyPath);
     }
   }
 
@@ -1437,6 +1440,7 @@ bool readConf() {
     global.proxyProviderInterval = kDefaultProxyProviderInterval;
     global.proxyProviderDirect = kDefaultProxyProviderDirect;
     global.surgePolicyPath = true;
+    global.surfboardPolicyPath = true;
   };
 
   std::string prefdata;
@@ -1611,6 +1615,8 @@ bool readConf() {
   if (ini.section_exist("remote_subscription")) {
     ini.enter_section("remote_subscription");
     ini.get_bool_if_exist("surge_policy_path", global.surgePolicyPath);
+    ini.get_bool_if_exist("surfboard_policy_path",
+                          global.surfboardPolicyPath);
   }
 
   if (ini.section_exist("node_pref")) {
