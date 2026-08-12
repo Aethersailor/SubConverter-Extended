@@ -4850,6 +4850,16 @@ def classic_protocol_baseline(base_url: str, fixture_base: str) -> None:
 
 
 def legacy_niche_protocol_baseline(base_url: str, fixture_base: str) -> None:
+    def reject_duplicate_json_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise AssertionError(
+                    f"sing-box output contains duplicate JSON key {key!r}"
+                )
+            result[key] = value
+        return result
+
     def singbox_outbound(source: str, tag: str) -> dict:
         status, body, _ = request(
             base_url,
@@ -4867,7 +4877,9 @@ def legacy_niche_protocol_baseline(base_url: str, fixture_base: str) -> None:
             raise AssertionError(
                 f"sing-box legacy protocol conversion failed: HTTP {status} {body!r}"
             )
-        payload = json.loads(body.decode("utf-8"))
+        payload = json.loads(
+            body.decode("utf-8"), object_pairs_hook=reject_duplicate_json_keys
+        )
         for outbound in payload.get("outbounds", []):
             if outbound.get("tag") == tag:
                 return outbound
