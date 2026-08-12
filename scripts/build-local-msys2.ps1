@@ -68,7 +68,13 @@ if [ "$SCX_REBUILD_LIBCRON" = "1" ] || [ ! -f /ucrt64/lib/liblibcron.a ]; then
   cd "$root"
 fi
 
-if [ "$SCX_REBUILD_BRIDGE" = "1" ] || [ ! -f bridge/libmihomo.a ]; then
+if [ "$SCX_REBUILD_BRIDGE" = "1" ] || [ ! -f bridge/libmihomo.a ] || \
+   [ ! -f bridge/libmihomo.h ] || \
+   ! grep -q 'ConvertXraySubscription' bridge/libmihomo.h || \
+   [ bridge/go.mod -nt bridge/libmihomo.a ] || \
+   [ bridge/go.sum -nt bridge/libmihomo.a ] || \
+   find bridge -maxdepth 1 -name '*.go' -newer bridge/libmihomo.a \
+     -print -quit | grep -q .; then
   cd "$root/bridge"
   go mod download
   go run ../scripts/generate_proxy_validation.go -o proxy_validation_generated.go -manifest mihomo_capabilities.json

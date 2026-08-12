@@ -127,8 +127,9 @@ SubConverter-Extended 因此诞生。它是一款更贴合 Mihomo 使用场景�
 
 > [!WARNING]
 > 1. 本项目优先保证 Mihomo 路径。`target=clash`、`target=clashr` 及 `target=auto` 识别为二者时，远程订阅只生成 `proxy-provider`，节点链接只调用 Mihomo 解析模块。
-> 2. Quantumult X 和 Surge 的完整配置可以使用客户端原生远程资源；其节点链接仍调用继承自上游项目的 Legacy 解析器。
+> 2. Quantumult X、Surge、Surfboard 和 Loon 的完整配置可以使用客户端原生远程资源；其节点链接仍调用继承自上游项目的 Legacy 解析器。
 > 3. 其他非 Mihomo 目标仍使用 Legacy 解析器。协议和参数支持范围以对应生成器能够表示的内容为准。
+> 4. 项目已固定集成 libXray `v26.7.28` 的解析基础层，但当前路由目标数为 `0`。它只执行启动自检，尚不接管 `v2ray`、`vless`、`trojan` 或其他目标；后续目标切换会单独验证并发布。
 
 ### 🔥 独特功能
 
@@ -1085,6 +1086,7 @@ docker run -d \
 本项目使用或引用了以下开源项目，在此表示感谢：
 
 * [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) - Clash 内核，提供节点链接解析能力
+* [XTLS/libXray](https://github.com/XTLS/libXray) - Xray 官方解析组件，提供下一阶段客户端路径所需的解析基础层
 * [Aethersailor/Custom_OpenClash_Rules](https://github.com/Aethersailor/Custom_OpenClash_Rules) - OpenClash 订阅转换模板、规则集与教程项目
 * [asdlokj1qpi233/subconverter](https://github.com/asdlokj1qpi233/subconverter) - 原版 subconverter 项目
 
@@ -1095,7 +1097,7 @@ docker run -d \
 本项目基于 [GPL-3.0](LICENSE) 协议开源。
 
 > [!TIP]
-> 内置的 Mihomo 解析器模块遵循 [MIT](https://github.com/MetaCubeX/mihomo/blob/Meta/LICENSE) 协议。
+> Mihomo 解析器依赖遵循 [GPL-3.0](https://github.com/MetaCubeX/mihomo/blob/Meta/LICENSE) 协议；libXray 解析依赖遵循 [MIT](https://github.com/XTLS/libXray/blob/v26.7.28/LICENSE) 协议。
 
 ---
 

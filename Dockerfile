@@ -10,6 +10,7 @@ FROM ${GO_IMAGE} AS go-builder
 ARG TARGETARCH
 ARG TARGETVARIANT
 ARG MIHOMO_REF="Meta"
+ARG LIBXRAY_REF="80263da83e96b2972455b0a94b13ee1a10e51391"
 ARG MIHOMO_CACHE_BUST=1
 ARG REFRESH_GO_DEPS=false
 ARG ENABLE_SANITIZERS=false
@@ -27,12 +28,15 @@ COPY bridge/converter.go ./
 COPY bridge/age.go ./
 COPY bridge/parser.go ./
 COPY bridge/preprocess.go ./
+COPY bridge/libxray.go ./
+COPY bridge/xray_parser.go ./
 
 RUN set -xe && \
     if [ "${REFRESH_GO_DEPS}" = "true" ]; then \
       echo "MIHOMO_CACHE_BUST=$MIHOMO_CACHE_BUST" && \
       go get github.com/metacubex/mihomo@${MIHOMO_REF} && \
       go get -u all && \
+      go get github.com/xtls/libxray@${LIBXRAY_REF} && \
       go mod tidy; \
     else \
       go mod download; \
@@ -55,6 +59,7 @@ RUN go run ../scripts/generate_param_compat.go -manifest mihomo_capabilities.jso
 RUN set -xe && \
     CGO_ENABLED=1 go build \
     -trimpath \
+    -ldflags='-s -w' \
     -buildmode=c-shared \
     -o libmihomo.so \
     . && \

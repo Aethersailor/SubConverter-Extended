@@ -20,6 +20,11 @@
       "repository": "https://github.com/PerMalmberg/libcron.git",
       "revision": "ee34810b11bd23c8be637345532f91059b68b2d7"
     },
+    "libxray": {
+      "ref": "refs/tags/v26.7.28",
+      "repository": "https://github.com/XTLS/libXray.git",
+      "revision": "80263da83e96b2972455b0a94b13ee1a10e51391"
+    },
     "mihomo": {
       "ref": "refs/heads/Meta",
       "repository": "https://github.com/MetaCubeX/mihomo.git",
