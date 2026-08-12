@@ -119,6 +119,80 @@ bool validSharePort(const std::string &port) {
     return value >= 1 && value <= 65535;
 }
 
+bool decodeStrictBase64(const std::string &encoded, std::string &decoded) {
+    if (encoded.empty())
+        return false;
+
+    size_t padding_start = encoded.size();
+    for (size_t i = 0; i < encoded.size(); ++i) {
+        const unsigned char ch = static_cast<unsigned char>(encoded[i]);
+        if (ch == '=') {
+            padding_start = std::min(padding_start, i);
+            continue;
+        }
+        if (padding_start != encoded.size() ||
+            !(std::isalnum(ch) || ch == '-' || ch == '_' || ch == '+' || ch == '/'))
+            return false;
+    }
+    const size_t padding = encoded.size() - padding_start;
+    if (padding > 0) {
+        const size_t expected_padding =
+            padding_start % 4 == 2 ? 2 : (padding_start % 4 == 3 ? 1 : 0);
+        if (encoded.size() % 4 != 0 || padding != expected_padding)
+            return false;
+    } else if (padding_start % 4 == 1) {
+        return false;
+    }
+
+    std::string candidate = urlSafeBase64Decode(encoded);
+    std::string normalized = encoded.substr(0, padding_start);
+    normalized = replaceAllDistinct(replaceAllDistinct(normalized, "+", "-"), "/", "_");
+    if (urlSafeBase64Encode(candidate) != normalized)
+        return false;
+    decoded = std::move(candidate);
+    return true;
+}
+
+bool parseShareAuthority(const std::string &authority, std::string &host,
+                         std::string &port) {
+    if (authority.empty())
+        return false;
+    if (authority.front() == '[') {
+        const size_t bracket = authority.find(']');
+        if (bracket == std::string::npos || bracket + 2 >= authority.size() ||
+            authority[bracket + 1] != ':')
+            return false;
+        host = authority.substr(1, bracket - 1);
+        port = authority.substr(bracket + 2);
+    } else {
+        const size_t colon = authority.rfind(':');
+        if (colon == std::string::npos || colon == 0 || colon + 1 >= authority.size() ||
+            authority.find(':') != colon)
+            return false;
+        host = authority.substr(0, colon);
+        port = authority.substr(colon + 1);
+    }
+    return !host.empty() && host.find_first_of("\r\n") == std::string::npos &&
+           validSharePort(port);
+}
+
+bool parseUserPassword(const std::string &userinfo, bool allow_plain,
+                       std::string &username, std::string &password) {
+    std::string decoded;
+    if (allow_plain && userinfo.find(':') != std::string::npos)
+        decoded = decodeShareUriUserInfo(userinfo);
+    else if (!decodeStrictBase64(userinfo, decoded))
+        return false;
+
+    const size_t colon = decoded.find(':');
+    if (colon == std::string::npos)
+        return false;
+    username = decoded.substr(0, colon);
+    password = decoded.substr(colon + 1);
+    return username.find_first_of("\r\n") == std::string::npos &&
+           password.find_first_of("\r\n") == std::string::npos;
+}
+
 bool parseShareUri(std::string uri, const std::string &scheme, ParsedShareUri &parsed) {
     const std::string prefix = scheme + "://";
     if (!startsWith(uri, prefix))
@@ -910,38 +984,64 @@ void explodeVmessConf(std::string content, std::vector<Proxy> &nodes) {
 }
 
 void explodeSS(std::string ss, Proxy &node) {
-    std::string ps, password, method, server, port, plugins, plugin, pluginopts, addition, group = SS_DEFAULT_GROUP,
-            secret;
-    //std::vector<std::string> args, secret;
-    ss = replaceAllDistinct(ss.substr(5), "/?", "?");
-    if (strFind(ss, "#")) {
-        auto sspos = ss.find('#');
-        ps = urlDecode(ss.substr(sspos + 1));
-        ss.erase(sspos);
-    }
+    if (!startsWith(ss, "ss://"))
+        return;
 
-    if (strFind(ss, "?")) {
-        addition = ss.substr(ss.find('?') + 1);
-        plugins = urlDecode(getUrlArg(addition, "plugin"));
-        auto pluginpos = plugins.find(';');
-        plugin = plugins.substr(0, pluginpos);
-        pluginopts = plugins.substr(pluginpos + 1);
-        group = getUrlArg(addition, "group");
-        if (!group.empty())
-            group = urlSafeBase64Decode(group);
-        ss.erase(ss.find('?'));
+    std::string ps, password, method, server, port, plugin, pluginopts,
+            addition, group = SS_DEFAULT_GROUP;
+    ss.erase(0, 5);
+
+    const size_t fragment_pos = ss.find('#');
+    if (fragment_pos != std::string::npos) {
+        ps = decodeShareUriUserInfo(ss.substr(fragment_pos + 1));
+        ss.erase(fragment_pos);
     }
-    if (strFind(ss, "@")) {
-        if (regGetMatch(ss, "(\\S+?)@(\\S+):(\\d+)", 4, 0, &secret, &server, &port))
-            return;
-        if (regGetMatch(urlSafeBase64Decode(secret), "(\\S+?):(\\S+)", 3, 0, &method, &password))
+    const size_t query_pos = ss.find('?');
+    if (query_pos != std::string::npos) {
+        addition = ss.substr(query_pos + 1);
+        ss.erase(query_pos);
+        std::string plugin_value = urlDecode(getUrlArg(addition, "plugin"));
+        const size_t plugin_separator = plugin_value.find(';');
+        plugin = plugin_value.substr(0, plugin_separator);
+        if (plugin_separator != std::string::npos)
+            pluginopts = plugin_value.substr(plugin_separator + 1);
+
+        std::string encoded_group = getUrlArg(addition, "group");
+        std::string decoded_group;
+        if (!encoded_group.empty() && decodeStrictBase64(encoded_group, decoded_group))
+            group = std::move(decoded_group);
+    }
+    if (!ss.empty() && ss.back() == '/')
+        ss.pop_back();
+
+    const size_t at = ss.rfind('@');
+    if (at != std::string::npos) {
+        if (at == 0 || at + 1 >= ss.size() ||
+            !parseUserPassword(ss.substr(0, at), true, method, password) ||
+            !parseShareAuthority(ss.substr(at + 1), server, port))
             return;
     } else {
-        if (regGetMatch(urlSafeBase64Decode(ss), "(\\S+?):(\\S+)@(\\S+):(\\d+)", 5, 0, &method, &password, &server,
-                        &port))
+        std::string decoded;
+        if (!decodeStrictBase64(ss, decoded))
             return;
+        const size_t decoded_at = decoded.rfind('@');
+        if (decoded_at == std::string::npos || decoded_at == 0 ||
+            decoded_at + 1 >= decoded.size())
+            return;
+        const size_t colon = decoded.find(':');
+        if (colon == std::string::npos || colon >= decoded_at ||
+            !parseShareAuthority(decoded.substr(decoded_at + 1), server, port))
+            return;
+        method = decoded.substr(0, colon);
+        password = decoded.substr(colon + 1, decoded_at - colon - 1);
     }
-    if (port == "0")
+    if (method.empty() || password.empty() ||
+        method.find_first_of("\r\n") != std::string::npos ||
+        password.find_first_of("\r\n") != std::string::npos ||
+        group.find_first_of("\r\n") != std::string::npos ||
+        ps.find_first_of("\r\n") != std::string::npos ||
+        plugin.find_first_of("\r\n") != std::string::npos ||
+        pluginopts.find_first_of("\r\n") != std::string::npos)
         return;
     if (ps.empty())
         ps = server + ":" + port;
@@ -1027,7 +1127,8 @@ void explodeSSAndroid(std::string ss, std::vector<Proxy> &nodes) {
     //first add some extra data before parsing
     ss = "{\"nodes\":" + ss + "}";
     json.Parse(ss.data());
-    if (json.HasParseError() || !json.IsObject())
+    if (json.HasParseError() || !json.IsObject() || !json.HasMember("nodes") ||
+        !json["nodes"].IsArray())
         return;
 
     for (uint32_t i = 0; i < json["nodes"].Size(); i++) {
@@ -1037,7 +1138,7 @@ void explodeSSAndroid(std::string ss, std::vector<Proxy> &nodes) {
             continue;
         ps = GetMember(json["nodes"][i], "remarks");
         port = GetMember(json["nodes"][i], "server_port");
-        if (port == "0")
+        if (!validSharePort(port))
             continue;
         if (ps.empty())
             ps = server + ":" + port;
@@ -1045,6 +1146,14 @@ void explodeSSAndroid(std::string ss, std::vector<Proxy> &nodes) {
         method = GetMember(json["nodes"][i], "method");
         plugin = GetMember(json["nodes"][i], "plugin");
         pluginopts = GetMember(json["nodes"][i], "plugin_opts");
+        if (password.empty() || method.empty() ||
+            server.find_first_of("\r\n") != std::string::npos ||
+            ps.find_first_of("\r\n") != std::string::npos ||
+            password.find_first_of("\r\n") != std::string::npos ||
+            method.find_first_of("\r\n") != std::string::npos ||
+            plugin.find_first_of("\r\n") != std::string::npos ||
+            pluginopts.find_first_of("\r\n") != std::string::npos)
+            continue;
 
         ssConstruct(node, group, ps, server, port, password, method, plugin, pluginopts);
         node.Id = index;
@@ -1059,27 +1168,46 @@ void explodeSSConf(std::string content, std::vector<Proxy> &nodes) {
     auto index = nodes.size();
 
     json.Parse(content.data());
-    if (json.HasParseError() || !json.IsObject())
+    if (json.HasParseError())
         return;
-    const char *section = json.HasMember("version") && json.HasMember("servers") ? "servers" : "configs";
-    if (!json.HasMember(section))
-        return;
-    GetMember(json, "remarks", group);
 
-    for (uint32_t i = 0; i < json[section].Size(); i++) {
+    const rapidjson::Value *server_list = nullptr;
+    if (json.IsArray()) {
+        server_list = &json;
+    } else if (json.IsObject()) {
+        if (json.HasMember("servers") && json["servers"].IsArray())
+            server_list = &json["servers"];
+        else if (json.HasMember("configs") && json["configs"].IsArray())
+            server_list = &json["configs"];
+        GetMember(json, "remarks", group);
+    }
+    if (server_list == nullptr || group.find_first_of("\r\n") != std::string::npos)
+        return;
+
+    for (uint32_t i = 0; i < server_list->Size(); i++) {
+        const rapidjson::Value &item = (*server_list)[i];
+        if (!item.IsObject())
+            continue;
         Proxy node;
-        ps = GetMember(json[section][i], "remarks");
-        port = GetMember(json[section][i], "server_port");
-        if (port == "0")
+        server = GetMember(item, "server");
+        port = GetMember(item, "server_port");
+        password = GetMember(item, "password");
+        method = GetMember(item, "method");
+        ps = GetMember(item, "remarks");
+        if (server.empty() || !validSharePort(port) || password.empty() ||
+            method.empty() ||
+            server.find_first_of("\r\n") != std::string::npos ||
+            ps.find_first_of("\r\n") != std::string::npos ||
+            password.find_first_of("\r\n") != std::string::npos ||
+            method.find_first_of("\r\n") != std::string::npos)
             continue;
         if (ps.empty())
             ps = server + ":" + port;
-
-        password = GetMember(json[section][i], "password");
-        method = GetMember(json[section][i], "method");
-        server = GetMember(json[section][i], "server");
-        plugin = GetMember(json[section][i], "plugin");
-        pluginopts = GetMember(json[section][i], "plugin_opts");
+        plugin = GetMember(item, "plugin");
+        pluginopts = GetMember(item, "plugin_opts");
+        if (plugin.find_first_of("\r\n") != std::string::npos ||
+            pluginopts.find_first_of("\r\n") != std::string::npos)
+            continue;
 
         node.Id = index;
         ssConstruct(node, group, ps, server, port, password, method, plugin, pluginopts);
@@ -1091,22 +1219,52 @@ void explodeSSConf(std::string content, std::vector<Proxy> &nodes) {
 void explodeSSR(std::string ssr, Proxy &node) {
     std::string strobfs;
     std::string remarks, group, server, port, method, password, protocol, protoparam, obfs, obfsparam;
-    ssr = replaceAllDistinct(ssr.substr(6), "\r", "");
-    ssr = urlSafeBase64Decode(ssr);
+    if (!startsWith(ssr, "ssr://"))
+        return;
+    if (!decodeStrictBase64(replaceAllDistinct(ssr.substr(6), "\r", ""), ssr))
+        return;
     if (strFind(ssr, "/?")) {
         strobfs = ssr.substr(ssr.find("/?") + 2);
         ssr = ssr.substr(0, ssr.find("/?"));
-        group = urlSafeBase64Decode(getUrlArg(strobfs, "group"));
-        remarks = urlSafeBase64Decode(getUrlArg(strobfs, "remarks"));
-        obfsparam = regReplace(urlSafeBase64Decode(getUrlArg(strobfs, "obfsparam")), "\\s", "");
-        protoparam = regReplace(urlSafeBase64Decode(getUrlArg(strobfs, "protoparam")), "\\s", "");
+        decodeStrictBase64(getUrlArg(strobfs, "group"), group);
+        decodeStrictBase64(getUrlArg(strobfs, "remarks"), remarks);
+        decodeStrictBase64(getUrlArg(strobfs, "obfsparam"), obfsparam);
+        decodeStrictBase64(getUrlArg(strobfs, "protoparam"), protoparam);
+        obfsparam = regReplace(obfsparam, "\\s", "");
+        protoparam = regReplace(protoparam, "\\s", "");
     }
 
-    if (regGetMatch(ssr, "(\\S+):(\\d+?):(\\S+?):(\\S+?):(\\S+?):(\\S+)", 7, 0, &server, &port, &protocol, &method,
-                    &obfs, &password))
+    size_t fields_start = 0;
+    if (!ssr.empty() && ssr.front() == '[') {
+        const size_t bracket = ssr.find(']');
+        if (bracket == std::string::npos || bracket + 1 >= ssr.size() || ssr[bracket + 1] != ':')
+            return;
+        server = ssr.substr(1, bracket - 1);
+        fields_start = bracket + 2;
+    } else {
+        const size_t colon = ssr.find(':');
+        if (colon == std::string::npos)
+            return;
+        server = ssr.substr(0, colon);
+        fields_start = colon + 1;
+    }
+    const string_array fields = split(ssr.substr(fields_start), ":");
+    if (server.empty() || fields.size() != 5)
         return;
-    password = urlSafeBase64Decode(password);
-    if (port == "0")
+    port = fields[0];
+    protocol = fields[1];
+    method = fields[2];
+    obfs = fields[3];
+    if (!validSharePort(port) || protocol.empty() || method.empty() || obfs.empty() ||
+        !decodeStrictBase64(fields[4], password))
+        return;
+    if (server.find_first_of("\r\n") != std::string::npos ||
+        protocol.find_first_of("\r\n") != std::string::npos ||
+        method.find_first_of("\r\n") != std::string::npos ||
+        obfs.find_first_of("\r\n") != std::string::npos ||
+        password.find_first_of("\r\n") != std::string::npos ||
+        group.find_first_of("\r\n") != std::string::npos ||
+        remarks.find_first_of("\r\n") != std::string::npos)
         return;
 
     if (group.empty())
@@ -1137,18 +1295,35 @@ void explodeSSRConf(std::string content, std::vector<Proxy> &nodes) {
         Proxy node;
         server = GetMember(json, "server");
         port = GetMember(json, "server_port");
+        password = GetMember(json, "password");
+        if (server.empty() || !validSharePort(port) || password.empty())
+            return;
         remarks = server + ":" + port;
         method = GetMember(json, "method");
         obfs = GetMember(json, "obfs");
         protocol = GetMember(json, "protocol");
+        if (method.empty() || server.find_first_of("\r\n") != std::string::npos ||
+            method.find_first_of("\r\n") != std::string::npos ||
+            password.find_first_of("\r\n") != std::string::npos ||
+            obfs.find_first_of("\r\n") != std::string::npos ||
+            protocol.find_first_of("\r\n") != std::string::npos)
+            return;
         if (find(ss_ciphers.begin(), ss_ciphers.end(), method) != ss_ciphers.end() &&
             (obfs.empty() || obfs == "plain") && (protocol.empty() || protocol == "origin")) {
             plugin = GetMember(json, "plugin");
             pluginopts = GetMember(json, "plugin_opts");
+            if (plugin.find_first_of("\r\n") != std::string::npos ||
+                pluginopts.find_first_of("\r\n") != std::string::npos)
+                return;
             ssConstruct(node, SS_DEFAULT_GROUP, remarks, server, port, password, method, plugin, pluginopts);
         } else {
+            if (protocol.empty() || obfs.empty())
+                return;
             protoparam = GetMember(json, "protocol_param");
             obfsparam = GetMember(json, "obfs_param");
+            if (protoparam.find_first_of("\r\n") != std::string::npos ||
+                obfsparam.find_first_of("\r\n") != std::string::npos)
+                return;
             ssrConstruct(node, SSR_DEFAULT_GROUP, remarks, server, port, protocol, method, obfs, password, obfsparam,
                          protoparam);
         }
@@ -1156,7 +1331,11 @@ void explodeSSRConf(std::string content, std::vector<Proxy> &nodes) {
         return;
     }
 
+    if (!json.HasMember("configs") || !json["configs"].IsArray())
+        return;
     for (uint32_t i = 0; i < json["configs"].Size(); i++) {
+        if (!json["configs"][i].IsObject())
+            continue;
         Proxy node;
         group = GetMember(json["configs"][i], "group");
         if (group.empty())
@@ -1164,7 +1343,7 @@ void explodeSSRConf(std::string content, std::vector<Proxy> &nodes) {
         remarks = GetMember(json["configs"][i], "remarks");
         server = GetMember(json["configs"][i], "server");
         port = GetMember(json["configs"][i], "server_port");
-        if (port == "0")
+        if (server.empty() || !validSharePort(port))
             continue;
         if (remarks.empty())
             remarks = server + ":" + port;
@@ -1177,6 +1356,18 @@ void explodeSSRConf(std::string content, std::vector<Proxy> &nodes) {
         obfs = GetMember(json["configs"][i], "obfs");
         obfsparam = GetMember(json["configs"][i], "obfsparam");
 
+        if (password.empty() || method.empty() ||
+            server.find_first_of("\r\n") != std::string::npos ||
+            group.find_first_of("\r\n") != std::string::npos ||
+            remarks.find_first_of("\r\n") != std::string::npos ||
+            password.find_first_of("\r\n") != std::string::npos ||
+            method.find_first_of("\r\n") != std::string::npos ||
+            protocol.find_first_of("\r\n") != std::string::npos ||
+            protoparam.find_first_of("\r\n") != std::string::npos ||
+            obfs.find_first_of("\r\n") != std::string::npos ||
+            obfsparam.find_first_of("\r\n") != std::string::npos)
+            continue;
+
         ssrConstruct(node, group, remarks, server, port, protocol, method, obfs, password, obfsparam, protoparam);
         node.Id = index;
         nodes.emplace_back(std::move(node));
@@ -1186,30 +1377,44 @@ void explodeSSRConf(std::string content, std::vector<Proxy> &nodes) {
 
 void explodeSocks(std::string link, Proxy &node) {
     std::string group, remarks, server, port, username, password;
-    if (strFind(link, "socks://")) //v2rayn socks link
+    if (startsWith(link, "socks://"))
     {
-        if (strFind(link, "#")) {
-            auto pos = link.find('#');
-            remarks = urlDecode(link.substr(pos + 1));
-            link.erase(pos);
+        std::string encoded = link.substr(8);
+        const size_t fragment_pos = encoded.find('#');
+        if (fragment_pos != std::string::npos) {
+            remarks = decodeShareUriUserInfo(encoded.substr(fragment_pos + 1));
+            encoded.erase(fragment_pos);
         }
-        link = urlSafeBase64Decode(link.substr(8));
-        if (strFind(link, "@")) {
-            auto userinfo = split(link, '@');
-            if (userinfo.size() < 2)
+        if (!encoded.empty() && encoded.back() == '/')
+            encoded.pop_back();
+
+        const size_t at = encoded.rfind('@');
+        if (at != std::string::npos) {
+            if (at == 0 || at + 1 >= encoded.size() ||
+                !parseUserPassword(encoded.substr(0, at), true, username, password) ||
+                !parseShareAuthority(encoded.substr(at + 1), server, port))
                 return;
-            link = userinfo[1];
-            userinfo = split(userinfo[0], ':');
-            if (userinfo.size() < 2)
-                return;
-            username = userinfo[0];
-            password = userinfo[1];
+        } else {
+            if (parseShareAuthority(encoded, server, port)) {
+                username.clear();
+                password.clear();
+            } else {
+                std::string decoded;
+                if (!decodeStrictBase64(encoded, decoded))
+                    return;
+                const size_t decoded_at = decoded.rfind('@');
+                if (decoded_at == std::string::npos) {
+                    if (!parseShareAuthority(decoded, server, port))
+                        return;
+                } else if (decoded_at == 0 || decoded_at + 1 >= decoded.size() ||
+                           !parseUserPassword(decoded.substr(0, decoded_at), true,
+                                              username, password) ||
+                           !parseShareAuthority(decoded.substr(decoded_at + 1),
+                                                server, port)) {
+                    return;
+                }
+            }
         }
-        auto arguments = split(link, ':');
-        if (arguments.size() < 2)
-            return;
-        server = arguments[0];
-        port = arguments[1];
     } else if (strFind(link, "https://t.me/socks") || strFind(link, "tg://socks")) //telegram style socks link
     {
         server = getUrlArg(link, "server");
@@ -1219,13 +1424,17 @@ void explodeSocks(std::string link, Proxy &node) {
         remarks = urlDecode(getUrlArg(link, "remarks"));
         group = urlDecode(getUrlArg(link, "group"));
     }
+    if (server.empty() || !validSharePort(port) ||
+        server.find_first_of("\r\n") != std::string::npos ||
+        username.find_first_of("\r\n") != std::string::npos ||
+        password.find_first_of("\r\n") != std::string::npos ||
+        remarks.find_first_of("\r\n") != std::string::npos ||
+        group.find_first_of("\r\n") != std::string::npos)
+        return;
     if (group.empty())
         group = SOCKS_DEFAULT_GROUP;
     if (remarks.empty())
         remarks = server + ":" + port;
-    if (port == "0")
-        return;
-
     socksConstruct(node, group, remarks, server, port, username, password);
 }
 
@@ -1238,13 +1447,17 @@ void explodeHTTP(const std::string &link, Proxy &node) {
     remarks = urlDecode(getUrlArg(link, "remarks"));
     group = urlDecode(getUrlArg(link, "group"));
 
+    if (server.empty() || !validSharePort(port) ||
+        server.find_first_of("\r\n") != std::string::npos ||
+        username.find_first_of("\r\n") != std::string::npos ||
+        password.find_first_of("\r\n") != std::string::npos ||
+        remarks.find_first_of("\r\n") != std::string::npos ||
+        group.find_first_of("\r\n") != std::string::npos)
+        return;
     if (group.empty())
         group = HTTP_DEFAULT_GROUP;
     if (remarks.empty())
         remarks = server + ":" + port;
-    if (port == "0")
-        return;
-
     httpConstruct(node, group, remarks, server, port, username, password, strFind(link, "/https"));
 }
 
@@ -1260,22 +1473,34 @@ void explodeHTTPSub(std::string link, Proxy &node) {
         group = urlDecode(getUrlArg(addition, "group"));
     }
     link.erase(0, link.find("://") + 3);
-    link = urlSafeBase64Decode(link);
-    if (strFind(link, "@")) {
-        if (regGetMatch(link, "(.*?):(.*?)@(.*):(.*)", 5, 0, &username, &password, &server, &port))
+    std::string decoded_link;
+    if (!decodeStrictBase64(link, decoded_link))
+        return;
+    link = std::move(decoded_link);
+    const size_t at = link.rfind('@');
+    std::string authority = link;
+    if (at != std::string::npos) {
+        if (at == 0 || at + 1 >= link.size())
             return;
-    } else {
-        if (regGetMatch(link, "(.*):(.*)", 3, 0, &server, &port))
+        const std::string userinfo = link.substr(0, at);
+        const size_t colon = userinfo.find(':');
+        if (colon == std::string::npos)
             return;
+        username = userinfo.substr(0, colon);
+        password = userinfo.substr(colon + 1);
+        authority = link.substr(at + 1);
     }
+    if (!parseShareAuthority(authority, server, port) ||
+        username.find_first_of("\r\n") != std::string::npos ||
+        password.find_first_of("\r\n") != std::string::npos ||
+        remarks.find_first_of("\r\n") != std::string::npos ||
+        group.find_first_of("\r\n") != std::string::npos)
+        return;
 
     if (group.empty())
         group = HTTP_DEFAULT_GROUP;
     if (remarks.empty())
         remarks = server + ":" + port;
-    if (port == "0")
-        return;
-
     httpConstruct(node, group, remarks, server, port, username, password, tls);
 }
 
@@ -3207,7 +3432,24 @@ void explodeNetchConf(std::string netch, std::vector<Proxy> &nodes) {
 int explodeConfContent(const std::string &content, std::vector<Proxy> &nodes) {
     ConfType filetype = ConfType::Unknow;
 
-    if (strFind(content, "\"version\""))
+    const auto first_non_space = std::find_if_not(
+        content.begin(), content.end(),
+        [](unsigned char ch) { return std::isspace(ch) != 0; });
+    if (first_non_space != content.end() && *first_non_space == '[') {
+        rapidjson::Document structured_json;
+        structured_json.Parse(content.c_str());
+        const auto looks_like_ss_server = [](const rapidjson::Value &value) {
+            return value.IsObject() && value.HasMember("server") &&
+                   value.HasMember("server_port") && value.HasMember("method") &&
+                   value.HasMember("password");
+        };
+        if (!structured_json.HasParseError() && structured_json.IsArray() &&
+            std::any_of(structured_json.Begin(), structured_json.End(),
+                        looks_like_ss_server))
+            filetype = ConfType::SS;
+    }
+
+    if (filetype == ConfType::Unknow && strFind(content, "\"version\""))
         filetype = ConfType::SS;
     else if (strFind(content, "\"serverSubscribes\""))
         filetype = ConfType::SSR;
@@ -3629,7 +3871,8 @@ void explode(const std::string &link, Proxy &node) {
         explodeVmess(link, node);
     else if (startsWith(link, "ss://"))
         explodeSS(link, node);
-    else if (startsWith(link, "socks://") || startsWith(link, "https://t.me/socks") || startsWith(link, "tg://socks"))
+    else if (startsWith(link, "socks://") || startsWith(link, "https://t.me/socks") ||
+             startsWith(link, "tg://socks"))
         explodeSocks(link, node);
     else if (startsWith(link, "https://t.me/http") || startsWith(link, "tg://http")) //telegram style http link
         explodeHTTP(link, node);

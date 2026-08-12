@@ -290,6 +290,8 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
   writeLog(LOG_LEVEL_VERBOSE, "已收到链接。");
   if (parse_set.force_direct_link)
     linkType = ConfType::HTTP;
+  else if (!use_mihomo_parser && isLegacyHttpProxyUri(link))
+    linkType = ConfType::HTTP;
   else if (startsWith(link, "https://t.me/socks") || startsWith(link, "tg://socks"))
     linkType = ConfType::SOCKS;
   else if (startsWith(link, "https://t.me/http") ||

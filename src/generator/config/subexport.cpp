@@ -287,6 +287,53 @@ static std::string shareLinkHost(const std::string &host) {
   return host.find(':') == std::string::npos ? host : "[" + host + "]";
 }
 
+static bool isShadowsocks2022Method(const std::string &method) {
+  return startsWith(method, "2022-");
+}
+
+static std::string shadowsocksShareLink(const Proxy &proxy,
+                                        bool include_group,
+                                        bool include_remark = true) {
+  std::string userinfo;
+  if (isShadowsocks2022Method(proxy.EncryptMethod)) {
+    userinfo = urlEncode(proxy.EncryptMethod) + ":" + urlEncode(proxy.Password);
+  } else {
+    userinfo = urlSafeBase64Encode(proxy.EncryptMethod + ":" + proxy.Password);
+  }
+
+  std::vector<std::string> query;
+  if (!proxy.Plugin.empty()) {
+    std::string plugin = proxy.Plugin;
+    if (!proxy.PluginOption.empty())
+      plugin += ";" + proxy.PluginOption;
+    query.emplace_back("plugin=" + urlEncode(plugin));
+  }
+  if (include_group && !proxy.Group.empty())
+    query.emplace_back("group=" + urlSafeBase64Encode(proxy.Group));
+
+  std::string result = "ss://" + userinfo + "@" +
+                       shareLinkHost(proxy.Hostname) + ":" +
+                       std::to_string(proxy.Port);
+  if (!query.empty())
+    result += "/?" + join(query, "&");
+  if (include_remark && !proxy.Remark.empty())
+    result += "#" + urlEncode(proxy.Remark);
+  return result;
+}
+
+static std::string shadowsocksRShareLink(const Proxy &proxy) {
+  return "ssr://" +
+         urlSafeBase64Encode(
+             shareLinkHost(proxy.Hostname) + ":" +
+             std::to_string(proxy.Port) + ":" + proxy.Protocol + ":" +
+             proxy.EncryptMethod + ":" + proxy.OBFS + ":" +
+             urlSafeBase64Encode(proxy.Password) + "/?group=" +
+             urlSafeBase64Encode(proxy.Group) + "&remarks=" +
+             urlSafeBase64Encode(proxy.Remark) + "&obfsparam=" +
+             urlSafeBase64Encode(proxy.OBFSParam) + "&protoparam=" +
+             urlSafeBase64Encode(proxy.ProtocolParam));
+}
+
 static std::string hysteria2PortSpec(const Proxy &proxy) {
   if (proxy.Ports.empty())
     return std::to_string(proxy.Port);
@@ -1646,6 +1693,13 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
     string_array args, headers;
     switch (x.Type) {
     case ProxyType::Shadowsocks:
+      if (!surgeProxyScalarIsSafe(x.Remark) ||
+          !surgeProxyScalarIsSafe(hostname) ||
+          !surgeProxyScalarIsSafe(method) ||
+          !surgeProxyScalarIsSafe(password)) {
+        supported = false;
+        break;
+      }
       if (surge_ver >= 3 || surge_ver == -3) {
         proxy = "ss, " + hostname + ", " + port + ", encrypt-method=" + method +
                 ", password=" + password;
@@ -1657,6 +1711,10 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
             "https://github.com/pobizhe/SSEncrypt/raw/master/SSEncrypt.module";
       }
       if (!plugin.empty()) {
+        if (!surgeProxyScalarIsSafe(pluginopts)) {
+          supported = false;
+          break;
+        }
         switch (hash_(plugin)) {
         case "simple-obfs"_hash:
         case "obfs-local"_hash:
@@ -2041,11 +2099,11 @@ std::string proxyToSingle(std::vector<Proxy> &nodes, SingleLinkTypes types,
   const bool vless = (types & SingleLinkType::VLESS) != 0;
 
   for (Proxy &x : nodes) {
+    proxyStr.clear();
     std::string remark = x.Remark;
     std::string &hostname = x.Hostname, &sni = x.ServerName,
                 &password = x.Password, &method = x.EncryptMethod,
-                &plugin = x.Plugin, &pluginopts = x.PluginOption,
-                &protocol = x.Protocol, &protoparam = x.ProtocolParam,
+                &plugin = x.Plugin, &protocol = x.Protocol,
                 &flow = x.Flow, &pbk = x.PublicKey, &sid = x.ShortId,
                 &fp = x.Fingerprint, &packet_encoding = x.PacketEncoding,
                 &fake_type = x.FakeType, &mode = x.GRPCMode, &obfs = x.OBFS,
@@ -2057,41 +2115,35 @@ std::string proxyToSingle(std::vector<Proxy> &nodes, SingleLinkTypes types,
     switch (x.Type) {
     case ProxyType::Shadowsocks:
       if (ss) {
-        proxyStr = "ss://" + urlSafeBase64Encode(method + ":" + password) +
-                   "@" + hostname + ":" + port;
-        if (!plugin.empty() && !pluginopts.empty()) {
-          proxyStr += "/?plugin=" + urlEncode(plugin + ";" + pluginopts);
-        }
-        proxyStr += "#" + urlEncode(remark);
+        proxyStr = shadowsocksShareLink(x, false);
       } else if (ssr) {
         if (std::find(ssr_ciphers.begin(), ssr_ciphers.end(), method) !=
                 ssr_ciphers.end() &&
-            plugin.empty())
-          proxyStr =
-              "ssr://" +
-              urlSafeBase64Encode(hostname + ":" + port + ":origin:" + method +
-                                  ":plain:" + urlSafeBase64Encode(password) +
-                                  "/?group=" + urlSafeBase64Encode(x.Group) +
-                                  "&remarks=" + urlSafeBase64Encode(remark));
+            plugin.empty()) {
+          Proxy converted = x;
+          converted.Protocol = "origin";
+          converted.OBFS = "plain";
+          proxyStr = shadowsocksRShareLink(converted);
+        } else {
+          continue;
+        }
       } else
         continue;
       break;
     case ProxyType::ShadowsocksR:
       if (ssr) {
-        proxyStr = "ssr://" +
-                   urlSafeBase64Encode(
-                       hostname + ":" + port + ":" + protocol + ":" + method +
-                       ":" + obfs + ":" + urlSafeBase64Encode(password) +
-                       "/?group=" + urlSafeBase64Encode(x.Group) +
-                       "&remarks=" + urlSafeBase64Encode(remark) +
-                       "&obfsparam=" + urlSafeBase64Encode(obfsparam) +
-                       "&protoparam=" + urlSafeBase64Encode(protoparam));
+        proxyStr = shadowsocksRShareLink(x);
       } else if (ss) {
         if (std::find(ss_ciphers.begin(), ss_ciphers.end(), method) !=
                 ss_ciphers.end() &&
-            protocol == "origin" && obfs == "plain")
-          proxyStr = "ss://" + urlSafeBase64Encode(method + ":" + password) +
-                     "@" + hostname + ":" + port + "#" + urlEncode(remark);
+            protocol == "origin" && obfs == "plain") {
+          Proxy converted = x;
+          converted.Plugin.clear();
+          converted.PluginOption.clear();
+          proxyStr = shadowsocksShareLink(converted, false);
+        } else {
+          continue;
+        }
       } else
         continue;
       break;
@@ -2259,11 +2311,14 @@ std::string proxyToSSSub(std::string base_conf, std::vector<Proxy> &nodes,
   if (base_conf.empty())
     base_conf = "{}";
   rapidjson::ParseResult result = base.Parse(base_conf.data());
-  if (!result)
+  if (!result || !base.IsObject()) {
     writeLog(LOG_LEVEL_ERROR,
              std::string("SIP008 基础配置加载失败：") +
-                 rapidjson::GetParseError_En(result.Code()) + " (" +
-                 std::to_string(result.Offset()) + ")");
+                 (result ? "root must be an object"
+                         : rapidjson::GetParseError_En(result.Code())) +
+                 " (" + std::to_string(result.Offset()) + ")");
+    base.SetObject();
+  }
 
   rapidjson::Value proxies(rapidjson::kArrayType);
   for (Proxy &x : nodes) {
@@ -2395,14 +2450,7 @@ void proxyToQuan(std::vector<Proxy> &nodes, INIReader &ini,
       break;
     case ProxyType::ShadowsocksR:
       if (ext.nodelist) {
-        proxyStr = "ssr://" +
-                   urlSafeBase64Encode(
-                       hostname + ":" + port + ":" + protocol + ":" + method +
-                       ":" + obfs + ":" + urlSafeBase64Encode(password) +
-                       "/?group=" + urlSafeBase64Encode(x.Group) +
-                       "&remarks=" + urlSafeBase64Encode(x.Remark) +
-                       "&obfsparam=" + urlSafeBase64Encode(obfsparam) +
-                       "&protoparam=" + urlSafeBase64Encode(protoparam));
+        proxyStr = shadowsocksRShareLink(x);
       } else {
         proxyStr = x.Remark + " = shadowsocksr, " + hostname + ", " + port +
                    ", " + method + ", \"" + password + "\", group=" + x.Group +
@@ -2415,13 +2463,7 @@ void proxyToQuan(std::vector<Proxy> &nodes, INIReader &ini,
       break;
     case ProxyType::Shadowsocks:
       if (ext.nodelist) {
-        proxyStr = "ss://" + urlSafeBase64Encode(method + ":" + password) +
-                   "@" + hostname + ":" + port;
-        if (!plugin.empty() && !pluginopts.empty()) {
-          proxyStr += "/?plugin=" + urlEncode(plugin + ";" + pluginopts);
-        }
-        proxyStr += "&group=" + urlSafeBase64Encode(x.Group) + "#" +
-                    urlEncode(x.Remark);
+        proxyStr = shadowsocksShareLink(x, true);
       } else {
         proxyStr = x.Remark + " = shadowsocks, " + hostname + ", " + port +
                    ", " + method + ", \"" + password + "\", group=" + x.Group;
@@ -3171,10 +3213,6 @@ void proxyToMellow(std::vector<Proxy> &nodes, INIReader &ini,
                    const ProxyGroupConfigs &extra_proxy_group,
                    extra_settings &ext) {
   std::string proxy;
-  std::string username, password, method;
-  std::string plugin, pluginopts;
-  std::string id, aid, transproto, faketype, host, path, quicsecure, quicsecret,
-      tlssecure;
   std::string url;
   tribool tfo, scv;
   std::vector<Proxy> nodelist;
@@ -3192,7 +3230,13 @@ void proxyToMellow(std::vector<Proxy> &nodes, INIReader &ini,
 
     processRemark(x.Remark, used_remarks);
 
-    std::string &hostname = x.Hostname, port = std::to_string(x.Port);
+    std::string &hostname = x.Hostname, &username = x.Username,
+                &password = x.Password,
+                &id = x.UserId, &transproto = x.TransferProtocol,
+                &host = x.Host, &path = x.Path,
+                &quicsecure = x.QUICSecure, &quicsecret = x.QUICSecret;
+    std::string port = std::to_string(x.Port);
+    const std::string tlssecure = x.TLSSecure ? "true" : "false";
 
     tfo = ext.tfo;
     scv = ext.skip_cert_verify;
@@ -3203,9 +3247,9 @@ void proxyToMellow(std::vector<Proxy> &nodes, INIReader &ini,
     case ProxyType::Shadowsocks:
       if (!x.Plugin.empty())
         continue;
-      proxy = x.Remark + ", ss, ss://" +
-              urlSafeBase64Encode(method + ":" + password) + "@" + hostname +
-              ":" + port;
+      if (!surgeProxyScalarIsSafe(x.Remark))
+        continue;
+      proxy = x.Remark + ", ss, " + shadowsocksShareLink(x, false, false);
       break;
     case ProxyType::VMess:
       proxy =
@@ -3240,10 +3284,20 @@ void proxyToMellow(std::vector<Proxy> &nodes, INIReader &ini,
         proxy += "&sockopt.tcpfastopen=" + tfo.get_str();
       break;
     case ProxyType::SOCKS5:
+      if (!surgeProxyScalarIsSafe(x.Remark) ||
+          !surgeProxyScalarIsSafe(hostname) ||
+          !surgeProxyScalarIsSafe(username) ||
+          !surgeProxyScalarIsSafe(password))
+        continue;
       proxy = x.Remark + ", builtin, socks, address=" + hostname +
               ", port=" + port + ", user=" + username + ", pass=" + password;
       break;
     case ProxyType::HTTP:
+      if (!surgeProxyScalarIsSafe(x.Remark) ||
+          !surgeProxyScalarIsSafe(hostname) ||
+          !surgeProxyScalarIsSafe(username) ||
+          !surgeProxyScalarIsSafe(password))
+        continue;
       proxy = x.Remark + ", builtin, http, address=" + hostname +
               ", port=" + port + ", user=" + username + ", pass=" + password;
       break;

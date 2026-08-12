@@ -127,8 +127,10 @@ SubConverter-Extended 因此诞生。它是一款更贴合 Mihomo 使用场景�
 
 > [!WARNING]
 > 1. 本项目优先保证 Mihomo 路径。`target=clash`、`target=clashr` 及 `target=auto` 识别为二者时，远程订阅只生成 `proxy-provider`，节点链接只调用 Mihomo 解析模块。
-> 2. Quantumult X 和 Surge 的完整配置可以使用客户端原生远程资源；其节点链接仍调用继承自上游项目的 Legacy 解析器。
+> 2. Quantumult X、Surge、Surfboard 和 Loon 的完整配置可以使用客户端原生远程资源；其节点链接仍调用继承自上游项目的 Legacy 解析器。
 > 3. 其他非 Mihomo 目标仍使用 Legacy 解析器。协议和参数支持范围以对应生成器能够表示的内容为准。
+
+Legacy 解析器对经典格式的兼容范围包括：Shadowsocks SIP002（含 AEAD-2022、插件和 IPv6）、SIP008/旧版 JSON 输入、历史 SSR 链接、v2rayN `socks://` 新旧格式，以及 Telegram 和 Base64 authority 形式的 HTTP(S) 代理链接。普通 HTTP(S) URL 仍按订阅处理；`socks5://` 仍属于 Mihomo 路径，不会借此改动进入 Legacy 解析器。解析成功不代表每个目标客户端都能表示对应协议，最终仍由目标生成器筛选。
 
 ### 🔥 独特功能
 
