@@ -32,9 +32,8 @@ COPY bridge/xray_parser.go ./
 RUN set -xe && \
     if [ "${REFRESH_GO_DEPS}" = "true" ]; then \
       echo "MIHOMO_CACHE_BUST=$MIHOMO_CACHE_BUST" && \
-      go get github.com/metacubex/mihomo@${MIHOMO_REF} && \
-      go get -u all && \
-      go get github.com/xtls/libxray@${LIBXRAY_REF} && \
+      go get github.com/metacubex/mihomo@${MIHOMO_REF} \
+        github.com/xtls/libxray@${LIBXRAY_REF} && \
       go mod tidy; \
     else \
       go mod download; \
