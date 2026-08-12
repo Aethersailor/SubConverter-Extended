@@ -937,6 +937,35 @@ YAML 使用 `remote_subscription.surfboard_policy_path`，INI 使用 `[remote_su
 
 Surfboard 开关不影响 Clash/ClashR、Quantumult X、Surge 或其他目标。
 
+### Loon `[Remote Proxy]`
+
+`target=loon` 生成完整配置时，兼容的 HTTP(S) 订阅默认写入 `[Remote Proxy]`，由 Loon 下载并解析；SubConverter-Extended 不会预先下载远程订阅内容。订阅服务商需要根据 Loon 的请求返回客户端可识别的节点资源。节点 URI 仍由 Legacy 解析器处理并写入 `[Proxy]`，两类输入可以混用。
+
+```ini
+[Remote Proxy]
+Airport_A = https://a.example/sub
+Airport_B = https://b.example/sub
+```
+
+第一版支持多个远程订阅。`provider:` 用于指定资源别名；未指定时按请求顺序生成 `SubConverter_Remote_1`、`SubConverter_Remote_2`。别名会经过安全清理并避开基础模板中已有的本地节点、远程资源、筛选器和策略组名称，发生冲突时稳定追加数字后缀。远程 URL 不会被重复解码，配置分隔符逗号会保留为百分号编码。
+
+普通节点名正则、`!!GROUP=`、`!!GROUPID=` 和 `!!PROVIDER=` 会转换为 `[Remote Filter]` 的 `NameRegex` 筛选器或直接引用远程资源。筛选正则使用双引号保护其中的配置分隔符；策略组引用最终的去重别名。`list=true`、`!!import:`、本次请求或用户显式外部配置要求的服务端节点过滤、改名、Emoji 增删、排序、节点选项覆盖，以及 Loon 无法准确表达的组类型或选择器，会在下载订阅前确定使用 Legacy，不会先走 Loon 再回退。
+
+主配置中已有的全局节点整理选项不会阻止 Loon 使用 `[Remote Proxy]`，也不会作用于 Loon 自行下载的远程节点；它们仍作用于本项目解析的直连节点。日志事件 `LOON_REMOTE_TRANSFORM_SCOPE` 会以数量说明这一作用域，不记录规则正文、订阅凭据或节点名称。
+
+Loon 的远程订阅路径不接受 `interval:` 或 `proxy_direct:` 前缀。请求只包含 Loon 生成器无法表示的本地节点时返回 HTTP 400；远程订阅与此类节点混用时，远程资源仍正常生成，不支持的本地协议会由 `LOON_NODE_GENERATION` 和 Explain 按协议计数。
+
+部署者可以使用以下可选配置关闭 Loon 原生远程订阅：
+
+```toml
+[remote_subscription]
+loon_remote_proxy = false
+```
+
+YAML 使用 `remote_subscription.loon_remote_proxy`，INI 使用 `[remote_subscription]` 下的 `loon_remote_proxy`。缺少整个配置节或字段时，默认值为 `true`；旧配置文件无需增加字段即可启动，配置热重载时删除该字段也会恢复默认值。已有但未知或失效的旧字段仍按原有宽容规则忽略。
+
+Loon 开关不影响 Clash/ClashR 的 Mihomo 与 `proxy-provider` 路径，也不影响 Quantumult X、Surge、Surfboard 或其他目标。Loon 官方说明订阅节点由客户端负责下载和解析，并提供当前的[节点格式](https://nsloon.app/docs/Node/)、[节点筛选](https://nsloon.app/docs/Node/nodefilter/)和[策略组](https://nsloon.app/docs/Policy/policygroup/)文档。
+
 ### `proxy_direct` 前缀（仅适用于 Clash/ClashR 订阅链接）
 
 默认情况下，项目为每个新生成的 `proxy-provider` 显式生成 `proxy: DIRECT`，保持既有行为。部署者可以将主配置文件中的 `proxy_provider.proxy_direct` 设为 `false`；用户也可以使用已有请求参数 `&provider_proxy_direct=false`，为本次请求中所有未单独覆盖的 provider 改变默认值。

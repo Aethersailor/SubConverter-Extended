@@ -930,6 +930,8 @@ void readYAMLConf(YAML::Node &node,
         global.surgePolicyPath;
     node["remote_subscription"]["surfboard_policy_path"] >>
         global.surfboardPolicyPath;
+    node["remote_subscription"]["loon_remote_proxy"] >>
+        global.loonRemoteProxy;
   }
 
   if (node["emojis"].IsDefined()) {
@@ -1241,7 +1243,8 @@ void readTOMLConf(toml::value &root,
     if (section_remote_subscription.is_table()) {
       find_if_exist(section_remote_subscription, "surge_policy_path",
                     global.surgePolicyPath, "surfboard_policy_path",
-                    global.surfboardPolicyPath);
+                    global.surfboardPolicyPath, "loon_remote_proxy",
+                    global.loonRemoteProxy);
     }
   }
 
@@ -1617,6 +1620,7 @@ bool readConf() {
     ini.get_bool_if_exist("surge_policy_path", global.surgePolicyPath);
     ini.get_bool_if_exist("surfboard_policy_path",
                           global.surfboardPolicyPath);
+    ini.get_bool_if_exist("loon_remote_proxy", global.loonRemoteProxy);
   }
 
   if (ini.section_exist("node_pref")) {

@@ -79,6 +79,7 @@ enum class RemoteSubscriptionMode {
   QuanXServerRemote,
   SurgePolicyPath,
   SurfboardPolicyPath,
+  LoonRemoteProxy,
 };
 
 struct TargetDescriptor {
@@ -101,7 +102,7 @@ static constexpr std::array<TargetDescriptor, 18> kTargetDescriptors = {{
     {"quanx", NodeParserMode::LegacyOnly,
      RemoteSubscriptionMode::QuanXServerRemote, false, 0},
     {"loon", NodeParserMode::LegacyOnly,
-     RemoteSubscriptionMode::ServerSideParse, false, 0},
+     RemoteSubscriptionMode::LoonRemoteProxy, false, 0},
     {"surfboard", NodeParserMode::LegacyOnly,
      RemoteSubscriptionMode::SurfboardPolicyPath, false, 0},
     {"mellow", NodeParserMode::LegacyOnly,
@@ -154,6 +155,8 @@ static const char *remoteSubscriptionModeName(RemoteSubscriptionMode mode) {
     return "surge-policy-path";
   case RemoteSubscriptionMode::SurfboardPolicyPath:
     return "surfboard-policy-path";
+  case RemoteSubscriptionMode::LoonRemoteProxy:
+    return "loon-remote-proxy";
   case RemoteSubscriptionMode::ServerSideParse:
   default:
     return "server-side-parse";
@@ -848,6 +851,14 @@ static std::string surfboardPolicyPathSourceError(size_t item_index) {
          " 个 Surfboard policy-path 订阅项包含未转义空格或控制字符。";
 }
 
+static std::string loonRemoteProxySourceError(size_t item_index) {
+  const std::string item = std::to_string(item_index + 1);
+  return "Invalid request: Loon Remote Proxy subscription item #" + item +
+         " contains an unescaped space or control character.\n"
+         "无效请求：第 " + item +
+         " 个 Loon Remote Proxy 订阅项包含未转义空格或控制字符。";
+}
+
 static std::string surgePolicyPathIntervalError(size_t item_index) {
   const std::string item = std::to_string(item_index + 1);
   return "Invalid request: interval: for Surge policy-path item #" + item +
@@ -949,7 +960,7 @@ static std::string sanitizeProviderName(const std::string &input) {
   return cleaned;
 }
 
-static std::string sanitizeQuanXResourceTag(const std::string &input) {
+static std::string sanitizeRemoteResourceName(const std::string &input) {
   std::string tag = sanitizeProviderName(input);
   std::replace(tag.begin(), tag.end(), ',', '_');
   std::replace(tag.begin(), tag.end(), '=', '_');
@@ -2603,6 +2614,127 @@ static std::string policyPathCapabilityReason(
                                      : "no-remote-policy-group";
 }
 
+struct LoonProspectiveRemote {
+  int group_id = 0;
+  std::string source_tag;
+  std::string requested_name;
+  std::string selection_name;
+};
+
+static bool loonGroupRuleSelectsRemote(
+    const std::string &rule,
+    const std::vector<LoonProspectiveRemote> &remotes) {
+  std::string selector, server_pattern;
+  if (parseGroupIdRule(rule, selector, server_pattern)) {
+    return std::any_of(remotes.begin(), remotes.end(), [&](const auto &remote) {
+      return matchRange(selector, remote.group_id);
+    });
+  }
+  if (parseSourceGroupRule(rule, selector, server_pattern)) {
+    return std::any_of(remotes.begin(), remotes.end(), [&](const auto &remote) {
+      return !remote.source_tag.empty() && regFind(remote.source_tag, selector);
+    });
+  }
+  return !startsWith(rule, "!!") && !startsWith(rule, "script:");
+}
+
+static std::string loonRemoteCapabilityReason(
+    const ParsedSubRequest &parsed, const EffectiveSubPolicy &policy,
+    const Settings &settings) {
+  if (!settings.loonRemoteProxy)
+    return "disabled-by-config";
+  if (policy.generator.nodelist)
+    return "list-mode";
+
+  std::vector<LoonProspectiveRemote> remotes;
+  int item_group_id = 0;
+  size_t generated_index = 0;
+  for (const std::string &raw_item : split(parsed.url, "|")) {
+    const TaggedLink tagged = parseTaggedLink(regTrim(raw_item));
+    const std::string link = tagged.link.empty() ? raw_item : tagged.link;
+    if (startsWith(regTrim(link), "!!import:"))
+      return "imported-source-list";
+    if (tagged.has_interval)
+      return "unsupported-update-interval";
+    if (tagged.error == TaggedLink::Error::None &&
+        isHttpSubscriptionLink(link, tagged.has_provider)) {
+      std::string selection_name = sanitizeRemoteResourceName(tagged.provider);
+      if (selection_name.empty())
+        selection_name =
+            "SubConverter_Remote_" + std::to_string(++generated_index);
+      remotes.push_back({item_group_id, tagged.tag, tagged.provider,
+                         std::move(selection_name)});
+    }
+    item_group_id++;
+  }
+  if (remotes.empty())
+    return "no-remote-subscription";
+
+  if (policy.requested_remote_node_filter)
+    return "node-filters";
+  if (policy.requested_remote_node_rename)
+    return "provider-rename";
+  if (!parsed.group_name.empty())
+    return "group-override";
+  if (policy.requested_remote_node_transform)
+    return "node-transform";
+  if (policy.requested_remote_node_option_override)
+    return "node-option-override";
+
+  bool selects_remote_subscription = false;
+  for (const ProxyGroupConfig &group : policy.custom_proxy_groups) {
+    bool group_has_dynamic_selector = false;
+    for (const std::string &rule : group.Proxies) {
+      if (startsWith(rule, "[]") || rule == "DIRECT" || rule == "REJECT")
+        continue;
+      if (startsWith(toLower(rule), "http://") ||
+          startsWith(toLower(rule), "https://"))
+        continue;
+      group_has_dynamic_selector = true;
+      if (startsWith(rule, "script:") || startsWith(rule, "!!INSERT=") ||
+          startsWith(rule, "!!TYPE=") || startsWith(rule, "!!PORT=") ||
+          startsWith(rule, "!!SERVER="))
+        return "unsupported-group-selector";
+
+      std::string selector, server_pattern;
+      if (parseGroupIdRule(rule, selector, server_pattern) ||
+          parseSourceGroupRule(rule, selector, server_pattern)) {
+        if (startsWith(rule, "!!GROUP=") && !regValid(selector))
+          return "invalid-group-regex";
+        if (!server_pattern.empty() &&
+            (!policyPathRegexIsSafe(server_pattern) ||
+             !regValid(server_pattern)))
+          return "unsafe-group-regex";
+      } else if (startsWith(rule, "!!")) {
+        return "unsupported-group-selector";
+      } else if (!policyPathRegexIsSafe(rule) || !regValid(rule)) {
+        return "unsafe-group-regex";
+      }
+      if (loonGroupRuleSelectsRemote(rule, remotes))
+        selects_remote_subscription = true;
+    }
+
+    for (const std::string &provider : group.UsingProvider) {
+      const std::string sanitized = sanitizeRemoteResourceName(provider);
+      if (std::any_of(remotes.begin(), remotes.end(), [&](const auto &remote) {
+            return provider == remote.requested_name ||
+                   provider == remote.selection_name ||
+                   sanitized == remote.selection_name;
+          }))
+        selects_remote_subscription = true;
+    }
+
+    if ((group.Type == ProxyGroupType::SSID ||
+         group.Type == ProxyGroupType::Relay ||
+         group.Type == ProxyGroupType::Smart) &&
+        (group_has_dynamic_selector || !group.UsingProvider.empty()))
+      return "unsupported-group-type";
+  }
+
+  return selects_remote_subscription ? "native-capable"
+                                     : "no-remote-policy-group";
+}
+
 static SubStageResponse processSubscriptionNodes(
     Request &request, Response &response, const Settings &settings,
     ParsedSubRequest &parsed, EffectiveSubPolicy &policy,
@@ -2655,12 +2787,17 @@ static SubStageResponse processSubscriptionNodes(
         policyPathCapabilityReason(parsed, policy, settings, remote_mode);
     if (remote_reason != "native-capable")
       remote_mode = RemoteSubscriptionMode::ServerSideParse;
+  } else if (remote_mode == RemoteSubscriptionMode::LoonRemoteProxy) {
+    remote_reason = loonRemoteCapabilityReason(parsed, policy, settings);
+    if (remote_reason != "native-capable")
+      remote_mode = RemoteSubscriptionMode::ServerSideParse;
   }
   explain.remote_subscription_backend = remoteSubscriptionModeName(remote_mode);
   explain.remote_subscription_reason = remote_reason;
 
   if (remote_mode == RemoteSubscriptionMode::SurgePolicyPath ||
-      remote_mode == RemoteSubscriptionMode::SurfboardPolicyPath) {
+      remote_mode == RemoteSubscriptionMode::SurfboardPolicyPath ||
+      remote_mode == RemoteSubscriptionMode::LoonRemoteProxy) {
     const size_t configured_filter_count =
         policy.include_remarks.size() + policy.exclude_remarks.size();
     const size_t configured_node_transform_count =
@@ -2681,9 +2818,12 @@ static SubStageResponse processSubscriptionNodes(
       writeLog(
           LOG_LEVEL_INFO,
           std::string(remote_mode == RemoteSubscriptionMode::SurgePolicyPath
-                          ? "SURGE"
-                          : "SURFBOARD") +
-              "_POLICY_PATH_TRANSFORM_SCOPE remote_nodes=client "
+                          ? "SURGE_POLICY_PATH"
+                          : remote_mode ==
+                                    RemoteSubscriptionMode::SurfboardPolicyPath
+                                ? "SURFBOARD_POLICY_PATH"
+                                : "LOON_REMOTE") +
+              "_TRANSFORM_SCOPE remote_nodes=client "
           "direct_nodes=server configured_filters=" +
               std::to_string(configured_filter_count) +
               " configured_rename_rules=" +
@@ -2719,7 +2859,8 @@ static SubStageResponse processSubscriptionNodes(
     const size_t provider_count = ext.providers.size();
     const size_t remote_count = ext.quanx_server_remotes.size() +
                                 ext.surge_policy_paths.size() +
-                                ext.surfboard_policy_paths.size();
+                                ext.surfboard_policy_paths.size() +
+                                ext.loon_remote_proxies.size();
     std::string route = "none";
     if ((provider_count || remote_count) && source_calls)
       route = "hybrid";
@@ -2750,7 +2891,9 @@ static SubStageResponse processSubscriptionNodes(
         parsed.target_descriptor->remote_subscription_mode ==
             RemoteSubscriptionMode::SurgePolicyPath ||
         parsed.target_descriptor->remote_subscription_mode ==
-            RemoteSubscriptionMode::SurfboardPolicyPath) {
+            RemoteSubscriptionMode::SurfboardPolicyPath ||
+        parsed.target_descriptor->remote_subscription_mode ==
+            RemoteSubscriptionMode::LoonRemoteProxy) {
       event += " remote_backend=" +
                std::string(remoteSubscriptionModeName(remote_mode)) +
                " remote_reason=" + remote_reason +
@@ -2802,15 +2945,20 @@ static SubStageResponse processSubscriptionNodes(
       remote_mode == RemoteSubscriptionMode::SurgePolicyPath;
   const bool surfboard_remote_eligible =
       remote_mode == RemoteSubscriptionMode::SurfboardPolicyPath;
+  const bool loon_remote_eligible =
+      remote_mode == RemoteSubscriptionMode::LoonRemoteProxy;
   const bool native_remote_target =
       parsed.target_descriptor->remote_subscription_mode ==
           RemoteSubscriptionMode::QuanXServerRemote ||
       parsed.target_descriptor->remote_subscription_mode ==
           RemoteSubscriptionMode::SurgePolicyPath ||
       parsed.target_descriptor->remote_subscription_mode ==
-          RemoteSubscriptionMode::SurfboardPolicyPath;
+          RemoteSubscriptionMode::SurfboardPolicyPath ||
+      parsed.target_descriptor->remote_subscription_mode ==
+          RemoteSubscriptionMode::LoonRemoteProxy;
   if (!provider_mode_eligible && !quanx_remote_eligible &&
-      !surge_remote_eligible && !surfboard_remote_eligible) {
+      !surge_remote_eligible && !surfboard_remote_eligible &&
+      !loon_remote_eligible) {
     for (size_t index = 0; index < urls.size(); ++index) {
       TaggedLink tagged = parseTaggedLink(regTrim(urls[index]));
       if (tagged.error != TaggedLink::Error::None) {
@@ -3109,7 +3257,7 @@ static SubStageResponse processSubscriptionNodes(
     for (const QuanXRemoteLinkItem &item : subscription_urls) {
       const std::string default_tag =
           "Provider_" + generateProviderHashFromDecodedUrl(item.url);
-      std::string requested_tag = sanitizeQuanXResourceTag(item.resource_tag);
+      std::string requested_tag = sanitizeRemoteResourceName(item.resource_tag);
       if (requested_tag.empty())
         requested_tag = default_tag;
 
@@ -3159,6 +3307,130 @@ static SubStageResponse processSubscriptionNodes(
       explain.remote_subscription_backend =
           remoteSubscriptionModeName(remote_mode);
       explain.remote_subscription_reason = remote_reason;
+    }
+  } else if (loon_remote_eligible) {
+    struct LoonRemoteLinkItem {
+      std::string url;
+      std::string source_tag;
+      std::string requested_name;
+      int group_id = 0;
+    };
+    struct LoonNodeLinkItem {
+      std::string url;
+      int group_id = 0;
+      bool force_direct_link = false;
+    };
+    std::vector<LoonRemoteLinkItem> subscription_urls;
+    std::vector<LoonNodeLinkItem> node_urls;
+
+    for (size_t index = 0; index < urls.size(); ++index) {
+      std::string &x = urls[index];
+      x = regTrim(x);
+      TaggedLink tagged = parseTaggedLink(x);
+      if (tagged.error != TaggedLink::Error::None) {
+        *status_code = 400;
+        return {true, providerLinkPrefixError(index, tagged.error)};
+      }
+      std::string link = tagged.link.empty() ? x : tagged.link;
+      const bool is_remote_subscription =
+          isHttpSubscriptionLink(link, tagged.has_provider);
+      const int item_group_id = groupID++;
+
+      if (is_remote_subscription) {
+        if (tagged.has_interval) {
+          *status_code = 400;
+          return {true, providerIntervalScopeError(index)};
+        }
+        if (tagged.has_proxy_direct) {
+          *status_code = 400;
+          return {true, providerDirectScopeError(index)};
+        }
+        if (hasUnsafeQuanXRemoteUrlChar(link)) {
+          *status_code = 400;
+          return {true, loonRemoteProxySourceError(index)};
+        }
+        writeLog(LOG_LEVEL_INFO,
+                 "检测到 Loon Remote Proxy 远程订阅：" +
+                     summarizeUrlForLog(link) + "，将由客户端更新。");
+        subscription_urls.push_back(
+            {link, tagged.tag, tagged.provider, item_group_id});
+        explain.subscription_url_count++;
+        continue;
+      }
+
+      if (tagged.has_interval) {
+        *status_code = 400;
+        return {true, providerIntervalScopeError(index)};
+      }
+      if (tagged.has_proxy_direct) {
+        *status_code = 400;
+        return {true, providerDirectScopeError(index)};
+      }
+      std::string node_link = link;
+      if (tagged.has_tag)
+        node_link = "tag:" + tagged.tag + "," + link;
+      node_urls.push_back(
+          {std::move(node_link), item_group_id, isLegacyHttpProxyUri(link)});
+      explain.node_link_count++;
+    }
+
+    std::unordered_set<std::string> resource_names;
+    auto reserve_resource_name = [&](const std::string &base) {
+      std::string base_name = clampProviderNameLength(base, 64);
+      if (base_name.empty())
+        base_name = "SubConverter_Remote";
+      if (resource_names.insert(base_name).second)
+        return base_name;
+      int suffix_index = 1;
+      while (true) {
+        const std::string suffix = "_" + std::to_string(suffix_index++);
+        const size_t max_base = 64 > suffix.size() ? 64 - suffix.size() : 0;
+        const std::string candidate =
+            clampProviderNameLength(base_name, max_base) + suffix;
+        if (resource_names.insert(candidate).second)
+          return candidate;
+      }
+    };
+
+    size_t generated_index = 0;
+    for (const LoonRemoteLinkItem &item : subscription_urls) {
+      std::string requested = sanitizeRemoteResourceName(item.requested_name);
+      if (requested.empty())
+        requested =
+            "SubConverter_Remote_" + std::to_string(++generated_index);
+
+      LoonRemoteProxyResource remote;
+      remote.resource_name = reserve_resource_name(requested);
+      remote.requested_name = item.requested_name;
+      remote.selection_name = remote.resource_name;
+      remote.source_tag = item.source_tag;
+      remote.url = item.url;
+      remote.group_id = item.group_id;
+      writeLog(LOG_LEVEL_INFO,
+               "LOON_REMOTE_PROXY_CREATED group_id=" +
+                   std::to_string(remote.group_id) + " source=" +
+                   summarizeUrlForLog(remote.url));
+      ext.loon_remote_proxies.push_back(std::move(remote));
+    }
+
+    for (const LoonNodeLinkItem &item : node_urls) {
+      string_array import_urls{item.url};
+      if (importItems(import_urls, true, FetchContext::PublicRequest) != 0) {
+        source_calls++;
+        source_failures++;
+        continue;
+      }
+      for (std::string &x : import_urls) {
+        source_calls++;
+        parse_settings item_parse_set = parse_set;
+        item_parse_set.force_direct_link = item.force_direct_link;
+        if (addNodes(x, nodes, item.group_id, item_parse_set) == -1) {
+          source_failures++;
+          writeLog(LOG_LEVEL_WARNING,
+                   "已跳过无效节点链接：" + summarizeUrlForLog(x) +
+                       "，继续处理其他节点。");
+        }
+      }
     }
   } else if (surge_remote_eligible || surfboard_remote_eligible) {
     struct PolicyPathRemoteLinkItem {
@@ -3315,7 +3587,8 @@ static SubStageResponse processSubscriptionNodes(
   explain.provider_count = ext.providers.size();
   explain.remote_subscription_count = ext.quanx_server_remotes.size() +
                                       ext.surge_policy_paths.size() +
-                                      ext.surfboard_policy_paths.size();
+                                      ext.surfboard_policy_paths.size() +
+                                      ext.loon_remote_proxies.size();
   explain.proxy_provider_mode = ext.use_proxy_provider && !ext.providers.empty();
   explain.insert_node_count = insert_nodes.size();
   explain.direct_node_count = nodes.size();
@@ -3329,7 +3602,7 @@ static SubStageResponse processSubscriptionNodes(
   }
   if (nodes.empty() && insert_nodes.empty() && ext.providers.empty() &&
       ext.quanx_server_remotes.empty() && ext.surge_policy_paths.empty() &&
-      ext.surfboard_policy_paths.empty()) {
+      ext.surfboard_policy_paths.empty() && ext.loon_remote_proxies.empty()) {
     *status_code = 400;
     return {true,
             "Invalid request: no valid proxy nodes or remote resources were "
@@ -3744,6 +4017,46 @@ static SubStageResponse dispatchTargetGenerator(
     }
     output = proxyToLoon(nodes, base_content, ruleset_content,
                          policy.custom_proxy_groups, ext);
+    {
+      const TargetGenerationStats &stats = ext.loon_generation_stats;
+      string_array unsupported_protocols;
+      unsupported_protocols.reserve(stats.unsupported_by_type.size());
+      for (const auto &[type, count] : stats.unsupported_by_type) {
+        unsupported_protocols.emplace_back(toLower(getProxyTypeName(type)) +
+                                           ":" + std::to_string(count));
+      }
+      const size_t unsupported_count = stats.unsupported_nodes();
+      writeLog(unsupported_count ? LOG_LEVEL_WARNING : LOG_LEVEL_INFO,
+               "LOON_NODE_GENERATION input=" +
+                   std::to_string(stats.input_nodes) + " emitted=" +
+                   std::to_string(stats.emitted_nodes) + " unsupported=" +
+                   std::to_string(unsupported_count) + " protocols=" +
+                   (unsupported_protocols.empty()
+                        ? std::string("none")
+                        : join(unsupported_protocols, ";")) +
+                   " remote_references=" +
+                   std::to_string(stats.remote_references_emitted));
+      parsed.explain.generated_node_count = stats.emitted_nodes;
+      parsed.explain.unsupported_node_count = unsupported_count;
+      parsed.explain.unsupported_protocols = unsupported_protocols;
+
+      if (stats.input_nodes > 0 && stats.emitted_nodes == 0 &&
+          ext.loon_remote_proxies.empty()) {
+        *status_code = 400;
+        return {true,
+                "Invalid request: none of the parsed proxy nodes can be "
+                "represented by Loon.\n"
+                "无效请求：解析到的代理节点均无法由 Loon 表示。"};
+      }
+      if (!ext.loon_remote_proxies.empty() &&
+          stats.remote_references_emitted == 0) {
+        *status_code = 400;
+        return {true,
+                "Invalid request: no compatible Loon proxy group selected "
+                "the Remote Proxy subscription.\n"
+                "无效请求：没有兼容的 Loon 策略组选择 Remote Proxy 订阅。"};
+      }
+    }
     if (upload)
       recordUpload("loon", upload_path, output, false);
     break;
@@ -4154,6 +4467,8 @@ static std::string assembleSubResponse(
       else if (explain.remote_subscription_backend ==
                "surfboard-policy-path")
         remote_section = "surfboard_policy_path";
+      else if (explain.remote_subscription_backend == "loon-remote-proxy")
+        remote_section = "loon_remote_proxy";
       addConfigSection(remote_section, "request", "generated",
                        std::to_string(explain.remote_subscription_count) +
                            " remote resource(s); node-name transformations run "

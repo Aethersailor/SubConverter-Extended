@@ -88,6 +88,7 @@ struct Settings {
   bool proxyProviderDirect = kDefaultProxyProviderDirect;
   bool surgePolicyPath = true;
   bool surfboardPolicyPath = true;
+  bool loonRemoteProxy = true;
   std::string sortScript, filterScript;
 
   std::string clashBase;
