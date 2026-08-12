@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <cctype>
 #include <string>
 #include <map>
 
@@ -64,6 +66,199 @@ void extractRemark(std::string &link, std::string &remark) {
     }
 }
 
+namespace {
+
+struct ParsedShareUri {
+    std::string user;
+    std::string host;
+    std::string port;
+    std::string query;
+    std::string remark;
+};
+
+int shareUriHexValue(unsigned char ch) {
+    if (ch >= '0' && ch <= '9')
+        return ch - '0';
+    if (ch >= 'a' && ch <= 'f')
+        return ch - 'a' + 10;
+    if (ch >= 'A' && ch <= 'F')
+        return ch - 'A' + 10;
+    return -1;
+}
+
+// Userinfo follows RFC 3986 percent-encoding, not HTML form encoding. A
+// literal '+' therefore remains '+'. Query values use the project's regular
+// form-style URL decoder below, matching url.Values-based Xray generators.
+std::string decodeShareUriUserInfo(const std::string &value) {
+    std::string decoded;
+    decoded.reserve(value.size());
+    for (size_t i = 0; i < value.size(); ++i) {
+        unsigned char ch = static_cast<unsigned char>(value[i]);
+        if (ch == '%' && i + 2 < value.size()) {
+            const int high = shareUriHexValue(static_cast<unsigned char>(value[i + 1]));
+            const int low = shareUriHexValue(static_cast<unsigned char>(value[i + 2]));
+            if (high >= 0 && low >= 0) {
+                ch = static_cast<unsigned char>((high << 4) | low);
+                i += 2;
+            }
+        }
+        if (ch != '\r' && ch != '\n')
+            decoded.push_back(static_cast<char>(ch));
+    }
+    return decoded;
+}
+
+bool validSharePort(const std::string &port) {
+    if (port.empty() || port.size() > 5 ||
+        !std::all_of(port.begin(), port.end(), [](unsigned char ch) {
+            return std::isdigit(ch) != 0;
+        }))
+        return false;
+    const int value = to_int(port, 0);
+    return value >= 1 && value <= 65535;
+}
+
+bool parseShareUri(std::string uri, const std::string &scheme, ParsedShareUri &parsed) {
+    const std::string prefix = scheme + "://";
+    if (!startsWith(uri, prefix))
+        return false;
+    uri.erase(0, prefix.size());
+
+    extractRemark(uri, parsed.remark);
+    const size_t query_pos = uri.find('?');
+    if (query_pos != std::string::npos) {
+        parsed.query = uri.substr(query_pos + 1);
+        uri.erase(query_pos);
+    }
+    if (!uri.empty() && uri.back() == '/')
+        uri.pop_back();
+
+    const size_t at = uri.rfind('@');
+    if (at == std::string::npos || at == 0 || at + 1 >= uri.size())
+        return false;
+    parsed.user = decodeShareUriUserInfo(uri.substr(0, at));
+    std::string authority = uri.substr(at + 1);
+
+    if (!authority.empty() && authority.front() == '[') {
+        const size_t bracket = authority.find(']');
+        if (bracket == std::string::npos || bracket + 1 >= authority.size() || authority[bracket + 1] != ':')
+            return false;
+        parsed.host = authority.substr(1, bracket - 1);
+        parsed.port = authority.substr(bracket + 2);
+    } else {
+        const size_t colon = authority.rfind(':');
+        if (colon == std::string::npos || colon == 0 || colon + 1 >= authority.size())
+            return false;
+        parsed.host = authority.substr(0, colon);
+        parsed.port = authority.substr(colon + 1);
+    }
+
+    return !parsed.user.empty() && !parsed.host.empty() && validSharePort(parsed.port);
+}
+
+bool isXrayUuid(const std::string &value) {
+    static const std::string pattern =
+            R"(^[\da-fA-F]{8}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{12}$)";
+    return regMatch(value, pattern);
+}
+
+std::string decodedUrlArg(const std::string &query, const std::string &key) {
+    return urlDecode(getUrlArg(query, key));
+}
+
+std::vector<std::string> getUrlAlpnList(const std::string &query) {
+    std::vector<std::string> result;
+    for (std::string item : split(decodedUrlArg(query, "alpn"), ",")) {
+        item = trim(item);
+        if (!item.empty())
+            result.emplace_back(std::move(item));
+    }
+    return result;
+}
+
+tribool getXrayAllowInsecure(const std::string &query) {
+    std::string value = getUrlArg(query, "insecure");
+    if (value.empty())
+        value = getUrlArg(query, "allowInsecure");
+    return tribool(value);
+}
+
+std::string normalizeXrayTransport(std::string network) {
+    network = toLower(trim(network));
+    if (network.empty() || network == "raw")
+        return "tcp";
+    if (network == "none")
+        return "tcp";
+    if (network == "websocket")
+        return "ws";
+    if (network == "mkcp")
+        return "kcp";
+    if (network == "gun")
+        return "grpc";
+    if (network == "h2")
+        return "http";
+    if (network == "splithttp")
+        return "xhttp";
+    return network;
+}
+
+void rememberXrayLinkOption(Proxy &node, const std::string &query, const std::string &key) {
+    std::string value = decodedUrlArg(query, key);
+    if (!value.empty())
+        node.XrayLinkOptions.emplace_back(key, std::move(value));
+}
+
+void rememberXrayLinkOptions(Proxy &node, const std::string &query) {
+    static const string_array keys = {
+        "authority", "extra", "fm", "ech", "pcs", "vcn", "pqv", "spx"
+    };
+    for (const std::string &key : keys)
+        rememberXrayLinkOption(node, query, key);
+}
+
+bool parseXrayTransport(const std::string &query, Proxy &node, std::string &network,
+                        std::string &header_type, std::string &path, std::string &host,
+                        std::string &mode) {
+    network = normalizeXrayTransport(decodedUrlArg(query, "type"));
+    header_type = decodedUrlArg(query, "headerType");
+    switch (hash_(network)) {
+        case "tcp"_hash:
+            if (header_type == "http") {
+                host = decodedUrlArg(query, "host");
+                path = getUrlArg(query, "path");
+            }
+            break;
+        case "kcp"_hash:
+            path = getUrlArg(query, "seed");
+            break;
+        case "ws"_hash:
+        case "http"_hash:
+        case "httpupgrade"_hash:
+            host = decodedUrlArg(query, "host");
+            path = getUrlArg(query, "path");
+            break;
+        case "grpc"_hash:
+            path = getUrlArg(query, "serviceName");
+            mode = decodedUrlArg(query, "mode");
+            break;
+        case "xhttp"_hash:
+            host = decodedUrlArg(query, "host");
+            path = getUrlArg(query, "path");
+            mode = decodedUrlArg(query, "mode");
+            break;
+        case "quic"_hash:
+            host = decodedUrlArg(query, "quicSecurity");
+            path = getUrlArg(query, "key");
+            break;
+        default:
+            return false;
+    }
+    rememberXrayLinkOptions(node, query);
+    return true;
+}
+
+} // namespace
+
 void commonConstruct(Proxy &node, ProxyType type, const std::string &group, const std::string &remarks,
                      const std::string &server, const std::string &port, const tribool &udp, const tribool &tfo,
                      const tribool &scv, const tribool &tls13, const std::string &underlying_proxy) {
@@ -89,11 +284,13 @@ void vmessConstruct(Proxy &node, const std::string &group, const std::string &re
     node.UserId = id.empty() ? "00000000-0000-0000-0000-000000000000" : id;
     node.AlterId = to_int(aid);
     node.EncryptMethod = cipher;
-    node.TransferProtocol = net.empty() ? "tcp" : net;
+    node.TransferProtocol = normalizeXrayTransport(net);
     node.Edge = edge;
     node.ServerName = sni;
+    node.AlpnList = alpnList;
+    node.TLSStr = tls;
 
-    if (net == "quic") {
+    if (node.TransferProtocol == "quic") {
         node.QUICSecure = host;
         node.QUICSecret = path;
     } else {
@@ -101,7 +298,7 @@ void vmessConstruct(Proxy &node, const std::string &group, const std::string &re
         node.Path = path.empty() ? "/" : trim(path);
     }
     node.FakeType = type;
-    node.TLSSecure = tls == "tls";
+    node.TLSSecure = tls == "tls" || tls == "reality";
 }
 
 void ssrConstruct(Proxy &node, const std::string &group, const std::string &remarks, const std::string &server,
@@ -159,6 +356,7 @@ void trojanConstruct(Proxy &node, const std::string &group, const std::string &r
     node.Password = password;
     node.Host = host;
     node.TLSSecure = tlssecure;
+    node.TLSStr = tlssecure ? "tls" : "none";
     node.TransferProtocol = network.empty() ? "tcp" : network;
     node.Path = path;
     node.Fingerprint = fp;
@@ -261,14 +459,16 @@ void vlessConstruct(Proxy &node, const std::string &group, const std::string &re
                     const std::string &pbk, const std::string &sid, const std::string &fp, const std::string &sni,
                     const std::vector<std::string> &alpnList, const std::string &packet_encoding,
                     tribool udp, tribool tfo,
-                    tribool scv, tribool tls13, const std::string &underlying_proxy, tribool v2ray_http_upgrade) {
+                    tribool scv, tribool tls13, const std::string &underlying_proxy, tribool v2ray_http_upgrade,
+                    const std::string &encryption) {
     commonConstruct(node, ProxyType::VLESS, group, remarks, add, port, udp, tfo, scv, tls13, underlying_proxy);
     node.UserId = id.empty() ? "00000000-0000-0000-0000-000000000000" : id;
     node.AlterId = to_int(aid);
     node.EncryptMethod = cipher;
-    node.TransferProtocol = net.empty() ? "tcp" : type == "http" ? "http" : net;
+    node.TransferProtocol = normalizeXrayTransport(net);
     node.Edge = edge;
     node.Flow = flow;
+    node.Encryption = encryption.empty() ? "none" : encryption;
     node.FakeType = type;
     node.TLSSecure = tls == "tls" || tls == "xtls" || tls == "reality";
     node.PublicKey = pbk;
@@ -278,7 +478,9 @@ void vlessConstruct(Proxy &node, const std::string &group, const std::string &re
     node.AlpnList = alpnList;
     node.PacketEncoding = packet_encoding;
     node.TLSStr = tls;
-    switch (hash_(net)) {
+    if (node.TransferProtocol == "xhttp")
+        node.GRPCMode = mode;
+    switch (hash_(node.TransferProtocol)) {
         case "grpc"_hash:
             node.Host = host;
             node.GRPCMode = mode.empty() ? "gun" : mode;
@@ -340,7 +542,7 @@ void tuicConstruct(Proxy &node, const std::string &group, const std::string &rem
 
 
 void explodeVmess(std::string vmess, Proxy &node) {
-    std::string version, ps, add, port, type, id, aid, net, path, host, tls, sni;
+    std::string version, ps, add, port, type, id, aid, net, path, host, tls, sni, cipher, fp, alpn;
     Document jsondata;
     std::vector<std::string> vArray;
 
@@ -378,9 +580,16 @@ void explodeVmess(std::string vmess, Proxy &node) {
     GetMember(jsondata, "aid", aid);
     GetMember(jsondata, "net", net);
     GetMember(jsondata, "tls", tls);
+    GetMember(jsondata, "scy", cipher);
+    if (cipher.empty())
+        GetMember(jsondata, "encryption", cipher);
+    if (cipher.empty())
+        cipher = "auto";
 
     GetMember(jsondata, "host", host);
     GetMember(jsondata, "sni", sni);
+    GetMember(jsondata, "fp", fp);
+    GetMember(jsondata, "alpn", alpn);
     switch (to_int(version)) {
         case 1:
             if (!host.empty()) {
@@ -397,9 +606,24 @@ void explodeVmess(std::string vmess, Proxy &node) {
     }
 
     add = trim(add);
+    net = normalizeXrayTransport(net);
 
-    vmessConstruct(node, V2RAY_DEFAULT_GROUP, ps, add, port, type, id, aid, net, "auto", path, host, "", tls, sni,
-                   std::vector<std::string>{});
+    std::vector<std::string> alpn_list;
+    for (std::string item : split(alpn, ",")) {
+        item = trim(item);
+        if (!item.empty())
+            alpn_list.emplace_back(std::move(item));
+    }
+    vmessConstruct(node, V2RAY_DEFAULT_GROUP, ps, add, port, type, id, aid, net, cipher, path, host, "", tls, sni,
+                   alpn_list);
+    node.Fingerprint = fp;
+    if (net == "grpc" || net == "xhttp")
+        node.GRPCMode = type;
+    for (const char *key : {"authority", "extra", "fm", "ech", "pcs", "vcn"}) {
+        std::string value = GetMember(jsondata, key);
+        if (!value.empty())
+            node.XrayLinkOptions.emplace_back(key, std::move(value));
+    }
 }
 
 void explodeVmessConf(std::string content, std::vector<Proxy> &nodes) {
@@ -943,65 +1167,46 @@ bool isLegacyHttpProxyUri(const std::string &link) {
 }
 
 void explodeTrojan(std::string trojan, Proxy &node) {
-    std::string server, port, psk, addition, group, remark, host, path, network, fp, sni;
+    ParsedShareUri parsed;
+    const std::string scheme = startsWith(trojan, "trojan-go://") ? "trojan-go" : "trojan";
+    if (!parseShareUri(trojan, scheme, parsed))
+        return;
+
+    std::string group, host, path, network, fp, sni, mode, header_type;
     tribool tfo, scv;
-    if (startsWith(trojan, "trojan://")) {
-        trojan.erase(0, 9);
-    }
-    if (startsWith(trojan, "trojan-go://")) {
-        trojan.erase(0, 12);
-    }
-    extractRemark(trojan, remark);
-    string_size pos;
-    pos = trojan.find('?');
-    if (pos != std::string::npos) {
-        addition = trojan.substr(pos + 1);
-        trojan.erase(pos);
-    }
-
-    if (regGetMatch(trojan, "(.*?)@(.*):(.*)", 4, 0, &psk, &server, &port))
-        return;
-    if (port == "0")
+    if (!parseXrayTransport(parsed.query, node, network, header_type, path, host, mode))
         return;
 
-    host = getUrlArg(addition, "sni");
-    sni = getUrlArg(addition, "sni");
+    sni = decodedUrlArg(parsed.query, "sni");
     if (host.empty())
-        host = getUrlArg(addition, "peer");
-    tfo = getUrlArg(addition, "tfo");
-    fp = getUrlArg(addition, "fp");
-    scv = getUrlArg(addition, "allowInsecure");
-    group = urlDecode(getUrlArg(addition, "group"));
+        host = sni;
+    if (host.empty())
+        host = decodedUrlArg(parsed.query, "peer");
+    tfo = getUrlArg(parsed.query, "tfo");
+    fp = decodedUrlArg(parsed.query, "fp");
+    scv = getXrayAllowInsecure(parsed.query);
+    group = decodedUrlArg(parsed.query, "group");
 
-    if (getUrlArg(addition, "ws") == "1") {
-        path = getUrlArg(addition, "wspath");
+    if (getUrlArg(parsed.query, "ws") == "1") {
+        path = getUrlArg(parsed.query, "wspath");
         network = "ws";
     }
-    // support the trojan link format used by v2ryaN and X-ui.
-    // format: trojan://{password}@{server}:{port}?type=ws&security=tls&path={path (urlencoded)}&sni={host}#{name}
-    else if (getUrlArg(addition, "type") == "ws") {
-        path = getUrlArg(addition, "path");
-        if (path.substr(0, 3) == "%2F")
-            path = urlDecode(path);
-        network = "ws";
-    }
+    path = urlDecode(path);
 
-    else if (getUrlArg(addition, "type") == "grpc") {  
-        path = getUrlArg(addition, "serviceName");  
-        network = "grpc";  
-    }
-    
-    if (remark.empty())
-        remark = server + ":" + port;
+    if (parsed.remark.empty())
+        parsed.remark = parsed.host + ":" + parsed.port;
     if (group.empty())
         group = TROJAN_DEFAULT_GROUP;
-    std::string alpn = getUrlArg(addition, "alpn");
-    std::vector<std::string> alpnList;
-    if (!alpn.empty()) {
-        alpnList.push_back(alpn);
-    }
-    trojanConstruct(node, group, remark, server, port, psk, network, host, path, fp, sni, alpnList, true, tribool(),
+    trojanConstruct(node, group, parsed.remark, parsed.host, parsed.port, parsed.user, network, host, path, fp, sni,
+                    getUrlAlpnList(parsed.query), true, tribool(),
                     tfo, scv);
+    node.FakeType = header_type;
+    node.GRPCMode = mode;
+    node.PublicKey = decodedUrlArg(parsed.query, "pbk");
+    node.ShortId = decodedUrlArg(parsed.query, "sid");
+    node.TLSStr = decodedUrlArg(parsed.query, "security");
+    if (node.TLSStr.empty())
+        node.TLSStr = "tls";
 }
 
 void explodeVless(std::string vless, Proxy &node) {
@@ -1645,10 +1850,32 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes) {
 }
 
 void explodeStdVMess(std::string vmess, Proxy &node) {
+    ParsedShareUri parsed;
+    if (parseShareUri(vmess, "vmess", parsed) && isXrayUuid(parsed.user)) {
+        std::string type, net, path, host, mode;
+        if (!parseXrayTransport(parsed.query, node, net, type, path, host, mode))
+            return;
+        std::string cipher = decodedUrlArg(parsed.query, "encryption");
+        if (cipher.empty())
+            cipher = "auto";
+        std::string tls = decodedUrlArg(parsed.query, "security");
+        std::string sni = decodedUrlArg(parsed.query, "sni");
+        if (parsed.remark.empty())
+            parsed.remark = parsed.host + ":" + parsed.port;
+        vmessConstruct(node, V2RAY_DEFAULT_GROUP, parsed.remark, parsed.host, parsed.port, type,
+                       parsed.user, "0", net, cipher, urlDecode(path), host, "", tls, sni,
+                       getUrlAlpnList(parsed.query));
+        node.Fingerprint = decodedUrlArg(parsed.query, "fp");
+        node.AllowInsecure = getXrayAllowInsecure(parsed.query);
+        node.GRPCMode = mode;
+        node.PublicKey = decodedUrlArg(parsed.query, "pbk");
+        node.ShortId = decodedUrlArg(parsed.query, "sid");
+        return;
+    }
+
     std::string add, port, type, id, aid, net, path, host, tls, remarks;
     std::string addition;
     vmess = vmess.substr(8);
-    string_size pos;
 
     extractRemark(vmess, remarks);
     const std::string stdvmess_matcher =
@@ -1810,62 +2037,27 @@ void explodeStdHysteria2(std::string hysteria2, Proxy &node) {
 
 
 void explodeStdVless(std::string vless, Proxy &node) {
-    std::string add, port, type, id, aid, net, flow, pbk, sid, fp, mode, path, host, tls, remarks, sni;
-    std::string addition;
-    vless = vless.substr(8);
-    string_size pos;
-
-    extractRemark(vless, remarks);
-    const std::string stdvless_matcher =
-            R"(^([\da-fA-F]{8}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{12})@\[?([\d\-a-zA-Z:.]+)\]?:(\d+)(?:\/?\?(.*))?$)";
-    if (regGetMatch(vless, stdvless_matcher, 5, 0, &id, &add, &port, &addition))
+    ParsedShareUri parsed;
+    if (!parseShareUri(vless, "vless", parsed) || !isXrayUuid(parsed.user))
         return;
 
-    tls = getUrlArg(addition, "security");
-    net = getUrlArg(addition, "type");
-    flow = getUrlArg(addition, "flow");
-    pbk = getUrlArg(addition, "pbk");
-    sid = getUrlArg(addition, "sid");
-    fp = getUrlArg(addition, "fp");
-    std::string packet_encoding = getUrlArg(addition, "packet-encoding");
-    std::string alpn = getUrlArg(addition, "alpn");
-    std::vector<std::string> alpnList;
-    if (!alpn.empty()) {
-        alpnList.push_back(alpn);
-    }
-    switch (hash_(net)) {
-        case "tcp"_hash:
-        case "ws"_hash:
-        case "h2"_hash:
-            type = getUrlArg(addition, "headerType");
-            host = getUrlArg(addition, strFind(addition, "sni") ? "sni" : "host");
-            path = getUrlArg(addition, "path");
-            break;
-        case "xhttp"_hash: // 新增对 type=xhttp 的支持
-            net = "h2"; // 视为 h2/http2 传输
-            type = getUrlArg(addition, "headerType");
-            host = getUrlArg(addition, strFind(addition, "sni") ? "sni" : "host");
-            path = getUrlArg(addition, "path");
-            break;
-        case "grpc"_hash:
-            host = getUrlArg(addition, "sni");
-            path = getUrlArg(addition, "serviceName");
-            mode = getUrlArg(addition, "mode");
-            break;
-        case "quic"_hash:
-            type = getUrlArg(addition, "headerType");
-            host = getUrlArg(addition, strFind(addition, "sni") ? "sni" : "quicSecurity");
-            path = getUrlArg(addition, "key");
-            break;
-        default:
-            return;
-    }
+    std::string type, net, path, host, mode;
+    if (!parseXrayTransport(parsed.query, node, net, type, path, host, mode))
+        return;
 
-    if (remarks.empty())
-        remarks = add + ":" + port;
-    sni = getUrlArg(addition, "sni");
-    vlessConstruct(node, XRAY_DEFAULT_GROUP, remarks, add, port, type, id, aid, net, "auto", flow, mode, path, host, "",
-                   tls, pbk, sid, fp, sni, alpnList, packet_encoding);
+    if (parsed.remark.empty())
+        parsed.remark = parsed.host + ":" + parsed.port;
+    std::string encryption = decodedUrlArg(parsed.query, "encryption");
+    if (encryption.empty())
+        encryption = "none";
+    vlessConstruct(node, XRAY_DEFAULT_GROUP, parsed.remark, parsed.host, parsed.port, type, parsed.user, "0", net,
+                   "auto", decodedUrlArg(parsed.query, "flow"), mode, path, host, "",
+                   decodedUrlArg(parsed.query, "security"), decodedUrlArg(parsed.query, "pbk"),
+                   decodedUrlArg(parsed.query, "sid"), decodedUrlArg(parsed.query, "fp"),
+                   decodedUrlArg(parsed.query, "sni"), getUrlAlpnList(parsed.query),
+                   decodedUrlArg(parsed.query, "packet-encoding"), tribool(), tribool(),
+                   getXrayAllowInsecure(parsed.query), tribool(), "",
+                   tribool(), encryption);
     return;
 }
 
@@ -3092,7 +3284,7 @@ void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
                                     break;
                                 }
                                 case "httpupgrade"_hash: {
-                                    net = "h2";
+                                    net = "httpupgrade";
                                     host = GetMember(transport, "host");
                                     path = GetMember(transport, "path");
                                     edge.clear();
