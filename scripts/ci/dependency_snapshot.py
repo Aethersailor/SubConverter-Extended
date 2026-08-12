@@ -32,10 +32,6 @@ GIT_DEPENDENCIES = {
         "repository": "https://github.com/MetaCubeX/mihomo.git",
         "ref": "refs/heads/Meta",
     },
-    "libxray": {
-        "repository": "https://github.com/XTLS/libXray.git",
-        "ref": "refs/tags/v26.7.28",
-    },
     "quickjspp": {
         "repository": "https://github.com/ftk/quickjspp.git",
         "ref": "HEAD",
@@ -76,7 +72,6 @@ IMAGE_DEPENDENCIES = {
 
 EXPORTS = {
     "MIHOMO_REF": ("git", "mihomo", "revision"),
-    "LIBXRAY_REF": ("git", "libxray", "revision"),
     "QUICKJSPP_REF": ("git", "quickjspp", "revision"),
     "LIBCRON_REF": ("git", "libcron", "revision"),
     "TOML11_REF": ("git", "toml11", "revision"),

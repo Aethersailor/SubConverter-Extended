@@ -3,7 +3,6 @@
 #include <cstdio>
 #include <fcntl.h>
 #include <iostream>
-#include <stdexcept>
 #include <string>
 #include <unistd.h>
 
@@ -22,7 +21,6 @@
 #include "handler/settings_view.h"
 #include "handler/statistics.h"
 #include "handler/version_page.h"
-#include "parser/libxray_bridge.h"
 #include "script/cron.h"
 #include "server/socket.h"
 #include "server/webserver.h"
@@ -251,30 +249,6 @@ int main(int argc, char *argv[]) {
   SetConsoleTitle("SubConverter-Extended " VERSION);
   if (!readConf())
     return 1;
-  try {
-    const auto xray_parser = libxray::parserInfo();
-    const auto xray_self_test = libxray::parseSubscription(
-        "vless://12345678-abcd-abcd-abcd-123456789abc@127.0.0.1:8443?"
-        "encryption=none#startup-self-test");
-    if (xray_self_test.size() != 1 ||
-        xray_self_test.front().protocol != "vless" ||
-        xray_self_test.front().server != "127.0.0.1" ||
-        xray_self_test.front().port != 8443)
-      throw std::runtime_error("libXray startup self-test mismatch");
-    writeLog(LOG_LEVEL_INFO,
-             "XRAY_PARSER_READY library=libXray release=" +
-                 xray_parser.release + " module=" + xray_parser.module_version +
-                 " revision=" + xray_parser.source_revision +
-                 " self_test_nodes=" +
-                 std::to_string(xray_self_test.size()) +
-                 " routed_targets=" +
-                 std::to_string(xray_parser.routed_targets));
-  } catch (const std::exception &error) {
-    writeLog(LOG_LEVEL_ERROR,
-             "XRAY_PARSER_UNAVAILABLE detail=" +
-                 std::string(error.what()).substr(0, 256) +
-                 " routed_targets=0 action=continue");
-  }
   writeLog(LOG_LEVEL_INFO,
       "并发运行参数：HTTP base/max threads=" +
           std::to_string(global.maxConcurThreads) + "/" +

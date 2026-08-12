@@ -134,7 +134,6 @@ SET(SUBCONVERTER_RUNTIME_SOURCES
     src/handler/sub_request_key.cpp
     src/parser/infoparser.cpp
     src/parser/subparser.cpp
-    src/parser/libxray_bridge.cpp
     src/parser/mihomo_bridge.cpp
     src/script/cron.cpp
     src/script/script_quickjs.cpp
@@ -210,11 +209,11 @@ FIND_PACKAGE(LibCron REQUIRED)
 TARGET_INCLUDE_DIRECTORIES(${BUILD_TARGET_NAME} SYSTEM PRIVATE ${LIBCRON_INCLUDE_DIRS})
 TARGET_LINK_LIBRARIES(${BUILD_TARGET_NAME} ${LIBCRON_LIBRARIES})
 
-# Native Go Parser Bridge (Mihomo routing and inactive libXray foundation)
+# Mihomo Go Parser Bridge
 # 支持 c-shared (.so) 和 c-archive (.a) 两种模式
 # c-shared 模式：解决 musl/Alpine 环境下 Go runtime 初始化问题
-IF(NOT WIN32 AND EXISTS "${CMAKE_SOURCE_DIR}/bridge/libmihomo.so")
-    MESSAGE(STATUS "Found native Go shared library (.so), enabling parser support")
+IF(EXISTS "${CMAKE_SOURCE_DIR}/bridge/libmihomo.so")
+    MESSAGE(STATUS "Found mihomo Go shared library (.so), enabling native parser support")
     TARGET_INCLUDE_DIRECTORIES(${BUILD_TARGET_NAME} PRIVATE "${CMAKE_SOURCE_DIR}/bridge")
     TARGET_COMPILE_DEFINITIONS(${BUILD_TARGET_NAME} PRIVATE USE_MIHOMO_PARSER)
     
@@ -227,7 +226,7 @@ IF(NOT WIN32 AND EXISTS "${CMAKE_SOURCE_DIR}/bridge/libmihomo.so")
     TARGET_LINK_LIBRARIES(${BUILD_TARGET_NAME} "${CMAKE_SOURCE_DIR}/bridge/libmihomo.so")
     
 ELSEIF(EXISTS "${CMAKE_SOURCE_DIR}/bridge/libmihomo.a")
-    MESSAGE(STATUS "Found native Go static library (.a), enabling parser support")
+    MESSAGE(STATUS "Found mihomo Go static library (.a), enabling native parser support")
     TARGET_INCLUDE_DIRECTORIES(${BUILD_TARGET_NAME} PRIVATE "${CMAKE_SOURCE_DIR}/bridge")
     TARGET_COMPILE_DEFINITIONS(${BUILD_TARGET_NAME} PRIVATE USE_MIHOMO_PARSER)
     
@@ -251,7 +250,7 @@ ELSEIF(EXISTS "${CMAKE_SOURCE_DIR}/bridge/libmihomo.a")
     ENDIF()
 ELSE()
     MESSAGE(WARNING
-        "native Go library not found; Clash/ClashR parsing and the libXray foundation are disabled")
+        "mihomo Go library not found; Clash/ClashR node parsing is disabled")
 ENDIF()
 
 IF(WIN32)
