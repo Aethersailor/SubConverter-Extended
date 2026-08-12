@@ -1499,7 +1499,7 @@ std::string page(Request &request, Response &response) {
                 var remoteBackend = mode.remote_subscription_backend || "server-side-parse";
                 var hasRemoteResources = Number(resources.remote_subscription_count || 0) > 0;
                 var policyPathBackend = remoteBackend === "surge-policy-path" || remoteBackend === "surfboard-policy-path";
-                var routeLabel = mode.proxy_provider ? "proxy-provider" : (remoteBackend === "quanx-server-remote" && hasRemoteResources ? "server_remote" : (policyPathBackend && hasRemoteResources ? "policy-path" : "direct nodes"));
+                var routeLabel = mode.proxy_provider ? "proxy-provider" : (remoteBackend === "quanx-server-remote" && hasRemoteResources ? "server_remote" : (remoteBackend === "loon-remote-proxy" && hasRemoteResources ? "remote-proxy" : (policyPathBackend && hasRemoteResources ? "policy-path" : "direct nodes")));
                 stateLine.appendChild(tag(routeLabel, routeLabel === "direct nodes" ? "warn" : ""));
                 if (resources.remote_subscription_count) {
                     stateLine.appendChild(tag(text("remote resources ", "远程资源 ") + resources.remote_subscription_count));

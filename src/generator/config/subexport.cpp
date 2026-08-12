@@ -3117,6 +3117,115 @@ void proxyToMellow(std::vector<Proxy> &nodes, INIReader &ini,
                    "", ext.rule_stats);
 }
 
+static std::string clampLoonAlias(const std::string &alias,
+                                  size_t max_length) {
+  if (alias.size() <= max_length)
+    return alias;
+  std::string result = alias.substr(0, max_length);
+  while (!result.empty() && !isStrUTF8(result))
+    result.pop_back();
+  return result;
+}
+
+static void collectLoonSectionNames(INIReader &ini, const std::string &section,
+                                    std::unordered_set<std::string> &names) {
+  string_multimap items;
+  ini.set_current_section(section);
+  ini.get_items(items);
+  for (const auto &[name, value] : items) {
+    (void)value;
+    std::string normalized = trimWhitespace(name, true, true);
+    if (!normalized.empty() && normalized != "{NONAME}")
+      names.emplace(std::move(normalized));
+  }
+}
+
+static std::string reserveLoonAlias(std::unordered_set<std::string> &used,
+                                    const std::string &base,
+                                    const std::string &fallback) {
+  std::string normalized = clampLoonAlias(base, 64);
+  if (normalized.empty())
+    normalized = fallback;
+  if (used.insert(normalized).second)
+    return normalized;
+  int suffix_index = 1;
+  while (true) {
+    const std::string suffix = "_" + std::to_string(suffix_index++);
+    const size_t max_base = 64 > suffix.size() ? 64 - suffix.size() : 0;
+    const std::string candidate =
+        clampLoonAlias(normalized, max_base) + suffix;
+    if (used.insert(candidate).second)
+      return candidate;
+  }
+}
+
+static bool loonRemoteMatchesProvider(const LoonRemoteProxyResource &remote,
+                                      const std::string &provider) {
+  return provider == remote.requested_name ||
+         provider == remote.selection_name ||
+         provider == remote.resource_name;
+}
+
+static std::vector<LoonRemoteProxyResource *>
+loonResourcesForRule(const std::string &rule,
+                     std::vector<LoonRemoteProxyResource> &remotes,
+                     std::string &server_pattern) {
+  std::vector<LoonRemoteProxyResource *> selected;
+  selected.reserve(remotes.size());
+  for (LoonRemoteProxyResource &remote : remotes)
+    selected.emplace_back(&remote);
+
+  std::string target;
+  if (parseProviderGroupIdMatcher(rule, target, server_pattern)) {
+    selected.erase(
+        std::remove_if(selected.begin(), selected.end(), [&](const auto *item) {
+          return !matchRange(target, item->group_id);
+        }),
+        selected.end());
+  } else if (parseQuanXSourceGroupRule(rule, target, server_pattern)) {
+    selected.erase(
+        std::remove_if(selected.begin(), selected.end(), [&](const auto *item) {
+          return item->source_tag.empty() ||
+                 !regFind(item->source_tag, target);
+        }),
+        selected.end());
+  } else if (!startsWith(rule, "!!") && !startsWith(rule, "script:")) {
+    server_pattern = rule;
+  } else {
+    selected.clear();
+  }
+  if (server_pattern.empty())
+    server_pattern = ".*";
+  return selected;
+}
+
+static void appendLoonRemoteProxies(
+    INIReader &ini, std::vector<Proxy> &nodes,
+    const ProxyGroupConfigs &extra_proxy_group, extra_settings &ext,
+    std::unordered_set<std::string> &used_aliases) {
+  collectLoonSectionNames(ini, "Remote Proxy", used_aliases);
+  collectLoonSectionNames(ini, "Remote Filter", used_aliases);
+  collectLoonSectionNames(ini, "Proxy", used_aliases);
+  collectLoonSectionNames(ini, "Proxy Group", used_aliases);
+  for (const ProxyGroupConfig &group : extra_proxy_group)
+    used_aliases.emplace(group.Name);
+  for (const Proxy &node : nodes)
+    used_aliases.emplace(node.Remark);
+
+  ini.set_current_section("Remote Proxy");
+  for (LoonRemoteProxyResource &remote : ext.loon_remote_proxies) {
+    const std::string final_name = reserveLoonAlias(
+        used_aliases, remote.resource_name, "SubConverter_Remote");
+    if (final_name != remote.resource_name) {
+      remote.resource_name = final_name;
+      writeLog(LOG_LEVEL_INFO, "LOON_REMOTE_PROXY_RENAMED group_id=" +
+                                   std::to_string(remote.group_id));
+    }
+    ini.set(remote.resource_name,
+            replaceAllDistinct(remote.url, ",", "%2C"));
+  }
+}
+
 std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
                         std::vector<RulesetContent> &ruleset_content_array,
                         const ProxyGroupConfigs &extra_proxy_group,
@@ -3124,6 +3233,9 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
   INIReader ini;
   std::string output_nodelist;
   std::vector<Proxy> nodelist;
+  TargetGenerationStats &generation_stats = ext.loon_generation_stats;
+  generation_stats = TargetGenerationStats{};
+  generation_stats.input_nodes = nodes.size();
 
   RemarkSet used_remarks;
   used_remarks.reserve(nodes.size());
@@ -3135,6 +3247,11 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
                     summarizeSensitiveTextForLog(ini.get_last_error()));
     return "";
   }
+
+  std::unordered_set<std::string> used_remote_aliases;
+  if (!ext.nodelist)
+    appendLoonRemoteProxies(ini, nodes, extra_proxy_group, ext,
+                            used_remote_aliases);
 
   ini.set_current_section("Proxy");
   ini.erase_section();
@@ -3172,8 +3289,10 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
           proxy += "," + replaceAllDistinct(
                              replaceAllDistinct(pluginopts, ";obfs-host=", ","),
                              "obfs=", "");
-      } else if (!plugin.empty())
+      } else if (!plugin.empty()) {
+        generation_stats.unsupported_by_type[x.Type]++;
         continue;
+      }
       break;
     case ProxyType::VMess:
       if (method == "auto")
@@ -3191,6 +3310,7 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
         proxy += ",transport=ws,path=" + path + ",host=" + host;
         break;
       default:
+        generation_stats.unsupported_by_type[x.Type]++;
         continue;
       }
       if (!scv.is_undef())
@@ -3206,6 +3326,7 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
                   ",udp=" + (udp.get() ? "true" : "false") +
                   ",over-tls=" + (tlssecure ? "true" : "false") + ",sni=" + sni;
         } else {
+          generation_stats.unsupported_by_type[x.Type]++;
           continue;
         }
       } else {
@@ -3222,6 +3343,7 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
         break;
       default:
         if (transproto != "ws") {
+          generation_stats.unsupported_by_type[x.Type]++;
           continue;
         } else {
           break;
@@ -3315,6 +3437,7 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
             ",skip-cert-verify=" + std::string(scv.get() ? "true" : "false");
       break;
     default:
+      generation_stats.unsupported_by_type[x.Type]++;
       continue;
     }
 
@@ -3340,6 +3463,7 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
       nodelist.emplace_back(x);
       used_remarks.emplace(x.Remark);
     }
+    generation_stats.emitted_nodes++;
   }
 
   if (ext.nodelist)
@@ -3350,7 +3474,10 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
   ini.get_items(original_groups);
   ini.erase_section();
 
+  size_t loon_group_index = 0;
+  size_t generated_remote_filters = 0;
   for (const ProxyGroupConfig &x : extra_proxy_group) {
+    const size_t current_group_index = ++loon_group_index;
     string_array filtered_nodelist;
     std::string group, group_extra;
 
@@ -3373,6 +3500,55 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
 
     for (const auto &y : x.Proxies)
       groupGenerate(y, nodelist, filtered_nodelist, true, ext);
+
+    auto add_remote_member = [&](const std::string &member) {
+      if (std::find(filtered_nodelist.begin(), filtered_nodelist.end(),
+                    member) == filtered_nodelist.end()) {
+        filtered_nodelist.emplace_back(member);
+        generation_stats.remote_references_emitted++;
+      }
+    };
+
+    for (const std::string &provider : x.UsingProvider) {
+      for (const LoonRemoteProxyResource &remote : ext.loon_remote_proxies) {
+        if (loonRemoteMatchesProvider(remote, provider))
+          add_remote_member(remote.resource_name);
+      }
+    }
+
+    size_t remote_rule_index = 0;
+    for (const std::string &rule : x.Proxies) {
+      if (startsWith(rule, "[]") || rule == "DIRECT" || rule == "REJECT")
+        continue;
+      if (startsWith(toLower(rule), "http://") ||
+          startsWith(toLower(rule), "https://"))
+        continue;
+      std::string server_pattern;
+      std::vector<LoonRemoteProxyResource *> selected =
+          loonResourcesForRule(rule, ext.loon_remote_proxies, server_pattern);
+      if (selected.empty())
+        continue;
+      if (server_pattern == ".*") {
+        for (const LoonRemoteProxyResource *remote : selected)
+          add_remote_member(remote->resource_name);
+        continue;
+      }
+
+      const std::string filter_name = reserveLoonAlias(
+          used_remote_aliases,
+          "SubConverter_Filter_" + std::to_string(current_group_index) +
+              "_" + std::to_string(++remote_rule_index),
+          "SubConverter_Filter");
+      string_array resource_names;
+      resource_names.reserve(selected.size());
+      for (const LoonRemoteProxyResource *remote : selected)
+        resource_names.emplace_back(remote->resource_name);
+      ini.set("Remote Filter", filter_name,
+              "NameRegex," + join(resource_names, ",") +
+                  ",FilterKey=\"" + server_pattern + "\"");
+      generated_remote_filters++;
+      add_remote_member(filter_name);
+    }
 
     if (filtered_nodelist.empty())
       filtered_nodelist.emplace_back("DIRECT");
@@ -3415,6 +3591,15 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
     }
 
     ini.set("{NONAME}", x.Name + " = " + group); // insert order
+  }
+
+  if (!ext.loon_remote_proxies.empty()) {
+    writeLog(LOG_LEVEL_INFO,
+             "LOON_REMOTE_FILTERS_GENERATED resources=" +
+                 std::to_string(ext.loon_remote_proxies.size()) +
+                 " filters=" + std::to_string(generated_remote_filters) +
+                 " references=" +
+                 std::to_string(generation_stats.remote_references_emitted));
   }
 
   if (ext.enable_rule_generator)

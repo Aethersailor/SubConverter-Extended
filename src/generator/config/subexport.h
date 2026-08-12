@@ -65,6 +65,15 @@ struct SurfboardPolicyPathResource {
   int group_id = 0;
 };
 
+struct LoonRemoteProxyResource {
+  std::string resource_name;
+  std::string requested_name;
+  std::string selection_name;
+  std::string source_tag;
+  std::string url;
+  int group_id = 0;
+};
+
 struct TargetGenerationStats {
   size_t input_nodes = 0;
   size_t emitted_nodes = 0;
@@ -128,8 +137,10 @@ struct extra_settings {
   std::vector<QuanXServerRemote> quanx_server_remotes;
   std::vector<SurgePolicyPathResource> surge_policy_paths;
   std::vector<SurfboardPolicyPathResource> surfboard_policy_paths;
+  std::vector<LoonRemoteProxyResource> loon_remote_proxies;
   TargetGenerationStats surge_generation_stats;
   TargetGenerationStats surfboard_generation_stats;
+  TargetGenerationStats loon_generation_stats;
   bool authorized = false;
   RuleConversionStats *rule_stats = nullptr;
 

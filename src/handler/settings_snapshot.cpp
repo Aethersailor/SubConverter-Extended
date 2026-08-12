@@ -80,6 +80,7 @@ std::string sanitizedSettingsSnapshot(const Settings &settings) {
        {
            {"surge_policy_path", settings.surgePolicyPath},
            {"surfboard_policy_path", settings.surfboardPolicyPath},
+           {"loon_remote_proxy", settings.loonRemoteProxy},
        }},
       {"rules",
        {
