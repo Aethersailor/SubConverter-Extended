@@ -2,6 +2,7 @@
 #define PROXY_H_INCLUDED
 
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "utils/tribool.h"
@@ -131,6 +132,7 @@ struct Proxy {
   String GRPCMode;
   String ShortId;
   String Flow;
+  String Encryption;
   bool FlowShow = false;
   tribool DisableSni;
   uint32_t UpSpeed;
@@ -145,6 +147,12 @@ struct Proxy {
   String PacketEncoding;
   String Multiplexing;
   tribool V2rayHttpUpgrade;
+
+  // Recognized Xray share-link options that do not yet have a portable field
+  // in every legacy target generator. They are kept as decoded key/value
+  // pairs so single-link targets can round-trip the official URI without
+  // coupling the generic proxy model to every Xray release.
+  std::vector<std::pair<String, String>> XrayLinkOptions;
 
   // Complete type-preserving mapping returned by Mihomo. Clash output treats
   // this JSON document as the canonical representation; the fields above are

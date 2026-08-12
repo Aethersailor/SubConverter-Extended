@@ -248,37 +248,97 @@ bool isNumeric(const std::string &str) {
   return true;
 }
 
-std::string vmessLinkConstruct(const std::string &remarks,
-                               const std::string &add, const std::string &port,
-                               const std::string &type, const std::string &id,
-                               const std::string &aid, const std::string &net,
-                               const std::string &path, const std::string &host,
-                               const std::string &tls) {
+static std::string xrayLinkOption(const Proxy &proxy, const std::string &key) {
+  const auto found = std::find_if(
+      proxy.XrayLinkOptions.begin(), proxy.XrayLinkOptions.end(),
+      [&](const auto &item) { return item.first == key; });
+  return found == proxy.XrayLinkOptions.end() ? std::string() : found->second;
+}
+
+static std::string shareLinkHost(const std::string &host) {
+  return host.find(':') == std::string::npos ? host : "[" + host + "]";
+}
+
+static void appendShareQuery(std::vector<std::string> &query,
+                             const std::string &key,
+                             const std::string &value) {
+  if (!value.empty())
+    query.emplace_back(key + "=" + urlEncode(value));
+}
+
+static std::string joinShareQuery(const std::vector<std::string> &query) {
+  return query.empty() ? std::string() : "?" + join(query, "&");
+}
+
+std::string vmessLinkConstruct(const Proxy &proxy) {
+  const std::string port = std::to_string(proxy.Port);
+  const std::string alter_id = std::to_string(proxy.AlterId);
   rapidjson::StringBuffer sb;
   rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
   writer.StartObject();
   writer.Key("v");
   writer.String("2");
   writer.Key("ps");
-  writer.String(remarks.data());
+  writer.String(proxy.Remark.data());
   writer.Key("add");
-  writer.String(add.data());
+  writer.String(proxy.Hostname.data());
   writer.Key("port");
   writer.String(port.data());
   writer.Key("type");
-  writer.String(type.empty() ? "none" : type.data());
+  const std::string transport_type =
+      (proxy.TransferProtocol == "grpc" || proxy.TransferProtocol == "xhttp")
+          ? proxy.GRPCMode
+          : proxy.FakeType;
+  writer.String(transport_type.empty() ? "none" : transport_type.data());
   writer.Key("id");
-  writer.String(id.data());
+  writer.String(proxy.UserId.data());
   writer.Key("aid");
-  writer.String(aid.data());
+  writer.String(alter_id.data());
+  writer.Key("scy");
+  writer.String(proxy.EncryptMethod.empty() ? "auto"
+                                             : proxy.EncryptMethod.data());
   writer.Key("net");
-  writer.String(net.empty() ? "tcp" : net.data());
+  writer.String(proxy.TransferProtocol.empty() ? "tcp"
+                                                : proxy.TransferProtocol.data());
   writer.Key("path");
-  writer.String(path.data());
+  writer.String((proxy.TransferProtocol == "quic" ? proxy.QUICSecret
+                                                    : proxy.Path)
+                    .data());
   writer.Key("host");
-  writer.String(host.data());
+  writer.String((proxy.TransferProtocol == "quic" ? proxy.QUICSecure
+                                                    : proxy.Host)
+                    .data());
   writer.Key("tls");
-  writer.String(tls.data());
+  writer.String(proxy.TLSSecure
+                    ? (proxy.TLSStr.empty() ? "tls" : proxy.TLSStr.data())
+                    : "");
+  if (!proxy.ServerName.empty()) {
+    writer.Key("sni");
+    writer.String(proxy.ServerName.data());
+  }
+  if (!proxy.AlpnList.empty()) {
+    writer.Key("alpn");
+    writer.String(join(proxy.AlpnList, ",").data());
+  }
+  if (!proxy.Fingerprint.empty()) {
+    writer.Key("fp");
+    writer.String(proxy.Fingerprint.data());
+  }
+  if (!proxy.PublicKey.empty()) {
+    writer.Key("pbk");
+    writer.String(proxy.PublicKey.data());
+  }
+  if (!proxy.ShortId.empty()) {
+    writer.Key("sid");
+    writer.String(proxy.ShortId.data());
+  }
+  for (const char *key : {"authority", "extra", "fm"}) {
+    const std::string value = xrayLinkOption(proxy, key);
+    if (!value.empty()) {
+      writer.Key(key);
+      writer.String(value.data());
+    }
+  }
   writer.EndObject();
   return sb.GetString();
 }
@@ -1885,11 +1945,9 @@ std::string proxyToSingle(std::vector<Proxy> &nodes, SingleLinkTypes types,
                 &obfsparam = x.OBFSParam, &obfsPassword = x.OBFSPassword,
                 &id = x.UserId, &transproto = x.TransferProtocol,
                 &host = x.Host, &tls = x.TLSStr, &path = x.Path,
-                &faketype = x.FakeType, &ports = x.Ports;
-    bool &tlssecure = x.TLSSecure;
+                &ports = x.Ports;
     std::vector<string> alpns = x.AlpnList;
     std::string port = std::to_string(x.Port);
-    std::string aid = std::to_string(x.AlterId);
     switch (x.Type) {
     case ProxyType::Shadowsocks:
       if (ss) {
@@ -1934,10 +1992,7 @@ std::string proxyToSingle(std::vector<Proxy> &nodes, SingleLinkTypes types,
     case ProxyType::VMess:
       if (!vmess)
         continue;
-      proxyStr =
-          "vmess://" + base64Encode(vmessLinkConstruct(
-                           remark, hostname, port, faketype, id, aid,
-                           transproto, path, host, tlssecure ? "tls" : ""));
+      proxyStr = "vmess://" + base64Encode(vmessLinkConstruct(x));
       break;
     case ProxyType::Hysteria2:
       if (!hysteria2)
@@ -1959,89 +2014,119 @@ std::string proxyToSingle(std::vector<Proxy> &nodes, SingleLinkTypes types,
     case ProxyType::VLESS:
       if (!vless)
         continue;
-      // tls = getUrlArg(addition, "security");
-      // net = getUrlArg(addition, "type");
-      // flow = getUrlArg(addition, "flow");
-      // pbk = getUrlArg(addition, "pbk");
-      // sid = getUrlArg(addition, "sid");
-      // fp = getUrlArg(addition, "fp");
-      // std::string packet_encoding = getUrlArg(addition, "packet-encoding");
-      // std::string alpn = getUrlArg(addition, "alpn");
-      proxyStr = "vless://" +
-                 (id.empty() ? "00000000-0000-0000-0000-000000000000" : id) +
-                 "@" + hostname + ":" + port + "?";
-      if (!tls.empty()) {
-        if (!pbk.empty()) {
-          proxyStr += "&security=reality";
-        } else {
-          proxyStr += "&security=" + tls;
-        }
-      }
-
-      if (!flow.empty()) {
-        proxyStr += "&flow=" + flow;
-      }
-      if (!pbk.empty()) {
-        proxyStr += "&pbk=" + pbk;
-      }
-      if (!sid.empty()) {
-        proxyStr += "&sid=" + sid;
-      }
-      if (!fp.empty()) {
-        proxyStr += "&fp=" + fp;
-      }
-      if (!packet_encoding.empty()) {
-        proxyStr += "&packet-encoding=" + packet_encoding;
-      }
-      if (!alpns.empty()) {
-        proxyStr += "&alpn=" + alpns[0];
-      }
-      if (!sni.empty()) {
-        proxyStr += "&sni=" + sni;
-      }
-      if (!transproto.empty()) {
-        proxyStr += "&type=" + transproto;
+      {
+        std::vector<std::string> query;
+        appendShareQuery(query, "encryption",
+                         x.Encryption.empty() ? "none" : x.Encryption);
+        appendShareQuery(query, "security",
+                         !pbk.empty() ? "reality" : tls);
+        appendShareQuery(query, "flow", flow);
+        appendShareQuery(query, "pbk", pbk);
+        appendShareQuery(query, "sid", sid);
+        appendShareQuery(query, "fp", fp);
+        appendShareQuery(query, "packet-encoding", packet_encoding);
+        if (x.AllowInsecure.get())
+          appendShareQuery(query, "insecure", "1");
+        if (!alpns.empty())
+          appendShareQuery(query, "alpn", join(alpns, ","));
+        appendShareQuery(query, "sni", sni);
+        appendShareQuery(query, "type", transproto);
         switch (hash_(transproto)) {
         case "tcp"_hash:
-        case "ws"_hash:
-        case "h2"_hash:
-          proxyStr += "&headerType=" + fake_type;
-          if (!host.empty()) {
-            proxyStr += "&host=" + host;
+          appendShareQuery(query, "headerType", fake_type);
+          if (fake_type == "http") {
+            appendShareQuery(query, "host", host);
+            appendShareQuery(query, "path", path.empty() ? "/" : path);
           }
-          proxyStr += "&path=" + urlEncode(path.empty() ? "/" : path);
+          break;
+        case "kcp"_hash:
+          appendShareQuery(query, "headerType", fake_type);
+          appendShareQuery(query, "seed", path);
+          break;
+        case "ws"_hash:
+        case "http"_hash:
+        case "httpupgrade"_hash:
+          appendShareQuery(query, "headerType", fake_type);
+          appendShareQuery(query, "host", host);
+          appendShareQuery(query, "path", path.empty() ? "/" : path);
           break;
         case "grpc"_hash:
-          proxyStr += "&serviceName=" + path;
-          proxyStr += "&mode=" + mode;
+          appendShareQuery(query, "serviceName", x.GRPCServiceName);
+          appendShareQuery(query, "mode", mode);
+          appendShareQuery(query, "authority", xrayLinkOption(x, "authority"));
+          break;
+        case "xhttp"_hash:
+          appendShareQuery(query, "host", host);
+          appendShareQuery(query, "path", path.empty() ? "/" : path);
+          appendShareQuery(query, "mode", mode);
+          appendShareQuery(query, "extra", xrayLinkOption(x, "extra"));
           break;
         case "quic"_hash:
-          proxyStr += "&headerType=" + fake_type;
-          proxyStr += "&quicSecurity=" + (host.empty() ? sni : host);
-          proxyStr += "&key=" + path;
+          appendShareQuery(query, "headerType", fake_type);
+          appendShareQuery(query, "quicSecurity", host.empty() ? sni : host);
+          appendShareQuery(query, "key", x.QUICSecret);
           break;
         default:
           break;
         }
+        for (const char *key : {"fm", "ech", "pcs", "vcn", "pqv", "spx"})
+          appendShareQuery(query, key, xrayLinkOption(x, key));
+        proxyStr = "vless://" +
+                   (id.empty() ? "00000000-0000-0000-0000-000000000000" : id) +
+                   "@" + shareLinkHost(hostname) + ":" + port +
+                   joinShareQuery(query) + "#" + urlEncode(remark);
       }
-      proxyStr += "#" + urlEncode(remark);
       break;
     case ProxyType::Trojan:
       if (!trojan)
         continue;
-      proxyStr = "trojan://" + password + "@" + hostname + ":" + port +
-                 "?allowInsecure=" + (x.AllowInsecure.get() ? "1" : "0");
-      if (!sni.empty()) {
-        proxyStr += "&sni=" + sni;
-      } else if (!host.empty()) {
-        proxyStr += "&sni=" + host;
+      {
+        std::vector<std::string> query;
+        appendShareQuery(query, "security", tls.empty() ? "tls" : tls);
+        appendShareQuery(query, "allowInsecure",
+                         x.AllowInsecure.get() ? "1" : "0");
+        if (x.AllowInsecure.get())
+          appendShareQuery(query, "insecure", "1");
+        appendShareQuery(query, "sni", !sni.empty() ? sni : host);
+        appendShareQuery(query, "fp", fp);
+        appendShareQuery(query, "pbk", x.PublicKey);
+        appendShareQuery(query, "sid", x.ShortId);
+        if (!alpns.empty())
+          appendShareQuery(query, "alpn", join(alpns, ","));
+        appendShareQuery(query, "type", transproto);
+        if (transproto == "tcp") {
+          appendShareQuery(query, "headerType", fake_type);
+          if (fake_type == "http") {
+            appendShareQuery(query, "host", host);
+            appendShareQuery(query, "path", path.empty() ? "/" : path);
+          }
+        } else if (transproto == "kcp") {
+          appendShareQuery(query, "headerType", fake_type);
+          appendShareQuery(query, "seed", path);
+        } else if (transproto == "ws" || transproto == "http" ||
+                   transproto == "httpupgrade") {
+          appendShareQuery(query, "host", host);
+          appendShareQuery(query, "path", path.empty() ? "/" : path);
+        } else if (transproto == "grpc") {
+          appendShareQuery(query, "serviceName", path);
+          appendShareQuery(query, "mode", mode);
+          appendShareQuery(query, "authority", xrayLinkOption(x, "authority"));
+        } else if (transproto == "xhttp") {
+          appendShareQuery(query, "host", host);
+          appendShareQuery(query, "path", path.empty() ? "/" : path);
+          appendShareQuery(query, "mode", mode);
+          appendShareQuery(query, "extra", xrayLinkOption(x, "extra"));
+        } else if (transproto == "quic") {
+          appendShareQuery(query, "headerType", fake_type);
+          appendShareQuery(query, "quicSecurity", host);
+          appendShareQuery(query, "key", path);
+        }
+        for (const char *key : {"fm", "ech", "pcs", "vcn"})
+          appendShareQuery(query, key, xrayLinkOption(x, key));
+        proxyStr = "trojan://" + urlEncode(password) + "@" +
+                   shareLinkHost(hostname) + ":" + port +
+                   joinShareQuery(query) + "#" + urlEncode(remark);
       }
-      if (transproto == "ws") {
-        proxyStr += "&ws=1";
-        if (!path.empty())
-          proxyStr += "&wspath=" + urlEncode(path);
-      }
-      proxyStr += "#" + urlEncode(remark);
       break;
     default:
       continue;
@@ -3628,17 +3713,27 @@ static rapidjson::Value
 buildSingBoxTransport(const Proxy &proxy,
                       rapidjson::MemoryPoolAllocator<> &allocator) {
   rapidjson::Value transport(rapidjson::kObjectType);
-  switch (hash_(proxy.TransferProtocol)) {
+  const std::string transport_type =
+      proxy.TransferProtocol == "tcp" && proxy.FakeType == "http"
+          ? "http"
+          : proxy.TransferProtocol;
+  switch (hash_(transport_type)) {
   case "http"_hash: {
-    if (!proxy.Host.empty())
-      transport.AddMember("host", rapidjson::StringRef(proxy.Host.c_str()),
-                          allocator);
-    [[fallthrough]];
+    transport.AddMember("type", "http", allocator);
+    if (!proxy.Host.empty()) {
+      rapidjson::Value hosts(rapidjson::kArrayType);
+      hosts.PushBack(rapidjson::StringRef(proxy.Host.c_str()), allocator);
+      transport.AddMember("host", hosts, allocator);
+    }
+    transport.AddMember("path",
+                        rapidjson::StringRef(proxy.Path.empty()
+                                                 ? "/"
+                                                 : proxy.Path.c_str()),
+                        allocator);
+    break;
   }
   case "ws"_hash: {
-    transport.AddMember("type",
-                        rapidjson::StringRef(proxy.TransferProtocol.c_str()),
-                        allocator);
+    transport.AddMember("type", "ws", allocator);
     if (proxy.Path.empty())
       transport.AddMember("path", "/", allocator);
     else
@@ -3657,15 +3752,36 @@ buildSingBoxTransport(const Proxy &proxy,
   }
   case "grpc"_hash: {
     transport.AddMember("type", "grpc", allocator);
-    if (!proxy.Path.empty())
+    const std::string &service_name = proxy.GRPCServiceName.empty()
+                                          ? proxy.Path
+                                          : proxy.GRPCServiceName;
+    if (!service_name.empty())
       transport.AddMember("service_name",
-                          rapidjson::StringRef(proxy.Path.c_str()), allocator);
+                          rapidjson::StringRef(service_name.c_str()), allocator);
+    break;
+  }
+  case "httpupgrade"_hash: {
+    transport.AddMember("type", "httpupgrade", allocator);
+    transport.AddMember("host", rapidjson::StringRef(proxy.Host.c_str()),
+                        allocator);
+    transport.AddMember("path",
+                        rapidjson::StringRef(proxy.Path.empty()
+                                                 ? "/"
+                                                 : proxy.Path.c_str()),
+                        allocator);
     break;
   }
   default:
     break;
   }
   return transport;
+}
+
+static bool singBoxTransportSupported(const Proxy &proxy) {
+  const std::string &network = proxy.TransferProtocol;
+  return network.empty() || network == "tcp" || network == "ws" ||
+         network == "http" || network == "grpc" ||
+         network == "httpupgrade";
 }
 
 static void addSingBoxCommonMembers(
@@ -3677,16 +3793,6 @@ static void addSingBoxCommonMembers(
   proxy.AddMember("server", rapidjson::StringRef(x.Hostname.c_str()),
                   allocator);
   proxy.AddMember("server_port", x.Port, allocator);
-}
-
-static void addHeaders(rapidjson::Value &transport, const Proxy &x,
-                       rapidjson::MemoryPoolAllocator<> &allocator) {
-  rapidjson::Value headers(rapidjson::kObjectType);
-  if (!x.Host.empty())
-    headers.AddMember("Host", rapidjson::StringRef(x.Host.c_str()), allocator);
-  if (!x.Edge.empty())
-    headers.AddMember("Edge", rapidjson::StringRef(x.Edge.c_str()), allocator);
-  transport.AddMember("headers", headers, allocator);
 }
 
 static rapidjson::Value
@@ -3786,6 +3892,8 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
     //                break;
     //            }
     case ProxyType::VMess: {
+      if (!singBoxTransportSupported(x))
+        continue;
       addSingBoxCommonMembers(proxy, x, "vmess", allocator);
       proxy.AddMember("uuid", rapidjson::StringRef(x.UserId.c_str()),
                       allocator);
@@ -3799,6 +3907,8 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
       break;
     }
     case ProxyType::VLESS: {
+      if (!singBoxTransportSupported(x))
+        continue;
       addSingBoxCommonMembers(proxy, x, "vless", allocator);
       proxy.AddMember("uuid", rapidjson::StringRef(x.UserId.c_str()),
                       allocator);
@@ -3813,62 +3923,14 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
                         rapidjson::StringRef(x.PacketEncoding.c_str()),
                         allocator);
       }
-      rapidjson::Value vlesstransport(rapidjson::kObjectType);
-      rapidjson::Value vlessheaders(rapidjson::kObjectType);
-      switch (hash_(x.TransferProtocol)) {
-      case "tcp"_hash:
-        break;
-      case "ws"_hash:
-        if (x.Path.empty())
-          vlesstransport.AddMember("path", "/", allocator);
-        else
-          vlesstransport.AddMember("path", rapidjson::StringRef(x.Path.c_str()),
-                                   allocator);
-        if (!x.Host.empty())
-          vlessheaders.AddMember("Host", rapidjson::StringRef(x.Host.c_str()),
-                                 allocator);
-        if (!x.Edge.empty())
-          vlessheaders.AddMember("Edge", rapidjson::StringRef(x.Edge.c_str()),
-                                 allocator);
-        vlesstransport.AddMember("type", rapidjson::StringRef("ws"), allocator);
-        addHeaders(vlesstransport, x, allocator);
-        proxy.AddMember("transport", vlesstransport, allocator);
-        break;
-      case "http"_hash:
-        vlesstransport.AddMember("type", rapidjson::StringRef("http"),
-                                 allocator);
-        vlesstransport.AddMember("host", rapidjson::StringRef(x.Host.c_str()),
-                                 allocator);
-        vlesstransport.AddMember("method", rapidjson::StringRef("GET"),
-                                 allocator);
-        vlesstransport.AddMember("path", rapidjson::StringRef(x.Path.c_str()),
-                                 allocator);
-        addHeaders(vlesstransport, x, allocator);
-        proxy.AddMember("transport", vlesstransport, allocator);
-        break;
-      case "h2"_hash:
-        vlesstransport.AddMember("type", rapidjson::StringRef("httpupgrade"),
-                                 allocator);
-        vlesstransport.AddMember("host", rapidjson::StringRef(x.Host.c_str()),
-                                 allocator);
-        vlesstransport.AddMember("path", rapidjson::StringRef(x.Path.c_str()),
-                                 allocator);
-        proxy.AddMember("transport", vlesstransport, allocator);
-        break;
-      case "grpc"_hash:
-        vlesstransport.AddMember("type", rapidjson::StringRef("grpc"),
-                                 allocator);
-        vlesstransport.AddMember(
-            "service_name", rapidjson::StringRef(x.GRPCServiceName.c_str()),
-            allocator);
-        proxy.AddMember("transport", vlesstransport, allocator);
-        break;
-      default:
-        continue;
-      }
+      auto transport = buildSingBoxTransport(x, allocator);
+      if (!transport.ObjectEmpty())
+        proxy.AddMember("transport", transport, allocator);
       break;
     }
     case ProxyType::Trojan: {
+      if (!singBoxTransportSupported(x))
+        continue;
       addSingBoxCommonMembers(proxy, x, "trojan", allocator);
       proxy.AddMember("password", rapidjson::StringRef(x.Password.c_str()),
                       allocator);
@@ -4123,31 +4185,33 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
         tls.AddMember("alpn", alpns, allocator);
       }
       tls.AddMember("insecure", buildBooleanValue(scv), allocator);
-      if (x.Type == ProxyType::VLESS) {
+      const bool has_reality = !x.PublicKey.empty() || !x.ShortId.empty();
+      if (!x.Fingerprint.empty() && !has_reality) {
+        rapidjson::Value utls(rapidjson::kObjectType);
+        utls.AddMember("enabled", true, allocator);
+        utls.AddMember("fingerprint",
+                       rapidjson::StringRef(x.Fingerprint.c_str()), allocator);
+        tls.AddMember("utls", utls, allocator);
+      }
+      if (has_reality) {
         rapidjson::Value reality(rapidjson::kObjectType);
-        if (!x.PublicKey.empty() || !x.ShortId.empty()) {
-          rapidjson::Value utls(rapidjson::kObjectType);
-          utls.AddMember("enabled", true, allocator);
-          utls.AddMember("fingerprint", rapidjson::StringRef("chrome"),
-                         allocator);
-          tls.AddMember("utls", utls, allocator);
-          reality.AddMember("enabled", true, allocator);
-          if (!x.PublicKey.empty()) {
-            reality.AddMember("public_key",
-                              rapidjson::StringRef(x.PublicKey.c_str()),
-                              allocator);
-          }
-          //                    auto shortIds =
-          //                    stringArrayToJsonArray(x.ShortId, ",",
-          //                    allocator);
-          if (!x.ShortId.empty()) {
-            reality.AddMember(
-                "short_id", rapidjson::StringRef(x.ShortId.c_str()), allocator);
-          } else {
-            reality.AddMember("short_id", rapidjson::StringRef(""), allocator);
-          }
-          tls.AddMember("reality", reality, allocator);
+        rapidjson::Value utls(rapidjson::kObjectType);
+        utls.AddMember("enabled", true, allocator);
+        utls.AddMember(
+            "fingerprint",
+            rapidjson::StringRef(x.Fingerprint.empty() ? "chrome"
+                                                       : x.Fingerprint.c_str()),
+            allocator);
+        tls.AddMember("utls", utls, allocator);
+        reality.AddMember("enabled", true, allocator);
+        if (!x.PublicKey.empty()) {
+          reality.AddMember("public_key",
+                            rapidjson::StringRef(x.PublicKey.c_str()),
+                            allocator);
         }
+        reality.AddMember("short_id",
+                          rapidjson::StringRef(x.ShortId.c_str()), allocator);
+        tls.AddMember("reality", reality, allocator);
       }
       proxy.AddMember("tls", tls, allocator);
     }

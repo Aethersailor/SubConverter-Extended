@@ -39,6 +39,102 @@ VLESS_URI = (
     "vless://11111111-1111-1111-1111-111111111111@vless.example.test:443"
     "?security=tls&type=ws&host=vless.example.test&path=%2Fws#VLESSFixture"
 )
+VMESS_STANDARD_URI = (
+    "vmess://22222222-2222-2222-2222-222222222222@vmess.example.test:443"
+    "?encryption=none&security=tls&sni=tls.example.test"
+    "&alpn=h2%2Chttp%2F1.1&fp=chrome&insecure=1#VMessStandard"
+)
+VMESS_QR_URI = "vmess://" + base64.urlsafe_b64encode(
+    json.dumps(
+        {
+            "v": "2",
+            "ps": "VMessQR",
+            "add": "vmess-qr.example.test",
+            "port": "443",
+            "id": "33333333-3333-3333-3333-333333333333",
+            "aid": "0",
+            "scy": "chacha20-poly1305",
+            "net": "grpc",
+            "type": "multi",
+            "path": "grpc-service",
+            "host": "",
+            "tls": "tls",
+            "sni": "grpc.example.test",
+            "alpn": "h2,http/1.1",
+            "fp": "firefox",
+        },
+        separators=(",", ":"),
+    ).encode()
+).decode().rstrip("=")
+VMESS_QR_QUIC_URI = "vmess://" + base64.urlsafe_b64encode(
+    json.dumps(
+        {
+            "v": "2",
+            "ps": "VMessQUIC",
+            "add": "vmess-quic.example.test",
+            "port": "443",
+            "id": "99999999-9999-9999-9999-999999999999",
+            "aid": "0",
+            "scy": "auto",
+            "net": "quic",
+            "type": "srtp",
+            "host": "aes-128-gcm",
+            "path": "quic-secret",
+            "tls": "tls",
+        },
+        separators=(",", ":"),
+    ).encode()
+).decode().rstrip("=")
+VLESS_DEFAULT_TCP_URI = (
+    "vless://44444444-4444-4444-4444-444444444444@[2001:db8::1]:443"
+    "?encryption=none&security=tls&sni=vless-tls.example.test"
+    "&alpn=h2%2Chttp%2F1.1&insecure=1#VLESSDefaultTCP"
+)
+VLESS_XHTTP_URI = (
+    "vless://55555555-5555-5555-5555-555555555555@vless-xhttp.example.test:443"
+    "?encryption=none&security=reality&type=xhttp&host=xhttp.example.test"
+    "&path=%2Fsplit%3Ftoken%3D1&mode=stream-one"
+    "&extra=%7B%22xPaddingBytes%22%3A%22100-1000%22%7D"
+    "&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sid=00112233"
+    "&fp=chrome#VLESSXHTTP"
+)
+VLESS_HTTPUPGRADE_URI = (
+    "vless://66666666-6666-6666-6666-666666666666@upgrade.example.test:443"
+    "?encryption=none&security=tls&type=httpupgrade&host=upgrade-host.example.test"
+    "&path=%2Fupgrade#VLESSHTTPUpgrade"
+)
+VLESS_GRPC_URI = (
+    "vless://77777777-7777-7777-7777-777777777777@grpc-vless.example.test:443"
+    "?encryption=none&security=tls&type=grpc&serviceName=service%2Fname"
+    "&mode=multi&authority=authority.example.test#VLESSGRPC"
+)
+VLESS_TCP_HTTP_URI = (
+    "vless://88888888-8888-8888-8888-888888888888@http-vless.example.test:443"
+    "?encryption=none&security=tls&type=tcp&headerType=http"
+    "&host=header.example.test&path=%2Fheader#VLESSTCPHTTP"
+)
+VLESS_QUIC_URI = (
+    "vless://aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa@vless-quic.example.test:443"
+    "?encryption=none&security=tls&type=quic&headerType=utp"
+    "&quicSecurity=chacha20-poly1305&key=vless-quic-secret#VLESSQUIC"
+)
+TROJAN_WS_URI = (
+    "trojan://p%40ss+word%2Ftoken@[2001:db8::2]:443"
+    "?security=tls&type=ws&host=ws.example.test&path=%2Fsocket"
+    "&sni=trojan-tls.example.test&alpn=h2%2Chttp%2F1.1&fp=chrome"
+    "&insecure=1#TrojanWS"
+)
+TROJAN_KCP_URI = (
+    "trojan://kcp-password@trojan-kcp.example.test:443"
+    "?security=tls&type=kcp&headerType=wechat-video"
+    "&seed=trojan-kcp-seed#TrojanKCP"
+)
+XRAY_PROTOCOL_SUBSCRIPTION = (
+    VMESS_STANDARD_URI + "\n" + VLESS_HTTPUPGRADE_URI + "\n" + TROJAN_WS_URI + "\n"
+)
+ENCODED_XRAY_PROTOCOL_SUBSCRIPTION = base64.urlsafe_b64encode(
+    XRAY_PROTOCOL_SUBSCRIPTION.encode()
+).decode()
 HYSTERIA2_URI = (
     "hysteria2://hy-password@hy2.example.test:8443/?insecure=1"
     "&obfs=salamander&obfs-password=real-obfs-password"
@@ -199,6 +295,9 @@ class FixtureHandler(BaseHTTPRequestHandler):
             content_type = "text/plain; charset=utf-8"
         elif request_path == "/mixed-protocol-subscription.txt":
             body = ENCODED_MIXED_PROTOCOL_SUBSCRIPTION.encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/xray-protocol-subscription.txt":
+            body = ENCODED_XRAY_PROTOCOL_SUBSCRIPTION.encode()
             content_type = "text/plain; charset=utf-8"
         elif request_path == "/rules.list":
             body = RULESET.encode()
@@ -4265,6 +4364,17 @@ def simple_target_protocol_baseline(base_url: str, fixture_base: str) -> None:
     if "obfs-password=real-obfs-password" not in mixed:
         raise AssertionError("mixed output did not preserve Hysteria2 obfs password")
 
+    xray_source = fixture_base + "/xray-protocol-subscription.txt"
+    xray_mixed = convert("mixed", xray_source, True)
+    xray_lines = [line for line in xray_mixed.splitlines() if line]
+    if len(xray_lines) != 3 or not all(
+        any(line.startswith(prefix) for line in xray_lines)
+        for prefix in ("vmess://", "vless://", "trojan://")
+    ):
+        raise AssertionError(
+            f"fetched Xray subscription lost a protocol: {xray_mixed!r}"
+        )
+
     for target, uri, prefix in (
         ("vless", VLESS_URI, "vless://"),
         ("hysteria2", HYSTERIA2_URI, "hysteria2://"),
@@ -4276,6 +4386,269 @@ def simple_target_protocol_baseline(base_url: str, fixture_base: str) -> None:
         if not encoded.startswith(prefix):
             raise AssertionError(
                 f"Base64 {target} output decoded incorrectly: {encoded!r}"
+            )
+
+    def parse_single_link(link: str, expected_scheme: str) -> tuple[
+        urllib.parse.SplitResult, dict[str, list[str]]
+    ]:
+        parsed = urllib.parse.urlsplit(link.strip())
+        if parsed.scheme != expected_scheme:
+            raise AssertionError(
+                f"expected {expected_scheme} single link, got {link!r}"
+            )
+        return parsed, urllib.parse.parse_qs(
+            parsed.query, keep_blank_values=True
+        )
+
+    def parse_vmess_qr(link: str) -> dict[str, object]:
+        if not link.startswith("vmess://"):
+            raise AssertionError(f"expected VMess QR link, got {link!r}")
+        payload = link.removeprefix("vmess://").strip()
+        payload += "=" * (-len(payload) % 4)
+        try:
+            decoded = base64.urlsafe_b64decode(payload)
+            value = json.loads(decoded)
+        except (ValueError, json.JSONDecodeError) as error:
+            raise AssertionError(f"invalid VMess QR output: {link!r}") from error
+        if not isinstance(value, dict):
+            raise AssertionError(f"VMess QR output is not an object: {value!r}")
+        return value
+
+    standard_vmess = parse_vmess_qr(
+        convert("v2ray", VMESS_STANDARD_URI, True)
+    )
+    for key, expected in {
+        "id": "22222222-2222-2222-2222-222222222222",
+        "net": "tcp",
+        "scy": "none",
+        "tls": "tls",
+        "sni": "tls.example.test",
+        "alpn": "h2,http/1.1",
+        "fp": "chrome",
+    }.items():
+        if standard_vmess.get(key) != expected:
+            raise AssertionError(
+                f"standard VMess lost {key}: {standard_vmess!r}"
+            )
+
+    legacy_vmess_qr = parse_vmess_qr(convert("v2ray", VMESS_QR_URI, True))
+    for key, expected in {
+        "net": "grpc",
+        "type": "multi",
+        "path": "grpc-service",
+        "scy": "chacha20-poly1305",
+        "sni": "grpc.example.test",
+        "alpn": "h2,http/1.1",
+        "fp": "firefox",
+    }.items():
+        if legacy_vmess_qr.get(key) != expected:
+            raise AssertionError(
+                f"VMess QR compatibility lost {key}: {legacy_vmess_qr!r}"
+            )
+
+    quic_vmess_qr = parse_vmess_qr(
+        convert("v2ray", VMESS_QR_QUIC_URI, True)
+    )
+    for key, expected in {
+        "net": "quic",
+        "type": "srtp",
+        "host": "aes-128-gcm",
+        "path": "quic-secret",
+    }.items():
+        if quic_vmess_qr.get(key) != expected:
+            raise AssertionError(
+                f"VMess QUIC lost {key}: {quic_vmess_qr!r}"
+            )
+
+    default_vless, default_vless_query = parse_single_link(
+        convert("vless", VLESS_DEFAULT_TCP_URI, True), "vless"
+    )
+    if default_vless.hostname != "2001:db8::1" or default_vless.port != 443:
+        raise AssertionError(
+            f"VLESS IPv6 authority was not preserved: {default_vless!r}"
+        )
+    for key, expected in {
+        "encryption": ["none"],
+        "security": ["tls"],
+        "type": ["tcp"],
+        "sni": ["vless-tls.example.test"],
+        "alpn": ["h2,http/1.1"],
+        "insecure": ["1"],
+    }.items():
+        if default_vless_query.get(key) != expected:
+            raise AssertionError(
+                f"default VLESS TCP lost {key}: {default_vless_query!r}"
+            )
+
+    _, xhttp_query = parse_single_link(
+        convert("vless", VLESS_XHTTP_URI, True), "vless"
+    )
+    for key, expected in {
+        "type": ["xhttp"],
+        "path": ["/split?token=1"],
+        "host": ["xhttp.example.test"],
+        "mode": ["stream-one"],
+        "extra": ['{"xPaddingBytes":"100-1000"}'],
+        "security": ["reality"],
+        "pbk": ["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],
+        "sid": ["00112233"],
+    }.items():
+        if xhttp_query.get(key) != expected:
+            raise AssertionError(
+                f"VLESS XHTTP lost {key}: {xhttp_query!r}"
+            )
+    if xhttp_query.get("type") == ["h2"]:
+        raise AssertionError("VLESS XHTTP was silently downgraded to h2")
+
+    _, grpc_query = parse_single_link(
+        convert("vless", VLESS_GRPC_URI, True), "vless"
+    )
+    for key, expected in {
+        "type": ["grpc"],
+        "serviceName": ["service/name"],
+        "mode": ["multi"],
+        "authority": ["authority.example.test"],
+    }.items():
+        if grpc_query.get(key) != expected:
+            raise AssertionError(
+                f"VLESS gRPC lost {key}: {grpc_query!r}"
+            )
+
+    _, tcp_http_query = parse_single_link(
+        convert("vless", VLESS_TCP_HTTP_URI, True), "vless"
+    )
+    for key, expected in {
+        "type": ["tcp"],
+        "headerType": ["http"],
+        "host": ["header.example.test"],
+        "path": ["/header"],
+    }.items():
+        if tcp_http_query.get(key) != expected:
+            raise AssertionError(
+                f"VLESS TCP HTTP header lost {key}: {tcp_http_query!r}"
+            )
+
+    _, vless_quic_query = parse_single_link(
+        convert("vless", VLESS_QUIC_URI, True), "vless"
+    )
+    for key, expected in {
+        "type": ["quic"],
+        "headerType": ["utp"],
+        "quicSecurity": ["chacha20-poly1305"],
+        "key": ["vless-quic-secret"],
+    }.items():
+        if vless_quic_query.get(key) != expected:
+            raise AssertionError(
+                f"VLESS QUIC lost {key}: {vless_quic_query!r}"
+            )
+
+    trojan, trojan_query = parse_single_link(
+        convert("trojan", TROJAN_WS_URI, True), "trojan"
+    )
+    if (
+        urllib.parse.unquote(trojan.username or "") != "p@ss+word/token"
+        or trojan.hostname != "2001:db8::2"
+        or trojan.port != 443
+    ):
+        raise AssertionError(f"Trojan credentials/IPv6 were changed: {trojan!r}")
+    for key, expected in {
+        "type": ["ws"],
+        "host": ["ws.example.test"],
+        "path": ["/socket"],
+        "sni": ["trojan-tls.example.test"],
+        "alpn": ["h2,http/1.1"],
+        "fp": ["chrome"],
+        "insecure": ["1"],
+    }.items():
+        if trojan_query.get(key) != expected:
+            raise AssertionError(
+                f"Trojan WS lost {key}: {trojan_query!r}"
+            )
+
+    _, trojan_kcp_query = parse_single_link(
+        convert("trojan", TROJAN_KCP_URI, True), "trojan"
+    )
+    for key, expected in {
+        "type": ["kcp"],
+        "headerType": ["wechat-video"],
+        "seed": ["trojan-kcp-seed"],
+    }.items():
+        if trojan_kcp_query.get(key) != expected:
+            raise AssertionError(
+                f"Trojan KCP lost {key}: {trojan_kcp_query!r}"
+            )
+
+    for uri, expected_type in (
+        (VMESS_STANDARD_URI, "vmess"),
+        (VLESS_HTTPUPGRADE_URI, "vless"),
+        (TROJAN_WS_URI, "trojan"),
+    ):
+        singbox = json.loads(convert("singbox", uri, True))
+        outbounds = singbox.get("outbounds", [])
+        if len(outbounds) != 1 or outbounds[0].get("type") != expected_type:
+            raise AssertionError(
+                f"sing-box lost {expected_type} node: {singbox!r}"
+            )
+        outbound = outbounds[0]
+        if expected_type == "vmess":
+            if outbound.get("security") != "none" or "transport" in outbound:
+                raise AssertionError(
+                    f"sing-box VMess default TCP was changed: {outbound!r}"
+                )
+            tls = outbound.get("tls", {})
+            if (
+                tls.get("server_name") != "tls.example.test"
+                or tls.get("alpn") != ["h2", "http/1.1"]
+                or tls.get("utls", {}).get("fingerprint") != "chrome"
+            ):
+                raise AssertionError(
+                    f"sing-box VMess TLS options were lost: {outbound!r}"
+                )
+        elif expected_type == "vless":
+            transport = outbound.get("transport", {})
+            if transport != {
+                "type": "httpupgrade",
+                "host": "upgrade-host.example.test",
+                "path": "/upgrade",
+            }:
+                raise AssertionError(
+                    f"sing-box VLESS HTTPUpgrade was changed: {outbound!r}"
+                )
+        else:
+            transport = outbound.get("transport", {})
+            if transport.get("type") != "ws" or transport.get("path") != "/socket":
+                raise AssertionError(
+                    f"sing-box Trojan WS was changed: {outbound!r}"
+                )
+            tls = outbound.get("tls", {})
+            if (
+                tls.get("server_name") != "trojan-tls.example.test"
+                or tls.get("alpn") != ["h2", "http/1.1"]
+                or tls.get("utls", {}).get("fingerprint") != "chrome"
+            ):
+                raise AssertionError(
+                    f"sing-box Trojan TLS options were lost: {outbound!r}"
+                )
+
+    for uri, expected_transport in (
+        (
+            VLESS_GRPC_URI,
+            {"type": "grpc", "service_name": "service/name"},
+        ),
+        (
+            VLESS_TCP_HTTP_URI,
+            {
+                "type": "http",
+                "host": ["header.example.test"],
+                "path": "/header",
+            },
+        ),
+    ):
+        singbox = json.loads(convert("singbox", uri, True))
+        outbounds = singbox.get("outbounds", [])
+        if len(outbounds) != 1 or outbounds[0].get("transport") != expected_transport:
+            raise AssertionError(
+                f"sing-box VLESS transport changed: {singbox!r}"
             )
 
     status, body, _ = request(
