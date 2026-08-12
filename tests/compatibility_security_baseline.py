@@ -4775,6 +4775,259 @@ def classic_protocol_baseline(base_url: str, fixture_base: str) -> None:
             )
 
 
+def wireguard_structured_conversion_baseline(
+    base_url: str, endpoint_base_url: str
+) -> None:
+    private_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+    public_key_one = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="
+    public_key_two = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC="
+    preshared_key = "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD="
+
+    def data_url(content: str) -> str:
+        return "data:text/plain;base64," + base64.b64encode(
+            content.encode("utf-8")
+        ).decode("ascii")
+
+    def convert(
+        service: str, target: str, source: str, *, list_mode: bool = False
+    ) -> str:
+        params = {
+            "target": target,
+            "url": source,
+            "config": DISABLE_RULEGEN_CONFIG,
+            "list": str(list_mode).lower(),
+        }
+        if target == "surge":
+            params["ver"] = "4"
+        status, body, _ = request(service, "/sub", params)
+        if status != 200:
+            raise AssertionError(
+                f"WireGuard target={target} returned HTTP {status}: {body!r}"
+            )
+        return body.decode("utf-8").replace("\r\n", "\n")
+
+    surge_source = (
+        "[Proxy]\n"
+        "WG Structured = wireguard, section-name=structured\n\n"
+        "[WireGuard structured]\n"
+        f"private-key = {private_key}\n"
+        "self-ip = 10.77.0.2\n"
+        "self-ip-v6 = 2001:db8:77::2\n"
+        "dns-server = 1.1.1.1,2606:4700:4700::1111\n"
+        "mtu = 1280\n"
+        "peer = ("
+        f"public-key = {public_key_one}, "
+        "allowed-ips = \"0.0.0.0/0, ::/0\", "
+        "endpoint = wg-one.example.test:51820, "
+        f"preshared-key = {preshared_key}, keepalive = 25)\n"
+        "peer = ("
+        f"public-key = {public_key_two}, "
+        "allowed-ips = \"10.0.0.0/8, 2001:db8::/32\", "
+        "endpoint = [2001:db8::53]:51821, client-id = 1/2/3, "
+        "keepalive = 25)\n"
+    )
+    surge_data = data_url(surge_source)
+
+    surge_output = convert(base_url, "surge", surge_data)
+    for expected in (
+        "private-key=" + private_key,
+        "self-ip=10.77.0.2",
+        "self-ip-v6=2001:db8:77::2",
+        "public-key = " + public_key_one,
+        "public-key = " + public_key_two,
+        "endpoint = [2001:db8::53]:51821",
+        "preshared-key = " + preshared_key,
+        "keepalive = 25",
+        "client-id = 1/2/3",
+    ):
+        if expected not in surge_output:
+            raise AssertionError(
+                f"Surge WireGuard output lost {expected!r}: {surge_output!r}"
+            )
+    if surge_output.count("public-key = ") != 2:
+        raise AssertionError("Surge output did not preserve both WireGuard peers")
+
+    loon_output = convert(base_url, "loon", surge_data)
+    for expected in (
+        "wireguard, interface-ip=10.77.0.2",
+        "interface-ipV6=2001:db8:77::2",
+        "keepalive=25",
+        "public-key=\"" + public_key_one + "\"",
+        "public-key=\"" + public_key_two + "\"",
+        "preshared-key=\"" + preshared_key + "\"",
+        "reserved=[1,2,3]",
+    ):
+        if expected not in loon_output:
+            raise AssertionError(
+                f"Loon WireGuard output lost {expected!r}: {loon_output!r}"
+            )
+
+    old_output_text = convert(base_url, "singbox", surge_data, list_mode=True)
+    old_output = json.loads(old_output_text)
+    wireguard_outbounds = [
+        item
+        for item in old_output.get("outbounds", [])
+        if isinstance(item, dict) and item.get("type") == "wireguard"
+    ]
+    if len(wireguard_outbounds) != 1 or old_output.get("endpoints"):
+        raise AssertionError(
+            f"default sing-box schema no longer emits one legacy outbound: {old_output!r}"
+        )
+    old_wireguard = wireguard_outbounds[0]
+    if (
+        old_wireguard.get("private_key") != private_key
+        or old_wireguard.get("local_address")
+        != ["10.77.0.2/32", "2001:db8:77::2/128"]
+        or len(old_wireguard.get("peers", [])) != 2
+        or old_wireguard["peers"][0].get("pre_shared_key") != preshared_key
+        or old_wireguard["peers"][1].get("reserved") != [1, 2, 3]
+    ):
+        raise AssertionError(
+            f"legacy sing-box WireGuard output is incomplete: {old_wireguard!r}"
+        )
+
+    old_roundtrip = convert(
+        base_url, "surge", data_url(json.dumps(old_output, separators=(",", ":")))
+    )
+    if private_key not in old_roundtrip or old_roundtrip.count("public-key = ") != 2:
+        raise AssertionError(
+            "sing-box outbound import swapped keys or lost structured peers"
+        )
+
+    loon_roundtrip = json.loads(
+        convert(base_url, "singbox", data_url(loon_output), list_mode=True)
+    )
+    loon_wireguard = next(
+        (
+            item
+            for item in loon_roundtrip.get("outbounds", [])
+            if isinstance(item, dict) and item.get("type") == "wireguard"
+        ),
+        None,
+    )
+    if loon_wireguard is None or len(loon_wireguard.get("peers", [])) != 2:
+        raise AssertionError("Loon inline WireGuard input lost multi-peer structure")
+
+    endpoint_output = json.loads(
+        convert(endpoint_base_url, "singbox", surge_data, list_mode=True)
+    )
+    endpoint_wireguards = [
+        item
+        for item in endpoint_output.get("endpoints", [])
+        if isinstance(item, dict) and item.get("type") == "wireguard"
+    ]
+    endpoint_outbounds = [
+        item
+        for item in endpoint_output.get("outbounds", [])
+        if isinstance(item, dict) and item.get("type") == "wireguard"
+    ]
+    if len(endpoint_wireguards) != 1 or endpoint_outbounds:
+        raise AssertionError(
+            f"opt-in sing-box endpoint schema is malformed: {endpoint_output!r}"
+        )
+    endpoint = endpoint_wireguards[0]
+    if (
+        endpoint.get("private_key") != private_key
+        or endpoint.get("address") != ["10.77.0.2/32", "2001:db8:77::2/128"]
+        or len(endpoint.get("peers", [])) != 2
+        or endpoint["peers"][0].get("persistent_keepalive_interval") != 25
+        or endpoint["peers"][1].get("address") != "2001:db8::53"
+    ):
+        raise AssertionError(f"sing-box endpoint fields are incomplete: {endpoint!r}")
+
+    expanded_endpoint_output = json.loads(json.dumps(endpoint_output))
+    expanded_endpoint_output["endpoints"][0]["address"].append(
+        "10.77.0.3/32"
+    )
+    expanded_roundtrip = json.loads(
+        convert(
+            endpoint_base_url,
+            "singbox",
+            data_url(
+                json.dumps(expanded_endpoint_output, separators=(",", ":"))
+            ),
+            list_mode=True,
+        )
+    )
+    if expanded_roundtrip["endpoints"][0].get("address") != [
+        "10.77.0.2/32",
+        "2001:db8:77::2/128",
+        "10.77.0.3/32",
+    ]:
+        raise AssertionError("sing-box endpoint import lost a local address")
+
+    endpoint_roundtrip = convert(
+        base_url,
+        "loon",
+        data_url(json.dumps(endpoint_output, separators=(",", ":"))),
+    )
+    if private_key not in endpoint_roundtrip or endpoint_roundtrip.count(
+        "public-key=\""
+    ) != 2:
+        raise AssertionError("sing-box endpoint import lost keys or peers")
+
+    clash_source = (
+        "proxies:\n"
+        "  - name: Clash WG\n"
+        "    type: wireguard\n"
+        f"    private-key: {private_key}\n"
+        "    ip: 10.88.0.2\n"
+        "    ipv6: 2001:db8:88::2\n"
+        "    peers:\n"
+        "      - server: clash-one.example.test\n"
+        "        port: 51830\n"
+        f"        public-key: {public_key_one}\n"
+        "        allowed-ips: [0.0.0.0/0, '::/0']\n"
+        "        persistent-keepalive: 30\n"
+        "      - server: 2001:db8::54\n"
+        "        port: 51831\n"
+        f"        public-key: {public_key_two}\n"
+        "        reserved: [4, 5, 6]\n"
+        "        persistent-keepalive: 30\n"
+    )
+    clash_to_loon = convert(base_url, "loon", data_url(clash_source))
+    if (
+        clash_to_loon.count("public-key=\"") != 2
+        or "reserved=[4,5,6]" not in clash_to_loon
+        or "keepalive=30" not in clash_to_loon
+    ):
+        raise AssertionError(
+            f"Clash multi-peer WireGuard input was not preserved: {clash_to_loon!r}"
+        )
+
+    clash_simple_source = (
+        "proxies:\n"
+        "  - name: Clash WG Simple\n"
+        "    type: wireguard\n"
+        "    server: simple-wg.example.test\n"
+        "    port: 51840\n"
+        f"    public-key: {public_key_one}\n"
+        f"    private-key: {private_key}\n"
+        f"    pre-shared-key: {preshared_key}\n"
+        "    ip: 10.99.0.2\n"
+        "    allowed-ips: [0.0.0.0/0, '::/0']\n"
+        "    reserved: [7, 8, 9]\n"
+        "    persistent-keepalive: 35\n"
+    )
+    clash_simple_output = json.loads(
+        convert(
+            base_url,
+            "singbox",
+            data_url(clash_simple_source),
+            list_mode=True,
+        )
+    )["outbounds"][0]
+    if (
+        clash_simple_output.get("private_key") != private_key
+        or clash_simple_output["peers"][0].get("pre_shared_key")
+        != preshared_key
+        or clash_simple_output["peers"][0].get("reserved") != [7, 8, 9]
+    ):
+        raise AssertionError(
+            f"Mihomo simple WireGuard fields were not imported: {clash_simple_output!r}"
+        )
+
+
 def simple_target_protocol_baseline(base_url: str, fixture_base: str) -> None:
     source = fixture_base + "/mixed-protocol-subscription.txt"
 
@@ -5873,6 +6126,43 @@ def settings_reload_compatibility_baseline(helper: Path) -> None:
                 )
 
 
+def settings_singbox_wireguard_endpoint_baseline(helper: Path) -> None:
+    runtime_dir = REPOSITORY / "build" / "test-baseline-runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=runtime_dir) as temporary:
+        temporary_path = Path(temporary)
+        for fixture_name in (
+            "legacy-pref.ini",
+            "legacy-pref.yml",
+            "legacy-pref.toml",
+        ):
+            original = COMPAT_FIXTURES / fixture_name
+            legacy = load_settings_snapshot(helper, original)
+            if legacy["singbox"]["wireguard_endpoint"] is not False:
+                raise AssertionError(
+                    f"{original.suffix} legacy WireGuard schema default changed"
+                )
+            content = original.read_text(encoding="utf-8")
+            if original.suffix == ".yml":
+                content += "\nsingbox:\n  wireguard_endpoint: true\n"
+            elif original.suffix == ".toml":
+                content += "\n[singbox]\nwireguard_endpoint = true\n"
+            else:
+                content += "\n[singbox]\nwireguard_endpoint=true\n"
+            configured = temporary_path / fixture_name
+            configured.write_text(content, encoding="utf-8", newline="\n")
+            enabled = load_settings_snapshot(helper, configured)
+            if enabled["singbox"]["wireguard_endpoint"] is not True:
+                raise AssertionError(
+                    f"{original.suffix} did not enable WireGuard endpoint output"
+                )
+            reloaded = reload_settings_snapshot(helper, configured, original)
+            if reloaded["singbox"]["wireguard_endpoint"] is not False:
+                raise AssertionError(
+                    f"{original.suffix} hot reload retained a removed endpoint switch"
+                )
+
+
 def common_scalar_binding_compatibility_baseline(helper: Path) -> None:
     configured_values: dict[str, str | bool] = {
         "prepend_insert_url": False,
@@ -6861,6 +7151,7 @@ def main() -> int:
         raise AssertionError("historical security profile default changed")
     security_configuration_matrix_baseline(settings_snapshot_helper)
     settings_reload_compatibility_baseline(settings_snapshot_helper)
+    settings_singbox_wireguard_endpoint_baseline(settings_snapshot_helper)
     common_scalar_binding_compatibility_baseline(settings_snapshot_helper)
     settings_parser_diagnostic_redaction_baseline(settings_snapshot_helper)
     settings_provider_interval_compatibility_baseline(settings_snapshot_helper)
@@ -6875,12 +7166,42 @@ def main() -> int:
         insert_url_parser_route_baseline(binary, fixture_base)
         vary_cache_and_coalesce_baseline(binary, fixture_base)
         explain_privacy_and_cache_baseline(binary, fixture_base)
-        with running_service(binary) as base_url:
+        wireguard_outbound_logs: list[str] = []
+        with running_service(
+            binary, log_capture=wireguard_outbound_logs
+        ) as base_url:
             conversion_baselines(base_url, fixture_base, args.update_golden)
             parser_route_isolation_baseline(base_url, fixture_base)
             classic_protocol_baseline(base_url, fixture_base)
+            wireguard_endpoint_logs: list[str] = []
+            with running_service(
+                binary,
+                log_capture=wireguard_endpoint_logs,
+                config_replacements=((
+                    "[custom_openclash_rules]",
+                    "[singbox]\nwireguard_endpoint = true\n\n"
+                    "[custom_openclash_rules]",
+                ),),
+            ) as endpoint_base_url:
+                wireguard_structured_conversion_baseline(
+                    base_url, endpoint_base_url
+                )
+            if not wireguard_endpoint_logs or (
+                "SINGBOX_WIREGUARD_GENERATION schema=endpoint nodes=1 peers=2"
+                not in wireguard_endpoint_logs[0]
+            ):
+                raise AssertionError(
+                    "sing-box endpoint WireGuard diagnostics are missing"
+                )
             simple_target_protocol_baseline(base_url, fixture_base)
             provider_direct_default_output_baseline(base_url, fixture_base)
+        if not wireguard_outbound_logs or (
+            "SINGBOX_WIREGUARD_GENERATION schema=outbound nodes=1 peers=2"
+            not in wireguard_outbound_logs[0]
+        ):
+            raise AssertionError(
+                "sing-box outbound WireGuard diagnostics are missing"
+            )
         with running_service(
             binary,
             config_replacements=(

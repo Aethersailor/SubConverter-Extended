@@ -168,6 +168,11 @@ remote_subscription:
   # Loon full profiles use Remote Proxy for compatible subscriptions by default; set false to force legacy server-side parsing.
   loon_remote_proxy: true
 
+singbox:
+  # 新配置使用 sing-box 1.11+ WireGuard endpoint；旧配置缺少本节时仍保持旧 outbound 输出。
+  # New configs use the sing-box 1.11+ WireGuard endpoint; existing configs without this section keep legacy outbound output.
+  wireguard_endpoint: true
+
 security:
   # 安全档位：lan 保留局域网兼容行为并允许本地/私网/fake-ip 资源；public 限制公开请求控制的不受信任抓取；strict 另行强制禁止公开上传。
   # Security profile: lan preserves LAN-compatible access to local/private/fake-IP resources; public restricts untrusted request-controlled fetches; strict also forbids public upload.

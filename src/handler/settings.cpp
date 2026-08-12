@@ -934,6 +934,11 @@ void readYAMLConf(YAML::Node &node,
         global.loonRemoteProxy;
   }
 
+  if (node["singbox"].IsDefined() && node["singbox"].IsMap()) {
+    node["singbox"]["wireguard_endpoint"] >>
+        global.singBoxWireGuardEndpoint;
+  }
+
   if (node["emojis"].IsDefined()) {
     section = node["emojis"];
     section["add_emoji"] >> global.addEmoji;
@@ -1248,6 +1253,14 @@ void readTOMLConf(toml::value &root,
     }
   }
 
+  if (root.contains("singbox")) {
+    const auto &section_singbox = root.as_table().at("singbox");
+    if (section_singbox.is_table()) {
+      find_if_exist(section_singbox, "wireguard_endpoint",
+                    global.singBoxWireGuardEndpoint);
+    }
+  }
+
   auto section_emojis = toml::find(root, "emojis");
 
   find_if_exist(section_emojis, "add_emoji", global.addEmoji,
@@ -1444,6 +1457,7 @@ bool readConf() {
     global.proxyProviderDirect = kDefaultProxyProviderDirect;
     global.surgePolicyPath = true;
     global.surfboardPolicyPath = true;
+    global.singBoxWireGuardEndpoint = false;
   };
 
   std::string prefdata;
@@ -1621,6 +1635,12 @@ bool readConf() {
     ini.get_bool_if_exist("surfboard_policy_path",
                           global.surfboardPolicyPath);
     ini.get_bool_if_exist("loon_remote_proxy", global.loonRemoteProxy);
+  }
+
+  if (ini.section_exist("singbox")) {
+    ini.enter_section("singbox");
+    ini.get_bool_if_exist("wireguard_endpoint",
+                          global.singBoxWireGuardEndpoint);
   }
 
   if (ini.section_exist("node_pref")) {

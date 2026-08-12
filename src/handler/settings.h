@@ -89,6 +89,9 @@ struct Settings {
   bool surgePolicyPath = true;
   bool surfboardPolicyPath = true;
   bool loonRemoteProxy = true;
+  // Preserve the historical sing-box WireGuard outbound by default. Newer
+  // deployments can opt into the 1.11+ endpoint schema independently.
+  bool singBoxWireGuardEndpoint = false;
   std::string sortScript, filterScript;
 
   std::string clashBase;

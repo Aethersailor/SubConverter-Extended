@@ -41,6 +41,16 @@ static bool parseProviderGroupIdMatcher(const std::string &rule,
 
 namespace {
 
+std::vector<WireGuardPeer> wireGuardPeers(const Proxy &node);
+std::vector<std::string> wireGuardLocalAddresses(const Proxy &node);
+std::string wireGuardAddressWithoutPrefix(std::string address);
+std::string wireGuardAddressWithDefaultPrefix(std::string address);
+std::string wireGuardEndpoint(const WireGuardPeer &peer);
+std::string generatePeer(const WireGuardPeer &peer,
+                         bool client_id_as_reserved = false);
+std::string generateLoonWireGuardPeer(const WireGuardPeer &peer);
+bool wireGuardStructuredConfigIsSafe(const Proxy &node);
+
 template <typename Resource> struct PolicyPathSelector {
   const Resource *resource = nullptr;
   std::string policy_pattern;
@@ -901,14 +911,56 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
         singleproxy["password"].SetTag("str");
       break;
     case ProxyType::WireGuard:
+      if (!wireGuardStructuredConfigIsSafe(x))
+        continue;
       singleproxy["type"] = "wireguard";
-      singleproxy["public-key"] = x.PublicKey;
       singleproxy["private-key"] = x.PrivateKey;
-      singleproxy["ip"] = x.SelfIP;
-      if (!x.SelfIPv6.empty())
-        singleproxy["ipv6"] = x.SelfIPv6;
-      if (!x.PreSharedKey.empty())
-        singleproxy["preshared-key"] = x.PreSharedKey;
+      {
+        const auto addresses = wireGuardLocalAddresses(x);
+        for (const std::string &address : addresses) {
+          const std::string bare = wireGuardAddressWithoutPrefix(address);
+          if (singleproxy["ip"].IsDefined() || !isIPv4(bare)) {
+            if (!singleproxy["ipv6"].IsDefined() && isIPv6(bare))
+              singleproxy["ipv6"] = bare;
+          } else {
+            singleproxy["ip"] = bare;
+          }
+        }
+      }
+      {
+        const auto peers = wireGuardPeers(x);
+        if (peers.size() == 1) {
+          const WireGuardPeer &peer = peers.front();
+          singleproxy["server"] = peer.Hostname;
+          singleproxy["port"] = peer.Port;
+          singleproxy["public-key"] = peer.PublicKey;
+          if (!peer.PreSharedKey.empty())
+            singleproxy["pre-shared-key"] = peer.PreSharedKey;
+          if (!peer.Reserved.empty())
+            for (const std::string &value : split(peer.Reserved, ","))
+              singleproxy["reserved"].push_back(to_int(trim(value), 0));
+        } else {
+          singleproxy.remove("server");
+          singleproxy.remove("port");
+          for (const WireGuardPeer &peer : peers) {
+            YAML::Node yaml_peer;
+            yaml_peer["server"] = peer.Hostname;
+            yaml_peer["port"] = peer.Port;
+            yaml_peer["public-key"] = peer.PublicKey;
+            if (!peer.PreSharedKey.empty())
+              yaml_peer["pre-shared-key"] = peer.PreSharedKey;
+            if (!peer.AllowedIPs.empty())
+              for (const std::string &allowed : split(peer.AllowedIPs, ","))
+                yaml_peer["allowed-ips"].push_back(trim(allowed));
+            if (!peer.Reserved.empty())
+              for (const std::string &value : split(peer.Reserved, ","))
+                yaml_peer["reserved"].push_back(to_int(trim(value), 0));
+            if (peer.KeepAlive > 0)
+              yaml_peer["persistent-keepalive"] = peer.KeepAlive;
+            singleproxy["peers"].push_back(yaml_peer);
+          }
+        }
+      }
       if (!x.DnsServers.empty())
         singleproxy["dns"] = x.DnsServers;
       if (x.Mtu > 0)
@@ -1606,20 +1658,158 @@ void replaceAll(std::string &input, const std::string &search,
 // client-id = 139/184/125),(public-key =
 // bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=, endpoint =
 // engage.cloudflareclient.com:2408)
-std::string generatePeer(Proxy &node, bool client_id_as_reserved = false) {
+namespace {
+
+std::vector<WireGuardPeer> wireGuardPeers(const Proxy &node) {
+  if (!node.WireGuardPeers.empty())
+    return node.WireGuardPeers;
+  WireGuardPeer peer;
+  peer.Hostname = node.Hostname;
+  peer.Port = node.Port;
+  peer.PublicKey = node.PublicKey;
+  peer.PreSharedKey = node.PreSharedKey;
+  peer.AllowedIPs = node.AllowedIPs;
+  peer.Reserved = node.ClientId;
+  peer.KeepAlive = node.KeepAlive;
+  return {peer};
+}
+
+std::vector<std::string> wireGuardLocalAddresses(const Proxy &node) {
+  if (!node.WireGuardLocalAddresses.empty())
+    return node.WireGuardLocalAddresses;
+  std::vector<std::string> addresses;
+  if (!node.SelfIP.empty())
+    addresses.emplace_back(node.SelfIP);
+  if (!node.SelfIPv6.empty())
+    addresses.emplace_back(node.SelfIPv6);
+  return addresses;
+}
+
+std::string wireGuardAddressWithoutPrefix(std::string address) {
+  address = trim(address);
+  const size_t slash = address.find('/');
+  return slash == std::string::npos ? address : address.substr(0, slash);
+}
+
+std::string wireGuardAddressWithDefaultPrefix(std::string address) {
+  address = trim(address);
+  if (address.find('/') != std::string::npos)
+    return address;
+  return address + (isIPv6(address) ? "/128" : "/32");
+}
+
+std::string wireGuardEndpoint(const WireGuardPeer &peer) {
+  const std::string host = isIPv6(peer.Hostname) ? "[" + peer.Hostname + "]"
+                                                 : peer.Hostname;
+  return host + ":" + std::to_string(peer.Port);
+}
+
+std::string generatePeer(const WireGuardPeer &peer,
+                         bool client_id_as_reserved) {
   std::string result;
-  result += "public-key = " + node.PublicKey;
-  result += ", endpoint = " + node.Hostname + ":" + std::to_string(node.Port);
-  if (!node.AllowedIPs.empty())
-    result += ", allowed-ips = \"" + node.AllowedIPs + "\"";
-  if (!node.ClientId.empty()) {
+  result += "public-key = " + peer.PublicKey;
+  result += ", endpoint = " + wireGuardEndpoint(peer);
+  if (!peer.AllowedIPs.empty())
+    result += ", allowed-ips = \"" + peer.AllowedIPs + "\"";
+  if (!peer.Reserved.empty()) {
     if (client_id_as_reserved)
-      result += ", reserved = [" + node.ClientId + "]";
+      result += ", reserved = [" +
+                replaceAllDistinct(peer.Reserved, "/", ",") + "]";
     else
-      result += ", client-id = " + node.ClientId;
+      result += ", client-id = " +
+                replaceAllDistinct(peer.Reserved, ",", "/");
   }
+  if (!peer.PreSharedKey.empty())
+    result += client_id_as_reserved
+                  ? ", preshared-key = \"" + peer.PreSharedKey + "\""
+                  : ", preshared-key = " + peer.PreSharedKey;
+  if (peer.KeepAlive > 0 && !client_id_as_reserved)
+    result += ", keepalive = " + std::to_string(peer.KeepAlive);
   return result;
 }
+
+std::string generateLoonWireGuardPeer(const WireGuardPeer &peer) {
+  std::string result = "public-key=\"" + peer.PublicKey + "\"";
+  if (!peer.PreSharedKey.empty())
+    result += ",preshared-key=\"" + peer.PreSharedKey + "\"";
+  if (!peer.Reserved.empty())
+    result += ",reserved=[" +
+              replaceAllDistinct(peer.Reserved, "/", ",") + "]";
+  if (!peer.AllowedIPs.empty())
+    result += ",allowed-ips=\"" + peer.AllowedIPs + "\"";
+  result += ",endpoint=" + wireGuardEndpoint(peer);
+  return result;
+}
+
+bool wireGuardStructuredConfigIsSafe(const Proxy &node) {
+  auto safe_scalar = [](const std::string &value) {
+    return !value.empty() && value.find_first_of(",\"'\r\n(){}[]") == std::string::npos;
+  };
+  auto safe_list = [](const std::string &value) {
+    return value.find_first_of("\"'\r\n{}[]") == std::string::npos;
+  };
+  auto valid_network = [](const std::string &value, bool require_prefix) {
+    const std::string network = trim(value);
+    const size_t slash = network.find('/');
+    if (require_prefix && slash == std::string::npos)
+      return false;
+    const std::string address = slash == std::string::npos
+                                    ? network
+                                    : network.substr(0, slash);
+    const bool ipv4 = isIPv4(address), ipv6 = isIPv6(address);
+    if (!ipv4 && !ipv6)
+      return false;
+    if (slash == std::string::npos)
+      return true;
+    const std::string prefix = network.substr(slash + 1);
+    if (prefix.empty() ||
+        !std::all_of(prefix.begin(), prefix.end(), [](unsigned char ch) {
+          return std::isdigit(ch) != 0;
+        }))
+      return false;
+    const int bits = to_int(prefix, -1);
+    return bits >= 0 && bits <= (ipv6 ? 128 : 32);
+  };
+  const auto addresses = wireGuardLocalAddresses(node);
+  const auto peers = wireGuardPeers(node);
+  if (!safe_scalar(node.PrivateKey) || addresses.empty() || peers.empty())
+    return false;
+  for (const std::string &address : addresses)
+    if (!safe_scalar(address) || !valid_network(address, false))
+      return false;
+  for (const std::string &dns : node.DnsServers)
+    if (!safe_scalar(dns))
+      return false;
+  for (const WireGuardPeer &peer : peers) {
+    if (!safe_scalar(peer.Hostname) || peer.Port == 0 ||
+        !safe_scalar(peer.PublicKey) ||
+        (!peer.PreSharedKey.empty() && !safe_scalar(peer.PreSharedKey)) ||
+        peer.AllowedIPs.empty() || !safe_list(peer.AllowedIPs) ||
+        (!peer.Reserved.empty() &&
+         !std::all_of(peer.Reserved.begin(), peer.Reserved.end(), [](unsigned char ch) {
+           return std::isdigit(ch) != 0 || ch == ',';
+         })))
+      return false;
+    const string_array allowed_ips = split(peer.AllowedIPs, ",");
+    if (std::any_of(allowed_ips.begin(), allowed_ips.end(),
+                    [&](const std::string &network) {
+                      return !valid_network(network, true);
+                    }))
+      return false;
+    if (!peer.Reserved.empty()) {
+      const string_array reserved = split(peer.Reserved, ",");
+      if (std::any_of(reserved.begin(), reserved.end(),
+                      [](const std::string &value) {
+                        const int byte = to_int(trim(value), -1);
+                        return byte < 0 || byte > 255;
+                      }))
+        return false;
+    }
+  }
+  return true;
+}
+
+} // namespace
 
 std::string proxyToSurge(std::vector<Proxy> &nodes,
                          const std::string &base_conf,
@@ -1923,24 +2113,36 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
         supported = false;
         break;
       }
+      if (!wireGuardStructuredConfigIsSafe(x)) {
+        supported = false;
+        break;
+      }
       section = randomStr(5);
       real_section = "WireGuard " + section;
       proxy = "wireguard, section-name=" + section;
       if (!x.TestUrl.empty())
         proxy += ", test-url=" + x.TestUrl;
       ini.set(real_section, "private-key", x.PrivateKey);
-      ini.set(real_section, "self-ip", x.SelfIP);
-      if (!x.SelfIPv6.empty())
-        ini.set(real_section, "self-ip-v6", x.SelfIPv6);
-      if (!x.PreSharedKey.empty())
-        ini.set(real_section, "preshared-key", x.PreSharedKey);
+      for (const std::string &address : wireGuardLocalAddresses(x)) {
+        const std::string bare = wireGuardAddressWithoutPrefix(address);
+        if (isIPv4(bare))
+          ini.set(real_section, "self-ip", bare);
+        else if (isIPv6(bare))
+          ini.set(real_section, "self-ip-v6", bare);
+      }
       if (!x.DnsServers.empty())
         ini.set(real_section, "dns-server", join(x.DnsServers, ","));
       if (x.Mtu > 0)
         ini.set(real_section, "mtu", std::to_string(x.Mtu));
-      if (x.KeepAlive > 0)
-        ini.set(real_section, "keepalive", std::to_string(x.KeepAlive));
-      ini.set(real_section, "peer", "(" + generatePeer(x) + ")");
+      {
+        std::string peer_value;
+        for (const WireGuardPeer &peer : wireGuardPeers(x)) {
+          if (!peer_value.empty())
+            peer_value += ",";
+          peer_value += "(" + generatePeer(peer) + ")";
+        }
+        ini.set(real_section, "peer", peer_value);
+      }
       break;
     default:
       supported = false;
@@ -3643,21 +3845,46 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
       }
       break;
     case ProxyType::WireGuard:
-      proxy = "wireguard, interface-ip=" + x.SelfIP;
-      if (!x.SelfIPv6.empty())
-        proxy += ", interface-ipv6=" + x.SelfIPv6;
-      proxy += ", private-key=" + x.PrivateKey;
+      if (!wireGuardStructuredConfigIsSafe(x)) {
+        generation_stats.unsupported_by_type[x.Type]++;
+        continue;
+      }
+      proxy = "wireguard";
+      for (const std::string &address : wireGuardLocalAddresses(x)) {
+        const std::string bare = wireGuardAddressWithoutPrefix(address);
+        if (isIPv4(bare))
+          proxy += ", interface-ip=" + bare;
+        else if (isIPv6(bare))
+          proxy += ", interface-ipV6=" + bare;
+      }
+      proxy += ", private-key=\"" + x.PrivateKey + "\"";
       for (const auto &y : x.DnsServers) {
         if (isIPv4(y))
           proxy += ", dns=" + y;
         else if (isIPv6(y))
-          proxy += ", dnsv6=" + y;
+          proxy += ", dnsV6=" + y;
       }
       if (x.Mtu > 0)
         proxy += ", mtu=" + std::to_string(x.Mtu);
-      if (x.KeepAlive > 0)
-        proxy += ", keepalive=" + std::to_string(x.KeepAlive);
-      proxy += ", peers=[{" + generatePeer(x, true) + "}]";
+      {
+        const auto peers = wireGuardPeers(x);
+        uint16_t common_keepalive = peers.empty() ? 0 : peers.front().KeepAlive;
+        if (std::any_of(peers.begin(), peers.end(), [common_keepalive](const WireGuardPeer &peer) {
+              return peer.KeepAlive != common_keepalive;
+            })) {
+          generation_stats.unsupported_by_type[x.Type]++;
+          continue;
+        }
+        if (common_keepalive > 0)
+          proxy += ", keepalive=" + std::to_string(common_keepalive);
+        proxy += ", peers=[";
+        for (size_t peer_index = 0; peer_index < peers.size(); ++peer_index) {
+          if (peer_index > 0)
+            proxy += ",";
+          proxy += "{" + generateLoonWireGuardPeer(peers[peer_index]) + "}";
+        }
+        proxy += "]";
+      }
       break;
     case ProxyType::Hysteria2:
       proxy = "Hysteria2," + hostname + "," + port + ",\"" + password + "\"";
@@ -3977,17 +4204,61 @@ vectorToJsonArray(const std::vector<std::string> &array,
   return result;
 }
 
+static rapidjson::Value wireGuardIntegerArray(
+    const std::string &values, rapidjson::MemoryPoolAllocator<> &allocator) {
+  rapidjson::Value result(rapidjson::kArrayType);
+  for (const std::string &value : split(replaceAllDistinct(values, "/", ","), ",")) {
+    const std::string item = trim(value);
+    if (!item.empty())
+      result.PushBack(to_int(item, 0), allocator);
+  }
+  return result;
+}
+
+static rapidjson::Value buildSingBoxWireGuardPeer(
+    const WireGuardPeer &peer, bool endpoint_schema,
+    rapidjson::MemoryPoolAllocator<> &allocator) {
+  rapidjson::Value result(rapidjson::kObjectType);
+  result.AddMember(rapidjson::Value(endpoint_schema ? "address" : "server", allocator),
+                   rapidjson::Value(peer.Hostname.c_str(), allocator), allocator);
+  if (endpoint_schema)
+    result.AddMember("port", peer.Port, allocator);
+  else
+    result.AddMember("server_port", peer.Port, allocator);
+  result.AddMember("public_key", rapidjson::Value(peer.PublicKey.c_str(), allocator), allocator);
+  if (!peer.PreSharedKey.empty())
+    result.AddMember("pre_shared_key",
+                     rapidjson::Value(peer.PreSharedKey.c_str(), allocator), allocator);
+  if (!peer.AllowedIPs.empty())
+    result.AddMember("allowed_ips",
+                     stringArrayToJsonArray(peer.AllowedIPs, ",", allocator), allocator);
+  if (!peer.Reserved.empty())
+    result.AddMember("reserved", wireGuardIntegerArray(peer.Reserved, allocator), allocator);
+  if (endpoint_schema && peer.KeepAlive > 0) {
+    result.AddMember("persistent_keepalive_interval",
+                     peer.KeepAlive, allocator);
+  }
+  return result;
+}
+
 void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
                     std::vector<RulesetContent> &ruleset_content_array,
                     const ProxyGroupConfigs &extra_proxy_group,
                     extra_settings &ext) {
   const bool add_clash_modes = effectiveSettings().singBoxAddClashModes;
+  const bool wireguard_endpoint = effectiveSettings().singBoxWireGuardEndpoint;
   using namespace rapidjson_ext;
   rapidjson::Document::AllocatorType &allocator = json.GetAllocator();
   rapidjson::Value outbounds(rapidjson::kArrayType),
       route(rapidjson::kArrayType);
+  rapidjson::Value endpoints(rapidjson::kArrayType);
+  if (wireguard_endpoint && json.IsObject() && json.HasMember("endpoints") &&
+      json["endpoints"].IsArray())
+    endpoints.CopyFrom(json["endpoints"], allocator);
   std::vector<Proxy> nodelist;
   string_array remarks_list;
+  size_t wireguard_nodes_emitted = 0;
+  size_t wireguard_peers_emitted = 0;
   RemarkSet used_remarks;
   used_remarks.reserve(nodes.size());
   std::string search = " Mbps";
@@ -4104,50 +4375,61 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
       break;
     }
     case ProxyType::WireGuard: {
-      proxy.AddMember("type", "wireguard", allocator);
-      proxy.AddMember("tag", rapidjson::StringRef(x.Remark.c_str()), allocator);
-      proxy.AddMember("inet4_bind_address",
-                      rapidjson::StringRef(x.SelfIP.c_str()), allocator);
+      if (!wireGuardStructuredConfigIsSafe(x))
+        continue;
+      const auto structured_peers = wireGuardPeers(x);
+      wireguard_nodes_emitted++;
+      wireguard_peers_emitted += structured_peers.size();
       rapidjson::Value addresses(rapidjson::kArrayType);
-      std::string local_address = x.SelfIP + "/32";
-      addresses.PushBack(rapidjson::Value(local_address.c_str(), allocator),
-                         allocator);
-      //                if (!x.SelfIPv6.empty())
-      //                    addresses.PushBack(rapidjson::StringRef(x.SelfIPv6.c_str()),
-      //                    allocator);
-      proxy.AddMember("local_address", addresses, allocator);
-      if (!x.SelfIPv6.empty())
-        proxy.AddMember("inet6_bind_address",
-                        rapidjson::StringRef(x.SelfIPv6.c_str()), allocator);
-      proxy.AddMember("private_key", rapidjson::StringRef(x.PrivateKey.c_str()),
-                      allocator);
-      rapidjson::Value peer(rapidjson::kObjectType);
-      peer.AddMember("server", rapidjson::StringRef(x.Hostname.c_str()),
-                     allocator);
-      peer.AddMember("server_port", x.Port, allocator);
-      peer.AddMember("public_key", rapidjson::StringRef(x.PublicKey.c_str()),
-                     allocator);
-      if (!x.PreSharedKey.empty())
-        peer.AddMember("pre_shared_key",
-                       rapidjson::StringRef(x.PreSharedKey.c_str()), allocator);
-
-      if (!x.AllowedIPs.empty()) {
-        auto allowed_ips = stringArrayToJsonArray(x.AllowedIPs, ",", allocator);
-        peer.AddMember("allowed_ips", allowed_ips, allocator);
-      }
-
-      if (!x.ClientId.empty()) {
-        auto reserved = stringArrayToJsonArray(x.ClientId, ",", allocator);
-        peer.AddMember("reserved", reserved, allocator);
-      }
-      if (!x.Password.empty()) {
-        proxy.AddMember("pre_shared_key",
-                        rapidjson::StringRef(x.Password.c_str()), allocator);
+      for (const std::string &address : wireGuardLocalAddresses(x)) {
+        const std::string prefixed = wireGuardAddressWithDefaultPrefix(address);
+        addresses.PushBack(rapidjson::Value(prefixed.c_str(), allocator), allocator);
       }
       rapidjson::Value peers(rapidjson::kArrayType);
-      peers.PushBack(peer, allocator);
+      for (const WireGuardPeer &peer : structured_peers)
+        peers.PushBack(buildSingBoxWireGuardPeer(peer, wireguard_endpoint, allocator),
+                       allocator);
+      if (wireguard_endpoint) {
+        rapidjson::Value endpoint(rapidjson::kObjectType);
+        endpoint.AddMember("type", "wireguard", allocator);
+        endpoint.AddMember("tag", rapidjson::Value(x.Remark.c_str(), allocator), allocator);
+        if (!x.WireGuardSystem.is_undef())
+          endpoint.AddMember("system", x.WireGuardSystem.get(), allocator);
+        if (!x.WireGuardInterfaceName.empty())
+          endpoint.AddMember("name",
+                             rapidjson::Value(x.WireGuardInterfaceName.c_str(), allocator),
+                             allocator);
+        if (x.Mtu > 0)
+          endpoint.AddMember("mtu", x.Mtu, allocator);
+        endpoint.AddMember("address", addresses, allocator);
+        endpoint.AddMember("private_key",
+                           rapidjson::Value(x.PrivateKey.c_str(), allocator), allocator);
+        if (x.WireGuardListenPort > 0)
+          endpoint.AddMember("listen_port", x.WireGuardListenPort, allocator);
+        endpoint.AddMember("peers", peers, allocator);
+        if (x.WireGuardWorkers > 0)
+          endpoint.AddMember("workers", x.WireGuardWorkers, allocator);
+        endpoints.PushBack(endpoint, allocator);
+        nodelist.push_back(x);
+        remarks_list.emplace_back(x.Remark);
+        used_remarks.emplace(x.Remark);
+        continue;
+      }
+      proxy.AddMember("type", "wireguard", allocator);
+      proxy.AddMember("tag", rapidjson::Value(x.Remark.c_str(), allocator), allocator);
+      proxy.AddMember("local_address", addresses, allocator);
+      proxy.AddMember("private_key", rapidjson::Value(x.PrivateKey.c_str(), allocator), allocator);
       proxy.AddMember("peers", peers, allocator);
-      proxy.AddMember("mtu", x.Mtu, allocator);
+      if (!x.WireGuardSystem.is_undef())
+        proxy.AddMember("system_interface", x.WireGuardSystem.get(), allocator);
+      if (!x.WireGuardInterfaceName.empty())
+        proxy.AddMember("interface_name",
+                        rapidjson::Value(x.WireGuardInterfaceName.c_str(), allocator),
+                        allocator);
+      if (x.WireGuardWorkers > 0)
+        proxy.AddMember("workers", x.WireGuardWorkers, allocator);
+      if (x.Mtu > 0)
+        proxy.AddMember("mtu", x.Mtu, allocator);
       break;
     }
     case ProxyType::HTTP:
@@ -4404,8 +4686,18 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
     outbounds.PushBack(proxy, allocator);
   }
 
+  if (wireguard_nodes_emitted > 0) {
+    writeLog(LOG_LEVEL_INFO,
+             "SINGBOX_WIREGUARD_GENERATION schema=" +
+                 std::string(wireguard_endpoint ? "endpoint" : "outbound") +
+                 " nodes=" + std::to_string(wireguard_nodes_emitted) +
+                 " peers=" + std::to_string(wireguard_peers_emitted));
+  }
+
   if (ext.nodelist) {
     json | AddMemberOrReplace("outbounds", outbounds, allocator);
+    if (wireguard_endpoint)
+      json | AddMemberOrReplace("endpoints", endpoints, allocator);
     return;
   }
 
@@ -4474,6 +4766,8 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
   }
 
   json | AddMemberOrReplace("outbounds", outbounds, allocator);
+  if (wireguard_endpoint)
+    json | AddMemberOrReplace("endpoints", endpoints, allocator);
 }
 
 std::string proxyToSingBox(std::vector<Proxy> &nodes,

@@ -474,6 +474,219 @@ bool parseXrayTransport(const std::string &query, Proxy &node, std::string &netw
     return true;
 }
 
+std::string stripWireGuardQuotes(std::string value) {
+    value = trim(value);
+    if (value.size() >= 2 &&
+        ((value.front() == '"' && value.back() == '"') ||
+         (value.front() == '\'' && value.back() == '\'')))
+        value = value.substr(1, value.size() - 2);
+    return trim(value);
+}
+
+std::vector<std::string> splitWireGuardFields(const std::string &value) {
+    std::vector<std::string> result;
+    size_t start = 0;
+    int round_depth = 0, square_depth = 0, brace_depth = 0;
+    char quote = 0;
+    bool escaped = false;
+    for (size_t i = 0; i < value.size(); ++i) {
+        const char ch = value[i];
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (quote != 0) {
+            if (ch == '\\')
+                escaped = true;
+            else if (ch == quote)
+                quote = 0;
+            continue;
+        }
+        if (ch == '"' || ch == '\'') {
+            quote = ch;
+            continue;
+        }
+        switch (ch) {
+            case '(': ++round_depth; break;
+            case ')': --round_depth; break;
+            case '[': ++square_depth; break;
+            case ']': --square_depth; break;
+            case '{': ++brace_depth; break;
+            case '}': --brace_depth; break;
+            case ',':
+                if (round_depth == 0 && square_depth == 0 && brace_depth == 0) {
+                    result.emplace_back(trim(value.substr(start, i - start)));
+                    start = i + 1;
+                }
+                break;
+            default: break;
+        }
+        if (round_depth < 0 || square_depth < 0 || brace_depth < 0)
+            return {};
+    }
+    if (quote != 0 || round_depth != 0 || square_depth != 0 || brace_depth != 0)
+        return {};
+    result.emplace_back(trim(value.substr(start)));
+    return result;
+}
+
+bool parseWireGuardEndpoint(std::string endpoint, std::string &host,
+                            uint16_t &port) {
+    endpoint = stripWireGuardQuotes(std::move(endpoint));
+    std::string port_text;
+    if (endpoint.size() > 2 && endpoint.front() == '[') {
+        const size_t bracket = endpoint.find(']');
+        if (bracket == std::string::npos || bracket + 2 >= endpoint.size() ||
+            endpoint[bracket + 1] != ':')
+            return false;
+        host = endpoint.substr(1, bracket - 1);
+        port_text = endpoint.substr(bracket + 2);
+    } else {
+        const size_t colon = endpoint.rfind(':');
+        if (colon == std::string::npos || colon == 0 || colon + 1 >= endpoint.size())
+            return false;
+        host = endpoint.substr(0, colon);
+        port_text = endpoint.substr(colon + 1);
+    }
+    if (!validSharePort(port_text) || host.find_first_of("\r\n") != std::string::npos)
+        return false;
+    port = static_cast<uint16_t>(to_int(port_text, 0));
+    return !host.empty();
+}
+
+std::string normalizeWireGuardAllowedIPs(const std::string &value) {
+    string_array networks;
+    for (std::string network : split(value, ",")) {
+        network = trim(network);
+        if (network.empty())
+            return {};
+        const size_t slash = network.find('/');
+        const std::string address = slash == std::string::npos
+                                        ? network
+                                        : network.substr(0, slash);
+        const bool ipv4 = isIPv4(address);
+        const bool ipv6 = isIPv6(address);
+        if (!ipv4 && !ipv6)
+            return {};
+        if (slash == std::string::npos) {
+            network += ipv6 ? "/128" : "/32";
+        } else {
+            const std::string prefix = network.substr(slash + 1);
+            if (prefix.empty() ||
+                !std::all_of(prefix.begin(), prefix.end(), [](unsigned char ch) {
+                    return std::isdigit(ch) != 0;
+                }))
+                return {};
+            const int bits = to_int(prefix, -1);
+            if (bits < 0 || bits > (ipv6 ? 128 : 32))
+                return {};
+        }
+        networks.emplace_back(std::move(network));
+    }
+    return join(networks, ", ");
+}
+
+bool validWireGuardPeer(const WireGuardPeer &peer) {
+    return !peer.Hostname.empty() && peer.Port > 0 && !peer.PublicKey.empty() &&
+           !peer.AllowedIPs.empty();
+}
+
+std::string normalizeWireGuardReserved(std::string value) {
+    value = replaceAllDistinct(stripWireGuardQuotes(std::move(value)), "/", ",");
+    string_array bytes;
+    for (std::string item : split(value, ",")) {
+        item = trim(item);
+        if (item.empty() || item.size() > 3 ||
+            !std::all_of(item.begin(), item.end(), [](unsigned char ch) {
+                return std::isdigit(ch) != 0;
+            }))
+            return {};
+        const int byte = to_int(item, -1);
+        if (byte < 0 || byte > 255)
+            return {};
+        bytes.emplace_back(std::to_string(byte));
+    }
+    return join(bytes, ",");
+}
+
+void syncLegacyWireGuardProjection(Proxy &node) {
+    if (node.WireGuardLocalAddresses.empty()) {
+        if (!node.SelfIP.empty())
+            node.WireGuardLocalAddresses.emplace_back(node.SelfIP);
+        if (!node.SelfIPv6.empty())
+            node.WireGuardLocalAddresses.emplace_back(node.SelfIPv6);
+    }
+    if (node.WireGuardPeers.empty()) {
+        WireGuardPeer peer;
+        peer.Hostname = node.Hostname;
+        peer.Port = node.Port;
+        peer.PublicKey = node.PublicKey;
+        peer.PreSharedKey = node.PreSharedKey;
+        peer.AllowedIPs = node.AllowedIPs;
+        peer.Reserved = node.ClientId;
+        peer.KeepAlive = node.KeepAlive;
+        if (validWireGuardPeer(peer))
+            node.WireGuardPeers.emplace_back(std::move(peer));
+    }
+    if (!node.WireGuardPeers.empty()) {
+        const WireGuardPeer &peer = node.WireGuardPeers.front();
+        node.Hostname = peer.Hostname;
+        node.Port = peer.Port;
+        node.PublicKey = peer.PublicKey;
+        node.PreSharedKey = peer.PreSharedKey;
+        node.AllowedIPs = peer.AllowedIPs;
+        node.ClientId = peer.Reserved;
+        node.KeepAlive = peer.KeepAlive;
+    }
+}
+
+std::vector<std::string> jsonStringArray(const rapidjson::Value &value) {
+    std::vector<std::string> result;
+    if (value.IsString()) {
+        result.emplace_back(value.GetString());
+        return result;
+    }
+    if (!value.IsArray())
+        return result;
+    for (const auto &item : value.GetArray()) {
+        std::string text;
+        item >> text;
+        if (!text.empty())
+            result.emplace_back(std::move(text));
+    }
+    return result;
+}
+
+std::string jsonWireGuardReserved(const rapidjson::Value &value) {
+    if (value.IsArray())
+        return normalizeWireGuardReserved(join(jsonStringArray(value), ","));
+    std::string result;
+    value >> result;
+    return normalizeWireGuardReserved(std::move(result));
+}
+
+WireGuardPeer parseSingBoxWireGuardPeer(const rapidjson::Value &value,
+                                        bool endpoint_schema) {
+    WireGuardPeer peer;
+    if (!value.IsObject())
+        return peer;
+    peer.Hostname = GetMember(value, endpoint_schema ? "address" : "server");
+    peer.Port = parseUint16Option(
+        GetMember(value, endpoint_schema ? "port" : "server_port"), 0);
+    peer.PublicKey = GetMember(value, "public_key");
+    peer.PreSharedKey = GetMember(value, "pre_shared_key");
+    if (value.HasMember("allowed_ips"))
+        peer.AllowedIPs = normalizeWireGuardAllowedIPs(
+            join(jsonStringArray(value["allowed_ips"]), ", "));
+    if (value.HasMember("reserved"))
+        peer.Reserved = jsonWireGuardReserved(value["reserved"]);
+    std::string keepalive = GetMember(value, "persistent_keepalive_interval");
+    if (!keepalive.empty() && keepalive.back() == 's')
+        keepalive.pop_back();
+    peer.KeepAlive = parseUint16Option(keepalive, 0);
+    return peer;
+}
+
 } // namespace
 
 void commonConstruct(Proxy &node, ProxyType type, const std::string &group, const std::string &remarks,
@@ -606,10 +819,11 @@ void wireguardConstruct(Proxy &node, const std::string &group, const std::string
     node.PublicKey = pubKey;
     node.PreSharedKey = psk;
     node.DnsServers = dns;
-    node.Mtu = to_int(mtu);
-    node.KeepAlive = to_int(keepalive);
+    node.Mtu = parseUint16Option(mtu, 0);
+    node.KeepAlive = parseUint16Option(keepalive, 0);
     node.TestUrl = testUrl;
-    node.ClientId = clientId;
+    node.ClientId = normalizeWireGuardReserved(clientId);
+    syncLegacyWireGuardProjection(node);
 }
 
 void hysteriaConstruct(Proxy &node, const std::string &group, const std::string &remarks, const std::string &add,
@@ -1799,7 +2013,8 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes) {
         std::string protocol, protoparam, obfs, obfsparam; //ssr
         std::string flow, mode; //trojan
         std::string user; //socks
-        std::string ip, ipv6, private_key, public_key, mtu; //wireguard
+        std::string ip, ipv6, private_key, public_key, mtu, wg_allowed_ips,
+                    wg_reserved, wg_keepalive; //wireguard
         std::string auth, up, down, obfsParam, insecure, alpn; //hysteria
         std::string obfsPassword, certificate_fingerprint; //hysteria2
         std::string congestion_control, udp_relay_mode, token; // tuic
@@ -1820,7 +2035,7 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes) {
         singleproxy["port"] >>= port;
         singleproxy["port-range"] >>= ports;
 
-        if (port.empty() || port == "0")
+        if ((port.empty() || port == "0") && proxytype != "wireguard")
             if (ports.empty())
                 continue;
         udp = safe_as<std::string>(singleproxy["udp"]);
@@ -2008,19 +2223,84 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes) {
 
                 snellConstruct(node, group, ps, server, port, password, obfs, host, to_int(aid, 0), udp, tfo, scv);
                 break;
-            case "wireguard"_hash:
+            case "wireguard"_hash: {
                 group = WG_DEFAULT_GROUP;
                 singleproxy["public-key"] >>= public_key;
                 singleproxy["private-key"] >>= private_key;
                 singleproxy["dns"] >>= dns_server;
                 singleproxy["mtu"] >>= mtu;
-                singleproxy["preshared-key"] >>= password;
+                singleproxy["pre-shared-key"] >>= password;
+                if (password.empty())
+                    singleproxy["preshared-key"] >>= password;
                 singleproxy["ip"] >>= ip;
                 singleproxy["ipv6"] >>= ipv6;
+                if (singleproxy["allowed-ips"].IsSequence()) {
+                    string_array allowed;
+                    singleproxy["allowed-ips"] >>= allowed;
+                    wg_allowed_ips = normalizeWireGuardAllowedIPs(join(allowed, ", "));
+                } else {
+                    singleproxy["allowed-ips"] >>= wg_allowed_ips;
+                    wg_allowed_ips = normalizeWireGuardAllowedIPs(wg_allowed_ips);
+                }
+                if (singleproxy["reserved"].IsSequence()) {
+                    string_array reserved;
+                    singleproxy["reserved"] >>= reserved;
+                    wg_reserved = normalizeWireGuardReserved(join(reserved, ","));
+                } else {
+                    singleproxy["reserved"] >>= wg_reserved;
+                    wg_reserved = normalizeWireGuardReserved(wg_reserved);
+                }
+                singleproxy["persistent-keepalive"] >>= wg_keepalive;
 
                 wireguardConstruct(node, group, ps, server, port, ip, ipv6, private_key, public_key, password,
-                                   dns_server, mtu, "0", "", "", udp, "");
+                                   dns_server, mtu, wg_keepalive, "", wg_reserved, udp, "");
+                if (!node.WireGuardPeers.empty() && !wg_allowed_ips.empty()) {
+                    node.WireGuardPeers.front().AllowedIPs = wg_allowed_ips;
+                    syncLegacyWireGuardProjection(node);
+                }
+                if (singleproxy["peers"].IsSequence()) {
+                    node.WireGuardPeers.clear();
+                    for (const auto &yaml_peer_value : singleproxy["peers"]) {
+                        YAML::Node yaml_peer = yaml_peer_value;
+                        WireGuardPeer peer;
+                        yaml_peer["server"] >>= peer.Hostname;
+                        std::string peer_port;
+                        yaml_peer["port"] >>= peer_port;
+                        peer.Port = parseUint16Option(peer_port, 0);
+                        yaml_peer["public-key"] >>= peer.PublicKey;
+                        yaml_peer["pre-shared-key"] >>= peer.PreSharedKey;
+                        if (peer.PreSharedKey.empty())
+                            yaml_peer["preshared-key"] >>= peer.PreSharedKey;
+                        if (yaml_peer["allowed-ips"].IsSequence()) {
+                            string_array allowed;
+                            yaml_peer["allowed-ips"] >>= allowed;
+                            peer.AllowedIPs = normalizeWireGuardAllowedIPs(join(allowed, ", "));
+                        } else if (yaml_peer["allowed-ips"].IsDefined()) {
+                            yaml_peer["allowed-ips"] >>= peer.AllowedIPs;
+                            if (!peer.AllowedIPs.empty())
+                                peer.AllowedIPs = normalizeWireGuardAllowedIPs(peer.AllowedIPs);
+                        }
+                        if (yaml_peer["reserved"].IsSequence()) {
+                            string_array reserved;
+                            yaml_peer["reserved"] >>= reserved;
+                            peer.Reserved = normalizeWireGuardReserved(join(reserved, ","));
+                        } else {
+                            yaml_peer["reserved"] >>= peer.Reserved;
+                            peer.Reserved = normalizeWireGuardReserved(peer.Reserved);
+                        }
+                        std::string peer_keepalive;
+                        yaml_peer["persistent-keepalive"] >>= peer_keepalive;
+                        peer.KeepAlive = parseUint16Option(peer_keepalive, 0);
+                        if (validWireGuardPeer(peer))
+                            node.WireGuardPeers.emplace_back(std::move(peer));
+                    }
+                    syncLegacyWireGuardProjection(node);
+                }
+                if (node.PrivateKey.empty() || node.WireGuardLocalAddresses.empty() ||
+                    node.WireGuardPeers.empty())
+                    continue;
                 break;
+            }
             case "vless"_hash:
                 group = XRAY_DEFAULT_GROUP;
                 singleproxy["uuid"] >>= id;
@@ -2509,31 +2789,45 @@ void parsePeers(Proxy &node, const std::string &data) {
     auto peers = regGetAllMatch(data, R"(\((.*?)\))", true);
     if (peers.empty())
         return;
-    auto peer = peers[0];
-    auto peerdata = regGetAllMatch(peer, R"(([a-z-]+) ?= ?([^" ),]+|".*?"),? ?)", true);
-    if (peerdata.size() % 2 != 0)
-        return;
-    for (size_t i = 0; i < peerdata.size(); i += 2) {
-        auto key = peerdata[i];
-        auto val = peerdata[i + 1];
-        switch (hash_(key)) {
-            case "public-key"_hash:
-                node.PublicKey = val;
-                break;
-            case "endpoint"_hash:
-                node.Hostname = val.substr(0, val.rfind(':'));
-                node.Port = to_int(val.substr(val.rfind(':') + 1));
-                break;
-            case "client-id"_hash:
-                node.ClientId = val;
-                break;
-            case "allowed-ips"_hash:
-                node.AllowedIPs = trimOf(val, '"');
-                break;
-            default:
-                break;
+    for (const std::string &peer_text : peers) {
+        WireGuardPeer peer;
+        for (const std::string &field : splitWireGuardFields(peer_text)) {
+            const size_t equal = field.find('=');
+            if (equal == std::string::npos)
+                continue;
+            const std::string key = toLower(trim(field.substr(0, equal)));
+            const std::string value = stripWireGuardQuotes(field.substr(equal + 1));
+            switch (hash_(key)) {
+                case "public-key"_hash:
+                    peer.PublicKey = value;
+                    break;
+                case "endpoint"_hash:
+                    parseWireGuardEndpoint(value, peer.Hostname, peer.Port);
+                    break;
+                case "client-id"_hash:
+                case "reserved"_hash:
+                    peer.Reserved = normalizeWireGuardReserved(
+                        trimOf(trimOf(value, '['), ']'));
+                    break;
+                case "allowed-ips"_hash:
+                    peer.AllowedIPs = normalizeWireGuardAllowedIPs(value);
+                    break;
+                case "preshared-key"_hash:
+                case "pre-shared-key"_hash:
+                    peer.PreSharedKey = value;
+                    break;
+                case "keepalive"_hash:
+                case "persistent-keepalive"_hash:
+                    peer.KeepAlive = parseUint16Option(value, 0);
+                    break;
+                default:
+                    break;
+            }
         }
+        if (validWireGuardPeer(peer))
+            node.WireGuardPeers.emplace_back(std::move(peer));
     }
+    syncLegacyWireGuardProjection(node);
 }
 
 bool explodeSurge(std::string surge, std::vector<Proxy> &nodes) {
@@ -2582,7 +2876,9 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes) {
         */
         regGetMatch(x.second, proxystr, 3, 0, &remarks, &config);
         configs = split(config, ",");
-        if (configs.size() < 3)
+        if (!configs.empty() && trim(configs.front()) == "wireguard")
+            configs = splitWireGuardFields(config);
+        if (configs.empty() || (configs.size() < 3 && configs[0] != "wireguard"))
             continue;
         switch (hash_(configs[0])) {
             case "direct"_hash:
@@ -2915,13 +3211,13 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes) {
                 snellConstruct(node, SNELL_DEFAULT_GROUP, remarks, server, port, password, plugin, host,
                                to_int(version, 0), udp, tfo, scv);
                 break;
-            case "wireguard"_hash:
+            case "wireguard"_hash: {
                 for (i = 1; i < configs.size(); i++) {
-                    vArray = split(trim(configs[i]), "=");
-                    if (vArray.size() != 2)
+                    const size_t equal = configs[i].find('=');
+                    if (equal == std::string::npos)
                         continue;
-                    itemName = trim(vArray[0]);
-                    itemVal = trim(vArray[1]);
+                    itemName = toLower(trim(configs[i].substr(0, equal)));
+                    itemVal = stripWireGuardQuotes(configs[i].substr(equal + 1));
                     switch (hash_(itemName)) {
                         case "section-name"_hash:
                             section = itemVal;
@@ -2929,48 +3225,103 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes) {
                         case "test-url"_hash:
                             test_url = itemVal;
                             break;
-                    }
-                }
-                if (section.empty())
-                    continue;
-                ini.get_items("WireGuard " + section, wireguard_config);
-                if (wireguard_config.empty())
-                    continue;
-
-                for (auto &c: wireguard_config) {
-                    itemName = trim(c.first);
-                    itemVal = trim(c.second);
-                    switch (hash_(itemName)) {
-                        case "self-ip"_hash:
+                        case "interface-ip"_hash:
                             ip = itemVal;
                             break;
-                        case "self-ip-v6"_hash:
+                        case "interface-ipv6"_hash:
+                        case "interface-ip-v6"_hash:
                             ipv6 = itemVal;
                             break;
                         case "private-key"_hash:
                             private_key = itemVal;
                             break;
-                        case "dns-server"_hash:
-                            vArray = split(itemVal, ",");
-                            for (auto &y: vArray)
-                                dns_servers.emplace_back(trim(y));
+                        case "dns"_hash:
+                        case "dnsv6"_hash:
+                            if (!itemVal.empty())
+                                dns_servers.emplace_back(itemVal);
                             break;
                         case "mtu"_hash:
                             mtu = itemVal;
                             break;
-                        case "peer"_hash:
-                            peer = itemVal;
-                            break;
                         case "keepalive"_hash:
                             keepalive = itemVal;
                             break;
+                        case "peers"_hash:
+                            peer = itemVal;
+                            break;
+                        case "udp"_hash:
+                        case "udp-relay"_hash:
+                            udp = itemVal;
+                            break;
+                    }
+                }
+                if (!section.empty()) {
+                    ini.get_items("WireGuard " + section, wireguard_config);
+                    if (wireguard_config.empty())
+                        continue;
+
+                    for (auto &c: wireguard_config) {
+                        itemName = toLower(trim(c.first));
+                        itemVal = trim(c.second);
+                        switch (hash_(itemName)) {
+                            case "self-ip"_hash:
+                                ip = itemVal;
+                                break;
+                            case "self-ip-v6"_hash:
+                                ipv6 = itemVal;
+                                break;
+                            case "private-key"_hash:
+                                private_key = itemVal;
+                                break;
+                            case "dns-server"_hash:
+                                vArray = split(itemVal, ",");
+                                for (auto &y: vArray)
+                                    dns_servers.emplace_back(trim(y));
+                                break;
+                            case "mtu"_hash:
+                                mtu = itemVal;
+                                break;
+                            case "peer"_hash:
+                                if (!peer.empty())
+                                    peer += ",";
+                                peer += itemVal;
+                                break;
+                            case "keepalive"_hash:
+                                keepalive = itemVal;
+                                break;
+                            case "preshared-key"_hash:
+                            case "pre-shared-key"_hash:
+                                password = itemVal;
+                                break;
+                        }
                     }
                 }
 
                 wireguardConstruct(node, WG_DEFAULT_GROUP, remarks, "", "0", ip, ipv6, private_key, "", "", dns_servers,
                                    mtu, keepalive, test_url, "", udp, "");
+                if (!section.empty())
+                    node.WireGuardInterfaceName = section;
+                if (!peer.empty() && peer.find('{') != std::string::npos) {
+                    peer = replaceAllDistinct(replaceAllDistinct(peer, "{", "("), "}", ")");
+                }
                 parsePeers(node, peer);
+                if (!password.empty()) {
+                    for (WireGuardPeer &parsed_peer : node.WireGuardPeers)
+                        if (parsed_peer.PreSharedKey.empty())
+                            parsed_peer.PreSharedKey = password;
+                }
+                const uint16_t common_keepalive = parseUint16Option(keepalive, 0);
+                if (common_keepalive > 0) {
+                    for (WireGuardPeer &parsed_peer : node.WireGuardPeers)
+                        if (parsed_peer.KeepAlive == 0)
+                            parsed_peer.KeepAlive = common_keepalive;
+                }
+                syncLegacyWireGuardProjection(node);
+                if (node.PrivateKey.empty() || node.WireGuardLocalAddresses.empty() ||
+                    node.WireGuardPeers.empty())
+                    continue;
                 break;
+            }
             case "anytls"_hash: //Surge style anytls proxy
                 server = trim(configs[1]);
                 port = trim(configs[2]);
@@ -3527,6 +3878,84 @@ void explodeSingboxTransport(rapidjson::Value &singboxNode, std::string &net, st
     }
 }
 
+namespace {
+
+std::string wireGuardAddressWithoutPrefix(const std::string &address) {
+    const std::string cleaned = trim(address);
+    const size_t slash = cleaned.find('/');
+    return slash == std::string::npos ? cleaned : cleaned.substr(0, slash);
+}
+
+bool explodeSingboxWireGuardNode(const rapidjson::Value &singboxNode,
+                                 bool endpoint_schema, Proxy &node) {
+    if (!singboxNode.IsObject())
+        return false;
+    const std::string remarks = GetMember(singboxNode, "tag");
+    string_array local_addresses;
+    const char *address_key = endpoint_schema ? "address" : "local_address";
+    if (singboxNode.HasMember(address_key))
+        local_addresses = jsonStringArray(singboxNode[address_key]);
+    if (local_addresses.empty()) {
+        const std::string ip = GetMember(singboxNode, "inet4_bind_address");
+        const std::string ipv6 = GetMember(singboxNode, "inet6_bind_address");
+        if (!ip.empty())
+            local_addresses.emplace_back(ip);
+        if (!ipv6.empty())
+            local_addresses.emplace_back(ipv6);
+    }
+
+    std::string self_ip, self_ipv6;
+    for (const std::string &address : local_addresses) {
+        const std::string bare = wireGuardAddressWithoutPrefix(address);
+        if (self_ip.empty() && isIPv4(bare))
+            self_ip = bare;
+        else if (self_ipv6.empty() && isIPv6(bare))
+            self_ipv6 = bare;
+    }
+
+    wireguardConstruct(node, WG_DEFAULT_GROUP, remarks, "", "0", self_ip,
+                       self_ipv6, GetMember(singboxNode, "private_key"), "", "",
+                       {}, GetMember(singboxNode, "mtu"), "0", "", "",
+                       tribool(), "");
+    node.WireGuardLocalAddresses = local_addresses;
+    node.WireGuardInterfaceName = GetMember(singboxNode, "name");
+    if (node.WireGuardInterfaceName.empty())
+        node.WireGuardInterfaceName = GetMember(singboxNode, "interface_name");
+    node.WireGuardListenPort = parseUint16Option(
+        GetMember(singboxNode, "listen_port"), 0);
+    node.WireGuardWorkers = parseUint16Option(
+        GetMember(singboxNode, "workers"), 0);
+    const char *system_key = endpoint_schema ? "system" : "system_interface";
+    if (singboxNode.HasMember(system_key) && singboxNode[system_key].IsBool())
+        node.WireGuardSystem = singboxNode[system_key].GetBool();
+
+    node.WireGuardPeers.clear();
+    if (singboxNode.HasMember("peers") && singboxNode["peers"].IsArray()) {
+        for (const auto &peer_value : singboxNode["peers"].GetArray()) {
+            WireGuardPeer peer = parseSingBoxWireGuardPeer(peer_value, endpoint_schema);
+            if (validWireGuardPeer(peer))
+                node.WireGuardPeers.emplace_back(std::move(peer));
+        }
+    } else if (!endpoint_schema) {
+        WireGuardPeer peer;
+        peer.Hostname = GetMember(singboxNode, "server");
+        peer.Port = parseUint16Option(GetMember(singboxNode, "server_port"), 0);
+        peer.PublicKey = GetMember(singboxNode, "peer_public_key");
+        if (peer.PublicKey.empty())
+            peer.PublicKey = GetMember(singboxNode, "public_key");
+        peer.PreSharedKey = GetMember(singboxNode, "pre_shared_key");
+        if (singboxNode.HasMember("reserved"))
+            peer.Reserved = jsonWireGuardReserved(singboxNode["reserved"]);
+        if (validWireGuardPeer(peer))
+            node.WireGuardPeers.emplace_back(std::move(peer));
+    }
+    syncLegacyWireGuardProjection(node);
+    return !node.PrivateKey.empty() && !node.WireGuardLocalAddresses.empty() &&
+           !node.WireGuardPeers.empty();
+}
+
+} // namespace
+
 void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
     uint32_t index = nodes.size();
     for (rapidjson::SizeType i = 0; i < outbounds.Size(); ++i) {
@@ -3684,16 +4113,8 @@ void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
                         httpConstruct(node, group, ps, server, port, user, password, tls == "tls", tfo, scv);
                         break;
                     case "wireguard"_hash:
-                        group = WG_DEFAULT_GROUP;
-                        ip = GetMember(singboxNode, "inet4_bind_address");
-                        ipv6 = GetMember(singboxNode, "inet6_bind_address");
-                        public_key = GetMember(singboxNode, "private_key");
-                        private_key = GetMember(singboxNode, "public_key");
-                        mtu = GetMember(singboxNode, "mtu");
-                        password = GetMember(singboxNode, "pre_shared_key");
-                        dns_server = {"8.8.8.8"};
-                        wireguardConstruct(node, group, ps, server, port, ip, ipv6, private_key, public_key, password,
-                                           dns_server, mtu, "0", "", "", udp, "");
+                        if (!explodeSingboxWireGuardNode(singboxNode, false, node))
+                            continue;
                         break;
                     case "socks"_hash:
                         group = SOCKS_DEFAULT_GROUP;
@@ -3799,6 +4220,22 @@ void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
                 index++;
             }
         }
+    }
+}
+
+void explodeSingboxEndpoints(rapidjson::Value &endpoints,
+                             std::vector<Proxy> &nodes) {
+    uint32_t index = nodes.size();
+    if (!endpoints.IsArray())
+        return;
+    for (auto &endpoint : endpoints.GetArray()) {
+        if (!endpoint.IsObject() || GetMember(endpoint, "type") != "wireguard")
+            continue;
+        Proxy node;
+        if (!explodeSingboxWireGuardNode(endpoint, true, node))
+            continue;
+        node.Id = index++;
+        nodes.emplace_back(std::move(node));
     }
 }
 
@@ -3923,23 +4360,18 @@ void explodeSub(std::string sub, std::vector<Proxy> &nodes) {
         throw;
     }
     try {
-        std::string pattern = "\"?(inbounds)\"?:";
-        if (!processed &&
-            regFind(sub, pattern)) {
-            pattern = "\"?(outbounds)\"?:";
-            if (regFind(sub, pattern)) {
-                pattern = "\"?(route)\"?:";
-                if (regFind(sub, pattern)) {
-                    rapidjson::Document document;
-                    document.Parse(sub.c_str());
-                    if (!document.HasParseError() || document.IsObject()) {
-                        rapidjson::Value &value = document["outbounds"];
-                        if (value.IsArray() && !value.Empty()) {
-                            explodeSingbox(value, nodes);
-                            processed = true;
-                        }
-                    }
-                }
+        if (!processed && !sub.empty() && sub.front() == '{') {
+            rapidjson::Document document;
+            document.Parse(sub.c_str());
+            if (!document.HasParseError() && document.IsObject()) {
+                const size_t before = nodes.size();
+                if (document.HasMember("outbounds") &&
+                    document["outbounds"].IsArray())
+                    explodeSingbox(document["outbounds"], nodes);
+                if (document.HasMember("endpoints") &&
+                    document["endpoints"].IsArray())
+                    explodeSingboxEndpoints(document["endpoints"], nodes);
+                processed = nodes.size() > before;
             }
         }
     } catch (std::exception &e) {

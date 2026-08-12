@@ -82,6 +82,10 @@ std::string sanitizedSettingsSnapshot(const Settings &settings) {
            {"surfboard_policy_path", settings.surfboardPolicyPath},
            {"loon_remote_proxy", settings.loonRemoteProxy},
        }},
+      {"singbox",
+       {
+           {"wireguard_endpoint", settings.singBoxWireGuardEndpoint},
+       }},
       {"rules",
        {
            {"enabled", settings.enableRuleGen},

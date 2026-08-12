@@ -130,7 +130,7 @@ SubConverter-Extended 因此诞生。它是一款更贴合 Mihomo 使用场景�
 > 2. Quantumult X、Surge、Surfboard 和 Loon 的完整配置可以使用客户端原生远程资源；其节点链接仍调用继承自上游项目的 Legacy 解析器。
 > 3. 其他非 Mihomo 目标仍使用 Legacy 解析器。协议和参数支持范围以对应生成器能够表示的内容为准。
 
-Legacy 解析器对经典格式的兼容范围包括：Shadowsocks SIP002（含 AEAD-2022、插件和 IPv6）、SIP008/旧版 JSON 输入、历史 SSR 链接、v2rayN `socks://` 新旧格式，以及 Telegram 和 Base64 authority 形式的 HTTP(S) 代理链接。普通 HTTP(S) URL 仍按订阅处理；`socks5://` 仍属于 Mihomo 路径，不会借此改动进入 Legacy 解析器。解析成功不代表每个目标客户端都能表示对应协议，最终仍由目标生成器筛选。
+Legacy 解析器对经典格式的兼容范围包括：Shadowsocks SIP002（含 AEAD-2022、插件和 IPv6）、SIP008/旧版 JSON 输入、历史 SSR 链接、v2rayN `socks://` 新旧格式、Telegram 和 Base64 authority 形式的 HTTP(S) 代理链接，以及 Surge、Loon、Mihomo 和 sing-box 新旧结构中的 WireGuard 节点。普通 HTTP(S) URL 仍按订阅处理；`socks5://` 仍属于 Mihomo 路径，不会借此改动进入 Legacy 解析器。解析成功不代表每个目标客户端都能表示对应协议，最终仍由目标生成器筛选。
 
 ### 🔥 独特功能
 
@@ -986,6 +986,41 @@ url=provider:A,proxy_direct:false,https://a.example/sub|provider:B,interval:2160
 * 如果代理路径本身依赖这个尚未完成初次下载的 provider，可能形成启动循环；因此本项目继续使用 `true` 作为兼容默认值
 * 接受 `true`、`false`、`1`、`0`；同一条订阅重复设置或使用其他值会返回 HTTP 400
 * `proxy_direct:` 不适用于节点 URI、`list=true` 或非 Clash/ClashR 目标
+
+</details>
+
+<details>
+<summary><strong>WireGuard 结构化转换与 sing-box 新旧模式</strong></summary>
+
+Legacy 节点路径会保留 WireGuard 的多个本地地址和多个 Peer，而不再只保留第一项。当前可识别以下输入：
+
+* Surge `[Proxy]` 与 `[WireGuard name]` 分节格式，包括重复或组合的 `peer`、Peer 级预共享密钥、保活时间、Allowed IP 和 Client ID；
+* Loon 内联 `wireguard` 与 `peers=[{...}]` 格式；
+* Mihomo 顶层单 Peer 与 `peers` 多 Peer 格式；
+* sing-box 旧版 WireGuard outbound 和 1.11+ WireGuard endpoint。
+
+Surge 输出使用官方 `[WireGuard name]` 分节格式，并为每个 Peer 保留独立参数；Loon 输出使用内联 `peers` 数组。Loon 只有节点级 `keepalive`，因此多个 Peer 的保活时间必须一致；不一致时该节点会按“不支持”处理，不会擅自选取某一个值。
+
+缺少新配置项的旧部署继续输出旧版 WireGuard outbound，以保证配置文件平滑升级。仓库提供的新示例配置默认启用 sing-box 1.11+ endpoint；部署者也可以显式设置：
+
+```toml
+[singbox]
+wireguard_endpoint = true
+```
+
+```yaml
+singbox:
+  wireguard_endpoint: true
+```
+
+```ini
+[singbox]
+wireguard_endpoint=true
+```
+
+缺少整个配置节或字段时，兼容默认值为 `false`；旧 `pref.ini`、`pref.yml` 和 `pref.toml` 无需增加字段即可启动，热重载时删除字段会恢复旧 outbound。sing-box 1.12 继续使用旧 outbound 时还需要设置官方兼容环境变量 `ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true`，1.13 已移除旧结构；使用这些新版本时应启用 endpoint。endpoint 模式会保留 Peer 级 `persistent_keepalive_interval`；旧 outbound 官方结构无法表示该字段，因此不会伪造或下放错误位置。日志事件 `SINGBOX_WIREGUARD_GENERATION` 只记录 `schema`、节点数和 Peer 数，不记录密钥、地址或节点名称。
+
+该开关只控制 `target=singbox` 的 WireGuard 输出结构，不参与输入解析，也不改变 Clash/ClashR 的 Mihomo 解析、Canonical JSON 或 `proxy-provider` 分流。格式依据见 [Surge WireGuard 手册](https://manual.nssurge.com/policies/wireguard.html)、[Loon 节点格式](https://nsloon.app/docs/Node/)、[Mihomo WireGuard 配置](https://wiki.metacubex.one/config/proxies/wg/)、[sing-box 旧 outbound](https://sing-box.sagernet.org/configuration/outbound/wireguard/)和[新 endpoint](https://sing-box.sagernet.org/configuration/endpoint/wireguard/)。
 
 </details>
 
