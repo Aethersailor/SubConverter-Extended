@@ -172,6 +172,71 @@ ANYTLS_MODERN_URI = (
     "&idle_session_check_interval=45s&idle_session_timeout=60s"
     "&min_idle_session=3#AnyTLS%20Modern"
 )
+HYSTERIA_V1_URI = (
+    "hy://[2001:db8::14]:36712?protocol=udp&auth=p%40ss%2Bword"
+    "&peer=hy1-tls.example.test&insecure=1&upmbps=100"
+    "&downmbps=200&alpn=h3%2Chysteria&obfs=xplus"
+    "&obfsParam=obfs%2Bsecret#Hysteria%20V1+Literal"
+)
+HYSTERIA_V1_SINGBOX_CONFIG = json.dumps(
+    {
+        "outbounds": [
+            {
+                "type": "hysteria",
+                "tag": "Hysteria V1 sing-box",
+                "server": "2001:db8::15",
+                "server_ports": ["20000:20002", "30000"],
+                "hop_interval": "45s",
+                "up": "640 KBps",
+                "down_mbps": 200,
+                "obfs": "singbox-obfs",
+                "auth": "YmluYXJ5LWF1dGg=",
+                "network": ["tcp"],
+                "tls": {
+                    "enabled": True,
+                    "server_name": "singbox-hy1.example.test",
+                    "insecure": True,
+                    "alpn": ["h3", "hysteria"],
+                },
+            },
+            {
+                "type": "hysteria",
+                "tag": "Hysteria V1 scalar ports",
+                "server": "hy1-scalar.example.test",
+                "server_ports": "40000:40002",
+                "up_mbps": 20,
+                "down_mbps": 80,
+                "auth_str": "scalar-auth",
+                "tls": {
+                    "enabled": True,
+                    "server_name": "hy1-scalar.example.test",
+                },
+            }
+        ]
+    },
+    separators=(",", ":"),
+)
+HYSTERIA_V1_CLASH_CONFIG = """proxies:
+  - name: Hysteria V1 Clash
+    type: hysteria
+    server: hy1-clash.example.test
+    port: 443
+    ports: 443,10000-10002
+    auth-str: clash-auth
+    protocol: udp
+    up: 30 Mbps
+    down: 200 Mbps
+    obfs: clash-obfs
+    alpn: [h3, hysteria]
+    sni: clash-hy1.example.test
+    skip-cert-verify: true
+"""
+SNELL_SURGE_CONFIG = """[Proxy]
+Snell V4 = snell, snell-v4.example.test, 443, psk=snell-secret==, version=4, reuse=true, obfs=http, obfs-host=cdn.example.test, obfs-uri=/resource
+Snell Shadow = snell, snell-shadow.example.test, 8443, psk=shadow-secret, version=4, reuse=false, shadow-tls-password=shadow-password, shadow-tls-sni=shadow.example.test, shadow-tls-version=3
+Snell V3 TLS = snell, snell-v3.example.test, 7443, psk=snell-v3-secret, version=3, obfs=tls, obfs-host=tls.example.test, udp-port=7444
+Snell V6 = snell, snell-v6.example.test, 9443, psk=123456789012, version=6, reuse=true, mode=unshaped
+"""
 SS_SIP002_URI = (
     "ss://"
     + _urlsafe_b64("aes-256-gcm:p@ss+word")
@@ -452,6 +517,15 @@ class FixtureHandler(BaseHTTPRequestHandler):
         elif request_path == "/ssr-libev.json":
             body = SSR_LIBEV_CONFIG.encode()
             content_type = "application/json; charset=utf-8"
+        elif request_path == "/hysteria-v1-singbox.json":
+            body = HYSTERIA_V1_SINGBOX_CONFIG.encode()
+            content_type = "application/json; charset=utf-8"
+        elif request_path == "/hysteria-v1-clash.yaml":
+            body = HYSTERIA_V1_CLASH_CONFIG.encode()
+            content_type = "text/yaml; charset=utf-8"
+        elif request_path == "/snell-surge.conf":
+            body = SNELL_SURGE_CONFIG.encode()
+            content_type = "text/plain; charset=utf-8"
         elif request_path == "/rules.list":
             body = RULESET.encode()
             content_type = "text/plain; charset=utf-8"
@@ -4775,6 +4849,234 @@ def classic_protocol_baseline(base_url: str, fixture_base: str) -> None:
             )
 
 
+def legacy_niche_protocol_baseline(base_url: str, fixture_base: str) -> None:
+    def singbox_outbound(source: str, tag: str) -> dict:
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "singbox",
+                "url": source,
+                "list": "true",
+                "udp": "true",
+                "tfo": "false",
+                "scv": "true",
+            },
+        )
+        if status != 200:
+            raise AssertionError(
+                f"sing-box legacy protocol conversion failed: HTTP {status} {body!r}"
+            )
+        payload = json.loads(body.decode("utf-8"))
+        for outbound in payload.get("outbounds", []):
+            if outbound.get("tag") == tag:
+                return outbound
+        raise AssertionError(f"missing sing-box outbound {tag!r}: {payload!r}")
+
+    uri_outbound = singbox_outbound(HYSTERIA_V1_URI, "Hysteria V1+Literal")
+    expected_uri_fields = {
+        "type": "hysteria",
+        "server": "2001:db8::14",
+        "server_port": 36712,
+        "up_mbps": 100,
+        "down_mbps": 200,
+        "obfs": "obfs+secret",
+        "auth_str": "p@ss+word",
+    }
+    if any(uri_outbound.get(key) != expected for key, expected in expected_uri_fields.items()):
+        raise AssertionError(f"Hysteria v1 URI mapping drifted: {uri_outbound!r}")
+    if uri_outbound.get("tls") != {
+        "enabled": True,
+        "server_name": "hy1-tls.example.test",
+        "insecure": True,
+        "alpn": ["h3", "hysteria"],
+    }:
+        raise AssertionError(f"Hysteria v1 URI TLS drifted: {uri_outbound!r}")
+
+    singbox_outbound_from_config = singbox_outbound(
+        fixture_base + "/hysteria-v1-singbox.json",
+        "Hysteria V1 sing-box",
+    )
+    for key, expected in (
+        ("server_ports", ["20000:20002", "30000:30000"]),
+        ("hop_interval", "45s"),
+        ("up", "640 KBps"),
+        ("down_mbps", 200),
+        ("auth", "YmluYXJ5LWF1dGg="),
+        ("network", "tcp"),
+    ):
+        if singbox_outbound_from_config.get(key) != expected:
+            raise AssertionError(
+                f"sing-box Hysteria v1 {key} drifted: "
+                f"{singbox_outbound_from_config!r}"
+            )
+    if "auth_str" in singbox_outbound_from_config:
+        raise AssertionError(
+            "base64 Hysteria v1 authentication was rewritten as auth_str"
+        )
+    scalar_ports_outbound = singbox_outbound(
+        fixture_base + "/hysteria-v1-singbox.json",
+        "Hysteria V1 scalar ports",
+    )
+    if scalar_ports_outbound.get("server_ports") != ["40000:40002"]:
+        raise AssertionError(
+            "sing-box scalar Hysteria v1 server_ports was not preserved: "
+            f"{scalar_ports_outbound!r}"
+        )
+
+    clash_outbound = singbox_outbound(
+        fixture_base + "/hysteria-v1-clash.yaml",
+        "Hysteria V1 Clash",
+    )
+    for key, expected in (
+        ("server_ports", ["443:443", "10000:10002"]),
+        ("auth_str", "clash-auth"),
+        ("up_mbps", 30),
+        ("down_mbps", 200),
+        ("obfs", "clash-obfs"),
+    ):
+        if clash_outbound.get(key) != expected:
+            raise AssertionError(
+                f"Clash Hysteria v1 {key} drifted: {clash_outbound!r}"
+            )
+    if clash_outbound.get("tls") != {
+        "enabled": True,
+        "server_name": "clash-hy1.example.test",
+        "insecure": True,
+        "alpn": ["h3", "hysteria"],
+    }:
+        raise AssertionError(f"Clash Hysteria v1 TLS drifted: {clash_outbound!r}")
+
+    faketcp_status, faketcp_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "singbox",
+            "url": HYSTERIA_V1_URI.replace("protocol=udp", "protocol=faketcp"),
+            "list": "true",
+        },
+    )
+    if faketcp_status == 200 and b"Hysteria V1+Literal" in faketcp_body:
+        raise AssertionError(
+            "sing-box emitted a Hysteria v1 faketcp outbound it cannot express"
+        )
+
+    missing_speed_status, _, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "singbox",
+            "url": HYSTERIA_V1_URI.replace("&downmbps=200", ""),
+            "list": "true",
+        },
+    )
+    if missing_speed_status != 400:
+        raise AssertionError("Hysteria v1 URI without downlink speed was accepted")
+    invalid_speed_status, _, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "singbox",
+            "url": HYSTERIA_V1_URI.replace(
+                "downmbps=200", "downmbps=2%20Gbps"
+            ),
+            "list": "true",
+        },
+    )
+    if invalid_speed_status != 400:
+        raise AssertionError("Hysteria v1 URI accepted a non-Mbps speed value")
+
+    no_tls_config = json.dumps(
+        {
+            "outbounds": [
+                {
+                    "type": "hysteria",
+                    "tag": "Missing TLS",
+                    "server": "hy1-no-tls.example.test",
+                    "server_port": 443,
+                    "up_mbps": 20,
+                    "down_mbps": 80,
+                }
+            ]
+        },
+        separators=(",", ":"),
+    )
+    no_tls_url = "data:application/json;base64," + base64.b64encode(
+        no_tls_config.encode("utf-8")
+    ).decode("ascii")
+    no_tls_status, _, _ = request(
+        base_url,
+        "/sub",
+        {"target": "singbox", "url": no_tls_url, "list": "true"},
+    )
+    if no_tls_status != 400:
+        raise AssertionError("sing-box Hysteria v1 without TLS was accepted")
+
+    snell_status, snell_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "surge",
+            "ver": "4",
+            "url": fixture_base + "/snell-surge.conf",
+            "list": "true",
+        },
+    )
+    snell = snell_body.decode("utf-8", errors="replace")
+    expected_snell_fragments = (
+        "Snell V4 = snell, snell-v4.example.test, 443, psk=snell-secret==",
+        "version=4",
+        "reuse=true",
+        "obfs=http",
+        "obfs-host=cdn.example.test",
+        "obfs-uri=/resource",
+        "Snell Shadow = snell, snell-shadow.example.test, 8443, psk=shadow-secret",
+        "shadow-tls-password=shadow-password",
+        "shadow-tls-sni=shadow.example.test",
+        "shadow-tls-version=3",
+        "Snell V3 TLS = snell, snell-v3.example.test, 7443, psk=snell-v3-secret",
+        "obfs=tls",
+        "obfs-host=tls.example.test",
+        "udp-port=7444",
+        "Snell V6 = snell, snell-v6.example.test, 9443, psk=123456789012",
+        "version=6",
+        "reuse=true",
+        "mode=unshaped",
+    )
+    if snell_status != 200 or any(
+        fragment not in snell for fragment in expected_snell_fragments
+    ):
+        raise AssertionError(
+            f"Surge Snell v4/v6 conversion drifted: HTTP {snell_status} {snell!r}"
+        )
+
+    invalid_snell_lines = (
+        "Bad V6 Obfs = snell, bad.example.test, 443, psk=secret, version=6, obfs=http",
+        "Bad V5 Mode = snell, bad.example.test, 443, psk=secret, version=5, mode=unshaped",
+        "Bad V2 UDP = snell, bad.example.test, 443, psk=secret, version=2, udp-port=7444",
+        "Bad Shadow TLS = snell, bad.example.test, 443, psk=secret, version=4, shadow-tls-password=shadow, shadow-tls-version=3",
+        "Bad Reuse = snell, bad.example.test, 443, psk=secret, version=4, reuse=maybe",
+    )
+    for invalid_line in invalid_snell_lines:
+        invalid_source = "data:text/plain;base64," + base64.b64encode(
+            ("[Proxy]\n" + invalid_line + "\n").encode("utf-8")
+        ).decode("ascii")
+        invalid_status, _, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "surge",
+                "ver": "4",
+                "url": invalid_source,
+                "list": "true",
+            },
+        )
+        if invalid_status != 400:
+            raise AssertionError(
+                f"invalid Surge Snell combination was accepted: {invalid_line!r}"
+            )
+
+
 def wireguard_structured_conversion_baseline(
     base_url: str, endpoint_base_url: str
 ) -> None:
@@ -7173,6 +7475,7 @@ def main() -> int:
             conversion_baselines(base_url, fixture_base, args.update_golden)
             parser_route_isolation_baseline(base_url, fixture_base)
             classic_protocol_baseline(base_url, fixture_base)
+            legacy_niche_protocol_baseline(base_url, fixture_base)
             wireguard_endpoint_logs: list[str] = []
             with running_service(
                 binary,

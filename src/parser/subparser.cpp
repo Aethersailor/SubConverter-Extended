@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cctype>
 #include <initializer_list>
+#include <limits>
 #include <string>
 #include <map>
 
@@ -117,6 +118,22 @@ bool validSharePort(const std::string &port) {
         return false;
     const int value = to_int(port, 0);
     return value >= 1 && value <= 65535;
+}
+
+bool validHysteriaUriMbps(const std::string &value) {
+    if (value.empty() ||
+        !std::all_of(value.begin(), value.end(), [](unsigned char ch) {
+            return std::isdigit(ch) != 0;
+        }))
+        return false;
+    try {
+        const unsigned long long parsed = std::stoull(value);
+        return parsed > 0 &&
+               parsed <= static_cast<unsigned long long>(
+                             std::numeric_limits<int>::max());
+    } catch (const std::exception &) {
+        return false;
+    }
 }
 
 bool decodeStrictBase64(const std::string &encoded, std::string &decoded) {
@@ -254,6 +271,52 @@ bool validHysteria2PortToken(const std::string &token, uint16_t &first_port,
     first_port = static_cast<uint16_t>(first);
     remaining = first < last ? std::to_string(first + 1) + "-" + end : std::string();
     return true;
+}
+
+bool normalizeHysteriaPortSpec(const std::string &value,
+                               std::string &normalized,
+                               uint16_t &first_port) {
+    string_array normalized_ranges;
+    first_port = 0;
+    for (std::string range : split(value, ",")) {
+        range = trim(range);
+        if (range.empty())
+            return false;
+        if (range.find(':') != std::string::npos) {
+            if (range.find(':') != range.rfind(':'))
+                return false;
+            range[range.find(':')] = '-';
+        }
+        uint16_t range_first = 0;
+        std::string ignored_remaining;
+        if (!validHysteria2PortToken(range, range_first, ignored_remaining))
+            return false;
+        if (normalized_ranges.empty())
+            first_port = range_first;
+        normalized_ranges.emplace_back(std::move(range));
+    }
+    if (normalized_ranges.empty())
+        return false;
+    normalized = join(normalized_ranges, ",");
+    return true;
+}
+
+bool normalizeHysteriaProtocol(std::string &protocol) {
+    protocol = toLower(trim(protocol));
+    if (protocol.empty())
+        protocol = "udp";
+    return protocol == "udp" || protocol == "wechat-video" ||
+           protocol == "faketcp";
+}
+
+bool normalizeHysteriaNetwork(std::string &network) {
+    network = toLower(trim(network));
+    return network.empty() || network == "tcp" || network == "udp";
+}
+
+bool validHysteriaHopInterval(const std::string &interval) {
+    return interval.empty() ||
+           regMatch(interval, R"(^([1-9][0-9]*(?:ns|us|ms|s|m|h))+$)");
 }
 
 bool parseModernShareUri(std::string uri, const std::string &scheme,
@@ -796,13 +859,16 @@ void trojanConstruct(Proxy &node, const std::string &group, const std::string &r
 
 void snellConstruct(Proxy &node, const std::string &group, const std::string &remarks, const std::string &server,
                     const std::string &port, const std::string &password, const std::string &obfs,
-                    const std::string &host, uint16_t version, tribool udp, tribool tfo, tribool scv,
+                    const std::string &host, const std::string &obfs_uri, uint16_t version,
+                    tribool reuse, tribool udp, tribool tfo, tribool scv,
                     const std::string &underlying_proxy) {
     commonConstruct(node, ProxyType::Snell, group, remarks, server, port, udp, tfo, scv, tribool(), underlying_proxy);
     node.Password = password;
     node.OBFS = obfs;
     node.Host = host;
+    node.Path = obfs_uri;
     node.SnellVersion = version;
+    node.SnellReuse = reuse;
 }
 
 void wireguardConstruct(Proxy &node, const std::string &group, const std::string &remarks, const std::string &server,
@@ -1819,11 +1885,9 @@ void explodeMierus(std::string mierus, Proxy &node) {
 
 void explodeHysteria(std::string hysteria, Proxy &node) {
     writeLog(LOG_LEVEL_DEBUG, "正在解析 Hysteria 节点。");
-    hysteria = regReplace(hysteria, "(hysteria|hy)://", "hysteria://");
-    if (regMatch(hysteria, "hysteria://(.*?)[:](.*)")) {
-        explodeStdHysteria(hysteria, node);
-        return;
-    }
+    if (startsWith(hysteria, "hy://"))
+        hysteria.replace(0, 5, "hysteria://");
+    explodeStdHysteria(std::move(hysteria), node);
 }
 
 void explodeHysteria2(std::string hysteria2, Proxy &node) {
@@ -1994,7 +2058,8 @@ void explodeNetch(std::string netch, Proxy &node) {
             aid = GetMember(json, "SnellVersion");
             if (group.empty())
                 group = SNELL_DEFAULT_GROUP;
-            snellConstruct(node, group, remark, address, port, password, obfs, host, to_int(aid, 0), udp, tfo, scv);
+            snellConstruct(node, group, remark, address, port, password, obfs,
+                           host, "", to_int(aid, 0), tribool(), udp, tfo, scv);
             break;
         default:
             return;
@@ -2015,14 +2080,16 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes) {
         std::string user; //socks
         std::string ip, ipv6, private_key, public_key, mtu, wg_allowed_ips,
                     wg_reserved, wg_keepalive; //wireguard
-        std::string auth, up, down, obfsParam, insecure, alpn; //hysteria
+        std::string auth, auth_str, up, down, obfsParam, insecure, alpn,
+                    hop_interval, reuse_text; //hysteria
         std::string obfsPassword, certificate_fingerprint; //hysteria2
         std::string congestion_control, udp_relay_mode, token; // tuic
         string_array dns_server;
         std::vector<String> alpns;
         String alpn2;
-        std::string fingerprint, multiplexing, transfer_protocol, v2ray_http_upgrade;
-        tribool udp, tfo, scv;
+        std::string fingerprint, snell_fingerprint, multiplexing,
+                    transfer_protocol, v2ray_http_upgrade;
+        tribool udp, tfo, scv, reuse;
         bool reduceRtt = false, disableSni = false; //tuic
         uint16_t request_timeout = 15000; //tuic
         uint16_t idle_check = 30, idle_timeout = 30, min_idle = 0; //anytls
@@ -2220,8 +2287,26 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes) {
                 singleproxy["obfs-opts"]["mode"] >>= obfs;
                 singleproxy["obfs-opts"]["host"] >>= host;
                 singleproxy["version"] >>= aid;
-
-                snellConstruct(node, group, ps, server, port, password, obfs, host, to_int(aid, 0), udp, tfo, scv);
+                singleproxy["reuse"] >> reuse_text;
+                reuse = reuse_text;
+                if (!reuse_text.empty() && reuse.is_undef())
+                    continue;
+                singleproxy["client-fingerprint"] >>= snell_fingerprint;
+                snellConstruct(node, group, ps, server, port, password, obfs,
+                               host, "", to_int(aid, 0), reuse, udp, tfo, scv);
+                if (obfs == "shadow-tls") {
+                    singleproxy["obfs-opts"]["password"] >>=
+                        node.ShadowTLSPassword;
+                    node.ShadowTLSSNI = host;
+                    std::string shadow_version;
+                    singleproxy["obfs-opts"]["version"] >>=
+                        shadow_version;
+                    node.ShadowTLSVersion = parseUint16Option(
+                        shadow_version, 0);
+                    singleproxy["obfs-opts"]["alpn"] >>=
+                        node.AlpnList;
+                }
+                node.Fingerprint = snell_fingerprint;
                 break;
             case "wireguard"_hash: {
                 group = WG_DEFAULT_GROUP;
@@ -2375,26 +2460,52 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes) {
                 break;
             case "hysteria"_hash:
                 group = HYSTERIA_DEFAULT_GROUP;
-                singleproxy["auth_str"] >> auth;
-                if (auth.empty()) {
-                    singleproxy["auth-str"] >> auth;
-                    if (auth.empty()) {
-                        singleproxy["password"] >> auth;
-                    }
-                }
+                singleproxy["auth_str"] >> auth_str;
+                if (auth_str.empty())
+                    singleproxy["auth-str"] >> auth_str;
+                if (auth_str.empty())
+                    singleproxy["password"] >> auth_str;
+                singleproxy["auth"] >> auth;
                 singleproxy["up"] >> up;
+                if (up.empty())
+                    singleproxy["up_mbps"] >> up;
                 singleproxy["down"] >> down;
+                if (down.empty())
+                    singleproxy["down_mbps"] >> down;
+                if (up.empty() || down.empty())
+                    continue;
                 singleproxy["obfs"] >> obfsParam;
                 singleproxy["protocol"] >> type;
-                singleproxy["sni"] >> host;
+                if (!normalizeHysteriaProtocol(type))
+                    continue;
+                singleproxy["sni"] >> sni;
+                if (sni.empty())
+                    singleproxy["server-name"] >> sni;
                 singleproxy["alpn"][0] >> alpn;
                 singleproxy["alpn"] >> alpnList;
-                singleproxy["protocol"] >> insecure;
+                singleproxy["skip-cert-verify"] >> insecure;
                 singleproxy["ports"] >> ports;
-                sni = host;
-                hysteriaConstruct(node, group, ps, server, port, type, auth, "", host, up, down, alpn, obfsParam,
+                if (!ports.empty()) {
+                    uint16_t first_port = 0;
+                    std::string normalized_ports;
+                    if (!normalizeHysteriaPortSpec(ports, normalized_ports,
+                                                   first_port))
+                        continue;
+                    ports = std::move(normalized_ports);
+                    if (port.empty() || port == "0")
+                        port = std::to_string(first_port);
+                }
+                singleproxy["hop-interval"] >> hop_interval;
+                if (hop_interval.empty())
+                    singleproxy["hop_interval"] >> hop_interval;
+                if (!validHysteriaHopInterval(hop_interval))
+                    continue;
+                hysteriaConstruct(node, group, ps, server, port, type, auth, auth_str, sni, up, down, alpn, obfsParam,
                                   insecure, ports, sni,
                                   udp, tfo, scv);
+                node.AlpnList = alpnList;
+                node.HysteriaHopInterval = hop_interval;
+                node.TLSSecure = true;
                 break;
             case "hysteria2"_hash:
                 group = HYSTERIA2_DEFAULT_GROUP;
@@ -2567,36 +2678,49 @@ void explodeStdVMess(std::string vmess, Proxy &node) {
 
 
 void explodeStdHysteria(std::string hysteria, Proxy &node) {
-    std::string add, port, type, auth, host, insecure, up, down, alpn, obfsParam, remarks, auth_str, sni;
-    std::string addition;
-    hysteria = hysteria.substr(11);
-    string_size pos;
-
-    extractRemark(hysteria, remarks);
-    const std::string stdhysteria_matcher = R"(^(.*)[:](\d+)[?](.*)$)";
-    if (regGetMatch(hysteria, stdhysteria_matcher, 4, 0, &add, &port, &addition))
+    ParsedShareUri parsed;
+    std::string ignored_ports;
+    if (!parseModernShareUri(std::move(hysteria), "hysteria", false, "",
+                             false, parsed, ignored_ports))
         return;
-    type = getUrlArg(addition, "protocol");
-    auth = getUrlArg(addition, "auth");
-    auth_str = getUrlArg(addition, "auth_str");
-    host = getUrlArg(addition, "peer");
-    insecure = getUrlArg(addition, "insecure");
-    up = getUrlArg(addition, "upmbps");
-    down = getUrlArg(addition, "downmbps");
-    alpn = getUrlArg(addition, "alpn");
-    obfsParam = getUrlArg(addition, "obfsParam");
-    sni = getUrlArg(addition, "peer");
 
-    if (remarks.empty())
-        remarks = add + ":" + port;
-    std::vector<std::string> alpnList;
-    if (!alpn.empty()) {
-        alpnList.push_back(alpn);
-    }
-    hysteriaConstruct(node, HYSTERIA_DEFAULT_GROUP, remarks, add, port, type, auth, auth_str, host, up, down, alpn,
-                      obfsParam,
-                      insecure, "", sni);
-    return;
+    std::string protocol = decodedUrlArg(parsed.query, "protocol");
+    if (!normalizeHysteriaProtocol(protocol))
+        return;
+    const std::string up = decodedFirstUrlArg(
+        parsed.query, {"upmbps", "up_mbps", "up"});
+    const std::string down = decodedFirstUrlArg(
+        parsed.query, {"downmbps", "down_mbps", "down"});
+    if (!validHysteriaUriMbps(up) || !validHysteriaUriMbps(down))
+        return;
+
+    std::string obfs_mode = toLower(trim(decodedUrlArg(parsed.query, "obfs")));
+    if (!obfs_mode.empty() && obfs_mode != "xplus")
+        return;
+    const std::string auth = decodedFirstUrlArg(
+        parsed.query, {"auth_str", "auth-str", "auth"});
+    const std::string sni = decodedFirstUrlArg(
+        parsed.query, {"peer", "sni", "server_name", "server-name"});
+    const std::string insecure = decodedFirstUrlArg(
+        parsed.query, {"insecure", "allow_insecure", "allow-insecure"});
+    const std::vector<std::string> alpn_list = getUrlAlpnList(parsed.query);
+    const std::string alpn = alpn_list.empty() ? std::string() : alpn_list.front();
+    const std::string hop_interval = decodedFirstUrlArg(
+        parsed.query, {"hop_interval", "hop-interval"});
+    if (!validHysteriaHopInterval(hop_interval))
+        return;
+
+    if (parsed.remark.empty())
+        parsed.remark = parsed.host + ":" + parsed.port;
+    hysteriaConstruct(
+        node, HYSTERIA_DEFAULT_GROUP, parsed.remark, parsed.host, parsed.port,
+        protocol, "", auth, sni, up, down, alpn,
+        decodedFirstUrlArg(parsed.query, {"obfsParam", "obfs-param"}),
+        insecure, "", sni, tribool(), tribool(), tribool(insecure));
+    node.OBFS = obfs_mode;
+    node.AlpnList = alpn_list;
+    node.HysteriaHopInterval = hop_interval;
+    node.TLSSecure = true;
 }
 
 void explodeStdMieru(std::string mieru, Proxy &node) {
@@ -2864,10 +2988,12 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes) {
         std::string section, ip, ipv6, private_key, public_key, mtu, test_url, client_id, peer, keepalive; //wireguard
         string_array dns_servers;
         string_multimap wireguard_config;
-        std::string version, aead = "1";
+        std::string version, aead = "1", obfs_uri, reuse_text, snell_mode,
+                    snell_udp_port, shadow_tls_password, shadow_tls_sni,
+                    shadow_tls_version;
         std::string itemName, itemVal, config;
         std::vector<std::string> configs, vArray, headers, header;
-        tribool udp, tfo, scv, tls13;
+        tribool udp, tfo, scv, tls13, reuse;
         Proxy node;
 
         /*
@@ -3176,11 +3302,12 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes) {
                     continue;
 
                 for (i = 3; i < configs.size(); i++) {
-                    vArray = split(configs[i], "=");
-                    if (vArray.size() != 2)
+                    const size_t equal = configs[i].find('=');
+                    if (equal == std::string::npos)
                         continue;
-                    itemName = trim(vArray[0]);
-                    itemVal = trim(vArray[1]);
+                    itemName = toLower(trim(configs[i].substr(0, equal)));
+                    itemVal = stripWireGuardQuotes(
+                        configs[i].substr(equal + 1));
                     switch (hash_(itemName)) {
                         case "psk"_hash:
                             password = itemVal;
@@ -3190,6 +3317,19 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes) {
                             break;
                         case "obfs-host"_hash:
                             host = itemVal;
+                            break;
+                        case "obfs-uri"_hash:
+                            obfs_uri = itemVal;
+                            break;
+                        case "reuse"_hash:
+                            reuse_text = itemVal;
+                            reuse = itemVal;
+                            break;
+                        case "mode"_hash:
+                            snell_mode = toLower(itemVal);
+                            break;
+                        case "udp-port"_hash:
+                            snell_udp_port = itemVal;
                             break;
                         case "udp-relay"_hash:
                             udp = itemVal;
@@ -3203,13 +3343,70 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes) {
                         case "version"_hash:
                             version = itemVal;
                             break;
+                        case "shadow-tls-password"_hash:
+                            shadow_tls_password = itemVal;
+                            break;
+                        case "shadow-tls-sni"_hash:
+                            shadow_tls_sni = itemVal;
+                            break;
+                        case "shadow-tls-version"_hash:
+                            shadow_tls_version = itemVal;
+                            break;
                         default:
                             continue;
                     }
                 }
 
-                snellConstruct(node, SNELL_DEFAULT_GROUP, remarks, server, port, password, plugin, host,
-                               to_int(version, 0), udp, tfo, scv);
+                {
+                    const int snell_version = version.empty()
+                                                  ? 1
+                                                  : to_int(version, 0);
+                    const uint16_t parsed_udp_port = parseUint16Option(
+                        snell_udp_port, 0);
+                    const uint16_t parsed_shadow_version = parseUint16Option(
+                        shadow_tls_version, 0);
+                    const bool has_shadow_tls =
+                        !shadow_tls_password.empty() ||
+                        !shadow_tls_sni.empty() ||
+                        !shadow_tls_version.empty();
+                    const bool valid_obfs =
+                        plugin.empty() || plugin == "http" ||
+                        (plugin == "tls" && snell_version <= 3);
+                    if (password.empty() || snell_version < 1 ||
+                        snell_version > 6 ||
+                        (!reuse_text.empty() && reuse.is_undef()) ||
+                        !valid_obfs ||
+                        (snell_version >= 4 && plugin == "tls") ||
+                        (snell_version == 6 &&
+                         (!plugin.empty() || !host.empty() ||
+                          !obfs_uri.empty())) ||
+                        (!obfs_uri.empty() && plugin != "http") ||
+                        (!snell_udp_port.empty() &&
+                         (parsed_udp_port == 0 || snell_version < 3)) ||
+                        (snell_version == 6
+                             ? (!snell_mode.empty() &&
+                                snell_mode != "default" &&
+                                snell_mode != "unshaped" &&
+                                snell_mode != "unsafe-raw")
+                             : !snell_mode.empty()) ||
+                        (has_shadow_tls &&
+                         (shadow_tls_password.empty() || !plugin.empty() ||
+                          (parsed_shadow_version != 0 &&
+                           parsed_shadow_version != 2 &&
+                           parsed_shadow_version != 3) ||
+                          (parsed_shadow_version == 3 &&
+                           shadow_tls_sni.empty()))))
+                        continue;
+                    snellConstruct(node, SNELL_DEFAULT_GROUP, remarks, server,
+                                   port, password, plugin, host, obfs_uri,
+                                   static_cast<uint16_t>(snell_version), reuse,
+                                   udp, tfo, scv);
+                    node.SnellMode = snell_mode;
+                    node.SnellUDPPort = parsed_udp_port;
+                    node.ShadowTLSPassword = shadow_tls_password;
+                    node.ShadowTLSSNI = shadow_tls_sni;
+                    node.ShadowTLSVersion = parsed_shadow_version;
+                }
                 break;
             case "wireguard"_hash: {
                 for (i = 1; i < configs.size(); i++) {
@@ -3968,7 +4165,8 @@ void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
             std::string flow, mode; //trojan
             std::string user; //socks
             std::string ip, ipv6, private_key, public_key, mtu; //wireguard
-            std::string auth, up, down, obfsParam, insecure, alpn; //hysteria
+            std::string auth, auth_str, up, down, obfsParam, insecure, alpn,
+                        hysteria_network, hop_interval; //hysteria
             std::string obfsPassword; //hysteria2
             string_array dns_server;
             std::string fingerprint;
@@ -4124,6 +4322,8 @@ void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
                         break;
                     case "hysteria"_hash:
                         group = HYSTERIA_DEFAULT_GROUP;
+                        if (tls != "tls")
+                            continue;
                         up = GetMember(singboxNode, "up");
                         if (up.empty()) {
                             up = GetMember(singboxNode, "up_mbps");
@@ -4132,12 +4332,86 @@ void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
                         if (down.empty()) {
                             down = GetMember(singboxNode, "down_mbps");
                         }
-                        auth = GetMember(singboxNode, "auth_str");
-                        type = GetMember(singboxNode, "network");
+                        if (up.empty() || down.empty())
+                            continue;
+                        auth_str = GetMember(singboxNode, "auth_str");
+                        auth = GetMember(singboxNode, "auth");
+                        if (singboxNode.HasMember("network")) {
+                            const auto &network_value = singboxNode["network"];
+                            if (network_value.IsString()) {
+                                hysteria_network = network_value.GetString();
+                                if (!normalizeHysteriaNetwork(
+                                        hysteria_network))
+                                    continue;
+                            } else if (network_value.IsArray()) {
+                                bool has_tcp = false, has_udp = false;
+                                bool valid_networks = true;
+                                for (const auto &network_item :
+                                     network_value.GetArray()) {
+                                    if (!network_item.IsString()) {
+                                        valid_networks = false;
+                                        break;
+                                    }
+                                    std::string network =
+                                        network_item.GetString();
+                                    if (!normalizeHysteriaNetwork(network) ||
+                                        network.empty()) {
+                                        valid_networks = false;
+                                        break;
+                                    }
+                                    has_tcp = has_tcp || network == "tcp";
+                                    has_udp = has_udp || network == "udp";
+                                }
+                                if (!valid_networks ||
+                                    (!has_tcp && !has_udp))
+                                    continue;
+                                hysteria_network = has_tcp && has_udp
+                                                       ? std::string()
+                                                       : has_tcp ? "tcp" : "udp";
+                            } else {
+                                continue;
+                            }
+                        }
+                        if (singboxNode.HasMember("server_ports")) {
+                            string_array port_ranges;
+                            const auto &server_ports =
+                                singboxNode["server_ports"];
+                            if (server_ports.IsString()) {
+                                port_ranges.emplace_back(
+                                    server_ports.GetString());
+                            } else if (server_ports.IsArray()) {
+                                for (const auto &item :
+                                     server_ports.GetArray()) {
+                                    if (!item.IsString()) {
+                                        port_ranges.clear();
+                                        break;
+                                    }
+                                    port_ranges.emplace_back(item.GetString());
+                                }
+                            } else {
+                                continue;
+                            }
+                            uint16_t first_port = 0;
+                            if (port_ranges.empty() ||
+                                !normalizeHysteriaPortSpec(
+                                    join(port_ranges, ","), ports,
+                                    first_port))
+                                continue;
+                            port = std::to_string(first_port);
+                        }
+                        if (!validSharePort(port))
+                            continue;
+                        hop_interval = GetMember(singboxNode, "hop_interval");
+                        if (!validHysteriaHopInterval(hop_interval))
+                            continue;
                         obfsParam = GetMember(singboxNode, "obfs");
-                        hysteriaConstruct(node, group, ps, server, port, type, auth, "", host, up, down, alpn,
+                        hysteriaConstruct(node, group, ps, server, port, "udp", auth, auth_str, sni, up, down, alpn,
                                           obfsParam, insecure, ports, sni,
                                           udp, tfo, scv);
+                        node.AlpnList = alpnList;
+                        node.TransferProtocol = hysteria_network;
+                        node.HysteriaHopInterval = hop_interval;
+                        node.TLSSecure = true;
                         break;
                     case "anytls"_hash:
                         group = ANYTLS_DEFAULT_GROUP;

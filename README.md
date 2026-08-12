@@ -130,7 +130,7 @@ SubConverter-Extended 因此诞生。它是一款更贴合 Mihomo 使用场景�
 > 2. Quantumult X、Surge、Surfboard 和 Loon 的完整配置可以使用客户端原生远程资源；其节点链接仍调用继承自上游项目的 Legacy 解析器。
 > 3. 其他非 Mihomo 目标仍使用 Legacy 解析器。协议和参数支持范围以对应生成器能够表示的内容为准。
 
-Legacy 解析器对经典格式的兼容范围包括：Shadowsocks SIP002（含 AEAD-2022、插件和 IPv6）、SIP008/旧版 JSON 输入、历史 SSR 链接、v2rayN `socks://` 新旧格式、Telegram 和 Base64 authority 形式的 HTTP(S) 代理链接，以及 Surge、Loon、Mihomo 和 sing-box 新旧结构中的 WireGuard 节点。普通 HTTP(S) URL 仍按订阅处理；`socks5://` 仍属于 Mihomo 路径，不会借此改动进入 Legacy 解析器。解析成功不代表每个目标客户端都能表示对应协议，最终仍由目标生成器筛选。
+Legacy 解析器对经典格式的兼容范围包括：Shadowsocks SIP002（含 AEAD-2022、插件和 IPv6）、SIP008/旧版 JSON 输入、历史 SSR 链接、v2rayN `socks://` 新旧格式、Telegram 和 Base64 authority 形式的 HTTP(S) 代理链接，以及 Surge、Loon、Mihomo 和 sing-box 新旧结构中的 WireGuard 节点。它也会校准 Hysteria v1 的官方 URI、Mihomo YAML 与 sing-box JSON 字段，以及 Surge Snell v1-v6 的 `version`、`reuse`、HTTP/TLS obfs、`udp-port`、v6 `mode` 和 Shadow TLS 字段；输出时仍会按目标客户端的稳定能力过滤不可表示的组合。普通 HTTP(S) URL 仍按订阅处理；`socks5://` 仍属于 Mihomo 路径，不会借此改动进入 Legacy 解析器。解析成功不代表每个目标客户端都能表示对应协议，最终仍由目标生成器筛选。
 
 ### 🔥 独特功能
 

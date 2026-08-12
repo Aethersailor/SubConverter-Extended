@@ -282,6 +282,38 @@ static bool parseMbpsValue(std::string value, int &result) {
   }
 }
 
+static bool parseSingBoxBandwidth(std::string value, bool &use_mbps,
+                                  int &mbps, std::string &bandwidth) {
+  value = trim(value);
+  if (parseMbpsValue(value, mbps)) {
+    use_mbps = true;
+    return mbps > 0;
+  }
+
+  const size_t space = value.find(' ');
+  if (space == std::string::npos || space == 0 ||
+      value.find(' ', space + 1) != std::string::npos)
+    return false;
+  const std::string amount = value.substr(0, space);
+  const std::string unit = value.substr(space + 1);
+  static const string_array supported_units = {
+      "bps", "Bps", "Kbps", "KBps", "Mbps", "MBps",
+      "Gbps", "GBps", "Tbps", "TBps"};
+  if (!isNumeric(amount) || amount.empty() || amount == "0" ||
+      std::find(supported_units.begin(), supported_units.end(), unit) ==
+          supported_units.end())
+    return false;
+  try {
+    if (std::stoull(amount) == 0)
+      return false;
+  } catch (const std::exception &) {
+    return false;
+  }
+  use_mbps = false;
+  bandwidth = value;
+  return true;
+}
+
 static bool surgeProxyScalarIsSafe(const std::string &value) {
   return value.find_first_of(",\r\n") == std::string::npos;
 }
@@ -364,6 +396,46 @@ static std::string singBoxHysteria2PortSpec(const Proxy &proxy) {
     ranges.emplace_back(std::move(token));
   }
   return join(ranges, ",");
+}
+
+static bool generatorPortIsValid(const std::string &value) {
+  if (value.empty() || !isNumeric(value))
+    return false;
+  try {
+    const unsigned long port = std::stoul(value);
+    return port > 0 && port <= 65535;
+  } catch (const std::exception &) {
+    return false;
+  }
+}
+
+static bool singBoxHysteriaPortSpec(const Proxy &proxy,
+                                    std::string &port_spec) {
+  string_array ranges;
+  for (std::string token : split(proxy.Ports, ",")) {
+    token = trim(token);
+    if (token.empty())
+      return false;
+    const size_t separator = token.find('-');
+    if (separator == std::string::npos) {
+      if (!generatorPortIsValid(token))
+        return false;
+      token += ":" + token;
+    } else {
+      if (token.find('-', separator + 1) != std::string::npos ||
+          !generatorPortIsValid(token.substr(0, separator)) ||
+          !generatorPortIsValid(token.substr(separator + 1)) ||
+          std::stoul(token.substr(0, separator)) >
+              std::stoul(token.substr(separator + 1)))
+        return false;
+      token[separator] = ':';
+    }
+    ranges.emplace_back(std::move(token));
+  }
+  if (ranges.empty())
+    return false;
+  port_spec = join(ranges, ",");
+  return true;
 }
 
 static void appendShareQuery(std::vector<std::string> &query,
@@ -895,20 +967,44 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
       }
       break;
     case ProxyType::Snell:
-      if (x.SnellVersion >= 4)
+      if ((clashR && x.SnellVersion >= 4) || x.SnellVersion > 5 ||
+          !x.Path.empty() || !x.SnellMode.empty() || x.SnellUDPPort != 0 ||
+          (!x.SnellReuse.is_undef() && x.SnellVersion != 4 &&
+           x.SnellVersion != 5))
         continue;
       singleproxy["type"] = "snell";
       singleproxy["psk"] = x.Password;
       if (x.SnellVersion != 0)
         singleproxy["version"] = x.SnellVersion;
-      if (!x.OBFS.empty()) {
-        singleproxy["obfs-opts"]["mode"] = x.OBFS;
-        if (!x.Host.empty())
-          singleproxy["obfs-opts"]["host"] = x.Host;
+      if (!x.SnellReuse.is_undef())
+        singleproxy["reuse"] = x.SnellReuse.get();
+      if (udp && x.SnellVersion >= 3 && x.SnellVersion <= 5)
+        singleproxy["udp"] = true;
+      {
+        const std::string snell_obfs =
+            !x.ShadowTLSPassword.empty() ? "shadow-tls" : x.OBFS;
+        if (!snell_obfs.empty()) {
+          singleproxy["obfs-opts"]["mode"] = snell_obfs;
+          const std::string &snell_host = x.ShadowTLSSNI.empty()
+                                              ? x.Host
+                                              : x.ShadowTLSSNI;
+          if (!snell_host.empty())
+            singleproxy["obfs-opts"]["host"] = snell_host;
+        }
+        if (snell_obfs == "shadow-tls") {
+          if (!x.ShadowTLSPassword.empty())
+            singleproxy["obfs-opts"]["password"] = x.ShadowTLSPassword;
+          if (x.ShadowTLSVersion > 0)
+            singleproxy["obfs-opts"]["version"] = x.ShadowTLSVersion;
+          if (!x.AlpnList.empty())
+            singleproxy["obfs-opts"]["alpn"] = x.AlpnList;
+        }
       }
+      if (!x.Fingerprint.empty())
+        singleproxy["client-fingerprint"] = x.Fingerprint;
       if (std::all_of(x.Password.begin(), x.Password.end(), ::isdigit) &&
           !x.Password.empty())
-        singleproxy["password"].SetTag("str");
+        singleproxy["psk"].SetTag("str");
       break;
     case ProxyType::WireGuard:
       if (!wireGuardStructuredConfigIsSafe(x))
@@ -967,9 +1063,14 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
         singleproxy["mtu"] = x.Mtu;
       break;
     case ProxyType::Hysteria:
+      if (x.AuthStr.empty() && !x.Auth.empty())
+        continue;
+      if (x.UpMbps.empty() || x.DownMbps.empty() ||
+          !x.TransferProtocol.empty() || !x.HysteriaHopInterval.empty())
+        continue;
       singleproxy["type"] = "hysteria";
-      singleproxy["auth_str"] = x.Auth;
-      singleproxy["auth-str"] = x.Auth;
+      if (!x.AuthStr.empty())
+        singleproxy["auth-str"] = x.AuthStr;
       singleproxy["up"] = x.UpMbps;
       singleproxy["down"] = x.DownMbps;
       if (!x.Ports.empty()) {
@@ -986,7 +1087,9 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
         singleproxy["skip-cert-verify"] = scv.get();
       if (x.Insecure == "1")
         singleproxy["skip-cert-verify"] = true;
-      if (!x.Alpn.empty())
+      if (!x.AlpnList.empty())
+        singleproxy["alpn"] = x.AlpnList;
+      else if (!x.Alpn.empty())
         singleproxy["alpn"].push_back(x.Alpn);
       if (!x.OBFSParam.empty())
         singleproxy["obfs"] = x.OBFSParam;
@@ -2022,16 +2125,64 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
       if (!scv.is_undef())
         proxy += ", skip-cert-verify=" + scv.get_str();
       break;
-    case ProxyType::Snell:
+    case ProxyType::Snell: {
+      const uint16_t snell_version =
+          x.SnellVersion == 0 ? 1 : x.SnellVersion;
+      if (surge_ver < 3 || surge_ver == -3 || snell_version > 6 ||
+          x.Password.empty() ||
+          (snell_version == 6 &&
+           (!x.OBFS.empty() || !x.Host.empty() || !x.Path.empty())) ||
+          (!x.OBFS.empty() && x.OBFS != "http" &&
+           x.OBFS != "tls" && x.OBFS != "shadow-tls") ||
+          (snell_version >= 4 && x.OBFS == "tls") ||
+          (!x.Path.empty() && x.OBFS != "http") ||
+          (x.SnellUDPPort != 0 && snell_version < 3) ||
+          (snell_version == 6
+               ? (!x.SnellMode.empty() && x.SnellMode != "default" &&
+                  x.SnellMode != "unshaped" &&
+                  x.SnellMode != "unsafe-raw")
+               : !x.SnellMode.empty()) ||
+          ((!x.ShadowTLSPassword.empty() || !x.ShadowTLSSNI.empty() ||
+            x.ShadowTLSVersion != 0) &&
+           (x.ShadowTLSPassword.empty() ||
+            (!x.OBFS.empty() && x.OBFS != "shadow-tls") ||
+            (x.ShadowTLSVersion != 0 && x.ShadowTLSVersion != 2 &&
+             x.ShadowTLSVersion != 3) ||
+            (x.ShadowTLSVersion == 3 && x.ShadowTLSSNI.empty()))) ||
+          !surgeProxyScalarIsSafe(hostname) ||
+          !surgeProxyScalarIsSafe(password) ||
+          !surgeProxyScalarIsSafe(obfs) ||
+          !surgeProxyScalarIsSafe(host) ||
+          !surgeProxyScalarIsSafe(path) ||
+          !surgeProxyScalarIsSafe(x.ShadowTLSPassword) ||
+          !surgeProxyScalarIsSafe(x.ShadowTLSSNI)) {
+        supported = false;
+        break;
+      }
       proxy = "snell, " + hostname + ", " + port + ", psk=" + password;
-      if (!obfs.empty()) {
+      if (obfs == "http" || obfs == "tls") {
         proxy += ", obfs=" + obfs;
         if (!host.empty())
           proxy += ", obfs-host=" + host;
       }
-      if (x.SnellVersion != 0)
-        proxy += ", version=" + std::to_string(x.SnellVersion);
+      if (!path.empty())
+        proxy += ", obfs-uri=" + path;
+      proxy += ", version=" + std::to_string(snell_version);
+      if (!x.SnellReuse.is_undef())
+        proxy += ", reuse=" + x.SnellReuse.get_str();
+      if (x.SnellUDPPort != 0)
+        proxy += ", udp-port=" + std::to_string(x.SnellUDPPort);
+      if (!x.SnellMode.empty())
+        proxy += ", mode=" + x.SnellMode;
+      if (!x.ShadowTLSPassword.empty())
+        proxy += ", shadow-tls-password=" + x.ShadowTLSPassword;
+      if (!x.ShadowTLSSNI.empty())
+        proxy += ", shadow-tls-sni=" + x.ShadowTLSSNI;
+      if (x.ShadowTLSVersion > 0)
+        proxy += ", shadow-tls-version=" +
+                 std::to_string(x.ShadowTLSVersion);
       break;
+    }
     case ProxyType::Hysteria2:
       if (surge_ver < 4 || !surgeProxyScalarIsSafe(hostname) ||
           !surgeProxyScalarIsSafe(password) ||
@@ -4261,7 +4412,6 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
   size_t wireguard_peers_emitted = 0;
   RemarkSet used_remarks;
   used_remarks.reserve(nodes.size());
-  std::string search = " Mbps";
 
   if (!ext.nodelist) {
     auto direct = buildObject(allocator, "type", "direct", "tag", "DIRECT");
@@ -4451,44 +4601,69 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
       break;
     }
     case ProxyType::Hysteria: {
+      bool up_uses_mbps = false, down_uses_mbps = false;
+      int up_mbps = 0, down_mbps = 0;
+      std::string up_bandwidth, down_bandwidth, port_spec;
+      if (!parseSingBoxBandwidth(x.UpMbps, up_uses_mbps, up_mbps,
+                                 up_bandwidth) ||
+          !parseSingBoxBandwidth(x.DownMbps, down_uses_mbps, down_mbps,
+                                 down_bandwidth) ||
+          (!x.FakeType.empty() && x.FakeType != "udp") ||
+          (!x.TransferProtocol.empty() && x.TransferProtocol != "tcp" &&
+           x.TransferProtocol != "udp") ||
+          (!x.HysteriaHopInterval.empty() &&
+           !regMatch(x.HysteriaHopInterval,
+                     R"(^([1-9][0-9]*(?:ns|us|ms|s|m|h))+$)")) ||
+          (x.Ports.empty() && x.Port == 0) ||
+          (!x.Ports.empty() &&
+           !singBoxHysteriaPortSpec(x, port_spec)))
+        continue;
       addSingBoxCommonMembers(proxy, x, "hysteria", allocator);
-      proxy.AddMember("auth_str", rapidjson::StringRef(x.Auth.c_str()),
-                      allocator);
-      if (isNumeric(x.UpMbps)) {
-        proxy.AddMember("up_mbps", std::stoi(x.UpMbps), allocator);
-      } else {
-        size_t pos = x.UpMbps.find(search);
-        if (pos != std::string::npos) {
-          x.UpMbps.replace(pos, search.length(), "");
-        }
-        proxy.AddMember("up_mbps", std::stoi(x.UpMbps), allocator);
+      if (!x.Ports.empty()) {
+        proxy.RemoveMember("server_port");
+        auto server_ports = stringArrayToJsonArray(port_spec, ",", allocator);
+        proxy.AddMember("server_ports", server_ports, allocator);
       }
-      if (isNumeric(x.DownMbps)) {
-        proxy.AddMember("down_mbps", std::stoi(x.DownMbps), allocator);
-      } else {
-        size_t pos = x.DownMbps.find(search);
-        if (pos != std::string::npos) {
-          x.DownMbps.replace(pos, search.length(), "");
-        }
-        proxy.AddMember("down_mbps", std::stoi(x.DownMbps), allocator);
-      }
-      if (!x.TLSSecure) {
-        rapidjson::Value tls(rapidjson::kObjectType);
-        tls.AddMember("enabled", true, allocator);
-        if (!x.Alpn.empty()) {
-          auto alpns = stringArrayToJsonArray(x.Alpn, ",", allocator);
-          tls.AddMember("alpn", alpns, allocator);
-        }
-        if (!x.ServerName.empty()) {
-          tls.AddMember("server_name",
-                        rapidjson::StringRef(x.ServerName.c_str()), allocator);
-        }
-        tls.AddMember("insecure", buildBooleanValue(scv), allocator);
-        proxy.AddMember("tls", tls, allocator);
-      }
-      if (!x.FakeType.empty() && x.FakeType != "none")
-        proxy.AddMember("network", rapidjson::StringRef(x.FakeType.c_str()),
+      if (!x.HysteriaHopInterval.empty())
+        proxy.AddMember(
+            "hop_interval",
+            rapidjson::StringRef(x.HysteriaHopInterval.c_str()), allocator);
+      if (!x.AuthStr.empty())
+        proxy.AddMember("auth_str",
+                        rapidjson::StringRef(x.AuthStr.c_str()), allocator);
+      else if (!x.Auth.empty())
+        proxy.AddMember("auth", rapidjson::StringRef(x.Auth.c_str()),
                         allocator);
+      if (up_uses_mbps)
+        proxy.AddMember("up_mbps", up_mbps, allocator);
+      else
+        proxy.AddMember("up",
+                        rapidjson::Value(up_bandwidth.c_str(), allocator),
+                        allocator);
+      if (down_uses_mbps)
+        proxy.AddMember("down_mbps", down_mbps, allocator);
+      else
+        proxy.AddMember("down",
+                        rapidjson::Value(down_bandwidth.c_str(), allocator),
+                        allocator);
+      rapidjson::Value tls(rapidjson::kObjectType);
+      tls.AddMember("enabled", true, allocator);
+      if (!x.AlpnList.empty()) {
+        auto alpns = vectorToJsonArray(x.AlpnList, allocator);
+        tls.AddMember("alpn", alpns, allocator);
+      } else if (!x.Alpn.empty()) {
+        auto alpns = stringArrayToJsonArray(x.Alpn, ",", allocator);
+        tls.AddMember("alpn", alpns, allocator);
+      }
+      if (!x.ServerName.empty())
+        tls.AddMember("server_name",
+                      rapidjson::StringRef(x.ServerName.c_str()), allocator);
+      tls.AddMember("insecure", buildBooleanValue(scv), allocator);
+      proxy.AddMember("tls", tls, allocator);
+      if (!x.TransferProtocol.empty())
+        proxy.AddMember(
+            "network", rapidjson::StringRef(x.TransferProtocol.c_str()),
+            allocator);
       if (!x.OBFSParam.empty())
         proxy.AddMember("obfs", rapidjson::StringRef(x.OBFSParam.c_str()),
                         allocator);
@@ -4674,7 +4849,9 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
     // AnyTLS is TCP-only and its sing-box outbound schema has no `network`
     // field. Other supported outbounds use this field to apply a TCP-only
     // override when UDP is disabled globally.
-    if (!udp.is_undef() && !udp && x.Type != ProxyType::AnyTLS) {
+    if (!udp.is_undef() && !udp && x.Type != ProxyType::AnyTLS &&
+        !(x.Type == ProxyType::Hysteria &&
+          !x.TransferProtocol.empty())) {
       proxy.AddMember("network", "tcp", allocator);
     }
     if (!tfo.is_undef() && x.Type != ProxyType::AnyTLS) {
