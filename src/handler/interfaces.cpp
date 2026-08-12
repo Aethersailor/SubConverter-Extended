@@ -78,6 +78,7 @@ enum class RemoteSubscriptionMode {
   ClashProxyProvider,
   QuanXServerRemote,
   SurgePolicyPath,
+  SurfboardPolicyPath,
 };
 
 struct TargetDescriptor {
@@ -102,7 +103,7 @@ static constexpr std::array<TargetDescriptor, 18> kTargetDescriptors = {{
     {"loon", NodeParserMode::LegacyOnly,
      RemoteSubscriptionMode::ServerSideParse, false, 0},
     {"surfboard", NodeParserMode::LegacyOnly,
-     RemoteSubscriptionMode::ServerSideParse, false, 0},
+     RemoteSubscriptionMode::SurfboardPolicyPath, false, 0},
     {"mellow", NodeParserMode::LegacyOnly,
      RemoteSubscriptionMode::ServerSideParse, false, 0},
     {"singbox", NodeParserMode::LegacyOnly,
@@ -151,6 +152,8 @@ static const char *remoteSubscriptionModeName(RemoteSubscriptionMode mode) {
     return "quanx-server-remote";
   case RemoteSubscriptionMode::SurgePolicyPath:
     return "surge-policy-path";
+  case RemoteSubscriptionMode::SurfboardPolicyPath:
+    return "surfboard-policy-path";
   case RemoteSubscriptionMode::ServerSideParse:
   default:
     return "server-side-parse";
@@ -835,6 +838,14 @@ static std::string surgePolicyPathSourceError(size_t item_index) {
          " contains an unescaped space or control character.\n"
          "无效请求：第 " + item +
          " 个 Surge policy-path 订阅项包含未转义空格或控制字符。";
+}
+
+static std::string surfboardPolicyPathSourceError(size_t item_index) {
+  const std::string item = std::to_string(item_index + 1);
+  return "Invalid request: Surfboard policy-path subscription item #" + item +
+         " contains an unescaped space or control character.\n"
+         "无效请求：第 " + item +
+         " 个 Surfboard policy-path 订阅项包含未转义空格或控制字符。";
 }
 
 static std::string surgePolicyPathIntervalError(size_t item_index) {
@@ -2410,7 +2421,7 @@ static bool remotePolicyRegexIsSafe(const std::string &pattern) {
          });
 }
 
-static bool surgePolicyRegexIsSafe(const std::string &pattern) {
+static bool policyPathRegexIsSafe(const std::string &pattern) {
   return pattern.find('"') == std::string::npos &&
          std::none_of(pattern.begin(), pattern.end(), [](unsigned char ch) {
            return ch < 0x20 || ch == 0x7f;
@@ -2481,15 +2492,17 @@ static std::string quanxRemoteCapabilityReason(
   return "native-capable";
 }
 
-static std::string surgePolicyPathCapabilityReason(
+static std::string policyPathCapabilityReason(
     const ParsedSubRequest &parsed, const EffectiveSubPolicy &policy,
-    const Settings &settings) {
+    const Settings &settings, RemoteSubscriptionMode mode) {
   const extra_settings &ext = policy.generator;
-  if (!settings.surgePolicyPath)
+  const bool surfboard = mode == RemoteSubscriptionMode::SurfboardPolicyPath;
+  if ((surfboard && !settings.surfboardPolicyPath) ||
+      (!surfboard && !settings.surgePolicyPath))
     return "disabled-by-config";
   if (ext.nodelist)
     return "list-mode";
-  if (parsed.surge_version < 3)
+  if (!surfboard && parsed.surge_version < 3)
     return "unsupported-target-version";
 
   size_t remote_subscription_count = 0;
@@ -2502,9 +2515,11 @@ static std::string surgePolicyPathCapabilityReason(
     const std::string link = tagged.link.empty() ? raw_item : tagged.link;
     if (startsWith(regTrim(link), "!!import:"))
       return "imported-source-list";
+    if (surfboard && tagged.has_interval)
+      return "unsupported-update-interval";
     if (tagged.error == TaggedLink::Error::None &&
-        isHttpSubscriptionLink(link,
-                               tagged.has_provider || tagged.has_interval)) {
+        isHttpSubscriptionLink(
+            link, tagged.has_provider || (!surfboard && tagged.has_interval))) {
       remote_subscription_count++;
       remote_group_id = item_group_id;
       remote_source_tag = tagged.tag;
@@ -2549,12 +2564,12 @@ static std::string surgePolicyPathCapabilityReason(
         if (startsWith(rule, "!!GROUP=") && !regValid(selector))
           return "invalid-group-regex";
         if (!server_pattern.empty() &&
-            (!surgePolicyRegexIsSafe(server_pattern) ||
+            (!policyPathRegexIsSafe(server_pattern) ||
              !regValid(server_pattern)))
           return "unsafe-group-regex";
       } else if (startsWith(rule, "!!")) {
         return "unsupported-group-selector";
-      } else if (!surgePolicyRegexIsSafe(rule) || !regValid(rule)) {
+      } else if (!policyPathRegexIsSafe(rule) || !regValid(rule)) {
         return "unsafe-group-regex";
       }
 
@@ -2631,14 +2646,21 @@ static SubStageResponse processSubscriptionNodes(
     if (remote_reason != "native-capable")
       remote_mode = RemoteSubscriptionMode::ServerSideParse;
   } else if (remote_mode == RemoteSubscriptionMode::SurgePolicyPath) {
-    remote_reason = surgePolicyPathCapabilityReason(parsed, policy, settings);
+    remote_reason =
+        policyPathCapabilityReason(parsed, policy, settings, remote_mode);
+    if (remote_reason != "native-capable")
+      remote_mode = RemoteSubscriptionMode::ServerSideParse;
+  } else if (remote_mode == RemoteSubscriptionMode::SurfboardPolicyPath) {
+    remote_reason =
+        policyPathCapabilityReason(parsed, policy, settings, remote_mode);
     if (remote_reason != "native-capable")
       remote_mode = RemoteSubscriptionMode::ServerSideParse;
   }
   explain.remote_subscription_backend = remoteSubscriptionModeName(remote_mode);
   explain.remote_subscription_reason = remote_reason;
 
-  if (remote_mode == RemoteSubscriptionMode::SurgePolicyPath) {
+  if (remote_mode == RemoteSubscriptionMode::SurgePolicyPath ||
+      remote_mode == RemoteSubscriptionMode::SurfboardPolicyPath) {
     const size_t configured_filter_count =
         policy.include_remarks.size() + policy.exclude_remarks.size();
     const size_t configured_node_transform_count =
@@ -2658,7 +2680,10 @@ static SubStageResponse processSubscriptionNodes(
         configured_node_transform_count || configured_node_option_count) {
       writeLog(
           LOG_LEVEL_INFO,
-          "SURGE_POLICY_PATH_TRANSFORM_SCOPE remote_nodes=client "
+          std::string(remote_mode == RemoteSubscriptionMode::SurgePolicyPath
+                          ? "SURGE"
+                          : "SURFBOARD") +
+              "_POLICY_PATH_TRANSFORM_SCOPE remote_nodes=client "
           "direct_nodes=server configured_filters=" +
               std::to_string(configured_filter_count) +
               " configured_rename_rules=" +
@@ -2693,7 +2718,8 @@ static SubStageResponse processSubscriptionNodes(
   auto logRouteSelection = [&]() {
     const size_t provider_count = ext.providers.size();
     const size_t remote_count = ext.quanx_server_remotes.size() +
-                                ext.surge_policy_paths.size();
+                                ext.surge_policy_paths.size() +
+                                ext.surfboard_policy_paths.size();
     std::string route = "none";
     if ((provider_count || remote_count) && source_calls)
       route = "hybrid";
@@ -2722,7 +2748,9 @@ static SubStageResponse processSubscriptionNodes(
     if (parsed.target_descriptor->remote_subscription_mode ==
             RemoteSubscriptionMode::QuanXServerRemote ||
         parsed.target_descriptor->remote_subscription_mode ==
-            RemoteSubscriptionMode::SurgePolicyPath) {
+            RemoteSubscriptionMode::SurgePolicyPath ||
+        parsed.target_descriptor->remote_subscription_mode ==
+            RemoteSubscriptionMode::SurfboardPolicyPath) {
       event += " remote_backend=" +
                std::string(remoteSubscriptionModeName(remote_mode)) +
                " remote_reason=" + remote_reason +
@@ -2772,13 +2800,17 @@ static SubStageResponse processSubscriptionNodes(
       remote_mode == RemoteSubscriptionMode::QuanXServerRemote;
   const bool surge_remote_eligible =
       remote_mode == RemoteSubscriptionMode::SurgePolicyPath;
+  const bool surfboard_remote_eligible =
+      remote_mode == RemoteSubscriptionMode::SurfboardPolicyPath;
   const bool native_remote_target =
       parsed.target_descriptor->remote_subscription_mode ==
           RemoteSubscriptionMode::QuanXServerRemote ||
       parsed.target_descriptor->remote_subscription_mode ==
-          RemoteSubscriptionMode::SurgePolicyPath;
+          RemoteSubscriptionMode::SurgePolicyPath ||
+      parsed.target_descriptor->remote_subscription_mode ==
+          RemoteSubscriptionMode::SurfboardPolicyPath;
   if (!provider_mode_eligible && !quanx_remote_eligible &&
-      !surge_remote_eligible) {
+      !surge_remote_eligible && !surfboard_remote_eligible) {
     for (size_t index = 0; index < urls.size(); ++index) {
       TaggedLink tagged = parseTaggedLink(regTrim(urls[index]));
       if (tagged.error != TaggedLink::Error::None) {
@@ -3128,8 +3160,8 @@ static SubStageResponse processSubscriptionNodes(
           remoteSubscriptionModeName(remote_mode);
       explain.remote_subscription_reason = remote_reason;
     }
-  } else if (surge_remote_eligible) {
-    struct SurgeRemoteLinkItem {
+  } else if (surge_remote_eligible || surfboard_remote_eligible) {
+    struct PolicyPathRemoteLinkItem {
       std::string url;
       std::string source_tag;
       std::string requested_name;
@@ -3137,13 +3169,13 @@ static SubStageResponse processSubscriptionNodes(
       bool has_interval = false;
       int group_id = 0;
     };
-    struct SurgeNodeLinkItem {
+    struct PolicyPathNodeLinkItem {
       std::string url;
       int group_id = 0;
       bool force_direct_link = false;
     };
-    std::vector<SurgeRemoteLinkItem> subscription_urls;
-    std::vector<SurgeNodeLinkItem> node_urls;
+    std::vector<PolicyPathRemoteLinkItem> subscription_urls;
+    std::vector<PolicyPathNodeLinkItem> node_urls;
 
     for (size_t index = 0; index < urls.size(); ++index) {
       std::string &x = urls[index];
@@ -3156,23 +3188,33 @@ static SubStageResponse processSubscriptionNodes(
 
       std::string link = tagged.link.empty() ? x : tagged.link;
       const bool is_remote_subscription = isHttpSubscriptionLink(
-          link, tagged.has_provider || tagged.has_interval);
+          link, tagged.has_provider ||
+                    (surge_remote_eligible && tagged.has_interval));
       const int item_group_id = groupID++;
       if (is_remote_subscription) {
         if (tagged.has_proxy_direct) {
           *status_code = 400;
           return {true, providerDirectScopeError(index)};
         }
-        if (tagged.has_interval && tagged.interval <= 0) {
+        if (surfboard_remote_eligible && tagged.has_interval) {
+          *status_code = 400;
+          return {true, providerIntervalScopeError(index)};
+        }
+        if (surge_remote_eligible && tagged.has_interval &&
+            tagged.interval <= 0) {
           *status_code = 400;
           return {true, surgePolicyPathIntervalError(index)};
         }
         if (hasUnsafeQuanXRemoteUrlChar(link)) {
           *status_code = 400;
-          return {true, surgePolicyPathSourceError(index)};
+          return {true, surge_remote_eligible
+                            ? surgePolicyPathSourceError(index)
+                            : surfboardPolicyPathSourceError(index)};
         }
         writeLog(LOG_LEVEL_INFO,
-                 "检测到 Surge policy-path 远程订阅：" +
+                 std::string("检测到 ") +
+                     (surge_remote_eligible ? "Surge" : "Surfboard") +
+                     " policy-path 远程订阅：" +
                      summarizeUrlForLog(link) + "，将由客户端更新。");
         subscription_urls.push_back({link, tagged.tag, tagged.provider,
                                      tagged.interval, tagged.has_interval,
@@ -3197,25 +3239,39 @@ static SubStageResponse processSubscriptionNodes(
       explain.node_link_count++;
     }
 
-    for (const SurgeRemoteLinkItem &item : subscription_urls) {
-      SurgePolicyPathResource resource;
-      resource.url = item.url;
-      resource.source_tag = item.source_tag;
-      resource.requested_name = item.requested_name;
-      resource.update_interval = item.interval;
-      resource.has_update_interval = item.has_interval;
-      resource.group_id = item.group_id;
-      writeLog(LOG_LEVEL_INFO,
-               "SURGE_POLICY_PATH_CREATED group_id=" +
-                   std::to_string(resource.group_id) + " interval=" +
-                   (resource.has_update_interval
-                        ? std::to_string(resource.update_interval)
-                        : std::string("client-default")) +
-                   " source=" + summarizeUrlForLog(resource.url));
-      ext.surge_policy_paths.push_back(std::move(resource));
+    for (const PolicyPathRemoteLinkItem &item : subscription_urls) {
+      if (surge_remote_eligible) {
+        SurgePolicyPathResource resource;
+        resource.url = item.url;
+        resource.source_tag = item.source_tag;
+        resource.requested_name = item.requested_name;
+        resource.update_interval = item.interval;
+        resource.has_update_interval = item.has_interval;
+        resource.group_id = item.group_id;
+        writeLog(LOG_LEVEL_INFO,
+                 "SURGE_POLICY_PATH_CREATED group_id=" +
+                     std::to_string(resource.group_id) + " interval=" +
+                     (resource.has_update_interval
+                          ? std::to_string(resource.update_interval)
+                          : std::string("client-default")) +
+                     " source=" + summarizeUrlForLog(resource.url));
+        ext.surge_policy_paths.push_back(std::move(resource));
+      } else {
+        SurfboardPolicyPathResource resource;
+        resource.url = item.url;
+        resource.source_tag = item.source_tag;
+        resource.requested_name = item.requested_name;
+        resource.group_id = item.group_id;
+        writeLog(LOG_LEVEL_INFO,
+                 "SURFBOARD_POLICY_PATH_CREATED group_id=" +
+                     std::to_string(resource.group_id) +
+                     " interval=client-default source=" +
+                     summarizeUrlForLog(resource.url));
+        ext.surfboard_policy_paths.push_back(std::move(resource));
+      }
     }
 
-    for (const SurgeNodeLinkItem &item : node_urls) {
+    for (const PolicyPathNodeLinkItem &item : node_urls) {
       string_array import_urls{item.url};
       if (importItems(import_urls, true, FetchContext::PublicRequest) != 0) {
         source_calls++;
@@ -3258,7 +3314,8 @@ static SubStageResponse processSubscriptionNodes(
 
   explain.provider_count = ext.providers.size();
   explain.remote_subscription_count = ext.quanx_server_remotes.size() +
-                                      ext.surge_policy_paths.size();
+                                      ext.surge_policy_paths.size() +
+                                      ext.surfboard_policy_paths.size();
   explain.proxy_provider_mode = ext.use_proxy_provider && !ext.providers.empty();
   explain.insert_node_count = insert_nodes.size();
   explain.direct_node_count = nodes.size();
@@ -3271,7 +3328,8 @@ static SubStageResponse processSubscriptionNodes(
             "无效请求：已选择 provider_headers，但没有生成 proxy-provider。"};
   }
   if (nodes.empty() && insert_nodes.empty() && ext.providers.empty() &&
-      ext.quanx_server_remotes.empty() && ext.surge_policy_paths.empty()) {
+      ext.quanx_server_remotes.empty() && ext.surge_policy_paths.empty() &&
+      ext.surfboard_policy_paths.empty()) {
     *status_code = 400;
     return {true,
             "Invalid request: no valid proxy nodes or remote resources were "
@@ -3503,18 +3561,61 @@ static SubStageResponse dispatchTargetGenerator(
     }
     output = proxyToSurge(nodes, base_content, ruleset_content,
                           policy.custom_proxy_groups, -3, ext);
+    {
+      const TargetGenerationStats &stats = ext.surfboard_generation_stats;
+      string_array unsupported_protocols;
+      unsupported_protocols.reserve(stats.unsupported_by_type.size());
+      for (const auto &[type, count] : stats.unsupported_by_type) {
+        unsupported_protocols.emplace_back(toLower(getProxyTypeName(type)) +
+                                           ":" + std::to_string(count));
+      }
+      const size_t unsupported_count = stats.unsupported_nodes();
+      writeLog(unsupported_count ? LOG_LEVEL_WARNING : LOG_LEVEL_INFO,
+               "SURFBOARD_NODE_GENERATION input=" +
+                   std::to_string(stats.input_nodes) + " emitted=" +
+                   std::to_string(stats.emitted_nodes) + " unsupported=" +
+                   std::to_string(unsupported_count) + " protocols=" +
+                   (unsupported_protocols.empty()
+                        ? std::string("none")
+                        : join(unsupported_protocols, ";")) +
+                   " remote_references=" +
+                   std::to_string(stats.remote_references_emitted));
+      parsed.explain.generated_node_count = stats.emitted_nodes;
+      parsed.explain.unsupported_node_count = unsupported_count;
+      parsed.explain.unsupported_protocols = unsupported_protocols;
+
+      if (stats.input_nodes > 0 && stats.emitted_nodes == 0 &&
+          ext.surfboard_policy_paths.empty()) {
+        *status_code = 400;
+        return {true,
+                "Invalid request: none of the parsed proxy nodes can be "
+                "represented by Surfboard.\n"
+                "无效请求：解析到的代理节点均无法由 Surfboard 表示。"};
+      }
+      if (!ext.surfboard_policy_paths.empty() &&
+          stats.remote_references_emitted == 0) {
+        *status_code = 400;
+        return {true,
+                "Invalid request: the Surfboard policy-path subscription was "
+                "not selected by any compatible proxy group.\n"
+                "无效请求：没有兼容的策略组选择该 Surfboard policy-path "
+                "订阅。"};
+      }
+    }
     if (upload)
       recordUpload("surfboard", upload_path, output, true);
-    if (settings.writeManagedConfig && !settings.managedConfigPrefix.empty())
-      generation.managed_url_used = true;
-    if (generation.managed_url_used)
-      output = "#!MANAGED-CONFIG " + managed_url +
-               (policy.update_interval
-                    ? " interval=" + std::to_string(policy.update_interval)
-                    : "") +
-               " strict=" +
-               std::string(policy.update_strict ? "true" : "false") +
-               "\n\n" + output;
+    if (!ext.nodelist) {
+      if (settings.writeManagedConfig && !settings.managedConfigPrefix.empty())
+        generation.managed_url_used = true;
+      if (generation.managed_url_used)
+        output = "#!MANAGED-CONFIG " + managed_url +
+                 (policy.update_interval > 0
+                      ? " interval=" + std::to_string(policy.update_interval)
+                      : "") +
+                 " strict=" +
+                 std::string(policy.update_strict ? "true" : "false") +
+                 "\n\n" + output;
+    }
     break;
 
   case "mellow"_hash:
@@ -4047,10 +4148,12 @@ static std::string assembleSubResponse(
                        std::to_string(explain.provider_count) +
                            " provider(s).");
     if (explain.remote_subscription_count) {
-      const std::string remote_section =
-          explain.remote_subscription_backend == "surge-policy-path"
-              ? "surge_policy_path"
-              : "quanx_server_remote";
+      std::string remote_section = "quanx_server_remote";
+      if (explain.remote_subscription_backend == "surge-policy-path")
+        remote_section = "surge_policy_path";
+      else if (explain.remote_subscription_backend ==
+               "surfboard-policy-path")
+        remote_section = "surfboard_policy_path";
       addConfigSection(remote_section, "request", "generated",
                        std::to_string(explain.remote_subscription_count) +
                            " remote resource(s); node-name transformations run "

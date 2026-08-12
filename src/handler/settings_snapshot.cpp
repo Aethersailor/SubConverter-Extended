@@ -79,6 +79,7 @@ std::string sanitizedSettingsSnapshot(const Settings &settings) {
       {"remote_subscription",
        {
            {"surge_policy_path", settings.surgePolicyPath},
+           {"surfboard_policy_path", settings.surfboardPolicyPath},
        }},
       {"rules",
        {
