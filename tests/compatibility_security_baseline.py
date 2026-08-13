@@ -172,6 +172,21 @@ ANYTLS_MODERN_URI = (
     "&idle_session_check_interval=45s&idle_session_timeout=60s"
     "&min_idle_session=3#AnyTLS%20Modern"
 )
+MIERU_OFFICIAL_SIMPLE_URI = (
+    "mierus://baozi:manlianpenfen@1.2.3.4?"
+    "handshake-mode=HANDSHAKE_NO_WAIT&mtu=1400&"
+    "multiplexing=MULTIPLEXING_HIGH&port=6666&port=9998-9999&"
+    "port=6489&port=4896&profile=default&protocol=TCP&protocol=TCP&"
+    "protocol=UDP&protocol=UDP&"
+    "traffic-pattern=CCoQARoECAEQCiIYCAMQASoIMDAwMTAyMDMqCDA0MDUwNjA3"
+)
+MIERU_STANDARD_PROTOBUF_URI = (
+    "mieru://CpsBCgdkZWZhdWx0ElgKBWJhb3ppEg1tYW5saWFucGVuZmVu"
+    "GkA0MGFiYWM0MGY1OWRhNTVkYWQ2YTk5ODMxYTUxMTY1MjJmYmM4MGUzODVi"
+    "YjFhYjE0ZGM1MmRiMzY4ZjczOGE0Gi8SCWxvY2FsaG9zdBoFCIo0EAIaDRAC"
+    "Ggk5OTk5LTk5OTkaBQjZMhABGgUIoCYQASD4CioCCAQSB2RlZmF1bHQYnUYg"
+    "uAgwBTgA"
+)
 HYSTERIA_V1_URI = (
     "hy://[2001:db8::14]:36712?protocol=udp&auth=p%40ss%2Bword"
     "&peer=hy1-tls.example.test&insecure=1&upmbps=100"
@@ -5342,6 +5357,88 @@ def wireguard_structured_conversion_baseline(
         )
 
 
+def mieru_legacy_parser_baseline(base_url: str) -> None:
+    status, body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "surge",
+            "ver": "4",
+            "url": MIERU_OFFICIAL_SIMPLE_URI + "|" + SUBSCRIPTION.strip(),
+            "list": "true",
+            "explain": "true",
+        },
+    )
+    if status != 200:
+        raise AssertionError(
+            f"official mierus URI did not survive Legacy parsing: HTTP {status} {body!r}"
+        )
+    report = json.loads(body)
+    if (
+        report.get("nodes", {}).get("total") != 5
+        or report.get("nodes", {}).get("generated") != 1
+        or report.get("nodes", {}).get("unsupported") != 4
+        or report.get("nodes", {}).get("unsupported_protocols") != ["mieru:4"]
+    ):
+        raise AssertionError(
+            f"official multi-binding mierus URI was not expanded exactly: {report!r}"
+        )
+
+    invalid_simple = (
+        "mierus://user:pass@example.test?profile=default&port=443&"
+        "port=444&protocol=TCP"
+    )
+    for rejected in (invalid_simple, MIERU_STANDARD_PROTOBUF_URI):
+        rejected_status, rejected_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "surge",
+                "ver": "4",
+                "url": rejected + "|" + SUBSCRIPTION.strip(),
+                "list": "true",
+                "explain": "true",
+            },
+        )
+        if rejected_status != 200:
+            raise AssertionError(
+                "a rejected Mieru link prevented the remaining valid node from "
+                f"converting: HTTP {rejected_status} {rejected_body!r}"
+            )
+        rejected_report = json.loads(rejected_body)
+        if (
+            rejected_report.get("nodes", {}).get("total") != 1
+            or rejected_report.get("nodes", {}).get("generated") != 1
+            or rejected_report.get("nodes", {}).get("unsupported") != 0
+        ):
+            raise AssertionError(
+                f"invalid or protobuf Mieru input did not fail closed: {rejected_report!r}"
+            )
+
+    clash_status, clash_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "clash",
+            "url": MIERU_OFFICIAL_SIMPLE_URI,
+            "list": "true",
+        },
+    )
+    clash_text = clash_body.decode("utf-8", errors="replace")
+    if (
+        clash_status != 200
+        or clash_text.count("type: mieru") != 4
+        or "port-range: 9998-9999" not in clash_text
+        or "handshake-mode: HANDSHAKE_NO_WAIT" not in clash_text
+        or "traffic-pattern: CCoQARoECAEQCiIYCAMQASoIMDAwMTAyMDMqCDA0MDUwNjA3"
+        not in clash_text
+    ):
+        raise AssertionError(
+            "Mihomo Mieru parsing changed while calibrating Legacy: "
+            f"HTTP {clash_status} {clash_text!r}"
+        )
+
+
 def simple_target_protocol_baseline(base_url: str, fixture_base: str) -> None:
     source = fixture_base + "/mixed-protocol-subscription.txt"
 
@@ -7508,6 +7605,7 @@ def main() -> int:
                 raise AssertionError(
                     "sing-box endpoint WireGuard diagnostics are missing"
                 )
+            mieru_legacy_parser_baseline(base_url)
             simple_target_protocol_baseline(base_url, fixture_base)
             provider_direct_default_output_baseline(base_url, fixture_base)
         if not wireguard_outbound_logs or (

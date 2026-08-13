@@ -69,6 +69,8 @@ inline String getProxyTypeName(ProxyType type) {
     return "Tuic";
   case ProxyType::AnyTLS:
     return "AnyTLS";
+  case ProxyType::Mieru:
+    return "Mieru";
   default:
     return "Unknown";
   }
@@ -179,6 +181,8 @@ struct Proxy {
   std::vector<String> AlpnList;
   String PacketEncoding;
   String Multiplexing;
+  String MieruHandshakeMode;
+  String MieruTrafficPattern;
   tribool V2rayHttpUpgrade;
 
   // Recognized Xray share-link options that do not yet have a portable field
