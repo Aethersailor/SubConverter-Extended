@@ -619,6 +619,19 @@ class FixtureHandler(BaseHTTPRequestHandler):
         elif request_path == "/generation-rules.list":
             body = GENERATION_RULESET.encode()
             content_type = "text/plain; charset=utf-8"
+        elif request_path == "/singbox-modern-rules.list":
+            body = (
+                "GEOSITE,cn\n"
+                "GEOIP,cn\n"
+                "SRC-GEOIP,us\n"
+                "DOMAIN-SUFFIX,modern-singbox.example\n"
+                "IP-CIDR,198.51.100.0/24\n"
+                "SRC-PORT,41641\n"
+                "PORT,999999999999999999999999\n"
+                "GEOSITE,../../unsafe\n"
+                "FINAL,Proxy\n"
+            ).encode()
+            content_type = "text/plain; charset=utf-8"
         elif request_path == "/slow-generation-rules.list":
             type(self).slow_ruleset_started.set()
             if not type(self).slow_ruleset_release.wait(timeout=15):
@@ -665,6 +678,16 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 "enable_rule_generator=true\n"
                 "custom_proxy_group=Proxy`select`.*\n"
                 f"ruleset=Proxy,http://{host}/issue-98-rules.list\n"
+            ).encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/external-singbox-modern.ini":
+            host = self.headers.get("Host", "127.0.0.1")
+            body = (
+                "[custom]\n"
+                "enable_rule_generator=true\n"
+                "overwrite_original_rules=true\n"
+                "custom_proxy_group=Proxy`select`.*\n"
+                f"ruleset=Proxy,http://{host}/singbox-modern-rules.list\n"
             ).encode()
             content_type = "text/plain; charset=utf-8"
         elif request_path == "/external-empty.ini":
@@ -2179,6 +2202,194 @@ def validate_mihomo_config(binary: Path, content: bytes) -> None:
                 "pinned Mihomo rejected the Issue #98 output: "
                 f"exit={completed.returncode}, output={diagnostics[-8000:]!r}"
             )
+
+
+def validate_singbox_config(binary: Path, content: bytes, label: str) -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        config_path = Path(temporary) / "generated-singbox.json"
+        config_path.write_bytes(content)
+        completed = subprocess.run(
+            [
+                str(binary),
+                "check",
+                "--disable-color",
+                "-c",
+                str(config_path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=60,
+            check=False,
+        )
+        if completed.returncode != 0:
+            diagnostics = completed.stdout.decode("utf-8", errors="replace")
+            raise AssertionError(
+                f"pinned sing-box {label} rejected the generated profile: "
+                f"exit={completed.returncode}, output={diagnostics[-8000:]!r}"
+            )
+
+
+def singbox_modern_full_profile_baseline(
+    base_url: str,
+    fixture_base: str,
+    stable_binary: Path | None,
+    next_binary: Path | None,
+) -> None:
+    status, body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "singbox",
+            "url": SUBSCRIPTION.strip(),
+            "config": fixture_base + "/external-singbox-modern.ini",
+        },
+    )
+    if status != 200:
+        raise AssertionError(
+            f"modern sing-box full profile returned HTTP {status}: {body!r}"
+        )
+    document = json.loads(body)
+
+    dns = document.get("dns", {})
+    dns_servers = dns.get("servers", [])
+    if [server.get("type") for server in dns_servers] != [
+        "tls",
+        "h3",
+        "fakeip",
+        "udp",
+    ]:
+        raise AssertionError("built-in sing-box DNS servers are not modernized")
+    if any(
+        "address" in server or "address_resolver" in server
+        for server in dns_servers
+    ):
+        raise AssertionError("legacy sing-box DNS server fields remain")
+    if "fakeip" in dns or "independent_cache" in dns:
+        raise AssertionError("legacy sing-box DNS options remain")
+    if any("action" not in rule for rule in dns.get("rules", [])):
+        raise AssertionError("modern sing-box DNS rules lost explicit actions")
+
+    tun = next(
+        inbound
+        for inbound in document.get("inbounds", [])
+        if inbound.get("type") == "tun"
+    )
+    if tun.get("address") != ["172.19.0.1/30"]:
+        raise AssertionError("sing-box TUN addresses were not merged correctly")
+    if any(
+        field in tun for field in ("inet4_address", "inet6_address", "sniff")
+    ):
+        raise AssertionError("legacy sing-box TUN or sniff fields remain")
+
+    route = document.get("route", {})
+    route_rules = route.get("rules", [])
+    if not any(rule.get("action") == "sniff" for rule in route_rules):
+        raise AssertionError("sing-box route lost the sniff action")
+    if not any(rule.get("action") == "hijack-dns" for rule in route_rules):
+        raise AssertionError("sing-box route lost the DNS hijack action")
+    if any("action" not in rule for rule in route_rules):
+        raise AssertionError("sing-box route contains a legacy actionless rule")
+    if any(
+        legacy in rule
+        for rule in route_rules
+        for legacy in ("geosite", "geoip", "source_geoip")
+    ):
+        raise AssertionError("legacy GeoIP/Geosite route fields remain")
+    if route.get("final") != "Proxy":
+        raise AssertionError("sing-box final rule was not preserved")
+
+    rule_sets = {
+        item.get("tag"): item
+        for item in route.get("rule_set", [])
+        if isinstance(item, dict)
+    }
+    for expected in (
+        "geosite-category-ads-all",
+        "geosite-geolocation-!cn",
+        "geosite-cn",
+        "geoip-cn",
+        "geoip-us",
+    ):
+        rule_set = rule_sets.get(expected)
+        if (
+            rule_set is None
+            or rule_set.get("type") != "remote"
+            or rule_set.get("format") != "binary"
+            or not str(rule_set.get("url", "")).endswith(f"/{expected}.srs")
+        ):
+            raise AssertionError(
+                f"sing-box remote rule-set is missing or malformed: {expected}"
+            )
+
+    source_geoip_rule = next(
+        (
+            rule
+            for rule in route_rules
+            if "geoip-us" in rule.get("rule_set", [])
+        ),
+        None,
+    )
+    if not source_geoip_rule or not source_geoip_rule.get(
+        "rule_set_ip_cidr_match_source"
+    ):
+        raise AssertionError("source GeoIP did not retain source matching")
+    ip_rule = next(
+        (rule for rule in route_rules if "198.51.100.0/24" in rule.get("ip_cidr", [])),
+        None,
+    )
+    source_port_rule = next(
+        (rule for rule in route_rules if rule.get("source_port") == 41641),
+        None,
+    )
+    if ip_rule is None or source_port_rule is None or ip_rule is source_port_rule:
+        raise AssertionError("heterogeneous sing-box rules were not kept as OR rules")
+    if any(
+        rule.get("port") == 999999999999999999999999 for rule in route_rules
+    ):
+        raise AssertionError("out-of-range sing-box integer rule was not rejected")
+    if any("unsafe" in str(item) for item in route.get("rule_set", [])):
+        raise AssertionError("unsafe sing-box rule-set code was not rejected")
+
+    ipv6_status, ipv6_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "singbox",
+            "url": SUBSCRIPTION.strip(),
+            "config": fixture_base + "/external-singbox-modern.ini",
+            "singbox.ipv6": "1",
+        },
+    )
+    if ipv6_status != 200:
+        raise AssertionError(
+            f"IPv6 sing-box full profile returned HTTP {ipv6_status}: "
+            f"{ipv6_body!r}"
+        )
+    ipv6_document = json.loads(ipv6_body)
+    ipv6_fakeip = next(
+        server
+        for server in ipv6_document.get("dns", {}).get("servers", [])
+        if server.get("type") == "fakeip"
+    )
+    if ipv6_fakeip.get("inet6_range") != "fc00::/18":
+        raise AssertionError("sing-box IPv6 FakeIP range was not rendered")
+    ipv6_tun = next(
+        inbound
+        for inbound in ipv6_document.get("inbounds", [])
+        if inbound.get("type") == "tun"
+    )
+    if ipv6_tun.get("address") != [
+        "172.19.0.1/30",
+        "fdfe:dcba:9876::1/126",
+    ]:
+        raise AssertionError("sing-box IPv6 TUN address was not rendered")
+
+    if stable_binary is not None:
+        validate_singbox_config(stable_binary, body, "stable")
+        validate_singbox_config(stable_binary, ipv6_body, "stable IPv6")
+    if next_binary is not None:
+        validate_singbox_config(next_binary, body, "next")
+        validate_singbox_config(next_binary, ipv6_body, "next IPv6")
 
 
 def issue_98_reality_baseline(
@@ -8770,11 +8981,23 @@ def main() -> int:
     )
     parser.add_argument("--update-golden", action="store_true")
     parser.add_argument("--mihomo-binary", type=Path)
+    parser.add_argument("--singbox-stable-binary", type=Path)
+    parser.add_argument("--singbox-next-binary", type=Path)
     args = parser.parse_args()
     binary = args.binary.resolve()
     settings_snapshot_helper = args.settings_snapshot_helper.resolve()
     mihomo_binary = (
         args.mihomo_binary.resolve() if args.mihomo_binary is not None else None
+    )
+    singbox_stable_binary = (
+        args.singbox_stable_binary.resolve()
+        if args.singbox_stable_binary is not None
+        else None
+    )
+    singbox_next_binary = (
+        args.singbox_next_binary.resolve()
+        if args.singbox_next_binary is not None
+        else None
     )
     if not binary.is_file():
         parser.error(f"binary does not exist: {binary}")
@@ -8789,6 +9012,12 @@ def main() -> int:
         )
     if mihomo_binary is not None and not mihomo_binary.is_file():
         parser.error(f"Mihomo binary does not exist: {mihomo_binary}")
+    if singbox_stable_binary is not None and not singbox_stable_binary.is_file():
+        parser.error(
+            f"stable sing-box binary does not exist: {singbox_stable_binary}"
+        )
+    if singbox_next_binary is not None and not singbox_next_binary.is_file():
+        parser.error(f"next sing-box binary does not exist: {singbox_next_binary}")
 
     deployment_security_defaults_baseline()
     runtime_cli_isolation_baseline(binary)
@@ -8833,6 +9062,12 @@ def main() -> int:
             binary, log_capture=wireguard_outbound_logs
         ) as base_url:
             conversion_baselines(base_url, fixture_base, args.update_golden)
+            singbox_modern_full_profile_baseline(
+                base_url,
+                fixture_base,
+                singbox_stable_binary,
+                singbox_next_binary,
+            )
             parser_route_isolation_baseline(base_url, fixture_base)
             classic_protocol_baseline(base_url, fixture_base)
             legacy_niche_protocol_baseline(base_url, fixture_base)

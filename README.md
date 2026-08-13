@@ -994,6 +994,17 @@ url=provider:A,proxy_direct:false,https://a.example/sub|provider:B,interval:2160
 </details>
 
 <details>
+<summary><strong>sing-box 1.13/1.14 完整配置兼容基线</strong></summary>
+
+仓库内置的 sing-box 完整配置模板使用 1.13 与 1.14 共同支持的现代结构：DNS 服务器采用带 `type` 的新格式，FakeIP 是独立 DNS 服务器，TUN 地址统一写入 `address`，嗅探与 DNS 劫持由路由动作表达；GeoSite/GeoIP 规则会转换为 sing-box 官方二进制远程规则集，不再输出 1.14 已移除的旧字段。
+
+这一迁移不增加主配置参数，也不改变 `pref.ini`、`pref.yml` 或 `pref.toml` 的读取方式。旧配置文件可以直接启动；`snell_outbound=false` 时，内置完整配置同时通过固定的 sing-box 1.13 稳定版和 1.14 预发布版 `sing-box check`。启用 Snell 后，最低客户端版本仍为 1.14。
+
+本项目只迁移仓库自带的 sing-box 基础模板和由项目生成的规则。部署者通过 `singbox_rule_base` 指定的自定义模板会按原内容保留，不会被服务端擅自重写；如果自定义模板仍含旧 DNS、TUN、嗅探或 GeoSite/GeoIP 字段，应由模板维护者按 sing-box 官方[迁移说明](https://sing-box.sagernet.org/migration/)更新。内置远程规则集需要客户端能够访问对应的 SagerNet GitHub Raw 地址。
+
+</details>
+
+<details>
 <summary><strong>WireGuard 结构化转换与 sing-box 新旧模式</strong></summary>
 
 Legacy 节点路径会保留 WireGuard 的多个本地地址和多个 Peer，而不再只保留第一项。当前可识别以下输入：
@@ -1059,7 +1070,7 @@ snell_outbound=true
 * 不含 QUIC 扩展的历史 v5 节点按官方兼容说明规范化为 v4；v1–v3、v5 `udp-port`、Shadow TLS、未知 Dial 字段或其他无法等价表达的组合不会被静默降级；
 * 只有实际生成 Snell 节点时，结果才要求 sing-box 1.14+。日志事件 `SINGBOX_SNELL_GENERATION` 记录启用状态、输入/输出数量、v5 规范化数量和最低版本，不记录服务器、PSK、userkey 或节点名称。
 
-在 sing-box 1.14 正式稳定且默认模板完成对应迁移前，建议使用 `list=true`，或提供已经通过 1.14 `sing-box check` 的自定义基础配置；仓库示例继续默认 `snell_outbound=false`。格式依据见 [sing-box Snell outbound](https://sing-box.sagernet.org/configuration/outbound/snell/)。
+仓库内置完整模板已经通过固定的 sing-box 1.13 与 1.14 双版本校验；仓库示例仍默认 `snell_outbound=false`，因此不会无意提高现有部署者的客户端版本要求。格式依据见 [sing-box Snell outbound](https://sing-box.sagernet.org/configuration/outbound/snell/)。
 
 </details>
 

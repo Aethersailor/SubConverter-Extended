@@ -1431,6 +1431,58 @@ def run_checks(
                 raise AssertionError(
                     "remote sing-box conversion did not expand the subscription"
                 )
+            dns = singbox_json.get("dns", {})
+            dns_servers = dns.get("servers", [])
+            if [server.get("type") for server in dns_servers] != [
+                "tls",
+                "h3",
+                "fakeip",
+                "udp",
+            ]:
+                raise AssertionError(
+                    "deployed sing-box profile did not use modern DNS servers"
+                )
+            if (
+                "fakeip" in dns
+                or "independent_cache" in dns
+                or any(
+                    "address" in server or "address_resolver" in server
+                    for server in dns_servers
+                )
+            ):
+                raise AssertionError(
+                    "deployed sing-box profile retained legacy DNS fields"
+                )
+            tun = next(
+                (
+                    inbound
+                    for inbound in singbox_json.get("inbounds", [])
+                    if inbound.get("type") == "tun"
+                ),
+                None,
+            )
+            if (
+                tun is None
+                or tun.get("address") != ["172.19.0.1/30"]
+                or any(
+                    field in tun
+                    for field in ("inet4_address", "inet6_address", "sniff")
+                )
+            ):
+                raise AssertionError(
+                    "deployed sing-box profile retained legacy TUN fields"
+                )
+            route_rules = singbox_json.get("route", {}).get("rules", [])
+            if (
+                not any(rule.get("action") == "sniff" for rule in route_rules)
+                or not any(
+                    rule.get("action") == "hijack-dns" for rule in route_rules
+                )
+                or any("action" not in rule for rule in route_rules)
+            ):
+                raise AssertionError(
+                    "deployed sing-box profile did not use modern route actions"
+                )
 
             surge_config = fetch(
                 base_url,
