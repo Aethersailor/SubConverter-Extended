@@ -51,6 +51,36 @@ std::string generatePeer(const WireGuardPeer &peer,
 std::string generateLoonWireGuardPeer(const WireGuardPeer &peer);
 bool wireGuardStructuredConfigIsSafe(const Proxy &node);
 
+class TargetNodeGenerationTracker {
+public:
+  TargetNodeGenerationTracker(TargetGenerationStats &stats, ProxyType type)
+      : stats_(stats), type_(type) {}
+  ~TargetNodeGenerationTracker() {
+    if (emitted_)
+      stats_.emitted_nodes++;
+    else
+      stats_.unsupported_by_type[type_]++;
+  }
+  void markEmitted() { emitted_ = true; }
+
+private:
+  TargetGenerationStats &stats_;
+  ProxyType type_;
+  bool emitted_ = false;
+};
+
+class TargetGenerationStatsMirror {
+public:
+  TargetGenerationStatsMirror(TargetGenerationStats &source,
+                              TargetGenerationStats &destination)
+      : source_(source), destination_(destination) {}
+  ~TargetGenerationStatsMirror() { destination_ = source_; }
+
+private:
+  TargetGenerationStats &source_;
+  TargetGenerationStats &destination_;
+};
+
 template <typename Resource> struct PolicyPathSelector {
   const Resource *resource = nullptr;
   std::string policy_pattern;
@@ -316,6 +346,151 @@ static bool parseSingBoxBandwidth(std::string value, bool &use_mbps,
 
 static bool surgeProxyScalarIsSafe(const std::string &value) {
   return value.find_first_of(",\r\n") == std::string::npos;
+}
+
+static bool quanxProxyScalarIsSafe(const std::string &value) {
+  if (value.empty())
+    return true;
+  if (trim(value) != value)
+    return false;
+  for (const unsigned char character : value) {
+    if (character == ',' || character < 0x20 || character == 0x7f)
+      return false;
+  }
+  return true;
+}
+
+static bool quanxPlainXrayTransportIsSafe(const Proxy &proxy) {
+  return proxy.Edge.empty() && proxy.GRPCServiceName.empty() &&
+         proxy.GRPCMode.empty() && proxy.QUICSecure.empty() &&
+         proxy.QUICSecret.empty() && proxy.XrayLinkOptions.empty() &&
+         proxy.UnderlyingProxy.empty() && !proxy.V2rayHttpUpgrade;
+}
+
+static bool quanxRealityPublicKeyIsValid(const std::string &public_key) {
+  if (public_key.size() != 43 ||
+      !std::all_of(public_key.begin(), public_key.end(), [](unsigned char c) {
+        return std::isalnum(c) || c == '-' || c == '_';
+      }))
+    return false;
+  const std::string decoded = urlSafeBase64Decode(public_key);
+  return decoded.size() == 32 && urlSafeBase64Encode(decoded) == public_key;
+}
+
+static bool quanxRealityShortIdIsValid(const std::string &short_id) {
+  return short_id.empty() ||
+         (short_id.size() <= 16 && short_id.size() % 2 == 0 &&
+          std::all_of(short_id.begin(), short_id.end(), [](unsigned char c) {
+            return std::isxdigit(c);
+          }));
+}
+
+static bool appendQuanXRealityFields(const Proxy &proxy,
+                                     std::string &output) {
+  if (!quanxRealityPublicKeyIsValid(proxy.PublicKey) ||
+      !quanxRealityShortIdIsValid(proxy.ShortId))
+    return false;
+  output += ", reality-base64-pubkey=" + proxy.PublicKey;
+  if (!proxy.ShortId.empty())
+    output += ", reality-hex-shortid=" + proxy.ShortId;
+  return true;
+}
+
+static bool quanxTlsAlpnHex(const std::vector<String> &alpn_list,
+                            std::string &output) {
+  static constexpr char hex_digits[] = "0123456789abcdef";
+  output.clear();
+  size_t encoded_bytes = 0;
+  for (const std::string &alpn : alpn_list) {
+    if (alpn.empty() || alpn.size() > 255 ||
+        encoded_bytes > 65535 - alpn.size() - 1)
+      return false;
+    const unsigned char length = static_cast<unsigned char>(alpn.size());
+    output += hex_digits[length >> 4];
+    output += hex_digits[length & 0x0f];
+    for (const unsigned char byte : alpn) {
+      output += hex_digits[byte >> 4];
+      output += hex_digits[byte & 0x0f];
+    }
+    encoded_bytes += alpn.size() + 1;
+  }
+  return true;
+}
+
+static bool appendQuanXXrayTransport(const Proxy &proxy, bool reality,
+                                     bool tls_active, std::string &output) {
+  const std::string &transport = proxy.TransferProtocol;
+  const bool fake_http = proxy.FakeType == "http";
+  if (transport == "tcp") {
+    if (fake_http) {
+      if (tls_active || !quanxProxyScalarIsSafe(proxy.Host) ||
+          !quanxProxyScalarIsSafe(proxy.Path))
+        return false;
+      output += ", obfs=http";
+      if (!proxy.Host.empty())
+        output += ", obfs-host=" + proxy.Host;
+      if (!proxy.Path.empty())
+        output += ", obfs-uri=" + proxy.Path;
+      return true;
+    }
+    if (!proxy.FakeType.empty() && proxy.FakeType != "none")
+      return false;
+    if (!tls_active)
+      return true;
+    if (reality && proxy.ServerName.empty())
+      return false;
+    if (!quanxProxyScalarIsSafe(proxy.ServerName))
+      return false;
+    output += ", obfs=over-tls";
+    if (!proxy.ServerName.empty())
+      output += ", obfs-host=" + proxy.ServerName;
+    return true;
+  }
+
+  if (transport != "ws" ||
+      (!proxy.FakeType.empty() && proxy.FakeType != "none") ||
+      !quanxProxyScalarIsSafe(proxy.Host) ||
+      !quanxProxyScalarIsSafe(proxy.Path))
+    return false;
+
+  if (tls_active) {
+    const std::string http_host =
+        proxy.Host.empty() ? proxy.Hostname : proxy.Host;
+    const std::string tls_host =
+        proxy.ServerName.empty() ? proxy.Hostname : proxy.ServerName;
+    if (!quanxProxyScalarIsSafe(http_host) ||
+        !quanxProxyScalarIsSafe(tls_host) ||
+        toLower(http_host) != toLower(tls_host))
+      return false;
+    output += ", obfs=wss";
+    if (!http_host.empty())
+      output += ", obfs-host=" + http_host;
+  } else {
+    output += ", obfs=ws";
+    if (!proxy.Host.empty())
+      output += ", obfs-host=" + proxy.Host;
+  }
+  if (!proxy.Path.empty())
+    output += ", obfs-uri=" + proxy.Path;
+  return true;
+}
+
+static bool loonProxyScalarIsSafe(const std::string &value) {
+  return value.find_first_of(",\"\r\n") == std::string::npos;
+}
+
+static bool loonQuotedScalarIsSafe(const std::string &value) {
+  // Loon documents double-quoted positional values, but does not document an
+  // escaping convention. Reject ambiguous input instead of producing a node
+  // whose credentials may be parsed differently by the client.
+  return value.find_first_of("\\\"\r\n") == std::string::npos;
+}
+
+static bool loonPlainXrayTransportIsSafe(const Proxy &proxy) {
+  return proxy.Edge.empty() && proxy.GRPCServiceName.empty() &&
+         proxy.GRPCMode.empty() && proxy.QUICSecure.empty() &&
+         proxy.QUICSecret.empty() && proxy.XrayLinkOptions.empty() &&
+         proxy.UnderlyingProxy.empty() && !proxy.V2rayHttpUpgrade;
 }
 
 static std::string xrayLinkOption(const Proxy &proxy, const std::string &key) {
@@ -1942,11 +2117,12 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
   RemarkSet used_remarks;
   used_remarks.reserve(nodes.size());
   const bool surfboard = surge_ver == -3;
-  TargetGenerationStats &generation_stats =
-      surfboard ? ext.surfboard_generation_stats
-                : ext.surge_generation_stats;
+  TargetGenerationStats &generation_stats = ext.target_generation_stats;
   generation_stats = TargetGenerationStats{};
   generation_stats.input_nodes = nodes.size();
+  TargetGenerationStatsMirror generation_stats_mirror(
+      generation_stats, surfboard ? ext.surfboard_generation_stats
+                                  : ext.surge_generation_stats);
 
   ini.store_any_line = true;
   // filter out sections that requires direct-save
@@ -2458,6 +2634,9 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
 
 std::string proxyToSingle(std::vector<Proxy> &nodes, SingleLinkTypes types,
                            extra_settings &ext) {
+  TargetGenerationStats &generation_stats = ext.target_generation_stats;
+  generation_stats = TargetGenerationStats{};
+  generation_stats.input_nodes = nodes.size();
   std::string proxyStr, allLinks;
   const bool ss = (types & SingleLinkType::Shadowsocks) != 0;
   const bool ssr = (types & SingleLinkType::ShadowsocksR) != 0;
@@ -2467,6 +2646,7 @@ std::string proxyToSingle(std::vector<Proxy> &nodes, SingleLinkTypes types,
   const bool vless = (types & SingleLinkType::VLESS) != 0;
 
   for (Proxy &x : nodes) {
+    TargetNodeGenerationTracker generation_tracker(generation_stats, x.Type);
     proxyStr.clear();
     std::string remark = x.Remark;
     std::string &hostname = x.Hostname, &sni = x.ServerName,
@@ -2661,6 +2841,7 @@ std::string proxyToSingle(std::vector<Proxy> &nodes, SingleLinkTypes types,
       continue;
     }
     allLinks += proxyStr + "\n";
+    generation_tracker.markEmitted();
   }
 
   if (ext.nodelist)
@@ -2670,6 +2851,9 @@ std::string proxyToSingle(std::vector<Proxy> &nodes, SingleLinkTypes types,
 
 std::string proxyToSSSub(std::string base_conf, std::vector<Proxy> &nodes,
                          extra_settings &ext) {
+  TargetGenerationStats &generation_stats = ext.target_generation_stats;
+  generation_stats = TargetGenerationStats{};
+  generation_stats.input_nodes = nodes.size();
   using namespace rapidjson_ext;
   rapidjson::Document base;
 
@@ -2690,6 +2874,7 @@ std::string proxyToSSSub(std::string base_conf, std::vector<Proxy> &nodes,
 
   rapidjson::Value proxies(rapidjson::kArrayType);
   for (Proxy &x : nodes) {
+    TargetNodeGenerationTracker generation_tracker(generation_stats, x.Type);
     std::string &remark = x.Remark;
     std::string &hostname = x.Hostname;
     std::string &password = x.Password;
@@ -2732,6 +2917,7 @@ std::string proxyToSSSub(std::string base_conf, std::vector<Proxy> &nodes,
             "plugin_opts",
             rapidjson::Value(pluginopts.c_str(), pluginopts.size()), alloc);
     proxies.PushBack(proxy, alloc);
+    generation_tracker.markEmitted();
   }
   return proxies | SerializeObject();
 }
@@ -2740,6 +2926,8 @@ std::string proxyToQuan(std::vector<Proxy> &nodes, const std::string &base_conf,
                         std::vector<RulesetContent> &ruleset_content_array,
                         const ProxyGroupConfigs &extra_proxy_group,
                         extra_settings &ext) {
+  ext.target_generation_stats = TargetGenerationStats{};
+  ext.target_generation_stats.input_nodes = nodes.size();
   INIReader ini;
   ini.store_any_line = true;
   if (!ext.nodelist && ini.parse(base_conf) != 0) {
@@ -2765,6 +2953,9 @@ void proxyToQuan(std::vector<Proxy> &nodes, INIReader &ini,
                  std::vector<RulesetContent> &ruleset_content_array,
                  const ProxyGroupConfigs &extra_proxy_group,
                  extra_settings &ext) {
+  TargetGenerationStats &generation_stats = ext.target_generation_stats;
+  generation_stats = TargetGenerationStats{};
+  generation_stats.input_nodes = nodes.size();
   std::string proxyStr;
   std::vector<Proxy> nodelist;
   RemarkSet used_remarks;
@@ -2773,6 +2964,7 @@ void proxyToQuan(std::vector<Proxy> &nodes, INIReader &ini,
   ini.set_current_section("SERVER");
   ini.erase_section();
   for (Proxy &x : nodes) {
+    TargetNodeGenerationTracker generation_tracker(generation_stats, x.Type);
     if (ext.append_proxy_type) {
       std::string type = getProxyTypeName(x.Type);
       x.Remark = "[" + type + "] " + x.Remark;
@@ -2890,6 +3082,7 @@ void proxyToQuan(std::vector<Proxy> &nodes, INIReader &ini,
     ini.set("{NONAME}", proxyStr);
     used_remarks.emplace(x.Remark);
     nodelist.emplace_back(x);
+    generation_tracker.markEmitted();
   }
 
   if (ext.nodelist)
@@ -3158,6 +3351,8 @@ std::string proxyToQuanX(std::vector<Proxy> &nodes,
                          std::vector<RulesetContent> &ruleset_content_array,
                          const ProxyGroupConfigs &extra_proxy_group,
                          extra_settings &ext) {
+  ext.target_generation_stats = TargetGenerationStats{};
+  ext.target_generation_stats.input_nodes = nodes.size();
   INIReader ini;
   ini.store_any_line = true;
   ini.add_direct_save_section("general");
@@ -3176,6 +3371,9 @@ std::string proxyToQuanX(std::vector<Proxy> &nodes,
   if (!ext.nodelist)
     appendQuanXServerRemotes(ini, ext);
   proxyToQuanX(nodes, ini, ruleset_content_array, extra_proxy_group, ext);
+  if (!ext.nodelist)
+    ext.target_generation_stats.remote_references_emitted =
+        ext.quanx_server_remotes.size();
 
   if (ext.nodelist) {
     string_array allnodes;
@@ -3192,6 +3390,9 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini,
                   std::vector<RulesetContent> &ruleset_content_array,
                   const ProxyGroupConfigs &extra_proxy_group,
                   extra_settings &ext) {
+  TargetGenerationStats &generation_stats = ext.target_generation_stats;
+  generation_stats = TargetGenerationStats{};
+  generation_stats.input_nodes = nodes.size();
   std::string proxyStr;
   tribool udp, tfo, scv, tls13;
   std::vector<Proxy> nodelist;
@@ -3201,12 +3402,18 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini,
   ini.set_current_section("server_local");
   ini.erase_section();
   for (Proxy &x : nodes) {
+    TargetNodeGenerationTracker generation_tracker(generation_stats, x.Type);
     if (ext.append_proxy_type) {
       std::string type = getProxyTypeName(x.Type);
       x.Remark = "[" + type + "] " + x.Remark;
     }
 
     processRemark(x.Remark, used_remarks);
+
+    if (x.Port == 0 || x.Hostname.empty() || x.Remark.empty() ||
+        !quanxProxyScalarIsSafe(x.Hostname) ||
+        !quanxProxyScalarIsSafe(x.Remark))
+      continue;
 
     std::string &hostname = x.Hostname, &method = x.EncryptMethod,
                 &id = x.UserId, &transproto = x.TransferProtocol,
@@ -3216,7 +3423,10 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini,
                 &obfs = x.OBFS, &obfsparam = x.OBFSParam,
                 &username = x.Username;
     std::string port = std::to_string(x.Port);
+    const std::string endpoint = shareLinkHost(hostname) + ":" + port;
     bool &tlssecure = x.TLSSecure;
+    bool emit_tls_verification = false;
+    bool force_disable_tfo = false;
 
     udp = ext.udp;
     tfo = ext.tfo;
@@ -3228,47 +3438,85 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini,
     tls13.define(x.TLS13);
 
     switch (x.Type) {
-    case ProxyType::VMess:
-      if (method == "auto")
-        method = "chacha20-ietf-poly1305";
-      proxyStr = "vmess = " + hostname + ":" + port + ", method=" + method +
+    case ProxyType::VMess: {
+      const bool reality = x.TLSStr == "reality" || !x.PublicKey.empty();
+      const bool tls_active = reality || tlssecure;
+      const std::string quanx_method =
+          method == "auto" ? "chacha20-ietf-poly1305" : method;
+      if (quanx_method.empty() || id.empty() ||
+          !quanxProxyScalarIsSafe(quanx_method) ||
+          !quanxProxyScalarIsSafe(id) ||
+          !quanxPlainXrayTransportIsSafe(x) || !x.Flow.empty() ||
+          !x.Encryption.empty() ||
+          (!x.PacketEncoding.empty() && x.PacketEncoding != "none") ||
+          (!x.TLSStr.empty() && x.TLSStr != "none" && x.TLSStr != "tls" &&
+           x.TLSStr != "reality") ||
+          (x.TLSStr == "none" && tlssecure) ||
+          (!x.ShortId.empty() && !reality))
+        continue;
+      proxyStr = "vmess = " + endpoint + ", method=" + quanx_method +
                  ", password=" + id;
       if (x.AlterId != 0)
         proxyStr += ", aead=false";
-      if (tlssecure && !tls13.is_undef())
-        proxyStr += ", tls13=" + std::string(tls13 ? "true" : "false");
-      if (transproto == "ws") {
-        if (tlssecure)
-          proxyStr += ", obfs=wss";
-        else
-          proxyStr += ", obfs=ws";
-        proxyStr += ", obfs-host=" + host + ", obfs-uri=" + path;
-      } else if (tlssecure)
-        proxyStr += ", obfs=over-tls, obfs-host=" + host;
+      if (!appendQuanXXrayTransport(x, reality, tls_active, proxyStr))
+        continue;
+      if (reality) {
+        if (!appendQuanXRealityFields(x, proxyStr))
+          continue;
+        force_disable_tfo = true;
+      } else if (tls_active) {
+        std::string alpn_hex;
+        if (!quanxTlsAlpnHex(x.AlpnList, alpn_hex))
+          continue;
+        if (!alpn_hex.empty())
+          proxyStr += ", tls-alpn=" + alpn_hex;
+        emit_tls_verification = true;
+      } else if (!x.AlpnList.empty()) {
+        continue;
+      }
       break;
-    case ProxyType::VLESS:
-      if (method == "auto")
-        method = "none";
-      else
-        method = "none";
-      proxyStr = "vless = " + hostname + ":" + port + ", method=" + method +
-                 ", password=" + id;
-      if (x.AlterId != 0)
-        proxyStr += ", aead=false";
-      if (tlssecure && !tls13.is_undef())
-        proxyStr += ", tls13=" + std::string(tls13 ? "true" : "false");
-      if (transproto == "ws") {
-        if (tlssecure)
-          proxyStr += ", obfs=wss";
-        else
-          proxyStr += ", obfs=ws";
-        proxyStr += ", obfs-host=" + host + ", obfs-uri=" + path;
-      } else if (tlssecure)
-        proxyStr += ", obfs=over-tls, obfs-host=" + host;
+    }
+    case ProxyType::VLESS: {
+      const bool reality = x.TLSStr == "reality" || !x.PublicKey.empty();
+      const bool tls_active = reality || tlssecure;
+      const bool vision = x.Flow == "xtls-rprx-vision";
+      if (id.empty() || !quanxProxyScalarIsSafe(id) ||
+          !quanxPlainXrayTransportIsSafe(x) ||
+          (!x.Encryption.empty() && x.Encryption != "none") ||
+          (!x.PacketEncoding.empty() && x.PacketEncoding != "none") ||
+          (!x.Flow.empty() && !vision) ||
+          (vision && (!reality || transproto != "tcp" ||
+                      x.FakeType == "http")) ||
+          (!x.TLSStr.empty() && x.TLSStr != "none" && x.TLSStr != "tls" &&
+           x.TLSStr != "reality") ||
+          (x.TLSStr == "none" && tlssecure) ||
+          (!x.ShortId.empty() && !reality))
+        continue;
+      proxyStr =
+          "vless = " + endpoint + ", method=none, password=" + id;
+      if (!appendQuanXXrayTransport(x, reality, tls_active, proxyStr))
+        continue;
+      if (reality) {
+        if (!appendQuanXRealityFields(x, proxyStr))
+          continue;
+        if (vision)
+          proxyStr += ", vless-flow=xtls-rprx-vision";
+        force_disable_tfo = true;
+      } else if (tls_active) {
+        std::string alpn_hex;
+        if (!quanxTlsAlpnHex(x.AlpnList, alpn_hex))
+          continue;
+        if (!alpn_hex.empty())
+          proxyStr += ", tls-alpn=" + alpn_hex;
+        emit_tls_verification = true;
+      } else if (!x.AlpnList.empty()) {
+        continue;
+      }
       break;
+    }
     case ProxyType::Shadowsocks:
-      proxyStr = "shadowsocks = " + hostname + ":" + port +
-                 ", method=" + method + ", password=" + password;
+      proxyStr = "shadowsocks = " + endpoint +
+                  ", method=" + method + ", password=" + password;
       if (!plugin.empty()) {
         switch (hash_(plugin)) {
         case "simple-obfs"_hash:
@@ -3300,9 +3548,9 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini,
 
       break;
     case ProxyType::ShadowsocksR:
-      proxyStr = "shadowsocks = " + hostname + ":" + port +
-                 ", method=" + method + ", password=" + password +
-                 ", ssr-protocol=" + protocol;
+      proxyStr = "shadowsocks = " + endpoint +
+                  ", method=" + method + ", password=" + password +
+                  ", ssr-protocol=" + protocol;
       if (!protoparam.empty())
         proxyStr += ", ssr-protocol-param=" + protoparam;
       proxyStr += ", obfs=" + obfs;
@@ -3311,33 +3559,110 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini,
       break;
     case ProxyType::HTTP:
     case ProxyType::HTTPS:
-      proxyStr = "http = " + hostname + ":" + port +
-                 ", username=" + (username.empty() ? "none" : username) +
-                 ", password=" + (password.empty() ? "none" : password);
+      proxyStr = "http = " + endpoint +
+                  ", username=" + (username.empty() ? "none" : username) +
+                  ", password=" + (password.empty() ? "none" : password);
       if (tlssecure) {
         proxyStr += ", over-tls=true";
+        emit_tls_verification = true;
         if (!tls13.is_undef())
           proxyStr += ", tls13=" + std::string(tls13 ? "true" : "false");
       } else {
         proxyStr += ", over-tls=false";
       }
       break;
-    case ProxyType::Trojan:
-      proxyStr = "trojan = " + hostname + ":" + port + ", password=" + password;
-      if (tlssecure) {
-        proxyStr += ", over-tls=true, tls-host=" + host;
-        if (!tls13.is_undef())
-          proxyStr += ", tls13=" + std::string(tls13 ? "true" : "false");
+    case ProxyType::Trojan: {
+      const bool reality = x.TLSStr == "reality" || !x.PublicKey.empty();
+      const bool tls_active = reality || tlssecure;
+      if (!tls_active || password.empty() ||
+          !quanxProxyScalarIsSafe(password) ||
+          !quanxPlainXrayTransportIsSafe(x) || !x.Flow.empty() ||
+          !x.Encryption.empty() ||
+          (!x.PacketEncoding.empty() && x.PacketEncoding != "none") ||
+          (!x.FakeType.empty() && x.FakeType != "none") ||
+          (transproto != "tcp" && transproto != "ws") ||
+          (!x.TLSStr.empty() && x.TLSStr != "tls" &&
+           x.TLSStr != "reality") ||
+          (!x.ShortId.empty() && !reality))
+        continue;
+      proxyStr = "trojan = " + endpoint + ", password=" + password;
+      if (transproto == "tcp") {
+        if (reality && x.ServerName.empty())
+          continue;
+        if (!quanxProxyScalarIsSafe(x.ServerName))
+          continue;
+        proxyStr += ", over-tls=true";
+        if (!x.ServerName.empty())
+          proxyStr += ", tls-host=" + x.ServerName;
       } else {
-        proxyStr += ", over-tls=false";
+        const std::string http_host = host.empty() ? hostname : host;
+        const std::string tls_host =
+            x.ServerName.empty() ? hostname : x.ServerName;
+        if (!quanxProxyScalarIsSafe(http_host) ||
+            !quanxProxyScalarIsSafe(tls_host) ||
+            !quanxProxyScalarIsSafe(path) ||
+            toLower(http_host) != toLower(tls_host))
+          continue;
+        proxyStr += ", obfs=wss";
+        if (!http_host.empty())
+          proxyStr += ", obfs-host=" + http_host;
+        if (!path.empty())
+          proxyStr += ", obfs-uri=" + path;
+      }
+      if (reality) {
+        if (!appendQuanXRealityFields(x, proxyStr))
+          continue;
+        force_disable_tfo = true;
+      } else {
+        std::string alpn_hex;
+        if (!quanxTlsAlpnHex(x.AlpnList, alpn_hex))
+          continue;
+        if (!alpn_hex.empty())
+          proxyStr += ", tls-alpn=" + alpn_hex;
+        emit_tls_verification = true;
       }
       break;
+    }
+    case ProxyType::AnyTLS: {
+      const bool reality = x.TLSStr == "reality" || !x.PublicKey.empty();
+      if (password.empty() || !quanxProxyScalarIsSafe(password) ||
+          !quanxPlainXrayTransportIsSafe(x) || !x.Flow.empty() ||
+          !x.Encryption.empty() ||
+          (!x.PacketEncoding.empty() && x.PacketEncoding != "none") ||
+          (!transproto.empty() && transproto != "tcp") ||
+          (!x.FakeType.empty() && x.FakeType != "none") ||
+          !x.Path.empty() ||
+          (!x.TLSStr.empty() && x.TLSStr != "tls" &&
+           x.TLSStr != "reality") ||
+          !quanxProxyScalarIsSafe(x.ServerName) ||
+          (!x.ShortId.empty() && !reality) ||
+          (reality && x.ServerName.empty()))
+        continue;
+      proxyStr =
+          "anytls = " + endpoint + ", password=" + password + ", over-tls=true";
+      if (!x.ServerName.empty())
+        proxyStr += ", tls-host=" + x.ServerName;
+      if (reality) {
+        if (!appendQuanXRealityFields(x, proxyStr))
+          continue;
+        force_disable_tfo = true;
+      } else {
+        std::string alpn_hex;
+        if (!quanxTlsAlpnHex(x.AlpnList, alpn_hex))
+          continue;
+        if (!alpn_hex.empty())
+          proxyStr += ", tls-alpn=" + alpn_hex;
+        emit_tls_verification = true;
+      }
+      break;
+    }
     case ProxyType::SOCKS5:
-      proxyStr = "socks5 = " + hostname + ":" + port;
+      proxyStr = "socks5 = " + endpoint;
       if (!username.empty() && !password.empty()) {
         proxyStr += ", username=" + username + ", password=" + password;
         if (tlssecure) {
           proxyStr += ", over-tls=true, tls-host=" + host;
+          emit_tls_verification = true;
           if (!tls13.is_undef())
             proxyStr += ", tls13=" + std::string(tls13 ? "true" : "false");
         } else {
@@ -3348,19 +3673,20 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini,
     default:
       continue;
     }
-    if (!tfo.is_undef())
+    if (force_disable_tfo)
+      proxyStr += ", fast-open=false";
+    else if (!tfo.is_undef())
       proxyStr += ", fast-open=" + tfo.get_str();
     if (!udp.is_undef())
       proxyStr += ", udp-relay=" + udp.get_str();
-    if (tlssecure && !scv.is_undef() &&
-        (x.Type != ProxyType::Shadowsocks &&
-         x.Type != ProxyType::ShadowsocksR && x.Type != ProxyType::VLESS))
+    if (emit_tls_verification && !scv.is_undef())
       proxyStr += ", tls-verification=" + scv.reverse().get_str();
     proxyStr += ", tag=" + x.Remark;
 
     ini.set("{NONAME}", proxyStr);
     used_remarks.emplace(x.Remark);
     nodelist.emplace_back(x);
+    generation_tracker.markEmitted();
   }
 
   if (ext.nodelist)
@@ -3457,6 +3783,9 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini,
 
 std::string proxyToSSD(std::vector<Proxy> &nodes, std::string &group,
                        std::string &userinfo, extra_settings &ext) {
+  TargetGenerationStats &generation_stats = ext.target_generation_stats;
+  generation_stats = TargetGenerationStats{};
+  generation_stats.input_nodes = nodes.size();
   rapidjson::StringBuffer sb;
   rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
   int index = 0;
@@ -3500,6 +3829,7 @@ std::string proxyToSSD(std::vector<Proxy> &nodes, std::string &group,
   writer.StartArray();
 
   for (Proxy &x : nodes) {
+    TargetNodeGenerationTracker generation_tracker(generation_stats, x.Type);
     std::string &hostname = x.Hostname, &password = x.Password,
                 &method = x.EncryptMethod, &plugin = x.Plugin,
                 &pluginopts = x.PluginOption, &protocol = x.Protocol,
@@ -3552,6 +3882,7 @@ std::string proxyToSSD(std::vector<Proxy> &nodes, std::string &group,
       continue;
     }
     index++;
+    generation_tracker.markEmitted();
   }
   writer.EndArray();
   writer.EndObject();
@@ -3563,6 +3894,8 @@ std::string proxyToMellow(std::vector<Proxy> &nodes,
                           std::vector<RulesetContent> &ruleset_content_array,
                           const ProxyGroupConfigs &extra_proxy_group,
                           extra_settings &ext) {
+  ext.target_generation_stats = TargetGenerationStats{};
+  ext.target_generation_stats.input_nodes = nodes.size();
   INIReader ini;
   ini.store_any_line = true;
   if (ini.parse(base_conf) != 0) {
@@ -3580,6 +3913,9 @@ void proxyToMellow(std::vector<Proxy> &nodes, INIReader &ini,
                    std::vector<RulesetContent> &ruleset_content_array,
                    const ProxyGroupConfigs &extra_proxy_group,
                    extra_settings &ext) {
+  TargetGenerationStats &generation_stats = ext.target_generation_stats;
+  generation_stats = TargetGenerationStats{};
+  generation_stats.input_nodes = nodes.size();
   std::string proxy;
   std::string url;
   tribool tfo, scv;
@@ -3591,6 +3927,7 @@ void proxyToMellow(std::vector<Proxy> &nodes, INIReader &ini,
   ini.set_current_section("Endpoint");
 
   for (Proxy &x : nodes) {
+    TargetNodeGenerationTracker generation_tracker(generation_stats, x.Type);
     if (ext.append_proxy_type) {
       std::string type = getProxyTypeName(x.Type);
       x.Remark = "[" + type + "] " + x.Remark;
@@ -3677,6 +4014,7 @@ void proxyToMellow(std::vector<Proxy> &nodes, INIReader &ini,
     remarks_list.emplace_back(x.Remark);
     used_remarks.emplace(x.Remark);
     nodelist.emplace_back(x);
+    generation_tracker.markEmitted();
   }
 
   ini.set_current_section("EndpointGroup");
@@ -3849,9 +4187,11 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
   INIReader ini;
   std::string output_nodelist;
   std::vector<Proxy> nodelist;
-  TargetGenerationStats &generation_stats = ext.loon_generation_stats;
+  TargetGenerationStats &generation_stats = ext.target_generation_stats;
   generation_stats = TargetGenerationStats{};
   generation_stats.input_nodes = nodes.size();
+  TargetGenerationStatsMirror generation_stats_mirror(
+      generation_stats, ext.loon_generation_stats);
 
   RemarkSet used_remarks;
   used_remarks.reserve(nodes.size());
@@ -3873,6 +4213,10 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
   ini.erase_section();
 
   for (Proxy &x : nodes) {
+    if (!loonQuotedScalarIsSafe(x.Remark)) {
+      generation_stats.unsupported_by_type[x.Type]++;
+      continue;
+    }
     if (ext.append_proxy_type) {
       std::string type = getProxyTypeName(x.Type);
       x.Remark = "[" + type + "] " + x.Remark;
@@ -3890,10 +4234,10 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
     std::string port = std::to_string(x.Port), aid = std::to_string(x.AlterId);
     bool &tlssecure = x.TLSSecure;
 
-    tribool scv = ext.skip_cert_verify;
+    tribool scv = ext.skip_cert_verify, udp = ext.udp, tfo = ext.tfo;
     scv.define(x.AllowInsecure);
-    tribool udp = x.UDP.is_undef() ? ext.udp.is_undef() ? false : ext.udp.get()
-                                   : x.UDP.get();
+    udp.define(x.UDP);
+    tfo.define(x.TCPFastOpen);
     std::string proxy;
 
     switch (x.Type) {
@@ -3911,65 +4255,97 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
       }
       break;
     case ProxyType::VMess:
-      if (method == "auto")
-        method = "chacha20-ietf-poly1305";
-
-      proxy = "vmess," + hostname + "," + port + "," + method + ",\"" + id +
-              "\",over-tls=" + (tlssecure ? "true" : "false");
-      if (tlssecure)
-        proxy += ",tls-name=" + host;
-      switch (hash_(transproto)) {
-      case "tcp"_hash:
-        proxy += ",transport=tcp";
-        break;
-      case "ws"_hash:
-        proxy += ",transport=ws,path=" + path + ",host=" + host;
-        break;
-      default:
+      if (x.Port == 0 || method.empty() || id.empty() ||
+          !loonProxyScalarIsSafe(hostname) ||
+          !loonProxyScalarIsSafe(method) || !loonQuotedScalarIsSafe(id) ||
+          !loonPlainXrayTransportIsSafe(x) || !x.AlpnList.empty() ||
+          !x.PacketEncoding.empty() ||
+          !x.TLS13.is_undef() || x.XUDP ||
+          (!x.TLSStr.empty() && x.TLSStr != "none" && x.TLSStr != "tls") ||
+          (x.TLSStr == "none" && tlssecure) ||
+          (x.TLSStr == "tls" && !tlssecure) ||
+          (!x.FakeType.empty() && x.FakeType != "none") ||
+          (!x.Fingerprint.empty() &&
+           (!tlssecure || !loonProxyScalarIsSafe(x.Fingerprint))) ||
+          (!sni.empty() && (!tlssecure || !loonProxyScalarIsSafe(sni)))) {
         generation_stats.unsupported_by_type[x.Type]++;
         continue;
       }
+      if (transproto != "tcp" && transproto != "ws" && transproto != "http") {
+        generation_stats.unsupported_by_type[x.Type]++;
+        continue;
+      }
+      if ((transproto == "ws" || transproto == "http") &&
+          (!loonProxyScalarIsSafe(path) || !loonProxyScalarIsSafe(host))) {
+        generation_stats.unsupported_by_type[x.Type]++;
+        continue;
+      }
+      proxy = "vmess," + hostname + "," + port + "," + method + ",\"" + id +
+              "\",transport=" + transproto + ",alterId=" + aid;
+      if (transproto == "ws" || transproto == "http")
+        proxy += ",path=" + path + ",host=" + host;
+      proxy += ",over-tls=" + std::string(tlssecure ? "true" : "false");
+      if (tlssecure && !sni.empty())
+        proxy += ",sni=" + sni;
+      if (tlssecure && !x.Fingerprint.empty())
+        proxy += ",tls-profile=" + x.Fingerprint;
       if (!scv.is_undef())
         proxy +=
             ",skip-cert-verify=" + std::string(scv.get() ? "true" : "false");
       break;
-    case ProxyType::VLESS:
-      if (flow != "xtls-rprx-vision") {
-        if (transproto == "ws") {
-          proxy = "VLESS," + hostname + "," + port + ",\"" + id + "\"" +
-                  ",path=" + path + ",host=" + host +
-                  ",transport=" + transproto +
-                  ",udp=" + (udp.get() ? "true" : "false") +
-                  ",over-tls=" + (tlssecure ? "true" : "false") + ",sni=" + sni;
-        } else {
+    case ProxyType::VLESS: {
+      const bool reality = x.TLSStr == "reality";
+      if (x.Port == 0 || id.empty() || !loonProxyScalarIsSafe(hostname) ||
+          !loonQuotedScalarIsSafe(id) || !loonPlainXrayTransportIsSafe(x) ||
+          !x.AlpnList.empty() ||
+          (!x.Encryption.empty() && x.Encryption != "none") ||
+          (!x.PacketEncoding.empty() && x.PacketEncoding != "none") ||
+          !x.TLS13.is_undef() || x.XUDP ||
+          (x.TLSStr == "none" && tlssecure) ||
+          (x.TLSStr == "tls" && !tlssecure) ||
+          (!x.FakeType.empty() && x.FakeType != "none") ||
+          (!x.Fingerprint.empty() &&
+           (!tlssecure || !loonProxyScalarIsSafe(x.Fingerprint))) ||
+          (!sni.empty() && (!tlssecure || !loonProxyScalarIsSafe(sni)))) {
+        generation_stats.unsupported_by_type[x.Type]++;
+        continue;
+      }
+      if (reality) {
+        if (!tlssecure || transproto != "tcp" || flow != "xtls-rprx-vision" ||
+            pk.empty() || sni.empty() || !loonQuotedScalarIsSafe(pk) ||
+            !loonProxyScalarIsSafe(shortId)) {
           generation_stats.unsupported_by_type[x.Type]++;
           continue;
         }
-      } else {
         proxy = "VLESS," + hostname + "," + port + ",\"" + id +
-                "\",flow=" + flow + ",public-key=\"" + pk +
-                "\",short-id=" + shortId +
-                ",udp=" + (udp.get() ? "true" : "false") +
-                ",over-tls=" + (tlssecure ? "true" : "false") + ",sni=" + sni;
-      }
-
-      switch (hash_(transproto)) {
-      case "tcp"_hash:
-        proxy += ",transport=tcp";
-        break;
-      default:
-        if (transproto != "ws") {
+                "\",transport=tcp,flow=xtls-rprx-vision,public-key=\"" + pk + "\"";
+        if (!shortId.empty())
+          proxy += ",short-id=" + shortId;
+        proxy += ",over-tls=true,sni=" + sni;
+      } else {
+        if ((!x.TLSStr.empty() && x.TLSStr != "none" && x.TLSStr != "tls") ||
+            !flow.empty() || !pk.empty() || !shortId.empty() ||
+            (transproto != "tcp" && transproto != "ws" && transproto != "http") ||
+            ((transproto == "ws" || transproto == "http") &&
+             (!loonProxyScalarIsSafe(path) || !loonProxyScalarIsSafe(host)))) {
           generation_stats.unsupported_by_type[x.Type]++;
           continue;
-        } else {
-          break;
-          ;
         }
+        proxy = "VLESS," + hostname + "," + port + ",\"" + id +
+                "\",transport=" + transproto;
+        if (transproto == "ws" || transproto == "http")
+          proxy += ",path=" + path + ",host=" + host;
+        proxy += ",over-tls=" + std::string(tlssecure ? "true" : "false");
+        if (tlssecure && !sni.empty())
+          proxy += ",sni=" + sni;
       }
+      if (tlssecure && !x.Fingerprint.empty())
+        proxy += ",tls-profile=" + x.Fingerprint;
       if (!scv.is_undef())
         proxy +=
             ",skip-cert-verify=" + std::string(scv.get() ? "true" : "false");
       break;
+    }
     case ProxyType::ShadowsocksR:
       proxy = "ShadowsocksR," + hostname + "," + port + "," + method + ",\"" +
               password + "\",protocol=" + protocol +
@@ -3990,12 +4366,59 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
             ",skip-cert-verify=" + std::string(scv.get() ? "true" : "false");
       break;
     case ProxyType::Trojan:
+      if (x.Port == 0 || password.empty() || !tlssecure ||
+          !loonProxyScalarIsSafe(hostname) ||
+          !loonQuotedScalarIsSafe(password) ||
+          !loonPlainXrayTransportIsSafe(x) ||
+          (transproto != "tcp" && transproto != "ws" && transproto != "http") ||
+          ((transproto == "ws" || transproto == "http") &&
+           (!loonProxyScalarIsSafe(path) || !loonProxyScalarIsSafe(host))) ||
+          x.AlpnList.size() > 1 || !x.PublicKey.empty() || !x.ShortId.empty() ||
+          !x.Flow.empty() || !x.PacketEncoding.empty() ||
+          !x.TLS13.is_undef() || x.XUDP ||
+          (!x.TLSStr.empty() && x.TLSStr != "tls") ||
+          (!x.FakeType.empty() && x.FakeType != "none") ||
+          (!sni.empty() && !loonProxyScalarIsSafe(sni)) ||
+          (!x.Fingerprint.empty() && !loonProxyScalarIsSafe(x.Fingerprint)) ||
+          (!x.AlpnList.empty() &&
+           !loonProxyScalarIsSafe(x.AlpnList.front()))) {
+        generation_stats.unsupported_by_type[x.Type]++;
+        continue;
+      }
       proxy = "trojan," + hostname + "," + port + ",\"" + password + "\"";
-      if (!host.empty())
-        proxy += ",tls-name=" + host;
+      if (transproto == "ws" || transproto == "http")
+        proxy += ",transport=" + transproto + ",path=" + path + ",host=" + host;
+      if (!x.AlpnList.empty())
+        proxy += ",alpn=" + x.AlpnList.front();
+      if (!sni.empty())
+        proxy += ",sni=" + sni;
+      if (!x.Fingerprint.empty())
+        proxy += ",tls-profile=" + x.Fingerprint;
       if (!scv.is_undef())
         proxy +=
             ",skip-cert-verify=" + std::string(scv.get() ? "true" : "false");
+      break;
+    case ProxyType::AnyTLS:
+      if (x.Port == 0 || password.empty() || !loonProxyScalarIsSafe(hostname) ||
+          !loonQuotedScalarIsSafe(password) || !x.AlpnList.empty() ||
+          !x.UnderlyingProxy.empty() || x.IdleSessionCheckInterval != 30 ||
+          x.IdleSessionTimeout != 30 || x.MinIdleSession != 0 ||
+          !x.TLS13.is_undef() ||
+          (!x.SNI.empty() && x.SNI != sni) ||
+          (!sni.empty() && !loonProxyScalarIsSafe(sni)) ||
+          (!x.Fingerprint.empty() && !loonProxyScalarIsSafe(x.Fingerprint))) {
+        generation_stats.unsupported_by_type[x.Type]++;
+        continue;
+      }
+      proxy = "AnyTLS," + hostname + "," + port + ",\"" + password + "\"";
+      if (!sni.empty())
+        proxy += ",sni=" + sni;
+      if (!x.Fingerprint.empty())
+        proxy += ",tls-profile=" + x.Fingerprint;
+      if (!scv.is_undef())
+        proxy +=
+            ",skip-cert-verify=" + std::string(scv.get() ? "true" : "false");
+      proxy += ",block-quic=false";
       break;
     case ProxyType::SOCKS5:
       proxy = "socks5," + hostname + "," + port;
@@ -4052,50 +4475,52 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
         proxy += "]";
       }
       break;
-    case ProxyType::Hysteria2:
+    case ProxyType::Hysteria2: {
+      const bool salamander = x.OBFSParam == "salamander";
+      int download_bandwidth = 0;
+      if (x.Port == 0 || password.empty() || !loonProxyScalarIsSafe(hostname) ||
+          !loonQuotedScalarIsSafe(password) || !x.UpMbps.empty() ||
+          !x.Ports.empty() || !x.Hysteria2ECH.empty() || !x.Alpn.empty() ||
+          !x.AlpnList.empty() || !x.PublicKey.empty() || !x.OBFS.empty() ||
+          !x.HysteriaHopInterval.empty() ||
+          (!x.ServerName.empty() &&
+           !loonProxyScalarIsSafe(x.ServerName)) ||
+          (!x.Fingerprint.empty() &&
+           (!loonProxyScalarIsSafe(x.Fingerprint) ||
+            (!scv.is_undef() && scv.get()))) ||
+          ((!x.OBFSParam.empty() || !x.OBFSPassword.empty()) &&
+           (!salamander || x.OBFSPassword.empty() ||
+            !loonQuotedScalarIsSafe(x.OBFSPassword))) ||
+          (!x.DownMbps.empty() &&
+           (!parseMbpsValue(x.DownMbps, download_bandwidth) ||
+            download_bandwidth <= 0))) {
+        generation_stats.unsupported_by_type[x.Type]++;
+        continue;
+      }
       proxy = "Hysteria2," + hostname + "," + port + ",\"" + password + "\"";
       if (!x.ServerName.empty()) {
         proxy += ",sni=" + x.ServerName;
       }
-      if (!x.UpMbps.empty()) {
-        std::string search = " Mbps";
-        size_t pos = x.UpMbps.find(search);
-        if (pos != std::string::npos) {
-          x.UpMbps.replace(pos, search.length(), "");
-        } else {
-          search = "Mbps";
-          pos = x.UpMbps.find(search);
-          if (pos != std::string::npos) {
-            x.UpMbps.replace(pos, search.length(), "");
-          }
-        }
-        proxy += ",download-bandwidth=" + x.UpMbps;
-      } else {
-        proxy += ",download-bandwidth=100";
-      }
+      if (!x.Fingerprint.empty())
+        proxy += ",tls-cert-sha256=" + x.Fingerprint;
+      if (!x.DownMbps.empty())
+        proxy += ",download-bandwidth=" + std::to_string(download_bandwidth);
+      if (salamander)
+        proxy += ",salamander-password=\"" + x.OBFSPassword + "\"";
       if (!scv.is_undef())
         proxy +=
             ",skip-cert-verify=" + std::string(scv.get() ? "true" : "false");
       break;
+    }
     default:
       generation_stats.unsupported_by_type[x.Type]++;
       continue;
     }
 
-    if (ext.tfo) {
-      proxy += ",fast-open=true";
-    } else {
-      if (x.Type == ProxyType::Hysteria2) {
-        proxy += ",fast-open=false";
-      }
-    }
-    if (ext.udp) {
-      proxy += ",udp=true";
-    } else {
-      if (x.Type == ProxyType::Hysteria2) {
-        proxy += ",udp=true";
-      }
-    }
+    if (!tfo.is_undef())
+      proxy += ",fast-open=" + std::string(tfo.get() ? "true" : "false");
+    if (!udp.is_undef())
+      proxy += ",udp=" + std::string(udp.get() ? "true" : "false");
 
     if (ext.nodelist)
       output_nodelist += x.Remark + " = " + proxy + "\n";
@@ -4411,6 +4836,9 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
                     std::vector<RulesetContent> &ruleset_content_array,
                     const ProxyGroupConfigs &extra_proxy_group,
                     extra_settings &ext) {
+  TargetGenerationStats &generation_stats = ext.target_generation_stats;
+  generation_stats = TargetGenerationStats{};
+  generation_stats.input_nodes = nodes.size();
   const bool add_clash_modes = effectiveSettings().singBoxAddClashModes;
   const bool wireguard_endpoint = effectiveSettings().singBoxWireGuardEndpoint;
   using namespace rapidjson_ext;
@@ -4439,6 +4867,7 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
   }
 
   for (Proxy &x : nodes) {
+    TargetNodeGenerationTracker generation_tracker(generation_stats, x.Type);
     std::string type = getProxyTypeName(x.Type);
     if (ext.append_proxy_type)
       x.Remark = "[" + type + "] " + x.Remark;
@@ -4583,6 +5012,7 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
         nodelist.push_back(x);
         remarks_list.emplace_back(x.Remark);
         used_remarks.emplace(x.Remark);
+        generation_tracker.markEmitted();
         continue;
       }
       proxy.AddMember("type", "wireguard", allocator);
@@ -4884,6 +5314,7 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
     remarks_list.emplace_back(x.Remark);
     used_remarks.emplace(x.Remark);
     outbounds.PushBack(proxy, allocator);
+    generation_tracker.markEmitted();
   }
 
   if (wireguard_nodes_emitted > 0) {
@@ -4975,6 +5406,8 @@ std::string proxyToSingBox(std::vector<Proxy> &nodes,
                            std::vector<RulesetContent> &ruleset_content_array,
                            const ProxyGroupConfigs &extra_proxy_group,
                            extra_settings &ext) {
+  ext.target_generation_stats = TargetGenerationStats{};
+  ext.target_generation_stats.input_nodes = nodes.size();
   using namespace rapidjson_ext;
   rapidjson::Document json;
 

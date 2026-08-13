@@ -20,6 +20,13 @@ func preprocessSubscription(subscription string) string {
 			result = append(result, line)
 			continue
 		}
+		// Mieru credentials and protobuf payloads use standard URL/Base64
+		// escaping. QueryUnescape would turn '+' into a space and can expose a
+		// percent-encoded '#' as a fragment delimiter before Mihomo parses it.
+		if strings.HasPrefix(line, mieruStandardPrefix) || strings.HasPrefix(line, "mierus://") {
+			result = append(result, line)
+			continue
+		}
 
 		// Decode the entire URL line. This fixes inputs such as v2rayN's
 		// uuid%3Apassword encoding and keeps malformed percent escapes unchanged.

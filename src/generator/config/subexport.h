@@ -138,6 +138,7 @@ struct extra_settings {
   std::vector<SurgePolicyPathResource> surge_policy_paths;
   std::vector<SurfboardPolicyPathResource> surfboard_policy_paths;
   std::vector<LoonRemoteProxyResource> loon_remote_proxies;
+  TargetGenerationStats target_generation_stats;
   TargetGenerationStats surge_generation_stats;
   TargetGenerationStats surfboard_generation_stats;
   TargetGenerationStats loon_generation_stats;
