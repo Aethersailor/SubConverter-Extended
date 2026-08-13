@@ -6442,9 +6442,10 @@ def v2ray_client_target_baseline(base_url: str) -> None:
         raw = base64.b64decode(body) if outer_base64 else body
         result: list[tuple[str, dict]] = []
         for line in raw.decode("utf-8").splitlines():
-            if not line.startswith("v2rayn://") or "/" not in line[10:]:
+            prefix = "v2rayn://"
+            if not line.startswith(prefix) or "/" not in line[len(prefix) :]:
                 raise AssertionError(f"invalid v2rayN internal link: {line!r}")
-            scheme, encoded = line[10:].split("/", 1)
+            scheme, encoded = line[len(prefix) :].split("/", 1)
             padded = encoded + "=" * (-len(encoded) % 4)
             profile = json.loads(base64.urlsafe_b64decode(padded))
             if profile.get("ConfigVersion") != 4:
