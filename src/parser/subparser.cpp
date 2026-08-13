@@ -1951,111 +1951,226 @@ void explodeQuan(const std::string &quan, Proxy &node) {
     }
 }
 
-void explodeNetch(std::string netch, Proxy &node) {
-    Document json;
-    std::string type, group, remark, address, port, username, password, method, plugin, pluginopts;
-    std::string protocol, protoparam, obfs, obfsparam, id, aid, transprot, faketype, host, edge, path, tls, sni, fp;
-    tribool udp, tfo, scv;
-    netch = urlSafeBase64Decode(netch.substr(8));
+namespace {
 
-    json.Parse(netch.data());
-    if (json.HasParseError() || !json.IsObject())
-        return;
-    type = GetMember(json, "Type");
-    group = GetMember(json, "Group");
-    remark = GetMember(json, "Remark");
-    address = GetMember(json, "Hostname");
-    udp = GetMember(json, "EnableUDP");
-    tfo = GetMember(json, "EnableTFO");
-    scv = GetMember(json, "AllowInsecure");
-    port = GetMember(json, "Port");
-    fp = GetMember(json, "FingerPrint");
-    if (port == "0")
-        return;
-    method = GetMember(json, "EncryptMethod");
-    password = GetMember(json, "Password");
+std::string firstNetchMember(const rapidjson::Value &value,
+                             std::initializer_list<const char *> keys) {
+    for (const char *key : keys) {
+        const std::string result = GetMember(value, key);
+        if (!result.empty())
+            return result;
+    }
+    return {};
+}
+
+std::string normalizeNetchTLS(const rapidjson::Value &value,
+                              const std::string &fallback = {}) {
+    std::string tls = toLower(trim(firstNetchMember(
+        value, {"TLSSecureType", "TLSSecure", "Security"})));
+    if (tls.empty())
+        return fallback;
+    if (tls == "true" || tls == "1")
+        return "tls";
+    if (tls == "false" || tls == "0")
+        return "none";
+    return tls;
+}
+
+bool parseNetchNode(const rapidjson::Value &json, Proxy &node) {
+    if (!json.IsObject())
+        return false;
+
+    const std::string type = toLower(trim(GetMember(json, "Type")));
+    std::string group = GetMember(json, "Group");
+    std::string remark = GetMember(json, "Remark");
+    const std::string address = trim(GetMember(json, "Hostname"));
+    const std::string port = GetMember(json, "Port");
+    if (type.empty() || address.empty() ||
+        address.find_first_of("\r\n") != std::string::npos ||
+        !validSharePort(port))
+        return false;
+
+    const tribool udp(GetMember(json, "EnableUDP"));
+    const tribool tfo(GetMember(json, "EnableTFO"));
+    const tribool scv(GetMember(json, "AllowInsecure"));
+    const std::string password = GetMember(json, "Password");
+    const std::string method = GetMember(json, "EncryptMethod");
+    const std::string fingerprint = firstNetchMember(
+        json, {"FingerPrint", "Fingerprint"});
     if (remark.empty())
         remark = address + ":" + port;
-    switch (hash_(type)) {
-        case "SS"_hash:
-            plugin = GetMember(json, "Plugin");
-            pluginopts = GetMember(json, "PluginOption");
+
+    if (type == "ss") {
+        if (method.empty() || password.empty())
+            return false;
+        if (group.empty())
+            group = SS_DEFAULT_GROUP;
+        ssConstruct(node, group, remark, address, port, password, method,
+                    GetMember(json, "Plugin"), GetMember(json, "PluginOption"),
+                    udp, tfo, scv);
+    } else if (type == "ssr") {
+        const std::string protocol = GetMember(json, "Protocol");
+        const std::string obfs = GetMember(json, "OBFS");
+        if (method.empty() || password.empty())
+            return false;
+        if (find(ss_ciphers.begin(), ss_ciphers.end(), method) != ss_ciphers.end() &&
+            (obfs.empty() || obfs == "plain") &&
+            (protocol.empty() || protocol == "origin")) {
             if (group.empty())
                 group = SS_DEFAULT_GROUP;
-            ssConstruct(node, group, remark, address, port, password, method, plugin, pluginopts, udp, tfo, scv);
-            break;
-        case "SSR"_hash:
-            protocol = GetMember(json, "Protocol");
-            obfs = GetMember(json, "OBFS");
-            if (find(ss_ciphers.begin(), ss_ciphers.end(), method) != ss_ciphers.end() &&
-                (obfs.empty() || obfs == "plain") && (protocol.empty() || protocol == "origin")) {
-                plugin = GetMember(json, "Plugin");
-                pluginopts = GetMember(json, "PluginOption");
-                if (group.empty())
-                    group = SS_DEFAULT_GROUP;
-                ssConstruct(node, group, remark, address, port, password, method, plugin, pluginopts, udp, tfo, scv);
-            } else {
-                protoparam = GetMember(json, "ProtocolParam");
-                obfsparam = GetMember(json, "OBFSParam");
-                if (group.empty())
-                    group = SSR_DEFAULT_GROUP;
-                ssrConstruct(node, group, remark, address, port, protocol, method, obfs, password, obfsparam,
-                             protoparam, udp, tfo, scv);
-            }
-            break;
-        case "VMess"_hash:
-            id = GetMember(json, "UserID");
-            aid = GetMember(json, "AlterID");
-            transprot = GetMember(json, "TransferProtocol");
-            faketype = GetMember(json, "FakeType");
-            host = GetMember(json, "Host");
-            path = GetMember(json, "Path");
-            edge = GetMember(json, "Edge");
-            tls = GetMember(json, "TLSSecure");
-            sni = GetMember(json, "ServerName");
+            ssConstruct(node, group, remark, address, port, password, method,
+                        GetMember(json, "Plugin"), GetMember(json, "PluginOption"),
+                        udp, tfo, scv);
+        } else {
+            if (protocol.empty() || obfs.empty())
+                return false;
+            if (group.empty())
+                group = SSR_DEFAULT_GROUP;
+            ssrConstruct(node, group, remark, address, port, protocol, method,
+                         obfs, password, GetMember(json, "OBFSParam"),
+                         GetMember(json, "ProtocolParam"), udp, tfo, scv);
+        }
+    } else if (type == "vmess" || type == "vless") {
+        std::string transport = normalizeXrayTransport(
+            GetMember(json, "TransferProtocol"));
+        const std::string fake_type = GetMember(json, "FakeType");
+        const std::string regular_host = GetMember(json, "Host");
+        const std::string regular_path = GetMember(json, "Path");
+        const std::string quic_security = GetMember(json, "QUICSecure");
+        const std::string quic_secret = GetMember(json, "QUICSecret");
+        const std::string transport_host =
+            transport == "quic" ? quic_security : regular_host;
+        const std::string transport_path =
+            transport == "quic" ? quic_secret : regular_path;
+        const std::string tls = normalizeNetchTLS(json, "none");
+        const std::string user_id = GetMember(json, "UserID");
+        const std::string alter_id = GetMember(json, "AlterID");
+        const std::string server_name = GetMember(json, "ServerName");
+        const std::string packet_encoding = firstNetchMember(
+            json, {"PacketEncoding", "packetEncoding"});
+        std::string cipher = method;
+        if (cipher.empty())
+            cipher = type == "vless" ? "none" : "auto";
+        if (!isXrayUuid(user_id))
+            return false;
 
+        if (type == "vmess") {
             if (group.empty())
                 group = V2RAY_DEFAULT_GROUP;
-            vmessConstruct(node, group, remark, address, port, faketype, id, aid, transprot, method, path, host, edge,
-                           tls, sni, std::vector<std::string>{}, udp, tfo, scv);
-            break;
-        case "Socks5"_hash:
-            username = GetMember(json, "Username");
+            vmessConstruct(node, group, remark, address, port, fake_type,
+                           user_id, alter_id, transport, cipher, transport_path,
+                           transport_host, GetMember(json, "Edge"), tls,
+                           server_name, {}, udp, tfo, scv);
+        } else {
             if (group.empty())
-                group = SOCKS_DEFAULT_GROUP;
-            socksConstruct(node, group, remark, address, port, username, password, udp, tfo, scv);
-            break;
-        case "HTTP"_hash:
-        case "HTTPS"_hash:
-            if (group.empty())
-                group = HTTP_DEFAULT_GROUP;
-            httpConstruct(node, group, remark, address, port, username, password, type == "HTTPS", tfo, scv);
-            break;
-        case "Trojan"_hash:
-            host = GetMember(json, "Host");
-            path = GetMember(json, "Path");
-            transprot = GetMember(json, "TransferProtocol");
-            tls = GetMember(json, "TLSSecure");
-            sni = host;
-            if (group.empty())
-                group = TROJAN_DEFAULT_GROUP;
-            trojanConstruct(node, group, remark, address, port, password, transprot, host, path, fp, sni,
-                            std::vector<std::string>{}, tls == "true",
-                            udp,
-                            tfo, scv);
-            break;
-        case "Snell"_hash:
-            obfs = GetMember(json, "OBFS");
-            host = GetMember(json, "Host");
-            aid = GetMember(json, "SnellVersion");
-            if (group.empty())
-                group = SNELL_DEFAULT_GROUP;
-            snellConstruct(node, group, remark, address, port, password, obfs,
-                           host, "", to_int(aid, 0), tribool(), udp, tfo, scv);
-            break;
-        default:
-            return;
+                group = XRAY_DEFAULT_GROUP;
+            vlessConstruct(node, group, remark, address, port, fake_type,
+                           user_id, alter_id, transport, cipher,
+                           GetMember(json, "Flow"), fake_type, transport_path,
+                           transport_host, GetMember(json, "Edge"), tls, "", "",
+                           fingerprint, server_name, {}, packet_encoding, udp,
+                           tfo, scv);
+        }
+        node.PacketEncoding = packet_encoding;
+        node.Fingerprint = fingerprint;
+        if (transport == "grpc") {
+            node.GRPCMode = fake_type.empty() ? "gun" : fake_type;
+            node.GRPCServiceName = regular_path;
+        } else if (transport == "quic") {
+            node.QUICSecure = quic_security;
+            node.QUICSecret = quic_secret;
+        }
+    } else if (type == "socks" || type == "socks5") {
+        const std::string version = GetMember(json, "Version");
+        if (!version.empty() && version != "5")
+            return false;
+        if (group.empty())
+            group = SOCKS_DEFAULT_GROUP;
+        socksConstruct(node, group, remark, address, port,
+                       GetMember(json, "Username"), password, udp, tfo, scv);
+    } else if (type == "http" || type == "https") {
+        if (group.empty())
+            group = HTTP_DEFAULT_GROUP;
+        httpConstruct(node, group, remark, address, port,
+                      GetMember(json, "Username"), password, type == "https",
+                      tfo, scv);
+    } else if (type == "trojan") {
+        if (password.empty())
+            return false;
+        const std::string tls = normalizeNetchTLS(json, "tls");
+        const std::string host = GetMember(json, "Host");
+        std::string server_name = GetMember(json, "ServerName");
+        if (server_name.empty())
+            server_name = host;
+        if (group.empty())
+            group = TROJAN_DEFAULT_GROUP;
+        trojanConstruct(node, group, remark, address, port, password,
+                        GetMember(json, "TransferProtocol"), host,
+                        GetMember(json, "Path"), fingerprint, server_name, {},
+                        tls != "none", udp, tfo, scv);
+        node.TLSStr = tls;
+    } else if (type == "snell") {
+        if (password.empty())
+            return false;
+        if (group.empty())
+            group = SNELL_DEFAULT_GROUP;
+        snellConstruct(node, group, remark, address, port, password,
+                       GetMember(json, "OBFS"), GetMember(json, "Host"), "",
+                       parseUint16Option(GetMember(json, "SnellVersion"), 0),
+                       tribool(), udp, tfo, scv);
+    } else if (type == "wireguard") {
+        const std::string private_key = GetMember(json, "PrivateKey");
+        const std::string public_key = GetMember(json, "PeerPublicKey");
+        const std::string local_addresses = normalizeWireGuardAllowedIPs(
+            GetMember(json, "LocalAddresses"));
+        if (private_key.empty() || public_key.empty() || local_addresses.empty() ||
+            private_key.find_first_of("\r\n") != std::string::npos ||
+            public_key.find_first_of("\r\n") != std::string::npos)
+            return false;
+
+        string_array addresses = split(local_addresses, ",");
+        std::string self_ip, self_ipv6;
+        for (std::string &local_address : addresses) {
+            local_address = trim(local_address);
+            const std::string bare = local_address.substr(0, local_address.find('/'));
+            if (self_ip.empty() && isIPv4(bare))
+                self_ip = bare;
+            else if (self_ipv6.empty() && isIPv6(bare))
+                self_ipv6 = bare;
+        }
+        if (group.empty())
+            group = WG_DEFAULT_GROUP;
+        wireguardConstruct(node, group, remark, address, port, self_ip,
+                           self_ipv6, private_key, public_key,
+                           GetMember(json, "PreSharedKey"), {},
+                           GetMember(json, "MTU"), "0", "", "", udp, "");
+        node.WireGuardLocalAddresses = std::move(addresses);
+        syncLegacyWireGuardProjection(node);
+        if (node.WireGuardPeers.empty())
+            return false;
+    } else {
+        // Netch also serializes SSH nodes, but the shared Proxy model has no
+        // SSH representation. Reject instead of silently converting it to a
+        // different protocol.
+        return false;
     }
+
+    return node.Type != ProxyType::Unknown;
+}
+
+} // namespace
+
+void explodeNetch(std::string netch, Proxy &node) {
+    if (!startsWith(netch, "Netch://"))
+        return;
+    std::string decoded;
+    if (!decodeStrictBase64(netch.substr(8), decoded))
+        return;
+    Document json;
+    json.Parse(decoded.data());
+    if (json.HasParseError())
+        return;
+    parseNetchNode(json, node);
 }
 
 void explodeClash(Node yamlnode, std::vector<Proxy> &nodes) {
@@ -3965,12 +4080,13 @@ void explodeNetchConf(std::string netch, std::vector<Proxy> &nodes) {
     if (json.HasParseError() || !json.IsObject())
         return;
 
-    if (!json.HasMember("Server"))
+    if (!json.HasMember("Server") || !json["Server"].IsArray())
         return;
 
-    for (uint32_t i = 0; i < json["Server"].Size(); i++) {
+    for (rapidjson::SizeType i = 0; i < json["Server"].Size(); i++) {
         Proxy node;
-        explodeNetch("Netch://" + base64Encode(json["Server"][i] | SerializeObject()), node);
+        if (!parseNetchNode(json["Server"][i], node))
+            continue;
 
         node.Id = index;
         nodes.emplace_back(std::move(node));
@@ -3984,7 +4100,8 @@ int explodeConfContent(const std::string &content, std::vector<Proxy> &nodes) {
     const auto first_non_space = std::find_if_not(
         content.begin(), content.end(),
         [](unsigned char ch) { return std::isspace(ch) != 0; });
-    if (first_non_space != content.end() && *first_non_space == '[') {
+    if (first_non_space != content.end() &&
+        (*first_non_space == '[' || *first_non_space == '{')) {
         rapidjson::Document structured_json;
         structured_json.Parse(content.c_str());
         const auto looks_like_ss_server = [](const rapidjson::Value &value) {
@@ -3996,6 +4113,18 @@ int explodeConfContent(const std::string &content, std::vector<Proxy> &nodes) {
             std::any_of(structured_json.Begin(), structured_json.End(),
                         looks_like_ss_server))
             filetype = ConfType::SS;
+        else if (!structured_json.HasParseError() && structured_json.IsObject() &&
+                 structured_json.HasMember("Server") &&
+                 structured_json["Server"].IsArray() &&
+                 std::any_of(structured_json["Server"].Begin(),
+                             structured_json["Server"].End(),
+                             [](const rapidjson::Value &value) {
+                                 return value.IsObject() &&
+                                        value.HasMember("Type") &&
+                                        value.HasMember("Hostname") &&
+                                        value.HasMember("Port");
+                             }))
+            filetype = ConfType::Netch;
     }
 
     if (filetype == ConfType::Unknow && strFind(content, "\"version\""))

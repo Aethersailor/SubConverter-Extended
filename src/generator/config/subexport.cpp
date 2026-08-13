@@ -480,9 +480,14 @@ std::string vmessLinkConstruct(const Proxy &proxy) {
   writer.String(proxy.TransferProtocol.empty() ? "tcp"
                                                 : proxy.TransferProtocol.data());
   writer.Key("path");
-  writer.String((proxy.TransferProtocol == "quic" ? proxy.QUICSecret
-                                                    : proxy.Path)
-                    .data());
+  const std::string &transport_path =
+      proxy.TransferProtocol == "quic"
+          ? proxy.QUICSecret
+          : (proxy.TransferProtocol == "grpc" &&
+                     !proxy.GRPCServiceName.empty()
+                 ? proxy.GRPCServiceName
+                 : proxy.Path);
+  writer.String(transport_path.data());
   writer.Key("host");
   writer.String((proxy.TransferProtocol == "quic" ? proxy.QUICSecure
                                                     : proxy.Host)
@@ -4486,7 +4491,9 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
     //                break;
     //            }
     case ProxyType::VMess: {
-      if (!singBoxTransportSupported(x))
+      if (!singBoxTransportSupported(x) ||
+          (!x.PacketEncoding.empty() && x.PacketEncoding != "none" &&
+           x.PacketEncoding != "xudp"))
         continue;
       addSingBoxCommonMembers(proxy, x, "vmess", allocator);
       proxy.AddMember("uuid", rapidjson::StringRef(x.UserId.c_str()),
@@ -4494,6 +4501,10 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
       proxy.AddMember("alter_id", x.AlterId, allocator);
       proxy.AddMember("security", rapidjson::StringRef(x.EncryptMethod.c_str()),
                       allocator);
+      if (x.PacketEncoding == "xudp")
+        proxy.AddMember("packet_encoding",
+                        rapidjson::StringRef(x.PacketEncoding.c_str()),
+                        allocator);
 
       auto transport = buildSingBoxTransport(x, allocator);
       if (!transport.ObjectEmpty())
@@ -4501,22 +4512,21 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
       break;
     }
     case ProxyType::VLESS: {
-      if (!singBoxTransportSupported(x))
+      if (!singBoxTransportSupported(x) ||
+          (!x.PacketEncoding.empty() && x.PacketEncoding != "none" &&
+           x.PacketEncoding != "xudp"))
         continue;
       addSingBoxCommonMembers(proxy, x, "vless", allocator);
       proxy.AddMember("uuid", rapidjson::StringRef(x.UserId.c_str()),
                       allocator);
-      if (xudp && udp)
+      const bool emit_xudp = x.PacketEncoding == "xudp" ||
+                             (x.PacketEncoding.empty() && xudp && udp);
+      if (emit_xudp)
         proxy.AddMember("packet_encoding", rapidjson::StringRef("xudp"),
                         allocator);
       if (!x.Flow.empty())
         proxy.AddMember("flow", rapidjson::StringRef(x.Flow.c_str()),
                         allocator);
-      if (!x.PacketEncoding.empty()) {
-        proxy.AddMember("packet_encoding",
-                        rapidjson::StringRef(x.PacketEncoding.c_str()),
-                        allocator);
-      }
       auto transport = buildSingBoxTransport(x, allocator);
       if (!transport.ObjectEmpty())
         proxy.AddMember("transport", transport, allocator);

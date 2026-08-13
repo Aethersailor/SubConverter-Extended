@@ -5439,6 +5439,305 @@ def mieru_legacy_parser_baseline(base_url: str) -> None:
         )
 
 
+def netch_legacy_parser_baseline(base_url: str) -> None:
+    def netch_link(node: dict[str, object]) -> str:
+        payload = json.dumps(node, separators=(",", ":")).encode("utf-8")
+        return "Netch://" + base64.urlsafe_b64encode(payload).decode(
+            "ascii"
+        ).rstrip("=")
+
+    def data_url(document: dict[str, object]) -> str:
+        payload = json.dumps(document, separators=(",", ":")).encode("utf-8")
+        return "data:application/json;base64," + base64.b64encode(
+            payload
+        ).decode("ascii")
+
+    def convert(source: str) -> list[dict[str, object]]:
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "singbox",
+                "url": source,
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+        )
+        if status != 200:
+            raise AssertionError(
+                f"Netch Legacy conversion returned HTTP {status}: {body!r}"
+            )
+        return json.loads(body).get("outbounds", [])
+
+    private_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+    public_key = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="
+    preshared_key = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC="
+    current_nodes: list[dict[str, object]] = [
+        {
+            "Type": "SOCKS",
+            "Group": "Netch",
+            "Remark": "Netch Modern SOCKS",
+            "Hostname": "socks-netch.example.test",
+            "Port": 1080,
+            "Username": "netch-user",
+            "Password": "netch-pass",
+            "Version": "5",
+        },
+        {
+            "Type": "VMess",
+            "Group": "Netch",
+            "Remark": "Netch Modern VMess",
+            "Hostname": "vmess-netch.example.test",
+            "Port": 443,
+            "UserID": "11111111-1111-1111-1111-111111111111",
+            "AlterID": 0,
+            "EncryptMethod": "auto",
+            "TransferProtocol": "ws",
+            "PacketEncoding": "xudp",
+            "FakeType": "none",
+            "Host": "cdn-netch.example.test",
+            "Path": "/vmess",
+            "TLSSecureType": "tls",
+            "ServerName": "vmess-sni.example.test",
+        },
+        {
+            "Type": "VLESS",
+            "Group": "Netch",
+            "Remark": "Netch Modern VLESS",
+            "Hostname": "vless-netch.example.test",
+            "Port": 8443,
+            "UserID": "22222222-2222-2222-2222-222222222222",
+            "EncryptMethod": "none",
+            "TransferProtocol": "grpc",
+            "PacketEncoding": "xudp",
+            "FakeType": "multi",
+            "Path": "netch-service",
+            "TLSSecureType": "tls",
+            "ServerName": "vless-sni.example.test",
+        },
+        {
+            "Type": "Trojan",
+            "Group": "Netch",
+            "Remark": "Netch Modern Trojan",
+            "Hostname": "trojan-netch.example.test",
+            "Port": 443,
+            "Password": "netch-trojan-pass",
+            "Host": "trojan-sni.example.test",
+            "TLSSecureType": "tls",
+        },
+        {
+            "Type": "WireGuard",
+            "Group": "Netch",
+            "Remark": "Netch Modern WireGuard",
+            "Hostname": "wireguard-netch.example.test",
+            "Port": 51820,
+            "LocalAddresses": "10.66.0.2,2001:db8:66::2",
+            "PeerPublicKey": public_key,
+            "PrivateKey": private_key,
+            "PreSharedKey": preshared_key,
+            "MTU": 1280,
+        },
+        {
+            "Type": "SSH",
+            "Remark": "Netch Unsupported SSH",
+            "Hostname": "ssh-netch.example.test",
+            "Port": 22,
+            "User": "root",
+            "Password": "not-a-proxy-protocol",
+        },
+    ]
+
+    direct = convert(netch_link(current_nodes[0]))
+    if len(direct) != 1 or any(
+        direct[0].get(key) != value
+        for key, value in {
+            "type": "socks",
+            "tag": "Netch Modern SOCKS",
+            "server": "socks-netch.example.test",
+            "server_port": 1080,
+            "version": "5",
+            "username": "netch-user",
+            "password": "netch-pass",
+        }.items()
+    ):
+        raise AssertionError(f"current Netch SOCKS link drifted: {direct!r}")
+
+    outbounds = {
+        item.get("tag"): item for item in convert(data_url({"Server": current_nodes}))
+    }
+    if set(outbounds) != {
+        "Netch Modern SOCKS",
+        "Netch Modern VMess",
+        "Netch Modern VLESS",
+        "Netch Modern Trojan",
+        "Netch Modern WireGuard",
+    }:
+        raise AssertionError(
+            f"current Netch settings.json node set drifted: {outbounds!r}"
+        )
+
+    vmess = outbounds["Netch Modern VMess"]
+    if (
+        vmess.get("packet_encoding") != "xudp"
+        or vmess.get("transport")
+        != {
+            "type": "ws",
+            "path": "/vmess",
+            "headers": {"Host": "cdn-netch.example.test"},
+        }
+        or vmess.get("tls", {}).get("server_name")
+        != "vmess-sni.example.test"
+    ):
+        raise AssertionError(f"current Netch VMess fields drifted: {vmess!r}")
+
+    vless = outbounds["Netch Modern VLESS"]
+    if (
+        vless.get("packet_encoding") != "xudp"
+        or vless.get("transport")
+        != {"type": "grpc", "service_name": "netch-service"}
+        or vless.get("tls", {}).get("server_name")
+        != "vless-sni.example.test"
+    ):
+        raise AssertionError(f"current Netch VLESS fields drifted: {vless!r}")
+
+    trojan = outbounds["Netch Modern Trojan"]
+    if (
+        "transport" in trojan
+        or trojan.get("tls", {}).get("server_name")
+        != "trojan-sni.example.test"
+    ):
+        raise AssertionError(f"current Netch Trojan fields drifted: {trojan!r}")
+
+    wireguard = outbounds["Netch Modern WireGuard"]
+    if (
+        wireguard.get("local_address") != ["10.66.0.2/32", "2001:db8:66::2/128"]
+        or wireguard.get("private_key") != private_key
+        or len(wireguard.get("peers", [])) != 1
+        or wireguard["peers"][0].get("public_key") != public_key
+        or wireguard["peers"][0].get("pre_shared_key") != preshared_key
+        or wireguard.get("mtu") != 1280
+    ):
+        raise AssertionError(
+            f"current Netch WireGuard fields drifted: {wireguard!r}"
+        )
+
+    legacy_nodes = [
+        {
+            "Type": "Socks5",
+            "Remark": "Netch Legacy Socks5",
+            "Hostname": "legacy-socks.example.test",
+            "Port": "1081",
+            "Username": "legacy-user",
+            "Password": "legacy-pass",
+        },
+        {
+            "Type": "VMess",
+            "Remark": "Netch Legacy VMess",
+            "Hostname": "legacy-vmess.example.test",
+            "Port": "443",
+            "UserID": "33333333-3333-3333-3333-333333333333",
+            "AlterID": "0",
+            "EncryptMethod": "auto",
+            "TransferProtocol": "ws",
+            "Host": "legacy-cdn.example.test",
+            "Path": "/legacy",
+            "TLSSecure": True,
+        },
+    ]
+    legacy = {
+        item.get("tag"): item
+        for item in convert(
+            data_url({"ModeFileNameType": 0, "Server": legacy_nodes})
+        )
+    }
+    if (
+        set(legacy) != {"Netch Legacy Socks5", "Netch Legacy VMess"}
+        or legacy["Netch Legacy VMess"].get("tls", {}).get("enabled") is not True
+    ):
+        raise AssertionError(f"legacy Netch fields no longer convert: {legacy!r}")
+
+    packet_vless = {
+        **current_nodes[2],
+        "Remark": "Netch VLESS Packet",
+        "PacketEncoding": "packet",
+    }
+    status, packet_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "vless",
+            "url": netch_link(packet_vless),
+            "config": DISABLE_RULEGEN_CONFIG,
+            "list": "true",
+        },
+    )
+    packet_output = packet_body.decode("utf-8", errors="replace")
+    if status != 200 or "packet-encoding=packet" not in packet_output:
+        raise AssertionError(
+            f"Netch VLESS packet encoding was not preserved: {packet_output!r}"
+        )
+    packet_singbox = convert(
+        data_url({"Server": [current_nodes[0], packet_vless]})
+    )
+    if (
+        len(packet_singbox) != 1
+        or packet_singbox[0].get("tag") != "Netch Modern SOCKS"
+    ):
+        raise AssertionError(
+            "sing-box did not isolate unsupported packet encoding: "
+            f"{packet_singbox!r}"
+        )
+
+    invalid_nodes = [
+        current_nodes[0],
+        {**current_nodes[0], "Remark": "Netch SOCKS4", "Version": "4"},
+        {**current_nodes[1], "Remark": "Netch Invalid UUID", "UserID": "bad"},
+        {
+            **current_nodes[4],
+            "Remark": "Netch Incomplete WireGuard",
+            "PeerPublicKey": "",
+        },
+        current_nodes[5],
+    ]
+    accepted = convert(data_url({"Server": invalid_nodes}))
+    if len(accepted) != 1 or accepted[0].get("tag") != "Netch Modern SOCKS":
+        raise AssertionError(
+            f"unsupported or invalid Netch nodes did not fail closed: {accepted!r}"
+        )
+
+    for source in (
+        "Netch://not-base64",
+        data_url({"Server": "not-an-array"}),
+    ):
+        status, _, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "singbox",
+                "url": source,
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+        )
+        if status != 400:
+            raise AssertionError(f"invalid Netch input was accepted: {source!r}")
+
+    clash_status, _, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "clash",
+            "url": netch_link(current_nodes[0]),
+            "config": DISABLE_RULEGEN_CONFIG,
+            "list": "true",
+        },
+    )
+    if clash_status != 400:
+        raise AssertionError(
+            "Mihomo route changed while calibrating the Legacy Netch parser"
+        )
+
+
 def simple_target_protocol_baseline(base_url: str, fixture_base: str) -> None:
     source = fixture_base + "/mixed-protocol-subscription.txt"
 
@@ -7605,6 +7904,7 @@ def main() -> int:
                 raise AssertionError(
                     "sing-box endpoint WireGuard diagnostics are missing"
                 )
+            netch_legacy_parser_baseline(base_url)
             mieru_legacy_parser_baseline(base_url)
             simple_target_protocol_baseline(base_url, fixture_base)
             provider_direct_default_output_baseline(base_url, fixture_base)

@@ -326,6 +326,110 @@ def assert_parser_route_isolation(base_url: str, timeout: int) -> None:
     )
 
 
+def assert_netch_legacy_parser(base_url: str, timeout: int) -> None:
+    def netch_link(node: dict[str, object]) -> str:
+        payload = json.dumps(node, separators=(",", ":")).encode("utf-8")
+        encoded = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+        return "Netch://" + encoded
+
+    def data_url(value: dict[str, object]) -> str:
+        payload = json.dumps(value, separators=(",", ":")).encode("utf-8")
+        encoded = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+        return "data:application/json;base64," + encoded
+
+    socks = {
+        "Type": "SOCKS",
+        "Remark": "Netch Smoke SOCKS",
+        "Hostname": "socks-netch-smoke.example.test",
+        "Port": 1080,
+        "Username": "smoke-user",
+        "Password": "smoke-password",
+        "Version": 5,
+    }
+    vless = {
+        "Type": "VLESS",
+        "Remark": "Netch Smoke VLESS",
+        "Hostname": "vless-netch-smoke.example.test",
+        "Port": 443,
+        "UserID": "22222222-2222-2222-2222-222222222222",
+        "EncryptMethod": "none",
+        "TransferProtocol": "grpc",
+        "PacketEncoding": "xudp",
+        "FakeType": "multi",
+        "Path": "smoke-service",
+        "TLSSecureType": "tls",
+        "ServerName": "vless-sni-smoke.example.test",
+    }
+    ssh = {
+        "Type": "SSH",
+        "Remark": "Netch Unsupported SSH",
+        "Hostname": "ssh-netch-smoke.example.test",
+        "Port": 22,
+        "User": "root",
+        "Password": "not-a-proxy-protocol",
+    }
+
+    direct = json.loads(
+        fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "singbox",
+                "url": netch_link(socks),
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+            timeout,
+        )
+    ).get("outbounds", [])
+    if (
+        len(direct) != 1
+        or direct[0].get("type") != "socks"
+        or direct[0].get("tag") != "Netch Smoke SOCKS"
+        or direct[0].get("version") != "5"
+    ):
+        raise AssertionError(f"modern Netch share link drifted: {direct!r}")
+
+    settings = json.loads(
+        fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "singbox",
+                "url": data_url({"Server": [socks, vless, ssh]}),
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+            timeout,
+        )
+    ).get("outbounds", [])
+    by_tag = {outbound.get("tag"): outbound for outbound in settings}
+    if set(by_tag) != {"Netch Smoke SOCKS", "Netch Smoke VLESS"}:
+        raise AssertionError(f"modern Netch settings.json drifted: {settings!r}")
+    vless_outbound = by_tag["Netch Smoke VLESS"]
+    if (
+        vless_outbound.get("packet_encoding") != "xudp"
+        or vless_outbound.get("transport")
+        != {"type": "grpc", "service_name": "smoke-service"}
+        or vless_outbound.get("tls", {}).get("server_name")
+        != "vless-sni-smoke.example.test"
+    ):
+        raise AssertionError(f"modern Netch VLESS fields drifted: {vless_outbound!r}")
+
+    assert_rejected(
+        base_url,
+        "/sub",
+        {
+            "target": "clash",
+            "url": netch_link(socks),
+            "config": DISABLE_RULEGEN_CONFIG,
+            "list": "true",
+        },
+        timeout,
+        "Clash Mihomo-only route with a Netch share link",
+    )
+
+
 def run_checks(
     base_url: str,
     timeout: int,
@@ -427,6 +531,7 @@ def run_checks(
 
     if verify_non_clash:
         assert_parser_route_isolation(base_url, timeout)
+        assert_netch_legacy_parser(base_url, timeout)
 
     direct_config = fetch(base_url, "/sub", common_params, timeout)
     if "Smoke" not in direct_config or "proxies:" not in direct_config:
