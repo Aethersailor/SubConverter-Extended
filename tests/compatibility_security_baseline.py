@@ -92,6 +92,23 @@ VMESS_QR_QUIC_URI = "vmess://" + base64.urlsafe_b64encode(
         separators=(",", ":"),
     ).encode()
 ).decode().rstrip("=")
+VMESS_QR_UNSUPPORTED_SECURITY_URI = "vmess://" + base64.urlsafe_b64encode(
+    json.dumps(
+        {
+            "v": "2",
+            "ps": "VMessUnsupportedSecurity",
+            "add": "vmess-security.example.test",
+            "port": "443",
+            "id": "99999999-9999-4999-8999-999999999998",
+            "aid": "0",
+            "scy": "unsupported-security",
+            "net": "tcp",
+            "type": "none",
+            "tls": "tls",
+        },
+        separators=(",", ":"),
+    ).encode()
+).decode().rstrip("=")
 VLESS_DEFAULT_TCP_URI = (
     "vless://44444444-4444-4444-4444-444444444444@[2001:db8::1]:443"
     "?encryption=none&security=tls&sni=vless-tls.example.test"
@@ -125,6 +142,11 @@ VLESS_QUIC_URI = (
     "?encryption=none&security=tls&type=quic&headerType=utp"
     "&quicSecurity=chacha20-poly1305&key=vless-quic-secret#VLESSQUIC"
 )
+VLESS_UNSUPPORTED_FLOW_URI = (
+    "vless://aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab@flow.example.test:443"
+    "?encryption=none&security=tls&type=tcp&flow=unsupported-flow"
+    "#VLESSUnsupportedFlow"
+)
 TROJAN_WS_URI = (
     "trojan://p%40ss+word%2Ftoken@[2001:db8::2]:443"
     "?security=tls&type=ws&host=ws.example.test&path=%2Fsocket"
@@ -153,6 +175,13 @@ HYSTERIA2_MODERN_URI = (
     "&sni=hy2-tls.example.test&pinSHA256=AA%3ABB%3ACC"
     "&ech=AE%2Bconfig%2Fvalue#Hy2%20Modern+Literal"
 )
+HYSTERIA2_REALM_V2RAYN_URI = (
+    "hysteria2+realm://realm-token@rendezvous.example.test:8443/realm-id"
+    "?auth=realm-password&stun=stun.example.test%3A3478"
+    "&sni=realm-tls.example.test&obfs=gecko"
+    "&obfs-password=realm-obfs&minPacketSize=600&maxPacketSize=1300"
+    "#Hysteria2%20Realm"
+)
 HYSTERIA2_SURGE_GECKO_URI = HYSTERIA2_MODERN_URI.replace(
     "obfs=salamander", "obfs=gecko"
 )
@@ -171,6 +200,32 @@ ANYTLS_MODERN_URI = (
     "&insecure=1&alpn=h2%2Chttp%2F1.1&fp=chrome"
     "&idle_session_check_interval=45s&idle_session_timeout=60s"
     "&min_idle_session=3#AnyTLS%20Modern"
+)
+TUIC_V2RAYN_URI = (
+    "tuic://99999999-9999-4999-8999-999999999999:tuic-password"
+    "@tuic-v2rayn.example.test:10443?allow_insecure=1"
+    "&sni=tuic-v2rayn-tls.example.test&alpn=h3"
+    "&congestion_control=bbr#TUIC%20v2rayN"
+)
+ANYTLS_V2RAYN_URI = (
+    "anytls://anytls-password@anytls-v2rayn.example.test:443"
+    "?sni=anytls-v2rayn-tls.example.test&insecure=1#AnyTLS%20v2rayN"
+)
+NAIVE_HTTPS_URI = (
+    "naive+https://naive-user:naive%2Bpassword@naive.example.test:443"
+    "?sni=naive-tls.example.test&insecure-concurrency=4#Naive%20HTTPS"
+)
+NAIVE_QUIC_URI = (
+    "naive+quic://naive-user:quic-password@naive-quic.example.test:443"
+    "?sni=naive-quic-tls.example.test#Naive%20QUIC"
+)
+WIREGUARD_URI = (
+    "wireguard://private%2Bkey%2Fvalue%3D@wg.example.test:51820"
+    "?publickey=public%2Bkey%2Fvalue%3D"
+    "&presharedkey=preshared%2Bkey%2Fvalue%3D"
+    "&reserved=1%2C2%2C3"
+    "&address=172.16.0.2%2F32%2C2606%3A4700%3A110%3A8765%3A%3A2%2F128"
+    "&mtu=1420#WireGuard%20URI"
 )
 MIERU_OFFICIAL_SIMPLE_URI = (
     "mierus://baozi:manlianpenfen@1.2.3.4?"
@@ -506,6 +561,8 @@ LEGACY_ONLY_TARGETS = (
     "ssr",
     "sssub",
     "v2ray",
+    "v2rayn",
+    "v2rayng",
     "trojan",
     "vless",
     "hysteria2",
@@ -6322,6 +6379,8 @@ def target_generation_stats_baseline(base_url: str) -> None:
         "ss": SUBSCRIPTION.strip(),
         "ssr": SSR_IPV6_URI,
         "v2ray": VMESS_QR_URI,
+        "v2rayn": VMESS_QR_URI,
+        "v2rayng": VMESS_QR_URI,
         "trojan": TROJAN_WS_URI,
         "vless": VLESS_URI,
         "hysteria2": HYSTERIA2_URI,
@@ -6376,6 +6435,338 @@ def target_generation_stats_baseline(base_url: str) -> None:
                 f"target={target} accepted an all-unsupported node set: "
                 f"HTTP {unsupported_status}"
             )
+
+
+def v2ray_client_target_baseline(base_url: str) -> None:
+    def decode_profiles(body: bytes, *, outer_base64: bool = False) -> list[tuple[str, dict]]:
+        raw = base64.b64decode(body) if outer_base64 else body
+        result: list[tuple[str, dict]] = []
+        for line in raw.decode("utf-8").splitlines():
+            if not line.startswith("v2rayn://") or "/" not in line[10:]:
+                raise AssertionError(f"invalid v2rayN internal link: {line!r}")
+            scheme, encoded = line[10:].split("/", 1)
+            padded = encoded + "=" * (-len(encoded) % 4)
+            profile = json.loads(base64.urlsafe_b64decode(padded))
+            if profile.get("ConfigVersion") != 4:
+                raise AssertionError(f"invalid ProfileItem version: {profile!r}")
+            result.append((scheme, profile))
+        return result
+
+    common_sources = (
+        VMESS_QR_URI,
+        SUBSCRIPTION.strip(),
+        SOCKS_CURRENT_URI,
+        VLESS_XHTTP_URI,
+        TROJAN_WS_URI,
+        HYSTERIA2_MODERN_URI,
+        WIREGUARD_URI,
+        HTTP_LEGACY_URI,
+    )
+    desktop_sources = common_sources + (
+        TUIC_V2RAYN_URI,
+        ANYTLS_V2RAYN_URI,
+        NAIVE_HTTPS_URI,
+        NAIVE_QUIC_URI,
+        HYSTERIA2_REALM_V2RAYN_URI,
+    )
+
+    def convert(target: str, sources: tuple[str, ...], **extra: str) -> tuple[int, bytes, dict[str, str]]:
+        params = {
+            "target": target,
+            "url": "|".join(sources),
+            "list": "true",
+            "config": DISABLE_RULEGEN_CONFIG,
+        }
+        params.update(extra)
+        return request(base_url, "/sub", params)
+
+    desktop_status, desktop_body, _ = convert("v2rayn", desktop_sources)
+    if desktop_status != 200:
+        raise AssertionError(
+            f"v2rayN current protocol matrix failed: HTTP {desktop_status} "
+            f"{desktop_body!r}"
+        )
+    desktop = decode_profiles(desktop_body)
+    desktop_schemes = [scheme for scheme, _ in desktop]
+    if desktop_schemes != [
+        "vmess",
+        "shadowsocks",
+        "socks",
+        "vless",
+        "trojan",
+        "hysteria2",
+        "wireguard",
+        "http",
+        "tuic",
+        "anytls",
+        "naive",
+        "naive",
+        "hysteria2",
+    ]:
+        raise AssertionError(f"v2rayN internal schemes drifted: {desktop!r}")
+    desktop_types = [profile["ConfigType"] for _, profile in desktop]
+    if desktop_types != [1, 3, 4, 5, 6, 7, 9, 10, 8, 11, 12, 12, 7]:
+        raise AssertionError(f"v2rayN protocol matrix drifted: {desktop!r}")
+
+    desktop_by_type: dict[int, list[dict]] = {}
+    for _, profile in desktop:
+        desktop_by_type.setdefault(profile["ConfigType"], []).append(profile)
+    vmess = desktop_by_type[1][0]
+    if (
+        vmess.get("Network") != "grpc"
+        or vmess.get("ProtoExtraObj", {}).get("AlterId") != "0"
+        or vmess.get("ProtoExtraObj", {}).get("VmessSecurity")
+        != "chacha20-poly1305"
+        or vmess.get("TransportExtraObj", {}).get("GrpcServiceName")
+        != "grpc-service"
+    ):
+        raise AssertionError(f"v2rayN VMess profile drifted: {vmess!r}")
+    shadowsocks = desktop_by_type[3][0]
+    if (
+        shadowsocks.get("CoreType") != 24
+        or shadowsocks.get("ProtoExtraObj", {}).get("SsMethod")
+        != "aes-128-gcm"
+    ):
+        raise AssertionError(f"v2rayN Shadowsocks profile drifted: {shadowsocks!r}")
+    vless = desktop_by_type[5][0]
+    if (
+        vless.get("Network") != "xhttp"
+        or vless.get("StreamSecurity") != "reality"
+        or vless.get("PublicKey")
+        != "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        or vless.get("ShortId") != "00112233"
+        or vless.get("TransportExtraObj", {}).get("XhttpMode")
+        != "stream-one"
+    ):
+        raise AssertionError(f"v2rayN VLESS/XHTTP profile drifted: {vless!r}")
+    socks = desktop_by_type[4][0]
+    if (
+        socks.get("Username") != "current-user"
+        or socks.get("Password") != "p@ss+word:tail"
+    ):
+        raise AssertionError(f"v2rayN SOCKS profile drifted: {socks!r}")
+    trojan = desktop_by_type[6][0]
+    if (
+        trojan.get("Password") != "p@ss+word/token"
+        or trojan.get("Network") != "ws"
+        or trojan.get("Sni") != "trojan-tls.example.test"
+        or trojan.get("TransportExtraObj", {}).get("Host")
+        != "ws.example.test"
+    ):
+        raise AssertionError(f"v2rayN Trojan profile drifted: {trojan!r}")
+    hysteria2 = desktop_by_type[7][0]
+    if (
+        hysteria2.get("ProtoExtraObj", {}).get("SalamanderPass")
+        != "obfs+secret"
+        or hysteria2.get("ProtoExtraObj", {}).get("Ports")
+        != "8443,12000-12002"
+        or hysteria2.get("Sni") != "hy2-tls.example.test"
+    ):
+        raise AssertionError(f"v2rayN Hysteria2 profile drifted: {hysteria2!r}")
+    realm = desktop_by_type[7][1]
+    realm_extra = realm.get("ProtoExtraObj", {})
+    if (
+        realm.get("Password") != "realm-password"
+        or realm.get("CoreType") != 24
+        or realm_extra.get("Hy2RealmUrl")
+        != (
+            "realm://realm-token@rendezvous.example.test:8443/realm-id"
+            "?stun=stun.example.test%3A3478"
+        )
+        or realm_extra.get("SalamanderPass") != "realm-obfs"
+        or realm_extra.get("GeckoMinPacketSize") != "600"
+        or realm_extra.get("GeckoMaxPacketSize") != "1300"
+    ):
+        raise AssertionError(f"v2rayN Hysteria2 Realm/Gecko drifted: {realm!r}")
+    wireguard = desktop_by_type[9][0]
+    if (
+        wireguard.get("Password") != "private+key/value="
+        or wireguard.get("Address") != "wg.example.test"
+        or wireguard.get("ProtoExtraObj", {}).get("WgPublicKey")
+        != "public+key/value="
+        or wireguard.get("ProtoExtraObj", {}).get("WgPresharedKey")
+        != "preshared+key/value="
+        or wireguard.get("ProtoExtraObj", {}).get("WgReserved") != "1,2,3"
+        or wireguard.get("ProtoExtraObj", {}).get("WgMtu") != 1420
+    ):
+        raise AssertionError(f"v2rayN WireGuard profile drifted: {wireguard!r}")
+    http = desktop_by_type[10][0]
+    if (
+        http.get("Username") != "http-user"
+        or http.get("Password") != "http-pass"
+        or http.get("Address") != "2001:db8::28"
+    ):
+        raise AssertionError(f"v2rayN HTTP profile drifted: {http!r}")
+    tuic = desktop_by_type[8][0]
+    if (
+        tuic.get("Username") != "99999999-9999-4999-8999-999999999999"
+        or tuic.get("Password") != "tuic-password"
+        or tuic.get("ProtoExtraObj", {}).get("CongestionControl") != "bbr"
+        or tuic.get("Alpn") != "h3"
+    ):
+        raise AssertionError(f"v2rayN TUIC profile drifted: {tuic!r}")
+    anytls = desktop_by_type[11][0]
+    if (
+        anytls.get("Password") != "anytls-password"
+        or anytls.get("StreamSecurity") != "tls"
+        or anytls.get("Sni") != "anytls-v2rayn-tls.example.test"
+    ):
+        raise AssertionError(f"v2rayN AnyTLS profile drifted: {anytls!r}")
+    for config_type in (8, 11, 12):
+        if any(item.get("CoreType") != 24 for item in desktop_by_type[config_type]):
+            raise AssertionError(
+                f"v2rayN sing-box-only core selection drifted: "
+                f"{desktop_by_type[config_type]!r}"
+            )
+    naive_profiles = desktop_by_type[12]
+    if (
+        [item.get("ProtoExtraObj", {}).get("NaiveQuic") for item in naive_profiles]
+        != [False, True]
+        or naive_profiles[0].get("Username") != "naive-user"
+        or naive_profiles[0].get("Password") != "naive+password"
+        or naive_profiles[0].get("ProtoExtraObj", {}).get("InsecureConcurrency")
+        != 4
+    ):
+        raise AssertionError(
+            f"v2rayN Naive HTTPS/QUIC mapping drifted: {naive_profiles!r}"
+        )
+
+    android_status, android_body, _ = convert("v2rayng", common_sources)
+    if android_status != 200:
+        raise AssertionError(
+            f"v2rayNG current protocol matrix failed: HTTP {android_status} "
+            f"{android_body!r}"
+        )
+    android = decode_profiles(android_body)
+    android_schemes = [scheme for scheme, _ in android]
+    if android_schemes != [
+        "vmess",
+        "shadowsocks",
+        "socks",
+        "vless",
+        "trojan",
+        "hysteria2",
+        "wireguard",
+        "http",
+    ]:
+        raise AssertionError(f"v2rayNG internal schemes drifted: {android!r}")
+    android_types = [profile["ConfigType"] for _, profile in android]
+    if android_types != [1, 3, 4, 5, 6, 7, 9, 10]:
+        raise AssertionError(f"v2rayNG protocol matrix drifted: {android!r}")
+    android_vmess = android[0][1]
+    if (
+        android_vmess.get("ProtoExtraObj", {}).get("AlterId") != 0
+        or android_vmess.get("Network") != "grpc"
+    ):
+        raise AssertionError(f"v2rayNG VMess internal mapping drifted: {android_vmess!r}")
+    android_wireguard = next(
+        profile for _, profile in android if profile.get("ConfigType") == 9
+    )
+    if (
+        android_wireguard.get("PublicKey") != "public+key/value="
+        or android_wireguard.get("ProtoExtraObj", {}).get("WgPublicKey")
+        != "public+key/value="
+    ):
+        raise AssertionError(
+            f"v2rayNG WireGuard public-key compatibility drifted: "
+            f"{android_wireguard!r}"
+        )
+
+    for unsupported in (
+        TUIC_V2RAYN_URI,
+        ANYTLS_V2RAYN_URI,
+        NAIVE_HTTPS_URI,
+        HYSTERIA2_REALM_V2RAYN_URI,
+    ):
+        unsupported_status, _, _ = convert("v2rayng", (unsupported,))
+        if unsupported_status != 400:
+            raise AssertionError(
+                "v2rayNG accepted a desktop-only protocol: "
+                f"{unsupported!r} HTTP {unsupported_status}"
+            )
+    invalid_gecko_status, _, _ = convert(
+        "v2rayn",
+        (
+            HYSTERIA2_REALM_V2RAYN_URI.replace(
+                "maxPacketSize=1300", "maxPacketSize=4096"
+            ),
+        ),
+    )
+    if invalid_gecko_status != 400:
+        raise AssertionError(
+            "v2rayN accepted Gecko packet sizes that the client would silently "
+            f"reset: HTTP {invalid_gecko_status}"
+        )
+    for target in ("v2rayn", "v2rayng"):
+        for unsupported in (
+            VMESS_QR_QUIC_URI,
+            VMESS_QR_UNSUPPORTED_SECURITY_URI,
+            VLESS_UNSUPPORTED_FLOW_URI,
+            HTTPS_LEGACY_URI,
+        ):
+            unsupported_status, _, _ = convert(target, (unsupported,))
+            if unsupported_status != 400:
+                raise AssertionError(
+                    f"target={target} downgraded an unsupported node: "
+                    f"{unsupported!r} HTTP {unsupported_status}"
+                )
+
+    encoded_status, encoded_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "v2rayn",
+            "url": VMESS_QR_URI,
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    if encoded_status != 200 or len(decode_profiles(encoded_body, outer_base64=True)) != 1:
+        raise AssertionError(
+            f"v2rayN encoded subscription contract failed: "
+            f"HTTP {encoded_status} {encoded_body!r}"
+        )
+
+    for user_agent, expected_target in (
+        ("v2rayNG/1.10.29", "v2rayng"),
+        ("V2RayN/7.14.3", "v2rayn"),
+    ):
+        status, body, headers = request(
+            base_url,
+            "/sub",
+            {
+                "target": "auto",
+                "url": VMESS_QR_URI,
+                "list": "true",
+                "config": DISABLE_RULEGEN_CONFIG,
+            },
+            {"User-Agent": user_agent},
+        )
+        if status != 200 or len(decode_profiles(body)) != 1:
+            raise AssertionError(
+                f"auto target for {user_agent} did not select {expected_target}: "
+                f"HTTP {status} {body!r}"
+            )
+        assert_vary_header(headers, "User-Agent", f"auto {expected_target}")
+
+    legacy_status, legacy_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "v2ray",
+            "url": VMESS_QR_URI,
+            "list": "true",
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    if (
+        legacy_status != 200
+        or not legacy_body.decode("utf-8").startswith("vmess://")
+        or b"v2rayn://" in legacy_body
+    ):
+        raise AssertionError(
+            f"historical target=v2ray output contract changed: "
+            f"HTTP {legacy_status} {legacy_body!r}"
+        )
 
 
 def singbox_import_fidelity_baseline(base_url: str, fixture_base: str) -> None:
@@ -9119,6 +9510,7 @@ def main() -> int:
             netch_legacy_parser_baseline(base_url)
             mieru_legacy_parser_baseline(base_url)
             target_generation_stats_baseline(base_url)
+            v2ray_client_target_baseline(base_url)
             singbox_import_fidelity_baseline(base_url, fixture_base)
             loon_current_node_output_baseline(base_url)
             quanx_current_node_output_baseline(base_url, fixture_base)

@@ -61,6 +61,8 @@ const std::vector<UAProfile> kUserAgentProfiles = {
     {"surge", "\\/([0-9.]+)", "900", "surge", false, 3, "surge"},
     {"surge", "", "", "surge", false, 2, "surge"},
     {"trojan-qt5", "", "", "trojan", tribool(), -1, "trojan-qt5"},
+    {"v2rayng", "", "", "v2rayng", tribool(), -1, "v2rayng"},
+    {"v2rayn", "", "", "v2rayn", tribool(), -1, "v2rayn"},
     {"v2rayu", "", "", "v2ray", tribool(), -1, "v2rayu"},
     {"v2rayx", "", "", "v2ray", tribool(), -1, "v2rayx"},
 };

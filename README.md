@@ -130,7 +130,16 @@ SubConverter-Extended 因此诞生。它是一款更贴合 Mihomo 使用场景�
 > 2. Quantumult X、Surge、Surfboard 和 Loon 的完整配置可以使用客户端原生远程资源；其节点链接仍调用继承自上游项目的 Legacy 解析器。
 > 3. 其他非 Mihomo 目标仍使用 Legacy 解析器。协议和参数支持范围以对应生成器能够表示的内容为准。
 
-Legacy 解析器对经典格式的兼容范围包括：Shadowsocks SIP002（含 AEAD-2022、插件和 IPv6）、SIP008/旧版 JSON 输入、历史 SSR 链接、v2rayN `socks://` 新旧格式、Telegram 和 Base64 authority 形式的 HTTP(S) 代理链接，以及 Surge、Loon、Mihomo 和 sing-box 新旧结构中的 WireGuard 节点。它也会校准 Hysteria v1 的官方 URI、Mihomo YAML 与 sing-box JSON 字段、当前 Netch `Netch://` 分享链接和 `settings.json` 中的 SS/SSR/SOCKS/VMess/VLESS/Trojan/WireGuard 节点，以及 Surge Snell v1-v6 的 `version`、`reuse`、HTTP/TLS obfs、`udp-port`、v6 `mode` 和 Shadow TLS 字段；历史 Netch 的 `Socks5`、`TLSSecure` 和 Snell 字段仍保持兼容。输出时仍会按目标客户端的稳定能力过滤不可表示的组合。Netch 的 SSH 节点没有可共用的内部代理模型，会明确跳过；`packet` 模式可由 VLESS 单链接保留，但不会输出给不支持该模式的 sing-box。普通 HTTP(S) URL 仍按订阅处理；`socks5://` 仍属于 Mihomo 路径，不会借此改动进入 Legacy 解析器。解析成功不代表每个目标客户端都能表示对应协议，最终仍由目标生成器筛选。Netch 字段依据见其[当前服务模型与分享链接实现](https://github.com/netchx/netch/tree/main/Netch/Servers)。
+Legacy 解析器对经典格式的兼容范围包括：Shadowsocks SIP002（含 AEAD-2022、插件和 IPv6）、SIP008/旧版 JSON 输入、历史 SSR 链接、v2rayN `socks://` 新旧格式、Naive HTTPS/QUIC 分享链接、Telegram 和 Base64 authority 形式的 HTTP(S) 代理链接，以及 Surge、Loon、Mihomo 和 sing-box 新旧结构中的 WireGuard 节点。它也会校准 Hysteria v1 的官方 URI、Mihomo YAML 与 sing-box JSON 字段、当前 Netch `Netch://` 分享链接和 `settings.json` 中的 SS/SSR/SOCKS/VMess/VLESS/Trojan/WireGuard 节点，以及 Surge Snell v1-v6 的 `version`、`reuse`、HTTP/TLS obfs、`udp-port`、v6 `mode` 和 Shadow TLS 字段；历史 Netch 的 `Socks5`、`TLSSecure` 和 Snell 字段仍保持兼容。输出时仍会按目标客户端的稳定能力过滤不可表示的组合。Netch 的 SSH 节点没有可共用的内部代理模型，会明确跳过；`packet` 模式可由 VLESS 单链接保留，但不会输出给不支持该模式的 sing-box。普通 HTTP(S) URL 仍按订阅处理；`socks5://` 仍属于 Mihomo 路径，不会借此改动进入 Legacy 解析器。解析成功不代表每个目标客户端都能表示对应协议，最终仍由目标生成器筛选。Netch 字段依据见其[当前服务模型与分享链接实现](https://github.com/netchx/netch/tree/main/Netch/Servers)。
+
+V2Ray/V2Fly 是代理平台与内核，不定义可由本项目直接生成的客户端订阅容器；其[官方文档](https://www.v2fly.org/)与 [VMess 协议说明](https://www.v2fly.org/en_US/developer/protocols/vmess.html)不应和 v2rayN、v2rayNG 的订阅格式混为一谈。为保持既有部署平滑升级，历史 `target=v2ray` 继续只生成原有 VMess 订阅，不改变字节级输出契约。现代客户端使用以下独立目标：
+
+| 目标 | 与当前客户端源码对齐的节点类型 | 输出格式 |
+| --- | --- | --- |
+| `v2rayn` | VMess、Shadowsocks、SOCKS5、VLESS、Trojan、Hysteria2（含 Realm/Gecko）、TUIC、WireGuard、HTTP、AnyTLS、Naive | 官方 `v2rayn://<type>/<base64url ProfileItem JSON>` 内部订阅格式 |
+| `v2rayng` | VMess、Shadowsocks、SOCKS5、VLESS、Trojan、Hysteria2、WireGuard、HTTP | v2rayNG 同样直接解析的 `v2rayn://` 内部订阅格式 |
+
+该格式由 [v2rayN 订阅说明](https://github.com/2dust/v2rayN/wiki/Description-of-subscription)正式定义；本轮协议编号和能力固定对照 v2rayN 提交 `e01717d` 的 [`EConfigType`](https://github.com/2dust/v2rayN/blob/e01717d8326a4f5060b335523590c5fda943fe03/v2rayN/ServiceLib/Enums/EConfigType.cs) 与[全局协议表](https://github.com/2dust/v2rayN/blob/e01717d8326a4f5060b335523590c5fda943fe03/v2rayN/ServiceLib/Global.cs)。v2rayNG 提交 `e8a82d9` 也注册了[对应内部格式解析器](https://github.com/2dust/v2rayNG/blob/e8a82d9810ca1cf97a3cc8a9b9525a9f21955807/V2rayNG/app/src/main/java/com/v2ray/ang/fmt/V2rayNFmt.kt)，但其[协议枚举](https://github.com/2dust/v2rayNG/blob/e8a82d9810ca1cf97a3cc8a9b9525a9f21955807/V2rayNG/app/src/main/java/com/v2ray/ang/enums/EConfigType.kt)比桌面端更窄。两个目标因此使用独立能力矩阵：例如 Realm/Gecko、TUIC、AnyTLS 和 Naive 只输出给当前确实支持它们的 v2rayN，不会借共用容器塞给 v2rayNG。两个目标仍由本项目下载并用 Legacy 解析器展开远程订阅，不会改动 Clash/Mihomo 路径。标准 URI或内部模型无法无损携带的客户端外字段会按节点明确跳过；若没有任何节点可表示，请求返回 HTTP 400，不会返回空白或不可连接的伪成功订阅。
 
 Mieru 的 Legacy 支持仅覆盖官方可读的 `mierus://` 简化链接。解析器会校验 profile、MTU、复用等级、握手模式和 traffic-pattern 的 Base64/protobuf 外层格式，并按成对出现的 `port` / `protocol` 展开多端口配置。完整客户端配置 `mieru://` 只在 `target=clash`、`target=clashr` 及 `auto` 命中这两类目标时，由 Mihomo 专属 Go 桥使用 `bridge/go.mod` 锁定的官方 Mieru v3 protobuf 定义严格展开，再交回同一 Mihomo 解析器；不可等价表达的配置会失败关闭，且绝不回退 Legacy。其他目标继续只走 Legacy，不会因该格式改变解析路径。
 
@@ -620,7 +629,7 @@ logread -e subconverter
 
 | 参数 | 说明 | 示例 |
 | :--- | :--- | :--- |
-| `target` | 目标格式；完整支持 `clash`, `clashr`, `surge`, `quan`, `quanx`, `loon`, `surfboard`, `mellow`, `singbox`, `ss`, `ssd`, `ssr`, `sssub`, `v2ray`, `trojan`, `vless`, `hysteria2`, `mixed` | `clash`, `vless`, `hysteria2` |
+| `target` | 目标格式；完整支持 `clash`, `clashr`, `surge`, `quan`, `quanx`, `loon`, `surfboard`, `mellow`, `singbox`, `ss`, `ssd`, `ssr`, `sssub`, `v2ray`, `v2rayn`, `v2rayng`, `trojan`, `vless`, `hysteria2`, `mixed` | `clash`, `v2rayn`, `v2rayng`, `vless`, `hysteria2` |
 | `url` | 订阅链接或节点链接（`\|` 分隔） | `https://sub.com\|vless://...` |
 | `config` | 外部配置文件 | `https://config-url` |
 | `include` | 包含节点（正则） | `香港\|台湾` |

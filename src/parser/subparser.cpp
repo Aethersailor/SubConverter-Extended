@@ -933,6 +933,30 @@ void anyTlSConstruct(Proxy &node, const std::string &group, const std::string &r
     node.IdleSessionCheckInterval = idleSessionCheckInterval;
     node.IdleSessionTimeout = idleSessionTimeout;
     node.MinIdleSession = minIdleSession;
+    node.TLSSecure = true;
+    node.TLSStr = "tls";
+}
+
+void naiveConstruct(Proxy &node, const std::string &group,
+                    const std::string &remarks, const std::string &port,
+                    const std::string &username,
+                    const std::string &password, const std::string &host,
+                    const std::vector<String> &alpn_list,
+                    const std::string &fingerprint,
+                    const std::string &sni, tribool scv,
+                    bool quic, uint32_t insecure_concurrency) {
+    commonConstruct(node, ProxyType::Naive, group, remarks, host, port,
+                    tribool(), tribool(), scv, tribool(), "");
+    node.Username = username;
+    node.Password = password;
+    node.TLSSecure = true;
+    node.TLSStr = "tls";
+    node.ServerName = sni;
+    node.SNI = sni;
+    node.AlpnList = alpn_list;
+    node.Fingerprint = fingerprint;
+    node.NaiveQuic = quic;
+    node.NaiveInsecureConcurrency = insecure_concurrency;
 }
 
 void mieruConstruct(Proxy &node, const std::string &group, const std::string &remarks,
@@ -1037,6 +1061,8 @@ void tuicConstruct(Proxy &node, const std::string &group, const std::string &rem
     node.UdpRelayMode = udpRelayMode;
     node.token = token;
     node.RequestTimeout = request_timeout;
+    node.TLSSecure = true;
+    node.TLSStr = "tls";
 }
 
 
@@ -2921,6 +2947,117 @@ void explodeStdHysteria2(std::string hysteria2, Proxy &node) {
     node.Fingerprint = decodedFirstUrlArg(parsed.query, {"pinSHA256", "pinsha256"});
     node.Hysteria2ECH = decodedUrlArg(parsed.query, "ech");
     node.Hysteria2PortsAreAdditional = !ports.empty();
+    if (toLower(trim(node.OBFSParam)) == "gecko") {
+        node.Hysteria2GeckoMinPacketSize = decodedFirstUrlArg(
+            parsed.query, {"minPacketSize", "min_packet_size"});
+        node.Hysteria2GeckoMaxPacketSize = decodedFirstUrlArg(
+            parsed.query, {"maxPacketSize", "max_packet_size"});
+    }
+}
+
+void explodeHysteria2Realm(std::string hysteria2, Proxy &node) {
+    const bool http = startsWith(hysteria2, "hysteria2+realm+http://");
+    const std::string prefix =
+        http ? "hysteria2+realm+http://" : "hysteria2+realm://";
+    if (!startsWith(hysteria2, prefix))
+        return;
+    hysteria2.erase(0, prefix.size());
+
+    std::string remark;
+    extractRemark(hysteria2, remark);
+    std::string query;
+    const size_t query_pos = hysteria2.find('?');
+    if (query_pos != std::string::npos) {
+        query = hysteria2.substr(query_pos + 1);
+        hysteria2.erase(query_pos);
+    }
+
+    const size_t at = hysteria2.rfind('@');
+    const size_t path = at == std::string::npos
+                            ? std::string::npos
+                            : hysteria2.find('/', at + 1);
+    if (at == std::string::npos || at == 0 || path == std::string::npos ||
+        path == at + 1 || path + 1 >= hysteria2.size())
+        return;
+    const std::string token =
+        decodeShareUriUserInfo(hysteria2.substr(0, at));
+    const std::string authority = hysteria2.substr(at + 1, path - at - 1);
+    const std::string realm_name = hysteria2.substr(path + 1);
+    if (token.empty() || token.find_first_of("\r\n") != std::string::npos ||
+        realm_name.find_first_of("/\r\n") != std::string::npos)
+        return;
+
+    std::string host;
+    std::string port;
+    if (!authority.empty() && authority.front() == '[') {
+        const size_t bracket = authority.find(']');
+        if (bracket == std::string::npos || bracket == 1)
+            return;
+        host = authority.substr(1, bracket - 1);
+        if (bracket + 1 < authority.size()) {
+            if (authority[bracket + 1] != ':' ||
+                !validSharePort(authority.substr(bracket + 2)))
+                return;
+            port = authority.substr(bracket + 2);
+        }
+    } else {
+        const size_t colon = authority.rfind(':');
+        if (colon != std::string::npos && authority.find(':') == colon) {
+            const std::string candidate_port = authority.substr(colon + 1);
+            if (!validSharePort(candidate_port))
+                return;
+            host = authority.substr(0, colon);
+            port = candidate_port;
+        } else {
+            host = authority;
+        }
+    }
+    if (host.empty() || host.find_first_of("\r\n") != std::string::npos)
+        return;
+    if (port.empty())
+        port = http ? "80" : "443";
+
+    const std::string auth = decodedUrlArg(query, "auth");
+    if (auth.empty())
+        return;
+    const std::string sni = decodedUrlArg(query, "sni");
+    if (remark.empty())
+        remark = host + ":" + port;
+
+    std::string realm_url = http ? "realm+http://" : "realm://";
+    realm_url += hysteria2;
+    string_array stun_query;
+    for (const std::string &entry : split(query, "&")) {
+        const size_t equal = entry.find('=');
+        if (equal == std::string::npos)
+            continue;
+        if (toLower(urlDecode(entry.substr(0, equal))) != "stun")
+            continue;
+        const std::string stun = urlDecode(entry.substr(equal + 1));
+        if (stun.empty() || stun.find_first_of("\r\n") != std::string::npos)
+            return;
+        stun_query.emplace_back(entry);
+    }
+    if (!stun_query.empty())
+        realm_url += "?" + join(stun_query, "&");
+
+    hysteria2Construct(
+        node, HYSTERIA2_DEFAULT_GROUP, remark, host, port, auth, sni,
+        decodedUrlArg(query, "up"), decodedUrlArg(query, "down"),
+        decodedUrlArg(query, "alpn"), decodedUrlArg(query, "obfs"),
+        decodedUrlArg(query, "obfs-password"), sni, "", "", tribool(),
+        tribool(), tribool(decodedUrlArg(query, "insecure")));
+    node.TLSSecure = true;
+    node.TLSStr = "tls";
+    node.Fingerprint = decodedFirstUrlArg(query, {"pinSHA256", "pinsha256"});
+    node.Hysteria2ECH = decodedUrlArg(query, "ech");
+    node.Hysteria2RealmUrl = std::move(realm_url);
+    if (toLower(trim(node.OBFSParam)) == "gecko") {
+        node.Hysteria2GeckoMinPacketSize = decodedFirstUrlArg(
+            query, {"minPacketSize", "min_packet_size"});
+        node.Hysteria2GeckoMaxPacketSize = decodedFirstUrlArg(
+            query, {"maxPacketSize", "max_packet_size"});
+    }
 }
 
 
@@ -5383,6 +5520,44 @@ void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
                         node.PublicKey = pbk;
                         node.ShortId = sid;
                         break;
+                    case "naive"_hash: {
+                        if (tls != "tls" && tls != "reality")
+                            continue;
+                        user = GetMember(singboxNode, "username");
+                        password = GetMember(singboxNode, "password");
+                        if (password.empty())
+                            continue;
+                        bool naive_quic = false;
+                        uint32_t insecure_concurrency = 0;
+                        if (singboxNode.HasMember("quic")) {
+                            if (!singboxNode["quic"].IsBool())
+                                continue;
+                            naive_quic = singboxNode["quic"].GetBool();
+                        }
+                        if (singboxNode.HasMember("insecure_concurrency")) {
+                            if (!singboxNode["insecure_concurrency"].IsUint())
+                                continue;
+                            insecure_concurrency =
+                                singboxNode["insecure_concurrency"].GetUint();
+                        }
+                        naiveConstruct(node, NAIVE_DEFAULT_GROUP, ps, port,
+                                       user, password, server, alpnList,
+                                       fingerprint, sni, scv, naive_quic,
+                                       insecure_concurrency);
+                        node.TLSStr = tls;
+                        node.PublicKey = pbk;
+                        node.ShortId = sid;
+                        node.CongestionControl =
+                            GetMember(singboxNode,
+                                      "quic_congestion_control");
+                        if (singboxNode.HasMember("udp_over_tcp")) {
+                            if (!singboxNode["udp_over_tcp"].IsBool())
+                                continue;
+                            node.NaiveUot =
+                                singboxNode["udp_over_tcp"].GetBool();
+                        }
+                        break;
+                    }
                     case "hysteria2"_hash:
                         group = HYSTERIA2_DEFAULT_GROUP;
                         password = GetMember(singboxNode, "password");
@@ -5441,6 +5616,10 @@ void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
                                       sni, id, udp_relay_mode, "",
                                       tribool(),
                                       tribool(), scv, rrt, disableSni);
+                        node.TLSStr = tls.empty() ? "tls" : tls;
+                        node.PublicKey = pbk;
+                        node.ShortId = sid;
+                        node.Fingerprint = fingerprint;
                         break;
                     default:
                         continue;
@@ -5506,6 +5685,12 @@ void explodeTuic(const std::string &tuic, Proxy &node) {
                   decodedUrlArg(parsed.query, "alpn"), decodedUrlArg(parsed.query, "sni"), uuid,
                   udp_relay_mode, token, tribool(), tribool(), tribool(insecure), tribool(reduce_rtt),
                   tribool(disable_sni), request_timeout);
+    node.TLSStr = decodedUrlArg(parsed.query, "security");
+    if (node.TLSStr.empty())
+        node.TLSStr = "tls";
+    node.PublicKey = decodedUrlArg(parsed.query, "pbk");
+    node.ShortId = decodedUrlArg(parsed.query, "sid");
+    node.Fingerprint = decodedUrlArg(parsed.query, "fp");
 }
 
 void explodeAnyTLS(std::string anytls, Proxy &node) {
@@ -5529,6 +5714,135 @@ void explodeAnyTLS(std::string anytls, Proxy &node) {
                     decodedUrlArg(parsed.query, "sni"), tribool(decodedUrlArg(parsed.query, "udp")),
                     tribool(decodedUrlArg(parsed.query, "tfo")), tribool(insecure), tribool(), "",
                     idle_check, idle_timeout, min_idle);
+    node.TLSStr = decodedUrlArg(parsed.query, "security");
+    if (node.TLSStr.empty())
+        node.TLSStr = "tls";
+    node.PublicKey = decodedUrlArg(parsed.query, "pbk");
+    node.ShortId = decodedUrlArg(parsed.query, "sid");
+}
+
+void explodeNaive(std::string naive, Proxy &node) {
+    const bool quic = startsWith(naive, "naive+quic://");
+    ParsedShareUri parsed;
+    std::string ignored_ports;
+    if (!parseModernShareUri(std::move(naive),
+                             quic ? "naive+quic" : "naive+https", true,
+                             "443", false, parsed, ignored_ports))
+        return;
+
+    std::string username;
+    std::string password = parsed.user;
+    const size_t separator = parsed.user.find(':');
+    if (separator != std::string::npos) {
+        username = parsed.user.substr(0, separator);
+        password = parsed.user.substr(separator + 1);
+    }
+    if (password.empty())
+        return;
+
+    uint32_t insecure_concurrency = 0;
+    const std::string concurrency =
+        decodedUrlArg(parsed.query, "insecure-concurrency");
+    if (!concurrency.empty()) {
+        if (!std::all_of(concurrency.begin(), concurrency.end(),
+                         [](unsigned char ch) { return std::isdigit(ch) != 0; }))
+            return;
+        try {
+            const unsigned long long parsed_value = std::stoull(concurrency);
+            if (parsed_value == 0 ||
+                parsed_value > std::numeric_limits<uint32_t>::max())
+                return;
+            insecure_concurrency = static_cast<uint32_t>(parsed_value);
+        } catch (const std::exception &) {
+            return;
+        }
+    }
+
+    if (parsed.remark.empty())
+        parsed.remark = parsed.host + ":" + parsed.port;
+    const std::string insecure = decodedFirstUrlArg(
+        parsed.query, {"insecure", "allow_insecure", "allow-insecure"});
+    naiveConstruct(node, NAIVE_DEFAULT_GROUP, parsed.remark, parsed.port,
+                   username, password, parsed.host,
+                   getUrlAlpnList(parsed.query),
+                   decodedFirstUrlArg(parsed.query, {"fp", "fingerprint"}),
+                   decodedUrlArg(parsed.query, "sni"), tribool(insecure), quic,
+                   insecure_concurrency);
+    node.TLSStr = decodedUrlArg(parsed.query, "security");
+    if (node.TLSStr.empty())
+        node.TLSStr = "tls";
+    node.PublicKey = decodedUrlArg(parsed.query, "pbk");
+    node.ShortId = decodedUrlArg(parsed.query, "sid");
+}
+
+void explodeWireGuard(std::string wireguard, Proxy &node) {
+    ParsedShareUri parsed;
+    if (!parseShareUri(std::move(wireguard), "wireguard", parsed))
+        return;
+
+    const std::string public_key = decodedUrlArg(parsed.query, "publickey");
+    const std::string address = decodedUrlArg(parsed.query, "address");
+    if (parsed.user.empty() || public_key.empty() || address.empty())
+        return;
+
+    string_array local_addresses;
+    std::string self_ip;
+    std::string self_ipv6;
+    for (std::string item : split(address, ",")) {
+        item = trim(item);
+        if (item.empty())
+            return;
+        const size_t slash = item.find('/');
+        const std::string host = slash == std::string::npos
+                                     ? item
+                                     : item.substr(0, slash);
+        const std::string prefix = slash == std::string::npos
+                                       ? std::string()
+                                       : item.substr(slash + 1);
+        if (slash != std::string::npos &&
+            (prefix.empty() || prefix.size() > 3 ||
+             !std::all_of(prefix.begin(), prefix.end(), [](unsigned char ch) {
+                 return std::isdigit(ch) != 0;
+             })))
+            return;
+        if (isIPv4(host)) {
+            if (!self_ip.empty())
+                return;
+            if (!prefix.empty() && to_int(prefix, -1) > 32)
+                return;
+            self_ip = host;
+            if (slash == std::string::npos)
+                item += "/32";
+        } else if (isIPv6(host)) {
+            if (!self_ipv6.empty())
+                return;
+            if (!prefix.empty() && to_int(prefix, -1) > 128)
+                return;
+            self_ipv6 = host;
+            if (slash == std::string::npos)
+                item += "/128";
+        } else {
+            return;
+        }
+        local_addresses.emplace_back(std::move(item));
+    }
+
+    const std::string mtu = decodedUrlArg(parsed.query, "mtu");
+    if (!mtu.empty() && parseUint16Option(mtu, 0) == 0)
+        return;
+    const std::string reserved = normalizeWireGuardReserved(
+        decodedUrlArg(parsed.query, "reserved"));
+    if (!decodedUrlArg(parsed.query, "reserved").empty() && reserved.empty())
+        return;
+
+    if (parsed.remark.empty())
+        parsed.remark = parsed.host + ":" + parsed.port;
+    wireguardConstruct(node, WG_DEFAULT_GROUP, parsed.remark, parsed.host,
+                       parsed.port, self_ip, self_ipv6, parsed.user, public_key,
+                       decodedUrlArg(parsed.query, "presharedkey"), {}, mtu,
+                       "0", "", reserved, tribool(), "");
+    node.WireGuardLocalAddresses = std::move(local_addresses);
+    syncLegacyWireGuardProjection(node);
 }
 
 void explode(const std::string &link, Proxy &node) {
@@ -5555,6 +5869,14 @@ void explode(const std::string &link, Proxy &node) {
         explodeTuic(link, node);
     else if (strFind(link, "anytls://"))
         explodeAnyTLS(link, node);
+    else if (startsWith(link, "naive+https://") ||
+             startsWith(link, "naive+quic://"))
+        explodeNaive(link, node);
+    else if (startsWith(link, "wireguard://"))
+        explodeWireGuard(link, node);
+    else if (startsWith(link, "hysteria2+realm://") ||
+             startsWith(link, "hysteria2+realm+http://"))
+        explodeHysteria2Realm(link, node);
     else if (strFind(link, "hysteria2://") || strFind(link, "hy2://"))
         explodeHysteria2(link, node);
     else if (startsWith(link, "mierus://") || startsWith(link, "mieru://"))

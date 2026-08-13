@@ -758,7 +758,9 @@ bool applyMatcher(const std::string &rule, std::string &real_rule,
       {ProxyType::Snell, "SNELL"},         {ProxyType::HTTP, "HTTP"},
       {ProxyType::HTTPS, "HTTPS"},         {ProxyType::SOCKS5, "SOCKS5"},
       {ProxyType::WireGuard, "WIREGUARD"}, {ProxyType::VLESS, "VLESS"},
-      {ProxyType::Hysteria, "HYSTERIA"},   {ProxyType::Hysteria2, "HYSTERIA2"}};
+      {ProxyType::Hysteria, "HYSTERIA"},   {ProxyType::Hysteria2, "HYSTERIA2"},
+      {ProxyType::TUIC, "TUIC"},           {ProxyType::AnyTLS, "ANYTLS"},
+      {ProxyType::Naive, "NAIVE"},         {ProxyType::Mieru, "MIERU"}};
   if (startsWith(rule, "!!GROUP=")) {
     regGetMatch(rule, group_regex, 3, 0, &target, &ret_real_rule);
     real_rule = ret_real_rule;
@@ -1276,6 +1278,10 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
         singleproxy["obfs"] = x.OBFSParam;
       break;
     case ProxyType::Hysteria2:
+      if (!x.Hysteria2RealmUrl.empty() ||
+          !x.Hysteria2GeckoMinPacketSize.empty() ||
+          !x.Hysteria2GeckoMaxPacketSize.empty())
+        continue;
       singleproxy["type"] = "hysteria2";
       singleproxy["password"] = x.Password;
       singleproxy["auth"] = x.Password;
@@ -2382,7 +2388,10 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
           !surgeProxyScalarIsSafe(x.ServerName) ||
           !surgeProxyScalarIsSafe(x.Fingerprint) ||
           !surgeProxyScalarIsSafe(x.OBFSPassword) ||
-          !surgeProxyScalarIsSafe(x.Alpn)) {
+          !surgeProxyScalarIsSafe(x.Alpn) ||
+          !x.Hysteria2RealmUrl.empty() ||
+          !x.Hysteria2GeckoMinPacketSize.empty() ||
+          !x.Hysteria2GeckoMaxPacketSize.empty()) {
         supported = false;
         break;
       }
@@ -2634,6 +2643,636 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
   return ini.to_string();
 }
 
+namespace {
+
+using V2RayProfileWriter =
+    rapidjson::Writer<rapidjson::StringBuffer>;
+
+void writeV2RayProfileString(V2RayProfileWriter &writer, const char *key,
+                             const std::string &value) {
+  if (value.empty())
+    return;
+  writer.Key(key);
+  writer.String(value.data(), static_cast<rapidjson::SizeType>(value.size()));
+}
+
+bool isV2RayProfileUuid(const std::string &value) {
+  static const std::string pattern =
+      "(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+      "[0-9a-f]{4}-[0-9a-f]{12}$";
+  return regMatch(value, pattern);
+}
+
+bool v2rayProfileTransport(const Proxy &proxy, V2RayClientTarget target,
+                           std::string &network) {
+  network = toLower(trim(proxy.TransferProtocol));
+  if (network.empty() || network == "tcp" || network == "none")
+    network = "raw";
+  else if (network == "mkcp")
+    network = "kcp";
+  else if (network == "gun")
+    network = "grpc";
+  else if (network == "splithttp")
+    network = "xhttp";
+  else if (network == "h2")
+    network = "http";
+
+  static const string_array desktop_networks = {
+      "raw", "kcp", "ws", "httpupgrade", "xhttp", "grpc"};
+  static const string_array android_networks = {
+      "raw", "kcp", "ws", "httpupgrade", "xhttp", "http", "grpc"};
+  const string_array &supported = target == V2RayClientTarget::V2RayN
+                                      ? desktop_networks
+                                      : android_networks;
+  if (std::find(supported.begin(), supported.end(), network) ==
+      supported.end())
+    return false;
+  if (proxy.V2rayHttpUpgrade.get(false) && network != "httpupgrade")
+    return false;
+  if (!proxy.Edge.empty() || !proxy.QUICSecure.empty() ||
+      !proxy.QUICSecret.empty())
+    return false;
+  if (network == "raw" && !proxy.FakeType.empty() &&
+      proxy.FakeType != "none" && proxy.FakeType != "http")
+    return false;
+  static const string_array kcp_header_types = {
+      "none", "srtp", "utp", "wechat-video", "dtls", "wireguard",
+      "dns"};
+  if (network == "kcp") {
+    const std::string header =
+        proxy.FakeType.empty() ? std::string("none")
+                               : toLower(trim(proxy.FakeType));
+    if (std::find(kcp_header_types.begin(), kcp_header_types.end(), header) ==
+        kcp_header_types.end())
+      return false;
+  }
+  if (network == "grpc" && !proxy.GRPCMode.empty() &&
+      proxy.GRPCMode != "gun" && proxy.GRPCMode != "multi")
+    return false;
+  static const string_array xhttp_modes = {
+      "auto", "packet-up", "stream-up", "stream-one"};
+  if (network == "xhttp" && !proxy.GRPCMode.empty() &&
+      std::find(xhttp_modes.begin(), xhttp_modes.end(), proxy.GRPCMode) ==
+          xhttp_modes.end())
+    return false;
+  return true;
+}
+
+bool v2rayProfileVmessSecurityIsSupported(const Proxy &proxy) {
+  static const string_array securities = {
+      "aes-128-gcm", "chacha20-poly1305", "auto", "none", "zero"};
+  const std::string security =
+      proxy.EncryptMethod.empty() ? std::string("auto")
+                                  : toLower(trim(proxy.EncryptMethod));
+  return std::find(securities.begin(), securities.end(), security) !=
+         securities.end();
+}
+
+bool v2rayProfileFlowIsSupported(const Proxy &proxy,
+                                 const std::string &network,
+                                 const std::string &security) {
+  if (proxy.Flow.empty())
+    return true;
+  if (proxy.Flow != "xtls-rprx-vision" &&
+      proxy.Flow != "xtls-rprx-vision-udp443")
+    return false;
+  return network == "raw" && (security == "tls" || security == "reality");
+}
+
+bool v2rayProfileSecurity(const Proxy &proxy, std::string &security) {
+  if (!proxy.PublicKey.empty()) {
+    if (proxy.Type != ProxyType::VLESS && proxy.Type != ProxyType::Trojan &&
+        proxy.Type != ProxyType::TUIC && proxy.Type != ProxyType::AnyTLS &&
+        proxy.Type != ProxyType::Naive)
+      return false;
+    const std::string declared_security = toLower(trim(proxy.TLSStr));
+    if (!declared_security.empty() && declared_security != "tls" &&
+        declared_security != "reality")
+      return false;
+    security = "reality";
+    if (proxy.ServerName.empty())
+      return false;
+  } else {
+    if (!proxy.ShortId.empty())
+      return false;
+    security = toLower(trim(proxy.TLSStr));
+    if (security.empty() && proxy.TLSSecure)
+      security = "tls";
+    if (security == "none")
+      security.clear();
+    if (!security.empty() && security != "tls")
+      return false;
+  }
+  return true;
+}
+
+bool v2rayProfileCommonIsSafe(const Proxy &proxy) {
+  return !proxy.Hostname.empty() && proxy.Port > 0 &&
+         proxy.UnderlyingProxy.empty();
+}
+
+bool v2rayProfileShadowsocksIsSupported(const Proxy &proxy,
+                                        V2RayClientTarget target) {
+  static const string_array xray_methods = {
+      "aes-256-gcm", "aes-128-gcm", "chacha20-poly1305",
+      "chacha20-ietf-poly1305", "xchacha20-poly1305",
+      "xchacha20-ietf-poly1305", "none", "plain",
+      "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm",
+      "2022-blake3-chacha20-poly1305"};
+  static const string_array singbox_methods = {
+      "aes-256-gcm", "aes-192-gcm", "aes-128-gcm",
+      "chacha20-ietf-poly1305", "xchacha20-ietf-poly1305", "none",
+      "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm",
+      "2022-blake3-chacha20-poly1305", "aes-128-ctr", "aes-192-ctr",
+      "aes-256-ctr", "aes-128-cfb", "aes-192-cfb", "aes-256-cfb",
+      "rc4-md5", "chacha20-ietf", "xchacha20"};
+  const std::string method = toLower(trim(proxy.EncryptMethod));
+  const string_array &supported = target == V2RayClientTarget::V2RayN
+                                      ? singbox_methods
+                                      : xray_methods;
+  return std::find(supported.begin(), supported.end(), method) !=
+         supported.end();
+}
+
+void writeV2RayTlsProfile(V2RayProfileWriter &writer, const Proxy &proxy,
+                          const extra_settings &ext,
+                          const std::string &security) {
+  writeV2RayProfileString(writer, "StreamSecurity", security);
+  tribool allow_insecure = ext.skip_cert_verify;
+  allow_insecure.define(proxy.AllowInsecure);
+  if (!allow_insecure.is_undef())
+    writeV2RayProfileString(writer, "AllowInsecure",
+                            allow_insecure.get() ? "true" : "false");
+  writeV2RayProfileString(writer, "Sni", proxy.ServerName);
+  if (!proxy.AlpnList.empty())
+    writeV2RayProfileString(writer, "Alpn", join(proxy.AlpnList, ","));
+  else
+    writeV2RayProfileString(writer, "Alpn", proxy.Alpn);
+  writeV2RayProfileString(writer, "Fingerprint", proxy.Fingerprint);
+  writeV2RayProfileString(writer, "PublicKey", proxy.PublicKey);
+  writeV2RayProfileString(writer, "ShortId", proxy.ShortId);
+  writeV2RayProfileString(writer, "SpiderX", xrayLinkOption(proxy, "spx"));
+  writeV2RayProfileString(writer, "Mldsa65Verify",
+                          xrayLinkOption(proxy, "pqv"));
+  writeV2RayProfileString(writer, "CertSha", xrayLinkOption(proxy, "pcs"));
+  writeV2RayProfileString(writer, "EchConfigList",
+                          xrayLinkOption(proxy, "ech"));
+  writeV2RayProfileString(writer, "VerifyPeerCertByName",
+                          xrayLinkOption(proxy, "vcn"));
+  writeV2RayProfileString(writer, "Finalmask", xrayLinkOption(proxy, "fm"));
+}
+
+void writeV2RayTransportProfile(V2RayProfileWriter &writer,
+                                const Proxy &proxy,
+                                const std::string &network) {
+  writeV2RayProfileString(writer, "Network", network);
+  writer.Key("TransportExtraObj");
+  writer.StartObject();
+  if (network == "raw") {
+    writeV2RayProfileString(
+        writer, "RawHeaderType",
+        proxy.FakeType.empty() ? std::string("none") : proxy.FakeType);
+    if (proxy.FakeType == "http") {
+      writeV2RayProfileString(writer, "Host", proxy.Host);
+      writeV2RayProfileString(writer, "Path", proxy.Path);
+    }
+  } else if (network == "kcp") {
+    writeV2RayProfileString(
+        writer, "KcpHeaderType",
+        proxy.FakeType.empty() ? std::string("none") : proxy.FakeType);
+    writeV2RayProfileString(writer, "KcpSeed", proxy.Path);
+  } else if (network == "ws" || network == "httpupgrade" ||
+             network == "http") {
+    writeV2RayProfileString(writer, "Host", proxy.Host);
+    writeV2RayProfileString(writer, "Path", proxy.Path);
+  } else if (network == "grpc") {
+    writeV2RayProfileString(writer, "GrpcAuthority",
+                            xrayLinkOption(proxy, "authority"));
+    writeV2RayProfileString(
+        writer, "GrpcServiceName",
+        proxy.GRPCServiceName.empty() ? proxy.Path : proxy.GRPCServiceName);
+    writeV2RayProfileString(writer, "GrpcMode", proxy.GRPCMode);
+  } else if (network == "xhttp") {
+    writeV2RayProfileString(writer, "Host", proxy.Host);
+    writeV2RayProfileString(writer, "Path", proxy.Path);
+    writeV2RayProfileString(writer, "XhttpMode", proxy.GRPCMode);
+    writeV2RayProfileString(writer, "XhttpExtra",
+                            xrayLinkOption(proxy, "extra"));
+  }
+  writer.EndObject();
+}
+
+bool writeV2RayProfilePayload(const Proxy &proxy, V2RayClientTarget target,
+                              const extra_settings &ext,
+                              const WireGuardPeer *wireguard_peer,
+                              std::string &scheme, std::string &payload) {
+  if (!v2rayProfileCommonIsSafe(proxy) && !wireguard_peer)
+    return false;
+
+  int config_type = 0;
+  std::string address = proxy.Hostname;
+  uint16_t port = proxy.Port;
+  std::string password = proxy.Password;
+  std::string username = proxy.Username;
+  std::string network;
+  std::string security;
+  bool xray_transport = false;
+
+  switch (proxy.Type) {
+  case ProxyType::VMess:
+    if (!isV2RayProfileUuid(proxy.UserId) ||
+        (target == V2RayClientTarget::V2RayNG && proxy.AlterId != 0) ||
+        !v2rayProfileVmessSecurityIsSupported(proxy) ||
+        !v2rayProfileTransport(proxy, target, network) ||
+        !v2rayProfileSecurity(proxy, security))
+      return false;
+    config_type = 1;
+    scheme = "vmess";
+    password = proxy.UserId;
+    xray_transport = true;
+    break;
+  case ProxyType::Shadowsocks:
+    if (proxy.Password.empty() || proxy.EncryptMethod.empty() ||
+        !proxy.Plugin.empty() || !proxy.PluginOption.empty() ||
+        !v2rayProfileShadowsocksIsSupported(proxy, target))
+      return false;
+    config_type = 3;
+    scheme = "shadowsocks";
+    break;
+  case ProxyType::SOCKS5:
+    config_type = 4;
+    scheme = "socks";
+    break;
+  case ProxyType::VLESS:
+    if (proxy.UserId.empty() ||
+        (!proxy.Encryption.empty() &&
+         toLower(trim(proxy.Encryption)) != "none") ||
+        (!proxy.PacketEncoding.empty() && proxy.PacketEncoding != "none") ||
+        proxy.XUDP.get(false) ||
+        !v2rayProfileTransport(proxy, target, network) ||
+        !v2rayProfileSecurity(proxy, security) ||
+        !v2rayProfileFlowIsSupported(proxy, network, security))
+      return false;
+    config_type = 5;
+    scheme = "vless";
+    password = proxy.UserId;
+    xray_transport = true;
+    break;
+  case ProxyType::Trojan:
+    if (proxy.Password.empty() ||
+        (target == V2RayClientTarget::V2RayN && !proxy.Flow.empty()) ||
+        !v2rayProfileTransport(proxy, target, network) ||
+        !v2rayProfileSecurity(proxy, security) ||
+        !v2rayProfileFlowIsSupported(proxy, network, security))
+      return false;
+    config_type = 6;
+    scheme = "trojan";
+    xray_transport = true;
+    break;
+  case ProxyType::Hysteria2:
+    {
+      const std::string obfs = toLower(trim(
+          proxy.OBFSParam.empty() ? proxy.OBFS : proxy.OBFSParam));
+      if (proxy.Password.empty() ||
+          (!proxy.OBFS.empty() && !proxy.OBFSParam.empty() &&
+           toLower(trim(proxy.OBFS)) != toLower(trim(proxy.OBFSParam))) ||
+          (!obfs.empty() && obfs != "salamander" && obfs != "gecko") ||
+          ((obfs == "salamander" || obfs == "gecko") !=
+           !proxy.OBFSPassword.empty()) ||
+          (!proxy.TLSStr.empty() && toLower(trim(proxy.TLSStr)) != "tls") ||
+          (target == V2RayClientTarget::V2RayN &&
+           (!proxy.Alpn.empty() || !proxy.AlpnList.empty())) ||
+          (target == V2RayClientTarget::V2RayNG &&
+           (!proxy.Hysteria2RealmUrl.empty() || obfs == "gecko" ||
+            !proxy.PublicKey.empty())))
+        return false;
+      if (obfs == "gecko") {
+        const std::string minimum =
+            proxy.Hysteria2GeckoMinPacketSize.empty()
+                ? std::string("512")
+                : proxy.Hysteria2GeckoMinPacketSize;
+        const std::string maximum =
+            proxy.Hysteria2GeckoMaxPacketSize.empty()
+                ? std::string("1200")
+                : proxy.Hysteria2GeckoMaxPacketSize;
+        if (!regMatch(minimum, "^[1-9][0-9]*$") ||
+            !regMatch(maximum, "^[1-9][0-9]*$") || minimum.size() > 4 ||
+            maximum.size() > 4 || to_int(minimum, 0) > to_int(maximum, 0) ||
+            to_int(maximum, 0) > 2048)
+          return false;
+      } else if (!proxy.Hysteria2GeckoMinPacketSize.empty() ||
+                 !proxy.Hysteria2GeckoMaxPacketSize.empty()) {
+        return false;
+      }
+    }
+    config_type = 7;
+    scheme = "hysteria2";
+    security = "tls";
+    break;
+  case ProxyType::TUIC:
+  {
+      static const string_array congestion_controls = {"cubic", "new_reno",
+                                                       "bbr"};
+      const std::string congestion =
+          toLower(trim(proxy.CongestionControl));
+      if (target != V2RayClientTarget::V2RayN ||
+          !isV2RayProfileUuid(proxy.UserId) || proxy.Password.empty() ||
+          !proxy.token.empty() ||
+          (!proxy.UdpRelayMode.empty() &&
+           toLower(trim(proxy.UdpRelayMode)) != "native") ||
+          proxy.ReduceRtt.get(false) || proxy.DisableSni.get(false) ||
+          !proxy.Fingerprint.empty() ||
+          (!congestion.empty() &&
+           std::find(congestion_controls.begin(), congestion_controls.end(),
+                     congestion) == congestion_controls.end()) ||
+          proxy.RequestTimeout != 15000 ||
+          !v2rayProfileSecurity(proxy, security))
+        return false;
+  }
+    config_type = 8;
+    scheme = "tuic";
+    username = proxy.UserId;
+    break;
+  case ProxyType::WireGuard:
+    if (!wireguard_peer || proxy.PrivateKey.empty() ||
+        !proxy.UnderlyingProxy.empty() ||
+        wireGuardLocalAddresses(proxy).empty() ||
+        wireguard_peer->Hostname.empty() || wireguard_peer->Port == 0 ||
+        wireguard_peer->PublicKey.empty() ||
+        (!wireguard_peer->AllowedIPs.empty() &&
+         wireguard_peer->AllowedIPs != "0.0.0.0/0, ::/0") ||
+        wireguard_peer->KeepAlive != 0 ||
+        !proxy.WireGuardInterfaceName.empty() ||
+        !proxy.WireGuardSystem.is_undef() || proxy.WireGuardListenPort != 0 ||
+        proxy.WireGuardWorkers != 0)
+      return false;
+    config_type = 9;
+    scheme = "wireguard";
+    address = wireguard_peer->Hostname;
+    port = wireguard_peer->Port;
+    password = proxy.PrivateKey;
+    break;
+  case ProxyType::HTTP:
+    config_type = 10;
+    scheme = "http";
+    break;
+  case ProxyType::AnyTLS:
+    if (target != V2RayClientTarget::V2RayN || proxy.Password.empty() ||
+        proxy.IdleSessionCheckInterval != 30 ||
+        proxy.IdleSessionTimeout != 30 || proxy.MinIdleSession != 0 ||
+        !v2rayProfileSecurity(proxy, security))
+      return false;
+    config_type = 11;
+    scheme = "anytls";
+    break;
+  case ProxyType::Naive:
+  {
+      static const string_array congestion_controls = {"bbr", "bbr2",
+                                                       "cubic", "reno"};
+      const std::string congestion =
+          toLower(trim(proxy.CongestionControl));
+      if (target != V2RayClientTarget::V2RayN || proxy.Password.empty() ||
+          !proxy.AlpnList.empty() || !proxy.Alpn.empty() ||
+          !proxy.Fingerprint.empty() || proxy.AllowInsecure.get(false) ||
+          ext.skip_cert_verify.get(false) ||
+          (!congestion.empty() &&
+           std::find(congestion_controls.begin(), congestion_controls.end(),
+                     congestion) == congestion_controls.end()) ||
+          !v2rayProfileSecurity(proxy, security))
+        return false;
+  }
+    config_type = 12;
+    scheme = "naive";
+    break;
+  default:
+    return false;
+  }
+
+  if (address.empty() || port == 0)
+    return false;
+
+  rapidjson::StringBuffer buffer;
+  V2RayProfileWriter writer(buffer);
+  writer.StartObject();
+  writer.Key("ConfigType");
+  writer.Int(config_type);
+  writer.Key("ConfigVersion");
+  writer.Int(4);
+  if (target == V2RayClientTarget::V2RayN &&
+      (proxy.Type == ProxyType::Shadowsocks ||
+       proxy.Type == ProxyType::TUIC || proxy.Type == ProxyType::AnyTLS ||
+       proxy.Type == ProxyType::Naive ||
+       (proxy.Type == ProxyType::Hysteria2 &&
+        (!proxy.Hysteria2RealmUrl.empty() ||
+         toLower(trim(proxy.OBFSParam.empty() ? proxy.OBFS
+                                              : proxy.OBFSParam)) ==
+             "gecko")))) {
+    writer.Key("CoreType");
+    writer.Int(24);
+  }
+  writeV2RayProfileString(writer, "Remarks", proxy.Remark);
+  writeV2RayProfileString(writer, "Address", address);
+  writer.Key("Port");
+  writer.Uint(port);
+  writeV2RayProfileString(writer, "Password", password);
+  writeV2RayProfileString(writer, "Username", username);
+  // v2rayNG's current V2rayNShareItem DTO declares WgPublicKey but does not
+  // copy it into ProfileItem. Its WireGuard outbound consumes the top-level
+  // PublicKey property instead, so emit that compatibility projection only
+  // for the Android target while retaining the canonical nested field below.
+  if (target == V2RayClientTarget::V2RayNG &&
+      proxy.Type == ProxyType::WireGuard)
+    writeV2RayProfileString(writer, "PublicKey",
+                            wireguard_peer->PublicKey);
+
+  if (xray_transport) {
+    writeV2RayTransportProfile(writer, proxy, network);
+    writeV2RayTlsProfile(writer, proxy, ext, security);
+  } else if (proxy.Type == ProxyType::Hysteria2) {
+    writeV2RayProfileString(writer, "StreamSecurity", security);
+    tribool allow_insecure = ext.skip_cert_verify;
+    allow_insecure.define(proxy.AllowInsecure);
+    if (!allow_insecure.is_undef())
+      writeV2RayProfileString(writer, "AllowInsecure",
+                              allow_insecure.get() ? "true" : "false");
+    writeV2RayProfileString(writer, "Sni", proxy.ServerName);
+    if (!proxy.AlpnList.empty())
+      writeV2RayProfileString(writer, "Alpn", join(proxy.AlpnList, ","));
+    else
+      writeV2RayProfileString(writer, "Alpn", proxy.Alpn);
+    if (target == V2RayClientTarget::V2RayN)
+      writeV2RayProfileString(writer, "Cert", proxy.PublicKey);
+    writeV2RayProfileString(writer, "CertSha", proxy.Fingerprint);
+    writeV2RayProfileString(writer, "EchConfigList", proxy.Hysteria2ECH);
+  } else if (proxy.Type == ProxyType::TUIC ||
+             proxy.Type == ProxyType::AnyTLS ||
+             proxy.Type == ProxyType::Naive) {
+    writeV2RayTlsProfile(writer, proxy, ext, security);
+  }
+
+  writer.Key("ProtoExtraObj");
+  writer.StartObject();
+  switch (proxy.Type) {
+  case ProxyType::VMess:
+    writer.Key("AlterId");
+    if (target == V2RayClientTarget::V2RayN) {
+      const std::string alter_id = std::to_string(proxy.AlterId);
+      writer.String(alter_id.data(),
+                    static_cast<rapidjson::SizeType>(alter_id.size()));
+    } else {
+      writer.Uint(proxy.AlterId);
+    }
+    writeV2RayProfileString(
+        writer, "VmessSecurity",
+        proxy.EncryptMethod.empty() ? std::string("auto")
+                                    : proxy.EncryptMethod);
+    break;
+  case ProxyType::Shadowsocks:
+    writeV2RayProfileString(writer, "SsMethod", proxy.EncryptMethod);
+    break;
+  case ProxyType::VLESS:
+    writeV2RayProfileString(writer, "Flow", proxy.Flow);
+    writeV2RayProfileString(
+        writer, "VlessEncryption",
+        "none");
+    break;
+  case ProxyType::Trojan:
+    writeV2RayProfileString(writer, "Flow", proxy.Flow);
+    break;
+  case ProxyType::Hysteria2: {
+    writeV2RayProfileString(writer, "SalamanderPass", proxy.OBFSPassword);
+    writeV2RayProfileString(writer, "Hy2RealmUrl",
+                            proxy.Hysteria2RealmUrl);
+    if (toLower(trim(proxy.OBFSParam.empty() ? proxy.OBFS
+                                             : proxy.OBFSParam)) == "gecko") {
+      writeV2RayProfileString(
+          writer, "GeckoMinPacketSize",
+          proxy.Hysteria2GeckoMinPacketSize.empty()
+              ? std::string("512")
+              : proxy.Hysteria2GeckoMinPacketSize);
+      writeV2RayProfileString(
+          writer, "GeckoMaxPacketSize",
+          proxy.Hysteria2GeckoMaxPacketSize.empty()
+              ? std::string("1200")
+              : proxy.Hysteria2GeckoMaxPacketSize);
+    }
+    int up_mbps = 0;
+    int down_mbps = 0;
+    if ((!proxy.UpMbps.empty() && !parseMbpsValue(proxy.UpMbps, up_mbps)) ||
+        (!proxy.DownMbps.empty() &&
+         !parseMbpsValue(proxy.DownMbps, down_mbps))) {
+      writer.EndObject();
+      writer.EndObject();
+      return false;
+    }
+    if (up_mbps > 0) {
+      writer.Key("UpMbps");
+      writer.Int(up_mbps);
+    }
+    if (down_mbps > 0) {
+      writer.Key("DownMbps");
+      writer.Int(down_mbps);
+    }
+    if (!proxy.Ports.empty())
+      writeV2RayProfileString(writer, "Ports", hysteria2PortSpec(proxy));
+    writeV2RayProfileString(writer, "HopInterval",
+                            proxy.HysteriaHopInterval);
+    break;
+  }
+  case ProxyType::TUIC:
+    writeV2RayProfileString(writer, "CongestionControl",
+                            toLower(trim(proxy.CongestionControl)));
+    break;
+  case ProxyType::WireGuard: {
+    writeV2RayProfileString(writer, "WgPublicKey",
+                            wireguard_peer->PublicKey);
+    writeV2RayProfileString(writer, "WgPresharedKey",
+                            wireguard_peer->PreSharedKey);
+    writeV2RayProfileString(writer, "WgInterfaceAddress",
+                            join(wireGuardLocalAddresses(proxy), ","));
+    const std::string reserved = wireguard_peer->Reserved.empty()
+                                     ? proxy.ClientId
+                                     : wireguard_peer->Reserved;
+    writeV2RayProfileString(writer, "WgReserved", reserved);
+    if (proxy.Mtu > 0) {
+      writer.Key("WgMtu");
+      writer.Uint(proxy.Mtu);
+    }
+    break;
+  }
+  case ProxyType::Naive:
+    writeV2RayProfileString(writer, "CongestionControl",
+                            toLower(trim(proxy.CongestionControl)));
+    if (proxy.NaiveInsecureConcurrency > 0) {
+      writer.Key("InsecureConcurrency");
+      writer.Uint(proxy.NaiveInsecureConcurrency);
+    }
+    if (!proxy.NaiveQuic.is_undef()) {
+      writer.Key("NaiveQuic");
+      writer.Bool(proxy.NaiveQuic.get());
+    }
+    if (!proxy.NaiveUot.is_undef()) {
+      writer.Key("Uot");
+      writer.Bool(proxy.NaiveUot.get());
+    }
+    break;
+  default:
+    break;
+  }
+  writer.EndObject();
+  writer.EndObject();
+  payload.assign(buffer.GetString(), buffer.GetSize());
+  return true;
+}
+
+} // namespace
+
+std::string proxyToV2RayClient(std::vector<Proxy> &nodes,
+                               V2RayClientTarget target,
+                               extra_settings &ext) {
+  TargetGenerationStats &generation_stats = ext.target_generation_stats;
+  generation_stats = TargetGenerationStats{};
+  generation_stats.input_nodes = nodes.size();
+  std::string all_links;
+
+  for (const Proxy &proxy : nodes) {
+    TargetNodeGenerationTracker generation_tracker(generation_stats,
+                                                   proxy.Type);
+    bool emitted = false;
+    std::string node_links;
+    const std::vector<WireGuardPeer> peers =
+        proxy.Type == ProxyType::WireGuard ? wireGuardPeers(proxy)
+                                           : std::vector<WireGuardPeer>{};
+    const size_t profile_count =
+        proxy.Type == ProxyType::WireGuard ? peers.size() : 1;
+    for (size_t index = 0; index < profile_count; ++index) {
+      const WireGuardPeer *peer =
+          proxy.Type == ProxyType::WireGuard ? &peers[index] : nullptr;
+      Proxy profile_proxy = proxy;
+      if (proxy.Type == ProxyType::WireGuard && peers.size() > 1)
+        profile_proxy.Remark += " [Peer " + std::to_string(index + 1) + "]";
+      std::string scheme;
+      std::string payload;
+      if (!writeV2RayProfilePayload(profile_proxy, target, ext, peer, scheme,
+                                    payload)) {
+        emitted = false;
+        break;
+      }
+      node_links += "v2rayn://" + scheme + "/" +
+                    urlSafeBase64Encode(payload) + "\n";
+      emitted = true;
+    }
+    if (emitted) {
+      all_links += node_links;
+      generation_tracker.markEmitted();
+    }
+  }
+
+  if (ext.nodelist)
+    return all_links;
+  return base64Encode(all_links);
+}
+
 std::string proxyToSingle(std::vector<Proxy> &nodes, SingleLinkTypes types,
                            extra_settings &ext) {
   TargetGenerationStats &generation_stats = ext.target_generation_stats;
@@ -2714,12 +3353,26 @@ std::string proxyToSingle(std::vector<Proxy> &nodes, SingleLinkTypes types,
         appendShareQuery(query, "sni", sni);
         appendShareQuery(query, "pinSHA256", x.Fingerprint);
         appendShareQuery(query, "ech", x.Hysteria2ECH);
-        const std::string port_spec = hysteria2PortSpec(x);
-        proxyStr = "hysteria2://" +
-                   (password.empty() ? std::string()
-                                     : urlEncode(password) + "@") +
-                   shareLinkHost(hostname) + ":" + port_spec + "/" +
-                   joinShareQuery(query) + "#" + urlEncode(remark);
+        appendShareQuery(query, "minPacketSize",
+                         x.Hysteria2GeckoMinPacketSize);
+        appendShareQuery(query, "maxPacketSize",
+                         x.Hysteria2GeckoMaxPacketSize);
+        if (!x.Hysteria2RealmUrl.empty()) {
+          appendShareQuery(query, "auth", password);
+          proxyStr = "hysteria2+" + x.Hysteria2RealmUrl;
+          const std::string query_string = joinShareQuery(query);
+          if (!query_string.empty())
+            proxyStr += (proxyStr.find('?') == std::string::npos ? "?" : "&") +
+                        query_string.substr(1);
+          proxyStr += "#" + urlEncode(remark);
+        } else {
+          const std::string port_spec = hysteria2PortSpec(x);
+          proxyStr = "hysteria2://" +
+                     (password.empty() ? std::string()
+                                       : urlEncode(password) + "@") +
+                     shareLinkHost(hostname) + ":" + port_spec + "/" +
+                     joinShareQuery(query) + "#" + urlEncode(remark);
+        }
       }
       break;
     case ProxyType::VLESS:
@@ -4484,7 +5137,9 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
           !loonQuotedScalarIsSafe(password) || !x.UpMbps.empty() ||
           !x.Ports.empty() || !x.Hysteria2ECH.empty() || !x.Alpn.empty() ||
           !x.AlpnList.empty() || !x.PublicKey.empty() || !x.OBFS.empty() ||
-          !x.HysteriaHopInterval.empty() ||
+          !x.HysteriaHopInterval.empty() || !x.Hysteria2RealmUrl.empty() ||
+          !x.Hysteria2GeckoMinPacketSize.empty() ||
+          !x.Hysteria2GeckoMaxPacketSize.empty() ||
           (!x.ServerName.empty() &&
            !loonProxyScalarIsSafe(x.ServerName)) ||
           (!x.Fingerprint.empty() &&
@@ -5126,6 +5781,10 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
       break;
     }
     case ProxyType::Hysteria2: {
+      if (!x.Hysteria2RealmUrl.empty() ||
+          !x.Hysteria2GeckoMinPacketSize.empty() ||
+          !x.Hysteria2GeckoMaxPacketSize.empty())
+        continue;
       addSingBoxCommonMembers(proxy, x, "hysteria2", allocator);
       proxy.AddMember("password", rapidjson::StringRef(x.Password.c_str()),
                       allocator);
