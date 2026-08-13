@@ -933,8 +933,6 @@ void anyTlSConstruct(Proxy &node, const std::string &group, const std::string &r
     node.IdleSessionCheckInterval = idleSessionCheckInterval;
     node.IdleSessionTimeout = idleSessionTimeout;
     node.MinIdleSession = minIdleSession;
-    node.TLSSecure = true;
-    node.TLSStr = "tls";
 }
 
 void naiveConstruct(Proxy &node, const std::string &group,
@@ -1061,8 +1059,6 @@ void tuicConstruct(Proxy &node, const std::string &group, const std::string &rem
     node.UdpRelayMode = udpRelayMode;
     node.token = token;
     node.RequestTimeout = request_timeout;
-    node.TLSSecure = true;
-    node.TLSStr = "tls";
 }
 
 
