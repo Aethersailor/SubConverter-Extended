@@ -1149,6 +1149,7 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
     case ProxyType::Snell:
       if ((clashR && x.SnellVersion >= 4) || x.SnellVersion > 5 ||
           !x.Path.empty() || !x.SnellMode.empty() || x.SnellUDPPort != 0 ||
+          !x.SnellUserKey.empty() || !x.SnellNetwork.empty() ||
           (!x.SnellReuse.is_undef() && x.SnellVersion != 4 &&
            x.SnellVersion != 5))
         continue;
@@ -2321,6 +2322,7 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
           x.SnellVersion == 0 ? 1 : x.SnellVersion;
       if (surge_ver < 3 || surge_ver == -3 || snell_version > 6 ||
           x.Password.empty() ||
+          !x.SnellUserKey.empty() || !x.SnellNetwork.empty() ||
           (snell_version == 6 &&
            (!x.OBFS.empty() || !x.Host.empty() || !x.Path.empty())) ||
           (!x.OBFS.empty() && x.OBFS != "http" &&
@@ -4841,6 +4843,7 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
   generation_stats.input_nodes = nodes.size();
   const bool add_clash_modes = effectiveSettings().singBoxAddClashModes;
   const bool wireguard_endpoint = effectiveSettings().singBoxWireGuardEndpoint;
+  const bool snell_outbound = effectiveSettings().singBoxSnellOutbound;
   using namespace rapidjson_ext;
   rapidjson::Document::AllocatorType &allocator = json.GetAllocator();
   rapidjson::Value outbounds(rapidjson::kArrayType),
@@ -4853,6 +4856,9 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
   string_array remarks_list;
   size_t wireguard_nodes_emitted = 0;
   size_t wireguard_peers_emitted = 0;
+  size_t snell_nodes_input = 0;
+  size_t snell_nodes_emitted = 0;
+  size_t snell_v5_normalized = 0;
   RemarkSet used_remarks;
   used_remarks.reserve(nodes.size());
 
@@ -5249,13 +5255,86 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
       proxy.AddMember("tls", tls, allocator);
       break;
     }
+    case ProxyType::Snell: {
+      snell_nodes_input++;
+      if (!snell_outbound || x.Password.empty() || x.Hostname.empty() ||
+          x.Port == 0 || x.SnellUDPPort != 0 ||
+          !x.ShadowTLSPassword.empty() || !x.ShadowTLSSNI.empty() ||
+          x.ShadowTLSVersion != 0 || !x.Path.empty() ||
+          !x.UnderlyingProxy.empty() || !x.TransferProtocol.empty() ||
+          !x.TLSStr.empty() || x.TLSSecure || !x.PublicKey.empty() ||
+          !x.PrivateKey.empty() || !x.PreSharedKey.empty() ||
+          !x.ServerName.empty() || !x.SNI.empty() ||
+          !x.Fingerprint.empty() || !x.Alpn.empty() ||
+          !x.AlpnList.empty() || x.SnellUserKey.size() > 255 ||
+          (!x.SnellNetwork.empty() && x.SnellNetwork != "tcp" &&
+           x.SnellNetwork != "udp"))
+        continue;
+
+      const bool normalize_v5 = x.SnellVersion == 5;
+      uint16_t output_version = normalize_v5 ? 4 : x.SnellVersion;
+      if (output_version != 4 && output_version != 6)
+        continue;
+
+      if (output_version == 4) {
+        if (!x.SnellMode.empty() ||
+            (!x.OBFS.empty() && x.OBFS != "none" && x.OBFS != "http") ||
+            (!x.Host.empty() && x.OBFS != "http") ||
+            !x.OBFSParam.empty())
+          continue;
+      } else if (x.Password.size() < 12 || x.Password.size() > 255 ||
+                 !x.OBFS.empty() || !x.OBFSParam.empty() ||
+                 !x.Host.empty() ||
+                 (!x.SnellMode.empty() && x.SnellMode != "default" &&
+                  x.SnellMode != "unshaped" &&
+                  x.SnellMode != "unsafe-raw")) {
+        continue;
+      }
+
+      addSingBoxCommonMembers(proxy, x, "snell", allocator);
+      proxy.AddMember("version", output_version, allocator);
+      proxy.AddMember("psk", rapidjson::StringRef(x.Password.c_str()),
+                      allocator);
+      if (!x.SnellUserKey.empty())
+        proxy.AddMember("userkey",
+                        rapidjson::StringRef(x.SnellUserKey.c_str()),
+                        allocator);
+      if (!x.SnellReuse.is_undef())
+        proxy.AddMember("reuse", buildBooleanValue(x.SnellReuse), allocator);
+
+      std::string network;
+      if (!ext.udp.is_undef())
+        network = ext.udp ? std::string() : "tcp";
+      else if (!x.SnellNetwork.empty())
+        network = x.SnellNetwork;
+      else if (!x.UDP.is_undef() && !x.UDP)
+        network = "tcp";
+      if (!network.empty())
+        proxy.AddMember("network", rapidjson::Value(network.c_str(), allocator),
+                        allocator);
+
+      if (output_version == 4 && x.OBFS == "http") {
+        proxy.AddMember("obfs_mode", "http", allocator);
+        if (!x.Host.empty())
+          proxy.AddMember("obfs_host",
+                          rapidjson::StringRef(x.Host.c_str()), allocator);
+      }
+      if (output_version == 6 && !x.SnellMode.empty())
+        proxy.AddMember("mode", rapidjson::StringRef(x.SnellMode.c_str()),
+                        allocator);
+      if (normalize_v5)
+        snell_v5_normalized++;
+      snell_nodes_emitted++;
+      break;
+    }
     default:
       continue;
     }
     // Hysteria v1 builds its mandatory TLS object in the protocol-specific
     // branch above. Adding the generic object as well would serialize a
     // duplicate `tls` key, leaving precedence up to the JSON consumer.
-    if (x.TLSSecure && x.Type != ProxyType::Hysteria) {
+    if (x.TLSSecure && x.Type != ProxyType::Hysteria &&
+        x.Type != ProxyType::Snell) {
       rapidjson::Value tls(rapidjson::kObjectType);
       tls.AddMember("enabled", true, allocator);
       if (!x.ServerName.empty())
@@ -5303,6 +5382,7 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
     // field. Other supported outbounds use this field to apply a TCP-only
     // override when UDP is disabled globally.
     if (!udp.is_undef() && !udp && x.Type != ProxyType::AnyTLS &&
+        x.Type != ProxyType::Snell &&
         !(x.Type == ProxyType::Hysteria &&
           !x.TransferProtocol.empty())) {
       proxy.AddMember("network", "tcp", allocator);
@@ -5323,6 +5403,17 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
                  std::string(wireguard_endpoint ? "endpoint" : "outbound") +
                  " nodes=" + std::to_string(wireguard_nodes_emitted) +
                  " peers=" + std::to_string(wireguard_peers_emitted));
+  }
+
+  if (snell_nodes_input > 0) {
+    writeLog(LOG_LEVEL_INFO,
+             "SINGBOX_SNELL_GENERATION enabled=" +
+                 std::string(snell_outbound ? "true" : "false") +
+                 " input=" + std::to_string(snell_nodes_input) +
+                 " emitted=" + std::to_string(snell_nodes_emitted) +
+                 " normalized_v5=" + std::to_string(snell_v5_normalized) +
+                 " minimum_version=" +
+                 std::string(snell_nodes_emitted > 0 ? "1.14.0" : "none"));
   }
 
   if (ext.nodelist) {

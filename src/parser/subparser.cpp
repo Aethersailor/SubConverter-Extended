@@ -4730,6 +4730,7 @@ void explodeNetchConf(std::string netch, std::vector<Proxy> &nodes) {
 
 int explodeConfContent(const std::string &content, std::vector<Proxy> &nodes) {
     ConfType filetype = ConfType::Unknow;
+    bool looks_like_singbox = false;
 
     const auto first_non_space = std::find_if_not(
         content.begin(), content.end(),
@@ -4759,22 +4760,32 @@ int explodeConfContent(const std::string &content, std::vector<Proxy> &nodes) {
                                         value.HasMember("Port");
                              }))
             filetype = ConfType::Netch;
+        if (!structured_json.HasParseError() && structured_json.IsObject()) {
+            looks_like_singbox =
+                (structured_json.HasMember("outbounds") &&
+                 structured_json["outbounds"].IsArray()) ||
+                (structured_json.HasMember("endpoints") &&
+                 structured_json["endpoints"].IsArray());
+        }
     }
 
-    if (filetype == ConfType::Unknow && strFind(content, "\"version\""))
-        filetype = ConfType::SS;
-    else if (strFind(content, "\"serverSubscribes\""))
-        filetype = ConfType::SSR;
-    else if (strFind(content, "\"uiItem\"") || strFind(content, "vnext"))
-        filetype = ConfType::V2Ray;
-    else if (strFind(content, "\"proxy_apps\""))
-        filetype = ConfType::SSConf;
-    else if (strFind(content, "\"idInUse\""))
-        filetype = ConfType::SSTap;
-    else if (strFind(content, "\"local_address\"") && strFind(content, "\"local_port\""))
-        filetype = ConfType::SSR; //use ssr config parser
-    else if (strFind(content, "\"ModeFileNameType\""))
-        filetype = ConfType::Netch;
+    if (!looks_like_singbox) {
+        if (filetype == ConfType::Unknow && strFind(content, "\"version\""))
+            filetype = ConfType::SS;
+        else if (strFind(content, "\"serverSubscribes\""))
+            filetype = ConfType::SSR;
+        else if (strFind(content, "\"uiItem\"") || strFind(content, "vnext"))
+            filetype = ConfType::V2Ray;
+        else if (strFind(content, "\"proxy_apps\""))
+            filetype = ConfType::SSConf;
+        else if (strFind(content, "\"idInUse\""))
+            filetype = ConfType::SSTap;
+        else if (strFind(content, "\"local_address\"") &&
+                 strFind(content, "\"local_port\""))
+            filetype = ConfType::SSR; //use ssr config parser
+        else if (strFind(content, "\"ModeFileNameType\""))
+            filetype = ConfType::Netch;
+    }
 
     switch (filetype) {
         case ConfType::SS:
@@ -4930,6 +4941,170 @@ bool explodeSingboxWireGuardNode(const rapidjson::Value &singboxNode,
            !node.WireGuardPeers.empty();
 }
 
+bool singBoxSnellMembersSupported(const rapidjson::Value &value) {
+    static constexpr const char *allowed[] = {
+        "type",       "tag",          "server",      "server_port",
+        "version",    "psk",          "userkey",     "reuse",
+        "network",    "obfs_mode",    "obfs_host",   "mode",
+        "tcp_fast_open",
+    };
+    for (auto member = value.MemberBegin(); member != value.MemberEnd(); ++member) {
+        bool known = false;
+        for (const char *name : allowed) {
+            if (std::string(member->name.GetString(),
+                            member->name.GetStringLength()) == name) {
+                known = true;
+                break;
+            }
+        }
+        if (!known)
+            return false;
+    }
+    return true;
+}
+
+bool parseSingBoxSnellNetwork(const rapidjson::Value &value,
+                              std::string &network) {
+    bool has_tcp = false, has_udp = false;
+    auto add_network = [&](const rapidjson::Value &item) {
+        if (!item.IsString())
+            return false;
+        const std::string candidate = item.GetString();
+        if (candidate == "tcp") {
+            if (has_tcp)
+                return false;
+            has_tcp = true;
+            return true;
+        }
+        if (candidate == "udp") {
+            if (has_udp)
+                return false;
+            has_udp = true;
+            return true;
+        }
+        return false;
+    };
+
+    if (value.IsString()) {
+        if (!add_network(value))
+            return false;
+    } else if (value.IsArray()) {
+        if (value.Empty())
+            return false;
+        for (const auto &item : value.GetArray()) {
+            if (!add_network(item))
+                return false;
+        }
+    } else {
+        return false;
+    }
+
+    network = has_tcp && has_udp ? std::string() : has_tcp ? "tcp" : "udp";
+    return has_tcp || has_udp;
+}
+
+bool explodeSingboxSnellNode(const rapidjson::Value &singboxNode,
+                             Proxy &node) {
+    auto reject = [](const char *reason) {
+        writeLog(LOG_LEVEL_DEBUG,
+                 "SINGBOX_SNELL_IMPORT_REJECTED reason=" +
+                     std::string(reason));
+        return false;
+    };
+    if (!singboxNode.IsObject() ||
+        !singBoxSnellMembersSupported(singboxNode) ||
+        !singboxNode.HasMember("server") ||
+        !singboxNode["server"].IsString() ||
+        !singboxNode.HasMember("server_port") ||
+        !singboxNode["server_port"].IsUint() ||
+        !singboxNode.HasMember("version") ||
+        !singboxNode["version"].IsUint() ||
+        !singboxNode.HasMember("psk") || !singboxNode["psk"].IsString())
+        return reject("schema");
+
+    const std::string server = singboxNode["server"].GetString();
+    const unsigned int port = singboxNode["server_port"].GetUint();
+    const unsigned int version = singboxNode["version"].GetUint();
+    const std::string password = singboxNode["psk"].GetString();
+    if (server.empty() || port == 0 || port > 65535 || password.empty() ||
+        (version != 4 && version != 6))
+        return reject("required-field");
+
+    std::string remarks;
+    if (singboxNode.HasMember("tag")) {
+        if (!singboxNode["tag"].IsString())
+            return reject("tag-type");
+        remarks = singboxNode["tag"].GetString();
+    }
+
+    std::string userkey;
+    if (singboxNode.HasMember("userkey")) {
+        if (!singboxNode["userkey"].IsString())
+            return reject("userkey-type");
+        userkey = singboxNode["userkey"].GetString();
+        if (userkey.size() > 255)
+            return reject("userkey-length");
+    }
+
+    tribool reuse, tfo;
+    if (singboxNode.HasMember("reuse")) {
+        if (!singboxNode["reuse"].IsBool())
+            return reject("reuse-type");
+        reuse = singboxNode["reuse"].GetBool();
+    }
+    if (singboxNode.HasMember("tcp_fast_open")) {
+        if (!singboxNode["tcp_fast_open"].IsBool())
+            return reject("tcp-fast-open-type");
+        tfo = singboxNode["tcp_fast_open"].GetBool();
+    }
+
+    std::string network;
+    if (singboxNode.HasMember("network") &&
+        !parseSingBoxSnellNetwork(singboxNode["network"], network))
+        return reject("network");
+
+    std::string obfs, obfs_host, mode;
+    if (singboxNode.HasMember("obfs_mode")) {
+        if (!singboxNode["obfs_mode"].IsString())
+            return reject("obfs-mode-type");
+        obfs = singboxNode["obfs_mode"].GetString();
+    }
+    if (singboxNode.HasMember("obfs_host")) {
+        if (!singboxNode["obfs_host"].IsString())
+            return reject("obfs-host-type");
+        obfs_host = singboxNode["obfs_host"].GetString();
+    }
+    if (singboxNode.HasMember("mode")) {
+        if (!singboxNode["mode"].IsString())
+            return reject("mode-type");
+        mode = singboxNode["mode"].GetString();
+    }
+
+    if (version == 4) {
+        if (!mode.empty() || (obfs != "" && obfs != "none" && obfs != "http") ||
+            (!obfs_host.empty() && obfs != "http"))
+            return reject("version-4-fields");
+        if (obfs == "none")
+            obfs.clear();
+    } else {
+        if (password.size() < 12 || password.size() > 255 || !obfs.empty() ||
+            !obfs_host.empty() ||
+            (mode != "" && mode != "default" && mode != "unshaped" &&
+             mode != "unsafe-raw"))
+            return reject("version-6-fields");
+    }
+
+    snellConstruct(node, SNELL_DEFAULT_GROUP, remarks, server,
+                   std::to_string(port), password, obfs, obfs_host, "",
+                   static_cast<uint16_t>(version), reuse,
+                   network == "tcp" ? tribool(false) : tribool(true), tfo,
+                   tribool());
+    node.SnellUserKey = userkey;
+    node.SnellNetwork = network;
+    node.SnellMode = mode;
+    return true;
+}
+
 } // namespace
 
 void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
@@ -5041,6 +5216,10 @@ void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
                         plugin = GetMember(singboxNode, "plugin");
                         pluginopts = GetMember(singboxNode, "plugin_opts");
                         ssConstruct(node, group, ps, server, port, password, cipher, plugin, pluginopts, udp, tfo, scv);
+                        break;
+                    case "snell"_hash:
+                        if (!explodeSingboxSnellNode(singboxNode, node))
+                            continue;
                         break;
                     case "trojan"_hash:
                         if (tls != "tls" && tls != "reality")

@@ -132,6 +132,8 @@ namespace qjs
 
             JS_DefinePropertyValueStr(ctx, obj, "SnellVersion", JS_NewInt32(ctx, n.SnellVersion), JS_PROP_C_W_E);
             JS_DefinePropertyValueStr(ctx, obj, "SnellReuse", js_traits<tribool>::wrap(ctx, n.SnellReuse), JS_PROP_C_W_E);
+            JS_DefinePropertyValueStr(ctx, obj, "SnellUserKey", JS_NewString(ctx, n.SnellUserKey), JS_PROP_C_W_E);
+            JS_DefinePropertyValueStr(ctx, obj, "SnellNetwork", JS_NewString(ctx, n.SnellNetwork), JS_PROP_C_W_E);
             JS_DefinePropertyValueStr(ctx, obj, "SnellMode", JS_NewString(ctx, n.SnellMode), JS_PROP_C_W_E);
             JS_DefinePropertyValueStr(ctx, obj, "SnellUDPPort", JS_NewUint32(ctx, n.SnellUDPPort), JS_PROP_C_W_E);
             JS_DefinePropertyValueStr(ctx, obj, "ShadowTLSPassword", JS_NewString(ctx, n.ShadowTLSPassword), JS_PROP_C_W_E);
@@ -204,6 +206,8 @@ namespace qjs
 
             node.SnellVersion = unwrap_free<int32_t>(ctx, v, "SnellVersion");
             node.SnellReuse = unwrap_free<tribool>(ctx, v, "SnellReuse");
+            node.SnellUserKey = unwrap_free<std::string>(ctx, v, "SnellUserKey");
+            node.SnellNetwork = unwrap_free<std::string>(ctx, v, "SnellNetwork");
             node.SnellMode = unwrap_free<std::string>(ctx, v, "SnellMode");
             node.SnellUDPPort = unwrap_free<uint32_t>(ctx, v, "SnellUDPPort");
             node.ShadowTLSPassword = unwrap_free<std::string>(ctx, v, "ShadowTLSPassword");

@@ -92,6 +92,9 @@ struct Settings {
   // Preserve the historical sing-box WireGuard outbound by default. Newer
   // deployments can opt into the 1.11+ endpoint schema independently.
   bool singBoxWireGuardEndpoint = false;
+  // Snell outbounds require sing-box 1.14+. Keep them disabled so existing
+  // deployments on the current stable client retain their historical output.
+  bool singBoxSnellOutbound = false;
   std::string sortScript, filterScript;
 
   std::string clashBase;
