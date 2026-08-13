@@ -556,6 +556,8 @@ int script_context_init(qjs::Context &context)
             .fun<&Proxy::UpMbps>("UpMbps")
             .fun<&Proxy::DownMbps>("DownMbps")
             .fun<&Proxy::HysteriaHopInterval>("HysteriaHopInterval")
+            .fun<&Proxy::MieruHandshakeMode>("MieruHandshakeMode")
+            .fun<&Proxy::MieruTrafficPattern>("MieruTrafficPattern")
             .fun<&Proxy::Insecure>("Insecure");
         context.global().add<&makeDataURI>("makeDataURI")
             .add<&qjs_fetch>("fetch")

@@ -1181,6 +1181,10 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
         singleproxy["min-idle-session"] = x.MinIdleSession;
       break;
     case ProxyType::Mieru:
+      // Mihomo has no per-proxy Mieru MTU field. Do not silently emit a node
+      // whose explicit simple-link MTU would be lost.
+      if (x.Mtu > 0)
+        continue;
       singleproxy["type"] = "mieru";
       if (!x.Password.empty()) {
         singleproxy["password"] = x.Password;
@@ -1193,6 +1197,12 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
       }
       if (!x.TransferProtocol.empty()) {
         singleproxy["transport"] = x.TransferProtocol;
+      }
+      if (!x.MieruHandshakeMode.empty()) {
+        singleproxy["handshake-mode"] = x.MieruHandshakeMode;
+      }
+      if (!x.MieruTrafficPattern.empty()) {
+        singleproxy["traffic-pattern"] = x.MieruTrafficPattern;
       }
       if (!x.Ports.empty()) {
         singleproxy["port-range"] = x.Ports;

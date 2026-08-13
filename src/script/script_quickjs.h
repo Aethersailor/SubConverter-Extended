@@ -158,6 +158,8 @@ namespace qjs
             JS_DefinePropertyValueStr(ctx, obj, "UpMbps", JS_NewString(ctx, n.UpMbps), JS_PROP_C_W_E);
             JS_DefinePropertyValueStr(ctx, obj, "DownMbps", JS_NewString(ctx, n.DownMbps), JS_PROP_C_W_E);
             JS_DefinePropertyValueStr(ctx, obj, "HysteriaHopInterval", JS_NewString(ctx, n.HysteriaHopInterval), JS_PROP_C_W_E);
+            JS_DefinePropertyValueStr(ctx, obj, "MieruHandshakeMode", JS_NewString(ctx, n.MieruHandshakeMode), JS_PROP_C_W_E);
+            JS_DefinePropertyValueStr(ctx, obj, "MieruTrafficPattern", JS_NewString(ctx, n.MieruTrafficPattern), JS_PROP_C_W_E);
             JS_DefinePropertyValueStr(ctx, obj, "Insecure", JS_NewString(ctx, n.Insecure), JS_PROP_C_W_E);
             return obj;
         }
@@ -228,6 +230,8 @@ namespace qjs
             node.UpMbps = unwrap_free<std::string>(ctx, v, "UpMbps");
             node.DownMbps = unwrap_free<std::string>(ctx, v, "DownMbps");
             node.HysteriaHopInterval = unwrap_free<std::string>(ctx, v, "HysteriaHopInterval");
+            node.MieruHandshakeMode = unwrap_free<std::string>(ctx, v, "MieruHandshakeMode");
+            node.MieruTrafficPattern = unwrap_free<std::string>(ctx, v, "MieruTrafficPattern");
             node.Insecure = unwrap_free<std::string>(ctx, v, "Insecure");
             
             return node;

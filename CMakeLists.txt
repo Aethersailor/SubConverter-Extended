@@ -133,6 +133,7 @@ SET(SUBCONVERTER_RUNTIME_SOURCES
     src/handler/settings_view.cpp
     src/handler/sub_request_key.cpp
     src/parser/infoparser.cpp
+    src/parser/mieru_uri.cpp
     src/parser/subparser.cpp
     src/parser/mihomo_bridge.cpp
     src/script/cron.cpp
@@ -498,6 +499,13 @@ IF(BUILD_TESTS)
     ADD_TEST(NAME proxy_provider_direct COMMAND proxy_provider_direct_test)
     SET_TESTS_PROPERTIES(proxy_provider_direct PROPERTIES LABELS fast)
 
+    ADD_EXECUTABLE(mieru_uri_test
+        tests/mieru_uri_test.cpp
+        src/parser/mieru_uri.cpp)
+    TARGET_INCLUDE_DIRECTORIES(mieru_uri_test PRIVATE src)
+    ADD_TEST(NAME mieru_uri COMMAND mieru_uri_test)
+    SET_TESTS_PROPERTIES(mieru_uri PROPERTIES LABELS fast)
+
     ADD_EXECUTABLE(curl_handle_pool_test
         tests/curl_handle_pool_test.cpp
         src/handler/curl_handle_pool.cpp)
@@ -578,6 +586,7 @@ IF(BUILD_TESTS)
         sub_request_key_test
         proxy_provider_interval_test
         proxy_provider_direct_test
+        mieru_uri_test
         curl_handle_pool_test
         file_scope_test
         preference_file_test
@@ -602,6 +611,7 @@ ADD_LIBRARY(${BUILD_TARGET_NAME} STATIC
     src/generator/config/subexport.cpp
     src/generator/template/templates.cpp
     src/lib/wrapper.cpp
+    src/parser/mieru_uri.cpp
     src/parser/subparser.cpp
     src/utils/base64/base64.cpp
     src/utils/codepage.cpp

@@ -132,6 +132,8 @@ SubConverter-Extended 因此诞生。它是一款更贴合 Mihomo 使用场景�
 
 Legacy 解析器对经典格式的兼容范围包括：Shadowsocks SIP002（含 AEAD-2022、插件和 IPv6）、SIP008/旧版 JSON 输入、历史 SSR 链接、v2rayN `socks://` 新旧格式、Telegram 和 Base64 authority 形式的 HTTP(S) 代理链接，以及 Surge、Loon、Mihomo 和 sing-box 新旧结构中的 WireGuard 节点。它也会校准 Hysteria v1 的官方 URI、Mihomo YAML 与 sing-box JSON 字段，以及 Surge Snell v1-v6 的 `version`、`reuse`、HTTP/TLS obfs、`udp-port`、v6 `mode` 和 Shadow TLS 字段；输出时仍会按目标客户端的稳定能力过滤不可表示的组合。普通 HTTP(S) URL 仍按订阅处理；`socks5://` 仍属于 Mihomo 路径，不会借此改动进入 Legacy 解析器。解析成功不代表每个目标客户端都能表示对应协议，最终仍由目标生成器筛选。
 
+Mieru 的 Legacy 支持仅覆盖官方可读的 `mierus://` 简化链接。解析器会校验 profile、MTU、复用等级、握手模式和 traffic-pattern 的 Base64/protobuf 外层格式，并按成对出现的 `port` / `protocol` 展开多端口配置。`mieru://` 是完整客户端 protobuf 配置的 Base64，不由人工解析器猜测或降级；该格式在 Legacy 路径会明确解析失败。`target=clash` 和 `target=clashr` 仍只调用 Mihomo，本轮改动不会替换或回退其 Mieru 解析结果。
+
 ### 🔥 独特功能
 
 #### 1. Proxy-Provider 模式 🛡️

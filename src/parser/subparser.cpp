@@ -16,6 +16,7 @@
 #include "utils/urlencode.h"
 #include "utils/yamlcpp_extra.h"
 #include "config/proxy.h"
+#include "mieru_uri.h"
 #include "subparser.h"
 #include "utils/logger.h"
 
@@ -1866,21 +1867,12 @@ void explodeVless(std::string vless, Proxy &node) {
 }
 
 void explodeMierus(std::string mierus, Proxy &node) {
-    if (strFind(mierus, "mierus://")) {
-        if (regMatch(mierus, "mierus://(.*?)@(.*)")) {
-            explodeStdMieru(mierus.substr(9), node);
-        } else {
-            mierus = urlSafeBase64Decode(mierus.substr(9));
-            explodeStdMieru("mierus://" + mierus, node);
-        }
-    } else if (strFind(mierus, "mieru://")) {
-        if (regMatch(mierus, "mierus://(.*?)@(.*)")) {
-            explodeStdMieru(mierus.substr(8), node);
-        } else {
-            mierus = urlSafeBase64Decode(mierus.substr(8));
-            explodeStdMieru("mierus://" + mierus, node);
-        }
-    }
+    if (!startsWith(mierus, "mierus://"))
+        return;
+    std::vector<Proxy> parsed_nodes;
+    explodeMierusNodes(mierus, parsed_nodes);
+    if (parsed_nodes.size() == 1)
+        node = std::move(parsed_nodes.front());
 }
 
 void explodeHysteria(std::string hysteria, Proxy &node) {
@@ -2088,7 +2080,8 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes) {
         std::vector<String> alpns;
         String alpn2;
         std::string fingerprint, snell_fingerprint, multiplexing,
-                    transfer_protocol, v2ray_http_upgrade;
+                    transfer_protocol, v2ray_http_upgrade,
+                    mieru_handshake_mode, mieru_traffic_pattern;
         tribool udp, tfo, scv, reuse;
         bool reduceRtt = false, disableSni = false; //tuic
         uint16_t request_timeout = 15000; //tuic
@@ -2589,7 +2582,6 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes) {
                 group = MIERU_DEFAULT_GROUP;
                 singleproxy["password"] >>= password;
                 singleproxy["username"] >>= user;
-                singleproxy["port-range"] >>= ports;
                 if (!singleproxy["multiplexing"].IsNull()) {
                     singleproxy["multiplexing"] >>= multiplexing;
                 }
@@ -2597,10 +2589,30 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes) {
                 if (!singleproxy["transport"].IsNull()) {
                     singleproxy["transport"] >>= transfer_protocol;
                 }
-                mieruConstruct(node, MIERU_DEFAULT_GROUP, ps, port, password, server, ports, user, multiplexing,
-                               transfer_protocol,
-                               udp,
-                               tribool(), scv, tribool(), "");
+                singleproxy["handshake-mode"] >>= mieru_handshake_mode;
+                singleproxy["traffic-pattern"] >>= mieru_traffic_pattern;
+                {
+                    MieruPortBinding binding;
+                    if (user.empty() || password.empty() || server.empty() ||
+                        (!ports.empty() && !port.empty() && port != "0") ||
+                        !isValidMieruMultiplexing(multiplexing) ||
+                        !isValidMieruHandshakeMode(mieru_handshake_mode) ||
+                        !isValidMieruTrafficPattern(mieru_traffic_pattern) ||
+                        !parseMieruPortBinding(ports.empty() ? port : ports,
+                                               transfer_protocol, binding))
+                        continue;
+                    const std::string normalized_port =
+                        binding.is_range ? "0" : binding.port;
+                    const std::string normalized_range =
+                        binding.is_range ? binding.port : std::string();
+                    mieruConstruct(node, MIERU_DEFAULT_GROUP, ps,
+                                   normalized_port, password, server,
+                                   normalized_range, user, multiplexing,
+                                   binding.protocol, udp, tribool(), scv,
+                                   tribool(), "");
+                    node.MieruHandshakeMode = mieru_handshake_mode;
+                    node.MieruTrafficPattern = mieru_traffic_pattern;
+                }
                 break;
             default:
                 continue;
@@ -2724,44 +2736,33 @@ void explodeStdHysteria(std::string hysteria, Proxy &node) {
 }
 
 void explodeStdMieru(std::string mieru, Proxy &node) {
-    std::string username, password, host, port, ports, profile, protocol, multiplexing, mtu, remarks;
-    std::string addition;
-    tribool udp, tfo, scv, tls13;
+    std::vector<Proxy> parsed_nodes;
+    explodeMierusNodes(mieru, parsed_nodes);
+    if (parsed_nodes.size() == 1)
+        node = std::move(parsed_nodes.front());
+}
 
-    // 去除前缀
-    string_size pos;
-
-    // 提取 remarks
-    extractRemark(mieru, remarks);
-
-    // 提取参数
-    pos = mieru.rfind("?");
-    if (pos != mieru.npos) {
-        addition = mieru.substr(pos + 1);
-        mieru.erase(pos);
-    }
-
-    // 账号密码@host
-    if (regGetMatch(mieru, R"(^(.*?):(.*?)@(.*)$)", 4, 0, &username, &password, &host))
+void explodeMierusNodes(const std::string &mieru, std::vector<Proxy> &nodes) {
+    MieruSimpleConfig config;
+    if (!parseMieruSimpleUri(mieru, config))
         return;
 
-    // 提取端口（port=多个情况）
-    port = getUrlArg(addition, "port");
-    if (port.find('-') != std::string::npos) {
-        ports = port;
+    nodes.reserve(nodes.size() + config.port_bindings.size());
+    const std::string remark_base = config.remark.empty() ? config.profile : config.remark;
+    for (const MieruPortBinding &binding : config.port_bindings) {
+        Proxy node;
+        const std::string port = binding.is_range ? "0" : binding.port;
+        const std::string ports = binding.is_range ? binding.port : std::string();
+        const std::string remark = remark_base + ":" + binding.port + "/" + binding.protocol;
+        mieruConstruct(node, MIERU_DEFAULT_GROUP, remark, port,
+                       config.password, config.host, ports, config.username,
+                       config.multiplexing, binding.protocol, tribool(true),
+                       tribool(), tribool(), tribool(), "");
+        node.Mtu = config.mtu;
+        node.MieruHandshakeMode = config.handshake_mode;
+        node.MieruTrafficPattern = config.traffic_pattern;
+        nodes.emplace_back(std::move(node));
     }
-    // 提取协议（多个 protocol）
-    protocol = getUrlArg(addition, "protocol");
-
-    multiplexing = getUrlArg(addition, "multiplexing");
-    mtu = getUrlArg(addition, "mtu");
-
-    if (remarks.empty())
-        remarks = host;
-
-    mieruConstruct(node, "MieruGroup", remarks, port,
-                   password, host, ports, username, multiplexing, protocol,
-                   udp, tfo, scv, tls13, "");
 }
 
 void explodeStdHysteria2(std::string hysteria2, Proxy &node) {
@@ -4601,7 +4602,7 @@ void explode(const std::string &link, Proxy &node) {
         explodeAnyTLS(link, node);
     else if (strFind(link, "hysteria2://") || strFind(link, "hy2://"))
         explodeHysteria2(link, node);
-    else if (strFind(link, "mierus://") || strFind(link, "mieru://"))
+    else if (startsWith(link, "mierus://") || startsWith(link, "mieru://"))
         explodeMierus(link, node);
     else if (isLink(link))
         explodeHTTPSub(link, node);
@@ -4672,9 +4673,13 @@ void explodeSub(std::string sub, std::vector<Proxy> &nodes) {
         char delimiter =
                 count(sub.begin(), sub.end(), '\n') < 1 ? count(sub.begin(), sub.end(), '\r') < 1 ? ' ' : '\r' : '\n';
         while (getline(strstream, strLink, delimiter)) {
-            Proxy node;
             if (strLink.rfind('\r') != std::string::npos)
                 strLink.erase(strLink.size() - 1);
+            if (startsWith(strLink, "mierus://")) {
+                explodeMierusNodes(strLink, nodes);
+                continue;
+            }
+            Proxy node;
             explode(strLink, node);
             if (strLink.empty() || node.Type == ProxyType::Unknown) {
                 continue;
