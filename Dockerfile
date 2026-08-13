@@ -66,6 +66,7 @@ RUN go run ../scripts/generate_param_compat.go -manifest mihomo_capabilities.jso
 RUN set -xe && \
     CGO_ENABLED=1 go build \
     -trimpath \
+    -ldflags='-s -w' \
     -buildmode=c-shared \
     -o libmihomo.so \
     . && \
@@ -78,6 +79,7 @@ RUN set -xe && \
     CGO_ENABLED=1 \
     go build ${sanitizer_flags} \
     -trimpath \
+    -ldflags='-s -w' \
     -buildmode=c-archive \
     -o libmihomo.a \
     .
