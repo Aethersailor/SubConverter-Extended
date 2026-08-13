@@ -158,9 +158,10 @@ def build_url(base_url: str, path: str, params: dict[str, str] | None = None) ->
 def decode_v2ray_internal_subscription(content: str) -> list[tuple[str, dict]]:
     profiles: list[tuple[str, dict]] = []
     for line in content.splitlines():
-        if not line.startswith("v2rayn://") or "/" not in line[10:]:
+        prefix = "v2rayn://"
+        if not line.startswith(prefix) or "/" not in line[len(prefix) :]:
             raise AssertionError(f"invalid v2rayN internal link: {line!r}")
-        scheme, payload = line[10:].split("/", 1)
+        scheme, payload = line[len(prefix) :].split("/", 1)
         payload += "=" * (-len(payload) % 4)
         profile = json.loads(base64.urlsafe_b64decode(payload))
         if profile.get("ConfigVersion") != 4:
