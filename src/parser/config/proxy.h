@@ -120,6 +120,9 @@ struct Proxy {
 
   uint16_t SnellVersion = 0;
   tribool SnellReuse;
+  String SnellUserKey;
+  // Empty means both TCP and UDP; otherwise sing-box accepts tcp or udp.
+  String SnellNetwork;
   String SnellMode;
   uint16_t SnellUDPPort = 0;
   String ShadowTLSPassword;

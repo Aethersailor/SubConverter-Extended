@@ -937,6 +937,7 @@ void readYAMLConf(YAML::Node &node,
   if (node["singbox"].IsDefined() && node["singbox"].IsMap()) {
     node["singbox"]["wireguard_endpoint"] >>
         global.singBoxWireGuardEndpoint;
+    node["singbox"]["snell_outbound"] >> global.singBoxSnellOutbound;
   }
 
   if (node["emojis"].IsDefined()) {
@@ -1257,7 +1258,8 @@ void readTOMLConf(toml::value &root,
     const auto &section_singbox = root.as_table().at("singbox");
     if (section_singbox.is_table()) {
       find_if_exist(section_singbox, "wireguard_endpoint",
-                    global.singBoxWireGuardEndpoint);
+                    global.singBoxWireGuardEndpoint, "snell_outbound",
+                    global.singBoxSnellOutbound);
     }
   }
 
@@ -1458,6 +1460,7 @@ bool readConf() {
     global.surgePolicyPath = true;
     global.surfboardPolicyPath = true;
     global.singBoxWireGuardEndpoint = false;
+    global.singBoxSnellOutbound = false;
   };
 
   std::string prefdata;
@@ -1641,6 +1644,7 @@ bool readConf() {
     ini.enter_section("singbox");
     ini.get_bool_if_exist("wireguard_endpoint",
                           global.singBoxWireGuardEndpoint);
+    ini.get_bool_if_exist("snell_outbound", global.singBoxSnellOutbound);
   }
 
   if (ini.section_exist("node_pref")) {

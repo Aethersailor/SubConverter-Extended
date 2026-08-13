@@ -5170,6 +5170,274 @@ def legacy_niche_protocol_baseline(base_url: str, fixture_base: str) -> None:
             )
 
 
+def singbox_snell_outbound_baseline(
+    default_base_url: str, enabled_base_url: str
+) -> None:
+    def reject_duplicate_json_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise AssertionError(
+                    f"sing-box output contains duplicate JSON key {key!r}"
+                )
+            result[key] = value
+        return result
+
+    def data_url(content: str, media_type: str = "text/plain") -> str:
+        encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        return f"data:{media_type};base64,{encoded}"
+
+    def convert(
+        service: str, source: str, *, target: str = "singbox", ver: str = ""
+    ) -> tuple[int, dict[str, object] | None]:
+        params = {"target": target, "url": source, "list": "true"}
+        if ver:
+            params["ver"] = ver
+        status, body, _ = request(service, "/sub", params)
+        if status != 200:
+            return status, None
+        return status, json.loads(
+            body.decode("utf-8"), object_pairs_hook=reject_duplicate_json_keys
+        )
+
+    legacy_source = data_url(
+        "[Proxy]\n"
+        "Snell V4 = snell, snell-v4.example.test, 443, "
+        "psk=snell-v4-secret, version=4, reuse=true, "
+        "obfs=http, obfs-host=cdn.example.test\n"
+        "Snell V5 = snell, snell-v5.example.test, 8443, "
+        "psk=snell-v5-secret, version=5, reuse=false\n"
+        "Snell V6 = snell, snell-v6.example.test, 9443, "
+        "psk=123456789012, version=6, reuse=true, mode=unshaped\n"
+    )
+    disabled_status, _ = convert(default_base_url, legacy_source)
+    if disabled_status != 400:
+        raise AssertionError(
+            "sing-box Snell output changed without the opt-in switch: "
+            f"HTTP {disabled_status}"
+        )
+
+    enabled_status, enabled_payload = convert(enabled_base_url, legacy_source)
+    if enabled_status != 200 or enabled_payload is None:
+        raise AssertionError(
+            f"enabled sing-box Snell conversion failed: HTTP {enabled_status}"
+        )
+    enabled_outbounds = {
+        outbound.get("tag"): outbound
+        for outbound in enabled_payload.get("outbounds", [])
+        if isinstance(outbound, dict)
+    }
+    if enabled_outbounds.get("Snell V4") != {
+        "type": "snell",
+        "tag": "Snell V4",
+        "server": "snell-v4.example.test",
+        "server_port": 443,
+        "version": 4,
+        "psk": "snell-v4-secret",
+        "reuse": True,
+        "obfs_mode": "http",
+        "obfs_host": "cdn.example.test",
+        "tcp_fast_open": True,
+    }:
+        raise AssertionError(
+            f"sing-box Snell v4 mapping drifted: {enabled_outbounds!r}"
+        )
+    if enabled_outbounds.get("Snell V5") != {
+        "type": "snell",
+        "tag": "Snell V5",
+        "server": "snell-v5.example.test",
+        "server_port": 8443,
+        "version": 4,
+        "psk": "snell-v5-secret",
+        "reuse": False,
+        "tcp_fast_open": True,
+    }:
+        raise AssertionError(
+            "non-QUIC Snell v5 was not normalized to v4 exactly: "
+            f"{enabled_outbounds!r}"
+        )
+    if enabled_outbounds.get("Snell V6") != {
+        "type": "snell",
+        "tag": "Snell V6",
+        "server": "snell-v6.example.test",
+        "server_port": 9443,
+        "version": 6,
+        "psk": "123456789012",
+        "reuse": True,
+        "mode": "unshaped",
+        "tcp_fast_open": True,
+    }:
+        raise AssertionError(
+            f"sing-box Snell v6 mapping drifted: {enabled_outbounds!r}"
+        )
+
+    native_source = data_url(
+        json.dumps(
+            {
+                "outbounds": [
+                    {
+                        "type": "snell",
+                        "tag": "Native Snell V4",
+                        "server": "native-v4.example.test",
+                        "server_port": 443,
+                        "version": 4,
+                        "psk": "native-v4-secret",
+                        "userkey": "native-user-key",
+                        "reuse": True,
+                        "network": "udp",
+                        "obfs_mode": "http",
+                        "obfs_host": "native-cdn.example.test",
+                        "tcp_fast_open": True,
+                    },
+                    {
+                        "type": "snell",
+                        "tag": "Native Snell V6",
+                        "server": "2001:db8::66",
+                        "server_port": 9443,
+                        "version": 6,
+                        "psk": "abcdefghijkl",
+                        "network": ["tcp", "udp"],
+                        "mode": "unsafe-raw",
+                    },
+                ]
+            },
+            separators=(",", ":"),
+        ),
+        "application/json",
+    )
+    native_status, native_payload = convert(enabled_base_url, native_source)
+    if native_status != 200 or native_payload is None:
+        raise AssertionError(
+            f"native sing-box Snell round trip failed: HTTP {native_status}"
+        )
+    native_outbounds = {
+        outbound.get("tag"): outbound
+        for outbound in native_payload.get("outbounds", [])
+        if isinstance(outbound, dict)
+    }
+    expected_native_v4 = {
+        "type": "snell",
+        "tag": "Native Snell V4",
+        "server": "native-v4.example.test",
+        "server_port": 443,
+        "version": 4,
+        "psk": "native-v4-secret",
+        "userkey": "native-user-key",
+        "reuse": True,
+        "network": "udp",
+        "obfs_mode": "http",
+        "obfs_host": "native-cdn.example.test",
+        "tcp_fast_open": True,
+    }
+    if native_outbounds.get("Native Snell V4") != expected_native_v4:
+        raise AssertionError(
+            f"native Snell v4 fields were not preserved: {native_outbounds!r}"
+        )
+    expected_native_v6 = {
+        "type": "snell",
+        "tag": "Native Snell V6",
+        "server": "2001:db8::66",
+        "server_port": 9443,
+        "version": 6,
+        "psk": "abcdefghijkl",
+        "mode": "unsafe-raw",
+        "tcp_fast_open": True,
+    }
+    if native_outbounds.get("Native Snell V6") != expected_native_v6:
+        raise AssertionError(
+            f"native Snell v6 fields were not preserved: {native_outbounds!r}"
+        )
+
+    invalid_nodes = (
+        {"version": 3, "psk": "legacy-secret"},
+        {"version": 5, "psk": "not-an-official-outbound"},
+        {"version": 6, "psk": "short"},
+        {"version": 6, "psk": "abcdefghijkl", "obfs_mode": "http"},
+        {"version": 4, "psk": "secret", "mode": "unshaped"},
+        {"version": 4, "psk": "secret", "network": ["tcp", "tcp"]},
+        {"version": 4, "psk": "secret", "detour": "hidden-dialer"},
+        {"version": "4", "psk": "wrong-type"},
+    )
+    for index, overrides in enumerate(invalid_nodes):
+        node: dict[str, object] = {
+            "type": "snell",
+            "tag": f"Invalid Snell {index}",
+            "server": "invalid.example.test",
+            "server_port": 443,
+        }
+        node.update(overrides)
+        source = data_url(
+            json.dumps({"outbounds": [node]}, separators=(",", ":")),
+            "application/json",
+        )
+        invalid_status, _ = convert(enabled_base_url, source)
+        if invalid_status != 400:
+            raise AssertionError(
+                f"invalid native Snell outbound was accepted: {node!r}"
+            )
+
+    mixed_source = data_url(
+        "[Proxy]\n"
+        "Safe SS = ss, safe.example.test, 8388, "
+        "encrypt-method=aes-128-gcm, password=safe-password\n"
+        "Unsupported Snell = snell, old.example.test, 443, "
+        "psk=old-secret, version=3\n"
+    )
+    mixed_status, mixed_payload = convert(enabled_base_url, mixed_source)
+    if mixed_status != 200 or mixed_payload is None:
+        raise AssertionError(
+            f"mixed sing-box output failed: HTTP {mixed_status}"
+        )
+    mixed_outbounds = mixed_payload.get("outbounds", [])
+    if not any(
+        isinstance(outbound, dict)
+        and outbound.get("tag") == "Safe SS"
+        and outbound.get("type") == "shadowsocks"
+        for outbound in mixed_outbounds
+    ) or any(
+        isinstance(outbound, dict) and outbound.get("type") == "snell"
+        for outbound in mixed_outbounds
+    ):
+        raise AssertionError(
+            f"mixed output did not skip only unsupported Snell: {mixed_payload!r}"
+        )
+
+    surge_source = data_url(
+        json.dumps(
+            {
+                "outbounds": [
+                    {
+                        "type": "snell",
+                        "tag": "Surge Must Reject",
+                        "server": "native-v4.example.test",
+                        "server_port": 443,
+                        "version": 4,
+                        "psk": "native-v4-secret",
+                        "userkey": "native-user-key",
+                        "network": "udp",
+                    }
+                ]
+            },
+            separators=(",", ":"),
+        ),
+        "application/json",
+    )
+    surge_status, _, _ = request(
+        enabled_base_url,
+        "/sub",
+        {
+            "target": "surge",
+            "ver": "4",
+            "url": surge_source,
+            "list": "true",
+        },
+    )
+    if surge_status != 400:
+        raise AssertionError(
+            "Snell userkey/network were silently discarded by Surge output"
+        )
+
+
 def wireguard_structured_conversion_baseline(
     base_url: str, endpoint_base_url: str
 ) -> None:
@@ -7512,13 +7780,29 @@ def settings_singbox_wireguard_endpoint_baseline(helper: Path) -> None:
                 raise AssertionError(
                     f"{original.suffix} legacy WireGuard schema default changed"
                 )
+            if legacy["singbox"]["snell_outbound"] is not False:
+                raise AssertionError(
+                    f"{original.suffix} legacy Snell outbound default changed"
+                )
             content = original.read_text(encoding="utf-8")
             if original.suffix == ".yml":
-                content += "\nsingbox:\n  wireguard_endpoint: true\n"
+                content += (
+                    "\nsingbox:\n"
+                    "  wireguard_endpoint: true\n"
+                    "  snell_outbound: true\n"
+                )
             elif original.suffix == ".toml":
-                content += "\n[singbox]\nwireguard_endpoint = true\n"
+                content += (
+                    "\n[singbox]\n"
+                    "wireguard_endpoint = true\n"
+                    "snell_outbound = true\n"
+                )
             else:
-                content += "\n[singbox]\nwireguard_endpoint=true\n"
+                content += (
+                    "\n[singbox]\n"
+                    "wireguard_endpoint=true\n"
+                    "snell_outbound=true\n"
+                )
             configured = temporary_path / fixture_name
             configured.write_text(content, encoding="utf-8", newline="\n")
             enabled = load_settings_snapshot(helper, configured)
@@ -7526,10 +7810,18 @@ def settings_singbox_wireguard_endpoint_baseline(helper: Path) -> None:
                 raise AssertionError(
                     f"{original.suffix} did not enable WireGuard endpoint output"
                 )
+            if enabled["singbox"]["snell_outbound"] is not True:
+                raise AssertionError(
+                    f"{original.suffix} did not enable Snell outbound output"
+                )
             reloaded = reload_settings_snapshot(helper, configured, original)
             if reloaded["singbox"]["wireguard_endpoint"] is not False:
                 raise AssertionError(
                     f"{original.suffix} hot reload retained a removed endpoint switch"
+                )
+            if reloaded["singbox"]["snell_outbound"] is not False:
+                raise AssertionError(
+                    f"{original.suffix} hot reload retained a removed Snell switch"
                 )
 
 
@@ -8563,6 +8855,31 @@ def main() -> int:
             ):
                 raise AssertionError(
                     "sing-box endpoint WireGuard diagnostics are missing"
+                )
+            snell_logs: list[str] = []
+            with running_service(
+                binary,
+                log_capture=snell_logs,
+                config_replacements=(
+                    (
+                        "[custom_openclash_rules]",
+                        "[singbox]\nsnell_outbound = true\n\n"
+                        "[custom_openclash_rules]",
+                    ),
+                    (
+                        "udp_flag = false",
+                        "# udp_flag intentionally omitted for Snell fidelity",
+                    ),
+                ),
+            ) as snell_base_url:
+                singbox_snell_outbound_baseline(base_url, snell_base_url)
+            if not snell_logs or (
+                "SINGBOX_SNELL_GENERATION enabled=true input=3 emitted=3 "
+                "normalized_v5=1 minimum_version=1.14.0"
+                not in snell_logs[0]
+            ):
+                raise AssertionError(
+                    "sing-box Snell generation diagnostics are missing"
                 )
             netch_legacy_parser_baseline(base_url)
             mieru_legacy_parser_baseline(base_url)

@@ -1028,6 +1028,41 @@ wireguard_endpoint=true
 
 </details>
 
+<details>
+<summary><strong>sing-box 1.14+ Snell outbound</strong></summary>
+
+sing-box 从 1.14 开始提供 Snell outbound。由于 1.14 目前仍处于预发布阶段，而当前稳定版 1.13 不识别 `type: "snell"`，本项目不会默认提高部署者的客户端版本要求。旧配置缺少新字段时继续跳过 sing-box Snell 输出，行为与升级前一致。
+
+确认使用 sing-box 1.14+ 后，可以显式启用：
+
+```toml
+[singbox]
+snell_outbound = true
+```
+
+```yaml
+singbox:
+  snell_outbound: true
+```
+
+```ini
+[singbox]
+snell_outbound=true
+```
+
+开关只影响 `target=singbox` 的 Snell 节点生成，不参与 Clash/ClashR 的 Mihomo 解析、Canonical JSON 或 `proxy-provider` 分流。热重载时删除字段会恢复为 `false`，旧 `pref.ini`、`pref.yml` 和 `pref.toml` 无需迁移即可继续启动。
+
+当前输出边界遵循 sing-box 官方结构：
+
+* v4 支持 `psk`、`userkey`、`reuse`、`network`，以及 `none`/`http` 混淆；
+* v6 支持 `psk`、`userkey`、`reuse`、`network` 和 `default`/`unshaped`/`unsafe-raw` 模式，并校验 PSK 为 12–255 字节；
+* 不含 QUIC 扩展的历史 v5 节点按官方兼容说明规范化为 v4；v1–v3、v5 `udp-port`、Shadow TLS、未知 Dial 字段或其他无法等价表达的组合不会被静默降级；
+* 只有实际生成 Snell 节点时，结果才要求 sing-box 1.14+。日志事件 `SINGBOX_SNELL_GENERATION` 记录启用状态、输入/输出数量、v5 规范化数量和最低版本，不记录服务器、PSK、userkey 或节点名称。
+
+在 sing-box 1.14 正式稳定且默认模板完成对应迁移前，建议使用 `list=true`，或提供已经通过 1.14 `sing-box check` 的自定义基础配置；仓库示例继续默认 `snell_outbound=false`。格式依据见 [sing-box Snell outbound](https://sing-box.sagernet.org/configuration/outbound/snell/)。
+
+</details>
+
 ---
 
 ## 🛠️ 配置说明

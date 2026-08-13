@@ -85,6 +85,7 @@ std::string sanitizedSettingsSnapshot(const Settings &settings) {
       {"singbox",
        {
            {"wireguard_endpoint", settings.singBoxWireGuardEndpoint},
+           {"snell_outbound", settings.singBoxSnellOutbound},
        }},
       {"rules",
        {
