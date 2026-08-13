@@ -40,6 +40,45 @@ MIERU_STANDARD_PROTOBUF_URI = (
 DIRECT_SS_LINK = (
     "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@direct.example.com:8389#DirectSmoke"
 )
+V2RAY_CLIENT_VMESS_LINK = "vmess://" + base64.urlsafe_b64encode(
+    json.dumps(
+        {
+            "v": "2",
+            "ps": "V2RayClientSmoke",
+            "add": "v2ray-client-smoke.example.test",
+            "port": "443",
+            "id": "33333333-3333-4333-8333-333333333333",
+            "aid": "0",
+            "scy": "auto",
+            "net": "grpc",
+            "type": "multi",
+            "path": "smoke-service",
+            "host": "",
+            "tls": "tls",
+            "sni": "v2ray-client-sni.example.test",
+        },
+        separators=(",", ":"),
+    ).encode()
+).decode().rstrip("=")
+V2RAY_CLIENT_HY2_LINK = (
+    "hysteria2://smoke-password@hy2-v2ray-client.example.test:8443"
+    "?obfs=salamander&obfs-password=smoke-obfs"
+    "&sni=hy2-v2ray-client.example.test#V2RayClientHy2"
+)
+V2RAYN_REALM_LINK = (
+    "hysteria2+realm://smoke-token@realm-v2rayn.example.test:8443/smoke-id"
+    "?auth=smoke-realm-password&stun=stun.example.test%3A3478"
+    "&sni=realm-v2rayn.example.test&obfs=gecko"
+    "&obfs-password=smoke-realm-obfs#V2RayNRealm"
+)
+V2RAYN_ANYTLS_LINK = (
+    "anytls://smoke-password@anytls-v2rayn.example.test:443"
+    "?sni=anytls-v2rayn.example.test#V2RayNAnyTLS"
+)
+V2RAYN_NAIVE_LINK = (
+    "naive+https://smoke-user:smoke-password@naive-v2rayn.example.test:443"
+    "?sni=naive-v2rayn.example.test#V2RayNNaive"
+)
 MIHOMO_ONLY_ROUTE_URI = (
     "socks5://user:pass@socks.example.test:1080#RouteProbe"
 )
@@ -114,6 +153,20 @@ def build_url(base_url: str, path: str, params: dict[str, str] | None = None) ->
     base = base_url.rstrip("/")
     query = urllib.parse.urlencode(params or {})
     return f"{base}{path}" + (f"?{query}" if query else "")
+
+
+def decode_v2ray_internal_subscription(content: str) -> list[tuple[str, dict]]:
+    profiles: list[tuple[str, dict]] = []
+    for line in content.splitlines():
+        if not line.startswith("v2rayn://") or "/" not in line[10:]:
+            raise AssertionError(f"invalid v2rayN internal link: {line!r}")
+        scheme, payload = line[10:].split("/", 1)
+        payload += "=" * (-len(payload) % 4)
+        profile = json.loads(base64.urlsafe_b64decode(payload))
+        if profile.get("ConfigVersion") != 4:
+            raise AssertionError(f"invalid v2rayN ProfileItem: {profile!r}")
+        profiles.append((scheme, profile))
+    return profiles
 
 
 def fetch_response(
@@ -641,6 +694,114 @@ def run_checks(
         assert_parser_route_isolation(base_url, timeout)
         assert_mieru_standard_mihomo_bridge(base_url, timeout)
         assert_netch_legacy_parser(base_url, timeout)
+
+        desktop_profiles = decode_v2ray_internal_subscription(
+            fetch(
+                base_url,
+                "/sub",
+                {
+                    "target": "v2rayn",
+                    "url": "|".join(
+                        (
+                            V2RAY_CLIENT_VMESS_LINK,
+                            V2RAYN_ANYTLS_LINK,
+                            V2RAYN_NAIVE_LINK,
+                            V2RAYN_REALM_LINK,
+                        )
+                    ),
+                    "config": DISABLE_RULEGEN_CONFIG,
+                    "list": "true",
+                },
+                timeout,
+            )
+        )
+        if [item[1].get("ConfigType") for item in desktop_profiles] != [
+            1,
+            11,
+            12,
+            7,
+        ]:
+            raise AssertionError(
+                f"v2rayN deployed protocol matrix drifted: {desktop_profiles!r}"
+            )
+        if any(
+            item[1].get("CoreType") != 24 for item in desktop_profiles[1:3]
+        ):
+            raise AssertionError(
+                f"v2rayN sing-box-only core mapping drifted: {desktop_profiles!r}"
+            )
+        realm_extra = desktop_profiles[3][1].get("ProtoExtraObj", {})
+        if (
+            desktop_profiles[3][1].get("CoreType") != 24
+            or not realm_extra.get("Hy2RealmUrl", "").startswith("realm://")
+            or realm_extra.get("GeckoMinPacketSize") != "512"
+            or realm_extra.get("GeckoMaxPacketSize") != "1200"
+        ):
+            raise AssertionError(
+                f"v2rayN deployed Realm/Gecko mapping drifted: {desktop_profiles!r}"
+            )
+
+        android_profiles = decode_v2ray_internal_subscription(
+            fetch(
+                base_url,
+                "/sub",
+                {
+                    "target": "v2rayng",
+                    "url": f"{V2RAY_CLIENT_VMESS_LINK}|{V2RAY_CLIENT_HY2_LINK}",
+                    "config": DISABLE_RULEGEN_CONFIG,
+                    "list": "true",
+                },
+                timeout,
+            )
+        )
+        if [item[1].get("ConfigType") for item in android_profiles] != [1, 7]:
+            raise AssertionError(
+                f"v2rayNG deployed protocol matrix drifted: {android_profiles!r}"
+            )
+        auto_android = decode_v2ray_internal_subscription(
+            fetch(
+                base_url,
+                "/sub",
+                {
+                    "target": "auto",
+                    "url": V2RAY_CLIENT_VMESS_LINK,
+                    "config": DISABLE_RULEGEN_CONFIG,
+                    "list": "true",
+                },
+                timeout,
+                {"User-Agent": "v2rayNG/1.10.29"},
+            )
+        )
+        if len(auto_android) != 1 or auto_android[0][1].get("ConfigType") != 1:
+            raise AssertionError(
+                f"v2rayNG deployed auto-target drifted: {auto_android!r}"
+            )
+        assert_rejected(
+            base_url,
+            "/sub",
+            {
+                "target": "v2rayng",
+                "url": V2RAYN_ANYTLS_LINK,
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+            timeout,
+            "v2rayNG desktop-only AnyTLS profile",
+        )
+
+        legacy_v2ray = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "v2ray",
+                "url": V2RAY_CLIENT_VMESS_LINK,
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+            timeout,
+        )
+        if not legacy_v2ray.startswith("vmess://") or "v2rayn://" in legacy_v2ray:
+            raise AssertionError("historical target=v2ray output contract changed")
 
     direct_config = fetch(base_url, "/sub", common_params, timeout)
     if "Smoke" not in direct_config or "proxies:" not in direct_config:

@@ -26,6 +26,7 @@ enum class ProxyType {
   Hysteria2,
   TUIC,
   AnyTLS,
+  Naive,
   Mieru
 };
 
@@ -69,6 +70,8 @@ inline String getProxyTypeName(ProxyType type) {
     return "Tuic";
   case ProxyType::AnyTLS:
     return "AnyTLS";
+  case ProxyType::Naive:
+    return "Naive";
   case ProxyType::Mieru:
     return "Mieru";
   default:
@@ -102,6 +105,9 @@ struct Proxy {
   uint16_t IdleSessionCheckInterval = 30;
   uint16_t IdleSessionTimeout = 30;
   uint16_t MinIdleSession = 0;
+  uint32_t NaiveInsecureConcurrency = 0;
+  tribool NaiveQuic;
+  tribool NaiveUot;
   String TLSStr;
   bool TLSSecure = false;
 
@@ -159,6 +165,9 @@ struct Proxy {
   String Insecure;
   String Fingerprint;
   String OBFSPassword;
+  String Hysteria2RealmUrl;
+  String Hysteria2GeckoMinPacketSize;
+  String Hysteria2GeckoMaxPacketSize;
   // Hysteria 2 URI-only ECH config. It is preserved for standards-compliant
   // single-link round trips and is not projected into clients whose legacy
   // generators cannot represent it safely.
@@ -213,5 +222,6 @@ struct Proxy {
 #define HYSTERIA2_DEFAULT_GROUP "Hysteria2Provider"
 #define TUIC_DEFAULT_GROUP "TuicProvider"
 #define ANYTLS_DEFAULT_GROUP "AnyTLSProvider"
+#define NAIVE_DEFAULT_GROUP "NaiveProvider"
 #define MIERU_DEFAULT_GROUP "MieruProvider"
 #endif // PROXY_H_INCLUDED

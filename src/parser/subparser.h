@@ -83,6 +83,14 @@ void anyTlSConstruct(Proxy &node, const std::string &group, const std::string &r
                        const std::string &fingerprint,
                        const std::string &sni, tribool udp = tribool(), tribool tfo = tribool(), tribool scv = tribool(),
                      tribool tls13 = tribool(),const std::string& underlying_proxy="",uint16_t idleSessionCheckInterval=30,uint16_t idleSessionTimeout=30,uint16_t minIdleSession=0);
+void naiveConstruct(Proxy &node, const std::string &group,
+                    const std::string &remarks, const std::string &port,
+                    const std::string &username,
+                    const std::string &password, const std::string &host,
+                    const std::vector<String> &alpn_list,
+                    const std::string &fingerprint,
+                    const std::string &sni, tribool scv,
+                    bool quic, uint32_t insecure_concurrency);
 void snellConstruct(Proxy &node, const std::string &group, const std::string &remarks, const std::string &server,
                     const std::string &port, const std::string &password, const std::string &obfs,
                     const std::string &host, const std::string &obfs_uri, uint16_t version = 0,
@@ -132,8 +140,11 @@ void explodeVless(std::string vless, Proxy &node);
 void explodeHysteria(std::string hysteria, Proxy &node);
 
 void explodeHysteria2(std::string hysteria2, Proxy &node);
+void explodeHysteria2Realm(std::string hysteria2, Proxy &node);
 
 void explodeAnyTLS(std::string anytls, Proxy &node);
+void explodeNaive(std::string naive, Proxy &node);
+void explodeWireGuard(std::string wireguard, Proxy &node);
 
 bool isLegacyHttpProxyUri(const std::string &link);
 

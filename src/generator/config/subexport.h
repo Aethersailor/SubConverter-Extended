@@ -102,6 +102,8 @@ constexpr SingleLinkTypes Mixed = Shadowsocks | ShadowsocksR | VMess | Trojan |
                                   Hysteria2 | VLESS;
 } // namespace SingleLinkType
 
+enum class V2RayClientTarget { V2RayN, V2RayNG };
+
 struct extra_settings {
   bool enable_rule_generator = true;
   bool overwrite_original_rules = true;
@@ -192,6 +194,9 @@ std::string proxyToSSSub(std::string base_conf, std::vector<Proxy> &nodes,
                          extra_settings &ext);
 std::string proxyToSingle(std::vector<Proxy> &nodes, SingleLinkTypes types,
                            extra_settings &ext);
+std::string proxyToV2RayClient(std::vector<Proxy> &nodes,
+                               V2RayClientTarget target,
+                               extra_settings &ext);
 std::string proxyToQuanX(std::vector<Proxy> &nodes,
                          const std::string &base_conf,
                          std::vector<RulesetContent> &ruleset_content_array,

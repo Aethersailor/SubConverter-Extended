@@ -84,6 +84,8 @@ int main() {
       {"Surge/1418", "surge", "surge", 0, 3},
       {"Surge/1419", "surge", "surge", 0, 4},
       {"Trojan-Qt5/1.4", "trojan", "trojan-qt5", -1, 3},
+      {"v2rayNG/1.10.29", "v2rayng", "v2rayng", -1, 3},
+      {"V2RayN/7.14.3", "v2rayn", "v2rayn", -1, 3},
       {"V2rayU/3.8", "v2ray", "v2rayu", -1, 3},
       {"V2RayX/1.5", "v2ray", "v2rayx", -1, 3},
   };

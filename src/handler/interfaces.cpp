@@ -90,7 +90,7 @@ struct TargetDescriptor {
   SingleLinkTypes single_link_types;
 };
 
-static constexpr std::array<TargetDescriptor, 18> kTargetDescriptors = {{
+static constexpr std::array<TargetDescriptor, 20> kTargetDescriptors = {{
     {"clash", NodeParserMode::MihomoOnly,
      RemoteSubscriptionMode::ClashProxyProvider, false, 0},
     {"clashr", NodeParserMode::MihomoOnly,
@@ -121,6 +121,10 @@ static constexpr std::array<TargetDescriptor, 18> kTargetDescriptors = {{
      RemoteSubscriptionMode::ServerSideParse, true, 0},
     {"v2ray", NodeParserMode::LegacyOnly,
      RemoteSubscriptionMode::ServerSideParse, true, SingleLinkType::VMess},
+    {"v2rayn", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, true, 0},
+    {"v2rayng", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, true, 0},
     {"trojan", NodeParserMode::LegacyOnly,
      RemoteSubscriptionMode::ServerSideParse, true, SingleLinkType::Trojan},
     {"vless", NodeParserMode::LegacyOnly,
@@ -3925,11 +3929,23 @@ static SubStageResponse dispatchTargetGenerator(
       recordUpload("ssr", upload_path, output, false);
     break;
   case "v2ray"_hash:
-    writeLog(LOG_LEVEL_INFO, "生成目标：v2rayN");
+    writeLog(LOG_LEVEL_INFO, "生成目标：Legacy VMess Subscription");
     output = proxyToSingle(nodes, parsed.target_descriptor->single_link_types,
                            ext);
     if (upload)
       recordUpload("v2ray", upload_path, output, false);
+    break;
+  case "v2rayn"_hash:
+    writeLog(LOG_LEVEL_INFO, "生成目标：v2rayN");
+    output = proxyToV2RayClient(nodes, V2RayClientTarget::V2RayN, ext);
+    if (upload)
+      recordUpload("v2rayn", upload_path, output, false);
+    break;
+  case "v2rayng"_hash:
+    writeLog(LOG_LEVEL_INFO, "生成目标：v2rayNG");
+    output = proxyToV2RayClient(nodes, V2RayClientTarget::V2RayNG, ext);
+    if (upload)
+      recordUpload("v2rayng", upload_path, output, false);
     break;
   case "trojan"_hash:
     writeLog(LOG_LEVEL_INFO, "生成目标：Trojan");

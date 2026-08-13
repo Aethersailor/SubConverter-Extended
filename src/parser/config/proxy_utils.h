@@ -14,7 +14,8 @@ inline ProxyType getProxyTypeFromString(const std::string &typeStr) {
       ProxyType::Trojan,      ProxyType::Snell,        ProxyType::HTTP,
       ProxyType::HTTPS,       ProxyType::SOCKS5,       ProxyType::WireGuard,
       ProxyType::VLESS,       ProxyType::Hysteria,     ProxyType::Hysteria2,
-      ProxyType::TUIC,        ProxyType::AnyTLS,       ProxyType::Mieru};
+      ProxyType::TUIC,        ProxyType::AnyTLS,       ProxyType::Naive,
+      ProxyType::Mieru};
 
   std::string lowerTypeStr = typeStr;
   std::transform(lowerTypeStr.begin(), lowerTypeStr.end(), lowerTypeStr.begin(),
