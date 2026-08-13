@@ -22,6 +22,21 @@ from pathlib import Path
 
 
 SAMPLE_SS_LINK = "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388#Smoke"
+MIERU_OFFICIAL_SIMPLE_URI = (
+    "mierus://baozi:manlianpenfen@1.2.3.4?"
+    "handshake-mode=HANDSHAKE_NO_WAIT&mtu=1400&"
+    "multiplexing=MULTIPLEXING_HIGH&port=6666&port=9998-9999&"
+    "port=6489&port=4896&profile=default&protocol=TCP&protocol=TCP&"
+    "protocol=UDP&protocol=UDP&"
+    "traffic-pattern=CCoQARoECAEQCiIYCAMQASoIMDAwMTAyMDMqCDA0MDUwNjA3"
+)
+MIERU_STANDARD_PROTOBUF_URI = (
+    "mieru://CpsBCgdkZWZhdWx0ElgKBWJhb3ppEg1tYW5saWFucGVuZmVu"
+    "GkA0MGFiYWM0MGY1OWRhNTVkYWQ2YTk5ODMxYTUxMTY1MjJmYmM4MGUzODVi"
+    "YjFhYjE0ZGM1MmRiMzY4ZjczOGE0Gi8SCWxvY2FsaG9zdBoFCIo0EAIaDRAC"
+    "Ggk5OTk5LTk5OTkaBQjZMhABGgUIoCYQASD4CioCCAQSB2RlZmF1bHQYnUYg"
+    "uAgwBTgA"
+)
 DIRECT_SS_LINK = (
     "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@direct.example.com:8389#DirectSmoke"
 )
@@ -326,6 +341,99 @@ def assert_parser_route_isolation(base_url: str, timeout: int) -> None:
     )
 
 
+def assert_mieru_standard_mihomo_bridge(base_url: str, timeout: int) -> None:
+    for target, headers in (
+        ("clash", None),
+        ("clashr", None),
+        ("auto", {"User-Agent": "clash.meta/1.19.29"}),
+        ("auto", {"User-Agent": "ClashForAndroid/1.3.3R2"}),
+    ):
+        converted = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": target,
+                "url": MIERU_STANDARD_PROTOBUF_URI,
+                "list": "true",
+            },
+            timeout,
+            headers,
+        )
+        if (
+            converted.count("type: mieru") != 4
+            or "server: localhost" not in converted
+            or "port: 6666" not in converted
+            or "port-range: 9999-9999" not in converted
+            or "transport: TCP" not in converted
+            or "transport: UDP" not in converted
+            or "multiplexing: MULTIPLEXING_HIGH" not in converted
+        ):
+            raise AssertionError(
+                "official standard Mieru URI did not stay on the Mihomo-only "
+                f"route for target={target}: {converted!r}"
+            )
+
+    assert_rejected(
+        base_url,
+        "/sub",
+        {
+            "target": "clash",
+            "url": "mieru://AQIDBA==",
+            "list": "true",
+        },
+        timeout,
+        "invalid standard Mieru protobuf",
+    )
+    assert_rejected(
+        base_url,
+        "/sub",
+        {
+            "target": "surge",
+            "ver": "4",
+            "url": MIERU_STANDARD_PROTOBUF_URI,
+            "list": "true",
+        },
+        timeout,
+        "standard Mieru URI on the Legacy-only Surge route",
+    )
+
+    legacy_report = json.loads(
+        fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "surge",
+                "ver": "4",
+                "url": MIERU_STANDARD_PROTOBUF_URI + "|" + SAMPLE_SS_LINK,
+                "list": "true",
+                "explain": "true",
+            },
+            timeout,
+        )
+    )
+    if (
+        legacy_report.get("nodes", {}).get("total") != 1
+        or legacy_report.get("nodes", {}).get("generated") != 1
+        or legacy_report.get("nodes", {}).get("unsupported") != 0
+    ):
+        raise AssertionError(
+            "standard Mieru input leaked into the Legacy parser or affected an "
+            f"independent SS node: {legacy_report!r}"
+        )
+
+    assert_rejected(
+        base_url,
+        "/sub",
+        {
+            "target": "loon",
+            "url": MIERU_OFFICIAL_SIMPLE_URI,
+            "list": "true",
+        },
+        timeout,
+        "unified target-generation all-unsupported fail-close",
+    )
+
+
 def assert_netch_legacy_parser(base_url: str, timeout: int) -> None:
     def netch_link(node: dict[str, object]) -> str:
         payload = json.dumps(node, separators=(",", ":")).encode("utf-8")
@@ -531,6 +639,7 @@ def run_checks(
 
     if verify_non_clash:
         assert_parser_route_isolation(base_url, timeout)
+        assert_mieru_standard_mihomo_bridge(base_url, timeout)
         assert_netch_legacy_parser(base_url, timeout)
 
     direct_config = fetch(base_url, "/sub", common_params, timeout)
@@ -772,6 +881,31 @@ def run_checks(
             if expected not in mixed_quanx:
                 raise AssertionError(
                     f"mixed Quantumult X output is missing {expected!r}\n{mixed_quanx}"
+                )
+
+        dead_loon_source = (
+            "https://127.0.0.1:1/loon-must-not-fetch"
+            "?token=loon-smoke-source-secret"
+        )
+        loon_output = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "loon",
+                "url": f"provider:LoonSmoke,{dead_loon_source}",
+                "config": QUANX_REMOTE_CONFIG,
+            },
+            timeout,
+        )
+        for expected in (
+            "[Remote Proxy]",
+            f"LoonSmoke={dead_loon_source}",
+            "[Proxy Group]",
+            "Remote = select,LoonSmoke",
+        ):
+            if expected not in loon_output:
+                raise AssertionError(
+                    f"Loon remote-proxy output is missing {expected!r}\n{loon_output}"
                 )
 
         quanx_list = fetch(
@@ -1304,7 +1438,7 @@ def run_checks(
                 {
                     "target": "surge",
                     "url": remote_subscription_url,
-                    "config": DISABLE_RULEGEN_CONFIG,
+                    "config": QUANX_REMOTE_CONFIG,
                 },
                 timeout,
             )

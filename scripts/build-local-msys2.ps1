@@ -79,6 +79,11 @@ if [ "$SCX_REBUILD_BRIDGE" = "1" ] || [ ! -f bridge/libmihomo.a ]; then
   cd "$root"
 fi
 
+# This local path intentionally links the freshly built c-archive. CMake
+# prefers libmihomo.so when both artifacts exist, so a stale Docker/shared
+# bridge must not silently override the archive rebuilt above.
+rm -f bridge/libmihomo.so
+
 cmake -S . -B build/ucrt64 -G Ninja \
   -DCMAKE_BUILD_TYPE="$SCX_BUILD_TYPE" \
   -DCMAKE_PREFIX_PATH=/ucrt64 \

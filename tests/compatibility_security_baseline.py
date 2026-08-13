@@ -231,6 +231,65 @@ HYSTERIA_V1_SINGBOX_CONFIG = json.dumps(
     },
     separators=(",", ":"),
 )
+SINGBOX_TRANSPORT_FIDELITY_CONFIG = json.dumps(
+    {
+        "outbounds": [
+            {
+                "type": "vmess",
+                "tag": "Singbox WS Edge",
+                "server": "vmess-import.example.test",
+                "server_port": 443,
+                "uuid": "15151515-1515-4515-8515-151515151515",
+                "security": "auto",
+                "transport": {
+                    "type": "ws",
+                    "path": "/edge",
+                    "headers": {"Host": "ws-import.example.test", "Edge": "edge-1"},
+                },
+                "tls": {
+                    "enabled": True,
+                    "server_name": "tls-import.example.test",
+                    "utls": {"enabled": True, "fingerprint": "firefox"},
+                },
+            },
+            {
+                "type": "vless",
+                "tag": "Singbox HTTPUpgrade",
+                "server": "vless-import.example.test",
+                "server_port": 443,
+                "uuid": "16161616-1616-4616-8616-161616161616",
+                "transport": {
+                    "type": "httpupgrade",
+                    "host": "upgrade-import.example.test",
+                    "path": "/upgrade",
+                },
+                "tls": {"enabled": True, "server_name": "vless-tls.example.test"},
+            },
+            {
+                "type": "trojan",
+                "tag": "Singbox Trojan gRPC",
+                "server": "trojan-import.example.test",
+                "server_port": 443,
+                "password": "trojan-import-password",
+                "transport": {"type": "grpc", "service_name": "trojan/service"},
+                "tls": {
+                    "enabled": True,
+                    "server_name": "trojan-tls.example.test",
+                    "utls": {"enabled": True, "fingerprint": "safari"},
+                },
+            },
+            {
+                "type": "vless",
+                "tag": "Unsupported Transport",
+                "server": "unsupported-import.example.test",
+                "server_port": 443,
+                "uuid": "17171717-1717-4717-8717-171717171717",
+                "transport": {"type": "future-transport"},
+            },
+        ]
+    },
+    separators=(",", ":"),
+)
 HYSTERIA_V1_CLASH_CONFIG = """proxies:
   - name: Hysteria V1 Clash
     type: hysteria
@@ -491,6 +550,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
     slow_subscription_release = threading.Event()
     slow_ruleset_started = threading.Event()
     slow_ruleset_release = threading.Event()
+    quanx_roundtrip_config = ""
 
     def do_GET(self) -> None:  # noqa: N802
         with type(self).counter_lock:
@@ -535,6 +595,12 @@ class FixtureHandler(BaseHTTPRequestHandler):
         elif request_path == "/hysteria-v1-singbox.json":
             body = HYSTERIA_V1_SINGBOX_CONFIG.encode()
             content_type = "application/json; charset=utf-8"
+        elif request_path == "/singbox-transport-fidelity.json":
+            body = SINGBOX_TRANSPORT_FIDELITY_CONFIG.encode()
+            content_type = "application/json; charset=utf-8"
+        elif request_path == "/quanx-roundtrip.conf":
+            body = type(self).quanx_roundtrip_config.encode()
+            content_type = "text/plain; charset=utf-8"
         elif request_path == "/hysteria-v1-clash.yaml":
             body = HYSTERIA_V1_CLASH_CONFIG.encode()
             content_type = "text/yaml; charset=utf-8"
@@ -5388,7 +5454,7 @@ def mieru_legacy_parser_baseline(base_url: str) -> None:
         "mierus://user:pass@example.test?profile=default&port=443&"
         "port=444&protocol=TCP"
     )
-    for rejected in (invalid_simple, MIERU_STANDARD_PROTOBUF_URI):
+    for rejected in (invalid_simple, "mieru://AQIDBA=="):
         rejected_status, rejected_body, _ = request(
             base_url,
             "/sub",
@@ -5412,7 +5478,39 @@ def mieru_legacy_parser_baseline(base_url: str) -> None:
             or rejected_report.get("nodes", {}).get("unsupported") != 0
         ):
             raise AssertionError(
-                f"invalid or protobuf Mieru input did not fail closed: {rejected_report!r}"
+                f"invalid Mieru input did not fail closed: {rejected_report!r}"
+            )
+
+    for target, headers in (
+        ("clash", {}),
+        ("clashr", {}),
+        ("auto", {"User-Agent": "clash.meta/1.19.29"}),
+        ("auto", {"User-Agent": "ClashForAndroid/1.3.3R2"}),
+    ):
+        standard_status, standard_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": target,
+                "url": MIERU_STANDARD_PROTOBUF_URI,
+                "list": "true",
+            },
+            headers=headers,
+        )
+        standard_text = standard_body.decode("utf-8", errors="replace")
+        if (
+            standard_status != 200
+            or standard_text.count("type: mieru") != 4
+            or "server: localhost" not in standard_text
+            or "port: 6666" not in standard_text
+            or "port-range: 9999-9999" not in standard_text
+            or "transport: TCP" not in standard_text
+            or "transport: UDP" not in standard_text
+            or "multiplexing: MULTIPLEXING_HIGH" not in standard_text
+        ):
+            raise AssertionError(
+                "official standard Mieru URI did not stay on the Mihomo-only "
+                f"route for target={target}: HTTP {standard_status} {standard_text!r}"
             )
 
     clash_status, clash_body, _ = request(
@@ -5736,6 +5834,568 @@ def netch_legacy_parser_baseline(base_url: str) -> None:
         raise AssertionError(
             "Mihomo route changed while calibrating the Legacy Netch parser"
         )
+
+
+def target_generation_stats_baseline(base_url: str) -> None:
+    supported_sources = {
+        "mellow": SUBSCRIPTION.strip(),
+        "sssub": SUBSCRIPTION.strip(),
+        "ss": SUBSCRIPTION.strip(),
+        "ssr": SSR_IPV6_URI,
+        "v2ray": VMESS_QR_URI,
+        "trojan": TROJAN_WS_URI,
+        "vless": VLESS_URI,
+        "hysteria2": HYSTERIA2_URI,
+        "mixed": SUBSCRIPTION.strip(),
+        "quan": SUBSCRIPTION.strip(),
+        "quanx": SUBSCRIPTION.strip(),
+        "ssd": SUBSCRIPTION.strip(),
+        "singbox": SUBSCRIPTION.strip(),
+        "surge": SUBSCRIPTION.strip(),
+        "surfboard": SUBSCRIPTION.strip(),
+        "loon": SUBSCRIPTION.strip(),
+    }
+    for target, supported in supported_sources.items():
+        params = {
+            "target": target,
+            "url": MIERU_OFFICIAL_SIMPLE_URI + "|" + supported,
+            "list": "true",
+            "explain": "true",
+        }
+        if target == "surge":
+            params["ver"] = "4"
+        status, body, _ = request(base_url, "/sub", params)
+        if status != 200:
+            raise AssertionError(
+                f"target={target} mixed supported/unsupported generation "
+                f"failed: HTTP {status} {body!r}"
+            )
+        report = json.loads(body)
+        nodes = report.get("nodes", {})
+        if (
+            nodes.get("total") != 5
+            or nodes.get("generated") != 1
+            or nodes.get("unsupported") != 4
+            or nodes.get("unsupported_protocols") != ["mieru:4"]
+        ):
+            raise AssertionError(
+                f"target={target} generation statistics drifted: {report!r}"
+            )
+
+        unsupported_params = {
+            "target": target,
+            "url": MIERU_OFFICIAL_SIMPLE_URI,
+            "list": "true",
+        }
+        if target == "surge":
+            unsupported_params["ver"] = "4"
+        unsupported_status, _, _ = request(
+            base_url, "/sub", unsupported_params
+        )
+        if unsupported_status != 400:
+            raise AssertionError(
+                f"target={target} accepted an all-unsupported node set: "
+                f"HTTP {unsupported_status}"
+            )
+
+
+def singbox_import_fidelity_baseline(base_url: str, fixture_base: str) -> None:
+    status, body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "singbox",
+            "url": fixture_base + "/singbox-transport-fidelity.json",
+            "list": "true",
+        },
+    )
+    if status != 200:
+        raise AssertionError(
+            f"sing-box transport import failed: HTTP {status} {body!r}"
+        )
+    payload = json.loads(body)
+    outbounds = {
+        item.get("tag"): item
+        for item in payload.get("outbounds", [])
+        if isinstance(item, dict)
+    }
+    if "Unsupported Transport" in outbounds:
+        raise AssertionError(f"unknown sing-box transport was downgraded: {outbounds!r}")
+    vmess = outbounds.get("Singbox WS Edge", {})
+    if (
+        vmess.get("transport", {}).get("headers", {}).get("Edge") != "edge-1"
+        or vmess.get("tls", {}).get("utls", {}).get("fingerprint") != "firefox"
+    ):
+        raise AssertionError(f"sing-box VMess Edge/uTLS was lost: {vmess!r}")
+    vless = outbounds.get("Singbox HTTPUpgrade", {})
+    if vless.get("transport") != {
+        "type": "httpupgrade",
+        "host": "upgrade-import.example.test",
+        "path": "/upgrade",
+    }:
+        raise AssertionError(f"sing-box HTTPUpgrade was lost: {vless!r}")
+    trojan = outbounds.get("Singbox Trojan gRPC", {})
+    if (
+        trojan.get("transport")
+        != {"type": "grpc", "service_name": "trojan/service"}
+        or trojan.get("tls", {}).get("utls", {}).get("fingerprint") != "safari"
+    ):
+        raise AssertionError(f"sing-box Trojan gRPC/uTLS was lost: {trojan!r}")
+
+
+def loon_current_node_output_baseline(base_url: str) -> None:
+    def vmess_qr(name: str, network: str, host: str = "", path: str = "/") -> str:
+        payload = {
+            "v": "2",
+            "ps": name,
+            "add": "vmess-loon.example.test",
+            "port": "443",
+            "id": "12121212-1212-4212-8212-121212121212",
+            "aid": "0",
+            "scy": "auto",
+            "net": network,
+            "type": "none",
+            "path": path,
+            "host": host,
+            "tls": "tls",
+            "sni": "vmess-sni.example.test",
+        }
+        return "vmess://" + _urlsafe_b64(
+            json.dumps(payload, separators=(",", ":"))
+        )
+
+    supported = (
+        vmess_qr("Loon VMess TCP", "tcp"),
+        vmess_qr("Loon VMess WS", "ws", "vmess-ws-host.example.test", "/ws"),
+        vmess_qr("Loon VMess HTTP", "http", "vmess-host.example.test", "/http"),
+        "vless://15151515-1515-4515-8515-151515151515@vless-tcp-loon.example.test:443"
+        "?encryption=none&security=tls&type=tcp"
+        "&sni=vless-tcp-sni.example.test#Loon%20VLESS%20TCP",
+        "vless://16161616-1616-4616-8616-161616161616@vless-ws-loon.example.test:443"
+        "?encryption=none&security=tls&type=ws&host=vless-ws-host.example.test"
+        "&path=%2Fws&sni=vless-ws-sni.example.test#Loon%20VLESS%20WS",
+        "vless://13131313-1313-4313-8313-131313131313@vless-loon.example.test:443"
+        "?encryption=none&security=tls&type=http&host=vless-host.example.test"
+        "&path=%2Fhttp&sni=vless-sni.example.test#Loon%20VLESS%20HTTP",
+        "vless://14141414-1414-4414-8414-141414141414@reality-loon.example.test:443"
+        "?encryption=none&security=reality&type=tcp&flow=xtls-rprx-vision"
+        "&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sid=00112233"
+        "&sni=reality-sni.example.test&fp=chrome#Loon%20VLESS%20Reality",
+        "trojan://trojan-password@trojan-loon.example.test:443?security=tls"
+        "&type=ws&host=trojan-host.example.test&path=%2Fws"
+        "&sni=trojan-sni.example.test&alpn=http%2F1.1#Loon%20Trojan%20WS",
+        "trojan://trojan-http@trojan-http.example.test:443?security=tls"
+        "&type=http&host=trojan-http-host.example.test&path=%2Fhttp"
+        "&sni=trojan-http-sni.example.test#Loon%20Trojan%20HTTP",
+        "trojan://pass%2Cword@trojan-comma.example.test:443?security=tls"
+        "&sni=trojan-comma-sni.example.test#Loon%2CComma",
+        "anytls://anytls-password@anytls-loon.example.test:8443"
+        "?sni=anytls-sni.example.test&fp=chrome#Loon%20AnyTLS",
+        "hysteria2://hy2-password@hy2-loon.example.test:8443/"
+        "?down=200&obfs=salamander&obfs-password=hy2-obfs"
+        "&sni=hy2-sni.example.test#Loon%20Hysteria2",
+    )
+    status, body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "loon",
+            "url": "|".join(supported),
+            "list": "true",
+            "udp": "true",
+            "tfo": "false",
+        },
+    )
+    output = body.decode("utf-8", errors="replace")
+    if status != 200:
+        raise AssertionError(f"current Loon node conversion failed: HTTP {status} {output!r}")
+    expected_fragments = (
+        "transport=http,alterId=0,path=/http,host=vmess-host.example.test,over-tls=true,sni=vmess-sni.example.test",
+        "transport=http,path=/http,host=vless-host.example.test,over-tls=true,sni=vless-sni.example.test",
+        "transport=tcp,flow=xtls-rprx-vision,public-key=\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",short-id=00112233,over-tls=true,sni=reality-sni.example.test,tls-profile=chrome",
+        "transport=ws,path=/ws,host=trojan-host.example.test,alpn=http/1.1,sni=trojan-sni.example.test",
+        "transport=http,path=/http,host=trojan-http-host.example.test,sni=trojan-http-sni.example.test",
+        "AnyTLS,anytls-loon.example.test,8443,\"anytls-password\",sni=anytls-sni.example.test,tls-profile=chrome,skip-cert-verify=false,block-quic=false",
+        "Hysteria2,hy2-loon.example.test,8443,\"hy2-password\",sni=hy2-sni.example.test,download-bandwidth=200,salamander-password=\"hy2-obfs\"",
+    )
+    for expected in expected_fragments:
+        if expected not in output:
+            raise AssertionError(f"Loon output lost {expected!r}: {output!r}")
+    if "download-bandwidth=100" in output:
+        raise AssertionError(f"Loon Hysteria2 restored the fabricated bandwidth: {output!r}")
+
+    loon_profile = "[Proxy]\n" + output
+    loon_data_url = "data:text/plain;base64," + base64.b64encode(
+        loon_profile.encode("utf-8")
+    ).decode("ascii")
+    roundtrip_status, roundtrip_body, _ = request(
+        base_url,
+        "/sub",
+        {"target": "singbox", "url": loon_data_url, "list": "true"},
+    )
+    if roundtrip_status != 200:
+        raise AssertionError(
+            "generated Loon profile could not be imported: "
+            f"HTTP {roundtrip_status} {roundtrip_body!r}"
+        )
+    roundtrip_payload = json.loads(roundtrip_body)
+    outbounds = {
+        item.get("tag"): item
+        for item in roundtrip_payload.get("outbounds", [])
+        if isinstance(item, dict)
+    }
+    vmess = outbounds.get("Loon VMess HTTP", {})
+    if (
+        vmess.get("transport")
+        != {
+            "type": "http",
+            "host": ["vmess-host.example.test"],
+            "path": "/http",
+        }
+        or vmess.get("tls", {}).get("server_name") != "vmess-sni.example.test"
+        or vmess.get("alter_id") != 0
+    ):
+        raise AssertionError(f"Loon VMess roundtrip drifted: {vmess!r}")
+    vmess_tcp = outbounds.get("Loon VMess TCP", {})
+    if (
+        vmess_tcp.get("transport") is not None
+        or vmess_tcp.get("tls", {}).get("server_name")
+        != "vmess-sni.example.test"
+    ):
+        raise AssertionError(f"Loon VMess TCP roundtrip drifted: {vmess_tcp!r}")
+    vmess_ws = outbounds.get("Loon VMess WS", {})
+    if vmess_ws.get("transport") != {
+        "type": "ws",
+        "path": "/ws",
+        "headers": {"Host": "vmess-ws-host.example.test"},
+    }:
+        raise AssertionError(f"Loon VMess WS roundtrip drifted: {vmess_ws!r}")
+    vless_tcp = outbounds.get("Loon VLESS TCP", {})
+    if (
+        vless_tcp.get("transport") is not None
+        or vless_tcp.get("tls", {}).get("server_name")
+        != "vless-tcp-sni.example.test"
+    ):
+        raise AssertionError(f"Loon VLESS TCP roundtrip drifted: {vless_tcp!r}")
+    vless_ws = outbounds.get("Loon VLESS WS", {})
+    if vless_ws.get("transport") != {
+        "type": "ws",
+        "path": "/ws",
+        "headers": {"Host": "vless-ws-host.example.test"},
+    }:
+        raise AssertionError(f"Loon VLESS WS roundtrip drifted: {vless_ws!r}")
+    vless_http = outbounds.get("Loon VLESS HTTP", {})
+    if vless_http.get("transport") != {
+        "type": "http",
+        "host": ["vless-host.example.test"],
+        "path": "/http",
+    }:
+        raise AssertionError(f"Loon VLESS HTTP roundtrip drifted: {vless_http!r}")
+    vless = outbounds.get("Loon VLESS Reality", {})
+    if (
+        vless.get("flow") != "xtls-rprx-vision"
+        or vless.get("tls", {}).get("reality", {}).get("public_key")
+        != "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        or vless.get("tls", {}).get("reality", {}).get("short_id") != "00112233"
+    ):
+        raise AssertionError(f"Loon VLESS Reality roundtrip drifted: {vless!r}")
+    trojan = outbounds.get("Loon Trojan WS", {})
+    if (
+        trojan.get("transport", {}).get("type") != "ws"
+        or trojan.get("transport", {}).get("headers", {}).get("Host")
+        != "trojan-host.example.test"
+        or trojan.get("transport", {}).get("path") != "/ws"
+    ):
+        raise AssertionError(f"Loon Trojan WS roundtrip drifted: {trojan!r}")
+    trojan_http = outbounds.get("Loon Trojan HTTP", {})
+    if trojan_http.get("transport") != {
+        "type": "http",
+        "host": ["trojan-http-host.example.test"],
+        "path": "/http",
+    }:
+        raise AssertionError(
+            f"Loon Trojan HTTP roundtrip drifted: {trojan_http!r}"
+        )
+    comma_trojan = outbounds.get("Loon,Comma", {})
+    if comma_trojan.get("password") != "pass,word":
+        raise AssertionError(
+            f"Loon quoted comma credential/remark drifted: {comma_trojan!r}"
+        )
+    anytls = outbounds.get("Loon AnyTLS", {})
+    if (
+        anytls.get("type") != "anytls"
+        or anytls.get("tls", {}).get("server_name") != "anytls-sni.example.test"
+    ):
+        raise AssertionError(f"Loon AnyTLS roundtrip drifted: {anytls!r}")
+    hysteria2 = outbounds.get("Loon Hysteria2", {})
+    if (
+        hysteria2.get("down_mbps") != 200
+        or hysteria2.get("obfs")
+        != {"type": "salamander", "password": "hy2-obfs"}
+    ):
+        raise AssertionError(f"Loon Hysteria2 roundtrip drifted: {hysteria2!r}")
+
+    invalid_profiles = (
+        '[Proxy]\nBad = Trojan,bad.example.test,443,"password",sni=a.example,tls-name=b.example',
+        '[Proxy]\nBad = AnyTLS,bad.example.test,443,"password",block-quic=true',
+        '[Proxy]\nBad = Hysteria2,bad.example.test,443,"password",salamander-password=unquoted',
+        '[Proxy]\nBad = VMess,bad.example.test,443,auto,"12121212-1212-4212-8212-121212121212,transport=tcp,alterId=0,over-tls=false',
+        '[Proxy]\nBad = VMess,bad.example.test,443,auto,"12121212-1212-4212-8212-121212121212",transport=tcp,alterId=0,path=/bad,over-tls=false',
+        '[Proxy]\nBad = VLESS,bad.example.test,443,"13131313-1313-4313-8313-131313131313",transport=tcp,over-tls=false,tls-profile=chrome',
+        '[Proxy]\nBad = Trojan,bad.example.test,443,"password",transport=tcp,path=/bad',
+        '[Proxy]\nBad = Hysteria2,bad.example.test,443,"password",tls-cert-sha256=001122,skip-cert-verify=true',
+    )
+    for invalid_profile in invalid_profiles:
+        invalid_url = "data:text/plain;base64," + base64.b64encode(
+            invalid_profile.encode("utf-8")
+        ).decode("ascii")
+        invalid_status, _, _ = request(
+            base_url,
+            "/sub",
+            {"target": "singbox", "url": invalid_url, "list": "true"},
+        )
+        if invalid_status != 400:
+            raise AssertionError(
+                "invalid Loon positional profile did not fail closed: "
+                f"HTTP {invalid_status} {invalid_profile!r}"
+            )
+
+    unsupported = (
+        VMESS_QR_URI,
+        VLESS_HTTPUPGRADE_URI,
+        TROJAN_WS_URI,
+        ANYTLS_MODERN_URI,
+        "hysteria2://password@hy2.example.test:443/?up=10&down=200#HY2Up",
+        "trojan://password@trojan.example.test:443?type=ws&host=bad%2Chost#BadScalar",
+    )
+    for source in unsupported:
+        rejected_status, _, _ = request(
+            base_url,
+            "/sub",
+            {"target": "loon", "url": source, "list": "true"},
+        )
+        if rejected_status != 400:
+            raise AssertionError(
+                f"Loon accepted a lossy or unsafe node: HTTP {rejected_status} {source!r}"
+            )
+
+
+def quanx_current_node_output_baseline(base_url: str, fixture_base: str) -> None:
+    vmess_reality = (
+        "vmess://15151515-1515-4515-8515-151515151515@vmess-reality.example.test:443"
+        "?encryption=none&security=reality&type=tcp&sni=reality.example.test"
+        "&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sid=00112233"
+        "&fp=chrome#QuanX%20VMess%20Reality"
+    )
+    vless_http = (
+        "vless://17171717-1717-4717-8717-171717171717@vless-http.example.test:80"
+        "?encryption=none&security=none&type=tcp&headerType=http"
+        "&host=http.example.test&path=%2Fheader#QuanX%20VLESS%20HTTP"
+    )
+    trojan_wss = (
+        "trojan://trojan-password@trojan-wss.example.test:443?security=tls"
+        "&type=ws&host=trojan-host.example.test&sni=trojan-host.example.test"
+        "&path=%2Fws&alpn=h2%2Chttp%2F1.1&insecure=1#QuanX%20Trojan%20WSS"
+    )
+    sources = (
+        VMESS_STANDARD_URI,
+        vmess_reality,
+        VLESS_DEFAULT_TCP_URI,
+        vless_http,
+        VLESS_REALITY_WITH_NUMERIC_SID_URI,
+        trojan_wss,
+        ANYTLS_MODERN_URI,
+    )
+    status, body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "quanx",
+            "url": "|".join(sources),
+            "list": "true",
+            "udp": "true",
+            "tfo": "true",
+        },
+    )
+    output = body.decode("utf-8", errors="replace")
+    if status != 200:
+        raise AssertionError(
+            f"current Quantumult X node conversion failed: HTTP {status} {output!r}"
+        )
+    expected = (
+        "vmess = vmess.example.test:443, method=none, password=22222222-2222-2222-2222-222222222222, obfs=over-tls, obfs-host=tls.example.test, tls-alpn=02683208687474702f312e31",
+        "vmess = vmess-reality.example.test:443, method=none, password=15151515-1515-4515-8515-151515151515, obfs=over-tls, obfs-host=reality.example.test, reality-base64-pubkey=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA, reality-hex-shortid=00112233, fast-open=false",
+        "vless = [2001:db8::1]:443, method=none, password=44444444-4444-4444-4444-444444444444, obfs=over-tls, obfs-host=vless-tls.example.test, tls-alpn=02683208687474702f312e31",
+        "vless = vless-http.example.test:80, method=none, password=17171717-1717-4717-8717-171717171717, obfs=http, obfs-host=http.example.test, obfs-uri=/header",
+        "reality-hex-shortid=00112233, vless-flow=xtls-rprx-vision, fast-open=false",
+        "trojan = trojan-wss.example.test:443, password=trojan-password, obfs=wss, obfs-host=trojan-host.example.test, obfs-uri=/ws, tls-alpn=02683208687474702f312e31",
+        "anytls = [2001:db8::12]:443, password=p@ss+word, over-tls=true, tls-host=anytls-tls.example.test, tls-alpn=02683208687474702f312e31",
+    )
+    for fragment in expected:
+        if fragment not in output:
+            raise AssertionError(
+                f"Quantumult X output lost {fragment!r}: {output!r}"
+            )
+    if "tls13=" in output or "udp-over-tcp=" in output:
+        raise AssertionError(f"Quantumult X emitted invalid legacy fields: {output!r}")
+    wss_line = next(
+        line for line in output.splitlines() if "tag=QuanX Trojan WSS" in line
+    )
+    if "over-tls=" in wss_line or "tls-host=" in wss_line:
+        raise AssertionError(f"Trojan WSS used TCP TLS syntax: {wss_line!r}")
+
+    FixtureHandler.quanx_roundtrip_config = "[server_local]\n" + output
+    roundtrip_status, roundtrip_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "singbox",
+            "url": fixture_base + "/quanx-roundtrip.conf",
+            "list": "true",
+        },
+    )
+    roundtrip_text = roundtrip_body.decode("utf-8", errors="replace")
+    if roundtrip_status != 200:
+        raise AssertionError(
+            "Quantumult X generator->parser roundtrip failed: "
+            f"HTTP {roundtrip_status} {roundtrip_text!r}"
+        )
+    roundtrip = json.loads(roundtrip_text)
+    outbounds = {
+        item.get("tag"): item
+        for item in roundtrip.get("outbounds", [])
+        if isinstance(item, dict) and isinstance(item.get("tag"), str)
+    }
+    expected_tags = {
+        "VMessStandard",
+        "QuanX VMess Reality",
+        "VLESSDefaultTCP",
+        "QuanX VLESS HTTP",
+        "RealityNumericSid",
+        "QuanX Trojan WSS",
+        "AnyTLS Modern",
+    }
+    if set(outbounds) != expected_tags:
+        raise AssertionError(
+            f"Quantumult X roundtrip node set drifted: {outbounds!r}"
+        )
+    vmess = outbounds["VMessStandard"]
+    if (
+        vmess.get("server") != "vmess.example.test"
+        or vmess.get("tls", {}).get("server_name") != "tls.example.test"
+        or vmess.get("tls", {}).get("alpn") != ["h2", "http/1.1"]
+    ):
+        raise AssertionError(f"Quantumult X VMess roundtrip drifted: {vmess!r}")
+    vmess_reality_out = outbounds["QuanX VMess Reality"]
+    if (
+        vmess_reality_out.get("tls", {}).get("reality", {}).get("public_key")
+        != "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        or vmess_reality_out.get("tls", {}).get("reality", {}).get("short_id")
+        != "00112233"
+        or vmess_reality_out.get("tls", {}).get("server_name")
+        != "reality.example.test"
+    ):
+        raise AssertionError(
+            f"Quantumult X VMess Reality roundtrip drifted: {vmess_reality_out!r}"
+        )
+    vless_ipv6 = outbounds["VLESSDefaultTCP"]
+    if (
+        vless_ipv6.get("server") != "2001:db8::1"
+        or vless_ipv6.get("tls", {}).get("alpn") != ["h2", "http/1.1"]
+    ):
+        raise AssertionError(
+            f"Quantumult X IPv6/ALPN roundtrip drifted: {vless_ipv6!r}"
+        )
+    vless_http_out = outbounds["QuanX VLESS HTTP"]
+    if (
+        vless_http_out.get("transport", {}).get("type") != "http"
+        or vless_http_out.get("transport", {}).get("host")
+        != ["http.example.test"]
+        or vless_http_out.get("transport", {}).get("path") != "/header"
+    ):
+        raise AssertionError(
+            f"Quantumult X VLESS HTTP roundtrip drifted: {vless_http_out!r}"
+        )
+    vless_reality = outbounds["RealityNumericSid"]
+    if (
+        vless_reality.get("flow") != "xtls-rprx-vision"
+        or vless_reality.get("tls", {}).get("reality", {}).get("short_id")
+        != "00112233"
+    ):
+        raise AssertionError(
+            f"Quantumult X VLESS Reality/Vision roundtrip drifted: {vless_reality!r}"
+        )
+    trojan = outbounds["QuanX Trojan WSS"]
+    if (
+        trojan.get("transport", {}).get("type") != "ws"
+        or trojan.get("transport", {}).get("path") != "/ws"
+        or trojan.get("transport", {}).get("headers", {}).get("Host")
+        != "trojan-host.example.test"
+        or trojan.get("tls", {}).get("alpn") != ["h2", "http/1.1"]
+    ):
+        raise AssertionError(f"Quantumult X Trojan WSS roundtrip drifted: {trojan!r}")
+    anytls = outbounds["AnyTLS Modern"]
+    if (
+        anytls.get("server") != "2001:db8::12"
+        or anytls.get("password") != "p@ss+word"
+        or anytls.get("tls", {}).get("server_name")
+        != "anytls-tls.example.test"
+        or anytls.get("tls", {}).get("alpn") != ["h2", "http/1.1"]
+    ):
+        raise AssertionError(f"Quantumult X AnyTLS roundtrip drifted: {anytls!r}")
+
+    invalid_quanx_lines = (
+        "vmess = vmess.example.test:443, method=none, "
+        "password=22222222-2222-2222-2222-222222222222, obfs=over-tls, "
+        "obfs-host=tls.example.test, tls-alpn=0, tag=Bad ALPN",
+        "vless = reality.example.test:443, method=none, "
+        "password=33333333-3333-4333-8333-333333333333, obfs=over-tls, "
+        "obfs-host=reality.example.test, "
+        "reality-base64-pubkey=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA, "
+        "reality-hex-shortid=xyz, vless-flow=xtls-rprx-vision, "
+        "tag=Bad Reality",
+        "trojan = trojan.example.test:443, password=secret, obfs=wss, "
+        "obfs-host=trojan.example.test, over-tls=true, tag=Conflicting TLS",
+        "anytls = anytls.example.test:443, password=secret, over-tls=true, "
+        "fast-open=maybe, tag=Bad Boolean",
+        "anytls = anytls.example.test:443, password=secret, over-tls=true, "
+        "unsupported-option=value, tag=Unknown Field",
+    )
+    for invalid_index, invalid_line in enumerate(invalid_quanx_lines):
+        FixtureHandler.quanx_roundtrip_config = (
+            "[server_local]\n" + invalid_line + "\n"
+        )
+        invalid_status, _, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "singbox",
+                "url": fixture_base
+                + f"/quanx-roundtrip.conf?case=invalid-{invalid_index}",
+                "list": "true",
+            },
+        )
+        if invalid_status != 400:
+            raise AssertionError(
+                "invalid or conflicting Quantumult X node did not fail closed: "
+                f"HTTP {invalid_status} {invalid_line!r}"
+            )
+
+    for source in (
+        VLESS_HTTPUPGRADE_URI,
+        VLESS_TCP_HTTP_URI,
+        TROJAN_WS_URI,
+        TROJAN_KCP_URI,
+        "trojan://bad%2Cpassword@trojan.example.test:443?security=tls#BadScalar",
+    ):
+        rejected_status, _, _ = request(
+            base_url, "/sub", {"target": "quanx", "url": source, "list": "true"}
+        )
+        if rejected_status != 400:
+            raise AssertionError(
+                "Quantumult X accepted a lossy or unsafe node: "
+                f"HTTP {rejected_status} {source!r}"
+            )
 
 
 def simple_target_protocol_baseline(base_url: str, fixture_base: str) -> None:
@@ -7906,6 +8566,10 @@ def main() -> int:
                 )
             netch_legacy_parser_baseline(base_url)
             mieru_legacy_parser_baseline(base_url)
+            target_generation_stats_baseline(base_url)
+            singbox_import_fidelity_baseline(base_url, fixture_base)
+            loon_current_node_output_baseline(base_url)
+            quanx_current_node_output_baseline(base_url, fixture_base)
             simple_target_protocol_baseline(base_url, fixture_base)
             provider_direct_default_output_baseline(base_url, fixture_base)
         if not wireguard_outbound_logs or (

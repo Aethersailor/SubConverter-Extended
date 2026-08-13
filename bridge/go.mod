@@ -2,7 +2,11 @@ module github.com/aethersailor/subconverter-extended/bridge
 
 go 1.25.5
 
-require github.com/metacubex/mihomo v1.19.29
+require (
+	github.com/enfein/mieru/v3 v3.34.0
+	github.com/metacubex/mihomo v1.19.29
+	google.golang.org/protobuf v1.34.2
+)
 
 require (
 	github.com/RyuaNerin/go-krypto v1.3.0 // indirect

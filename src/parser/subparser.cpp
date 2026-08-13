@@ -1799,6 +1799,7 @@ bool isLegacyHttpProxyUri(const std::string &link) {
     if (authority_end == scheme_end || link.find('/', scheme_end) < authority_end)
         return false;
 
+    bool has_legacy_metadata = false;
     if (query_start != std::string::npos) {
         for (const std::string &item : split(link.substr(query_start + 1), "&")) {
             if (item.empty())
@@ -1807,13 +1808,21 @@ bool isLegacyHttpProxyUri(const std::string &link) {
             const std::string key = item.substr(0, equals);
             if (key != "remarks" && key != "group")
                 return false;
+            has_legacy_metadata = true;
         }
     }
 
     Proxy candidate;
     explodeHTTPSub(link, candidate);
-    return (candidate.Type == ProxyType::HTTP || candidate.Type == ProxyType::HTTPS) &&
-           !candidate.Hostname.empty() && candidate.Port != 0;
+    if ((candidate.Type == ProxyType::HTTP || candidate.Type == ProxyType::HTTPS) &&
+        !candidate.Hostname.empty() && candidate.Port != 0)
+        return true;
+
+    // A no-path HTTP(S) URI carrying only the legacy remarks/group metadata is
+    // still a direct-node candidate when its Base64 payload is malformed. Keep
+    // it on the local parser path so it fails closed instead of being fetched as
+    // a remote subscription.
+    return has_legacy_metadata;
 }
 
 void explodeTrojan(std::string trojan, Proxy &node) {
@@ -3070,6 +3079,604 @@ void parsePeers(Proxy &node, const std::string &data) {
     syncLegacyWireGuardProjection(node);
 }
 
+enum class LoonProxyParseResult { NotLoon, Invalid, Parsed };
+
+struct LoonProxyValue {
+    std::string value;
+    bool quoted = false;
+};
+
+using LoonProxyOptions = std::map<std::string, LoonProxyValue>;
+
+bool parseLoonProxyValue(std::string input, LoonProxyValue &result,
+                         bool require_quotes = false) {
+    input = trim(input);
+    if (input.empty() || input.find_first_of("\r\n") != std::string::npos)
+        return false;
+    if (input.front() == '"') {
+        if (input.size() < 2 || input.back() != '"')
+            return false;
+        input = input.substr(1, input.size() - 2);
+        if (input.find_first_of("\\\"\r\n") != std::string::npos)
+            return false;
+        result.quoted = true;
+        result.value = std::move(input);
+        return true;
+    }
+    if (require_quotes || input.front() == '\'' || input.back() == '\'' ||
+        input.find('"') != std::string::npos)
+        return false;
+    result.value = std::move(input);
+    return true;
+}
+
+bool parseLoonProxyOptions(const std::vector<std::string> &configs, size_t start,
+                           LoonProxyOptions &options) {
+    for (size_t i = start; i < configs.size(); ++i) {
+        const size_t equal = configs[i].find('=');
+        if (equal == std::string::npos || equal == 0)
+            return false;
+        const std::string key = toLower(trim(configs[i].substr(0, equal)));
+        if (key.empty() || !std::all_of(key.begin(), key.end(), [](unsigned char ch) {
+                return std::isalnum(ch) != 0 || ch == '-';
+            }) || options.count(key) != 0)
+            return false;
+        LoonProxyValue value;
+        const std::string raw_value = trim(configs[i].substr(equal + 1));
+        if (!raw_value.empty() && !parseLoonProxyValue(raw_value, value))
+            return false;
+        options.emplace(key, std::move(value));
+    }
+    return true;
+}
+
+bool loonOptionsAreKnown(const LoonProxyOptions &options,
+                         std::initializer_list<const char *> known) {
+    for (const auto &item : options) {
+        if (std::none_of(known.begin(), known.end(), [&](const char *key) {
+                return item.first == key;
+            }))
+            return false;
+    }
+    return true;
+}
+
+bool loonOption(const LoonProxyOptions &options, const std::string &key,
+                std::string &value, bool require_quotes = false) {
+    const auto found = options.find(key);
+    if (found == options.end()) {
+        value.clear();
+        return true;
+    }
+    if (require_quotes && !found->second.quoted)
+        return false;
+    value = found->second.value;
+    return true;
+}
+
+bool loonAliasedOption(const LoonProxyOptions &options, const std::string &first,
+                       const std::string &second, std::string &value) {
+    const auto a = options.find(first), b = options.find(second);
+    if (a != options.end() && b != options.end() && a->second.value != b->second.value)
+        return false;
+    value = a != options.end() ? a->second.value
+                               : b != options.end() ? b->second.value : std::string();
+    return true;
+}
+
+bool loonBoolOption(const LoonProxyOptions &options, const std::string &first,
+                    const std::string &second, tribool &value) {
+    const auto a = options.find(first), b = options.find(second);
+    if (a != options.end() && b != options.end() && a != b &&
+        a->second.value != b->second.value)
+        return false;
+    if (a == options.end() && b == options.end()) {
+        value = tribool();
+        return true;
+    }
+    const std::string &text = a != options.end() ? a->second.value : b->second.value;
+    if (text != "true" && text != "false")
+        return false;
+    value = tribool(text);
+    return true;
+}
+
+bool validLoonPort(const std::string &port) {
+    return validSharePort(port);
+}
+
+bool validLoonAlterId(const std::string &alter_id) {
+    if (alter_id.empty() || alter_id.size() > 5 ||
+        !std::all_of(alter_id.begin(), alter_id.end(), [](unsigned char ch) {
+            return std::isdigit(ch) != 0;
+        }))
+        return false;
+    return to_int(alter_id, -1) <= 65535;
+}
+
+bool isLoonPositionalCandidate(const std::vector<std::string> &configs,
+                               const std::string &kind) {
+    const size_t minimum = kind == "vmess" ? 5 : 4;
+    if (configs.size() < minimum)
+        return false;
+    // Surge's same-named forms begin their fourth field with a named option
+    // (`username=` / `password=`); Loon uses a positional cipher/password.
+    const std::string &positional = configs[3];
+    if (!positional.empty() && positional.front() == '"')
+        return true;
+    return positional.find('=') == std::string::npos;
+}
+
+LoonProxyParseResult parseLoonProxyLine(const std::vector<std::string> &configs,
+                                        std::string remarks, Proxy &node) {
+    if (configs.empty())
+        return LoonProxyParseResult::NotLoon;
+    const std::string kind = toLower(trim(configs.front()));
+    if (kind != "vmess" && kind != "vless" && kind != "trojan" &&
+        kind != "anytls" && kind != "hysteria2")
+        return LoonProxyParseResult::NotLoon;
+    if (!isLoonPositionalCandidate(configs, kind))
+        return LoonProxyParseResult::NotLoon;
+
+    LoonProxyValue remark_value, server_value, credential_value;
+    if (!parseLoonProxyValue(std::move(remarks), remark_value) ||
+        !parseLoonProxyValue(configs[1], server_value) ||
+        server_value.quoted || !validLoonPort(trim(configs[2])))
+        return LoonProxyParseResult::Invalid;
+    const std::string server = server_value.value;
+    const std::string port = trim(configs[2]);
+    const size_t option_start = kind == "vmess" ? 5 : 4;
+    if (!parseLoonProxyValue(configs[kind == "vmess" ? 4 : 3],
+                             credential_value, true) ||
+        credential_value.value.empty())
+        return LoonProxyParseResult::Invalid;
+
+    LoonProxyOptions options;
+    if (!parseLoonProxyOptions(configs, option_start, options))
+        return LoonProxyParseResult::Invalid;
+    for (const auto &option : options) {
+        if (option.second.quoted && option.first != "public-key" &&
+            option.first != "salamander-password")
+            return LoonProxyParseResult::Invalid;
+    }
+    tribool udp, tfo, scv;
+    std::string sni, fingerprint;
+    if (!loonAliasedOption(options, "sni", "tls-name", sni) ||
+        !loonOption(options, "tls-profile", fingerprint) ||
+        !loonBoolOption(options, "udp", "udp-relay", udp) ||
+        !loonBoolOption(options, "fast-open", "tfo", tfo) ||
+        !loonBoolOption(options, "skip-cert-verify", "skip-cert-verify", scv))
+        return LoonProxyParseResult::Invalid;
+
+    if (kind == "vmess") {
+        if (!loonOptionsAreKnown(options, {"transport", "alterid", "path", "host", "over-tls",
+                                            "sni", "tls-name", "skip-cert-verify", "tls-profile",
+                                            "fast-open", "tfo", "udp", "udp-relay"}))
+            return LoonProxyParseResult::Invalid;
+        LoonProxyValue method_value;
+        std::string transport, alter_id, path, host, over_tls;
+        if (!parseLoonProxyValue(configs[3], method_value) || method_value.quoted ||
+            method_value.value.empty() || !isXrayUuid(credential_value.value) ||
+            !loonOption(options, "transport", transport) ||
+            !loonOption(options, "alterid", alter_id) ||
+            !loonOption(options, "path", path) || !loonOption(options, "host", host) ||
+            !loonOption(options, "over-tls", over_tls) ||
+            (transport != "tcp" && transport != "ws" && transport != "http") ||
+            (over_tls != "true" && over_tls != "false") ||
+            !validLoonAlterId(alter_id) ||
+            (transport == "tcp" && (!path.empty() || !host.empty())) ||
+            (!fingerprint.empty() && over_tls != "true") ||
+            (!sni.empty() && over_tls != "true"))
+            return LoonProxyParseResult::Invalid;
+        vmessConstruct(node, V2RAY_DEFAULT_GROUP, remark_value.value, server, port, "",
+                       credential_value.value, alter_id, transport, method_value.value,
+                       path, host, "", over_tls == "true" ? "tls" : "", sni,
+                       {}, udp, tfo, scv);
+        node.Fingerprint = fingerprint;
+        return LoonProxyParseResult::Parsed;
+    }
+
+    if (kind == "vless") {
+        if (!loonOptionsAreKnown(options, {"transport", "path", "host", "flow", "public-key", "short-id",
+                                            "over-tls", "sni", "tls-name", "skip-cert-verify",
+                                            "tls-profile", "fast-open", "tfo", "udp", "udp-relay"}))
+            return LoonProxyParseResult::Invalid;
+        std::string transport, path, host, flow, public_key, short_id, over_tls;
+        if (!isXrayUuid(credential_value.value) ||
+            !loonOption(options, "transport", transport) ||
+            !loonOption(options, "path", path) || !loonOption(options, "host", host) ||
+            !loonOption(options, "flow", flow) ||
+            !loonOption(options, "public-key", public_key, true) ||
+            !loonOption(options, "short-id", short_id) ||
+            !loonOption(options, "over-tls", over_tls) ||
+            (transport != "tcp" && transport != "ws" && transport != "http") ||
+            (over_tls != "true" && over_tls != "false") ||
+            (transport == "tcp" && (!path.empty() || !host.empty())) ||
+            (!fingerprint.empty() && over_tls != "true"))
+            return LoonProxyParseResult::Invalid;
+        const bool reality = !public_key.empty() || !flow.empty() || !short_id.empty();
+        if (reality ? (transport != "tcp" || over_tls != "true" ||
+                       flow != "xtls-rprx-vision" || public_key.empty() || sni.empty())
+                    : (!flow.empty() || !public_key.empty() || !short_id.empty()))
+            return LoonProxyParseResult::Invalid;
+        vlessConstruct(node, XRAY_DEFAULT_GROUP, remark_value.value, server, port, "",
+                       credential_value.value, "0", transport, "auto", flow, "", path,
+                       host, "", reality ? "reality" : over_tls == "true" ? "tls" : "",
+                       public_key, short_id, fingerprint, sni, {}, "none", udp, tfo, scv);
+        return LoonProxyParseResult::Parsed;
+    }
+
+    if (kind == "trojan") {
+        if (!loonOptionsAreKnown(options, {"transport", "path", "host", "alpn", "sni", "tls-name",
+                                            "skip-cert-verify", "tls-profile", "fast-open", "tfo",
+                                            "udp", "udp-relay"}))
+            return LoonProxyParseResult::Invalid;
+        std::string transport, path, host, alpn;
+        if (!loonOption(options, "transport", transport) ||
+            !loonOption(options, "path", path) || !loonOption(options, "host", host) ||
+            !loonOption(options, "alpn", alpn) ||
+            (transport.empty() ? false : transport != "tcp" && transport != "ws" && transport != "http") ||
+            ((transport.empty() || transport == "tcp") && (!path.empty() || !host.empty())))
+            return LoonProxyParseResult::Invalid;
+        if (transport.empty())
+            transport = "tcp";
+        std::vector<std::string> alpn_list;
+        if (!alpn.empty())
+            alpn_list.emplace_back(alpn);
+        trojanConstruct(node, TROJAN_DEFAULT_GROUP, remark_value.value, server, port,
+                        credential_value.value, transport, host, path, fingerprint, sni,
+                        alpn_list, true, udp, tfo, scv);
+        return LoonProxyParseResult::Parsed;
+    }
+
+    if (kind == "anytls") {
+        if (!loonOptionsAreKnown(options, {"sni", "tls-name", "skip-cert-verify", "tls-profile",
+                                            "fast-open", "tfo", "udp", "udp-relay", "block-quic"}))
+            return LoonProxyParseResult::Invalid;
+        std::string block_quic;
+        if (!loonOption(options, "block-quic", block_quic) ||
+            (options.count("block-quic") != 0 && block_quic != "false"))
+            return LoonProxyParseResult::Invalid;
+        anyTlSConstruct(node, ANYTLS_DEFAULT_GROUP, remark_value.value, port,
+                        credential_value.value, server, {}, fingerprint, sni, udp, tfo,
+                        scv, tribool(), "", 30, 30, 0);
+        return LoonProxyParseResult::Parsed;
+    }
+
+    if (!loonOptionsAreKnown(options, {"sni", "tls-name", "skip-cert-verify", "tls-cert-sha256",
+                                        "download-bandwidth", "salamander-password", "fast-open",
+                                        "tfo", "udp", "udp-relay"}))
+        return LoonProxyParseResult::Invalid;
+    std::string certificate, down, salamander_password;
+    if (!loonOption(options, "tls-cert-sha256", certificate) ||
+        !loonOption(options, "download-bandwidth", down) ||
+        !loonOption(options, "salamander-password", salamander_password, true) ||
+        (!down.empty() && !validHysteriaUriMbps(down)) ||
+        (!certificate.empty() && !scv.is_undef() && scv.get()))
+        return LoonProxyParseResult::Invalid;
+    hysteria2Construct(node, HYSTERIA2_DEFAULT_GROUP, remark_value.value, server, port,
+                       credential_value.value, sni, "", down, "",
+                       salamander_password.empty() ? "" : "salamander",
+                       salamander_password, sni, "", "", udp, tfo, scv);
+    node.Fingerprint = certificate;
+    return LoonProxyParseResult::Parsed;
+}
+
+enum class QuanXProxyParseResult { NotQuanX, Invalid, Parsed };
+
+using QuanXProxyOptions = std::map<std::string, std::string>;
+
+bool parseQuanXProxyOptions(const std::vector<std::string> &configs, size_t start,
+                            QuanXProxyOptions &options) {
+    for (size_t i = start; i < configs.size(); ++i) {
+        const size_t equal = configs[i].find('=');
+        if (equal == std::string::npos || equal == 0)
+            return false;
+        const std::string key = toLower(trim(configs[i].substr(0, equal)));
+        std::string value = trim(configs[i].substr(equal + 1));
+        if (key.empty() || value.find_first_of("\r\n") != std::string::npos ||
+            !std::all_of(key.begin(), key.end(), [](unsigned char ch) {
+                return std::isalnum(ch) != 0 || ch == '-';
+            }) || options.count(key) != 0)
+            return false;
+        options.emplace(key, std::move(value));
+    }
+    return true;
+}
+
+bool quanXOptionsAreKnown(const QuanXProxyOptions &options,
+                          std::initializer_list<const char *> known) {
+    return std::all_of(options.begin(), options.end(), [&](const auto &item) {
+        return std::any_of(known.begin(), known.end(), [&](const char *key) {
+            return item.first == key;
+        });
+    });
+}
+
+bool quanXOption(const QuanXProxyOptions &options, const std::string &key,
+                 std::string &value) {
+    const auto found = options.find(key);
+    value = found == options.end() ? std::string() : found->second;
+    return true;
+}
+
+bool quanXBoolOption(const QuanXProxyOptions &options, const std::string &key,
+                     tribool &value) {
+    const auto found = options.find(key);
+    if (found == options.end()) {
+        value = tribool();
+        return true;
+    }
+    if (found->second != "true" && found->second != "false")
+        return false;
+    value = tribool(found->second);
+    return true;
+}
+
+bool parseQuanXEndpoint(const std::string &input, std::string &server,
+                        std::string &port) {
+    const std::string endpoint = trim(input);
+    if (endpoint.empty() || endpoint.find_first_of(",\r\n") != std::string::npos)
+        return false;
+    if (endpoint.front() == '[') {
+        const size_t closing = endpoint.find("]:");
+        if (closing == std::string::npos)
+            return false;
+        server = endpoint.substr(1, closing - 1);
+        port = endpoint.substr(closing + 2);
+    } else {
+        const size_t colon = endpoint.rfind(':');
+        if (colon == std::string::npos)
+            return false;
+        server = endpoint.substr(0, colon);
+        port = endpoint.substr(colon + 1);
+    }
+    return !server.empty() && validSharePort(port);
+}
+
+bool parseQuanXTlsAlpn(const std::string &hex, std::vector<std::string> &alpn_list) {
+    alpn_list.clear();
+    if (hex.empty())
+        return true;
+    if (hex.size() % 2 != 0 ||
+        !std::all_of(hex.begin(), hex.end(), [](unsigned char ch) {
+            return std::isxdigit(ch) != 0;
+        }))
+        return false;
+    std::string bytes;
+    bytes.reserve(hex.size() / 2);
+    const auto nibble = [](unsigned char ch) -> unsigned char {
+        if (ch >= '0' && ch <= '9')
+            return ch - '0';
+        ch = static_cast<unsigned char>(std::tolower(ch));
+        return static_cast<unsigned char>(ch - 'a' + 10);
+    };
+    for (size_t i = 0; i < hex.size(); i += 2)
+        bytes.push_back(static_cast<char>((nibble(hex[i]) << 4) | nibble(hex[i + 1])));
+    for (size_t offset = 0; offset < bytes.size();) {
+        const size_t length = static_cast<unsigned char>(bytes[offset++]);
+        if (length == 0 || length > bytes.size() - offset)
+            return false;
+        alpn_list.emplace_back(bytes.substr(offset, length));
+        offset += length;
+    }
+    return !alpn_list.empty();
+}
+
+bool validQuanXReality(const std::string &public_key, const std::string &short_id) {
+    if (public_key.size() != 43 ||
+        !std::all_of(public_key.begin(), public_key.end(), [](unsigned char ch) {
+            return std::isalnum(ch) != 0 || ch == '-' || ch == '_';
+        }))
+        return false;
+    const std::string decoded = urlSafeBase64Decode(public_key);
+    if (decoded.size() != 32 || urlSafeBase64Encode(decoded) != public_key)
+        return false;
+    return short_id.empty() ||
+           (short_id.size() <= 16 && short_id.size() % 2 == 0 &&
+            std::all_of(short_id.begin(), short_id.end(), [](unsigned char ch) {
+                return std::isxdigit(ch) != 0;
+            }));
+}
+
+struct QuanXTransport {
+    std::string network = "tcp";
+    std::string fake_type;
+    std::string host;
+    std::string path;
+    std::string sni;
+    std::string tls;
+};
+
+bool parseQuanXTransport(const QuanXProxyOptions &options, bool reality,
+                         QuanXTransport &transport) {
+    std::string obfs, host, path;
+    quanXOption(options, "obfs", obfs);
+    quanXOption(options, "obfs-host", host);
+    quanXOption(options, "obfs-uri", path);
+    if (obfs.empty())
+        return host.empty() && path.empty() && !reality;
+    if (obfs == "http") {
+        if (reality)
+            return false;
+        transport.fake_type = "http";
+        transport.host = host;
+        transport.path = path;
+        return true;
+    }
+    if (obfs == "ws") {
+        if (reality)
+            return false;
+        transport.network = "ws";
+        transport.host = host;
+        transport.path = path;
+        return true;
+    }
+    if (obfs == "over-tls") {
+        if (!path.empty() || host.empty())
+            return false;
+        transport.sni = host;
+        transport.tls = reality ? "reality" : "tls";
+        return true;
+    }
+    if (obfs == "wss") {
+        if (host.empty())
+            return false;
+        transport.network = "ws";
+        transport.host = host;
+        transport.path = path;
+        transport.sni = host;
+        transport.tls = reality ? "reality" : "tls";
+        return true;
+    }
+    return false;
+}
+
+QuanXProxyParseResult parseQuanXProxyLine(const std::vector<std::string> &configs,
+                                          std::string kind, Proxy &node) {
+    kind = toLower(trim(kind));
+    if (kind != "vmess" && kind != "vless" && kind != "trojan" &&
+        kind != "anytls")
+        return QuanXProxyParseResult::NotQuanX;
+    if (configs.size() < 2)
+        return QuanXProxyParseResult::Invalid;
+    const std::string first = toLower(trim(configs.front()));
+    if (first == "vmess" || first == "vless" || first == "trojan" ||
+        first == "anytls" || first == "ss" || first == "socks5" ||
+        first == "http" || first == "wireguard" || first == "snell" ||
+        first == "custom" || first == "direct" || first == "reject" ||
+        first == "reject-tinygif")
+        return QuanXProxyParseResult::NotQuanX;
+
+    std::string server, port;
+    QuanXProxyOptions options;
+    if (!parseQuanXEndpoint(configs.front(), server, port) ||
+        !parseQuanXProxyOptions(configs, 1, options))
+        return QuanXProxyParseResult::Invalid;
+
+    std::string remarks, password, public_key, short_id, alpn_hex;
+    quanXOption(options, "tag", remarks);
+    quanXOption(options, "password", password);
+    quanXOption(options, "reality-base64-pubkey", public_key);
+    quanXOption(options, "reality-hex-shortid", short_id);
+    quanXOption(options, "tls-alpn", alpn_hex);
+    const bool reality = !public_key.empty() || !short_id.empty();
+    if (remarks.empty() || password.empty() ||
+        (reality && !validQuanXReality(public_key, short_id)))
+        return QuanXProxyParseResult::Invalid;
+
+    tribool udp, tfo, tls_verification;
+    if (!quanXBoolOption(options, "udp-relay", udp) ||
+        !quanXBoolOption(options, "fast-open", tfo) ||
+        !quanXBoolOption(options, "tls-verification", tls_verification) ||
+        (reality && !tfo.is_undef() && tfo.get()))
+        return QuanXProxyParseResult::Invalid;
+    tribool scv;
+    if (!tls_verification.is_undef())
+        scv = !tls_verification.get();
+    std::vector<std::string> alpn_list;
+    if (!parseQuanXTlsAlpn(alpn_hex, alpn_list) ||
+        (reality && (!alpn_list.empty() || !tls_verification.is_undef())))
+        return QuanXProxyParseResult::Invalid;
+
+    if (kind == "vmess" || kind == "vless") {
+        const bool vmess = kind == "vmess";
+        if (!quanXOptionsAreKnown(
+                options,
+                vmess ? std::initializer_list<const char *>{
+                            "method", "password", "aead", "obfs", "obfs-host", "obfs-uri",
+                            "reality-base64-pubkey", "reality-hex-shortid", "tls-alpn",
+                            "fast-open", "udp-relay", "tls-verification", "tag"}
+                      : std::initializer_list<const char *>{
+                            "method", "password", "obfs", "obfs-host", "obfs-uri",
+                            "reality-base64-pubkey", "reality-hex-shortid", "vless-flow",
+                            "tls-alpn", "fast-open", "udp-relay", "tls-verification", "tag"}) ||
+            !isXrayUuid(password))
+            return QuanXProxyParseResult::Invalid;
+        std::string method, aead_text, flow;
+        quanXOption(options, "method", method);
+        quanXOption(options, "aead", aead_text);
+        quanXOption(options, "vless-flow", flow);
+        tribool aead;
+        if (method.empty() || (!vmess && method != "none") ||
+            (!aead_text.empty() && !aead.set(aead_text)) ||
+            (!flow.empty() && flow != "xtls-rprx-vision"))
+            return QuanXProxyParseResult::Invalid;
+        QuanXTransport transport;
+        if (!parseQuanXTransport(options, reality, transport) ||
+            (!alpn_list.empty() && transport.tls != "tls") ||
+            (!tls_verification.is_undef() && transport.tls != "tls") ||
+            (!flow.empty() && (!reality || transport.network != "tcp")))
+            return QuanXProxyParseResult::Invalid;
+        if (vmess) {
+            vmessConstruct(node, V2RAY_DEFAULT_GROUP, remarks, server, port,
+                           transport.fake_type, password,
+                           !aead.is_undef() && !aead.get() ? "1" : "0",
+                           transport.network, method, transport.path, transport.host, "",
+                           transport.tls, transport.sni, alpn_list, udp, tfo, scv);
+            node.PublicKey = public_key;
+            node.ShortId = short_id;
+        } else {
+            vlessConstruct(node, XRAY_DEFAULT_GROUP, remarks, server, port,
+                           transport.fake_type, password, "0", transport.network, method,
+                           flow, "", transport.path, transport.host, "", transport.tls,
+                           public_key, short_id, "", transport.sni, alpn_list, "none",
+                           udp, tfo, scv);
+        }
+        return QuanXProxyParseResult::Parsed;
+    }
+
+    if (kind == "trojan") {
+        if (!quanXOptionsAreKnown(options, {"password", "over-tls", "tls-host", "obfs",
+                                             "obfs-host", "obfs-uri", "reality-base64-pubkey",
+                                             "reality-hex-shortid", "tls-alpn", "fast-open",
+                                             "udp-relay", "tls-verification", "tag"}))
+            return QuanXProxyParseResult::Invalid;
+        std::string over_tls, tls_host, obfs;
+        quanXOption(options, "over-tls", over_tls);
+        quanXOption(options, "tls-host", tls_host);
+        quanXOption(options, "obfs", obfs);
+        QuanXTransport transport;
+        if (obfs.empty()) {
+            if (over_tls != "true" || tls_host.empty())
+                return QuanXProxyParseResult::Invalid;
+            transport.tls = reality ? "reality" : "tls";
+            transport.sni = tls_host;
+        } else if (!over_tls.empty() || !tls_host.empty() || obfs != "wss" ||
+                   !parseQuanXTransport(options, reality, transport)) {
+            return QuanXProxyParseResult::Invalid;
+        }
+        if ((!alpn_list.empty() && transport.tls != "tls") ||
+            (!tls_verification.is_undef() && transport.tls != "tls"))
+            return QuanXProxyParseResult::Invalid;
+        trojanConstruct(node, TROJAN_DEFAULT_GROUP, remarks, server, port, password,
+                        transport.network, transport.host, transport.path, "", transport.sni,
+                        alpn_list, true, udp, tfo, scv);
+        node.TLSStr = transport.tls;
+        node.PublicKey = public_key;
+        node.ShortId = short_id;
+        return QuanXProxyParseResult::Parsed;
+    }
+
+    if (!quanXOptionsAreKnown(options, {"password", "over-tls", "tls-host",
+                                         "reality-base64-pubkey", "reality-hex-shortid",
+                                         "tls-alpn", "fast-open", "udp-relay",
+                                         "tls-verification", "tag"}))
+        return QuanXProxyParseResult::Invalid;
+    std::string over_tls, tls_host;
+    quanXOption(options, "over-tls", over_tls);
+    quanXOption(options, "tls-host", tls_host);
+    if (over_tls != "true" || (reality && tls_host.empty()))
+        return QuanXProxyParseResult::Invalid;
+    anyTlSConstruct(node, ANYTLS_DEFAULT_GROUP, remarks, port, password, server,
+                    alpn_list, "", tls_host, udp, tfo, scv, tribool(), "", 30, 30, 0);
+    node.TLSStr = reality ? "reality" : "tls";
+    node.TLSSecure = true;
+    node.PublicKey = public_key;
+    node.ShortId = short_id;
+    return QuanXProxyParseResult::Parsed;
+}
+
 bool explodeSurge(std::string surge, std::vector<Proxy> &nodes) {
     std::multimap<std::string, std::string> proxies;
     uint32_t i, index = nodes.size();
@@ -3085,14 +3692,23 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes) {
     ini.allow_dup_section_titles = true;
     ini.set_isolated_items_section("Proxy");
     ini.add_direct_save_section("Proxy");
+    ini.add_direct_save_section("server_local");
     if (surge.find("[Proxy]") != surge.npos)
         surge = regReplace(surge, R"(^[\S\s]*?\[)", "[", false);
     ini.parse(surge);
 
-    if (!ini.section_exist("Proxy"))
+    if (!ini.section_exist("Proxy") && !ini.section_exist("server_local"))
         return false;
-    ini.enter_section("Proxy");
-    ini.get_items(proxies);
+    if (ini.section_exist("Proxy")) {
+        string_multimap section_proxies;
+        ini.get_items("Proxy", section_proxies);
+        proxies.insert(section_proxies.begin(), section_proxies.end());
+    }
+    if (ini.section_exist("server_local")) {
+        string_multimap section_proxies;
+        ini.get_items("server_local", section_proxies);
+        proxies.insert(section_proxies.begin(), section_proxies.end());
+    }
 
     const std::string proxystr = "(.*?)\\s*=\\s*(.*)";
 
@@ -3117,11 +3733,29 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes) {
         configs = split(regReplace(x.second, proxystr, "$2"), ",");
         */
         regGetMatch(x.second, proxystr, 3, 0, &remarks, &config);
-        configs = split(config, ",");
-        if (!configs.empty() && trim(configs.front()) == "wireguard")
-            configs = splitWireGuardFields(config);
+        configs = splitWireGuardFields(config);
         if (configs.empty() || (configs.size() < 3 && configs[0] != "wireguard"))
             continue;
+        const LoonProxyParseResult loon_result =
+                parseLoonProxyLine(configs, remarks, node);
+        if (loon_result == LoonProxyParseResult::Invalid)
+            continue;
+        if (loon_result == LoonProxyParseResult::Parsed) {
+            node.Id = index;
+            nodes.emplace_back(std::move(node));
+            index++;
+            continue;
+        }
+        const QuanXProxyParseResult quanx_result =
+                parseQuanXProxyLine(configs, remarks, node);
+        if (quanx_result == QuanXProxyParseResult::Invalid)
+            continue;
+        if (quanx_result == QuanXProxyParseResult::Parsed) {
+            node.Id = index;
+            nodes.emplace_back(std::move(node));
+            index++;
+            continue;
+        }
         switch (hash_(configs[0])) {
             case "direct"_hash:
             case "reject"_hash:
@@ -4169,20 +4803,31 @@ int explodeConfContent(const std::string &content, std::vector<Proxy> &nodes) {
     return !nodes.empty();
 }
 
-void explodeSingboxTransport(rapidjson::Value &singboxNode, std::string &net, std::string &host, std::string &path,
-                             std::string edge) {
+bool explodeSingboxTransport(const rapidjson::Value &singboxNode, std::string &net, std::string &host,
+                             std::string &path, std::string &edge) {
     if (singboxNode.HasMember("transport") && singboxNode["transport"].IsObject()) {
-        rapidjson::Value transport = singboxNode["transport"].GetObject();
+        const rapidjson::Value &transport = singboxNode["transport"];
         net = GetMember(transport, "type");
         switch (hash_(net)) {
+            case "tcp"_hash:
+                break;
             case "http"_hash: {
-                host = GetMember(transport, "host");
+                if (transport.HasMember("host")) {
+                    const rapidjson::Value &host_value = transport["host"];
+                    if (host_value.IsString())
+                        host = host_value.GetString();
+                    else if (host_value.IsArray() && !host_value.Empty() && host_value[0].IsString())
+                        host = host_value[0].GetString();
+                    else
+                        return false;
+                }
+                path = GetMember(transport, "path");
                 break;
             }
             case "ws"_hash: {
                 path = GetMember(transport, "path");
                 if (transport.HasMember("headers") && transport["headers"].IsObject()) {
-                    rapidjson::Value headers = transport["headers"].GetObject();
+                    const rapidjson::Value &headers = transport["headers"];
                     host = GetMember(headers, "Host");
                     edge = GetMember(headers, "Edge");
                 }
@@ -4192,10 +4837,13 @@ void explodeSingboxTransport(rapidjson::Value &singboxNode, std::string &net, st
                 path = GetMember(transport, "service_name");
                 break;
             }
-            default:
-                net = "tcp";
-                path.clear();
+            case "httpupgrade"_hash: {
+                host = GetMember(transport, "host");
+                path = GetMember(transport, "path");
                 break;
+            }
+            default:
+                return false;
         }
     } else {
         net = "tcp";
@@ -4203,6 +4851,7 @@ void explodeSingboxTransport(rapidjson::Value &singboxNode, std::string &net, st
         edge.clear();
         path.clear();
     }
+    return true;
 }
 
 namespace {
@@ -4318,15 +4967,20 @@ void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
                         tls = "tls";
                     }
                     sni = GetMember(tlsObj, "server_name");
-                    if (tlsObj.HasMember("alpn") && tlsObj["alpn"].IsArray() && !tlsObj["alpn"].Empty()) {
-                        rapidjson::Value alpns = tlsObj["alpn"].GetArray();
-                        if (alpns.Size() > 0) {
-                            alpn = alpns[0].GetString();
-                            for (auto &item: tlsObj["alpn"].GetArray()) {
-                                if (item.IsString())
-                                    alpnList.emplace_back(item.GetString());
+                    if (tlsObj.HasMember("alpn")) {
+                        if (!tlsObj["alpn"].IsArray())
+                            continue;
+                        for (const auto &item : tlsObj["alpn"].GetArray()) {
+                            if (!item.IsString()) {
+                                alpnList.clear();
+                                break;
                             }
+                            alpnList.emplace_back(item.GetString());
                         }
+                        if (alpnList.empty() && !tlsObj["alpn"].Empty())
+                            continue;
+                        if (!alpnList.empty())
+                            alpn = alpnList.front();
                     }
                     if (tlsObj.HasMember("insecure") && tlsObj["insecure"].IsBool()) {
                         scv = tlsObj["insecure"].GetBool();
@@ -4363,15 +5017,22 @@ void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
                     case "vmess"_hash:
                         group = V2RAY_DEFAULT_GROUP;
                         id = GetMember(singboxNode, "uuid");
-                        if (id.length() < 36) {
-                            break;
-                        }
+                        if (id.length() < 36)
+                            continue;
                         aid = GetMember(singboxNode, "alter_id");
                         cipher = GetMember(singboxNode, "security");
-                        explodeSingboxTransport(singboxNode, net, host, path, edge);
+                        if (!explodeSingboxTransport(singboxNode, net, host, path, edge))
+                            continue;
                         vmessConstruct(node, group, ps, server, port, "", id, aid, net, cipher, path, host, edge, tls,
                                        sni, alpnList, udp,
                                        tfo, scv);
+                        node.Fingerprint = fingerprint;
+                        node.PublicKey = pbk;
+                        node.ShortId = sid;
+                        if (net == "grpc") {
+                            node.GRPCServiceName = path;
+                            node.GRPCMode = "gun";
+                        }
                         break;
                     case "shadowsocks"_hash:
                         group = SS_DEFAULT_GROUP;
@@ -4382,58 +5043,38 @@ void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
                         ssConstruct(node, group, ps, server, port, password, cipher, plugin, pluginopts, udp, tfo, scv);
                         break;
                     case "trojan"_hash:
+                        if (tls != "tls" && tls != "reality")
+                            continue;
                         group = TROJAN_DEFAULT_GROUP;
                         password = GetMember(singboxNode, "password");
-                        explodeSingboxTransport(singboxNode, net, host, path, edge);
-                        trojanConstruct(node, group, ps, server, port, password, net, host, path, fp, sni, alpnList,
+                        if (!explodeSingboxTransport(singboxNode, net, host, path, edge))
+                            continue;
+                        trojanConstruct(node, group, ps, server, port, password, net, host, path, fingerprint, sni, alpnList,
                                         true, udp,
                                         tfo,
                                         scv);
+                        node.TLSStr = tls;
+                        node.PublicKey = pbk;
+                        node.ShortId = sid;
+                        if (net == "grpc") {
+                            node.GRPCServiceName = path;
+                            node.GRPCMode = "gun";
+                        }
                         break;
                     case "vless"_hash:
                         group = XRAY_DEFAULT_GROUP;
                         id = GetMember(singboxNode, "uuid");
                         flow = GetMember(singboxNode, "flow");
                         packet_encoding = GetMember(singboxNode, "packet_encoding");
-                        if (singboxNode.HasMember("transport") && singboxNode["transport"].IsObject()) {
-                            rapidjson::Value transport = singboxNode["transport"].GetObject();
-                            net = GetMember(transport, "type");
-                            switch (hash_(net)) {
-                                case "tcp"_hash: {
-                                    break;
-                                }
-                                case "ws"_hash: {
-                                    path = GetMember(transport, "path");
-                                    if (transport.HasMember("headers") && transport["headers"].IsObject()) {
-                                        rapidjson::Value headers = transport["headers"].GetObject();
-                                        host = GetMember(headers, "Host");
-                                        edge = GetMember(headers, "Edge");
-                                    }
-                                    break;
-                                }
-                                case "http"_hash: {
-                                    host = GetMember(transport, "host");
-                                    path = GetMember(transport, "path");
-                                    edge.clear();
-                                    break;
-                                }
-                                case "httpupgrade"_hash: {
-                                    net = "httpupgrade";
-                                    host = GetMember(transport, "host");
-                                    path = GetMember(transport, "path");
-                                    edge.clear();
-                                    break;
-                                }
-                                case "grpc"_hash: {
-                                    host = server;
-                                    path = GetMember(transport, "service_name");
-                                    break;
-                                }
-                            }
-                        }
+                        if (!explodeSingboxTransport(singboxNode, net, host, path, edge))
+                            continue;
 
                         vlessConstruct(node, group, ps, server, port, type, id, aid, net, "auto", flow, mode, path,
-                                       host, "", tls, pbk, sid, fp, sni, alpnList, packet_encoding, udp);
+                                       host, "", tls, pbk, sid, fingerprint, sni, alpnList, packet_encoding, udp);
+                        if (net == "grpc") {
+                            node.GRPCServiceName = path;
+                            node.GRPCMode = "gun";
+                        }
                         break;
                     case "http"_hash:
                         password = GetMember(singboxNode, "password");
@@ -4544,6 +5185,8 @@ void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
                         node.TLSSecure = true;
                         break;
                     case "anytls"_hash:
+                        if (tls != "tls" && tls != "reality")
+                            continue;
                         group = ANYTLS_DEFAULT_GROUP;
                         password = GetMember(singboxNode, "password");
                         idle_check = parseUint16Option(
@@ -4556,6 +5199,10 @@ void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
                                         sni,
                                         udp,
                                         tribool(), scv, tribool(), "", idle_check, idle_timeout, min_idle);
+                        node.TLSStr = tls;
+                        node.TLSSecure = true;
+                        node.PublicKey = pbk;
+                        node.ShortId = sid;
                         break;
                     case "hysteria2"_hash:
                         group = HYSTERIA2_DEFAULT_GROUP;
@@ -4794,7 +5441,8 @@ void explodeSub(std::string sub, std::vector<Proxy> &nodes) {
     //try to parse as normal subscription
     if (!processed) {
         sub = urlSafeBase64Decode(sub);
-        if (regFind(sub, "(vmess|shadowsocks|http|trojan)\\s*?=")) {
+        if (sub.find("[Proxy]") != std::string::npos ||
+            regFind(sub, "(?i)(vmess|vless|shadowsocks|hysteria2|anytls|http|trojan)\\s*?=")) {
             if (explodeSurge(sub, nodes))
                 return;
         }

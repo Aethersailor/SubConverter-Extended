@@ -132,7 +132,9 @@ SubConverter-Extended 因此诞生。它是一款更贴合 Mihomo 使用场景�
 
 Legacy 解析器对经典格式的兼容范围包括：Shadowsocks SIP002（含 AEAD-2022、插件和 IPv6）、SIP008/旧版 JSON 输入、历史 SSR 链接、v2rayN `socks://` 新旧格式、Telegram 和 Base64 authority 形式的 HTTP(S) 代理链接，以及 Surge、Loon、Mihomo 和 sing-box 新旧结构中的 WireGuard 节点。它也会校准 Hysteria v1 的官方 URI、Mihomo YAML 与 sing-box JSON 字段、当前 Netch `Netch://` 分享链接和 `settings.json` 中的 SS/SSR/SOCKS/VMess/VLESS/Trojan/WireGuard 节点，以及 Surge Snell v1-v6 的 `version`、`reuse`、HTTP/TLS obfs、`udp-port`、v6 `mode` 和 Shadow TLS 字段；历史 Netch 的 `Socks5`、`TLSSecure` 和 Snell 字段仍保持兼容。输出时仍会按目标客户端的稳定能力过滤不可表示的组合。Netch 的 SSH 节点没有可共用的内部代理模型，会明确跳过；`packet` 模式可由 VLESS 单链接保留，但不会输出给不支持该模式的 sing-box。普通 HTTP(S) URL 仍按订阅处理；`socks5://` 仍属于 Mihomo 路径，不会借此改动进入 Legacy 解析器。解析成功不代表每个目标客户端都能表示对应协议，最终仍由目标生成器筛选。Netch 字段依据见其[当前服务模型与分享链接实现](https://github.com/netchx/netch/tree/main/Netch/Servers)。
 
-Mieru 的 Legacy 支持仅覆盖官方可读的 `mierus://` 简化链接。解析器会校验 profile、MTU、复用等级、握手模式和 traffic-pattern 的 Base64/protobuf 外层格式，并按成对出现的 `port` / `protocol` 展开多端口配置。`mieru://` 是完整客户端 protobuf 配置的 Base64，不由人工解析器猜测或降级；该格式在 Legacy 路径会明确解析失败。`target=clash` 和 `target=clashr` 仍只调用 Mihomo，本轮改动不会替换或回退其 Mieru 解析结果。
+Mieru 的 Legacy 支持仅覆盖官方可读的 `mierus://` 简化链接。解析器会校验 profile、MTU、复用等级、握手模式和 traffic-pattern 的 Base64/protobuf 外层格式，并按成对出现的 `port` / `protocol` 展开多端口配置。完整客户端配置 `mieru://` 只在 `target=clash`、`target=clashr` 及 `auto` 命中这两类目标时，由 Mihomo 专属 Go 桥使用 `bridge/go.mod` 锁定的官方 Mieru v3 protobuf 定义严格展开，再交回同一 Mihomo 解析器；不可等价表达的配置会失败关闭，且绝不回退 Legacy。其他目标继续只走 Legacy，不会因该格式改变解析路径。
+
+Legacy 生成器会统一统计「已解析但目标格式无法表示」的节点。请求中的本地节点全部无法表示，且没有客户端原生远程资源时，接口返回 HTTP 400，不再以空节点列表伪装成功；混合输入只保留能够精确表示的节点，并在 Explain 与 `TARGET_NODE_GENERATION` 日志中给出协议计数。Quantumult X 当前可精确输出 VMess、VLESS、Trojan 的 TLS、WebSocket、Reality/Vision 组合和 AnyTLS；Loon 当前可精确输出 VMess、VLESS、Trojan 的 TCP、WebSocket、HTTP 组合、VLESS Reality/Vision、AnyTLS，以及带 Salamander 的 Hysteria 2。无法等价表达的传输、TLS 组合或危险配置分隔符会明确跳过，不会静默降级成 TCP。以上判断依据官方配置语法和项目往返测试；由于仓库不包含 Quantumult X 或 Loon 内核，仍需客户端设备验证实际导入与连通性。
 
 ### 🔥 独特功能
 

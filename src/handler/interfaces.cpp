@@ -3705,11 +3705,17 @@ static SubStageResponse dispatchTargetGenerator(
     managed_url =
         settings.managedConfigPrefix + "/sub?" + joinArguments(argument);
 
+  struct PendingUpload {
+    std::string name;
+    std::string path;
+    std::string content;
+    bool write_manage_url = false;
+  };
+  std::vector<PendingUpload> pending_uploads;
   bool upload_failed = false;
   auto recordUpload = [&](const std::string &name, const std::string &path,
                           const std::string &content, bool write_manage_url) {
-    if (uploadGist(name, path, content, write_manage_url) != 0)
-      upload_failed = true;
+    pending_uploads.push_back({name, path, content, write_manage_url});
   };
 
   proxy = parseProxy(settings.proxyConfig, settings.proxyBypass);
@@ -3786,14 +3792,6 @@ static SubStageResponse dispatchTargetGenerator(
       parsed.explain.unsupported_node_count = unsupported_count;
       parsed.explain.unsupported_protocols = unsupported_protocols;
 
-      if (stats.input_nodes > 0 && stats.emitted_nodes == 0 &&
-          ext.surge_policy_paths.empty()) {
-        *status_code = 400;
-        return {true,
-                "Invalid request: none of the parsed proxy nodes can be "
-                "represented by the selected Surge output version.\n"
-                "无效请求：解析到的代理节点均无法由所选 Surge 输出版本表示。"};
-      }
       if (!ext.surge_policy_paths.empty() &&
           stats.remote_references_emitted == 0) {
         *status_code = 400;
@@ -3857,14 +3855,6 @@ static SubStageResponse dispatchTargetGenerator(
       parsed.explain.unsupported_node_count = unsupported_count;
       parsed.explain.unsupported_protocols = unsupported_protocols;
 
-      if (stats.input_nodes > 0 && stats.emitted_nodes == 0 &&
-          ext.surfboard_policy_paths.empty()) {
-        *status_code = 400;
-        return {true,
-                "Invalid request: none of the parsed proxy nodes can be "
-                "represented by Surfboard.\n"
-                "无效请求：解析到的代理节点均无法由 Surfboard 表示。"};
-      }
       if (!ext.surfboard_policy_paths.empty() &&
           stats.remote_references_emitted == 0) {
         *status_code = 400;
@@ -4040,14 +4030,6 @@ static SubStageResponse dispatchTargetGenerator(
       parsed.explain.unsupported_node_count = unsupported_count;
       parsed.explain.unsupported_protocols = unsupported_protocols;
 
-      if (stats.input_nodes > 0 && stats.emitted_nodes == 0 &&
-          ext.loon_remote_proxies.empty()) {
-        *status_code = 400;
-        return {true,
-                "Invalid request: none of the parsed proxy nodes can be "
-                "represented by Loon.\n"
-                "无效请求：解析到的代理节点均无法由 Loon 表示。"};
-      }
       if (!ext.loon_remote_proxies.empty() &&
           stats.remote_references_emitted == 0) {
         *status_code = 400;
@@ -4094,6 +4076,45 @@ static SubStageResponse dispatchTargetGenerator(
             "内部错误：target 已通过校验，但没有对应的生成器处理它。\n"
             "Please report this request to the service maintainer.\n"
             "请将该请求反馈给服务维护者。"};
+  }
+
+  if (parsed.target_descriptor->parser_mode == NodeParserMode::LegacyOnly) {
+    const TargetGenerationStats &stats = ext.target_generation_stats;
+    string_array unsupported_protocols;
+    unsupported_protocols.reserve(stats.unsupported_by_type.size());
+    for (const auto &[type, count] : stats.unsupported_by_type) {
+      unsupported_protocols.emplace_back(toLower(getProxyTypeName(type)) +
+                                         ":" + std::to_string(count));
+    }
+    const size_t unsupported_count = stats.unsupported_nodes();
+    writeLog(unsupported_count ? LOG_LEVEL_WARNING : LOG_LEVEL_INFO,
+             "TARGET_NODE_GENERATION target=" + target + " input=" +
+                 std::to_string(stats.input_nodes) + " emitted=" +
+                 std::to_string(stats.emitted_nodes) + " unsupported=" +
+                 std::to_string(unsupported_count) + " protocols=" +
+                 (unsupported_protocols.empty()
+                      ? std::string("none")
+                      : join(unsupported_protocols, ";")) +
+                 " remote_references=" +
+                 std::to_string(stats.remote_references_emitted));
+    parsed.explain.generated_node_count = stats.emitted_nodes;
+    parsed.explain.unsupported_node_count = unsupported_count;
+    parsed.explain.unsupported_protocols = unsupported_protocols;
+
+    if (stats.input_nodes > 0 && stats.emitted_nodes == 0 &&
+        stats.remote_references_emitted == 0) {
+      *status_code = 400;
+      return {true,
+              "Invalid request: none of the parsed proxy nodes can be "
+              "represented by the selected output target.\n"
+              "无效请求：解析到的代理节点均无法由所选输出目标表示。"};
+    }
+  }
+
+  for (const PendingUpload &pending : pending_uploads) {
+    if (uploadGist(pending.name, pending.path, pending.content,
+                   pending.write_manage_url) != 0)
+      upload_failed = true;
   }
 
   if (upload_failed)
