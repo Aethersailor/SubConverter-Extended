@@ -120,7 +120,7 @@ VLESS_XHTTP_URI = (
     "&path=%2Fsplit%3Ftoken%3D1&mode=stream-one"
     "&extra=%7B%22xPaddingBytes%22%3A%22100-1000%22%7D"
     "&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sid=00112233"
-    "&fp=chrome#VLESSXHTTP"
+    "&fp=chrome&sni=vless-reality.example.test#VLESSXHTTP"
 )
 VLESS_HTTPUPGRADE_URI = (
     "vless://66666666-6666-6666-6666-666666666666@upgrade.example.test:443"
