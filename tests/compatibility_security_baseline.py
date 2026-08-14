@@ -7111,11 +7111,14 @@ def shadowrocket_target_baseline(base_url: str) -> None:
             f"HTTP {unknown_mieru_status} {unknown_mieru_body!r}"
         )
 
+    remote_mieru_subscription = base64.b64encode(
+        (MIERU_OFFICIAL_SIMPLE_URI + "\n").encode("utf-8")
+    ).decode("ascii")
     remote_mieru_source = (
         "data:text/plain;base64,"
-        + base64.b64encode(
-            (MIERU_OFFICIAL_SIMPLE_URI + "\n").encode("utf-8")
-        ).decode("ascii")
+        + base64.b64encode(remote_mieru_subscription.encode("ascii")).decode(
+            "ascii"
+        )
     )
     filtered_mieru_status, filtered_mieru_body, _ = request(
         base_url,
