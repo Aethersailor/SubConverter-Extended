@@ -126,8 +126,7 @@ static constexpr std::array<TargetDescriptor, 21> kTargetDescriptors = {{
     {"v2rayng", NodeParserMode::LegacyOnly,
      RemoteSubscriptionMode::ServerSideParse, true, 0},
     {"shadowrocket", NodeParserMode::LegacyOnly,
-     RemoteSubscriptionMode::ServerSideParse, true,
-     SingleLinkType::Shadowrocket},
+     RemoteSubscriptionMode::ServerSideParse, true, 0},
     {"trojan", NodeParserMode::LegacyOnly,
      RemoteSubscriptionMode::ServerSideParse, true, SingleLinkType::Trojan},
     {"vless", NodeParserMode::LegacyOnly,
@@ -3954,7 +3953,10 @@ static SubStageResponse dispatchTargetGenerator(
     writeLog(LOG_LEVEL_INFO, "生成目标：Shadowrocket");
     output = proxyToShadowrocket(nodes, ext);
     if (upload)
-      recordUpload("shadowrocket", upload_path, output, false);
+      // Shadowrocket UA requests historically resolved to mixed and updated
+      // the default Gist path "sub". Preserve that path for smooth upgrades.
+      recordUpload(parsed.target_was_auto ? "sub" : "shadowrocket", upload_path,
+                   output, false);
     break;
   case "trojan"_hash:
     writeLog(LOG_LEVEL_INFO, "生成目标：Trojan");

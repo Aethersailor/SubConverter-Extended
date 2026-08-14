@@ -3349,35 +3349,67 @@ std::string proxyToV2RayClient(std::vector<Proxy> &nodes,
   return base64Encode(all_links);
 }
 
-std::string proxyToSingle(std::vector<Proxy> &nodes, SingleLinkTypes types,
-                           extra_settings &ext) {
+namespace {
+
+enum class SingleLinkDialect { Legacy, Shadowrocket };
+
+struct SingleLinkProfile {
+  bool shadowsocks;
+  bool shadowsocksr;
+  bool vmess;
+  bool trojan;
+  bool hysteria2;
+  bool vless;
+  SingleLinkDialect dialect;
+};
+
+static SingleLinkProfile legacySingleLinkProfile(SingleLinkTypes types) {
+  return {
+      (types & SingleLinkType::Shadowsocks) != 0,
+      (types & SingleLinkType::ShadowsocksR) != 0,
+      (types & SingleLinkType::VMess) != 0,
+      (types & SingleLinkType::Trojan) != 0,
+      (types & SingleLinkType::Hysteria2) != 0,
+      (types & SingleLinkType::VLESS) != 0,
+      SingleLinkDialect::Legacy,
+  };
+}
+
+static constexpr SingleLinkProfile kShadowrocketSingleLinkProfile = {
+    true, true, true, true, true, true, SingleLinkDialect::Shadowrocket,
+};
+
+static std::string proxyToSingleProfile(const std::vector<Proxy> &nodes,
+                                        const SingleLinkProfile &profile,
+                                        extra_settings &ext) {
   TargetGenerationStats &generation_stats = ext.target_generation_stats;
   generation_stats = TargetGenerationStats{};
   generation_stats.input_nodes = nodes.size();
   std::string proxyStr, allLinks;
-  const bool ss = (types & SingleLinkType::Shadowsocks) != 0;
-  const bool ssr = (types & SingleLinkType::ShadowsocksR) != 0;
-  const bool vmess = (types & SingleLinkType::VMess) != 0;
-  const bool trojan = (types & SingleLinkType::Trojan) != 0;
-  const bool hysteria2 = (types & SingleLinkType::Hysteria2) != 0;
-  const bool vless = (types & SingleLinkType::VLESS) != 0;
-  const bool hysteria = (types & SingleLinkType::Hysteria) != 0;
-  const bool anytls = (types & SingleLinkType::AnyTLS) != 0;
+  const bool ss = profile.shadowsocks;
+  const bool ssr = profile.shadowsocksr;
+  const bool vmess = profile.vmess;
+  const bool trojan = profile.trojan;
+  const bool hysteria2 = profile.hysteria2;
+  const bool vless = profile.vless;
+  const bool shadowrocket = profile.dialect == SingleLinkDialect::Shadowrocket;
 
-  for (Proxy &x : nodes) {
+  for (const Proxy &x : nodes) {
     TargetNodeGenerationTracker generation_tracker(generation_stats, x.Type);
     proxyStr.clear();
-    std::string remark = x.Remark;
-    std::string &hostname = x.Hostname, &sni = x.ServerName,
-                &password = x.Password, &method = x.EncryptMethod,
-                &plugin = x.Plugin, &protocol = x.Protocol,
-                &flow = x.Flow, &pbk = x.PublicKey, &sid = x.ShortId,
-                &fp = x.Fingerprint, &packet_encoding = x.PacketEncoding,
-                &fake_type = x.FakeType, &mode = x.GRPCMode, &obfs = x.OBFS,
-                &obfsparam = x.OBFSParam, &obfsPassword = x.OBFSPassword,
-                &id = x.UserId, &transproto = x.TransferProtocol,
-                &host = x.Host, &tls = x.TLSStr, &path = x.Path;
-    std::vector<string> alpns = x.AlpnList;
+    const std::string &remark = x.Remark, &hostname = x.Hostname,
+                      &sni = x.ServerName, &password = x.Password,
+                      &method = x.EncryptMethod, &plugin = x.Plugin,
+                      &protocol = x.Protocol, &flow = x.Flow,
+                      &pbk = x.PublicKey, &sid = x.ShortId,
+                      &fp = x.Fingerprint,
+                      &packet_encoding = x.PacketEncoding,
+                      &fake_type = x.FakeType, &mode = x.GRPCMode,
+                      &obfs = x.OBFS, &obfsparam = x.OBFSParam,
+                      &obfsPassword = x.OBFSPassword, &id = x.UserId,
+                      &transproto = x.TransferProtocol, &host = x.Host,
+                      &tls = x.TLSStr, &path = x.Path;
+    const std::vector<string> &alpns = x.AlpnList;
     std::string port = std::to_string(x.Port);
     switch (x.Type) {
     case ProxyType::Shadowsocks:
@@ -3454,7 +3486,7 @@ std::string proxyToSingle(std::vector<Proxy> &nodes, SingleLinkTypes types,
       }
       break;
     case ProxyType::Hysteria:
-      if (!hysteria)
+      if (!shadowrocket)
         continue;
       {
         std::string hysteria_protocol, hysteria_alpn, hysteria_obfs,
@@ -3480,7 +3512,7 @@ std::string proxyToSingle(std::vector<Proxy> &nodes, SingleLinkTypes types,
       }
       break;
     case ProxyType::AnyTLS:
-      if (!anytls)
+      if (!shadowrocket)
         continue;
       {
         std::string anytls_sni;
@@ -3625,11 +3657,17 @@ std::string proxyToSingle(std::vector<Proxy> &nodes, SingleLinkTypes types,
   return base64Encode(allLinks);
 }
 
-std::string proxyToShadowrocket(std::vector<Proxy> &nodes,
+} // namespace
+
+std::string proxyToSingle(const std::vector<Proxy> &nodes,
+                          SingleLinkTypes types,
+                          extra_settings &ext) {
+  return proxyToSingleProfile(nodes, legacySingleLinkProfile(types), ext);
+}
+
+std::string proxyToShadowrocket(const std::vector<Proxy> &nodes,
                                 extra_settings &ext) {
-  // Shadowrocket has its own evidence-backed protocol matrix. Keep Mixed
-  // unchanged because it is a historical public output contract.
-  return proxyToSingle(nodes, SingleLinkType::Shadowrocket, ext);
+  return proxyToSingleProfile(nodes, kShadowrocketSingleLinkProfile, ext);
 }
 
 std::string proxyToSSSub(std::string base_conf, std::vector<Proxy> &nodes,

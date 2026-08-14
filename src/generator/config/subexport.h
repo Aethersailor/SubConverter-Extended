@@ -98,11 +98,8 @@ constexpr SingleLinkTypes VMess = 1U << 2;
 constexpr SingleLinkTypes Trojan = 1U << 3;
 constexpr SingleLinkTypes Hysteria2 = 1U << 4;
 constexpr SingleLinkTypes VLESS = 1U << 5;
-constexpr SingleLinkTypes Hysteria = 1U << 6;
-constexpr SingleLinkTypes AnyTLS = 1U << 7;
 constexpr SingleLinkTypes Mixed = Shadowsocks | ShadowsocksR | VMess | Trojan |
                                   Hysteria2 | VLESS;
-constexpr SingleLinkTypes Shadowrocket = Mixed | Hysteria | AnyTLS;
 } // namespace SingleLinkType
 
 enum class V2RayClientTarget { V2RayN, V2RayNG };
@@ -195,9 +192,10 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
                         extra_settings &ext);
 std::string proxyToSSSub(std::string base_conf, std::vector<Proxy> &nodes,
                          extra_settings &ext);
-std::string proxyToSingle(std::vector<Proxy> &nodes, SingleLinkTypes types,
+std::string proxyToSingle(const std::vector<Proxy> &nodes,
+                          SingleLinkTypes types,
                            extra_settings &ext);
-std::string proxyToShadowrocket(std::vector<Proxy> &nodes,
+std::string proxyToShadowrocket(const std::vector<Proxy> &nodes,
                                 extra_settings &ext);
 std::string proxyToV2RayClient(std::vector<Proxy> &nodes,
                                V2RayClientTarget target,
