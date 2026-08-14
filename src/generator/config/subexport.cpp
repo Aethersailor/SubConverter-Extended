@@ -3222,6 +3222,7 @@ static std::string proxyToStashImpl(
                              : YAML::Node(YAML::NodeType::Map);
   if (!providers.IsMap())
     providers = YAML::Node(YAML::NodeType::Map);
+  providers.SetStyle(YAML::EmitterStyle::Block);
   std::unordered_set<std::string> provider_name_keys;
   std::unordered_set<std::string> provider_path_keys;
   for (const auto &entry : providers) {
@@ -3250,12 +3251,16 @@ static std::string proxyToStashImpl(
       return "";
     }
     YAML::Node item;
+    item.SetStyle(YAML::EmitterStyle::Block);
     item["url"] = provider.url;
     item["path"] = provider.path;
     item["interval"] = provider.interval;
     if (!provider.headers.empty()) {
+      YAML::Node headers(YAML::NodeType::Map);
+      headers.SetStyle(YAML::EmitterStyle::Block);
       for (const auto &[name, value] : provider.headers)
-        item["headers"][name] = value;
+        headers[name] = value;
+      item["headers"] = headers;
     }
     providers[provider.name] = item;
   }
