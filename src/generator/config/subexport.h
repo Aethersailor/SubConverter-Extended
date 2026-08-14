@@ -156,6 +156,7 @@ struct extra_settings {
   std::vector<SurfboardPolicyPathResource> surfboard_policy_paths;
   std::vector<LoonRemoteProxyResource> loon_remote_proxies;
   std::vector<StashProxyProvider> stash_proxy_providers;
+  StashRuleConversionStats stash_rule_stats;
   TargetGenerationStats target_generation_stats;
   TargetGenerationStats surge_generation_stats;
   TargetGenerationStats surfboard_generation_stats;

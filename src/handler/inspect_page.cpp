@@ -1508,6 +1508,9 @@ std::string page(Request &request, Response &response) {
                 }
                 stateLine.appendChild(tag(external.loaded ? text("config loaded", "配置已加载") : text("config not loaded", "配置未加载"), external.loaded ? "" : "warn"));
                 stateLine.appendChild(tag(text("rulesets ", "规则集 ") + (resources.ruleset_count || 0)));
+                if (resources.rule_provider_count) {
+                    stateLine.appendChild(tag(text("rule providers ", "规则提供器 ") + resources.rule_provider_count));
+                }
                 stateLine.appendChild(tag(text("subscriptions ", "订阅 ") + (inputs.subscription_url_count || 0)));
                 stateLine.appendChild(tag(text("params ", "参数 ") + recognized.length));
                 if (lastRequestId) {

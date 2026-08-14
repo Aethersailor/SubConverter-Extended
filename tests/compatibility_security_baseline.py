@@ -615,6 +615,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
     gist_uploaded_paths: list[str] = []
     provider_never_fetch_count = 0
     quanx_remote_fetch_count = 0
+    stash_rule_source_count = 0
+    stash_legacy_text_fetch_count = 0
     external_valid_count = 0
     get_request_count = 0
     counter_lock = threading.Lock()
@@ -641,6 +643,24 @@ class FixtureHandler(BaseHTTPRequestHandler):
         elif request_path == "/quanx-remote.txt":
             type(self).quanx_remote_fetch_count += 1
             body = ENCODED_SUBSCRIPTION.encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path in (
+            "/stash-domain.mrs",
+            "/stash-domain-yaml.yaml",
+            "/stash-domain-text.list",
+            "/stash-domain-api",
+            "/stash-ip.mrs",
+            "/stash-ip-yaml.yml",
+            "/stash-ip-text.txt",
+            "/stash-classical.txt",
+            "/stash-classical-yaml.yaml",
+        ):
+            type(self).stash_rule_source_count += 1
+            body = b"fixture body must never be fetched by the server"
+            content_type = "application/octet-stream"
+        elif request_path == "/stash-legacy-domain.txt":
+            type(self).stash_legacy_text_fetch_count += 1
+            body = b"DOMAIN,legacy-text.example\n"
             content_type = "text/plain; charset=utf-8"
         elif request_path == "/mihomo-raw-subscription.txt":
             body = SUBSCRIPTION.encode()
@@ -779,6 +799,128 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 f"case={encoded_case}\n"
             ).encode()
             content_type = "text/plain; charset=utf-8"
+        elif request_path == "/external-stash-rules.ini":
+            host = self.headers.get("Host", "127.0.0.1")
+            body = (
+                "[custom]\n"
+                "enable_rule_generator=true\n"
+                "overwrite_original_rules=true\n"
+                "custom_proxy_group=RuleGroup`select`.*\n"
+                f"ruleset=RuleGroup,clash-domain:http://{host}/stash-domain.mrs?"
+                "token=stash-domain-token,3600\n"
+                f"ruleset=RuleGroup,clash-domain:http://{host}/stash-domain-yaml.yaml?"
+                "token=stash-domain-yaml-token,3601\n"
+                f"ruleset=RuleGroup,clash-domain:http://{host}/stash-domain-text.list?"
+                "token=stash-domain-text-token,3602|stash-format=text\n"
+                f"ruleset=RuleGroup,clash-domain:http://{host}/stash-domain-api?"
+                "token=stash-domain-api-token,3603|stash-format=yaml\n"
+                f"ruleset=RuleGroup,clash-ipcidr:http://{host}/stash-ip.mrs?"
+                "token=stash-ip-token,7200|no-resolve\n"
+                f"ruleset=RuleGroup,clash-ipcidr:http://{host}/stash-ip-yaml.yml?"
+                "token=stash-ip-yaml-token,7201\n"
+                f"ruleset=RuleGroup,clash-ipcidr:http://{host}/stash-ip-text.txt?"
+                "token=stash-ip-text-token,7202|stash-format=text\n"
+                f"ruleset=RuleGroup,clash-classic:http://{host}/stash-classical.txt?"
+                "token=stash-classical-token,1800|stash-format=text\n"
+                f"ruleset=RuleGroup,clash-classic:http://{host}/stash-classical-yaml.yaml?"
+                "token=stash-classical-yaml-token,1801\n"
+                "ruleset=RuleGroup,[]GEOSITE,telegram\n"
+                "ruleset=RuleGroup,[]GEOIP,CN\n"
+            ).encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/external-stash-rules-invalid.ini":
+            host = self.headers.get("Host", "127.0.0.1")
+            case = request_query.get("case", [""])[0]
+            ruleset = {
+                "classical-mrs": (
+                    f"clash-classic:http://{host}/stash-classical.mrs,3600"
+                ),
+                "unknown-format": (
+                    f"clash-domain:http://{host}/stash-domain.bin,3600"
+                ),
+                "src-port": "[]SRC-PORT,41641",
+                "non-country-geoip": "[]GEOIP,telegram",
+                "existing-policy": "[]DOMAIN,policy.example,DIRECT",
+                "conflicting-format": (
+                    f"clash-domain:http://{host}/stash-domain.mrs,"
+                    "3600|stash-format=text|stash-format=yaml"
+                ),
+            }.get(case)
+            if ruleset is None:
+                self.send_error(404)
+                return
+            ruleset_lines = [f"ruleset=RuleGroup,{ruleset}"]
+            if case == "existing-policy":
+                ruleset_lines.insert(
+                    0,
+                    f"ruleset=RuleGroup,clash-domain:http://{host}/"
+                    "stash-domain.mrs?token=stash-atomic-token,3600",
+                )
+            body = (
+                "[custom]\n"
+                "enable_rule_generator=true\n"
+                "overwrite_original_rules=true\n"
+                "custom_proxy_group=RuleGroup`select`.*\n"
+                + "\n".join(ruleset_lines)
+                + "\n"
+            ).encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/external-stash-rules-legacy-text.ini":
+            host = self.headers.get("Host", "127.0.0.1")
+            body = (
+                "[custom]\n"
+                "enable_rule_generator=true\n"
+                "overwrite_original_rules=true\n"
+                "custom_proxy_group=RuleGroup`select`.*\n"
+                f"ruleset=RuleGroup,clash-domain:http://{host}/"
+                "stash-legacy-domain.txt,3600\n"
+            ).encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/external-stash-rules-merge.ini":
+            host = self.headers.get("Host", "127.0.0.1")
+            case = request_query.get("case", ["merge"])[0]
+            if case not in ("merge", "path-collision"):
+                self.send_error(404)
+                return
+            body = (
+                "[custom]\n"
+                "enable_rule_generator=true\n"
+                "overwrite_original_rules=false\n"
+                "custom_proxy_group=RuleGroup`select`.*\n"
+                f"stash_rule_base=http://{host}/stash-rules-merge-base.yaml?"
+                f"case={case}\n"
+                f"ruleset=RuleGroup,clash-domain:http://{host}/stash-domain.mrs?"
+                "token=stash-merge-token,3600\n"
+            ).encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/stash-rules-merge-base.yaml":
+            case = request_query.get("case", ["merge"])[0]
+            existing_name = "stash-domain" if case == "merge" else "base-domain"
+            existing_path = (
+                "./rules/existing-domain.txt"
+                if case == "merge"
+                else "./rules/stash-domain.mrs"
+            )
+            body = (
+                "mode: rule\n"
+                "proxies: []\n"
+                "proxy-providers: {}\n"
+                "proxy-groups:\n"
+                "  - name: Proxy\n"
+                "    type: select\n"
+                "    proxies: [DIRECT]\n"
+                "rule-providers:\n"
+                f"  {existing_name}:\n"
+                "    behavior: domain\n"
+                "    format: text\n"
+                "    url: https://127.0.0.1:1/existing-domain.txt\n"
+                f"    path: {existing_path}\n"
+                "rules:\n"
+                f"  - RULE-SET,{existing_name},RuleGroup\n"
+                "  - DOMAIN,base.example,RuleGroup\n"
+                "  - MATCH,Proxy\n"
+            ).encode()
+            content_type = "text/yaml; charset=utf-8"
         elif request_path == "/stash-invalid-base.yaml":
             case = request_query.get("case", [""])[0]
             invalid_base = type(self).stash_invalid_bases.get(case)
@@ -996,6 +1138,8 @@ def fixture_server():
     FixtureHandler.gist_uploaded_paths = []
     FixtureHandler.provider_never_fetch_count = 0
     FixtureHandler.quanx_remote_fetch_count = 0
+    FixtureHandler.stash_rule_source_count = 0
+    FixtureHandler.stash_legacy_text_fetch_count = 0
     FixtureHandler.external_valid_count = 0
     FixtureHandler.get_request_count = 0
     FixtureHandler.stash_invalid_bases = {}
@@ -7341,6 +7485,34 @@ def shadowrocket_target_baseline(base_url: str) -> None:
         )
 
 
+def _yaml_named_mapping_block(text: str, section: str, name: str) -> str:
+    lines = text.splitlines()
+    try:
+        section_index = lines.index(f"{section}:")
+    except ValueError as exc:
+        raise AssertionError(f"missing YAML section {section!r}") from exc
+    entry_prefix = f"  {name}:"
+    entry_index = None
+    for index in range(section_index + 1, len(lines)):
+        line = lines[index]
+        if line and not line.startswith(" "):
+            break
+        if line == entry_prefix:
+            entry_index = index
+            break
+    if entry_index is None:
+        raise AssertionError(
+            f"missing YAML mapping entry {section}.{name}"
+        )
+    end = entry_index + 1
+    while end < len(lines):
+        line = lines[end]
+        if line and len(line) - len(line.lstrip(" ")) <= 2:
+            break
+        end += 1
+    return "\n".join(lines[entry_index:end])
+
+
 def stash_target_baseline(base_url: str, fixture_base: str) -> None:
     provider_source = (
         "https://127.0.0.1:1/stash-provider.yaml?token=stash-provider-secret"
@@ -7420,6 +7592,332 @@ def stash_target_baseline(base_url: str, fixture_base: str) -> None:
         raise AssertionError(f"Stash explain contract mismatch: {report!r}")
     if "stash-provider-secret" in explain_body.decode("utf-8", errors="replace"):
         raise AssertionError("Stash explain leaked its provider source token")
+
+    FixtureHandler.stash_rule_source_count = 0
+    rules_config = fixture_base + "/external-stash-rules.ini"
+    rules_status, rules_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "stash",
+            "url": SUBSCRIPTION.strip(),
+            "config": rules_config,
+        },
+    )
+    rules_text = rules_body.decode("utf-8", errors="replace")
+    if rules_status != 200:
+        raise AssertionError(
+            f"Stash native rule-provider conversion failed: "
+            f"HTTP {rules_status} {rules_text!r}"
+        )
+    native_rule_fragments = (
+        "rule-providers:",
+    )
+    if any(fragment not in rules_text for fragment in native_rule_fragments):
+        raise AssertionError(
+            f"Stash native rule-provider schema mismatch: {rules_text!r}"
+        )
+    expected_rule_lines = {
+        "  - RULE-SET,stash-domain,RuleGroup",
+        "  - RULE-SET,stash-domain-yaml,RuleGroup",
+        "  - RULE-SET,stash-domain-text,RuleGroup",
+        "  - RULE-SET,stash-domain-api,RuleGroup",
+        "  - RULE-SET,stash-ip,RuleGroup,no-resolve",
+        "  - RULE-SET,stash-ip-yaml,RuleGroup",
+        "  - RULE-SET,stash-ip-text,RuleGroup",
+        "  - RULE-SET,stash-classical,RuleGroup",
+        "  - RULE-SET,stash-classical-yaml,RuleGroup",
+        "  - GEOSITE,telegram,RuleGroup",
+        "  - GEOIP,CN,RuleGroup",
+    }
+    missing_rule_lines = expected_rule_lines.difference(rules_text.splitlines())
+    if missing_rule_lines:
+        raise AssertionError(
+            f"Stash native rule references drifted: {sorted(missing_rule_lines)!r}"
+        )
+    provider_contracts = {
+        "stash-domain": (
+            "    behavior: domain",
+            "    format: mrs",
+            f"    url: {fixture_base}/stash-domain.mrs?token=stash-domain-token",
+            "    path: ./rules/stash-domain.mrs",
+            "    interval: 3600",
+        ),
+        "stash-domain-yaml": (
+            "    behavior: domain",
+            "    format: yaml",
+            f"    url: {fixture_base}/stash-domain-yaml.yaml?token=stash-domain-yaml-token",
+            "    path: ./rules/stash-domain-yaml.yaml",
+            "    interval: 3601",
+        ),
+        "stash-domain-text": (
+            "    behavior: domain",
+            "    format: text",
+            f"    url: {fixture_base}/stash-domain-text.list?token=stash-domain-text-token",
+            "    path: ./rules/stash-domain-text.txt",
+            "    interval: 3602",
+        ),
+        "stash-domain-api": (
+            "    behavior: domain",
+            "    format: yaml",
+            f"    url: {fixture_base}/stash-domain-api?token=stash-domain-api-token",
+            "    path: ./rules/stash-domain-api.yaml",
+            "    interval: 3603",
+        ),
+        "stash-ip": (
+            "    behavior: ipcidr",
+            "    format: mrs",
+            f"    url: {fixture_base}/stash-ip.mrs?token=stash-ip-token",
+            "    path: ./rules/stash-ip.mrs",
+            "    interval: 7200",
+        ),
+        "stash-ip-yaml": (
+            "    behavior: ipcidr",
+            "    format: yaml",
+            f"    url: {fixture_base}/stash-ip-yaml.yml?token=stash-ip-yaml-token",
+            "    path: ./rules/stash-ip-yaml.yaml",
+            "    interval: 7201",
+        ),
+        "stash-ip-text": (
+            "    behavior: ipcidr",
+            "    format: text",
+            f"    url: {fixture_base}/stash-ip-text.txt?token=stash-ip-text-token",
+            "    path: ./rules/stash-ip-text.txt",
+            "    interval: 7202",
+        ),
+        "stash-classical": (
+            "    behavior: classical",
+            "    format: text",
+            f"    url: {fixture_base}/stash-classical.txt?token=stash-classical-token",
+            "    path: ./rules/stash-classical.txt",
+            "    interval: 1800",
+        ),
+        "stash-classical-yaml": (
+            "    behavior: classical",
+            "    format: yaml",
+            f"    url: {fixture_base}/stash-classical-yaml.yaml?token=stash-classical-yaml-token",
+            "    path: ./rules/stash-classical-yaml.yaml",
+            "    interval: 1801",
+        ),
+    }
+    for provider_name, expected_fields in provider_contracts.items():
+        block = _yaml_named_mapping_block(
+            rules_text, "rule-providers", provider_name
+        )
+        block_lines = set(block.splitlines())
+        if any(field not in block_lines for field in expected_fields):
+            raise AssertionError(
+                f"Stash rule-provider {provider_name!r} drifted: {block!r}"
+            )
+    rule_provider_block = rules_text.split("rule-providers:", 1)[1].split(
+        "proxy-groups:", 1
+    )[0]
+    if "type:" in rule_provider_block or rules_text.count("no-resolve") != 1:
+        raise AssertionError(
+            f"Stash rule-provider leaked Mihomo fields or misplaced no-resolve: "
+            f"{rules_text!r}"
+        )
+    if FixtureHandler.stash_rule_source_count != 0:
+        raise AssertionError(
+            "Stash rule-provider sources were fetched by the conversion server: "
+            f"count={FixtureHandler.stash_rule_source_count}"
+        )
+
+    rules_explain_status, rules_explain_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "stash",
+            "url": SUBSCRIPTION.strip(),
+            "config": rules_config,
+            "explain": "true",
+        },
+    )
+    rules_report = json.loads(rules_explain_body)
+    resources = rules_report.get("resources", {})
+    if (
+        rules_explain_status != 200
+        or resources.get("ruleset_count") != 11
+        or resources.get("rule_provider_count") != 9
+        or resources.get("inline_rule_source_count") != 2
+        or resources.get("expanded_rule_source_count") != 0
+        or resources.get("unsupported_ruleset_count") != 0
+    ):
+        raise AssertionError(
+            f"Stash native rule Explain statistics drifted: {rules_report!r}"
+        )
+    if (
+        FixtureHandler.stash_rule_source_count != 0
+        or any(
+            token in rules_explain_body.decode("utf-8", errors="replace")
+            for token in (
+                "stash-domain-token",
+                "stash-domain-yaml-token",
+                "stash-domain-text-token",
+                "stash-domain-api-token",
+                "stash-ip-token",
+                "stash-ip-yaml-token",
+                "stash-ip-text-token",
+                "stash-classical-token",
+                "stash-classical-yaml-token",
+            )
+        )
+    ):
+        raise AssertionError(
+            "Stash native rule Explain fetched a source or leaked its token"
+        )
+
+    invalid_rule_cases = {
+        "classical-mrs": "unsupported format or unsafe value",
+        "unknown-format": "could not be fetched or was empty",
+        "src-port": "unsupported or invalid rule",
+        "non-country-geoip": "unsupported or invalid rule",
+        "existing-policy": "unsupported or invalid rule",
+        "conflicting-format": "unsupported format or unsafe value",
+    }
+    for case, expected_error in invalid_rule_cases.items():
+        invalid_rule_status, invalid_rule_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "stash",
+                "url": SUBSCRIPTION.strip(),
+                "config": (
+                    fixture_base
+                    + "/external-stash-rules-invalid.ini?case="
+                    + urllib.parse.quote(case, safe="")
+                ),
+            },
+        )
+        invalid_rule_text = invalid_rule_body.decode("utf-8", errors="replace")
+        if invalid_rule_status != 400 or expected_error not in invalid_rule_text:
+            raise AssertionError(
+                f"Stash accepted or misclassified invalid ruleset {case}: "
+                f"HTTP {invalid_rule_status} {invalid_rule_text!r}"
+            )
+        if case == "existing-policy" and "rule-providers:" in invalid_rule_text:
+            raise AssertionError(
+                "Stash returned partial YAML after a later invalid ruleset"
+            )
+    if FixtureHandler.stash_rule_source_count != 0:
+        raise AssertionError(
+            "Stash fetched a native rule-provider while rejecting invalid input"
+        )
+
+    legacy_text_status, legacy_text_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "stash",
+            "url": SUBSCRIPTION.strip(),
+            "config": fixture_base + "/external-stash-rules-legacy-text.ini",
+        },
+    )
+    legacy_text = legacy_text_body.decode("utf-8", errors="replace")
+    if (
+        legacy_text_status != 200
+        or "  - DOMAIN,legacy-text.example,RuleGroup" not in legacy_text.splitlines()
+        or "stash-legacy-domain:" in legacy_text
+        or FixtureHandler.stash_legacy_text_fetch_count != 1
+    ):
+        raise AssertionError(
+            "Stash did not preserve server-side handling for ambiguous .txt "
+            f"rulesets: HTTP {legacy_text_status} {legacy_text!r} "
+            f"fetches={FixtureHandler.stash_legacy_text_fetch_count}"
+        )
+    clash_control_status, clash_control_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "clash",
+            "url": SUBSCRIPTION.strip(),
+            "config": fixture_base + "/external-stash-rules-legacy-text.ini",
+        },
+    )
+    clash_control_text = clash_control_body.decode("utf-8", errors="replace")
+    if (
+        clash_control_status != 200
+        or "DOMAIN,legacy-text.example,RuleGroup" not in clash_control_text
+        or "stash-format" in clash_control_text
+    ):
+        raise AssertionError(
+            "Stash rule-provider work changed the Clash ruleset path: "
+            f"HTTP {clash_control_status} {clash_control_text!r}"
+        )
+
+    merge_status, merge_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "stash",
+            "url": SUBSCRIPTION.strip(),
+            "config": fixture_base + "/external-stash-rules-merge.ini?case=merge",
+        },
+    )
+    merge_text = merge_body.decode("utf-8", errors="replace")
+    if merge_status != 200:
+        raise AssertionError(
+            f"Stash failed to preserve existing rules/providers: {merge_text!r}"
+        )
+    merge_fragments = (
+        "stash-domain:",
+        "path: ./rules/existing-domain.txt",
+        "stash-domain_2:",
+        "path: ./rules/stash-domain_2.mrs",
+        "RULE-SET,stash-domain,RuleGroup",
+        "DOMAIN,base.example,RuleGroup",
+        "RULE-SET,stash-domain_2,RuleGroup",
+        "MATCH,Proxy",
+    )
+    if any(fragment not in merge_text for fragment in merge_fragments):
+        raise AssertionError(
+            f"Stash existing rule/provider merge drifted: {merge_text!r}"
+        )
+    if not (
+        merge_text.index("DOMAIN,base.example,RuleGroup")
+        < merge_text.index("RULE-SET,stash-domain_2,RuleGroup")
+        < merge_text.index("MATCH,Proxy")
+    ):
+        raise AssertionError(
+            "Stash appended generated rules after an existing final MATCH"
+        )
+    merge_explain_status, merge_explain_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "stash",
+            "url": SUBSCRIPTION.strip(),
+            "config": fixture_base + "/external-stash-rules-merge.ini?case=merge",
+            "explain": "true",
+        },
+    )
+    merge_report = json.loads(merge_explain_body)
+    if (
+        merge_explain_status != 200
+        or merge_report.get("resources", {}).get("rule_provider_count") != 2
+    ):
+        raise AssertionError(
+            f"Stash merged rule-provider Explain count drifted: {merge_report!r}"
+        )
+
+    collision_status, collision_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "stash",
+            "url": SUBSCRIPTION.strip(),
+            "config": (
+                fixture_base
+                + "/external-stash-rules-merge.ini?case=path-collision"
+            ),
+        },
+    )
+    collision_text = collision_body.decode("utf-8", errors="replace")
+    if collision_status != 400 or "paths conflict" not in collision_text:
+        raise AssertionError(
+            "Stash did not fail closed on a rule-provider path collision: "
+            f"HTTP {collision_status} {collision_text!r}"
+        )
 
     direct_status, direct_body, _ = request(
         base_url,
@@ -7598,6 +8096,24 @@ def stash_target_baseline(base_url: str, fixture_base: str) -> None:
     if interval_status != 400 or direct_proxy_status != 400:
         raise AssertionError(
             "Stash accepted an invalid interval or Mihomo-only proxy_direct"
+        )
+
+
+def stash_rule_limit_baseline(base_url: str, fixture_base: str) -> None:
+    status, body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "stash",
+            "url": SUBSCRIPTION.strip(),
+            "config": fixture_base + "/external-stash-rules.ini",
+        },
+    )
+    text = body.decode("utf-8", errors="replace")
+    if status != 400 or "max_allowed_rules" not in text:
+        raise AssertionError(
+            "Stash did not enforce max_allowed_rules on the final rule set: "
+            f"HTTP {status} {text!r}"
         )
 
 
@@ -10413,6 +10929,33 @@ def main() -> int:
             raise AssertionError(
                 "sing-box outbound WireGuard diagnostics are missing"
             )
+        if (
+            "STASH_RULE_GENERATION input=11 inline=2 expanded=0 providers=9 "
+            not in wireguard_outbound_logs[0]
+        ):
+            raise AssertionError("Stash native rule generation diagnostics are missing")
+        for secret in (
+            "stash-domain-token",
+            "stash-domain-yaml-token",
+            "stash-domain-text-token",
+            "stash-domain-api-token",
+            "stash-ip-token",
+            "stash-ip-yaml-token",
+            "stash-ip-text-token",
+            "stash-classical-token",
+            "stash-classical-yaml-token",
+            "stash-atomic-token",
+        ):
+            if secret in wireguard_outbound_logs[0]:
+                raise AssertionError("Stash native rule diagnostics leaked a source token")
+        with running_service(
+            binary,
+            config_replacements=((
+                "max_allowed_rules = 4096",
+                "max_allowed_rules = 1",
+            ),),
+        ) as stash_rule_limit_url:
+            stash_rule_limit_baseline(stash_rule_limit_url, fixture_base)
         with running_service(
             binary,
             config_replacements=(

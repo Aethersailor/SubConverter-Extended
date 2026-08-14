@@ -710,7 +710,8 @@ int readRuleset(YAML::Node node, string_array &dest, bool scope_limit = true,
 
 void refreshRulesets(RulesetConfigs &ruleset_list,
                      std::vector<RulesetContent> &ruleset_content_array,
-                     FetchContext context) {
+                     FetchContext context, RulesetRefreshMode mode,
+                     const std::vector<RulesetContent> *reusable_content) {
   ruleset_content_array.clear();
   ruleset_content_array.reserve(ruleset_list.size());
   std::string rule_group, rule_url, rule_url_typed, interval;
@@ -719,6 +720,7 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
   const Settings &settings = effectiveSettings();
   ProxyPolicy proxy = parseProxy(settings.proxyRuleset, settings.proxyBypass);
 
+  size_t source_index = 0;
   for (RulesetConfig &x : ruleset_list) {
     rule_group = x.Group;
     rule_url = x.Url;
@@ -727,13 +729,17 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
       writeLog(LOG_LEVEL_INFO,
                "正在添加规则：'" + rule_url.substr(pos + 2) + "," +
                    rule_group + "'。");
-      rc = {rule_group,
-            "",
-            "",
-            RULESET_SURGE,
-            makeReadyStringFuture(rule_url.substr(pos)),
-            0,
-            x.Options};
+      if (reusable_content &&
+          reusable_content->size() == ruleset_list.size())
+        rc = (*reusable_content)[source_index];
+      else
+        rc = {rule_group,
+              "",
+              "",
+              RULESET_SURGE,
+              makeReadyStringFuture(rule_url.substr(pos)),
+              0,
+              x.Options};
     } else {
       ruleset_type type = RULESET_SURGE;
       rule_url_typed = rule_url;
@@ -750,18 +756,41 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
                      rule_group + "' 安全忽略。");
 
       writeLog(LOG_LEVEL_INFO,
-               "正在更新规则集 URL：'" + rule_url + "'，策略组：'" +
+               "正在更新规则集 URL：'" + summarizeUrlForLog(rule_url) +
+                   "'，策略组：'" +
                    rule_group + "'。");
-      rc = {rule_group,
-            rule_url,
-            rule_url_typed,
-            type,
-            fetchFileAsync(rule_url, proxy, settings.cacheRuleset, true,
-                           settings.asyncFetchRuleset, context),
-            x.Interval,
-            x.Options};
+      std::string native_rule_path = toLower(rule_url);
+      const size_t native_rule_query = native_rule_path.find_first_of("?#");
+      if (native_rule_query != std::string::npos)
+        native_rule_path.erase(native_rule_query);
+      const bool native_stash_provider =
+          mode == RulesetRefreshMode::PreferNativeStashProviders &&
+          (startsWith(rule_url, "https://") || startsWith(rule_url, "http://")) &&
+          (type == RULESET_CLASH_DOMAIN || type == RULESET_CLASH_IPCIDR ||
+           type == RULESET_CLASH_CLASSICAL) &&
+          (!x.Options.stash_format.empty() ||
+           endsWith(native_rule_path, ".mrs") ||
+           endsWith(native_rule_path, ".yaml") ||
+           endsWith(native_rule_path, ".yml"));
+      if (!native_stash_provider && reusable_content &&
+          reusable_content->size() == ruleset_list.size())
+        rc = (*reusable_content)[source_index];
+      else
+        rc = {rule_group,
+              rule_url,
+              rule_url_typed,
+              type,
+              native_stash_provider
+                  ? makeReadyStringFuture("")
+                  : fetchFileAsync(rule_url, proxy, settings.cacheRuleset, true,
+                                   settings.asyncFetchRuleset, context),
+              x.Interval,
+              x.Options,
+              native_stash_provider ? RulesetDelivery::NativeStashProvider
+                                    : RulesetDelivery::ServerFetched};
     }
     ruleset_content_array.emplace_back(std::move(rc));
+    ++source_index;
   }
 }
 
