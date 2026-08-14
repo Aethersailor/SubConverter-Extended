@@ -905,6 +905,21 @@ def run_checks(
                 "target=shadowrocket changed the historical mixed output contract: "
                 f"{mixed!r} != {expected_mixed!r}"
             )
+        for isolated_target in ("mixed", "v2ray"):
+            assert_rejected(
+                base_url,
+                "/sub",
+                {
+                    "target": isolated_target,
+                    "url": "|".join(
+                        (SHADOWROCKET_HYSTERIA_LINK, SHADOWROCKET_ANYTLS_LINK)
+                    ),
+                    "config": DISABLE_RULEGEN_CONFIG,
+                    "list": "true",
+                },
+                timeout,
+                f"Shadowrocket-only protocols on target={isolated_target}",
+            )
         auto_shadowrocket, auto_shadowrocket_headers = fetch_response(
             base_url,
             "/sub",

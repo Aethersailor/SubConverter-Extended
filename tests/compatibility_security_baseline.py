@@ -611,6 +611,7 @@ GIST_REMOTE_FAILURE_BODY = (
 
 class FixtureHandler(BaseHTTPRequestHandler):
     gist_request_count = 0
+    gist_uploaded_paths: list[str] = []
     provider_never_fetch_count = 0
     quanx_remote_fetch_count = 0
     external_valid_count = 0
@@ -837,10 +838,16 @@ class FixtureHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _write_gist_response(self) -> None:
-        type(self).gist_request_count += 1
         content_length = int(self.headers.get("Content-Length", "0"))
-        if content_length:
-            self.rfile.read(content_length)
+        request_body = self.rfile.read(content_length) if content_length else b""
+        try:
+            request_data = json.loads(request_body) if request_body else {}
+            uploaded_paths = list(request_data.get("files", {}).keys())
+        except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+            uploaded_paths = []
+        with type(self).counter_lock:
+            type(self).gist_request_count += 1
+            type(self).gist_uploaded_paths.extend(uploaded_paths)
         request_path = urllib.parse.urlsplit(self.path).path
         remote_failure = request_path.startswith("/failure/")
         body = (
@@ -960,6 +967,7 @@ def authenticated_proxy_server(username: str, password: str):
 @contextlib.contextmanager
 def fixture_server():
     FixtureHandler.gist_request_count = 0
+    FixtureHandler.gist_uploaded_paths = []
     FixtureHandler.provider_never_fetch_count = 0
     FixtureHandler.quanx_remote_fetch_count = 0
     FixtureHandler.external_valid_count = 0
@@ -6916,6 +6924,21 @@ def shadowrocket_target_baseline(base_url: str) -> None:
             f"HTTP {encoded_status} {decoded_output!r} != {raw_output!r}"
         )
 
+    default_params = dict(params)
+    default_params.pop("list")
+    default_status, default_body, _ = request(base_url, "/sub", default_params)
+    try:
+        default_output = base64.b64decode(default_body, validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError) as error:
+        raise AssertionError(
+            f"Shadowrocket default subscription is invalid: {default_body!r}"
+        ) from error
+    if default_status != 200 or default_output != raw_output:
+        raise AssertionError(
+            "Shadowrocket default list mode changed: "
+            f"HTTP {default_status} {default_output!r} != {raw_output!r}"
+        )
+
     mixed_status, mixed_body, _ = request(
         base_url,
         "/sub",
@@ -6932,6 +6955,65 @@ def shadowrocket_target_baseline(base_url: str) -> None:
             "introducing target=shadowrocket changed the historical mixed output: "
             f"HTTP {mixed_status} {mixed_body!r} != {expected_mixed!r}"
         )
+
+    isolated_legacy_targets = {
+        "ss": SUBSCRIPTION.strip(),
+        "ssr": SSR_IPV6_URI,
+        "v2ray": VMESS_QR_URI,
+        "trojan": TROJAN_WS_URI,
+        "vless": VLESS_URI,
+        "hysteria2": HYSTERIA2_URI,
+        "mixed": SUBSCRIPTION.strip(),
+    }
+    shadowrocket_only_sources = (
+        HYSTERIA_SHADOWROCKET_URI + "|" + ANYTLS_SHADOWROCKET_URI
+    )
+    for target, supported_source in isolated_legacy_targets.items():
+        isolation_status, isolation_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": target,
+                "url": supported_source + "|" + shadowrocket_only_sources,
+                "list": "true",
+                "explain": "true",
+                "config": DISABLE_RULEGEN_CONFIG,
+            },
+        )
+        isolation_report = (
+            json.loads(isolation_body) if isolation_status == 200 else {}
+        )
+        isolation_nodes = isolation_report.get("nodes", {})
+        if (
+            isolation_status != 200
+            or isolation_nodes.get("total") != 3
+            or isolation_nodes.get("generated") != 1
+            or isolation_nodes.get("unsupported") != 2
+            or set(isolation_nodes.get("unsupported_protocols", []))
+            != {"hysteria:1", "anytls:1"}
+        ):
+            raise AssertionError(
+                "Shadowrocket-only protocols leaked into the historical "
+                f"target={target} capability matrix: HTTP {isolation_status} "
+                f"{isolation_report!r}"
+            )
+
+        unsupported_status, unsupported_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": target,
+                "url": shadowrocket_only_sources,
+                "list": "true",
+                "config": DISABLE_RULEGEN_CONFIG,
+            },
+        )
+        if unsupported_status != 400:
+            raise AssertionError(
+                "Shadowrocket-only protocols were accepted by the historical "
+                f"target={target}: HTTP {unsupported_status} "
+                f"{unsupported_body!r}"
+            )
 
     auto_status, auto_body, auto_headers = request(
         base_url,
@@ -8452,6 +8534,48 @@ def security_endpoint_matrix_baseline(binary: Path, fixture_base: str) -> None:
             )
 
 
+def shadowrocket_upload_path_compatibility_baseline(
+    binary: Path, fixture_base: str
+) -> None:
+    with FixtureHandler.counter_lock:
+        uploaded_path_offset = len(FixtureHandler.gist_uploaded_paths)
+
+    params = {
+        "target": "shadowrocket",
+        "url": SUBSCRIPTION.strip(),
+        "config": DISABLE_RULEGEN_CONFIG,
+        "list": "true",
+        "upload": "true",
+    }
+    with running_service(
+        binary,
+        security_profile="lan",
+        gist_api_base=fixture_base,
+    ) as base_url:
+        explicit_status, explicit_body, _ = request(base_url, "/sub", params)
+        auto_status, auto_body, auto_headers = request(
+            base_url,
+            "/sub",
+            {**params, "target": "auto"},
+            {"User-Agent": "Shadowrocket/2.2.60"},
+        )
+
+    with FixtureHandler.counter_lock:
+        uploaded_paths = FixtureHandler.gist_uploaded_paths[uploaded_path_offset:]
+    if (
+        explicit_status != 200
+        or auto_status != 200
+        or explicit_body != auto_body
+        or uploaded_paths != ["shadowrocket", "sub"]
+    ):
+        raise AssertionError(
+            "Shadowrocket upload path compatibility drifted: "
+            f"explicit=HTTP {explicit_status}, auto=HTTP {auto_status}, "
+            f"body_equal={explicit_body == auto_body}, paths={uploaded_paths!r}"
+        )
+    assert_vary_header(auto_headers, "User-Agent", "auto Shadowrocket upload")
+
+
 def upload_failure_compatibility_baseline(binary: Path, fixture_base: str) -> None:
     subscription_query_secret = "subscription-query-secret"
     request_query_secret = "request-query-secret"
@@ -9885,6 +10009,7 @@ def main() -> int:
         persistence_degradation_baseline(binary, fixture_base)
         public_request_baseline(binary, fixture_base)
         security_endpoint_matrix_baseline(binary, fixture_base)
+        shadowrocket_upload_path_compatibility_baseline(binary, fixture_base)
         upload_failure_compatibility_baseline(binary, fixture_base)
         external_config_failure_baseline(binary, fixture_base)
         loopback_proxy_route_baseline(binary, fixture_base)
