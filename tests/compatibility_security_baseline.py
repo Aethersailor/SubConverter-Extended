@@ -7426,9 +7426,6 @@ def stash_target_baseline(base_url: str) -> None:
         "&mode=stream-one&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
         "&sid=00112233&fp=chrome&sni=xhttp-sni.example.test#StashXHTTP"
     )
-    stash_hy2_hop_uri = HYSTERIA2_URI.replace(
-        "#Hy2Fixture", "&hop-interval=30s#Hy2Fixture"
-    )
     protocol_status, protocol_body, _ = request(
         base_url,
         "/sub",
@@ -7440,7 +7437,7 @@ def stash_target_baseline(base_url: str) -> None:
                     VLESS_DEFAULT_TCP_URI,
                     stash_xhttp_uri,
                     ANYTLS_V2RAYN_URI,
-                    stash_hy2_hop_uri,
+                    HYSTERIA2_URI,
                     stash_mieru_uri,
                     WIREGUARD_URI,
                 )
@@ -7458,7 +7455,6 @@ def stash_target_baseline(base_url: str) -> None:
         "mode: stream-one",
         "type: anytls",
         "type: hysteria2",
-        "hop-interval: 30",
         "type: mieru",
         "port-range: 9998-9999",
         "transport: tcp",

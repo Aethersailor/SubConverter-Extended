@@ -326,21 +326,6 @@ bool validHysteriaHopInterval(const std::string &interval) {
            regMatch(interval, R"(^([1-9][0-9]*(?:ns|us|ms|s|m|h))+$)");
 }
 
-bool validHysteria2HopInterval(const std::string &interval) {
-    if (interval.empty() || validHysteriaUriMbps(interval) ||
-        validHysteriaHopInterval(interval))
-        return true;
-
-    const size_t separator = interval.find('-');
-    if (separator == std::string::npos ||
-        interval.find('-', separator + 1) != std::string::npos)
-        return false;
-    const std::string minimum = interval.substr(0, separator);
-    const std::string maximum = interval.substr(separator + 1);
-    return validHysteriaUriMbps(minimum) && validHysteriaUriMbps(maximum) &&
-           to_int(minimum, 0) <= to_int(maximum, 0);
-}
-
 bool parseModernShareUri(std::string uri, const std::string &scheme,
                          bool require_user, const std::string &default_port,
                          bool allow_hysteria2_ports, ParsedShareUri &parsed,
@@ -2696,16 +2681,10 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes) {
                 singleproxy["fingerprint"] >>= certificate_fingerprint;
                 singleproxy["alpn"][0] >>= alpn;
                 singleproxy["ports"] >> ports;
-                singleproxy["hop-interval"] >> hop_interval;
-                if (hop_interval.empty())
-                    singleproxy["hop_interval"] >> hop_interval;
-                if (!validHysteria2HopInterval(hop_interval))
-                    continue;
                 sni = host;
                 hysteria2Construct(node, group, ps, server, port, password, host, up, down, alpn, obfsParam,
                                    obfsPassword, sni, public_key, ports, udp, tfo, scv);
                 node.Fingerprint = certificate_fingerprint;
-                node.HysteriaHopInterval = hop_interval;
                 break;
             case "tuic"_hash:
                 group = TUIC_DEFAULT_GROUP;
@@ -2967,10 +2946,6 @@ void explodeStdHysteria2(std::string hysteria2, Proxy &node) {
         ports = ports.empty() ? query_ports : ports + "," + query_ports;
     }
     const std::string sni = decodedUrlArg(parsed.query, "sni");
-    const std::string hop_interval = decodedFirstUrlArg(
-        parsed.query, {"hop_interval", "hop-interval"});
-    if (!validHysteria2HopInterval(hop_interval))
-        return;
     if (parsed.remark.empty())
         parsed.remark = parsed.host + ":" + parsed.port;
 
@@ -2982,7 +2957,6 @@ void explodeStdHysteria2(std::string hysteria2, Proxy &node) {
     node.Fingerprint = decodedFirstUrlArg(parsed.query, {"pinSHA256", "pinsha256"});
     node.Hysteria2ECH = decodedUrlArg(parsed.query, "ech");
     node.Hysteria2PortsAreAdditional = !ports.empty();
-    node.HysteriaHopInterval = hop_interval;
     if (toLower(trim(node.OBFSParam)) == "gecko") {
         node.Hysteria2GeckoMinPacketSize = decodedFirstUrlArg(
             parsed.query, {"minPacketSize", "min_packet_size"});
