@@ -90,7 +90,7 @@ struct TargetDescriptor {
   SingleLinkTypes single_link_types;
 };
 
-static constexpr std::array<TargetDescriptor, 20> kTargetDescriptors = {{
+static constexpr std::array<TargetDescriptor, 21> kTargetDescriptors = {{
     {"clash", NodeParserMode::MihomoOnly,
      RemoteSubscriptionMode::ClashProxyProvider, false, 0},
     {"clashr", NodeParserMode::MihomoOnly,
@@ -125,6 +125,9 @@ static constexpr std::array<TargetDescriptor, 20> kTargetDescriptors = {{
      RemoteSubscriptionMode::ServerSideParse, true, 0},
     {"v2rayng", NodeParserMode::LegacyOnly,
      RemoteSubscriptionMode::ServerSideParse, true, 0},
+    {"shadowrocket", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, true,
+     SingleLinkType::Mixed},
     {"trojan", NodeParserMode::LegacyOnly,
      RemoteSubscriptionMode::ServerSideParse, true, SingleLinkType::Trojan},
     {"vless", NodeParserMode::LegacyOnly,
@@ -3946,6 +3949,12 @@ static SubStageResponse dispatchTargetGenerator(
     output = proxyToV2RayClient(nodes, V2RayClientTarget::V2RayNG, ext);
     if (upload)
       recordUpload("v2rayng", upload_path, output, false);
+    break;
+  case "shadowrocket"_hash:
+    writeLog(LOG_LEVEL_INFO, "生成目标：Shadowrocket");
+    output = proxyToShadowrocket(nodes, ext);
+    if (upload)
+      recordUpload("shadowrocket", upload_path, output, false);
     break;
   case "trojan"_hash:
     writeLog(LOG_LEVEL_INFO, "生成目标：Trojan");

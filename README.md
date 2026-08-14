@@ -138,8 +138,11 @@ V2Ray/V2Fly 是代理平台与内核，不定义可由本项目直接生成的�
 | --- | --- | --- |
 | `v2rayn` | VMess、Shadowsocks、SOCKS5、VLESS、Trojan、Hysteria2（含 Realm/Gecko）、TUIC、WireGuard、HTTP、AnyTLS、Naive | 官方 `v2rayn://<type>/<base64url ProfileItem JSON>` 内部订阅格式 |
 | `v2rayng` | VMess、Shadowsocks、SOCKS5、VLESS、Trojan、Hysteria2、WireGuard、HTTP | v2rayNG 同样直接解析的 `v2rayn://` 内部订阅格式 |
+| `shadowrocket` | Shadowsocks、ShadowsocksR、VMess、VLESS、Trojan、Hysteria2 | 标准分享链接订阅；默认 Base64，`list=true` 输出原始链接列表 |
 
 该格式由 [v2rayN 订阅说明](https://github.com/2dust/v2rayN/wiki/Description-of-subscription)正式定义；本轮协议编号和能力固定对照 v2rayN 提交 `e01717d` 的 [`EConfigType`](https://github.com/2dust/v2rayN/blob/e01717d8326a4f5060b335523590c5fda943fe03/v2rayN/ServiceLib/Enums/EConfigType.cs) 与[全局协议表](https://github.com/2dust/v2rayN/blob/e01717d8326a4f5060b335523590c5fda943fe03/v2rayN/ServiceLib/Global.cs)。v2rayNG 提交 `e8a82d9` 也注册了[对应内部格式解析器](https://github.com/2dust/v2rayNG/blob/e8a82d9810ca1cf97a3cc8a9b9525a9f21955807/V2rayNG/app/src/main/java/com/v2ray/ang/fmt/V2rayNFmt.kt)，但其[协议枚举](https://github.com/2dust/v2rayNG/blob/e8a82d9810ca1cf97a3cc8a9b9525a9f21955807/V2rayNG/app/src/main/java/com/v2ray/ang/enums/EConfigType.kt)比桌面端更窄。两个目标因此使用独立能力矩阵：例如 Realm/Gecko、TUIC、AnyTLS 和 Naive 只输出给当前确实支持它们的 v2rayN，不会借共用容器塞给 v2rayNG。两个目标仍由本项目下载并用 Legacy 解析器展开远程订阅，不会改动 Clash/Mihomo 路径。标准 URI或内部模型无法无损携带的客户端外字段会按节点明确跳过；若没有任何节点可表示，请求返回 HTTP 400，不会返回空白或不可连接的伪成功订阅。
+
+Shadowrocket 是闭源客户端。与官方群组同步维护的[社区使用手册](https://github.com/LOWERTOP/Shadowrocket/wiki/)确认客户端可添加 `Subscribe` URL，并可识别复制的 `trojan://`、`vmess://`、`vless://` 等分享链接；手册同时明确指出节点分享格式缺乏统一标准。为避免猜测闭源字段，本项目第一阶段只把历史 `mixed` 已稳定生成的 Shadowsocks、ShadowsocksR、VMess、VLESS、Trojan 和 Hysteria2 固定为独立 `target=shadowrocket` 能力矩阵。`Shadowrocket/*` User-Agent 在 `target=auto` 时会进入该独立目标；远程订阅仍由服务端 Legacy 路径展开。历史 `target=mixed` 的输出保持不变，配置文件也无需新增或迁移参数。其余协议须在分享字段获得可复核证据后逐项加入，不以客户端界面列出协议作为已经适配的依据。
 
 Mieru 的 Legacy 支持仅覆盖官方可读的 `mierus://` 简化链接。解析器会校验 profile、MTU、复用等级、握手模式和 traffic-pattern 的 Base64/protobuf 外层格式，并按成对出现的 `port` / `protocol` 展开多端口配置。完整客户端配置 `mieru://` 只在 `target=clash`、`target=clashr` 及 `auto` 命中这两类目标时，由 Mihomo 专属 Go 桥使用 `bridge/go.mod` 锁定的官方 Mieru v3 protobuf 定义严格展开，再交回同一 Mihomo 解析器；不可等价表达的配置会失败关闭，且绝不回退 Legacy。其他目标继续只走 Legacy，不会因该格式改变解析路径。
 
@@ -629,7 +632,7 @@ logread -e subconverter
 
 | 参数 | 说明 | 示例 |
 | :--- | :--- | :--- |
-| `target` | 目标格式；完整支持 `clash`, `clashr`, `surge`, `quan`, `quanx`, `loon`, `surfboard`, `mellow`, `singbox`, `ss`, `ssd`, `ssr`, `sssub`, `v2ray`, `v2rayn`, `v2rayng`, `trojan`, `vless`, `hysteria2`, `mixed` | `clash`, `v2rayn`, `v2rayng`, `vless`, `hysteria2` |
+| `target` | 目标格式；完整支持 `clash`, `clashr`, `surge`, `quan`, `quanx`, `loon`, `surfboard`, `mellow`, `singbox`, `ss`, `ssd`, `ssr`, `sssub`, `v2ray`, `v2rayn`, `v2rayng`, `shadowrocket`, `trojan`, `vless`, `hysteria2`, `mixed` | `clash`, `v2rayn`, `v2rayng`, `shadowrocket`, `vless`, `hysteria2` |
 | `url` | 订阅链接或节点链接（`\|` 分隔） | `https://sub.com\|vless://...` |
 | `config` | 外部配置文件 | `https://config-url` |
 | `include` | 包含节点（正则） | `香港\|台湾` |

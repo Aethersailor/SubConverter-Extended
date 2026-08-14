@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import contextlib
 import difflib
 import hashlib
@@ -563,6 +564,7 @@ LEGACY_ONLY_TARGETS = (
     "v2ray",
     "v2rayn",
     "v2rayng",
+    "shadowrocket",
     "trojan",
     "vless",
     "hysteria2",
@@ -6381,6 +6383,7 @@ def target_generation_stats_baseline(base_url: str) -> None:
         "v2ray": VMESS_QR_URI,
         "v2rayn": VMESS_QR_URI,
         "v2rayng": VMESS_QR_URI,
+        "shadowrocket": SUBSCRIPTION.strip(),
         "trojan": TROJAN_WS_URI,
         "vless": VLESS_URI,
         "hysteria2": HYSTERIA2_URI,
@@ -6767,6 +6770,107 @@ def v2ray_client_target_baseline(base_url: str) -> None:
         raise AssertionError(
             f"historical target=v2ray output contract changed: "
             f"HTTP {legacy_status} {legacy_body!r}"
+        )
+
+
+def shadowrocket_target_baseline(base_url: str) -> None:
+    sources = (
+        SUBSCRIPTION.strip(),
+        SSR_IPV6_URI,
+        VMESS_QR_URI,
+        VLESS_URI,
+        TROJAN_WS_URI,
+        HYSTERIA2_URI,
+    )
+    params = {
+        "target": "shadowrocket",
+        "url": "|".join(sources),
+        "list": "true",
+        "config": DISABLE_RULEGEN_CONFIG,
+    }
+    status, body, _ = request(base_url, "/sub", params)
+    if status != 200:
+        raise AssertionError(
+            f"Shadowrocket standard-link target failed: HTTP {status} {body!r}"
+        )
+    raw_output = body.decode("utf-8")
+    schemes = [line.split("://", 1)[0] for line in raw_output.splitlines()]
+    if schemes != ["ss", "ssr", "vmess", "vless", "trojan", "hysteria2"]:
+        raise AssertionError(
+            f"Shadowrocket stage-one protocol matrix drifted: {raw_output!r}"
+        )
+
+    encoded_status, encoded_body, _ = request(
+        base_url,
+        "/sub",
+        {**params, "list": "false"},
+    )
+    try:
+        decoded_output = base64.b64decode(encoded_body, validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError) as error:
+        raise AssertionError(
+            f"Shadowrocket encoded subscription is invalid: {encoded_body!r}"
+        ) from error
+    if encoded_status != 200 or decoded_output != raw_output:
+        raise AssertionError(
+            "Shadowrocket encoded and raw subscriptions diverged: "
+            f"HTTP {encoded_status} {decoded_output!r} != {raw_output!r}"
+        )
+
+    mixed_status, mixed_body, _ = request(
+        base_url,
+        "/sub",
+        {**params, "target": "mixed"},
+    )
+    if mixed_status != 200 or mixed_body != body:
+        raise AssertionError(
+            "introducing target=shadowrocket changed the historical mixed output: "
+            f"HTTP {mixed_status} {mixed_body!r} != {body!r}"
+        )
+
+    auto_status, auto_body, auto_headers = request(
+        base_url,
+        "/sub",
+        {
+            **params,
+            "target": "auto",
+            "explain": "true",
+        },
+        {"User-Agent": "Shadowrocket/2.2.60"},
+    )
+    if auto_status != 200:
+        raise AssertionError(
+            f"Shadowrocket auto target failed: HTTP {auto_status} {auto_body!r}"
+        )
+    assert_vary_header(auto_headers, "User-Agent", "auto Shadowrocket")
+    report = json.loads(auto_body)
+    if (
+        report.get("target") != "shadowrocket"
+        or report.get("mode", {}).get("simple_subscription") is not True
+        or report.get("mode", {}).get("remote_subscription_backend")
+        != "server-side-parse"
+        or report.get("nodes", {}).get("total") != 6
+        or report.get("nodes", {}).get("generated") != 6
+        or report.get("nodes", {}).get("unsupported") != 0
+    ):
+        raise AssertionError(
+            f"Shadowrocket auto route diagnostics drifted: {report!r}"
+        )
+
+    unsupported_status, _, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "shadowrocket",
+            "url": MIERU_OFFICIAL_SIMPLE_URI,
+            "list": "true",
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    if unsupported_status != 400:
+        raise AssertionError(
+            "Shadowrocket accepted a protocol outside its stage-one matrix: "
+            f"HTTP {unsupported_status}"
         )
 
 
@@ -9512,6 +9616,7 @@ def main() -> int:
             mieru_legacy_parser_baseline(base_url)
             target_generation_stats_baseline(base_url)
             v2ray_client_target_baseline(base_url)
+            shadowrocket_target_baseline(base_url)
             singbox_import_fidelity_baseline(base_url, fixture_base)
             loon_current_node_output_baseline(base_url)
             quanx_current_node_output_baseline(base_url, fixture_base)
