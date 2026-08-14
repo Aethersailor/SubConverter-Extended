@@ -32,7 +32,9 @@ bool sensitiveParameter(const std::string &name) {
          lower == "filter_script" || lower == "private_key" ||
          lower == "pre_shared_key" || lower == "privatekey" ||
          lower == "presharedkey" || lower == "quicsecret" ||
-         lower == "userid" || has_suffix("_token") ||
+         lower == "userid" || lower == "auth" || lower == "authstr" ||
+         lower == "auth_str" || lower == "psk" ||
+         lower == "shadowtlspassword" || has_suffix("_token") ||
          has_suffix("_secret") || has_suffix("_password") ||
          has_suffix("_api_key") || has_suffix("_apikey") ||
          has_suffix("_private_key");

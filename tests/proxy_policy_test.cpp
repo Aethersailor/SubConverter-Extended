@@ -274,6 +274,17 @@ int main() {
   assert(json_fields.find(R"("safe":"retained-json-value")") !=
          std::string::npos);
 
+  const std::string protocol_auth_fields = redactSensitiveLogText(
+      R"({"Auth":"hysteria-auth-secret","auth-str":"hysteria-auth-string-secret","psk":"snell-psk-secret","ShadowTLSPassword":"shadow-tls-secret","SnellMode":"unshaped"})");
+  assert(protocol_auth_fields.find("hysteria-auth-secret") ==
+         std::string::npos);
+  assert(protocol_auth_fields.find("hysteria-auth-string-secret") ==
+         std::string::npos);
+  assert(protocol_auth_fields.find("snell-psk-secret") == std::string::npos);
+  assert(protocol_auth_fields.find("shadow-tls-secret") == std::string::npos);
+  assert(protocol_auth_fields.find(R"("SnellMode":"unshaped")") !=
+         std::string::npos);
+
   const std::string composite_json = redactSensitiveLogText(
       R"({"config":{"token":"nested-json-secret","mode":"inside"},"safe":"retained-after-composite"})");
   assert(composite_json.find("nested-json-secret") == std::string::npos);

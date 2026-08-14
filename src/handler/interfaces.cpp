@@ -32,6 +32,7 @@
 #include "ruleset_output.h"
 #include "parser/mihomo_scheme_utils.h"
 #include "parser/mihomo_bridge.h"
+#include "parser/subparser.h"
 #include "script/cron.h"
 #include "script/script_quickjs.h"
 #include "server/webserver.h"
@@ -72,34 +73,72 @@ string_array gRegexBlacklist = {"(.*)*"};
 
 static constexpr size_t kProviderUserAgentMaxLen = 512;
 
+enum class RemoteSubscriptionMode {
+  ServerSideParse,
+  ClashProxyProvider,
+  QuanXServerRemote,
+  SurgePolicyPath,
+  SurfboardPolicyPath,
+  LoonRemoteProxy,
+  StashProxyProvider,
+};
+
 struct TargetDescriptor {
   const char *name;
   NodeParserMode parser_mode;
+  RemoteSubscriptionMode remote_subscription_mode;
   bool simple_subscription;
   SingleLinkTypes single_link_types;
 };
 
-static constexpr std::array<TargetDescriptor, 18> kTargetDescriptors = {{
-    {"clash", NodeParserMode::MihomoOnly, false, 0},
-    {"clashr", NodeParserMode::MihomoOnly, false, 0},
-    {"surge", NodeParserMode::LegacyOnly, false, 0},
-    {"quan", NodeParserMode::LegacyOnly, false, 0},
-    {"quanx", NodeParserMode::LegacyOnly, false, 0},
-    {"loon", NodeParserMode::LegacyOnly, false, 0},
-    {"surfboard", NodeParserMode::LegacyOnly, false, 0},
-    {"mellow", NodeParserMode::LegacyOnly, false, 0},
-    {"singbox", NodeParserMode::LegacyOnly, false, 0},
-    {"ss", NodeParserMode::LegacyOnly, true, SingleLinkType::Shadowsocks},
-    {"ssd", NodeParserMode::LegacyOnly, true, 0},
-    {"ssr", NodeParserMode::LegacyOnly, true,
+static constexpr std::array<TargetDescriptor, 22> kTargetDescriptors = {{
+    {"clash", NodeParserMode::MihomoOnly,
+     RemoteSubscriptionMode::ClashProxyProvider, false, 0},
+    {"clashr", NodeParserMode::MihomoOnly,
+     RemoteSubscriptionMode::ClashProxyProvider, false, 0},
+    {"surge", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::SurgePolicyPath, false, 0},
+    {"quan", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, false, 0},
+    {"quanx", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::QuanXServerRemote, false, 0},
+    {"loon", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::LoonRemoteProxy, false, 0},
+    {"surfboard", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::SurfboardPolicyPath, false, 0},
+    {"stash", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::StashProxyProvider, false, 0},
+    {"mellow", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, false, 0},
+    {"singbox", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, false, 0},
+    {"ss", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, true,
+     SingleLinkType::Shadowsocks},
+    {"ssd", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, true, 0},
+    {"ssr", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, true,
      SingleLinkType::ShadowsocksR},
-    {"sssub", NodeParserMode::LegacyOnly, true, 0},
-    {"v2ray", NodeParserMode::LegacyOnly, true, SingleLinkType::VMess},
-    {"trojan", NodeParserMode::LegacyOnly, true, SingleLinkType::Trojan},
-    {"vless", NodeParserMode::LegacyOnly, true, SingleLinkType::VLESS},
-    {"hysteria2", NodeParserMode::LegacyOnly, true,
+    {"sssub", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, true, 0},
+    {"v2ray", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, true, SingleLinkType::VMess},
+    {"v2rayn", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, true, 0},
+    {"v2rayng", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, true, 0},
+    {"shadowrocket", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, true, 0},
+    {"trojan", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, true, SingleLinkType::Trojan},
+    {"vless", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, true, SingleLinkType::VLESS},
+    {"hysteria2", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, true,
      SingleLinkType::Hysteria2},
-    {"mixed", NodeParserMode::LegacyOnly, true, SingleLinkType::Mixed},
+    {"mixed", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::ServerSideParse, true, SingleLinkType::Mixed},
 }};
 
 static const TargetDescriptor *findTargetDescriptor(const std::string &name) {
@@ -113,6 +152,26 @@ static const TargetDescriptor *findTargetDescriptor(const std::string &name) {
 
 static const char *nodeParserModeName(NodeParserMode mode) {
   return mode == NodeParserMode::MihomoOnly ? "mihomo" : "legacy";
+}
+
+static const char *remoteSubscriptionModeName(RemoteSubscriptionMode mode) {
+  switch (mode) {
+  case RemoteSubscriptionMode::ClashProxyProvider:
+    return "clash-proxy-provider";
+  case RemoteSubscriptionMode::QuanXServerRemote:
+    return "quanx-server-remote";
+  case RemoteSubscriptionMode::SurgePolicyPath:
+    return "surge-policy-path";
+  case RemoteSubscriptionMode::SurfboardPolicyPath:
+    return "surfboard-policy-path";
+  case RemoteSubscriptionMode::LoonRemoteProxy:
+    return "loon-remote-proxy";
+  case RemoteSubscriptionMode::StashProxyProvider:
+    return "stash-proxy-provider";
+  case RemoteSubscriptionMode::ServerSideParse:
+  default:
+    return "server-side-parse";
+  }
 }
 
 static std::string supportedTargets(const std::string &separator) {
@@ -396,6 +455,8 @@ static const std::string *selectedExternalBase(const ExternalConfig &extconf,
     return &extconf.surge_rule_base;
   if (target == "surfboard")
     return &extconf.surfboard_rule_base;
+  if (target == "stash")
+    return &extconf.stash_rule_base;
   if (target == "mellow")
     return &extconf.mellow_rule_base;
   if (target == "quan")
@@ -424,7 +485,8 @@ static bool validateSelectedExternalBase(const ExternalConfig &extconf,
 
 static bool hasEffectiveExternalConfig(const ExternalConfig &extconf,
                                        const template_args &tpl_args,
-                                       const string_map &tpl_args_base) {
+                                       const string_map &tpl_args_base,
+                                       const std::string &target) {
   if (tpl_args.local_vars != tpl_args_base)
     return true;
 
@@ -439,6 +501,7 @@ static bool hasEffectiveExternalConfig(const ExternalConfig &extconf,
       !extconf.surfboard_rule_base.empty() ||
       !extconf.mellow_rule_base.empty() || !extconf.quan_rule_base.empty() ||
       !extconf.quanx_rule_base.empty() || !extconf.loon_rule_base.empty() ||
+      (target == "stash" && !extconf.stash_rule_base.empty()) ||
       !extconf.sssub_rule_base.empty() ||
       !extconf.singbox_rule_base.empty())
     return true;
@@ -761,10 +824,12 @@ static std::string providerIntervalScopeError(size_t item_index) {
   const std::string item = std::to_string(item_index + 1);
   return "Invalid request: interval: for URL item #" + item +
          " is only valid for subscription links that generate Clash/ClashR "
-         "proxy-providers.\n"
+         "proxy-providers, Quantumult X server_remote resources, Surge "
+         "policy-path resources, or Stash proxy-providers.\n"
          "无效请求：第 " + item +
          " 个 url 项的 interval: 仅适用于会生成 Clash/ClashR "
-         "proxy-provider 的订阅链接。";
+         "proxy-provider、Quantumult X server_remote、Surge policy-path "
+         "或 Stash proxy-provider 资源的订阅链接。";
 }
 
 static std::string providerDirectScopeError(size_t item_index) {
@@ -775,6 +840,54 @@ static std::string providerDirectScopeError(size_t item_index) {
          "无效请求：第 " + item +
          " 个 url 项的 proxy_direct: 仅适用于会生成 Clash/ClashR "
          "proxy-provider 的订阅链接。";
+}
+
+static std::string quanxRemoteSourceError(size_t item_index) {
+  const std::string item = std::to_string(item_index + 1);
+  return "Invalid request: Quantumult X remote subscription item #" + item +
+         " contains an unescaped space or control character.\n"
+         "无效请求：第 " + item +
+         " 个 Quantumult X 远程订阅项包含未转义空格或控制字符。";
+}
+
+static std::string surgePolicyPathSourceError(size_t item_index) {
+  const std::string item = std::to_string(item_index + 1);
+  return "Invalid request: Surge policy-path subscription item #" + item +
+         " contains an unescaped space or control character.\n"
+         "无效请求：第 " + item +
+         " 个 Surge policy-path 订阅项包含未转义空格或控制字符。";
+}
+
+static std::string surfboardPolicyPathSourceError(size_t item_index) {
+  const std::string item = std::to_string(item_index + 1);
+  return "Invalid request: Surfboard policy-path subscription item #" + item +
+         " contains an unescaped space or control character.\n"
+         "无效请求：第 " + item +
+         " 个 Surfboard policy-path 订阅项包含未转义空格或控制字符。";
+}
+
+static std::string loonRemoteProxySourceError(size_t item_index) {
+  const std::string item = std::to_string(item_index + 1);
+  return "Invalid request: Loon Remote Proxy subscription item #" + item +
+         " contains an unescaped space or control character.\n"
+         "无效请求：第 " + item +
+         " 个 Loon Remote Proxy 订阅项包含未转义空格或控制字符。";
+}
+
+static std::string stashProxyProviderSourceError(size_t item_index) {
+  const std::string item = std::to_string(item_index + 1);
+  return "Invalid request: Stash proxy-provider subscription item #" + item +
+         " contains an unescaped space or control character.\n"
+         "无效请求：第 " + item +
+         " 个 Stash proxy-provider 订阅项包含未转义空格或控制字符。";
+}
+
+static std::string surgePolicyPathIntervalError(size_t item_index) {
+  const std::string item = std::to_string(item_index + 1);
+  return "Invalid request: interval: for Surge policy-path item #" + item +
+         " must be greater than zero. Omit it to use the client default.\n"
+         "无效请求：第 " + item +
+         " 个 Surge policy-path 项的 interval: 必须大于 0；省略该前缀可使用客户端默认值。";
 }
 
 static constexpr size_t kProviderNameMaxLen = 64;
@@ -870,6 +983,59 @@ static std::string sanitizeProviderName(const std::string &input) {
   return cleaned;
 }
 
+static std::string sanitizeRemoteResourceName(const std::string &input) {
+  std::string tag = sanitizeProviderName(input);
+  std::replace(tag.begin(), tag.end(), ',', '_');
+  std::replace(tag.begin(), tag.end(), '=', '_');
+  tag = trimWhitespace(tag, true, true);
+  return tag;
+}
+
+static std::string reserveStashProviderName(
+    const std::string &base, std::unordered_set<std::string> &reserved_keys) {
+  std::string base_name = clampProviderNameLength(base, 64);
+  if (base_name.empty())
+    base_name = "SubConverter_Provider";
+  if (reserved_keys.insert(toLower(base_name)).second)
+    return base_name;
+  int suffix_index = 1;
+  while (true) {
+    const std::string suffix = "_" + std::to_string(suffix_index++);
+    const size_t max_base = 64 > suffix.size() ? 64 - suffix.size() : 0;
+    const std::string candidate =
+        clampProviderNameLength(base_name, max_base) + suffix;
+    if (reserved_keys.insert(toLower(candidate)).second)
+      return candidate;
+  }
+}
+
+static bool hasUnsafeQuanXRemoteUrlChar(const std::string &url) {
+  return std::any_of(url.begin(), url.end(), [](unsigned char ch) {
+    return ch <= 0x20 || ch == 0x7f;
+  });
+}
+
+static bool isHttpSubscriptionLink(const std::string &link,
+                                   bool explicitly_remote) {
+  if (!mihomo::isHttpSchemeLink(link))
+    return false;
+  const std::string lower_link = toLower(link);
+  if (startsWith(lower_link, "https://t.me/socks") ||
+      startsWith(lower_link, "https://t.me/http"))
+    return false;
+  if (isLegacyHttpProxyUri(link))
+    return false;
+  if (explicitly_remote)
+    return true;
+  const size_t protocol_end = link.find("://") + 3;
+  const size_t query_start = link.find('?', protocol_end);
+  if (query_start != std::string::npos)
+    return true;
+  const size_t path_start = link.find('/', protocol_end);
+  return path_start != std::string::npos &&
+         link.size() - path_start > 1;
+}
+
 static std::string subconverter_impl(Request &request, Response &response,
                                      const Settings &settings,
                                      RuleConversionStats *rule_stats = nullptr);
@@ -907,6 +1073,7 @@ static std::mutex g_sub_response_cache_mutex;
 static std::map<std::string, CachedSubResponse> g_sub_response_cache;
 
 struct SubExplainProvider {
+  std::string backend = "mihomo";
   std::string name;
   std::string tag;
   std::string source_hash;
@@ -956,6 +1123,8 @@ struct SubExplainReport {
   bool rule_generator_enabled = false;
   bool expand_rulesets = false;
   bool proxy_provider_mode = false;
+  std::string remote_subscription_backend = "server-side-parse";
+  std::string remote_subscription_reason = "target-default";
   bool nodelist = false;
   bool managed_config = false;
   std::string proxy_config;
@@ -970,10 +1139,18 @@ struct SubExplainReport {
   size_t node_link_count = 0;
   size_t unknown_node_link_count = 0;
   size_t provider_count = 0;
+  size_t remote_subscription_count = 0;
   size_t insert_node_count = 0;
   size_t direct_node_count = 0;
   size_t total_node_count = 0;
+  size_t generated_node_count = 0;
+  size_t unsupported_node_count = 0;
+  string_array unsupported_protocols;
   size_t ruleset_count = 0;
+  size_t rule_provider_count = 0;
+  size_t inline_rule_source_count = 0;
+  size_t expanded_rule_source_count = 0;
+  size_t unsupported_ruleset_count = 0;
   size_t custom_group_count = 0;
   size_t output_bytes = 0;
   std::vector<SubExplainProvider> providers;
@@ -1100,6 +1277,10 @@ static std::string serializeSubExplainReport(const SubExplainReport &report,
   writer.Bool(report.simple_subscription);
   writer.Key("proxy_provider");
   writer.Bool(report.proxy_provider_mode);
+  writeJsonString(writer, "remote_subscription_backend",
+                  report.remote_subscription_backend);
+  writeJsonString(writer, "remote_subscription_reason",
+                  report.remote_subscription_reason);
   writer.Key("nodelist");
   writer.Bool(report.nodelist);
   writer.Key("expand_rulesets");
@@ -1177,8 +1358,18 @@ static std::string serializeSubExplainReport(const SubExplainReport &report,
   writeJsonString(writer, "ruleset_fetch_context", report.ruleset_fetch_context);
   writer.Key("ruleset_count");
   writer.Uint64(report.ruleset_count);
+  writer.Key("rule_provider_count");
+  writer.Uint64(report.rule_provider_count);
+  writer.Key("inline_rule_source_count");
+  writer.Uint64(report.inline_rule_source_count);
+  writer.Key("expanded_rule_source_count");
+  writer.Uint64(report.expanded_rule_source_count);
+  writer.Key("unsupported_ruleset_count");
+  writer.Uint64(report.unsupported_ruleset_count);
   writer.Key("custom_group_count");
   writer.Uint64(report.custom_group_count);
+  writer.Key("remote_subscription_count");
+  writer.Uint64(report.remote_subscription_count);
   writer.EndObject();
 
   writer.Key("nodes");
@@ -1189,12 +1380,22 @@ static std::string serializeSubExplainReport(const SubExplainReport &report,
   writer.Uint64(report.direct_node_count);
   writer.Key("total");
   writer.Uint64(report.total_node_count);
+  writer.Key("generated");
+  writer.Uint64(report.generated_node_count);
+  writer.Key("unsupported");
+  writer.Uint64(report.unsupported_node_count);
+  writer.Key("unsupported_protocols");
+  writer.StartArray();
+  for (const std::string &protocol : report.unsupported_protocols)
+    writer.String(protocol.c_str());
+  writer.EndArray();
   writer.EndObject();
 
   writer.Key("providers");
   writer.StartArray();
   for (const SubExplainProvider &provider : report.providers) {
     writer.StartObject();
+    writeJsonString(writer, "backend", provider.backend);
     writeJsonString(writer, "name", provider.name);
     writeJsonString(writer, "tag", provider.tag);
     writeJsonString(writer, "source_hash", provider.source_hash);
@@ -1226,6 +1427,8 @@ static std::string serializeSubExplainReport(const SubExplainReport &report,
   writer.Uint64(report.output_bytes);
   writer.Key("provider_count");
   writer.Uint64(report.provider_count);
+  writer.Key("remote_subscription_count");
+  writer.Uint64(report.remote_subscription_count);
   writer.EndObject();
 
   writer.EndObject();
@@ -1726,6 +1929,8 @@ static std::string parseSubRequestArguments(Request &request,
            supportedTargets("、") + "。";
   }
   parsed.simple_subscription = parsed.target_descriptor->simple_subscription;
+  parsed.explain.remote_subscription_backend = remoteSubscriptionModeName(
+      parsed.target_descriptor->remote_subscription_mode);
   if (parsed.target_was_auto) {
     writeLog(LOG_LEVEL_INFO,
              "AUTO_TARGET_RESOLVED target=" + parsed.target +
@@ -1790,6 +1995,7 @@ struct EffectiveSubPolicy {
   std::string surge_base;
   std::string mellow_base;
   std::string surfboard_base;
+  std::string stash_base;
   std::string quan_base;
   std::string quanx_base;
   std::string loon_base;
@@ -1799,6 +2005,16 @@ struct EffectiveSubPolicy {
   std::map<std::string, std::string> provider_headers;
   template_args template_arguments;
   ProxyPolicy subscription_proxy;
+
+  // Client-managed remote resources cannot consume server-side node
+  // transformations. Preserve explicit request semantics by selecting the
+  // Legacy route, while configured defaults remain applicable to direct
+  // nodes without disabling native remote subscriptions for existing
+  // deployments.
+  bool requested_remote_node_filter = false;
+  bool requested_remote_node_rename = false;
+  bool requested_remote_node_transform = false;
+  bool requested_remote_node_option_override = false;
 };
 
 static std::string buildEffectiveSubPolicy(Request &request,
@@ -1836,6 +2052,7 @@ static std::string buildEffectiveSubPolicy(Request &request,
   policy.surge_base = settings.surgeBase;
   policy.mellow_base = settings.mellowBase;
   policy.surfboard_base = settings.surfboardBase;
+  policy.stash_base = settings.stashBase;
   policy.quan_base = settings.quanBase;
   policy.quanx_base = settings.quanXBase;
   policy.loon_base = settings.loonBase;
@@ -1855,10 +2072,20 @@ static std::string buildEffectiveSubPolicy(Request &request,
   }
 
   std::string provider_headers_error;
-  if (!parsed.provider_headers.empty() && parsed.target != "clash") {
+  if (!parsed.provider_headers.empty() && parsed.target != "clash" &&
+      parsed.target != "stash") {
     response.status_code = 400;
-    return "Invalid request: provider_headers is supported only for target=clash.\n"
-           "无效请求：provider_headers 仅支持 target=clash。";
+    return "Invalid request: provider_headers is supported only for "
+           "target=clash or target=stash.\n"
+           "无效请求：provider_headers 仅支持 target=clash 或 "
+           "target=stash。";
+  }
+  if (parsed.target == "stash" && !parsed.provider_proxy_direct.is_undef()) {
+    response.status_code = 400;
+    return "Invalid request: provider_proxy_direct is a Mihomo-only option "
+           "and cannot be applied to Stash proxy-providers.\n"
+           "无效请求：provider_proxy_direct 是 Mihomo 专用选项，不能应用于 "
+           "Stash proxy-provider。";
   }
   if (!providerHeadersFromRequest(request, parsed.provider_headers,
                                   policy.provider_headers,
@@ -1881,6 +2108,16 @@ static std::string buildEffectiveSubPolicy(Request &request,
 
   policy.subscription_proxy =
       parseProxy(settings.proxySubscription, settings.proxyBypass);
+  policy.requested_remote_node_filter =
+      !parsed.include_remark.empty() || !parsed.exclude_remark.empty();
+  policy.requested_remote_node_rename = !parsed.renames.empty();
+  policy.requested_remote_node_transform =
+      !parsed.emoji.is_undef() || parsed.add_emoji.get(false) ||
+      parsed.remove_emoji.get(false) || parsed.append_type.get(false) ||
+      parsed.sort.get(false) || parsed.filter_deprecated.get(false);
+  policy.requested_remote_node_option_override =
+      !parsed.tfo.is_undef() || !parsed.udp.is_undef() ||
+      !parsed.skip_cert_verify.is_undef() || !parsed.tls13.is_undef();
   policy.generator.append_proxy_type =
       parsed.append_type.get(settings.appendType);
   // 上游项目默认在 clash 目标下自动把 expand 设为 true
@@ -1890,6 +2127,9 @@ static std::string buildEffectiveSubPolicy(Request &request,
 
   policy.generator.clash_proxies_style = settings.clashProxiesStyle;
   policy.generator.clash_proxy_groups_style = settings.clashProxyGroupsStyle;
+  policy.generator.stash_request_tfo = parsed.tfo;
+  policy.generator.stash_request_udp = parsed.udp;
+  policy.generator.stash_request_tls13 = parsed.tls13;
   policy.generator.tfo.define(parsed.tfo).define(settings.TFOFlag);
   policy.generator.udp.define(parsed.udp).define(settings.UDPFlag);
   policy.generator.skip_cert_verify
@@ -1996,6 +2236,7 @@ static std::string buildExternalConfigFetchPlan(
 
   auto applyExternalConfig = [&](const ExternalConfig &extconf,
                                  FetchContext context) {
+    const bool requested_config = context == FetchContext::PublicRequest;
     rulePrependSources = extconf.rule_prepend_sources;
     ruleAppendSources = extconf.rule_append_sources;
     externalRuleFetchContext = extconf.rule_sources_context;
@@ -2012,6 +2253,10 @@ static std::string buildExternalConfigFetchPlan(
           plan.base_fetch_context = context;
         if (checkExternalBase(extconf.surfboard_rule_base,
                               policy.surfboard_base, context))
+          plan.base_fetch_context = context;
+        if (parsed.target == "stash" &&
+            checkExternalBase(extconf.stash_rule_base, policy.stash_base,
+                              context))
           plan.base_fetch_context = context;
         if (checkExternalBase(extconf.mellow_rule_base, policy.mellow_base,
                               context))
@@ -2044,13 +2289,25 @@ static std::string buildExternalConfigFetchPlan(
     if (!extconf.rename.empty()) {
       policy.generator.rename_array = extconf.rename;
       policy.generator.rename_for_providers = true;
+      if (requested_config)
+        policy.requested_remote_node_rename = true;
     }
     if (!extconf.emoji.empty())
       policy.generator.emoji_array = extconf.emoji;
-    if (!extconf.include.empty())
+    if (!extconf.include.empty()) {
       policy.include_remarks = extconf.include;
-    if (!extconf.exclude.empty())
+      if (requested_config)
+        policy.requested_remote_node_filter = true;
+    }
+    if (!extconf.exclude.empty()) {
       policy.exclude_remarks = extconf.exclude;
+      if (requested_config)
+        policy.requested_remote_node_filter = true;
+    }
+    if (requested_config &&
+        (extconf.add_emoji.get(false) ||
+         extconf.remove_old_emoji.get(false)))
+      policy.requested_remote_node_transform = true;
     parsed.add_emoji.define(extconf.add_emoji);
     parsed.remove_emoji.define(extconf.remove_old_emoji);
   };
@@ -2070,7 +2327,8 @@ static std::string buildExternalConfigFetchPlan(
         loadExternalConfig(candidate.path, extconf, candidate.context);
     bool effective =
         loaded.ok() && hasEffectiveExternalConfig(
-                           extconf, policy.template_arguments, tpl_args_base);
+                           extconf, policy.template_arguments, tpl_args_base,
+                           parsed.target);
     bool selected_base_valid =
         effective && validateSelectedExternalBase(
                          extconf, parsed.target, parsed.simple_subscription,
@@ -2157,7 +2415,18 @@ static std::string buildExternalConfigFetchPlan(
 
   if (policy.generator.enable_rule_generator &&
       !policy.generator.nodelist && !parsed.simple_subscription) {
-    if (policy.custom_rulesets != settings.customRulesets)
+    const bool stash_native_rulesets = parsed.target == "stash";
+    if (stash_native_rulesets) {
+      const bool reuse_cached_rulesets =
+          policy.custom_rulesets == settings.customRulesets &&
+          !settings.updateRulesetOnRequest &&
+          settings.rulesetsContent.size() == policy.custom_rulesets.size();
+      refreshRulesets(policy.custom_rulesets, plan.ruleset_content,
+                      rulesetFetchContext,
+                      RulesetRefreshMode::PreferNativeStashProviders,
+                      reuse_cached_rulesets ? &settings.rulesetsContent
+                                            : nullptr);
+    } else if (policy.custom_rulesets != settings.customRulesets)
       refreshRulesets(policy.custom_rulesets, plan.ruleset_content,
                       rulesetFetchContext);
     else {
@@ -2212,6 +2481,484 @@ struct SubStageResponse {
   std::string body;
 };
 
+static bool parseSourceGroupRule(const std::string &rule,
+                                 std::string &source_pattern,
+                                 std::string &server_pattern) {
+  static const std::string group_regex =
+      R"(^!!GROUP=(.+?)(?:!!(.*))?$)";
+  if (!startsWith(rule, "!!GROUP="))
+    return false;
+  source_pattern.clear();
+  server_pattern.clear();
+  return regGetMatch(rule, group_regex, 3,
+                     static_cast<std::string *>(nullptr), &source_pattern,
+                     &server_pattern) == 0 &&
+         !source_pattern.empty();
+}
+
+static bool parseGroupIdRule(const std::string &rule,
+                             std::string &group_id_pattern,
+                             std::string &server_pattern) {
+  static const std::string group_id_regex =
+      R"(^!!GROUPID=([\d\-+!,]+)(?:!!(.*))?$)";
+  if (!startsWith(rule, "!!GROUPID="))
+    return false;
+  group_id_pattern.clear();
+  server_pattern.clear();
+  return regGetMatch(rule, group_id_regex, 3,
+                     static_cast<std::string *>(nullptr), &group_id_pattern,
+                     &server_pattern) == 0 &&
+         !group_id_pattern.empty();
+}
+
+static bool remotePolicyRegexIsSafe(const std::string &pattern) {
+  return pattern.find(',') == std::string::npos &&
+         std::none_of(pattern.begin(), pattern.end(), [](unsigned char ch) {
+           return ch < 0x20 || ch == 0x7f;
+         });
+}
+
+static bool policyPathRegexIsSafe(const std::string &pattern) {
+  return pattern.find('"') == std::string::npos &&
+         std::none_of(pattern.begin(), pattern.end(), [](unsigned char ch) {
+           return ch < 0x20 || ch == 0x7f;
+         });
+}
+
+static std::string quanxRemoteCapabilityReason(
+    const ParsedSubRequest &parsed, const EffectiveSubPolicy &policy,
+    const Settings &settings) {
+  const extra_settings &ext = policy.generator;
+  if (ext.nodelist)
+    return "list-mode";
+  for (const std::string &raw_item : split(parsed.url, "|")) {
+    const TaggedLink tagged = parseTaggedLink(regTrim(raw_item));
+    const std::string link = tagged.link.empty() ? raw_item : tagged.link;
+    if (startsWith(regTrim(link), "!!import:"))
+      return "imported-source-list";
+  }
+  if (!policy.include_remarks.empty() || !policy.exclude_remarks.empty())
+    return "node-filters";
+  if (!ext.rename_array.empty())
+    return "provider-rename";
+  if (!parsed.group_name.empty())
+    return "group-override";
+  if (ext.add_emoji || ext.remove_emoji || ext.append_proxy_type ||
+      ext.sort_flag || ext.filter_deprecated || !settings.filterScript.empty())
+    return "node-transform";
+  if (!ext.udp.is_undef() || !ext.tfo.is_undef() ||
+      !ext.skip_cert_verify.is_undef() || !ext.tls13.is_undef())
+    return "node-option-override";
+
+  for (const ProxyGroupConfig &group : policy.custom_proxy_groups) {
+    if (group.Type == ProxyGroupType::SSID ||
+        group.Type == ProxyGroupType::Relay ||
+        group.Type == ProxyGroupType::Smart)
+      continue;
+
+    size_t dynamic_rule_count = 0;
+    for (const std::string &rule : group.Proxies) {
+      if (startsWith(rule, "[]") || rule == "DIRECT" || rule == "REJECT")
+        continue;
+      if (startsWith(rule, "script:") || startsWith(rule, "!!INSERT=") ||
+          startsWith(rule, "!!TYPE=") || startsWith(rule, "!!PORT=") ||
+          startsWith(rule, "!!SERVER="))
+        return "unsupported-group-selector";
+
+      std::string selector, server_pattern;
+      if (parseGroupIdRule(rule, selector, server_pattern) ||
+          parseSourceGroupRule(rule, selector, server_pattern)) {
+        if (startsWith(rule, "!!GROUP=") && !regValid(selector))
+          return "invalid-group-regex";
+        if (!server_pattern.empty() &&
+            (!remotePolicyRegexIsSafe(server_pattern) ||
+             !regValid(server_pattern)))
+          return "unsafe-group-regex";
+      } else if (startsWith(rule, "!!")) {
+        return "unsupported-group-selector";
+      } else if (!remotePolicyRegexIsSafe(rule) || !regValid(rule)) {
+        return "unsafe-group-regex";
+      }
+
+      if (++dynamic_rule_count > 1)
+        return "multiple-group-selectors";
+    }
+    if (!group.UsingProvider.empty() && dynamic_rule_count)
+      return "provider-and-rule-selectors";
+  }
+  return "native-capable";
+}
+
+static std::string policyPathCapabilityReason(
+    const ParsedSubRequest &parsed, const EffectiveSubPolicy &policy,
+    const Settings &settings, RemoteSubscriptionMode mode) {
+  const extra_settings &ext = policy.generator;
+  const bool surfboard = mode == RemoteSubscriptionMode::SurfboardPolicyPath;
+  if ((surfboard && !settings.surfboardPolicyPath) ||
+      (!surfboard && !settings.surgePolicyPath))
+    return "disabled-by-config";
+  if (ext.nodelist)
+    return "list-mode";
+  if (!surfboard && parsed.surge_version < 3)
+    return "unsupported-target-version";
+
+  size_t remote_subscription_count = 0;
+  int remote_group_id = -1;
+  std::string remote_source_tag;
+  std::string remote_requested_name;
+  int item_group_id = 0;
+  for (const std::string &raw_item : split(parsed.url, "|")) {
+    const TaggedLink tagged = parseTaggedLink(regTrim(raw_item));
+    const std::string link = tagged.link.empty() ? raw_item : tagged.link;
+    if (startsWith(regTrim(link), "!!import:"))
+      return "imported-source-list";
+    if (surfboard && tagged.has_interval)
+      return "unsupported-update-interval";
+    if (tagged.error == TaggedLink::Error::None &&
+        isHttpSubscriptionLink(
+            link, tagged.has_provider || (!surfboard && tagged.has_interval))) {
+      remote_subscription_count++;
+      remote_group_id = item_group_id;
+      remote_source_tag = tagged.tag;
+      remote_requested_name = tagged.provider;
+    }
+    item_group_id++;
+  }
+  if (remote_subscription_count == 0)
+    return "no-remote-subscription";
+  if (remote_subscription_count > 1)
+    return "multiple-remote-subscriptions";
+
+  if (policy.requested_remote_node_filter)
+    return "node-filters";
+  if (policy.requested_remote_node_rename)
+    return "provider-rename";
+  if (!parsed.group_name.empty())
+    return "group-override";
+  if (policy.requested_remote_node_transform)
+    return "node-transform";
+  if (policy.requested_remote_node_option_override)
+    return "node-option-override";
+
+  bool selects_remote_subscription = false;
+  for (const ProxyGroupConfig &group : policy.custom_proxy_groups) {
+    size_t dynamic_rule_count = 0;
+    for (const std::string &rule : group.Proxies) {
+      if (startsWith(rule, "[]") || rule == "DIRECT" || rule == "REJECT")
+        continue;
+      if (startsWith(rule, "script:") || startsWith(rule, "!!INSERT=") ||
+          startsWith(rule, "!!TYPE=") || startsWith(rule, "!!PORT=") ||
+          startsWith(rule, "!!SERVER="))
+        return "unsupported-group-selector";
+
+      std::string selector, server_pattern;
+      const bool group_id_selector =
+          parseGroupIdRule(rule, selector, server_pattern);
+      const bool source_selector =
+          !group_id_selector &&
+          parseSourceGroupRule(rule, selector, server_pattern);
+      if (group_id_selector || source_selector) {
+        if (startsWith(rule, "!!GROUP=") && !regValid(selector))
+          return "invalid-group-regex";
+        if (!server_pattern.empty() &&
+            (!policyPathRegexIsSafe(server_pattern) ||
+             !regValid(server_pattern)))
+          return "unsafe-group-regex";
+      } else if (startsWith(rule, "!!")) {
+        return "unsupported-group-selector";
+      } else if (!policyPathRegexIsSafe(rule) || !regValid(rule)) {
+        return "unsafe-group-regex";
+      }
+
+      if (group_id_selector && matchRange(selector, remote_group_id))
+        selects_remote_subscription = true;
+      else if (source_selector && !remote_source_tag.empty() &&
+               regFind(remote_source_tag, selector))
+        selects_remote_subscription = true;
+      else if (!group_id_selector && !source_selector)
+        selects_remote_subscription = true;
+      if (++dynamic_rule_count > 1)
+        return "multiple-group-selectors";
+    }
+
+    if (!group.UsingProvider.empty()) {
+      if (dynamic_rule_count)
+        return "provider-and-rule-selectors";
+      if (!remote_requested_name.empty() &&
+          std::find(group.UsingProvider.begin(), group.UsingProvider.end(),
+                    remote_requested_name) != group.UsingProvider.end())
+        selects_remote_subscription = true;
+    }
+    if ((group.Type == ProxyGroupType::SSID ||
+         group.Type == ProxyGroupType::Relay ||
+         group.Type == ProxyGroupType::Smart) &&
+        (dynamic_rule_count || !group.UsingProvider.empty()))
+      return "unsupported-group-type";
+  }
+
+  return selects_remote_subscription ? "native-capable"
+                                     : "no-remote-policy-group";
+}
+
+struct LoonProspectiveRemote {
+  int group_id = 0;
+  std::string source_tag;
+  std::string requested_name;
+  std::string selection_name;
+};
+
+static bool loonGroupRuleSelectsRemote(
+    const std::string &rule,
+    const std::vector<LoonProspectiveRemote> &remotes) {
+  std::string selector, server_pattern;
+  if (parseGroupIdRule(rule, selector, server_pattern)) {
+    return std::any_of(remotes.begin(), remotes.end(), [&](const auto &remote) {
+      return matchRange(selector, remote.group_id);
+    });
+  }
+  if (parseSourceGroupRule(rule, selector, server_pattern)) {
+    return std::any_of(remotes.begin(), remotes.end(), [&](const auto &remote) {
+      return !remote.source_tag.empty() && regFind(remote.source_tag, selector);
+    });
+  }
+  return !startsWith(rule, "!!") && !startsWith(rule, "script:");
+}
+
+static std::string loonRemoteCapabilityReason(
+    const ParsedSubRequest &parsed, const EffectiveSubPolicy &policy,
+    const Settings &settings) {
+  if (!settings.loonRemoteProxy)
+    return "disabled-by-config";
+  if (policy.generator.nodelist)
+    return "list-mode";
+  std::vector<LoonProspectiveRemote> remotes;
+  int item_group_id = 0;
+  size_t generated_index = 0;
+  for (const std::string &raw_item : split(parsed.url, "|")) {
+    const TaggedLink tagged = parseTaggedLink(regTrim(raw_item));
+    const std::string link = tagged.link.empty() ? raw_item : tagged.link;
+    if (startsWith(regTrim(link), "!!import:"))
+      return "imported-source-list";
+    if (tagged.has_interval)
+      return "unsupported-update-interval";
+    if (tagged.error == TaggedLink::Error::None &&
+        isHttpSubscriptionLink(link, tagged.has_provider)) {
+      std::string selection_name = sanitizeRemoteResourceName(tagged.provider);
+      if (selection_name.empty())
+        selection_name =
+            "SubConverter_Remote_" + std::to_string(++generated_index);
+      remotes.push_back({item_group_id, tagged.tag, tagged.provider,
+                         std::move(selection_name)});
+    }
+    item_group_id++;
+  }
+  if (remotes.empty())
+    return "no-remote-subscription";
+
+  if (policy.requested_remote_node_filter)
+    return "node-filters";
+  if (policy.requested_remote_node_rename)
+    return "provider-rename";
+  if (!parsed.group_name.empty())
+    return "group-override";
+  if (policy.requested_remote_node_transform)
+    return "node-transform";
+  if (policy.requested_remote_node_option_override)
+    return "node-option-override";
+
+  bool selects_remote_subscription = false;
+  for (const ProxyGroupConfig &group : policy.custom_proxy_groups) {
+    bool group_has_dynamic_selector = false;
+    for (const std::string &rule : group.Proxies) {
+      if (startsWith(rule, "[]") || rule == "DIRECT" || rule == "REJECT")
+        continue;
+      if (startsWith(toLower(rule), "http://") ||
+          startsWith(toLower(rule), "https://"))
+        continue;
+      group_has_dynamic_selector = true;
+      if (startsWith(rule, "script:") || startsWith(rule, "!!INSERT=") ||
+          startsWith(rule, "!!TYPE=") || startsWith(rule, "!!PORT=") ||
+          startsWith(rule, "!!SERVER="))
+        return "unsupported-group-selector";
+
+      std::string selector, server_pattern;
+      if (parseGroupIdRule(rule, selector, server_pattern) ||
+          parseSourceGroupRule(rule, selector, server_pattern)) {
+        if (startsWith(rule, "!!GROUP=") && !regValid(selector))
+          return "invalid-group-regex";
+        if (!server_pattern.empty() &&
+            (!policyPathRegexIsSafe(server_pattern) ||
+             !regValid(server_pattern)))
+          return "unsafe-group-regex";
+      } else if (startsWith(rule, "!!")) {
+        return "unsupported-group-selector";
+      } else if (!policyPathRegexIsSafe(rule) || !regValid(rule)) {
+        return "unsafe-group-regex";
+      }
+      if (loonGroupRuleSelectsRemote(rule, remotes))
+        selects_remote_subscription = true;
+    }
+
+    for (const std::string &provider : group.UsingProvider) {
+      const std::string sanitized = sanitizeRemoteResourceName(provider);
+      if (std::any_of(remotes.begin(), remotes.end(), [&](const auto &remote) {
+            return provider == remote.requested_name ||
+                   provider == remote.selection_name ||
+                   sanitized == remote.selection_name;
+          }))
+        selects_remote_subscription = true;
+    }
+
+    if ((group.Type == ProxyGroupType::SSID ||
+         group.Type == ProxyGroupType::Relay ||
+         group.Type == ProxyGroupType::Smart) &&
+        (group_has_dynamic_selector || !group.UsingProvider.empty()))
+      return "unsupported-group-type";
+  }
+
+  return selects_remote_subscription ? "native-capable"
+                                     : "no-remote-policy-group";
+}
+
+struct StashProspectiveProvider {
+  int group_id = 0;
+  std::string source_tag;
+  std::string requested_name;
+  std::string selection_name;
+};
+
+static bool stashGroupRuleSelectsProvider(
+    const std::string &rule,
+    const std::vector<StashProspectiveProvider> &providers) {
+  std::string selector, server_pattern;
+  if (parseGroupIdRule(rule, selector, server_pattern)) {
+    return std::any_of(providers.begin(), providers.end(),
+                       [&](const auto &provider) {
+                         return matchRange(selector, provider.group_id);
+                       });
+  }
+  if (parseSourceGroupRule(rule, selector, server_pattern)) {
+    return std::any_of(providers.begin(), providers.end(),
+                       [&](const auto &provider) {
+                         return !provider.source_tag.empty() &&
+                                regFind(provider.source_tag, selector);
+                       });
+  }
+  return !startsWith(rule, "!!") && !startsWith(rule, "script:");
+}
+
+static std::string stashProxyProviderCapabilityReason(
+    const ParsedSubRequest &parsed, const EffectiveSubPolicy &policy) {
+  if (policy.generator.nodelist)
+    return "list-mode";
+  if (parsed.provider_proxy_direct.get(false))
+    return "unsupported-provider-proxy";
+
+  std::vector<StashProspectiveProvider> providers;
+  std::unordered_set<std::string> reserved_provider_keys;
+  int item_group_id = 0;
+  size_t generated_index = 0;
+  for (const std::string &raw_item : split(parsed.url, "|")) {
+    const TaggedLink tagged = parseTaggedLink(regTrim(raw_item));
+    const std::string link = tagged.link.empty() ? raw_item : tagged.link;
+    if (startsWith(regTrim(link), "!!import:"))
+      return "imported-source-list";
+    if (tagged.has_proxy_direct)
+      return "unsupported-provider-proxy";
+    if (tagged.has_interval && tagged.interval <= 0)
+      return "invalid-update-interval";
+    if (tagged.error == TaggedLink::Error::None &&
+        isHttpSubscriptionLink(
+            link, tagged.has_provider || tagged.has_interval)) {
+      std::string selection_name = sanitizeRemoteResourceName(tagged.provider);
+      if (selection_name.empty())
+        selection_name =
+            "SubConverter_Provider_" + std::to_string(++generated_index);
+      selection_name = reserveStashProviderName(selection_name,
+                                                reserved_provider_keys);
+      providers.push_back({item_group_id, tagged.tag, tagged.provider,
+                           std::move(selection_name)});
+    }
+    item_group_id++;
+  }
+  if (providers.empty())
+    return "no-remote-subscription";
+
+  if (policy.requested_remote_node_filter)
+    return "node-filters";
+  if (policy.requested_remote_node_rename)
+    return "provider-rename";
+  if (!parsed.group_name.empty())
+    return "group-override";
+  if (policy.requested_remote_node_transform)
+    return "node-transform";
+  if (policy.requested_remote_node_option_override)
+    return "node-option-override";
+
+  // The built-in Stash base contains a safe `Proxy` selector. When no custom
+  // groups are configured, the generator attaches every provider to that
+  // selector so legacy preference files need no migration.
+  if (policy.custom_proxy_groups.empty())
+    return "native-capable";
+
+  bool selects_remote_provider = false;
+  for (const ProxyGroupConfig &group : policy.custom_proxy_groups) {
+    if (group.Type == ProxyGroupType::Smart ||
+        group.Type == ProxyGroupType::SSID)
+      return "unsupported-group-type";
+    size_t dynamic_selector_count = 0;
+    for (const std::string &rule : group.Proxies) {
+      if (startsWith(rule, "[]") || rule == "DIRECT" || rule == "REJECT")
+        continue;
+      if (startsWith(toLower(rule), "http://") ||
+          startsWith(toLower(rule), "https://"))
+        continue;
+      if (startsWith(rule, "script:") || startsWith(rule, "!!INSERT=") ||
+          startsWith(rule, "!!TYPE=") || startsWith(rule, "!!PORT=") ||
+          startsWith(rule, "!!SERVER="))
+        return "unsupported-group-selector";
+
+      std::string selector, server_pattern;
+      if (parseGroupIdRule(rule, selector, server_pattern) ||
+          parseSourceGroupRule(rule, selector, server_pattern)) {
+        if (startsWith(rule, "!!GROUP=") && !regValid(selector))
+          return "invalid-group-regex";
+        if (!server_pattern.empty() &&
+            (!remotePolicyRegexIsSafe(server_pattern) ||
+             !regValid(server_pattern)))
+          return "unsafe-group-regex";
+      } else if (startsWith(rule, "!!")) {
+        return "unsupported-group-selector";
+      } else if (!remotePolicyRegexIsSafe(rule) || !regValid(rule)) {
+        return "unsafe-group-regex";
+      }
+      if (++dynamic_selector_count > 1)
+        return "multiple-group-selectors";
+      if (stashGroupRuleSelectsProvider(rule, providers))
+        selects_remote_provider = true;
+    }
+
+    if (!group.UsingProvider.empty() && dynamic_selector_count)
+      return "provider-and-rule-selectors";
+    for (const std::string &requested : group.UsingProvider) {
+      const std::string sanitized = sanitizeRemoteResourceName(requested);
+      if (std::any_of(providers.begin(), providers.end(),
+                      [&](const auto &provider) {
+                        return requested == provider.requested_name ||
+                               requested == provider.selection_name ||
+                               sanitized == provider.selection_name;
+                      }))
+        selects_remote_provider = true;
+    }
+    if (group.Type == ProxyGroupType::Relay &&
+        (dynamic_selector_count || !group.UsingProvider.empty()))
+      return "unsupported-group-type";
+  }
+
+  return selects_remote_provider ? "native-capable"
+                                 : "no-remote-policy-group";
+}
+
 static SubStageResponse processSubscriptionNodes(
     Request &request, Response &response, const Settings &settings,
     ParsedSubRequest &parsed, EffectiveSubPolicy &policy,
@@ -2244,6 +2991,82 @@ static SubStageResponse processSubscriptionNodes(
   size_t source_failures = 0;
   NodeParserStats parser_stats;
 
+  RemoteSubscriptionMode remote_mode =
+      parsed.target_descriptor->remote_subscription_mode;
+  std::string remote_reason = "target-default";
+  if (ext.nodelist) {
+    remote_mode = RemoteSubscriptionMode::ServerSideParse;
+    remote_reason = "list-mode";
+  } else if (remote_mode == RemoteSubscriptionMode::QuanXServerRemote) {
+    remote_reason = quanxRemoteCapabilityReason(parsed, policy, settings);
+    if (remote_reason != "native-capable")
+      remote_mode = RemoteSubscriptionMode::ServerSideParse;
+  } else if (remote_mode == RemoteSubscriptionMode::SurgePolicyPath) {
+    remote_reason =
+        policyPathCapabilityReason(parsed, policy, settings, remote_mode);
+    if (remote_reason != "native-capable")
+      remote_mode = RemoteSubscriptionMode::ServerSideParse;
+  } else if (remote_mode == RemoteSubscriptionMode::SurfboardPolicyPath) {
+    remote_reason =
+        policyPathCapabilityReason(parsed, policy, settings, remote_mode);
+    if (remote_reason != "native-capable")
+      remote_mode = RemoteSubscriptionMode::ServerSideParse;
+  } else if (remote_mode == RemoteSubscriptionMode::LoonRemoteProxy) {
+    remote_reason = loonRemoteCapabilityReason(parsed, policy, settings);
+    if (remote_reason != "native-capable")
+      remote_mode = RemoteSubscriptionMode::ServerSideParse;
+  } else if (remote_mode == RemoteSubscriptionMode::StashProxyProvider) {
+    remote_reason = stashProxyProviderCapabilityReason(parsed, policy);
+    if (remote_reason != "native-capable")
+      remote_mode = RemoteSubscriptionMode::ServerSideParse;
+  }
+  explain.remote_subscription_backend = remoteSubscriptionModeName(remote_mode);
+  explain.remote_subscription_reason = remote_reason;
+
+  if (remote_mode == RemoteSubscriptionMode::SurgePolicyPath ||
+      remote_mode == RemoteSubscriptionMode::SurfboardPolicyPath ||
+      remote_mode == RemoteSubscriptionMode::LoonRemoteProxy ||
+      remote_mode == RemoteSubscriptionMode::StashProxyProvider) {
+    const size_t configured_filter_count =
+        policy.include_remarks.size() + policy.exclude_remarks.size();
+    const size_t configured_node_transform_count =
+        static_cast<size_t>(policy.generator.add_emoji) +
+        static_cast<size_t>(policy.generator.remove_emoji) +
+        static_cast<size_t>(policy.generator.append_proxy_type) +
+        static_cast<size_t>(policy.generator.sort_flag) +
+        static_cast<size_t>(policy.generator.filter_deprecated) +
+        static_cast<size_t>(!settings.filterScript.empty());
+    const size_t configured_node_option_count =
+        static_cast<size_t>(!policy.generator.udp.is_undef()) +
+        static_cast<size_t>(!policy.generator.tfo.is_undef()) +
+        static_cast<size_t>(
+            !policy.generator.skip_cert_verify.is_undef()) +
+        static_cast<size_t>(!policy.generator.tls13.is_undef());
+    if (configured_filter_count || !policy.generator.rename_array.empty() ||
+        configured_node_transform_count || configured_node_option_count) {
+      writeLog(
+          LOG_LEVEL_INFO,
+          std::string(remote_mode == RemoteSubscriptionMode::SurgePolicyPath
+                          ? "SURGE_POLICY_PATH"
+                          : remote_mode ==
+                                    RemoteSubscriptionMode::SurfboardPolicyPath
+                                ? "SURFBOARD_POLICY_PATH"
+                                : remote_mode ==
+                                          RemoteSubscriptionMode::LoonRemoteProxy
+                                      ? "LOON_REMOTE"
+                                      : "STASH_PROXY_PROVIDER") +
+              "_TRANSFORM_SCOPE remote_nodes=client "
+          "direct_nodes=server configured_filters=" +
+              std::to_string(configured_filter_count) +
+              " configured_rename_rules=" +
+              std::to_string(policy.generator.rename_array.size()) +
+              " configured_node_transforms=" +
+              std::to_string(configured_node_transform_count) +
+              " configured_node_option_overrides=" +
+              std::to_string(configured_node_option_count));
+    }
+  }
+
   parse_settings parse_set;
   parse_set.proxy = &proxy;
   parse_set.exclude_remarks = &lExcludeRemarks;
@@ -2266,31 +3089,52 @@ static SubStageResponse processSubscriptionNodes(
 
   auto logRouteSelection = [&]() {
     const size_t provider_count = ext.providers.size();
+    const size_t remote_count = ext.quanx_server_remotes.size() +
+                                ext.surge_policy_paths.size() +
+                                ext.surfboard_policy_paths.size() +
+                                ext.loon_remote_proxies.size() +
+                                ext.stash_proxy_providers.size();
     std::string route = "none";
-    if (provider_count && source_calls)
+    if ((provider_count || remote_count) && source_calls)
       route = "hybrid";
     else if (provider_count)
       route = "proxy-provider";
+    else if (remote_count)
+      route = remoteSubscriptionModeName(remote_mode);
     else if (parser_stats.invocations)
       route = "node-parser";
     else if (source_calls)
       route = "node-source";
-    writeLog(LOG_LEVEL_INFO,
-             "SUB_ROUTE_RESULT target=" + parsed.target +
-                 " source=" +
-                 std::string(parsed.target_was_auto ? "auto" : "explicit") +
-                 " route=" + route + " parser_policy=" +
-                 nodeParserModeName(parse_set.parser_mode) + " parser=" +
-                 (parser_stats.invocations
-                      ? std::string(nodeParserModeName(parse_set.parser_mode))
-                      : std::string("none")) +
-                 " provider_count=" + std::to_string(provider_count) +
-                 " source_calls=" + std::to_string(source_calls) +
-                 " source_failures=" + std::to_string(source_failures) +
-                 " parser_calls=" +
-                 std::to_string(parser_stats.invocations) +
-                 " parser_failures=" +
-                 std::to_string(parser_stats.failures));
+    std::string event =
+        "SUB_ROUTE_RESULT target=" + parsed.target +
+        " source=" +
+        std::string(parsed.target_was_auto ? "auto" : "explicit") +
+        " route=" + route + " parser_policy=" +
+        nodeParserModeName(parse_set.parser_mode) + " parser=" +
+        (parser_stats.invocations
+             ? std::string(nodeParserModeName(parse_set.parser_mode))
+             : std::string("none")) +
+        " provider_count=" + std::to_string(provider_count) +
+        " source_calls=" + std::to_string(source_calls) +
+        " source_failures=" + std::to_string(source_failures) +
+        " parser_calls=" + std::to_string(parser_stats.invocations) +
+        " parser_failures=" + std::to_string(parser_stats.failures);
+    if (parsed.target_descriptor->remote_subscription_mode ==
+            RemoteSubscriptionMode::QuanXServerRemote ||
+        parsed.target_descriptor->remote_subscription_mode ==
+            RemoteSubscriptionMode::SurgePolicyPath ||
+        parsed.target_descriptor->remote_subscription_mode ==
+            RemoteSubscriptionMode::SurfboardPolicyPath ||
+        parsed.target_descriptor->remote_subscription_mode ==
+            RemoteSubscriptionMode::LoonRemoteProxy ||
+        parsed.target_descriptor->remote_subscription_mode ==
+            RemoteSubscriptionMode::StashProxyProvider) {
+      event += " remote_backend=" +
+               std::string(remoteSubscriptionModeName(remote_mode)) +
+               " remote_reason=" + remote_reason +
+               " remote_count=" + std::to_string(remote_count);
+    }
+    writeLog(LOG_LEVEL_INFO, event);
   };
 
   if (!settings.insertUrls.empty() && argEnableInsert) {
@@ -2329,8 +3173,31 @@ static SubStageResponse processSubscriptionNodes(
   groupID = 0;
 
   const bool provider_mode_eligible =
-      (argTarget == "clash" || argTarget == "clashr") && !ext.nodelist;
-  if (!provider_mode_eligible) {
+      remote_mode == RemoteSubscriptionMode::ClashProxyProvider;
+  const bool quanx_remote_eligible =
+      remote_mode == RemoteSubscriptionMode::QuanXServerRemote;
+  const bool surge_remote_eligible =
+      remote_mode == RemoteSubscriptionMode::SurgePolicyPath;
+  const bool surfboard_remote_eligible =
+      remote_mode == RemoteSubscriptionMode::SurfboardPolicyPath;
+  const bool loon_remote_eligible =
+      remote_mode == RemoteSubscriptionMode::LoonRemoteProxy;
+  const bool stash_remote_eligible =
+      remote_mode == RemoteSubscriptionMode::StashProxyProvider;
+  const bool native_remote_target =
+      parsed.target_descriptor->remote_subscription_mode ==
+          RemoteSubscriptionMode::QuanXServerRemote ||
+      parsed.target_descriptor->remote_subscription_mode ==
+          RemoteSubscriptionMode::SurgePolicyPath ||
+      parsed.target_descriptor->remote_subscription_mode ==
+          RemoteSubscriptionMode::SurfboardPolicyPath ||
+      parsed.target_descriptor->remote_subscription_mode ==
+          RemoteSubscriptionMode::LoonRemoteProxy ||
+      parsed.target_descriptor->remote_subscription_mode ==
+          RemoteSubscriptionMode::StashProxyProvider;
+  if (!provider_mode_eligible && !quanx_remote_eligible &&
+      !surge_remote_eligible && !surfboard_remote_eligible &&
+      !loon_remote_eligible && !stash_remote_eligible) {
     for (size_t index = 0; index < urls.size(); ++index) {
       TaggedLink tagged = parseTaggedLink(regTrim(urls[index]));
       if (tagged.error != TaggedLink::Error::None) {
@@ -2344,6 +3211,12 @@ static SubStageResponse processSubscriptionNodes(
       if (tagged.has_proxy_direct) {
         *status_code = 400;
         return {true, providerDirectScopeError(index)};
+      }
+      if (native_remote_target && tagged.has_provider) {
+        std::string normalized = tagged.link;
+        if (tagged.has_tag)
+          normalized = "tag:" + tagged.tag + "," + normalized;
+        urls[index] = std::move(normalized);
       }
     }
   }
@@ -2532,13 +3405,540 @@ static SubStageResponse processSubscriptionNodes(
         groupID++;
       }
     }
+  } else if (quanx_remote_eligible) {
+    struct QuanXRemoteLinkItem {
+      std::string url;
+      std::string source_tag;
+      std::string resource_tag;
+      int interval = 0;
+      bool has_interval = false;
+      int group_id = 0;
+    };
+    struct QuanXNodeLinkItem {
+      std::string url;
+      int group_id = 0;
+      bool force_direct_link = false;
+    };
+    std::vector<QuanXRemoteLinkItem> subscription_urls;
+    std::vector<QuanXNodeLinkItem> node_urls;
+
+    for (size_t index = 0; index < urls.size(); ++index) {
+      std::string &x = urls[index];
+      x = regTrim(x);
+      TaggedLink tagged = parseTaggedLink(x);
+      if (tagged.error != TaggedLink::Error::None) {
+        *status_code = 400;
+        return {true, providerLinkPrefixError(index, tagged.error)};
+      }
+      std::string link = tagged.link.empty() ? x : tagged.link;
+      const bool is_remote_subscription = isHttpSubscriptionLink(
+          link, tagged.has_provider || tagged.has_interval);
+      const int item_group_id = groupID++;
+
+      if (is_remote_subscription) {
+        if (tagged.has_proxy_direct) {
+          *status_code = 400;
+          return {true, providerDirectScopeError(index)};
+        }
+        const std::string decoded_link = link;
+        if (hasUnsafeQuanXRemoteUrlChar(decoded_link)) {
+          *status_code = 400;
+          return {true, quanxRemoteSourceError(index)};
+        }
+        writeLog(LOG_LEVEL_INFO,
+                 "检测到 Quantumult X 远程订阅：" +
+                     summarizeUrlForLog(decoded_link) +
+                     "，将由客户端更新。");
+        subscription_urls.push_back(
+            {decoded_link, tagged.tag, tagged.provider, tagged.interval,
+             tagged.has_interval, item_group_id});
+        explain.subscription_url_count++;
+        continue;
+      }
+
+      if (tagged.has_interval) {
+        *status_code = 400;
+        return {true, providerIntervalScopeError(index)};
+      }
+      if (tagged.has_proxy_direct) {
+        *status_code = 400;
+        return {true, providerDirectScopeError(index)};
+      }
+      std::string node_link = link;
+      if (tagged.has_tag)
+        node_link = "tag:" + tagged.tag + "," + link;
+      node_urls.push_back(
+          {std::move(node_link), item_group_id, isLegacyHttpProxyUri(link)});
+      explain.node_link_count++;
+    }
+
+    std::unordered_set<std::string> resource_tags;
+    auto reserve_resource_tag = [&](const std::string &base) {
+      std::string base_tag =
+          clampProviderNameLength(base, kProviderNameMaxLen);
+      if (base_tag.empty())
+        base_tag = "Provider";
+      if (resource_tags.insert(base_tag).second)
+        return base_tag;
+      int suffix_index = 1;
+      while (true) {
+        const std::string suffix = "_" + std::to_string(suffix_index++);
+        const size_t max_base = kProviderNameMaxLen > suffix.size()
+                                    ? kProviderNameMaxLen - suffix.size()
+                                    : 0;
+        std::string candidate =
+            clampProviderNameLength(base_tag, max_base) + suffix;
+        if (resource_tags.insert(candidate).second)
+          return candidate;
+      }
+    };
+
+    for (const QuanXRemoteLinkItem &item : subscription_urls) {
+      const std::string default_tag =
+          "Provider_" + generateProviderHashFromDecodedUrl(item.url);
+      std::string requested_tag = sanitizeRemoteResourceName(item.resource_tag);
+      if (requested_tag.empty())
+        requested_tag = default_tag;
+
+      QuanXServerRemote remote;
+      remote.resource_tag = reserve_resource_tag(requested_tag);
+      remote.requested_resource_tag = item.resource_tag;
+      remote.selection_resource_tag = remote.resource_tag;
+      remote.source_tag = item.source_tag;
+      remote.url = item.url;
+      remote.update_interval = item.interval;
+      remote.has_update_interval = item.has_interval;
+      remote.group_id = item.group_id;
+      writeLog(LOG_LEVEL_INFO,
+               "QUANX_REMOTE_RESOURCE_CREATED group_id=" +
+                   std::to_string(remote.group_id) + " interval=" +
+                   (remote.has_update_interval
+                        ? std::to_string(remote.update_interval)
+                        : std::string("client-default")) +
+                   " source=" + summarizeUrlForLog(remote.url));
+      ext.quanx_server_remotes.push_back(std::move(remote));
+    }
+
+    if (!node_urls.empty()) {
+      for (const QuanXNodeLinkItem &item : node_urls) {
+        string_array import_urls{item.url};
+        if (importItems(import_urls, true, FetchContext::PublicRequest) != 0) {
+          source_calls++;
+          source_failures++;
+          continue;
+        }
+        for (std::string &x : import_urls) {
+          source_calls++;
+          parse_settings item_parse_set = parse_set;
+          item_parse_set.force_direct_link = item.force_direct_link;
+          if (addNodes(x, nodes, item.group_id, item_parse_set) == -1) {
+            source_failures++;
+            writeLog(LOG_LEVEL_WARNING,
+                     "已跳过无效节点链接：" + summarizeUrlForLog(x) +
+                         "，继续处理其他节点。");
+          }
+        }
+      }
+    }
+    if (subscription_urls.empty()) {
+      remote_mode = RemoteSubscriptionMode::ServerSideParse;
+      remote_reason = "no-remote-subscription";
+      explain.remote_subscription_backend =
+          remoteSubscriptionModeName(remote_mode);
+      explain.remote_subscription_reason = remote_reason;
+    }
+  } else if (stash_remote_eligible) {
+    struct StashRemoteLinkItem {
+      std::string url;
+      std::string source_tag;
+      std::string requested_name;
+      int interval = 3600;
+      int group_id = 0;
+    };
+    struct StashNodeLinkItem {
+      std::string url;
+      int group_id = 0;
+      bool force_direct_link = false;
+    };
+    std::vector<StashRemoteLinkItem> subscription_urls;
+    std::vector<StashNodeLinkItem> node_urls;
+
+    for (size_t index = 0; index < urls.size(); ++index) {
+      std::string &x = urls[index];
+      x = regTrim(x);
+      TaggedLink tagged = parseTaggedLink(x);
+      if (tagged.error != TaggedLink::Error::None) {
+        *status_code = 400;
+        return {true, providerLinkPrefixError(index, tagged.error)};
+      }
+      const std::string link = tagged.link.empty() ? x : tagged.link;
+      const bool is_remote_subscription = isHttpSubscriptionLink(
+          link, tagged.has_provider || tagged.has_interval);
+      const int item_group_id = groupID++;
+
+      if (is_remote_subscription) {
+        if (tagged.has_proxy_direct) {
+          *status_code = 400;
+          return {true, providerDirectScopeError(index)};
+        }
+        if (tagged.has_interval && tagged.interval <= 0) {
+          *status_code = 400;
+          return {true, surgePolicyPathIntervalError(index)};
+        }
+        if (hasUnsafeQuanXRemoteUrlChar(link)) {
+          *status_code = 400;
+          return {true, stashProxyProviderSourceError(index)};
+        }
+        writeLog(LOG_LEVEL_INFO,
+                 "检测到 Stash proxy-provider 远程订阅：" +
+                     summarizeUrlForLog(link) + "，将由客户端更新。");
+        subscription_urls.push_back(
+            {link, tagged.tag, tagged.provider,
+             tagged.has_interval ? tagged.interval : 3600, item_group_id});
+        explain.subscription_url_count++;
+        continue;
+      }
+
+      if (tagged.has_interval) {
+        *status_code = 400;
+        return {true, providerIntervalScopeError(index)};
+      }
+      if (tagged.has_proxy_direct) {
+        *status_code = 400;
+        return {true, providerDirectScopeError(index)};
+      }
+      std::string node_link = link;
+      if (tagged.has_tag)
+        node_link = "tag:" + tagged.tag + "," + link;
+      node_urls.push_back(
+          {std::move(node_link), item_group_id, isLegacyHttpProxyUri(link)});
+      explain.node_link_count++;
+    }
+
+    std::unordered_set<std::string> provider_names;
+
+    size_t generated_index = 0;
+    for (const StashRemoteLinkItem &item : subscription_urls) {
+      std::string requested = sanitizeRemoteResourceName(item.requested_name);
+      if (requested.empty())
+        requested =
+            "SubConverter_Provider_" + std::to_string(++generated_index);
+
+      StashProxyProvider provider;
+      provider.name = reserveStashProviderName(requested, provider_names);
+      provider.requested_name = item.requested_name;
+      provider.selection_name = provider.name;
+      provider.source_tag = item.source_tag;
+      provider.url = item.url;
+      provider.path = "./providers/" + provider.name + ".yaml";
+      provider.interval = item.interval;
+      provider.group_id = item.group_id;
+      provider.headers = provider_headers;
+      writeLog(LOG_LEVEL_INFO,
+               "STASH_PROXY_PROVIDER_CREATED group_id=" +
+                   std::to_string(provider.group_id) + " interval=" +
+                   std::to_string(provider.interval) + " source=" +
+                   summarizeUrlForLog(provider.url));
+      SubExplainProvider explain_provider;
+      explain_provider.backend = "stash-client";
+      explain_provider.name = provider.name;
+      explain_provider.tag = provider.source_tag;
+      explain_provider.source_summary = summarizeUrlForLog(provider.url);
+      explain_provider.path = provider.path;
+      explain_provider.name_generated = item.requested_name.empty();
+      explain_provider.group_id = provider.group_id;
+      explain_provider.interval = provider.interval;
+      explain_provider.proxy_direct = false;
+      explain.providers.push_back(std::move(explain_provider));
+      ext.stash_proxy_providers.push_back(std::move(provider));
+    }
+
+    for (const StashNodeLinkItem &item : node_urls) {
+      string_array import_urls{item.url};
+      if (importItems(import_urls, true, FetchContext::PublicRequest) != 0) {
+        source_calls++;
+        source_failures++;
+        continue;
+      }
+      for (std::string &x : import_urls) {
+        source_calls++;
+        parse_settings item_parse_set = parse_set;
+        item_parse_set.force_direct_link = item.force_direct_link;
+        if (addNodes(x, nodes, item.group_id, item_parse_set) == -1) {
+          source_failures++;
+          writeLog(LOG_LEVEL_WARNING,
+                   "已跳过无效节点链接：" + summarizeUrlForLog(x) +
+                       "，继续处理其他节点。");
+        }
+      }
+    }
+  } else if (loon_remote_eligible) {
+    struct LoonRemoteLinkItem {
+      std::string url;
+      std::string source_tag;
+      std::string requested_name;
+      int group_id = 0;
+    };
+    struct LoonNodeLinkItem {
+      std::string url;
+      int group_id = 0;
+      bool force_direct_link = false;
+    };
+    std::vector<LoonRemoteLinkItem> subscription_urls;
+    std::vector<LoonNodeLinkItem> node_urls;
+
+    for (size_t index = 0; index < urls.size(); ++index) {
+      std::string &x = urls[index];
+      x = regTrim(x);
+      TaggedLink tagged = parseTaggedLink(x);
+      if (tagged.error != TaggedLink::Error::None) {
+        *status_code = 400;
+        return {true, providerLinkPrefixError(index, tagged.error)};
+      }
+      std::string link = tagged.link.empty() ? x : tagged.link;
+      const bool is_remote_subscription =
+          isHttpSubscriptionLink(link, tagged.has_provider);
+      const int item_group_id = groupID++;
+
+      if (is_remote_subscription) {
+        if (tagged.has_interval) {
+          *status_code = 400;
+          return {true, providerIntervalScopeError(index)};
+        }
+        if (tagged.has_proxy_direct) {
+          *status_code = 400;
+          return {true, providerDirectScopeError(index)};
+        }
+        if (hasUnsafeQuanXRemoteUrlChar(link)) {
+          *status_code = 400;
+          return {true, loonRemoteProxySourceError(index)};
+        }
+        writeLog(LOG_LEVEL_INFO,
+                 "检测到 Loon Remote Proxy 远程订阅：" +
+                     summarizeUrlForLog(link) + "，将由客户端更新。");
+        subscription_urls.push_back(
+            {link, tagged.tag, tagged.provider, item_group_id});
+        explain.subscription_url_count++;
+        continue;
+      }
+
+      if (tagged.has_interval) {
+        *status_code = 400;
+        return {true, providerIntervalScopeError(index)};
+      }
+      if (tagged.has_proxy_direct) {
+        *status_code = 400;
+        return {true, providerDirectScopeError(index)};
+      }
+      std::string node_link = link;
+      if (tagged.has_tag)
+        node_link = "tag:" + tagged.tag + "," + link;
+      node_urls.push_back(
+          {std::move(node_link), item_group_id, isLegacyHttpProxyUri(link)});
+      explain.node_link_count++;
+    }
+
+    std::unordered_set<std::string> resource_names;
+    auto reserve_resource_name = [&](const std::string &base) {
+      std::string base_name = clampProviderNameLength(base, 64);
+      if (base_name.empty())
+        base_name = "SubConverter_Remote";
+      if (resource_names.insert(base_name).second)
+        return base_name;
+      int suffix_index = 1;
+      while (true) {
+        const std::string suffix = "_" + std::to_string(suffix_index++);
+        const size_t max_base = 64 > suffix.size() ? 64 - suffix.size() : 0;
+        const std::string candidate =
+            clampProviderNameLength(base_name, max_base) + suffix;
+        if (resource_names.insert(candidate).second)
+          return candidate;
+      }
+    };
+
+    size_t generated_index = 0;
+    for (const LoonRemoteLinkItem &item : subscription_urls) {
+      std::string requested = sanitizeRemoteResourceName(item.requested_name);
+      if (requested.empty())
+        requested =
+            "SubConverter_Remote_" + std::to_string(++generated_index);
+
+      LoonRemoteProxyResource remote;
+      remote.resource_name = reserve_resource_name(requested);
+      remote.requested_name = item.requested_name;
+      remote.selection_name = remote.resource_name;
+      remote.source_tag = item.source_tag;
+      remote.url = item.url;
+      remote.group_id = item.group_id;
+      writeLog(LOG_LEVEL_INFO,
+               "LOON_REMOTE_PROXY_CREATED group_id=" +
+                   std::to_string(remote.group_id) + " source=" +
+                   summarizeUrlForLog(remote.url));
+      ext.loon_remote_proxies.push_back(std::move(remote));
+    }
+
+    for (const LoonNodeLinkItem &item : node_urls) {
+      string_array import_urls{item.url};
+      if (importItems(import_urls, true, FetchContext::PublicRequest) != 0) {
+        source_calls++;
+        source_failures++;
+        continue;
+      }
+      for (std::string &x : import_urls) {
+        source_calls++;
+        parse_settings item_parse_set = parse_set;
+        item_parse_set.force_direct_link = item.force_direct_link;
+        if (addNodes(x, nodes, item.group_id, item_parse_set) == -1) {
+          source_failures++;
+          writeLog(LOG_LEVEL_WARNING,
+                   "已跳过无效节点链接：" + summarizeUrlForLog(x) +
+                       "，继续处理其他节点。");
+        }
+      }
+    }
+  } else if (surge_remote_eligible || surfboard_remote_eligible) {
+    struct PolicyPathRemoteLinkItem {
+      std::string url;
+      std::string source_tag;
+      std::string requested_name;
+      int interval = 0;
+      bool has_interval = false;
+      int group_id = 0;
+    };
+    struct PolicyPathNodeLinkItem {
+      std::string url;
+      int group_id = 0;
+      bool force_direct_link = false;
+    };
+    std::vector<PolicyPathRemoteLinkItem> subscription_urls;
+    std::vector<PolicyPathNodeLinkItem> node_urls;
+
+    for (size_t index = 0; index < urls.size(); ++index) {
+      std::string &x = urls[index];
+      x = regTrim(x);
+      TaggedLink tagged = parseTaggedLink(x);
+      if (tagged.error != TaggedLink::Error::None) {
+        *status_code = 400;
+        return {true, providerLinkPrefixError(index, tagged.error)};
+      }
+
+      std::string link = tagged.link.empty() ? x : tagged.link;
+      const bool is_remote_subscription = isHttpSubscriptionLink(
+          link, tagged.has_provider ||
+                    (surge_remote_eligible && tagged.has_interval));
+      const int item_group_id = groupID++;
+      if (is_remote_subscription) {
+        if (tagged.has_proxy_direct) {
+          *status_code = 400;
+          return {true, providerDirectScopeError(index)};
+        }
+        if (surfboard_remote_eligible && tagged.has_interval) {
+          *status_code = 400;
+          return {true, providerIntervalScopeError(index)};
+        }
+        if (surge_remote_eligible && tagged.has_interval &&
+            tagged.interval <= 0) {
+          *status_code = 400;
+          return {true, surgePolicyPathIntervalError(index)};
+        }
+        if (hasUnsafeQuanXRemoteUrlChar(link)) {
+          *status_code = 400;
+          return {true, surge_remote_eligible
+                            ? surgePolicyPathSourceError(index)
+                            : surfboardPolicyPathSourceError(index)};
+        }
+        writeLog(LOG_LEVEL_INFO,
+                 std::string("检测到 ") +
+                     (surge_remote_eligible ? "Surge" : "Surfboard") +
+                     " policy-path 远程订阅：" +
+                     summarizeUrlForLog(link) + "，将由客户端更新。");
+        subscription_urls.push_back({link, tagged.tag, tagged.provider,
+                                     tagged.interval, tagged.has_interval,
+                                     item_group_id});
+        explain.subscription_url_count++;
+        continue;
+      }
+
+      if (tagged.has_interval) {
+        *status_code = 400;
+        return {true, providerIntervalScopeError(index)};
+      }
+      if (tagged.has_proxy_direct) {
+        *status_code = 400;
+        return {true, providerDirectScopeError(index)};
+      }
+      std::string node_link = link;
+      if (tagged.has_tag)
+        node_link = "tag:" + tagged.tag + "," + link;
+      node_urls.push_back(
+          {std::move(node_link), item_group_id, isLegacyHttpProxyUri(link)});
+      explain.node_link_count++;
+    }
+
+    for (const PolicyPathRemoteLinkItem &item : subscription_urls) {
+      if (surge_remote_eligible) {
+        SurgePolicyPathResource resource;
+        resource.url = item.url;
+        resource.source_tag = item.source_tag;
+        resource.requested_name = item.requested_name;
+        resource.update_interval = item.interval;
+        resource.has_update_interval = item.has_interval;
+        resource.group_id = item.group_id;
+        writeLog(LOG_LEVEL_INFO,
+                 "SURGE_POLICY_PATH_CREATED group_id=" +
+                     std::to_string(resource.group_id) + " interval=" +
+                     (resource.has_update_interval
+                          ? std::to_string(resource.update_interval)
+                          : std::string("client-default")) +
+                     " source=" + summarizeUrlForLog(resource.url));
+        ext.surge_policy_paths.push_back(std::move(resource));
+      } else {
+        SurfboardPolicyPathResource resource;
+        resource.url = item.url;
+        resource.source_tag = item.source_tag;
+        resource.requested_name = item.requested_name;
+        resource.group_id = item.group_id;
+        writeLog(LOG_LEVEL_INFO,
+                 "SURFBOARD_POLICY_PATH_CREATED group_id=" +
+                     std::to_string(resource.group_id) +
+                     " interval=client-default source=" +
+                     summarizeUrlForLog(resource.url));
+        ext.surfboard_policy_paths.push_back(std::move(resource));
+      }
+    }
+
+    for (const PolicyPathNodeLinkItem &item : node_urls) {
+      string_array import_urls{item.url};
+      if (importItems(import_urls, true, FetchContext::PublicRequest) != 0) {
+        source_calls++;
+        source_failures++;
+        continue;
+      }
+      for (std::string &x : import_urls) {
+        source_calls++;
+        parse_settings item_parse_set = parse_set;
+        item_parse_set.force_direct_link = item.force_direct_link;
+        if (addNodes(x, nodes, item.group_id, item_parse_set) == -1) {
+          source_failures++;
+          writeLog(LOG_LEVEL_WARNING,
+                   "已跳过无效节点链接：" + summarizeUrlForLog(x) +
+                       "，继续处理其他节点。");
+        }
+      }
+    }
   } else {
     importItems(urls, true, FetchContext::PublicRequest);
     for (std::string &x : urls) {
       x = regTrim(x);
       writeLog(LOG_LEVEL_INFO, "正在从 URL 获取节点数据：" + summarizeUrlForLog(x) + "。");
       source_calls++;
-      if (addNodes(x, nodes, groupID, parse_set) == -1) {
+      parse_settings item_parse_set = parse_set;
+      if (native_remote_target) {
+        const TaggedLink tagged = parseTaggedLink(x);
+        item_parse_set.force_direct_link =
+            isLegacyHttpProxyUri(tagged.link.empty() ? x : tagged.link);
+      }
+      if (addNodes(x, nodes, groupID, item_parse_set) == -1) {
         source_failures++;
         writeLog(LOG_LEVEL_WARNING,
                  "已跳过无效节点链接：" + summarizeUrlForLog(x) +
@@ -2548,24 +3948,36 @@ static SubStageResponse processSubscriptionNodes(
     }
   }
 
-  explain.provider_count = ext.providers.size();
-  explain.proxy_provider_mode = ext.use_proxy_provider && !ext.providers.empty();
+  explain.provider_count =
+      ext.providers.size() + ext.stash_proxy_providers.size();
+  explain.remote_subscription_count = ext.quanx_server_remotes.size() +
+                                      ext.surge_policy_paths.size() +
+                                      ext.surfboard_policy_paths.size() +
+                                      ext.loon_remote_proxies.size() +
+                                      ext.stash_proxy_providers.size();
+  explain.proxy_provider_mode =
+      (ext.use_proxy_provider && !ext.providers.empty()) ||
+      !ext.stash_proxy_providers.empty();
   explain.insert_node_count = insert_nodes.size();
   explain.direct_node_count = nodes.size();
   logRouteSelection();
-  if (!argProviderHeaders.empty() && !ext.nodelist && ext.providers.empty()) {
+  if (!argProviderHeaders.empty() && !ext.nodelist && ext.providers.empty() &&
+      ext.stash_proxy_providers.empty()) {
     *status_code = 400;
     return {true,
             "Invalid request: provider_headers was selected, but no "
             "proxy-provider was generated.\n"
             "无效请求：已选择 provider_headers，但没有生成 proxy-provider。"};
   }
-  if (nodes.empty() && insert_nodes.empty() && ext.providers.empty()) {
+  if (nodes.empty() && insert_nodes.empty() && ext.providers.empty() &&
+      ext.quanx_server_remotes.empty() && ext.surge_policy_paths.empty() &&
+      ext.surfboard_policy_paths.empty() && ext.loon_remote_proxies.empty() &&
+      ext.stash_proxy_providers.empty()) {
     *status_code = 400;
     return {true,
-            "Invalid request: no valid proxy nodes or proxy providers were "
+            "Invalid request: no valid proxy nodes or remote resources were "
             "found.\n"
-            "无效请求：未找到有效的代理节点或代理提供者。\n"
+            "无效请求：未找到有效的代理节点或远程资源。\n"
             "Please check whether the subscription URL or node URI format is "
             "supported, and whether filters excluded all nodes.\n"
             "请检查订阅链接或节点 URI 格式是否受支持，以及过滤规则是否排除了所有节点。"};
@@ -2663,11 +4075,17 @@ static SubStageResponse dispatchTargetGenerator(
     managed_url =
         settings.managedConfigPrefix + "/sub?" + joinArguments(argument);
 
+  struct PendingUpload {
+    std::string name;
+    std::string path;
+    std::string content;
+    bool write_manage_url = false;
+  };
+  std::vector<PendingUpload> pending_uploads;
   bool upload_failed = false;
   auto recordUpload = [&](const std::string &name, const std::string &path,
                           const std::string &content, bool write_manage_url) {
-    if (uploadGist(name, path, content, write_manage_url) != 0)
-      upload_failed = true;
+    pending_uploads.push_back({name, path, content, write_manage_url});
   };
 
   proxy = parseProxy(settings.proxyConfig, settings.proxyBypass);
@@ -2708,9 +4126,6 @@ static SubStageResponse dispatchTargetGenerator(
     if (ext.nodelist) {
       output = proxyToSurge(nodes, base_content, dummy_ruleset, dummy_group,
                             parsed.surge_version, ext);
-      if (upload)
-        recordUpload("surge" + surge_version_text + "list", upload_path,
-                     output, true);
     } else {
       if (render_template(fetchFile(policy.surge_base, proxy,
                                     settings.cacheConfig, true, base_context),
@@ -2722,8 +4137,46 @@ static SubStageResponse dispatchTargetGenerator(
       output = proxyToSurge(nodes, base_content, ruleset_content,
                             policy.custom_proxy_groups, parsed.surge_version,
                             ext);
-      if (upload)
-        recordUpload("surge" + surge_version_text, upload_path, output, true);
+    }
+
+    {
+      const TargetGenerationStats &stats = ext.surge_generation_stats;
+      string_array unsupported_protocols;
+      unsupported_protocols.reserve(stats.unsupported_by_type.size());
+      for (const auto &[type, count] : stats.unsupported_by_type) {
+        unsupported_protocols.emplace_back(toLower(getProxyTypeName(type)) +
+                                           ":" + std::to_string(count));
+      }
+      const size_t unsupported_count = stats.unsupported_nodes();
+      writeLog(unsupported_count ? LOG_LEVEL_WARNING : LOG_LEVEL_INFO,
+               "SURGE_NODE_GENERATION input=" +
+                   std::to_string(stats.input_nodes) + " emitted=" +
+                   std::to_string(stats.emitted_nodes) + " unsupported=" +
+                   std::to_string(unsupported_count) + " protocols=" +
+                   (unsupported_protocols.empty()
+                        ? std::string("none")
+                        : join(unsupported_protocols, ";")) +
+                   " remote_references=" +
+                   std::to_string(stats.remote_references_emitted));
+      parsed.explain.generated_node_count = stats.emitted_nodes;
+      parsed.explain.unsupported_node_count = unsupported_count;
+      parsed.explain.unsupported_protocols = unsupported_protocols;
+
+      if (!ext.surge_policy_paths.empty() &&
+          stats.remote_references_emitted == 0) {
+        *status_code = 400;
+        return {true,
+                "Invalid request: the Surge policy-path subscription was not "
+                "selected by any compatible proxy group.\n"
+                "无效请求：没有兼容的策略组选择该 Surge policy-path 订阅。"};
+      }
+    }
+
+    if (upload)
+      recordUpload(ext.nodelist ? "surge" + surge_version_text + "list"
+                                : "surge" + surge_version_text,
+                   upload_path, output, true);
+    if (!ext.nodelist) {
       if (settings.writeManagedConfig && !settings.managedConfigPrefix.empty())
         generation.managed_url_used = true;
       if (generation.managed_url_used)
@@ -2749,18 +4202,89 @@ static SubStageResponse dispatchTargetGenerator(
     }
     output = proxyToSurge(nodes, base_content, ruleset_content,
                           policy.custom_proxy_groups, -3, ext);
+    {
+      const TargetGenerationStats &stats = ext.surfboard_generation_stats;
+      string_array unsupported_protocols;
+      unsupported_protocols.reserve(stats.unsupported_by_type.size());
+      for (const auto &[type, count] : stats.unsupported_by_type) {
+        unsupported_protocols.emplace_back(toLower(getProxyTypeName(type)) +
+                                           ":" + std::to_string(count));
+      }
+      const size_t unsupported_count = stats.unsupported_nodes();
+      writeLog(unsupported_count ? LOG_LEVEL_WARNING : LOG_LEVEL_INFO,
+               "SURFBOARD_NODE_GENERATION input=" +
+                   std::to_string(stats.input_nodes) + " emitted=" +
+                   std::to_string(stats.emitted_nodes) + " unsupported=" +
+                   std::to_string(unsupported_count) + " protocols=" +
+                   (unsupported_protocols.empty()
+                        ? std::string("none")
+                        : join(unsupported_protocols, ";")) +
+                   " remote_references=" +
+                   std::to_string(stats.remote_references_emitted));
+      parsed.explain.generated_node_count = stats.emitted_nodes;
+      parsed.explain.unsupported_node_count = unsupported_count;
+      parsed.explain.unsupported_protocols = unsupported_protocols;
+
+      if (!ext.surfboard_policy_paths.empty() &&
+          stats.remote_references_emitted == 0) {
+        *status_code = 400;
+        return {true,
+                "Invalid request: the Surfboard policy-path subscription was "
+                "not selected by any compatible proxy group.\n"
+                "无效请求：没有兼容的策略组选择该 Surfboard policy-path "
+                "订阅。"};
+      }
+    }
     if (upload)
       recordUpload("surfboard", upload_path, output, true);
-    if (settings.writeManagedConfig && !settings.managedConfigPrefix.empty())
-      generation.managed_url_used = true;
-    if (generation.managed_url_used)
-      output = "#!MANAGED-CONFIG " + managed_url +
-               (policy.update_interval
-                    ? " interval=" + std::to_string(policy.update_interval)
-                    : "") +
-               " strict=" +
-               std::string(policy.update_strict ? "true" : "false") +
-               "\n\n" + output;
+    if (!ext.nodelist) {
+      if (settings.writeManagedConfig && !settings.managedConfigPrefix.empty())
+        generation.managed_url_used = true;
+      if (generation.managed_url_used)
+        output = "#!MANAGED-CONFIG " + managed_url +
+                 (policy.update_interval > 0
+                      ? " interval=" + std::to_string(policy.update_interval)
+                      : "") +
+                 " strict=" +
+                 std::string(policy.update_strict ? "true" : "false") +
+                 "\n\n" + output;
+    }
+    break;
+
+  case "stash"_hash:
+    writeLog(LOG_LEVEL_INFO, "生成目标：Stash");
+    if (render_template(fetchFile(policy.stash_base, proxy,
+                                  settings.cacheConfig, true, base_context),
+                        template_arguments, base_content,
+                        settings.templatePath, base_context) != 0) {
+      *status_code = 400;
+      return {true, base_content};
+    }
+    output = proxyToStash(nodes, base_content, ruleset_content,
+                          policy.custom_proxy_groups, ext);
+    parsed.explain.rule_provider_count =
+        ext.stash_rule_stats.final_provider_count;
+    parsed.explain.inline_rule_source_count =
+        ext.stash_rule_stats.inline_sources;
+    parsed.explain.expanded_rule_source_count =
+        ext.stash_rule_stats.expanded_sources;
+    parsed.explain.unsupported_ruleset_count =
+        ext.stash_rule_stats.unsupported_sources;
+    if (!ext.external_rule_error.empty()) {
+      *status_code = 400;
+      return {true, ext.external_rule_error};
+    }
+    if (ext.stash_proxy_providers.size() !=
+        ext.target_generation_stats.remote_references_emitted) {
+      *status_code = 400;
+      return {true,
+              "Invalid request: every Stash proxy-provider must be selected "
+              "by a compatible proxy group.\n"
+              "无效请求：每个 Stash proxy-provider 都必须被兼容的策略组"
+              "选中。"};
+    }
+    if (upload)
+      recordUpload("stash", upload_path, output, false);
     break;
 
   case "mellow"_hash:
@@ -2807,11 +4331,32 @@ static SubStageResponse dispatchTargetGenerator(
       recordUpload("ssr", upload_path, output, false);
     break;
   case "v2ray"_hash:
-    writeLog(LOG_LEVEL_INFO, "生成目标：v2rayN");
+    writeLog(LOG_LEVEL_INFO, "生成目标：Legacy VMess Subscription");
     output = proxyToSingle(nodes, parsed.target_descriptor->single_link_types,
                            ext);
     if (upload)
       recordUpload("v2ray", upload_path, output, false);
+    break;
+  case "v2rayn"_hash:
+    writeLog(LOG_LEVEL_INFO, "生成目标：v2rayN");
+    output = proxyToV2RayClient(nodes, V2RayClientTarget::V2RayN, ext);
+    if (upload)
+      recordUpload("v2rayn", upload_path, output, false);
+    break;
+  case "v2rayng"_hash:
+    writeLog(LOG_LEVEL_INFO, "生成目标：v2rayNG");
+    output = proxyToV2RayClient(nodes, V2RayClientTarget::V2RayNG, ext);
+    if (upload)
+      recordUpload("v2rayng", upload_path, output, false);
+    break;
+  case "shadowrocket"_hash:
+    writeLog(LOG_LEVEL_INFO, "生成目标：Shadowrocket");
+    output = proxyToShadowrocket(nodes, ext);
+    if (upload)
+      // Shadowrocket UA requests historically resolved to mixed and updated
+      // the default Gist path "sub". Preserve that path for smooth upgrades.
+      recordUpload(parsed.target_was_auto ? "sub" : "shadowrocket", upload_path,
+                   output, false);
     break;
   case "trojan"_hash:
     writeLog(LOG_LEVEL_INFO, "生成目标：Trojan");
@@ -2889,6 +4434,38 @@ static SubStageResponse dispatchTargetGenerator(
     }
     output = proxyToLoon(nodes, base_content, ruleset_content,
                          policy.custom_proxy_groups, ext);
+    {
+      const TargetGenerationStats &stats = ext.loon_generation_stats;
+      string_array unsupported_protocols;
+      unsupported_protocols.reserve(stats.unsupported_by_type.size());
+      for (const auto &[type, count] : stats.unsupported_by_type) {
+        unsupported_protocols.emplace_back(toLower(getProxyTypeName(type)) +
+                                           ":" + std::to_string(count));
+      }
+      const size_t unsupported_count = stats.unsupported_nodes();
+      writeLog(unsupported_count ? LOG_LEVEL_WARNING : LOG_LEVEL_INFO,
+               "LOON_NODE_GENERATION input=" +
+                   std::to_string(stats.input_nodes) + " emitted=" +
+                   std::to_string(stats.emitted_nodes) + " unsupported=" +
+                   std::to_string(unsupported_count) + " protocols=" +
+                   (unsupported_protocols.empty()
+                        ? std::string("none")
+                        : join(unsupported_protocols, ";")) +
+                   " remote_references=" +
+                   std::to_string(stats.remote_references_emitted));
+      parsed.explain.generated_node_count = stats.emitted_nodes;
+      parsed.explain.unsupported_node_count = unsupported_count;
+      parsed.explain.unsupported_protocols = unsupported_protocols;
+
+      if (!ext.loon_remote_proxies.empty() &&
+          stats.remote_references_emitted == 0) {
+        *status_code = 400;
+        return {true,
+                "Invalid request: no compatible Loon proxy group selected "
+                "the Remote Proxy subscription.\n"
+                "无效请求：没有兼容的 Loon 策略组选择 Remote Proxy 订阅。"};
+      }
+    }
     if (upload)
       recordUpload("loon", upload_path, output, false);
     break;
@@ -2926,6 +4503,45 @@ static SubStageResponse dispatchTargetGenerator(
             "内部错误：target 已通过校验，但没有对应的生成器处理它。\n"
             "Please report this request to the service maintainer.\n"
             "请将该请求反馈给服务维护者。"};
+  }
+
+  if (parsed.target_descriptor->parser_mode == NodeParserMode::LegacyOnly) {
+    const TargetGenerationStats &stats = ext.target_generation_stats;
+    string_array unsupported_protocols;
+    unsupported_protocols.reserve(stats.unsupported_by_type.size());
+    for (const auto &[type, count] : stats.unsupported_by_type) {
+      unsupported_protocols.emplace_back(toLower(getProxyTypeName(type)) +
+                                         ":" + std::to_string(count));
+    }
+    const size_t unsupported_count = stats.unsupported_nodes();
+    writeLog(unsupported_count ? LOG_LEVEL_WARNING : LOG_LEVEL_INFO,
+             "TARGET_NODE_GENERATION target=" + target + " input=" +
+                 std::to_string(stats.input_nodes) + " emitted=" +
+                 std::to_string(stats.emitted_nodes) + " unsupported=" +
+                 std::to_string(unsupported_count) + " protocols=" +
+                 (unsupported_protocols.empty()
+                      ? std::string("none")
+                      : join(unsupported_protocols, ";")) +
+                 " remote_references=" +
+                 std::to_string(stats.remote_references_emitted));
+    parsed.explain.generated_node_count = stats.emitted_nodes;
+    parsed.explain.unsupported_node_count = unsupported_count;
+    parsed.explain.unsupported_protocols = unsupported_protocols;
+
+    if (stats.input_nodes > 0 && stats.emitted_nodes == 0 &&
+        stats.remote_references_emitted == 0) {
+      *status_code = 400;
+      return {true,
+              "Invalid request: none of the parsed proxy nodes can be "
+              "represented by the selected output target.\n"
+              "无效请求：解析到的代理节点均无法由所选输出目标表示。"};
+    }
+  }
+
+  for (const PendingUpload &pending : pending_uploads) {
+    if (uploadGist(pending.name, pending.path, pending.content,
+                   pending.write_manage_url) != 0)
+      upload_failed = true;
   }
 
   if (upload_failed)
@@ -3144,7 +4760,7 @@ static std::string assembleSubResponse(
                      " explicitly selected header(s)",
                  provider_headers.empty() ? "ignored" : "applied",
                  "Only named, present, non-reserved request headers are "
-                 "copied into generated proxy-providers.");
+                 "copied into generated Clash or Stash proxy-providers.");
     addParameter("upload", boolString(argUpload), explain.upload_suppressed
                                                     ? "suppressed"
                                                     : "applied",
@@ -3159,9 +4775,17 @@ static std::string assembleSubResponse(
     addSwitchParameter("tfo", ext.tfo.get(false), ext.tfo);
     addSwitchParameter("udp", ext.udp.get(false), ext.udp);
     addParameter("list", boolString(ext.nodelist), "applied",
-                 ext.nodelist
-                     ? "Explicit node-list mode expands subscription sources."
-                     : "Clash-compatible output defaults to provider mode.");
+                  ext.nodelist
+                      ? "Explicit node-list mode expands subscription sources."
+                      : (argTarget == "quanx"
+                             ? "Quantumult X full-config output uses client-managed "
+                               "server_remote resources when the request can be "
+                               "represented without losing advanced semantics."
+                             : (argTarget == "stash"
+                                    ? "Stash full-config output uses named client-managed "
+                                      "proxy-providers when the request can be represented "
+                                      "without losing advanced semantics."
+                                    : "Clash-compatible output defaults to provider mode.")));
     addSwitchParameter("sort", ext.sort_flag, argSort);
     addParameter("sort_script",
                  argUseSortScript ? "enabled" : "disabled",
@@ -3288,6 +4912,23 @@ static std::string assembleSubResponse(
       addConfigSection("proxy_providers", "request", "generated",
                        std::to_string(explain.provider_count) +
                            " provider(s).");
+    if (explain.remote_subscription_count) {
+      std::string remote_section = "quanx_server_remote";
+      if (explain.remote_subscription_backend == "surge-policy-path")
+        remote_section = "surge_policy_path";
+      else if (explain.remote_subscription_backend ==
+               "surfboard-policy-path")
+        remote_section = "surfboard_policy_path";
+      else if (explain.remote_subscription_backend == "loon-remote-proxy")
+        remote_section = "loon_remote_proxy";
+      else if (explain.remote_subscription_backend ==
+               "stash-proxy-provider")
+        remote_section = "stash_proxy_provider";
+      addConfigSection(remote_section, "request", "generated",
+                       std::to_string(explain.remote_subscription_count) +
+                           " remote resource(s); node-name transformations run "
+                           "only in the client or its configured resource parser.");
+    }
     if (explain.managed_config)
       addConfigSection("managed_config", "global", "enabled",
                        "Managed config prefix is available.");
@@ -3297,6 +4938,8 @@ static std::string assembleSubResponse(
              "已生成 /sub explain JSON 诊断结果：target=" + argTarget +
                  ", status=" + std::to_string(response.status_code) +
                  ", providers=" + std::to_string(explain.provider_count) +
+                 ", remote_resources=" +
+                 std::to_string(explain.remote_subscription_count) +
                  ", nodes=" + std::to_string(explain.total_node_count) +
                  ", recognized_params=" +
                  std::to_string(explain.recognized_parameters.size()) +

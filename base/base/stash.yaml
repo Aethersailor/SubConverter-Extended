@@ -1,0 +1,24 @@
+# Stash base configuration. Generated nodes, providers, groups, and rules are
+# merged into this document by the Stash target generator.
+mode: rule
+log-level: info
+
+dns:
+  default-nameserver:
+    - 223.5.5.5
+    - 1.12.12.12
+  nameserver:
+    - doh3://223.5.5.5/dns-query
+    - https://1.12.12.12/dns-query
+  skip-cert-verify: false
+  follow-rule: false
+
+proxies: []
+proxy-providers: {}
+proxy-groups:
+  - name: Proxy
+    type: select
+    proxies:
+      - DIRECT
+rules:
+  - MATCH,Proxy

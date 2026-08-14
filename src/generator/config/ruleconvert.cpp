@@ -1,4 +1,13 @@
+#include <algorithm>
+#include <charconv>
+#include <cctype>
+#include <cstdint>
+#include <limits>
+#include <map>
+#include <set>
+#include <sstream>
 #include <string>
+#include <unordered_set>
 
 #include "handler/settings.h"
 #include "handler/settings_view.h"
@@ -208,6 +217,378 @@ static void warnNoResolveIgnoredForTarget(
                      " 输出，已对策略组 '" + ruleset.rule_group +
                      "' 安全忽略。");
     }
+}
+
+namespace {
+
+struct StashNativeRulesetContract
+{
+    std::string behavior;
+    std::string format;
+    std::string extension;
+};
+
+bool inferStashNativeRulesetContract(const RulesetContent &ruleset,
+                                     StashNativeRulesetContract &contract)
+{
+    if(ruleset.delivery != RulesetDelivery::NativeStashProvider ||
+       (!startsWith(ruleset.rule_path, "https://") &&
+        !startsWith(ruleset.rule_path, "http://")))
+        return false;
+
+    switch(ruleset.rule_type)
+    {
+    case RULESET_CLASH_DOMAIN:
+        contract.behavior = "domain";
+        break;
+    case RULESET_CLASH_IPCIDR:
+        contract.behavior = "ipcidr";
+        break;
+    case RULESET_CLASH_CLASSICAL:
+        contract.behavior = "classical";
+        break;
+    default:
+        return false;
+    }
+
+    std::string path = ruleset.rule_path;
+    const size_t query = path.find_first_of("?#");
+    if(query != std::string::npos)
+        path.erase(query);
+    const std::string explicit_format = ruleset.options.stash_format;
+    const size_t slash = path.find_last_of('/');
+    const size_t dot = path.find_last_of('.');
+    const std::string extension =
+        dot == std::string::npos ||
+                (slash != std::string::npos && dot < slash + 1)
+            ? ""
+            : toLower(path.substr(dot));
+    if(explicit_format.empty() && extension.empty())
+        return false;
+    if(explicit_format == "mrs" ||
+       (explicit_format.empty() && extension == ".mrs"))
+    {
+        if(contract.behavior == "classical")
+            return false;
+        contract.format = "mrs";
+        contract.extension = ".mrs";
+    }
+    else if(explicit_format == "yaml" ||
+            (explicit_format.empty() &&
+             (extension == ".yaml" || extension == ".yml")))
+    {
+        contract.format = "yaml";
+        contract.extension = ".yaml";
+    }
+    else if(explicit_format == "text")
+    {
+        contract.format = "text";
+        contract.extension = ".txt";
+    }
+    else
+        return false;
+    return true;
+}
+
+std::string stashRulesetStem(const std::string &url)
+{
+    std::string path = url;
+    const size_t query = path.find_first_of("?#");
+    if(query != std::string::npos)
+        path.erase(query);
+    const size_t slash = path.find_last_of('/');
+    std::string name = path.substr(slash == std::string::npos ? 0 : slash + 1);
+    const size_t dot = name.find_last_of('.');
+    if(dot != std::string::npos)
+        name.erase(dot);
+
+    std::string safe;
+    safe.reserve(std::min<size_t>(name.size(), 48));
+    bool last_separator = false;
+    for(unsigned char ch : name)
+    {
+        if(safe.size() >= 48)
+            break;
+        if(std::isalnum(ch) || ch == '-' || ch == '_')
+        {
+            safe.push_back(static_cast<char>(ch));
+            last_separator = false;
+        }
+        else if(!safe.empty() && !last_separator)
+        {
+            safe.push_back('_');
+            last_separator = true;
+        }
+    }
+    while(!safe.empty() && safe.back() == '_')
+        safe.pop_back();
+    return safe.empty() ? "SubConverter_Rule" : safe;
+}
+
+bool stashRulesetScalarIsSafe(const std::string &value)
+{
+    if(value.empty() || value != trimWhitespace(value, true, true))
+        return false;
+    return std::none_of(value.begin(), value.end(), [](unsigned char ch) {
+        return ch < 0x20 || ch == 0x7f;
+    });
+}
+
+bool stashRulesetGroupIsSafe(const std::string &value)
+{
+    return stashRulesetScalarIsSafe(value) &&
+           value.find(',') == std::string::npos;
+}
+
+bool normalizeStashRule(std::string rule, const std::string &group,
+                        const RulesetOptions &options, std::string &output)
+{
+    rule = trimWhitespace(rule, true, true);
+    if(rule.empty())
+        return false;
+    string_array fields = split(rule, ",");
+    for(std::string &field : fields)
+    {
+        field = trimWhitespace(field, true, true);
+        if(!stashRulesetScalarIsSafe(field))
+            return false;
+    }
+    if(fields.empty())
+        return false;
+    const std::string type = toUpper(fields[0]);
+    static const std::unordered_set<std::string> allowed_types = {
+        "DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "DOMAIN-WILDCARD",
+        "DOMAIN-REGEX", "GEOSITE", "IP-CIDR", "IP-CIDR6", "IP-ASN",
+        "GEOIP", "PROCESS-NAME", "PROCESS-PATH", "USER-AGENT",
+        "URL-REGEX", "NETWORK", "PROTOCOL", "DST-PORT", "MATCH",
+        "FINAL"};
+    if(allowed_types.find(type) == allowed_types.end())
+        return false;
+
+    const bool terminal_rule = type == "MATCH" || type == "FINAL";
+    if((terminal_rule && fields.size() != 1) ||
+       (!terminal_rule && (fields.size() < 2 || fields[1].empty())))
+        return false;
+
+    const bool supports_no_resolve =
+        type == "GEOIP" || type == "IP-CIDR" || type == "IP-CIDR6" ||
+        type == "IP-ASN";
+    bool no_resolve = options.no_resolve && supports_no_resolve;
+    bool explicit_no_resolve = false;
+    bool no_track = false;
+    for(size_t index = 2; index < fields.size(); ++index)
+    {
+        const std::string option = toLower(fields[index]);
+        if(option == "no-resolve" && supports_no_resolve &&
+           !explicit_no_resolve)
+        {
+            no_resolve = true;
+            explicit_no_resolve = true;
+        }
+        else if(option == "no-track" && !no_track)
+            no_track = true;
+        else
+            return false;
+    }
+
+    if(type == "GEOIP")
+    {
+        const std::string &country = fields[1];
+        if(country.size() != 2 ||
+           !std::all_of(country.begin(), country.end(), [](unsigned char ch) {
+               return std::isalpha(ch) != 0;
+           }))
+            return false;
+    }
+
+    output = terminal_rule ? "MATCH," + group
+                           : type + "," + fields[1] + "," + group;
+    if(no_resolve)
+        output += ",no-resolve";
+    if(no_track)
+        output += ",no-track";
+    return true;
+}
+
+} // namespace
+
+bool rulesetToStash(YAML::Node &base_rule,
+                    const std::vector<RulesetContent> &ruleset_content_array,
+                    bool overwrite_original_rules,
+                    StashRuleConversionStats &stash_stats,
+                    RuleConversionStats *stats,
+                    std::string &error)
+{
+    stash_stats = StashRuleConversionStats{};
+    stash_stats.input_sources = ruleset_content_array.size();
+    error.clear();
+    const size_t max_allowed_rules = effectiveSettings().maxAllowedRules;
+
+    auto fail = [&](const std::string &english, const std::string &chinese) {
+        stash_stats.unsupported_sources++;
+        error = "Invalid request: " + english + ".\n无效请求：" + chinese + "。";
+        return false;
+    };
+
+    YAML::Node rules(YAML::NodeType::Sequence);
+    YAML::Node terminal_rules(YAML::NodeType::Sequence);
+    if(!overwrite_original_rules && base_rule["rules"].IsSequence())
+    {
+        bool terminal_seen = false;
+        for(const YAML::Node &entry : base_rule["rules"])
+        {
+            if(!entry.IsScalar())
+                return fail("the selected Stash base contains a non-scalar rule",
+                            "所选 Stash 基础模板包含非标量规则");
+            const std::string value = trimWhitespace(
+                entry.as<std::string>(), true, true);
+            const size_t separator = value.find(',');
+            const std::string type = toUpper(trimWhitespace(
+                separator == std::string::npos ? value
+                                               : value.substr(0, separator),
+                true, true));
+            if(type == "MATCH" || type == "FINAL")
+                terminal_seen = true;
+            (terminal_seen ? terminal_rules : rules).push_back(entry);
+        }
+    }
+    YAML::Node providers = base_rule["rule-providers"].IsMap()
+                               ? YAML::Clone(base_rule["rule-providers"])
+                               : YAML::Node(YAML::NodeType::Map);
+    rules.SetStyle(YAML::EmitterStyle::Block);
+    providers.SetStyle(YAML::EmitterStyle::Block);
+    if(max_allowed_rules &&
+       rules.size() + terminal_rules.size() > max_allowed_rules)
+        return fail("the selected Stash base exceeds max_allowed_rules",
+                    "所选 Stash 基础模板超过 max_allowed_rules 限制");
+
+    std::unordered_set<std::string> provider_names;
+    std::unordered_set<std::string> provider_paths;
+    if(base_rule["rule-providers"].IsDefined() &&
+       !base_rule["rule-providers"].IsNull() &&
+       !base_rule["rule-providers"].IsMap())
+        return fail("the selected Stash base has an invalid rule-providers field",
+                    "所选 Stash 基础模板的 rule-providers 字段无效");
+    for(const auto &entry : providers)
+    {
+        if(!entry.first.IsScalar() || !entry.second.IsMap())
+            return fail("the selected Stash base contains an invalid rule-provider",
+                        "所选 Stash 基础模板包含无效的 rule-provider");
+        const std::string name = entry.first.as<std::string>();
+        if(!provider_names.insert(toLower(name)).second)
+            return fail("the selected Stash base contains duplicate rule-provider names",
+                        "所选 Stash 基础模板包含重复的 rule-provider 名称");
+        const YAML::Node path = entry.second["path"];
+        if(path.IsDefined() && !path.IsNull())
+        {
+            if(!path.IsScalar() ||
+               !provider_paths.insert(toLower(path.as<std::string>())).second)
+                return fail("the selected Stash base contains conflicting rule-provider paths",
+                            "所选 Stash 基础模板包含冲突的 rule-provider 路径");
+        }
+    }
+
+    RuleConversionStats local_stats;
+    for(const RulesetContent &source : ruleset_content_array)
+    {
+        if(max_allowed_rules &&
+           rules.size() + terminal_rules.size() >= max_allowed_rules)
+            return fail("the final Stash rule count exceeds max_allowed_rules",
+                        "最终 Stash 规则数量超过 max_allowed_rules 限制");
+
+        if(source.delivery == RulesetDelivery::NativeStashProvider)
+        {
+            StashNativeRulesetContract contract;
+            if(!inferStashNativeRulesetContract(source, contract) ||
+               !stashRulesetScalarIsSafe(source.rule_path) ||
+               !stashRulesetGroupIsSafe(source.rule_group))
+                return fail("a Stash rule-provider source has an unsupported format or unsafe value",
+                            "Stash rule-provider 来源的格式不受支持或包含不安全值");
+
+            const std::string stem = stashRulesetStem(source.rule_path);
+            std::string name = stem;
+            size_t suffix = 2;
+            while(provider_names.find(toLower(name)) != provider_names.end())
+                name = stem + "_" + std::to_string(suffix++);
+            const std::string path = "./rules/" + name + contract.extension;
+            if(!provider_paths.insert(toLower(path)).second)
+                return fail("generated Stash rule-provider paths conflict",
+                            "生成的 Stash rule-provider 路径发生冲突");
+            provider_names.insert(toLower(name));
+
+            YAML::Node item;
+            item.SetStyle(YAML::EmitterStyle::Block);
+            item["behavior"] = contract.behavior;
+            item["format"] = contract.format;
+            item["url"] = source.rule_path;
+            item["path"] = path;
+            if(source.update_interval > 0)
+                item["interval"] = source.update_interval;
+            providers[name] = item;
+            rules.push_back(buildClashRuleSetReference(
+                name, source.rule_group, source.rule_type, source.options));
+            stash_stats.providerized_sources++;
+            stash_stats.provider_references++;
+            stash_stats.emitted_rules++;
+            local_stats.add();
+            continue;
+        }
+
+        std::string retrieved = source.rule_content.get();
+        if(!stashRulesetGroupIsSafe(source.rule_group))
+            return fail("a Stash ruleset policy name contains an unsafe value",
+                        "Stash 规则集的策略名称包含不安全值");
+        if(retrieved.empty())
+            return fail("a Stash ruleset could not be fetched or was empty",
+                        "Stash 规则集获取失败或内容为空");
+        if(source.rule_path.empty())
+            stash_stats.inline_sources++;
+        else
+        {
+            stash_stats.expanded_sources++;
+        }
+        if(startsWith(retrieved, "[]"))
+            retrieved.erase(0, 2);
+        else
+            retrieved = convertRuleset(retrieved, source.rule_type);
+
+        std::stringstream stream(retrieved);
+        std::string line;
+        const char delimiter = getLineBreak(retrieved);
+        bool emitted_source_rule = false;
+        while(getline(stream, line, delimiter))
+        {
+            line = trimWhitespace(line, true, true);
+            if(line.empty() || line[0] == ';' || line[0] == '#' ||
+               (line.size() >= 2 && line[0] == '/' && line[1] == '/'))
+                continue;
+            std::string normalized;
+            if(!normalizeStashRule(line, source.rule_group, source.options,
+                                   normalized))
+                return fail("a Stash ruleset contains an unsupported or invalid rule",
+                            "Stash 规则集包含不受支持或无效的规则");
+            if(max_allowed_rules &&
+               rules.size() + terminal_rules.size() >= max_allowed_rules)
+                return fail("the final Stash rule count exceeds max_allowed_rules",
+                            "最终 Stash 规则数量超过 max_allowed_rules 限制");
+            rules.push_back(normalized);
+            stash_stats.emitted_rules++;
+            local_stats.add();
+            emitted_source_rule = true;
+        }
+        if(!emitted_source_rule)
+            return fail("a Stash ruleset did not contain any supported rules",
+                        "Stash 规则集不包含任何受支持的规则");
+    }
+
+    for(const YAML::Node &entry : terminal_rules)
+        rules.push_back(entry);
+    stash_stats.final_provider_count = providers.size();
+    base_rule["rules"] = rules;
+    base_rule["rule-providers"] = providers;
+    if(stats)
+        stats->add(local_stats.rules);
+    return true;
 }
 
 void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_content_array, bool overwrite_original_rules, bool new_field_name, RuleConversionStats *stats)
@@ -584,53 +965,221 @@ void rulesetToSurge(INIReader &base_rule, std::vector<RulesetContent> &ruleset_c
         stats->add(local_stats.rules);
 }
 
-static rapidjson::Value transformRuleToSingBox(std::vector<std::string_view> &args, const std::string& rule, const std::string &group, rapidjson::MemoryPoolAllocator<>& allocator)
-{
-    args.clear();
-    split(args, rule, ',');
-    if (args.size() < 2) return rapidjson::Value(rapidjson::kObjectType);
-    auto type = toLower(std::string(args[0]));
-    auto value = toLower(std::string(args[1]));
-//    std::string_view option;
-//    if (args.size() >= 3) option = args[2];
+namespace {
 
-    rapidjson::Value rule_obj(rapidjson::kObjectType);
-    type = replaceAllDistinct(type, "-", "_");
-    type = replaceAllDistinct(type, "ip_cidr6", "ip_cidr");
-    type = replaceAllDistinct(type, "src_", "source_");
-    if (type == "match" || type == "final")
-    {
-        rule_obj.AddMember("outbound", rapidjson::Value(value.data(), value.size(), allocator), allocator);
-    }
-    else
-    {
-        rule_obj.AddMember(rapidjson::Value(type.c_str(), allocator), rapidjson::Value(value.data(), value.size(), allocator), allocator);
-        rule_obj.AddMember("outbound", rapidjson::Value(group.c_str(), allocator), allocator);
-    }
-    return rule_obj;
+enum class SingBoxRuleValueKind { String, Integer, Boolean };
+
+struct SingBoxRuleBucket {
+    std::string field;
+    SingBoxRuleValueKind kind = SingBoxRuleValueKind::String;
+    bool match_rule_set_source = false;
+    std::vector<std::string> values;
+};
+
+bool singBoxRuleSetCodeSafe(const std::string &value) {
+    return !value.empty() &&
+           regMatch(value, R"(^[a-z0-9][a-z0-9._@!+-]*$)");
 }
 
-static bool appendSingBoxRule(std::vector<std::string_view> &args, rapidjson::Value &rules, const std::string& rule, rapidjson::MemoryPoolAllocator<>& allocator)
-{
-    using namespace rapidjson_ext;
+std::string singBoxRuleSetTag(const std::string &family,
+                              const std::string &value) {
+    return family + "-" + value;
+}
+
+bool parseSingBoxRuleInteger(const std::string &value, uint32_t maximum,
+                             uint32_t &parsed) {
+    if (value.empty())
+        return false;
+    const char *begin = value.data();
+    const char *end = begin + value.size();
+    const auto result = std::from_chars(begin, end, parsed);
+    return result.ec == std::errc{} && result.ptr == end &&
+           parsed <= maximum;
+}
+
+bool appendSingBoxRule(std::vector<std::string_view> &args,
+                       std::map<std::string, SingBoxRuleBucket> &buckets,
+                       std::set<std::string> &geosite_codes,
+                       std::set<std::string> &geoip_codes,
+                       const std::string &rule, std::string &final,
+                       const std::string &rule_group) {
     args.clear();
     split(args, rule, ',');
-    if (args.size() < 2) return false;
-    auto type = args[0];
-//    std::string_view option;
-//    if (args.size() >= 3) option = args[2];
-
-    if (none_of(SingBoxRuleTypes, [&](const std::string& t){ return type == t; }))
+    if (args.size() < 2)
         return false;
 
-    auto realType = toLower(std::string(type));
-    auto value = toLower(std::string(args[1]));
-    realType = replaceAllDistinct(realType, "-", "_");
-    realType = replaceAllDistinct(realType, "ip_cidr6", "ip_cidr");
+    const std::string type = toUpper(trimWhitespace(std::string(args[0])));
+    std::string value = toLower(trimWhitespace(std::string(args[1])));
+    if (none_of(SingBoxRuleTypes, [&](const std::string &candidate) {
+          return type == candidate;
+        }))
+        return false;
 
-    rules | AppendToArray(realType.c_str(), rapidjson::Value(value.c_str(), value.size(), allocator), allocator);
+    if (type == "MATCH" || type == "FINAL") {
+        final = rule_group;
+        return true;
+    }
+
+    std::string field;
+    SingBoxRuleValueKind kind = SingBoxRuleValueKind::String;
+    bool match_rule_set_source = false;
+    if (type == "DOMAIN")
+        field = "domain";
+    else if (type == "DOMAIN-SUFFIX")
+        field = "domain_suffix";
+    else if (type == "DOMAIN-KEYWORD")
+        field = "domain_keyword";
+    else if (type == "DOMAIN-REGEX")
+        field = "domain_regex";
+    else if (type == "IP-CIDR" || type == "IP-CIDR6")
+        field = "ip_cidr";
+    else if (type == "SRC-IP-CIDR")
+        field = "source_ip_cidr";
+    else if (type == "IP-VERSION") {
+        uint32_t parsed = 0;
+        if ((value != "4" && value != "6") ||
+            !parseSingBoxRuleInteger(value, 6, parsed) ||
+            (parsed != 4 && parsed != 6))
+            return false;
+        field = "ip_version";
+        kind = SingBoxRuleValueKind::Integer;
+    } else if (type == "INBOUND")
+        field = "inbound";
+    else if (type == "PROTOCOL")
+        field = "protocol";
+    else if (type == "NETWORK")
+        field = "network";
+    else if (type == "PROCESS-NAME")
+        field = "process_name";
+    else if (type == "PROCESS-PATH")
+        field = "process_path";
+    else if (type == "PACKAGE-NAME")
+        field = "package_name";
+    else if (type == "PORT" || type == "SRC-PORT" || type == "USER-ID") {
+        const uint32_t maximum = type == "USER-ID"
+            ? std::numeric_limits<uint32_t>::max()
+            : 65535U;
+        uint32_t parsed = 0;
+        if (!parseSingBoxRuleInteger(value, maximum, parsed))
+            return false;
+        field = type == "PORT" ? "port"
+                 : type == "SRC-PORT" ? "source_port"
+                                        : "user_id";
+        kind = SingBoxRuleValueKind::Integer;
+    } else if (type == "PORT-RANGE")
+        field = "port_range";
+    else if (type == "SRC-PORT-RANGE")
+        field = "source_port_range";
+    else if (type == "USER")
+        field = "auth_user";
+    else if (type == "GEOSITE") {
+        if (!singBoxRuleSetCodeSafe(value))
+            return false;
+        field = "rule_set";
+        value = singBoxRuleSetTag("geosite", value);
+        geosite_codes.emplace(value.substr(std::string("geosite-").size()));
+    } else if (type == "GEOIP" || type == "SRC-GEOIP") {
+        const bool source = type == "SRC-GEOIP";
+        if (value == "private") {
+            field = source ? "source_ip_is_private" : "ip_is_private";
+            value = "true";
+            kind = SingBoxRuleValueKind::Boolean;
+        } else {
+            if (!singBoxRuleSetCodeSafe(value))
+                return false;
+            field = "rule_set";
+            match_rule_set_source = source;
+            value = singBoxRuleSetTag("geoip", value);
+            geoip_codes.emplace(value.substr(std::string("geoip-").size()));
+        }
+    } else {
+        return false;
+    }
+
+    const std::string bucket_key = field +
+        (match_rule_set_source ? ":source" : ":destination");
+    auto &bucket = buckets[bucket_key];
+    bucket.field = field;
+    bucket.kind = kind;
+    bucket.match_rule_set_source = match_rule_set_source;
+    if (std::find(bucket.values.begin(), bucket.values.end(), value) ==
+        bucket.values.end())
+        bucket.values.emplace_back(std::move(value));
     return true;
 }
+
+void emitSingBoxRuleBuckets(
+    const std::map<std::string, SingBoxRuleBucket> &buckets,
+    const std::string &outbound, rapidjson::Value &rules,
+    rapidjson::MemoryPoolAllocator<> &allocator) {
+    for (const auto &[key, bucket] : buckets) {
+        (void)key;
+        rapidjson::Value rule(rapidjson::kObjectType);
+        rapidjson::Value field_name(bucket.field.c_str(), allocator);
+        if (bucket.kind == SingBoxRuleValueKind::Boolean) {
+            rule.AddMember(field_name, true, allocator);
+        } else if (bucket.kind == SingBoxRuleValueKind::Integer &&
+                   bucket.values.size() == 1) {
+            uint32_t parsed = 0;
+            parseSingBoxRuleInteger(bucket.values.front(),
+                                    std::numeric_limits<uint32_t>::max(),
+                                    parsed);
+            rule.AddMember(field_name, parsed, allocator);
+        } else {
+            rapidjson::Value values(rapidjson::kArrayType);
+            for (const std::string &value : bucket.values) {
+                if (bucket.kind == SingBoxRuleValueKind::Integer) {
+                    uint32_t parsed = 0;
+                    parseSingBoxRuleInteger(
+                        value, std::numeric_limits<uint32_t>::max(), parsed);
+                    values.PushBack(parsed, allocator);
+                } else {
+                    values.PushBack(rapidjson::Value(value.c_str(), allocator),
+                                    allocator);
+                }
+            }
+            rule.AddMember(field_name, values, allocator);
+        }
+        if (bucket.match_rule_set_source)
+            rule.AddMember("rule_set_ip_cidr_match_source", true, allocator);
+        rule.AddMember("action", "route", allocator);
+        rule.AddMember("outbound",
+                       rapidjson::Value(outbound.c_str(), allocator), allocator);
+        rules.PushBack(rule, allocator);
+    }
+}
+
+void appendSingBoxRemoteRuleSet(
+    rapidjson::Value &rule_sets, std::set<std::string> &existing_tags,
+    const std::string &family, const std::string &code,
+    rapidjson::MemoryPoolAllocator<> &allocator) {
+    const std::string tag = singBoxRuleSetTag(family, code);
+    if (!existing_tags.emplace(tag).second)
+        return;
+    rapidjson::Value rule_set(rapidjson::kObjectType);
+    rule_set.AddMember("type", "remote", allocator);
+    rule_set.AddMember("tag", rapidjson::Value(tag.c_str(), allocator),
+                       allocator);
+    rule_set.AddMember("format", "binary", allocator);
+    const std::string url =
+        "https://raw.githubusercontent.com/SagerNet/sing-" + family +
+        "/rule-set/" + tag + ".srs";
+    rule_set.AddMember("url", rapidjson::Value(url.c_str(), allocator),
+                       allocator);
+    rule_set.AddMember("download_detour", "DIRECT", allocator);
+    rule_sets.PushBack(rule_set, allocator);
+}
+
+bool preserveSingBoxBaseActionRule(const rapidjson::Value &rule) {
+    if (!rule.IsObject() || !rule.HasMember("action") ||
+        !rule["action"].IsString())
+        return false;
+    const std::string action = rule["action"].GetString();
+    return action == "sniff" || action == "hijack-dns" ||
+           action == "resolve" || action == "route-options";
+}
+
+} // namespace
 
 void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent> &ruleset_content_array, bool overwrite_original_rules, RuleConversionStats *stats)
 {
@@ -643,17 +1192,35 @@ void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent
     size_t total_rules = 0;
     auto &allocator = base_rule.GetAllocator();
 
+    if (base_rule.HasMember("route") && !base_rule["route"].IsObject())
+        base_rule.RemoveMember("route");
+    if (!base_rule.HasMember("route"))
+        base_rule.AddMember("route", rapidjson::Value(rapidjson::kObjectType),
+                            allocator);
+
     rapidjson::Value rules(rapidjson::kArrayType);
-    if (!overwrite_original_rules)
-    {
-        if (base_rule.HasMember("route") && base_rule["route"].HasMember("rules") && base_rule["route"]["rules"].IsArray())
+    if (base_rule["route"].HasMember("rules") &&
+        base_rule["route"]["rules"].IsArray()) {
+        if (!overwrite_original_rules) {
             rules.Swap(base_rule["route"]["rules"]);
+        } else {
+            for (const rapidjson::Value &base_item :
+                 base_rule["route"]["rules"].GetArray()) {
+                if (!preserveSingBoxBaseActionRule(base_item))
+                    continue;
+                rapidjson::Value copy(rapidjson::kObjectType);
+                copy.CopyFrom(base_item, allocator);
+                rules.PushBack(copy, allocator);
+            }
+        }
     }
 
     if (settings.singBoxAddClashModes)
     {
-        auto global_object = buildObject(allocator, "clash_mode", "Global", "outbound", "GLOBAL");
-        auto direct_object = buildObject(allocator, "clash_mode", "Direct", "outbound", "DIRECT");
+        auto global_object = buildObject(allocator, "clash_mode", "Global",
+                                         "action", "route", "outbound", "GLOBAL");
+        auto direct_object = buildObject(allocator, "clash_mode", "Direct",
+                                         "action", "route", "outbound", "DIRECT");
         rules.PushBack(global_object, allocator);
         rules.PushBack(direct_object, allocator);
     }
@@ -662,6 +1229,7 @@ void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent
     // rules.PushBack(dns_object, allocator);
 
     std::vector<std::string_view> temp(4);
+    std::set<std::string> geosite_codes, geoip_codes;
     for(RulesetContent &x : ruleset_content_array)
     {
         if(settings.maxAllowedRules && total_rules > settings.maxAllowedRules)
@@ -676,14 +1244,13 @@ void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent
         if(startsWith(retrieved_rules, "[]"))
         {
             strLine = retrieved_rules.substr(2);
-            if(startsWith(strLine, "FINAL") || startsWith(strLine, "MATCH"))
-            {
-                final = rule_group;
-                continue;
+            std::map<std::string, SingBoxRuleBucket> buckets;
+            if (appendSingBoxRule(temp, buckets, geosite_codes, geoip_codes,
+                                  strLine, final, rule_group)) {
+                emitSingBoxRuleBuckets(buckets, rule_group, rules, allocator);
+                total_rules++;
+                local_stats.add();
             }
-            rules.PushBack(transformRuleToSingBox(temp, strLine, rule_group, allocator), allocator);
-            total_rules++;
-            local_stats.add();
             continue;
         }
         retrieved_rules = convertRuleset(retrieved_rules, x.rule_type);
@@ -693,7 +1260,7 @@ void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent
         strStrm<<retrieved_rules;
 
         std::string::size_type lineSize;
-        rapidjson::Value rule(rapidjson::kObjectType);
+        std::map<std::string, SingBoxRuleBucket> buckets;
 
         while(getline(strStrm, strLine, delimiter))
         {
@@ -708,23 +1275,38 @@ void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent
                 strLine.erase(strLine.find("//"));
                 strLine = trimWhitespace(strLine);
             }
-            if (appendSingBoxRule(temp, rule, strLine, allocator))
+            if (appendSingBoxRule(temp, buckets, geosite_codes, geoip_codes,
+                                  strLine, final, rule_group))
             {
                 total_rules++;
                 local_stats.add();
             }
         }
-        if (rule.ObjectEmpty()) continue;
-        rule.AddMember("outbound", rapidjson::Value(rule_group.c_str(), allocator), allocator);
-        rules.PushBack(rule, allocator);
+        emitSingBoxRuleBuckets(buckets, rule_group, rules, allocator);
     }
 
-    if (!base_rule.HasMember("route"))
-        base_rule.AddMember("route", rapidjson::Value(rapidjson::kObjectType), allocator);
+    rapidjson::Value rule_sets(rapidjson::kArrayType);
+    std::set<std::string> existing_tags;
+    if (base_rule["route"].HasMember("rule_set") &&
+        base_rule["route"]["rule_set"].IsArray()) {
+        rule_sets.Swap(base_rule["route"]["rule_set"]);
+        for (const rapidjson::Value &rule_set : rule_sets.GetArray()) {
+            if (rule_set.IsObject() && rule_set.HasMember("tag") &&
+                rule_set["tag"].IsString())
+                existing_tags.emplace(rule_set["tag"].GetString());
+        }
+    }
+    for (const std::string &code : geosite_codes)
+        appendSingBoxRemoteRuleSet(rule_sets, existing_tags, "geosite", code,
+                                   allocator);
+    for (const std::string &code : geoip_codes)
+        appendSingBoxRemoteRuleSet(rule_sets, existing_tags, "geoip", code,
+                                   allocator);
 
     auto finalValue = rapidjson::Value(final.c_str(), allocator);
     base_rule["route"]
     | AddMemberOrReplace("rules", rules, allocator)
+    | AddMemberOrReplace("rule_set", rule_sets, allocator)
     | AddMemberOrReplace("final", finalValue, allocator);
     if(stats)
         stats->add(local_stats.rules);

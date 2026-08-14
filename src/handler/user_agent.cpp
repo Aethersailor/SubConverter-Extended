@@ -51,7 +51,8 @@ const std::vector<UAProfile> kUserAgentProfiles = {
      "quantumult-x"},
     {"quantumult", "", "", "quan", tribool(), -1, "quantumult"},
     {"qv2ray", "", "", "v2ray", tribool(), -1, "qv2ray"},
-    {"shadowrocket", "", "", "mixed", tribool(), -1, "shadowrocket"},
+    {"shadowrocket", "", "", "shadowrocket", tribool(), -1,
+     "shadowrocket"},
     {"surfboard", "", "", "surfboard", tribool(), -1, "surfboard"},
     {"surge", "\\/([0-9.]+).*x86", "906", "surge", false, 4,
      "surge"},
@@ -61,6 +62,8 @@ const std::vector<UAProfile> kUserAgentProfiles = {
     {"surge", "\\/([0-9.]+)", "900", "surge", false, 3, "surge"},
     {"surge", "", "", "surge", false, 2, "surge"},
     {"trojan-qt5", "", "", "trojan", tribool(), -1, "trojan-qt5"},
+    {"v2rayng", "", "", "v2rayng", tribool(), -1, "v2rayng"},
+    {"v2rayn", "", "", "v2rayn", tribool(), -1, "v2rayn"},
     {"v2rayu", "", "", "v2ray", tribool(), -1, "v2rayu"},
     {"v2rayx", "", "", "v2ray", tribool(), -1, "v2rayx"},
 };

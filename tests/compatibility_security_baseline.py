@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import contextlib
 import difflib
 import hashlib
@@ -31,6 +32,13 @@ REPOSITORY = Path(__file__).resolve().parents[1]
 FIXTURES = REPOSITORY / "tests" / "fixtures"
 COMPAT_FIXTURES = FIXTURES / "compat"
 GOLDEN_ROOT = REPOSITORY / "tests" / "snapshots" / "compatibility"
+
+
+def _urlsafe_b64(value: str | bytes) -> str:
+    raw = value.encode("utf-8") if isinstance(value, str) else value
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
 SUBSCRIPTION = (
     "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388#Smoke\n"
 )
@@ -39,10 +47,448 @@ VLESS_URI = (
     "vless://11111111-1111-1111-1111-111111111111@vless.example.test:443"
     "?security=tls&type=ws&host=vless.example.test&path=%2Fws#VLESSFixture"
 )
+VMESS_STANDARD_URI = (
+    "vmess://22222222-2222-2222-2222-222222222222@vmess.example.test:443"
+    "?encryption=none&security=tls&sni=tls.example.test"
+    "&alpn=h2%2Chttp%2F1.1&fp=chrome&insecure=1#VMessStandard"
+)
+VMESS_QR_URI = "vmess://" + base64.urlsafe_b64encode(
+    json.dumps(
+        {
+            "v": "2",
+            "ps": "VMessQR",
+            "add": "vmess-qr.example.test",
+            "port": "443",
+            "id": "33333333-3333-3333-3333-333333333333",
+            "aid": "0",
+            "scy": "chacha20-poly1305",
+            "net": "grpc",
+            "type": "multi",
+            "path": "grpc-service",
+            "host": "",
+            "tls": "tls",
+            "sni": "grpc.example.test",
+            "alpn": "h2,http/1.1",
+            "fp": "firefox",
+        },
+        separators=(",", ":"),
+    ).encode()
+).decode().rstrip("=")
+VMESS_QR_QUIC_URI = "vmess://" + base64.urlsafe_b64encode(
+    json.dumps(
+        {
+            "v": "2",
+            "ps": "VMessQUIC",
+            "add": "vmess-quic.example.test",
+            "port": "443",
+            "id": "99999999-9999-9999-9999-999999999999",
+            "aid": "0",
+            "scy": "auto",
+            "net": "quic",
+            "type": "srtp",
+            "host": "aes-128-gcm",
+            "path": "quic-secret",
+            "tls": "tls",
+        },
+        separators=(",", ":"),
+    ).encode()
+).decode().rstrip("=")
+VMESS_QR_UNSUPPORTED_SECURITY_URI = "vmess://" + base64.urlsafe_b64encode(
+    json.dumps(
+        {
+            "v": "2",
+            "ps": "VMessUnsupportedSecurity",
+            "add": "vmess-security.example.test",
+            "port": "443",
+            "id": "99999999-9999-4999-8999-999999999998",
+            "aid": "0",
+            "scy": "unsupported-security",
+            "net": "tcp",
+            "type": "none",
+            "tls": "tls",
+        },
+        separators=(",", ":"),
+    ).encode()
+).decode().rstrip("=")
+VLESS_DEFAULT_TCP_URI = (
+    "vless://44444444-4444-4444-4444-444444444444@[2001:db8::1]:443"
+    "?encryption=none&security=tls&sni=vless-tls.example.test"
+    "&alpn=h2%2Chttp%2F1.1&insecure=1#VLESSDefaultTCP"
+)
+VLESS_XHTTP_URI = (
+    "vless://55555555-5555-5555-5555-555555555555@vless-xhttp.example.test:443"
+    "?encryption=none&security=reality&type=xhttp&host=xhttp.example.test"
+    "&path=%2Fsplit%3Ftoken%3D1&mode=stream-one"
+    "&extra=%7B%22xPaddingBytes%22%3A%22100-1000%22%7D"
+    "&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sid=00112233"
+    "&fp=chrome&sni=vless-reality.example.test#VLESSXHTTP"
+)
+VLESS_HTTPUPGRADE_URI = (
+    "vless://66666666-6666-6666-6666-666666666666@upgrade.example.test:443"
+    "?encryption=none&security=tls&type=httpupgrade&host=upgrade-host.example.test"
+    "&path=%2Fupgrade#VLESSHTTPUpgrade"
+)
+VLESS_GRPC_URI = (
+    "vless://77777777-7777-7777-7777-777777777777@grpc-vless.example.test:443"
+    "?encryption=none&security=tls&type=grpc&serviceName=service%2Fname"
+    "&mode=multi&authority=authority.example.test#VLESSGRPC"
+)
+VLESS_TCP_HTTP_URI = (
+    "vless://88888888-8888-8888-8888-888888888888@http-vless.example.test:443"
+    "?encryption=none&security=tls&type=tcp&headerType=http"
+    "&host=header.example.test&path=%2Fheader#VLESSTCPHTTP"
+)
+VLESS_QUIC_URI = (
+    "vless://aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa@vless-quic.example.test:443"
+    "?encryption=none&security=tls&type=quic&headerType=utp"
+    "&quicSecurity=chacha20-poly1305&key=vless-quic-secret#VLESSQUIC"
+)
+VLESS_UNSUPPORTED_FLOW_URI = (
+    "vless://aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab@flow.example.test:443"
+    "?encryption=none&security=tls&type=tcp&flow=unsupported-flow"
+    "#VLESSUnsupportedFlow"
+)
+TROJAN_WS_URI = (
+    "trojan://p%40ss+word%2Ftoken@[2001:db8::2]:443"
+    "?security=tls&type=ws&host=ws.example.test&path=%2Fsocket"
+    "&sni=trojan-tls.example.test&alpn=h2%2Chttp%2F1.1&fp=chrome"
+    "&insecure=1#TrojanWS"
+)
+TROJAN_KCP_URI = (
+    "trojan://kcp-password@trojan-kcp.example.test:443"
+    "?security=tls&type=kcp&headerType=wechat-video"
+    "&seed=trojan-kcp-seed#TrojanKCP"
+)
+XRAY_PROTOCOL_SUBSCRIPTION = (
+    VMESS_STANDARD_URI + "\n" + VLESS_HTTPUPGRADE_URI + "\n" + TROJAN_WS_URI + "\n"
+)
+ENCODED_XRAY_PROTOCOL_SUBSCRIPTION = base64.urlsafe_b64encode(
+    XRAY_PROTOCOL_SUBSCRIPTION.encode()
+).decode()
 HYSTERIA2_URI = (
     "hysteria2://hy-password@hy2.example.test:8443/?insecure=1"
     "&obfs=salamander&obfs-password=real-obfs-password"
     "&sni=hy2.example.test#Hy2Fixture"
+)
+HYSTERIA2_MODERN_URI = (
+    "hy2://user%3Apass+token@[2001:db8::10]:8443,12000-12002/"
+    "?insecure=1&obfs=salamander&obfs-password=obfs%2Bsecret"
+    "&sni=hy2-tls.example.test&pinSHA256=AA%3ABB%3ACC"
+    "&ech=AE%2Bconfig%2Fvalue#Hy2%20Modern+Literal"
+)
+HYSTERIA2_REALM_V2RAYN_URI = (
+    "hysteria2+realm://realm-token@rendezvous.example.test:8443/realm-id"
+    "?auth=realm-password&stun=stun.example.test%3A3478"
+    "&sni=realm-tls.example.test&obfs=gecko"
+    "&obfs-password=realm-obfs&minPacketSize=600&maxPacketSize=1300"
+    "#Hysteria2%20Realm"
+)
+HYSTERIA2_SURGE_GECKO_URI = HYSTERIA2_MODERN_URI.replace(
+    "obfs=salamander", "obfs=gecko"
+)
+TUIC_MODERN_URI = (
+    "tuic://99999999-9999-4999-8999-999999999999:p%40ss+word"
+    "@[2001:db8::11]:10443?allow_insecure=1&sni=tuic-tls.example.test"
+    "&congestion_control=bbr&udp_relay_mode=quic&zero_rtt_handshake=1"
+    "&disable_sni=0&request_timeout=9000#TUIC%20Modern"
+)
+TUIC_SURGE_URI = (
+    "tuic://surge%2Btoken@[2001:db8::13]:11443?allow_insecure=1"
+    "&sni=tuic-surge.example.test&alpn=h3#TUIC%20Surge"
+)
+ANYTLS_MODERN_URI = (
+    "anytls://p%40ss+word@[2001:db8::12]/?sni=anytls-tls.example.test"
+    "&insecure=1&alpn=h2%2Chttp%2F1.1&fp=chrome"
+    "&idle_session_check_interval=45s&idle_session_timeout=60s"
+    "&min_idle_session=3#AnyTLS%20Modern"
+)
+TUIC_V2RAYN_URI = (
+    "tuic://99999999-9999-4999-8999-999999999999:tuic-password"
+    "@tuic-v2rayn.example.test:10443?allow_insecure=1"
+    "&sni=tuic-v2rayn-tls.example.test&alpn=h3"
+    "&congestion_control=bbr#TUIC%20v2rayN"
+)
+ANYTLS_V2RAYN_URI = (
+    "anytls://anytls-password@anytls-v2rayn.example.test:443"
+    "?sni=anytls-v2rayn-tls.example.test&insecure=1#AnyTLS%20v2rayN"
+)
+ANYTLS_SHADOWROCKET_URI = (
+    "anytls://p%40ss%2Bword@[2001:db8::16]:443/"
+    "?sni=anytls-shadowrocket.example.test&insecure=1"
+    "#AnyTLS%20Shadowrocket"
+)
+SHADOWROCKET_STAGE_ONE_MIXED_SHA256 = (
+    "32681630201a639d9ebfa784304a870f08d6fcb522e8b0ac8f610c495dd70c22"
+)
+NAIVE_HTTPS_URI = (
+    "naive+https://naive-user:naive%2Bpassword@naive.example.test:443"
+    "?sni=naive-tls.example.test&insecure-concurrency=4#Naive%20HTTPS"
+)
+NAIVE_QUIC_URI = (
+    "naive+quic://naive-user:quic-password@naive-quic.example.test:443"
+    "?sni=naive-quic-tls.example.test#Naive%20QUIC"
+)
+WIREGUARD_URI = (
+    "wireguard://private%2Bkey%2Fvalue%3D@wg.example.test:51820"
+    "?publickey=public%2Bkey%2Fvalue%3D"
+    "&presharedkey=preshared%2Bkey%2Fvalue%3D"
+    "&reserved=1%2C2%2C3"
+    "&address=172.16.0.2%2F32%2C2606%3A4700%3A110%3A8765%3A%3A2%2F128"
+    "&mtu=1420#WireGuard%20URI"
+)
+MIERU_OFFICIAL_SIMPLE_URI = (
+    "mierus://baozi:manlianpenfen@1.2.3.4?"
+    "handshake-mode=HANDSHAKE_NO_WAIT&mtu=1400&"
+    "multiplexing=MULTIPLEXING_HIGH&port=6666&port=9998-9999&"
+    "port=6489&port=4896&profile=default&protocol=TCP&protocol=TCP&"
+    "protocol=UDP&protocol=UDP&"
+    "traffic-pattern=CCoQARoECAEQCiIYCAMQASoIMDAwMTAyMDMqCDA0MDUwNjA3"
+)
+MIERU_STANDARD_PROTOBUF_URI = (
+    "mieru://CpsBCgdkZWZhdWx0ElgKBWJhb3ppEg1tYW5saWFucGVuZmVu"
+    "GkA0MGFiYWM0MGY1OWRhNTVkYWQ2YTk5ODMxYTUxMTY1MjJmYmM4MGUzODVi"
+    "YjFhYjE0ZGM1MmRiMzY4ZjczOGE0Gi8SCWxvY2FsaG9zdBoFCIo0EAIaDRAC"
+    "Ggk5OTk5LTk5OTkaBQjZMhABGgUIoCYQASD4CioCCAQSB2RlZmF1bHQYnUYg"
+    "uAgwBTgA"
+)
+HYSTERIA_V1_URI = (
+    "hy://[2001:db8::14]:36712?protocol=udp&auth=p%40ss%2Bword"
+    "&peer=hy1-tls.example.test&insecure=1&upmbps=100"
+    "&downmbps=200&alpn=h3%2Chysteria&obfs=xplus"
+    "&obfsParam=obfs%2Bsecret#Hysteria%20V1+Literal"
+)
+HYSTERIA_SHADOWROCKET_URI = HYSTERIA_V1_URI.replace(
+    "alpn=h3%2Chysteria", "alpn=hysteria"
+)
+HYSTERIA_V1_SINGBOX_CONFIG = json.dumps(
+    {
+        "outbounds": [
+            {
+                "type": "hysteria",
+                "tag": "Hysteria V1 sing-box",
+                "server": "2001:db8::15",
+                "server_ports": ["20000:20002", "30000"],
+                "hop_interval": "45s",
+                "up": "640 KBps",
+                "down_mbps": 200,
+                "obfs": "singbox-obfs",
+                "auth": "YmluYXJ5LWF1dGg=",
+                "network": ["tcp"],
+                "tls": {
+                    "enabled": True,
+                    "server_name": "singbox-hy1.example.test",
+                    "insecure": True,
+                    "alpn": ["h3", "hysteria"],
+                },
+            },
+            {
+                "type": "hysteria",
+                "tag": "Hysteria V1 scalar ports",
+                "server": "hy1-scalar.example.test",
+                "server_ports": "40000:40002",
+                "up_mbps": 20,
+                "down_mbps": 80,
+                "auth_str": "scalar-auth",
+                "tls": {
+                    "enabled": True,
+                    "server_name": "hy1-scalar.example.test",
+                },
+            }
+        ]
+    },
+    separators=(",", ":"),
+)
+SINGBOX_TRANSPORT_FIDELITY_CONFIG = json.dumps(
+    {
+        "outbounds": [
+            {
+                "type": "vmess",
+                "tag": "Singbox WS Edge",
+                "server": "vmess-import.example.test",
+                "server_port": 443,
+                "uuid": "15151515-1515-4515-8515-151515151515",
+                "security": "auto",
+                "transport": {
+                    "type": "ws",
+                    "path": "/edge",
+                    "headers": {"Host": "ws-import.example.test", "Edge": "edge-1"},
+                },
+                "tls": {
+                    "enabled": True,
+                    "server_name": "tls-import.example.test",
+                    "utls": {"enabled": True, "fingerprint": "firefox"},
+                },
+            },
+            {
+                "type": "vless",
+                "tag": "Singbox HTTPUpgrade",
+                "server": "vless-import.example.test",
+                "server_port": 443,
+                "uuid": "16161616-1616-4616-8616-161616161616",
+                "transport": {
+                    "type": "httpupgrade",
+                    "host": "upgrade-import.example.test",
+                    "path": "/upgrade",
+                },
+                "tls": {"enabled": True, "server_name": "vless-tls.example.test"},
+            },
+            {
+                "type": "trojan",
+                "tag": "Singbox Trojan gRPC",
+                "server": "trojan-import.example.test",
+                "server_port": 443,
+                "password": "trojan-import-password",
+                "transport": {"type": "grpc", "service_name": "trojan/service"},
+                "tls": {
+                    "enabled": True,
+                    "server_name": "trojan-tls.example.test",
+                    "utls": {"enabled": True, "fingerprint": "safari"},
+                },
+            },
+            {
+                "type": "vless",
+                "tag": "Unsupported Transport",
+                "server": "unsupported-import.example.test",
+                "server_port": 443,
+                "uuid": "17171717-1717-4717-8717-171717171717",
+                "transport": {"type": "future-transport"},
+            },
+        ]
+    },
+    separators=(",", ":"),
+)
+HYSTERIA_V1_CLASH_CONFIG = """proxies:
+  - name: Hysteria V1 Clash
+    type: hysteria
+    server: hy1-clash.example.test
+    port: 443
+    ports: 443,10000-10002
+    auth-str: clash-auth
+    protocol: udp
+    up: 30 Mbps
+    down: 200 Mbps
+    obfs: clash-obfs
+    alpn: [h3, hysteria]
+    sni: clash-hy1.example.test
+    skip-cert-verify: true
+"""
+SNELL_SURGE_CONFIG = """[Proxy]
+Snell V4 = snell, snell-v4.example.test, 443, psk=snell-secret==, version=4, reuse=true, obfs=http, obfs-host=cdn.example.test, obfs-uri=/resource
+Snell Shadow = snell, snell-shadow.example.test, 8443, psk=shadow-secret, version=4, reuse=false, shadow-tls-password=shadow-password, shadow-tls-sni=shadow.example.test, shadow-tls-version=3
+Snell V3 TLS = snell, snell-v3.example.test, 7443, psk=snell-v3-secret, version=3, obfs=tls, obfs-host=tls.example.test, udp-port=7444
+Snell V6 = snell, snell-v6.example.test, 9443, psk=123456789012, version=6, reuse=true, mode=unshaped
+"""
+SS_SIP002_URI = (
+    "ss://"
+    + _urlsafe_b64("aes-256-gcm:p@ss+word")
+    + "@[2001:db8::21]:8388/?plugin="
+    + urllib.parse.quote(
+        "v2ray-plugin;mode=websocket;host=plugin.example.test;path=/ws;tls",
+        safe="",
+    )
+    + "#SS%20SIP002"
+)
+SS_2022_PASSWORD = base64.b64encode(
+    bytes([0xFB]) * 32
+).decode("ascii")
+SS_2022_URI = (
+    "ss://2022-blake3-aes-256-gcm:"
+    + urllib.parse.quote(SS_2022_PASSWORD, safe="")
+    + "@[2001:db8::22]:8389#SS%202022"
+)
+SSR_IPV6_URI = "ssr://" + _urlsafe_b64(
+    "[2001:db8::23]:8390:auth_sha1_v4:aes-256-cfb:tls1.2_ticket_auth:"
+    + _urlsafe_b64("legacy:p@ss")
+    + "/?group="
+    + _urlsafe_b64("SSR Fixture")
+    + "&remarks="
+    + _urlsafe_b64("SSR IPv6")
+    + "&obfsparam="
+    + _urlsafe_b64("cdn.example.test")
+    + "&protoparam="
+    + _urlsafe_b64("64:fixture")
+)
+SOCKS_CURRENT_URI = (
+    "socks://"
+    + _urlsafe_b64("current-user:p@ss+word:tail")
+    + "@[2001:db8::24]:1080#SOCKS%20Current"
+)
+SOCKS_LEGACY_URI = (
+    "socks://"
+    + _urlsafe_b64("legacy-user:legacy-pass@[2001:db8::25]:1081")
+    + "#SOCKS%20Legacy"
+)
+SOCKS_PLAIN_URI = (
+    "socks://plain-user:p%40ss%2Bword@[2001:db8::26]:1082"
+    "#SOCKS%20Plain"
+)
+SOCKS_NO_AUTH_URI = (
+    "socks://" + _urlsafe_b64("[2001:db8::27]:1083") + "#SOCKS%20NoAuth"
+)
+HTTP_LEGACY_URI = (
+    "http://"
+    + _urlsafe_b64("http-user:http-pass@[2001:db8::28]:8080")
+    + "?remarks=HTTP%20Legacy&group=HTTP%20Fixture"
+)
+HTTPS_LEGACY_URI = (
+    "https://"
+    + _urlsafe_b64("https-user:https-pass@[2001:db8::29]:8443")
+    + "?remarks=HTTPS%20Legacy&group=HTTP%20Fixture"
+)
+TELEGRAM_SOCKS_URI = (
+    "tg://socks?server=telegram-socks.example.test&port=1084"
+    "&user=tg-user&pass=tg%2Bpass&remarks=Telegram%20SOCKS"
+)
+TELEGRAM_HTTP_URI = (
+    "tg://http?server=telegram-http.example.test&port=8081"
+    "&user=tg-http&pass=tg%2Bhttp&remarks=Telegram%20HTTP"
+)
+SIP008_OBJECT = json.dumps(
+    {
+        "version": 1,
+        "remarks": "SIP008 Fixture",
+        "servers": [
+            {
+                "id": "sip008-plugin",
+                "remarks": "SIP008 Plugin",
+                "server": "2001:db8::30",
+                "server_port": 8388,
+                "password": "sip008-password",
+                "method": "aes-256-gcm",
+                "plugin": "v2ray-plugin",
+                "plugin_opts": "mode=websocket;host=sip008.example.test;tls",
+            }
+        ],
+    },
+    separators=(",", ":"),
+)
+SIP008_ARRAY = json.dumps(
+    [
+        {
+            "id": "sip008-array",
+            "remarks": "SIP008 Array",
+            "server": "2001:db8::31",
+            "server_port": 8391,
+            "password": SS_2022_PASSWORD,
+            "method": "2022-blake3-aes-256-gcm",
+        }
+    ],
+    separators=(",", ":"),
+)
+SSR_LIBEV_CONFIG = json.dumps(
+    {
+        "server": "2001:db8::32",
+        "server_port": 8392,
+        "local_address": "127.0.0.1",
+        "local_port": 1080,
+        "password": "ssr-json-password",
+        "method": "aes-256-cfb",
+        "protocol": "auth_sha1_v4",
+        "protocol_param": "32:json",
+        "obfs": "tls1.2_ticket_auth",
+        "obfs_param": "json.example.test",
+    },
+    separators=(",", ":"),
 )
 MIXED_PROTOCOL_SUBSCRIPTION = SUBSCRIPTION + VLESS_URI + "\n" + HYSTERIA2_URI + "\n"
 ENCODED_MIXED_PROTOCOL_SUBSCRIPTION = base64.urlsafe_b64encode(
@@ -120,6 +566,7 @@ LEGACY_ONLY_TARGETS = (
     "quanx",
     "loon",
     "surfboard",
+    "stash",
     "mellow",
     "singbox",
     "ss",
@@ -127,6 +574,9 @@ LEGACY_ONLY_TARGETS = (
     "ssr",
     "sssub",
     "v2ray",
+    "v2rayn",
+    "v2rayng",
+    "shadowrocket",
     "trojan",
     "vless",
     "hysteria2",
@@ -162,7 +612,11 @@ GIST_REMOTE_FAILURE_BODY = (
 
 class FixtureHandler(BaseHTTPRequestHandler):
     gist_request_count = 0
+    gist_uploaded_paths: list[str] = []
     provider_never_fetch_count = 0
+    quanx_remote_fetch_count = 0
+    stash_rule_source_count = 0
+    stash_legacy_text_fetch_count = 0
     external_valid_count = 0
     get_request_count = 0
     counter_lock = threading.Lock()
@@ -170,17 +624,43 @@ class FixtureHandler(BaseHTTPRequestHandler):
     slow_subscription_release = threading.Event()
     slow_ruleset_started = threading.Event()
     slow_ruleset_release = threading.Event()
+    quanx_roundtrip_config = ""
+    stash_invalid_bases: dict[str, str] = {}
 
     def do_GET(self) -> None:  # noqa: N802
         with type(self).counter_lock:
             type(self).get_request_count += 1
-        request_path = urllib.parse.urlsplit(self.path).path
+        request_url = urllib.parse.urlsplit(self.path)
+        request_path = request_url.path
+        request_query = urllib.parse.parse_qs(request_url.query)
         if request_path == "/subscription.txt":
             body = ENCODED_SUBSCRIPTION.encode()
             content_type = "text/plain; charset=utf-8"
         elif request_path == "/provider-must-not-fetch.txt":
             type(self).provider_never_fetch_count += 1
             body = ENCODED_SUBSCRIPTION.encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/quanx-remote.txt":
+            type(self).quanx_remote_fetch_count += 1
+            body = ENCODED_SUBSCRIPTION.encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path in (
+            "/stash-domain.mrs",
+            "/stash-domain-yaml.yaml",
+            "/stash-domain-text.list",
+            "/stash-domain-api",
+            "/stash-ip.mrs",
+            "/stash-ip-yaml.yml",
+            "/stash-ip-text.txt",
+            "/stash-classical.txt",
+            "/stash-classical-yaml.yaml",
+        ):
+            type(self).stash_rule_source_count += 1
+            body = b"fixture body must never be fetched by the server"
+            content_type = "application/octet-stream"
+        elif request_path == "/stash-legacy-domain.txt":
+            type(self).stash_legacy_text_fetch_count += 1
+            body = b"DOMAIN,legacy-text.example\n"
             content_type = "text/plain; charset=utf-8"
         elif request_path == "/mihomo-raw-subscription.txt":
             body = SUBSCRIPTION.encode()
@@ -195,6 +675,33 @@ class FixtureHandler(BaseHTTPRequestHandler):
         elif request_path == "/mixed-protocol-subscription.txt":
             body = ENCODED_MIXED_PROTOCOL_SUBSCRIPTION.encode()
             content_type = "text/plain; charset=utf-8"
+        elif request_path == "/xray-protocol-subscription.txt":
+            body = ENCODED_XRAY_PROTOCOL_SUBSCRIPTION.encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/sip008.json":
+            body = SIP008_OBJECT.encode()
+            content_type = "application/json; charset=utf-8"
+        elif request_path == "/sip008-array.json":
+            body = SIP008_ARRAY.encode()
+            content_type = "application/json; charset=utf-8"
+        elif request_path == "/ssr-libev.json":
+            body = SSR_LIBEV_CONFIG.encode()
+            content_type = "application/json; charset=utf-8"
+        elif request_path == "/hysteria-v1-singbox.json":
+            body = HYSTERIA_V1_SINGBOX_CONFIG.encode()
+            content_type = "application/json; charset=utf-8"
+        elif request_path == "/singbox-transport-fidelity.json":
+            body = SINGBOX_TRANSPORT_FIDELITY_CONFIG.encode()
+            content_type = "application/json; charset=utf-8"
+        elif request_path == "/quanx-roundtrip.conf":
+            body = type(self).quanx_roundtrip_config.encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/hysteria-v1-clash.yaml":
+            body = HYSTERIA_V1_CLASH_CONFIG.encode()
+            content_type = "text/yaml; charset=utf-8"
+        elif request_path == "/snell-surge.conf":
+            body = SNELL_SURGE_CONFIG.encode()
+            content_type = "text/plain; charset=utf-8"
         elif request_path == "/rules.list":
             body = RULESET.encode()
             content_type = "text/plain; charset=utf-8"
@@ -206,6 +713,19 @@ class FixtureHandler(BaseHTTPRequestHandler):
             content_type = "text/plain; charset=utf-8"
         elif request_path == "/generation-rules.list":
             body = GENERATION_RULESET.encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/singbox-modern-rules.list":
+            body = (
+                "GEOSITE,cn\n"
+                "GEOIP,cn\n"
+                "SRC-GEOIP,us\n"
+                "DOMAIN-SUFFIX,modern-singbox.example\n"
+                "IP-CIDR,198.51.100.0/24\n"
+                "SRC-PORT,41641\n"
+                "PORT,999999999999999999999999\n"
+                "GEOSITE,../../unsafe\n"
+                "FINAL,Proxy\n"
+            ).encode()
             content_type = "text/plain; charset=utf-8"
         elif request_path == "/slow-generation-rules.list":
             type(self).slow_ruleset_started.set()
@@ -255,6 +775,160 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 f"ruleset=Proxy,http://{host}/issue-98-rules.list\n"
             ).encode()
             content_type = "text/plain; charset=utf-8"
+        elif request_path == "/external-singbox-modern.ini":
+            host = self.headers.get("Host", "127.0.0.1")
+            body = (
+                "[custom]\n"
+                "enable_rule_generator=true\n"
+                "overwrite_original_rules=true\n"
+                "custom_proxy_group=Proxy`select`.*\n"
+                f"ruleset=Proxy,http://{host}/singbox-modern-rules.list\n"
+            ).encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/external-stash-invalid.ini":
+            case = request_query.get("case", [""])[0]
+            if case not in type(self).stash_invalid_bases:
+                self.send_error(404)
+                return
+            host = self.headers.get("Host", "127.0.0.1")
+            encoded_case = urllib.parse.quote(case, safe="")
+            body = (
+                "[custom]\n"
+                "enable_rule_generator=false\n"
+                f"stash_rule_base=http://{host}/stash-invalid-base.yaml?"
+                f"case={encoded_case}\n"
+            ).encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/external-stash-rules.ini":
+            host = self.headers.get("Host", "127.0.0.1")
+            body = (
+                "[custom]\n"
+                "enable_rule_generator=true\n"
+                "overwrite_original_rules=true\n"
+                "custom_proxy_group=RuleGroup`select`.*\n"
+                f"ruleset=RuleGroup,clash-domain:http://{host}/stash-domain.mrs?"
+                "token=stash-domain-token,3600\n"
+                f"ruleset=RuleGroup,clash-domain:http://{host}/stash-domain-yaml.yaml?"
+                "token=stash-domain-yaml-token,3601\n"
+                f"ruleset=RuleGroup,clash-domain:http://{host}/stash-domain-text.list?"
+                "token=stash-domain-text-token,3602|stash-format=text\n"
+                f"ruleset=RuleGroup,clash-domain:http://{host}/stash-domain-api?"
+                "token=stash-domain-api-token,3603|stash-format=yaml\n"
+                f"ruleset=RuleGroup,clash-ipcidr:http://{host}/stash-ip.mrs?"
+                "token=stash-ip-token,7200|no-resolve\n"
+                f"ruleset=RuleGroup,clash-ipcidr:http://{host}/stash-ip-yaml.yml?"
+                "token=stash-ip-yaml-token,7201\n"
+                f"ruleset=RuleGroup,clash-ipcidr:http://{host}/stash-ip-text.txt?"
+                "token=stash-ip-text-token,7202|stash-format=text\n"
+                f"ruleset=RuleGroup,clash-classic:http://{host}/stash-classical.txt?"
+                "token=stash-classical-token,1800|stash-format=text\n"
+                f"ruleset=RuleGroup,clash-classic:http://{host}/stash-classical-yaml.yaml?"
+                "token=stash-classical-yaml-token,1801\n"
+                "ruleset=RuleGroup,[]GEOSITE,telegram\n"
+                "ruleset=RuleGroup,[]GEOIP,CN\n"
+            ).encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/external-stash-rules-invalid.ini":
+            host = self.headers.get("Host", "127.0.0.1")
+            case = request_query.get("case", [""])[0]
+            ruleset = {
+                "classical-mrs": (
+                    f"clash-classic:http://{host}/stash-classical.mrs,3600"
+                ),
+                "unknown-format": (
+                    f"clash-domain:http://{host}/stash-domain.bin,3600"
+                ),
+                "src-port": "[]SRC-PORT,41641",
+                "non-country-geoip": "[]GEOIP,telegram",
+                "existing-policy": "[]DOMAIN,policy.example,DIRECT",
+                "conflicting-format": (
+                    f"clash-domain:http://{host}/stash-domain.mrs,"
+                    "3600|stash-format=text|stash-format=yaml"
+                ),
+            }.get(case)
+            if ruleset is None:
+                self.send_error(404)
+                return
+            ruleset_lines = [f"ruleset=RuleGroup,{ruleset}"]
+            if case == "existing-policy":
+                ruleset_lines.insert(
+                    0,
+                    f"ruleset=RuleGroup,clash-domain:http://{host}/"
+                    "stash-domain.mrs?token=stash-atomic-token,3600",
+                )
+            body = (
+                "[custom]\n"
+                "enable_rule_generator=true\n"
+                "overwrite_original_rules=true\n"
+                "custom_proxy_group=RuleGroup`select`.*\n"
+                + "\n".join(ruleset_lines)
+                + "\n"
+            ).encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/external-stash-rules-legacy-text.ini":
+            host = self.headers.get("Host", "127.0.0.1")
+            body = (
+                "[custom]\n"
+                "enable_rule_generator=true\n"
+                "overwrite_original_rules=true\n"
+                "custom_proxy_group=RuleGroup`select`.*\n"
+                f"ruleset=RuleGroup,clash-domain:http://{host}/"
+                "stash-legacy-domain.txt,3600\n"
+            ).encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/external-stash-rules-merge.ini":
+            host = self.headers.get("Host", "127.0.0.1")
+            case = request_query.get("case", ["merge"])[0]
+            if case not in ("merge", "path-collision"):
+                self.send_error(404)
+                return
+            body = (
+                "[custom]\n"
+                "enable_rule_generator=true\n"
+                "overwrite_original_rules=false\n"
+                "custom_proxy_group=RuleGroup`select`.*\n"
+                f"stash_rule_base=http://{host}/stash-rules-merge-base.yaml?"
+                f"case={case}\n"
+                f"ruleset=RuleGroup,clash-domain:http://{host}/stash-domain.mrs?"
+                "token=stash-merge-token,3600\n"
+            ).encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/stash-rules-merge-base.yaml":
+            case = request_query.get("case", ["merge"])[0]
+            existing_name = "stash-domain" if case == "merge" else "base-domain"
+            existing_path = (
+                "./rules/existing-domain.txt"
+                if case == "merge"
+                else "./rules/stash-domain.mrs"
+            )
+            body = (
+                "mode: rule\n"
+                "proxies: []\n"
+                "proxy-providers: {}\n"
+                "proxy-groups:\n"
+                "  - name: Proxy\n"
+                "    type: select\n"
+                "    proxies: [DIRECT]\n"
+                "rule-providers:\n"
+                f"  {existing_name}:\n"
+                "    behavior: domain\n"
+                "    format: text\n"
+                "    url: https://127.0.0.1:1/existing-domain.txt\n"
+                f"    path: {existing_path}\n"
+                "rules:\n"
+                f"  - RULE-SET,{existing_name},RuleGroup\n"
+                "  - DOMAIN,base.example,RuleGroup\n"
+                "  - MATCH,Proxy\n"
+            ).encode()
+            content_type = "text/yaml; charset=utf-8"
+        elif request_path == "/stash-invalid-base.yaml":
+            case = request_query.get("case", [""])[0]
+            invalid_base = type(self).stash_invalid_bases.get(case)
+            if invalid_base is None:
+                self.send_error(404)
+                return
+            body = invalid_base.encode()
+            content_type = "text/yaml; charset=utf-8"
         elif request_path == "/external-empty.ini":
             body = b""
             content_type = "text/plain; charset=utf-8"
@@ -332,10 +1006,16 @@ class FixtureHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _write_gist_response(self) -> None:
-        type(self).gist_request_count += 1
         content_length = int(self.headers.get("Content-Length", "0"))
-        if content_length:
-            self.rfile.read(content_length)
+        request_body = self.rfile.read(content_length) if content_length else b""
+        try:
+            request_data = json.loads(request_body) if request_body else {}
+            uploaded_paths = list(request_data.get("files", {}).keys())
+        except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+            uploaded_paths = []
+        with type(self).counter_lock:
+            type(self).gist_request_count += 1
+            type(self).gist_uploaded_paths.extend(uploaded_paths)
         request_path = urllib.parse.urlsplit(self.path).path
         remote_failure = request_path.startswith("/failure/")
         body = (
@@ -455,9 +1135,14 @@ def authenticated_proxy_server(username: str, password: str):
 @contextlib.contextmanager
 def fixture_server():
     FixtureHandler.gist_request_count = 0
+    FixtureHandler.gist_uploaded_paths = []
     FixtureHandler.provider_never_fetch_count = 0
+    FixtureHandler.quanx_remote_fetch_count = 0
+    FixtureHandler.stash_rule_source_count = 0
+    FixtureHandler.stash_legacy_text_fetch_count = 0
     FixtureHandler.external_valid_count = 0
     FixtureHandler.get_request_count = 0
+    FixtureHandler.stash_invalid_bases = {}
     FixtureHandler.slow_subscription_started.clear()
     FixtureHandler.slow_subscription_release.set()
     FixtureHandler.slow_ruleset_started.clear()
@@ -645,6 +1330,19 @@ def running_service(
     )
     base_path = (REPOSITORY / "base" / "base").as_posix()
     baseline = baseline.replace('base_path = "base"', f'base_path = "{base_path}"')
+    stash_base_setting = 'stash_rule_base = "base/stash.yaml"'
+    if stash_base_setting in baseline:
+        baseline = baseline.replace(
+            stash_base_setting,
+            f'stash_rule_base = "{base_path}/stash.yaml"',
+            1,
+        )
+    else:
+        baseline = baseline.replace(
+            f'base_path = "{base_path}"',
+            f'base_path = "{base_path}"\nstash_rule_base = "{base_path}/stash.yaml"',
+            1,
+        )
     baseline = baseline.replace(
         '"base/all_base.tpl"', f'"{base_path}/all_base.tpl"'
     )
@@ -833,6 +1531,10 @@ def running_service(
             )
             if log_capture is not None:
                 log_capture.append(diagnostics)
+            if body_error is not None and diagnostics and hasattr(body_error, "add_note"):
+                body_error.add_note(
+                    f"service stderr tail: {diagnostics[-8000:]!r}"
+                )
             if shutdown_error is not None:
                 detail = (
                     f"{shutdown_error}; service stderr tail: "
@@ -1768,6 +2470,194 @@ def validate_mihomo_config(binary: Path, content: bytes) -> None:
             )
 
 
+def validate_singbox_config(binary: Path, content: bytes, label: str) -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        config_path = Path(temporary) / "generated-singbox.json"
+        config_path.write_bytes(content)
+        completed = subprocess.run(
+            [
+                str(binary),
+                "check",
+                "--disable-color",
+                "-c",
+                str(config_path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=60,
+            check=False,
+        )
+        if completed.returncode != 0:
+            diagnostics = completed.stdout.decode("utf-8", errors="replace")
+            raise AssertionError(
+                f"pinned sing-box {label} rejected the generated profile: "
+                f"exit={completed.returncode}, output={diagnostics[-8000:]!r}"
+            )
+
+
+def singbox_modern_full_profile_baseline(
+    base_url: str,
+    fixture_base: str,
+    stable_binary: Path | None,
+    next_binary: Path | None,
+) -> None:
+    status, body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "singbox",
+            "url": SUBSCRIPTION.strip(),
+            "config": fixture_base + "/external-singbox-modern.ini",
+        },
+    )
+    if status != 200:
+        raise AssertionError(
+            f"modern sing-box full profile returned HTTP {status}: {body!r}"
+        )
+    document = json.loads(body)
+
+    dns = document.get("dns", {})
+    dns_servers = dns.get("servers", [])
+    if [server.get("type") for server in dns_servers] != [
+        "tls",
+        "h3",
+        "fakeip",
+        "udp",
+    ]:
+        raise AssertionError("built-in sing-box DNS servers are not modernized")
+    if any(
+        "address" in server or "address_resolver" in server
+        for server in dns_servers
+    ):
+        raise AssertionError("legacy sing-box DNS server fields remain")
+    if "fakeip" in dns or "independent_cache" in dns:
+        raise AssertionError("legacy sing-box DNS options remain")
+    if any("action" not in rule for rule in dns.get("rules", [])):
+        raise AssertionError("modern sing-box DNS rules lost explicit actions")
+
+    tun = next(
+        inbound
+        for inbound in document.get("inbounds", [])
+        if inbound.get("type") == "tun"
+    )
+    if tun.get("address") != ["172.19.0.1/30"]:
+        raise AssertionError("sing-box TUN addresses were not merged correctly")
+    if any(
+        field in tun for field in ("inet4_address", "inet6_address", "sniff")
+    ):
+        raise AssertionError("legacy sing-box TUN or sniff fields remain")
+
+    route = document.get("route", {})
+    route_rules = route.get("rules", [])
+    if not any(rule.get("action") == "sniff" for rule in route_rules):
+        raise AssertionError("sing-box route lost the sniff action")
+    if not any(rule.get("action") == "hijack-dns" for rule in route_rules):
+        raise AssertionError("sing-box route lost the DNS hijack action")
+    if any("action" not in rule for rule in route_rules):
+        raise AssertionError("sing-box route contains a legacy actionless rule")
+    if any(
+        legacy in rule
+        for rule in route_rules
+        for legacy in ("geosite", "geoip", "source_geoip")
+    ):
+        raise AssertionError("legacy GeoIP/Geosite route fields remain")
+    if route.get("final") != "Proxy":
+        raise AssertionError("sing-box final rule was not preserved")
+
+    rule_sets = {
+        item.get("tag"): item
+        for item in route.get("rule_set", [])
+        if isinstance(item, dict)
+    }
+    for expected in (
+        "geosite-category-ads-all",
+        "geosite-geolocation-!cn",
+        "geosite-cn",
+        "geoip-cn",
+        "geoip-us",
+    ):
+        rule_set = rule_sets.get(expected)
+        if (
+            rule_set is None
+            or rule_set.get("type") != "remote"
+            or rule_set.get("format") != "binary"
+            or not str(rule_set.get("url", "")).endswith(f"/{expected}.srs")
+        ):
+            raise AssertionError(
+                f"sing-box remote rule-set is missing or malformed: {expected}"
+            )
+
+    source_geoip_rule = next(
+        (
+            rule
+            for rule in route_rules
+            if "geoip-us" in rule.get("rule_set", [])
+        ),
+        None,
+    )
+    if not source_geoip_rule or not source_geoip_rule.get(
+        "rule_set_ip_cidr_match_source"
+    ):
+        raise AssertionError("source GeoIP did not retain source matching")
+    ip_rule = next(
+        (rule for rule in route_rules if "198.51.100.0/24" in rule.get("ip_cidr", [])),
+        None,
+    )
+    source_port_rule = next(
+        (rule for rule in route_rules if rule.get("source_port") == 41641),
+        None,
+    )
+    if ip_rule is None or source_port_rule is None or ip_rule is source_port_rule:
+        raise AssertionError("heterogeneous sing-box rules were not kept as OR rules")
+    if any(
+        rule.get("port") == 999999999999999999999999 for rule in route_rules
+    ):
+        raise AssertionError("out-of-range sing-box integer rule was not rejected")
+    if any("unsafe" in str(item) for item in route.get("rule_set", [])):
+        raise AssertionError("unsafe sing-box rule-set code was not rejected")
+
+    ipv6_status, ipv6_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "singbox",
+            "url": SUBSCRIPTION.strip(),
+            "config": fixture_base + "/external-singbox-modern.ini",
+            "singbox.ipv6": "1",
+        },
+    )
+    if ipv6_status != 200:
+        raise AssertionError(
+            f"IPv6 sing-box full profile returned HTTP {ipv6_status}: "
+            f"{ipv6_body!r}"
+        )
+    ipv6_document = json.loads(ipv6_body)
+    ipv6_fakeip = next(
+        server
+        for server in ipv6_document.get("dns", {}).get("servers", [])
+        if server.get("type") == "fakeip"
+    )
+    if ipv6_fakeip.get("inet6_range") != "fc00::/18":
+        raise AssertionError("sing-box IPv6 FakeIP range was not rendered")
+    ipv6_tun = next(
+        inbound
+        for inbound in ipv6_document.get("inbounds", [])
+        if inbound.get("type") == "tun"
+    )
+    if ipv6_tun.get("address") != [
+        "172.19.0.1/30",
+        "fdfe:dcba:9876::1/126",
+    ]:
+        raise AssertionError("sing-box IPv6 TUN address was not rendered")
+
+    if stable_binary is not None:
+        validate_singbox_config(stable_binary, body, "stable")
+        validate_singbox_config(stable_binary, ipv6_body, "stable IPv6")
+    if next_binary is not None:
+        validate_singbox_config(next_binary, body, "next")
+        validate_singbox_config(next_binary, ipv6_body, "next IPv6")
+
+
 def issue_98_reality_baseline(
     base_url: str, fixture_base: str, mihomo_binary: Path | None
 ) -> None:
@@ -2385,6 +3275,442 @@ def provider_no_fetch_vary_and_route_log_baseline(
         raise AssertionError("unrecognized auto-target event is missing")
 
 
+def quanx_server_remote_baseline(binary: Path, fixture_base: str) -> None:
+    def data_url(content: str) -> str:
+        encoded = base64.urlsafe_b64encode(content.encode()).decode()
+        return "data:text/plain;base64," + encoded
+
+    def section_lines(output: str, name: str) -> list[str]:
+        marker = f"[{name}]"
+        lines = output.splitlines()
+        try:
+            start = lines.index(marker) + 1
+        except ValueError as error:
+            raise AssertionError(f"missing [{name}] section\n{output}") from error
+        result: list[str] = []
+        for line in lines[start:]:
+            if line.startswith("[") and line.endswith("]"):
+                break
+            if line.strip():
+                result.append(line.strip())
+        return result
+
+    group_config = data_url(
+        "enable_rule_generator=false\n"
+        "custom_proxy_group=Remote`select`.*\n"
+    )
+    native_config = (
+        ("udp_flag = false", "# udp_flag intentionally left unset"),
+        ("tcp_fast_open_flag = true", "# tcp_fast_open_flag intentionally left unset"),
+        ("skip_cert_verify_flag = false", "# skip_cert_verify_flag intentionally left unset"),
+        ("tls13_flag = true", "# tls13_flag intentionally left unset"),
+    )
+    source_secret = "quanx-source-secret-must-not-reach-logs"
+    source_a = (
+        fixture_base
+        + "/quanx-remote.txt?case=native-a&token="
+        + source_secret
+        + "+literal-plus%252F"
+    )
+    source_b = fixture_base + "/quanx-remote.txt?case=native-b"
+    FixtureHandler.quanx_remote_fetch_count = 0
+    logs: list[str] = []
+
+    with running_service(
+        binary,
+        log_capture=logs,
+        log_level="verbose",
+        config_replacements=native_config,
+    ) as base_url:
+        status, body, headers = request(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": "|".join(
+                    (
+                        f"interval:0,provider:Airport/A,{source_a}",
+                        f"provider:Airport/A,interval:21600,{source_b}",
+                        SUBSCRIPTION.strip(),
+                    )
+                ),
+                "config": group_config,
+            },
+        )
+        output = body.decode("utf-8", errors="replace")
+        if status != 200:
+            raise AssertionError(
+                f"Quantumult X native remote request returned HTTP {status}: {output!r}"
+            )
+        assert_vary_header(headers, "User-Agent", "Quantumult X native response")
+        assert_request_id(headers, "Quantumult X native response")
+        remote_lines = section_lines(output, "server_remote")
+        expected_remote_fragments = (
+            (source_a, "tag=Airport_A", "update-interval=-1", "enabled=true"),
+            (source_b, "tag=Airport_A_1", "update-interval=21600", "enabled=true"),
+        )
+        if len(remote_lines) != 2:
+            raise AssertionError(
+                f"Quantumult X remote resources mismatch: {remote_lines!r}"
+            )
+        for line, fragments in zip(remote_lines, expected_remote_fragments):
+            missing = [fragment for fragment in fragments if fragment not in line]
+            if missing:
+                raise AssertionError(
+                    f"Quantumult X remote line is missing {missing!r}: {line!r}"
+                )
+        if "opt-parser=" in output:
+            raise AssertionError("Quantumult X output enabled opt-parser implicitly")
+        local_lines = section_lines(output, "server_local")
+        if not any("tag=Smoke" in line for line in local_lines):
+            raise AssertionError(
+                f"mixed Quantumult X request lost its direct node: {local_lines!r}"
+            )
+        policy_lines = section_lines(output, "policy")
+        if not any(
+            "static=Remote" in line
+            and "resource-tag-regex=^(?:Airport_A|Airport_A_1)$" in line
+            and "server-tag-regex=.*" in line
+            for line in policy_lines
+        ):
+            raise AssertionError(
+                f"Quantumult X policy does not reference remote resources: {policy_lines!r}"
+            )
+        if FixtureHandler.quanx_remote_fetch_count != 0:
+            raise AssertionError(
+                "Quantumult X native route downloaded a client-managed resource: "
+                f"count={FixtureHandler.quanx_remote_fetch_count}"
+            )
+
+        existing_base = data_url(
+            "[general]\n"
+            "[policy]\n"
+            "[server_remote]\n"
+            "https://existing.example.test/sub, tag=Airport_A, enabled=true\n"
+            "[server_local]\n"
+        )
+        collision_config = data_url(
+            "enable_rule_generator=false\n"
+            f"quanx_rule_base={existing_base}\n"
+            "custom_proxy_group=Remote`select`!!PROVIDER=Airport/A\n"
+        )
+        collision_status, collision_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": f"provider:Airport/A,{source_a}",
+                "config": collision_config,
+            },
+        )
+        collision_output = collision_body.decode("utf-8", errors="replace")
+        collision_lines = section_lines(collision_output, "server_remote")
+        if (
+            collision_status != 200
+            or not any("tag=Airport_A," in line for line in collision_lines)
+            or not any("tag=Airport_A_1," in line for line in collision_lines)
+            or "resource-tag-regex=^Airport_A_1$" not in collision_output
+        ):
+            raise AssertionError(
+                "Quantumult X custom base resource preservation/collision failed: "
+                f"HTTP {collision_status}: {collision_output!r}"
+            )
+        if FixtureHandler.quanx_remote_fetch_count != 0:
+            raise AssertionError("custom Quantumult X base caused a remote source fetch")
+
+        root_source = "https://root-subscription.example.test"
+        root_status, root_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": f"provider:RootRemote,{root_source}",
+                "config": group_config,
+            },
+        )
+        root_output = root_body.decode("utf-8", errors="replace")
+        if (
+            root_status != 200
+            or root_source not in root_output
+            or "tag=RootRemote" not in root_output
+        ):
+            raise AssertionError(
+                "explicit root Quantumult X subscription was not treated as remote: "
+                f"HTTP {root_status}: {root_output!r}"
+            )
+
+        explain_status, explain_body, explain_headers = request(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": f"provider:ExplainRemote,{source_a}",
+                "config": group_config,
+                "explain": "true",
+            },
+        )
+        if explain_status != 200:
+            raise AssertionError(
+                "Quantumult X explain failed: "
+                f"HTTP {explain_status}: {explain_body[-1000:]!r}"
+            )
+        if "no-store" not in explain_headers.get("cache-control", ""):
+            raise AssertionError("Quantumult X explain is missing no-store")
+        explain_text = explain_body.decode("utf-8", errors="replace")
+        if source_secret in explain_text:
+            raise AssertionError("Quantumult X explain leaked a source credential")
+        report = json.loads(explain_body)
+        if (
+            report.get("mode", {}).get("remote_subscription_backend")
+            != "quanx-server-remote"
+            or report.get("mode", {}).get("remote_subscription_reason")
+            != "native-capable"
+            or report.get("resources", {}).get("remote_subscription_count") != 1
+            or report.get("output", {}).get("remote_subscription_count") != 1
+        ):
+            raise AssertionError(
+                f"Quantumult X explain route metadata mismatch: {report!r}"
+            )
+
+        direct_explain_status, direct_explain_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": SUBSCRIPTION.strip(),
+                "config": group_config,
+                "explain": "true",
+            },
+        )
+        direct_report = json.loads(direct_explain_body)
+        if (
+            direct_explain_status != 200
+            or direct_report.get("mode", {}).get("remote_subscription_backend")
+            != "server-side-parse"
+            or direct_report.get("mode", {}).get("remote_subscription_reason")
+            != "no-remote-subscription"
+            or direct_report.get("resources", {}).get("remote_subscription_count") != 0
+        ):
+            raise AssertionError(
+                f"direct-only Quantumult X route metadata mismatch: {direct_report!r}"
+            )
+
+        imported_uri = "!!import:" + data_url(SUBSCRIPTION)
+        imported_status, imported_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": imported_uri,
+                "config": group_config,
+                "explain": "true",
+            },
+        )
+        imported_report = json.loads(imported_body)
+        if (
+            imported_status != 200
+            or imported_report.get("mode", {}).get("remote_subscription_backend")
+            != "server-side-parse"
+            or imported_report.get("mode", {}).get("remote_subscription_reason")
+            != "imported-source-list"
+        ):
+            raise AssertionError(
+                f"imported Quantumult X source did not preserve Legacy: {imported_report!r}"
+            )
+
+        combined_group_config = data_url(
+            "enable_rule_generator=false\n"
+            "custom_proxy_group=Remote`select`!!PROVIDER=Only`.*\n"
+        )
+        combined_status, combined_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": f"provider:Only,{fixture_base}/subscription.txt",
+                "config": combined_group_config,
+                "explain": "true",
+            },
+        )
+        combined_report = json.loads(combined_body)
+        if (
+            combined_status != 200
+            or combined_report.get("mode", {}).get("remote_subscription_backend")
+            != "server-side-parse"
+            or combined_report.get("mode", {}).get("remote_subscription_reason")
+            != "provider-and-rule-selectors"
+        ):
+            raise AssertionError(
+                "combined provider/rule Quantumult X group did not preserve Legacy: "
+                f"{combined_report!r}"
+            )
+
+        auto_status, auto_body, auto_headers = request(
+            base_url,
+            "/sub",
+            {
+                "target": "auto",
+                "url": "https://127.0.0.1:1/quanx-dead-sub?case=auto",
+                "config": group_config,
+            },
+            {"User-Agent": "Quantumult%20X/1.4"},
+        )
+        auto_output = auto_body.decode("utf-8", errors="replace")
+        if auto_status != 200 or "quanx-dead-sub" not in auto_output:
+            raise AssertionError(
+                f"auto Quantumult X did not select server_remote: HTTP {auto_status}: "
+                f"{auto_output!r}"
+            )
+        assert_vary_header(auto_headers, "User-Agent", "auto Quantumult X response")
+
+        http_proxy_payload = (
+            "cHJveHktdXNlcjpwcm94eS1wYXNzQHByb3h5LmV4YW1wbGUudGVzdDo4MDgw"
+        )
+        for proxy_uri in (
+            f"http://{http_proxy_payload}",
+            f"https://{http_proxy_payload}?remarks=NamedHTTP&group=NamedGroup",
+            f"provider:Ignored,http://{http_proxy_payload}?remarks=NamedHTTP",
+        ):
+            proxy_status, proxy_body, _ = request(
+                base_url,
+                "/sub",
+                {
+                    "target": "quanx",
+                    "url": proxy_uri,
+                    "config": group_config,
+                },
+            )
+            proxy_output = proxy_body.decode("utf-8", errors="replace")
+            local_proxy_lines = section_lines(proxy_output, "server_local")
+            remote_proxy_lines = section_lines(proxy_output, "server_remote")
+            if (
+                proxy_status != 200
+                or not any("proxy.example.test" in line for line in local_proxy_lines)
+                or any(http_proxy_payload in line for line in remote_proxy_lines)
+            ):
+                raise AssertionError(
+                    "Legacy HTTP proxy URI was misclassified as a remote subscription: "
+                    f"HTTP {proxy_status}: {proxy_output!r}"
+                )
+
+        interval_proxy_status, interval_proxy_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": f"interval:3600,http://{http_proxy_payload}",
+                "config": group_config,
+            },
+        )
+        if interval_proxy_status != 400 or b"interval:" not in interval_proxy_body:
+            raise AssertionError(
+                "Quantumult X accepted interval: for an HTTP proxy node: "
+                f"HTTP {interval_proxy_status}: {interval_proxy_body!r}"
+            )
+
+        telegram_status, telegram_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": (
+                    "https://t.me/http?server=telegram.example.test&port=8080"
+                    "&user=telegram-user&pass=telegram-pass&remarks=TelegramHTTP"
+                ),
+                "config": group_config,
+            },
+        )
+        telegram_output = telegram_body.decode("utf-8", errors="replace")
+        if (
+            telegram_status != 200
+            or not any(
+                "telegram.example.test" in line
+                for line in section_lines(telegram_output, "server_local")
+            )
+            or any(
+                "t.me/http" in line
+                for line in section_lines(telegram_output, "server_remote")
+            )
+        ):
+            raise AssertionError(
+                "Telegram HTTP node was misclassified as Quantumult X remote: "
+                f"HTTP {telegram_status}: {telegram_output!r}"
+            )
+
+        if FixtureHandler.quanx_remote_fetch_count != 0:
+            raise AssertionError("a native Quantumult X request fetched the remote source")
+
+        list_status, list_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": source_b,
+                "config": group_config,
+                "list": "true",
+            },
+        )
+        if list_status != 200 or b"Smoke" not in list_body:
+            raise AssertionError(
+                f"Quantumult X list=true no longer uses Legacy: HTTP {list_status}: {list_body!r}"
+            )
+        if FixtureHandler.quanx_remote_fetch_count != 1:
+            raise AssertionError("Quantumult X list=true did not fetch exactly once")
+
+    diagnostics = "".join(logs)
+    if source_secret in diagnostics:
+        raise AssertionError("Quantumult X source credential leaked into logs")
+    if "NODE_PARSER_INVOKE parser=mihomo" in diagnostics:
+        raise AssertionError("Quantumult X route invoked Mihomo")
+    if (
+        "SUB_ROUTE_RESULT target=quanx source=explicit route=hybrid "
+        "parser_policy=legacy parser=legacy provider_count=0 source_calls=1 "
+        "source_failures=0 parser_calls=1 parser_failures=0 "
+        "remote_backend=quanx-server-remote remote_reason=native-capable "
+        "remote_count=2"
+        not in diagnostics
+    ):
+        raise AssertionError("Quantumult X native route summary is missing")
+    if (
+        "AUTO_TARGET_RESOLVED target=quanx parser=legacy ua_family=quantumult-x"
+        not in diagnostics
+    ):
+        raise AssertionError("Quantumult X auto-target event is missing")
+
+    FixtureHandler.quanx_remote_fetch_count = 0
+    fallback_logs: list[str] = []
+    with running_service(
+        binary, log_capture=fallback_logs, log_level="info"
+    ) as base_url:
+        fallback_status, fallback_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": f"provider:IgnoredOnFallback,{source_b}",
+                "config": group_config,
+            },
+        )
+        fallback_output = fallback_body.decode("utf-8", errors="replace")
+        if fallback_status != 200 or "tag=Smoke" not in fallback_output:
+            raise AssertionError(
+                "legacy preferences no longer preserve Quantumult X Legacy behavior: "
+                f"HTTP {fallback_status}: {fallback_output!r}"
+            )
+        if any(source_b in line for line in section_lines(fallback_output, "server_remote")):
+            raise AssertionError("capability-gated Quantumult X request emitted server_remote")
+        if FixtureHandler.quanx_remote_fetch_count != 1:
+            raise AssertionError(
+                "capability-gated Quantumult X request did not use Legacy exactly once"
+            )
+
+    fallback_diagnostics = "".join(fallback_logs)
+    if (
+        "remote_backend=server-side-parse remote_reason=node-option-override "
+        "remote_count=0"
+        not in fallback_diagnostics
+    ):
+        raise AssertionError("Quantumult X Legacy capability reason is missing")
 def parser_failure_level_and_mixed_request_baseline(binary: Path) -> None:
     for log_level in ("info", "error"):
         failure_logs: list[str] = []
@@ -3749,6 +5075,3566 @@ def dashboard_client_ip_security_baseline(binary: Path, fixture_base: str) -> No
             raise AssertionError("client-IP policy changed /sub behavior")
 
 
+def classic_protocol_baseline(base_url: str, fixture_base: str) -> None:
+    def convert_text(target: str, source: str) -> str:
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {"target": target, "url": source, "list": "true"},
+        )
+        if status != 200:
+            raise AssertionError(
+                f"classic target={target} returned HTTP {status}: {body!r}"
+            )
+        return body.decode("utf-8").replace("\r\n", "\n")
+
+    def decode_urlsafe(value: str) -> str:
+        try:
+            return base64.urlsafe_b64decode(
+                value + "=" * (-len(value) % 4)
+            ).decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as error:
+            raise AssertionError(f"invalid URL-safe Base64: {value!r}") from error
+
+    ss_output = convert_text("ss", "|".join((SS_SIP002_URI, SS_2022_URI)))
+    ss_lines = [line for line in ss_output.splitlines() if line]
+    if len(ss_lines) != 2:
+        raise AssertionError(f"classic SS conversion lost a node: {ss_output!r}")
+    sip002_line = next(
+        (line for line in ss_lines if line.endswith("#SS%20SIP002")), ""
+    )
+    if not sip002_line:
+        raise AssertionError(f"SIP002 remark was not preserved: {ss_output!r}")
+    sip002_userinfo = sip002_line.removeprefix("ss://").split("@", 1)[0]
+    if decode_urlsafe(sip002_userinfo) != "aes-256-gcm:p@ss+word":
+        raise AssertionError(f"SIP002 userinfo changed: {sip002_line!r}")
+    sip002_parts = urllib.parse.urlsplit(sip002_line)
+    sip002_query = urllib.parse.parse_qs(
+        sip002_parts.query, keep_blank_values=True
+    )
+    expected_plugin = (
+        "v2ray-plugin;mode=websocket;host=plugin.example.test;path=/ws;tls"
+    )
+    if (
+        sip002_parts.hostname != "2001:db8::21"
+        or sip002_parts.port != 8388
+        or sip002_query.get("plugin") != [expected_plugin]
+    ):
+        raise AssertionError(
+            f"SIP002 IPv6/plugin mapping changed: {sip002_line!r}"
+        )
+
+    ss2022_line = next(
+        (line for line in ss_lines if line.endswith("#SS%202022")), ""
+    )
+    expected_2022_prefix = (
+        "ss://2022-blake3-aes-256-gcm:"
+        + urllib.parse.quote(SS_2022_PASSWORD, safe="")
+        + "@[2001:db8::22]:8389"
+    )
+    if not ss2022_line.startswith(expected_2022_prefix):
+        raise AssertionError(
+            "Shadowsocks 2022 credentials were incorrectly Base64-wrapped: "
+            f"{ss2022_line!r}"
+        )
+
+    quan_status, quan_body, _ = request(
+        base_url,
+        "/sub",
+        {"target": "quan", "url": SS_SIP002_URI, "list": "true"},
+    )
+    quan_line = decode_urlsafe(
+        quan_body.decode("utf-8", errors="replace").strip()
+    ).strip()
+    quan_parts = urllib.parse.urlsplit(quan_line)
+    quan_query = urllib.parse.parse_qs(quan_parts.query, keep_blank_values=True)
+    if (
+        quan_status != 200
+        or quan_query.get("plugin") != [expected_plugin]
+        or decode_urlsafe(quan_query.get("group", [""])[0]) != "SSProvider"
+        or ":8388&group=" in quan_line
+    ):
+        raise AssertionError(
+            f"Quantumult SS nodelist query is malformed: {quan_line!r}"
+        )
+
+    sip008_object_output = convert_text("ss", fixture_base + "/sip008.json")
+    if (
+        "@[2001:db8::30]:8388/" not in sip008_object_output
+        or "plugin=v2ray-plugin%3Bmode%3Dwebsocket" not in sip008_object_output
+        or "#SIP008%20Plugin" not in sip008_object_output
+    ):
+        raise AssertionError(
+            f"SIP008 object input was not preserved: {sip008_object_output!r}"
+        )
+
+    sip008_array_output = convert_text("ss", fixture_base + "/sip008-array.json")
+    if not sip008_array_output.startswith(
+        "ss://2022-blake3-aes-256-gcm:"
+        + urllib.parse.quote(SS_2022_PASSWORD, safe="")
+        + "@[2001:db8::31]:8391"
+    ):
+        raise AssertionError(
+            f"SIP008 root-array input was not recognized: {sip008_array_output!r}"
+        )
+
+    sssub_status, sssub_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "sssub",
+            "url": fixture_base + "/sip008.json",
+            "list": "true",
+        },
+    )
+    try:
+        sssub = json.loads(sssub_body)
+    except json.JSONDecodeError as error:
+        raise AssertionError(
+            f"SS subscription output is not JSON: {sssub_body!r}"
+        ) from error
+    if (
+        sssub_status != 200
+        or not isinstance(sssub, list)
+        or len(sssub) != 1
+        or sssub[0].get("password") != "sip008-password"
+        or sssub[0].get("plugin") != "v2ray-plugin"
+    ):
+        raise AssertionError(f"SS subscription output changed: {sssub!r}")
+
+    ssr_output = convert_text("ssr", SSR_IPV6_URI).strip()
+    if not ssr_output.startswith("ssr://"):
+        raise AssertionError(f"SSR output is not a share link: {ssr_output!r}")
+    decoded_ssr = decode_urlsafe(ssr_output.removeprefix("ssr://"))
+    for expected in (
+        "[2001:db8::23]:8390:auth_sha1_v4:aes-256-cfb:tls1.2_ticket_auth:",
+        "group=" + _urlsafe_b64("SSR Fixture"),
+        "remarks=" + _urlsafe_b64("SSR IPv6"),
+        "obfsparam=" + _urlsafe_b64("cdn.example.test"),
+        "protoparam=" + _urlsafe_b64("64:fixture"),
+    ):
+        if expected not in decoded_ssr:
+            raise AssertionError(f"SSR output lost {expected!r}: {decoded_ssr!r}")
+
+    ssr_json_output = convert_text(
+        "ssr", fixture_base + "/ssr-libev.json"
+    ).strip()
+    decoded_ssr_json = decode_urlsafe(ssr_json_output.removeprefix("ssr://"))
+    if (
+        "[2001:db8::32]:8392:auth_sha1_v4:aes-256-cfb:tls1.2_ticket_auth:"
+        not in decoded_ssr_json
+        or _urlsafe_b64("ssr-json-password") not in decoded_ssr_json
+    ):
+        raise AssertionError(
+            f"SSR libev password/IPv6 input was lost: {decoded_ssr_json!r}"
+        )
+
+    classic_nodes = "|".join(
+        (
+            SS_SIP002_URI,
+            SS_2022_URI,
+            SOCKS_CURRENT_URI,
+            SOCKS_LEGACY_URI,
+            SOCKS_PLAIN_URI,
+            SOCKS_NO_AUTH_URI,
+            HTTP_LEGACY_URI,
+            HTTPS_LEGACY_URI,
+            TELEGRAM_SOCKS_URI,
+            TELEGRAM_HTTP_URI,
+        )
+    )
+    singbox_status, singbox_body, _ = request(
+        base_url,
+        "/sub",
+        {"target": "singbox", "url": classic_nodes, "list": "true"},
+    )
+    try:
+        singbox = json.loads(singbox_body)
+    except json.JSONDecodeError as error:
+        raise AssertionError(
+            f"classic sing-box output is not JSON: {singbox_body!r}"
+        ) from error
+    if singbox_status != 200 or not isinstance(singbox, dict):
+        raise AssertionError(
+            f"classic sing-box conversion failed: HTTP {singbox_status} {singbox!r}"
+        )
+    outbounds = {
+        item.get("tag"): item
+        for item in singbox.get("outbounds", [])
+        if isinstance(item, dict) and isinstance(item.get("tag"), str)
+    }
+    expected_outbounds = {
+        "SS SIP002": {
+            "type": "shadowsocks",
+            "server": "2001:db8::21",
+            "server_port": 8388,
+            "method": "aes-256-gcm",
+            "password": "p@ss+word",
+            "plugin": "v2ray-plugin",
+            "plugin_opts": expected_plugin.removeprefix("v2ray-plugin;"),
+        },
+        "SS 2022": {
+            "type": "shadowsocks",
+            "server": "2001:db8::22",
+            "server_port": 8389,
+            "method": "2022-blake3-aes-256-gcm",
+            "password": SS_2022_PASSWORD,
+        },
+        "SOCKS Current": {
+            "type": "socks",
+            "server": "2001:db8::24",
+            "server_port": 1080,
+            "username": "current-user",
+            "password": "p@ss+word:tail",
+        },
+        "SOCKS Legacy": {
+            "type": "socks",
+            "server": "2001:db8::25",
+            "server_port": 1081,
+            "username": "legacy-user",
+            "password": "legacy-pass",
+        },
+        "SOCKS Plain": {
+            "type": "socks",
+            "server": "2001:db8::26",
+            "server_port": 1082,
+            "username": "plain-user",
+            "password": "p@ss+word",
+        },
+        "SOCKS NoAuth": {
+            "type": "socks",
+            "server": "2001:db8::27",
+            "server_port": 1083,
+            "username": "",
+            "password": "",
+        },
+        "HTTP Legacy": {
+            "type": "http",
+            "server": "2001:db8::28",
+            "server_port": 8080,
+            "username": "http-user",
+            "password": "http-pass",
+        },
+        "HTTPS Legacy": {
+            "type": "http",
+            "server": "2001:db8::29",
+            "server_port": 8443,
+            "username": "https-user",
+            "password": "https-pass",
+        },
+        "Telegram SOCKS": {
+            "type": "socks",
+            "server": "telegram-socks.example.test",
+            "server_port": 1084,
+            "username": "tg-user",
+            "password": "tg+pass",
+        },
+        "Telegram HTTP": {
+            "type": "http",
+            "server": "telegram-http.example.test",
+            "server_port": 8081,
+            "username": "tg-http",
+            "password": "tg+http",
+        },
+    }
+    for tag, expected in expected_outbounds.items():
+        actual = outbounds.get(tag)
+        if actual is None or any(actual.get(key) != value for key, value in expected.items()):
+            raise AssertionError(
+                f"classic protocol mapping for {tag!r} is incomplete: {actual!r}"
+            )
+
+    mellow_status, mellow_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "mellow",
+            "url": "|".join((SS_2022_URI, SOCKS_CURRENT_URI, HTTP_LEGACY_URI)),
+            "list": "false",
+        },
+    )
+    mellow = mellow_body.decode("utf-8", errors="replace")
+    for expected in (
+        "SS 2022, ss, ss://2022-blake3-aes-256-gcm:",
+        "SOCKS Current, builtin, socks, address=2001:db8::24, port=1080, "
+        "user=current-user, pass=p@ss+word:tail",
+        "HTTP Legacy, builtin, http, address=2001:db8::28, port=8080, "
+        "user=http-user, pass=http-pass",
+    ):
+        if expected not in mellow:
+            raise AssertionError(
+                f"Mellow classic endpoint lost {expected!r}: {mellow!r}"
+            )
+    if mellow_status != 200:
+        raise AssertionError(
+            f"Mellow classic conversion returned HTTP {mellow_status}: {mellow!r}"
+        )
+
+    unsafe_surge_uri = (
+        "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388"
+        "#Unsafe%2CInjected"
+    )
+    unsafe_surge_status, unsafe_surge_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "surge",
+            "ver": "4",
+            "url": unsafe_surge_uri,
+            "list": "true",
+        },
+    )
+    if unsafe_surge_status != 400 or b"Unsafe,Injected =" in unsafe_surge_body:
+        raise AssertionError(
+            "Surge accepted a comma-delimited Shadowsocks field: "
+            f"HTTP {unsafe_surge_status} {unsafe_surge_body!r}"
+        )
+
+    for malformed in (
+        "ss://not-base64@bad.example.test:70000#BadSS",
+        "ssr://not-base64",
+        "socks://not-base64#BadSOCKS",
+        "http://not-base64?remarks=BadHTTP",
+    ):
+        status, _, _ = request(
+            base_url,
+            "/sub",
+            {"target": "singbox", "url": malformed, "list": "true"},
+        )
+        if status != 400:
+            raise AssertionError(
+                f"malformed classic URI did not fail closed: {malformed!r} -> {status}"
+            )
+
+
+def legacy_niche_protocol_baseline(base_url: str, fixture_base: str) -> None:
+    def reject_duplicate_json_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise AssertionError(
+                    f"sing-box output contains duplicate JSON key {key!r}"
+                )
+            result[key] = value
+        return result
+
+    def singbox_outbound(source: str, tag: str) -> dict:
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "singbox",
+                "url": source,
+                "list": "true",
+                "udp": "true",
+                "tfo": "false",
+                "scv": "true",
+            },
+        )
+        if status != 200:
+            raise AssertionError(
+                f"sing-box legacy protocol conversion failed: HTTP {status} {body!r}"
+            )
+        payload = json.loads(
+            body.decode("utf-8"), object_pairs_hook=reject_duplicate_json_keys
+        )
+        for outbound in payload.get("outbounds", []):
+            if outbound.get("tag") == tag:
+                return outbound
+        raise AssertionError(f"missing sing-box outbound {tag!r}: {payload!r}")
+
+    uri_outbound = singbox_outbound(HYSTERIA_V1_URI, "Hysteria V1+Literal")
+    expected_uri_fields = {
+        "type": "hysteria",
+        "server": "2001:db8::14",
+        "server_port": 36712,
+        "up_mbps": 100,
+        "down_mbps": 200,
+        "obfs": "obfs+secret",
+        "auth_str": "p@ss+word",
+    }
+    if any(uri_outbound.get(key) != expected for key, expected in expected_uri_fields.items()):
+        raise AssertionError(f"Hysteria v1 URI mapping drifted: {uri_outbound!r}")
+    if uri_outbound.get("tls") != {
+        "enabled": True,
+        "server_name": "hy1-tls.example.test",
+        "insecure": True,
+        "alpn": ["h3", "hysteria"],
+    }:
+        raise AssertionError(f"Hysteria v1 URI TLS drifted: {uri_outbound!r}")
+
+    singbox_outbound_from_config = singbox_outbound(
+        fixture_base + "/hysteria-v1-singbox.json",
+        "Hysteria V1 sing-box",
+    )
+    for key, expected in (
+        ("server_ports", ["20000:20002", "30000:30000"]),
+        ("hop_interval", "45s"),
+        ("up", "640 KBps"),
+        ("down_mbps", 200),
+        ("auth", "YmluYXJ5LWF1dGg="),
+        ("network", "tcp"),
+    ):
+        if singbox_outbound_from_config.get(key) != expected:
+            raise AssertionError(
+                f"sing-box Hysteria v1 {key} drifted: "
+                f"{singbox_outbound_from_config!r}"
+            )
+    if "auth_str" in singbox_outbound_from_config:
+        raise AssertionError(
+            "base64 Hysteria v1 authentication was rewritten as auth_str"
+        )
+    scalar_ports_outbound = singbox_outbound(
+        fixture_base + "/hysteria-v1-singbox.json",
+        "Hysteria V1 scalar ports",
+    )
+    if scalar_ports_outbound.get("server_ports") != ["40000:40002"]:
+        raise AssertionError(
+            "sing-box scalar Hysteria v1 server_ports was not preserved: "
+            f"{scalar_ports_outbound!r}"
+        )
+
+    clash_outbound = singbox_outbound(
+        fixture_base + "/hysteria-v1-clash.yaml",
+        "Hysteria V1 Clash",
+    )
+    for key, expected in (
+        ("server_ports", ["443:443", "10000:10002"]),
+        ("auth_str", "clash-auth"),
+        ("up_mbps", 30),
+        ("down_mbps", 200),
+        ("obfs", "clash-obfs"),
+    ):
+        if clash_outbound.get(key) != expected:
+            raise AssertionError(
+                f"Clash Hysteria v1 {key} drifted: {clash_outbound!r}"
+            )
+    if clash_outbound.get("tls") != {
+        "enabled": True,
+        "server_name": "clash-hy1.example.test",
+        "insecure": True,
+        "alpn": ["h3", "hysteria"],
+    }:
+        raise AssertionError(f"Clash Hysteria v1 TLS drifted: {clash_outbound!r}")
+
+    faketcp_status, faketcp_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "singbox",
+            "url": HYSTERIA_V1_URI.replace("protocol=udp", "protocol=faketcp"),
+            "list": "true",
+        },
+    )
+    if faketcp_status == 200 and b"Hysteria V1+Literal" in faketcp_body:
+        raise AssertionError(
+            "sing-box emitted a Hysteria v1 faketcp outbound it cannot express"
+        )
+
+    missing_speed_status, _, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "singbox",
+            "url": HYSTERIA_V1_URI.replace("&downmbps=200", ""),
+            "list": "true",
+        },
+    )
+    if missing_speed_status != 400:
+        raise AssertionError("Hysteria v1 URI without downlink speed was accepted")
+    invalid_speed_status, _, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "singbox",
+            "url": HYSTERIA_V1_URI.replace(
+                "downmbps=200", "downmbps=2%20Gbps"
+            ),
+            "list": "true",
+        },
+    )
+    if invalid_speed_status != 400:
+        raise AssertionError("Hysteria v1 URI accepted a non-Mbps speed value")
+
+    no_tls_config = json.dumps(
+        {
+            "outbounds": [
+                {
+                    "type": "hysteria",
+                    "tag": "Missing TLS",
+                    "server": "hy1-no-tls.example.test",
+                    "server_port": 443,
+                    "up_mbps": 20,
+                    "down_mbps": 80,
+                }
+            ]
+        },
+        separators=(",", ":"),
+    )
+    no_tls_url = "data:application/json;base64," + base64.b64encode(
+        no_tls_config.encode("utf-8")
+    ).decode("ascii")
+    no_tls_status, _, _ = request(
+        base_url,
+        "/sub",
+        {"target": "singbox", "url": no_tls_url, "list": "true"},
+    )
+    if no_tls_status != 400:
+        raise AssertionError("sing-box Hysteria v1 without TLS was accepted")
+
+    snell_status, snell_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "surge",
+            "ver": "4",
+            "url": fixture_base + "/snell-surge.conf",
+            "list": "true",
+        },
+    )
+    snell = snell_body.decode("utf-8", errors="replace")
+    expected_snell_fragments = (
+        "Snell V4 = snell, snell-v4.example.test, 443, psk=snell-secret==",
+        "version=4",
+        "reuse=true",
+        "obfs=http",
+        "obfs-host=cdn.example.test",
+        "obfs-uri=/resource",
+        "Snell Shadow = snell, snell-shadow.example.test, 8443, psk=shadow-secret",
+        "shadow-tls-password=shadow-password",
+        "shadow-tls-sni=shadow.example.test",
+        "shadow-tls-version=3",
+        "Snell V3 TLS = snell, snell-v3.example.test, 7443, psk=snell-v3-secret",
+        "obfs=tls",
+        "obfs-host=tls.example.test",
+        "udp-port=7444",
+        "Snell V6 = snell, snell-v6.example.test, 9443, psk=123456789012",
+        "version=6",
+        "reuse=true",
+        "mode=unshaped",
+    )
+    if snell_status != 200 or any(
+        fragment not in snell for fragment in expected_snell_fragments
+    ):
+        raise AssertionError(
+            f"Surge Snell v4/v6 conversion drifted: HTTP {snell_status} {snell!r}"
+        )
+
+    invalid_snell_lines = (
+        "Bad V6 Obfs = snell, bad.example.test, 443, psk=secret, version=6, obfs=http",
+        "Bad V5 Mode = snell, bad.example.test, 443, psk=secret, version=5, mode=unshaped",
+        "Bad V2 UDP = snell, bad.example.test, 443, psk=secret, version=2, udp-port=7444",
+        "Bad Shadow TLS = snell, bad.example.test, 443, psk=secret, version=4, shadow-tls-password=shadow, shadow-tls-version=3",
+        "Bad Reuse = snell, bad.example.test, 443, psk=secret, version=4, reuse=maybe",
+    )
+    for invalid_line in invalid_snell_lines:
+        invalid_source = "data:text/plain;base64," + base64.b64encode(
+            ("[Proxy]\n" + invalid_line + "\n").encode("utf-8")
+        ).decode("ascii")
+        invalid_status, _, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "surge",
+                "ver": "4",
+                "url": invalid_source,
+                "list": "true",
+            },
+        )
+        if invalid_status != 400:
+            raise AssertionError(
+                f"invalid Surge Snell combination was accepted: {invalid_line!r}"
+            )
+
+
+def singbox_snell_outbound_baseline(
+    default_base_url: str, enabled_base_url: str
+) -> None:
+    def reject_duplicate_json_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise AssertionError(
+                    f"sing-box output contains duplicate JSON key {key!r}"
+                )
+            result[key] = value
+        return result
+
+    def data_url(content: str, media_type: str = "text/plain") -> str:
+        encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        return f"data:{media_type};base64,{encoded}"
+
+    def convert(
+        service: str, source: str, *, target: str = "singbox", ver: str = ""
+    ) -> tuple[int, dict[str, object] | None]:
+        params = {"target": target, "url": source, "list": "true"}
+        if ver:
+            params["ver"] = ver
+        status, body, _ = request(service, "/sub", params)
+        if status != 200:
+            return status, None
+        return status, json.loads(
+            body.decode("utf-8"), object_pairs_hook=reject_duplicate_json_keys
+        )
+
+    legacy_source = data_url(
+        "[Proxy]\n"
+        "Snell V4 = snell, snell-v4.example.test, 443, "
+        "psk=snell-v4-secret, version=4, reuse=true, "
+        "obfs=http, obfs-host=cdn.example.test\n"
+        "Snell V5 = snell, snell-v5.example.test, 8443, "
+        "psk=snell-v5-secret, version=5, reuse=false\n"
+        "Snell V6 = snell, snell-v6.example.test, 9443, "
+        "psk=123456789012, version=6, reuse=true, mode=unshaped\n"
+    )
+    disabled_status, _ = convert(default_base_url, legacy_source)
+    if disabled_status != 400:
+        raise AssertionError(
+            "sing-box Snell output changed without the opt-in switch: "
+            f"HTTP {disabled_status}"
+        )
+
+    enabled_status, enabled_payload = convert(enabled_base_url, legacy_source)
+    if enabled_status != 200 or enabled_payload is None:
+        raise AssertionError(
+            f"enabled sing-box Snell conversion failed: HTTP {enabled_status}"
+        )
+    enabled_outbounds = {
+        outbound.get("tag"): outbound
+        for outbound in enabled_payload.get("outbounds", [])
+        if isinstance(outbound, dict)
+    }
+    if enabled_outbounds.get("Snell V4") != {
+        "type": "snell",
+        "tag": "Snell V4",
+        "server": "snell-v4.example.test",
+        "server_port": 443,
+        "version": 4,
+        "psk": "snell-v4-secret",
+        "reuse": True,
+        "obfs_mode": "http",
+        "obfs_host": "cdn.example.test",
+        "tcp_fast_open": True,
+    }:
+        raise AssertionError(
+            f"sing-box Snell v4 mapping drifted: {enabled_outbounds!r}"
+        )
+    if enabled_outbounds.get("Snell V5") != {
+        "type": "snell",
+        "tag": "Snell V5",
+        "server": "snell-v5.example.test",
+        "server_port": 8443,
+        "version": 4,
+        "psk": "snell-v5-secret",
+        "reuse": False,
+        "tcp_fast_open": True,
+    }:
+        raise AssertionError(
+            "non-QUIC Snell v5 was not normalized to v4 exactly: "
+            f"{enabled_outbounds!r}"
+        )
+    if enabled_outbounds.get("Snell V6") != {
+        "type": "snell",
+        "tag": "Snell V6",
+        "server": "snell-v6.example.test",
+        "server_port": 9443,
+        "version": 6,
+        "psk": "123456789012",
+        "reuse": True,
+        "mode": "unshaped",
+        "tcp_fast_open": True,
+    }:
+        raise AssertionError(
+            f"sing-box Snell v6 mapping drifted: {enabled_outbounds!r}"
+        )
+
+    native_source = data_url(
+        json.dumps(
+            {
+                "outbounds": [
+                    {
+                        "type": "snell",
+                        "tag": "Native Snell V4",
+                        "server": "native-v4.example.test",
+                        "server_port": 443,
+                        "version": 4,
+                        "psk": "native-v4-secret",
+                        "userkey": "native-user-key",
+                        "reuse": True,
+                        "network": "udp",
+                        "obfs_mode": "http",
+                        "obfs_host": "native-cdn.example.test",
+                        "tcp_fast_open": True,
+                    },
+                    {
+                        "type": "snell",
+                        "tag": "Native Snell V6",
+                        "server": "2001:db8::66",
+                        "server_port": 9443,
+                        "version": 6,
+                        "psk": "abcdefghijkl",
+                        "network": ["tcp", "udp"],
+                        "mode": "unsafe-raw",
+                    },
+                ]
+            },
+            separators=(",", ":"),
+        ),
+        "application/json",
+    )
+    native_status, native_payload = convert(enabled_base_url, native_source)
+    if native_status != 200 or native_payload is None:
+        raise AssertionError(
+            f"native sing-box Snell round trip failed: HTTP {native_status}"
+        )
+    native_outbounds = {
+        outbound.get("tag"): outbound
+        for outbound in native_payload.get("outbounds", [])
+        if isinstance(outbound, dict)
+    }
+    expected_native_v4 = {
+        "type": "snell",
+        "tag": "Native Snell V4",
+        "server": "native-v4.example.test",
+        "server_port": 443,
+        "version": 4,
+        "psk": "native-v4-secret",
+        "userkey": "native-user-key",
+        "reuse": True,
+        "network": "udp",
+        "obfs_mode": "http",
+        "obfs_host": "native-cdn.example.test",
+        "tcp_fast_open": True,
+    }
+    if native_outbounds.get("Native Snell V4") != expected_native_v4:
+        raise AssertionError(
+            f"native Snell v4 fields were not preserved: {native_outbounds!r}"
+        )
+    expected_native_v6 = {
+        "type": "snell",
+        "tag": "Native Snell V6",
+        "server": "2001:db8::66",
+        "server_port": 9443,
+        "version": 6,
+        "psk": "abcdefghijkl",
+        "mode": "unsafe-raw",
+        "tcp_fast_open": True,
+    }
+    if native_outbounds.get("Native Snell V6") != expected_native_v6:
+        raise AssertionError(
+            f"native Snell v6 fields were not preserved: {native_outbounds!r}"
+        )
+
+    invalid_nodes = (
+        {"version": 3, "psk": "legacy-secret"},
+        {"version": 5, "psk": "not-an-official-outbound"},
+        {"version": 6, "psk": "short"},
+        {"version": 6, "psk": "abcdefghijkl", "obfs_mode": "http"},
+        {"version": 4, "psk": "secret", "mode": "unshaped"},
+        {"version": 4, "psk": "secret", "network": ["tcp", "tcp"]},
+        {"version": 4, "psk": "secret", "detour": "hidden-dialer"},
+        {"version": "4", "psk": "wrong-type"},
+    )
+    for index, overrides in enumerate(invalid_nodes):
+        node: dict[str, object] = {
+            "type": "snell",
+            "tag": f"Invalid Snell {index}",
+            "server": "invalid.example.test",
+            "server_port": 443,
+        }
+        node.update(overrides)
+        source = data_url(
+            json.dumps({"outbounds": [node]}, separators=(",", ":")),
+            "application/json",
+        )
+        invalid_status, _ = convert(enabled_base_url, source)
+        if invalid_status != 400:
+            raise AssertionError(
+                f"invalid native Snell outbound was accepted: {node!r}"
+            )
+
+    mixed_source = data_url(
+        "[Proxy]\n"
+        "Safe SS = ss, safe.example.test, 8388, "
+        "encrypt-method=aes-128-gcm, password=safe-password\n"
+        "Unsupported Snell = snell, old.example.test, 443, "
+        "psk=old-secret, version=3\n"
+    )
+    mixed_status, mixed_payload = convert(enabled_base_url, mixed_source)
+    if mixed_status != 200 or mixed_payload is None:
+        raise AssertionError(
+            f"mixed sing-box output failed: HTTP {mixed_status}"
+        )
+    mixed_outbounds = mixed_payload.get("outbounds", [])
+    if not any(
+        isinstance(outbound, dict)
+        and outbound.get("tag") == "Safe SS"
+        and outbound.get("type") == "shadowsocks"
+        for outbound in mixed_outbounds
+    ) or any(
+        isinstance(outbound, dict) and outbound.get("type") == "snell"
+        for outbound in mixed_outbounds
+    ):
+        raise AssertionError(
+            f"mixed output did not skip only unsupported Snell: {mixed_payload!r}"
+        )
+
+    surge_source = data_url(
+        json.dumps(
+            {
+                "outbounds": [
+                    {
+                        "type": "snell",
+                        "tag": "Surge Must Reject",
+                        "server": "native-v4.example.test",
+                        "server_port": 443,
+                        "version": 4,
+                        "psk": "native-v4-secret",
+                        "userkey": "native-user-key",
+                        "network": "udp",
+                    }
+                ]
+            },
+            separators=(",", ":"),
+        ),
+        "application/json",
+    )
+    surge_status, _, _ = request(
+        enabled_base_url,
+        "/sub",
+        {
+            "target": "surge",
+            "ver": "4",
+            "url": surge_source,
+            "list": "true",
+        },
+    )
+    if surge_status != 400:
+        raise AssertionError(
+            "Snell userkey/network were silently discarded by Surge output"
+        )
+
+
+def wireguard_structured_conversion_baseline(
+    base_url: str, endpoint_base_url: str
+) -> None:
+    private_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+    public_key_one = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="
+    public_key_two = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC="
+    preshared_key = "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD="
+
+    def data_url(content: str) -> str:
+        return "data:text/plain;base64," + base64.b64encode(
+            content.encode("utf-8")
+        ).decode("ascii")
+
+    def convert(
+        service: str, target: str, source: str, *, list_mode: bool = False
+    ) -> str:
+        params = {
+            "target": target,
+            "url": source,
+            "config": DISABLE_RULEGEN_CONFIG,
+            "list": str(list_mode).lower(),
+        }
+        if target == "surge":
+            params["ver"] = "4"
+        status, body, _ = request(service, "/sub", params)
+        if status != 200:
+            raise AssertionError(
+                f"WireGuard target={target} returned HTTP {status}: {body!r}"
+            )
+        return body.decode("utf-8").replace("\r\n", "\n")
+
+    surge_source = (
+        "[Proxy]\n"
+        "WG Structured = wireguard, section-name=structured\n\n"
+        "[WireGuard structured]\n"
+        f"private-key = {private_key}\n"
+        "self-ip = 10.77.0.2\n"
+        "self-ip-v6 = 2001:db8:77::2\n"
+        "dns-server = 1.1.1.1,2606:4700:4700::1111\n"
+        "mtu = 1280\n"
+        "peer = ("
+        f"public-key = {public_key_one}, "
+        "allowed-ips = \"0.0.0.0/0, ::/0\", "
+        "endpoint = wg-one.example.test:51820, "
+        f"preshared-key = {preshared_key}, keepalive = 25)\n"
+        "peer = ("
+        f"public-key = {public_key_two}, "
+        "allowed-ips = \"10.0.0.0/8, 2001:db8::/32\", "
+        "endpoint = [2001:db8::53]:51821, client-id = 1/2/3, "
+        "keepalive = 25)\n"
+    )
+    surge_data = data_url(surge_source)
+
+    surge_output = convert(base_url, "surge", surge_data)
+    for expected in (
+        "private-key=" + private_key,
+        "self-ip=10.77.0.2",
+        "self-ip-v6=2001:db8:77::2",
+        "public-key = " + public_key_one,
+        "public-key = " + public_key_two,
+        "endpoint = [2001:db8::53]:51821",
+        "preshared-key = " + preshared_key,
+        "keepalive = 25",
+        "client-id = 1/2/3",
+    ):
+        if expected not in surge_output:
+            raise AssertionError(
+                f"Surge WireGuard output lost {expected!r}: {surge_output!r}"
+            )
+    if surge_output.count("public-key = ") != 2:
+        raise AssertionError("Surge output did not preserve both WireGuard peers")
+
+    loon_output = convert(base_url, "loon", surge_data)
+    for expected in (
+        "wireguard, interface-ip=10.77.0.2",
+        "interface-ipV6=2001:db8:77::2",
+        "keepalive=25",
+        "public-key=\"" + public_key_one + "\"",
+        "public-key=\"" + public_key_two + "\"",
+        "preshared-key=\"" + preshared_key + "\"",
+        "reserved=[1,2,3]",
+    ):
+        if expected not in loon_output:
+            raise AssertionError(
+                f"Loon WireGuard output lost {expected!r}: {loon_output!r}"
+            )
+
+    old_output_text = convert(base_url, "singbox", surge_data, list_mode=True)
+    old_output = json.loads(old_output_text)
+    wireguard_outbounds = [
+        item
+        for item in old_output.get("outbounds", [])
+        if isinstance(item, dict) and item.get("type") == "wireguard"
+    ]
+    if len(wireguard_outbounds) != 1 or old_output.get("endpoints"):
+        raise AssertionError(
+            f"default sing-box schema no longer emits one legacy outbound: {old_output!r}"
+        )
+    old_wireguard = wireguard_outbounds[0]
+    if (
+        old_wireguard.get("private_key") != private_key
+        or old_wireguard.get("local_address")
+        != ["10.77.0.2/32", "2001:db8:77::2/128"]
+        or len(old_wireguard.get("peers", [])) != 2
+        or old_wireguard["peers"][0].get("pre_shared_key") != preshared_key
+        or old_wireguard["peers"][1].get("reserved") != [1, 2, 3]
+    ):
+        raise AssertionError(
+            f"legacy sing-box WireGuard output is incomplete: {old_wireguard!r}"
+        )
+
+    old_roundtrip = convert(
+        base_url, "surge", data_url(json.dumps(old_output, separators=(",", ":")))
+    )
+    if private_key not in old_roundtrip or old_roundtrip.count("public-key = ") != 2:
+        raise AssertionError(
+            "sing-box outbound import swapped keys or lost structured peers"
+        )
+
+    loon_roundtrip = json.loads(
+        convert(base_url, "singbox", data_url(loon_output), list_mode=True)
+    )
+    loon_wireguard = next(
+        (
+            item
+            for item in loon_roundtrip.get("outbounds", [])
+            if isinstance(item, dict) and item.get("type") == "wireguard"
+        ),
+        None,
+    )
+    if loon_wireguard is None or len(loon_wireguard.get("peers", [])) != 2:
+        raise AssertionError("Loon inline WireGuard input lost multi-peer structure")
+
+    endpoint_output = json.loads(
+        convert(endpoint_base_url, "singbox", surge_data, list_mode=True)
+    )
+    endpoint_wireguards = [
+        item
+        for item in endpoint_output.get("endpoints", [])
+        if isinstance(item, dict) and item.get("type") == "wireguard"
+    ]
+    endpoint_outbounds = [
+        item
+        for item in endpoint_output.get("outbounds", [])
+        if isinstance(item, dict) and item.get("type") == "wireguard"
+    ]
+    if len(endpoint_wireguards) != 1 or endpoint_outbounds:
+        raise AssertionError(
+            f"opt-in sing-box endpoint schema is malformed: {endpoint_output!r}"
+        )
+    endpoint = endpoint_wireguards[0]
+    if (
+        endpoint.get("private_key") != private_key
+        or endpoint.get("address") != ["10.77.0.2/32", "2001:db8:77::2/128"]
+        or len(endpoint.get("peers", [])) != 2
+        or endpoint["peers"][0].get("persistent_keepalive_interval") != 25
+        or endpoint["peers"][1].get("address") != "2001:db8::53"
+    ):
+        raise AssertionError(f"sing-box endpoint fields are incomplete: {endpoint!r}")
+
+    expanded_endpoint_output = json.loads(json.dumps(endpoint_output))
+    expanded_endpoint_output["endpoints"][0]["address"].append(
+        "10.77.0.3/32"
+    )
+    expanded_roundtrip = json.loads(
+        convert(
+            endpoint_base_url,
+            "singbox",
+            data_url(
+                json.dumps(expanded_endpoint_output, separators=(",", ":"))
+            ),
+            list_mode=True,
+        )
+    )
+    if expanded_roundtrip["endpoints"][0].get("address") != [
+        "10.77.0.2/32",
+        "2001:db8:77::2/128",
+        "10.77.0.3/32",
+    ]:
+        raise AssertionError("sing-box endpoint import lost a local address")
+
+    endpoint_roundtrip = convert(
+        base_url,
+        "loon",
+        data_url(json.dumps(endpoint_output, separators=(",", ":"))),
+    )
+    if private_key not in endpoint_roundtrip or endpoint_roundtrip.count(
+        "public-key=\""
+    ) != 2:
+        raise AssertionError("sing-box endpoint import lost keys or peers")
+
+    clash_source = (
+        "proxies:\n"
+        "  - name: Clash WG\n"
+        "    type: wireguard\n"
+        f"    private-key: {private_key}\n"
+        "    ip: 10.88.0.2\n"
+        "    ipv6: 2001:db8:88::2\n"
+        "    peers:\n"
+        "      - server: clash-one.example.test\n"
+        "        port: 51830\n"
+        f"        public-key: {public_key_one}\n"
+        "        allowed-ips: [0.0.0.0/0, '::/0']\n"
+        "        persistent-keepalive: 30\n"
+        "      - server: 2001:db8::54\n"
+        "        port: 51831\n"
+        f"        public-key: {public_key_two}\n"
+        "        reserved: [4, 5, 6]\n"
+        "        persistent-keepalive: 30\n"
+    )
+    clash_to_loon = convert(base_url, "loon", data_url(clash_source))
+    if (
+        clash_to_loon.count("public-key=\"") != 2
+        or "reserved=[4,5,6]" not in clash_to_loon
+        or "keepalive=30" not in clash_to_loon
+    ):
+        raise AssertionError(
+            f"Clash multi-peer WireGuard input was not preserved: {clash_to_loon!r}"
+        )
+
+    clash_simple_source = (
+        "proxies:\n"
+        "  - name: Clash WG Simple\n"
+        "    type: wireguard\n"
+        "    server: simple-wg.example.test\n"
+        "    port: 51840\n"
+        f"    public-key: {public_key_one}\n"
+        f"    private-key: {private_key}\n"
+        f"    pre-shared-key: {preshared_key}\n"
+        "    ip: 10.99.0.2\n"
+        "    allowed-ips: [0.0.0.0/0, '::/0']\n"
+        "    reserved: [7, 8, 9]\n"
+        "    persistent-keepalive: 35\n"
+    )
+    clash_simple_output = json.loads(
+        convert(
+            base_url,
+            "singbox",
+            data_url(clash_simple_source),
+            list_mode=True,
+        )
+    )["outbounds"][0]
+    if (
+        clash_simple_output.get("private_key") != private_key
+        or clash_simple_output["peers"][0].get("pre_shared_key")
+        != preshared_key
+        or clash_simple_output["peers"][0].get("reserved") != [7, 8, 9]
+    ):
+        raise AssertionError(
+            f"Mihomo simple WireGuard fields were not imported: {clash_simple_output!r}"
+        )
+
+
+def mieru_legacy_parser_baseline(base_url: str) -> None:
+    status, body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "surge",
+            "ver": "4",
+            "url": MIERU_OFFICIAL_SIMPLE_URI + "|" + SUBSCRIPTION.strip(),
+            "list": "true",
+            "explain": "true",
+        },
+    )
+    if status != 200:
+        raise AssertionError(
+            f"official mierus URI did not survive Legacy parsing: HTTP {status} {body!r}"
+        )
+    report = json.loads(body)
+    if (
+        report.get("nodes", {}).get("total") != 5
+        or report.get("nodes", {}).get("generated") != 1
+        or report.get("nodes", {}).get("unsupported") != 4
+        or report.get("nodes", {}).get("unsupported_protocols") != ["mieru:4"]
+    ):
+        raise AssertionError(
+            f"official multi-binding mierus URI was not expanded exactly: {report!r}"
+        )
+
+    invalid_simple = (
+        "mierus://user:pass@example.test?profile=default&port=443&"
+        "port=444&protocol=TCP"
+    )
+    for rejected in (invalid_simple, "mieru://AQIDBA=="):
+        rejected_status, rejected_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "surge",
+                "ver": "4",
+                "url": rejected + "|" + SUBSCRIPTION.strip(),
+                "list": "true",
+                "explain": "true",
+            },
+        )
+        if rejected_status != 200:
+            raise AssertionError(
+                "a rejected Mieru link prevented the remaining valid node from "
+                f"converting: HTTP {rejected_status} {rejected_body!r}"
+            )
+        rejected_report = json.loads(rejected_body)
+        if (
+            rejected_report.get("nodes", {}).get("total") != 1
+            or rejected_report.get("nodes", {}).get("generated") != 1
+            or rejected_report.get("nodes", {}).get("unsupported") != 0
+        ):
+            raise AssertionError(
+                f"invalid Mieru input did not fail closed: {rejected_report!r}"
+            )
+
+    for target, headers in (
+        ("clash", {}),
+        ("clashr", {}),
+        ("auto", {"User-Agent": "clash.meta/1.19.29"}),
+        ("auto", {"User-Agent": "ClashForAndroid/1.3.3R2"}),
+    ):
+        standard_status, standard_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": target,
+                "url": MIERU_STANDARD_PROTOBUF_URI,
+                "list": "true",
+            },
+            headers=headers,
+        )
+        standard_text = standard_body.decode("utf-8", errors="replace")
+        if (
+            standard_status != 200
+            or standard_text.count("type: mieru") != 4
+            or "server: localhost" not in standard_text
+            or "port: 6666" not in standard_text
+            or "port-range: 9999-9999" not in standard_text
+            or "transport: TCP" not in standard_text
+            or "transport: UDP" not in standard_text
+            or "multiplexing: MULTIPLEXING_HIGH" not in standard_text
+        ):
+            raise AssertionError(
+                "official standard Mieru URI did not stay on the Mihomo-only "
+                f"route for target={target}: HTTP {standard_status} {standard_text!r}"
+            )
+
+    clash_status, clash_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "clash",
+            "url": MIERU_OFFICIAL_SIMPLE_URI,
+            "list": "true",
+        },
+    )
+    clash_text = clash_body.decode("utf-8", errors="replace")
+    if (
+        clash_status != 200
+        or clash_text.count("type: mieru") != 4
+        or "port-range: 9998-9999" not in clash_text
+        or "handshake-mode: HANDSHAKE_NO_WAIT" not in clash_text
+        or "traffic-pattern: CCoQARoECAEQCiIYCAMQASoIMDAwMTAyMDMqCDA0MDUwNjA3"
+        not in clash_text
+    ):
+        raise AssertionError(
+            "Mihomo Mieru parsing changed while calibrating Legacy: "
+            f"HTTP {clash_status} {clash_text!r}"
+        )
+
+
+def netch_legacy_parser_baseline(base_url: str) -> None:
+    def netch_link(node: dict[str, object]) -> str:
+        payload = json.dumps(node, separators=(",", ":")).encode("utf-8")
+        return "Netch://" + base64.urlsafe_b64encode(payload).decode(
+            "ascii"
+        ).rstrip("=")
+
+    def data_url(document: dict[str, object]) -> str:
+        payload = json.dumps(document, separators=(",", ":")).encode("utf-8")
+        return "data:application/json;base64," + base64.b64encode(
+            payload
+        ).decode("ascii")
+
+    def convert(source: str) -> list[dict[str, object]]:
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "singbox",
+                "url": source,
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+        )
+        if status != 200:
+            raise AssertionError(
+                f"Netch Legacy conversion returned HTTP {status}: {body!r}"
+            )
+        return json.loads(body).get("outbounds", [])
+
+    private_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+    public_key = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="
+    preshared_key = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC="
+    current_nodes: list[dict[str, object]] = [
+        {
+            "Type": "SOCKS",
+            "Group": "Netch",
+            "Remark": "Netch Modern SOCKS",
+            "Hostname": "socks-netch.example.test",
+            "Port": 1080,
+            "Username": "netch-user",
+            "Password": "netch-pass",
+            "Version": "5",
+        },
+        {
+            "Type": "VMess",
+            "Group": "Netch",
+            "Remark": "Netch Modern VMess",
+            "Hostname": "vmess-netch.example.test",
+            "Port": 443,
+            "UserID": "11111111-1111-1111-1111-111111111111",
+            "AlterID": 0,
+            "EncryptMethod": "auto",
+            "TransferProtocol": "ws",
+            "PacketEncoding": "xudp",
+            "FakeType": "none",
+            "Host": "cdn-netch.example.test",
+            "Path": "/vmess",
+            "TLSSecureType": "tls",
+            "ServerName": "vmess-sni.example.test",
+        },
+        {
+            "Type": "VLESS",
+            "Group": "Netch",
+            "Remark": "Netch Modern VLESS",
+            "Hostname": "vless-netch.example.test",
+            "Port": 8443,
+            "UserID": "22222222-2222-2222-2222-222222222222",
+            "EncryptMethod": "none",
+            "TransferProtocol": "grpc",
+            "PacketEncoding": "xudp",
+            "FakeType": "multi",
+            "Path": "netch-service",
+            "TLSSecureType": "tls",
+            "ServerName": "vless-sni.example.test",
+        },
+        {
+            "Type": "Trojan",
+            "Group": "Netch",
+            "Remark": "Netch Modern Trojan",
+            "Hostname": "trojan-netch.example.test",
+            "Port": 443,
+            "Password": "netch-trojan-pass",
+            "Host": "trojan-sni.example.test",
+            "TLSSecureType": "tls",
+        },
+        {
+            "Type": "WireGuard",
+            "Group": "Netch",
+            "Remark": "Netch Modern WireGuard",
+            "Hostname": "wireguard-netch.example.test",
+            "Port": 51820,
+            "LocalAddresses": "10.66.0.2,2001:db8:66::2",
+            "PeerPublicKey": public_key,
+            "PrivateKey": private_key,
+            "PreSharedKey": preshared_key,
+            "MTU": 1280,
+        },
+        {
+            "Type": "SSH",
+            "Remark": "Netch Unsupported SSH",
+            "Hostname": "ssh-netch.example.test",
+            "Port": 22,
+            "User": "root",
+            "Password": "not-a-proxy-protocol",
+        },
+    ]
+
+    direct = convert(netch_link(current_nodes[0]))
+    if len(direct) != 1 or any(
+        direct[0].get(key) != value
+        for key, value in {
+            "type": "socks",
+            "tag": "Netch Modern SOCKS",
+            "server": "socks-netch.example.test",
+            "server_port": 1080,
+            "version": "5",
+            "username": "netch-user",
+            "password": "netch-pass",
+        }.items()
+    ):
+        raise AssertionError(f"current Netch SOCKS link drifted: {direct!r}")
+
+    outbounds = {
+        item.get("tag"): item for item in convert(data_url({"Server": current_nodes}))
+    }
+    if set(outbounds) != {
+        "Netch Modern SOCKS",
+        "Netch Modern VMess",
+        "Netch Modern VLESS",
+        "Netch Modern Trojan",
+        "Netch Modern WireGuard",
+    }:
+        raise AssertionError(
+            f"current Netch settings.json node set drifted: {outbounds!r}"
+        )
+
+    vmess = outbounds["Netch Modern VMess"]
+    if (
+        vmess.get("packet_encoding") != "xudp"
+        or vmess.get("transport")
+        != {
+            "type": "ws",
+            "path": "/vmess",
+            "headers": {"Host": "cdn-netch.example.test"},
+        }
+        or vmess.get("tls", {}).get("server_name")
+        != "vmess-sni.example.test"
+    ):
+        raise AssertionError(f"current Netch VMess fields drifted: {vmess!r}")
+
+    vless = outbounds["Netch Modern VLESS"]
+    if (
+        vless.get("packet_encoding") != "xudp"
+        or vless.get("transport")
+        != {"type": "grpc", "service_name": "netch-service"}
+        or vless.get("tls", {}).get("server_name")
+        != "vless-sni.example.test"
+    ):
+        raise AssertionError(f"current Netch VLESS fields drifted: {vless!r}")
+
+    trojan = outbounds["Netch Modern Trojan"]
+    if (
+        "transport" in trojan
+        or trojan.get("tls", {}).get("server_name")
+        != "trojan-sni.example.test"
+    ):
+        raise AssertionError(f"current Netch Trojan fields drifted: {trojan!r}")
+
+    wireguard = outbounds["Netch Modern WireGuard"]
+    if (
+        wireguard.get("local_address") != ["10.66.0.2/32", "2001:db8:66::2/128"]
+        or wireguard.get("private_key") != private_key
+        or len(wireguard.get("peers", [])) != 1
+        or wireguard["peers"][0].get("public_key") != public_key
+        or wireguard["peers"][0].get("pre_shared_key") != preshared_key
+        or wireguard.get("mtu") != 1280
+    ):
+        raise AssertionError(
+            f"current Netch WireGuard fields drifted: {wireguard!r}"
+        )
+
+    legacy_nodes = [
+        {
+            "Type": "Socks5",
+            "Remark": "Netch Legacy Socks5",
+            "Hostname": "legacy-socks.example.test",
+            "Port": "1081",
+            "Username": "legacy-user",
+            "Password": "legacy-pass",
+        },
+        {
+            "Type": "VMess",
+            "Remark": "Netch Legacy VMess",
+            "Hostname": "legacy-vmess.example.test",
+            "Port": "443",
+            "UserID": "33333333-3333-3333-3333-333333333333",
+            "AlterID": "0",
+            "EncryptMethod": "auto",
+            "TransferProtocol": "ws",
+            "Host": "legacy-cdn.example.test",
+            "Path": "/legacy",
+            "TLSSecure": True,
+        },
+    ]
+    legacy = {
+        item.get("tag"): item
+        for item in convert(
+            data_url({"ModeFileNameType": 0, "Server": legacy_nodes})
+        )
+    }
+    if (
+        set(legacy) != {"Netch Legacy Socks5", "Netch Legacy VMess"}
+        or legacy["Netch Legacy VMess"].get("tls", {}).get("enabled") is not True
+    ):
+        raise AssertionError(f"legacy Netch fields no longer convert: {legacy!r}")
+
+    packet_vless = {
+        **current_nodes[2],
+        "Remark": "Netch VLESS Packet",
+        "PacketEncoding": "packet",
+    }
+    status, packet_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "vless",
+            "url": netch_link(packet_vless),
+            "config": DISABLE_RULEGEN_CONFIG,
+            "list": "true",
+        },
+    )
+    packet_output = packet_body.decode("utf-8", errors="replace")
+    if status != 200 or "packet-encoding=packet" not in packet_output:
+        raise AssertionError(
+            f"Netch VLESS packet encoding was not preserved: {packet_output!r}"
+        )
+    packet_singbox = convert(
+        data_url({"Server": [current_nodes[0], packet_vless]})
+    )
+    if (
+        len(packet_singbox) != 1
+        or packet_singbox[0].get("tag") != "Netch Modern SOCKS"
+    ):
+        raise AssertionError(
+            "sing-box did not isolate unsupported packet encoding: "
+            f"{packet_singbox!r}"
+        )
+
+    invalid_nodes = [
+        current_nodes[0],
+        {**current_nodes[0], "Remark": "Netch SOCKS4", "Version": "4"},
+        {**current_nodes[1], "Remark": "Netch Invalid UUID", "UserID": "bad"},
+        {
+            **current_nodes[4],
+            "Remark": "Netch Incomplete WireGuard",
+            "PeerPublicKey": "",
+        },
+        current_nodes[5],
+    ]
+    accepted = convert(data_url({"Server": invalid_nodes}))
+    if len(accepted) != 1 or accepted[0].get("tag") != "Netch Modern SOCKS":
+        raise AssertionError(
+            f"unsupported or invalid Netch nodes did not fail closed: {accepted!r}"
+        )
+
+    for source in (
+        "Netch://not-base64",
+        data_url({"Server": "not-an-array"}),
+    ):
+        status, _, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "singbox",
+                "url": source,
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+        )
+        if status != 400:
+            raise AssertionError(f"invalid Netch input was accepted: {source!r}")
+
+    clash_status, _, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "clash",
+            "url": netch_link(current_nodes[0]),
+            "config": DISABLE_RULEGEN_CONFIG,
+            "list": "true",
+        },
+    )
+    if clash_status != 400:
+        raise AssertionError(
+            "Mihomo route changed while calibrating the Legacy Netch parser"
+        )
+
+
+def target_generation_stats_baseline(base_url: str) -> None:
+    supported_sources = {
+        "mellow": SUBSCRIPTION.strip(),
+        "sssub": SUBSCRIPTION.strip(),
+        "ss": SUBSCRIPTION.strip(),
+        "ssr": SSR_IPV6_URI,
+        "v2ray": VMESS_QR_URI,
+        "v2rayn": VMESS_QR_URI,
+        "v2rayng": VMESS_QR_URI,
+        "trojan": TROJAN_WS_URI,
+        "vless": VLESS_URI,
+        "hysteria2": HYSTERIA2_URI,
+        "mixed": SUBSCRIPTION.strip(),
+        "quan": SUBSCRIPTION.strip(),
+        "quanx": SUBSCRIPTION.strip(),
+        "ssd": SUBSCRIPTION.strip(),
+        "singbox": SUBSCRIPTION.strip(),
+        "surge": SUBSCRIPTION.strip(),
+        "surfboard": SUBSCRIPTION.strip(),
+        "loon": SUBSCRIPTION.strip(),
+    }
+    for target, supported in supported_sources.items():
+        params = {
+            "target": target,
+            "url": MIERU_OFFICIAL_SIMPLE_URI + "|" + supported,
+            "list": "true",
+            "explain": "true",
+        }
+        if target == "surge":
+            params["ver"] = "4"
+        status, body, _ = request(base_url, "/sub", params)
+        if status != 200:
+            raise AssertionError(
+                f"target={target} mixed supported/unsupported generation "
+                f"failed: HTTP {status} {body!r}"
+            )
+        report = json.loads(body)
+        nodes = report.get("nodes", {})
+        if (
+            nodes.get("total") != 5
+            or nodes.get("generated") != 1
+            or nodes.get("unsupported") != 4
+            or nodes.get("unsupported_protocols") != ["mieru:4"]
+        ):
+            raise AssertionError(
+                f"target={target} generation statistics drifted: {report!r}"
+            )
+
+        unsupported_params = {
+            "target": target,
+            "url": MIERU_OFFICIAL_SIMPLE_URI,
+            "list": "true",
+        }
+        if target == "surge":
+            unsupported_params["ver"] = "4"
+        unsupported_status, _, _ = request(
+            base_url, "/sub", unsupported_params
+        )
+        if unsupported_status != 400:
+            raise AssertionError(
+                f"target={target} accepted an all-unsupported node set: "
+                f"HTTP {unsupported_status}"
+            )
+
+
+def v2ray_client_target_baseline(base_url: str) -> None:
+    def decode_profiles(body: bytes, *, outer_base64: bool = False) -> list[tuple[str, dict]]:
+        raw = base64.b64decode(body) if outer_base64 else body
+        result: list[tuple[str, dict]] = []
+        for line in raw.decode("utf-8").splitlines():
+            prefix = "v2rayn://"
+            if not line.startswith(prefix) or "/" not in line[len(prefix) :]:
+                raise AssertionError(f"invalid v2rayN internal link: {line!r}")
+            scheme, encoded = line[len(prefix) :].split("/", 1)
+            padded = encoded + "=" * (-len(encoded) % 4)
+            profile = json.loads(base64.urlsafe_b64decode(padded))
+            if profile.get("ConfigVersion") != 4:
+                raise AssertionError(f"invalid ProfileItem version: {profile!r}")
+            result.append((scheme, profile))
+        return result
+
+    common_sources = (
+        VMESS_QR_URI,
+        SUBSCRIPTION.strip(),
+        SOCKS_CURRENT_URI,
+        VLESS_XHTTP_URI,
+        TROJAN_WS_URI,
+        HYSTERIA2_MODERN_URI,
+        WIREGUARD_URI,
+        HTTP_LEGACY_URI,
+    )
+    desktop_sources = common_sources + (
+        TUIC_V2RAYN_URI,
+        ANYTLS_V2RAYN_URI,
+        NAIVE_HTTPS_URI,
+        NAIVE_QUIC_URI,
+        HYSTERIA2_REALM_V2RAYN_URI,
+    )
+
+    def convert(target: str, sources: tuple[str, ...], **extra: str) -> tuple[int, bytes, dict[str, str]]:
+        params = {
+            "target": target,
+            "url": "|".join(sources),
+            "list": "true",
+            "config": DISABLE_RULEGEN_CONFIG,
+        }
+        params.update(extra)
+        return request(base_url, "/sub", params)
+
+    desktop_status, desktop_body, _ = convert("v2rayn", desktop_sources)
+    if desktop_status != 200:
+        raise AssertionError(
+            f"v2rayN current protocol matrix failed: HTTP {desktop_status} "
+            f"{desktop_body!r}"
+        )
+    desktop = decode_profiles(desktop_body)
+    desktop_schemes = [scheme for scheme, _ in desktop]
+    if desktop_schemes != [
+        "vmess",
+        "shadowsocks",
+        "socks",
+        "vless",
+        "trojan",
+        "hysteria2",
+        "wireguard",
+        "http",
+        "tuic",
+        "anytls",
+        "naive",
+        "naive",
+        "hysteria2",
+    ]:
+        raise AssertionError(f"v2rayN internal schemes drifted: {desktop!r}")
+    desktop_types = [profile["ConfigType"] for _, profile in desktop]
+    if desktop_types != [1, 3, 4, 5, 6, 7, 9, 10, 8, 11, 12, 12, 7]:
+        raise AssertionError(f"v2rayN protocol matrix drifted: {desktop!r}")
+
+    desktop_by_type: dict[int, list[dict]] = {}
+    for _, profile in desktop:
+        desktop_by_type.setdefault(profile["ConfigType"], []).append(profile)
+    vmess = desktop_by_type[1][0]
+    if (
+        vmess.get("Network") != "grpc"
+        or vmess.get("ProtoExtraObj", {}).get("AlterId") != "0"
+        or vmess.get("ProtoExtraObj", {}).get("VmessSecurity")
+        != "chacha20-poly1305"
+        or vmess.get("TransportExtraObj", {}).get("GrpcServiceName")
+        != "grpc-service"
+    ):
+        raise AssertionError(f"v2rayN VMess profile drifted: {vmess!r}")
+    shadowsocks = desktop_by_type[3][0]
+    if (
+        shadowsocks.get("CoreType") != 24
+        or shadowsocks.get("ProtoExtraObj", {}).get("SsMethod")
+        != "aes-128-gcm"
+    ):
+        raise AssertionError(f"v2rayN Shadowsocks profile drifted: {shadowsocks!r}")
+    vless = desktop_by_type[5][0]
+    if (
+        vless.get("Network") != "xhttp"
+        or vless.get("StreamSecurity") != "reality"
+        or vless.get("PublicKey")
+        != "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        or vless.get("ShortId") != "00112233"
+        or vless.get("TransportExtraObj", {}).get("XhttpMode")
+        != "stream-one"
+    ):
+        raise AssertionError(f"v2rayN VLESS/XHTTP profile drifted: {vless!r}")
+    socks = desktop_by_type[4][0]
+    if (
+        socks.get("Username") != "current-user"
+        or socks.get("Password") != "p@ss+word:tail"
+    ):
+        raise AssertionError(f"v2rayN SOCKS profile drifted: {socks!r}")
+    trojan = desktop_by_type[6][0]
+    if (
+        trojan.get("Password") != "p@ss+word/token"
+        or trojan.get("Network") != "ws"
+        or trojan.get("Sni") != "trojan-tls.example.test"
+        or trojan.get("TransportExtraObj", {}).get("Host")
+        != "ws.example.test"
+    ):
+        raise AssertionError(f"v2rayN Trojan profile drifted: {trojan!r}")
+    hysteria2 = desktop_by_type[7][0]
+    if (
+        hysteria2.get("ProtoExtraObj", {}).get("SalamanderPass")
+        != "obfs+secret"
+        or hysteria2.get("ProtoExtraObj", {}).get("Ports")
+        != "8443,12000-12002"
+        or hysteria2.get("Sni") != "hy2-tls.example.test"
+    ):
+        raise AssertionError(f"v2rayN Hysteria2 profile drifted: {hysteria2!r}")
+    realm = desktop_by_type[7][1]
+    realm_extra = realm.get("ProtoExtraObj", {})
+    if (
+        realm.get("Password") != "realm-password"
+        or realm.get("CoreType") != 24
+        or realm_extra.get("Hy2RealmUrl")
+        != (
+            "realm://realm-token@rendezvous.example.test:8443/realm-id"
+            "?stun=stun.example.test%3A3478"
+        )
+        or realm_extra.get("SalamanderPass") != "realm-obfs"
+        or realm_extra.get("GeckoMinPacketSize") != "600"
+        or realm_extra.get("GeckoMaxPacketSize") != "1300"
+    ):
+        raise AssertionError(f"v2rayN Hysteria2 Realm/Gecko drifted: {realm!r}")
+    wireguard = desktop_by_type[9][0]
+    if (
+        wireguard.get("Password") != "private+key/value="
+        or wireguard.get("Address") != "wg.example.test"
+        or wireguard.get("ProtoExtraObj", {}).get("WgPublicKey")
+        != "public+key/value="
+        or wireguard.get("ProtoExtraObj", {}).get("WgPresharedKey")
+        != "preshared+key/value="
+        or wireguard.get("ProtoExtraObj", {}).get("WgReserved") != "1,2,3"
+        or wireguard.get("ProtoExtraObj", {}).get("WgMtu") != 1420
+    ):
+        raise AssertionError(f"v2rayN WireGuard profile drifted: {wireguard!r}")
+    http = desktop_by_type[10][0]
+    if (
+        http.get("Username") != "http-user"
+        or http.get("Password") != "http-pass"
+        or http.get("Address") != "2001:db8::28"
+    ):
+        raise AssertionError(f"v2rayN HTTP profile drifted: {http!r}")
+    tuic = desktop_by_type[8][0]
+    if (
+        tuic.get("Username") != "99999999-9999-4999-8999-999999999999"
+        or tuic.get("Password") != "tuic-password"
+        or tuic.get("ProtoExtraObj", {}).get("CongestionControl") != "bbr"
+        or tuic.get("Alpn") != "h3"
+    ):
+        raise AssertionError(f"v2rayN TUIC profile drifted: {tuic!r}")
+    anytls = desktop_by_type[11][0]
+    if (
+        anytls.get("Password") != "anytls-password"
+        or anytls.get("StreamSecurity") != "tls"
+        or anytls.get("Sni") != "anytls-v2rayn-tls.example.test"
+    ):
+        raise AssertionError(f"v2rayN AnyTLS profile drifted: {anytls!r}")
+    for config_type in (8, 11, 12):
+        if any(item.get("CoreType") != 24 for item in desktop_by_type[config_type]):
+            raise AssertionError(
+                f"v2rayN sing-box-only core selection drifted: "
+                f"{desktop_by_type[config_type]!r}"
+            )
+    naive_profiles = desktop_by_type[12]
+    if (
+        [item.get("ProtoExtraObj", {}).get("NaiveQuic") for item in naive_profiles]
+        != [False, True]
+        or naive_profiles[0].get("Username") != "naive-user"
+        or naive_profiles[0].get("Password") != "naive+password"
+        or naive_profiles[0].get("ProtoExtraObj", {}).get("InsecureConcurrency")
+        != 4
+    ):
+        raise AssertionError(
+            f"v2rayN Naive HTTPS/QUIC mapping drifted: {naive_profiles!r}"
+        )
+
+    android_status, android_body, _ = convert("v2rayng", common_sources)
+    if android_status != 200:
+        raise AssertionError(
+            f"v2rayNG current protocol matrix failed: HTTP {android_status} "
+            f"{android_body!r}"
+        )
+    android = decode_profiles(android_body)
+    android_schemes = [scheme for scheme, _ in android]
+    if android_schemes != [
+        "vmess",
+        "shadowsocks",
+        "socks",
+        "vless",
+        "trojan",
+        "hysteria2",
+        "wireguard",
+        "http",
+    ]:
+        raise AssertionError(f"v2rayNG internal schemes drifted: {android!r}")
+    android_types = [profile["ConfigType"] for _, profile in android]
+    if android_types != [1, 3, 4, 5, 6, 7, 9, 10]:
+        raise AssertionError(f"v2rayNG protocol matrix drifted: {android!r}")
+    android_vmess = android[0][1]
+    if (
+        android_vmess.get("ProtoExtraObj", {}).get("AlterId") != 0
+        or android_vmess.get("Network") != "grpc"
+    ):
+        raise AssertionError(f"v2rayNG VMess internal mapping drifted: {android_vmess!r}")
+    android_wireguard = next(
+        profile for _, profile in android if profile.get("ConfigType") == 9
+    )
+    if (
+        android_wireguard.get("PublicKey") != "public+key/value="
+        or android_wireguard.get("ProtoExtraObj", {}).get("WgPublicKey")
+        != "public+key/value="
+    ):
+        raise AssertionError(
+            f"v2rayNG WireGuard public-key compatibility drifted: "
+            f"{android_wireguard!r}"
+        )
+
+    for unsupported in (
+        TUIC_V2RAYN_URI,
+        ANYTLS_V2RAYN_URI,
+        NAIVE_HTTPS_URI,
+        HYSTERIA2_REALM_V2RAYN_URI,
+    ):
+        unsupported_status, _, _ = convert("v2rayng", (unsupported,))
+        if unsupported_status != 400:
+            raise AssertionError(
+                "v2rayNG accepted a desktop-only protocol: "
+                f"{unsupported!r} HTTP {unsupported_status}"
+            )
+    invalid_gecko_status, _, _ = convert(
+        "v2rayn",
+        (
+            HYSTERIA2_REALM_V2RAYN_URI.replace(
+                "maxPacketSize=1300", "maxPacketSize=4096"
+            ),
+        ),
+    )
+    if invalid_gecko_status != 400:
+        raise AssertionError(
+            "v2rayN accepted Gecko packet sizes that the client would silently "
+            f"reset: HTTP {invalid_gecko_status}"
+        )
+    for target in ("v2rayn", "v2rayng"):
+        for unsupported in (
+            VMESS_QR_QUIC_URI,
+            VMESS_QR_UNSUPPORTED_SECURITY_URI,
+            VLESS_UNSUPPORTED_FLOW_URI,
+            HTTPS_LEGACY_URI,
+        ):
+            unsupported_status, _, _ = convert(target, (unsupported,))
+            if unsupported_status != 400:
+                raise AssertionError(
+                    f"target={target} downgraded an unsupported node: "
+                    f"{unsupported!r} HTTP {unsupported_status}"
+                )
+
+    encoded_status, encoded_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "v2rayn",
+            "url": VMESS_QR_URI,
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    if encoded_status != 200 or len(decode_profiles(encoded_body, outer_base64=True)) != 1:
+        raise AssertionError(
+            f"v2rayN encoded subscription contract failed: "
+            f"HTTP {encoded_status} {encoded_body!r}"
+        )
+
+    for user_agent, expected_target in (
+        ("v2rayNG/1.10.29", "v2rayng"),
+        ("V2RayN/7.14.3", "v2rayn"),
+    ):
+        status, body, headers = request(
+            base_url,
+            "/sub",
+            {
+                "target": "auto",
+                "url": VMESS_QR_URI,
+                "list": "true",
+                "config": DISABLE_RULEGEN_CONFIG,
+            },
+            {"User-Agent": user_agent},
+        )
+        if status != 200 or len(decode_profiles(body)) != 1:
+            raise AssertionError(
+                f"auto target for {user_agent} did not select {expected_target}: "
+                f"HTTP {status} {body!r}"
+            )
+        assert_vary_header(headers, "User-Agent", f"auto {expected_target}")
+
+    legacy_status, legacy_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "v2ray",
+            "url": VMESS_QR_URI,
+            "list": "true",
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    if (
+        legacy_status != 200
+        or not legacy_body.decode("utf-8").startswith("vmess://")
+        or b"v2rayn://" in legacy_body
+    ):
+        raise AssertionError(
+            f"historical target=v2ray output contract changed: "
+            f"HTTP {legacy_status} {legacy_body!r}"
+        )
+
+
+def shadowrocket_target_baseline(base_url: str) -> None:
+    sources = (
+        SUBSCRIPTION.strip(),
+        SSR_IPV6_URI,
+        VMESS_QR_URI,
+        VLESS_URI,
+        TROJAN_WS_URI,
+        HYSTERIA2_URI,
+        HYSTERIA_SHADOWROCKET_URI,
+        ANYTLS_SHADOWROCKET_URI,
+        MIERU_OFFICIAL_SIMPLE_URI,
+    )
+    params = {
+        "target": "shadowrocket",
+        "url": "|".join(sources),
+        "list": "true",
+        "config": DISABLE_RULEGEN_CONFIG,
+    }
+    status, body, _ = request(base_url, "/sub", params)
+    if status != 200:
+        raise AssertionError(
+            f"Shadowrocket standard-link target failed: HTTP {status} {body!r}"
+        )
+    raw_output = body.decode("utf-8")
+    schemes = [line.split("://", 1)[0] for line in raw_output.splitlines()]
+    if schemes != [
+        "ss",
+        "ssr",
+        "vmess",
+        "vless",
+        "trojan",
+        "hysteria2",
+        "hysteria",
+        "anytls",
+        "mierus",
+    ]:
+        raise AssertionError(
+            f"Shadowrocket stage-two protocol matrix drifted: {raw_output!r}"
+        )
+
+    output_lines = raw_output.splitlines()
+    legacy_sources = "|".join(sources[:6])
+    legacy_shadowrocket_status, legacy_shadowrocket_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "shadowrocket",
+            "url": legacy_sources,
+            "list": "true",
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    legacy_mixed_status, legacy_mixed_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "mixed",
+            "url": legacy_sources,
+            "list": "true",
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    if (
+        legacy_shadowrocket_status != 200
+        or legacy_mixed_status != 200
+        or legacy_shadowrocket_body != legacy_mixed_body
+        or legacy_shadowrocket_body.decode("utf-8")
+        != "\n".join(output_lines[:6]) + "\n"
+        or hashlib.sha256(legacy_mixed_body).hexdigest()
+        != SHADOWROCKET_STAGE_ONE_MIXED_SHA256
+    ):
+        raise AssertionError(
+            "Shadowrocket changed the published six-protocol mixed contract: "
+            f"shadowrocket={legacy_shadowrocket_body!r} mixed={legacy_mixed_body!r}"
+        )
+    hysteria_parts = urllib.parse.urlsplit(output_lines[6])
+    hysteria_query = urllib.parse.parse_qs(
+        hysteria_parts.query, keep_blank_values=True
+    )
+    if (
+        hysteria_parts.hostname != "2001:db8::14"
+        or hysteria_parts.port != 36712
+        or hysteria_query
+        != {
+            "protocol": ["udp"],
+            "auth": ["p@ss+word"],
+            "peer": ["hy1-tls.example.test"],
+            "insecure": ["1"],
+            "upmbps": ["100"],
+            "downmbps": ["200"],
+            "alpn": ["hysteria"],
+            "obfs": ["xplus"],
+            "obfsParam": ["obfs+secret"],
+        }
+        or urllib.parse.unquote(hysteria_parts.fragment)
+        != "Hysteria V1+Literal"
+    ):
+        raise AssertionError(
+            f"Shadowrocket Hysteria v1 URI drifted: {output_lines[6]!r}"
+        )
+
+    anytls_parts = urllib.parse.urlsplit(output_lines[7])
+    anytls_query = urllib.parse.parse_qs(
+        anytls_parts.query, keep_blank_values=True
+    )
+    if (
+        urllib.parse.unquote(anytls_parts.username or "") != "p@ss+word"
+        or anytls_parts.hostname != "2001:db8::16"
+        or anytls_parts.port != 443
+        or anytls_query
+        != {"sni": ["anytls-shadowrocket.example.test"], "insecure": ["1"]}
+        or urllib.parse.unquote(anytls_parts.fragment) != "AnyTLS Shadowrocket"
+    ):
+        raise AssertionError(
+            f"Shadowrocket AnyTLS URI drifted: {output_lines[7]!r}"
+        )
+
+    mieru_parts = urllib.parse.urlsplit(output_lines[8])
+    mieru_query = urllib.parse.parse_qs(
+        mieru_parts.query, keep_blank_values=True
+    )
+    if (
+        urllib.parse.unquote(mieru_parts.username or "") != "baozi"
+        or urllib.parse.unquote(mieru_parts.password or "")
+        != "manlianpenfen"
+        or mieru_parts.hostname != "1.2.3.4"
+        or mieru_query
+        != {
+            "profile": ["default"],
+            "mtu": ["1400"],
+            "multiplexing": ["MULTIPLEXING_HIGH"],
+            "handshake-mode": ["HANDSHAKE_NO_WAIT"],
+            "traffic-pattern": [
+                "CCoQARoECAEQCiIYCAMQASoIMDAwMTAyMDMqCDA0MDUwNjA3"
+            ],
+            "port": ["6666", "9998-9999", "6489", "4896"],
+            "protocol": ["TCP", "TCP", "UDP", "UDP"],
+        }
+        or mieru_parts.fragment
+    ):
+        raise AssertionError(
+            f"Shadowrocket Mieru URI drifted: {output_lines[8]!r}"
+        )
+
+    encoded_status, encoded_body, _ = request(
+        base_url,
+        "/sub",
+        {**params, "list": "false"},
+    )
+    try:
+        decoded_output = base64.b64decode(encoded_body, validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError) as error:
+        raise AssertionError(
+            f"Shadowrocket encoded subscription is invalid: {encoded_body!r}"
+        ) from error
+    if encoded_status != 200 or decoded_output != raw_output:
+        raise AssertionError(
+            "Shadowrocket encoded and raw subscriptions diverged: "
+            f"HTTP {encoded_status} {decoded_output!r} != {raw_output!r}"
+        )
+
+    default_params = dict(params)
+    default_params.pop("list")
+    default_status, default_body, _ = request(base_url, "/sub", default_params)
+    try:
+        default_output = base64.b64decode(default_body, validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError) as error:
+        raise AssertionError(
+            f"Shadowrocket default subscription is invalid: {default_body!r}"
+        ) from error
+    if default_status != 200 or default_output != raw_output:
+        raise AssertionError(
+            "Shadowrocket default list mode changed: "
+            f"HTTP {default_status} {default_output!r} != {raw_output!r}"
+        )
+
+    mixed_status, mixed_body, _ = request(
+        base_url,
+        "/sub",
+        {**params, "target": "mixed"},
+    )
+    expected_mixed = "\n".join(output_lines[:6]) + "\n"
+    if (
+        mixed_status != 200
+        or mixed_body.decode("utf-8") != expected_mixed
+        or "hysteria://" in mixed_body.decode("utf-8")
+        or "anytls://" in mixed_body.decode("utf-8")
+    ):
+        raise AssertionError(
+            "introducing target=shadowrocket changed the historical mixed output: "
+            f"HTTP {mixed_status} {mixed_body!r} != {expected_mixed!r}"
+        )
+
+    isolated_legacy_targets = {
+        "ss": SUBSCRIPTION.strip(),
+        "ssr": SSR_IPV6_URI,
+        "v2ray": VMESS_QR_URI,
+        "trojan": TROJAN_WS_URI,
+        "vless": VLESS_URI,
+        "hysteria2": HYSTERIA2_URI,
+        "mixed": SUBSCRIPTION.strip(),
+    }
+    shadowrocket_only_sources = "|".join(
+        (
+            HYSTERIA_SHADOWROCKET_URI,
+            ANYTLS_SHADOWROCKET_URI,
+            MIERU_OFFICIAL_SIMPLE_URI,
+        )
+    )
+    for target, supported_source in isolated_legacy_targets.items():
+        isolation_status, isolation_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": target,
+                "url": supported_source + "|" + shadowrocket_only_sources,
+                "list": "true",
+                "explain": "true",
+                "config": DISABLE_RULEGEN_CONFIG,
+            },
+        )
+        isolation_report = (
+            json.loads(isolation_body) if isolation_status == 200 else {}
+        )
+        isolation_nodes = isolation_report.get("nodes", {})
+        if (
+            isolation_status != 200
+            or isolation_nodes.get("total") != 7
+            or isolation_nodes.get("generated") != 1
+            or isolation_nodes.get("unsupported") != 6
+            or set(isolation_nodes.get("unsupported_protocols", []))
+            != {"hysteria:1", "anytls:1", "mieru:4"}
+        ):
+            raise AssertionError(
+                "Shadowrocket-only protocols leaked into the historical "
+                f"target={target} capability matrix: HTTP {isolation_status} "
+                f"{isolation_report!r}"
+            )
+
+        unsupported_status, unsupported_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": target,
+                "url": shadowrocket_only_sources,
+                "list": "true",
+                "config": DISABLE_RULEGEN_CONFIG,
+            },
+        )
+        if unsupported_status != 400:
+            raise AssertionError(
+                "Shadowrocket-only protocols were accepted by the historical "
+                f"target={target}: HTTP {unsupported_status} "
+                f"{unsupported_body!r}"
+            )
+
+    auto_status, auto_body, auto_headers = request(
+        base_url,
+        "/sub",
+        {
+            **params,
+            "target": "auto",
+            "explain": "true",
+        },
+        {"User-Agent": "Shadowrocket/2.2.60"},
+    )
+    if auto_status != 200:
+        raise AssertionError(
+            f"Shadowrocket auto target failed: HTTP {auto_status} {auto_body!r}"
+        )
+    assert_vary_header(auto_headers, "User-Agent", "auto Shadowrocket")
+    report = json.loads(auto_body)
+    if (
+        report.get("target") != "shadowrocket"
+        or report.get("mode", {}).get("simple_subscription") is not True
+        or report.get("mode", {}).get("remote_subscription_backend")
+        != "server-side-parse"
+        or report.get("nodes", {}).get("total") != 12
+        or report.get("nodes", {}).get("generated") != 12
+        or report.get("nodes", {}).get("unsupported") != 0
+    ):
+        raise AssertionError(
+            f"Shadowrocket auto route diagnostics drifted: {report!r}"
+        )
+
+    unsupported_status, _, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "shadowrocket",
+            "url": MIERU_STANDARD_PROTOBUF_URI,
+            "list": "true",
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    if unsupported_status != 400:
+        raise AssertionError(
+            "Shadowrocket routed the protobuf mieru:// link through Legacy: "
+            f"HTTP {unsupported_status}"
+        )
+
+    unknown_mieru_status, unknown_mieru_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "shadowrocket",
+            "url": (
+                "mierus://user:pass@example.test?profile=default&port=443"
+                "&protocol=TCP&future-option=must-not-disappear"
+            ),
+            "list": "true",
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    if unknown_mieru_status != 400 or b"mierus://" in unknown_mieru_body:
+        raise AssertionError(
+            "Shadowrocket silently discarded an unknown Mieru parameter: "
+            f"HTTP {unknown_mieru_status} {unknown_mieru_body!r}"
+        )
+
+    remote_mieru_subscription = base64.b64encode(
+        (MIERU_OFFICIAL_SIMPLE_URI + "\n").encode("utf-8")
+    ).decode("ascii")
+    remote_mieru_source = (
+        "data:text/plain;base64,"
+        + base64.b64encode(remote_mieru_subscription.encode("ascii")).decode(
+            "ascii"
+        )
+    )
+    filtered_mieru_status, filtered_mieru_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "shadowrocket",
+            "url": remote_mieru_source,
+            "include": "9998-9999",
+            "list": "true",
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    filtered_mieru_lines = filtered_mieru_body.decode("utf-8").splitlines()
+    filtered_mieru_query = (
+        urllib.parse.parse_qs(
+            urllib.parse.urlsplit(filtered_mieru_lines[0]).query,
+            keep_blank_values=True,
+        )
+        if len(filtered_mieru_lines) == 1
+        else {}
+    )
+    if (
+        filtered_mieru_status != 200
+        or filtered_mieru_query.get("port") != ["9998-9999"]
+        or filtered_mieru_query.get("protocol") != ["TCP"]
+    ):
+        raise AssertionError(
+            "Shadowrocket did not preserve the filtered Mieru binding set: "
+            f"HTTP {filtered_mieru_status} {filtered_mieru_body!r}"
+        )
+
+    remote_mieru_status, remote_mieru_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "shadowrocket",
+            "url": remote_mieru_source,
+            "list": "true",
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    if remote_mieru_status != 200 or remote_mieru_body.decode("utf-8") != (
+        output_lines[8] + "\n"
+    ):
+        raise AssertionError(
+            "Shadowrocket remote subscription and direct Mieru paths diverged: "
+            f"HTTP {remote_mieru_status} {remote_mieru_body!r}"
+        )
+
+    lossy_status, lossy_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "shadowrocket",
+            "url": ANYTLS_MODERN_URI,
+            "list": "true",
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    if lossy_status != 400 or b"anytls://" in lossy_body:
+        raise AssertionError(
+            "Shadowrocket emitted non-portable AnyTLS extensions: "
+            f"HTTP {lossy_status} {lossy_body!r}"
+        )
+
+    multi_alpn_hysteria = HYSTERIA_V1_URI
+    multi_alpn_status, multi_alpn_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "shadowrocket",
+            "url": multi_alpn_hysteria,
+            "list": "true",
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    if multi_alpn_status != 400 or b"hysteria://" in multi_alpn_body:
+        raise AssertionError(
+            "Shadowrocket emitted Hysteria v1 with a non-standard ALPN list: "
+            f"HTTP {multi_alpn_status} {multi_alpn_body!r}"
+        )
+
+    portable_native_hysteria = HYSTERIA_V1_CLASH_CONFIG.replace(
+        "    ports: 443,10000-10002\n", ""
+    ).replace("    alpn: [h3, hysteria]", "    alpn: [hysteria]")
+    portable_native_hysteria_url = (
+        "data:text/plain;base64,"
+        + base64.b64encode(portable_native_hysteria.encode("utf-8")).decode(
+            "ascii"
+        )
+    )
+    portable_native_status, portable_native_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "shadowrocket",
+            "url": portable_native_hysteria_url,
+            "list": "true",
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    if portable_native_status != 200:
+        raise AssertionError(
+            "Shadowrocket rejected portable native Hysteria v1 input: "
+            f"HTTP {portable_native_status} {portable_native_body!r}"
+        )
+    portable_native_parts = urllib.parse.urlsplit(
+        portable_native_body.decode("utf-8").strip()
+    )
+    portable_native_query = urllib.parse.parse_qs(
+        portable_native_parts.query, keep_blank_values=True
+    )
+    if portable_native_query != {
+        "protocol": ["udp"],
+        "auth": ["clash-auth"],
+        "peer": ["clash-hy1.example.test"],
+        "insecure": ["1"],
+        "upmbps": ["30"],
+        "downmbps": ["200"],
+        "alpn": ["hysteria"],
+        "obfs": ["xplus"],
+        "obfsParam": ["clash-obfs"],
+    }:
+        raise AssertionError(
+            "Shadowrocket native Hysteria v1 projection drifted: "
+            f"{portable_native_body!r}"
+        )
+
+    nonportable_native_hysteria_url = (
+        "data:text/plain;base64,"
+        + base64.b64encode(HYSTERIA_V1_CLASH_CONFIG.encode("utf-8")).decode(
+            "ascii"
+        )
+    )
+    native_hysteria_status, native_hysteria_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "shadowrocket",
+            "url": nonportable_native_hysteria_url,
+            "list": "true",
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    if native_hysteria_status != 400 or b"hysteria://" in native_hysteria_body:
+        raise AssertionError(
+            "Shadowrocket silently discarded native Hysteria v1 ports or ALPN: "
+            f"HTTP {native_hysteria_status} {native_hysteria_body!r}"
+        )
+
+    mixed_lossy_status, mixed_lossy_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "shadowrocket",
+            "url": SUBSCRIPTION.strip() + "|" + ANYTLS_MODERN_URI,
+            "list": "true",
+            "explain": "true",
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    mixed_lossy_report = (
+        json.loads(mixed_lossy_body) if mixed_lossy_status == 200 else {}
+    )
+    mixed_lossy_nodes = mixed_lossy_report.get("nodes", {})
+    if (
+        mixed_lossy_status != 200
+        or mixed_lossy_nodes.get("total") != 2
+        or mixed_lossy_nodes.get("generated") != 1
+        or mixed_lossy_nodes.get("unsupported") != 1
+        or mixed_lossy_nodes.get("unsupported_protocols") != ["anytls:1"]
+    ):
+        raise AssertionError(
+            "Shadowrocket did not fail closed per node for mixed portable and "
+            f"non-portable links: HTTP {mixed_lossy_status} {mixed_lossy_report!r}"
+        )
+
+
+def _yaml_named_mapping_block(text: str, section: str, name: str) -> str:
+    lines = text.splitlines()
+    try:
+        section_index = lines.index(f"{section}:")
+    except ValueError as exc:
+        raise AssertionError(f"missing YAML section {section!r}") from exc
+    entry_prefix = f"  {name}:"
+    entry_index = None
+    for index in range(section_index + 1, len(lines)):
+        line = lines[index]
+        if line and not line.startswith(" "):
+            break
+        if line == entry_prefix:
+            entry_index = index
+            break
+    if entry_index is None:
+        raise AssertionError(
+            f"missing YAML mapping entry {section}.{name}"
+        )
+    end = entry_index + 1
+    while end < len(lines):
+        line = lines[end]
+        if line and len(line) - len(line.lstrip(" ")) <= 2:
+            break
+        end += 1
+    return "\n".join(lines[entry_index:end])
+
+
+def stash_target_baseline(base_url: str, fixture_base: str) -> None:
+    provider_source = (
+        "https://127.0.0.1:1/stash-provider.yaml?token=stash-provider-secret"
+    )
+    status, body, headers = request(
+        base_url,
+        "/sub",
+        {
+            "target": "stash",
+            "url": f"provider:Airport,interval:7200,{provider_source}",
+            "provider_headers": "X-Stash-Key",
+        },
+        {"X-Stash-Key": "stash-header-secret"},
+    )
+    text = body.decode("utf-8", errors="replace")
+    if status != 200:
+        raise AssertionError(
+            f"Stash provider route returned HTTP {status}: {text[-1200:]!r}"
+        )
+    assert_vary_header(headers, "X-Stash-Key", "Stash provider response")
+    required_fragments = (
+        "default-nameserver:",
+        "- 223.5.5.5",
+        "- 1.12.12.12",
+        "- doh3://223.5.5.5/dns-query",
+        "- https://1.12.12.12/dns-query",
+        "skip-cert-verify: false",
+        "follow-rule: false",
+        "proxy-providers:",
+        "Airport:",
+        f"url: {provider_source}",
+        "path: ./providers/Airport.yaml",
+        "interval: 7200",
+        "headers:",
+        "X-Stash-Key: stash-header-secret",
+        "use:",
+        "- Airport",
+    )
+    if any(fragment not in text for fragment in required_fragments):
+        raise AssertionError(f"Stash provider schema mismatch: {text!r}")
+    provider_block = text.split("Airport:", 1)[1].split("proxy-groups:", 1)[0]
+    forbidden_provider_fields = (
+        "type:",
+        "proxy:",
+        "header:",
+        "health-check:",
+        "override:",
+        "exclude-filter:",
+    )
+    if any(field in provider_block for field in forbidden_provider_fields):
+        raise AssertionError(
+            f"Stash provider leaked Mihomo-only fields: {provider_block!r}"
+        )
+
+    explain_status, explain_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "stash",
+            "url": f"provider:Airport,{provider_source}",
+            "explain": "true",
+        },
+    )
+    report = json.loads(explain_body)
+    if (
+        explain_status != 200
+        or report.get("target") != "stash"
+        or report.get("mode", {}).get("remote_subscription_backend")
+        != "stash-proxy-provider"
+        or report.get("resources", {}).get("remote_subscription_count") != 1
+        or report.get("output", {}).get("provider_count") != 1
+        or report.get("mode", {}).get("proxy_provider") is not True
+        or len(report.get("providers", [])) != 1
+        or report.get("providers", [{}])[0].get("backend") != "stash-client"
+        or report.get("nodes", {}).get("generated") != 0
+    ):
+        raise AssertionError(f"Stash explain contract mismatch: {report!r}")
+    if "stash-provider-secret" in explain_body.decode("utf-8", errors="replace"):
+        raise AssertionError("Stash explain leaked its provider source token")
+
+    FixtureHandler.stash_rule_source_count = 0
+    rules_config = fixture_base + "/external-stash-rules.ini"
+    rules_status, rules_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "stash",
+            "url": SUBSCRIPTION.strip(),
+            "config": rules_config,
+        },
+    )
+    rules_text = rules_body.decode("utf-8", errors="replace")
+    if rules_status != 200:
+        raise AssertionError(
+            f"Stash native rule-provider conversion failed: "
+            f"HTTP {rules_status} {rules_text!r}"
+        )
+    native_rule_fragments = (
+        "rule-providers:",
+    )
+    if any(fragment not in rules_text for fragment in native_rule_fragments):
+        raise AssertionError(
+            f"Stash native rule-provider schema mismatch: {rules_text!r}"
+        )
+    expected_rule_lines = {
+        "  - RULE-SET,stash-domain,RuleGroup",
+        "  - RULE-SET,stash-domain-yaml,RuleGroup",
+        "  - RULE-SET,stash-domain-text,RuleGroup",
+        "  - RULE-SET,stash-domain-api,RuleGroup",
+        "  - RULE-SET,stash-ip,RuleGroup,no-resolve",
+        "  - RULE-SET,stash-ip-yaml,RuleGroup",
+        "  - RULE-SET,stash-ip-text,RuleGroup",
+        "  - RULE-SET,stash-classical,RuleGroup",
+        "  - RULE-SET,stash-classical-yaml,RuleGroup",
+        "  - GEOSITE,telegram,RuleGroup",
+        "  - GEOIP,CN,RuleGroup",
+    }
+    missing_rule_lines = expected_rule_lines.difference(rules_text.splitlines())
+    if missing_rule_lines:
+        raise AssertionError(
+            f"Stash native rule references drifted: {sorted(missing_rule_lines)!r}"
+        )
+    provider_contracts = {
+        "stash-domain": (
+            "    behavior: domain",
+            "    format: mrs",
+            f"    url: {fixture_base}/stash-domain.mrs?token=stash-domain-token",
+            "    path: ./rules/stash-domain.mrs",
+            "    interval: 3600",
+        ),
+        "stash-domain-yaml": (
+            "    behavior: domain",
+            "    format: yaml",
+            f"    url: {fixture_base}/stash-domain-yaml.yaml?token=stash-domain-yaml-token",
+            "    path: ./rules/stash-domain-yaml.yaml",
+            "    interval: 3601",
+        ),
+        "stash-domain-text": (
+            "    behavior: domain",
+            "    format: text",
+            f"    url: {fixture_base}/stash-domain-text.list?token=stash-domain-text-token",
+            "    path: ./rules/stash-domain-text.txt",
+            "    interval: 3602",
+        ),
+        "stash-domain-api": (
+            "    behavior: domain",
+            "    format: yaml",
+            f"    url: {fixture_base}/stash-domain-api?token=stash-domain-api-token",
+            "    path: ./rules/stash-domain-api.yaml",
+            "    interval: 3603",
+        ),
+        "stash-ip": (
+            "    behavior: ipcidr",
+            "    format: mrs",
+            f"    url: {fixture_base}/stash-ip.mrs?token=stash-ip-token",
+            "    path: ./rules/stash-ip.mrs",
+            "    interval: 7200",
+        ),
+        "stash-ip-yaml": (
+            "    behavior: ipcidr",
+            "    format: yaml",
+            f"    url: {fixture_base}/stash-ip-yaml.yml?token=stash-ip-yaml-token",
+            "    path: ./rules/stash-ip-yaml.yaml",
+            "    interval: 7201",
+        ),
+        "stash-ip-text": (
+            "    behavior: ipcidr",
+            "    format: text",
+            f"    url: {fixture_base}/stash-ip-text.txt?token=stash-ip-text-token",
+            "    path: ./rules/stash-ip-text.txt",
+            "    interval: 7202",
+        ),
+        "stash-classical": (
+            "    behavior: classical",
+            "    format: text",
+            f"    url: {fixture_base}/stash-classical.txt?token=stash-classical-token",
+            "    path: ./rules/stash-classical.txt",
+            "    interval: 1800",
+        ),
+        "stash-classical-yaml": (
+            "    behavior: classical",
+            "    format: yaml",
+            f"    url: {fixture_base}/stash-classical-yaml.yaml?token=stash-classical-yaml-token",
+            "    path: ./rules/stash-classical-yaml.yaml",
+            "    interval: 1801",
+        ),
+    }
+    for provider_name, expected_fields in provider_contracts.items():
+        block = _yaml_named_mapping_block(
+            rules_text, "rule-providers", provider_name
+        )
+        block_lines = set(block.splitlines())
+        if any(field not in block_lines for field in expected_fields):
+            raise AssertionError(
+                f"Stash rule-provider {provider_name!r} drifted: {block!r}"
+            )
+    rule_provider_block = rules_text.split("rule-providers:", 1)[1].split(
+        "proxy-groups:", 1
+    )[0]
+    if "type:" in rule_provider_block or rules_text.count("no-resolve") != 1:
+        raise AssertionError(
+            f"Stash rule-provider leaked Mihomo fields or misplaced no-resolve: "
+            f"{rules_text!r}"
+        )
+    if FixtureHandler.stash_rule_source_count != 0:
+        raise AssertionError(
+            "Stash rule-provider sources were fetched by the conversion server: "
+            f"count={FixtureHandler.stash_rule_source_count}"
+        )
+
+    rules_explain_status, rules_explain_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "stash",
+            "url": SUBSCRIPTION.strip(),
+            "config": rules_config,
+            "explain": "true",
+        },
+    )
+    rules_report = json.loads(rules_explain_body)
+    resources = rules_report.get("resources", {})
+    if (
+        rules_explain_status != 200
+        or resources.get("ruleset_count") != 11
+        or resources.get("rule_provider_count") != 9
+        or resources.get("inline_rule_source_count") != 2
+        or resources.get("expanded_rule_source_count") != 0
+        or resources.get("unsupported_ruleset_count") != 0
+    ):
+        raise AssertionError(
+            f"Stash native rule Explain statistics drifted: {rules_report!r}"
+        )
+    if (
+        FixtureHandler.stash_rule_source_count != 0
+        or any(
+            token in rules_explain_body.decode("utf-8", errors="replace")
+            for token in (
+                "stash-domain-token",
+                "stash-domain-yaml-token",
+                "stash-domain-text-token",
+                "stash-domain-api-token",
+                "stash-ip-token",
+                "stash-ip-yaml-token",
+                "stash-ip-text-token",
+                "stash-classical-token",
+                "stash-classical-yaml-token",
+            )
+        )
+    ):
+        raise AssertionError(
+            "Stash native rule Explain fetched a source or leaked its token"
+        )
+
+    invalid_rule_cases = {
+        "classical-mrs": "unsupported format or unsafe value",
+        "unknown-format": "could not be fetched or was empty",
+        "src-port": "unsupported or invalid rule",
+        "non-country-geoip": "unsupported or invalid rule",
+        "existing-policy": "unsupported or invalid rule",
+        "conflicting-format": "unsupported format or unsafe value",
+    }
+    for case, expected_error in invalid_rule_cases.items():
+        invalid_rule_status, invalid_rule_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "stash",
+                "url": SUBSCRIPTION.strip(),
+                "config": (
+                    fixture_base
+                    + "/external-stash-rules-invalid.ini?case="
+                    + urllib.parse.quote(case, safe="")
+                ),
+            },
+        )
+        invalid_rule_text = invalid_rule_body.decode("utf-8", errors="replace")
+        if invalid_rule_status != 400 or expected_error not in invalid_rule_text:
+            raise AssertionError(
+                f"Stash accepted or misclassified invalid ruleset {case}: "
+                f"HTTP {invalid_rule_status} {invalid_rule_text!r}"
+            )
+        if case == "existing-policy" and "rule-providers:" in invalid_rule_text:
+            raise AssertionError(
+                "Stash returned partial YAML after a later invalid ruleset"
+            )
+    if FixtureHandler.stash_rule_source_count != 0:
+        raise AssertionError(
+            "Stash fetched a native rule-provider while rejecting invalid input"
+        )
+
+    legacy_text_status, legacy_text_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "stash",
+            "url": SUBSCRIPTION.strip(),
+            "config": fixture_base + "/external-stash-rules-legacy-text.ini",
+        },
+    )
+    legacy_text = legacy_text_body.decode("utf-8", errors="replace")
+    if (
+        legacy_text_status != 200
+        or "  - DOMAIN,legacy-text.example,RuleGroup" not in legacy_text.splitlines()
+        or "stash-legacy-domain:" in legacy_text
+        or FixtureHandler.stash_legacy_text_fetch_count != 1
+    ):
+        raise AssertionError(
+            "Stash did not preserve server-side handling for ambiguous .txt "
+            f"rulesets: HTTP {legacy_text_status} {legacy_text!r} "
+            f"fetches={FixtureHandler.stash_legacy_text_fetch_count}"
+        )
+    clash_control_status, clash_control_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "clash",
+            "url": SUBSCRIPTION.strip(),
+            "config": fixture_base + "/external-stash-rules-legacy-text.ini",
+        },
+    )
+    clash_control_text = clash_control_body.decode("utf-8", errors="replace")
+    if clash_control_status != 200:
+        raise AssertionError(
+            "Stash rule-provider work changed the Clash ruleset path: "
+            f"HTTP {clash_control_status} {clash_control_text!r}"
+        )
+    clash_control_provider = _yaml_named_mapping_block(
+        clash_control_text, "rule-providers", "stash-legacy-domain"
+    )
+    clash_control_provider_lines = set(clash_control_provider.splitlines())
+    clash_control_expected_lines = {
+        "    type: http",
+        "    behavior: domain",
+        f"    url: {fixture_base}/stash-legacy-domain.txt",
+        "    format: text",
+        "    interval: 3600",
+    }
+    if (
+        not clash_control_expected_lines.issubset(clash_control_provider_lines)
+        or "  - RULE-SET,stash-legacy-domain,RuleGroup"
+        not in clash_control_text.splitlines()
+        or "DOMAIN,legacy-text.example,RuleGroup" in clash_control_text
+        or "stash-format" in clash_control_text
+        or FixtureHandler.stash_legacy_text_fetch_count != 1
+    ):
+        raise AssertionError(
+            "Stash rule-provider work changed the Clash ruleset path: "
+            f"HTTP {clash_control_status} {clash_control_text!r}"
+        )
+
+    merge_status, merge_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "stash",
+            "url": SUBSCRIPTION.strip(),
+            "config": fixture_base + "/external-stash-rules-merge.ini?case=merge",
+        },
+    )
+    merge_text = merge_body.decode("utf-8", errors="replace")
+    if merge_status != 200:
+        raise AssertionError(
+            f"Stash failed to preserve existing rules/providers: {merge_text!r}"
+        )
+    merge_fragments = (
+        "stash-domain:",
+        "path: ./rules/existing-domain.txt",
+        "stash-domain_2:",
+        "path: ./rules/stash-domain_2.mrs",
+        "RULE-SET,stash-domain,RuleGroup",
+        "DOMAIN,base.example,RuleGroup",
+        "RULE-SET,stash-domain_2,RuleGroup",
+        "MATCH,Proxy",
+    )
+    if any(fragment not in merge_text for fragment in merge_fragments):
+        raise AssertionError(
+            f"Stash existing rule/provider merge drifted: {merge_text!r}"
+        )
+    if not (
+        merge_text.index("DOMAIN,base.example,RuleGroup")
+        < merge_text.index("RULE-SET,stash-domain_2,RuleGroup")
+        < merge_text.index("MATCH,Proxy")
+    ):
+        raise AssertionError(
+            "Stash appended generated rules after an existing final MATCH"
+        )
+    merge_explain_status, merge_explain_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "stash",
+            "url": SUBSCRIPTION.strip(),
+            "config": fixture_base + "/external-stash-rules-merge.ini?case=merge",
+            "explain": "true",
+        },
+    )
+    merge_report = json.loads(merge_explain_body)
+    if (
+        merge_explain_status != 200
+        or merge_report.get("resources", {}).get("rule_provider_count") != 2
+    ):
+        raise AssertionError(
+            f"Stash merged rule-provider Explain count drifted: {merge_report!r}"
+        )
+
+    collision_status, collision_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "stash",
+            "url": SUBSCRIPTION.strip(),
+            "config": (
+                fixture_base
+                + "/external-stash-rules-merge.ini?case=path-collision"
+            ),
+        },
+    )
+    collision_text = collision_body.decode("utf-8", errors="replace")
+    if collision_status != 400 or "paths conflict" not in collision_text:
+        raise AssertionError(
+            "Stash did not fail closed on a rule-provider path collision: "
+            f"HTTP {collision_status} {collision_text!r}"
+        )
+
+    direct_status, direct_body, _ = request(
+        base_url,
+        "/sub",
+        {"target": "stash", "url": SUBSCRIPTION.strip(), "list": "true"},
+    )
+    direct_text = direct_body.decode("utf-8", errors="replace")
+    if (
+        direct_status != 200
+        or "type: ss" not in direct_text
+        or "server: example.com" not in direct_text
+        or "cipher: aes-128-gcm" not in direct_text
+        or "password: password" not in direct_text
+    ):
+        raise AssertionError(f"Stash direct-node projection mismatch: {direct_text!r}")
+    direct_group = direct_text.split("proxy-groups:", 1)[1].split("rules:", 1)[0]
+    if "- Smoke" not in direct_group:
+        raise AssertionError(
+            f"Stash default Proxy group did not reference the direct node: {direct_group!r}"
+        )
+
+    stash_mieru_uri = (
+        "mierus://stash-user:stash-password@mieru-stash.example.test?"
+        "profile=default&port=9998-9999&protocol=TCP"
+    )
+    stash_xhttp_uri = (
+        "vless://99999999-9999-4999-8999-999999999998@"
+        "xhttp-stash.example.test:443?encryption=none&security=reality"
+        "&type=xhttp&host=xhttp-host.example.test&path=%2Fsplit"
+        "&mode=stream-one&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "&sid=00112233&fp=chrome&sni=xhttp-sni.example.test#StashXHTTP"
+    )
+    protocol_status, protocol_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "stash",
+            "url": "|".join(
+                (
+                    VMESS_STANDARD_URI.replace("&fp=chrome", ""),
+                    VLESS_DEFAULT_TCP_URI,
+                    stash_xhttp_uri,
+                    ANYTLS_V2RAYN_URI,
+                    HYSTERIA2_URI,
+                    stash_mieru_uri,
+                    WIREGUARD_URI,
+                )
+            ),
+            "list": "true",
+        },
+    )
+    protocol_text = protocol_body.decode("utf-8", errors="replace")
+    protocol_fragments = (
+        "type: vless",
+        "type: vmess",
+        "servername: tls.example.test",
+        "sni: vless-tls.example.test",
+        "network: xhttp",
+        "mode: stream-one",
+        "type: anytls",
+        "type: hysteria2",
+        "type: mieru",
+        "port-range: 9998-9999",
+        "transport: tcp",
+        "type: wireguard",
+        "reserved:",
+        "- 1",
+        "- 2",
+        "- 3",
+    )
+    if protocol_status != 200 or any(
+        fragment not in protocol_text for fragment in protocol_fragments
+    ):
+        raise AssertionError(
+            "Stash current-protocol projection drifted: "
+            f"HTTP {protocol_status} {protocol_text!r}"
+        )
+
+    for unsupported_option in ("tls13=true", "tfo=true"):
+        unsupported_flag_status, _, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "stash",
+                "url": SUBSCRIPTION.strip(),
+                "list": "true",
+                **dict(item.split("=", 1) for item in (unsupported_option,)),
+            },
+        )
+        if unsupported_flag_status != 400:
+            raise AssertionError(
+                "Stash silently ignored an unsupported node option override: "
+                f"{unsupported_option} -> HTTP {unsupported_flag_status}"
+            )
+
+    invalid_stash_bases = {
+        "dangling MATCH policy": (
+            "mode: rule\nproxies: []\nproxy-providers: {}\n"
+            "proxy-groups:\n  - name: Proxy\n    type: select\n"
+            "    proxies: [DIRECT]\nrules: ['MATCH,MissingPolicy']\n",
+            "final Stash configuration contains a dangling or cyclic "
+            "policy reference",
+        ),
+        "nested dangling RULE-SET": (
+            "mode: rule\nproxies: []\nproxy-providers: {}\n"
+            "proxy-groups:\n  - name: Proxy\n    type: select\n"
+            "    proxies: [DIRECT]\n"
+            "rules: ['AND,((RULE-SET,missing),(NETWORK,TCP)),Proxy']\n",
+            "final Stash configuration contains a dangling or cyclic "
+            "policy reference",
+        ),
+        "reserved PASS proxy name": (
+            "mode: rule\nproxies:\n  - name: PASS\n    type: direct\n"
+            "proxy-providers: {}\nproxy-groups:\n"
+            "  - name: Proxy\n    type: select\n    proxies: [DIRECT]\n"
+            "rules: ['MATCH,Proxy']\n",
+            "selected Stash base has an invalid 'proxies.name' entry",
+        ),
+        "proxy and group namespace collision": (
+            "mode: rule\nproxies:\n  - name: Proxy\n    type: direct\n"
+            "proxy-providers: {}\nproxy-groups:\n"
+            "  - name: Proxy\n    type: select\n    proxies: [DIRECT]\n"
+            "rules: ['MATCH,Proxy']\n",
+            "selected Stash base has an invalid 'proxy-groups.name' entry",
+        ),
+    }
+    FixtureHandler.stash_invalid_bases = {
+        description: invalid_base
+        for description, (invalid_base, _) in invalid_stash_bases.items()
+    }
+    for description, (_, expected_error) in invalid_stash_bases.items():
+        invalid_status, invalid_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "stash",
+                "url": SUBSCRIPTION.strip(),
+                "config": (
+                    fixture_base
+                    + "/external-stash-invalid.ini?case="
+                    + urllib.parse.quote(description, safe="")
+                ),
+            },
+        )
+        invalid_text = invalid_body.decode("utf-8", errors="replace")
+        if invalid_status != 400 or expected_error not in invalid_text:
+            raise AssertionError(
+                f"Stash accepted or misclassified a custom base with {description}: "
+                f"HTTP {invalid_status} {invalid_text!r}"
+            )
+
+    unsupported_status, unsupported_body, _ = request(
+        base_url,
+        "/sub",
+        {"target": "stash", "url": NAIVE_HTTPS_URI, "list": "true"},
+    )
+    if (
+        unsupported_status != 400
+        or b"none of the parsed proxy nodes" not in unsupported_body
+    ):
+        raise AssertionError(
+            "Stash unsupported-only request did not fail closed: "
+            f"HTTP {unsupported_status}: {unsupported_body!r}"
+        )
+
+    interval_status, _, _ = request(
+        base_url,
+        "/sub",
+        {"target": "stash", "url": f"interval:0,{provider_source}"},
+    )
+    direct_proxy_status, _, _ = request(
+        base_url,
+        "/sub",
+        {"target": "stash", "url": f"proxy_direct:true,{provider_source}"},
+    )
+    if interval_status != 400 or direct_proxy_status != 400:
+        raise AssertionError(
+            "Stash accepted an invalid interval or Mihomo-only proxy_direct"
+        )
+
+
+def stash_rule_limit_baseline(base_url: str, fixture_base: str) -> None:
+    status, body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "stash",
+            "url": SUBSCRIPTION.strip(),
+            "config": fixture_base + "/external-stash-rules.ini",
+        },
+    )
+    text = body.decode("utf-8", errors="replace")
+    if status != 400 or "max_allowed_rules" not in text:
+        raise AssertionError(
+            "Stash did not enforce max_allowed_rules on the final rule set: "
+            f"HTTP {status} {text!r}"
+        )
+
+
+def singbox_import_fidelity_baseline(base_url: str, fixture_base: str) -> None:
+    status, body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "singbox",
+            "url": fixture_base + "/singbox-transport-fidelity.json",
+            "list": "true",
+        },
+    )
+    if status != 200:
+        raise AssertionError(
+            f"sing-box transport import failed: HTTP {status} {body!r}"
+        )
+    payload = json.loads(body)
+    outbounds = {
+        item.get("tag"): item
+        for item in payload.get("outbounds", [])
+        if isinstance(item, dict)
+    }
+    if "Unsupported Transport" in outbounds:
+        raise AssertionError(f"unknown sing-box transport was downgraded: {outbounds!r}")
+    vmess = outbounds.get("Singbox WS Edge", {})
+    if (
+        vmess.get("transport", {}).get("headers", {}).get("Edge") != "edge-1"
+        or vmess.get("tls", {}).get("utls", {}).get("fingerprint") != "firefox"
+    ):
+        raise AssertionError(f"sing-box VMess Edge/uTLS was lost: {vmess!r}")
+    vless = outbounds.get("Singbox HTTPUpgrade", {})
+    if vless.get("transport") != {
+        "type": "httpupgrade",
+        "host": "upgrade-import.example.test",
+        "path": "/upgrade",
+    }:
+        raise AssertionError(f"sing-box HTTPUpgrade was lost: {vless!r}")
+    trojan = outbounds.get("Singbox Trojan gRPC", {})
+    if (
+        trojan.get("transport")
+        != {"type": "grpc", "service_name": "trojan/service"}
+        or trojan.get("tls", {}).get("utls", {}).get("fingerprint") != "safari"
+    ):
+        raise AssertionError(f"sing-box Trojan gRPC/uTLS was lost: {trojan!r}")
+
+
+def loon_current_node_output_baseline(base_url: str) -> None:
+    def vmess_qr(name: str, network: str, host: str = "", path: str = "/") -> str:
+        payload = {
+            "v": "2",
+            "ps": name,
+            "add": "vmess-loon.example.test",
+            "port": "443",
+            "id": "12121212-1212-4212-8212-121212121212",
+            "aid": "0",
+            "scy": "auto",
+            "net": network,
+            "type": "none",
+            "path": path,
+            "host": host,
+            "tls": "tls",
+            "sni": "vmess-sni.example.test",
+        }
+        return "vmess://" + _urlsafe_b64(
+            json.dumps(payload, separators=(",", ":"))
+        )
+
+    supported = (
+        vmess_qr("Loon VMess TCP", "tcp"),
+        vmess_qr("Loon VMess WS", "ws", "vmess-ws-host.example.test", "/ws"),
+        vmess_qr("Loon VMess HTTP", "http", "vmess-host.example.test", "/http"),
+        "vless://15151515-1515-4515-8515-151515151515@vless-tcp-loon.example.test:443"
+        "?encryption=none&security=tls&type=tcp"
+        "&sni=vless-tcp-sni.example.test#Loon%20VLESS%20TCP",
+        "vless://16161616-1616-4616-8616-161616161616@vless-ws-loon.example.test:443"
+        "?encryption=none&security=tls&type=ws&host=vless-ws-host.example.test"
+        "&path=%2Fws&sni=vless-ws-sni.example.test#Loon%20VLESS%20WS",
+        "vless://13131313-1313-4313-8313-131313131313@vless-loon.example.test:443"
+        "?encryption=none&security=tls&type=http&host=vless-host.example.test"
+        "&path=%2Fhttp&sni=vless-sni.example.test#Loon%20VLESS%20HTTP",
+        "vless://14141414-1414-4414-8414-141414141414@reality-loon.example.test:443"
+        "?encryption=none&security=reality&type=tcp&flow=xtls-rprx-vision"
+        "&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sid=00112233"
+        "&sni=reality-sni.example.test&fp=chrome#Loon%20VLESS%20Reality",
+        "trojan://trojan-password@trojan-loon.example.test:443?security=tls"
+        "&type=ws&host=trojan-host.example.test&path=%2Fws"
+        "&sni=trojan-sni.example.test&alpn=http%2F1.1#Loon%20Trojan%20WS",
+        "trojan://trojan-http@trojan-http.example.test:443?security=tls"
+        "&type=http&host=trojan-http-host.example.test&path=%2Fhttp"
+        "&sni=trojan-http-sni.example.test#Loon%20Trojan%20HTTP",
+        "trojan://pass%2Cword@trojan-comma.example.test:443?security=tls"
+        "&sni=trojan-comma-sni.example.test#Loon%2CComma",
+        "anytls://anytls-password@anytls-loon.example.test:8443"
+        "?sni=anytls-sni.example.test&fp=chrome#Loon%20AnyTLS",
+        "hysteria2://hy2-password@hy2-loon.example.test:8443/"
+        "?down=200&obfs=salamander&obfs-password=hy2-obfs"
+        "&sni=hy2-sni.example.test#Loon%20Hysteria2",
+    )
+    status, body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "loon",
+            "url": "|".join(supported),
+            "list": "true",
+            "udp": "true",
+            "tfo": "false",
+        },
+    )
+    output = body.decode("utf-8", errors="replace")
+    if status != 200:
+        raise AssertionError(f"current Loon node conversion failed: HTTP {status} {output!r}")
+    expected_fragments = (
+        "transport=http,alterId=0,path=/http,host=vmess-host.example.test,over-tls=true,sni=vmess-sni.example.test",
+        "transport=http,path=/http,host=vless-host.example.test,over-tls=true,sni=vless-sni.example.test",
+        "transport=tcp,flow=xtls-rprx-vision,public-key=\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",short-id=00112233,over-tls=true,sni=reality-sni.example.test,tls-profile=chrome",
+        "transport=ws,path=/ws,host=trojan-host.example.test,alpn=http/1.1,sni=trojan-sni.example.test",
+        "transport=http,path=/http,host=trojan-http-host.example.test,sni=trojan-http-sni.example.test",
+        "AnyTLS,anytls-loon.example.test,8443,\"anytls-password\",sni=anytls-sni.example.test,tls-profile=chrome,skip-cert-verify=false,block-quic=false",
+        "Hysteria2,hy2-loon.example.test,8443,\"hy2-password\",sni=hy2-sni.example.test,download-bandwidth=200,salamander-password=\"hy2-obfs\"",
+    )
+    for expected in expected_fragments:
+        if expected not in output:
+            raise AssertionError(f"Loon output lost {expected!r}: {output!r}")
+    if "download-bandwidth=100" in output:
+        raise AssertionError(f"Loon Hysteria2 restored the fabricated bandwidth: {output!r}")
+
+    loon_profile = "[Proxy]\n" + output
+    loon_data_url = "data:text/plain;base64," + base64.b64encode(
+        loon_profile.encode("utf-8")
+    ).decode("ascii")
+    roundtrip_status, roundtrip_body, _ = request(
+        base_url,
+        "/sub",
+        {"target": "singbox", "url": loon_data_url, "list": "true"},
+    )
+    if roundtrip_status != 200:
+        raise AssertionError(
+            "generated Loon profile could not be imported: "
+            f"HTTP {roundtrip_status} {roundtrip_body!r}"
+        )
+    roundtrip_payload = json.loads(roundtrip_body)
+    outbounds = {
+        item.get("tag"): item
+        for item in roundtrip_payload.get("outbounds", [])
+        if isinstance(item, dict)
+    }
+    vmess = outbounds.get("Loon VMess HTTP", {})
+    if (
+        vmess.get("transport")
+        != {
+            "type": "http",
+            "host": ["vmess-host.example.test"],
+            "path": "/http",
+        }
+        or vmess.get("tls", {}).get("server_name") != "vmess-sni.example.test"
+        or vmess.get("alter_id") != 0
+    ):
+        raise AssertionError(f"Loon VMess roundtrip drifted: {vmess!r}")
+    vmess_tcp = outbounds.get("Loon VMess TCP", {})
+    if (
+        vmess_tcp.get("transport") is not None
+        or vmess_tcp.get("tls", {}).get("server_name")
+        != "vmess-sni.example.test"
+    ):
+        raise AssertionError(f"Loon VMess TCP roundtrip drifted: {vmess_tcp!r}")
+    vmess_ws = outbounds.get("Loon VMess WS", {})
+    if vmess_ws.get("transport") != {
+        "type": "ws",
+        "path": "/ws",
+        "headers": {"Host": "vmess-ws-host.example.test"},
+    }:
+        raise AssertionError(f"Loon VMess WS roundtrip drifted: {vmess_ws!r}")
+    vless_tcp = outbounds.get("Loon VLESS TCP", {})
+    if (
+        vless_tcp.get("transport") is not None
+        or vless_tcp.get("tls", {}).get("server_name")
+        != "vless-tcp-sni.example.test"
+    ):
+        raise AssertionError(f"Loon VLESS TCP roundtrip drifted: {vless_tcp!r}")
+    vless_ws = outbounds.get("Loon VLESS WS", {})
+    if vless_ws.get("transport") != {
+        "type": "ws",
+        "path": "/ws",
+        "headers": {"Host": "vless-ws-host.example.test"},
+    }:
+        raise AssertionError(f"Loon VLESS WS roundtrip drifted: {vless_ws!r}")
+    vless_http = outbounds.get("Loon VLESS HTTP", {})
+    if vless_http.get("transport") != {
+        "type": "http",
+        "host": ["vless-host.example.test"],
+        "path": "/http",
+    }:
+        raise AssertionError(f"Loon VLESS HTTP roundtrip drifted: {vless_http!r}")
+    vless = outbounds.get("Loon VLESS Reality", {})
+    if (
+        vless.get("flow") != "xtls-rprx-vision"
+        or vless.get("tls", {}).get("reality", {}).get("public_key")
+        != "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        or vless.get("tls", {}).get("reality", {}).get("short_id") != "00112233"
+    ):
+        raise AssertionError(f"Loon VLESS Reality roundtrip drifted: {vless!r}")
+    trojan = outbounds.get("Loon Trojan WS", {})
+    if (
+        trojan.get("transport", {}).get("type") != "ws"
+        or trojan.get("transport", {}).get("headers", {}).get("Host")
+        != "trojan-host.example.test"
+        or trojan.get("transport", {}).get("path") != "/ws"
+    ):
+        raise AssertionError(f"Loon Trojan WS roundtrip drifted: {trojan!r}")
+    trojan_http = outbounds.get("Loon Trojan HTTP", {})
+    if trojan_http.get("transport") != {
+        "type": "http",
+        "host": ["trojan-http-host.example.test"],
+        "path": "/http",
+    }:
+        raise AssertionError(
+            f"Loon Trojan HTTP roundtrip drifted: {trojan_http!r}"
+        )
+    comma_trojan = outbounds.get("Loon,Comma", {})
+    if comma_trojan.get("password") != "pass,word":
+        raise AssertionError(
+            f"Loon quoted comma credential/remark drifted: {comma_trojan!r}"
+        )
+    anytls = outbounds.get("Loon AnyTLS", {})
+    if (
+        anytls.get("type") != "anytls"
+        or anytls.get("tls", {}).get("server_name") != "anytls-sni.example.test"
+    ):
+        raise AssertionError(f"Loon AnyTLS roundtrip drifted: {anytls!r}")
+    hysteria2 = outbounds.get("Loon Hysteria2", {})
+    if (
+        hysteria2.get("down_mbps") != 200
+        or hysteria2.get("obfs")
+        != {"type": "salamander", "password": "hy2-obfs"}
+    ):
+        raise AssertionError(f"Loon Hysteria2 roundtrip drifted: {hysteria2!r}")
+
+    invalid_profiles = (
+        '[Proxy]\nBad = Trojan,bad.example.test,443,"password",sni=a.example,tls-name=b.example',
+        '[Proxy]\nBad = AnyTLS,bad.example.test,443,"password",block-quic=true',
+        '[Proxy]\nBad = Hysteria2,bad.example.test,443,"password",salamander-password=unquoted',
+        '[Proxy]\nBad = VMess,bad.example.test,443,auto,"12121212-1212-4212-8212-121212121212,transport=tcp,alterId=0,over-tls=false',
+        '[Proxy]\nBad = VMess,bad.example.test,443,auto,"12121212-1212-4212-8212-121212121212",transport=tcp,alterId=0,path=/bad,over-tls=false',
+        '[Proxy]\nBad = VLESS,bad.example.test,443,"13131313-1313-4313-8313-131313131313",transport=tcp,over-tls=false,tls-profile=chrome',
+        '[Proxy]\nBad = Trojan,bad.example.test,443,"password",transport=tcp,path=/bad',
+        '[Proxy]\nBad = Hysteria2,bad.example.test,443,"password",tls-cert-sha256=001122,skip-cert-verify=true',
+    )
+    for invalid_profile in invalid_profiles:
+        invalid_url = "data:text/plain;base64," + base64.b64encode(
+            invalid_profile.encode("utf-8")
+        ).decode("ascii")
+        invalid_status, _, _ = request(
+            base_url,
+            "/sub",
+            {"target": "singbox", "url": invalid_url, "list": "true"},
+        )
+        if invalid_status != 400:
+            raise AssertionError(
+                "invalid Loon positional profile did not fail closed: "
+                f"HTTP {invalid_status} {invalid_profile!r}"
+            )
+
+    unsupported = (
+        VMESS_QR_URI,
+        VLESS_HTTPUPGRADE_URI,
+        TROJAN_WS_URI,
+        ANYTLS_MODERN_URI,
+        "hysteria2://password@hy2.example.test:443/?up=10&down=200#HY2Up",
+        "trojan://password@trojan.example.test:443?type=ws&host=bad%2Chost#BadScalar",
+    )
+    for source in unsupported:
+        rejected_status, _, _ = request(
+            base_url,
+            "/sub",
+            {"target": "loon", "url": source, "list": "true"},
+        )
+        if rejected_status != 400:
+            raise AssertionError(
+                f"Loon accepted a lossy or unsafe node: HTTP {rejected_status} {source!r}"
+            )
+
+
+def quanx_current_node_output_baseline(base_url: str, fixture_base: str) -> None:
+    vmess_reality = (
+        "vmess://15151515-1515-4515-8515-151515151515@vmess-reality.example.test:443"
+        "?encryption=none&security=reality&type=tcp&sni=reality.example.test"
+        "&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sid=00112233"
+        "&fp=chrome#QuanX%20VMess%20Reality"
+    )
+    vless_http = (
+        "vless://17171717-1717-4717-8717-171717171717@vless-http.example.test:80"
+        "?encryption=none&security=none&type=tcp&headerType=http"
+        "&host=http.example.test&path=%2Fheader#QuanX%20VLESS%20HTTP"
+    )
+    trojan_wss = (
+        "trojan://trojan-password@trojan-wss.example.test:443?security=tls"
+        "&type=ws&host=trojan-host.example.test&sni=trojan-host.example.test"
+        "&path=%2Fws&alpn=h2%2Chttp%2F1.1&insecure=1#QuanX%20Trojan%20WSS"
+    )
+    sources = (
+        VMESS_STANDARD_URI,
+        vmess_reality,
+        VLESS_DEFAULT_TCP_URI,
+        vless_http,
+        VLESS_REALITY_WITH_NUMERIC_SID_URI,
+        trojan_wss,
+        ANYTLS_MODERN_URI,
+    )
+    status, body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "quanx",
+            "url": "|".join(sources),
+            "list": "true",
+            "udp": "true",
+            "tfo": "true",
+        },
+    )
+    output = body.decode("utf-8", errors="replace")
+    if status != 200:
+        raise AssertionError(
+            f"current Quantumult X node conversion failed: HTTP {status} {output!r}"
+        )
+    expected = (
+        "vmess = vmess.example.test:443, method=none, password=22222222-2222-2222-2222-222222222222, obfs=over-tls, obfs-host=tls.example.test, tls-alpn=02683208687474702f312e31",
+        "vmess = vmess-reality.example.test:443, method=none, password=15151515-1515-4515-8515-151515151515, obfs=over-tls, obfs-host=reality.example.test, reality-base64-pubkey=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA, reality-hex-shortid=00112233, fast-open=false",
+        "vless = [2001:db8::1]:443, method=none, password=44444444-4444-4444-4444-444444444444, obfs=over-tls, obfs-host=vless-tls.example.test, tls-alpn=02683208687474702f312e31",
+        "vless = vless-http.example.test:80, method=none, password=17171717-1717-4717-8717-171717171717, obfs=http, obfs-host=http.example.test, obfs-uri=/header",
+        "reality-hex-shortid=00112233, vless-flow=xtls-rprx-vision, fast-open=false",
+        "trojan = trojan-wss.example.test:443, password=trojan-password, obfs=wss, obfs-host=trojan-host.example.test, obfs-uri=/ws, tls-alpn=02683208687474702f312e31",
+        "anytls = [2001:db8::12]:443, password=p@ss+word, over-tls=true, tls-host=anytls-tls.example.test, tls-alpn=02683208687474702f312e31",
+    )
+    for fragment in expected:
+        if fragment not in output:
+            raise AssertionError(
+                f"Quantumult X output lost {fragment!r}: {output!r}"
+            )
+    if "tls13=" in output or "udp-over-tcp=" in output:
+        raise AssertionError(f"Quantumult X emitted invalid legacy fields: {output!r}")
+    wss_line = next(
+        line for line in output.splitlines() if "tag=QuanX Trojan WSS" in line
+    )
+    if "over-tls=" in wss_line or "tls-host=" in wss_line:
+        raise AssertionError(f"Trojan WSS used TCP TLS syntax: {wss_line!r}")
+
+    FixtureHandler.quanx_roundtrip_config = "[server_local]\n" + output
+    roundtrip_status, roundtrip_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "singbox",
+            "url": fixture_base + "/quanx-roundtrip.conf",
+            "list": "true",
+        },
+    )
+    roundtrip_text = roundtrip_body.decode("utf-8", errors="replace")
+    if roundtrip_status != 200:
+        raise AssertionError(
+            "Quantumult X generator->parser roundtrip failed: "
+            f"HTTP {roundtrip_status} {roundtrip_text!r}"
+        )
+    roundtrip = json.loads(roundtrip_text)
+    outbounds = {
+        item.get("tag"): item
+        for item in roundtrip.get("outbounds", [])
+        if isinstance(item, dict) and isinstance(item.get("tag"), str)
+    }
+    expected_tags = {
+        "VMessStandard",
+        "QuanX VMess Reality",
+        "VLESSDefaultTCP",
+        "QuanX VLESS HTTP",
+        "RealityNumericSid",
+        "QuanX Trojan WSS",
+        "AnyTLS Modern",
+    }
+    if set(outbounds) != expected_tags:
+        raise AssertionError(
+            f"Quantumult X roundtrip node set drifted: {outbounds!r}"
+        )
+    vmess = outbounds["VMessStandard"]
+    if (
+        vmess.get("server") != "vmess.example.test"
+        or vmess.get("tls", {}).get("server_name") != "tls.example.test"
+        or vmess.get("tls", {}).get("alpn") != ["h2", "http/1.1"]
+    ):
+        raise AssertionError(f"Quantumult X VMess roundtrip drifted: {vmess!r}")
+    vmess_reality_out = outbounds["QuanX VMess Reality"]
+    if (
+        vmess_reality_out.get("tls", {}).get("reality", {}).get("public_key")
+        != "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        or vmess_reality_out.get("tls", {}).get("reality", {}).get("short_id")
+        != "00112233"
+        or vmess_reality_out.get("tls", {}).get("server_name")
+        != "reality.example.test"
+    ):
+        raise AssertionError(
+            f"Quantumult X VMess Reality roundtrip drifted: {vmess_reality_out!r}"
+        )
+    vless_ipv6 = outbounds["VLESSDefaultTCP"]
+    if (
+        vless_ipv6.get("server") != "2001:db8::1"
+        or vless_ipv6.get("tls", {}).get("alpn") != ["h2", "http/1.1"]
+    ):
+        raise AssertionError(
+            f"Quantumult X IPv6/ALPN roundtrip drifted: {vless_ipv6!r}"
+        )
+    vless_http_out = outbounds["QuanX VLESS HTTP"]
+    if (
+        vless_http_out.get("transport", {}).get("type") != "http"
+        or vless_http_out.get("transport", {}).get("host")
+        != ["http.example.test"]
+        or vless_http_out.get("transport", {}).get("path") != "/header"
+    ):
+        raise AssertionError(
+            f"Quantumult X VLESS HTTP roundtrip drifted: {vless_http_out!r}"
+        )
+    vless_reality = outbounds["RealityNumericSid"]
+    if (
+        vless_reality.get("flow") != "xtls-rprx-vision"
+        or vless_reality.get("tls", {}).get("reality", {}).get("short_id")
+        != "00112233"
+    ):
+        raise AssertionError(
+            f"Quantumult X VLESS Reality/Vision roundtrip drifted: {vless_reality!r}"
+        )
+    trojan = outbounds["QuanX Trojan WSS"]
+    if (
+        trojan.get("transport", {}).get("type") != "ws"
+        or trojan.get("transport", {}).get("path") != "/ws"
+        or trojan.get("transport", {}).get("headers", {}).get("Host")
+        != "trojan-host.example.test"
+        or trojan.get("tls", {}).get("alpn") != ["h2", "http/1.1"]
+    ):
+        raise AssertionError(f"Quantumult X Trojan WSS roundtrip drifted: {trojan!r}")
+    anytls = outbounds["AnyTLS Modern"]
+    if (
+        anytls.get("server") != "2001:db8::12"
+        or anytls.get("password") != "p@ss+word"
+        or anytls.get("tls", {}).get("server_name")
+        != "anytls-tls.example.test"
+        or anytls.get("tls", {}).get("alpn") != ["h2", "http/1.1"]
+    ):
+        raise AssertionError(f"Quantumult X AnyTLS roundtrip drifted: {anytls!r}")
+
+    invalid_quanx_lines = (
+        "vmess = vmess.example.test:443, method=none, "
+        "password=22222222-2222-2222-2222-222222222222, obfs=over-tls, "
+        "obfs-host=tls.example.test, tls-alpn=0, tag=Bad ALPN",
+        "vless = reality.example.test:443, method=none, "
+        "password=33333333-3333-4333-8333-333333333333, obfs=over-tls, "
+        "obfs-host=reality.example.test, "
+        "reality-base64-pubkey=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA, "
+        "reality-hex-shortid=xyz, vless-flow=xtls-rprx-vision, "
+        "tag=Bad Reality",
+        "trojan = trojan.example.test:443, password=secret, obfs=wss, "
+        "obfs-host=trojan.example.test, over-tls=true, tag=Conflicting TLS",
+        "anytls = anytls.example.test:443, password=secret, over-tls=true, "
+        "fast-open=maybe, tag=Bad Boolean",
+        "anytls = anytls.example.test:443, password=secret, over-tls=true, "
+        "unsupported-option=value, tag=Unknown Field",
+    )
+    for invalid_index, invalid_line in enumerate(invalid_quanx_lines):
+        FixtureHandler.quanx_roundtrip_config = (
+            "[server_local]\n" + invalid_line + "\n"
+        )
+        invalid_status, _, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "singbox",
+                "url": fixture_base
+                + f"/quanx-roundtrip.conf?case=invalid-{invalid_index}",
+                "list": "true",
+            },
+        )
+        if invalid_status != 400:
+            raise AssertionError(
+                "invalid or conflicting Quantumult X node did not fail closed: "
+                f"HTTP {invalid_status} {invalid_line!r}"
+            )
+
+    for source in (
+        VLESS_HTTPUPGRADE_URI,
+        VLESS_TCP_HTTP_URI,
+        TROJAN_WS_URI,
+        TROJAN_KCP_URI,
+        "trojan://bad%2Cpassword@trojan.example.test:443?security=tls#BadScalar",
+    ):
+        rejected_status, _, _ = request(
+            base_url, "/sub", {"target": "quanx", "url": source, "list": "true"}
+        )
+        if rejected_status != 400:
+            raise AssertionError(
+                "Quantumult X accepted a lossy or unsafe node: "
+                f"HTTP {rejected_status} {source!r}"
+            )
+
+
 def simple_target_protocol_baseline(base_url: str, fixture_base: str) -> None:
     source = fixture_base + "/mixed-protocol-subscription.txt"
 
@@ -3813,6 +8699,158 @@ def simple_target_protocol_baseline(base_url: str, fixture_base: str) -> None:
     if "obfs-password=salamander" in hysteria2:
         raise AssertionError("Hysteria2 output reused the obfs type as its password")
 
+    modern_hysteria2 = convert("hysteria2", HYSTERIA2_MODERN_URI, True).strip()
+    if not modern_hysteria2.startswith(
+        "hysteria2://user%3Apass%2Btoken@[2001:db8::10]:8443,12000-12002/"
+    ):
+        raise AssertionError(
+            "modern Hysteria2 authority did not preserve IPv6, credentials, or "
+            f"port hopping: {modern_hysteria2!r}"
+        )
+    modern_hy2_parts = urllib.parse.urlsplit(modern_hysteria2)
+    modern_hy2_query = urllib.parse.parse_qs(
+        modern_hy2_parts.query, keep_blank_values=True
+    )
+    for key, expected in {
+        "insecure": ["1"],
+        "obfs": ["salamander"],
+        "obfs-password": ["obfs+secret"],
+        "sni": ["hy2-tls.example.test"],
+        "pinSHA256": ["AA:BB:CC"],
+        "ech": ["AE+config/value"],
+    }.items():
+        if modern_hy2_query.get(key) != expected:
+            raise AssertionError(
+                f"modern Hysteria2 output lost {key}: {modern_hysteria2!r}"
+            )
+    if urllib.parse.unquote(modern_hy2_parts.fragment) != "Hy2 Modern+Literal":
+        raise AssertionError("modern Hysteria2 output lost the decoded remark")
+
+    def convert_json(target: str, url: str) -> dict[str, object]:
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {"target": target, "url": url, "list": "true"},
+        )
+        if status != 200:
+            raise AssertionError(
+                f"target={target} modern protocol conversion returned HTTP "
+                f"{status}: {body!r}"
+            )
+        try:
+            result = json.loads(body)
+        except json.JSONDecodeError as error:
+            raise AssertionError(
+                f"target={target} did not return valid JSON: {body!r}"
+            ) from error
+        if not isinstance(result, dict):
+            raise AssertionError(f"target={target} JSON is not an object: {result!r}")
+        return result
+
+    modern_singbox = convert_json(
+        "singbox", "|".join((HYSTERIA2_MODERN_URI, TUIC_MODERN_URI, ANYTLS_MODERN_URI))
+    )
+    modern_outbounds = {
+        item.get("type"): item
+        for item in modern_singbox.get("outbounds", [])
+        if isinstance(item, dict)
+        and item.get("type") in {"hysteria2", "tuic", "anytls"}
+    }
+    if set(modern_outbounds) != {"hysteria2", "tuic", "anytls"}:
+        raise AssertionError(
+            f"sing-box lost a modern Legacy protocol: {modern_outbounds!r}"
+        )
+
+    hy2_outbound = modern_outbounds["hysteria2"]
+    if (
+        hy2_outbound.get("server") != "2001:db8::10"
+        or hy2_outbound.get("server_port") is not None
+        or hy2_outbound.get("server_ports") != ["8443:8443", "12000:12002"]
+        or hy2_outbound.get("password") != "user:pass+token"
+        or hy2_outbound.get("obfs")
+        != {"type": "salamander", "password": "obfs+secret"}
+        or hy2_outbound.get("tls", {}).get("server_name")
+        != "hy2-tls.example.test"
+        # The fixture runtime's explicit global scv=false remains authoritative
+        # over per-node values in generated client configs.
+        or hy2_outbound.get("tls", {}).get("insecure") is not False
+    ):
+        raise AssertionError(
+            f"sing-box Hysteria2 mapping is incomplete: {hy2_outbound!r}"
+        )
+
+    tuic_outbound = modern_outbounds["tuic"]
+    if (
+        tuic_outbound.get("server") != "2001:db8::11"
+        or tuic_outbound.get("server_port") != 10443
+        or tuic_outbound.get("uuid")
+        != "99999999-9999-4999-8999-999999999999"
+        or tuic_outbound.get("password") != "p@ss+word"
+        or tuic_outbound.get("congestion_control") != "bbr"
+        or tuic_outbound.get("udp_relay_mode") != "quic"
+        or tuic_outbound.get("zero_rtt_handshake") is not True
+        or tuic_outbound.get("tls", {}).get("server_name")
+        != "tuic-tls.example.test"
+        or tuic_outbound.get("tls", {}).get("insecure") is not False
+        or tuic_outbound.get("tls", {}).get("disable_sni") is not False
+    ):
+        raise AssertionError(f"sing-box TUIC mapping is incomplete: {tuic_outbound!r}")
+
+    anytls_outbound = modern_outbounds["anytls"]
+    if (
+        anytls_outbound.get("server") != "2001:db8::12"
+        or anytls_outbound.get("server_port") != 443
+        or anytls_outbound.get("password") != "p@ss+word"
+        or anytls_outbound.get("idle_session_check_interval") != "45s"
+        or anytls_outbound.get("idle_session_timeout") != "60s"
+        or anytls_outbound.get("min_idle_session") != 3
+        or "network" in anytls_outbound
+        or "tcp_fast_open" in anytls_outbound
+        or anytls_outbound.get("tls", {}).get("server_name")
+        != "anytls-tls.example.test"
+        or anytls_outbound.get("tls", {}).get("insecure") is not False
+        or anytls_outbound.get("tls", {}).get("alpn") != ["h2", "http/1.1"]
+        or anytls_outbound.get("tls", {}).get("utls", {}).get("fingerprint")
+        != "chrome"
+    ):
+        raise AssertionError(
+            f"sing-box AnyTLS mapping is incomplete: {anytls_outbound!r}"
+        )
+
+    surge_status, surge_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "surge",
+            "ver": "4",
+            "url": "|".join(
+                (HYSTERIA2_SURGE_GECKO_URI, TUIC_SURGE_URI, ANYTLS_MODERN_URI)
+            ),
+            "list": "true",
+        },
+    )
+    surge_text = surge_body.decode("utf-8", errors="replace")
+    if surge_status != 200 or not all(
+        expected in surge_text
+        for expected in (
+            "password=user:pass+token",
+            "sni=hy2-tls.example.test",
+            "server-cert-fingerprint-sha256=AA:BB:CC",
+            "gecko-password=obfs+secret",
+            "port-hopping=8443;12000-12002",
+            "tuic, 2001:db8::13, 11443, token=surge+token",
+            "sni=tuic-surge.example.test",
+            "alpn=h3",
+            "anytls, 2001:db8::12, 443, password=p@ss+word",
+            "sni=anytls-tls.example.test",
+            "alpn=h2",
+        )
+    ):
+        raise AssertionError(
+            f"Surge modern protocol mapping is incomplete: HTTP {surge_status} "
+            f"{surge_text!r}"
+        )
+
     mixed = convert("mixed", source, True)
     mixed_lines = [line for line in mixed.splitlines() if line]
     if len(mixed_lines) != 3 or not all(
@@ -3822,6 +8860,17 @@ def simple_target_protocol_baseline(base_url: str, fixture_base: str) -> None:
         raise AssertionError(f"mixed target lost a protocol: {mixed!r}")
     if "obfs-password=real-obfs-password" not in mixed:
         raise AssertionError("mixed output did not preserve Hysteria2 obfs password")
+
+    xray_source = fixture_base + "/xray-protocol-subscription.txt"
+    xray_mixed = convert("mixed", xray_source, True)
+    xray_lines = [line for line in xray_mixed.splitlines() if line]
+    if len(xray_lines) != 3 or not all(
+        any(line.startswith(prefix) for line in xray_lines)
+        for prefix in ("vmess://", "vless://", "trojan://")
+    ):
+        raise AssertionError(
+            f"fetched Xray subscription lost a protocol: {xray_mixed!r}"
+        )
 
     for target, uri, prefix in (
         ("vless", VLESS_URI, "vless://"),
@@ -3834,6 +8883,269 @@ def simple_target_protocol_baseline(base_url: str, fixture_base: str) -> None:
         if not encoded.startswith(prefix):
             raise AssertionError(
                 f"Base64 {target} output decoded incorrectly: {encoded!r}"
+            )
+
+    def parse_single_link(link: str, expected_scheme: str) -> tuple[
+        urllib.parse.SplitResult, dict[str, list[str]]
+    ]:
+        parsed = urllib.parse.urlsplit(link.strip())
+        if parsed.scheme != expected_scheme:
+            raise AssertionError(
+                f"expected {expected_scheme} single link, got {link!r}"
+            )
+        return parsed, urllib.parse.parse_qs(
+            parsed.query, keep_blank_values=True
+        )
+
+    def parse_vmess_qr(link: str) -> dict[str, object]:
+        if not link.startswith("vmess://"):
+            raise AssertionError(f"expected VMess QR link, got {link!r}")
+        payload = link.removeprefix("vmess://").strip()
+        payload += "=" * (-len(payload) % 4)
+        try:
+            decoded = base64.urlsafe_b64decode(payload)
+            value = json.loads(decoded)
+        except (ValueError, json.JSONDecodeError) as error:
+            raise AssertionError(f"invalid VMess QR output: {link!r}") from error
+        if not isinstance(value, dict):
+            raise AssertionError(f"VMess QR output is not an object: {value!r}")
+        return value
+
+    standard_vmess = parse_vmess_qr(
+        convert("v2ray", VMESS_STANDARD_URI, True)
+    )
+    for key, expected in {
+        "id": "22222222-2222-2222-2222-222222222222",
+        "net": "tcp",
+        "scy": "none",
+        "tls": "tls",
+        "sni": "tls.example.test",
+        "alpn": "h2,http/1.1",
+        "fp": "chrome",
+    }.items():
+        if standard_vmess.get(key) != expected:
+            raise AssertionError(
+                f"standard VMess lost {key}: {standard_vmess!r}"
+            )
+
+    legacy_vmess_qr = parse_vmess_qr(convert("v2ray", VMESS_QR_URI, True))
+    for key, expected in {
+        "net": "grpc",
+        "type": "multi",
+        "path": "grpc-service",
+        "scy": "chacha20-poly1305",
+        "sni": "grpc.example.test",
+        "alpn": "h2,http/1.1",
+        "fp": "firefox",
+    }.items():
+        if legacy_vmess_qr.get(key) != expected:
+            raise AssertionError(
+                f"VMess QR compatibility lost {key}: {legacy_vmess_qr!r}"
+            )
+
+    quic_vmess_qr = parse_vmess_qr(
+        convert("v2ray", VMESS_QR_QUIC_URI, True)
+    )
+    for key, expected in {
+        "net": "quic",
+        "type": "srtp",
+        "host": "aes-128-gcm",
+        "path": "quic-secret",
+    }.items():
+        if quic_vmess_qr.get(key) != expected:
+            raise AssertionError(
+                f"VMess QUIC lost {key}: {quic_vmess_qr!r}"
+            )
+
+    default_vless, default_vless_query = parse_single_link(
+        convert("vless", VLESS_DEFAULT_TCP_URI, True), "vless"
+    )
+    if default_vless.hostname != "2001:db8::1" or default_vless.port != 443:
+        raise AssertionError(
+            f"VLESS IPv6 authority was not preserved: {default_vless!r}"
+        )
+    for key, expected in {
+        "encryption": ["none"],
+        "security": ["tls"],
+        "type": ["tcp"],
+        "sni": ["vless-tls.example.test"],
+        "alpn": ["h2,http/1.1"],
+        "insecure": ["1"],
+    }.items():
+        if default_vless_query.get(key) != expected:
+            raise AssertionError(
+                f"default VLESS TCP lost {key}: {default_vless_query!r}"
+            )
+
+    _, xhttp_query = parse_single_link(
+        convert("vless", VLESS_XHTTP_URI, True), "vless"
+    )
+    for key, expected in {
+        "type": ["xhttp"],
+        "path": ["/split?token=1"],
+        "host": ["xhttp.example.test"],
+        "mode": ["stream-one"],
+        "extra": ['{"xPaddingBytes":"100-1000"}'],
+        "security": ["reality"],
+        "pbk": ["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],
+        "sid": ["00112233"],
+    }.items():
+        if xhttp_query.get(key) != expected:
+            raise AssertionError(
+                f"VLESS XHTTP lost {key}: {xhttp_query!r}"
+            )
+    if xhttp_query.get("type") == ["h2"]:
+        raise AssertionError("VLESS XHTTP was silently downgraded to h2")
+
+    _, grpc_query = parse_single_link(
+        convert("vless", VLESS_GRPC_URI, True), "vless"
+    )
+    for key, expected in {
+        "type": ["grpc"],
+        "serviceName": ["service/name"],
+        "mode": ["multi"],
+        "authority": ["authority.example.test"],
+    }.items():
+        if grpc_query.get(key) != expected:
+            raise AssertionError(
+                f"VLESS gRPC lost {key}: {grpc_query!r}"
+            )
+
+    _, tcp_http_query = parse_single_link(
+        convert("vless", VLESS_TCP_HTTP_URI, True), "vless"
+    )
+    for key, expected in {
+        "type": ["tcp"],
+        "headerType": ["http"],
+        "host": ["header.example.test"],
+        "path": ["/header"],
+    }.items():
+        if tcp_http_query.get(key) != expected:
+            raise AssertionError(
+                f"VLESS TCP HTTP header lost {key}: {tcp_http_query!r}"
+            )
+
+    _, vless_quic_query = parse_single_link(
+        convert("vless", VLESS_QUIC_URI, True), "vless"
+    )
+    for key, expected in {
+        "type": ["quic"],
+        "headerType": ["utp"],
+        "quicSecurity": ["chacha20-poly1305"],
+        "key": ["vless-quic-secret"],
+    }.items():
+        if vless_quic_query.get(key) != expected:
+            raise AssertionError(
+                f"VLESS QUIC lost {key}: {vless_quic_query!r}"
+            )
+
+    trojan, trojan_query = parse_single_link(
+        convert("trojan", TROJAN_WS_URI, True), "trojan"
+    )
+    if (
+        urllib.parse.unquote(trojan.username or "") != "p@ss+word/token"
+        or trojan.hostname != "2001:db8::2"
+        or trojan.port != 443
+    ):
+        raise AssertionError(f"Trojan credentials/IPv6 were changed: {trojan!r}")
+    for key, expected in {
+        "type": ["ws"],
+        "host": ["ws.example.test"],
+        "path": ["/socket"],
+        "sni": ["trojan-tls.example.test"],
+        "alpn": ["h2,http/1.1"],
+        "fp": ["chrome"],
+        "insecure": ["1"],
+    }.items():
+        if trojan_query.get(key) != expected:
+            raise AssertionError(
+                f"Trojan WS lost {key}: {trojan_query!r}"
+            )
+
+    _, trojan_kcp_query = parse_single_link(
+        convert("trojan", TROJAN_KCP_URI, True), "trojan"
+    )
+    for key, expected in {
+        "type": ["kcp"],
+        "headerType": ["wechat-video"],
+        "seed": ["trojan-kcp-seed"],
+    }.items():
+        if trojan_kcp_query.get(key) != expected:
+            raise AssertionError(
+                f"Trojan KCP lost {key}: {trojan_kcp_query!r}"
+            )
+
+    for uri, expected_type in (
+        (VMESS_STANDARD_URI, "vmess"),
+        (VLESS_HTTPUPGRADE_URI, "vless"),
+        (TROJAN_WS_URI, "trojan"),
+    ):
+        singbox = json.loads(convert("singbox", uri, True))
+        outbounds = singbox.get("outbounds", [])
+        if len(outbounds) != 1 or outbounds[0].get("type") != expected_type:
+            raise AssertionError(
+                f"sing-box lost {expected_type} node: {singbox!r}"
+            )
+        outbound = outbounds[0]
+        if expected_type == "vmess":
+            if outbound.get("security") != "none" or "transport" in outbound:
+                raise AssertionError(
+                    f"sing-box VMess default TCP was changed: {outbound!r}"
+                )
+            tls = outbound.get("tls", {})
+            if (
+                tls.get("server_name") != "tls.example.test"
+                or tls.get("alpn") != ["h2", "http/1.1"]
+                or tls.get("utls", {}).get("fingerprint") != "chrome"
+            ):
+                raise AssertionError(
+                    f"sing-box VMess TLS options were lost: {outbound!r}"
+                )
+        elif expected_type == "vless":
+            transport = outbound.get("transport", {})
+            if transport != {
+                "type": "httpupgrade",
+                "host": "upgrade-host.example.test",
+                "path": "/upgrade",
+            }:
+                raise AssertionError(
+                    f"sing-box VLESS HTTPUpgrade was changed: {outbound!r}"
+                )
+        else:
+            transport = outbound.get("transport", {})
+            if transport.get("type") != "ws" or transport.get("path") != "/socket":
+                raise AssertionError(
+                    f"sing-box Trojan WS was changed: {outbound!r}"
+                )
+            tls = outbound.get("tls", {})
+            if (
+                tls.get("server_name") != "trojan-tls.example.test"
+                or tls.get("alpn") != ["h2", "http/1.1"]
+                or tls.get("utls", {}).get("fingerprint") != "chrome"
+            ):
+                raise AssertionError(
+                    f"sing-box Trojan TLS options were lost: {outbound!r}"
+                )
+
+    for uri, expected_transport in (
+        (
+            VLESS_GRPC_URI,
+            {"type": "grpc", "service_name": "service/name"},
+        ),
+        (
+            VLESS_TCP_HTTP_URI,
+            {
+                "type": "http",
+                "host": ["header.example.test"],
+                "path": "/header",
+            },
+        ),
+    ):
+        singbox = json.loads(convert("singbox", uri, True))
+        outbounds = singbox.get("outbounds", [])
+        if len(outbounds) != 1 or outbounds[0].get("transport") != expected_transport:
+            raise AssertionError(
+                f"sing-box VLESS transport changed: {singbox!r}"
             )
 
     status, body, _ = request(
@@ -4169,6 +9481,48 @@ def security_endpoint_matrix_baseline(binary: Path, fixture_base: str) -> None:
             )
 
 
+def shadowrocket_upload_path_compatibility_baseline(
+    binary: Path, fixture_base: str
+) -> None:
+    with FixtureHandler.counter_lock:
+        uploaded_path_offset = len(FixtureHandler.gist_uploaded_paths)
+
+    params = {
+        "target": "shadowrocket",
+        "url": SUBSCRIPTION.strip(),
+        "config": DISABLE_RULEGEN_CONFIG,
+        "list": "true",
+        "upload": "true",
+    }
+    with running_service(
+        binary,
+        security_profile="lan",
+        gist_api_base=fixture_base,
+    ) as base_url:
+        explicit_status, explicit_body, _ = request(base_url, "/sub", params)
+        auto_status, auto_body, auto_headers = request(
+            base_url,
+            "/sub",
+            {**params, "target": "auto"},
+            {"User-Agent": "Shadowrocket/2.2.60"},
+        )
+
+    with FixtureHandler.counter_lock:
+        uploaded_paths = FixtureHandler.gist_uploaded_paths[uploaded_path_offset:]
+    if (
+        explicit_status != 200
+        or auto_status != 200
+        or explicit_body != auto_body
+        or uploaded_paths != ["shadowrocket", "sub"]
+    ):
+        raise AssertionError(
+            "Shadowrocket upload path compatibility drifted: "
+            f"explicit=HTTP {explicit_status}, auto=HTTP {auto_status}, "
+            f"body_equal={explicit_body == auto_body}, paths={uploaded_paths!r}"
+        )
+    assert_vary_header(auto_headers, "User-Agent", "auto Shadowrocket upload")
+
+
 def upload_failure_compatibility_baseline(binary: Path, fixture_base: str) -> None:
     subscription_query_secret = "subscription-query-secret"
     request_query_secret = "request-query-secret"
@@ -4421,6 +9775,67 @@ def settings_reload_compatibility_baseline(helper: Path) -> None:
                 )
 
 
+def settings_singbox_wireguard_endpoint_baseline(helper: Path) -> None:
+    runtime_dir = REPOSITORY / "build" / "test-baseline-runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=runtime_dir) as temporary:
+        temporary_path = Path(temporary)
+        for fixture_name in (
+            "legacy-pref.ini",
+            "legacy-pref.yml",
+            "legacy-pref.toml",
+        ):
+            original = COMPAT_FIXTURES / fixture_name
+            legacy = load_settings_snapshot(helper, original)
+            if legacy["singbox"]["wireguard_endpoint"] is not False:
+                raise AssertionError(
+                    f"{original.suffix} legacy WireGuard schema default changed"
+                )
+            if legacy["singbox"]["snell_outbound"] is not False:
+                raise AssertionError(
+                    f"{original.suffix} legacy Snell outbound default changed"
+                )
+            content = original.read_text(encoding="utf-8")
+            if original.suffix == ".yml":
+                content += (
+                    "\nsingbox:\n"
+                    "  wireguard_endpoint: true\n"
+                    "  snell_outbound: true\n"
+                )
+            elif original.suffix == ".toml":
+                content += (
+                    "\n[singbox]\n"
+                    "wireguard_endpoint = true\n"
+                    "snell_outbound = true\n"
+                )
+            else:
+                content += (
+                    "\n[singbox]\n"
+                    "wireguard_endpoint=true\n"
+                    "snell_outbound=true\n"
+                )
+            configured = temporary_path / fixture_name
+            configured.write_text(content, encoding="utf-8", newline="\n")
+            enabled = load_settings_snapshot(helper, configured)
+            if enabled["singbox"]["wireguard_endpoint"] is not True:
+                raise AssertionError(
+                    f"{original.suffix} did not enable WireGuard endpoint output"
+                )
+            if enabled["singbox"]["snell_outbound"] is not True:
+                raise AssertionError(
+                    f"{original.suffix} did not enable Snell outbound output"
+                )
+            reloaded = reload_settings_snapshot(helper, configured, original)
+            if reloaded["singbox"]["wireguard_endpoint"] is not False:
+                raise AssertionError(
+                    f"{original.suffix} hot reload retained a removed endpoint switch"
+                )
+            if reloaded["singbox"]["snell_outbound"] is not False:
+                raise AssertionError(
+                    f"{original.suffix} hot reload retained a removed Snell switch"
+                )
+
+
 def common_scalar_binding_compatibility_baseline(helper: Path) -> None:
     configured_values: dict[str, str | bool] = {
         "prepend_insert_url": False,
@@ -4428,6 +9843,7 @@ def common_scalar_binding_compatibility_baseline(helper: Path) -> None:
         "clash_rule_base": "stage-c/clash.tpl",
         "surge_rule_base": "stage-c/surge.tpl",
         "surfboard_rule_base": "stage-c/surfboard.tpl",
+        "stash_rule_base": "stage-c/stash.tpl",
         "mellow_rule_base": "stage-c/mellow.tpl",
         "quan_rule_base": "stage-c/quan.tpl",
         "quanx_rule_base": "stage-c/quanx.tpl",
@@ -4553,6 +9969,14 @@ def common_scalar_binding_compatibility_baseline(helper: Path) -> None:
                 "legacy preferences without proxy_bypass did not use "
                 "the LOOPBACK+PRIVATE default"
             )
+        if any(
+            snapshot["common"]["rule_bases"].get("stash") != "base/stash.yaml"
+            for snapshot in legacy_snapshots
+        ):
+            raise AssertionError(
+                "legacy preferences without stash_rule_base did not use "
+                "base/stash.yaml"
+            )
         common = configured_snapshots[0]["common"]
         proxies = configured_snapshots[0]["proxies"]
         expected_rule_bases = {
@@ -4561,6 +9985,7 @@ def common_scalar_binding_compatibility_baseline(helper: Path) -> None:
                 "clash",
                 "surge",
                 "surfboard",
+                "stash",
                 "mellow",
                 "quan",
                 "quanx",
@@ -4589,6 +10014,10 @@ def common_scalar_binding_compatibility_baseline(helper: Path) -> None:
             if reloaded["proxies"]["bypass"] != "LOOPBACK,PRIVATE":
                 raise AssertionError(
                     f"{suffix} removal did not restore the default proxy_bypass"
+                )
+            if reloaded["common"]["rule_bases"].get("stash") != "base/stash.yaml":
+                raise AssertionError(
+                    f"{suffix} removal did not restore the default stash_rule_base"
                 )
 
             invalid_bypass = temporary_path / ("invalid-bypass-pref" + suffix)
@@ -5366,11 +10795,23 @@ def main() -> int:
     )
     parser.add_argument("--update-golden", action="store_true")
     parser.add_argument("--mihomo-binary", type=Path)
+    parser.add_argument("--singbox-stable-binary", type=Path)
+    parser.add_argument("--singbox-next-binary", type=Path)
     args = parser.parse_args()
     binary = args.binary.resolve()
     settings_snapshot_helper = args.settings_snapshot_helper.resolve()
     mihomo_binary = (
         args.mihomo_binary.resolve() if args.mihomo_binary is not None else None
+    )
+    singbox_stable_binary = (
+        args.singbox_stable_binary.resolve()
+        if args.singbox_stable_binary is not None
+        else None
+    )
+    singbox_next_binary = (
+        args.singbox_next_binary.resolve()
+        if args.singbox_next_binary is not None
+        else None
     )
     if not binary.is_file():
         parser.error(f"binary does not exist: {binary}")
@@ -5385,6 +10826,12 @@ def main() -> int:
         )
     if mihomo_binary is not None and not mihomo_binary.is_file():
         parser.error(f"Mihomo binary does not exist: {mihomo_binary}")
+    if singbox_stable_binary is not None and not singbox_stable_binary.is_file():
+        parser.error(
+            f"stable sing-box binary does not exist: {singbox_stable_binary}"
+        )
+    if singbox_next_binary is not None and not singbox_next_binary.is_file():
+        parser.error(f"next sing-box binary does not exist: {singbox_next_binary}")
 
     deployment_security_defaults_baseline()
     runtime_cli_isolation_baseline(binary)
@@ -5409,6 +10856,7 @@ def main() -> int:
         raise AssertionError("historical security profile default changed")
     security_configuration_matrix_baseline(settings_snapshot_helper)
     settings_reload_compatibility_baseline(settings_snapshot_helper)
+    settings_singbox_wireguard_endpoint_baseline(settings_snapshot_helper)
     common_scalar_binding_compatibility_baseline(settings_snapshot_helper)
     settings_parser_diagnostic_redaction_baseline(settings_snapshot_helper)
     settings_provider_interval_compatibility_baseline(settings_snapshot_helper)
@@ -5418,15 +10866,115 @@ def main() -> int:
     with fixture_server() as fixture_base:
         parser_invocation_log_baseline(binary, fixture_base)
         provider_no_fetch_vary_and_route_log_baseline(binary, fixture_base)
+        quanx_server_remote_baseline(binary, fixture_base)
         parser_failure_level_and_mixed_request_baseline(binary)
         insert_url_parser_route_baseline(binary, fixture_base)
         vary_cache_and_coalesce_baseline(binary, fixture_base)
         explain_privacy_and_cache_baseline(binary, fixture_base)
-        with running_service(binary) as base_url:
+        wireguard_outbound_logs: list[str] = []
+        with running_service(
+            binary, log_capture=wireguard_outbound_logs
+        ) as base_url:
             conversion_baselines(base_url, fixture_base, args.update_golden)
+            singbox_modern_full_profile_baseline(
+                base_url,
+                fixture_base,
+                singbox_stable_binary,
+                singbox_next_binary,
+            )
             parser_route_isolation_baseline(base_url, fixture_base)
+            classic_protocol_baseline(base_url, fixture_base)
+            legacy_niche_protocol_baseline(base_url, fixture_base)
+            wireguard_endpoint_logs: list[str] = []
+            with running_service(
+                binary,
+                log_capture=wireguard_endpoint_logs,
+                config_replacements=((
+                    "[custom_openclash_rules]",
+                    "[singbox]\nwireguard_endpoint = true\n\n"
+                    "[custom_openclash_rules]",
+                ),),
+            ) as endpoint_base_url:
+                wireguard_structured_conversion_baseline(
+                    base_url, endpoint_base_url
+                )
+            if not wireguard_endpoint_logs or (
+                "SINGBOX_WIREGUARD_GENERATION schema=endpoint nodes=1 peers=2"
+                not in wireguard_endpoint_logs[0]
+            ):
+                raise AssertionError(
+                    "sing-box endpoint WireGuard diagnostics are missing"
+                )
+            snell_logs: list[str] = []
+            with running_service(
+                binary,
+                log_capture=snell_logs,
+                config_replacements=(
+                    (
+                        "[custom_openclash_rules]",
+                        "[singbox]\nsnell_outbound = true\n\n"
+                        "[custom_openclash_rules]",
+                    ),
+                    (
+                        "udp_flag = false",
+                        "# udp_flag intentionally omitted for Snell fidelity",
+                    ),
+                ),
+            ) as snell_base_url:
+                singbox_snell_outbound_baseline(base_url, snell_base_url)
+            if not snell_logs or (
+                "SINGBOX_SNELL_GENERATION enabled=true input=3 emitted=3 "
+                "normalized_v5=1 minimum_version=1.14.0"
+                not in snell_logs[0]
+            ):
+                raise AssertionError(
+                    "sing-box Snell generation diagnostics are missing"
+                )
+            netch_legacy_parser_baseline(base_url)
+            mieru_legacy_parser_baseline(base_url)
+            target_generation_stats_baseline(base_url)
+            v2ray_client_target_baseline(base_url)
+            shadowrocket_target_baseline(base_url)
+            stash_target_baseline(base_url, fixture_base)
+            singbox_import_fidelity_baseline(base_url, fixture_base)
+            loon_current_node_output_baseline(base_url)
+            quanx_current_node_output_baseline(base_url, fixture_base)
             simple_target_protocol_baseline(base_url, fixture_base)
             provider_direct_default_output_baseline(base_url, fixture_base)
+        if not wireguard_outbound_logs or (
+            "SINGBOX_WIREGUARD_GENERATION schema=outbound nodes=1 peers=2"
+            not in wireguard_outbound_logs[0]
+        ):
+            raise AssertionError(
+                "sing-box outbound WireGuard diagnostics are missing"
+            )
+        if (
+            "STASH_RULE_GENERATION input=11 inline=2 expanded=0 providers=9 "
+            not in wireguard_outbound_logs[0]
+        ):
+            raise AssertionError("Stash native rule generation diagnostics are missing")
+        for secret in (
+            "stash-domain-token",
+            "stash-domain-yaml-token",
+            "stash-domain-text-token",
+            "stash-domain-api-token",
+            "stash-ip-token",
+            "stash-ip-yaml-token",
+            "stash-ip-text-token",
+            "stash-classical-token",
+            "stash-classical-yaml-token",
+            "stash-atomic-token",
+        ):
+            if secret in wireguard_outbound_logs[0]:
+                raise AssertionError("Stash native rule diagnostics leaked a source token")
+        with running_service(
+            binary,
+            config_replacements=((
+                "max_allowed_rules = 4096",
+                "max_allowed_rules = 1",
+            ),),
+        ) as stash_rule_limit_url:
+            stash_rule_limit_baseline(stash_rule_limit_url, fixture_base)
         with running_service(
             binary,
             config_replacements=(
@@ -5450,6 +10998,7 @@ def main() -> int:
         persistence_degradation_baseline(binary, fixture_base)
         public_request_baseline(binary, fixture_base)
         security_endpoint_matrix_baseline(binary, fixture_base)
+        shadowrocket_upload_path_compatibility_baseline(binary, fixture_base)
         upload_failure_compatibility_baseline(binary, fixture_base)
         external_config_failure_baseline(binary, fixture_base)
         loopback_proxy_route_baseline(binary, fixture_base)

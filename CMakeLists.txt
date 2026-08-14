@@ -59,6 +59,12 @@ SET(MIHOMO_TEST_BINARY "" CACHE FILEPATH
     "Pinned Mihomo CLI used by compatibility tests")
 OPTION(REQUIRE_MIHOMO_TEST_BINARY
     "Fail configuration unless a Mihomo test CLI is supplied." OFF)
+SET(SINGBOX_STABLE_TEST_BINARY "" CACHE FILEPATH
+    "Pinned stable sing-box CLI used by compatibility tests")
+SET(SINGBOX_NEXT_TEST_BINARY "" CACHE FILEPATH
+    "Pinned next-version sing-box CLI used by compatibility tests")
+OPTION(REQUIRE_SINGBOX_TEST_BINARIES
+    "Fail configuration unless both sing-box test CLIs are supplied." OFF)
 
 IF(ENABLE_SANITIZERS)
     IF(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -133,6 +139,7 @@ SET(SUBCONVERTER_RUNTIME_SOURCES
     src/handler/settings_view.cpp
     src/handler/sub_request_key.cpp
     src/parser/infoparser.cpp
+    src/parser/mieru_uri.cpp
     src/parser/subparser.cpp
     src/parser/mihomo_bridge.cpp
     src/script/cron.cpp
@@ -305,6 +312,28 @@ IF(BUILD_TESTS)
     ELSEIF(REQUIRE_MIHOMO_TEST_BINARY)
         MESSAGE(FATAL_ERROR
             "REQUIRE_MIHOMO_TEST_BINARY requires MIHOMO_TEST_BINARY")
+    ENDIF()
+    IF(SINGBOX_STABLE_TEST_BINARY)
+        IF(NOT EXISTS "${SINGBOX_STABLE_TEST_BINARY}")
+            MESSAGE(FATAL_ERROR
+                "SINGBOX_STABLE_TEST_BINARY does not exist: ${SINGBOX_STABLE_TEST_BINARY}")
+        ENDIF()
+        LIST(APPEND COMPATIBILITY_SECURITY_BASELINE_ARGS
+            --singbox-stable-binary "${SINGBOX_STABLE_TEST_BINARY}")
+    ELSEIF(REQUIRE_SINGBOX_TEST_BINARIES)
+        MESSAGE(FATAL_ERROR
+            "REQUIRE_SINGBOX_TEST_BINARIES requires SINGBOX_STABLE_TEST_BINARY")
+    ENDIF()
+    IF(SINGBOX_NEXT_TEST_BINARY)
+        IF(NOT EXISTS "${SINGBOX_NEXT_TEST_BINARY}")
+            MESSAGE(FATAL_ERROR
+                "SINGBOX_NEXT_TEST_BINARY does not exist: ${SINGBOX_NEXT_TEST_BINARY}")
+        ENDIF()
+        LIST(APPEND COMPATIBILITY_SECURITY_BASELINE_ARGS
+            --singbox-next-binary "${SINGBOX_NEXT_TEST_BINARY}")
+    ELSEIF(REQUIRE_SINGBOX_TEST_BINARIES)
+        MESSAGE(FATAL_ERROR
+            "REQUIRE_SINGBOX_TEST_BINARIES requires SINGBOX_NEXT_TEST_BINARY")
     ENDIF()
 
     ADD_TEST(
@@ -498,6 +527,13 @@ IF(BUILD_TESTS)
     ADD_TEST(NAME proxy_provider_direct COMMAND proxy_provider_direct_test)
     SET_TESTS_PROPERTIES(proxy_provider_direct PROPERTIES LABELS fast)
 
+    ADD_EXECUTABLE(mieru_uri_test
+        tests/mieru_uri_test.cpp
+        src/parser/mieru_uri.cpp)
+    TARGET_INCLUDE_DIRECTORIES(mieru_uri_test PRIVATE src)
+    ADD_TEST(NAME mieru_uri COMMAND mieru_uri_test)
+    SET_TESTS_PROPERTIES(mieru_uri PROPERTIES LABELS fast)
+
     ADD_EXECUTABLE(curl_handle_pool_test
         tests/curl_handle_pool_test.cpp
         src/handler/curl_handle_pool.cpp)
@@ -578,6 +614,7 @@ IF(BUILD_TESTS)
         sub_request_key_test
         proxy_provider_interval_test
         proxy_provider_direct_test
+        mieru_uri_test
         curl_handle_pool_test
         file_scope_test
         preference_file_test
@@ -602,6 +639,7 @@ ADD_LIBRARY(${BUILD_TARGET_NAME} STATIC
     src/generator/config/subexport.cpp
     src/generator/template/templates.cpp
     src/lib/wrapper.cpp
+    src/parser/mieru_uri.cpp
     src/parser/subparser.cpp
     src/utils/base64/base64.cpp
     src/utils/codepage.cpp

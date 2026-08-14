@@ -138,6 +138,18 @@
 #define CPPHTTPLIB_RANGE_MAX_COUNT 1024
 #endif
 
+// std::regex_match's backtracking implementation (most acutely on libstdc++)
+// recurses roughly once per matched character for quantified patterns such
+// as "(.*)", so a long enough path can exhaust the calling thread's stack; on
+// a default ~8MB thread stack that has been observed to take on the order of
+// a couple thousand characters for a simple pattern. 256 leaves a wide safety
+// margin below that (well under the 8192-byte request URI limit) while still
+// fitting any realistic route segment; raise it if a route legitimately needs
+// longer paths. Regex routes are never applied to paths longer than this.
+#ifndef CPPHTTPLIB_REGEX_ROUTE_PATH_MAX_LENGTH
+#define CPPHTTPLIB_REGEX_ROUTE_PATH_MAX_LENGTH 256
+#endif
+
 #ifndef CPPHTTPLIB_TCP_NODELAY
 #define CPPHTTPLIB_TCP_NODELAY false
 #endif
@@ -11633,6 +11645,11 @@ inline bool PathParamsMatcher::match(Request &request) const {
 
 inline bool RegexMatcher::match(Request &request) const {
   request.path_params.clear();
+  // See CPPHTTPLIB_REGEX_ROUTE_PATH_MAX_LENGTH: an overlong path is treated as
+  // a non-match rather than risking a stack overflow in std::regex_match.
+  if (request.path.length() > CPPHTTPLIB_REGEX_ROUTE_PATH_MAX_LENGTH) {
+    return false;
+  }
   return std::regex_match(request.path, request.matches, regex_);
 }
 
@@ -12704,15 +12721,12 @@ inline bool Server::read_content_core(
         }
       }
       if (has_data) {
-        auto result =
-            detail::read_content_without_length(strm, payload_max_length_, out);
-        if (result == detail::ReadContentResult::PayloadTooLarge) {
-          res.status = StatusCode::PayloadTooLarge_413;
-          return false;
-        } else if (result != detail::ReadContentResult::Success) {
-          return false;
-        }
-        return true;
+        // Route through the same decompressing reader used by the
+        // length-framed and chunked paths below, so payload_max_length_ is
+        // enforced on the decompressed size here too instead of only on the
+        // compressed wire bytes.
+        return detail::read_content(strm, req, payload_max_length_, res.status,
+                                    nullptr, out, true);
       }
     }
     return true;

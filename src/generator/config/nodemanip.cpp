@@ -288,7 +288,11 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
   }
 
   writeLog(LOG_LEVEL_VERBOSE, "已收到链接。");
-  if (startsWith(link, "https://t.me/socks") || startsWith(link, "tg://socks"))
+  if (parse_set.force_direct_link)
+    linkType = ConfType::HTTP;
+  else if (!use_mihomo_parser && isLegacyHttpProxyUri(link))
+    linkType = ConfType::HTTP;
+  else if (startsWith(link, "https://t.me/socks") || startsWith(link, "tg://socks"))
     linkType = ConfType::SOCKS;
   else if (startsWith(link, "https://t.me/http") ||
            startsWith(link, "tg://http"))
@@ -574,6 +578,23 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
       recordParserInvocation();
       writeLog(LOG_LEVEL_VERBOSE,
                "NODE_PARSER_INVOKE parser=legacy branch=direct");
+      if (startsWith(link, "mierus://")) {
+        std::vector<Proxy> parsed_nodes;
+        explodeMierusNodes(link, parsed_nodes);
+        if (parsed_nodes.empty()) {
+          recordParserFailure();
+          writeLog(LOG_LEVEL_ERROR,
+                   "NODE_PARSER_FAILED parser=legacy branch=direct reason=no_nodes");
+          return -1;
+        }
+        for (auto &parsed_node : parsed_nodes) {
+          parsed_node.GroupId = groupID;
+          if (!custom_group.empty())
+            parsed_node.Group = custom_group;
+          allNodes.emplace_back(std::move(parsed_node));
+        }
+        return 0;
+      }
       explode(link, node);
       if (node.Type == ProxyType::Unknown) {
         recordParserFailure();

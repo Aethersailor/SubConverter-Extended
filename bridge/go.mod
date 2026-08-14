@@ -2,7 +2,11 @@ module github.com/aethersailor/subconverter-extended/bridge
 
 go 1.25.5
 
-require github.com/metacubex/mihomo v1.19.29
+require (
+	github.com/enfein/mieru/v3 v3.34.0
+	github.com/metacubex/mihomo v1.19.29
+	google.golang.org/protobuf v1.34.2
+)
 
 require (
 	github.com/RyuaNerin/go-krypto v1.3.0 // indirect
@@ -13,6 +17,7 @@ require (
 	github.com/ericlagergren/siv v0.0.0-20220507050439-0b757b3aa5f1 // indirect
 	github.com/ericlagergren/subtle v0.0.0-20220507045147-890d697da010 // indirect
 	github.com/gofrs/uuid/v5 v5.5.1 // indirect
+	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/kr/pretty v0.1.0 // indirect
 	github.com/metacubex/age v0.0.0-20260603010618-28d156b4ea78 // indirect
 	github.com/metacubex/ascon v0.1.0 // indirect
@@ -26,20 +31,20 @@ require (
 	github.com/metacubex/randv2 v0.2.0 // indirect
 	github.com/metacubex/sing v0.5.7 // indirect
 	github.com/metacubex/sing-shadowsocks v0.2.12 // indirect
-	github.com/metacubex/tls v0.1.7 // indirect
+	github.com/metacubex/tls v0.1.8 // indirect
 	github.com/oasisprotocol/deoxysii v0.0.0-20220228165953-2091330c22b7 // indirect
 	github.com/samber/lo v1.53.0 // indirect
 	github.com/sina-ghaderi/poly1305 v0.0.0-20220724002748-c5926b03988b // indirect
 	github.com/sina-ghaderi/rabaead v0.0.0-20220730151906-ab6e06b96e8c // indirect
 	github.com/sina-ghaderi/rabbitio v0.0.0-20220730151941-9ce26f4f872e // indirect
-	github.com/sirupsen/logrus v1.9.4 // indirect
+	github.com/sirupsen/logrus v1.10.0 // indirect
 	gitlab.com/go-extension/aes-ccm v0.0.0-20230221065045-e58665ef23c7 // indirect
 	gitlab.com/yawning/bsaes.git v0.0.0-20190805113838-0a714cd429ec // indirect
-	golang.org/x/crypto v0.54.0 // indirect
-	golang.org/x/exp v0.0.0-20260810151157-a8b543ca52da // indirect
-	golang.org/x/net v0.57.0 // indirect
+	golang.org/x/crypto v0.55.0 // indirect
+	golang.org/x/exp v0.0.0-20260813180055-c1d0aacb2297 // indirect
+	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 	gopkg.in/check.v1 v1.0.0-20180628173108-788fd7840127 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

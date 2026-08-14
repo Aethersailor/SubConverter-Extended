@@ -45,6 +45,7 @@ struct CommonScalarSettings {
   std::string loonBase;
   std::string SSSubBase;
   std::string singBoxBase;
+  std::string stashBase;
   std::string defaultExtConfig;
   bool fallbackToDefaultExternalConfig;
   bool appendType;
@@ -67,6 +68,7 @@ CommonScalarSettings captureCommonScalarSettings() {
           global.loonBase,
           global.SSSubBase,
           global.singBoxBase,
+          global.stashBase,
           global.defaultExtConfig,
           global.fallbackToDefaultExternalConfig,
           global.appendType,
@@ -96,6 +98,7 @@ void applyCommonScalarSettings(CommonScalarSettings settings) {
   global.loonBase = std::move(settings.loonBase);
   global.SSSubBase = std::move(settings.SSSubBase);
   global.singBoxBase = std::move(settings.singBoxBase);
+  global.stashBase = std::move(settings.stashBase);
   global.defaultExtConfig = std::move(settings.defaultExtConfig);
   global.fallbackToDefaultExternalConfig =
       settings.fallbackToDefaultExternalConfig;
@@ -707,7 +710,8 @@ int readRuleset(YAML::Node node, string_array &dest, bool scope_limit = true,
 
 void refreshRulesets(RulesetConfigs &ruleset_list,
                      std::vector<RulesetContent> &ruleset_content_array,
-                     FetchContext context) {
+                     FetchContext context, RulesetRefreshMode mode,
+                     const std::vector<RulesetContent> *reusable_content) {
   ruleset_content_array.clear();
   ruleset_content_array.reserve(ruleset_list.size());
   std::string rule_group, rule_url, rule_url_typed, interval;
@@ -716,6 +720,7 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
   const Settings &settings = effectiveSettings();
   ProxyPolicy proxy = parseProxy(settings.proxyRuleset, settings.proxyBypass);
 
+  size_t source_index = 0;
   for (RulesetConfig &x : ruleset_list) {
     rule_group = x.Group;
     rule_url = x.Url;
@@ -724,13 +729,17 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
       writeLog(LOG_LEVEL_INFO,
                "正在添加规则：'" + rule_url.substr(pos + 2) + "," +
                    rule_group + "'。");
-      rc = {rule_group,
-            "",
-            "",
-            RULESET_SURGE,
-            makeReadyStringFuture(rule_url.substr(pos)),
-            0,
-            x.Options};
+      if (reusable_content &&
+          reusable_content->size() == ruleset_list.size())
+        rc = (*reusable_content)[source_index];
+      else
+        rc = {rule_group,
+              "",
+              "",
+              RULESET_SURGE,
+              makeReadyStringFuture(rule_url.substr(pos)),
+              0,
+              x.Options};
     } else {
       ruleset_type type = RULESET_SURGE;
       rule_url_typed = rule_url;
@@ -747,18 +756,41 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
                      rule_group + "' 安全忽略。");
 
       writeLog(LOG_LEVEL_INFO,
-               "正在更新规则集 URL：'" + rule_url + "'，策略组：'" +
+               "正在更新规则集 URL：'" + summarizeUrlForLog(rule_url) +
+                   "'，策略组：'" +
                    rule_group + "'。");
-      rc = {rule_group,
-            rule_url,
-            rule_url_typed,
-            type,
-            fetchFileAsync(rule_url, proxy, settings.cacheRuleset, true,
-                           settings.asyncFetchRuleset, context),
-            x.Interval,
-            x.Options};
+      std::string native_rule_path = toLower(rule_url);
+      const size_t native_rule_query = native_rule_path.find_first_of("?#");
+      if (native_rule_query != std::string::npos)
+        native_rule_path.erase(native_rule_query);
+      const bool native_stash_provider =
+          mode == RulesetRefreshMode::PreferNativeStashProviders &&
+          (startsWith(rule_url, "https://") || startsWith(rule_url, "http://")) &&
+          (type == RULESET_CLASH_DOMAIN || type == RULESET_CLASH_IPCIDR ||
+           type == RULESET_CLASH_CLASSICAL) &&
+          (!x.Options.stash_format.empty() ||
+           endsWith(native_rule_path, ".mrs") ||
+           endsWith(native_rule_path, ".yaml") ||
+           endsWith(native_rule_path, ".yml"));
+      if (!native_stash_provider && reusable_content &&
+          reusable_content->size() == ruleset_list.size())
+        rc = (*reusable_content)[source_index];
+      else
+        rc = {rule_group,
+              rule_url,
+              rule_url_typed,
+              type,
+              native_stash_provider
+                  ? makeReadyStringFuture("")
+                  : fetchFileAsync(rule_url, proxy, settings.cacheRuleset, true,
+                                   settings.asyncFetchRuleset, context),
+              x.Interval,
+              x.Options,
+              native_stash_provider ? RulesetDelivery::NativeStashProvider
+                                    : RulesetDelivery::ServerFetched};
     }
     ruleset_content_array.emplace_back(std::move(rc));
+    ++source_index;
   }
 }
 
@@ -820,6 +852,7 @@ void readYAMLConf(YAML::Node &node,
   section["loon_rule_base"] >> common.loonBase;
   section["sssub_rule_base"] >> common.SSSubBase;
   section["singbox_rule_base"] >> common.singBoxBase;
+  section["stash_rule_base"] >> common.stashBase;
 
   section["default_external_config"] >> common.defaultExtConfig;
   section["fallback_to_default_external_config"] >>
@@ -922,6 +955,22 @@ void readYAMLConf(YAML::Node &node,
     node["surge_external_proxy"]["surge_ssr_path"] >> global.surgeSSRPath;
     node["surge_external_proxy"]["resolve_hostname"] >>
         global.surgeResolveHostname;
+  }
+
+  if (node["remote_subscription"].IsDefined() &&
+      node["remote_subscription"].IsMap()) {
+    node["remote_subscription"]["surge_policy_path"] >>
+        global.surgePolicyPath;
+    node["remote_subscription"]["surfboard_policy_path"] >>
+        global.surfboardPolicyPath;
+    node["remote_subscription"]["loon_remote_proxy"] >>
+        global.loonRemoteProxy;
+  }
+
+  if (node["singbox"].IsDefined() && node["singbox"].IsMap()) {
+    node["singbox"]["wireguard_endpoint"] >>
+        global.singBoxWireGuardEndpoint;
+    node["singbox"]["snell_outbound"] >> global.singBoxSnellOutbound;
   }
 
   if (node["emojis"].IsDefined()) {
@@ -1148,8 +1197,9 @@ void readTOMLConf(toml::value &root,
       "surfboard_rule_base", common.surfboardBase, "mellow_rule_base",
       common.mellowBase, "quan_rule_base", common.quanBase, "quanx_rule_base",
       common.quanXBase, "loon_rule_base", common.loonBase, "sssub_rule_base",
-      common.SSSubBase, "singbox_rule_base", common.singBoxBase, "proxy_config",
-      common.proxyConfig, "proxy_ruleset", common.proxyRuleset,
+      common.SSSubBase, "singbox_rule_base", common.singBoxBase,
+      "stash_rule_base", common.stashBase, "proxy_config", common.proxyConfig,
+      "proxy_ruleset", common.proxyRuleset,
       "proxy_subscription", common.proxySubscription, "proxy_bypass",
       common.proxyBypass, "append_proxy_type",
       common.appendType, "reload_conf_on_request", common.reloadConfOnRequest);
@@ -1226,6 +1276,26 @@ void readTOMLConf(toml::value &root,
   auto section_surge_external = toml::find(root, "surge_external_proxy");
   find_if_exist(section_surge_external, "surge_ssr_path", global.surgeSSRPath,
                 "resolve_hostname", global.surgeResolveHostname);
+
+  if (root.contains("remote_subscription")) {
+    const auto &section_remote_subscription =
+        root.as_table().at("remote_subscription");
+    if (section_remote_subscription.is_table()) {
+      find_if_exist(section_remote_subscription, "surge_policy_path",
+                    global.surgePolicyPath, "surfboard_policy_path",
+                    global.surfboardPolicyPath, "loon_remote_proxy",
+                    global.loonRemoteProxy);
+    }
+  }
+
+  if (root.contains("singbox")) {
+    const auto &section_singbox = root.as_table().at("singbox");
+    if (section_singbox.is_table()) {
+      find_if_exist(section_singbox, "wireguard_endpoint",
+                    global.singBoxWireGuardEndpoint, "snell_outbound",
+                    global.singBoxSnellOutbound);
+    }
+  }
 
   auto section_emojis = toml::find(root, "emojis");
 
@@ -1421,6 +1491,11 @@ bool readConf() {
     global.proxyBypass = kDefaultProxyBypass;
     global.proxyProviderInterval = kDefaultProxyProviderInterval;
     global.proxyProviderDirect = kDefaultProxyProviderDirect;
+    global.stashBase = kDefaultStashRuleBase;
+    global.surgePolicyPath = true;
+    global.surfboardPolicyPath = true;
+    global.singBoxWireGuardEndpoint = false;
+    global.singBoxSnellOutbound = false;
   };
 
   std::string prefdata;
@@ -1554,6 +1629,7 @@ bool readConf() {
   ini.get_if_exist("loon_rule_base", common.loonBase);
   ini.get_if_exist("sssub_rule_base", common.SSSubBase);
   ini.get_if_exist("singbox_rule_base", common.singBoxBase);
+  ini.get_if_exist("stash_rule_base", common.stashBase);
   ini.get_if_exist("default_external_config", common.defaultExtConfig);
   ini.get_bool_if_exist("fallback_to_default_external_config",
                         common.fallbackToDefaultExternalConfig);
@@ -1590,6 +1666,21 @@ bool readConf() {
     ini.enter_section("surge_external_proxy");
     ini.get_if_exist("surge_ssr_path", global.surgeSSRPath);
     ini.get_bool_if_exist("resolve_hostname", global.surgeResolveHostname);
+  }
+
+  if (ini.section_exist("remote_subscription")) {
+    ini.enter_section("remote_subscription");
+    ini.get_bool_if_exist("surge_policy_path", global.surgePolicyPath);
+    ini.get_bool_if_exist("surfboard_policy_path",
+                          global.surfboardPolicyPath);
+    ini.get_bool_if_exist("loon_remote_proxy", global.loonRemoteProxy);
+  }
+
+  if (ini.section_exist("singbox")) {
+    ini.enter_section("singbox");
+    ini.get_bool_if_exist("wireguard_endpoint",
+                          global.singBoxWireGuardEndpoint);
+    ini.get_bool_if_exist("snell_outbound", global.singBoxSnellOutbound);
   }
 
   if (ini.section_exist("node_pref")) {
@@ -1856,6 +1947,7 @@ ExternalConfigLoadStatus loadExternalYAML(YAML::Node &node,
   section["loon_rule_base"] >> ext.loon_rule_base;
   section["sssub_rule_base"] >> ext.sssub_rule_base;
   section["singbox_rule_base"] >> ext.singbox_rule_base;
+  section["stash_rule_base"] >> ext.stash_rule_base;
 
   section["enable_rule_generator"] >> ext.enable_rule_generator;
   section["overwrite_original_rules"] >> ext.overwrite_original_rules;
@@ -1937,7 +2029,8 @@ ExternalConfigLoadStatus loadExternalTOML(toml::value &root,
                 ext.mellow_rule_base, "quan_rule_base", ext.quan_rule_base,
                 "quanx_rule_base", ext.quanx_rule_base, "loon_rule_base",
                 ext.loon_rule_base, "sssub_rule_base", ext.sssub_rule_base,
-                "singbox_rule_base", ext.singbox_rule_base, "add_emoji",
+                "singbox_rule_base", ext.singbox_rule_base,
+                "stash_rule_base", ext.stash_rule_base, "add_emoji",
                 ext.add_emoji, "remove_old_emoji", ext.remove_old_emoji,
                 "include_remarks", ext.include, "exclude_remarks", ext.exclude);
 
@@ -2044,6 +2137,7 @@ parseExternalConfigContent(const std::string &path,
   ini.get_if_exist("loon_rule_base", ext.loon_rule_base);
   ini.get_if_exist("sssub_rule_base", ext.sssub_rule_base);
   ini.get_if_exist("singbox_rule_base", ext.singbox_rule_base);
+  ini.get_if_exist("stash_rule_base", ext.stash_rule_base);
 
   ini.get_bool_if_exist("overwrite_original_rules",
                         ext.overwrite_original_rules);
@@ -2088,7 +2182,7 @@ namespace {
 constexpr size_t kExternalConfigCacheEntries = 64;
 constexpr size_t kExternalConfigCacheBytes = 8 * 1024 * 1024;
 constexpr const char *kExternalConfigParserIdentity =
-    "external-config:auto-yaml-toml-ini:v2";
+    "external-config:auto-yaml-toml-ini:v3";
 
 struct CachedExternalConfig {
   ExternalConfigLoadStatus status = ExternalConfigLoadStatus::ParseFailed;
