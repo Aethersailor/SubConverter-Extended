@@ -24,6 +24,7 @@ COPY bridge/converter.go ./
 COPY bridge/age.go ./
 COPY bridge/parser.go ./
 COPY bridge/preprocess.go ./
+COPY bridge/mieru.go ./
 
 RUN set -xe && \
     if [ "${REFRESH_GO_DEPS}" = "true" ]; then \
