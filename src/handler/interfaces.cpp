@@ -1147,6 +1147,10 @@ struct SubExplainReport {
   size_t unsupported_node_count = 0;
   string_array unsupported_protocols;
   size_t ruleset_count = 0;
+  size_t rule_provider_count = 0;
+  size_t inline_rule_source_count = 0;
+  size_t expanded_rule_source_count = 0;
+  size_t unsupported_ruleset_count = 0;
   size_t custom_group_count = 0;
   size_t output_bytes = 0;
   std::vector<SubExplainProvider> providers;
@@ -1354,6 +1358,14 @@ static std::string serializeSubExplainReport(const SubExplainReport &report,
   writeJsonString(writer, "ruleset_fetch_context", report.ruleset_fetch_context);
   writer.Key("ruleset_count");
   writer.Uint64(report.ruleset_count);
+  writer.Key("rule_provider_count");
+  writer.Uint64(report.rule_provider_count);
+  writer.Key("inline_rule_source_count");
+  writer.Uint64(report.inline_rule_source_count);
+  writer.Key("expanded_rule_source_count");
+  writer.Uint64(report.expanded_rule_source_count);
+  writer.Key("unsupported_ruleset_count");
+  writer.Uint64(report.unsupported_ruleset_count);
   writer.Key("custom_group_count");
   writer.Uint64(report.custom_group_count);
   writer.Key("remote_subscription_count");
@@ -2403,7 +2415,18 @@ static std::string buildExternalConfigFetchPlan(
 
   if (policy.generator.enable_rule_generator &&
       !policy.generator.nodelist && !parsed.simple_subscription) {
-    if (policy.custom_rulesets != settings.customRulesets)
+    const bool stash_native_rulesets = parsed.target == "stash";
+    if (stash_native_rulesets) {
+      const bool reuse_cached_rulesets =
+          policy.custom_rulesets == settings.customRulesets &&
+          !settings.updateRulesetOnRequest &&
+          settings.rulesetsContent.size() == policy.custom_rulesets.size();
+      refreshRulesets(policy.custom_rulesets, plan.ruleset_content,
+                      rulesetFetchContext,
+                      RulesetRefreshMode::PreferNativeStashProviders,
+                      reuse_cached_rulesets ? &settings.rulesetsContent
+                                            : nullptr);
+    } else if (policy.custom_rulesets != settings.customRulesets)
       refreshRulesets(policy.custom_rulesets, plan.ruleset_content,
                       rulesetFetchContext);
     else {
@@ -4239,6 +4262,14 @@ static SubStageResponse dispatchTargetGenerator(
     }
     output = proxyToStash(nodes, base_content, ruleset_content,
                           policy.custom_proxy_groups, ext);
+    parsed.explain.rule_provider_count =
+        ext.stash_rule_stats.final_provider_count;
+    parsed.explain.inline_rule_source_count =
+        ext.stash_rule_stats.inline_sources;
+    parsed.explain.expanded_rule_source_count =
+        ext.stash_rule_stats.expanded_sources;
+    parsed.explain.unsupported_ruleset_count =
+        ext.stash_rule_stats.unsupported_sources;
     if (!ext.external_rule_error.empty()) {
       *status_code = 400;
       return {true, ext.external_rule_error};

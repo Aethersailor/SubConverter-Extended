@@ -3448,9 +3448,38 @@ static std::string proxyToStashImpl(
   }
   stats.remote_references_emitted = referenced_providers.size();
 
-  if (ext.enable_rule_generator)
-    rulesetToClash(root, ruleset_content_array, ext.overwrite_original_rules,
-                   true, ext.rule_stats);
+  if (ext.enable_rule_generator) {
+    std::string stash_rule_error;
+    if (!rulesetToStash(root, ruleset_content_array,
+                        ext.overwrite_original_rules, ext.stash_rule_stats,
+                        ext.rule_stats, stash_rule_error)) {
+      ext.external_rule_error = std::move(stash_rule_error);
+      writeLog(LOG_LEVEL_WARNING,
+               "STASH_RULE_GENERATION input=" +
+                   std::to_string(ext.stash_rule_stats.input_sources) +
+                   " inline=" +
+                   std::to_string(ext.stash_rule_stats.inline_sources) +
+                   " expanded=" +
+                   std::to_string(ext.stash_rule_stats.expanded_sources) +
+                   " providers=" +
+                   std::to_string(ext.stash_rule_stats.providerized_sources) +
+                   " unsupported=" +
+                   std::to_string(ext.stash_rule_stats.unsupported_sources));
+      return "";
+    }
+    writeLog(LOG_LEVEL_INFO,
+             "STASH_RULE_GENERATION input=" +
+                 std::to_string(ext.stash_rule_stats.input_sources) +
+                 " inline=" +
+                 std::to_string(ext.stash_rule_stats.inline_sources) +
+                 " expanded=" +
+                 std::to_string(ext.stash_rule_stats.expanded_sources) +
+                 " providers=" +
+                 std::to_string(ext.stash_rule_stats.providerized_sources) +
+                 " emitted_rules=" +
+                 std::to_string(ext.stash_rule_stats.emitted_rules) +
+                 " unsupported=0");
+  }
   if (!ext.rule_prepend.empty() || !ext.rule_append.empty()) {
     string_array current_rules;
     if (root["rules"].IsDefined() && root["rules"].IsSequence())
@@ -3685,6 +3714,7 @@ static std::string proxyToStashImpl(
       if (!rule_sequence_is_closed(sub_rule.second))
         return fail_reference_graph();
   }
+  ext.stash_rule_stats.final_provider_count = rule_provider_names.size();
   return finalizeCanonicalClashYaml(YAML::Dump(root));
 }
 

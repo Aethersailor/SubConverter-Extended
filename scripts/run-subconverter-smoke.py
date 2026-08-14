@@ -170,6 +170,18 @@ PROVIDER_FILTER_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
 QUANX_REMOTE_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
     b"enable_rule_generator=false\ncustom_proxy_group=Remote`select`.*\n"
 ).decode("ascii")
+STASH_RULE_PROVIDER_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
+    b"\n".join(
+        (
+            b"enable_rule_generator=true",
+            b"overwrite_original_rules=true",
+            b"custom_proxy_group=RuleGroup`select`.*",
+            b"ruleset=RuleGroup,clash-domain:https://127.0.0.1:1/"
+            b"stash-smoke-domain.mrs?token=stash-rule-smoke-secret,3600",
+            b"ruleset=RuleGroup,[]GEOSITE,telegram",
+        )
+    )
+).decode("ascii")
 AGE_PUBLIC_KEY = (
     "age1xh86kh9v23vattr58yedspm3f57sxvnswu9krr6ns438amekx5gsd09uma"
 )
@@ -1343,6 +1355,92 @@ def run_checks(
             raise AssertionError(f"Stash explain route mismatch: {stash_explain!r}")
         if "stash-smoke-source-secret" in json.dumps(stash_explain):
             raise AssertionError("Stash explain leaked its source token")
+
+        stash_rules = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "stash",
+                "url": f"provider:RuleNodes,{dead_stash_source}",
+                "config": STASH_RULE_PROVIDER_CONFIG,
+            },
+            timeout,
+        )
+        for expected in (
+            "rule-providers:",
+            "stash-smoke-domain:",
+            "behavior: domain",
+            "format: mrs",
+            "path: ./rules/stash-smoke-domain.mrs",
+            "RULE-SET,stash-smoke-domain,RuleGroup",
+            "GEOSITE,telegram,RuleGroup",
+        ):
+            if expected not in stash_rules:
+                raise AssertionError(
+                    f"Stash native rule-provider output is missing {expected!r}\n"
+                    f"{stash_rules}"
+                )
+        stash_rule_provider_block = provider_block_from_output(
+            stash_rules, "stash-smoke-domain"
+        )
+        expected_rule_provider_fields = (
+            "    behavior: domain",
+            "    format: mrs",
+            "    url: https://127.0.0.1:1/stash-smoke-domain.mrs?"
+            "token=stash-rule-smoke-secret",
+            "    path: ./rules/stash-smoke-domain.mrs",
+            "    interval: 3600",
+        )
+        stash_rule_provider_lines = set(stash_rule_provider_block.splitlines())
+        if any(
+            field not in stash_rule_provider_lines
+            for field in expected_rule_provider_fields
+        ):
+            raise AssertionError(
+                "Stash rule-provider fields are not associated with the "
+                f"expected provider:\n{stash_rule_provider_block}"
+            )
+        if "type:" in stash_rule_provider_block:
+            raise AssertionError(
+                "Stash rule-provider leaked the Mihomo type field"
+            )
+        stash_rules_explain = json.loads(
+            fetch(
+                base_url,
+                "/sub",
+                {
+                    "target": "stash",
+                    "url": f"provider:RuleNodes,{dead_stash_source}",
+                    "config": STASH_RULE_PROVIDER_CONFIG,
+                    "explain": "true",
+                },
+                timeout,
+            )
+        )
+        stash_rule_resources = stash_rules_explain.get("resources", {})
+        if (
+            stash_rules_explain.get("target") != "stash"
+            or stash_rules_explain.get("ok") is not True
+            or stash_rules_explain.get("status_code") != 200
+            or stash_rule_resources.get("ruleset_count") != 2
+            or stash_rule_resources.get("rule_provider_count") != 1
+            or stash_rule_resources.get("inline_rule_source_count") != 1
+            or stash_rule_resources.get("expanded_rule_source_count") != 0
+            or stash_rule_resources.get("unsupported_ruleset_count") != 0
+        ):
+            raise AssertionError(
+                f"Stash native rule-provider Explain mismatch: "
+                f"{stash_rules_explain!r}"
+            )
+        stash_rules_explain_text = json.dumps(stash_rules_explain)
+        if any(
+            secret in stash_rules_explain_text
+            for secret in (
+                "stash-rule-smoke-secret",
+                "stash-smoke-source-secret",
+            )
+        ):
+            raise AssertionError("Stash rule-provider Explain leaked a token")
 
         stash_direct = fetch(
             base_url,

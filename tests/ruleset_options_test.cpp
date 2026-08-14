@@ -176,6 +176,11 @@ int main()
     assert(yaml_normalized.Interval == 86400);
     assert(yaml_normalized.Options.no_resolve);
     assert(parseRulesetOptions({"no-resolve"}).no_resolve);
+    assert(parseRulesetOptions({"stash-format=text"}).stash_format == "text");
+    assert(parseRulesetOptions({"STASH-FORMAT=YAML"}).stash_format == "yaml");
+    assert(parseRulesetOptions(
+               {"stash-format=text", "stash-format=yaml"})
+               .stash_format == "invalid");
 
     return 0;
 }

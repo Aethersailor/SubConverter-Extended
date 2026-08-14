@@ -1,9 +1,13 @@
+#include <algorithm>
 #include <charconv>
+#include <cctype>
 #include <cstdint>
 #include <limits>
 #include <map>
 #include <set>
+#include <sstream>
 #include <string>
+#include <unordered_set>
 
 #include "handler/settings.h"
 #include "handler/settings_view.h"
@@ -213,6 +217,378 @@ static void warnNoResolveIgnoredForTarget(
                      " 输出，已对策略组 '" + ruleset.rule_group +
                      "' 安全忽略。");
     }
+}
+
+namespace {
+
+struct StashNativeRulesetContract
+{
+    std::string behavior;
+    std::string format;
+    std::string extension;
+};
+
+bool inferStashNativeRulesetContract(const RulesetContent &ruleset,
+                                     StashNativeRulesetContract &contract)
+{
+    if(ruleset.delivery != RulesetDelivery::NativeStashProvider ||
+       (!startsWith(ruleset.rule_path, "https://") &&
+        !startsWith(ruleset.rule_path, "http://")))
+        return false;
+
+    switch(ruleset.rule_type)
+    {
+    case RULESET_CLASH_DOMAIN:
+        contract.behavior = "domain";
+        break;
+    case RULESET_CLASH_IPCIDR:
+        contract.behavior = "ipcidr";
+        break;
+    case RULESET_CLASH_CLASSICAL:
+        contract.behavior = "classical";
+        break;
+    default:
+        return false;
+    }
+
+    std::string path = ruleset.rule_path;
+    const size_t query = path.find_first_of("?#");
+    if(query != std::string::npos)
+        path.erase(query);
+    const std::string explicit_format = ruleset.options.stash_format;
+    const size_t slash = path.find_last_of('/');
+    const size_t dot = path.find_last_of('.');
+    const std::string extension =
+        dot == std::string::npos ||
+                (slash != std::string::npos && dot < slash + 1)
+            ? ""
+            : toLower(path.substr(dot));
+    if(explicit_format.empty() && extension.empty())
+        return false;
+    if(explicit_format == "mrs" ||
+       (explicit_format.empty() && extension == ".mrs"))
+    {
+        if(contract.behavior == "classical")
+            return false;
+        contract.format = "mrs";
+        contract.extension = ".mrs";
+    }
+    else if(explicit_format == "yaml" ||
+            (explicit_format.empty() &&
+             (extension == ".yaml" || extension == ".yml")))
+    {
+        contract.format = "yaml";
+        contract.extension = ".yaml";
+    }
+    else if(explicit_format == "text")
+    {
+        contract.format = "text";
+        contract.extension = ".txt";
+    }
+    else
+        return false;
+    return true;
+}
+
+std::string stashRulesetStem(const std::string &url)
+{
+    std::string path = url;
+    const size_t query = path.find_first_of("?#");
+    if(query != std::string::npos)
+        path.erase(query);
+    const size_t slash = path.find_last_of('/');
+    std::string name = path.substr(slash == std::string::npos ? 0 : slash + 1);
+    const size_t dot = name.find_last_of('.');
+    if(dot != std::string::npos)
+        name.erase(dot);
+
+    std::string safe;
+    safe.reserve(std::min<size_t>(name.size(), 48));
+    bool last_separator = false;
+    for(unsigned char ch : name)
+    {
+        if(safe.size() >= 48)
+            break;
+        if(std::isalnum(ch) || ch == '-' || ch == '_')
+        {
+            safe.push_back(static_cast<char>(ch));
+            last_separator = false;
+        }
+        else if(!safe.empty() && !last_separator)
+        {
+            safe.push_back('_');
+            last_separator = true;
+        }
+    }
+    while(!safe.empty() && safe.back() == '_')
+        safe.pop_back();
+    return safe.empty() ? "SubConverter_Rule" : safe;
+}
+
+bool stashRulesetScalarIsSafe(const std::string &value)
+{
+    if(value.empty() || value != trimWhitespace(value, true, true))
+        return false;
+    return std::none_of(value.begin(), value.end(), [](unsigned char ch) {
+        return ch < 0x20 || ch == 0x7f;
+    });
+}
+
+bool stashRulesetGroupIsSafe(const std::string &value)
+{
+    return stashRulesetScalarIsSafe(value) &&
+           value.find(',') == std::string::npos;
+}
+
+bool normalizeStashRule(std::string rule, const std::string &group,
+                        const RulesetOptions &options, std::string &output)
+{
+    rule = trimWhitespace(rule, true, true);
+    if(rule.empty())
+        return false;
+    string_array fields = split(rule, ",");
+    for(std::string &field : fields)
+    {
+        field = trimWhitespace(field, true, true);
+        if(!stashRulesetScalarIsSafe(field))
+            return false;
+    }
+    if(fields.empty())
+        return false;
+    const std::string type = toUpper(fields[0]);
+    static const std::unordered_set<std::string> allowed_types = {
+        "DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "DOMAIN-WILDCARD",
+        "DOMAIN-REGEX", "GEOSITE", "IP-CIDR", "IP-CIDR6", "IP-ASN",
+        "GEOIP", "PROCESS-NAME", "PROCESS-PATH", "USER-AGENT",
+        "URL-REGEX", "NETWORK", "PROTOCOL", "DST-PORT", "MATCH",
+        "FINAL"};
+    if(allowed_types.find(type) == allowed_types.end())
+        return false;
+
+    const bool terminal_rule = type == "MATCH" || type == "FINAL";
+    if((terminal_rule && fields.size() != 1) ||
+       (!terminal_rule && (fields.size() < 2 || fields[1].empty())))
+        return false;
+
+    const bool supports_no_resolve =
+        type == "GEOIP" || type == "IP-CIDR" || type == "IP-CIDR6" ||
+        type == "IP-ASN";
+    bool no_resolve = options.no_resolve && supports_no_resolve;
+    bool explicit_no_resolve = false;
+    bool no_track = false;
+    for(size_t index = 2; index < fields.size(); ++index)
+    {
+        const std::string option = toLower(fields[index]);
+        if(option == "no-resolve" && supports_no_resolve &&
+           !explicit_no_resolve)
+        {
+            no_resolve = true;
+            explicit_no_resolve = true;
+        }
+        else if(option == "no-track" && !no_track)
+            no_track = true;
+        else
+            return false;
+    }
+
+    if(type == "GEOIP")
+    {
+        const std::string &country = fields[1];
+        if(country.size() != 2 ||
+           !std::all_of(country.begin(), country.end(), [](unsigned char ch) {
+               return std::isalpha(ch) != 0;
+           }))
+            return false;
+    }
+
+    output = terminal_rule ? "MATCH," + group
+                           : type + "," + fields[1] + "," + group;
+    if(no_resolve)
+        output += ",no-resolve";
+    if(no_track)
+        output += ",no-track";
+    return true;
+}
+
+} // namespace
+
+bool rulesetToStash(YAML::Node &base_rule,
+                    const std::vector<RulesetContent> &ruleset_content_array,
+                    bool overwrite_original_rules,
+                    StashRuleConversionStats &stash_stats,
+                    RuleConversionStats *stats,
+                    std::string &error)
+{
+    stash_stats = StashRuleConversionStats{};
+    stash_stats.input_sources = ruleset_content_array.size();
+    error.clear();
+    const size_t max_allowed_rules = effectiveSettings().maxAllowedRules;
+
+    auto fail = [&](const std::string &english, const std::string &chinese) {
+        stash_stats.unsupported_sources++;
+        error = "Invalid request: " + english + ".\n无效请求：" + chinese + "。";
+        return false;
+    };
+
+    YAML::Node rules(YAML::NodeType::Sequence);
+    YAML::Node terminal_rules(YAML::NodeType::Sequence);
+    if(!overwrite_original_rules && base_rule["rules"].IsSequence())
+    {
+        bool terminal_seen = false;
+        for(const YAML::Node &entry : base_rule["rules"])
+        {
+            if(!entry.IsScalar())
+                return fail("the selected Stash base contains a non-scalar rule",
+                            "所选 Stash 基础模板包含非标量规则");
+            const std::string value = trimWhitespace(
+                entry.as<std::string>(), true, true);
+            const size_t separator = value.find(',');
+            const std::string type = toUpper(trimWhitespace(
+                separator == std::string::npos ? value
+                                               : value.substr(0, separator),
+                true, true));
+            if(type == "MATCH" || type == "FINAL")
+                terminal_seen = true;
+            (terminal_seen ? terminal_rules : rules).push_back(entry);
+        }
+    }
+    YAML::Node providers = base_rule["rule-providers"].IsMap()
+                               ? YAML::Clone(base_rule["rule-providers"])
+                               : YAML::Node(YAML::NodeType::Map);
+    rules.SetStyle(YAML::EmitterStyle::Block);
+    providers.SetStyle(YAML::EmitterStyle::Block);
+    if(max_allowed_rules &&
+       rules.size() + terminal_rules.size() > max_allowed_rules)
+        return fail("the selected Stash base exceeds max_allowed_rules",
+                    "所选 Stash 基础模板超过 max_allowed_rules 限制");
+
+    std::unordered_set<std::string> provider_names;
+    std::unordered_set<std::string> provider_paths;
+    if(base_rule["rule-providers"].IsDefined() &&
+       !base_rule["rule-providers"].IsNull() &&
+       !base_rule["rule-providers"].IsMap())
+        return fail("the selected Stash base has an invalid rule-providers field",
+                    "所选 Stash 基础模板的 rule-providers 字段无效");
+    for(const auto &entry : providers)
+    {
+        if(!entry.first.IsScalar() || !entry.second.IsMap())
+            return fail("the selected Stash base contains an invalid rule-provider",
+                        "所选 Stash 基础模板包含无效的 rule-provider");
+        const std::string name = entry.first.as<std::string>();
+        if(!provider_names.insert(toLower(name)).second)
+            return fail("the selected Stash base contains duplicate rule-provider names",
+                        "所选 Stash 基础模板包含重复的 rule-provider 名称");
+        const YAML::Node path = entry.second["path"];
+        if(path.IsDefined() && !path.IsNull())
+        {
+            if(!path.IsScalar() ||
+               !provider_paths.insert(toLower(path.as<std::string>())).second)
+                return fail("the selected Stash base contains conflicting rule-provider paths",
+                            "所选 Stash 基础模板包含冲突的 rule-provider 路径");
+        }
+    }
+
+    RuleConversionStats local_stats;
+    for(const RulesetContent &source : ruleset_content_array)
+    {
+        if(max_allowed_rules &&
+           rules.size() + terminal_rules.size() >= max_allowed_rules)
+            return fail("the final Stash rule count exceeds max_allowed_rules",
+                        "最终 Stash 规则数量超过 max_allowed_rules 限制");
+
+        if(source.delivery == RulesetDelivery::NativeStashProvider)
+        {
+            StashNativeRulesetContract contract;
+            if(!inferStashNativeRulesetContract(source, contract) ||
+               !stashRulesetScalarIsSafe(source.rule_path) ||
+               !stashRulesetGroupIsSafe(source.rule_group))
+                return fail("a Stash rule-provider source has an unsupported format or unsafe value",
+                            "Stash rule-provider 来源的格式不受支持或包含不安全值");
+
+            const std::string stem = stashRulesetStem(source.rule_path);
+            std::string name = stem;
+            size_t suffix = 2;
+            while(provider_names.find(toLower(name)) != provider_names.end())
+                name = stem + "_" + std::to_string(suffix++);
+            const std::string path = "./rules/" + name + contract.extension;
+            if(!provider_paths.insert(toLower(path)).second)
+                return fail("generated Stash rule-provider paths conflict",
+                            "生成的 Stash rule-provider 路径发生冲突");
+            provider_names.insert(toLower(name));
+
+            YAML::Node item;
+            item.SetStyle(YAML::EmitterStyle::Block);
+            item["behavior"] = contract.behavior;
+            item["format"] = contract.format;
+            item["url"] = source.rule_path;
+            item["path"] = path;
+            if(source.update_interval > 0)
+                item["interval"] = source.update_interval;
+            providers[name] = item;
+            rules.push_back(buildClashRuleSetReference(
+                name, source.rule_group, source.rule_type, source.options));
+            stash_stats.providerized_sources++;
+            stash_stats.provider_references++;
+            stash_stats.emitted_rules++;
+            local_stats.add();
+            continue;
+        }
+
+        std::string retrieved = source.rule_content.get();
+        if(!stashRulesetGroupIsSafe(source.rule_group))
+            return fail("a Stash ruleset policy name contains an unsafe value",
+                        "Stash 规则集的策略名称包含不安全值");
+        if(retrieved.empty())
+            return fail("a Stash ruleset could not be fetched or was empty",
+                        "Stash 规则集获取失败或内容为空");
+        if(source.rule_path.empty())
+            stash_stats.inline_sources++;
+        else
+        {
+            stash_stats.expanded_sources++;
+        }
+        if(startsWith(retrieved, "[]"))
+            retrieved.erase(0, 2);
+        else
+            retrieved = convertRuleset(retrieved, source.rule_type);
+
+        std::stringstream stream(retrieved);
+        std::string line;
+        const char delimiter = getLineBreak(retrieved);
+        bool emitted_source_rule = false;
+        while(getline(stream, line, delimiter))
+        {
+            line = trimWhitespace(line, true, true);
+            if(line.empty() || line[0] == ';' || line[0] == '#' ||
+               (line.size() >= 2 && line[0] == '/' && line[1] == '/'))
+                continue;
+            std::string normalized;
+            if(!normalizeStashRule(line, source.rule_group, source.options,
+                                   normalized))
+                return fail("a Stash ruleset contains an unsupported or invalid rule",
+                            "Stash 规则集包含不受支持或无效的规则");
+            if(max_allowed_rules &&
+               rules.size() + terminal_rules.size() >= max_allowed_rules)
+                return fail("the final Stash rule count exceeds max_allowed_rules",
+                            "最终 Stash 规则数量超过 max_allowed_rules 限制");
+            rules.push_back(normalized);
+            stash_stats.emitted_rules++;
+            local_stats.add();
+            emitted_source_rule = true;
+        }
+        if(!emitted_source_rule)
+            return fail("a Stash ruleset did not contain any supported rules",
+                        "Stash 规则集不包含任何受支持的规则");
+    }
+
+    for(const YAML::Node &entry : terminal_rules)
+        rules.push_back(entry);
+    stash_stats.final_provider_count = providers.size();
+    base_rule["rules"] = rules;
+    base_rule["rule-providers"] = providers;
+    if(stats)
+        stats->add(local_stats.rules);
+    return true;
 }
 
 void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_content_array, bool overwrite_original_rules, bool new_field_name, RuleConversionStats *stats)
