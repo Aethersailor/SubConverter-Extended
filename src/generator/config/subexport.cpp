@@ -3072,6 +3072,7 @@ static std::string proxyToStashImpl(
   YAML::Node generated_nodes = root["proxies"].IsSequence()
                                    ? YAML::Clone(root["proxies"])
                                    : YAML::Node(YAML::NodeType::Sequence);
+  generated_nodes.SetStyle(YAML::EmitterStyle::Block);
   if (!generated_nodes.IsSequence())
     generated_nodes = YAML::Node(YAML::NodeType::Sequence);
   YAML::Node base_groups = root["proxy-groups"].IsSequence()
@@ -3208,6 +3209,7 @@ static std::string proxyToStashImpl(
     }
     insecure.define(node.AllowInsecure);
     YAML::Node generated;
+    generated.SetStyle(YAML::EmitterStyle::Block);
     if (!buildStashNode(node, generated, udp, tfo, insecure, tls13))
       continue;
     generated_nodes.push_back(generated);
