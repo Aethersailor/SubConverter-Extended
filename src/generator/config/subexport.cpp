@@ -3423,7 +3423,7 @@ static bool sameMieruResource(const Proxy &left, const Proxy &right) {
          left.MieruTrafficPattern == right.MieruTrafficPattern;
 }
 
-static bool buildShadowrocketMieruGroup(std::vector<const Proxy *> members,
+static bool buildShadowrocketMieruGroup(std::vector<const Proxy *> &members,
                                         std::string &link) {
   if (members.empty())
     return false;
@@ -3502,7 +3502,6 @@ static std::string proxyToSingleProfile(const std::vector<Proxy> &nodes,
   const bool shadowrocket = profile.dialect == SingleLinkDialect::Shadowrocket;
   std::unordered_map<std::string, ShadowrocketMieruGroup> mieru_groups;
   if (shadowrocket) {
-    mieru_groups.reserve(nodes.size());
     for (const Proxy &node : nodes) {
       if (node.Type == ProxyType::Mieru && !node.MieruSourceId.empty())
         mieru_groups[node.MieruSourceId].members.push_back(&node);
