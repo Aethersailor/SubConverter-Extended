@@ -43,6 +43,21 @@ assert_trace() {
   }
 }
 
+mapfile -t bridge_sources < <(
+  git -C "$REPOSITORY" ls-files 'bridge/*.go' |
+    sed 's#^bridge/##' |
+    grep -Ev '(_test\.go$|^proxy_validation_generated\.go$)'
+)
+bridge_dockerfiles=(Dockerfile docker/Dockerfile.debian docker/Dockerfile.armv7-cross)
+for dockerfile in "${bridge_dockerfiles[@]}"; do
+  for source in "${bridge_sources[@]}"; do
+    tr -d '\r' < "$REPOSITORY/$dockerfile" | grep -Fqx "COPY bridge/$source ./" || {
+      echo "missing bridge source in $dockerfile: $source" >&2
+      exit 1
+    }
+  done
+done
+
 deny_trace() {
   if grep -F -- "$1" "$TRACE" >/dev/null; then
     echo "unexpected trace token: $1" >&2
