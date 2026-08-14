@@ -3382,6 +3382,8 @@ static constexpr SingleLinkProfile kShadowrocketSingleLinkProfile = {
 };
 
 struct ShadowrocketMieruGroup {
+  std::vector<const Proxy *> members;
+  bool built = false;
   bool valid = false;
   bool written = false;
   std::string link;
@@ -3421,14 +3423,8 @@ static bool sameMieruResource(const Proxy &left, const Proxy &right) {
          left.MieruTrafficPattern == right.MieruTrafficPattern;
 }
 
-static bool buildShadowrocketMieruGroup(const std::vector<Proxy> &nodes,
-                                        const std::string &source_id,
+static bool buildShadowrocketMieruGroup(std::vector<const Proxy *> members,
                                         std::string &link) {
-  std::vector<const Proxy *> members;
-  for (const Proxy &node : nodes) {
-    if (node.Type == ProxyType::Mieru && node.MieruSourceId == source_id)
-      members.push_back(&node);
-  }
   if (members.empty())
     return false;
   std::sort(members.begin(), members.end(), [](const Proxy *left,
@@ -3505,6 +3501,13 @@ static std::string proxyToSingleProfile(const std::vector<Proxy> &nodes,
   const bool vless = profile.vless;
   const bool shadowrocket = profile.dialect == SingleLinkDialect::Shadowrocket;
   std::unordered_map<std::string, ShadowrocketMieruGroup> mieru_groups;
+  if (shadowrocket) {
+    mieru_groups.reserve(nodes.size());
+    for (const Proxy &node : nodes) {
+      if (node.Type == ProxyType::Mieru && !node.MieruSourceId.empty())
+        mieru_groups[node.MieruSourceId].members.push_back(&node);
+    }
+  }
 
   for (const Proxy &x : nodes) {
     TargetNodeGenerationTracker generation_tracker(generation_stats, x.Type);
@@ -3644,11 +3647,15 @@ static std::string proxyToSingleProfile(const std::vector<Proxy> &nodes,
       if (!shadowrocket || x.MieruSourceId.empty())
         continue;
       {
-        auto [group_it, inserted] = mieru_groups.try_emplace(x.MieruSourceId);
+        auto group_it = mieru_groups.find(x.MieruSourceId);
+        if (group_it == mieru_groups.end())
+          continue;
         ShadowrocketMieruGroup &group = group_it->second;
-        if (inserted)
+        if (!group.built) {
+          group.built = true;
           group.valid =
-              buildShadowrocketMieruGroup(nodes, x.MieruSourceId, group.link);
+              buildShadowrocketMieruGroup(group.members, group.link);
+        }
         if (!group.valid)
           continue;
         generation_tracker.markEmitted();
