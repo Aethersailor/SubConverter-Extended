@@ -623,11 +623,14 @@ class FixtureHandler(BaseHTTPRequestHandler):
     slow_ruleset_started = threading.Event()
     slow_ruleset_release = threading.Event()
     quanx_roundtrip_config = ""
+    stash_invalid_bases: dict[str, str] = {}
 
     def do_GET(self) -> None:  # noqa: N802
         with type(self).counter_lock:
             type(self).get_request_count += 1
-        request_path = urllib.parse.urlsplit(self.path).path
+        request_url = urllib.parse.urlsplit(self.path)
+        request_path = request_url.path
+        request_query = urllib.parse.parse_qs(request_url.query)
         if request_path == "/subscription.txt":
             body = ENCODED_SUBSCRIPTION.encode()
             content_type = "text/plain; charset=utf-8"
@@ -762,6 +765,28 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 f"ruleset=Proxy,http://{host}/singbox-modern-rules.list\n"
             ).encode()
             content_type = "text/plain; charset=utf-8"
+        elif request_path == "/external-stash-invalid.ini":
+            case = request_query.get("case", [""])[0]
+            if case not in type(self).stash_invalid_bases:
+                self.send_error(404)
+                return
+            host = self.headers.get("Host", "127.0.0.1")
+            encoded_case = urllib.parse.quote(case, safe="")
+            body = (
+                "[custom]\n"
+                "enable_rule_generator=false\n"
+                f"stash_rule_base=http://{host}/stash-invalid-base.yaml?"
+                f"case={encoded_case}\n"
+            ).encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/stash-invalid-base.yaml":
+            case = request_query.get("case", [""])[0]
+            invalid_base = type(self).stash_invalid_bases.get(case)
+            if invalid_base is None:
+                self.send_error(404)
+                return
+            body = invalid_base.encode()
+            content_type = "text/yaml; charset=utf-8"
         elif request_path == "/external-empty.ini":
             body = b""
             content_type = "text/plain; charset=utf-8"
@@ -973,6 +998,7 @@ def fixture_server():
     FixtureHandler.quanx_remote_fetch_count = 0
     FixtureHandler.external_valid_count = 0
     FixtureHandler.get_request_count = 0
+    FixtureHandler.stash_invalid_bases = {}
     FixtureHandler.slow_subscription_started.clear()
     FixtureHandler.slow_subscription_release.set()
     FixtureHandler.slow_ruleset_started.clear()
@@ -7315,7 +7341,7 @@ def shadowrocket_target_baseline(base_url: str) -> None:
         )
 
 
-def stash_target_baseline(base_url: str) -> None:
+def stash_target_baseline(base_url: str, fixture_base: str) -> None:
     provider_source = (
         "https://127.0.0.1:1/stash-provider.yaml?token=stash-provider-secret"
     )
@@ -7493,47 +7519,57 @@ def stash_target_baseline(base_url: str) -> None:
         "dangling MATCH policy": (
             "mode: rule\nproxies: []\nproxy-providers: {}\n"
             "proxy-groups:\n  - name: Proxy\n    type: select\n"
-            "    proxies: [DIRECT]\nrules: ['MATCH,MissingPolicy']\n"
+            "    proxies: [DIRECT]\nrules: ['MATCH,MissingPolicy']\n",
+            "final Stash configuration contains a dangling or cyclic "
+            "policy reference",
         ),
         "nested dangling RULE-SET": (
             "mode: rule\nproxies: []\nproxy-providers: {}\n"
             "proxy-groups:\n  - name: Proxy\n    type: select\n"
             "    proxies: [DIRECT]\n"
-            "rules: ['AND,((RULE-SET,missing),(NETWORK,TCP)),Proxy']\n"
+            "rules: ['AND,((RULE-SET,missing),(NETWORK,TCP)),Proxy']\n",
+            "final Stash configuration contains a dangling or cyclic "
+            "policy reference",
         ),
         "reserved PASS proxy name": (
             "mode: rule\nproxies:\n  - name: PASS\n    type: direct\n"
             "proxy-providers: {}\nproxy-groups:\n"
             "  - name: Proxy\n    type: select\n    proxies: [DIRECT]\n"
-            "rules: ['MATCH,Proxy']\n"
+            "rules: ['MATCH,Proxy']\n",
+            "selected Stash base has an invalid 'proxies.name' entry",
         ),
         "proxy and group namespace collision": (
             "mode: rule\nproxies:\n  - name: Proxy\n    type: direct\n"
-            "proxy-providers: {}\nproxy-groups: []\nrules: ['MATCH,Proxy']\n"
+            "proxy-providers: {}\nproxy-groups:\n"
+            "  - name: Proxy\n    type: select\n    proxies: [DIRECT]\n"
+            "rules: ['MATCH,Proxy']\n",
+            "selected Stash base has an invalid 'proxy-groups.name' entry",
         ),
     }
-    for description, invalid_base_text in invalid_stash_bases.items():
-        invalid_base = base64.urlsafe_b64encode(
-            invalid_base_text.encode("utf-8")
-        ).decode("ascii")
-        invalid_config = base64.urlsafe_b64encode(
-            (
-                "enable_rule_generator=false\n"
-                f"stash_rule_base=data:text/plain;base64,{invalid_base}\n"
-            ).encode("utf-8")
-        ).decode("ascii")
-        invalid_status, _, _ = request(
+    FixtureHandler.stash_invalid_bases = {
+        description: invalid_base
+        for description, (invalid_base, _) in invalid_stash_bases.items()
+    }
+    for description, (_, expected_error) in invalid_stash_bases.items():
+        invalid_status, invalid_body, _ = request(
             base_url,
             "/sub",
             {
                 "target": "stash",
                 "url": SUBSCRIPTION.strip(),
-                "list": "true",
-                "config": f"data:text/plain;base64,{invalid_config}",
+                "config": (
+                    fixture_base
+                    + "/external-stash-invalid.ini?case="
+                    + urllib.parse.quote(description, safe="")
+                ),
             },
         )
-        if invalid_status != 400:
-            raise AssertionError(f"Stash accepted a custom base with {description}")
+        invalid_text = invalid_body.decode("utf-8", errors="replace")
+        if invalid_status != 400 or expected_error not in invalid_text:
+            raise AssertionError(
+                f"Stash accepted or misclassified a custom base with {description}: "
+                f"HTTP {invalid_status} {invalid_text!r}"
+            )
 
     unsupported_status, unsupported_body, _ = request(
         base_url,
@@ -10364,7 +10400,7 @@ def main() -> int:
             target_generation_stats_baseline(base_url)
             v2ray_client_target_baseline(base_url)
             shadowrocket_target_baseline(base_url)
-            stash_target_baseline(base_url)
+            stash_target_baseline(base_url, fixture_base)
             singbox_import_fidelity_baseline(base_url, fixture_base)
             loon_current_node_output_baseline(base_url)
             quanx_current_node_output_baseline(base_url, fixture_base)
