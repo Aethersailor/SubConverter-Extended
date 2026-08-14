@@ -127,7 +127,7 @@ static constexpr std::array<TargetDescriptor, 21> kTargetDescriptors = {{
      RemoteSubscriptionMode::ServerSideParse, true, 0},
     {"shadowrocket", NodeParserMode::LegacyOnly,
      RemoteSubscriptionMode::ServerSideParse, true,
-     SingleLinkType::Mixed},
+     SingleLinkType::Shadowrocket},
     {"trojan", NodeParserMode::LegacyOnly,
      RemoteSubscriptionMode::ServerSideParse, true, SingleLinkType::Trojan},
     {"vless", NodeParserMode::LegacyOnly,

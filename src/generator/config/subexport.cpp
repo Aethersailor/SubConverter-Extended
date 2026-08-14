@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cctype>
 #include <climits>
 #include <cmath>
 #include <iostream>
@@ -622,6 +623,81 @@ static void appendShareQuery(std::vector<std::string> &query,
 
 static std::string joinShareQuery(const std::vector<std::string> &query) {
   return query.empty() ? std::string() : "?" + join(query, "&");
+}
+
+static bool hysteriaShareLinkFields(const Proxy &proxy,
+                                    std::string &protocol,
+                                    std::string &alpn,
+                                    std::string &obfs_mode,
+                                    std::string &up_mbps,
+                                    std::string &down_mbps,
+                                    bool &allow_insecure) {
+  protocol = toLower(trim(proxy.FakeType));
+  if (protocol.empty())
+    protocol = "udp";
+  int normalized_up = 0, normalized_down = 0;
+  if ((protocol != "udp" && protocol != "wechat-video" &&
+       protocol != "faketcp") ||
+      !parseMbpsValue(proxy.UpMbps, normalized_up) || normalized_up <= 0 ||
+      !parseMbpsValue(proxy.DownMbps, normalized_down) ||
+      normalized_down <= 0 || !proxy.Auth.empty() ||
+      !proxy.Ports.empty() || !proxy.HysteriaHopInterval.empty() ||
+      !proxy.TransferProtocol.empty() || !proxy.UnderlyingProxy.empty() ||
+      !proxy.Fingerprint.empty() || !proxy.PublicKey.empty() ||
+      !proxy.ShortId.empty() || !proxy.TCPFastOpen.is_undef() ||
+      !proxy.UDP.is_undef() || !proxy.TLS13.is_undef())
+    return false;
+  up_mbps = std::to_string(normalized_up);
+  down_mbps = std::to_string(normalized_down);
+
+  alpn = proxy.Alpn;
+  if (!proxy.AlpnList.empty()) {
+    if (proxy.AlpnList.size() != 1 ||
+        (!alpn.empty() && alpn != proxy.AlpnList.front()))
+      return false;
+    alpn = proxy.AlpnList.front();
+  }
+
+  obfs_mode = toLower(trim(proxy.OBFS));
+  if (!obfs_mode.empty() && obfs_mode != "xplus")
+    return false;
+  if (obfs_mode.empty() && !proxy.OBFSParam.empty())
+    obfs_mode = "xplus";
+
+  const std::string insecure = toLower(trim(proxy.Insecure));
+  if (!insecure.empty() && insecure != "0" && insecure != "1" &&
+      insecure != "false" && insecure != "true")
+    return false;
+  const bool insecure_text = insecure == "1" || insecure == "true";
+  if (!proxy.AllowInsecure.is_undef() &&
+      proxy.AllowInsecure.get() != insecure_text && !insecure.empty())
+    return false;
+  allow_insecure = insecure_text ||
+                   (!proxy.AllowInsecure.is_undef() &&
+                    proxy.AllowInsecure.get());
+  return true;
+}
+
+static bool anyTlsShareLinkFields(const Proxy &proxy, std::string &sni,
+                                  bool &allow_insecure) {
+  sni = proxy.ServerName.empty() ? proxy.SNI : proxy.ServerName;
+  if (!proxy.ServerName.empty() && !proxy.SNI.empty() &&
+      proxy.ServerName != proxy.SNI)
+    return false;
+  const std::string tls = toLower(trim(proxy.TLSStr));
+  if (proxy.Password.empty() || (!tls.empty() && tls != "tls") ||
+      !proxy.PublicKey.empty() || !proxy.ShortId.empty() ||
+      !proxy.Alpn.empty() || !proxy.AlpnList.empty() ||
+      !proxy.Fingerprint.empty() || proxy.IdleSessionCheckInterval != 30 ||
+      proxy.IdleSessionTimeout != 30 || proxy.MinIdleSession != 0 ||
+      !proxy.UnderlyingProxy.empty() || !proxy.TCPFastOpen.is_undef() ||
+      !proxy.UDP.is_undef() || !proxy.XUDP.is_undef() ||
+      !proxy.TLS13.is_undef() ||
+      (!proxy.Host.empty() && proxy.Host != proxy.Hostname))
+    return false;
+  allow_insecure = !proxy.AllowInsecure.is_undef() &&
+                   proxy.AllowInsecure.get();
+  return true;
 }
 
 std::string vmessLinkConstruct(const Proxy &proxy) {
@@ -3285,6 +3361,8 @@ std::string proxyToSingle(std::vector<Proxy> &nodes, SingleLinkTypes types,
   const bool trojan = (types & SingleLinkType::Trojan) != 0;
   const bool hysteria2 = (types & SingleLinkType::Hysteria2) != 0;
   const bool vless = (types & SingleLinkType::VLESS) != 0;
+  const bool hysteria = (types & SingleLinkType::Hysteria) != 0;
+  const bool anytls = (types & SingleLinkType::AnyTLS) != 0;
 
   for (Proxy &x : nodes) {
     TargetNodeGenerationTracker generation_tracker(generation_stats, x.Type);
@@ -3373,6 +3451,49 @@ std::string proxyToSingle(std::vector<Proxy> &nodes, SingleLinkTypes types,
                      shareLinkHost(hostname) + ":" + port_spec + "/" +
                      joinShareQuery(query) + "#" + urlEncode(remark);
         }
+      }
+      break;
+    case ProxyType::Hysteria:
+      if (!hysteria)
+        continue;
+      {
+        std::string hysteria_protocol, hysteria_alpn, hysteria_obfs,
+            hysteria_up, hysteria_down;
+        bool allow_insecure = false;
+        if (!hysteriaShareLinkFields(x, hysteria_protocol, hysteria_alpn,
+                                     hysteria_obfs, hysteria_up,
+                                     hysteria_down, allow_insecure))
+          continue;
+        std::vector<std::string> query;
+        appendShareQuery(query, "protocol", hysteria_protocol);
+        appendShareQuery(query, "auth", x.AuthStr);
+        appendShareQuery(query, "peer", sni);
+        if (allow_insecure)
+          appendShareQuery(query, "insecure", "1");
+        appendShareQuery(query, "upmbps", hysteria_up);
+        appendShareQuery(query, "downmbps", hysteria_down);
+        appendShareQuery(query, "alpn", hysteria_alpn);
+        appendShareQuery(query, "obfs", hysteria_obfs);
+        appendShareQuery(query, "obfsParam", x.OBFSParam);
+        proxyStr = "hysteria://" + shareLinkHost(hostname) + ":" + port +
+                   joinShareQuery(query) + "#" + urlEncode(remark);
+      }
+      break;
+    case ProxyType::AnyTLS:
+      if (!anytls)
+        continue;
+      {
+        std::string anytls_sni;
+        bool allow_insecure = false;
+        if (!anyTlsShareLinkFields(x, anytls_sni, allow_insecure))
+          continue;
+        std::vector<std::string> query;
+        appendShareQuery(query, "sni", anytls_sni);
+        if (allow_insecure)
+          appendShareQuery(query, "insecure", "1");
+        proxyStr = "anytls://" + urlEncode(password) + "@" +
+                   shareLinkHost(hostname) + ":" + port + "/" +
+                   joinShareQuery(query) + "#" + urlEncode(remark);
       }
       break;
     case ProxyType::VLESS:
@@ -3506,10 +3627,9 @@ std::string proxyToSingle(std::vector<Proxy> &nodes, SingleLinkTypes types,
 
 std::string proxyToShadowrocket(std::vector<Proxy> &nodes,
                                 extra_settings &ext) {
-  // Stage one intentionally preserves the established standard-link subset.
-  // Keeping a dedicated entry point lets Shadowrocket evolve independently
-  // without changing the generic target=mixed compatibility contract.
-  return proxyToSingle(nodes, SingleLinkType::Mixed, ext);
+  // Shadowrocket has its own evidence-backed protocol matrix. Keep Mixed
+  // unchanged because it is a historical public output contract.
+  return proxyToSingle(nodes, SingleLinkType::Shadowrocket, ext);
 }
 
 std::string proxyToSSSub(std::string base_conf, std::vector<Proxy> &nodes,

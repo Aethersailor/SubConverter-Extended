@@ -212,6 +212,14 @@ ANYTLS_V2RAYN_URI = (
     "anytls://anytls-password@anytls-v2rayn.example.test:443"
     "?sni=anytls-v2rayn-tls.example.test&insecure=1#AnyTLS%20v2rayN"
 )
+ANYTLS_SHADOWROCKET_URI = (
+    "anytls://p%40ss%2Bword@[2001:db8::16]:443/"
+    "?sni=anytls-shadowrocket.example.test&insecure=1"
+    "#AnyTLS%20Shadowrocket"
+)
+SHADOWROCKET_STAGE_ONE_MIXED_SHA256 = (
+    "32681630201a639d9ebfa784304a870f08d6fcb522e8b0ac8f610c495dd70c22"
+)
 NAIVE_HTTPS_URI = (
     "naive+https://naive-user:naive%2Bpassword@naive.example.test:443"
     "?sni=naive-tls.example.test&insecure-concurrency=4#Naive%20HTTPS"
@@ -248,6 +256,9 @@ HYSTERIA_V1_URI = (
     "&peer=hy1-tls.example.test&insecure=1&upmbps=100"
     "&downmbps=200&alpn=h3%2Chysteria&obfs=xplus"
     "&obfsParam=obfs%2Bsecret#Hysteria%20V1+Literal"
+)
+HYSTERIA_SHADOWROCKET_URI = HYSTERIA_V1_URI.replace(
+    "alpn=h3%2Chysteria", "alpn=hysteria"
 )
 HYSTERIA_V1_SINGBOX_CONFIG = json.dumps(
     {
@@ -6781,6 +6792,8 @@ def shadowrocket_target_baseline(base_url: str) -> None:
         VLESS_URI,
         TROJAN_WS_URI,
         HYSTERIA2_URI,
+        HYSTERIA_SHADOWROCKET_URI,
+        ANYTLS_SHADOWROCKET_URI,
     )
     params = {
         "target": "shadowrocket",
@@ -6795,9 +6808,95 @@ def shadowrocket_target_baseline(base_url: str) -> None:
         )
     raw_output = body.decode("utf-8")
     schemes = [line.split("://", 1)[0] for line in raw_output.splitlines()]
-    if schemes != ["ss", "ssr", "vmess", "vless", "trojan", "hysteria2"]:
+    if schemes != [
+        "ss",
+        "ssr",
+        "vmess",
+        "vless",
+        "trojan",
+        "hysteria2",
+        "hysteria",
+        "anytls",
+    ]:
         raise AssertionError(
-            f"Shadowrocket stage-one protocol matrix drifted: {raw_output!r}"
+            f"Shadowrocket stage-two protocol matrix drifted: {raw_output!r}"
+        )
+
+    output_lines = raw_output.splitlines()
+    legacy_sources = "|".join(sources[:6])
+    legacy_shadowrocket_status, legacy_shadowrocket_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "shadowrocket",
+            "url": legacy_sources,
+            "list": "true",
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    legacy_mixed_status, legacy_mixed_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "mixed",
+            "url": legacy_sources,
+            "list": "true",
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    if (
+        legacy_shadowrocket_status != 200
+        or legacy_mixed_status != 200
+        or legacy_shadowrocket_body != legacy_mixed_body
+        or legacy_shadowrocket_body.decode("utf-8")
+        != "\n".join(output_lines[:6]) + "\n"
+        or hashlib.sha256(legacy_mixed_body).hexdigest()
+        != SHADOWROCKET_STAGE_ONE_MIXED_SHA256
+    ):
+        raise AssertionError(
+            "Shadowrocket changed the published six-protocol mixed contract: "
+            f"shadowrocket={legacy_shadowrocket_body!r} mixed={legacy_mixed_body!r}"
+        )
+    hysteria_parts = urllib.parse.urlsplit(output_lines[6])
+    hysteria_query = urllib.parse.parse_qs(
+        hysteria_parts.query, keep_blank_values=True
+    )
+    if (
+        hysteria_parts.hostname != "2001:db8::14"
+        or hysteria_parts.port != 36712
+        or hysteria_query
+        != {
+            "protocol": ["udp"],
+            "auth": ["p@ss+word"],
+            "peer": ["hy1-tls.example.test"],
+            "insecure": ["1"],
+            "upmbps": ["100"],
+            "downmbps": ["200"],
+            "alpn": ["hysteria"],
+            "obfs": ["xplus"],
+            "obfsParam": ["obfs+secret"],
+        }
+        or urllib.parse.unquote(hysteria_parts.fragment)
+        != "Hysteria V1+Literal"
+    ):
+        raise AssertionError(
+            f"Shadowrocket Hysteria v1 URI drifted: {output_lines[6]!r}"
+        )
+
+    anytls_parts = urllib.parse.urlsplit(output_lines[7])
+    anytls_query = urllib.parse.parse_qs(
+        anytls_parts.query, keep_blank_values=True
+    )
+    if (
+        urllib.parse.unquote(anytls_parts.username or "") != "p@ss+word"
+        or anytls_parts.hostname != "2001:db8::16"
+        or anytls_parts.port != 443
+        or anytls_query
+        != {"sni": ["anytls-shadowrocket.example.test"], "insecure": ["1"]}
+        or urllib.parse.unquote(anytls_parts.fragment) != "AnyTLS Shadowrocket"
+    ):
+        raise AssertionError(
+            f"Shadowrocket AnyTLS URI drifted: {output_lines[7]!r}"
         )
 
     encoded_status, encoded_body, _ = request(
@@ -6822,10 +6921,16 @@ def shadowrocket_target_baseline(base_url: str) -> None:
         "/sub",
         {**params, "target": "mixed"},
     )
-    if mixed_status != 200 or mixed_body != body:
+    expected_mixed = "\n".join(output_lines[:6]) + "\n"
+    if (
+        mixed_status != 200
+        or mixed_body.decode("utf-8") != expected_mixed
+        or "hysteria://" in mixed_body.decode("utf-8")
+        or "anytls://" in mixed_body.decode("utf-8")
+    ):
         raise AssertionError(
             "introducing target=shadowrocket changed the historical mixed output: "
-            f"HTTP {mixed_status} {mixed_body!r} != {body!r}"
+            f"HTTP {mixed_status} {mixed_body!r} != {expected_mixed!r}"
         )
 
     auto_status, auto_body, auto_headers = request(
@@ -6849,8 +6954,8 @@ def shadowrocket_target_baseline(base_url: str) -> None:
         or report.get("mode", {}).get("simple_subscription") is not True
         or report.get("mode", {}).get("remote_subscription_backend")
         != "server-side-parse"
-        or report.get("nodes", {}).get("total") != 6
-        or report.get("nodes", {}).get("generated") != 6
+        or report.get("nodes", {}).get("total") != 8
+        or report.get("nodes", {}).get("generated") != 8
         or report.get("nodes", {}).get("unsupported") != 0
     ):
         raise AssertionError(
@@ -6869,8 +6974,136 @@ def shadowrocket_target_baseline(base_url: str) -> None:
     )
     if unsupported_status != 400:
         raise AssertionError(
-            "Shadowrocket accepted a protocol outside its stage-one matrix: "
+            "Shadowrocket accepted a protocol outside its stage-two matrix: "
             f"HTTP {unsupported_status}"
+        )
+
+    lossy_status, lossy_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "shadowrocket",
+            "url": ANYTLS_MODERN_URI,
+            "list": "true",
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    if lossy_status != 400 or b"anytls://" in lossy_body:
+        raise AssertionError(
+            "Shadowrocket emitted non-portable AnyTLS extensions: "
+            f"HTTP {lossy_status} {lossy_body!r}"
+        )
+
+    multi_alpn_hysteria = HYSTERIA_V1_URI
+    multi_alpn_status, multi_alpn_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "shadowrocket",
+            "url": multi_alpn_hysteria,
+            "list": "true",
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    if multi_alpn_status != 400 or b"hysteria://" in multi_alpn_body:
+        raise AssertionError(
+            "Shadowrocket emitted Hysteria v1 with a non-standard ALPN list: "
+            f"HTTP {multi_alpn_status} {multi_alpn_body!r}"
+        )
+
+    portable_native_hysteria = HYSTERIA_V1_CLASH_CONFIG.replace(
+        "    ports: 443,10000-10002\n", ""
+    ).replace("    alpn: [h3, hysteria]", "    alpn: [hysteria]")
+    portable_native_hysteria_url = (
+        "data:text/plain;base64,"
+        + base64.b64encode(portable_native_hysteria.encode("utf-8")).decode(
+            "ascii"
+        )
+    )
+    portable_native_status, portable_native_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "shadowrocket",
+            "url": portable_native_hysteria_url,
+            "list": "true",
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    if portable_native_status != 200:
+        raise AssertionError(
+            "Shadowrocket rejected portable native Hysteria v1 input: "
+            f"HTTP {portable_native_status} {portable_native_body!r}"
+        )
+    portable_native_parts = urllib.parse.urlsplit(
+        portable_native_body.decode("utf-8").strip()
+    )
+    portable_native_query = urllib.parse.parse_qs(
+        portable_native_parts.query, keep_blank_values=True
+    )
+    if portable_native_query != {
+        "protocol": ["udp"],
+        "auth": ["clash-auth"],
+        "peer": ["clash-hy1.example.test"],
+        "insecure": ["1"],
+        "upmbps": ["30"],
+        "downmbps": ["200"],
+        "alpn": ["hysteria"],
+        "obfs": ["xplus"],
+        "obfsParam": ["clash-obfs"],
+    }:
+        raise AssertionError(
+            "Shadowrocket native Hysteria v1 projection drifted: "
+            f"{portable_native_body!r}"
+        )
+
+    nonportable_native_hysteria_url = (
+        "data:text/plain;base64,"
+        + base64.b64encode(HYSTERIA_V1_CLASH_CONFIG.encode("utf-8")).decode(
+            "ascii"
+        )
+    )
+    native_hysteria_status, native_hysteria_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "shadowrocket",
+            "url": nonportable_native_hysteria_url,
+            "list": "true",
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    if native_hysteria_status != 400 or b"hysteria://" in native_hysteria_body:
+        raise AssertionError(
+            "Shadowrocket silently discarded native Hysteria v1 ports or ALPN: "
+            f"HTTP {native_hysteria_status} {native_hysteria_body!r}"
+        )
+
+    mixed_lossy_status, mixed_lossy_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "shadowrocket",
+            "url": SUBSCRIPTION.strip() + "|" + ANYTLS_MODERN_URI,
+            "list": "true",
+            "explain": "true",
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    mixed_lossy_report = (
+        json.loads(mixed_lossy_body) if mixed_lossy_status == 200 else {}
+    )
+    mixed_lossy_nodes = mixed_lossy_report.get("nodes", {})
+    if (
+        mixed_lossy_status != 200
+        or mixed_lossy_nodes.get("total") != 2
+        or mixed_lossy_nodes.get("generated") != 1
+        or mixed_lossy_nodes.get("unsupported") != 1
+        or mixed_lossy_nodes.get("unsupported_protocols") != ["anytls:1"]
+    ):
+        raise AssertionError(
+            "Shadowrocket did not fail closed per node for mixed portable and "
+            f"non-portable links: HTTP {mixed_lossy_status} {mixed_lossy_report!r}"
         )
 
 
