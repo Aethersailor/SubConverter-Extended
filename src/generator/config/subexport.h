@@ -141,6 +141,9 @@ struct extra_settings {
   tribool xudp = tribool();
   tribool skip_cert_verify = tribool();
   tribool tls13 = tribool();
+  tribool stash_request_udp = tribool();
+  tribool stash_request_tfo = tribool();
+  tribool stash_request_tls13 = tribool();
   bool clash_classical_ruleset = false;
   std::string sort_script;
   std::string clash_proxies_style = "flow";

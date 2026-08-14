@@ -2115,6 +2115,9 @@ static std::string buildEffectiveSubPolicy(Request &request,
 
   policy.generator.clash_proxies_style = settings.clashProxiesStyle;
   policy.generator.clash_proxy_groups_style = settings.clashProxyGroupsStyle;
+  policy.generator.stash_request_tfo = parsed.tfo;
+  policy.generator.stash_request_udp = parsed.udp;
+  policy.generator.stash_request_tls13 = parsed.tls13;
   policy.generator.tfo.define(parsed.tfo).define(settings.TFOFlag);
   policy.generator.udp.define(parsed.udp).define(settings.UDPFlag);
   policy.generator.skip_cert_verify

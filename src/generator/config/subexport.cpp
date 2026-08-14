@@ -2924,7 +2924,10 @@ bool buildStashNode(const Proxy &node, YAML::Node &out, tribool udp,
     } else if (node.Type == ProxyType::Mieru) {
       // Mieru's transport selects its carrier and is not an UDP-relay toggle.
       // Stash has no separate Mieru UDP override, so the generic preference is
-      // intentionally not projected onto this protocol.
+      // intentionally not projected onto this protocol. A node-local false
+      // value is nevertheless semantic and cannot be preserved.
+      if (!udp.get())
+        return false;
     } else if (!udp.get())
       return false;
   }
@@ -3158,8 +3161,28 @@ std::string proxyToStash(std::vector<Proxy> &nodes,
     if (ext.append_proxy_type)
       node.Remark = "[" + getProxyTypeName(node.Type) + "] " + node.Remark;
     processRemark(node.Remark, used_remarks, false);
-    tribool udp = ext.udp;
-    tribool tfo = ext.tfo;
+    const bool stash_udp_field =
+        node.Type == ProxyType::Shadowsocks ||
+        node.Type == ProxyType::SOCKS5 || node.Type == ProxyType::Snell ||
+        node.Type == ProxyType::Trojan;
+    tribool udp = node.UDP;
+    if (stash_udp_field) {
+      udp = ext.udp;
+      udp.define(node.UDP);
+    } else if (!ext.stash_request_udp.is_undef()) {
+      if (node.Type == ProxyType::Mieru)
+        continue;
+      udp = ext.stash_request_udp;
+      udp.define(node.UDP);
+    }
+    tribool tfo = node.TCPFastOpen;
+    if (node.Type == ProxyType::Hysteria2) {
+      tfo = ext.tfo;
+      tfo.define(node.TCPFastOpen);
+    } else if (!ext.stash_request_tfo.is_undef()) {
+      tfo = ext.stash_request_tfo;
+      tfo.define(node.TCPFastOpen);
+    }
     const bool stash_tls_capable =
         node.Type == ProxyType::HTTP || node.Type == ProxyType::HTTPS ||
         node.Type == ProxyType::SOCKS5 || node.Type == ProxyType::VMess ||
@@ -3170,11 +3193,12 @@ std::string proxyToStash(std::vector<Proxy> &nodes,
          toLower(node.Plugin) == "v2ray-plugin");
     tribool insecure = stash_tls_capable ? ext.skip_cert_verify
                                          : node.AllowInsecure;
-    tribool tls13 = ext.tls13;
-    udp.define(node.UDP);
-    tfo.define(node.TCPFastOpen);
+    tribool tls13 = node.TLS13;
+    if (!ext.stash_request_tls13.is_undef()) {
+      tls13 = ext.stash_request_tls13;
+      tls13.define(node.TLS13);
+    }
     insecure.define(node.AllowInsecure);
-    tls13.define(node.TLS13);
     YAML::Node generated;
     if (!buildStashNode(node, generated, udp, tfo, insecure, tls13))
       continue;
@@ -3439,20 +3463,22 @@ std::string proxyToStash(std::vector<Proxy> &nodes,
   };
   std::unordered_set<std::string> proxy_names = {"DIRECT", "REJECT",
                                                   "REJECT-DROP", "PASS"};
-  if (root["proxies"].IsSequence())
+  if (root["proxies"].IsSequence()) {
     for (const YAML::Node &proxy : root["proxies"])
       if (!proxy.IsMap() || !proxy["name"].IsScalar())
         return fail_reference_graph();
       else
         proxy_names.insert(proxy["name"].as<std::string>());
+  }
 
   std::unordered_set<std::string> provider_names;
-  if (root["proxy-providers"].IsMap())
+  if (root["proxy-providers"].IsMap()) {
     for (const auto &provider : root["proxy-providers"])
       if (!provider.first.IsScalar())
         return fail_reference_graph();
       else
         provider_names.insert(provider.first.as<std::string>());
+  }
 
   std::unordered_set<std::string> rule_provider_names;
   if (root["rule-providers"].IsDefined() &&

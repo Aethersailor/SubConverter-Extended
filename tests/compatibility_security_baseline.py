@@ -1160,6 +1160,19 @@ def running_service(
     )
     base_path = (REPOSITORY / "base" / "base").as_posix()
     baseline = baseline.replace('base_path = "base"', f'base_path = "{base_path}"')
+    stash_base_setting = 'stash_rule_base = "base/stash.yaml"'
+    if stash_base_setting in baseline:
+        baseline = baseline.replace(
+            stash_base_setting,
+            f'stash_rule_base = "{base_path}/stash.yaml"',
+            1,
+        )
+    else:
+        baseline = baseline.replace(
+            f'base_path = "{base_path}"',
+            f'base_path = "{base_path}"\nstash_rule_base = "{base_path}/stash.yaml"',
+            1,
+        )
     baseline = baseline.replace(
         '"base/all_base.tpl"', f'"{base_path}/all_base.tpl"'
     )
