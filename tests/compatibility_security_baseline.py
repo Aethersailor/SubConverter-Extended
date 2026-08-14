@@ -7835,10 +7835,29 @@ def stash_target_baseline(base_url: str, fixture_base: str) -> None:
         },
     )
     clash_control_text = clash_control_body.decode("utf-8", errors="replace")
+    if clash_control_status != 200:
+        raise AssertionError(
+            "Stash rule-provider work changed the Clash ruleset path: "
+            f"HTTP {clash_control_status} {clash_control_text!r}"
+        )
+    clash_control_provider = _yaml_named_mapping_block(
+        clash_control_text, "rule-providers", "stash-legacy-domain"
+    )
+    clash_control_provider_lines = set(clash_control_provider.splitlines())
+    clash_control_expected_lines = {
+        "    type: http",
+        "    behavior: domain",
+        f"    url: {fixture_base}/stash-legacy-domain.txt",
+        "    format: text",
+        "    interval: 3600",
+    }
     if (
-        clash_control_status != 200
-        or "DOMAIN,legacy-text.example,RuleGroup" not in clash_control_text
+        not clash_control_expected_lines.issubset(clash_control_provider_lines)
+        or "  - RULE-SET,stash-legacy-domain,RuleGroup"
+        not in clash_control_text.splitlines()
+        or "DOMAIN,legacy-text.example,RuleGroup" in clash_control_text
         or "stash-format" in clash_control_text
+        or FixtureHandler.stash_legacy_text_fetch_count != 1
     ):
         raise AssertionError(
             "Stash rule-provider work changed the Clash ruleset path: "
