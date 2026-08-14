@@ -20,6 +20,8 @@
 #include "config/proxy_provider_direct.h"
 #include "config/proxy_provider_interval.h"
 
+inline constexpr char kDefaultStashRuleBase[] = "base/stash.yaml";
+
 struct SecuritySettingsDiagnostics {
   std::string profileSource = "builtin-default";
   std::string profileFileSource;
@@ -86,12 +88,22 @@ struct Settings {
   int updateInterval = 0;
   int proxyProviderInterval = kDefaultProxyProviderInterval;
   bool proxyProviderDirect = kDefaultProxyProviderDirect;
+  bool surgePolicyPath = true;
+  bool surfboardPolicyPath = true;
+  bool loonRemoteProxy = true;
+  // Preserve the historical sing-box WireGuard outbound by default. Newer
+  // deployments can opt into the 1.11+ endpoint schema independently.
+  bool singBoxWireGuardEndpoint = false;
+  // Snell outbounds require sing-box 1.14+. Keep them disabled so existing
+  // deployments on the current stable client retain their historical output.
+  bool singBoxSnellOutbound = false;
   std::string sortScript, filterScript;
 
   std::string clashBase;
   ProxyGroupConfigs customProxyGroups;
   std::string surgeBase, surfboardBase, mellowBase, quanBase, quanXBase,
       loonBase, SSSubBase, singBoxBase;
+  std::string stashBase = kDefaultStashRuleBase;
   std::string surgeSSRPath, quanXDevID;
 
   // cache system
@@ -147,6 +159,7 @@ struct ExternalConfig {
   std::string loon_rule_base;
   std::string sssub_rule_base;
   std::string singbox_rule_base;
+  std::string stash_rule_base;
   RegexMatchConfigs rename;
   RegexMatchConfigs emoji;
   string_array include;

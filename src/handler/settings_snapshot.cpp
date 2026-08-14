@@ -43,6 +43,7 @@ std::string sanitizedSettingsSnapshot(const Settings &settings) {
                 {"loon", settings.loonBase},
                 {"sssub", settings.SSSubBase},
                 {"singbox", settings.singBoxBase},
+                {"stash", settings.stashBase},
             }},
            {"default_urls", sensitiveState(settings.defaultUrls)},
            {"insert_urls", sensitiveState(settings.insertUrls)},
@@ -75,6 +76,17 @@ std::string sanitizedSettingsSnapshot(const Settings &settings) {
        {
            {"interval", settings.proxyProviderInterval},
            {"proxy_direct", settings.proxyProviderDirect},
+       }},
+      {"remote_subscription",
+       {
+           {"surge_policy_path", settings.surgePolicyPath},
+           {"surfboard_policy_path", settings.surfboardPolicyPath},
+           {"loon_remote_proxy", settings.loonRemoteProxy},
+       }},
+      {"singbox",
+       {
+           {"wireguard_endpoint", settings.singBoxWireGuardEndpoint},
+           {"snell_outbound", settings.singBoxSnellOutbound},
        }},
       {"rules",
        {

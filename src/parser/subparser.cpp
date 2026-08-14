@@ -1,3 +1,8 @@
+#include <algorithm>
+#include <atomic>
+#include <cctype>
+#include <initializer_list>
+#include <limits>
 #include <string>
 #include <map>
 
@@ -12,6 +17,7 @@
 #include "utils/urlencode.h"
 #include "utils/yamlcpp_extra.h"
 #include "config/proxy.h"
+#include "mieru_uri.h"
 #include "subparser.h"
 #include "utils/logger.h"
 
@@ -64,6 +70,695 @@ void extractRemark(std::string &link, std::string &remark) {
     }
 }
 
+namespace {
+
+std::string nextMieruSourceId() {
+    static std::atomic<uint64_t> next_id{1};
+    return std::to_string(next_id.fetch_add(1, std::memory_order_relaxed));
+}
+
+struct ParsedShareUri {
+    std::string user;
+    std::string host;
+    std::string port;
+    std::string query;
+    std::string remark;
+};
+
+int shareUriHexValue(unsigned char ch) {
+    if (ch >= '0' && ch <= '9')
+        return ch - '0';
+    if (ch >= 'a' && ch <= 'f')
+        return ch - 'a' + 10;
+    if (ch >= 'A' && ch <= 'F')
+        return ch - 'A' + 10;
+    return -1;
+}
+
+// Userinfo follows RFC 3986 percent-encoding, not HTML form encoding. A
+// literal '+' therefore remains '+'. Query values use the project's regular
+// form-style URL decoder below, matching url.Values-based Xray generators.
+std::string decodeShareUriUserInfo(const std::string &value) {
+    std::string decoded;
+    decoded.reserve(value.size());
+    for (size_t i = 0; i < value.size(); ++i) {
+        unsigned char ch = static_cast<unsigned char>(value[i]);
+        if (ch == '%' && i + 2 < value.size()) {
+            const int high = shareUriHexValue(static_cast<unsigned char>(value[i + 1]));
+            const int low = shareUriHexValue(static_cast<unsigned char>(value[i + 2]));
+            if (high >= 0 && low >= 0) {
+                ch = static_cast<unsigned char>((high << 4) | low);
+                i += 2;
+            }
+        }
+        if (ch != '\r' && ch != '\n')
+            decoded.push_back(static_cast<char>(ch));
+    }
+    return decoded;
+}
+
+bool validSharePort(const std::string &port) {
+    if (port.empty() || port.size() > 5 ||
+        !std::all_of(port.begin(), port.end(), [](unsigned char ch) {
+            return std::isdigit(ch) != 0;
+        }))
+        return false;
+    const int value = to_int(port, 0);
+    return value >= 1 && value <= 65535;
+}
+
+bool validHysteriaUriMbps(const std::string &value) {
+    if (value.empty() ||
+        !std::all_of(value.begin(), value.end(), [](unsigned char ch) {
+            return std::isdigit(ch) != 0;
+        }))
+        return false;
+    try {
+        const unsigned long long parsed = std::stoull(value);
+        return parsed > 0 &&
+               parsed <= static_cast<unsigned long long>(
+                             std::numeric_limits<int>::max());
+    } catch (const std::exception &) {
+        return false;
+    }
+}
+
+bool decodeStrictBase64(const std::string &encoded, std::string &decoded) {
+    if (encoded.empty())
+        return false;
+
+    size_t padding_start = encoded.size();
+    for (size_t i = 0; i < encoded.size(); ++i) {
+        const unsigned char ch = static_cast<unsigned char>(encoded[i]);
+        if (ch == '=') {
+            padding_start = std::min(padding_start, i);
+            continue;
+        }
+        if (padding_start != encoded.size() ||
+            !(std::isalnum(ch) || ch == '-' || ch == '_' || ch == '+' || ch == '/'))
+            return false;
+    }
+    const size_t padding = encoded.size() - padding_start;
+    if (padding > 0) {
+        const size_t expected_padding =
+            padding_start % 4 == 2 ? 2 : (padding_start % 4 == 3 ? 1 : 0);
+        if (encoded.size() % 4 != 0 || padding != expected_padding)
+            return false;
+    } else if (padding_start % 4 == 1) {
+        return false;
+    }
+
+    std::string candidate = urlSafeBase64Decode(encoded);
+    std::string normalized = encoded.substr(0, padding_start);
+    normalized = replaceAllDistinct(replaceAllDistinct(normalized, "+", "-"), "/", "_");
+    if (urlSafeBase64Encode(candidate) != normalized)
+        return false;
+    decoded = std::move(candidate);
+    return true;
+}
+
+bool parseShareAuthority(const std::string &authority, std::string &host,
+                         std::string &port) {
+    if (authority.empty())
+        return false;
+    if (authority.front() == '[') {
+        const size_t bracket = authority.find(']');
+        if (bracket == std::string::npos || bracket + 2 >= authority.size() ||
+            authority[bracket + 1] != ':')
+            return false;
+        host = authority.substr(1, bracket - 1);
+        port = authority.substr(bracket + 2);
+    } else {
+        const size_t colon = authority.rfind(':');
+        if (colon == std::string::npos || colon == 0 || colon + 1 >= authority.size() ||
+            authority.find(':') != colon)
+            return false;
+        host = authority.substr(0, colon);
+        port = authority.substr(colon + 1);
+    }
+    return !host.empty() && host.find_first_of("\r\n") == std::string::npos &&
+           validSharePort(port);
+}
+
+bool parseUserPassword(const std::string &userinfo, bool allow_plain,
+                       std::string &username, std::string &password) {
+    std::string decoded;
+    if (allow_plain && userinfo.find(':') != std::string::npos)
+        decoded = decodeShareUriUserInfo(userinfo);
+    else if (!decodeStrictBase64(userinfo, decoded))
+        return false;
+
+    const size_t colon = decoded.find(':');
+    if (colon == std::string::npos)
+        return false;
+    username = decoded.substr(0, colon);
+    password = decoded.substr(colon + 1);
+    return username.find_first_of("\r\n") == std::string::npos &&
+           password.find_first_of("\r\n") == std::string::npos;
+}
+
+bool parseShareUri(std::string uri, const std::string &scheme, ParsedShareUri &parsed) {
+    const std::string prefix = scheme + "://";
+    if (!startsWith(uri, prefix))
+        return false;
+    uri.erase(0, prefix.size());
+
+    extractRemark(uri, parsed.remark);
+    const size_t query_pos = uri.find('?');
+    if (query_pos != std::string::npos) {
+        parsed.query = uri.substr(query_pos + 1);
+        uri.erase(query_pos);
+    }
+    if (!uri.empty() && uri.back() == '/')
+        uri.pop_back();
+
+    const size_t at = uri.rfind('@');
+    if (at == std::string::npos || at == 0 || at + 1 >= uri.size())
+        return false;
+    parsed.user = decodeShareUriUserInfo(uri.substr(0, at));
+    std::string authority = uri.substr(at + 1);
+
+    if (!authority.empty() && authority.front() == '[') {
+        const size_t bracket = authority.find(']');
+        if (bracket == std::string::npos || bracket + 1 >= authority.size() || authority[bracket + 1] != ':')
+            return false;
+        parsed.host = authority.substr(1, bracket - 1);
+        parsed.port = authority.substr(bracket + 2);
+    } else {
+        const size_t colon = authority.rfind(':');
+        if (colon == std::string::npos || colon == 0 || colon + 1 >= authority.size())
+            return false;
+        parsed.host = authority.substr(0, colon);
+        parsed.port = authority.substr(colon + 1);
+    }
+
+    return !parsed.user.empty() && !parsed.host.empty() && validSharePort(parsed.port);
+}
+
+bool validHysteria2PortToken(const std::string &token, uint16_t &first_port,
+                             std::string &remaining) {
+    const size_t dash = token.find('-');
+    if (dash == std::string::npos) {
+        if (!validSharePort(token))
+            return false;
+        first_port = static_cast<uint16_t>(to_int(token, 0));
+        remaining.clear();
+        return true;
+    }
+    if (dash == 0 || dash + 1 >= token.size() || token.find('-', dash + 1) != std::string::npos)
+        return false;
+    const std::string start = token.substr(0, dash);
+    const std::string end = token.substr(dash + 1);
+    if (!validSharePort(start) || !validSharePort(end))
+        return false;
+    const int first = to_int(start, 0);
+    const int last = to_int(end, 0);
+    if (first > last)
+        return false;
+    first_port = static_cast<uint16_t>(first);
+    remaining = first < last ? std::to_string(first + 1) + "-" + end : std::string();
+    return true;
+}
+
+bool normalizeHysteriaPortSpec(const std::string &value,
+                               std::string &normalized,
+                               uint16_t &first_port) {
+    string_array normalized_ranges;
+    first_port = 0;
+    for (std::string range : split(value, ",")) {
+        range = trim(range);
+        if (range.empty())
+            return false;
+        if (range.find(':') != std::string::npos) {
+            if (range.find(':') != range.rfind(':'))
+                return false;
+            range[range.find(':')] = '-';
+        }
+        uint16_t range_first = 0;
+        std::string ignored_remaining;
+        if (!validHysteria2PortToken(range, range_first, ignored_remaining))
+            return false;
+        if (normalized_ranges.empty())
+            first_port = range_first;
+        normalized_ranges.emplace_back(std::move(range));
+    }
+    if (normalized_ranges.empty())
+        return false;
+    normalized = join(normalized_ranges, ",");
+    return true;
+}
+
+bool normalizeHysteriaProtocol(std::string &protocol) {
+    protocol = toLower(trim(protocol));
+    if (protocol.empty())
+        protocol = "udp";
+    return protocol == "udp" || protocol == "wechat-video" ||
+           protocol == "faketcp";
+}
+
+bool normalizeHysteriaNetwork(std::string &network) {
+    network = toLower(trim(network));
+    return network.empty() || network == "tcp" || network == "udp";
+}
+
+bool validHysteriaHopInterval(const std::string &interval) {
+    return interval.empty() ||
+           regMatch(interval, R"(^([1-9][0-9]*(?:ns|us|ms|s|m|h))+$)");
+}
+
+bool parseModernShareUri(std::string uri, const std::string &scheme,
+                         bool require_user, const std::string &default_port,
+                         bool allow_hysteria2_ports, ParsedShareUri &parsed,
+                         std::string &additional_ports) {
+    const std::string prefix = scheme + "://";
+    if (!startsWith(uri, prefix))
+        return false;
+    uri.erase(0, prefix.size());
+
+    const size_t fragment_pos = uri.find('#');
+    if (fragment_pos != std::string::npos) {
+        parsed.remark = decodeShareUriUserInfo(uri.substr(fragment_pos + 1));
+        uri.erase(fragment_pos);
+    }
+    const size_t query_pos = uri.find('?');
+    if (query_pos != std::string::npos) {
+        parsed.query = uri.substr(query_pos + 1);
+        uri.erase(query_pos);
+    }
+    if (!uri.empty() && uri.back() == '/')
+        uri.pop_back();
+    if (uri.empty() || uri.find('/') != std::string::npos)
+        return false;
+
+    const size_t at = uri.rfind('@');
+    std::string authority;
+    if (at == std::string::npos) {
+        if (require_user)
+            return false;
+        authority = uri;
+    } else {
+        if (at == 0 || at + 1 >= uri.size())
+            return false;
+        parsed.user = decodeShareUriUserInfo(uri.substr(0, at));
+        authority = uri.substr(at + 1);
+    }
+
+    std::string port_spec;
+    if (!authority.empty() && authority.front() == '[') {
+        const size_t bracket = authority.find(']');
+        if (bracket == std::string::npos)
+            return false;
+        parsed.host = authority.substr(1, bracket - 1);
+        if (bracket + 1 < authority.size()) {
+            if (authority[bracket + 1] != ':' || bracket + 2 >= authority.size())
+                return false;
+            port_spec = authority.substr(bracket + 2);
+        }
+    } else {
+        const size_t colon = authority.rfind(':');
+        if (colon == std::string::npos) {
+            parsed.host = authority;
+        } else {
+            if (authority.find(':') != colon || colon == 0 || colon + 1 >= authority.size())
+                return false;
+            parsed.host = authority.substr(0, colon);
+            port_spec = authority.substr(colon + 1);
+        }
+    }
+    if (parsed.host.empty())
+        return false;
+    if (port_spec.empty())
+        port_spec = default_port;
+
+    if (!allow_hysteria2_ports) {
+        if (!validSharePort(port_spec))
+            return false;
+        parsed.port = port_spec;
+        return !require_user || !parsed.user.empty();
+    }
+
+    const string_array port_tokens = split(port_spec, ",");
+    if (port_tokens.empty())
+        return false;
+    uint16_t primary_port = 0;
+    std::string first_remaining;
+    if (!validHysteria2PortToken(port_tokens.front(), primary_port, first_remaining))
+        return false;
+    string_array remaining_ports;
+    if (!first_remaining.empty())
+        remaining_ports.emplace_back(std::move(first_remaining));
+    for (size_t i = 1; i < port_tokens.size(); ++i) {
+        uint16_t ignored_port = 0;
+        std::string ignored_remaining;
+        if (!validHysteria2PortToken(port_tokens[i], ignored_port, ignored_remaining))
+            return false;
+        remaining_ports.emplace_back(port_tokens[i]);
+    }
+    parsed.port = std::to_string(primary_port);
+    additional_ports = join(remaining_ports, ",");
+    return true;
+}
+
+bool isXrayUuid(const std::string &value) {
+    static const std::string pattern =
+            R"(^[\da-fA-F]{8}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{12}$)";
+    return regMatch(value, pattern);
+}
+
+std::string decodedUrlArg(const std::string &query, const std::string &key) {
+    return urlDecode(getUrlArg(query, key));
+}
+
+std::vector<std::string> getUrlAlpnList(const std::string &query) {
+    std::vector<std::string> result;
+    for (std::string item : split(decodedUrlArg(query, "alpn"), ",")) {
+        item = trim(item);
+        if (!item.empty())
+            result.emplace_back(std::move(item));
+    }
+    return result;
+}
+
+std::string decodedFirstUrlArg(const std::string &query,
+                               std::initializer_list<const char *> keys) {
+    for (const char *key : keys) {
+        std::string value = decodedUrlArg(query, key);
+        if (!value.empty())
+            return value;
+    }
+    return {};
+}
+
+uint16_t parseUint16Option(const std::string &value, uint16_t fallback,
+                           bool allow_seconds_suffix = false) {
+    std::string normalized = trim(value);
+    if (allow_seconds_suffix && normalized.size() > 1 && normalized.back() == 's')
+        normalized.pop_back();
+    if (normalized.empty() || normalized.size() > 5 ||
+        !std::all_of(normalized.begin(), normalized.end(), [](unsigned char ch) {
+            return std::isdigit(ch) != 0;
+        }))
+        return fallback;
+    const int parsed = to_int(normalized, -1);
+    return parsed >= 0 && parsed <= 65535 ? static_cast<uint16_t>(parsed) : fallback;
+}
+
+tribool getXrayAllowInsecure(const std::string &query) {
+    std::string value = getUrlArg(query, "insecure");
+    if (value.empty())
+        value = getUrlArg(query, "allowInsecure");
+    return tribool(value);
+}
+
+std::string normalizeXrayTransport(std::string network) {
+    network = toLower(trim(network));
+    if (network.empty() || network == "raw")
+        return "tcp";
+    if (network == "none")
+        return "tcp";
+    if (network == "websocket")
+        return "ws";
+    if (network == "mkcp")
+        return "kcp";
+    if (network == "gun")
+        return "grpc";
+    if (network == "h2")
+        return "http";
+    if (network == "splithttp")
+        return "xhttp";
+    return network;
+}
+
+void rememberXrayLinkOption(Proxy &node, const std::string &query, const std::string &key) {
+    std::string value = decodedUrlArg(query, key);
+    if (!value.empty())
+        node.XrayLinkOptions.emplace_back(key, std::move(value));
+}
+
+void rememberXrayLinkOptions(Proxy &node, const std::string &query) {
+    static const string_array keys = {
+        "authority", "extra", "fm", "ech", "pcs", "vcn", "pqv", "spx"
+    };
+    for (const std::string &key : keys)
+        rememberXrayLinkOption(node, query, key);
+}
+
+bool parseXrayTransport(const std::string &query, Proxy &node, std::string &network,
+                        std::string &header_type, std::string &path, std::string &host,
+                        std::string &mode) {
+    network = normalizeXrayTransport(decodedUrlArg(query, "type"));
+    header_type = decodedUrlArg(query, "headerType");
+    switch (hash_(network)) {
+        case "tcp"_hash:
+            if (header_type == "http") {
+                host = decodedUrlArg(query, "host");
+                path = getUrlArg(query, "path");
+            }
+            break;
+        case "kcp"_hash:
+            path = getUrlArg(query, "seed");
+            break;
+        case "ws"_hash:
+        case "http"_hash:
+        case "httpupgrade"_hash:
+            host = decodedUrlArg(query, "host");
+            path = getUrlArg(query, "path");
+            break;
+        case "grpc"_hash:
+            path = getUrlArg(query, "serviceName");
+            mode = decodedUrlArg(query, "mode");
+            break;
+        case "xhttp"_hash:
+            host = decodedUrlArg(query, "host");
+            path = getUrlArg(query, "path");
+            mode = decodedUrlArg(query, "mode");
+            break;
+        case "quic"_hash:
+            host = decodedUrlArg(query, "quicSecurity");
+            path = getUrlArg(query, "key");
+            break;
+        default:
+            return false;
+    }
+    rememberXrayLinkOptions(node, query);
+    return true;
+}
+
+std::string stripWireGuardQuotes(std::string value) {
+    value = trim(value);
+    if (value.size() >= 2 &&
+        ((value.front() == '"' && value.back() == '"') ||
+         (value.front() == '\'' && value.back() == '\'')))
+        value = value.substr(1, value.size() - 2);
+    return trim(value);
+}
+
+std::vector<std::string> splitWireGuardFields(const std::string &value) {
+    std::vector<std::string> result;
+    size_t start = 0;
+    int round_depth = 0, square_depth = 0, brace_depth = 0;
+    char quote = 0;
+    bool escaped = false;
+    for (size_t i = 0; i < value.size(); ++i) {
+        const char ch = value[i];
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (quote != 0) {
+            if (ch == '\\')
+                escaped = true;
+            else if (ch == quote)
+                quote = 0;
+            continue;
+        }
+        if (ch == '"' || ch == '\'') {
+            quote = ch;
+            continue;
+        }
+        switch (ch) {
+            case '(': ++round_depth; break;
+            case ')': --round_depth; break;
+            case '[': ++square_depth; break;
+            case ']': --square_depth; break;
+            case '{': ++brace_depth; break;
+            case '}': --brace_depth; break;
+            case ',':
+                if (round_depth == 0 && square_depth == 0 && brace_depth == 0) {
+                    result.emplace_back(trim(value.substr(start, i - start)));
+                    start = i + 1;
+                }
+                break;
+            default: break;
+        }
+        if (round_depth < 0 || square_depth < 0 || brace_depth < 0)
+            return {};
+    }
+    if (quote != 0 || round_depth != 0 || square_depth != 0 || brace_depth != 0)
+        return {};
+    result.emplace_back(trim(value.substr(start)));
+    return result;
+}
+
+bool parseWireGuardEndpoint(std::string endpoint, std::string &host,
+                            uint16_t &port) {
+    endpoint = stripWireGuardQuotes(std::move(endpoint));
+    std::string port_text;
+    if (endpoint.size() > 2 && endpoint.front() == '[') {
+        const size_t bracket = endpoint.find(']');
+        if (bracket == std::string::npos || bracket + 2 >= endpoint.size() ||
+            endpoint[bracket + 1] != ':')
+            return false;
+        host = endpoint.substr(1, bracket - 1);
+        port_text = endpoint.substr(bracket + 2);
+    } else {
+        const size_t colon = endpoint.rfind(':');
+        if (colon == std::string::npos || colon == 0 || colon + 1 >= endpoint.size())
+            return false;
+        host = endpoint.substr(0, colon);
+        port_text = endpoint.substr(colon + 1);
+    }
+    if (!validSharePort(port_text) || host.find_first_of("\r\n") != std::string::npos)
+        return false;
+    port = static_cast<uint16_t>(to_int(port_text, 0));
+    return !host.empty();
+}
+
+std::string normalizeWireGuardAllowedIPs(const std::string &value) {
+    string_array networks;
+    for (std::string network : split(value, ",")) {
+        network = trim(network);
+        if (network.empty())
+            return {};
+        const size_t slash = network.find('/');
+        const std::string address = slash == std::string::npos
+                                        ? network
+                                        : network.substr(0, slash);
+        const bool ipv4 = isIPv4(address);
+        const bool ipv6 = isIPv6(address);
+        if (!ipv4 && !ipv6)
+            return {};
+        if (slash == std::string::npos) {
+            network += ipv6 ? "/128" : "/32";
+        } else {
+            const std::string prefix = network.substr(slash + 1);
+            if (prefix.empty() ||
+                !std::all_of(prefix.begin(), prefix.end(), [](unsigned char ch) {
+                    return std::isdigit(ch) != 0;
+                }))
+                return {};
+            const int bits = to_int(prefix, -1);
+            if (bits < 0 || bits > (ipv6 ? 128 : 32))
+                return {};
+        }
+        networks.emplace_back(std::move(network));
+    }
+    return join(networks, ", ");
+}
+
+bool validWireGuardPeer(const WireGuardPeer &peer) {
+    return !peer.Hostname.empty() && peer.Port > 0 && !peer.PublicKey.empty() &&
+           !peer.AllowedIPs.empty();
+}
+
+std::string normalizeWireGuardReserved(std::string value) {
+    value = replaceAllDistinct(stripWireGuardQuotes(std::move(value)), "/", ",");
+    string_array bytes;
+    for (std::string item : split(value, ",")) {
+        item = trim(item);
+        if (item.empty() || item.size() > 3 ||
+            !std::all_of(item.begin(), item.end(), [](unsigned char ch) {
+                return std::isdigit(ch) != 0;
+            }))
+            return {};
+        const int byte = to_int(item, -1);
+        if (byte < 0 || byte > 255)
+            return {};
+        bytes.emplace_back(std::to_string(byte));
+    }
+    return join(bytes, ",");
+}
+
+void syncLegacyWireGuardProjection(Proxy &node) {
+    if (node.WireGuardLocalAddresses.empty()) {
+        if (!node.SelfIP.empty())
+            node.WireGuardLocalAddresses.emplace_back(node.SelfIP);
+        if (!node.SelfIPv6.empty())
+            node.WireGuardLocalAddresses.emplace_back(node.SelfIPv6);
+    }
+    if (node.WireGuardPeers.empty()) {
+        WireGuardPeer peer;
+        peer.Hostname = node.Hostname;
+        peer.Port = node.Port;
+        peer.PublicKey = node.PublicKey;
+        peer.PreSharedKey = node.PreSharedKey;
+        peer.AllowedIPs = node.AllowedIPs;
+        peer.Reserved = node.ClientId;
+        peer.KeepAlive = node.KeepAlive;
+        if (validWireGuardPeer(peer))
+            node.WireGuardPeers.emplace_back(std::move(peer));
+    }
+    if (!node.WireGuardPeers.empty()) {
+        const WireGuardPeer &peer = node.WireGuardPeers.front();
+        node.Hostname = peer.Hostname;
+        node.Port = peer.Port;
+        node.PublicKey = peer.PublicKey;
+        node.PreSharedKey = peer.PreSharedKey;
+        node.AllowedIPs = peer.AllowedIPs;
+        node.ClientId = peer.Reserved;
+        node.KeepAlive = peer.KeepAlive;
+    }
+}
+
+std::vector<std::string> jsonStringArray(const rapidjson::Value &value) {
+    std::vector<std::string> result;
+    if (value.IsString()) {
+        result.emplace_back(value.GetString());
+        return result;
+    }
+    if (!value.IsArray())
+        return result;
+    for (const auto &item : value.GetArray()) {
+        std::string text;
+        item >> text;
+        if (!text.empty())
+            result.emplace_back(std::move(text));
+    }
+    return result;
+}
+
+std::string jsonWireGuardReserved(const rapidjson::Value &value) {
+    if (value.IsArray())
+        return normalizeWireGuardReserved(join(jsonStringArray(value), ","));
+    std::string result;
+    value >> result;
+    return normalizeWireGuardReserved(std::move(result));
+}
+
+WireGuardPeer parseSingBoxWireGuardPeer(const rapidjson::Value &value,
+                                        bool endpoint_schema) {
+    WireGuardPeer peer;
+    if (!value.IsObject())
+        return peer;
+    peer.Hostname = GetMember(value, endpoint_schema ? "address" : "server");
+    peer.Port = parseUint16Option(
+        GetMember(value, endpoint_schema ? "port" : "server_port"), 0);
+    peer.PublicKey = GetMember(value, "public_key");
+    peer.PreSharedKey = GetMember(value, "pre_shared_key");
+    if (value.HasMember("allowed_ips"))
+        peer.AllowedIPs = normalizeWireGuardAllowedIPs(
+            join(jsonStringArray(value["allowed_ips"]), ", "));
+    if (value.HasMember("reserved"))
+        peer.Reserved = jsonWireGuardReserved(value["reserved"]);
+    std::string keepalive = GetMember(value, "persistent_keepalive_interval");
+    if (!keepalive.empty() && keepalive.back() == 's')
+        keepalive.pop_back();
+    peer.KeepAlive = parseUint16Option(keepalive, 0);
+    return peer;
+}
+
+} // namespace
+
 void commonConstruct(Proxy &node, ProxyType type, const std::string &group, const std::string &remarks,
                      const std::string &server, const std::string &port, const tribool &udp, const tribool &tfo,
                      const tribool &scv, const tribool &tls13, const std::string &underlying_proxy) {
@@ -89,11 +784,13 @@ void vmessConstruct(Proxy &node, const std::string &group, const std::string &re
     node.UserId = id.empty() ? "00000000-0000-0000-0000-000000000000" : id;
     node.AlterId = to_int(aid);
     node.EncryptMethod = cipher;
-    node.TransferProtocol = net.empty() ? "tcp" : net;
+    node.TransferProtocol = normalizeXrayTransport(net);
     node.Edge = edge;
     node.ServerName = sni;
+    node.AlpnList = alpnList;
+    node.TLSStr = tls;
 
-    if (net == "quic") {
+    if (node.TransferProtocol == "quic") {
         node.QUICSecure = host;
         node.QUICSecret = path;
     } else {
@@ -101,7 +798,7 @@ void vmessConstruct(Proxy &node, const std::string &group, const std::string &re
         node.Path = path.empty() ? "/" : trim(path);
     }
     node.FakeType = type;
-    node.TLSSecure = tls == "tls";
+    node.TLSSecure = tls == "tls" || tls == "reality";
 }
 
 void ssrConstruct(Proxy &node, const std::string &group, const std::string &remarks, const std::string &server,
@@ -159,6 +856,7 @@ void trojanConstruct(Proxy &node, const std::string &group, const std::string &r
     node.Password = password;
     node.Host = host;
     node.TLSSecure = tlssecure;
+    node.TLSStr = tlssecure ? "tls" : "none";
     node.TransferProtocol = network.empty() ? "tcp" : network;
     node.Path = path;
     node.Fingerprint = fp;
@@ -168,13 +866,16 @@ void trojanConstruct(Proxy &node, const std::string &group, const std::string &r
 
 void snellConstruct(Proxy &node, const std::string &group, const std::string &remarks, const std::string &server,
                     const std::string &port, const std::string &password, const std::string &obfs,
-                    const std::string &host, uint16_t version, tribool udp, tribool tfo, tribool scv,
+                    const std::string &host, const std::string &obfs_uri, uint16_t version,
+                    tribool reuse, tribool udp, tribool tfo, tribool scv,
                     const std::string &underlying_proxy) {
     commonConstruct(node, ProxyType::Snell, group, remarks, server, port, udp, tfo, scv, tribool(), underlying_proxy);
     node.Password = password;
     node.OBFS = obfs;
     node.Host = host;
+    node.Path = obfs_uri;
     node.SnellVersion = version;
+    node.SnellReuse = reuse;
 }
 
 void wireguardConstruct(Proxy &node, const std::string &group, const std::string &remarks, const std::string &server,
@@ -191,10 +892,11 @@ void wireguardConstruct(Proxy &node, const std::string &group, const std::string
     node.PublicKey = pubKey;
     node.PreSharedKey = psk;
     node.DnsServers = dns;
-    node.Mtu = to_int(mtu);
-    node.KeepAlive = to_int(keepalive);
+    node.Mtu = parseUint16Option(mtu, 0);
+    node.KeepAlive = parseUint16Option(keepalive, 0);
     node.TestUrl = testUrl;
-    node.ClientId = clientId;
+    node.ClientId = normalizeWireGuardReserved(clientId);
+    syncLegacyWireGuardProjection(node);
 }
 
 void hysteriaConstruct(Proxy &node, const std::string &group, const std::string &remarks, const std::string &add,
@@ -232,10 +934,33 @@ void anyTlSConstruct(Proxy &node, const std::string &group, const std::string &r
     node.Password = password;
     node.AlpnList = AlpnList;
     node.SNI = sni;
+    node.ServerName = sni;
     node.Fingerprint = fingerprint;
     node.IdleSessionCheckInterval = idleSessionCheckInterval;
     node.IdleSessionTimeout = idleSessionTimeout;
     node.MinIdleSession = minIdleSession;
+}
+
+void naiveConstruct(Proxy &node, const std::string &group,
+                    const std::string &remarks, const std::string &port,
+                    const std::string &username,
+                    const std::string &password, const std::string &host,
+                    const std::vector<String> &alpn_list,
+                    const std::string &fingerprint,
+                    const std::string &sni, tribool scv,
+                    bool quic, uint32_t insecure_concurrency) {
+    commonConstruct(node, ProxyType::Naive, group, remarks, host, port,
+                    tribool(), tribool(), scv, tribool(), "");
+    node.Username = username;
+    node.Password = password;
+    node.TLSSecure = true;
+    node.TLSStr = "tls";
+    node.ServerName = sni;
+    node.SNI = sni;
+    node.AlpnList = alpn_list;
+    node.Fingerprint = fingerprint;
+    node.NaiveQuic = quic;
+    node.NaiveInsecureConcurrency = insecure_concurrency;
 }
 
 void mieruConstruct(Proxy &node, const std::string &group, const std::string &remarks,
@@ -261,14 +986,16 @@ void vlessConstruct(Proxy &node, const std::string &group, const std::string &re
                     const std::string &pbk, const std::string &sid, const std::string &fp, const std::string &sni,
                     const std::vector<std::string> &alpnList, const std::string &packet_encoding,
                     tribool udp, tribool tfo,
-                    tribool scv, tribool tls13, const std::string &underlying_proxy, tribool v2ray_http_upgrade) {
+                    tribool scv, tribool tls13, const std::string &underlying_proxy, tribool v2ray_http_upgrade,
+                    const std::string &encryption) {
     commonConstruct(node, ProxyType::VLESS, group, remarks, add, port, udp, tfo, scv, tls13, underlying_proxy);
     node.UserId = id.empty() ? "00000000-0000-0000-0000-000000000000" : id;
     node.AlterId = to_int(aid);
     node.EncryptMethod = cipher;
-    node.TransferProtocol = net.empty() ? "tcp" : type == "http" ? "http" : net;
+    node.TransferProtocol = normalizeXrayTransport(net);
     node.Edge = edge;
     node.Flow = flow;
+    node.Encryption = encryption.empty() ? "none" : encryption;
     node.FakeType = type;
     node.TLSSecure = tls == "tls" || tls == "xtls" || tls == "reality";
     node.PublicKey = pbk;
@@ -278,7 +1005,9 @@ void vlessConstruct(Proxy &node, const std::string &group, const std::string &re
     node.AlpnList = alpnList;
     node.PacketEncoding = packet_encoding;
     node.TLSStr = tls;
-    switch (hash_(net)) {
+    if (node.TransferProtocol == "xhttp")
+        node.GRPCMode = mode;
+    switch (hash_(node.TransferProtocol)) {
         case "grpc"_hash:
             node.Host = host;
             node.GRPCMode = mode.empty() ? "gun" : mode;
@@ -340,7 +1069,7 @@ void tuicConstruct(Proxy &node, const std::string &group, const std::string &rem
 
 
 void explodeVmess(std::string vmess, Proxy &node) {
-    std::string version, ps, add, port, type, id, aid, net, path, host, tls, sni;
+    std::string version, ps, add, port, type, id, aid, net, path, host, tls, sni, cipher, fp, alpn;
     Document jsondata;
     std::vector<std::string> vArray;
 
@@ -378,9 +1107,16 @@ void explodeVmess(std::string vmess, Proxy &node) {
     GetMember(jsondata, "aid", aid);
     GetMember(jsondata, "net", net);
     GetMember(jsondata, "tls", tls);
+    GetMember(jsondata, "scy", cipher);
+    if (cipher.empty())
+        GetMember(jsondata, "encryption", cipher);
+    if (cipher.empty())
+        cipher = "auto";
 
     GetMember(jsondata, "host", host);
     GetMember(jsondata, "sni", sni);
+    GetMember(jsondata, "fp", fp);
+    GetMember(jsondata, "alpn", alpn);
     switch (to_int(version)) {
         case 1:
             if (!host.empty()) {
@@ -397,9 +1133,24 @@ void explodeVmess(std::string vmess, Proxy &node) {
     }
 
     add = trim(add);
+    net = normalizeXrayTransport(net);
 
-    vmessConstruct(node, V2RAY_DEFAULT_GROUP, ps, add, port, type, id, aid, net, "auto", path, host, "", tls, sni,
-                   std::vector<std::string>{});
+    std::vector<std::string> alpn_list;
+    for (std::string item : split(alpn, ",")) {
+        item = trim(item);
+        if (!item.empty())
+            alpn_list.emplace_back(std::move(item));
+    }
+    vmessConstruct(node, V2RAY_DEFAULT_GROUP, ps, add, port, type, id, aid, net, cipher, path, host, "", tls, sni,
+                   alpn_list);
+    node.Fingerprint = fp;
+    if (net == "grpc" || net == "xhttp")
+        node.GRPCMode = type;
+    for (const char *key : {"authority", "extra", "fm", "ech", "pcs", "vcn"}) {
+        std::string value = GetMember(jsondata, key);
+        if (!value.empty())
+            node.XrayLinkOptions.emplace_back(key, std::move(value));
+    }
 }
 
 void explodeVmessConf(std::string content, std::vector<Proxy> &nodes) {
@@ -542,38 +1293,64 @@ void explodeVmessConf(std::string content, std::vector<Proxy> &nodes) {
 }
 
 void explodeSS(std::string ss, Proxy &node) {
-    std::string ps, password, method, server, port, plugins, plugin, pluginopts, addition, group = SS_DEFAULT_GROUP,
-            secret;
-    //std::vector<std::string> args, secret;
-    ss = replaceAllDistinct(ss.substr(5), "/?", "?");
-    if (strFind(ss, "#")) {
-        auto sspos = ss.find('#');
-        ps = urlDecode(ss.substr(sspos + 1));
-        ss.erase(sspos);
-    }
+    if (!startsWith(ss, "ss://"))
+        return;
 
-    if (strFind(ss, "?")) {
-        addition = ss.substr(ss.find('?') + 1);
-        plugins = urlDecode(getUrlArg(addition, "plugin"));
-        auto pluginpos = plugins.find(';');
-        plugin = plugins.substr(0, pluginpos);
-        pluginopts = plugins.substr(pluginpos + 1);
-        group = getUrlArg(addition, "group");
-        if (!group.empty())
-            group = urlSafeBase64Decode(group);
-        ss.erase(ss.find('?'));
+    std::string ps, password, method, server, port, plugin, pluginopts,
+            addition, group = SS_DEFAULT_GROUP;
+    ss.erase(0, 5);
+
+    const size_t fragment_pos = ss.find('#');
+    if (fragment_pos != std::string::npos) {
+        ps = decodeShareUriUserInfo(ss.substr(fragment_pos + 1));
+        ss.erase(fragment_pos);
     }
-    if (strFind(ss, "@")) {
-        if (regGetMatch(ss, "(\\S+?)@(\\S+):(\\d+)", 4, 0, &secret, &server, &port))
-            return;
-        if (regGetMatch(urlSafeBase64Decode(secret), "(\\S+?):(\\S+)", 3, 0, &method, &password))
+    const size_t query_pos = ss.find('?');
+    if (query_pos != std::string::npos) {
+        addition = ss.substr(query_pos + 1);
+        ss.erase(query_pos);
+        std::string plugin_value = urlDecode(getUrlArg(addition, "plugin"));
+        const size_t plugin_separator = plugin_value.find(';');
+        plugin = plugin_value.substr(0, plugin_separator);
+        if (plugin_separator != std::string::npos)
+            pluginopts = plugin_value.substr(plugin_separator + 1);
+
+        std::string encoded_group = getUrlArg(addition, "group");
+        std::string decoded_group;
+        if (!encoded_group.empty() && decodeStrictBase64(encoded_group, decoded_group))
+            group = std::move(decoded_group);
+    }
+    if (!ss.empty() && ss.back() == '/')
+        ss.pop_back();
+
+    const size_t at = ss.rfind('@');
+    if (at != std::string::npos) {
+        if (at == 0 || at + 1 >= ss.size() ||
+            !parseUserPassword(ss.substr(0, at), true, method, password) ||
+            !parseShareAuthority(ss.substr(at + 1), server, port))
             return;
     } else {
-        if (regGetMatch(urlSafeBase64Decode(ss), "(\\S+?):(\\S+)@(\\S+):(\\d+)", 5, 0, &method, &password, &server,
-                        &port))
+        std::string decoded;
+        if (!decodeStrictBase64(ss, decoded))
             return;
+        const size_t decoded_at = decoded.rfind('@');
+        if (decoded_at == std::string::npos || decoded_at == 0 ||
+            decoded_at + 1 >= decoded.size())
+            return;
+        const size_t colon = decoded.find(':');
+        if (colon == std::string::npos || colon >= decoded_at ||
+            !parseShareAuthority(decoded.substr(decoded_at + 1), server, port))
+            return;
+        method = decoded.substr(0, colon);
+        password = decoded.substr(colon + 1, decoded_at - colon - 1);
     }
-    if (port == "0")
+    if (method.empty() || password.empty() ||
+        method.find_first_of("\r\n") != std::string::npos ||
+        password.find_first_of("\r\n") != std::string::npos ||
+        group.find_first_of("\r\n") != std::string::npos ||
+        ps.find_first_of("\r\n") != std::string::npos ||
+        plugin.find_first_of("\r\n") != std::string::npos ||
+        pluginopts.find_first_of("\r\n") != std::string::npos)
         return;
     if (ps.empty())
         ps = server + ":" + port;
@@ -659,7 +1436,8 @@ void explodeSSAndroid(std::string ss, std::vector<Proxy> &nodes) {
     //first add some extra data before parsing
     ss = "{\"nodes\":" + ss + "}";
     json.Parse(ss.data());
-    if (json.HasParseError() || !json.IsObject())
+    if (json.HasParseError() || !json.IsObject() || !json.HasMember("nodes") ||
+        !json["nodes"].IsArray())
         return;
 
     for (uint32_t i = 0; i < json["nodes"].Size(); i++) {
@@ -669,7 +1447,7 @@ void explodeSSAndroid(std::string ss, std::vector<Proxy> &nodes) {
             continue;
         ps = GetMember(json["nodes"][i], "remarks");
         port = GetMember(json["nodes"][i], "server_port");
-        if (port == "0")
+        if (!validSharePort(port))
             continue;
         if (ps.empty())
             ps = server + ":" + port;
@@ -677,6 +1455,14 @@ void explodeSSAndroid(std::string ss, std::vector<Proxy> &nodes) {
         method = GetMember(json["nodes"][i], "method");
         plugin = GetMember(json["nodes"][i], "plugin");
         pluginopts = GetMember(json["nodes"][i], "plugin_opts");
+        if (password.empty() || method.empty() ||
+            server.find_first_of("\r\n") != std::string::npos ||
+            ps.find_first_of("\r\n") != std::string::npos ||
+            password.find_first_of("\r\n") != std::string::npos ||
+            method.find_first_of("\r\n") != std::string::npos ||
+            plugin.find_first_of("\r\n") != std::string::npos ||
+            pluginopts.find_first_of("\r\n") != std::string::npos)
+            continue;
 
         ssConstruct(node, group, ps, server, port, password, method, plugin, pluginopts);
         node.Id = index;
@@ -691,27 +1477,46 @@ void explodeSSConf(std::string content, std::vector<Proxy> &nodes) {
     auto index = nodes.size();
 
     json.Parse(content.data());
-    if (json.HasParseError() || !json.IsObject())
+    if (json.HasParseError())
         return;
-    const char *section = json.HasMember("version") && json.HasMember("servers") ? "servers" : "configs";
-    if (!json.HasMember(section))
-        return;
-    GetMember(json, "remarks", group);
 
-    for (uint32_t i = 0; i < json[section].Size(); i++) {
+    const rapidjson::Value *server_list = nullptr;
+    if (json.IsArray()) {
+        server_list = &json;
+    } else if (json.IsObject()) {
+        if (json.HasMember("servers") && json["servers"].IsArray())
+            server_list = &json["servers"];
+        else if (json.HasMember("configs") && json["configs"].IsArray())
+            server_list = &json["configs"];
+        GetMember(json, "remarks", group);
+    }
+    if (server_list == nullptr || group.find_first_of("\r\n") != std::string::npos)
+        return;
+
+    for (uint32_t i = 0; i < server_list->Size(); i++) {
+        const rapidjson::Value &item = (*server_list)[i];
+        if (!item.IsObject())
+            continue;
         Proxy node;
-        ps = GetMember(json[section][i], "remarks");
-        port = GetMember(json[section][i], "server_port");
-        if (port == "0")
+        server = GetMember(item, "server");
+        port = GetMember(item, "server_port");
+        password = GetMember(item, "password");
+        method = GetMember(item, "method");
+        ps = GetMember(item, "remarks");
+        if (server.empty() || !validSharePort(port) || password.empty() ||
+            method.empty() ||
+            server.find_first_of("\r\n") != std::string::npos ||
+            ps.find_first_of("\r\n") != std::string::npos ||
+            password.find_first_of("\r\n") != std::string::npos ||
+            method.find_first_of("\r\n") != std::string::npos)
             continue;
         if (ps.empty())
             ps = server + ":" + port;
-
-        password = GetMember(json[section][i], "password");
-        method = GetMember(json[section][i], "method");
-        server = GetMember(json[section][i], "server");
-        plugin = GetMember(json[section][i], "plugin");
-        pluginopts = GetMember(json[section][i], "plugin_opts");
+        plugin = GetMember(item, "plugin");
+        pluginopts = GetMember(item, "plugin_opts");
+        if (plugin.find_first_of("\r\n") != std::string::npos ||
+            pluginopts.find_first_of("\r\n") != std::string::npos)
+            continue;
 
         node.Id = index;
         ssConstruct(node, group, ps, server, port, password, method, plugin, pluginopts);
@@ -723,22 +1528,52 @@ void explodeSSConf(std::string content, std::vector<Proxy> &nodes) {
 void explodeSSR(std::string ssr, Proxy &node) {
     std::string strobfs;
     std::string remarks, group, server, port, method, password, protocol, protoparam, obfs, obfsparam;
-    ssr = replaceAllDistinct(ssr.substr(6), "\r", "");
-    ssr = urlSafeBase64Decode(ssr);
+    if (!startsWith(ssr, "ssr://"))
+        return;
+    if (!decodeStrictBase64(replaceAllDistinct(ssr.substr(6), "\r", ""), ssr))
+        return;
     if (strFind(ssr, "/?")) {
         strobfs = ssr.substr(ssr.find("/?") + 2);
         ssr = ssr.substr(0, ssr.find("/?"));
-        group = urlSafeBase64Decode(getUrlArg(strobfs, "group"));
-        remarks = urlSafeBase64Decode(getUrlArg(strobfs, "remarks"));
-        obfsparam = regReplace(urlSafeBase64Decode(getUrlArg(strobfs, "obfsparam")), "\\s", "");
-        protoparam = regReplace(urlSafeBase64Decode(getUrlArg(strobfs, "protoparam")), "\\s", "");
+        decodeStrictBase64(getUrlArg(strobfs, "group"), group);
+        decodeStrictBase64(getUrlArg(strobfs, "remarks"), remarks);
+        decodeStrictBase64(getUrlArg(strobfs, "obfsparam"), obfsparam);
+        decodeStrictBase64(getUrlArg(strobfs, "protoparam"), protoparam);
+        obfsparam = regReplace(obfsparam, "\\s", "");
+        protoparam = regReplace(protoparam, "\\s", "");
     }
 
-    if (regGetMatch(ssr, "(\\S+):(\\d+?):(\\S+?):(\\S+?):(\\S+?):(\\S+)", 7, 0, &server, &port, &protocol, &method,
-                    &obfs, &password))
+    size_t fields_start = 0;
+    if (!ssr.empty() && ssr.front() == '[') {
+        const size_t bracket = ssr.find(']');
+        if (bracket == std::string::npos || bracket + 1 >= ssr.size() || ssr[bracket + 1] != ':')
+            return;
+        server = ssr.substr(1, bracket - 1);
+        fields_start = bracket + 2;
+    } else {
+        const size_t colon = ssr.find(':');
+        if (colon == std::string::npos)
+            return;
+        server = ssr.substr(0, colon);
+        fields_start = colon + 1;
+    }
+    const string_array fields = split(ssr.substr(fields_start), ":");
+    if (server.empty() || fields.size() != 5)
         return;
-    password = urlSafeBase64Decode(password);
-    if (port == "0")
+    port = fields[0];
+    protocol = fields[1];
+    method = fields[2];
+    obfs = fields[3];
+    if (!validSharePort(port) || protocol.empty() || method.empty() || obfs.empty() ||
+        !decodeStrictBase64(fields[4], password))
+        return;
+    if (server.find_first_of("\r\n") != std::string::npos ||
+        protocol.find_first_of("\r\n") != std::string::npos ||
+        method.find_first_of("\r\n") != std::string::npos ||
+        obfs.find_first_of("\r\n") != std::string::npos ||
+        password.find_first_of("\r\n") != std::string::npos ||
+        group.find_first_of("\r\n") != std::string::npos ||
+        remarks.find_first_of("\r\n") != std::string::npos)
         return;
 
     if (group.empty())
@@ -769,18 +1604,35 @@ void explodeSSRConf(std::string content, std::vector<Proxy> &nodes) {
         Proxy node;
         server = GetMember(json, "server");
         port = GetMember(json, "server_port");
+        password = GetMember(json, "password");
+        if (server.empty() || !validSharePort(port) || password.empty())
+            return;
         remarks = server + ":" + port;
         method = GetMember(json, "method");
         obfs = GetMember(json, "obfs");
         protocol = GetMember(json, "protocol");
+        if (method.empty() || server.find_first_of("\r\n") != std::string::npos ||
+            method.find_first_of("\r\n") != std::string::npos ||
+            password.find_first_of("\r\n") != std::string::npos ||
+            obfs.find_first_of("\r\n") != std::string::npos ||
+            protocol.find_first_of("\r\n") != std::string::npos)
+            return;
         if (find(ss_ciphers.begin(), ss_ciphers.end(), method) != ss_ciphers.end() &&
             (obfs.empty() || obfs == "plain") && (protocol.empty() || protocol == "origin")) {
             plugin = GetMember(json, "plugin");
             pluginopts = GetMember(json, "plugin_opts");
+            if (plugin.find_first_of("\r\n") != std::string::npos ||
+                pluginopts.find_first_of("\r\n") != std::string::npos)
+                return;
             ssConstruct(node, SS_DEFAULT_GROUP, remarks, server, port, password, method, plugin, pluginopts);
         } else {
+            if (protocol.empty() || obfs.empty())
+                return;
             protoparam = GetMember(json, "protocol_param");
             obfsparam = GetMember(json, "obfs_param");
+            if (protoparam.find_first_of("\r\n") != std::string::npos ||
+                obfsparam.find_first_of("\r\n") != std::string::npos)
+                return;
             ssrConstruct(node, SSR_DEFAULT_GROUP, remarks, server, port, protocol, method, obfs, password, obfsparam,
                          protoparam);
         }
@@ -788,7 +1640,11 @@ void explodeSSRConf(std::string content, std::vector<Proxy> &nodes) {
         return;
     }
 
+    if (!json.HasMember("configs") || !json["configs"].IsArray())
+        return;
     for (uint32_t i = 0; i < json["configs"].Size(); i++) {
+        if (!json["configs"][i].IsObject())
+            continue;
         Proxy node;
         group = GetMember(json["configs"][i], "group");
         if (group.empty())
@@ -796,7 +1652,7 @@ void explodeSSRConf(std::string content, std::vector<Proxy> &nodes) {
         remarks = GetMember(json["configs"][i], "remarks");
         server = GetMember(json["configs"][i], "server");
         port = GetMember(json["configs"][i], "server_port");
-        if (port == "0")
+        if (server.empty() || !validSharePort(port))
             continue;
         if (remarks.empty())
             remarks = server + ":" + port;
@@ -809,6 +1665,18 @@ void explodeSSRConf(std::string content, std::vector<Proxy> &nodes) {
         obfs = GetMember(json["configs"][i], "obfs");
         obfsparam = GetMember(json["configs"][i], "obfsparam");
 
+        if (password.empty() || method.empty() ||
+            server.find_first_of("\r\n") != std::string::npos ||
+            group.find_first_of("\r\n") != std::string::npos ||
+            remarks.find_first_of("\r\n") != std::string::npos ||
+            password.find_first_of("\r\n") != std::string::npos ||
+            method.find_first_of("\r\n") != std::string::npos ||
+            protocol.find_first_of("\r\n") != std::string::npos ||
+            protoparam.find_first_of("\r\n") != std::string::npos ||
+            obfs.find_first_of("\r\n") != std::string::npos ||
+            obfsparam.find_first_of("\r\n") != std::string::npos)
+            continue;
+
         ssrConstruct(node, group, remarks, server, port, protocol, method, obfs, password, obfsparam, protoparam);
         node.Id = index;
         nodes.emplace_back(std::move(node));
@@ -818,30 +1686,44 @@ void explodeSSRConf(std::string content, std::vector<Proxy> &nodes) {
 
 void explodeSocks(std::string link, Proxy &node) {
     std::string group, remarks, server, port, username, password;
-    if (strFind(link, "socks://")) //v2rayn socks link
+    if (startsWith(link, "socks://"))
     {
-        if (strFind(link, "#")) {
-            auto pos = link.find('#');
-            remarks = urlDecode(link.substr(pos + 1));
-            link.erase(pos);
+        std::string encoded = link.substr(8);
+        const size_t fragment_pos = encoded.find('#');
+        if (fragment_pos != std::string::npos) {
+            remarks = decodeShareUriUserInfo(encoded.substr(fragment_pos + 1));
+            encoded.erase(fragment_pos);
         }
-        link = urlSafeBase64Decode(link.substr(8));
-        if (strFind(link, "@")) {
-            auto userinfo = split(link, '@');
-            if (userinfo.size() < 2)
+        if (!encoded.empty() && encoded.back() == '/')
+            encoded.pop_back();
+
+        const size_t at = encoded.rfind('@');
+        if (at != std::string::npos) {
+            if (at == 0 || at + 1 >= encoded.size() ||
+                !parseUserPassword(encoded.substr(0, at), true, username, password) ||
+                !parseShareAuthority(encoded.substr(at + 1), server, port))
                 return;
-            link = userinfo[1];
-            userinfo = split(userinfo[0], ':');
-            if (userinfo.size() < 2)
-                return;
-            username = userinfo[0];
-            password = userinfo[1];
+        } else {
+            if (parseShareAuthority(encoded, server, port)) {
+                username.clear();
+                password.clear();
+            } else {
+                std::string decoded;
+                if (!decodeStrictBase64(encoded, decoded))
+                    return;
+                const size_t decoded_at = decoded.rfind('@');
+                if (decoded_at == std::string::npos) {
+                    if (!parseShareAuthority(decoded, server, port))
+                        return;
+                } else if (decoded_at == 0 || decoded_at + 1 >= decoded.size() ||
+                           !parseUserPassword(decoded.substr(0, decoded_at), true,
+                                              username, password) ||
+                           !parseShareAuthority(decoded.substr(decoded_at + 1),
+                                                server, port)) {
+                    return;
+                }
+            }
         }
-        auto arguments = split(link, ':');
-        if (arguments.size() < 2)
-            return;
-        server = arguments[0];
-        port = arguments[1];
     } else if (strFind(link, "https://t.me/socks") || strFind(link, "tg://socks")) //telegram style socks link
     {
         server = getUrlArg(link, "server");
@@ -851,13 +1733,17 @@ void explodeSocks(std::string link, Proxy &node) {
         remarks = urlDecode(getUrlArg(link, "remarks"));
         group = urlDecode(getUrlArg(link, "group"));
     }
+    if (server.empty() || !validSharePort(port) ||
+        server.find_first_of("\r\n") != std::string::npos ||
+        username.find_first_of("\r\n") != std::string::npos ||
+        password.find_first_of("\r\n") != std::string::npos ||
+        remarks.find_first_of("\r\n") != std::string::npos ||
+        group.find_first_of("\r\n") != std::string::npos)
+        return;
     if (group.empty())
         group = SOCKS_DEFAULT_GROUP;
     if (remarks.empty())
         remarks = server + ":" + port;
-    if (port == "0")
-        return;
-
     socksConstruct(node, group, remarks, server, port, username, password);
 }
 
@@ -870,13 +1756,17 @@ void explodeHTTP(const std::string &link, Proxy &node) {
     remarks = urlDecode(getUrlArg(link, "remarks"));
     group = urlDecode(getUrlArg(link, "group"));
 
+    if (server.empty() || !validSharePort(port) ||
+        server.find_first_of("\r\n") != std::string::npos ||
+        username.find_first_of("\r\n") != std::string::npos ||
+        password.find_first_of("\r\n") != std::string::npos ||
+        remarks.find_first_of("\r\n") != std::string::npos ||
+        group.find_first_of("\r\n") != std::string::npos)
+        return;
     if (group.empty())
         group = HTTP_DEFAULT_GROUP;
     if (remarks.empty())
         remarks = server + ":" + port;
-    if (port == "0")
-        return;
-
     httpConstruct(node, group, remarks, server, port, username, password, strFind(link, "/https"));
 }
 
@@ -892,85 +1782,118 @@ void explodeHTTPSub(std::string link, Proxy &node) {
         group = urlDecode(getUrlArg(addition, "group"));
     }
     link.erase(0, link.find("://") + 3);
-    link = urlSafeBase64Decode(link);
-    if (strFind(link, "@")) {
-        if (regGetMatch(link, "(.*?):(.*?)@(.*):(.*)", 5, 0, &username, &password, &server, &port))
+    std::string decoded_link;
+    if (!decodeStrictBase64(link, decoded_link))
+        return;
+    link = std::move(decoded_link);
+    const size_t at = link.rfind('@');
+    std::string authority = link;
+    if (at != std::string::npos) {
+        if (at == 0 || at + 1 >= link.size())
             return;
-    } else {
-        if (regGetMatch(link, "(.*):(.*)", 3, 0, &server, &port))
+        const std::string userinfo = link.substr(0, at);
+        const size_t colon = userinfo.find(':');
+        if (colon == std::string::npos)
             return;
+        username = userinfo.substr(0, colon);
+        password = userinfo.substr(colon + 1);
+        authority = link.substr(at + 1);
     }
+    if (!parseShareAuthority(authority, server, port) ||
+        username.find_first_of("\r\n") != std::string::npos ||
+        password.find_first_of("\r\n") != std::string::npos ||
+        remarks.find_first_of("\r\n") != std::string::npos ||
+        group.find_first_of("\r\n") != std::string::npos)
+        return;
 
     if (group.empty())
         group = HTTP_DEFAULT_GROUP;
     if (remarks.empty())
         remarks = server + ":" + port;
-    if (port == "0")
-        return;
-
     httpConstruct(node, group, remarks, server, port, username, password, tls);
 }
 
+bool isLegacyHttpProxyUri(const std::string &link) {
+    if (!startsWith(link, "http://") && !startsWith(link, "https://"))
+        return false;
+
+    const size_t scheme_end = link.find("://") + 3;
+    const size_t query_start = link.find('?', scheme_end);
+    const size_t fragment_start = link.find('#', scheme_end);
+    if (fragment_start != std::string::npos)
+        return false;
+
+    const size_t authority_end = query_start == std::string::npos ? link.size() : query_start;
+    if (authority_end == scheme_end || link.find('/', scheme_end) < authority_end)
+        return false;
+
+    bool has_legacy_metadata = false;
+    if (query_start != std::string::npos) {
+        for (const std::string &item : split(link.substr(query_start + 1), "&")) {
+            if (item.empty())
+                continue;
+            const size_t equals = item.find('=');
+            const std::string key = item.substr(0, equals);
+            if (key != "remarks" && key != "group")
+                return false;
+            has_legacy_metadata = true;
+        }
+    }
+
+    Proxy candidate;
+    explodeHTTPSub(link, candidate);
+    if ((candidate.Type == ProxyType::HTTP || candidate.Type == ProxyType::HTTPS) &&
+        !candidate.Hostname.empty() && candidate.Port != 0)
+        return true;
+
+    // A no-path HTTP(S) URI carrying only the legacy remarks/group metadata is
+    // still a direct-node candidate when its Base64 payload is malformed. Keep
+    // it on the local parser path so it fails closed instead of being fetched as
+    // a remote subscription.
+    return has_legacy_metadata;
+}
+
 void explodeTrojan(std::string trojan, Proxy &node) {
-    std::string server, port, psk, addition, group, remark, host, path, network, fp, sni;
+    ParsedShareUri parsed;
+    const std::string scheme = startsWith(trojan, "trojan-go://") ? "trojan-go" : "trojan";
+    if (!parseShareUri(trojan, scheme, parsed))
+        return;
+
+    std::string group, host, path, network, fp, sni, mode, header_type;
     tribool tfo, scv;
-    if (startsWith(trojan, "trojan://")) {
-        trojan.erase(0, 9);
-    }
-    if (startsWith(trojan, "trojan-go://")) {
-        trojan.erase(0, 12);
-    }
-    extractRemark(trojan, remark);
-    string_size pos;
-    pos = trojan.find('?');
-    if (pos != std::string::npos) {
-        addition = trojan.substr(pos + 1);
-        trojan.erase(pos);
-    }
-
-    if (regGetMatch(trojan, "(.*?)@(.*):(.*)", 4, 0, &psk, &server, &port))
-        return;
-    if (port == "0")
+    if (!parseXrayTransport(parsed.query, node, network, header_type, path, host, mode))
         return;
 
-    host = getUrlArg(addition, "sni");
-    sni = getUrlArg(addition, "sni");
+    sni = decodedUrlArg(parsed.query, "sni");
     if (host.empty())
-        host = getUrlArg(addition, "peer");
-    tfo = getUrlArg(addition, "tfo");
-    fp = getUrlArg(addition, "fp");
-    scv = getUrlArg(addition, "allowInsecure");
-    group = urlDecode(getUrlArg(addition, "group"));
+        host = sni;
+    if (host.empty())
+        host = decodedUrlArg(parsed.query, "peer");
+    tfo = getUrlArg(parsed.query, "tfo");
+    fp = decodedUrlArg(parsed.query, "fp");
+    scv = getXrayAllowInsecure(parsed.query);
+    group = decodedUrlArg(parsed.query, "group");
 
-    if (getUrlArg(addition, "ws") == "1") {
-        path = getUrlArg(addition, "wspath");
+    if (getUrlArg(parsed.query, "ws") == "1") {
+        path = getUrlArg(parsed.query, "wspath");
         network = "ws";
     }
-    // support the trojan link format used by v2ryaN and X-ui.
-    // format: trojan://{password}@{server}:{port}?type=ws&security=tls&path={path (urlencoded)}&sni={host}#{name}
-    else if (getUrlArg(addition, "type") == "ws") {
-        path = getUrlArg(addition, "path");
-        if (path.substr(0, 3) == "%2F")
-            path = urlDecode(path);
-        network = "ws";
-    }
+    path = urlDecode(path);
 
-    else if (getUrlArg(addition, "type") == "grpc") {  
-        path = getUrlArg(addition, "serviceName");  
-        network = "grpc";  
-    }
-    
-    if (remark.empty())
-        remark = server + ":" + port;
+    if (parsed.remark.empty())
+        parsed.remark = parsed.host + ":" + parsed.port;
     if (group.empty())
         group = TROJAN_DEFAULT_GROUP;
-    std::string alpn = getUrlArg(addition, "alpn");
-    std::vector<std::string> alpnList;
-    if (!alpn.empty()) {
-        alpnList.push_back(alpn);
-    }
-    trojanConstruct(node, group, remark, server, port, psk, network, host, path, fp, sni, alpnList, true, tribool(),
+    trojanConstruct(node, group, parsed.remark, parsed.host, parsed.port, parsed.user, network, host, path, fp, sni,
+                    getUrlAlpnList(parsed.query), true, tribool(),
                     tfo, scv);
+    node.FakeType = header_type;
+    node.GRPCMode = mode;
+    node.PublicKey = decodedUrlArg(parsed.query, "pbk");
+    node.ShortId = decodedUrlArg(parsed.query, "sid");
+    node.TLSStr = decodedUrlArg(parsed.query, "security");
+    if (node.TLSStr.empty())
+        node.TLSStr = "tls";
 }
 
 void explodeVless(std::string vless, Proxy &node) {
@@ -981,41 +1904,24 @@ void explodeVless(std::string vless, Proxy &node) {
 }
 
 void explodeMierus(std::string mierus, Proxy &node) {
-    if (strFind(mierus, "mierus://")) {
-        if (regMatch(mierus, "mierus://(.*?)@(.*)")) {
-            explodeStdMieru(mierus.substr(9), node);
-        } else {
-            mierus = urlSafeBase64Decode(mierus.substr(9));
-            explodeStdMieru("mierus://" + mierus, node);
-        }
-    } else if (strFind(mierus, "mieru://")) {
-        if (regMatch(mierus, "mierus://(.*?)@(.*)")) {
-            explodeStdMieru(mierus.substr(8), node);
-        } else {
-            mierus = urlSafeBase64Decode(mierus.substr(8));
-            explodeStdMieru("mierus://" + mierus, node);
-        }
-    }
+    if (!startsWith(mierus, "mierus://"))
+        return;
+    std::vector<Proxy> parsed_nodes;
+    explodeMierusNodes(mierus, parsed_nodes);
+    if (parsed_nodes.size() == 1)
+        node = std::move(parsed_nodes.front());
 }
 
 void explodeHysteria(std::string hysteria, Proxy &node) {
     writeLog(LOG_LEVEL_DEBUG, "正在解析 Hysteria 节点。");
-    hysteria = regReplace(hysteria, "(hysteria|hy)://", "hysteria://");
-    if (regMatch(hysteria, "hysteria://(.*?)[:](.*)")) {
-        explodeStdHysteria(hysteria, node);
-        return;
-    }
+    if (startsWith(hysteria, "hy://"))
+        hysteria.replace(0, 5, "hysteria://");
+    explodeStdHysteria(std::move(hysteria), node);
 }
 
 void explodeHysteria2(std::string hysteria2, Proxy &node) {
     hysteria2 = regReplace(hysteria2, "(hysteria2|hy2)://", "hysteria2://");
-
-    // replace /? with ?
-    hysteria2 = regReplace(hysteria2, "/\\?", "?", true, false);
-    if (regMatch(hysteria2, "hysteria2://(.*?)[:](.*)")) {
-        explodeStdHysteria2(hysteria2, node);
-        return;
-    }
+    explodeStdHysteria2(hysteria2, node);
 }
 
 void explodeQuan(const std::string &quan, Proxy &node) {
@@ -1082,110 +1988,226 @@ void explodeQuan(const std::string &quan, Proxy &node) {
     }
 }
 
-void explodeNetch(std::string netch, Proxy &node) {
-    Document json;
-    std::string type, group, remark, address, port, username, password, method, plugin, pluginopts;
-    std::string protocol, protoparam, obfs, obfsparam, id, aid, transprot, faketype, host, edge, path, tls, sni, fp;
-    tribool udp, tfo, scv;
-    netch = urlSafeBase64Decode(netch.substr(8));
+namespace {
 
-    json.Parse(netch.data());
-    if (json.HasParseError() || !json.IsObject())
-        return;
-    type = GetMember(json, "Type");
-    group = GetMember(json, "Group");
-    remark = GetMember(json, "Remark");
-    address = GetMember(json, "Hostname");
-    udp = GetMember(json, "EnableUDP");
-    tfo = GetMember(json, "EnableTFO");
-    scv = GetMember(json, "AllowInsecure");
-    port = GetMember(json, "Port");
-    fp = GetMember(json, "FingerPrint");
-    if (port == "0")
-        return;
-    method = GetMember(json, "EncryptMethod");
-    password = GetMember(json, "Password");
+std::string firstNetchMember(const rapidjson::Value &value,
+                             std::initializer_list<const char *> keys) {
+    for (const char *key : keys) {
+        const std::string result = GetMember(value, key);
+        if (!result.empty())
+            return result;
+    }
+    return {};
+}
+
+std::string normalizeNetchTLS(const rapidjson::Value &value,
+                              const std::string &fallback = {}) {
+    std::string tls = toLower(trim(firstNetchMember(
+        value, {"TLSSecureType", "TLSSecure", "Security"})));
+    if (tls.empty())
+        return fallback;
+    if (tls == "true" || tls == "1")
+        return "tls";
+    if (tls == "false" || tls == "0")
+        return "none";
+    return tls;
+}
+
+bool parseNetchNode(const rapidjson::Value &json, Proxy &node) {
+    if (!json.IsObject())
+        return false;
+
+    const std::string type = toLower(trim(GetMember(json, "Type")));
+    std::string group = GetMember(json, "Group");
+    std::string remark = GetMember(json, "Remark");
+    const std::string address = trim(GetMember(json, "Hostname"));
+    const std::string port = GetMember(json, "Port");
+    if (type.empty() || address.empty() ||
+        address.find_first_of("\r\n") != std::string::npos ||
+        !validSharePort(port))
+        return false;
+
+    const tribool udp(GetMember(json, "EnableUDP"));
+    const tribool tfo(GetMember(json, "EnableTFO"));
+    const tribool scv(GetMember(json, "AllowInsecure"));
+    const std::string password = GetMember(json, "Password");
+    const std::string method = GetMember(json, "EncryptMethod");
+    const std::string fingerprint = firstNetchMember(
+        json, {"FingerPrint", "Fingerprint"});
     if (remark.empty())
         remark = address + ":" + port;
-    switch (hash_(type)) {
-        case "SS"_hash:
-            plugin = GetMember(json, "Plugin");
-            pluginopts = GetMember(json, "PluginOption");
+
+    if (type == "ss") {
+        if (method.empty() || password.empty())
+            return false;
+        if (group.empty())
+            group = SS_DEFAULT_GROUP;
+        ssConstruct(node, group, remark, address, port, password, method,
+                    GetMember(json, "Plugin"), GetMember(json, "PluginOption"),
+                    udp, tfo, scv);
+    } else if (type == "ssr") {
+        const std::string protocol = GetMember(json, "Protocol");
+        const std::string obfs = GetMember(json, "OBFS");
+        if (method.empty() || password.empty())
+            return false;
+        if (find(ss_ciphers.begin(), ss_ciphers.end(), method) != ss_ciphers.end() &&
+            (obfs.empty() || obfs == "plain") &&
+            (protocol.empty() || protocol == "origin")) {
             if (group.empty())
                 group = SS_DEFAULT_GROUP;
-            ssConstruct(node, group, remark, address, port, password, method, plugin, pluginopts, udp, tfo, scv);
-            break;
-        case "SSR"_hash:
-            protocol = GetMember(json, "Protocol");
-            obfs = GetMember(json, "OBFS");
-            if (find(ss_ciphers.begin(), ss_ciphers.end(), method) != ss_ciphers.end() &&
-                (obfs.empty() || obfs == "plain") && (protocol.empty() || protocol == "origin")) {
-                plugin = GetMember(json, "Plugin");
-                pluginopts = GetMember(json, "PluginOption");
-                if (group.empty())
-                    group = SS_DEFAULT_GROUP;
-                ssConstruct(node, group, remark, address, port, password, method, plugin, pluginopts, udp, tfo, scv);
-            } else {
-                protoparam = GetMember(json, "ProtocolParam");
-                obfsparam = GetMember(json, "OBFSParam");
-                if (group.empty())
-                    group = SSR_DEFAULT_GROUP;
-                ssrConstruct(node, group, remark, address, port, protocol, method, obfs, password, obfsparam,
-                             protoparam, udp, tfo, scv);
-            }
-            break;
-        case "VMess"_hash:
-            id = GetMember(json, "UserID");
-            aid = GetMember(json, "AlterID");
-            transprot = GetMember(json, "TransferProtocol");
-            faketype = GetMember(json, "FakeType");
-            host = GetMember(json, "Host");
-            path = GetMember(json, "Path");
-            edge = GetMember(json, "Edge");
-            tls = GetMember(json, "TLSSecure");
-            sni = GetMember(json, "ServerName");
+            ssConstruct(node, group, remark, address, port, password, method,
+                        GetMember(json, "Plugin"), GetMember(json, "PluginOption"),
+                        udp, tfo, scv);
+        } else {
+            if (protocol.empty() || obfs.empty())
+                return false;
+            if (group.empty())
+                group = SSR_DEFAULT_GROUP;
+            ssrConstruct(node, group, remark, address, port, protocol, method,
+                         obfs, password, GetMember(json, "OBFSParam"),
+                         GetMember(json, "ProtocolParam"), udp, tfo, scv);
+        }
+    } else if (type == "vmess" || type == "vless") {
+        std::string transport = normalizeXrayTransport(
+            GetMember(json, "TransferProtocol"));
+        const std::string fake_type = GetMember(json, "FakeType");
+        const std::string regular_host = GetMember(json, "Host");
+        const std::string regular_path = GetMember(json, "Path");
+        const std::string quic_security = GetMember(json, "QUICSecure");
+        const std::string quic_secret = GetMember(json, "QUICSecret");
+        const std::string transport_host =
+            transport == "quic" ? quic_security : regular_host;
+        const std::string transport_path =
+            transport == "quic" ? quic_secret : regular_path;
+        const std::string tls = normalizeNetchTLS(json, "none");
+        const std::string user_id = GetMember(json, "UserID");
+        const std::string alter_id = GetMember(json, "AlterID");
+        const std::string server_name = GetMember(json, "ServerName");
+        const std::string packet_encoding = firstNetchMember(
+            json, {"PacketEncoding", "packetEncoding"});
+        std::string cipher = method;
+        if (cipher.empty())
+            cipher = type == "vless" ? "none" : "auto";
+        if (!isXrayUuid(user_id))
+            return false;
 
+        if (type == "vmess") {
             if (group.empty())
                 group = V2RAY_DEFAULT_GROUP;
-            vmessConstruct(node, group, remark, address, port, faketype, id, aid, transprot, method, path, host, edge,
-                           tls, sni, std::vector<std::string>{}, udp, tfo, scv);
-            break;
-        case "Socks5"_hash:
-            username = GetMember(json, "Username");
+            vmessConstruct(node, group, remark, address, port, fake_type,
+                           user_id, alter_id, transport, cipher, transport_path,
+                           transport_host, GetMember(json, "Edge"), tls,
+                           server_name, {}, udp, tfo, scv);
+        } else {
             if (group.empty())
-                group = SOCKS_DEFAULT_GROUP;
-            socksConstruct(node, group, remark, address, port, username, password, udp, tfo, scv);
-            break;
-        case "HTTP"_hash:
-        case "HTTPS"_hash:
-            if (group.empty())
-                group = HTTP_DEFAULT_GROUP;
-            httpConstruct(node, group, remark, address, port, username, password, type == "HTTPS", tfo, scv);
-            break;
-        case "Trojan"_hash:
-            host = GetMember(json, "Host");
-            path = GetMember(json, "Path");
-            transprot = GetMember(json, "TransferProtocol");
-            tls = GetMember(json, "TLSSecure");
-            sni = host;
-            if (group.empty())
-                group = TROJAN_DEFAULT_GROUP;
-            trojanConstruct(node, group, remark, address, port, password, transprot, host, path, fp, sni,
-                            std::vector<std::string>{}, tls == "true",
-                            udp,
-                            tfo, scv);
-            break;
-        case "Snell"_hash:
-            obfs = GetMember(json, "OBFS");
-            host = GetMember(json, "Host");
-            aid = GetMember(json, "SnellVersion");
-            if (group.empty())
-                group = SNELL_DEFAULT_GROUP;
-            snellConstruct(node, group, remark, address, port, password, obfs, host, to_int(aid, 0), udp, tfo, scv);
-            break;
-        default:
-            return;
+                group = XRAY_DEFAULT_GROUP;
+            vlessConstruct(node, group, remark, address, port, fake_type,
+                           user_id, alter_id, transport, cipher,
+                           GetMember(json, "Flow"), fake_type, transport_path,
+                           transport_host, GetMember(json, "Edge"), tls, "", "",
+                           fingerprint, server_name, {}, packet_encoding, udp,
+                           tfo, scv);
+        }
+        node.PacketEncoding = packet_encoding;
+        node.Fingerprint = fingerprint;
+        if (transport == "grpc") {
+            node.GRPCMode = fake_type.empty() ? "gun" : fake_type;
+            node.GRPCServiceName = regular_path;
+        } else if (transport == "quic") {
+            node.QUICSecure = quic_security;
+            node.QUICSecret = quic_secret;
+        }
+    } else if (type == "socks" || type == "socks5") {
+        const std::string version = GetMember(json, "Version");
+        if (!version.empty() && version != "5")
+            return false;
+        if (group.empty())
+            group = SOCKS_DEFAULT_GROUP;
+        socksConstruct(node, group, remark, address, port,
+                       GetMember(json, "Username"), password, udp, tfo, scv);
+    } else if (type == "http" || type == "https") {
+        if (group.empty())
+            group = HTTP_DEFAULT_GROUP;
+        httpConstruct(node, group, remark, address, port,
+                      GetMember(json, "Username"), password, type == "https",
+                      tfo, scv);
+    } else if (type == "trojan") {
+        if (password.empty())
+            return false;
+        const std::string tls = normalizeNetchTLS(json, "tls");
+        const std::string host = GetMember(json, "Host");
+        std::string server_name = GetMember(json, "ServerName");
+        if (server_name.empty())
+            server_name = host;
+        if (group.empty())
+            group = TROJAN_DEFAULT_GROUP;
+        trojanConstruct(node, group, remark, address, port, password,
+                        GetMember(json, "TransferProtocol"), host,
+                        GetMember(json, "Path"), fingerprint, server_name, {},
+                        tls != "none", udp, tfo, scv);
+        node.TLSStr = tls;
+    } else if (type == "snell") {
+        if (password.empty())
+            return false;
+        if (group.empty())
+            group = SNELL_DEFAULT_GROUP;
+        snellConstruct(node, group, remark, address, port, password,
+                       GetMember(json, "OBFS"), GetMember(json, "Host"), "",
+                       parseUint16Option(GetMember(json, "SnellVersion"), 0),
+                       tribool(), udp, tfo, scv);
+    } else if (type == "wireguard") {
+        const std::string private_key = GetMember(json, "PrivateKey");
+        const std::string public_key = GetMember(json, "PeerPublicKey");
+        const std::string local_addresses = normalizeWireGuardAllowedIPs(
+            GetMember(json, "LocalAddresses"));
+        if (private_key.empty() || public_key.empty() || local_addresses.empty() ||
+            private_key.find_first_of("\r\n") != std::string::npos ||
+            public_key.find_first_of("\r\n") != std::string::npos)
+            return false;
+
+        string_array addresses = split(local_addresses, ",");
+        std::string self_ip, self_ipv6;
+        for (std::string &local_address : addresses) {
+            local_address = trim(local_address);
+            const std::string bare = local_address.substr(0, local_address.find('/'));
+            if (self_ip.empty() && isIPv4(bare))
+                self_ip = bare;
+            else if (self_ipv6.empty() && isIPv6(bare))
+                self_ipv6 = bare;
+        }
+        if (group.empty())
+            group = WG_DEFAULT_GROUP;
+        wireguardConstruct(node, group, remark, address, port, self_ip,
+                           self_ipv6, private_key, public_key,
+                           GetMember(json, "PreSharedKey"), {},
+                           GetMember(json, "MTU"), "0", "", "", udp, "");
+        node.WireGuardLocalAddresses = std::move(addresses);
+        syncLegacyWireGuardProjection(node);
+        if (node.WireGuardPeers.empty())
+            return false;
+    } else {
+        // Netch also serializes SSH nodes, but the shared Proxy model has no
+        // SSH representation. Reject instead of silently converting it to a
+        // different protocol.
+        return false;
     }
+
+    return node.Type != ProxyType::Unknown;
+}
+
+} // namespace
+
+void explodeNetch(std::string netch, Proxy &node) {
+    if (!startsWith(netch, "Netch://"))
+        return;
+    std::string decoded;
+    if (!decodeStrictBase64(netch.substr(8), decoded))
+        return;
+    Document json;
+    json.Parse(decoded.data());
+    if (json.HasParseError())
+        return;
+    parseNetchNode(json, node);
 }
 
 void explodeClash(Node yamlnode, std::vector<Proxy> &nodes) {
@@ -1200,16 +2222,22 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes) {
         std::string protocol, protoparam, obfs, obfsparam; //ssr
         std::string flow, mode; //trojan
         std::string user; //socks
-        std::string ip, ipv6, private_key, public_key, mtu; //wireguard
-        std::string auth, up, down, obfsParam, insecure, alpn; //hysteria
-        std::string obfsPassword; //hysteria2
+        std::string ip, ipv6, private_key, public_key, mtu, wg_allowed_ips,
+                    wg_reserved, wg_keepalive; //wireguard
+        std::string auth, auth_str, up, down, obfsParam, insecure, alpn,
+                    hop_interval, reuse_text; //hysteria
+        std::string obfsPassword, certificate_fingerprint; //hysteria2
         std::string congestion_control, udp_relay_mode, token; // tuic
         string_array dns_server;
         std::vector<String> alpns;
         String alpn2;
-        std::string fingerprint, multiplexing, transfer_protocol, v2ray_http_upgrade;
-        tribool udp, tfo, scv;
-        bool reduceRtt, disableSni; //tuic
+        std::string fingerprint, snell_fingerprint, multiplexing,
+                    transfer_protocol, v2ray_http_upgrade,
+                    mieru_handshake_mode, mieru_traffic_pattern;
+        tribool udp, tfo, scv, reuse;
+        bool reduceRtt = false, disableSni = false; //tuic
+        uint16_t request_timeout = 15000; //tuic
+        uint16_t idle_check = 30, idle_timeout = 30, min_idle = 0; //anytls
         std::vector<std::string> alpnList;
         Proxy node;
         singleproxy = yamlnode[section][i];
@@ -1219,7 +2247,7 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes) {
         singleproxy["port"] >>= port;
         singleproxy["port-range"] >>= ports;
 
-        if (port.empty() || port == "0")
+        if ((port.empty() || port == "0") && proxytype != "wireguard")
             if (ports.empty())
                 continue;
         udp = safe_as<std::string>(singleproxy["udp"]);
@@ -1404,22 +2432,105 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes) {
                 singleproxy["obfs-opts"]["mode"] >>= obfs;
                 singleproxy["obfs-opts"]["host"] >>= host;
                 singleproxy["version"] >>= aid;
-
-                snellConstruct(node, group, ps, server, port, password, obfs, host, to_int(aid, 0), udp, tfo, scv);
+                singleproxy["reuse"] >> reuse_text;
+                reuse = reuse_text;
+                if (!reuse_text.empty() && reuse.is_undef())
+                    continue;
+                singleproxy["client-fingerprint"] >>= snell_fingerprint;
+                snellConstruct(node, group, ps, server, port, password, obfs,
+                               host, "", to_int(aid, 0), reuse, udp, tfo, scv);
+                if (obfs == "shadow-tls") {
+                    singleproxy["obfs-opts"]["password"] >>=
+                        node.ShadowTLSPassword;
+                    node.ShadowTLSSNI = host;
+                    std::string shadow_version;
+                    singleproxy["obfs-opts"]["version"] >>=
+                        shadow_version;
+                    node.ShadowTLSVersion = parseUint16Option(
+                        shadow_version, 0);
+                    singleproxy["obfs-opts"]["alpn"] >>=
+                        node.AlpnList;
+                }
+                node.Fingerprint = snell_fingerprint;
                 break;
-            case "wireguard"_hash:
+            case "wireguard"_hash: {
                 group = WG_DEFAULT_GROUP;
                 singleproxy["public-key"] >>= public_key;
                 singleproxy["private-key"] >>= private_key;
                 singleproxy["dns"] >>= dns_server;
                 singleproxy["mtu"] >>= mtu;
-                singleproxy["preshared-key"] >>= password;
+                singleproxy["pre-shared-key"] >>= password;
+                if (password.empty())
+                    singleproxy["preshared-key"] >>= password;
                 singleproxy["ip"] >>= ip;
                 singleproxy["ipv6"] >>= ipv6;
+                if (singleproxy["allowed-ips"].IsSequence()) {
+                    string_array allowed;
+                    singleproxy["allowed-ips"] >>= allowed;
+                    wg_allowed_ips = normalizeWireGuardAllowedIPs(join(allowed, ", "));
+                } else {
+                    singleproxy["allowed-ips"] >>= wg_allowed_ips;
+                    wg_allowed_ips = normalizeWireGuardAllowedIPs(wg_allowed_ips);
+                }
+                if (singleproxy["reserved"].IsSequence()) {
+                    string_array reserved;
+                    singleproxy["reserved"] >>= reserved;
+                    wg_reserved = normalizeWireGuardReserved(join(reserved, ","));
+                } else {
+                    singleproxy["reserved"] >>= wg_reserved;
+                    wg_reserved = normalizeWireGuardReserved(wg_reserved);
+                }
+                singleproxy["persistent-keepalive"] >>= wg_keepalive;
 
                 wireguardConstruct(node, group, ps, server, port, ip, ipv6, private_key, public_key, password,
-                                   dns_server, mtu, "0", "", "", udp, "");
+                                   dns_server, mtu, wg_keepalive, "", wg_reserved, udp, "");
+                if (!node.WireGuardPeers.empty() && !wg_allowed_ips.empty()) {
+                    node.WireGuardPeers.front().AllowedIPs = wg_allowed_ips;
+                    syncLegacyWireGuardProjection(node);
+                }
+                if (singleproxy["peers"].IsSequence()) {
+                    node.WireGuardPeers.clear();
+                    for (const auto &yaml_peer_value : singleproxy["peers"]) {
+                        YAML::Node yaml_peer = yaml_peer_value;
+                        WireGuardPeer peer;
+                        yaml_peer["server"] >>= peer.Hostname;
+                        std::string peer_port;
+                        yaml_peer["port"] >>= peer_port;
+                        peer.Port = parseUint16Option(peer_port, 0);
+                        yaml_peer["public-key"] >>= peer.PublicKey;
+                        yaml_peer["pre-shared-key"] >>= peer.PreSharedKey;
+                        if (peer.PreSharedKey.empty())
+                            yaml_peer["preshared-key"] >>= peer.PreSharedKey;
+                        if (yaml_peer["allowed-ips"].IsSequence()) {
+                            string_array allowed;
+                            yaml_peer["allowed-ips"] >>= allowed;
+                            peer.AllowedIPs = normalizeWireGuardAllowedIPs(join(allowed, ", "));
+                        } else if (yaml_peer["allowed-ips"].IsDefined()) {
+                            yaml_peer["allowed-ips"] >>= peer.AllowedIPs;
+                            if (!peer.AllowedIPs.empty())
+                                peer.AllowedIPs = normalizeWireGuardAllowedIPs(peer.AllowedIPs);
+                        }
+                        if (yaml_peer["reserved"].IsSequence()) {
+                            string_array reserved;
+                            yaml_peer["reserved"] >>= reserved;
+                            peer.Reserved = normalizeWireGuardReserved(join(reserved, ","));
+                        } else {
+                            yaml_peer["reserved"] >>= peer.Reserved;
+                            peer.Reserved = normalizeWireGuardReserved(peer.Reserved);
+                        }
+                        std::string peer_keepalive;
+                        yaml_peer["persistent-keepalive"] >>= peer_keepalive;
+                        peer.KeepAlive = parseUint16Option(peer_keepalive, 0);
+                        if (validWireGuardPeer(peer))
+                            node.WireGuardPeers.emplace_back(std::move(peer));
+                    }
+                    syncLegacyWireGuardProjection(node);
+                }
+                if (node.PrivateKey.empty() || node.WireGuardLocalAddresses.empty() ||
+                    node.WireGuardPeers.empty())
+                    continue;
                 break;
+            }
             case "vless"_hash:
                 group = XRAY_DEFAULT_GROUP;
                 singleproxy["uuid"] >>= id;
@@ -1494,26 +2605,52 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes) {
                 break;
             case "hysteria"_hash:
                 group = HYSTERIA_DEFAULT_GROUP;
-                singleproxy["auth_str"] >> auth;
-                if (auth.empty()) {
-                    singleproxy["auth-str"] >> auth;
-                    if (auth.empty()) {
-                        singleproxy["password"] >> auth;
-                    }
-                }
+                singleproxy["auth_str"] >> auth_str;
+                if (auth_str.empty())
+                    singleproxy["auth-str"] >> auth_str;
+                if (auth_str.empty())
+                    singleproxy["password"] >> auth_str;
+                singleproxy["auth"] >> auth;
                 singleproxy["up"] >> up;
+                if (up.empty())
+                    singleproxy["up_mbps"] >> up;
                 singleproxy["down"] >> down;
+                if (down.empty())
+                    singleproxy["down_mbps"] >> down;
+                if (up.empty() || down.empty())
+                    continue;
                 singleproxy["obfs"] >> obfsParam;
                 singleproxy["protocol"] >> type;
-                singleproxy["sni"] >> host;
+                if (!normalizeHysteriaProtocol(type))
+                    continue;
+                singleproxy["sni"] >> sni;
+                if (sni.empty())
+                    singleproxy["server-name"] >> sni;
                 singleproxy["alpn"][0] >> alpn;
                 singleproxy["alpn"] >> alpnList;
-                singleproxy["protocol"] >> insecure;
+                singleproxy["skip-cert-verify"] >> insecure;
                 singleproxy["ports"] >> ports;
-                sni = host;
-                hysteriaConstruct(node, group, ps, server, port, type, auth, "", host, up, down, alpn, obfsParam,
+                if (!ports.empty()) {
+                    uint16_t first_port = 0;
+                    std::string normalized_ports;
+                    if (!normalizeHysteriaPortSpec(ports, normalized_ports,
+                                                   first_port))
+                        continue;
+                    ports = std::move(normalized_ports);
+                    if (port.empty() || port == "0")
+                        port = std::to_string(first_port);
+                }
+                singleproxy["hop-interval"] >> hop_interval;
+                if (hop_interval.empty())
+                    singleproxy["hop_interval"] >> hop_interval;
+                if (!validHysteriaHopInterval(hop_interval))
+                    continue;
+                hysteriaConstruct(node, group, ps, server, port, type, auth, auth_str, sni, up, down, alpn, obfsParam,
                                   insecure, ports, sni,
                                   udp, tfo, scv);
+                node.AlpnList = alpnList;
+                node.HysteriaHopInterval = hop_interval;
+                node.TLSSecure = true;
                 break;
             case "hysteria2"_hash:
                 group = HYSTERIA2_DEFAULT_GROUP;
@@ -1541,15 +2678,16 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes) {
                 singleproxy["obfs"] >>= obfsParam;
                 singleproxy["obfs-password"] >>= obfsPassword;
                 singleproxy["sni"] >>= host;
+                singleproxy["fingerprint"] >>= certificate_fingerprint;
                 singleproxy["alpn"][0] >>= alpn;
                 singleproxy["ports"] >> ports;
                 sni = host;
                 hysteria2Construct(node, group, ps, server, port, password, host, up, down, alpn, obfsParam,
                                    obfsPassword, sni, public_key, ports, udp, tfo, scv);
+                node.Fingerprint = certificate_fingerprint;
                 break;
             case "tuic"_hash:
                 group = TUIC_DEFAULT_GROUP;
-                uint16_t request_timeout;
                 singleproxy["password"] >>= password;
                 singleproxy["uuid"] >>= id;
                 singleproxy["congestion-controller"] >>= congestion_control;
@@ -1582,15 +2720,20 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes) {
                     }
                 }
                 singleproxy["client-fingerprint"] >>= fingerprint;
+                idle_check = parseUint16Option(
+                    safe_as<std::string>(singleproxy["idle-session-check-interval"]), 30, true);
+                idle_timeout = parseUint16Option(
+                    safe_as<std::string>(singleproxy["idle-session-timeout"]), 30, true);
+                min_idle = parseUint16Option(
+                    safe_as<std::string>(singleproxy["min-idle-session"]), 0);
                 anyTlSConstruct(node, ANYTLS_DEFAULT_GROUP, ps, port, password, server, alpns, fingerprint, sni,
                                 udp,
-                                tribool(), scv, tribool(), "", 30, 30, 0);
+                                tribool(), scv, tribool(), "", idle_check, idle_timeout, min_idle);
                 break;
             case "mieru"_hash:
                 group = MIERU_DEFAULT_GROUP;
                 singleproxy["password"] >>= password;
                 singleproxy["username"] >>= user;
-                singleproxy["port-range"] >>= ports;
                 if (!singleproxy["multiplexing"].IsNull()) {
                     singleproxy["multiplexing"] >>= multiplexing;
                 }
@@ -1598,10 +2741,30 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes) {
                 if (!singleproxy["transport"].IsNull()) {
                     singleproxy["transport"] >>= transfer_protocol;
                 }
-                mieruConstruct(node, MIERU_DEFAULT_GROUP, ps, port, password, server, ports, user, multiplexing,
-                               transfer_protocol,
-                               udp,
-                               tribool(), scv, tribool(), "");
+                singleproxy["handshake-mode"] >>= mieru_handshake_mode;
+                singleproxy["traffic-pattern"] >>= mieru_traffic_pattern;
+                {
+                    MieruPortBinding binding;
+                    if (user.empty() || password.empty() || server.empty() ||
+                        (!ports.empty() && !port.empty() && port != "0") ||
+                        !isValidMieruMultiplexing(multiplexing) ||
+                        !isValidMieruHandshakeMode(mieru_handshake_mode) ||
+                        !isValidMieruTrafficPattern(mieru_traffic_pattern) ||
+                        !parseMieruPortBinding(ports.empty() ? port : ports,
+                                               transfer_protocol, binding))
+                        continue;
+                    const std::string normalized_port =
+                        binding.is_range ? "0" : binding.port;
+                    const std::string normalized_range =
+                        binding.is_range ? binding.port : std::string();
+                    mieruConstruct(node, MIERU_DEFAULT_GROUP, ps,
+                                   normalized_port, password, server,
+                                   normalized_range, user, multiplexing,
+                                   binding.protocol, udp, tribool(), scv,
+                                   tribool(), "");
+                    node.MieruHandshakeMode = mieru_handshake_mode;
+                    node.MieruTrafficPattern = mieru_traffic_pattern;
+                }
                 break;
             default:
                 continue;
@@ -1614,10 +2777,32 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes) {
 }
 
 void explodeStdVMess(std::string vmess, Proxy &node) {
+    ParsedShareUri parsed;
+    if (parseShareUri(vmess, "vmess", parsed) && isXrayUuid(parsed.user)) {
+        std::string type, net, path, host, mode;
+        if (!parseXrayTransport(parsed.query, node, net, type, path, host, mode))
+            return;
+        std::string cipher = decodedUrlArg(parsed.query, "encryption");
+        if (cipher.empty())
+            cipher = "auto";
+        std::string tls = decodedUrlArg(parsed.query, "security");
+        std::string sni = decodedUrlArg(parsed.query, "sni");
+        if (parsed.remark.empty())
+            parsed.remark = parsed.host + ":" + parsed.port;
+        vmessConstruct(node, V2RAY_DEFAULT_GROUP, parsed.remark, parsed.host, parsed.port, type,
+                       parsed.user, "0", net, cipher, urlDecode(path), host, "", tls, sni,
+                       getUrlAlpnList(parsed.query));
+        node.Fingerprint = decodedUrlArg(parsed.query, "fp");
+        node.AllowInsecure = getXrayAllowInsecure(parsed.query);
+        node.GRPCMode = mode;
+        node.PublicKey = decodedUrlArg(parsed.query, "pbk");
+        node.ShortId = decodedUrlArg(parsed.query, "sid");
+        return;
+    }
+
     std::string add, port, type, id, aid, net, path, host, tls, remarks;
     std::string addition;
     vmess = vmess.substr(8);
-    string_size pos;
 
     extractRemark(vmess, remarks);
     const std::string stdvmess_matcher =
@@ -1657,184 +2842,257 @@ void explodeStdVMess(std::string vmess, Proxy &node) {
 
 
 void explodeStdHysteria(std::string hysteria, Proxy &node) {
-    std::string add, port, type, auth, host, insecure, up, down, alpn, obfsParam, remarks, auth_str, sni;
-    std::string addition;
-    hysteria = hysteria.substr(11);
-    string_size pos;
-
-    extractRemark(hysteria, remarks);
-    const std::string stdhysteria_matcher = R"(^(.*)[:](\d+)[?](.*)$)";
-    if (regGetMatch(hysteria, stdhysteria_matcher, 4, 0, &add, &port, &addition))
+    ParsedShareUri parsed;
+    std::string ignored_ports;
+    if (!parseModernShareUri(std::move(hysteria), "hysteria", false, "",
+                             false, parsed, ignored_ports))
         return;
-    type = getUrlArg(addition, "protocol");
-    auth = getUrlArg(addition, "auth");
-    auth_str = getUrlArg(addition, "auth_str");
-    host = getUrlArg(addition, "peer");
-    insecure = getUrlArg(addition, "insecure");
-    up = getUrlArg(addition, "upmbps");
-    down = getUrlArg(addition, "downmbps");
-    alpn = getUrlArg(addition, "alpn");
-    obfsParam = getUrlArg(addition, "obfsParam");
-    sni = getUrlArg(addition, "peer");
 
-    if (remarks.empty())
-        remarks = add + ":" + port;
-    std::vector<std::string> alpnList;
-    if (!alpn.empty()) {
-        alpnList.push_back(alpn);
-    }
-    hysteriaConstruct(node, HYSTERIA_DEFAULT_GROUP, remarks, add, port, type, auth, auth_str, host, up, down, alpn,
-                      obfsParam,
-                      insecure, "", sni);
-    return;
+    std::string protocol = decodedUrlArg(parsed.query, "protocol");
+    if (!normalizeHysteriaProtocol(protocol))
+        return;
+    const std::string up = decodedFirstUrlArg(
+        parsed.query, {"upmbps", "up_mbps", "up"});
+    const std::string down = decodedFirstUrlArg(
+        parsed.query, {"downmbps", "down_mbps", "down"});
+    if (!validHysteriaUriMbps(up) || !validHysteriaUriMbps(down))
+        return;
+
+    std::string obfs_mode = toLower(trim(decodedUrlArg(parsed.query, "obfs")));
+    if (!obfs_mode.empty() && obfs_mode != "xplus")
+        return;
+    const std::string auth = decodedFirstUrlArg(
+        parsed.query, {"auth_str", "auth-str", "auth"});
+    const std::string sni = decodedFirstUrlArg(
+        parsed.query, {"peer", "sni", "server_name", "server-name"});
+    const std::string insecure = decodedFirstUrlArg(
+        parsed.query, {"insecure", "allow_insecure", "allow-insecure"});
+    const std::vector<std::string> alpn_list = getUrlAlpnList(parsed.query);
+    const std::string alpn = alpn_list.empty() ? std::string() : alpn_list.front();
+    const std::string hop_interval = decodedFirstUrlArg(
+        parsed.query, {"hop_interval", "hop-interval"});
+    if (!validHysteriaHopInterval(hop_interval))
+        return;
+
+    if (parsed.remark.empty())
+        parsed.remark = parsed.host + ":" + parsed.port;
+    hysteriaConstruct(
+        node, HYSTERIA_DEFAULT_GROUP, parsed.remark, parsed.host, parsed.port,
+        protocol, "", auth, sni, up, down, alpn,
+        decodedFirstUrlArg(parsed.query, {"obfsParam", "obfs-param"}),
+        insecure, "", sni, tribool(), tribool(), tribool(insecure));
+    node.OBFS = obfs_mode;
+    node.AlpnList = alpn_list;
+    node.HysteriaHopInterval = hop_interval;
+    node.TLSSecure = true;
 }
 
 void explodeStdMieru(std::string mieru, Proxy &node) {
-    std::string username, password, host, port, ports, profile, protocol, multiplexing, mtu, remarks;
-    std::string addition;
-    tribool udp, tfo, scv, tls13;
+    std::vector<Proxy> parsed_nodes;
+    explodeMierusNodes(mieru, parsed_nodes);
+    if (parsed_nodes.size() == 1)
+        node = std::move(parsed_nodes.front());
+}
 
-    // 去除前缀
-    string_size pos;
-
-    // 提取 remarks
-    extractRemark(mieru, remarks);
-
-    // 提取参数
-    pos = mieru.rfind("?");
-    if (pos != mieru.npos) {
-        addition = mieru.substr(pos + 1);
-        mieru.erase(pos);
-    }
-
-    // 账号密码@host
-    if (regGetMatch(mieru, R"(^(.*?):(.*?)@(.*)$)", 4, 0, &username, &password, &host))
+void explodeMierusNodes(const std::string &mieru, std::vector<Proxy> &nodes) {
+    MieruSimpleConfig config;
+    if (!parseMieruSimpleUri(mieru, config))
         return;
 
-    // 提取端口（port=多个情况）
-    port = getUrlArg(addition, "port");
-    if (port.find('-') != std::string::npos) {
-        ports = port;
+    nodes.reserve(nodes.size() + config.port_bindings.size());
+    const std::string remark_base = config.remark.empty() ? config.profile : config.remark;
+    const std::string source_id = nextMieruSourceId();
+    for (size_t binding_index = 0;
+         binding_index < config.port_bindings.size(); ++binding_index) {
+        const MieruPortBinding &binding = config.port_bindings[binding_index];
+        Proxy node;
+        const std::string port = binding.is_range ? "0" : binding.port;
+        const std::string ports = binding.is_range ? binding.port : std::string();
+        const std::string remark = remark_base + ":" + binding.port + "/" + binding.protocol;
+        mieruConstruct(node, MIERU_DEFAULT_GROUP, remark, port,
+                       config.password, config.host, ports, config.username,
+                       config.multiplexing, binding.protocol, tribool(true),
+                       tribool(), tribool(), tribool(), "");
+        node.Mtu = config.mtu;
+        node.MieruProfile = config.profile;
+        node.MieruSourceId = source_id;
+        node.MieruSourceRemark = config.remark;
+        node.MieruBindingIndex = static_cast<uint32_t>(binding_index);
+        node.MieruHasUnknownParameters = config.has_unknown_parameters;
+        node.MieruHandshakeMode = config.handshake_mode;
+        node.MieruTrafficPattern = config.traffic_pattern;
+        nodes.emplace_back(std::move(node));
     }
-    // 提取协议（多个 protocol）
-    protocol = getUrlArg(addition, "protocol");
-
-    multiplexing = getUrlArg(addition, "multiplexing");
-    mtu = getUrlArg(addition, "mtu");
-
-    if (remarks.empty())
-        remarks = host;
-
-    mieruConstruct(node, "MieruGroup", remarks, port,
-                   password, host, ports, username, multiplexing, protocol,
-                   udp, tfo, scv, tls13, "");
 }
 
 void explodeStdHysteria2(std::string hysteria2, Proxy &node) {
-    std::string add, port, password, host, insecure, up, down, alpn, obfsParam, obfsPassword, remarks, sni, ports;
-    std::string addition;
-    tribool scv;
-    hysteria2 = hysteria2.substr(12);
-    string_size pos;
+    ParsedShareUri parsed;
+    std::string ports;
+    if (!parseModernShareUri(std::move(hysteria2), "hysteria2", false, "443", true, parsed, ports))
+        return;
 
-    extractRemark(hysteria2, remarks);
+    std::string password = parsed.user;
+    if (password.empty())
+        password = decodedUrlArg(parsed.query, "password");
+    std::string query_ports = decodedUrlArg(parsed.query, "ports");
+    if (!query_ports.empty()) {
+        for (const std::string &token : split(query_ports, ",")) {
+            uint16_t ignored_port = 0;
+            std::string ignored_remaining;
+            if (!validHysteria2PortToken(token, ignored_port,
+                                         ignored_remaining))
+                return;
+        }
+        ports = ports.empty() ? query_ports : ports + "," + query_ports;
+    }
+    const std::string sni = decodedUrlArg(parsed.query, "sni");
+    if (parsed.remark.empty())
+        parsed.remark = parsed.host + ":" + parsed.port;
 
-    pos = hysteria2.rfind("?");
-    if (pos != hysteria2.npos) {
-        addition = hysteria2.substr(pos + 1);
-        hysteria2.erase(pos);
+    hysteria2Construct(node, HYSTERIA2_DEFAULT_GROUP, parsed.remark, parsed.host, parsed.port, password, sni,
+                       decodedUrlArg(parsed.query, "up"), decodedUrlArg(parsed.query, "down"),
+                       decodedUrlArg(parsed.query, "alpn"), decodedUrlArg(parsed.query, "obfs"),
+                       decodedUrlArg(parsed.query, "obfs-password"), sni, "", ports,
+                       tribool(), tribool(), tribool(getUrlArg(parsed.query, "insecure")));
+    node.Fingerprint = decodedFirstUrlArg(parsed.query, {"pinSHA256", "pinsha256"});
+    node.Hysteria2ECH = decodedUrlArg(parsed.query, "ech");
+    node.Hysteria2PortsAreAdditional = !ports.empty();
+    if (toLower(trim(node.OBFSParam)) == "gecko") {
+        node.Hysteria2GeckoMinPacketSize = decodedFirstUrlArg(
+            parsed.query, {"minPacketSize", "min_packet_size"});
+        node.Hysteria2GeckoMaxPacketSize = decodedFirstUrlArg(
+            parsed.query, {"maxPacketSize", "max_packet_size"});
+    }
+}
+
+void explodeHysteria2Realm(std::string hysteria2, Proxy &node) {
+    const bool http = startsWith(hysteria2, "hysteria2+realm+http://");
+    const std::string prefix =
+        http ? "hysteria2+realm+http://" : "hysteria2+realm://";
+    if (!startsWith(hysteria2, prefix))
+        return;
+    hysteria2.erase(0, prefix.size());
+
+    std::string remark;
+    extractRemark(hysteria2, remark);
+    std::string query;
+    const size_t query_pos = hysteria2.find('?');
+    if (query_pos != std::string::npos) {
+        query = hysteria2.substr(query_pos + 1);
+        hysteria2.erase(query_pos);
     }
 
-    if (strFind(hysteria2, "@")) {
-        if (regGetMatch(hysteria2, R"(^(.*?)@(.*)[:](\d+)$)", 4, 0, &password, &add, &port))
+    const size_t at = hysteria2.rfind('@');
+    const size_t path = at == std::string::npos
+                            ? std::string::npos
+                            : hysteria2.find('/', at + 1);
+    if (at == std::string::npos || at == 0 || path == std::string::npos ||
+        path == at + 1 || path + 1 >= hysteria2.size())
+        return;
+    const std::string token =
+        decodeShareUriUserInfo(hysteria2.substr(0, at));
+    const std::string authority = hysteria2.substr(at + 1, path - at - 1);
+    const std::string realm_name = hysteria2.substr(path + 1);
+    if (token.empty() || token.find_first_of("\r\n") != std::string::npos ||
+        realm_name.find_first_of("/\r\n") != std::string::npos)
+        return;
+
+    std::string host;
+    std::string port;
+    if (!authority.empty() && authority.front() == '[') {
+        const size_t bracket = authority.find(']');
+        if (bracket == std::string::npos || bracket == 1)
             return;
+        host = authority.substr(1, bracket - 1);
+        if (bracket + 1 < authority.size()) {
+            if (authority[bracket + 1] != ':' ||
+                !validSharePort(authority.substr(bracket + 2)))
+                return;
+            port = authority.substr(bracket + 2);
+        }
     } else {
-        password = getUrlArg(addition, "password");
-        if (password.empty())
-            return;
-
-        if (!strFind(hysteria2, ":"))
-            return;
-
-        if (regGetMatch(hysteria2, R"(^(.*)[:](\d+)$)", 3, 0, &add, &port))
-            return;
+        const size_t colon = authority.rfind(':');
+        if (colon != std::string::npos && authority.find(':') == colon) {
+            const std::string candidate_port = authority.substr(colon + 1);
+            if (!validSharePort(candidate_port))
+                return;
+            host = authority.substr(0, colon);
+            port = candidate_port;
+        } else {
+            host = authority;
+        }
     }
+    if (host.empty() || host.find_first_of("\r\n") != std::string::npos)
+        return;
+    if (port.empty())
+        port = http ? "80" : "443";
 
-    scv = getUrlArg(addition, "insecure");
-    up = getUrlArg(addition, "up");
-    down = getUrlArg(addition, "down");
-    alpn = getUrlArg(addition, "alpn");
-    obfsParam = getUrlArg(addition, "obfs");
-    obfsPassword = getUrlArg(addition, "obfs-password");
-    host = getUrlArg(addition, "sni");
-    sni = getUrlArg(addition, "sni");
-    ports = getUrlArg(addition, "ports");
-    if (remarks.empty())
-        remarks = add + ":" + port;
+    const std::string auth = decodedUrlArg(query, "auth");
+    if (auth.empty())
+        return;
+    const std::string sni = decodedUrlArg(query, "sni");
+    if (remark.empty())
+        remark = host + ":" + port;
 
-    hysteria2Construct(node, HYSTERIA2_DEFAULT_GROUP, remarks, add, port, password, host, up, down, alpn, obfsParam,
-                       obfsPassword, host, "", ports, tribool(), tribool(), scv);
-    return;
+    std::string realm_url = http ? "realm+http://" : "realm://";
+    realm_url += hysteria2;
+    string_array stun_query;
+    for (const std::string &entry : split(query, "&")) {
+        const size_t equal = entry.find('=');
+        if (equal == std::string::npos)
+            continue;
+        if (toLower(urlDecode(entry.substr(0, equal))) != "stun")
+            continue;
+        const std::string stun = urlDecode(entry.substr(equal + 1));
+        if (stun.empty() || stun.find_first_of("\r\n") != std::string::npos)
+            return;
+        stun_query.emplace_back(entry);
+    }
+    if (!stun_query.empty())
+        realm_url += "?" + join(stun_query, "&");
+
+    hysteria2Construct(
+        node, HYSTERIA2_DEFAULT_GROUP, remark, host, port, auth, sni,
+        decodedUrlArg(query, "up"), decodedUrlArg(query, "down"),
+        decodedUrlArg(query, "alpn"), decodedUrlArg(query, "obfs"),
+        decodedUrlArg(query, "obfs-password"), sni, "", "", tribool(),
+        tribool(), tribool(decodedUrlArg(query, "insecure")));
+    node.TLSSecure = true;
+    node.TLSStr = "tls";
+    node.Fingerprint = decodedFirstUrlArg(query, {"pinSHA256", "pinsha256"});
+    node.Hysteria2ECH = decodedUrlArg(query, "ech");
+    node.Hysteria2RealmUrl = std::move(realm_url);
+    if (toLower(trim(node.OBFSParam)) == "gecko") {
+        node.Hysteria2GeckoMinPacketSize = decodedFirstUrlArg(
+            query, {"minPacketSize", "min_packet_size"});
+        node.Hysteria2GeckoMaxPacketSize = decodedFirstUrlArg(
+            query, {"maxPacketSize", "max_packet_size"});
+    }
 }
 
 
 void explodeStdVless(std::string vless, Proxy &node) {
-    std::string add, port, type, id, aid, net, flow, pbk, sid, fp, mode, path, host, tls, remarks, sni;
-    std::string addition;
-    vless = vless.substr(8);
-    string_size pos;
-
-    extractRemark(vless, remarks);
-    const std::string stdvless_matcher =
-            R"(^([\da-fA-F]{8}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{12})@\[?([\d\-a-zA-Z:.]+)\]?:(\d+)(?:\/?\?(.*))?$)";
-    if (regGetMatch(vless, stdvless_matcher, 5, 0, &id, &add, &port, &addition))
+    ParsedShareUri parsed;
+    if (!parseShareUri(vless, "vless", parsed) || !isXrayUuid(parsed.user))
         return;
 
-    tls = getUrlArg(addition, "security");
-    net = getUrlArg(addition, "type");
-    flow = getUrlArg(addition, "flow");
-    pbk = getUrlArg(addition, "pbk");
-    sid = getUrlArg(addition, "sid");
-    fp = getUrlArg(addition, "fp");
-    std::string packet_encoding = getUrlArg(addition, "packet-encoding");
-    std::string alpn = getUrlArg(addition, "alpn");
-    std::vector<std::string> alpnList;
-    if (!alpn.empty()) {
-        alpnList.push_back(alpn);
-    }
-    switch (hash_(net)) {
-        case "tcp"_hash:
-        case "ws"_hash:
-        case "h2"_hash:
-            type = getUrlArg(addition, "headerType");
-            host = getUrlArg(addition, strFind(addition, "sni") ? "sni" : "host");
-            path = getUrlArg(addition, "path");
-            break;
-        case "xhttp"_hash: // 新增对 type=xhttp 的支持
-            net = "h2"; // 视为 h2/http2 传输
-            type = getUrlArg(addition, "headerType");
-            host = getUrlArg(addition, strFind(addition, "sni") ? "sni" : "host");
-            path = getUrlArg(addition, "path");
-            break;
-        case "grpc"_hash:
-            host = getUrlArg(addition, "sni");
-            path = getUrlArg(addition, "serviceName");
-            mode = getUrlArg(addition, "mode");
-            break;
-        case "quic"_hash:
-            type = getUrlArg(addition, "headerType");
-            host = getUrlArg(addition, strFind(addition, "sni") ? "sni" : "quicSecurity");
-            path = getUrlArg(addition, "key");
-            break;
-        default:
-            return;
-    }
+    std::string type, net, path, host, mode;
+    if (!parseXrayTransport(parsed.query, node, net, type, path, host, mode))
+        return;
 
-    if (remarks.empty())
-        remarks = add + ":" + port;
-    sni = getUrlArg(addition, "sni");
-    vlessConstruct(node, XRAY_DEFAULT_GROUP, remarks, add, port, type, id, aid, net, "auto", flow, mode, path, host, "",
-                   tls, pbk, sid, fp, sni, alpnList, packet_encoding);
+    if (parsed.remark.empty())
+        parsed.remark = parsed.host + ":" + parsed.port;
+    std::string encryption = decodedUrlArg(parsed.query, "encryption");
+    if (encryption.empty())
+        encryption = "none";
+    vlessConstruct(node, XRAY_DEFAULT_GROUP, parsed.remark, parsed.host, parsed.port, type, parsed.user, "0", net,
+                   "auto", decodedUrlArg(parsed.query, "flow"), mode, path, host, "",
+                   decodedUrlArg(parsed.query, "security"), decodedUrlArg(parsed.query, "pbk"),
+                   decodedUrlArg(parsed.query, "sid"), decodedUrlArg(parsed.query, "fp"),
+                   decodedUrlArg(parsed.query, "sni"), getUrlAlpnList(parsed.query),
+                   decodedUrlArg(parsed.query, "packet-encoding"), tribool(), tribool(),
+                   getXrayAllowInsecure(parsed.query), tribool(), "",
+                   tribool(), encryption);
     return;
 }
 
@@ -1927,31 +3185,643 @@ void parsePeers(Proxy &node, const std::string &data) {
     auto peers = regGetAllMatch(data, R"(\((.*?)\))", true);
     if (peers.empty())
         return;
-    auto peer = peers[0];
-    auto peerdata = regGetAllMatch(peer, R"(([a-z-]+) ?= ?([^" ),]+|".*?"),? ?)", true);
-    if (peerdata.size() % 2 != 0)
-        return;
-    for (size_t i = 0; i < peerdata.size(); i += 2) {
-        auto key = peerdata[i];
-        auto val = peerdata[i + 1];
-        switch (hash_(key)) {
-            case "public-key"_hash:
-                node.PublicKey = val;
-                break;
-            case "endpoint"_hash:
-                node.Hostname = val.substr(0, val.rfind(':'));
-                node.Port = to_int(val.substr(val.rfind(':') + 1));
-                break;
-            case "client-id"_hash:
-                node.ClientId = val;
-                break;
-            case "allowed-ips"_hash:
-                node.AllowedIPs = trimOf(val, '"');
-                break;
-            default:
-                break;
+    for (const std::string &peer_text : peers) {
+        WireGuardPeer peer;
+        for (const std::string &field : splitWireGuardFields(peer_text)) {
+            const size_t equal = field.find('=');
+            if (equal == std::string::npos)
+                continue;
+            const std::string key = toLower(trim(field.substr(0, equal)));
+            const std::string value = stripWireGuardQuotes(field.substr(equal + 1));
+            switch (hash_(key)) {
+                case "public-key"_hash:
+                    peer.PublicKey = value;
+                    break;
+                case "endpoint"_hash:
+                    parseWireGuardEndpoint(value, peer.Hostname, peer.Port);
+                    break;
+                case "client-id"_hash:
+                case "reserved"_hash:
+                    peer.Reserved = normalizeWireGuardReserved(
+                        trimOf(trimOf(value, '['), ']'));
+                    break;
+                case "allowed-ips"_hash:
+                    peer.AllowedIPs = normalizeWireGuardAllowedIPs(value);
+                    break;
+                case "preshared-key"_hash:
+                case "pre-shared-key"_hash:
+                    peer.PreSharedKey = value;
+                    break;
+                case "keepalive"_hash:
+                case "persistent-keepalive"_hash:
+                    peer.KeepAlive = parseUint16Option(value, 0);
+                    break;
+                default:
+                    break;
+            }
         }
+        if (validWireGuardPeer(peer))
+            node.WireGuardPeers.emplace_back(std::move(peer));
     }
+    syncLegacyWireGuardProjection(node);
+}
+
+enum class LoonProxyParseResult { NotLoon, Invalid, Parsed };
+
+struct LoonProxyValue {
+    std::string value;
+    bool quoted = false;
+};
+
+using LoonProxyOptions = std::map<std::string, LoonProxyValue>;
+
+bool parseLoonProxyValue(std::string input, LoonProxyValue &result,
+                         bool require_quotes = false) {
+    input = trim(input);
+    if (input.empty() || input.find_first_of("\r\n") != std::string::npos)
+        return false;
+    if (input.front() == '"') {
+        if (input.size() < 2 || input.back() != '"')
+            return false;
+        input = input.substr(1, input.size() - 2);
+        if (input.find_first_of("\\\"\r\n") != std::string::npos)
+            return false;
+        result.quoted = true;
+        result.value = std::move(input);
+        return true;
+    }
+    if (require_quotes || input.front() == '\'' || input.back() == '\'' ||
+        input.find('"') != std::string::npos)
+        return false;
+    result.value = std::move(input);
+    return true;
+}
+
+bool parseLoonProxyOptions(const std::vector<std::string> &configs, size_t start,
+                           LoonProxyOptions &options) {
+    for (size_t i = start; i < configs.size(); ++i) {
+        const size_t equal = configs[i].find('=');
+        if (equal == std::string::npos || equal == 0)
+            return false;
+        const std::string key = toLower(trim(configs[i].substr(0, equal)));
+        if (key.empty() || !std::all_of(key.begin(), key.end(), [](unsigned char ch) {
+                return std::isalnum(ch) != 0 || ch == '-';
+            }) || options.count(key) != 0)
+            return false;
+        LoonProxyValue value;
+        const std::string raw_value = trim(configs[i].substr(equal + 1));
+        if (!raw_value.empty() && !parseLoonProxyValue(raw_value, value))
+            return false;
+        options.emplace(key, std::move(value));
+    }
+    return true;
+}
+
+bool loonOptionsAreKnown(const LoonProxyOptions &options,
+                         std::initializer_list<const char *> known) {
+    for (const auto &item : options) {
+        if (std::none_of(known.begin(), known.end(), [&](const char *key) {
+                return item.first == key;
+            }))
+            return false;
+    }
+    return true;
+}
+
+bool loonOption(const LoonProxyOptions &options, const std::string &key,
+                std::string &value, bool require_quotes = false) {
+    const auto found = options.find(key);
+    if (found == options.end()) {
+        value.clear();
+        return true;
+    }
+    if (require_quotes && !found->second.quoted)
+        return false;
+    value = found->second.value;
+    return true;
+}
+
+bool loonAliasedOption(const LoonProxyOptions &options, const std::string &first,
+                       const std::string &second, std::string &value) {
+    const auto a = options.find(first), b = options.find(second);
+    if (a != options.end() && b != options.end() && a->second.value != b->second.value)
+        return false;
+    value = a != options.end() ? a->second.value
+                               : b != options.end() ? b->second.value : std::string();
+    return true;
+}
+
+bool loonBoolOption(const LoonProxyOptions &options, const std::string &first,
+                    const std::string &second, tribool &value) {
+    const auto a = options.find(first), b = options.find(second);
+    if (a != options.end() && b != options.end() && a != b &&
+        a->second.value != b->second.value)
+        return false;
+    if (a == options.end() && b == options.end()) {
+        value = tribool();
+        return true;
+    }
+    const std::string &text = a != options.end() ? a->second.value : b->second.value;
+    if (text != "true" && text != "false")
+        return false;
+    value = tribool(text);
+    return true;
+}
+
+bool validLoonPort(const std::string &port) {
+    return validSharePort(port);
+}
+
+bool validLoonAlterId(const std::string &alter_id) {
+    if (alter_id.empty() || alter_id.size() > 5 ||
+        !std::all_of(alter_id.begin(), alter_id.end(), [](unsigned char ch) {
+            return std::isdigit(ch) != 0;
+        }))
+        return false;
+    return to_int(alter_id, -1) <= 65535;
+}
+
+bool isLoonPositionalCandidate(const std::vector<std::string> &configs,
+                               const std::string &kind) {
+    const size_t minimum = kind == "vmess" ? 5 : 4;
+    if (configs.size() < minimum)
+        return false;
+    // Surge's same-named forms begin their fourth field with a named option
+    // (`username=` / `password=`); Loon uses a positional cipher/password.
+    const std::string &positional = configs[3];
+    if (!positional.empty() && positional.front() == '"')
+        return true;
+    return positional.find('=') == std::string::npos;
+}
+
+LoonProxyParseResult parseLoonProxyLine(const std::vector<std::string> &configs,
+                                        std::string remarks, Proxy &node) {
+    if (configs.empty())
+        return LoonProxyParseResult::NotLoon;
+    const std::string kind = toLower(trim(configs.front()));
+    if (kind != "vmess" && kind != "vless" && kind != "trojan" &&
+        kind != "anytls" && kind != "hysteria2")
+        return LoonProxyParseResult::NotLoon;
+    if (!isLoonPositionalCandidate(configs, kind))
+        return LoonProxyParseResult::NotLoon;
+
+    LoonProxyValue remark_value, server_value, credential_value;
+    if (!parseLoonProxyValue(std::move(remarks), remark_value) ||
+        !parseLoonProxyValue(configs[1], server_value) ||
+        server_value.quoted || !validLoonPort(trim(configs[2])))
+        return LoonProxyParseResult::Invalid;
+    const std::string server = server_value.value;
+    const std::string port = trim(configs[2]);
+    const size_t option_start = kind == "vmess" ? 5 : 4;
+    if (!parseLoonProxyValue(configs[kind == "vmess" ? 4 : 3],
+                             credential_value, true) ||
+        credential_value.value.empty())
+        return LoonProxyParseResult::Invalid;
+
+    LoonProxyOptions options;
+    if (!parseLoonProxyOptions(configs, option_start, options))
+        return LoonProxyParseResult::Invalid;
+    for (const auto &option : options) {
+        if (option.second.quoted && option.first != "public-key" &&
+            option.first != "salamander-password")
+            return LoonProxyParseResult::Invalid;
+    }
+    tribool udp, tfo, scv;
+    std::string sni, fingerprint;
+    if (!loonAliasedOption(options, "sni", "tls-name", sni) ||
+        !loonOption(options, "tls-profile", fingerprint) ||
+        !loonBoolOption(options, "udp", "udp-relay", udp) ||
+        !loonBoolOption(options, "fast-open", "tfo", tfo) ||
+        !loonBoolOption(options, "skip-cert-verify", "skip-cert-verify", scv))
+        return LoonProxyParseResult::Invalid;
+
+    if (kind == "vmess") {
+        if (!loonOptionsAreKnown(options, {"transport", "alterid", "path", "host", "over-tls",
+                                            "sni", "tls-name", "skip-cert-verify", "tls-profile",
+                                            "fast-open", "tfo", "udp", "udp-relay"}))
+            return LoonProxyParseResult::Invalid;
+        LoonProxyValue method_value;
+        std::string transport, alter_id, path, host, over_tls;
+        if (!parseLoonProxyValue(configs[3], method_value) || method_value.quoted ||
+            method_value.value.empty() || !isXrayUuid(credential_value.value) ||
+            !loonOption(options, "transport", transport) ||
+            !loonOption(options, "alterid", alter_id) ||
+            !loonOption(options, "path", path) || !loonOption(options, "host", host) ||
+            !loonOption(options, "over-tls", over_tls) ||
+            (transport != "tcp" && transport != "ws" && transport != "http") ||
+            (over_tls != "true" && over_tls != "false") ||
+            !validLoonAlterId(alter_id) ||
+            (transport == "tcp" && (!path.empty() || !host.empty())) ||
+            (!fingerprint.empty() && over_tls != "true") ||
+            (!sni.empty() && over_tls != "true"))
+            return LoonProxyParseResult::Invalid;
+        vmessConstruct(node, V2RAY_DEFAULT_GROUP, remark_value.value, server, port, "",
+                       credential_value.value, alter_id, transport, method_value.value,
+                       path, host, "", over_tls == "true" ? "tls" : "", sni,
+                       {}, udp, tfo, scv);
+        node.Fingerprint = fingerprint;
+        return LoonProxyParseResult::Parsed;
+    }
+
+    if (kind == "vless") {
+        if (!loonOptionsAreKnown(options, {"transport", "path", "host", "flow", "public-key", "short-id",
+                                            "over-tls", "sni", "tls-name", "skip-cert-verify",
+                                            "tls-profile", "fast-open", "tfo", "udp", "udp-relay"}))
+            return LoonProxyParseResult::Invalid;
+        std::string transport, path, host, flow, public_key, short_id, over_tls;
+        if (!isXrayUuid(credential_value.value) ||
+            !loonOption(options, "transport", transport) ||
+            !loonOption(options, "path", path) || !loonOption(options, "host", host) ||
+            !loonOption(options, "flow", flow) ||
+            !loonOption(options, "public-key", public_key, true) ||
+            !loonOption(options, "short-id", short_id) ||
+            !loonOption(options, "over-tls", over_tls) ||
+            (transport != "tcp" && transport != "ws" && transport != "http") ||
+            (over_tls != "true" && over_tls != "false") ||
+            (transport == "tcp" && (!path.empty() || !host.empty())) ||
+            (!fingerprint.empty() && over_tls != "true"))
+            return LoonProxyParseResult::Invalid;
+        const bool reality = !public_key.empty() || !flow.empty() || !short_id.empty();
+        if (reality ? (transport != "tcp" || over_tls != "true" ||
+                       flow != "xtls-rprx-vision" || public_key.empty() || sni.empty())
+                    : (!flow.empty() || !public_key.empty() || !short_id.empty()))
+            return LoonProxyParseResult::Invalid;
+        vlessConstruct(node, XRAY_DEFAULT_GROUP, remark_value.value, server, port, "",
+                       credential_value.value, "0", transport, "auto", flow, "", path,
+                       host, "", reality ? "reality" : over_tls == "true" ? "tls" : "",
+                       public_key, short_id, fingerprint, sni, {}, "none", udp, tfo, scv);
+        return LoonProxyParseResult::Parsed;
+    }
+
+    if (kind == "trojan") {
+        if (!loonOptionsAreKnown(options, {"transport", "path", "host", "alpn", "sni", "tls-name",
+                                            "skip-cert-verify", "tls-profile", "fast-open", "tfo",
+                                            "udp", "udp-relay"}))
+            return LoonProxyParseResult::Invalid;
+        std::string transport, path, host, alpn;
+        if (!loonOption(options, "transport", transport) ||
+            !loonOption(options, "path", path) || !loonOption(options, "host", host) ||
+            !loonOption(options, "alpn", alpn) ||
+            (transport.empty() ? false : transport != "tcp" && transport != "ws" && transport != "http") ||
+            ((transport.empty() || transport == "tcp") && (!path.empty() || !host.empty())))
+            return LoonProxyParseResult::Invalid;
+        if (transport.empty())
+            transport = "tcp";
+        std::vector<std::string> alpn_list;
+        if (!alpn.empty())
+            alpn_list.emplace_back(alpn);
+        trojanConstruct(node, TROJAN_DEFAULT_GROUP, remark_value.value, server, port,
+                        credential_value.value, transport, host, path, fingerprint, sni,
+                        alpn_list, true, udp, tfo, scv);
+        return LoonProxyParseResult::Parsed;
+    }
+
+    if (kind == "anytls") {
+        if (!loonOptionsAreKnown(options, {"sni", "tls-name", "skip-cert-verify", "tls-profile",
+                                            "fast-open", "tfo", "udp", "udp-relay", "block-quic"}))
+            return LoonProxyParseResult::Invalid;
+        std::string block_quic;
+        if (!loonOption(options, "block-quic", block_quic) ||
+            (options.count("block-quic") != 0 && block_quic != "false"))
+            return LoonProxyParseResult::Invalid;
+        anyTlSConstruct(node, ANYTLS_DEFAULT_GROUP, remark_value.value, port,
+                        credential_value.value, server, {}, fingerprint, sni, udp, tfo,
+                        scv, tribool(), "", 30, 30, 0);
+        return LoonProxyParseResult::Parsed;
+    }
+
+    if (!loonOptionsAreKnown(options, {"sni", "tls-name", "skip-cert-verify", "tls-cert-sha256",
+                                        "download-bandwidth", "salamander-password", "fast-open",
+                                        "tfo", "udp", "udp-relay"}))
+        return LoonProxyParseResult::Invalid;
+    std::string certificate, down, salamander_password;
+    if (!loonOption(options, "tls-cert-sha256", certificate) ||
+        !loonOption(options, "download-bandwidth", down) ||
+        !loonOption(options, "salamander-password", salamander_password, true) ||
+        (!down.empty() && !validHysteriaUriMbps(down)) ||
+        (!certificate.empty() && !scv.is_undef() && scv.get()))
+        return LoonProxyParseResult::Invalid;
+    hysteria2Construct(node, HYSTERIA2_DEFAULT_GROUP, remark_value.value, server, port,
+                       credential_value.value, sni, "", down, "",
+                       salamander_password.empty() ? "" : "salamander",
+                       salamander_password, sni, "", "", udp, tfo, scv);
+    node.Fingerprint = certificate;
+    return LoonProxyParseResult::Parsed;
+}
+
+enum class QuanXProxyParseResult { NotQuanX, Invalid, Parsed };
+
+using QuanXProxyOptions = std::map<std::string, std::string>;
+
+bool parseQuanXProxyOptions(const std::vector<std::string> &configs, size_t start,
+                            QuanXProxyOptions &options) {
+    for (size_t i = start; i < configs.size(); ++i) {
+        const size_t equal = configs[i].find('=');
+        if (equal == std::string::npos || equal == 0)
+            return false;
+        const std::string key = toLower(trim(configs[i].substr(0, equal)));
+        std::string value = trim(configs[i].substr(equal + 1));
+        if (key.empty() || value.find_first_of("\r\n") != std::string::npos ||
+            !std::all_of(key.begin(), key.end(), [](unsigned char ch) {
+                return std::isalnum(ch) != 0 || ch == '-';
+            }) || options.count(key) != 0)
+            return false;
+        options.emplace(key, std::move(value));
+    }
+    return true;
+}
+
+bool quanXOptionsAreKnown(const QuanXProxyOptions &options,
+                          std::initializer_list<const char *> known) {
+    return std::all_of(options.begin(), options.end(), [&](const auto &item) {
+        return std::any_of(known.begin(), known.end(), [&](const char *key) {
+            return item.first == key;
+        });
+    });
+}
+
+bool quanXOption(const QuanXProxyOptions &options, const std::string &key,
+                 std::string &value) {
+    const auto found = options.find(key);
+    value = found == options.end() ? std::string() : found->second;
+    return true;
+}
+
+bool quanXBoolOption(const QuanXProxyOptions &options, const std::string &key,
+                     tribool &value) {
+    const auto found = options.find(key);
+    if (found == options.end()) {
+        value = tribool();
+        return true;
+    }
+    if (found->second != "true" && found->second != "false")
+        return false;
+    value = tribool(found->second);
+    return true;
+}
+
+bool parseQuanXEndpoint(const std::string &input, std::string &server,
+                        std::string &port) {
+    const std::string endpoint = trim(input);
+    if (endpoint.empty() || endpoint.find_first_of(",\r\n") != std::string::npos)
+        return false;
+    if (endpoint.front() == '[') {
+        const size_t closing = endpoint.find("]:");
+        if (closing == std::string::npos)
+            return false;
+        server = endpoint.substr(1, closing - 1);
+        port = endpoint.substr(closing + 2);
+    } else {
+        const size_t colon = endpoint.rfind(':');
+        if (colon == std::string::npos)
+            return false;
+        server = endpoint.substr(0, colon);
+        port = endpoint.substr(colon + 1);
+    }
+    return !server.empty() && validSharePort(port);
+}
+
+bool parseQuanXTlsAlpn(const std::string &hex, std::vector<std::string> &alpn_list) {
+    alpn_list.clear();
+    if (hex.empty())
+        return true;
+    if (hex.size() % 2 != 0 ||
+        !std::all_of(hex.begin(), hex.end(), [](unsigned char ch) {
+            return std::isxdigit(ch) != 0;
+        }))
+        return false;
+    std::string bytes;
+    bytes.reserve(hex.size() / 2);
+    const auto nibble = [](unsigned char ch) -> unsigned char {
+        if (ch >= '0' && ch <= '9')
+            return ch - '0';
+        ch = static_cast<unsigned char>(std::tolower(ch));
+        return static_cast<unsigned char>(ch - 'a' + 10);
+    };
+    for (size_t i = 0; i < hex.size(); i += 2)
+        bytes.push_back(static_cast<char>((nibble(hex[i]) << 4) | nibble(hex[i + 1])));
+    for (size_t offset = 0; offset < bytes.size();) {
+        const size_t length = static_cast<unsigned char>(bytes[offset++]);
+        if (length == 0 || length > bytes.size() - offset)
+            return false;
+        alpn_list.emplace_back(bytes.substr(offset, length));
+        offset += length;
+    }
+    return !alpn_list.empty();
+}
+
+bool validQuanXReality(const std::string &public_key, const std::string &short_id) {
+    if (public_key.size() != 43 ||
+        !std::all_of(public_key.begin(), public_key.end(), [](unsigned char ch) {
+            return std::isalnum(ch) != 0 || ch == '-' || ch == '_';
+        }))
+        return false;
+    const std::string decoded = urlSafeBase64Decode(public_key);
+    if (decoded.size() != 32 || urlSafeBase64Encode(decoded) != public_key)
+        return false;
+    return short_id.empty() ||
+           (short_id.size() <= 16 && short_id.size() % 2 == 0 &&
+            std::all_of(short_id.begin(), short_id.end(), [](unsigned char ch) {
+                return std::isxdigit(ch) != 0;
+            }));
+}
+
+struct QuanXTransport {
+    std::string network = "tcp";
+    std::string fake_type;
+    std::string host;
+    std::string path;
+    std::string sni;
+    std::string tls;
+};
+
+bool parseQuanXTransport(const QuanXProxyOptions &options, bool reality,
+                         QuanXTransport &transport) {
+    std::string obfs, host, path;
+    quanXOption(options, "obfs", obfs);
+    quanXOption(options, "obfs-host", host);
+    quanXOption(options, "obfs-uri", path);
+    if (obfs.empty())
+        return host.empty() && path.empty() && !reality;
+    if (obfs == "http") {
+        if (reality)
+            return false;
+        transport.fake_type = "http";
+        transport.host = host;
+        transport.path = path;
+        return true;
+    }
+    if (obfs == "ws") {
+        if (reality)
+            return false;
+        transport.network = "ws";
+        transport.host = host;
+        transport.path = path;
+        return true;
+    }
+    if (obfs == "over-tls") {
+        if (!path.empty() || host.empty())
+            return false;
+        transport.sni = host;
+        transport.tls = reality ? "reality" : "tls";
+        return true;
+    }
+    if (obfs == "wss") {
+        if (host.empty())
+            return false;
+        transport.network = "ws";
+        transport.host = host;
+        transport.path = path;
+        transport.sni = host;
+        transport.tls = reality ? "reality" : "tls";
+        return true;
+    }
+    return false;
+}
+
+QuanXProxyParseResult parseQuanXProxyLine(const std::vector<std::string> &configs,
+                                          std::string kind, Proxy &node) {
+    kind = toLower(trim(kind));
+    if (kind != "vmess" && kind != "vless" && kind != "trojan" &&
+        kind != "anytls")
+        return QuanXProxyParseResult::NotQuanX;
+    if (configs.size() < 2)
+        return QuanXProxyParseResult::Invalid;
+    const std::string first = toLower(trim(configs.front()));
+    if (first == "vmess" || first == "vless" || first == "trojan" ||
+        first == "anytls" || first == "ss" || first == "socks5" ||
+        first == "http" || first == "wireguard" || first == "snell" ||
+        first == "custom" || first == "direct" || first == "reject" ||
+        first == "reject-tinygif")
+        return QuanXProxyParseResult::NotQuanX;
+
+    std::string server, port;
+    QuanXProxyOptions options;
+    if (!parseQuanXEndpoint(configs.front(), server, port) ||
+        !parseQuanXProxyOptions(configs, 1, options))
+        return QuanXProxyParseResult::Invalid;
+
+    std::string remarks, password, public_key, short_id, alpn_hex;
+    quanXOption(options, "tag", remarks);
+    quanXOption(options, "password", password);
+    quanXOption(options, "reality-base64-pubkey", public_key);
+    quanXOption(options, "reality-hex-shortid", short_id);
+    quanXOption(options, "tls-alpn", alpn_hex);
+    const bool reality = !public_key.empty() || !short_id.empty();
+    if (remarks.empty() || password.empty() ||
+        (reality && !validQuanXReality(public_key, short_id)))
+        return QuanXProxyParseResult::Invalid;
+
+    tribool udp, tfo, tls_verification;
+    if (!quanXBoolOption(options, "udp-relay", udp) ||
+        !quanXBoolOption(options, "fast-open", tfo) ||
+        !quanXBoolOption(options, "tls-verification", tls_verification) ||
+        (reality && !tfo.is_undef() && tfo.get()))
+        return QuanXProxyParseResult::Invalid;
+    tribool scv;
+    if (!tls_verification.is_undef())
+        scv = !tls_verification.get();
+    std::vector<std::string> alpn_list;
+    if (!parseQuanXTlsAlpn(alpn_hex, alpn_list) ||
+        (reality && (!alpn_list.empty() || !tls_verification.is_undef())))
+        return QuanXProxyParseResult::Invalid;
+
+    if (kind == "vmess" || kind == "vless") {
+        const bool vmess = kind == "vmess";
+        if (!quanXOptionsAreKnown(
+                options,
+                vmess ? std::initializer_list<const char *>{
+                            "method", "password", "aead", "obfs", "obfs-host", "obfs-uri",
+                            "reality-base64-pubkey", "reality-hex-shortid", "tls-alpn",
+                            "fast-open", "udp-relay", "tls-verification", "tag"}
+                      : std::initializer_list<const char *>{
+                            "method", "password", "obfs", "obfs-host", "obfs-uri",
+                            "reality-base64-pubkey", "reality-hex-shortid", "vless-flow",
+                            "tls-alpn", "fast-open", "udp-relay", "tls-verification", "tag"}) ||
+            !isXrayUuid(password))
+            return QuanXProxyParseResult::Invalid;
+        std::string method, aead_text, flow;
+        quanXOption(options, "method", method);
+        quanXOption(options, "aead", aead_text);
+        quanXOption(options, "vless-flow", flow);
+        tribool aead;
+        if (method.empty() || (!vmess && method != "none") ||
+            (!aead_text.empty() && !aead.set(aead_text)) ||
+            (!flow.empty() && flow != "xtls-rprx-vision"))
+            return QuanXProxyParseResult::Invalid;
+        QuanXTransport transport;
+        if (!parseQuanXTransport(options, reality, transport) ||
+            (!alpn_list.empty() && transport.tls != "tls") ||
+            (!tls_verification.is_undef() && transport.tls != "tls") ||
+            (!flow.empty() && (!reality || transport.network != "tcp")))
+            return QuanXProxyParseResult::Invalid;
+        if (vmess) {
+            vmessConstruct(node, V2RAY_DEFAULT_GROUP, remarks, server, port,
+                           transport.fake_type, password,
+                           !aead.is_undef() && !aead.get() ? "1" : "0",
+                           transport.network, method, transport.path, transport.host, "",
+                           transport.tls, transport.sni, alpn_list, udp, tfo, scv);
+            node.PublicKey = public_key;
+            node.ShortId = short_id;
+        } else {
+            vlessConstruct(node, XRAY_DEFAULT_GROUP, remarks, server, port,
+                           transport.fake_type, password, "0", transport.network, method,
+                           flow, "", transport.path, transport.host, "", transport.tls,
+                           public_key, short_id, "", transport.sni, alpn_list, "none",
+                           udp, tfo, scv);
+        }
+        return QuanXProxyParseResult::Parsed;
+    }
+
+    if (kind == "trojan") {
+        if (!quanXOptionsAreKnown(options, {"password", "over-tls", "tls-host", "obfs",
+                                             "obfs-host", "obfs-uri", "reality-base64-pubkey",
+                                             "reality-hex-shortid", "tls-alpn", "fast-open",
+                                             "udp-relay", "tls-verification", "tag"}))
+            return QuanXProxyParseResult::Invalid;
+        std::string over_tls, tls_host, obfs;
+        quanXOption(options, "over-tls", over_tls);
+        quanXOption(options, "tls-host", tls_host);
+        quanXOption(options, "obfs", obfs);
+        QuanXTransport transport;
+        if (obfs.empty()) {
+            if (over_tls != "true" || tls_host.empty())
+                return QuanXProxyParseResult::Invalid;
+            transport.tls = reality ? "reality" : "tls";
+            transport.sni = tls_host;
+        } else if (!over_tls.empty() || !tls_host.empty() || obfs != "wss" ||
+                   !parseQuanXTransport(options, reality, transport)) {
+            return QuanXProxyParseResult::Invalid;
+        }
+        if ((!alpn_list.empty() && transport.tls != "tls") ||
+            (!tls_verification.is_undef() && transport.tls != "tls"))
+            return QuanXProxyParseResult::Invalid;
+        trojanConstruct(node, TROJAN_DEFAULT_GROUP, remarks, server, port, password,
+                        transport.network, transport.host, transport.path, "", transport.sni,
+                        alpn_list, true, udp, tfo, scv);
+        node.TLSStr = transport.tls;
+        node.PublicKey = public_key;
+        node.ShortId = short_id;
+        return QuanXProxyParseResult::Parsed;
+    }
+
+    if (!quanXOptionsAreKnown(options, {"password", "over-tls", "tls-host",
+                                         "reality-base64-pubkey", "reality-hex-shortid",
+                                         "tls-alpn", "fast-open", "udp-relay",
+                                         "tls-verification", "tag"}))
+        return QuanXProxyParseResult::Invalid;
+    std::string over_tls, tls_host;
+    quanXOption(options, "over-tls", over_tls);
+    quanXOption(options, "tls-host", tls_host);
+    if (over_tls != "true" || (reality && tls_host.empty()))
+        return QuanXProxyParseResult::Invalid;
+    anyTlSConstruct(node, ANYTLS_DEFAULT_GROUP, remarks, port, password, server,
+                    alpn_list, "", tls_host, udp, tfo, scv, tribool(), "", 30, 30, 0);
+    node.TLSStr = reality ? "reality" : "tls";
+    node.TLSSecure = true;
+    node.PublicKey = public_key;
+    node.ShortId = short_id;
+    return QuanXProxyParseResult::Parsed;
 }
 
 bool explodeSurge(std::string surge, std::vector<Proxy> &nodes) {
@@ -1969,14 +3839,23 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes) {
     ini.allow_dup_section_titles = true;
     ini.set_isolated_items_section("Proxy");
     ini.add_direct_save_section("Proxy");
+    ini.add_direct_save_section("server_local");
     if (surge.find("[Proxy]") != surge.npos)
         surge = regReplace(surge, R"(^[\S\s]*?\[)", "[", false);
     ini.parse(surge);
 
-    if (!ini.section_exist("Proxy"))
+    if (!ini.section_exist("Proxy") && !ini.section_exist("server_local"))
         return false;
-    ini.enter_section("Proxy");
-    ini.get_items(proxies);
+    if (ini.section_exist("Proxy")) {
+        string_multimap section_proxies;
+        ini.get_items("Proxy", section_proxies);
+        proxies.insert(section_proxies.begin(), section_proxies.end());
+    }
+    if (ini.section_exist("server_local")) {
+        string_multimap section_proxies;
+        ini.get_items("server_local", section_proxies);
+        proxies.insert(section_proxies.begin(), section_proxies.end());
+    }
 
     const std::string proxystr = "(.*?)\\s*=\\s*(.*)";
 
@@ -1988,10 +3867,12 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes) {
         std::string section, ip, ipv6, private_key, public_key, mtu, test_url, client_id, peer, keepalive; //wireguard
         string_array dns_servers;
         string_multimap wireguard_config;
-        std::string version, aead = "1";
+        std::string version, aead = "1", obfs_uri, reuse_text, snell_mode,
+                    snell_udp_port, shadow_tls_password, shadow_tls_sni,
+                    shadow_tls_version;
         std::string itemName, itemVal, config;
         std::vector<std::string> configs, vArray, headers, header;
-        tribool udp, tfo, scv, tls13;
+        tribool udp, tfo, scv, tls13, reuse;
         Proxy node;
 
         /*
@@ -1999,9 +3880,29 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes) {
         configs = split(regReplace(x.second, proxystr, "$2"), ",");
         */
         regGetMatch(x.second, proxystr, 3, 0, &remarks, &config);
-        configs = split(config, ",");
-        if (configs.size() < 3)
+        configs = splitWireGuardFields(config);
+        if (configs.empty() || (configs.size() < 3 && configs[0] != "wireguard"))
             continue;
+        const LoonProxyParseResult loon_result =
+                parseLoonProxyLine(configs, remarks, node);
+        if (loon_result == LoonProxyParseResult::Invalid)
+            continue;
+        if (loon_result == LoonProxyParseResult::Parsed) {
+            node.Id = index;
+            nodes.emplace_back(std::move(node));
+            index++;
+            continue;
+        }
+        const QuanXProxyParseResult quanx_result =
+                parseQuanXProxyLine(configs, remarks, node);
+        if (quanx_result == QuanXProxyParseResult::Invalid)
+            continue;
+        if (quanx_result == QuanXProxyParseResult::Parsed) {
+            node.Id = index;
+            nodes.emplace_back(std::move(node));
+            index++;
+            continue;
+        }
         switch (hash_(configs[0])) {
             case "direct"_hash:
             case "reject"_hash:
@@ -2298,11 +4199,12 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes) {
                     continue;
 
                 for (i = 3; i < configs.size(); i++) {
-                    vArray = split(configs[i], "=");
-                    if (vArray.size() != 2)
+                    const size_t equal = configs[i].find('=');
+                    if (equal == std::string::npos)
                         continue;
-                    itemName = trim(vArray[0]);
-                    itemVal = trim(vArray[1]);
+                    itemName = toLower(trim(configs[i].substr(0, equal)));
+                    itemVal = stripWireGuardQuotes(
+                        configs[i].substr(equal + 1));
                     switch (hash_(itemName)) {
                         case "psk"_hash:
                             password = itemVal;
@@ -2312,6 +4214,19 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes) {
                             break;
                         case "obfs-host"_hash:
                             host = itemVal;
+                            break;
+                        case "obfs-uri"_hash:
+                            obfs_uri = itemVal;
+                            break;
+                        case "reuse"_hash:
+                            reuse_text = itemVal;
+                            reuse = itemVal;
+                            break;
+                        case "mode"_hash:
+                            snell_mode = toLower(itemVal);
+                            break;
+                        case "udp-port"_hash:
+                            snell_udp_port = itemVal;
                             break;
                         case "udp-relay"_hash:
                             udp = itemVal;
@@ -2325,21 +4240,78 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes) {
                         case "version"_hash:
                             version = itemVal;
                             break;
+                        case "shadow-tls-password"_hash:
+                            shadow_tls_password = itemVal;
+                            break;
+                        case "shadow-tls-sni"_hash:
+                            shadow_tls_sni = itemVal;
+                            break;
+                        case "shadow-tls-version"_hash:
+                            shadow_tls_version = itemVal;
+                            break;
                         default:
                             continue;
                     }
                 }
 
-                snellConstruct(node, SNELL_DEFAULT_GROUP, remarks, server, port, password, plugin, host,
-                               to_int(version, 0), udp, tfo, scv);
-                break;
-            case "wireguard"_hash:
-                for (i = 1; i < configs.size(); i++) {
-                    vArray = split(trim(configs[i]), "=");
-                    if (vArray.size() != 2)
+                {
+                    const int snell_version = version.empty()
+                                                  ? 1
+                                                  : to_int(version, 0);
+                    const uint16_t parsed_udp_port = parseUint16Option(
+                        snell_udp_port, 0);
+                    const uint16_t parsed_shadow_version = parseUint16Option(
+                        shadow_tls_version, 0);
+                    const bool has_shadow_tls =
+                        !shadow_tls_password.empty() ||
+                        !shadow_tls_sni.empty() ||
+                        !shadow_tls_version.empty();
+                    const bool valid_obfs =
+                        plugin.empty() || plugin == "http" ||
+                        (plugin == "tls" && snell_version <= 3);
+                    if (password.empty() || snell_version < 1 ||
+                        snell_version > 6 ||
+                        (!reuse_text.empty() && reuse.is_undef()) ||
+                        !valid_obfs ||
+                        (snell_version >= 4 && plugin == "tls") ||
+                        (snell_version == 6 &&
+                         (!plugin.empty() || !host.empty() ||
+                          !obfs_uri.empty())) ||
+                        (!obfs_uri.empty() && plugin != "http") ||
+                        (!snell_udp_port.empty() &&
+                         (parsed_udp_port == 0 || snell_version < 3)) ||
+                        (snell_version == 6
+                             ? (!snell_mode.empty() &&
+                                snell_mode != "default" &&
+                                snell_mode != "unshaped" &&
+                                snell_mode != "unsafe-raw")
+                             : !snell_mode.empty()) ||
+                        (has_shadow_tls &&
+                         (shadow_tls_password.empty() || !plugin.empty() ||
+                          (parsed_shadow_version != 0 &&
+                           parsed_shadow_version != 2 &&
+                           parsed_shadow_version != 3) ||
+                          (parsed_shadow_version == 3 &&
+                           shadow_tls_sni.empty()))))
                         continue;
-                    itemName = trim(vArray[0]);
-                    itemVal = trim(vArray[1]);
+                    snellConstruct(node, SNELL_DEFAULT_GROUP, remarks, server,
+                                   port, password, plugin, host, obfs_uri,
+                                   static_cast<uint16_t>(snell_version), reuse,
+                                   udp, tfo, scv);
+                    node.SnellMode = snell_mode;
+                    node.SnellUDPPort = parsed_udp_port;
+                    node.ShadowTLSPassword = shadow_tls_password;
+                    node.ShadowTLSSNI = shadow_tls_sni;
+                    node.ShadowTLSVersion = parsed_shadow_version;
+                }
+                break;
+            case "wireguard"_hash: {
+                for (i = 1; i < configs.size(); i++) {
+                    const size_t equal = configs[i].find('=');
+                    if (equal == std::string::npos)
+                        continue;
+                    itemName = toLower(trim(configs[i].substr(0, equal)));
+                    itemVal = stripWireGuardQuotes(configs[i].substr(equal + 1));
                     switch (hash_(itemName)) {
                         case "section-name"_hash:
                             section = itemVal;
@@ -2347,48 +4319,103 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes) {
                         case "test-url"_hash:
                             test_url = itemVal;
                             break;
-                    }
-                }
-                if (section.empty())
-                    continue;
-                ini.get_items("WireGuard " + section, wireguard_config);
-                if (wireguard_config.empty())
-                    continue;
-
-                for (auto &c: wireguard_config) {
-                    itemName = trim(c.first);
-                    itemVal = trim(c.second);
-                    switch (hash_(itemName)) {
-                        case "self-ip"_hash:
+                        case "interface-ip"_hash:
                             ip = itemVal;
                             break;
-                        case "self-ip-v6"_hash:
+                        case "interface-ipv6"_hash:
+                        case "interface-ip-v6"_hash:
                             ipv6 = itemVal;
                             break;
                         case "private-key"_hash:
                             private_key = itemVal;
                             break;
-                        case "dns-server"_hash:
-                            vArray = split(itemVal, ",");
-                            for (auto &y: vArray)
-                                dns_servers.emplace_back(trim(y));
+                        case "dns"_hash:
+                        case "dnsv6"_hash:
+                            if (!itemVal.empty())
+                                dns_servers.emplace_back(itemVal);
                             break;
                         case "mtu"_hash:
                             mtu = itemVal;
                             break;
-                        case "peer"_hash:
-                            peer = itemVal;
-                            break;
                         case "keepalive"_hash:
                             keepalive = itemVal;
                             break;
+                        case "peers"_hash:
+                            peer = itemVal;
+                            break;
+                        case "udp"_hash:
+                        case "udp-relay"_hash:
+                            udp = itemVal;
+                            break;
+                    }
+                }
+                if (!section.empty()) {
+                    ini.get_items("WireGuard " + section, wireguard_config);
+                    if (wireguard_config.empty())
+                        continue;
+
+                    for (auto &c: wireguard_config) {
+                        itemName = toLower(trim(c.first));
+                        itemVal = trim(c.second);
+                        switch (hash_(itemName)) {
+                            case "self-ip"_hash:
+                                ip = itemVal;
+                                break;
+                            case "self-ip-v6"_hash:
+                                ipv6 = itemVal;
+                                break;
+                            case "private-key"_hash:
+                                private_key = itemVal;
+                                break;
+                            case "dns-server"_hash:
+                                vArray = split(itemVal, ",");
+                                for (auto &y: vArray)
+                                    dns_servers.emplace_back(trim(y));
+                                break;
+                            case "mtu"_hash:
+                                mtu = itemVal;
+                                break;
+                            case "peer"_hash:
+                                if (!peer.empty())
+                                    peer += ",";
+                                peer += itemVal;
+                                break;
+                            case "keepalive"_hash:
+                                keepalive = itemVal;
+                                break;
+                            case "preshared-key"_hash:
+                            case "pre-shared-key"_hash:
+                                password = itemVal;
+                                break;
+                        }
                     }
                 }
 
                 wireguardConstruct(node, WG_DEFAULT_GROUP, remarks, "", "0", ip, ipv6, private_key, "", "", dns_servers,
                                    mtu, keepalive, test_url, "", udp, "");
+                if (!section.empty())
+                    node.WireGuardInterfaceName = section;
+                if (!peer.empty() && peer.find('{') != std::string::npos) {
+                    peer = replaceAllDistinct(replaceAllDistinct(peer, "{", "("), "}", ")");
+                }
                 parsePeers(node, peer);
+                if (!password.empty()) {
+                    for (WireGuardPeer &parsed_peer : node.WireGuardPeers)
+                        if (parsed_peer.PreSharedKey.empty())
+                            parsed_peer.PreSharedKey = password;
+                }
+                const uint16_t common_keepalive = parseUint16Option(keepalive, 0);
+                if (common_keepalive > 0) {
+                    for (WireGuardPeer &parsed_peer : node.WireGuardPeers)
+                        if (parsed_peer.KeepAlive == 0)
+                            parsed_peer.KeepAlive = common_keepalive;
+                }
+                syncLegacyWireGuardProjection(node);
+                if (node.PrivateKey.empty() || node.WireGuardLocalAddresses.empty() ||
+                    node.WireGuardPeers.empty())
+                    continue;
                 break;
+            }
             case "anytls"_hash: //Surge style anytls proxy
                 server = trim(configs[1]);
                 port = trim(configs[2]);
@@ -2834,12 +4861,13 @@ void explodeNetchConf(std::string netch, std::vector<Proxy> &nodes) {
     if (json.HasParseError() || !json.IsObject())
         return;
 
-    if (!json.HasMember("Server"))
+    if (!json.HasMember("Server") || !json["Server"].IsArray())
         return;
 
-    for (uint32_t i = 0; i < json["Server"].Size(); i++) {
+    for (rapidjson::SizeType i = 0; i < json["Server"].Size(); i++) {
         Proxy node;
-        explodeNetch("Netch://" + base64Encode(json["Server"][i] | SerializeObject()), node);
+        if (!parseNetchNode(json["Server"][i], node))
+            continue;
 
         node.Id = index;
         nodes.emplace_back(std::move(node));
@@ -2849,21 +4877,62 @@ void explodeNetchConf(std::string netch, std::vector<Proxy> &nodes) {
 
 int explodeConfContent(const std::string &content, std::vector<Proxy> &nodes) {
     ConfType filetype = ConfType::Unknow;
+    bool looks_like_singbox = false;
 
-    if (strFind(content, "\"version\""))
-        filetype = ConfType::SS;
-    else if (strFind(content, "\"serverSubscribes\""))
-        filetype = ConfType::SSR;
-    else if (strFind(content, "\"uiItem\"") || strFind(content, "vnext"))
-        filetype = ConfType::V2Ray;
-    else if (strFind(content, "\"proxy_apps\""))
-        filetype = ConfType::SSConf;
-    else if (strFind(content, "\"idInUse\""))
-        filetype = ConfType::SSTap;
-    else if (strFind(content, "\"local_address\"") && strFind(content, "\"local_port\""))
-        filetype = ConfType::SSR; //use ssr config parser
-    else if (strFind(content, "\"ModeFileNameType\""))
-        filetype = ConfType::Netch;
+    const auto first_non_space = std::find_if_not(
+        content.begin(), content.end(),
+        [](unsigned char ch) { return std::isspace(ch) != 0; });
+    if (first_non_space != content.end() &&
+        (*first_non_space == '[' || *first_non_space == '{')) {
+        rapidjson::Document structured_json;
+        structured_json.Parse(content.c_str());
+        const auto looks_like_ss_server = [](const rapidjson::Value &value) {
+            return value.IsObject() && value.HasMember("server") &&
+                   value.HasMember("server_port") && value.HasMember("method") &&
+                   value.HasMember("password");
+        };
+        if (!structured_json.HasParseError() && structured_json.IsArray() &&
+            std::any_of(structured_json.Begin(), structured_json.End(),
+                        looks_like_ss_server))
+            filetype = ConfType::SS;
+        else if (!structured_json.HasParseError() && structured_json.IsObject() &&
+                 structured_json.HasMember("Server") &&
+                 structured_json["Server"].IsArray() &&
+                 std::any_of(structured_json["Server"].Begin(),
+                             structured_json["Server"].End(),
+                             [](const rapidjson::Value &value) {
+                                 return value.IsObject() &&
+                                        value.HasMember("Type") &&
+                                        value.HasMember("Hostname") &&
+                                        value.HasMember("Port");
+                             }))
+            filetype = ConfType::Netch;
+        if (!structured_json.HasParseError() && structured_json.IsObject()) {
+            looks_like_singbox =
+                (structured_json.HasMember("outbounds") &&
+                 structured_json["outbounds"].IsArray()) ||
+                (structured_json.HasMember("endpoints") &&
+                 structured_json["endpoints"].IsArray());
+        }
+    }
+
+    if (!looks_like_singbox) {
+        if (filetype == ConfType::Unknow && strFind(content, "\"version\""))
+            filetype = ConfType::SS;
+        else if (strFind(content, "\"serverSubscribes\""))
+            filetype = ConfType::SSR;
+        else if (strFind(content, "\"uiItem\"") || strFind(content, "vnext"))
+            filetype = ConfType::V2Ray;
+        else if (strFind(content, "\"proxy_apps\""))
+            filetype = ConfType::SSConf;
+        else if (strFind(content, "\"idInUse\""))
+            filetype = ConfType::SSTap;
+        else if (strFind(content, "\"local_address\"") &&
+                 strFind(content, "\"local_port\""))
+            filetype = ConfType::SSR; //use ssr config parser
+        else if (strFind(content, "\"ModeFileNameType\""))
+            filetype = ConfType::Netch;
+    }
 
     switch (filetype) {
         case ConfType::SS:
@@ -2892,20 +4961,31 @@ int explodeConfContent(const std::string &content, std::vector<Proxy> &nodes) {
     return !nodes.empty();
 }
 
-void explodeSingboxTransport(rapidjson::Value &singboxNode, std::string &net, std::string &host, std::string &path,
-                             std::string edge) {
+bool explodeSingboxTransport(const rapidjson::Value &singboxNode, std::string &net, std::string &host,
+                             std::string &path, std::string &edge) {
     if (singboxNode.HasMember("transport") && singboxNode["transport"].IsObject()) {
-        rapidjson::Value transport = singboxNode["transport"].GetObject();
+        const rapidjson::Value &transport = singboxNode["transport"];
         net = GetMember(transport, "type");
         switch (hash_(net)) {
+            case "tcp"_hash:
+                break;
             case "http"_hash: {
-                host = GetMember(transport, "host");
+                if (transport.HasMember("host")) {
+                    const rapidjson::Value &host_value = transport["host"];
+                    if (host_value.IsString())
+                        host = host_value.GetString();
+                    else if (host_value.IsArray() && !host_value.Empty() && host_value[0].IsString())
+                        host = host_value[0].GetString();
+                    else
+                        return false;
+                }
+                path = GetMember(transport, "path");
                 break;
             }
             case "ws"_hash: {
                 path = GetMember(transport, "path");
                 if (transport.HasMember("headers") && transport["headers"].IsObject()) {
-                    rapidjson::Value headers = transport["headers"].GetObject();
+                    const rapidjson::Value &headers = transport["headers"];
                     host = GetMember(headers, "Host");
                     edge = GetMember(headers, "Edge");
                 }
@@ -2915,10 +4995,13 @@ void explodeSingboxTransport(rapidjson::Value &singboxNode, std::string &net, st
                 path = GetMember(transport, "service_name");
                 break;
             }
-            default:
-                net = "tcp";
-                path.clear();
+            case "httpupgrade"_hash: {
+                host = GetMember(transport, "host");
+                path = GetMember(transport, "path");
                 break;
+            }
+            default:
+                return false;
         }
     } else {
         net = "tcp";
@@ -2926,7 +5009,250 @@ void explodeSingboxTransport(rapidjson::Value &singboxNode, std::string &net, st
         edge.clear();
         path.clear();
     }
+    return true;
 }
+
+namespace {
+
+std::string wireGuardAddressWithoutPrefix(const std::string &address) {
+    const std::string cleaned = trim(address);
+    const size_t slash = cleaned.find('/');
+    return slash == std::string::npos ? cleaned : cleaned.substr(0, slash);
+}
+
+bool explodeSingboxWireGuardNode(const rapidjson::Value &singboxNode,
+                                 bool endpoint_schema, Proxy &node) {
+    if (!singboxNode.IsObject())
+        return false;
+    const std::string remarks = GetMember(singboxNode, "tag");
+    string_array local_addresses;
+    const char *address_key = endpoint_schema ? "address" : "local_address";
+    if (singboxNode.HasMember(address_key))
+        local_addresses = jsonStringArray(singboxNode[address_key]);
+    if (local_addresses.empty()) {
+        const std::string ip = GetMember(singboxNode, "inet4_bind_address");
+        const std::string ipv6 = GetMember(singboxNode, "inet6_bind_address");
+        if (!ip.empty())
+            local_addresses.emplace_back(ip);
+        if (!ipv6.empty())
+            local_addresses.emplace_back(ipv6);
+    }
+
+    std::string self_ip, self_ipv6;
+    for (const std::string &address : local_addresses) {
+        const std::string bare = wireGuardAddressWithoutPrefix(address);
+        if (self_ip.empty() && isIPv4(bare))
+            self_ip = bare;
+        else if (self_ipv6.empty() && isIPv6(bare))
+            self_ipv6 = bare;
+    }
+
+    wireguardConstruct(node, WG_DEFAULT_GROUP, remarks, "", "0", self_ip,
+                       self_ipv6, GetMember(singboxNode, "private_key"), "", "",
+                       {}, GetMember(singboxNode, "mtu"), "0", "", "",
+                       tribool(), "");
+    node.WireGuardLocalAddresses = local_addresses;
+    node.WireGuardInterfaceName = GetMember(singboxNode, "name");
+    if (node.WireGuardInterfaceName.empty())
+        node.WireGuardInterfaceName = GetMember(singboxNode, "interface_name");
+    node.WireGuardListenPort = parseUint16Option(
+        GetMember(singboxNode, "listen_port"), 0);
+    node.WireGuardWorkers = parseUint16Option(
+        GetMember(singboxNode, "workers"), 0);
+    const char *system_key = endpoint_schema ? "system" : "system_interface";
+    if (singboxNode.HasMember(system_key) && singboxNode[system_key].IsBool())
+        node.WireGuardSystem = singboxNode[system_key].GetBool();
+
+    node.WireGuardPeers.clear();
+    if (singboxNode.HasMember("peers") && singboxNode["peers"].IsArray()) {
+        for (const auto &peer_value : singboxNode["peers"].GetArray()) {
+            WireGuardPeer peer = parseSingBoxWireGuardPeer(peer_value, endpoint_schema);
+            if (validWireGuardPeer(peer))
+                node.WireGuardPeers.emplace_back(std::move(peer));
+        }
+    } else if (!endpoint_schema) {
+        WireGuardPeer peer;
+        peer.Hostname = GetMember(singboxNode, "server");
+        peer.Port = parseUint16Option(GetMember(singboxNode, "server_port"), 0);
+        peer.PublicKey = GetMember(singboxNode, "peer_public_key");
+        if (peer.PublicKey.empty())
+            peer.PublicKey = GetMember(singboxNode, "public_key");
+        peer.PreSharedKey = GetMember(singboxNode, "pre_shared_key");
+        if (singboxNode.HasMember("reserved"))
+            peer.Reserved = jsonWireGuardReserved(singboxNode["reserved"]);
+        if (validWireGuardPeer(peer))
+            node.WireGuardPeers.emplace_back(std::move(peer));
+    }
+    syncLegacyWireGuardProjection(node);
+    return !node.PrivateKey.empty() && !node.WireGuardLocalAddresses.empty() &&
+           !node.WireGuardPeers.empty();
+}
+
+bool singBoxSnellMembersSupported(const rapidjson::Value &value) {
+    static constexpr const char *allowed[] = {
+        "type",       "tag",          "server",      "server_port",
+        "version",    "psk",          "userkey",     "reuse",
+        "network",    "obfs_mode",    "obfs_host",   "mode",
+        "tcp_fast_open",
+    };
+    for (auto member = value.MemberBegin(); member != value.MemberEnd(); ++member) {
+        bool known = false;
+        for (const char *name : allowed) {
+            if (std::string(member->name.GetString(),
+                            member->name.GetStringLength()) == name) {
+                known = true;
+                break;
+            }
+        }
+        if (!known)
+            return false;
+    }
+    return true;
+}
+
+bool parseSingBoxSnellNetwork(const rapidjson::Value &value,
+                              std::string &network) {
+    bool has_tcp = false, has_udp = false;
+    auto add_network = [&](const rapidjson::Value &item) {
+        if (!item.IsString())
+            return false;
+        const std::string candidate = item.GetString();
+        if (candidate == "tcp") {
+            if (has_tcp)
+                return false;
+            has_tcp = true;
+            return true;
+        }
+        if (candidate == "udp") {
+            if (has_udp)
+                return false;
+            has_udp = true;
+            return true;
+        }
+        return false;
+    };
+
+    if (value.IsString()) {
+        if (!add_network(value))
+            return false;
+    } else if (value.IsArray()) {
+        if (value.Empty())
+            return false;
+        for (const auto &item : value.GetArray()) {
+            if (!add_network(item))
+                return false;
+        }
+    } else {
+        return false;
+    }
+
+    network = has_tcp && has_udp ? std::string() : has_tcp ? "tcp" : "udp";
+    return has_tcp || has_udp;
+}
+
+bool explodeSingboxSnellNode(const rapidjson::Value &singboxNode,
+                             Proxy &node) {
+    auto reject = [](const char *reason) {
+        writeLog(LOG_LEVEL_DEBUG,
+                 "SINGBOX_SNELL_IMPORT_REJECTED reason=" +
+                     std::string(reason));
+        return false;
+    };
+    if (!singboxNode.IsObject() ||
+        !singBoxSnellMembersSupported(singboxNode) ||
+        !singboxNode.HasMember("server") ||
+        !singboxNode["server"].IsString() ||
+        !singboxNode.HasMember("server_port") ||
+        !singboxNode["server_port"].IsUint() ||
+        !singboxNode.HasMember("version") ||
+        !singboxNode["version"].IsUint() ||
+        !singboxNode.HasMember("psk") || !singboxNode["psk"].IsString())
+        return reject("schema");
+
+    const std::string server = singboxNode["server"].GetString();
+    const unsigned int port = singboxNode["server_port"].GetUint();
+    const unsigned int version = singboxNode["version"].GetUint();
+    const std::string password = singboxNode["psk"].GetString();
+    if (server.empty() || port == 0 || port > 65535 || password.empty() ||
+        (version != 4 && version != 6))
+        return reject("required-field");
+
+    std::string remarks;
+    if (singboxNode.HasMember("tag")) {
+        if (!singboxNode["tag"].IsString())
+            return reject("tag-type");
+        remarks = singboxNode["tag"].GetString();
+    }
+
+    std::string userkey;
+    if (singboxNode.HasMember("userkey")) {
+        if (!singboxNode["userkey"].IsString())
+            return reject("userkey-type");
+        userkey = singboxNode["userkey"].GetString();
+        if (userkey.size() > 255)
+            return reject("userkey-length");
+    }
+
+    tribool reuse, tfo;
+    if (singboxNode.HasMember("reuse")) {
+        if (!singboxNode["reuse"].IsBool())
+            return reject("reuse-type");
+        reuse = singboxNode["reuse"].GetBool();
+    }
+    if (singboxNode.HasMember("tcp_fast_open")) {
+        if (!singboxNode["tcp_fast_open"].IsBool())
+            return reject("tcp-fast-open-type");
+        tfo = singboxNode["tcp_fast_open"].GetBool();
+    }
+
+    std::string network;
+    if (singboxNode.HasMember("network") &&
+        !parseSingBoxSnellNetwork(singboxNode["network"], network))
+        return reject("network");
+
+    std::string obfs, obfs_host, mode;
+    if (singboxNode.HasMember("obfs_mode")) {
+        if (!singboxNode["obfs_mode"].IsString())
+            return reject("obfs-mode-type");
+        obfs = singboxNode["obfs_mode"].GetString();
+    }
+    if (singboxNode.HasMember("obfs_host")) {
+        if (!singboxNode["obfs_host"].IsString())
+            return reject("obfs-host-type");
+        obfs_host = singboxNode["obfs_host"].GetString();
+    }
+    if (singboxNode.HasMember("mode")) {
+        if (!singboxNode["mode"].IsString())
+            return reject("mode-type");
+        mode = singboxNode["mode"].GetString();
+    }
+
+    if (version == 4) {
+        if (!mode.empty() || (obfs != "" && obfs != "none" && obfs != "http") ||
+            (!obfs_host.empty() && obfs != "http"))
+            return reject("version-4-fields");
+        if (obfs == "none")
+            obfs.clear();
+    } else {
+        if (password.size() < 12 || password.size() > 255 || !obfs.empty() ||
+            !obfs_host.empty() ||
+            (mode != "" && mode != "default" && mode != "unshaped" &&
+             mode != "unsafe-raw"))
+            return reject("version-6-fields");
+    }
+
+    snellConstruct(node, SNELL_DEFAULT_GROUP, remarks, server,
+                   std::to_string(port), password, obfs, obfs_host, "",
+                   static_cast<uint16_t>(version), reuse,
+                   network == "tcp" ? tribool(false) : tribool(true), tfo,
+                   tribool());
+    node.SnellUserKey = userkey;
+    node.SnellNetwork = network;
+    node.SnellMode = mode;
+    return true;
+}
+
+} // namespace
 
 void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
     uint32_t index = nodes.size();
@@ -2940,12 +5266,14 @@ void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
             std::string flow, mode; //trojan
             std::string user; //socks
             std::string ip, ipv6, private_key, public_key, mtu; //wireguard
-            std::string auth, up, down, obfsParam, insecure, alpn; //hysteria
+            std::string auth, auth_str, up, down, obfsParam, insecure, alpn,
+                        hysteria_network, hop_interval; //hysteria
             std::string obfsPassword; //hysteria2
             string_array dns_server;
             std::string fingerprint;
             std::string congestion_control, udp_relay_mode; //quic
             tribool udp, tfo, scv, rrt, disableSni;
+            uint16_t idle_check = 30, idle_timeout = 30, min_idle = 0;
             rapidjson::Value singboxNode = outbounds[i].GetObject();
             if (singboxNode.HasMember("type") && singboxNode["type"].IsString()) {
                 Proxy node;
@@ -2961,15 +5289,20 @@ void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
                         tls = "tls";
                     }
                     sni = GetMember(tlsObj, "server_name");
-                    if (tlsObj.HasMember("alpn") && tlsObj["alpn"].IsArray() && !tlsObj["alpn"].Empty()) {
-                        rapidjson::Value alpns = tlsObj["alpn"].GetArray();
-                        if (alpns.Size() > 0) {
-                            alpn = alpns[0].GetString();
-                            for (auto &item: tlsObj["alpn"].GetArray()) {
-                                if (item.IsString())
-                                    alpnList.emplace_back(item.GetString());
+                    if (tlsObj.HasMember("alpn")) {
+                        if (!tlsObj["alpn"].IsArray())
+                            continue;
+                        for (const auto &item : tlsObj["alpn"].GetArray()) {
+                            if (!item.IsString()) {
+                                alpnList.clear();
+                                break;
                             }
+                            alpnList.emplace_back(item.GetString());
                         }
+                        if (alpnList.empty() && !tlsObj["alpn"].Empty())
+                            continue;
+                        if (!alpnList.empty())
+                            alpn = alpnList.front();
                     }
                     if (tlsObj.HasMember("insecure") && tlsObj["insecure"].IsBool()) {
                         scv = tlsObj["insecure"].GetBool();
@@ -3006,15 +5339,22 @@ void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
                     case "vmess"_hash:
                         group = V2RAY_DEFAULT_GROUP;
                         id = GetMember(singboxNode, "uuid");
-                        if (id.length() < 36) {
-                            break;
-                        }
+                        if (id.length() < 36)
+                            continue;
                         aid = GetMember(singboxNode, "alter_id");
                         cipher = GetMember(singboxNode, "security");
-                        explodeSingboxTransport(singboxNode, net, host, path, edge);
+                        if (!explodeSingboxTransport(singboxNode, net, host, path, edge))
+                            continue;
                         vmessConstruct(node, group, ps, server, port, "", id, aid, net, cipher, path, host, edge, tls,
                                        sni, alpnList, udp,
                                        tfo, scv);
+                        node.Fingerprint = fingerprint;
+                        node.PublicKey = pbk;
+                        node.ShortId = sid;
+                        if (net == "grpc") {
+                            node.GRPCServiceName = path;
+                            node.GRPCMode = "gun";
+                        }
                         break;
                     case "shadowsocks"_hash:
                         group = SS_DEFAULT_GROUP;
@@ -3024,59 +5364,43 @@ void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
                         pluginopts = GetMember(singboxNode, "plugin_opts");
                         ssConstruct(node, group, ps, server, port, password, cipher, plugin, pluginopts, udp, tfo, scv);
                         break;
+                    case "snell"_hash:
+                        if (!explodeSingboxSnellNode(singboxNode, node))
+                            continue;
+                        break;
                     case "trojan"_hash:
+                        if (tls != "tls" && tls != "reality")
+                            continue;
                         group = TROJAN_DEFAULT_GROUP;
                         password = GetMember(singboxNode, "password");
-                        explodeSingboxTransport(singboxNode, net, host, path, edge);
-                        trojanConstruct(node, group, ps, server, port, password, net, host, path, fp, sni, alpnList,
+                        if (!explodeSingboxTransport(singboxNode, net, host, path, edge))
+                            continue;
+                        trojanConstruct(node, group, ps, server, port, password, net, host, path, fingerprint, sni, alpnList,
                                         true, udp,
                                         tfo,
                                         scv);
+                        node.TLSStr = tls;
+                        node.PublicKey = pbk;
+                        node.ShortId = sid;
+                        if (net == "grpc") {
+                            node.GRPCServiceName = path;
+                            node.GRPCMode = "gun";
+                        }
                         break;
                     case "vless"_hash:
                         group = XRAY_DEFAULT_GROUP;
                         id = GetMember(singboxNode, "uuid");
                         flow = GetMember(singboxNode, "flow");
                         packet_encoding = GetMember(singboxNode, "packet_encoding");
-                        if (singboxNode.HasMember("transport") && singboxNode["transport"].IsObject()) {
-                            rapidjson::Value transport = singboxNode["transport"].GetObject();
-                            net = GetMember(transport, "type");
-                            switch (hash_(net)) {
-                                case "tcp"_hash: {
-                                    break;
-                                }
-                                case "ws"_hash: {
-                                    path = GetMember(transport, "path");
-                                    if (transport.HasMember("headers") && transport["headers"].IsObject()) {
-                                        rapidjson::Value headers = transport["headers"].GetObject();
-                                        host = GetMember(headers, "Host");
-                                        edge = GetMember(headers, "Edge");
-                                    }
-                                    break;
-                                }
-                                case "http"_hash: {
-                                    host = GetMember(transport, "host");
-                                    path = GetMember(transport, "path");
-                                    edge.clear();
-                                    break;
-                                }
-                                case "httpupgrade"_hash: {
-                                    net = "h2";
-                                    host = GetMember(transport, "host");
-                                    path = GetMember(transport, "path");
-                                    edge.clear();
-                                    break;
-                                }
-                                case "grpc"_hash: {
-                                    host = server;
-                                    path = GetMember(transport, "service_name");
-                                    break;
-                                }
-                            }
-                        }
+                        if (!explodeSingboxTransport(singboxNode, net, host, path, edge))
+                            continue;
 
                         vlessConstruct(node, group, ps, server, port, type, id, aid, net, "auto", flow, mode, path,
-                                       host, "", tls, pbk, sid, fp, sni, alpnList, packet_encoding, udp);
+                                       host, "", tls, pbk, sid, fingerprint, sni, alpnList, packet_encoding, udp);
+                        if (net == "grpc") {
+                            node.GRPCServiceName = path;
+                            node.GRPCMode = "gun";
+                        }
                         break;
                     case "http"_hash:
                         password = GetMember(singboxNode, "password");
@@ -3084,16 +5408,8 @@ void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
                         httpConstruct(node, group, ps, server, port, user, password, tls == "tls", tfo, scv);
                         break;
                     case "wireguard"_hash:
-                        group = WG_DEFAULT_GROUP;
-                        ip = GetMember(singboxNode, "inet4_bind_address");
-                        ipv6 = GetMember(singboxNode, "inet6_bind_address");
-                        public_key = GetMember(singboxNode, "private_key");
-                        private_key = GetMember(singboxNode, "public_key");
-                        mtu = GetMember(singboxNode, "mtu");
-                        password = GetMember(singboxNode, "pre_shared_key");
-                        dns_server = {"8.8.8.8"};
-                        wireguardConstruct(node, group, ps, server, port, ip, ipv6, private_key, public_key, password,
-                                           dns_server, mtu, "0", "", "", udp, "");
+                        if (!explodeSingboxWireGuardNode(singboxNode, false, node))
+                            continue;
                         break;
                     case "socks"_hash:
                         group = SOCKS_DEFAULT_GROUP;
@@ -3103,6 +5419,8 @@ void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
                         break;
                     case "hysteria"_hash:
                         group = HYSTERIA_DEFAULT_GROUP;
+                        if (tls != "tls")
+                            continue;
                         up = GetMember(singboxNode, "up");
                         if (up.empty()) {
                             up = GetMember(singboxNode, "up_mbps");
@@ -3111,33 +5429,189 @@ void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
                         if (down.empty()) {
                             down = GetMember(singboxNode, "down_mbps");
                         }
-                        auth = GetMember(singboxNode, "auth_str");
-                        type = GetMember(singboxNode, "network");
+                        if (up.empty() || down.empty())
+                            continue;
+                        auth_str = GetMember(singboxNode, "auth_str");
+                        auth = GetMember(singboxNode, "auth");
+                        if (singboxNode.HasMember("network")) {
+                            const auto &network_value = singboxNode["network"];
+                            if (network_value.IsString()) {
+                                hysteria_network = network_value.GetString();
+                                if (!normalizeHysteriaNetwork(
+                                        hysteria_network))
+                                    continue;
+                            } else if (network_value.IsArray()) {
+                                bool has_tcp = false, has_udp = false;
+                                bool valid_networks = true;
+                                for (const auto &network_item :
+                                     network_value.GetArray()) {
+                                    if (!network_item.IsString()) {
+                                        valid_networks = false;
+                                        break;
+                                    }
+                                    std::string network =
+                                        network_item.GetString();
+                                    if (!normalizeHysteriaNetwork(network) ||
+                                        network.empty()) {
+                                        valid_networks = false;
+                                        break;
+                                    }
+                                    has_tcp = has_tcp || network == "tcp";
+                                    has_udp = has_udp || network == "udp";
+                                }
+                                if (!valid_networks ||
+                                    (!has_tcp && !has_udp))
+                                    continue;
+                                hysteria_network = has_tcp && has_udp
+                                                       ? std::string()
+                                                       : has_tcp ? "tcp" : "udp";
+                            } else {
+                                continue;
+                            }
+                        }
+                        if (singboxNode.HasMember("server_ports")) {
+                            string_array port_ranges;
+                            const auto &server_ports =
+                                singboxNode["server_ports"];
+                            if (server_ports.IsString()) {
+                                port_ranges.emplace_back(
+                                    server_ports.GetString());
+                            } else if (server_ports.IsArray()) {
+                                for (const auto &item :
+                                     server_ports.GetArray()) {
+                                    if (!item.IsString()) {
+                                        port_ranges.clear();
+                                        break;
+                                    }
+                                    port_ranges.emplace_back(item.GetString());
+                                }
+                            } else {
+                                continue;
+                            }
+                            uint16_t first_port = 0;
+                            if (port_ranges.empty() ||
+                                !normalizeHysteriaPortSpec(
+                                    join(port_ranges, ","), ports,
+                                    first_port))
+                                continue;
+                            port = std::to_string(first_port);
+                        }
+                        if (!validSharePort(port))
+                            continue;
+                        hop_interval = GetMember(singboxNode, "hop_interval");
+                        if (!validHysteriaHopInterval(hop_interval))
+                            continue;
                         obfsParam = GetMember(singboxNode, "obfs");
-                        hysteriaConstruct(node, group, ps, server, port, type, auth, "", host, up, down, alpn,
+                        hysteriaConstruct(node, group, ps, server, port, "udp", auth, auth_str, sni, up, down, alpn,
                                           obfsParam, insecure, ports, sni,
                                           udp, tfo, scv);
+                        node.AlpnList = alpnList;
+                        node.TransferProtocol = hysteria_network;
+                        node.HysteriaHopInterval = hop_interval;
+                        node.TLSSecure = true;
                         break;
                     case "anytls"_hash:
+                        if (tls != "tls" && tls != "reality")
+                            continue;
                         group = ANYTLS_DEFAULT_GROUP;
                         password = GetMember(singboxNode, "password");
+                        idle_check = parseUint16Option(
+                            GetMember(singboxNode, "idle_session_check_interval"), 30, true);
+                        idle_timeout = parseUint16Option(
+                            GetMember(singboxNode, "idle_session_timeout"), 30, true);
+                        min_idle = parseUint16Option(
+                            GetMember(singboxNode, "min_idle_session"), 0);
                         anyTlSConstruct(node, ANYTLS_DEFAULT_GROUP, ps, port, password, server, alpnList, fingerprint,
                                         sni,
                                         udp,
-                                        tribool(), scv, tribool(), "", 30, 30, 0);
+                                        tribool(), scv, tribool(), "", idle_check, idle_timeout, min_idle);
+                        node.TLSStr = tls;
+                        node.TLSSecure = true;
+                        node.PublicKey = pbk;
+                        node.ShortId = sid;
                         break;
+                    case "naive"_hash: {
+                        if (tls != "tls" && tls != "reality")
+                            continue;
+                        user = GetMember(singboxNode, "username");
+                        password = GetMember(singboxNode, "password");
+                        if (password.empty())
+                            continue;
+                        bool naive_quic = false;
+                        uint32_t insecure_concurrency = 0;
+                        if (singboxNode.HasMember("quic")) {
+                            if (!singboxNode["quic"].IsBool())
+                                continue;
+                            naive_quic = singboxNode["quic"].GetBool();
+                        }
+                        if (singboxNode.HasMember("insecure_concurrency")) {
+                            if (!singboxNode["insecure_concurrency"].IsUint())
+                                continue;
+                            insecure_concurrency =
+                                singboxNode["insecure_concurrency"].GetUint();
+                        }
+                        naiveConstruct(node, NAIVE_DEFAULT_GROUP, ps, port,
+                                       user, password, server, alpnList,
+                                       fingerprint, sni, scv, naive_quic,
+                                       insecure_concurrency);
+                        node.TLSStr = tls;
+                        node.PublicKey = pbk;
+                        node.ShortId = sid;
+                        node.CongestionControl =
+                            GetMember(singboxNode,
+                                      "quic_congestion_control");
+                        if (singboxNode.HasMember("udp_over_tcp")) {
+                            if (!singboxNode["udp_over_tcp"].IsBool())
+                                continue;
+                            node.NaiveUot =
+                                singboxNode["udp_over_tcp"].GetBool();
+                        }
+                        break;
+                    }
                     case "hysteria2"_hash:
                         group = HYSTERIA2_DEFAULT_GROUP;
                         password = GetMember(singboxNode, "password");
                         up = GetMember(singboxNode, "up");
+                        if (up.empty())
+                            up = GetMember(singboxNode, "up_mbps");
                         down = GetMember(singboxNode, "down");
+                        if (down.empty())
+                            down = GetMember(singboxNode, "down_mbps");
+                        if (singboxNode.HasMember("server_ports") && singboxNode["server_ports"].IsArray()) {
+                            string_array port_ranges;
+                            bool valid_port_ranges = true;
+                            for (const auto &item : singboxNode["server_ports"].GetArray()) {
+                                if (!item.IsString()) {
+                                    valid_port_ranges = false;
+                                    break;
+                                }
+                                std::string range =
+                                    replaceAllDistinct(item.GetString(), ":", "-");
+                                uint16_t first_port = 0;
+                                std::string remaining;
+                                if (!validHysteria2PortToken(
+                                        range, first_port, remaining)) {
+                                    valid_port_ranges = false;
+                                    break;
+                                }
+                                port_ranges.emplace_back(std::move(range));
+                            }
+                            if (!valid_port_ranges || port_ranges.empty())
+                                continue;
+                            ports = join(port_ranges, ",");
+                            uint16_t first_port = 0;
+                            std::string remaining;
+                            validHysteria2PortToken(port_ranges.front(),
+                                                   first_port, remaining);
+                            port = std::to_string(first_port);
+                        }
                         if (singboxNode.HasMember("obfs") && singboxNode["obfs"].IsObject()) {
                             rapidjson::Value obfsOpt = singboxNode["obfs"].GetObject();
                             obfsParam = GetMember(obfsOpt, "type");
                             obfsPassword = GetMember(obfsOpt, "password");
                         }
                         hysteria2Construct(node, group, ps, server, port, password, host, up, down, alpn, obfsParam,
-                                           obfsPassword, sni, public_key, "", udp, tfo, scv);
+                                           obfsPassword, sni, public_key, ports, udp, tfo, scv);
                         break;
                     case "tuic"_hash:
                         group = TUIC_DEFAULT_GROUP;
@@ -3152,6 +5626,10 @@ void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
                                       sni, id, udp_relay_mode, "",
                                       tribool(),
                                       tribool(), scv, rrt, disableSni);
+                        node.TLSStr = tls.empty() ? "tls" : tls;
+                        node.PublicKey = pbk;
+                        node.ShortId = sid;
+                        node.Fingerprint = fingerprint;
                         break;
                     default:
                         continue;
@@ -3164,112 +5642,217 @@ void explodeSingbox(rapidjson::Value &outbounds, std::vector<Proxy> &nodes) {
     }
 }
 
+void explodeSingboxEndpoints(rapidjson::Value &endpoints,
+                             std::vector<Proxy> &nodes) {
+    uint32_t index = nodes.size();
+    if (!endpoints.IsArray())
+        return;
+    for (auto &endpoint : endpoints.GetArray()) {
+        if (!endpoint.IsObject() || GetMember(endpoint, "type") != "wireguard")
+            continue;
+        Proxy node;
+        if (!explodeSingboxWireGuardNode(endpoint, true, node))
+            continue;
+        node.Id = index++;
+        nodes.emplace_back(std::move(node));
+    }
+}
+
 void explodeTuic(const std::string &tuic, Proxy &node) {
-    std::string add, port, password, host, insecure, alpn, remarks, sni, ports, congestion_control;
-    std::string addition;
-    tribool scv;
-    std::string link = tuic.substr(7);
-    string_size pos;
+    ParsedShareUri parsed;
+    std::string ignored_ports;
+    if (!parseModernShareUri(tuic, "tuic", true, "", false, parsed, ignored_ports))
+        return;
 
-    extractRemark(link, remarks);
-
-    pos = link.rfind("?");
-    if (pos != std::string::npos) {
-        addition = link.substr(pos + 1);
-        link.erase(pos);
+    std::string uuid, password, token;
+    const size_t credential_separator = parsed.user.find(':');
+    if (credential_separator == std::string::npos) {
+        token = parsed.user;
+    } else {
+        uuid = parsed.user.substr(0, credential_separator);
+        password = parsed.user.substr(credential_separator + 1);
+        if (!isXrayUuid(uuid) || password.empty())
+            return;
     }
+    const std::string query_token = decodedUrlArg(parsed.query, "token");
+    if (!query_token.empty())
+        token = query_token;
+    if (parsed.remark.empty())
+        parsed.remark = parsed.host + ":" + parsed.port;
 
-    std::string uuid;
-    pos = link.find(":");
-    if (pos != std::string::npos) {
-        uuid = link.substr(0, pos);
-        link = link.substr(pos + 1);
-        if (strFind(link, "@")) {
-            pos = link.find("@");
-            if (pos != std::string::npos) {
-                password = link.substr(0, pos);
-                link = link.substr(pos + 1);
-            }
-        }
-    }
+    std::string udp_relay_mode = decodedFirstUrlArg(parsed.query, {"udp_relay_mode", "udp-relay-mode"});
+    if (udp_relay_mode.empty())
+        udp_relay_mode = "native";
+    std::string insecure = decodedFirstUrlArg(parsed.query, {"insecure", "allow_insecure", "allow-insecure"});
+    std::string reduce_rtt = decodedFirstUrlArg(parsed.query,
+                                                {"zero_rtt_handshake", "zero-rtt-handshake", "reduce_rtt", "reduce-rtt"});
+    std::string disable_sni = decodedFirstUrlArg(parsed.query, {"disable_sni", "disable-sni"});
+    const uint16_t request_timeout = parseUint16Option(
+        decodedFirstUrlArg(parsed.query, {"request_timeout", "request-timeout"}), 15000);
 
-    pos = link.find(":");
-    if (pos != std::string::npos) {
-        add = link.substr(0, pos);
-        link = link.substr(pos + 1);
-        pos = link.find("?");
-        if (pos != std::string::npos) {
-            port = link.substr(0, pos);
-            addition = link.substr(pos + 1);
-        } else {
-            port = link;
-        }
-    }
-
-
-    scv = getUrlArg(addition, "insecure");
-    alpn = getUrlArg(addition, "alpn");
-    sni = getUrlArg(addition, "sni");
-    congestion_control = getUrlArg(addition, "congestion_control");
-    if (remarks.empty())
-        remarks = add + ":" + port;
-    tuicConstruct(node, TUIC_DEFAULT_GROUP, remarks, add, port, password, congestion_control, alpn, sni, uuid, "native",
-                  "",
-                  tribool(),
-                  tribool(), scv);
-
-    return;
+    tuicConstruct(node, TUIC_DEFAULT_GROUP, parsed.remark, parsed.host, parsed.port, password,
+                  decodedFirstUrlArg(parsed.query, {"congestion_control", "congestion-controller"}),
+                  decodedUrlArg(parsed.query, "alpn"), decodedUrlArg(parsed.query, "sni"), uuid,
+                  udp_relay_mode, token, tribool(), tribool(), tribool(insecure), tribool(reduce_rtt),
+                  tribool(disable_sni), request_timeout);
+    node.TLSStr = decodedUrlArg(parsed.query, "security");
+    if (node.TLSStr.empty())
+        node.TLSStr = "tls";
+    node.PublicKey = decodedUrlArg(parsed.query, "pbk");
+    node.ShortId = decodedUrlArg(parsed.query, "sid");
+    node.Fingerprint = decodedUrlArg(parsed.query, "fp");
 }
 
 void explodeAnyTLS(std::string anytls, Proxy &node) {
-    std::string add, port, password, remarks, addition, sni, fp;
-    std::vector<std::string> alpnList;
-    tribool udp, tfo, scv;
-    anytls = anytls.substr(9);
-    string_size pos;
+    ParsedShareUri parsed;
+    std::string ignored_ports;
+    if (!parseModernShareUri(std::move(anytls), "anytls", true, "443", false, parsed, ignored_ports))
+        return;
+    if (parsed.remark.empty())
+        parsed.remark = parsed.host + ":" + parsed.port;
 
-    extractRemark(anytls, remarks);
+    const uint16_t idle_check = parseUint16Option(
+        decodedFirstUrlArg(parsed.query, {"idle_session_check_interval", "idle-session-check-interval"}), 30, true);
+    const uint16_t idle_timeout = parseUint16Option(
+        decodedFirstUrlArg(parsed.query, {"idle_session_timeout", "idle-session-timeout"}), 30, true);
+    const uint16_t min_idle = parseUint16Option(
+        decodedFirstUrlArg(parsed.query, {"min_idle_session", "min-idle-session"}), 0);
+    const std::string insecure = decodedFirstUrlArg(parsed.query, {"insecure", "allow_insecure", "allow-insecure"});
 
-    pos = anytls.rfind("?");
-    if (pos != anytls.npos) {
-        addition = anytls.substr(pos + 1);
-        anytls.erase(pos);
+    anyTlSConstruct(node, ANYTLS_DEFAULT_GROUP, parsed.remark, parsed.port, parsed.user, parsed.host,
+                    getUrlAlpnList(parsed.query), decodedFirstUrlArg(parsed.query, {"fp", "fingerprint"}),
+                    decodedUrlArg(parsed.query, "sni"), tribool(decodedUrlArg(parsed.query, "udp")),
+                    tribool(decodedUrlArg(parsed.query, "tfo")), tribool(insecure), tribool(), "",
+                    idle_check, idle_timeout, min_idle);
+    node.TLSStr = decodedUrlArg(parsed.query, "security");
+    if (node.TLSStr.empty())
+        node.TLSStr = "tls";
+    node.PublicKey = decodedUrlArg(parsed.query, "pbk");
+    node.ShortId = decodedUrlArg(parsed.query, "sid");
+}
+
+void explodeNaive(std::string naive, Proxy &node) {
+    const bool quic = startsWith(naive, "naive+quic://");
+    ParsedShareUri parsed;
+    std::string ignored_ports;
+    if (!parseModernShareUri(std::move(naive),
+                             quic ? "naive+quic" : "naive+https", true,
+                             "443", false, parsed, ignored_ports))
+        return;
+
+    std::string username;
+    std::string password = parsed.user;
+    const size_t separator = parsed.user.find(':');
+    if (separator != std::string::npos) {
+        username = parsed.user.substr(0, separator);
+        password = parsed.user.substr(separator + 1);
     }
+    if (password.empty())
+        return;
 
-    pos = anytls.find("@");
-    if (pos != anytls.npos) {
-        password = anytls.substr(0, pos);
-        anytls = anytls.substr(pos + 1);
-    }
-
-    pos = anytls.find(":");
-    if (pos != anytls.npos) {
-        add = anytls.substr(0, pos);
-        port = anytls.substr(pos + 1);
-    }
-
-    if (remarks.empty())
-        remarks = add + ":" + port;
-
-    std::string alpn = getUrlArg(addition, "alpn");
-    if (!alpn.empty()) {
-        auto alpns = split(alpn, ",");
-        for (auto &item : alpns) {
-            if (!item.empty())
-                alpnList.emplace_back(item);
+    uint32_t insecure_concurrency = 0;
+    const std::string concurrency =
+        decodedUrlArg(parsed.query, "insecure-concurrency");
+    if (!concurrency.empty()) {
+        if (!std::all_of(concurrency.begin(), concurrency.end(),
+                         [](unsigned char ch) { return std::isdigit(ch) != 0; }))
+            return;
+        try {
+            const unsigned long long parsed_value = std::stoull(concurrency);
+            if (parsed_value == 0 ||
+                parsed_value > std::numeric_limits<uint32_t>::max())
+                return;
+            insecure_concurrency = static_cast<uint32_t>(parsed_value);
+        } catch (const std::exception &) {
+            return;
         }
     }
 
-    fp = getUrlArg(addition, "fp");
-    if (fp.empty())
-        fp = getUrlArg(addition, "fingerprint");
-    sni = getUrlArg(addition, "sni");
-    udp = getUrlArg(addition, "udp");
-    tfo = getUrlArg(addition, "tfo");
-    scv = getUrlArg(addition, "insecure");
+    if (parsed.remark.empty())
+        parsed.remark = parsed.host + ":" + parsed.port;
+    const std::string insecure = decodedFirstUrlArg(
+        parsed.query, {"insecure", "allow_insecure", "allow-insecure"});
+    naiveConstruct(node, NAIVE_DEFAULT_GROUP, parsed.remark, parsed.port,
+                   username, password, parsed.host,
+                   getUrlAlpnList(parsed.query),
+                   decodedFirstUrlArg(parsed.query, {"fp", "fingerprint"}),
+                   decodedUrlArg(parsed.query, "sni"), tribool(insecure), quic,
+                   insecure_concurrency);
+    node.TLSStr = decodedUrlArg(parsed.query, "security");
+    if (node.TLSStr.empty())
+        node.TLSStr = "tls";
+    node.PublicKey = decodedUrlArg(parsed.query, "pbk");
+    node.ShortId = decodedUrlArg(parsed.query, "sid");
+}
 
-    anyTlSConstruct(node, ANYTLS_DEFAULT_GROUP, remarks, port, password, add, alpnList, fp, sni, udp, tfo, scv,
-                    tribool(), "", 30, 30, 0);
+void explodeWireGuard(std::string wireguard, Proxy &node) {
+    ParsedShareUri parsed;
+    if (!parseShareUri(std::move(wireguard), "wireguard", parsed))
+        return;
+
+    const std::string public_key = decodedUrlArg(parsed.query, "publickey");
+    const std::string address = decodedUrlArg(parsed.query, "address");
+    if (parsed.user.empty() || public_key.empty() || address.empty())
+        return;
+
+    string_array local_addresses;
+    std::string self_ip;
+    std::string self_ipv6;
+    for (std::string item : split(address, ",")) {
+        item = trim(item);
+        if (item.empty())
+            return;
+        const size_t slash = item.find('/');
+        const std::string host = slash == std::string::npos
+                                     ? item
+                                     : item.substr(0, slash);
+        const std::string prefix = slash == std::string::npos
+                                       ? std::string()
+                                       : item.substr(slash + 1);
+        if (slash != std::string::npos &&
+            (prefix.empty() || prefix.size() > 3 ||
+             !std::all_of(prefix.begin(), prefix.end(), [](unsigned char ch) {
+                 return std::isdigit(ch) != 0;
+             })))
+            return;
+        if (isIPv4(host)) {
+            if (!self_ip.empty())
+                return;
+            if (!prefix.empty() && to_int(prefix, -1) > 32)
+                return;
+            self_ip = host;
+            if (slash == std::string::npos)
+                item += "/32";
+        } else if (isIPv6(host)) {
+            if (!self_ipv6.empty())
+                return;
+            if (!prefix.empty() && to_int(prefix, -1) > 128)
+                return;
+            self_ipv6 = host;
+            if (slash == std::string::npos)
+                item += "/128";
+        } else {
+            return;
+        }
+        local_addresses.emplace_back(std::move(item));
+    }
+
+    const std::string mtu = decodedUrlArg(parsed.query, "mtu");
+    if (!mtu.empty() && parseUint16Option(mtu, 0) == 0)
+        return;
+    const std::string reserved = normalizeWireGuardReserved(
+        decodedUrlArg(parsed.query, "reserved"));
+    if (!decodedUrlArg(parsed.query, "reserved").empty() && reserved.empty())
+        return;
+
+    if (parsed.remark.empty())
+        parsed.remark = parsed.host + ":" + parsed.port;
+    wireguardConstruct(node, WG_DEFAULT_GROUP, parsed.remark, parsed.host,
+                       parsed.port, self_ip, self_ipv6, parsed.user, public_key,
+                       decodedUrlArg(parsed.query, "presharedkey"), {}, mtu,
+                       "0", "", reserved, tribool(), "");
+    node.WireGuardLocalAddresses = std::move(local_addresses);
+    syncLegacyWireGuardProjection(node);
 }
 
 void explode(const std::string &link, Proxy &node) {
@@ -3279,7 +5862,8 @@ void explode(const std::string &link, Proxy &node) {
         explodeVmess(link, node);
     else if (startsWith(link, "ss://"))
         explodeSS(link, node);
-    else if (startsWith(link, "socks://") || startsWith(link, "https://t.me/socks") || startsWith(link, "tg://socks"))
+    else if (startsWith(link, "socks://") || startsWith(link, "https://t.me/socks") ||
+             startsWith(link, "tg://socks"))
         explodeSocks(link, node);
     else if (startsWith(link, "https://t.me/http") || startsWith(link, "tg://http")) //telegram style http link
         explodeHTTP(link, node);
@@ -3295,9 +5879,17 @@ void explode(const std::string &link, Proxy &node) {
         explodeTuic(link, node);
     else if (strFind(link, "anytls://"))
         explodeAnyTLS(link, node);
+    else if (startsWith(link, "naive+https://") ||
+             startsWith(link, "naive+quic://"))
+        explodeNaive(link, node);
+    else if (startsWith(link, "wireguard://"))
+        explodeWireGuard(link, node);
+    else if (startsWith(link, "hysteria2+realm://") ||
+             startsWith(link, "hysteria2+realm+http://"))
+        explodeHysteria2Realm(link, node);
     else if (strFind(link, "hysteria2://") || strFind(link, "hy2://"))
         explodeHysteria2(link, node);
-    else if (strFind(link, "mierus://") || strFind(link, "mieru://"))
+    else if (startsWith(link, "mierus://") || startsWith(link, "mieru://"))
         explodeMierus(link, node);
     else if (isLink(link))
         explodeHTTPSub(link, node);
@@ -3330,23 +5922,18 @@ void explodeSub(std::string sub, std::vector<Proxy> &nodes) {
         throw;
     }
     try {
-        std::string pattern = "\"?(inbounds)\"?:";
-        if (!processed &&
-            regFind(sub, pattern)) {
-            pattern = "\"?(outbounds)\"?:";
-            if (regFind(sub, pattern)) {
-                pattern = "\"?(route)\"?:";
-                if (regFind(sub, pattern)) {
-                    rapidjson::Document document;
-                    document.Parse(sub.c_str());
-                    if (!document.HasParseError() || document.IsObject()) {
-                        rapidjson::Value &value = document["outbounds"];
-                        if (value.IsArray() && !value.Empty()) {
-                            explodeSingbox(value, nodes);
-                            processed = true;
-                        }
-                    }
-                }
+        if (!processed && !sub.empty() && sub.front() == '{') {
+            rapidjson::Document document;
+            document.Parse(sub.c_str());
+            if (!document.HasParseError() && document.IsObject()) {
+                const size_t before = nodes.size();
+                if (document.HasMember("outbounds") &&
+                    document["outbounds"].IsArray())
+                    explodeSingbox(document["outbounds"], nodes);
+                if (document.HasMember("endpoints") &&
+                    document["endpoints"].IsArray())
+                    explodeSingboxEndpoints(document["endpoints"], nodes);
+                processed = nodes.size() > before;
             }
         }
     } catch (std::exception &e) {
@@ -3365,7 +5952,8 @@ void explodeSub(std::string sub, std::vector<Proxy> &nodes) {
     //try to parse as normal subscription
     if (!processed) {
         sub = urlSafeBase64Decode(sub);
-        if (regFind(sub, "(vmess|shadowsocks|http|trojan)\\s*?=")) {
+        if (sub.find("[Proxy]") != std::string::npos ||
+            regFind(sub, "(?i)(vmess|vless|shadowsocks|hysteria2|anytls|http|trojan)\\s*?=")) {
             if (explodeSurge(sub, nodes))
                 return;
         }
@@ -3373,9 +5961,13 @@ void explodeSub(std::string sub, std::vector<Proxy> &nodes) {
         char delimiter =
                 count(sub.begin(), sub.end(), '\n') < 1 ? count(sub.begin(), sub.end(), '\r') < 1 ? ' ' : '\r' : '\n';
         while (getline(strstream, strLink, delimiter)) {
-            Proxy node;
             if (strLink.rfind('\r') != std::string::npos)
                 strLink.erase(strLink.size() - 1);
+            if (startsWith(strLink, "mierus://")) {
+                explodeMierusNodes(strLink, nodes);
+                continue;
+            }
+            Proxy node;
             explode(strLink, node);
             if (strLink.empty() || node.Type == ProxyType::Unknown) {
                 continue;

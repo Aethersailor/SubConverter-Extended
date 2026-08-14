@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import base64
 import difflib
+import hashlib
 import json
 import re
 import sys
@@ -22,8 +23,87 @@ from pathlib import Path
 
 
 SAMPLE_SS_LINK = "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388#Smoke"
+MIERU_OFFICIAL_SIMPLE_URI = (
+    "mierus://baozi:manlianpenfen@1.2.3.4?"
+    "handshake-mode=HANDSHAKE_NO_WAIT&mtu=1400&"
+    "multiplexing=MULTIPLEXING_HIGH&port=6666&port=9998-9999&"
+    "port=6489&port=4896&profile=default&protocol=TCP&protocol=TCP&"
+    "protocol=UDP&protocol=UDP&"
+    "traffic-pattern=CCoQARoECAEQCiIYCAMQASoIMDAwMTAyMDMqCDA0MDUwNjA3"
+)
+MIERU_STANDARD_PROTOBUF_URI = (
+    "mieru://CpsBCgdkZWZhdWx0ElgKBWJhb3ppEg1tYW5saWFucGVuZmVu"
+    "GkA0MGFiYWM0MGY1OWRhNTVkYWQ2YTk5ODMxYTUxMTY1MjJmYmM4MGUzODVi"
+    "YjFhYjE0ZGM1MmRiMzY4ZjczOGE0Gi8SCWxvY2FsaG9zdBoFCIo0EAIaDRAC"
+    "Ggk5OTk5LTk5OTkaBQjZMhABGgUIoCYQASD4CioCCAQSB2RlZmF1bHQYnUYg"
+    "uAgwBTgA"
+)
 DIRECT_SS_LINK = (
     "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@direct.example.com:8389#DirectSmoke"
+)
+V2RAY_CLIENT_VMESS_LINK = "vmess://" + base64.urlsafe_b64encode(
+    json.dumps(
+        {
+            "v": "2",
+            "ps": "V2RayClientSmoke",
+            "add": "v2ray-client-smoke.example.test",
+            "port": "443",
+            "id": "33333333-3333-4333-8333-333333333333",
+            "aid": "0",
+            "scy": "auto",
+            "net": "grpc",
+            "type": "multi",
+            "path": "smoke-service",
+            "host": "",
+            "tls": "tls",
+            "sni": "v2ray-client-sni.example.test",
+        },
+        separators=(",", ":"),
+    ).encode()
+).decode().rstrip("=")
+V2RAY_CLIENT_HY2_LINK = (
+    "hysteria2://smoke-password@hy2-v2ray-client.example.test:8443"
+    "?obfs=salamander&obfs-password=smoke-obfs"
+    "&sni=hy2-v2ray-client.example.test#V2RayClientHy2"
+)
+V2RAYN_REALM_LINK = (
+    "hysteria2+realm://smoke-token@realm-v2rayn.example.test:8443/smoke-id"
+    "?auth=smoke-realm-password&stun=stun.example.test%3A3478"
+    "&sni=realm-v2rayn.example.test&obfs=gecko"
+    "&obfs-password=smoke-realm-obfs#V2RayNRealm"
+)
+V2RAYN_ANYTLS_LINK = (
+    "anytls://smoke-password@anytls-v2rayn.example.test:443"
+    "?sni=anytls-v2rayn.example.test#V2RayNAnyTLS"
+)
+SHADOWROCKET_HYSTERIA_LINK = (
+    "hysteria://hy1-shadowrocket.example.test:36712"
+    "?protocol=udp&auth=smoke-password&peer=hy1-shadowrocket.example.test"
+    "&insecure=1&upmbps=100&downmbps=200&alpn=h3"
+    "&obfs=xplus&obfsParam=smoke-obfs#ShadowrocketHy1"
+)
+SHADOWROCKET_ANYTLS_LINK = (
+    "anytls://smoke-password@anytls-shadowrocket.example.test:443/"
+    "?sni=anytls-shadowrocket.example.test#ShadowrocketAnyTLS"
+)
+SHADOWROCKET_LOSSY_ANYTLS_LINK = (
+    "anytls://smoke-password@anytls-shadowrocket.example.test:443/"
+    "?sni=anytls-shadowrocket.example.test&fp=chrome#LossyAnyTLS"
+)
+STASH_MIERU_LINK = (
+    "mierus://stash-user:stash-password@mieru-stash.example.test?"
+    "profile=default&port=9998-9999&protocol=TCP"
+)
+STASH_HYSTERIA2_LINK = (
+    "hysteria2://stash-password@hy2-stash.example.test:8443/"
+    "?sni=hy2-stash.example.test#StashHy2"
+)
+SHADOWROCKET_STAGE_ONE_SMOKE_SHA256 = (
+    "7f12b33d4d71596e81abd0e9f79b1f95b59d964bbd8f80fe33b840f60f62ecc6"
+)
+V2RAYN_NAIVE_LINK = (
+    "naive+https://smoke-user:smoke-password@naive-v2rayn.example.test:443"
+    "?sni=naive-v2rayn.example.test#V2RayNNaive"
 )
 MIHOMO_ONLY_ROUTE_URI = (
     "socks5://user:pass@socks.example.test:1080#RouteProbe"
@@ -87,6 +167,21 @@ PROVIDER_FILTER_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
         )
     )
 ).decode("ascii")
+QUANX_REMOTE_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
+    b"enable_rule_generator=false\ncustom_proxy_group=Remote`select`.*\n"
+).decode("ascii")
+STASH_RULE_PROVIDER_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
+    b"\n".join(
+        (
+            b"enable_rule_generator=true",
+            b"overwrite_original_rules=true",
+            b"custom_proxy_group=RuleGroup`select`.*",
+            b"ruleset=RuleGroup,clash-domain:https://127.0.0.1:1/"
+            b"stash-smoke-domain.mrs?token=stash-rule-smoke-secret,3600",
+            b"ruleset=RuleGroup,[]GEOSITE,telegram",
+        )
+    )
+).decode("ascii")
 AGE_PUBLIC_KEY = (
     "age1xh86kh9v23vattr58yedspm3f57sxvnswu9krr6ns438amekx5gsd09uma"
 )
@@ -96,6 +191,21 @@ def build_url(base_url: str, path: str, params: dict[str, str] | None = None) ->
     base = base_url.rstrip("/")
     query = urllib.parse.urlencode(params or {})
     return f"{base}{path}" + (f"?{query}" if query else "")
+
+
+def decode_v2ray_internal_subscription(content: str) -> list[tuple[str, dict]]:
+    profiles: list[tuple[str, dict]] = []
+    for line in content.splitlines():
+        prefix = "v2rayn://"
+        if not line.startswith(prefix) or "/" not in line[len(prefix) :]:
+            raise AssertionError(f"invalid v2rayN internal link: {line!r}")
+        scheme, payload = line[len(prefix) :].split("/", 1)
+        payload += "=" * (-len(payload) % 4)
+        profile = json.loads(base64.urlsafe_b64decode(payload))
+        if profile.get("ConfigVersion") != 4:
+            raise AssertionError(f"invalid v2rayN ProfileItem: {profile!r}")
+        profiles.append((scheme, profile))
+    return profiles
 
 
 def fetch_response(
@@ -323,6 +433,203 @@ def assert_parser_route_isolation(base_url: str, timeout: int) -> None:
     )
 
 
+def assert_mieru_standard_mihomo_bridge(base_url: str, timeout: int) -> None:
+    for target, headers in (
+        ("clash", None),
+        ("clashr", None),
+        ("auto", {"User-Agent": "clash.meta/1.19.29"}),
+        ("auto", {"User-Agent": "ClashForAndroid/1.3.3R2"}),
+    ):
+        converted = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": target,
+                "url": MIERU_STANDARD_PROTOBUF_URI,
+                "list": "true",
+            },
+            timeout,
+            headers,
+        )
+        if (
+            converted.count("type: mieru") != 4
+            or "server: localhost" not in converted
+            or "port: 6666" not in converted
+            or "port-range: 9999-9999" not in converted
+            or "transport: TCP" not in converted
+            or "transport: UDP" not in converted
+            or "multiplexing: MULTIPLEXING_HIGH" not in converted
+        ):
+            raise AssertionError(
+                "official standard Mieru URI did not stay on the Mihomo-only "
+                f"route for target={target}: {converted!r}"
+            )
+
+    assert_rejected(
+        base_url,
+        "/sub",
+        {
+            "target": "clash",
+            "url": "mieru://AQIDBA==",
+            "list": "true",
+        },
+        timeout,
+        "invalid standard Mieru protobuf",
+    )
+    assert_rejected(
+        base_url,
+        "/sub",
+        {
+            "target": "surge",
+            "ver": "4",
+            "url": MIERU_STANDARD_PROTOBUF_URI,
+            "list": "true",
+        },
+        timeout,
+        "standard Mieru URI on the Legacy-only Surge route",
+    )
+
+    legacy_report = json.loads(
+        fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "surge",
+                "ver": "4",
+                "url": MIERU_STANDARD_PROTOBUF_URI + "|" + SAMPLE_SS_LINK,
+                "list": "true",
+                "explain": "true",
+            },
+            timeout,
+        )
+    )
+    if (
+        legacy_report.get("nodes", {}).get("total") != 1
+        or legacy_report.get("nodes", {}).get("generated") != 1
+        or legacy_report.get("nodes", {}).get("unsupported") != 0
+    ):
+        raise AssertionError(
+            "standard Mieru input leaked into the Legacy parser or affected an "
+            f"independent SS node: {legacy_report!r}"
+        )
+
+    assert_rejected(
+        base_url,
+        "/sub",
+        {
+            "target": "loon",
+            "url": MIERU_OFFICIAL_SIMPLE_URI,
+            "list": "true",
+        },
+        timeout,
+        "unified target-generation all-unsupported fail-close",
+    )
+
+
+def assert_netch_legacy_parser(base_url: str, timeout: int) -> None:
+    def netch_link(node: dict[str, object]) -> str:
+        payload = json.dumps(node, separators=(",", ":")).encode("utf-8")
+        encoded = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+        return "Netch://" + encoded
+
+    def data_url(value: dict[str, object]) -> str:
+        payload = json.dumps(value, separators=(",", ":")).encode("utf-8")
+        encoded = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+        return "data:application/json;base64," + encoded
+
+    socks = {
+        "Type": "SOCKS",
+        "Remark": "Netch Smoke SOCKS",
+        "Hostname": "socks-netch-smoke.example.test",
+        "Port": 1080,
+        "Username": "smoke-user",
+        "Password": "smoke-password",
+        "Version": 5,
+    }
+    vless = {
+        "Type": "VLESS",
+        "Remark": "Netch Smoke VLESS",
+        "Hostname": "vless-netch-smoke.example.test",
+        "Port": 443,
+        "UserID": "22222222-2222-2222-2222-222222222222",
+        "EncryptMethod": "none",
+        "TransferProtocol": "grpc",
+        "PacketEncoding": "xudp",
+        "FakeType": "multi",
+        "Path": "smoke-service",
+        "TLSSecureType": "tls",
+        "ServerName": "vless-sni-smoke.example.test",
+    }
+    ssh = {
+        "Type": "SSH",
+        "Remark": "Netch Unsupported SSH",
+        "Hostname": "ssh-netch-smoke.example.test",
+        "Port": 22,
+        "User": "root",
+        "Password": "not-a-proxy-protocol",
+    }
+
+    direct = json.loads(
+        fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "singbox",
+                "url": netch_link(socks),
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+            timeout,
+        )
+    ).get("outbounds", [])
+    if (
+        len(direct) != 1
+        or direct[0].get("type") != "socks"
+        or direct[0].get("tag") != "Netch Smoke SOCKS"
+        or direct[0].get("version") != "5"
+    ):
+        raise AssertionError(f"modern Netch share link drifted: {direct!r}")
+
+    settings = json.loads(
+        fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "singbox",
+                "url": data_url({"Server": [socks, vless, ssh]}),
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+            timeout,
+        )
+    ).get("outbounds", [])
+    by_tag = {outbound.get("tag"): outbound for outbound in settings}
+    if set(by_tag) != {"Netch Smoke SOCKS", "Netch Smoke VLESS"}:
+        raise AssertionError(f"modern Netch settings.json drifted: {settings!r}")
+    vless_outbound = by_tag["Netch Smoke VLESS"]
+    if (
+        vless_outbound.get("packet_encoding") != "xudp"
+        or vless_outbound.get("transport")
+        != {"type": "grpc", "service_name": "smoke-service"}
+        or vless_outbound.get("tls", {}).get("server_name")
+        != "vless-sni-smoke.example.test"
+    ):
+        raise AssertionError(f"modern Netch VLESS fields drifted: {vless_outbound!r}")
+
+    assert_rejected(
+        base_url,
+        "/sub",
+        {
+            "target": "clash",
+            "url": netch_link(socks),
+            "config": DISABLE_RULEGEN_CONFIG,
+            "list": "true",
+        },
+        timeout,
+        "Clash Mihomo-only route with a Netch share link",
+    )
+
+
 def run_checks(
     base_url: str,
     timeout: int,
@@ -424,6 +731,286 @@ def run_checks(
 
     if verify_non_clash:
         assert_parser_route_isolation(base_url, timeout)
+        assert_mieru_standard_mihomo_bridge(base_url, timeout)
+        assert_netch_legacy_parser(base_url, timeout)
+
+        desktop_profiles = decode_v2ray_internal_subscription(
+            fetch(
+                base_url,
+                "/sub",
+                {
+                    "target": "v2rayn",
+                    "url": "|".join(
+                        (
+                            V2RAY_CLIENT_VMESS_LINK,
+                            V2RAYN_ANYTLS_LINK,
+                            V2RAYN_NAIVE_LINK,
+                            V2RAYN_REALM_LINK,
+                        )
+                    ),
+                    "config": DISABLE_RULEGEN_CONFIG,
+                    "list": "true",
+                },
+                timeout,
+            )
+        )
+        if [item[1].get("ConfigType") for item in desktop_profiles] != [
+            1,
+            11,
+            12,
+            7,
+        ]:
+            raise AssertionError(
+                f"v2rayN deployed protocol matrix drifted: {desktop_profiles!r}"
+            )
+        if any(
+            item[1].get("CoreType") != 24 for item in desktop_profiles[1:3]
+        ):
+            raise AssertionError(
+                f"v2rayN sing-box-only core mapping drifted: {desktop_profiles!r}"
+            )
+        realm_extra = desktop_profiles[3][1].get("ProtoExtraObj", {})
+        if (
+            desktop_profiles[3][1].get("CoreType") != 24
+            or not realm_extra.get("Hy2RealmUrl", "").startswith("realm://")
+            or realm_extra.get("GeckoMinPacketSize") != "512"
+            or realm_extra.get("GeckoMaxPacketSize") != "1200"
+        ):
+            raise AssertionError(
+                f"v2rayN deployed Realm/Gecko mapping drifted: {desktop_profiles!r}"
+            )
+
+        android_profiles = decode_v2ray_internal_subscription(
+            fetch(
+                base_url,
+                "/sub",
+                {
+                    "target": "v2rayng",
+                    "url": f"{V2RAY_CLIENT_VMESS_LINK}|{V2RAY_CLIENT_HY2_LINK}",
+                    "config": DISABLE_RULEGEN_CONFIG,
+                    "list": "true",
+                },
+                timeout,
+            )
+        )
+        if [item[1].get("ConfigType") for item in android_profiles] != [1, 7]:
+            raise AssertionError(
+                f"v2rayNG deployed protocol matrix drifted: {android_profiles!r}"
+            )
+        auto_android = decode_v2ray_internal_subscription(
+            fetch(
+                base_url,
+                "/sub",
+                {
+                    "target": "auto",
+                    "url": V2RAY_CLIENT_VMESS_LINK,
+                    "config": DISABLE_RULEGEN_CONFIG,
+                    "list": "true",
+                },
+                timeout,
+                {"User-Agent": "v2rayNG/1.10.29"},
+            )
+        )
+        if len(auto_android) != 1 or auto_android[0][1].get("ConfigType") != 1:
+            raise AssertionError(
+                f"v2rayNG deployed auto-target drifted: {auto_android!r}"
+            )
+        assert_rejected(
+            base_url,
+            "/sub",
+            {
+                "target": "v2rayng",
+                "url": V2RAYN_ANYTLS_LINK,
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+            timeout,
+            "v2rayNG desktop-only AnyTLS profile",
+        )
+
+        legacy_v2ray = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "v2ray",
+                "url": V2RAY_CLIENT_VMESS_LINK,
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+            timeout,
+        )
+        if not legacy_v2ray.startswith("vmess://") or "v2rayn://" in legacy_v2ray:
+            raise AssertionError("historical target=v2ray output contract changed")
+
+        shadowrocket_params = {
+            "target": "shadowrocket",
+            "url": "|".join(
+                (
+                    SAMPLE_SS_LINK,
+                    V2RAY_CLIENT_VMESS_LINK,
+                    V2RAY_CLIENT_HY2_LINK,
+                    SHADOWROCKET_HYSTERIA_LINK,
+                    SHADOWROCKET_ANYTLS_LINK,
+                    MIERU_OFFICIAL_SIMPLE_URI,
+                )
+            ),
+            "config": DISABLE_RULEGEN_CONFIG,
+            "list": "true",
+        }
+        shadowrocket = fetch(
+            base_url,
+            "/sub",
+            shadowrocket_params,
+            timeout,
+        )
+        if [line.split("://", 1)[0] for line in shadowrocket.splitlines()] != [
+            "ss",
+            "vmess",
+            "hysteria2",
+            "hysteria",
+            "anytls",
+            "mierus",
+        ]:
+            raise AssertionError(
+                f"Shadowrocket deployed protocol matrix drifted: {shadowrocket!r}"
+            )
+        encoded_shadowrocket = fetch(
+            base_url,
+            "/sub",
+            {**shadowrocket_params, "list": "false"},
+            timeout,
+        )
+        try:
+            decoded_shadowrocket = base64.b64decode(
+                encoded_shadowrocket, validate=True
+            ).decode()
+        except (ValueError, UnicodeDecodeError) as error:
+            raise AssertionError(
+                "Shadowrocket deployed default output is not strict Base64"
+            ) from error
+        if decoded_shadowrocket != shadowrocket:
+            raise AssertionError(
+                "Shadowrocket deployed raw and Base64 subscriptions diverged"
+            )
+        shadowrocket_report = json.loads(
+            fetch(
+                base_url,
+                "/sub",
+                {**shadowrocket_params, "explain": "true"},
+                timeout,
+            )
+        )
+        shadowrocket_nodes = shadowrocket_report.get("nodes", {})
+        if (
+            shadowrocket_report.get("target") != "shadowrocket"
+            or shadowrocket_nodes.get("total") != 9
+            or shadowrocket_nodes.get("generated") != 9
+            or shadowrocket_nodes.get("unsupported") != 0
+        ):
+            raise AssertionError(
+                "Shadowrocket deployed generation diagnostics drifted: "
+                f"{shadowrocket_report!r}"
+            )
+        mixed = fetch(
+            base_url,
+            "/sub",
+            {**shadowrocket_params, "target": "mixed"},
+            timeout,
+        )
+        expected_mixed = "\n".join(shadowrocket.splitlines()[:3]) + "\n"
+        if (
+            mixed != expected_mixed
+            or hashlib.sha256(mixed.encode()).hexdigest()
+            != SHADOWROCKET_STAGE_ONE_SMOKE_SHA256
+        ):
+            raise AssertionError(
+                "target=shadowrocket changed the historical mixed output contract: "
+                f"{mixed!r} != {expected_mixed!r}"
+            )
+        for isolated_target in ("mixed", "v2ray"):
+            assert_rejected(
+                base_url,
+                "/sub",
+                {
+                    "target": isolated_target,
+                    "url": "|".join(
+                        (
+                            SHADOWROCKET_HYSTERIA_LINK,
+                            SHADOWROCKET_ANYTLS_LINK,
+                            MIERU_OFFICIAL_SIMPLE_URI,
+                        )
+                    ),
+                    "config": DISABLE_RULEGEN_CONFIG,
+                    "list": "true",
+                },
+                timeout,
+                f"Shadowrocket-only protocols on target={isolated_target}",
+            )
+        auto_shadowrocket, auto_shadowrocket_headers = fetch_response(
+            base_url,
+            "/sub",
+            {**shadowrocket_params, "target": "auto"},
+            timeout,
+            {"User-Agent": "Shadowrocket/2.2.60"},
+        )
+        if auto_shadowrocket != shadowrocket:
+            raise AssertionError(
+                "Shadowrocket deployed auto-target did not select its dedicated path"
+            )
+        if "user-agent" not in {
+            value.strip().lower()
+            for value in auto_shadowrocket_headers.get("vary", "").split(",")
+            if value.strip()
+        }:
+            raise AssertionError(
+                "Shadowrocket deployed auto-target is missing Vary: User-Agent"
+            )
+        mieru_lines = [
+            line for line in shadowrocket.splitlines() if line.startswith("mierus://")
+        ]
+        if len(mieru_lines) != 1:
+            raise AssertionError(
+                f"Shadowrocket did not aggregate Mieru bindings: {shadowrocket!r}"
+            )
+        mieru_parts = urllib.parse.urlsplit(mieru_lines[0])
+        mieru_query = urllib.parse.parse_qs(
+            mieru_parts.query, keep_blank_values=True
+        )
+        if (
+            mieru_query.get("profile") != ["default"]
+            or mieru_query.get("port")
+            != ["6666", "9998-9999", "6489", "4896"]
+            or mieru_query.get("protocol") != ["TCP", "TCP", "UDP", "UDP"]
+            or mieru_query.get("traffic-pattern")
+            != ["CCoQARoECAEQCiIYCAMQASoIMDAwMTAyMDMqCDA0MDUwNjA3"]
+        ):
+            raise AssertionError(
+                f"Shadowrocket deployed Mieru link drifted: {mieru_lines[0]!r}"
+            )
+        assert_rejected(
+            base_url,
+            "/sub",
+            {
+                "target": "shadowrocket",
+                "url": MIERU_STANDARD_PROTOBUF_URI,
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+            timeout,
+            "Shadowrocket protobuf Mieru link on Legacy route",
+        )
+        assert_rejected(
+            base_url,
+            "/sub",
+            {
+                "target": "shadowrocket",
+                "url": SHADOWROCKET_LOSSY_ANYTLS_LINK,
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+            timeout,
+            "Shadowrocket non-portable AnyTLS link",
+        )
 
     direct_config = fetch(base_url, "/sub", common_params, timeout)
     if "Smoke" not in direct_config or "proxies:" not in direct_config:
@@ -575,6 +1162,340 @@ def run_checks(
     assert_snapshot("provider-explain.json", provider_explain, snapshot_dir, update)
 
     if remote_subscription_url:
+        dead_quanx_source = (
+            "https://127.0.0.1:1/quanx-must-not-fetch"
+            "?token=quanx-smoke-source-secret"
+        )
+        quanx_output, quanx_headers = fetch_response(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": f"provider:QXSmoke,interval:0,{dead_quanx_source}",
+                "config": QUANX_REMOTE_CONFIG,
+            },
+            timeout,
+        )
+        for expected in (
+            "[server_remote]",
+            dead_quanx_source,
+            "tag=QXSmoke",
+            "update-interval=-1",
+            "enabled=true",
+            "resource-tag-regex=^QXSmoke$",
+            "server-tag-regex=.*",
+        ):
+            if expected not in quanx_output:
+                raise AssertionError(
+                    f"Quantumult X server_remote output is missing {expected!r}\n"
+                    f"{quanx_output}"
+                )
+        if "opt-parser=" in quanx_output:
+            raise AssertionError("Quantumult X smoke output enabled opt-parser implicitly")
+        if "user-agent" not in quanx_headers.get("vary", "").lower():
+            raise AssertionError(
+                "Quantumult X server_remote response did not emit Vary: User-Agent"
+            )
+
+        quanx_explain = json.loads(
+            fetch(
+                base_url,
+                "/sub",
+                {
+                    "target": "quanx",
+                    "url": f"provider:QXExplain,{dead_quanx_source}",
+                    "config": QUANX_REMOTE_CONFIG,
+                    "explain": "true",
+                },
+                timeout,
+            )
+        )
+        if (
+            quanx_explain.get("mode", {}).get("remote_subscription_backend")
+            != "quanx-server-remote"
+            or quanx_explain.get("mode", {}).get("remote_subscription_reason")
+            != "native-capable"
+            or quanx_explain.get("output", {}).get("remote_subscription_count") != 1
+        ):
+            raise AssertionError(
+                f"Quantumult X explain route mismatch: {quanx_explain!r}"
+            )
+        if "quanx-smoke-source-secret" in json.dumps(quanx_explain):
+            raise AssertionError("Quantumult X explain leaked its source credential")
+
+        auto_quanx = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "auto",
+                "url": f"provider:QXAuto,{dead_quanx_source}",
+                "config": QUANX_REMOTE_CONFIG,
+            },
+            timeout,
+            {"User-Agent": "Quantumult%20X/1.4"},
+        )
+        if "tag=QXAuto" not in auto_quanx or dead_quanx_source not in auto_quanx:
+            raise AssertionError("auto Quantumult X did not select server_remote")
+
+        mixed_quanx = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": f"provider:QXMixed,{dead_quanx_source}|{DIRECT_SS_LINK}",
+                "config": QUANX_REMOTE_CONFIG,
+            },
+            timeout,
+        )
+        for expected in ("tag=QXMixed", "DirectSmoke", "[server_local]"):
+            if expected not in mixed_quanx:
+                raise AssertionError(
+                    f"mixed Quantumult X output is missing {expected!r}\n{mixed_quanx}"
+                )
+
+        dead_loon_source = (
+            "https://127.0.0.1:1/loon-must-not-fetch"
+            "?token=loon-smoke-source-secret"
+        )
+        loon_output = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "loon",
+                "url": f"provider:LoonSmoke,{dead_loon_source}",
+                "config": QUANX_REMOTE_CONFIG,
+            },
+            timeout,
+        )
+        for expected in (
+            "[Remote Proxy]",
+            f"LoonSmoke={dead_loon_source}",
+            "[Proxy Group]",
+            "Remote = select,LoonSmoke",
+        ):
+            if expected not in loon_output:
+                raise AssertionError(
+                    f"Loon remote-proxy output is missing {expected!r}\n{loon_output}"
+                )
+
+        dead_stash_source = (
+            "https://127.0.0.1:1/stash-must-not-fetch.yaml"
+            "?token=stash-smoke-source-secret"
+        )
+        stash_output = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "stash",
+                "url": f"provider:StashSmoke,interval:7200,{dead_stash_source}",
+                "config": QUANX_REMOTE_CONFIG,
+            },
+            timeout,
+        )
+        for expected in (
+            "default-nameserver:",
+            "- 223.5.5.5",
+            "- 1.12.12.12",
+            "- doh3://223.5.5.5/dns-query",
+            "- https://1.12.12.12/dns-query",
+            "skip-cert-verify: false",
+            "follow-rule: false",
+            "proxy-providers:",
+            "StashSmoke:",
+            f"url: {dead_stash_source}",
+            "path: ./providers/StashSmoke.yaml",
+            "interval: 7200",
+            "use:",
+            "- StashSmoke",
+            "name: Proxy",
+            "- Remote",
+        ):
+            if expected not in stash_output:
+                raise AssertionError(
+                    f"Stash provider output is missing {expected!r}\n{stash_output}"
+                )
+        stash_provider_block = stash_output.split("StashSmoke:", 1)[1].split(
+            "proxy-groups:", 1
+        )[0]
+        if any(
+            field in stash_provider_block
+            for field in (
+                "type:",
+                "proxy:",
+                "header:",
+                "health-check:",
+                "override:",
+                "exclude-filter:",
+            )
+        ):
+            raise AssertionError(
+                f"Stash provider leaked Mihomo fields: {stash_provider_block!r}"
+            )
+        stash_explain = json.loads(
+            fetch(
+                base_url,
+                "/sub",
+                {
+                    "target": "stash",
+                    "url": f"provider:StashSmoke,{dead_stash_source}",
+                    "config": QUANX_REMOTE_CONFIG,
+                    "explain": "true",
+                },
+                timeout,
+            )
+        )
+        if (
+            stash_explain.get("mode", {}).get("remote_subscription_backend")
+            != "stash-proxy-provider"
+            or stash_explain.get("resources", {}).get(
+                "remote_subscription_count"
+            )
+            != 1
+        ):
+            raise AssertionError(f"Stash explain route mismatch: {stash_explain!r}")
+        if "stash-smoke-source-secret" in json.dumps(stash_explain):
+            raise AssertionError("Stash explain leaked its source token")
+
+        stash_rules = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "stash",
+                "url": f"provider:RuleNodes,{dead_stash_source}",
+                "config": STASH_RULE_PROVIDER_CONFIG,
+            },
+            timeout,
+        )
+        for expected in (
+            "rule-providers:",
+            "stash-smoke-domain:",
+            "behavior: domain",
+            "format: mrs",
+            "path: ./rules/stash-smoke-domain.mrs",
+            "RULE-SET,stash-smoke-domain,RuleGroup",
+            "GEOSITE,telegram,RuleGroup",
+        ):
+            if expected not in stash_rules:
+                raise AssertionError(
+                    f"Stash native rule-provider output is missing {expected!r}\n"
+                    f"{stash_rules}"
+                )
+        stash_rule_provider_block = provider_block_from_output(
+            stash_rules, "stash-smoke-domain"
+        )
+        expected_rule_provider_fields = (
+            "    behavior: domain",
+            "    format: mrs",
+            "    url: https://127.0.0.1:1/stash-smoke-domain.mrs?"
+            "token=stash-rule-smoke-secret",
+            "    path: ./rules/stash-smoke-domain.mrs",
+            "    interval: 3600",
+        )
+        stash_rule_provider_lines = set(stash_rule_provider_block.splitlines())
+        if any(
+            field not in stash_rule_provider_lines
+            for field in expected_rule_provider_fields
+        ):
+            raise AssertionError(
+                "Stash rule-provider fields are not associated with the "
+                f"expected provider:\n{stash_rule_provider_block}"
+            )
+        if "type:" in stash_rule_provider_block:
+            raise AssertionError(
+                "Stash rule-provider leaked the Mihomo type field"
+            )
+        stash_rules_explain = json.loads(
+            fetch(
+                base_url,
+                "/sub",
+                {
+                    "target": "stash",
+                    "url": f"provider:RuleNodes,{dead_stash_source}",
+                    "config": STASH_RULE_PROVIDER_CONFIG,
+                    "explain": "true",
+                },
+                timeout,
+            )
+        )
+        stash_rule_resources = stash_rules_explain.get("resources", {})
+        if (
+            stash_rules_explain.get("target") != "stash"
+            or stash_rules_explain.get("ok") is not True
+            or stash_rules_explain.get("status_code") != 200
+            or stash_rule_resources.get("ruleset_count") != 2
+            or stash_rule_resources.get("rule_provider_count") != 1
+            or stash_rule_resources.get("inline_rule_source_count") != 1
+            or stash_rule_resources.get("expanded_rule_source_count") != 0
+            or stash_rule_resources.get("unsupported_ruleset_count") != 0
+        ):
+            raise AssertionError(
+                f"Stash native rule-provider Explain mismatch: "
+                f"{stash_rules_explain!r}"
+            )
+        stash_rules_explain_text = json.dumps(stash_rules_explain)
+        if any(
+            secret in stash_rules_explain_text
+            for secret in (
+                "stash-rule-smoke-secret",
+                "stash-smoke-source-secret",
+            )
+        ):
+            raise AssertionError("Stash rule-provider Explain leaked a token")
+
+        stash_direct = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "stash",
+                "url": STASH_MIERU_LINK + "|" + STASH_HYSTERIA2_LINK,
+                "list": "true",
+            },
+            timeout,
+        )
+        for expected in (
+            "type: mieru",
+            "port-range: 9998-9999",
+            "transport: tcp",
+            "type: hysteria2",
+        ):
+            if expected not in stash_direct:
+                raise AssertionError(
+                    f"Stash direct protocol output is missing {expected!r}\n"
+                    f"{stash_direct}"
+                )
+
+        quanx_list = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": remote_subscription_url,
+                "config": QUANX_REMOTE_CONFIG,
+                "list": "true",
+            },
+            timeout,
+        )
+        if "Smoke" not in quanx_list or remote_subscription_url in quanx_list:
+            raise AssertionError(
+                "Quantumult X list=true did not retain Legacy expansion"
+            )
+
+        quanx_fallback = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "quanx",
+                "url": f"provider:QXLegacy,{remote_subscription_url}",
+                "config": QUANX_REMOTE_CONFIG,
+                "tfo": "true",
+            },
+            timeout,
+        )
+        if "Smoke" not in quanx_fallback or remote_subscription_url in quanx_fallback:
+            raise AssertionError(
+                "Quantumult X explicit node override did not select Legacy"
+            )
+
         mixed_url = f"{remote_subscription_url}|{DIRECT_SS_LINK}"
         clash_cases = (
             (
@@ -1066,6 +1987,58 @@ def run_checks(
                 raise AssertionError(
                     "remote sing-box conversion did not expand the subscription"
                 )
+            dns = singbox_json.get("dns", {})
+            dns_servers = dns.get("servers", [])
+            if [server.get("type") for server in dns_servers] != [
+                "tls",
+                "h3",
+                "fakeip",
+                "udp",
+            ]:
+                raise AssertionError(
+                    "deployed sing-box profile did not use modern DNS servers"
+                )
+            if (
+                "fakeip" in dns
+                or "independent_cache" in dns
+                or any(
+                    "address" in server or "address_resolver" in server
+                    for server in dns_servers
+                )
+            ):
+                raise AssertionError(
+                    "deployed sing-box profile retained legacy DNS fields"
+                )
+            tun = next(
+                (
+                    inbound
+                    for inbound in singbox_json.get("inbounds", [])
+                    if inbound.get("type") == "tun"
+                ),
+                None,
+            )
+            if (
+                tun is None
+                or tun.get("address") != ["172.19.0.1/30"]
+                or any(
+                    field in tun
+                    for field in ("inet4_address", "inet6_address", "sniff")
+                )
+            ):
+                raise AssertionError(
+                    "deployed sing-box profile retained legacy TUN fields"
+                )
+            route_rules = singbox_json.get("route", {}).get("rules", [])
+            if (
+                not any(rule.get("action") == "sniff" for rule in route_rules)
+                or not any(
+                    rule.get("action") == "hijack-dns" for rule in route_rules
+                )
+                or any("action" not in rule for rule in route_rules)
+            ):
+                raise AssertionError(
+                    "deployed sing-box profile did not use modern route actions"
+                )
 
             surge_config = fetch(
                 base_url,
@@ -1073,13 +2046,20 @@ def run_checks(
                 {
                     "target": "surge",
                     "url": remote_subscription_url,
-                    "config": DISABLE_RULEGEN_CONFIG,
+                    "config": QUANX_REMOTE_CONFIG,
                 },
                 timeout,
             )
-            if "Smoke" not in surge_config or "example.com" not in surge_config:
+            if (
+                f"policy-path={remote_subscription_url}" not in surge_config
+                or "policy-regex-filter=" not in surge_config
+            ):
                 raise AssertionError(
-                    "remote Surge conversion did not expand the subscription"
+                    "remote Surge conversion did not emit policy-path"
+                )
+            if "Smoke" in surge_config or "example.com" in surge_config:
+                raise AssertionError(
+                    "remote Surge conversion unexpectedly expanded the subscription"
                 )
 
     if mihomo_yaml_subscription_url:

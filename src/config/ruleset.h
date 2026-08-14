@@ -15,10 +15,11 @@ enum ruleset_type
 struct RulesetOptions
 {
     bool no_resolve = false;
+    String stash_format;
 
     bool operator==(const RulesetOptions &r) const
     {
-        return no_resolve == r.no_resolve;
+        return no_resolve == r.no_resolve && stash_format == r.stash_format;
     }
 };
 

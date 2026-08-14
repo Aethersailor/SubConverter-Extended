@@ -1,6 +1,7 @@
 #ifndef SUBEXPORT_H_INCLUDED
 #define SUBEXPORT_H_INCLUDED
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -37,6 +38,70 @@ struct ProxyProvider {
         proxy_direct(kDefaultProxyProviderDirect), groupId(0) {}
 };
 
+struct QuanXServerRemote {
+  std::string resource_tag;
+  std::string requested_resource_tag;
+  std::string selection_resource_tag;
+  std::string source_tag;
+  std::string url;
+  int update_interval = 0;
+  bool has_update_interval = false;
+  int group_id = 0;
+};
+
+struct SurgePolicyPathResource {
+  std::string url;
+  std::string source_tag;
+  std::string requested_name;
+  int update_interval = 0;
+  bool has_update_interval = false;
+  int group_id = 0;
+};
+
+struct SurfboardPolicyPathResource {
+  std::string url;
+  std::string source_tag;
+  std::string requested_name;
+  int group_id = 0;
+};
+
+struct LoonRemoteProxyResource {
+  std::string resource_name;
+  std::string requested_name;
+  std::string selection_name;
+  std::string source_tag;
+  std::string url;
+  int group_id = 0;
+};
+
+struct StashProxyProvider {
+  std::string name;
+  std::string requested_name;
+  std::string selection_name;
+  std::string source_tag;
+  std::string url;
+  std::string path;
+  int interval = 3600;
+  int group_id = 0;
+  std::map<std::string, std::string> headers;
+};
+
+struct TargetGenerationStats {
+  size_t input_nodes = 0;
+  size_t emitted_nodes = 0;
+  size_t remote_references_emitted = 0;
+  std::map<ProxyType, size_t> unsupported_by_type;
+
+  size_t unsupported_nodes() const {
+    size_t count = 0;
+    for (const auto &[type, type_count] : unsupported_by_type) {
+      (void)type;
+      count += type_count;
+    }
+    return count;
+  }
+};
+
 using SingleLinkTypes = std::uint32_t;
 namespace SingleLinkType {
 constexpr SingleLinkTypes Shadowsocks = 1U << 0;
@@ -48,6 +113,8 @@ constexpr SingleLinkTypes VLESS = 1U << 5;
 constexpr SingleLinkTypes Mixed = Shadowsocks | ShadowsocksR | VMess | Trojan |
                                   Hysteria2 | VLESS;
 } // namespace SingleLinkType
+
+enum class V2RayClientTarget { V2RayN, V2RayNG };
 
 struct extra_settings {
   bool enable_rule_generator = true;
@@ -74,6 +141,9 @@ struct extra_settings {
   tribool xudp = tribool();
   tribool skip_cert_verify = tribool();
   tribool tls13 = tribool();
+  tribool stash_request_udp = tribool();
+  tribool stash_request_tfo = tribool();
+  tribool stash_request_tls13 = tribool();
   bool clash_classical_ruleset = false;
   std::string sort_script;
   std::string clash_proxies_style = "flow";
@@ -81,6 +151,16 @@ struct extra_settings {
   bool use_proxy_provider = true;       // 默认启用 proxy-provider 模式
   bool provider_proxy_direct = true;    // proxy-provider 默认使用 DIRECT 更新
   std::vector<ProxyProvider> providers; // provider 列表
+  std::vector<QuanXServerRemote> quanx_server_remotes;
+  std::vector<SurgePolicyPathResource> surge_policy_paths;
+  std::vector<SurfboardPolicyPathResource> surfboard_policy_paths;
+  std::vector<LoonRemoteProxyResource> loon_remote_proxies;
+  std::vector<StashProxyProvider> stash_proxy_providers;
+  StashRuleConversionStats stash_rule_stats;
+  TargetGenerationStats target_generation_stats;
+  TargetGenerationStats surge_generation_stats;
+  TargetGenerationStats surfboard_generation_stats;
+  TargetGenerationStats loon_generation_stats;
   bool authorized = false;
   RuleConversionStats *rule_stats = nullptr;
 
@@ -98,6 +178,8 @@ struct extra_settings {
   }
 #endif // NO_JS_RUNTIME
 };
+
+bool matchRange(const std::string &range, int target);
 
 std::string proxyToClash(std::vector<Proxy> &nodes,
                          const std::string &base_conf,
@@ -125,10 +207,21 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
                         std::vector<RulesetContent> &ruleset_content_array,
                         const ProxyGroupConfigs &extra_proxy_group,
                         extra_settings &ext);
+std::string proxyToStash(std::vector<Proxy> &nodes,
+                         const std::string &base_conf,
+                         std::vector<RulesetContent> &ruleset_content_array,
+                         const ProxyGroupConfigs &extra_proxy_group,
+                         extra_settings &ext);
 std::string proxyToSSSub(std::string base_conf, std::vector<Proxy> &nodes,
                          extra_settings &ext);
-std::string proxyToSingle(std::vector<Proxy> &nodes, SingleLinkTypes types,
+std::string proxyToSingle(const std::vector<Proxy> &nodes,
+                          SingleLinkTypes types,
                            extra_settings &ext);
+std::string proxyToShadowrocket(const std::vector<Proxy> &nodes,
+                                extra_settings &ext);
+std::string proxyToV2RayClient(std::vector<Proxy> &nodes,
+                               V2RayClientTarget target,
+                               extra_settings &ext);
 std::string proxyToQuanX(std::vector<Proxy> &nodes,
                          const std::string &base_conf,
                          std::vector<RulesetContent> &ruleset_content_array,

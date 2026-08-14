@@ -17,7 +17,10 @@ type proxySchema struct {
 }
 
 func parseSubscriptionWithMihomo(subscription string) ([]map[string]any, error) {
-	buf := []byte(preprocessSubscription(subscription))
+	// Expand binary Mieru links before the generic URL preprocessor. A standard
+	// protobuf Base64 payload may contain '+', which QueryUnescape correctly
+	// treats as a space for URLs but must not touch inside mieru:// payloads.
+	buf := []byte(preprocessSubscription(expandMieruStandardSubscription(subscription)))
 	schema := &proxySchema{}
 
 	// Match Mihomo's proxy-provider parser: prefer a native `proxies` YAML

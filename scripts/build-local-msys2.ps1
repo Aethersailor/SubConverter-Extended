@@ -74,10 +74,15 @@ if [ "$SCX_REBUILD_BRIDGE" = "1" ] || [ ! -f bridge/libmihomo.a ]; then
   go run ../scripts/generate_proxy_validation.go -o proxy_validation_generated.go -manifest mihomo_capabilities.json
   go run ../scripts/generate_schemes.go -manifest mihomo_capabilities.json -o ../src/parser/mihomo_schemes.h
   go run ../scripts/generate_param_compat.go -manifest mihomo_capabilities.json -o ../src/parser/param_compat.h
-  CC=gcc CXX=g++ CGO_ENABLED=1 go build -buildmode=c-archive -o libmihomo.a .
+  CC=gcc CXX=g++ CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -buildmode=c-archive -o libmihomo.a .
   unix2dos libmihomo.h >/dev/null 2>&1 || true
   cd "$root"
 fi
+
+# This local path intentionally links the freshly built c-archive. CMake
+# prefers libmihomo.so when both artifacts exist, so a stale Docker/shared
+# bridge must not silently override the archive rebuilt above.
+rm -f bridge/libmihomo.so
 
 cmake -S . -B build/ucrt64 -G Ninja \
   -DCMAKE_BUILD_TYPE="$SCX_BUILD_TYPE" \

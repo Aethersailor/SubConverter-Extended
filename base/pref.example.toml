@@ -80,6 +80,10 @@ sssub_rule_base = "base/all_base.tpl"
 # sing-box 基础模板。/ sing-box base template.
 singbox_rule_base = "base/all_base.tpl"
 
+# Stash 独立基础模板。旧配置缺少此项时仍使用 base/stash.yaml。
+# Independent Stash base template. Existing configs that omit this option still use base/stash.yaml.
+stash_rule_base = "base/stash.yaml"
+
 # 分别控制下载外部配置、规则集和订阅时使用的代理。NONE（不区分大小写）和空值强制直连并忽略环境代理；SYSTEM 按系统代理来源解析；显式 URI 支持 http/https/socks4/socks4a/socks5/socks5h，不受环境 NO_PROXY 影响，但官方构建会在受信任请求和 lan 模式下直连初始回环主机。
 # Proxies used when downloading external configs, rulesets, and subscriptions. NONE (case-insensitive) and an empty value force direct connections and ignore proxy environment variables. SYSTEM resolves the documented system source. Explicit http/https/socks4/socks4a/socks5/socks5h URIs ignore ambient NO_PROXY, while official builds directly reach an initial loopback host for trusted requests and lan mode.
 # socks5 在本地解析域名，socks5h 将域名交给 SOCKS 服务端解析。cors:https://relay.example/ 是兼容的 HTTP CORS 中继，不是底层网络代理。
@@ -187,21 +191,21 @@ singbox_add_clash_modes = true
 
 # 节点重命名规则按数组顺序执行；match/replace 为正则替换，也可改用 script 或 import 表项。
 # Node-renaming rules run in array order; match/replace performs regex replacement, and script or import entries may be used instead.
-[[node_pref.rename_node]]
-match = '\(?((x|X)?(\d+)(\.?\d+)?)((\s?倍率?)|(x|X))\)?'
-replace = "$1x"
+#[[node_pref.rename_node]]
+#match = '\(?((x|X)?(\d+)(\.?\d+)?)((\s?倍率?)|(x|X))\)?'
+#replace = "$1x"
 
 [managed_config]
-# 是否在 Surge 输出中写入 #!MANAGED-CONFIG 元信息。
-# Whether to write #!MANAGED-CONFIG metadata into Surge output.
+# 是否在 Surge 与 Surfboard 输出中写入 #!MANAGED-CONFIG 元信息。
+# Whether to write #!MANAGED-CONFIG metadata into Surge and Surfboard output.
 write_managed_config = true
 
 # MANAGED-CONFIG 与 /getruleset、/qx-rewrite、/qx-script 生成地址的服务前缀，不含末尾斜杠。
 # Service prefix used by MANAGED-CONFIG and generated /getruleset, /qx-rewrite, and /qx-script URLs, without a trailing slash.
 managed_config_prefix = "http://127.0.0.1:25500"
 
-# 托管配置建议更新间隔，单位秒。
-# Suggested managed-config refresh interval in seconds.
+# 托管配置建议更新间隔，单位秒；Surfboard 要求至少 900 秒。
+# Suggested managed-config refresh interval in seconds; Surfboard requires at least 900 seconds.
 config_update_interval = 86400
 
 # true 时 Surge 在超过更新间隔后要求强制更新；false 仅按普通托管配置更新。
@@ -219,6 +223,25 @@ quanx_device_id = ""
 # 是否在生成 Surge 外部代理配置时解析服务器主机名。
 # Whether to resolve server hostnames while generating Surge external-proxy configuration.
 resolve_hostname = true
+
+[remote_subscription]
+# Surge 完整配置默认使用 policy-path 让客户端直接更新兼容的远程订阅；设为 false 可强制保留服务端 Legacy 解析。
+# Surge full profiles use policy-path for compatible remote subscriptions by default; set false to force legacy server-side parsing.
+surge_policy_path = true
+# Surfboard 完整配置默认使用独立的 policy-path 路径；设为 false 可强制保留服务端 Legacy 解析。
+# Surfboard full profiles use their own policy-path route by default; set false to force legacy server-side parsing.
+surfboard_policy_path = true
+# Loon 完整配置默认使用 Remote Proxy 让客户端直接读取远程订阅；设为 false 可强制保留服务端 Legacy 解析。
+# Loon full profiles use Remote Proxy for compatible subscriptions by default; set false to force legacy server-side parsing.
+loon_remote_proxy = true
+
+[singbox]
+# 新配置使用 sing-box 1.11+ WireGuard endpoint；旧配置缺少本节时仍保持旧 outbound 输出。
+# New configs use the sing-box 1.11+ WireGuard endpoint; existing configs without this section keep legacy outbound output.
+wireguard_endpoint = true
+# sing-box 1.14+ 才支持 Snell outbound；当前稳定版尚不支持，因此默认关闭。
+# Snell outbounds require sing-box 1.14+ and remain disabled while the current stable release lacks them.
+snell_outbound = false
 
 [security]
 # 安全档位：lan 保留局域网兼容行为并允许本地/私网/fake-ip 资源；public 限制公开请求控制的不受信任抓取；strict 另行强制禁止公开上传。
@@ -281,9 +304,9 @@ trusted_proxy_cidrs = []
 # 是否按 emoji 数组规则为节点名称添加 Emoji。
 # Whether to add emoji to node remarks according to the emoji array.
 add_emoji = false
-# 添加新 Emoji 前是否移除节点名称中已有的 Emoji，避免重复标记。
-# Whether to remove existing emoji from node remarks before applying new ones, avoiding duplicate markers.
-remove_old_emoji = true
+# 添加新 Emoji 前是否移除节点名称中已有的 Emoji；启用节点预处理时，Quantumult X 远程订阅会保留 Legacy 路径。
+# Whether to remove existing emoji before applying new ones. Enabling node preprocessing keeps Quantumult X remote subscriptions on the Legacy route.
+remove_old_emoji = false
 
 # Emoji 规则按数组顺序处理：match/emoji 为正则映射，也可使用 script 或 import 表项。
 # Emoji rules run in array order: match/emoji defines a regex mapping, while script or import entries are also supported.

@@ -90,6 +90,19 @@ RulesetOptions parseRulesetOptions(const StrArray &raw_options,
             result.no_resolve = true;
             continue;
         }
+        constexpr std::string_view stash_format_prefix = "stash-format=";
+        if(option.rfind(stash_format_prefix, 0) == 0)
+        {
+            const std::string format = option.substr(stash_format_prefix.size());
+            if(format == "yaml" || format == "text" || format == "mrs")
+            {
+                if(result.stash_format.empty() || result.stash_format == format)
+                    result.stash_format = format;
+                else
+                    result.stash_format = "invalid";
+                continue;
+            }
+        }
         if(unknown_options != nullptr &&
            std::find(unknown_options->begin(), unknown_options->end(), option) ==
                unknown_options->end())
