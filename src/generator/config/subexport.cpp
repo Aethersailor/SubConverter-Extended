@@ -3021,11 +3021,10 @@ StashGroupProviderSelection stashProvidersForGroup(
 
 } // namespace
 
-std::string proxyToStash(std::vector<Proxy> &nodes,
-                         const std::string &base_conf,
-                         std::vector<RulesetContent> &ruleset_content_array,
-                         const ProxyGroupConfigs &extra_proxy_group,
-                         extra_settings &ext) {
+static std::string proxyToStashImpl(
+    std::vector<Proxy> &nodes, const std::string &base_conf,
+    std::vector<RulesetContent> &ruleset_content_array,
+    const ProxyGroupConfigs &extra_proxy_group, extra_settings &ext) {
   YAML::Node root;
   try {
     root = YAML::Load(base_conf);
@@ -3070,10 +3069,14 @@ std::string proxyToStash(std::vector<Proxy> &nodes,
   TargetGenerationStats &stats = ext.target_generation_stats;
   stats = TargetGenerationStats{};
   stats.input_nodes = nodes.size();
-  YAML::Node generated_nodes = root["proxies"];
+  YAML::Node generated_nodes = root["proxies"].IsSequence()
+                                   ? YAML::Clone(root["proxies"])
+                                   : YAML::Node(YAML::NodeType::Sequence);
   if (!generated_nodes.IsSequence())
     generated_nodes = YAML::Node(YAML::NodeType::Sequence);
-  YAML::Node base_groups = root["proxy-groups"];
+  YAML::Node base_groups = root["proxy-groups"].IsSequence()
+                               ? YAML::Clone(root["proxy-groups"])
+                               : YAML::Node(YAML::NodeType::Sequence);
   auto fail_base_schema = [&](const std::string &field) {
     ext.external_rule_error =
         "Invalid request: the selected Stash base has an invalid '" + field +
@@ -3209,7 +3212,9 @@ std::string proxyToStash(std::vector<Proxy> &nodes,
   }
   root["proxies"] = generated_nodes;
 
-  YAML::Node providers = root["proxy-providers"];
+  YAML::Node providers = root["proxy-providers"].IsMap()
+                             ? YAML::Clone(root["proxy-providers"])
+                             : YAML::Node(YAML::NodeType::Map);
   if (!providers.IsMap())
     providers = YAML::Node(YAML::NodeType::Map);
   std::unordered_set<std::string> provider_name_keys;
@@ -3304,8 +3309,8 @@ std::string proxyToStash(std::vector<Proxy> &nodes,
         referenced_providers.insert(provider.name);
       }
       base_groups.push_back(group);
-      root["proxy-groups"] = base_groups;
     }
+    root["proxy-groups"] = base_groups;
   }
   for (const ProxyGroupConfig &group : extra_proxy_group) {
     if (group.Type == ProxyGroupType::Smart ||
@@ -3669,6 +3674,29 @@ std::string proxyToStash(std::vector<Proxy> &nodes,
         return fail_reference_graph();
   }
   return finalizeCanonicalClashYaml(YAML::Dump(root));
+}
+
+std::string proxyToStash(std::vector<Proxy> &nodes,
+                         const std::string &base_conf,
+                         std::vector<RulesetContent> &ruleset_content_array,
+                         const ProxyGroupConfigs &extra_proxy_group,
+                         extra_settings &ext) {
+  try {
+    return proxyToStashImpl(nodes, base_conf, ruleset_content_array,
+                            extra_proxy_group, ext);
+  } catch (const std::exception &e) {
+    writeLog(LOG_LEVEL_ERROR,
+             "STASH_CONFIG_GENERATION_FAILED detail=" +
+                 summarizeSensitiveTextForLog(e.what()));
+  } catch (...) {
+    writeLog(LOG_LEVEL_ERROR,
+             "STASH_CONFIG_GENERATION_FAILED detail=unknown-exception");
+  }
+  ext.external_rule_error =
+      "Invalid request: the Stash configuration could not be generated from "
+      "the selected inputs.\n"
+      "无效请求：无法根据所选输入生成 Stash 配置。";
+  return "";
 }
 
 std::string proxyToSurge(std::vector<Proxy> &nodes,

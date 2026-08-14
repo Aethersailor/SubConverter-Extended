@@ -1361,6 +1361,10 @@ def running_service(
             )
             if log_capture is not None:
                 log_capture.append(diagnostics)
+            if body_error is not None and diagnostics and hasattr(body_error, "add_note"):
+                body_error.add_note(
+                    f"service stderr tail: {diagnostics[-8000:]!r}"
+                )
             if shutdown_error is not None:
                 detail = (
                     f"{shutdown_error}; service stderr tail: "
