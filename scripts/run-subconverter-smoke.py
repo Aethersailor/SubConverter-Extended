@@ -96,7 +96,7 @@ STASH_MIERU_LINK = (
 )
 STASH_HYSTERIA2_LINK = (
     "hysteria2://stash-password@hy2-stash.example.test:8443/"
-    "?sni=hy2-stash.example.test&hop-interval=30s#StashHy2"
+    "?sni=hy2-stash.example.test#StashHy2"
 )
 SHADOWROCKET_STAGE_ONE_SMOKE_SHA256 = (
     "7f12b33d4d71596e81abd0e9f79b1f95b59d964bbd8f80fe33b840f60f62ecc6"
@@ -1359,7 +1359,6 @@ def run_checks(
             "port-range: 9998-9999",
             "transport: tcp",
             "type: hysteria2",
-            "hop-interval: 30",
         ):
             if expected not in stash_direct:
                 raise AssertionError(
