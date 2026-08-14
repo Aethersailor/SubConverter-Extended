@@ -7111,12 +7111,18 @@ def shadowrocket_target_baseline(base_url: str) -> None:
             f"HTTP {unknown_mieru_status} {unknown_mieru_body!r}"
         )
 
+    remote_mieru_source = (
+        "data:text/plain;base64,"
+        + base64.b64encode(
+            (MIERU_OFFICIAL_SIMPLE_URI + "\n").encode("utf-8")
+        ).decode("ascii")
+    )
     filtered_mieru_status, filtered_mieru_body, _ = request(
         base_url,
         "/sub",
         {
             "target": "shadowrocket",
-            "url": MIERU_OFFICIAL_SIMPLE_URI,
+            "url": remote_mieru_source,
             "include": "9998-9999",
             "list": "true",
             "config": DISABLE_RULEGEN_CONFIG,
@@ -7141,12 +7147,6 @@ def shadowrocket_target_baseline(base_url: str) -> None:
             f"HTTP {filtered_mieru_status} {filtered_mieru_body!r}"
         )
 
-    remote_mieru_source = (
-        "data:text/plain;base64,"
-        + base64.b64encode(
-            (MIERU_OFFICIAL_SIMPLE_URI + "\n").encode("utf-8")
-        ).decode("ascii")
-    )
     remote_mieru_status, remote_mieru_body, _ = request(
         base_url,
         "/sub",
