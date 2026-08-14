@@ -37,6 +37,20 @@ int main() {
   assert(official.port_bindings[1].port == "9998-9999");
   assert(official.port_bindings[1].is_range);
   assert(official.port_bindings[2].protocol == "UDP");
+  std::string rebuilt;
+  assert(buildMieruSimpleUri(official, rebuilt));
+  MieruSimpleConfig rebuilt_official;
+  assert(parseMieruSimpleUri(rebuilt, rebuilt_official));
+  assert(rebuilt_official.username == official.username);
+  assert(rebuilt_official.password == official.password);
+  assert(rebuilt_official.host == official.host);
+  assert(rebuilt_official.profile == official.profile);
+  assert(rebuilt_official.mtu == official.mtu);
+  assert(rebuilt_official.multiplexing == official.multiplexing);
+  assert(rebuilt_official.handshake_mode == official.handshake_mode);
+  assert(rebuilt_official.traffic_pattern == official.traffic_pattern);
+  assert(rebuilt_official.port_bindings.size() ==
+         official.port_bindings.size());
 
   MieruSimpleConfig ipv6;
   assert(parseMieruSimpleUri(
@@ -52,6 +66,10 @@ int main() {
   assert(ipv6.port_bindings.size() == 1);
   assert(ipv6.port_bindings[0].port == "443");
   assert(ipv6.traffic_pattern == "CgE+");
+  assert(buildMieruSimpleUri(ipv6, rebuilt));
+  assert(rebuilt.find("user%2Bname:p%40ss%2Bword@[2001:db8::20]") !=
+         std::string::npos);
+  assert(rebuilt.find("traffic-pattern=CgE%2B") != std::string::npos);
 
   MieruSimpleConfig defaults;
   assert(parseMieruSimpleUri(
@@ -61,6 +79,8 @@ int main() {
   assert(defaults.mtu == 0);
   assert(defaults.multiplexing.empty());
   assert(defaults.handshake_mode.empty());
+  assert(defaults.has_unknown_parameters);
+  assert(!buildMieruSimpleUri(defaults, rebuilt));
 
   MieruPortBinding binding;
   assert(parseMieruPortBinding("1000-1000", "UDP", binding));

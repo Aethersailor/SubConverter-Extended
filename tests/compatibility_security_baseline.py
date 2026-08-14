@@ -6402,7 +6402,6 @@ def target_generation_stats_baseline(base_url: str) -> None:
         "v2ray": VMESS_QR_URI,
         "v2rayn": VMESS_QR_URI,
         "v2rayng": VMESS_QR_URI,
-        "shadowrocket": SUBSCRIPTION.strip(),
         "trojan": TROJAN_WS_URI,
         "vless": VLESS_URI,
         "hysteria2": HYSTERIA2_URI,
@@ -6802,6 +6801,7 @@ def shadowrocket_target_baseline(base_url: str) -> None:
         HYSTERIA2_URI,
         HYSTERIA_SHADOWROCKET_URI,
         ANYTLS_SHADOWROCKET_URI,
+        MIERU_OFFICIAL_SIMPLE_URI,
     )
     params = {
         "target": "shadowrocket",
@@ -6825,6 +6825,7 @@ def shadowrocket_target_baseline(base_url: str) -> None:
         "hysteria2",
         "hysteria",
         "anytls",
+        "mierus",
     ]:
         raise AssertionError(
             f"Shadowrocket stage-two protocol matrix drifted: {raw_output!r}"
@@ -6907,6 +6908,33 @@ def shadowrocket_target_baseline(base_url: str) -> None:
             f"Shadowrocket AnyTLS URI drifted: {output_lines[7]!r}"
         )
 
+    mieru_parts = urllib.parse.urlsplit(output_lines[8])
+    mieru_query = urllib.parse.parse_qs(
+        mieru_parts.query, keep_blank_values=True
+    )
+    if (
+        urllib.parse.unquote(mieru_parts.username or "") != "baozi"
+        or urllib.parse.unquote(mieru_parts.password or "")
+        != "manlianpenfen"
+        or mieru_parts.hostname != "1.2.3.4"
+        or mieru_query
+        != {
+            "profile": ["default"],
+            "mtu": ["1400"],
+            "multiplexing": ["MULTIPLEXING_HIGH"],
+            "handshake-mode": ["HANDSHAKE_NO_WAIT"],
+            "traffic-pattern": [
+                "CCoQARoECAEQCiIYCAMQASoIMDAwMTAyMDMqCDA0MDUwNjA3"
+            ],
+            "port": ["6666", "9998-9999", "6489", "4896"],
+            "protocol": ["TCP", "TCP", "UDP", "UDP"],
+        }
+        or mieru_parts.fragment
+    ):
+        raise AssertionError(
+            f"Shadowrocket Mieru URI drifted: {output_lines[8]!r}"
+        )
+
     encoded_status, encoded_body, _ = request(
         base_url,
         "/sub",
@@ -6965,8 +6993,12 @@ def shadowrocket_target_baseline(base_url: str) -> None:
         "hysteria2": HYSTERIA2_URI,
         "mixed": SUBSCRIPTION.strip(),
     }
-    shadowrocket_only_sources = (
-        HYSTERIA_SHADOWROCKET_URI + "|" + ANYTLS_SHADOWROCKET_URI
+    shadowrocket_only_sources = "|".join(
+        (
+            HYSTERIA_SHADOWROCKET_URI,
+            ANYTLS_SHADOWROCKET_URI,
+            MIERU_OFFICIAL_SIMPLE_URI,
+        )
     )
     for target, supported_source in isolated_legacy_targets.items():
         isolation_status, isolation_body, _ = request(
@@ -6986,11 +7018,11 @@ def shadowrocket_target_baseline(base_url: str) -> None:
         isolation_nodes = isolation_report.get("nodes", {})
         if (
             isolation_status != 200
-            or isolation_nodes.get("total") != 3
+            or isolation_nodes.get("total") != 7
             or isolation_nodes.get("generated") != 1
-            or isolation_nodes.get("unsupported") != 2
+            or isolation_nodes.get("unsupported") != 6
             or set(isolation_nodes.get("unsupported_protocols", []))
-            != {"hysteria:1", "anytls:1"}
+            != {"hysteria:1", "anytls:1", "mieru:4"}
         ):
             raise AssertionError(
                 "Shadowrocket-only protocols leaked into the historical "
@@ -7036,8 +7068,8 @@ def shadowrocket_target_baseline(base_url: str) -> None:
         or report.get("mode", {}).get("simple_subscription") is not True
         or report.get("mode", {}).get("remote_subscription_backend")
         != "server-side-parse"
-        or report.get("nodes", {}).get("total") != 8
-        or report.get("nodes", {}).get("generated") != 8
+        or report.get("nodes", {}).get("total") != 12
+        or report.get("nodes", {}).get("generated") != 12
         or report.get("nodes", {}).get("unsupported") != 0
     ):
         raise AssertionError(
@@ -7049,15 +7081,88 @@ def shadowrocket_target_baseline(base_url: str) -> None:
         "/sub",
         {
             "target": "shadowrocket",
-            "url": MIERU_OFFICIAL_SIMPLE_URI,
+            "url": MIERU_STANDARD_PROTOBUF_URI,
             "list": "true",
             "config": DISABLE_RULEGEN_CONFIG,
         },
     )
     if unsupported_status != 400:
         raise AssertionError(
-            "Shadowrocket accepted a protocol outside its stage-two matrix: "
+            "Shadowrocket routed the protobuf mieru:// link through Legacy: "
             f"HTTP {unsupported_status}"
+        )
+
+    unknown_mieru_status, unknown_mieru_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "shadowrocket",
+            "url": (
+                "mierus://user:pass@example.test?profile=default&port=443"
+                "&protocol=TCP&future-option=must-not-disappear"
+            ),
+            "list": "true",
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    if unknown_mieru_status != 400 or b"mierus://" in unknown_mieru_body:
+        raise AssertionError(
+            "Shadowrocket silently discarded an unknown Mieru parameter: "
+            f"HTTP {unknown_mieru_status} {unknown_mieru_body!r}"
+        )
+
+    filtered_mieru_status, filtered_mieru_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "shadowrocket",
+            "url": MIERU_OFFICIAL_SIMPLE_URI,
+            "include": "9998-9999",
+            "list": "true",
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    filtered_mieru_lines = filtered_mieru_body.decode("utf-8").splitlines()
+    filtered_mieru_query = (
+        urllib.parse.parse_qs(
+            urllib.parse.urlsplit(filtered_mieru_lines[0]).query,
+            keep_blank_values=True,
+        )
+        if len(filtered_mieru_lines) == 1
+        else {}
+    )
+    if (
+        filtered_mieru_status != 200
+        or filtered_mieru_query.get("port") != ["9998-9999"]
+        or filtered_mieru_query.get("protocol") != ["TCP"]
+    ):
+        raise AssertionError(
+            "Shadowrocket did not preserve the filtered Mieru binding set: "
+            f"HTTP {filtered_mieru_status} {filtered_mieru_body!r}"
+        )
+
+    remote_mieru_source = (
+        "data:text/plain;base64,"
+        + base64.b64encode(
+            (MIERU_OFFICIAL_SIMPLE_URI + "\n").encode("utf-8")
+        ).decode("ascii")
+    )
+    remote_mieru_status, remote_mieru_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "shadowrocket",
+            "url": remote_mieru_source,
+            "list": "true",
+            "config": DISABLE_RULEGEN_CONFIG,
+        },
+    )
+    if remote_mieru_status != 200 or remote_mieru_body.decode("utf-8") != (
+        output_lines[8] + "\n"
+    ):
+        raise AssertionError(
+            "Shadowrocket remote subscription and direct Mieru paths diverged: "
+            f"HTTP {remote_mieru_status} {remote_mieru_body!r}"
         )
 
     lossy_status, lossy_body, _ = request(

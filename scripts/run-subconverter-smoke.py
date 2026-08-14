@@ -831,6 +831,7 @@ def run_checks(
                     V2RAY_CLIENT_HY2_LINK,
                     SHADOWROCKET_HYSTERIA_LINK,
                     SHADOWROCKET_ANYTLS_LINK,
+                    MIERU_OFFICIAL_SIMPLE_URI,
                 )
             ),
             "config": DISABLE_RULEGEN_CONFIG,
@@ -848,6 +849,7 @@ def run_checks(
             "hysteria2",
             "hysteria",
             "anytls",
+            "mierus",
         ]:
             raise AssertionError(
                 f"Shadowrocket deployed protocol matrix drifted: {shadowrocket!r}"
@@ -881,8 +883,8 @@ def run_checks(
         shadowrocket_nodes = shadowrocket_report.get("nodes", {})
         if (
             shadowrocket_report.get("target") != "shadowrocket"
-            or shadowrocket_nodes.get("total") != 5
-            or shadowrocket_nodes.get("generated") != 5
+            or shadowrocket_nodes.get("total") != 9
+            or shadowrocket_nodes.get("generated") != 9
             or shadowrocket_nodes.get("unsupported") != 0
         ):
             raise AssertionError(
@@ -912,7 +914,11 @@ def run_checks(
                 {
                     "target": isolated_target,
                     "url": "|".join(
-                        (SHADOWROCKET_HYSTERIA_LINK, SHADOWROCKET_ANYTLS_LINK)
+                        (
+                            SHADOWROCKET_HYSTERIA_LINK,
+                            SHADOWROCKET_ANYTLS_LINK,
+                            MIERU_OFFICIAL_SIMPLE_URI,
+                        )
                     ),
                     "config": DISABLE_RULEGEN_CONFIG,
                     "list": "true",
@@ -939,17 +945,39 @@ def run_checks(
             raise AssertionError(
                 "Shadowrocket deployed auto-target is missing Vary: User-Agent"
             )
+        mieru_lines = [
+            line for line in shadowrocket.splitlines() if line.startswith("mierus://")
+        ]
+        if len(mieru_lines) != 1:
+            raise AssertionError(
+                f"Shadowrocket did not aggregate Mieru bindings: {shadowrocket!r}"
+            )
+        mieru_parts = urllib.parse.urlsplit(mieru_lines[0])
+        mieru_query = urllib.parse.parse_qs(
+            mieru_parts.query, keep_blank_values=True
+        )
+        if (
+            mieru_query.get("profile") != ["default"]
+            or mieru_query.get("port")
+            != ["6666", "9998-9999", "6489", "4896"]
+            or mieru_query.get("protocol") != ["TCP", "TCP", "UDP", "UDP"]
+            or mieru_query.get("traffic-pattern")
+            != ["CCoQARoECAEQCiIYCAMQASoIMDAwMTAyMDMqCDA0MDUwNjA3"]
+        ):
+            raise AssertionError(
+                f"Shadowrocket deployed Mieru link drifted: {mieru_lines[0]!r}"
+            )
         assert_rejected(
             base_url,
             "/sub",
             {
                 "target": "shadowrocket",
-                "url": MIERU_OFFICIAL_SIMPLE_URI,
+                "url": MIERU_STANDARD_PROTOBUF_URI,
                 "config": DISABLE_RULEGEN_CONFIG,
                 "list": "true",
             },
             timeout,
-            "Shadowrocket unsupported Mieru link",
+            "Shadowrocket protobuf Mieru link on Legacy route",
         )
         assert_rejected(
             base_url,

@@ -193,6 +193,14 @@ struct Proxy {
   std::vector<String> AlpnList;
   String PacketEncoding;
   String Multiplexing;
+  // Metadata from one official mierus:// resource. Legacy parsing expands
+  // every port/protocol binding into a Proxy, while Shadowrocket needs the
+  // original resource boundary to emit one lossless sharing link again.
+  String MieruProfile;
+  String MieruSourceId;
+  String MieruSourceRemark;
+  uint32_t MieruBindingIndex = 0;
+  bool MieruHasUnknownParameters = false;
   String MieruHandshakeMode;
   String MieruTrafficPattern;
   tribool V2rayHttpUpgrade;

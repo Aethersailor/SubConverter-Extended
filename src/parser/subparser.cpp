@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <initializer_list>
 #include <limits>
@@ -70,6 +71,11 @@ void extractRemark(std::string &link, std::string &remark) {
 }
 
 namespace {
+
+std::string nextMieruSourceId() {
+    static std::atomic<uint64_t> next_id{1};
+    return std::to_string(next_id.fetch_add(1, std::memory_order_relaxed));
+}
 
 struct ParsedShareUri {
     std::string user;
@@ -2895,7 +2901,10 @@ void explodeMierusNodes(const std::string &mieru, std::vector<Proxy> &nodes) {
 
     nodes.reserve(nodes.size() + config.port_bindings.size());
     const std::string remark_base = config.remark.empty() ? config.profile : config.remark;
-    for (const MieruPortBinding &binding : config.port_bindings) {
+    const std::string source_id = nextMieruSourceId();
+    for (size_t binding_index = 0;
+         binding_index < config.port_bindings.size(); ++binding_index) {
+        const MieruPortBinding &binding = config.port_bindings[binding_index];
         Proxy node;
         const std::string port = binding.is_range ? "0" : binding.port;
         const std::string ports = binding.is_range ? binding.port : std::string();
@@ -2905,6 +2914,11 @@ void explodeMierusNodes(const std::string &mieru, std::vector<Proxy> &nodes) {
                        config.multiplexing, binding.protocol, tribool(true),
                        tribool(), tribool(), tribool(), "");
         node.Mtu = config.mtu;
+        node.MieruProfile = config.profile;
+        node.MieruSourceId = source_id;
+        node.MieruSourceRemark = config.remark;
+        node.MieruBindingIndex = static_cast<uint32_t>(binding_index);
+        node.MieruHasUnknownParameters = config.has_unknown_parameters;
         node.MieruHandshakeMode = config.handshake_mode;
         node.MieruTrafficPattern = config.traffic_pattern;
         nodes.emplace_back(std::move(node));

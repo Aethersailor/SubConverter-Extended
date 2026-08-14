@@ -21,12 +21,17 @@ struct MieruSimpleConfig {
   std::string traffic_pattern;
   std::string remark;
   uint16_t mtu = 0;
+  bool has_unknown_parameters = false;
   std::vector<MieruPortBinding> port_bindings;
 };
 
 // Parses the official human-readable mierus:// format. The binary protobuf
 // mieru:// format deliberately remains outside the Legacy parser.
 bool parseMieruSimpleUri(const std::string &uri, MieruSimpleConfig &config);
+
+// Serializes the portable subset defined by the official human-readable
+// mierus:// format. Unknown source parameters deliberately fail closed.
+bool buildMieruSimpleUri(const MieruSimpleConfig &config, std::string &uri);
 
 // Validates one Mihomo/Mieru port or port-range plus transport pair.
 bool parseMieruPortBinding(const std::string &port,

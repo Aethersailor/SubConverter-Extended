@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <map>
+#include <set>
 #include <string_view>
 #include <utility>
 
@@ -41,6 +42,53 @@ bool percentDecode(std::string_view value, bool plus_as_space,
     decoded.push_back(static_cast<char>(ch));
   }
   return true;
+}
+
+std::string percentEncode(std::string_view value) {
+  static constexpr char hex[] = "0123456789ABCDEF";
+  std::string encoded;
+  encoded.reserve(value.size());
+  for (const unsigned char ch : value) {
+    if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+        (ch >= '0' && ch <= '9') || ch == '-' || ch == '.' || ch == '_' ||
+        ch == '~') {
+      encoded.push_back(static_cast<char>(ch));
+      continue;
+    }
+    encoded.push_back('%');
+    encoded.push_back(hex[ch >> 4]);
+    encoded.push_back(hex[ch & 0x0f]);
+  }
+  return encoded;
+}
+
+bool validMieruHost(const std::string &host) {
+  if (host.empty() ||
+      std::any_of(host.begin(), host.end(), [](unsigned char ch) {
+        return std::isspace(ch) != 0 || std::iscntrl(ch) != 0;
+      }) ||
+      host.find_first_of("/?#@[]") != std::string::npos)
+    return false;
+  if (host.find(':') == std::string::npos)
+    return true;
+  return std::all_of(host.begin(), host.end(), [](unsigned char ch) {
+    return std::isxdigit(ch) != 0 || ch == ':' || ch == '.';
+  });
+}
+
+bool knownMieruQueryKey(const std::string &key) {
+  static const std::set<std::string> keys = {
+      "profile", "mtu", "multiplexing", "handshake-mode",
+      "traffic-pattern", "port", "protocol",
+  };
+  return keys.find(key) != keys.end();
+}
+
+void appendQueryParameter(std::vector<std::string> &query,
+                          const std::string &key,
+                          const std::string &value) {
+  if (!value.empty())
+    query.emplace_back(key + "=" + percentEncode(value));
 }
 
 bool parseUnsigned(std::string_view value, unsigned minimum, unsigned maximum,
@@ -306,16 +354,19 @@ bool parseMieruSimpleUri(const std::string &uri, MieruSimpleConfig &config) {
         !percentDecode(authority, false, parsed.host))
       return false;
   }
-  if (parsed.host.empty() ||
-      std::any_of(parsed.host.begin(), parsed.host.end(),
-                  [](unsigned char ch) { return std::isspace(ch) != 0; }) ||
-      parsed.host.find_first_of("/?#@[]") != std::string::npos ||
+  if (!validMieruHost(parsed.host) ||
       (authority.front() != '[' &&
        parsed.host.find(':') != std::string::npos))
     return false;
 
   QueryValues query;
-  if (!parseQuery(raw_query, query) ||
+  if (!parseQuery(raw_query, query))
+    return false;
+  parsed.has_unknown_parameters =
+      std::any_of(query.begin(), query.end(), [](const auto &entry) {
+        return !knownMieruQueryKey(entry.first);
+      });
+  if (
       !readSingleton(query, "profile", true, parsed.profile) ||
       !readSingleton(query, "multiplexing", false, parsed.multiplexing) ||
       !readSingleton(query, "handshake-mode", false,
@@ -351,5 +402,53 @@ bool parseMieruSimpleUri(const std::string &uri, MieruSimpleConfig &config) {
   }
 
   config = std::move(parsed);
+  return true;
+}
+
+bool buildMieruSimpleUri(const MieruSimpleConfig &config, std::string &uri) {
+  if (config.username.empty() || config.password.empty() ||
+      !validMieruHost(config.host) || config.profile.empty() ||
+      config.has_unknown_parameters ||
+      (config.mtu != 0 && (config.mtu < 1280 || config.mtu > 1400)) ||
+      !isValidMieruMultiplexing(config.multiplexing) ||
+      !isValidMieruHandshakeMode(config.handshake_mode) ||
+      !isValidMieruTrafficPattern(config.traffic_pattern) ||
+      config.port_bindings.empty())
+    return false;
+
+  std::vector<MieruPortBinding> bindings;
+  bindings.reserve(config.port_bindings.size());
+  for (const MieruPortBinding &candidate : config.port_bindings) {
+    MieruPortBinding normalized;
+    if (!parseMieruPortBinding(candidate.port, candidate.protocol, normalized))
+      return false;
+    bindings.emplace_back(std::move(normalized));
+  }
+
+  std::vector<std::string> query;
+  appendQueryParameter(query, "profile", config.profile);
+  if (config.mtu != 0)
+    appendQueryParameter(query, "mtu", std::to_string(config.mtu));
+  appendQueryParameter(query, "multiplexing", config.multiplexing);
+  appendQueryParameter(query, "handshake-mode", config.handshake_mode);
+  appendQueryParameter(query, "traffic-pattern", config.traffic_pattern);
+  for (const MieruPortBinding &binding : bindings)
+    appendQueryParameter(query, "port", binding.port);
+  for (const MieruPortBinding &binding : bindings)
+    appendQueryParameter(query, "protocol", binding.protocol);
+
+  const std::string authority =
+      config.host.find(':') == std::string::npos
+          ? percentEncode(config.host)
+          : "[" + config.host + "]";
+  uri = "mierus://" + percentEncode(config.username) + ":" +
+        percentEncode(config.password) + "@" + authority + "?";
+  for (size_t i = 0; i < query.size(); ++i) {
+    if (i != 0)
+      uri.push_back('&');
+    uri += query[i];
+  }
+  if (!config.remark.empty())
+    uri += "#" + percentEncode(config.remark);
   return true;
 }
