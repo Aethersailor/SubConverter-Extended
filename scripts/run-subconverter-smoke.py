@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import base64
 import difflib
+import hashlib
 import json
 import re
 import sys
@@ -74,6 +75,23 @@ V2RAYN_REALM_LINK = (
 V2RAYN_ANYTLS_LINK = (
     "anytls://smoke-password@anytls-v2rayn.example.test:443"
     "?sni=anytls-v2rayn.example.test#V2RayNAnyTLS"
+)
+SHADOWROCKET_HYSTERIA_LINK = (
+    "hysteria://hy1-shadowrocket.example.test:36712"
+    "?protocol=udp&auth=smoke-password&peer=hy1-shadowrocket.example.test"
+    "&insecure=1&upmbps=100&downmbps=200&alpn=h3"
+    "&obfs=xplus&obfsParam=smoke-obfs#ShadowrocketHy1"
+)
+SHADOWROCKET_ANYTLS_LINK = (
+    "anytls://smoke-password@anytls-shadowrocket.example.test:443/"
+    "?sni=anytls-shadowrocket.example.test#ShadowrocketAnyTLS"
+)
+SHADOWROCKET_LOSSY_ANYTLS_LINK = (
+    "anytls://smoke-password@anytls-shadowrocket.example.test:443/"
+    "?sni=anytls-shadowrocket.example.test&fp=chrome#LossyAnyTLS"
+)
+SHADOWROCKET_STAGE_ONE_SMOKE_SHA256 = (
+    "7f12b33d4d71596e81abd0e9f79b1f95b59d964bbd8f80fe33b840f60f62ecc6"
 )
 V2RAYN_NAIVE_LINK = (
     "naive+https://smoke-user:smoke-password@naive-v2rayn.example.test:443"
@@ -811,6 +829,8 @@ def run_checks(
                     SAMPLE_SS_LINK,
                     V2RAY_CLIENT_VMESS_LINK,
                     V2RAY_CLIENT_HY2_LINK,
+                    SHADOWROCKET_HYSTERIA_LINK,
+                    SHADOWROCKET_ANYTLS_LINK,
                 )
             ),
             "config": DISABLE_RULEGEN_CONFIG,
@@ -826,9 +846,48 @@ def run_checks(
             "ss",
             "vmess",
             "hysteria2",
+            "hysteria",
+            "anytls",
         ]:
             raise AssertionError(
                 f"Shadowrocket deployed protocol matrix drifted: {shadowrocket!r}"
+            )
+        encoded_shadowrocket = fetch(
+            base_url,
+            "/sub",
+            {**shadowrocket_params, "list": "false"},
+            timeout,
+        )
+        try:
+            decoded_shadowrocket = base64.b64decode(
+                encoded_shadowrocket, validate=True
+            ).decode()
+        except (ValueError, UnicodeDecodeError) as error:
+            raise AssertionError(
+                "Shadowrocket deployed default output is not strict Base64"
+            ) from error
+        if decoded_shadowrocket != shadowrocket:
+            raise AssertionError(
+                "Shadowrocket deployed raw and Base64 subscriptions diverged"
+            )
+        shadowrocket_report = json.loads(
+            fetch(
+                base_url,
+                "/sub",
+                {**shadowrocket_params, "explain": "true"},
+                timeout,
+            )
+        )
+        shadowrocket_nodes = shadowrocket_report.get("nodes", {})
+        if (
+            shadowrocket_report.get("target") != "shadowrocket"
+            or shadowrocket_nodes.get("total") != 5
+            or shadowrocket_nodes.get("generated") != 5
+            or shadowrocket_nodes.get("unsupported") != 0
+        ):
+            raise AssertionError(
+                "Shadowrocket deployed generation diagnostics drifted: "
+                f"{shadowrocket_report!r}"
             )
         mixed = fetch(
             base_url,
@@ -836,9 +895,15 @@ def run_checks(
             {**shadowrocket_params, "target": "mixed"},
             timeout,
         )
-        if shadowrocket != mixed:
+        expected_mixed = "\n".join(shadowrocket.splitlines()[:3]) + "\n"
+        if (
+            mixed != expected_mixed
+            or hashlib.sha256(mixed.encode()).hexdigest()
+            != SHADOWROCKET_STAGE_ONE_SMOKE_SHA256
+        ):
             raise AssertionError(
-                "target=shadowrocket changed the historical mixed output contract"
+                "target=shadowrocket changed the historical mixed output contract: "
+                f"{mixed!r} != {expected_mixed!r}"
             )
         auto_shadowrocket, auto_shadowrocket_headers = fetch_response(
             base_url,
@@ -870,6 +935,18 @@ def run_checks(
             },
             timeout,
             "Shadowrocket unsupported Mieru link",
+        )
+        assert_rejected(
+            base_url,
+            "/sub",
+            {
+                "target": "shadowrocket",
+                "url": SHADOWROCKET_LOSSY_ANYTLS_LINK,
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+            timeout,
+            "Shadowrocket non-portable AnyTLS link",
         )
 
     direct_config = fetch(base_url, "/sub", common_params, timeout)

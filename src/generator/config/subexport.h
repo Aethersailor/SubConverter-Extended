@@ -98,8 +98,11 @@ constexpr SingleLinkTypes VMess = 1U << 2;
 constexpr SingleLinkTypes Trojan = 1U << 3;
 constexpr SingleLinkTypes Hysteria2 = 1U << 4;
 constexpr SingleLinkTypes VLESS = 1U << 5;
+constexpr SingleLinkTypes Hysteria = 1U << 6;
+constexpr SingleLinkTypes AnyTLS = 1U << 7;
 constexpr SingleLinkTypes Mixed = Shadowsocks | ShadowsocksR | VMess | Trojan |
                                   Hysteria2 | VLESS;
+constexpr SingleLinkTypes Shadowrocket = Mixed | Hysteria | AnyTLS;
 } // namespace SingleLinkType
 
 enum class V2RayClientTarget { V2RayN, V2RayNG };
