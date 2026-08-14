@@ -127,7 +127,7 @@ SubConverter-Extended 因此诞生。它是一款更贴合 Mihomo 使用场景�
 
 > [!WARNING]
 > 1. 本项目优先保证 Mihomo 路径。`target=clash`、`target=clashr` 及 `target=auto` 识别为二者时，远程订阅只生成 `proxy-provider`，节点链接只调用 Mihomo 解析模块。
-> 2. Quantumult X、Surge、Surfboard 和 Loon 的完整配置可以使用客户端原生远程资源；其节点链接仍调用继承自上游项目的 Legacy 解析器。
+> 2. Quantumult X、Surge、Surfboard、Loon 和 Stash 的完整配置可以使用客户端原生远程资源；其节点链接仍调用继承自上游项目的 Legacy 解析器。
 > 3. 其他非 Mihomo 目标仍使用 Legacy 解析器。协议和参数支持范围以对应生成器能够表示的内容为准。
 
 Legacy 解析器对经典格式的兼容范围包括：Shadowsocks SIP002（含 AEAD-2022、插件和 IPv6）、SIP008/旧版 JSON 输入、历史 SSR 链接、v2rayN `socks://` 新旧格式、Naive HTTPS/QUIC 分享链接、Telegram 和 Base64 authority 形式的 HTTP(S) 代理链接，以及 Surge、Loon、Mihomo 和 sing-box 新旧结构中的 WireGuard 节点。它也会校准 Hysteria v1 的官方 URI、Mihomo YAML 与 sing-box JSON 字段、当前 Netch `Netch://` 分享链接和 `settings.json` 中的 SS/SSR/SOCKS/VMess/VLESS/Trojan/WireGuard 节点，以及 Surge Snell v1-v6 的 `version`、`reuse`、HTTP/TLS obfs、`udp-port`、v6 `mode` 和 Shadow TLS 字段；历史 Netch 的 `Socks5`、`TLSSecure` 和 Snell 字段仍保持兼容。输出时仍会按目标客户端的稳定能力过滤不可表示的组合。Netch 的 SSH 节点没有可共用的内部代理模型，会明确跳过；`packet` 模式可由 VLESS 单链接保留，但不会输出给不支持该模式的 sing-box。普通 HTTP(S) URL 仍按订阅处理；`socks5://` 仍属于 Mihomo 路径，不会借此改动进入 Legacy 解析器。解析成功不代表每个目标客户端都能表示对应协议，最终仍由目标生成器筛选。Netch 字段依据见其[当前服务模型与分享链接实现](https://github.com/netchx/netch/tree/main/Netch/Servers)。
@@ -139,12 +139,19 @@ V2Ray/V2Fly 是代理平台与内核，不定义可由本项目直接生成的�
 | `v2rayn` | VMess、Shadowsocks、SOCKS5、VLESS、Trojan、Hysteria2（含 Realm/Gecko）、TUIC、WireGuard、HTTP、AnyTLS、Naive | 官方 `v2rayn://<type>/<base64url ProfileItem JSON>` 内部订阅格式 |
 | `v2rayng` | VMess、Shadowsocks、SOCKS5、VLESS、Trojan、Hysteria2、WireGuard、HTTP | v2rayNG 同样直接解析的 `v2rayn://` 内部订阅格式 |
 | `shadowrocket` | Shadowsocks、ShadowsocksR、VMess、VLESS、Trojan、Hysteria、Hysteria2、AnyTLS、Mieru | 标准分享链接订阅；默认 Base64，`list=true` 输出原始链接列表 |
+| `stash` | Shadowsocks、ShadowsocksR、VMess、VLESS、Trojan、Snell、HTTP(S)、SOCKS5、WireGuard、Hysteria、Hysteria2、TUIC、AnyTLS、Mieru | 独立 Stash YAML；远程订阅生成 named `proxy-providers`，节点链接走 Legacy 后按 Stash 字段严格投影 |
 
 该格式由 [v2rayN 订阅说明](https://github.com/2dust/v2rayN/wiki/Description-of-subscription)正式定义；本轮协议编号和能力固定对照 v2rayN 提交 `e01717d` 的 [`EConfigType`](https://github.com/2dust/v2rayN/blob/e01717d8326a4f5060b335523590c5fda943fe03/v2rayN/ServiceLib/Enums/EConfigType.cs) 与[全局协议表](https://github.com/2dust/v2rayN/blob/e01717d8326a4f5060b335523590c5fda943fe03/v2rayN/ServiceLib/Global.cs)。v2rayNG 提交 `e8a82d9` 也注册了[对应内部格式解析器](https://github.com/2dust/v2rayNG/blob/e8a82d9810ca1cf97a3cc8a9b9525a9f21955807/V2rayNG/app/src/main/java/com/v2ray/ang/fmt/V2rayNFmt.kt)，但其[协议枚举](https://github.com/2dust/v2rayNG/blob/e8a82d9810ca1cf97a3cc8a9b9525a9f21955807/V2rayNG/app/src/main/java/com/v2ray/ang/enums/EConfigType.kt)比桌面端更窄。两个目标因此使用独立能力矩阵：例如 Realm/Gecko、TUIC、AnyTLS 和 Naive 只输出给当前确实支持它们的 v2rayN，不会借共用容器塞给 v2rayNG。两个目标仍由本项目下载并用 Legacy 解析器展开远程订阅，不会改动 Clash/Mihomo 路径。标准 URI或内部模型无法无损携带的客户端外字段会按节点明确跳过；若没有任何节点可表示，请求返回 HTTP 400，不会返回空白或不可连接的伪成功订阅。
 
 Shadowrocket 是闭源客户端。与官方群组同步维护的[社区使用手册](https://github.com/LOWERTOP/Shadowrocket/wiki/)确认客户端可添加 `Subscribe` URL，并可识别复制的 `trojan://`、`vmess://`、`vless://` 等分享链接；手册同时明确指出节点分享格式缺乏统一标准。独立 `target=shadowrocket` 在历史 `mixed` 六协议基础上，增加 [Hysteria v1 官方 URI](https://v1.hysteria.network/docs/uri-scheme/)、[AnyTLS 官方 URI](https://github.com/anytls/anytls-go/blob/main/docs/uri_scheme.md)和 [Mieru 官方简化 URI](https://github.com/enfein/mieru/blob/main/docs/client-install.md#simple-sharing-link)。Hysteria v1 的规范明确说明该格式最初由 Shadowrocket 引入；AnyTLS 只输出密码、地址、端口、SNI、证书校验开关和名称等官方可移植字段；Mieru 会保留 profile、MTU、复用等级、握手模式、traffic-pattern，以及按位置配对的多组 `port` / `protocol`。Shadowrocket 2.2.87 的[版本记录](https://apps.apple.com/app/shadowrocket/id932747118)明确提到 Mieru URL 导入和导出格式。AnyTLS Reality、ALPN、指纹、非默认会话参数，以及 Mieru 未知参数或互相矛盾的多端口成员会明确跳过，不会静默丢失。服务端输出已按对应官方 URI 契约校验；由于 Shadowrocket 闭源且本项目没有对应设备，实际导入与连通仍需客户端验收。`Shadowrocket/*` User-Agent 在 `target=auto` 时会进入该独立目标；远程订阅仍由服务端 Legacy 路径展开。历史 `target=mixed` 的六协议输出保持不变，配置文件也无需新增或迁移参数。TUIC、WireGuard、Snell 等协议须在 Shadowrocket 分享字段获得可复核证据后逐项加入，不以客户端界面列出协议作为已经适配的依据。
 
 Mieru 的 Legacy 支持仅覆盖官方可读的 `mierus://` 简化链接。解析器会校验 profile、MTU、复用等级、握手模式和 traffic-pattern 的 Base64/protobuf 外层格式，并按成对出现的 `port` / `protocol` 展开多端口配置；`target=shadowrocket` 会在过滤后重新组合仍然有效的成员，输出一条保持配对顺序的简化链接。完整客户端配置 `mieru://` 只在 `target=clash`、`target=clashr` 及 `auto` 命中这两类目标时，由 Mihomo 专属 Go 桥使用 `bridge/go.mod` 锁定的官方 Mieru v3 protobuf 定义严格展开，再交回同一 Mihomo 解析器；不可等价表达的配置会失败关闭，且绝不回退 Legacy。其他目标继续只走 Legacy，不会因该格式改变解析路径。
+
+`target=stash` 使用完全独立的基础模板、远程资源模型和节点生成器，不复用 Clash/Mihomo 的 `proxyToClash` 或 provider 扩展字段。远程订阅按 Stash [Proxy Providers](https://stash.wiki/en/proxy-protocols/proxy-providers) 规范输出 `url`、`path`、`interval` 和按需使用的 `headers`，节点筛选条件由策略组的 `filter` 表达，并由策略组通过 `use` 引用；上游响应必须是顶层包含 `proxies` 的 Stash YAML。服务商若仍返回普通 Base64 节点列表，需要自行根据 Stash 请求头提供兼容内容，本项目不会假定任意订阅都能被客户端直接读取。直接节点依据 Stash 当前[协议字段](https://stash.wiki/en/proxy-protocols/proxy-types)逐项投影；无法完整表示的字段或组合会明确跳过。旧 INI、YAML、TOML 配置不需要新增 `stash_rule_base`，缺省时自动使用 `base/stash.yaml`。
+
+Stash 输出以当前客户端能力为准，不承诺旧版本接受新协议字段：AnyTLS 至少需要 iOS/tvOS 3.3 或 macOS 4.1；Hysteria2 Salamander 至少需要 iOS/tvOS 3.4 或 macOS 4.2；Mieru、VLESS XHTTP 与 Hysteria2 Gecko 至少需要 iOS/tvOS 3.6 或 macOS 4.3。Stash 当前普通策略组没有组级测速 URL、超时与容差字段，因此这些跨客户端参数不会被伪造成未公开字段：输出会沿用 Stash 自身默认值并写入非敏感告警日志；`interval`、`lazy`、负载均衡策略及 relay 的 `benchmark-url` / `benchmark-timeout` 会按官方字段输出。会改变代理连接语义且无法表示的组选项仍会失败关闭。
+
+Stash 默认模板包含 DNS：`default-nameserver` 使用 `223.5.5.5` 和 `1.12.12.12`，`nameserver` 使用 `doh3://223.5.5.5/dns-query` 和 `https://1.12.12.12/dns-query`，并保持证书校验。字段结构符合 Stash [DNS Server](https://stash.wiki/en/features/dns-server) 文档；但腾讯已公告免费 DoT/DoH [不再公开提供 IP 接入](https://docs.dnspod.cn/notices/mian-fei-ban-dot-dohbu-zai-gong-kai-ipjie-ru-de-gong-gao/)，阿里也未承诺 IP 字面量 DoH3 的长期兼容性。这组 IP 端点按项目指定默认值保留，部署者如遇证书或可用性问题，应在自定义 Stash base 中改用运营方当前推荐的域名端点。仓库没有 Stash 设备，因此验收范围是官方 YAML 结构、远程引用与服务端行为，不冒充客户端真机连通测试。
 
 Legacy 生成器会统一统计「已解析但目标格式无法表示」的节点。请求中的本地节点全部无法表示，且没有客户端原生远程资源时，接口返回 HTTP 400，不再以空节点列表伪装成功；混合输入只保留能够精确表示的节点，并在 Explain 与 `TARGET_NODE_GENERATION` 日志中给出协议计数。Quantumult X 当前可精确输出 VMess、VLESS、Trojan 的 TLS、WebSocket、Reality/Vision 组合和 AnyTLS；Loon 当前可精确输出 VMess、VLESS、Trojan 的 TCP、WebSocket、HTTP 组合、VLESS Reality/Vision、AnyTLS，以及带 Salamander 的 Hysteria 2。无法等价表达的传输、TLS 组合或危险配置分隔符会明确跳过，不会静默降级成 TCP。以上判断依据官方配置语法和项目往返测试；由于仓库不包含 Quantumult X 或 Loon 内核，仍需客户端设备验证实际导入与连通性。
 
@@ -623,7 +630,7 @@ logread -e subconverter
 下方仅重点说明本项目的高频参数、特有能力，以及与原版 subconverter 行为不同的部分；未列出的兼容参数仍可按原版 subconverter 的使用习惯传入。
 
 > [!IMPORTANT]
-> 默认输出为**最简配置**，不包含 DNS 参数，请在各 Clash 客户端中启用 DNS 覆写功能，或在生成的配置文件中自行补全 DNS 配置。
+> 除 `target=stash` 外，默认输出为**最简配置**，不包含 DNS 参数，请在各客户端中启用 DNS 覆写功能，或在生成的配置文件中自行补全 DNS 配置。Stash 使用上述独立 DNS 默认值。
 
 <details open>
 <summary><strong>快速调用与常用参数</strong></summary>
@@ -632,7 +639,7 @@ logread -e subconverter
 
 | 参数 | 说明 | 示例 |
 | :--- | :--- | :--- |
-| `target` | 目标格式；完整支持 `clash`, `clashr`, `surge`, `quan`, `quanx`, `loon`, `surfboard`, `mellow`, `singbox`, `ss`, `ssd`, `ssr`, `sssub`, `v2ray`, `v2rayn`, `v2rayng`, `shadowrocket`, `trojan`, `vless`, `hysteria2`, `mixed` | `clash`, `v2rayn`, `v2rayng`, `shadowrocket`, `vless`, `hysteria2` |
+| `target` | 可用目标格式：`clash`, `clashr`, `surge`, `quan`, `quanx`, `loon`, `surfboard`, `stash`, `mellow`, `singbox`, `ss`, `ssd`, `ssr`, `sssub`, `v2ray`, `v2rayn`, `v2rayng`, `shadowrocket`, `trojan`, `vless`, `hysteria2`, `mixed` | `clash`, `stash`, `v2rayn`, `v2rayng`, `shadowrocket`, `vless`, `hysteria2` |
 | `url` | 订阅链接或节点链接（`\|` 分隔） | `https://sub.com\|vless://...` |
 | `config` | 外部配置文件 | `https://config-url` |
 | `include` | 包含节点（正则） | `香港\|台湾` |

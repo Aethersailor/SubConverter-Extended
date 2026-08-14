@@ -566,6 +566,7 @@ LEGACY_ONLY_TARGETS = (
     "quanx",
     "loon",
     "surfboard",
+    "stash",
     "mellow",
     "singbox",
     "ss",
@@ -7297,6 +7298,260 @@ def shadowrocket_target_baseline(base_url: str) -> None:
         )
 
 
+def stash_target_baseline(base_url: str) -> None:
+    provider_source = (
+        "https://127.0.0.1:1/stash-provider.yaml?token=stash-provider-secret"
+    )
+    status, body, headers = request(
+        base_url,
+        "/sub",
+        {
+            "target": "stash",
+            "url": f"provider:Airport,interval:7200,{provider_source}",
+            "provider_headers": "X-Stash-Key",
+        },
+        {"X-Stash-Key": "stash-header-secret"},
+    )
+    text = body.decode("utf-8", errors="replace")
+    if status != 200:
+        raise AssertionError(
+            f"Stash provider route returned HTTP {status}: {text[-1200:]!r}"
+        )
+    assert_vary_header(headers, "X-Stash-Key", "Stash provider response")
+    required_fragments = (
+        "default-nameserver:",
+        "- 223.5.5.5",
+        "- 1.12.12.12",
+        "- doh3://223.5.5.5/dns-query",
+        "- https://1.12.12.12/dns-query",
+        "skip-cert-verify: false",
+        "follow-rule: false",
+        "proxy-providers:",
+        "Airport:",
+        f"url: {provider_source}",
+        "path: ./providers/Airport.yaml",
+        "interval: 7200",
+        "headers:",
+        "X-Stash-Key: stash-header-secret",
+        "use:",
+        "- Airport",
+    )
+    if any(fragment not in text for fragment in required_fragments):
+        raise AssertionError(f"Stash provider schema mismatch: {text!r}")
+    provider_block = text.split("Airport:", 1)[1].split("proxy-groups:", 1)[0]
+    forbidden_provider_fields = (
+        "type:",
+        "proxy:",
+        "header:",
+        "health-check:",
+        "override:",
+        "exclude-filter:",
+    )
+    if any(field in provider_block for field in forbidden_provider_fields):
+        raise AssertionError(
+            f"Stash provider leaked Mihomo-only fields: {provider_block!r}"
+        )
+
+    explain_status, explain_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "stash",
+            "url": f"provider:Airport,{provider_source}",
+            "explain": "true",
+        },
+    )
+    report = json.loads(explain_body)
+    if (
+        explain_status != 200
+        or report.get("target") != "stash"
+        or report.get("mode", {}).get("remote_subscription_backend")
+        != "stash-proxy-provider"
+        or report.get("resources", {}).get("remote_subscription_count") != 1
+        or report.get("output", {}).get("provider_count") != 1
+        or report.get("mode", {}).get("proxy_provider") is not True
+        or len(report.get("providers", [])) != 1
+        or report.get("providers", [{}])[0].get("backend") != "stash-client"
+        or report.get("nodes", {}).get("generated") != 0
+    ):
+        raise AssertionError(f"Stash explain contract mismatch: {report!r}")
+    if "stash-provider-secret" in explain_body.decode("utf-8", errors="replace"):
+        raise AssertionError("Stash explain leaked its provider source token")
+
+    direct_status, direct_body, _ = request(
+        base_url,
+        "/sub",
+        {"target": "stash", "url": SUBSCRIPTION.strip(), "list": "true"},
+    )
+    direct_text = direct_body.decode("utf-8", errors="replace")
+    if (
+        direct_status != 200
+        or "type: ss" not in direct_text
+        or "server: example.com" not in direct_text
+        or "cipher: aes-128-gcm" not in direct_text
+        or "password: password" not in direct_text
+    ):
+        raise AssertionError(f"Stash direct-node projection mismatch: {direct_text!r}")
+    direct_group = direct_text.split("proxy-groups:", 1)[1].split("rules:", 1)[0]
+    if "- Smoke" not in direct_group:
+        raise AssertionError(
+            f"Stash default Proxy group did not reference the direct node: {direct_group!r}"
+        )
+
+    stash_mieru_uri = (
+        "mierus://stash-user:stash-password@mieru-stash.example.test?"
+        "profile=default&port=9998-9999&protocol=TCP"
+    )
+    stash_xhttp_uri = (
+        "vless://99999999-9999-4999-8999-999999999998@"
+        "xhttp-stash.example.test:443?encryption=none&security=reality"
+        "&type=xhttp&host=xhttp-host.example.test&path=%2Fsplit"
+        "&mode=stream-one&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "&sid=00112233&fp=chrome&sni=xhttp-sni.example.test#StashXHTTP"
+    )
+    stash_hy2_hop_uri = HYSTERIA2_URI.replace(
+        "#Hy2Fixture", "&hop-interval=30s#Hy2Fixture"
+    )
+    protocol_status, protocol_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "stash",
+            "url": "|".join(
+                (
+                    VMESS_STANDARD_URI.replace("&fp=chrome", ""),
+                    VLESS_DEFAULT_TCP_URI,
+                    stash_xhttp_uri,
+                    ANYTLS_V2RAYN_URI,
+                    stash_hy2_hop_uri,
+                    stash_mieru_uri,
+                    WIREGUARD_URI,
+                )
+            ),
+            "list": "true",
+        },
+    )
+    protocol_text = protocol_body.decode("utf-8", errors="replace")
+    protocol_fragments = (
+        "type: vless",
+        "type: vmess",
+        "servername: tls.example.test",
+        "sni: vless-tls.example.test",
+        "network: xhttp",
+        "mode: stream-one",
+        "type: anytls",
+        "type: hysteria2",
+        "hop-interval: 30",
+        "type: mieru",
+        "port-range: 9998-9999",
+        "transport: tcp",
+        "type: wireguard",
+        "reserved:",
+        "- 1",
+        "- 2",
+        "- 3",
+    )
+    if protocol_status != 200 or any(
+        fragment not in protocol_text for fragment in protocol_fragments
+    ):
+        raise AssertionError(
+            "Stash current-protocol projection drifted: "
+            f"HTTP {protocol_status} {protocol_text!r}"
+        )
+
+    for unsupported_option in ("tls13=true", "tfo=true"):
+        unsupported_flag_status, _, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "stash",
+                "url": SUBSCRIPTION.strip(),
+                "list": "true",
+                **dict(item.split("=", 1) for item in (unsupported_option,)),
+            },
+        )
+        if unsupported_flag_status != 400:
+            raise AssertionError(
+                "Stash silently ignored an unsupported node option override: "
+                f"{unsupported_option} -> HTTP {unsupported_flag_status}"
+            )
+
+    invalid_stash_bases = {
+        "dangling MATCH policy": (
+            "mode: rule\nproxies: []\nproxy-providers: {}\n"
+            "proxy-groups:\n  - name: Proxy\n    type: select\n"
+            "    proxies: [DIRECT]\nrules: ['MATCH,MissingPolicy']\n"
+        ),
+        "nested dangling RULE-SET": (
+            "mode: rule\nproxies: []\nproxy-providers: {}\n"
+            "proxy-groups:\n  - name: Proxy\n    type: select\n"
+            "    proxies: [DIRECT]\n"
+            "rules: ['AND,((RULE-SET,missing),(NETWORK,TCP)),Proxy']\n"
+        ),
+        "reserved PASS proxy name": (
+            "mode: rule\nproxies:\n  - name: PASS\n    type: direct\n"
+            "proxy-providers: {}\nproxy-groups:\n"
+            "  - name: Proxy\n    type: select\n    proxies: [DIRECT]\n"
+            "rules: ['MATCH,Proxy']\n"
+        ),
+        "proxy and group namespace collision": (
+            "mode: rule\nproxies:\n  - name: Proxy\n    type: direct\n"
+            "proxy-providers: {}\nproxy-groups: []\nrules: ['MATCH,Proxy']\n"
+        ),
+    }
+    for description, invalid_base_text in invalid_stash_bases.items():
+        invalid_base = base64.urlsafe_b64encode(
+            invalid_base_text.encode("utf-8")
+        ).decode("ascii")
+        invalid_config = base64.urlsafe_b64encode(
+            (
+                "enable_rule_generator=false\n"
+                f"stash_rule_base=data:text/plain;base64,{invalid_base}\n"
+            ).encode("utf-8")
+        ).decode("ascii")
+        invalid_status, _, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "stash",
+                "url": SUBSCRIPTION.strip(),
+                "list": "true",
+                "config": f"data:text/plain;base64,{invalid_config}",
+            },
+        )
+        if invalid_status != 400:
+            raise AssertionError(f"Stash accepted a custom base with {description}")
+
+    unsupported_status, unsupported_body, _ = request(
+        base_url,
+        "/sub",
+        {"target": "stash", "url": NAIVE_HTTPS_URI, "list": "true"},
+    )
+    if (
+        unsupported_status != 400
+        or b"none of the parsed proxy nodes" not in unsupported_body
+    ):
+        raise AssertionError(
+            "Stash unsupported-only request did not fail closed: "
+            f"HTTP {unsupported_status}: {unsupported_body!r}"
+        )
+
+    interval_status, _, _ = request(
+        base_url,
+        "/sub",
+        {"target": "stash", "url": f"interval:0,{provider_source}"},
+    )
+    direct_proxy_status, _, _ = request(
+        base_url,
+        "/sub",
+        {"target": "stash", "url": f"proxy_direct:true,{provider_source}"},
+    )
+    if interval_status != 400 or direct_proxy_status != 400:
+        raise AssertionError(
+            "Stash accepted an invalid interval or Mihomo-only proxy_direct"
+        )
+
+
 def singbox_import_fidelity_baseline(base_url: str, fixture_base: str) -> None:
     status, body, _ = request(
         base_url,
@@ -9004,6 +9259,7 @@ def common_scalar_binding_compatibility_baseline(helper: Path) -> None:
         "clash_rule_base": "stage-c/clash.tpl",
         "surge_rule_base": "stage-c/surge.tpl",
         "surfboard_rule_base": "stage-c/surfboard.tpl",
+        "stash_rule_base": "stage-c/stash.tpl",
         "mellow_rule_base": "stage-c/mellow.tpl",
         "quan_rule_base": "stage-c/quan.tpl",
         "quanx_rule_base": "stage-c/quanx.tpl",
@@ -9129,6 +9385,14 @@ def common_scalar_binding_compatibility_baseline(helper: Path) -> None:
                 "legacy preferences without proxy_bypass did not use "
                 "the LOOPBACK+PRIVATE default"
             )
+        if any(
+            snapshot["common"]["rule_bases"].get("stash") != "base/stash.yaml"
+            for snapshot in legacy_snapshots
+        ):
+            raise AssertionError(
+                "legacy preferences without stash_rule_base did not use "
+                "base/stash.yaml"
+            )
         common = configured_snapshots[0]["common"]
         proxies = configured_snapshots[0]["proxies"]
         expected_rule_bases = {
@@ -9137,6 +9401,7 @@ def common_scalar_binding_compatibility_baseline(helper: Path) -> None:
                 "clash",
                 "surge",
                 "surfboard",
+                "stash",
                 "mellow",
                 "quan",
                 "quanx",
@@ -9165,6 +9430,10 @@ def common_scalar_binding_compatibility_baseline(helper: Path) -> None:
             if reloaded["proxies"]["bypass"] != "LOOPBACK,PRIVATE":
                 raise AssertionError(
                     f"{suffix} removal did not restore the default proxy_bypass"
+                )
+            if reloaded["common"]["rule_bases"].get("stash") != "base/stash.yaml":
+                raise AssertionError(
+                    f"{suffix} removal did not restore the default stash_rule_base"
                 )
 
             invalid_bypass = temporary_path / ("invalid-bypass-pref" + suffix)
@@ -10082,6 +10351,7 @@ def main() -> int:
             target_generation_stats_baseline(base_url)
             v2ray_client_target_baseline(base_url)
             shadowrocket_target_baseline(base_url)
+            stash_target_baseline(base_url)
             singbox_import_fidelity_baseline(base_url, fixture_base)
             loon_current_node_output_baseline(base_url)
             quanx_current_node_output_baseline(base_url, fixture_base)

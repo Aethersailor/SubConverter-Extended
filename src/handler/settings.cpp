@@ -45,6 +45,7 @@ struct CommonScalarSettings {
   std::string loonBase;
   std::string SSSubBase;
   std::string singBoxBase;
+  std::string stashBase;
   std::string defaultExtConfig;
   bool fallbackToDefaultExternalConfig;
   bool appendType;
@@ -67,6 +68,7 @@ CommonScalarSettings captureCommonScalarSettings() {
           global.loonBase,
           global.SSSubBase,
           global.singBoxBase,
+          global.stashBase,
           global.defaultExtConfig,
           global.fallbackToDefaultExternalConfig,
           global.appendType,
@@ -96,6 +98,7 @@ void applyCommonScalarSettings(CommonScalarSettings settings) {
   global.loonBase = std::move(settings.loonBase);
   global.SSSubBase = std::move(settings.SSSubBase);
   global.singBoxBase = std::move(settings.singBoxBase);
+  global.stashBase = std::move(settings.stashBase);
   global.defaultExtConfig = std::move(settings.defaultExtConfig);
   global.fallbackToDefaultExternalConfig =
       settings.fallbackToDefaultExternalConfig;
@@ -820,6 +823,7 @@ void readYAMLConf(YAML::Node &node,
   section["loon_rule_base"] >> common.loonBase;
   section["sssub_rule_base"] >> common.SSSubBase;
   section["singbox_rule_base"] >> common.singBoxBase;
+  section["stash_rule_base"] >> common.stashBase;
 
   section["default_external_config"] >> common.defaultExtConfig;
   section["fallback_to_default_external_config"] >>
@@ -1164,8 +1168,9 @@ void readTOMLConf(toml::value &root,
       "surfboard_rule_base", common.surfboardBase, "mellow_rule_base",
       common.mellowBase, "quan_rule_base", common.quanBase, "quanx_rule_base",
       common.quanXBase, "loon_rule_base", common.loonBase, "sssub_rule_base",
-      common.SSSubBase, "singbox_rule_base", common.singBoxBase, "proxy_config",
-      common.proxyConfig, "proxy_ruleset", common.proxyRuleset,
+      common.SSSubBase, "singbox_rule_base", common.singBoxBase,
+      "stash_rule_base", common.stashBase, "proxy_config", common.proxyConfig,
+      "proxy_ruleset", common.proxyRuleset,
       "proxy_subscription", common.proxySubscription, "proxy_bypass",
       common.proxyBypass, "append_proxy_type",
       common.appendType, "reload_conf_on_request", common.reloadConfOnRequest);
@@ -1457,6 +1462,7 @@ bool readConf() {
     global.proxyBypass = kDefaultProxyBypass;
     global.proxyProviderInterval = kDefaultProxyProviderInterval;
     global.proxyProviderDirect = kDefaultProxyProviderDirect;
+    global.stashBase = kDefaultStashRuleBase;
     global.surgePolicyPath = true;
     global.surfboardPolicyPath = true;
     global.singBoxWireGuardEndpoint = false;
@@ -1594,6 +1600,7 @@ bool readConf() {
   ini.get_if_exist("loon_rule_base", common.loonBase);
   ini.get_if_exist("sssub_rule_base", common.SSSubBase);
   ini.get_if_exist("singbox_rule_base", common.singBoxBase);
+  ini.get_if_exist("stash_rule_base", common.stashBase);
   ini.get_if_exist("default_external_config", common.defaultExtConfig);
   ini.get_bool_if_exist("fallback_to_default_external_config",
                         common.fallbackToDefaultExternalConfig);
@@ -1911,6 +1918,7 @@ ExternalConfigLoadStatus loadExternalYAML(YAML::Node &node,
   section["loon_rule_base"] >> ext.loon_rule_base;
   section["sssub_rule_base"] >> ext.sssub_rule_base;
   section["singbox_rule_base"] >> ext.singbox_rule_base;
+  section["stash_rule_base"] >> ext.stash_rule_base;
 
   section["enable_rule_generator"] >> ext.enable_rule_generator;
   section["overwrite_original_rules"] >> ext.overwrite_original_rules;
@@ -1992,7 +2000,8 @@ ExternalConfigLoadStatus loadExternalTOML(toml::value &root,
                 ext.mellow_rule_base, "quan_rule_base", ext.quan_rule_base,
                 "quanx_rule_base", ext.quanx_rule_base, "loon_rule_base",
                 ext.loon_rule_base, "sssub_rule_base", ext.sssub_rule_base,
-                "singbox_rule_base", ext.singbox_rule_base, "add_emoji",
+                "singbox_rule_base", ext.singbox_rule_base,
+                "stash_rule_base", ext.stash_rule_base, "add_emoji",
                 ext.add_emoji, "remove_old_emoji", ext.remove_old_emoji,
                 "include_remarks", ext.include, "exclude_remarks", ext.exclude);
 
@@ -2099,6 +2108,7 @@ parseExternalConfigContent(const std::string &path,
   ini.get_if_exist("loon_rule_base", ext.loon_rule_base);
   ini.get_if_exist("sssub_rule_base", ext.sssub_rule_base);
   ini.get_if_exist("singbox_rule_base", ext.singbox_rule_base);
+  ini.get_if_exist("stash_rule_base", ext.stash_rule_base);
 
   ini.get_bool_if_exist("overwrite_original_rules",
                         ext.overwrite_original_rules);
@@ -2143,7 +2153,7 @@ namespace {
 constexpr size_t kExternalConfigCacheEntries = 64;
 constexpr size_t kExternalConfigCacheBytes = 8 * 1024 * 1024;
 constexpr const char *kExternalConfigParserIdentity =
-    "external-config:auto-yaml-toml-ini:v2";
+    "external-config:auto-yaml-toml-ini:v3";
 
 struct CachedExternalConfig {
   ExternalConfigLoadStatus status = ExternalConfigLoadStatus::ParseFailed;

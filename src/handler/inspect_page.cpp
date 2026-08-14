@@ -1453,9 +1453,11 @@ std::string page(Request &request, Response &response) {
                             : provider.interval
                                 ? String(provider.interval) + text("s", " 秒")
                                 : "-",
-                        provider.proxy_direct
-                            ? text("Forced DIRECT", "强制 DIRECT")
-                            : text("Mihomo routing", "按 Mihomo 路由")
+                        provider.backend === "stash-client"
+                            ? text("Stash client fetch", "由 Stash 客户端获取")
+                            : (provider.proxy_direct
+                                ? text("Forced DIRECT", "强制 DIRECT")
+                                : text("Mihomo routing", "按 Mihomo 路由"))
                     ].forEach(function (value) {
                         var cell = document.createElement("td");
                         cell.textContent = value;
@@ -1499,7 +1501,7 @@ std::string page(Request &request, Response &response) {
                 var remoteBackend = mode.remote_subscription_backend || "server-side-parse";
                 var hasRemoteResources = Number(resources.remote_subscription_count || 0) > 0;
                 var policyPathBackend = remoteBackend === "surge-policy-path" || remoteBackend === "surfboard-policy-path";
-                var routeLabel = mode.proxy_provider ? "proxy-provider" : (remoteBackend === "quanx-server-remote" && hasRemoteResources ? "server_remote" : (remoteBackend === "loon-remote-proxy" && hasRemoteResources ? "remote-proxy" : (policyPathBackend && hasRemoteResources ? "policy-path" : "direct nodes")));
+                var routeLabel = remoteBackend === "stash-proxy-provider" && hasRemoteResources ? "stash-provider" : (mode.proxy_provider ? "proxy-provider" : (remoteBackend === "quanx-server-remote" && hasRemoteResources ? "server_remote" : (remoteBackend === "loon-remote-proxy" && hasRemoteResources ? "remote-proxy" : (policyPathBackend && hasRemoteResources ? "policy-path" : "direct nodes"))));
                 stateLine.appendChild(tag(routeLabel, routeLabel === "direct nodes" ? "warn" : ""));
                 if (resources.remote_subscription_count) {
                     stateLine.appendChild(tag(text("remote resources ", "远程资源 ") + resources.remote_subscription_count));

@@ -43,6 +43,7 @@ std::string sanitizedSettingsSnapshot(const Settings &settings) {
                 {"loon", settings.loonBase},
                 {"sssub", settings.SSSubBase},
                 {"singbox", settings.singBoxBase},
+                {"stash", settings.stashBase},
             }},
            {"default_urls", sensitiveState(settings.defaultUrls)},
            {"insert_urls", sensitiveState(settings.insertUrls)},

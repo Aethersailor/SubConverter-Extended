@@ -45,6 +45,9 @@ common:
   loon_rule_base: base/all_base.tpl
   sssub_rule_base: base/all_base.tpl
   singbox_rule_base: base/all_base.tpl
+  # Stash 使用独立模板；旧配置缺少此项时仍使用 base/stash.yaml。
+  # Stash uses an independent template; existing configs that omit this option still use base/stash.yaml.
+  stash_rule_base: base/stash.yaml
   # 分别控制下载外部配置、规则集和订阅时使用的代理。NONE（不区分大小写）和空值强制直连并忽略环境代理；SYSTEM 按系统代理来源解析；显式 http/https/socks4/socks4a/socks5/socks5h URI 不受环境 NO_PROXY 影响，但官方构建会在受信任请求和 lan 模式下直连初始回环主机。
   # Proxies used when downloading external configs, rulesets, and subscriptions. NONE (case-insensitive) and an empty value force direct connections and ignore proxy environment variables. SYSTEM resolves the documented system source. Explicit http/https/socks4/socks4a/socks5/socks5h URIs ignore ambient NO_PROXY, while official builds directly reach an initial loopback host for trusted requests and lan mode.
   # socks5 本地解析域名，socks5h 由 SOCKS 服务端解析。cors:https://relay.example/ 是兼容的 HTTP CORS 中继，而不是网络代理。

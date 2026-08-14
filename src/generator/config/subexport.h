@@ -74,6 +74,18 @@ struct LoonRemoteProxyResource {
   int group_id = 0;
 };
 
+struct StashProxyProvider {
+  std::string name;
+  std::string requested_name;
+  std::string selection_name;
+  std::string source_tag;
+  std::string url;
+  std::string path;
+  int interval = 3600;
+  int group_id = 0;
+  std::map<std::string, std::string> headers;
+};
+
 struct TargetGenerationStats {
   size_t input_nodes = 0;
   size_t emitted_nodes = 0;
@@ -140,6 +152,7 @@ struct extra_settings {
   std::vector<SurgePolicyPathResource> surge_policy_paths;
   std::vector<SurfboardPolicyPathResource> surfboard_policy_paths;
   std::vector<LoonRemoteProxyResource> loon_remote_proxies;
+  std::vector<StashProxyProvider> stash_proxy_providers;
   TargetGenerationStats target_generation_stats;
   TargetGenerationStats surge_generation_stats;
   TargetGenerationStats surfboard_generation_stats;
@@ -190,6 +203,11 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
                         std::vector<RulesetContent> &ruleset_content_array,
                         const ProxyGroupConfigs &extra_proxy_group,
                         extra_settings &ext);
+std::string proxyToStash(std::vector<Proxy> &nodes,
+                         const std::string &base_conf,
+                         std::vector<RulesetContent> &ruleset_content_array,
+                         const ProxyGroupConfigs &extra_proxy_group,
+                         extra_settings &ext);
 std::string proxyToSSSub(std::string base_conf, std::vector<Proxy> &nodes,
                          extra_settings &ext);
 std::string proxyToSingle(const std::vector<Proxy> &nodes,

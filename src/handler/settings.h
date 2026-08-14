@@ -20,6 +20,8 @@
 #include "config/proxy_provider_direct.h"
 #include "config/proxy_provider_interval.h"
 
+inline constexpr char kDefaultStashRuleBase[] = "base/stash.yaml";
+
 struct SecuritySettingsDiagnostics {
   std::string profileSource = "builtin-default";
   std::string profileFileSource;
@@ -101,6 +103,7 @@ struct Settings {
   ProxyGroupConfigs customProxyGroups;
   std::string surgeBase, surfboardBase, mellowBase, quanBase, quanXBase,
       loonBase, SSSubBase, singBoxBase;
+  std::string stashBase = kDefaultStashRuleBase;
   std::string surgeSSRPath, quanXDevID;
 
   // cache system
@@ -156,6 +159,7 @@ struct ExternalConfig {
   std::string loon_rule_base;
   std::string sssub_rule_base;
   std::string singbox_rule_base;
+  std::string stash_rule_base;
   RegexMatchConfigs rename;
   RegexMatchConfigs emoji;
   string_array include;
