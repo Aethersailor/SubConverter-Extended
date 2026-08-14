@@ -3132,11 +3132,16 @@ static std::string proxyToStashImpl(
           base_remark_keys.find(name) != base_remark_keys.end() ||
           !base_group_names.insert(name).second)
         return fail_base_schema("proxy-groups.name"), std::string();
-      for (const char *member_key : {"proxies", "use"})
-        if (group[member_key].IsSequence())
-          for (const YAML::Node &member : group[member_key])
-            if (!member.IsScalar())
-              return fail_base_schema("proxy-groups"), std::string();
+      for (const char *member_key : {"proxies", "use"}) {
+        const YAML::Node members = group[member_key];
+        if (!members.IsDefined() || members.IsNull())
+          continue;
+        if (!members.IsSequence())
+          return fail_base_schema("proxy-groups"), std::string();
+        for (const YAML::Node &member : members)
+          if (!member.IsScalar())
+            return fail_base_schema("proxy-groups"), std::string();
+      }
       base_remark_storage.push_back(name);
     }
   }
