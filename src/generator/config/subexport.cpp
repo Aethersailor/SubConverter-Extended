@@ -5,6 +5,7 @@
 #include <iostream>
 #include <numeric>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "config/regmatch.h"
@@ -16,6 +17,7 @@
 #include "handler/settings_view.h"
 #include "nodemanip.h"
 #include "parser/config/proxy.h"
+#include "parser/mieru_uri.h"
 #include "ruleconvert.h"
 #include "script/script_quickjs.h"
 #include "utils/bitwise.h"
@@ -3379,6 +3381,115 @@ static constexpr SingleLinkProfile kShadowrocketSingleLinkProfile = {
     true, true, true, true, true, true, SingleLinkDialect::Shadowrocket,
 };
 
+struct ShadowrocketMieruGroup {
+  bool valid = false;
+  bool written = false;
+  std::string link;
+};
+
+static std::string mieruBindingSpec(const Proxy &node) {
+  return node.Ports.empty() ? std::to_string(node.Port) : node.Ports;
+}
+
+static bool shadowrocketMieruNodeIsPortable(const Proxy &node) {
+  if (node.Type != ProxyType::Mieru || node.MieruSourceId.empty() ||
+      node.MieruProfile.empty() || node.MieruHasUnknownParameters ||
+      node.Username.empty() || node.Password.empty() || node.Hostname.empty() ||
+      !node.UnderlyingProxy.empty() || node.TCPFastOpen.get() ||
+      node.AllowInsecure.get() || node.TLS13.get() || node.XUDP.get() ||
+      !node.UDP.get() ||
+      (node.Mtu != 0 && (node.Mtu < 1280 || node.Mtu > 1400)) ||
+      !isValidMieruMultiplexing(node.Multiplexing) ||
+      !isValidMieruHandshakeMode(node.MieruHandshakeMode) ||
+      !isValidMieruTrafficPattern(node.MieruTrafficPattern))
+    return false;
+  MieruPortBinding binding;
+  return parseMieruPortBinding(mieruBindingSpec(node),
+                               node.TransferProtocol, binding);
+}
+
+static bool sameMieruResource(const Proxy &left, const Proxy &right) {
+  return left.Username == right.Username &&
+         left.Password == right.Password &&
+         left.Hostname == right.Hostname &&
+         left.Mtu == right.Mtu &&
+         left.Multiplexing == right.Multiplexing &&
+         left.MieruProfile == right.MieruProfile &&
+         left.MieruSourceRemark == right.MieruSourceRemark &&
+         left.MieruHasUnknownParameters == right.MieruHasUnknownParameters &&
+         left.MieruHandshakeMode == right.MieruHandshakeMode &&
+         left.MieruTrafficPattern == right.MieruTrafficPattern;
+}
+
+static bool buildShadowrocketMieruGroup(const std::vector<Proxy> &nodes,
+                                        const std::string &source_id,
+                                        std::string &link) {
+  std::vector<const Proxy *> members;
+  for (const Proxy &node : nodes) {
+    if (node.Type == ProxyType::Mieru && node.MieruSourceId == source_id)
+      members.push_back(&node);
+  }
+  if (members.empty())
+    return false;
+  std::sort(members.begin(), members.end(), [](const Proxy *left,
+                                                const Proxy *right) {
+    return left->MieruBindingIndex < right->MieruBindingIndex;
+  });
+
+  const Proxy &first = *members.front();
+  if (!shadowrocketMieruNodeIsPortable(first))
+    return false;
+  MieruSimpleConfig config;
+  config.username = first.Username;
+  config.password = first.Password;
+  config.host = first.Hostname;
+  config.profile = first.MieruProfile;
+  config.mtu = first.Mtu;
+  config.multiplexing = first.Multiplexing;
+  config.handshake_mode = first.MieruHandshakeMode;
+  config.traffic_pattern = first.MieruTrafficPattern;
+  config.has_unknown_parameters = first.MieruHasUnknownParameters;
+
+  std::string effective_remark;
+  bool has_effective_remark = false;
+  uint32_t previous_index = 0;
+  bool has_previous_index = false;
+  for (const Proxy *member : members) {
+    if (!shadowrocketMieruNodeIsPortable(*member) ||
+        !sameMieruResource(first, *member) ||
+        (has_previous_index &&
+         member->MieruBindingIndex == previous_index))
+      return false;
+    previous_index = member->MieruBindingIndex;
+    has_previous_index = true;
+
+    MieruPortBinding binding;
+    if (!parseMieruPortBinding(mieruBindingSpec(*member),
+                               member->TransferProtocol, binding))
+      return false;
+    const std::string suffix =
+        ":" + binding.port + "/" + binding.protocol;
+    std::string member_remark = member->Remark;
+    if (endsWith(member_remark, suffix))
+      member_remark.erase(member_remark.size() - suffix.size());
+    if (!has_effective_remark) {
+      effective_remark = std::move(member_remark);
+      has_effective_remark = true;
+    } else if (effective_remark != member_remark) {
+      return false;
+    }
+    config.port_bindings.emplace_back(std::move(binding));
+  }
+
+  const std::string source_base = first.MieruSourceRemark.empty()
+                                      ? first.MieruProfile
+                                      : first.MieruSourceRemark;
+  config.remark = effective_remark == source_base
+                      ? first.MieruSourceRemark
+                      : effective_remark;
+  return buildMieruSimpleUri(config, link);
+}
+
 static std::string proxyToSingleProfile(const std::vector<Proxy> &nodes,
                                         const SingleLinkProfile &profile,
                                         extra_settings &ext) {
@@ -3393,6 +3504,7 @@ static std::string proxyToSingleProfile(const std::vector<Proxy> &nodes,
   const bool hysteria2 = profile.hysteria2;
   const bool vless = profile.vless;
   const bool shadowrocket = profile.dialect == SingleLinkDialect::Shadowrocket;
+  std::unordered_map<std::string, ShadowrocketMieruGroup> mieru_groups;
 
   for (const Proxy &x : nodes) {
     TargetNodeGenerationTracker generation_tracker(generation_stats, x.Type);
@@ -3526,6 +3638,24 @@ static std::string proxyToSingleProfile(const std::vector<Proxy> &nodes,
         proxyStr = "anytls://" + urlEncode(password) + "@" +
                    shareLinkHost(hostname) + ":" + port + "/" +
                    joinShareQuery(query) + "#" + urlEncode(remark);
+      }
+      break;
+    case ProxyType::Mieru:
+      if (!shadowrocket || x.MieruSourceId.empty())
+        continue;
+      {
+        auto [group_it, inserted] = mieru_groups.try_emplace(x.MieruSourceId);
+        ShadowrocketMieruGroup &group = group_it->second;
+        if (inserted)
+          group.valid =
+              buildShadowrocketMieruGroup(nodes, x.MieruSourceId, group.link);
+        if (!group.valid)
+          continue;
+        generation_tracker.markEmitted();
+        if (group.written)
+          continue;
+        group.written = true;
+        proxyStr = group.link;
       }
       break;
     case ProxyType::VLESS:
