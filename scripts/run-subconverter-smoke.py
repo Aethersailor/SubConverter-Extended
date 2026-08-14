@@ -90,6 +90,14 @@ SHADOWROCKET_LOSSY_ANYTLS_LINK = (
     "anytls://smoke-password@anytls-shadowrocket.example.test:443/"
     "?sni=anytls-shadowrocket.example.test&fp=chrome#LossyAnyTLS"
 )
+STASH_MIERU_LINK = (
+    "mierus://stash-user:stash-password@mieru-stash.example.test?"
+    "profile=default&port=9998-9999&protocol=TCP"
+)
+STASH_HYSTERIA2_LINK = (
+    "hysteria2://stash-password@hy2-stash.example.test:8443/"
+    "?sni=hy2-stash.example.test&hop-interval=30s#StashHy2"
+)
 SHADOWROCKET_STAGE_ONE_SMOKE_SHA256 = (
     "7f12b33d4d71596e81abd0e9f79b1f95b59d964bbd8f80fe33b840f60f62ecc6"
 )
@@ -1256,6 +1264,107 @@ def run_checks(
             if expected not in loon_output:
                 raise AssertionError(
                     f"Loon remote-proxy output is missing {expected!r}\n{loon_output}"
+                )
+
+        dead_stash_source = (
+            "https://127.0.0.1:1/stash-must-not-fetch.yaml"
+            "?token=stash-smoke-source-secret"
+        )
+        stash_output = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "stash",
+                "url": f"provider:StashSmoke,interval:7200,{dead_stash_source}",
+                "config": QUANX_REMOTE_CONFIG,
+            },
+            timeout,
+        )
+        for expected in (
+            "default-nameserver:",
+            "- 223.5.5.5",
+            "- 1.12.12.12",
+            "- doh3://223.5.5.5/dns-query",
+            "- https://1.12.12.12/dns-query",
+            "skip-cert-verify: false",
+            "follow-rule: false",
+            "proxy-providers:",
+            "StashSmoke:",
+            f"url: {dead_stash_source}",
+            "path: ./providers/StashSmoke.yaml",
+            "interval: 7200",
+            "use:",
+            "- StashSmoke",
+            "name: Proxy",
+            "- Remote",
+        ):
+            if expected not in stash_output:
+                raise AssertionError(
+                    f"Stash provider output is missing {expected!r}\n{stash_output}"
+                )
+        stash_provider_block = stash_output.split("StashSmoke:", 1)[1].split(
+            "proxy-groups:", 1
+        )[0]
+        if any(
+            field in stash_provider_block
+            for field in (
+                "type:",
+                "proxy:",
+                "header:",
+                "health-check:",
+                "override:",
+                "exclude-filter:",
+            )
+        ):
+            raise AssertionError(
+                f"Stash provider leaked Mihomo fields: {stash_provider_block!r}"
+            )
+        stash_explain = json.loads(
+            fetch(
+                base_url,
+                "/sub",
+                {
+                    "target": "stash",
+                    "url": f"provider:StashSmoke,{dead_stash_source}",
+                    "config": QUANX_REMOTE_CONFIG,
+                    "explain": "true",
+                },
+                timeout,
+            )
+        )
+        if (
+            stash_explain.get("mode", {}).get("remote_subscription_backend")
+            != "stash-proxy-provider"
+            or stash_explain.get("resources", {}).get(
+                "remote_subscription_count"
+            )
+            != 1
+        ):
+            raise AssertionError(f"Stash explain route mismatch: {stash_explain!r}")
+        if "stash-smoke-source-secret" in json.dumps(stash_explain):
+            raise AssertionError("Stash explain leaked its source token")
+
+        stash_direct = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "stash",
+                "url": STASH_MIERU_LINK + "|" + STASH_HYSTERIA2_LINK,
+                "list": "true",
+            },
+            timeout,
+        )
+        for expected in (
+            "type: mieru",
+            "port-range: 9998-9999",
+            "transport: tcp",
+            "type: hysteria2",
+            "hop-interval: 30",
+        ):
+            if expected not in stash_direct:
+                raise AssertionError(
+                    f"Stash direct protocol output is missing {expected!r}\n"
+                    f"{stash_direct}"
                 )
 
         quanx_list = fetch(

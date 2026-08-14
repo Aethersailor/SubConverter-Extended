@@ -2,7 +2,9 @@
 #include <cctype>
 #include <climits>
 #include <cmath>
+#include <functional>
 #include <iostream>
+#include <limits>
 #include <numeric>
 #include <string_view>
 #include <unordered_map>
@@ -2187,7 +2189,1461 @@ bool wireGuardStructuredConfigIsSafe(const Proxy &node) {
   return true;
 }
 
+bool stashNodeHasUnsupportedSharedFields(const Proxy &node) {
+  return !node.UnderlyingProxy.empty() || !node.Edge.empty() ||
+         !node.QUICSecure.empty() || !node.QUICSecret.empty() ||
+         !node.ShadowTLSPassword.empty() || !node.ShadowTLSSNI.empty() ||
+         node.ShadowTLSVersion != 0 || !node.XrayLinkOptions.empty() ||
+         node.V2rayHttpUpgrade.get(false) || node.XUDP.get(false) ||
+         node.TLS13.get(false);
+}
+
+void addStashTlsFields(YAML::Node &out, const Proxy &node, tribool insecure,
+                       bool emit_tls, bool inherent_tls = false,
+                       bool use_servername_key = false) {
+  const std::string tls_state = toLower(trim(node.TLSStr));
+  const bool tls_active = inherent_tls || node.TLSSecure ||
+                          tls_state == "tls" || tls_state == "reality" ||
+                          tls_state == "xtls" || !node.PublicKey.empty();
+  if (emit_tls && tls_active)
+    out["tls"] = true;
+  if (tls_active && !insecure.is_undef())
+    out["skip-cert-verify"] = insecure.get();
+  const std::string &sni = !node.ServerName.empty() ? node.ServerName : node.SNI;
+  if (tls_active && !sni.empty())
+    out[use_servername_key ? "servername" : "sni"] = sni;
+  if (tls_active && !node.AlpnList.empty())
+    out["alpn"] = node.AlpnList;
+  else if (tls_active && !node.Alpn.empty())
+    out["alpn"].push_back(node.Alpn);
+}
+
+bool addStashV2RayTransport(YAML::Node &out, const Proxy &node,
+                           bool allow_http, bool allow_h2, bool allow_grpc,
+                           bool allow_xhttp = false) {
+  const std::string network = toLower(node.TransferProtocol);
+  if (network.empty() || network == "tcp")
+    return node.FakeType.empty() || node.FakeType == "none";
+  if (network == "ws") {
+    out["network"] = "ws";
+    if (!node.Path.empty())
+      out["ws-opts"]["path"] = node.Path;
+    if (!node.Host.empty())
+      out["ws-opts"]["headers"]["Host"] = node.Host;
+    return true;
+  }
+  if (network == "http" && allow_http) {
+    out["network"] = "http";
+    out["http-opts"]["method"] = "GET";
+    if (!node.Path.empty())
+      out["http-opts"]["path"].push_back(node.Path);
+    if (!node.Host.empty())
+      out["http-opts"]["headers"]["Host"].push_back(node.Host);
+    return true;
+  }
+  if (network == "h2" && allow_h2) {
+    out["network"] = "h2";
+    if (!node.Path.empty())
+      out["h2-opts"]["path"] = node.Path;
+    if (!node.Host.empty())
+      out["h2-opts"]["host"].push_back(node.Host);
+    return true;
+  }
+  if (network == "grpc" && allow_grpc &&
+      (node.GRPCMode.empty() || node.GRPCMode == "gun")) {
+    out["network"] = "grpc";
+    if (!node.GRPCServiceName.empty())
+      out["grpc-opts"]["grpc-service-name"] = node.GRPCServiceName;
+    return true;
+  }
+  if (network == "xhttp" && allow_xhttp) {
+    static const std::unordered_set<std::string> modes = {
+        "auto", "stream-one", "stream-up", "packet-up"};
+    const std::string mode =
+        node.GRPCMode.empty() ? std::string("auto") : node.GRPCMode;
+    if (modes.find(mode) == modes.end())
+      return false;
+    out["network"] = "xhttp";
+    out["xhttp-opts"]["mode"] = mode;
+    if (!node.Path.empty())
+      out["xhttp-opts"]["path"] = node.Path;
+    if (!node.Host.empty())
+      out["xhttp-opts"]["host"] = node.Host;
+    return true;
+  }
+  return false;
+}
+
+bool stashStringIn(const std::string &value,
+                   const std::unordered_set<std::string> &allowed) {
+  return allowed.find(toLower(trim(value))) != allowed.end();
+}
+
+bool stashTlsStateIsValid(const Proxy &node, bool allow_reality,
+                          bool allow_xtls = false) {
+  const std::string declared = toLower(trim(node.TLSStr));
+  if (declared.empty())
+    return allow_reality || node.PublicKey.empty();
+  if (declared == "none")
+    return !node.TLSSecure && node.PublicKey.empty();
+  if (declared == "tls")
+    return node.PublicKey.empty() || allow_reality;
+  if (declared == "xtls")
+    return allow_xtls && node.PublicKey.empty();
+  if (declared == "reality")
+    return allow_reality && !node.PublicKey.empty();
+  return false;
+}
+
+bool stashPortSpecIsValid(const std::string &spec) {
+  if (spec.empty())
+    return true;
+  for (std::string token : split(spec, ",")) {
+    token = trim(token);
+    const size_t dash = token.find('-');
+    if (dash == std::string::npos) {
+      if (!generatorPortIsValid(token))
+        return false;
+      continue;
+    }
+    if (dash == 0 || dash + 1 >= token.size() ||
+        token.find('-', dash + 1) != std::string::npos ||
+        !generatorPortIsValid(token.substr(0, dash)) ||
+        !generatorPortIsValid(token.substr(dash + 1)) ||
+        std::stoul(token.substr(0, dash)) >
+            std::stoul(token.substr(dash + 1)))
+      return false;
+  }
+  return true;
+}
+
+bool stashSinglePortRangeIsValid(const std::string &range) {
+  if (range.empty() || range.find(',') != std::string::npos)
+    return false;
+  const size_t dash = range.find('-');
+  return dash != std::string::npos && dash > 0 && dash + 1 < range.size() &&
+         range.find('-', dash + 1) == std::string::npos &&
+         generatorPortIsValid(range.substr(0, dash)) &&
+         generatorPortIsValid(range.substr(dash + 1)) &&
+         std::stoul(range.substr(0, dash)) <=
+             std::stoul(range.substr(dash + 1));
+}
+
+bool stashBase64ValueIsValid(const std::string &value) {
+  return !value.empty() && value.size() % 4 == 0 &&
+         regMatch(value, R"(^[A-Za-z0-9+/]+={0,2}$)");
+}
+
+bool stashHopIntervalSeconds(const std::string &value, int &seconds) {
+  seconds = 0;
+  if (value.empty())
+    return true;
+  if (isNumeric(value)) {
+    try {
+      const unsigned long parsed = std::stoul(value);
+      if (parsed == 0 || parsed > static_cast<unsigned long>(INT_MAX))
+        return false;
+      seconds = static_cast<int>(parsed);
+      return true;
+    } catch (const std::exception &) {
+      return false;
+    }
+  }
+
+  uint64_t total_nanoseconds = 0;
+  size_t position = 0;
+  while (position < value.size()) {
+    const size_t number_start = position;
+    while (position < value.size() &&
+           std::isdigit(static_cast<unsigned char>(value[position])))
+      ++position;
+    if (number_start == position)
+      return false;
+    uint64_t amount = 0;
+    try {
+      amount = std::stoull(value.substr(number_start, position - number_start));
+    } catch (const std::exception &) {
+      return false;
+    }
+    uint64_t multiplier = 0;
+    if (value.compare(position, 2, "ns") == 0) {
+      multiplier = 1;
+      position += 2;
+    } else if (value.compare(position, 2, "us") == 0) {
+      multiplier = 1000;
+      position += 2;
+    } else if (value.compare(position, 2, "ms") == 0) {
+      multiplier = 1000000;
+      position += 2;
+    } else if (position < value.size() && value[position] == 's') {
+      multiplier = 1000000000ULL;
+      ++position;
+    } else if (position < value.size() && value[position] == 'm') {
+      multiplier = 60ULL * 1000000000ULL;
+      ++position;
+    } else if (position < value.size() && value[position] == 'h') {
+      multiplier = 3600ULL * 1000000000ULL;
+      ++position;
+    } else {
+      return false;
+    }
+    if (amount > (std::numeric_limits<uint64_t>::max() - total_nanoseconds) /
+                     multiplier)
+      return false;
+    total_nanoseconds += amount * multiplier;
+  }
+  constexpr uint64_t nanoseconds_per_second = 1000000000ULL;
+  if (total_nanoseconds == 0 ||
+      total_nanoseconds % nanoseconds_per_second != 0 ||
+      total_nanoseconds / nanoseconds_per_second >
+          static_cast<uint64_t>(INT_MAX))
+    return false;
+  seconds = static_cast<int>(total_nanoseconds / nanoseconds_per_second);
+  return true;
+}
+
+std::string stashHysteriaPorts(const Proxy &node) {
+  if (node.Ports.empty())
+    return "";
+  if (node.Hysteria2PortsAreAdditional)
+    return std::to_string(node.Port) + "," + node.Ports;
+  return node.Ports;
+}
+
+bool buildStashNode(const Proxy &node, YAML::Node &out, tribool udp,
+                    tribool tfo, tribool insecure, tribool tls13) {
+  const bool mieru_port_range =
+      node.Type == ProxyType::Mieru && node.Port == 0 && !node.Ports.empty();
+  if (node.Hostname.empty() || (node.Port == 0 && !mieru_port_range) ||
+      node.Remark.empty() || tls13.get(false) ||
+      std::any_of(node.AlpnList.begin(), node.AlpnList.end(),
+                  [](const std::string &alpn) { return alpn.empty(); }) ||
+      stashNodeHasUnsupportedSharedFields(node))
+    return false;
+
+  out["name"] = node.Remark;
+  out["server"] = node.Hostname;
+  if (node.Port != 0)
+    out["port"] = node.Port;
+
+  switch (node.Type) {
+  case ProxyType::Shadowsocks: {
+    static const std::unordered_set<std::string> ciphers = {
+        "aes-128-gcm", "aes-192-gcm", "aes-256-gcm", "aes-128-cfb",
+        "aes-192-cfb", "aes-256-cfb", "aes-128-ctr", "aes-192-ctr",
+        "aes-256-ctr", "rc4-md5", "chacha20", "chacha20-ietf",
+        "xchacha20", "chacha20-ietf-poly1305",
+        "xchacha20-ietf-poly1305", "2022-blake3-aes-128-gcm",
+        "2022-blake3-aes-256-gcm"};
+    std::string cipher = toLower(trim(node.EncryptMethod));
+    if (cipher == "aead_chacha20_poly1305")
+      cipher = "chacha20-ietf-poly1305";
+    if (node.Password.empty() || !stashStringIn(cipher, ciphers) ||
+        (!node.Plugin.empty() && node.PluginOption.empty()))
+      return false;
+    out["type"] = "ss";
+    out["cipher"] = cipher;
+    out["password"] = node.Password;
+    if (!node.Plugin.empty()) {
+      const std::string options =
+          replaceAllDistinct(node.PluginOption, ";", "&");
+      const std::string plugin = toLower(node.Plugin);
+      std::unordered_map<std::string, std::string> parsed_options;
+      for (const std::string &raw_option : split(options, "&")) {
+        if (raw_option.empty())
+          continue;
+        const size_t equals = raw_option.find('=');
+        const std::string key =
+            toLower(trim(raw_option.substr(0, equals)));
+        const std::string value =
+            equals == std::string::npos ? std::string()
+                                        : raw_option.substr(equals + 1);
+        if (key.empty() || !parsed_options.emplace(key, value).second)
+          return false;
+      }
+      auto flag_value = [&](const std::string &key, bool &present,
+                            bool &value) {
+        const auto found = parsed_options.find(key);
+        present = found != parsed_options.end();
+        if (!present)
+          return true;
+        const std::string normalized = toLower(trim(found->second));
+        if (normalized.empty() || normalized == "true" || normalized == "1") {
+          value = true;
+          return true;
+        }
+        if (normalized == "false" || normalized == "0") {
+          value = false;
+          return true;
+        }
+        return false;
+      };
+      if (plugin == "simple-obfs" || plugin == "obfs-local") {
+        if (std::any_of(parsed_options.begin(), parsed_options.end(),
+                        [](const auto &option) {
+                          return option.first != "obfs" &&
+                                 option.first != "obfs-host";
+                        }))
+          return false;
+        const std::string mode =
+            urlDecode(parsed_options.count("obfs") ? parsed_options["obfs"]
+                                                    : std::string());
+        if (mode != "http" && mode != "tls")
+          return false;
+        out["plugin"] = "obfs";
+        out["plugin-opts"]["mode"] = mode;
+        const std::string host =
+            urlDecode(parsed_options.count("obfs-host")
+                          ? parsed_options["obfs-host"]
+                          : std::string());
+        if (!host.empty())
+          out["plugin-opts"]["host"] = host;
+      } else if (plugin == "v2ray-plugin") {
+        if (std::any_of(parsed_options.begin(), parsed_options.end(),
+                        [](const auto &option) {
+                          return option.first != "mode" &&
+                                 option.first != "host" &&
+                                 option.first != "path" &&
+                                 option.first != "tls" &&
+                                 option.first != "skip-cert-verify";
+                        }))
+          return false;
+        const std::string mode = parsed_options["mode"];
+        if (!mode.empty() && mode != "websocket")
+          return false;
+        bool tls_present = false, tls_enabled = false;
+        bool scv_present = false, scv_enabled = false;
+        if (!flag_value("tls", tls_present, tls_enabled) ||
+            !flag_value("skip-cert-verify", scv_present, scv_enabled))
+          return false;
+        if (!insecure.is_undef()) {
+          if (scv_present && insecure.get() != scv_enabled)
+            return false;
+          scv_present = true;
+          scv_enabled = insecure.get();
+        }
+        out["plugin"] = "v2ray-plugin";
+        out["plugin-opts"]["mode"] = "websocket";
+        const std::string host = parsed_options["host"];
+        const std::string path = parsed_options["path"];
+        if (!host.empty())
+          out["plugin-opts"]["host"] = host;
+        if (!path.empty())
+          out["plugin-opts"]["path"] = path;
+        if (tls_present)
+          out["plugin-opts"]["tls"] = tls_enabled;
+        if (scv_present)
+          out["plugin-opts"]["skip-cert-verify"] = scv_enabled;
+        if (tls_present && tls_enabled)
+          out["plugin-opts"]["tls"] = true;
+      } else {
+        return false;
+      }
+    } else if (!node.PluginOption.empty() || insecure.get(false))
+      return false;
+    break;
+  }
+  case ProxyType::ShadowsocksR: {
+    static const std::unordered_set<std::string> ciphers = {
+        "aes-128-gcm", "aes-192-gcm", "aes-256-gcm", "aes-128-cfb",
+        "aes-192-cfb", "aes-256-cfb", "aes-128-ctr", "aes-192-ctr",
+        "aes-256-ctr", "rc4-md5", "chacha20", "chacha20-ietf",
+        "xchacha20", "chacha20-ietf-poly1305",
+        "xchacha20-ietf-poly1305", "2022-blake3-aes-128-gcm",
+        "2022-blake3-aes-256-gcm"};
+    static const std::unordered_set<std::string> protocols = {
+        "origin", "auth_sha1_v4", "auth_aes128_md5", "auth_aes128_sha1",
+        "auth_chain_a", "auth_chain_b"};
+    static const std::unordered_set<std::string> obfs_values = {
+        "plain", "http_simple", "http_post", "random_head",
+        "tls1.2_ticket_auth", "tls1.2_ticket_fastauth"};
+    std::string cipher = toLower(trim(node.EncryptMethod));
+    if (cipher == "aead_chacha20_poly1305")
+      cipher = "chacha20-ietf-poly1305";
+    const std::string protocol = toLower(trim(node.Protocol));
+    const std::string obfs = toLower(trim(node.OBFS));
+    if (node.Password.empty() || !stashStringIn(cipher, ciphers) ||
+        (!protocol.empty() && !stashStringIn(protocol, protocols)) ||
+        (!obfs.empty() && !stashStringIn(obfs, obfs_values)) ||
+        insecure.get(false))
+      return false;
+    out["type"] = "ssr";
+    out["cipher"] = cipher;
+    out["password"] = node.Password;
+    out["protocol"] = protocol;
+    out["obfs"] = obfs;
+    if (!node.ProtocolParam.empty())
+      out["protocol-param"] = node.ProtocolParam;
+    if (!node.OBFSParam.empty())
+      out["obfs-param"] = node.OBFSParam;
+    break;
+  }
+  case ProxyType::HTTP:
+  case ProxyType::HTTPS:
+    out["type"] = "http";
+    if (!node.Username.empty())
+      out["username"] = node.Username;
+    if (!node.Password.empty())
+      out["password"] = node.Password;
+    if (node.Type == ProxyType::HTTPS || node.TLSSecure)
+      out["tls"] = true;
+    if (!stashTlsStateIsValid(node, false))
+      return false;
+    addStashTlsFields(out, node, insecure, true,
+                      node.Type == ProxyType::HTTPS);
+    break;
+  case ProxyType::SOCKS5:
+    out["type"] = "socks5";
+    if (!node.Username.empty())
+      out["username"] = node.Username;
+    if (!node.Password.empty())
+      out["password"] = node.Password;
+    if (!stashTlsStateIsValid(node, false))
+      return false;
+    addStashTlsFields(out, node, insecure, true);
+    break;
+  case ProxyType::VMess: {
+    static const std::unordered_set<std::string> ciphers = {
+        "auto", "aes-128-gcm", "chacha20-poly1305", "none"};
+    const std::string cipher = node.EncryptMethod.empty()
+                                   ? std::string("auto")
+                                   : toLower(trim(node.EncryptMethod));
+    if (node.UserId.empty() || !node.PublicKey.empty() || !node.Flow.empty() ||
+        !node.ShortId.empty() || !node.Fingerprint.empty() ||
+        !node.Encryption.empty() || !stashStringIn(cipher, ciphers) ||
+        !stashTlsStateIsValid(node, false) ||
+        (!node.PacketEncoding.empty() && node.PacketEncoding != "none") ||
+        !addStashV2RayTransport(out, node, true, true, true))
+      return false;
+    out["type"] = "vmess";
+    out["uuid"] = node.UserId;
+    out["alterId"] = node.AlterId;
+    out["cipher"] = cipher;
+    addStashTlsFields(out, node, insecure, true, false, true);
+    break;
+  }
+  case ProxyType::Trojan:
+    if (node.Password.empty() || !node.PublicKey.empty() || !node.Flow.empty() ||
+        !node.ShortId.empty() || !node.Fingerprint.empty() ||
+        !node.Encryption.empty() || !node.PacketEncoding.empty() ||
+        !stashTlsStateIsValid(node, false) ||
+        toLower(trim(node.TLSStr)) == "none" ||
+        !addStashV2RayTransport(out, node, false, false, true))
+      return false;
+    out["type"] = "trojan";
+    out["password"] = node.Password;
+    addStashTlsFields(out, node, insecure, false, true);
+    break;
+  case ProxyType::VLESS: {
+    static const std::unordered_set<std::string> flows = {
+        "xtls-rprx-origin", "xtls-rprx-direct", "xtls-rprx-splice",
+        "xtls-rprx-vision"};
+    const std::string network = toLower(node.TransferProtocol);
+    const std::string flow = toLower(trim(node.Flow));
+    const std::string tls_state = toLower(trim(node.TLSStr));
+    const bool tls_active = node.TLSSecure || !node.PublicKey.empty() ||
+                            tls_state == "tls" || tls_state == "xtls" ||
+                            tls_state == "reality";
+    if (node.UserId.empty() ||
+        (!node.Encryption.empty() && node.Encryption != "none") ||
+        (!node.PacketEncoding.empty() && node.PacketEncoding != "none") ||
+        (!flow.empty() &&
+         (!stashStringIn(flow, flows) ||
+          (!network.empty() && network != "tcp") ||
+           !tls_active)) ||
+        !stashTlsStateIsValid(node, true, true) ||
+        !addStashV2RayTransport(out, node, true, true, true, true))
+      return false;
+    out["type"] = "vless";
+    out["uuid"] = node.UserId;
+    if (!flow.empty())
+      out["flow"] = flow;
+    addStashTlsFields(out, node, insecure, true);
+    if (!node.PublicKey.empty()) {
+      out["tls"] = true;
+      out["reality-opts"]["public-key"] = node.PublicKey;
+      if (!node.ShortId.empty())
+        out["reality-opts"]["short-id"] = node.ShortId;
+    } else if (!node.ShortId.empty()) {
+      return false;
+    }
+    if (!node.Fingerprint.empty()) {
+      if (!tls_active)
+        return false;
+      out["client-fingerprint"] = node.Fingerprint;
+    }
+    break;
+  }
+  case ProxyType::Snell:
+    if (node.Password.empty() || node.SnellVersion == 0 ||
+        node.SnellVersion > 5 ||
+        !node.SnellReuse.is_undef() || !node.SnellUserKey.empty() ||
+        !node.SnellNetwork.empty() || !node.SnellMode.empty() ||
+        node.SnellUDPPort != 0 || !node.Path.empty())
+      return false;
+    out["type"] = "snell";
+    out["psk"] = node.Password;
+    out["version"] = node.SnellVersion;
+    if (!node.OBFS.empty() && node.OBFS != "none") {
+      if (node.OBFS != "http" && node.OBFS != "tls")
+        return false;
+      out["obfs-opts"]["mode"] = node.OBFS;
+      if (!node.Host.empty())
+        out["obfs-opts"]["host"] = node.Host;
+    }
+    if (udp.get(false) && node.SnellVersion < 3)
+      return false;
+    break;
+  case ProxyType::AnyTLS:
+    if (node.Password.empty() || !node.PublicKey.empty() ||
+        !node.ShortId.empty() || !node.Fingerprint.empty() ||
+        !node.Flow.empty() || !node.Encryption.empty() ||
+        !node.PacketEncoding.empty() ||
+        (!node.TransferProtocol.empty() &&
+         toLower(node.TransferProtocol) != "tcp") ||
+        !node.FakeType.empty() || !node.Path.empty() ||
+        !node.GRPCServiceName.empty() || !node.GRPCMode.empty() ||
+        node.IdleSessionCheckInterval != 30 ||
+        node.IdleSessionTimeout != 30 || node.MinIdleSession != 0 ||
+        (!node.TLSStr.empty() && node.TLSStr != "tls"))
+      return false;
+    out["type"] = "anytls";
+    out["password"] = node.Password;
+    addStashTlsFields(out, node, insecure, false, true);
+    break;
+  case ProxyType::Hysteria: {
+    int up = 0, down = 0;
+    if (!parseMbpsValue(node.UpMbps, up) || !parseMbpsValue(node.DownMbps, down) ||
+        up <= 0 || down <= 0 ||
+        (!node.FakeType.empty() && node.FakeType != "udp" &&
+         node.FakeType != "wechat-video") || !node.Fingerprint.empty() ||
+        (!node.OBFS.empty() && node.OBFS != "xplus"))
+      return false;
+    out["type"] = "hysteria";
+    out["up-speed"] = up;
+    out["down-speed"] = down;
+    if (!node.AuthStr.empty() && !node.Auth.empty())
+      return false;
+    if (!node.AuthStr.empty())
+      out["auth-str"] = node.AuthStr;
+    else if (!node.Auth.empty()) {
+      if (!stashBase64ValueIsValid(node.Auth))
+        return false;
+      out["auth"] = node.Auth;
+    }
+    if (!node.FakeType.empty())
+      out["protocol"] = node.FakeType;
+    if (!node.OBFSParam.empty())
+      out["obfs"] = node.OBFSParam;
+    addStashTlsFields(out, node, insecure, false, true);
+    const std::string ports = stashHysteriaPorts(node);
+    int hop_interval = 0;
+    if (!stashPortSpecIsValid(ports) ||
+        !stashHopIntervalSeconds(node.HysteriaHopInterval, hop_interval) ||
+        (!node.TLSStr.empty() && node.TLSStr != "tls"))
+      return false;
+    if (!ports.empty())
+      out["ports"] = ports;
+    if (hop_interval > 0)
+      out["hop-interval"] = hop_interval;
+    break;
+  }
+  case ProxyType::Hysteria2: {
+    if (node.Password.empty() || !node.Hysteria2RealmUrl.empty() ||
+        !node.Hysteria2ECH.empty() ||
+        !node.Hysteria2GeckoMinPacketSize.empty() ||
+        !node.Hysteria2GeckoMaxPacketSize.empty() ||
+        !node.PublicKey.empty() || !node.Fingerprint.empty() ||
+        (!node.OBFSParam.empty() && node.OBFSParam != "salamander" &&
+         node.OBFSParam != "gecko") ||
+        (node.OBFSParam.empty() != node.OBFSPassword.empty()))
+      return false;
+    out["type"] = "hysteria2";
+    out["auth"] = node.Password;
+    if (!node.OBFSParam.empty()) {
+      out["obfs"] = node.OBFSParam;
+      out["obfs-password"] = node.OBFSPassword;
+    }
+    int bandwidth = 0;
+    if (!node.UpMbps.empty() &&
+        (!parseMbpsValue(node.UpMbps, bandwidth) || bandwidth <= 0))
+      return false;
+    if (!node.UpMbps.empty())
+      out["up-speed"] = bandwidth;
+    if (!node.DownMbps.empty() &&
+        (!parseMbpsValue(node.DownMbps, bandwidth) || bandwidth <= 0))
+      return false;
+    if (!node.DownMbps.empty())
+      out["down-speed"] = bandwidth;
+    addStashTlsFields(out, node, insecure, false, true);
+    const std::string ports = stashHysteriaPorts(node);
+    int hop_interval = 0;
+    if (!stashPortSpecIsValid(ports) ||
+        !stashHopIntervalSeconds(node.HysteriaHopInterval, hop_interval) ||
+        (!node.TLSStr.empty() && node.TLSStr != "tls"))
+      return false;
+    if (!ports.empty())
+      out["ports"] = ports;
+    if (hop_interval > 0)
+      out["hop-interval"] = hop_interval;
+    break;
+  }
+  case ProxyType::TUIC: {
+    const bool v4 = !node.token.empty() && node.UserId.empty() &&
+                    node.Password.empty();
+    const bool v5 = node.token.empty() && !node.UserId.empty() &&
+                    !node.Password.empty();
+    if (!v4 && !v5)
+      return false;
+    if ((!node.CongestionControl.empty() &&
+         node.CongestionControl != "cubic") ||
+        (!node.UdpRelayMode.empty() && node.UdpRelayMode != "native") ||
+        node.ReduceRtt.get(false) || node.DisableSni.get(false) ||
+        !node.PublicKey.empty() || !node.ShortId.empty() ||
+        !node.Fingerprint.empty() ||
+        node.RequestTimeout != 15000 ||
+        (!node.TLSStr.empty() && node.TLSStr != "tls"))
+      return false;
+    out["type"] = "tuic";
+    out["version"] = v4 ? 4 : 5;
+    if (v4)
+      out["token"] = node.token;
+    else {
+      out["uuid"] = node.UserId;
+      out["password"] = node.Password;
+    }
+    addStashTlsFields(out, node, insecure, false, true);
+    if (!out["alpn"].IsDefined())
+      out["alpn"].push_back("h3");
+    const std::string ports = stashHysteriaPorts(node);
+    int hop_interval = 0;
+    if (!stashPortSpecIsValid(ports) ||
+        !stashHopIntervalSeconds(node.HysteriaHopInterval, hop_interval))
+      return false;
+    if (!ports.empty())
+      out["ports"] = ports;
+    if (hop_interval > 0)
+      out["hop-interval"] = hop_interval;
+    break;
+  }
+  case ProxyType::Mieru: {
+    const std::string transport = toLower(trim(node.TransferProtocol));
+    if (node.Username.empty() || node.Password.empty() ||
+        (transport != "tcp" && transport != "udp") ||
+        (!node.MieruProfile.empty() && node.MieruProfile != "default") ||
+        node.Mtu != 0 ||
+        (!node.Multiplexing.empty() &&
+         node.Multiplexing != "MULTIPLEXING_LOW") ||
+        !node.MieruHandshakeMode.empty() || !node.MieruTrafficPattern.empty() ||
+        node.MieruHasUnknownParameters ||
+        (node.Port == 0 && !stashSinglePortRangeIsValid(node.Ports)) ||
+        (node.Port != 0 && !node.Ports.empty()))
+      return false;
+    out["type"] = "mieru";
+    out["username"] = node.Username;
+    out["password"] = node.Password;
+    out["transport"] = transport;
+    if (node.Port == 0)
+      out["port-range"] = node.Ports;
+    break;
+  }
+  case ProxyType::WireGuard: {
+    if (!wireGuardStructuredConfigIsSafe(node) ||
+        !node.WireGuardInterfaceName.empty() || node.WireGuardSystem.get(false) ||
+        node.WireGuardListenPort != 0 || node.WireGuardWorkers != 0 ||
+        (!node.ClientId.empty() && node.WireGuardPeers.size() == 1 &&
+         node.ClientId != node.WireGuardPeers.front().Reserved))
+      return false;
+    const auto peers = wireGuardPeers(node);
+    const auto addresses = wireGuardLocalAddresses(node);
+    std::unordered_set<std::string> allowed_ips;
+    for (std::string value : split(peers.empty() ? std::string()
+                                                  : peers[0].AllowedIPs,
+                                   ",")) {
+      value = trim(value);
+      if (!value.empty())
+        allowed_ips.insert(value);
+    }
+    if (peers.size() != 1 || addresses.empty() || addresses.size() > 2 ||
+        allowed_ips !=
+            std::unordered_set<std::string>{"0.0.0.0/0", "::/0"})
+      return false;
+    out["type"] = "wireguard";
+    out["server"] = peers[0].Hostname;
+    out["port"] = peers[0].Port;
+    out["private-key"] = node.PrivateKey;
+    out["public-key"] = peers[0].PublicKey;
+    if (!peers[0].PreSharedKey.empty())
+      out["preshared-key"] = peers[0].PreSharedKey;
+    size_t ipv4_count = 0, ipv6_count = 0;
+    for (const std::string &address : addresses) {
+      const std::string value = wireGuardAddressWithoutPrefix(address);
+      if (isIPv4(value)) {
+        if (++ipv4_count > 1)
+          return false;
+        out["ip"] = value;
+      } else if (isIPv6(value)) {
+        if (++ipv6_count > 1)
+          return false;
+        out["ipv6"] = value;
+      } else
+        return false;
+    }
+    if (ipv4_count != 1)
+      return false;
+    if (!node.DnsServers.empty())
+      out["dns"] = node.DnsServers;
+    if (node.Mtu > 0)
+      out["mtu"] = node.Mtu;
+    if (!peers[0].Reserved.empty()) {
+      const string_array values = split(peers[0].Reserved, ",");
+      if (values.size() != 3)
+        return false;
+      for (const std::string &value : values)
+        out["reserved"].push_back(to_int(trim(value), -1));
+    }
+    if (peers[0].KeepAlive > 0)
+      out["keepalive"] = peers[0].KeepAlive;
+    break;
+  }
+  case ProxyType::Naive:
+  case ProxyType::Unknown:
+  default:
+    return false;
+  }
+
+  if (!udp.is_undef()) {
+    if (node.Type == ProxyType::Shadowsocks ||
+        node.Type == ProxyType::SOCKS5 || node.Type == ProxyType::Snell ||
+        node.Type == ProxyType::Trojan) {
+      out["udp"] = udp.get();
+    } else if (node.Type == ProxyType::HTTP || node.Type == ProxyType::HTTPS ||
+               node.Type == ProxyType::AnyTLS) {
+      if (udp.get())
+        return false;
+    } else if (node.Type == ProxyType::Mieru) {
+      // Mieru's transport selects its carrier and is not an UDP-relay toggle.
+      // Stash has no separate Mieru UDP override, so the generic preference is
+      // intentionally not projected onto this protocol.
+    } else if (!udp.get())
+      return false;
+  }
+  if (!tfo.is_undef()) {
+    if (node.Type == ProxyType::Hysteria2)
+      out["fast-open"] = tfo.get();
+    else if (tfo.get())
+      return false;
+  }
+  if (insecure.get(false) &&
+      (node.Type == ProxyType::Snell || node.Type == ProxyType::Mieru ||
+       node.Type == ProxyType::WireGuard))
+    return false;
+  if (!node.TestUrl.empty())
+    out["benchmark-url"] = node.TestUrl;
+  return true;
+}
+
+struct StashGroupProviderSelection {
+  std::vector<const StashProxyProvider *> providers;
+  std::string filter;
+  bool valid = true;
+};
+
+StashGroupProviderSelection stashProvidersForGroup(
+    const ProxyGroupConfig &group,
+    const std::vector<StashProxyProvider> &providers) {
+  StashGroupProviderSelection selection;
+  if (providers.empty())
+    return selection;
+  auto add_matching = [&](auto predicate) {
+    for (const StashProxyProvider &provider : providers)
+      if (predicate(provider) &&
+          std::find(selection.providers.begin(), selection.providers.end(),
+                    &provider) == selection.providers.end())
+        selection.providers.push_back(&provider);
+  };
+
+  if (!group.UsingProvider.empty()) {
+    add_matching([&](const StashProxyProvider &provider) {
+      return std::any_of(group.UsingProvider.begin(), group.UsingProvider.end(),
+                         [&](const std::string &requested) {
+                           return requested == provider.name ||
+                                  requested == provider.requested_name ||
+                                  requested == provider.selection_name;
+                         });
+    });
+    return selection;
+  }
+
+  bool saw_dynamic_selector = false;
+  for (const std::string &rule : group.Proxies) {
+    if (startsWith(rule, "[]") || rule == "DIRECT" || rule == "REJECT" ||
+        startsWith(toLower(rule), "http://") ||
+        startsWith(toLower(rule), "https://"))
+      continue;
+    std::string selector, server_pattern;
+    bool matched_dynamic_selector = false;
+    if (parseProviderGroupIdMatcher(rule, selector, server_pattern)) {
+      matched_dynamic_selector = true;
+      add_matching([&](const StashProxyProvider &provider) {
+        return matchRange(selector, provider.group_id);
+      });
+    } else if (startsWith(rule, "!!GROUP=")) {
+      static const std::string group_regex = R"(^!!GROUP=(.+?)(?:!!(.*))?$)";
+      if (regGetMatch(rule, group_regex, 3,
+                       static_cast<std::string *>(nullptr), &selector,
+                       &server_pattern) == 0) {
+        matched_dynamic_selector = true;
+        add_matching([&](const StashProxyProvider &provider) {
+          return !provider.source_tag.empty() &&
+                 regFind(provider.source_tag, selector);
+        });
+      }
+    } else if (!startsWith(rule, "!!") && !startsWith(rule, "script:")) {
+      matched_dynamic_selector = true;
+      add_matching([](const StashProxyProvider &) { return true; });
+      server_pattern = rule;
+    }
+    if (!matched_dynamic_selector)
+      continue;
+    if (saw_dynamic_selector && selection.filter != server_pattern) {
+      selection.valid = false;
+      return selection;
+    }
+    saw_dynamic_selector = true;
+    selection.filter = server_pattern;
+  }
+  return selection;
+}
+
 } // namespace
+
+std::string proxyToStash(std::vector<Proxy> &nodes,
+                         const std::string &base_conf,
+                         std::vector<RulesetContent> &ruleset_content_array,
+                         const ProxyGroupConfigs &extra_proxy_group,
+                         extra_settings &ext) {
+  YAML::Node root;
+  try {
+    root = YAML::Load(base_conf);
+  } catch (const std::exception &e) {
+    writeLog(LOG_LEVEL_ERROR,
+             "STASH_BASE_CONFIG_PARSE_FAILED detail=" +
+                 summarizeSensitiveTextForLog(e.what()));
+    ext.external_rule_error =
+        "Invalid request: the selected Stash base template is not valid "
+        "YAML.\n"
+        "无效请求：所选 Stash 基础模板不是有效的 YAML。";
+    return "";
+  }
+  if (!root.IsMap()) {
+    ext.external_rule_error =
+        "Invalid request: the selected Stash base template must be a YAML "
+        "mapping.\n"
+        "无效请求：所选 Stash 基础模板必须是 YAML 映射。";
+    return "";
+  }
+  auto require_collection_type = [&](const char *key, YAML::NodeType::value type,
+                                     const char *expected) {
+    const YAML::Node value = root[key];
+    if (!value.IsDefined() || value.IsNull() || value.Type() == type)
+      return true;
+    ext.external_rule_error =
+        "Invalid request: Stash base field '" + std::string(key) +
+        "' must be " + expected + ".\n无效请求：Stash 基础模板字段 '" +
+        key + "' 的类型无效。";
+    return false;
+  };
+  if (!require_collection_type("proxies", YAML::NodeType::Sequence,
+                               "a YAML sequence") ||
+      !require_collection_type("proxy-providers", YAML::NodeType::Map,
+                               "a YAML mapping") ||
+      !require_collection_type("proxy-groups", YAML::NodeType::Sequence,
+                               "a YAML sequence") ||
+      !require_collection_type("rules", YAML::NodeType::Sequence,
+                               "a YAML sequence"))
+    return "";
+
+  TargetGenerationStats &stats = ext.target_generation_stats;
+  stats = TargetGenerationStats{};
+  stats.input_nodes = nodes.size();
+  YAML::Node generated_nodes = root["proxies"];
+  if (!generated_nodes.IsSequence())
+    generated_nodes = YAML::Node(YAML::NodeType::Sequence);
+  YAML::Node base_groups = root["proxy-groups"];
+  auto fail_base_schema = [&](const std::string &field) {
+    ext.external_rule_error =
+        "Invalid request: the selected Stash base has an invalid '" + field +
+        "' entry.\n无效请求：所选 Stash 基础模板中的 '" + field +
+        "' 条目无效。";
+    return false;
+  };
+  if (root["rules"].IsSequence())
+    for (const YAML::Node &rule : root["rules"])
+      if (!rule.IsScalar())
+        return fail_base_schema("rules"), std::string();
+  if (root["sub-rules"].IsDefined() && !root["sub-rules"].IsNull()) {
+    if (!root["sub-rules"].IsMap())
+      return fail_base_schema("sub-rules"), std::string();
+    for (const auto &sub_rule : root["sub-rules"]) {
+      if (!sub_rule.first.IsScalar() || !sub_rule.second.IsSequence())
+        return fail_base_schema("sub-rules"), std::string();
+      for (const YAML::Node &rule : sub_rule.second)
+        if (!rule.IsScalar())
+          return fail_base_schema("sub-rules"), std::string();
+    }
+  }
+
+  std::vector<std::string> base_remark_storage;
+  base_remark_storage.reserve(generated_nodes.size() + base_groups.size());
+  std::unordered_set<std::string> base_remark_keys;
+  const std::unordered_set<std::string> built_in_policy_names = {
+      "DIRECT", "REJECT", "REJECT-DROP", "PASS"};
+  auto is_built_in_policy_name = [&](const std::string &name) {
+    return built_in_policy_names.find(name) != built_in_policy_names.end();
+  };
+  for (const YAML::Node &item : generated_nodes) {
+    if (!item.IsMap() || !item["name"].IsScalar())
+      return fail_base_schema("proxies"), std::string();
+    const std::string name = item["name"].as<std::string>();
+    if (name.empty() || is_built_in_policy_name(name) ||
+        !base_remark_keys.insert(name).second)
+      return fail_base_schema("proxies.name"), std::string();
+    base_remark_storage.push_back(name);
+  }
+  std::unordered_set<std::string> base_group_names;
+  if (base_groups.IsSequence()) {
+    for (const YAML::Node &group : base_groups) {
+      if (!group.IsMap() || !group["name"].IsScalar() ||
+          !group["type"].IsScalar() ||
+          (group["proxies"].IsDefined() && !group["proxies"].IsNull() &&
+           !group["proxies"].IsSequence()) ||
+          (group["use"].IsDefined() && !group["use"].IsNull() &&
+           !group["use"].IsSequence()))
+        return fail_base_schema("proxy-groups"), std::string();
+      const std::string name = group["name"].as<std::string>();
+      if (name.empty() || is_built_in_policy_name(name) ||
+          base_remark_keys.find(name) != base_remark_keys.end() ||
+          !base_group_names.insert(name).second)
+        return fail_base_schema("proxy-groups.name"), std::string();
+      for (const char *member_key : {"proxies", "use"})
+        if (group[member_key].IsSequence())
+          for (const YAML::Node &member : group[member_key])
+            if (!member.IsScalar())
+              return fail_base_schema("proxy-groups"), std::string();
+      base_remark_storage.push_back(name);
+    }
+  }
+  std::unordered_set<std::string> planned_custom_group_names;
+  for (const ProxyGroupConfig &group : extra_proxy_group) {
+    if (group.Name.empty() || is_built_in_policy_name(group.Name) ||
+        base_remark_keys.find(group.Name) != base_remark_keys.end() ||
+        !planned_custom_group_names.insert(group.Name).second)
+      return fail_base_schema("custom proxy-group name"), std::string();
+    base_remark_storage.push_back(group.Name);
+  }
+  std::vector<Proxy> emitted_nodes;
+  emitted_nodes.reserve(nodes.size());
+  RemarkSet used_remarks;
+  used_remarks.reserve(nodes.size() + base_remark_storage.size() +
+                       built_in_policy_names.size());
+  for (const std::string &name : built_in_policy_names)
+    used_remarks.emplace(name);
+  for (const std::string &name : base_remark_storage)
+    used_remarks.emplace(name);
+
+  for (const Proxy &original : nodes) {
+    TargetNodeGenerationTracker tracker(stats, original.Type);
+    Proxy node = original;
+    if (ext.append_proxy_type)
+      node.Remark = "[" + getProxyTypeName(node.Type) + "] " + node.Remark;
+    processRemark(node.Remark, used_remarks, false);
+    tribool udp = ext.udp;
+    tribool tfo = ext.tfo;
+    const bool stash_tls_capable =
+        node.Type == ProxyType::HTTP || node.Type == ProxyType::HTTPS ||
+        node.Type == ProxyType::SOCKS5 || node.Type == ProxyType::VMess ||
+        node.Type == ProxyType::Trojan || node.Type == ProxyType::VLESS ||
+        node.Type == ProxyType::AnyTLS || node.Type == ProxyType::Hysteria ||
+        node.Type == ProxyType::Hysteria2 || node.Type == ProxyType::TUIC ||
+        (node.Type == ProxyType::Shadowsocks &&
+         toLower(node.Plugin) == "v2ray-plugin");
+    tribool insecure = stash_tls_capable ? ext.skip_cert_verify
+                                         : node.AllowInsecure;
+    tribool tls13 = ext.tls13;
+    udp.define(node.UDP);
+    tfo.define(node.TCPFastOpen);
+    insecure.define(node.AllowInsecure);
+    tls13.define(node.TLS13);
+    YAML::Node generated;
+    if (!buildStashNode(node, generated, udp, tfo, insecure, tls13))
+      continue;
+    generated_nodes.push_back(generated);
+    emitted_nodes.push_back(node);
+    used_remarks.emplace(emitted_nodes.back().Remark);
+    tracker.markEmitted();
+  }
+  root["proxies"] = generated_nodes;
+
+  YAML::Node providers = root["proxy-providers"];
+  if (!providers.IsMap())
+    providers = YAML::Node(YAML::NodeType::Map);
+  std::unordered_set<std::string> provider_name_keys;
+  std::unordered_set<std::string> provider_path_keys;
+  for (const auto &entry : providers) {
+    if (!entry.first.IsScalar() || !entry.second.IsMap())
+      return fail_base_schema("proxy-providers"), std::string();
+    const std::string name = entry.first.as<std::string>();
+    if (name.empty() || !provider_name_keys.insert(toLower(name)).second)
+      return fail_base_schema("proxy-providers.name"), std::string();
+    const YAML::Node path = entry.second["path"];
+    if (path.IsDefined() && !path.IsNull()) {
+      if (!path.IsScalar())
+        return fail_base_schema("proxy-providers.path"), std::string();
+      const std::string normalized_path = toLower(path.as<std::string>());
+      if (!normalized_path.empty() &&
+          !provider_path_keys.insert(normalized_path).second)
+        return fail_base_schema("proxy-providers.path"), std::string();
+    }
+  }
+  for (const StashProxyProvider &provider : ext.stash_proxy_providers) {
+    if (!provider_name_keys.insert(toLower(provider.name)).second ||
+        !provider_path_keys.insert(toLower(provider.path)).second) {
+      ext.external_rule_error =
+          "Invalid request: a generated Stash proxy-provider name or path conflicts "
+          "with the selected base template.\n"
+          "无效请求：生成的 Stash proxy-provider 名称或路径与所选基础模板冲突。";
+      return "";
+    }
+    YAML::Node item;
+    item["url"] = provider.url;
+    item["path"] = provider.path;
+    item["interval"] = provider.interval;
+    if (!provider.headers.empty()) {
+      for (const auto &[name, value] : provider.headers)
+        item["headers"][name] = value;
+    }
+    providers[provider.name] = item;
+  }
+  root["proxy-providers"] = providers;
+
+  YAML::Node groups(YAML::NodeType::Sequence);
+  std::unordered_set<std::string> referenced_providers;
+  std::unordered_set<std::string> generated_group_names;
+  std::string preferred_entry_group;
+  bool preferred_entry_has_provider = false;
+  if (extra_proxy_group.empty() &&
+      (!emitted_nodes.empty() || !ext.stash_proxy_providers.empty())) {
+    bool attached = false;
+    if (base_groups.IsSequence()) {
+      for (YAML::Node group : base_groups) {
+        if (!group["name"].IsDefined() ||
+            group["name"].as<std::string>() != "Proxy")
+          continue;
+        if (group["type"].as<std::string>() != "select") {
+          ext.external_rule_error =
+              "Invalid request: the built-in Stash 'Proxy' group must be a "
+              "select group before generated nodes or providers can be attached.\n"
+              "无效请求：内置 Stash 'Proxy' 策略组必须是 select 类型，才能附加生成的节点或 provider。";
+          return "";
+        }
+        std::unordered_set<std::string> existing_members;
+        if (group["proxies"].IsSequence())
+          for (const YAML::Node &member : group["proxies"])
+            if (member.IsScalar())
+              existing_members.insert(member.as<std::string>());
+        for (const Proxy &node : emitted_nodes)
+          if (existing_members.insert(node.Remark).second)
+            group["proxies"].push_back(node.Remark);
+        std::unordered_set<std::string> existing_uses;
+        if (group["use"].IsSequence())
+          for (const YAML::Node &use : group["use"])
+            existing_uses.insert(use.as<std::string>());
+        for (const StashProxyProvider &provider : ext.stash_proxy_providers)
+          if (existing_uses.insert(provider.name).second) {
+            group["use"].push_back(provider.name);
+            referenced_providers.insert(provider.name);
+          }
+        attached = true;
+        break;
+      }
+    }
+    if (!attached) {
+      YAML::Node group;
+      group["name"] = "Proxy";
+      group["type"] = "select";
+      group["proxies"].push_back("DIRECT");
+      for (const Proxy &node : emitted_nodes)
+        group["proxies"].push_back(node.Remark);
+      for (const StashProxyProvider &provider : ext.stash_proxy_providers) {
+        group["use"].push_back(provider.name);
+        referenced_providers.insert(provider.name);
+      }
+      base_groups.push_back(group);
+      root["proxy-groups"] = base_groups;
+    }
+  }
+  for (const ProxyGroupConfig &group : extra_proxy_group) {
+    if (group.Type == ProxyGroupType::Smart ||
+        group.Type == ProxyGroupType::SSID) {
+      ext.external_rule_error =
+          "Invalid request: the selected Stash target cannot represent a "
+          "Smart or SSID custom proxy group without changing its semantics.\n"
+          "无效请求：Stash 目标无法在不改变语义的前提下表示 Smart "
+          "或 SSID 自定义策略组。";
+      return "";
+    }
+    generated_group_names.insert(group.Name);
+    if (group.DisableUdp.get(false) || group.Persistent.get(false) ||
+        group.EvaluateBeforeUse.get(false)) {
+      ext.external_rule_error =
+          "Invalid request: the selected Stash target cannot represent one "
+          "or more enabled custom proxy-group options.\n"
+          "无效请求：Stash 目标无法表示一个或多个已启用的自定义策略组选项。";
+      return "";
+    }
+    const StashGroupProviderSelection remote =
+        stashProvidersForGroup(group, ext.stash_proxy_providers);
+    if (!remote.valid) {
+      ext.external_rule_error =
+          "Invalid request: a Stash proxy group contains multiple remote "
+          "selectors with different filters.\n"
+          "无效请求：Stash 策略组包含筛选条件不同的多个远程选择器。";
+      return "";
+    }
+    if (group.Type == ProxyGroupType::Relay && !remote.providers.empty()) {
+      ext.external_rule_error =
+          "Invalid request: a Stash relay group cannot preserve the order of "
+          "a dynamic proxy-provider.\n"
+          "无效请求：Stash relay 策略组无法保留动态 proxy-provider 的顺序。";
+      return "";
+    }
+
+    YAML::Node item;
+    item["name"] = group.Name;
+    switch (group.Type) {
+    case ProxyGroupType::Select:
+      item["type"] = "select";
+      break;
+    case ProxyGroupType::URLTest:
+      item["type"] = "url-test";
+      break;
+    case ProxyGroupType::Fallback:
+      item["type"] = "fallback";
+      break;
+    case ProxyGroupType::LoadBalance:
+      item["type"] = "load-balance";
+      item["strategy"] = group.StrategyStr();
+      break;
+    case ProxyGroupType::Relay:
+      item["type"] = "relay";
+      if (!group.Url.empty())
+        item["benchmark-url"] = group.Url;
+      if (group.Timeout > 0)
+        item["benchmark-timeout"] = group.Timeout;
+      break;
+    default:
+      continue;
+    }
+    string_array local_members;
+    for (const std::string &rule : group.Proxies)
+      groupGenerate(rule, emitted_nodes, local_members, true, ext);
+    if (local_members.empty() && remote.providers.empty())
+      local_members.emplace_back("DIRECT");
+    if (!local_members.empty())
+      item["proxies"] = local_members;
+    for (const StashProxyProvider *provider : remote.providers) {
+      item["use"].push_back(provider->name);
+      referenced_providers.insert(provider->name);
+    }
+    if (!remote.providers.empty() && !remote.filter.empty())
+      item["filter"] = remote.filter;
+    if (group.Interval != 0)
+      item["interval"] = group.Interval;
+    if (!group.Lazy.is_undef())
+      item["lazy"] = group.Lazy.get();
+    if (preferred_entry_group.empty() ||
+        (!preferred_entry_has_provider && !remote.providers.empty())) {
+      preferred_entry_group = group.Name;
+      preferred_entry_has_provider = !remote.providers.empty();
+    }
+    groups.push_back(item);
+  }
+  if (groups.size() > 0 &&
+      generated_group_names.find("Proxy") == generated_group_names.end()) {
+    bool references_proxy = false;
+    for (const ProxyGroupConfig &group : extra_proxy_group)
+      if (std::find(group.Proxies.begin(), group.Proxies.end(), "[]Proxy") !=
+          group.Proxies.end())
+        references_proxy = true;
+    if (references_proxy) {
+      ext.external_rule_error =
+          "Invalid request: adding the required Stash 'Proxy' entry group "
+          "would create a proxy-group cycle.\n"
+          "无效请求：补充必需的 Stash 'Proxy' 入口策略组会形成循环引用。";
+      return "";
+    }
+    YAML::Node entry;
+    entry["name"] = "Proxy";
+    entry["type"] = "select";
+    entry["proxies"].push_back(preferred_entry_group.empty()
+                                   ? std::string("DIRECT")
+                                   : preferred_entry_group);
+    groups.push_back(entry);
+  }
+  if (groups.size() > 0) {
+    const bool ignored_benchmark_tuning =
+        std::any_of(extra_proxy_group.begin(), extra_proxy_group.end(),
+                    [](const ProxyGroupConfig &group) {
+                      return group.Type != ProxyGroupType::Relay &&
+                             (!group.Url.empty() || group.Timeout != 0 ||
+                              group.Tolerance != 0);
+                    });
+    if (ignored_benchmark_tuning)
+      writeLog(LOG_LEVEL_WARNING,
+               "STASH_GROUP_BENCHMARK_DEFAULTS client=stash reason="
+               "unsupported-group-specific-url-timeout-tolerance");
+    root["proxy-groups"] = groups;
+  }
+  stats.remote_references_emitted = referenced_providers.size();
+
+  if (ext.enable_rule_generator)
+    rulesetToClash(root, ruleset_content_array, ext.overwrite_original_rules,
+                   true, ext.rule_stats);
+  if (!ext.rule_prepend.empty() || !ext.rule_append.empty()) {
+    string_array current_rules;
+    if (root["rules"].IsDefined() && root["rules"].IsSequence())
+      current_rules = safe_as<string_array>(root["rules"]);
+    string_array merged;
+    if (!mergeClashRulesWithinLimit(
+            ext.rule_prepend, {}, current_rules, ext.rule_append,
+            effectiveSettings().maxAllowedRules, merged)) {
+      ext.external_rule_error =
+          "Invalid request: the final Stash rule count exceeds "
+          "max_allowed_rules.\n"
+          "无效请求：最终 Stash 规则数量超过 max_allowed_rules 限制。";
+      return "";
+    }
+    root["rules"] = merged;
+  }
+
+  // A custom Stash base is deployment input. Validate the final reference
+  // graph after every generated group/rule rewrite so a syntactically valid
+  // YAML document cannot retain a dangling policy/provider or a group cycle.
+  auto fail_reference_graph = [&]() {
+    ext.external_rule_error =
+        "Invalid request: the final Stash configuration contains a dangling "
+        "or cyclic policy reference.\n"
+        "无效请求：最终 Stash 配置包含悬空或循环的策略引用。";
+    return std::string();
+  };
+  std::unordered_set<std::string> proxy_names = {"DIRECT", "REJECT",
+                                                  "REJECT-DROP", "PASS"};
+  if (root["proxies"].IsSequence())
+    for (const YAML::Node &proxy : root["proxies"])
+      if (!proxy.IsMap() || !proxy["name"].IsScalar())
+        return fail_reference_graph();
+      else
+        proxy_names.insert(proxy["name"].as<std::string>());
+
+  std::unordered_set<std::string> provider_names;
+  if (root["proxy-providers"].IsMap())
+    for (const auto &provider : root["proxy-providers"])
+      if (!provider.first.IsScalar())
+        return fail_reference_graph();
+      else
+        provider_names.insert(provider.first.as<std::string>());
+
+  std::unordered_set<std::string> rule_provider_names;
+  if (root["rule-providers"].IsDefined() &&
+      !root["rule-providers"].IsNull()) {
+    if (!root["rule-providers"].IsMap())
+      return fail_reference_graph();
+    for (const auto &provider : root["rule-providers"])
+      if (!provider.first.IsScalar())
+        return fail_reference_graph();
+      else
+        rule_provider_names.insert(provider.first.as<std::string>());
+  }
+
+  std::unordered_set<std::string> script_shortcut_names;
+  YAML::Node script_shortcuts;
+  if (root["script"].IsDefined() && !root["script"].IsNull()) {
+    if (!root["script"].IsMap())
+      return fail_reference_graph();
+    script_shortcuts = root["script"]["shortcuts"];
+  }
+  if (script_shortcuts.IsDefined() && !script_shortcuts.IsNull()) {
+    if (!script_shortcuts.IsMap())
+      return fail_reference_graph();
+    for (const auto &shortcut : script_shortcuts)
+      if (!shortcut.first.IsScalar())
+        return fail_reference_graph();
+      else
+        script_shortcut_names.insert(shortcut.first.as<std::string>());
+  }
+
+  std::unordered_set<std::string> group_names;
+  if (root["proxy-groups"].IsSequence())
+    for (const YAML::Node &group : root["proxy-groups"])
+      if (!group.IsMap() || !group["name"].IsScalar() ||
+          proxy_names.find(group["name"].as<std::string>()) !=
+              proxy_names.end() ||
+          !group_names.insert(group["name"].as<std::string>()).second)
+        return fail_reference_graph();
+
+  std::unordered_set<std::string> sub_rule_names;
+  if (root["sub-rules"].IsDefined() && !root["sub-rules"].IsNull()) {
+    if (!root["sub-rules"].IsMap())
+      return fail_reference_graph();
+    for (const auto &sub_rule : root["sub-rules"])
+      if (!sub_rule.first.IsScalar() || !sub_rule.second.IsSequence())
+        return fail_reference_graph();
+      else
+        sub_rule_names.insert(sub_rule.first.as<std::string>());
+  }
+
+  std::unordered_map<std::string, std::vector<std::string>> group_edges;
+  if (root["proxy-groups"].IsSequence()) {
+    for (const YAML::Node &group : root["proxy-groups"]) {
+      const std::string name = group["name"].as<std::string>();
+      if (group["proxies"].IsDefined() && !group["proxies"].IsNull()) {
+        if (!group["proxies"].IsSequence())
+          return fail_reference_graph();
+        for (const YAML::Node &member_node : group["proxies"]) {
+          if (!member_node.IsScalar())
+            return fail_reference_graph();
+          const std::string member = member_node.as<std::string>();
+          if (proxy_names.find(member) == proxy_names.end() &&
+              group_names.find(member) == group_names.end())
+            return fail_reference_graph();
+          if (group_names.find(member) != group_names.end())
+            group_edges[name].push_back(member);
+        }
+      }
+      if (group["use"].IsDefined() && !group["use"].IsNull()) {
+        if (!group["use"].IsSequence())
+          return fail_reference_graph();
+        for (const YAML::Node &provider_node : group["use"])
+          if (!provider_node.IsScalar() ||
+              provider_names.find(provider_node.as<std::string>()) ==
+                  provider_names.end())
+            return fail_reference_graph();
+      }
+      if (group["ssid-policy"].IsDefined() &&
+          !group["ssid-policy"].IsNull()) {
+        if (!group["ssid-policy"].IsMap())
+          return fail_reference_graph();
+        for (const auto &mapping : group["ssid-policy"]) {
+          if (!mapping.first.IsScalar() || !mapping.second.IsScalar())
+            return fail_reference_graph();
+          const std::string member = mapping.second.as<std::string>();
+          if (proxy_names.find(member) == proxy_names.end() &&
+              group_names.find(member) == group_names.end())
+            return fail_reference_graph();
+          if (group_names.find(member) != group_names.end())
+            group_edges[name].push_back(member);
+        }
+      }
+    }
+  }
+
+  std::unordered_map<std::string, unsigned char> visit_state;
+  std::function<bool(const std::string &)> has_group_cycle =
+      [&](const std::string &name) {
+        unsigned char &state = visit_state[name];
+        if (state == 1)
+          return true;
+        if (state == 2)
+          return false;
+        state = 1;
+        for (const std::string &child : group_edges[name])
+          if (has_group_cycle(child))
+            return true;
+        state = 2;
+        return false;
+      };
+  for (const std::string &name : group_names)
+    if (has_group_cycle(name))
+      return fail_reference_graph();
+
+  auto embedded_rule_references_are_closed =
+      [&](const std::string &rule) {
+        const string_array references = regGetAllMatch(
+            rule,
+            R"((?:^|\()\s*([A-Za-z-]+)\s*,\s*([^,()]+))",
+            true);
+        if (references.size() % 2 != 0)
+          return false;
+        for (size_t i = 0; i < references.size(); i += 2) {
+          const std::string kind = toUpper(trim(references[i]));
+          if (kind != "RULE-SET" && kind != "SCRIPT")
+            continue;
+          const std::string reference = trim(references[i + 1]);
+          if (reference.empty())
+            return false;
+          if (kind == "RULE-SET" &&
+              rule_provider_names.find(reference) == rule_provider_names.end())
+            return false;
+          if (kind == "SCRIPT" &&
+              script_shortcut_names.find(reference) ==
+                  script_shortcut_names.end())
+            return false;
+        }
+        return true;
+      };
+  auto rule_sequence_is_closed = [&](const YAML::Node &rules) {
+    if (!rules.IsSequence())
+      return false;
+    for (const YAML::Node &rule_node : rules) {
+      if (!rule_node.IsScalar())
+        return false;
+      const std::string rule = rule_node.as<std::string>();
+      if (!embedded_rule_references_are_closed(rule))
+        return false;
+      string_array fields = split(rule, ",");
+      if (fields.size() < 2)
+        return false;
+      size_t policy_index = fields.size() - 1;
+      while (policy_index > 0) {
+        const std::string option = toLower(trim(fields[policy_index]));
+        if (option != "no-resolve" && option != "no-track")
+          break;
+        --policy_index;
+      }
+      if (policy_index == 0)
+        return false;
+      const std::string rule_type = toUpper(trim(fields.front()));
+      if (rule_type == "RULE-SET" &&
+          (fields.size() < 3 ||
+           rule_provider_names.find(trim(fields[1])) ==
+               rule_provider_names.end()))
+        return false;
+      if (rule_type == "SCRIPT" &&
+          (fields.size() < 3 ||
+           script_shortcut_names.find(trim(fields[1])) ==
+               script_shortcut_names.end()))
+        return false;
+      const std::string policy = trim(fields[policy_index]);
+      const bool valid_sub_rule =
+          rule_type == "SUB-RULE" &&
+          sub_rule_names.find(policy) != sub_rule_names.end();
+      if (!valid_sub_rule && proxy_names.find(policy) == proxy_names.end() &&
+          group_names.find(policy) == group_names.end())
+        return false;
+    }
+    return true;
+  };
+  if (root["rules"].IsDefined() && !root["rules"].IsNull() &&
+      !rule_sequence_is_closed(root["rules"]))
+    return fail_reference_graph();
+  if (root["sub-rules"].IsMap()) {
+    for (const auto &sub_rule : root["sub-rules"])
+      if (!rule_sequence_is_closed(sub_rule.second))
+        return fail_reference_graph();
+  }
+  return finalizeCanonicalClashYaml(YAML::Dump(root));
+}
 
 std::string proxyToSurge(std::vector<Proxy> &nodes,
                          const std::string &base_conf,

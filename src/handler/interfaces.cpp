@@ -80,6 +80,7 @@ enum class RemoteSubscriptionMode {
   SurgePolicyPath,
   SurfboardPolicyPath,
   LoonRemoteProxy,
+  StashProxyProvider,
 };
 
 struct TargetDescriptor {
@@ -90,7 +91,7 @@ struct TargetDescriptor {
   SingleLinkTypes single_link_types;
 };
 
-static constexpr std::array<TargetDescriptor, 21> kTargetDescriptors = {{
+static constexpr std::array<TargetDescriptor, 22> kTargetDescriptors = {{
     {"clash", NodeParserMode::MihomoOnly,
      RemoteSubscriptionMode::ClashProxyProvider, false, 0},
     {"clashr", NodeParserMode::MihomoOnly,
@@ -105,6 +106,8 @@ static constexpr std::array<TargetDescriptor, 21> kTargetDescriptors = {{
      RemoteSubscriptionMode::LoonRemoteProxy, false, 0},
     {"surfboard", NodeParserMode::LegacyOnly,
      RemoteSubscriptionMode::SurfboardPolicyPath, false, 0},
+    {"stash", NodeParserMode::LegacyOnly,
+     RemoteSubscriptionMode::StashProxyProvider, false, 0},
     {"mellow", NodeParserMode::LegacyOnly,
      RemoteSubscriptionMode::ServerSideParse, false, 0},
     {"singbox", NodeParserMode::LegacyOnly,
@@ -163,6 +166,8 @@ static const char *remoteSubscriptionModeName(RemoteSubscriptionMode mode) {
     return "surfboard-policy-path";
   case RemoteSubscriptionMode::LoonRemoteProxy:
     return "loon-remote-proxy";
+  case RemoteSubscriptionMode::StashProxyProvider:
+    return "stash-proxy-provider";
   case RemoteSubscriptionMode::ServerSideParse:
   default:
     return "server-side-parse";
@@ -450,6 +455,8 @@ static const std::string *selectedExternalBase(const ExternalConfig &extconf,
     return &extconf.surge_rule_base;
   if (target == "surfboard")
     return &extconf.surfboard_rule_base;
+  if (target == "stash")
+    return &extconf.stash_rule_base;
   if (target == "mellow")
     return &extconf.mellow_rule_base;
   if (target == "quan")
@@ -478,7 +485,8 @@ static bool validateSelectedExternalBase(const ExternalConfig &extconf,
 
 static bool hasEffectiveExternalConfig(const ExternalConfig &extconf,
                                        const template_args &tpl_args,
-                                       const string_map &tpl_args_base) {
+                                       const string_map &tpl_args_base,
+                                       const std::string &target) {
   if (tpl_args.local_vars != tpl_args_base)
     return true;
 
@@ -493,6 +501,7 @@ static bool hasEffectiveExternalConfig(const ExternalConfig &extconf,
       !extconf.surfboard_rule_base.empty() ||
       !extconf.mellow_rule_base.empty() || !extconf.quan_rule_base.empty() ||
       !extconf.quanx_rule_base.empty() || !extconf.loon_rule_base.empty() ||
+      (target == "stash" && !extconf.stash_rule_base.empty()) ||
       !extconf.sssub_rule_base.empty() ||
       !extconf.singbox_rule_base.empty())
     return true;
@@ -815,12 +824,12 @@ static std::string providerIntervalScopeError(size_t item_index) {
   const std::string item = std::to_string(item_index + 1);
   return "Invalid request: interval: for URL item #" + item +
          " is only valid for subscription links that generate Clash/ClashR "
-         "proxy-providers, Quantumult X server_remote resources, or Surge "
-         "policy-path resources.\n"
+         "proxy-providers, Quantumult X server_remote resources, Surge "
+         "policy-path resources, or Stash proxy-providers.\n"
          "无效请求：第 " + item +
          " 个 url 项的 interval: 仅适用于会生成 Clash/ClashR "
-         "proxy-provider、Quantumult X server_remote 或 Surge policy-path "
-         "资源的订阅链接。";
+         "proxy-provider、Quantumult X server_remote、Surge policy-path "
+         "或 Stash proxy-provider 资源的订阅链接。";
 }
 
 static std::string providerDirectScopeError(size_t item_index) {
@@ -863,6 +872,14 @@ static std::string loonRemoteProxySourceError(size_t item_index) {
          " contains an unescaped space or control character.\n"
          "无效请求：第 " + item +
          " 个 Loon Remote Proxy 订阅项包含未转义空格或控制字符。";
+}
+
+static std::string stashProxyProviderSourceError(size_t item_index) {
+  const std::string item = std::to_string(item_index + 1);
+  return "Invalid request: Stash proxy-provider subscription item #" + item +
+         " contains an unescaped space or control character.\n"
+         "无效请求：第 " + item +
+         " 个 Stash proxy-provider 订阅项包含未转义空格或控制字符。";
 }
 
 static std::string surgePolicyPathIntervalError(size_t item_index) {
@@ -974,6 +991,24 @@ static std::string sanitizeRemoteResourceName(const std::string &input) {
   return tag;
 }
 
+static std::string reserveStashProviderName(
+    const std::string &base, std::unordered_set<std::string> &reserved_keys) {
+  std::string base_name = clampProviderNameLength(base, 64);
+  if (base_name.empty())
+    base_name = "SubConverter_Provider";
+  if (reserved_keys.insert(toLower(base_name)).second)
+    return base_name;
+  int suffix_index = 1;
+  while (true) {
+    const std::string suffix = "_" + std::to_string(suffix_index++);
+    const size_t max_base = 64 > suffix.size() ? 64 - suffix.size() : 0;
+    const std::string candidate =
+        clampProviderNameLength(base_name, max_base) + suffix;
+    if (reserved_keys.insert(toLower(candidate)).second)
+      return candidate;
+  }
+}
+
 static bool hasUnsafeQuanXRemoteUrlChar(const std::string &url) {
   return std::any_of(url.begin(), url.end(), [](unsigned char ch) {
     return ch <= 0x20 || ch == 0x7f;
@@ -1038,6 +1073,7 @@ static std::mutex g_sub_response_cache_mutex;
 static std::map<std::string, CachedSubResponse> g_sub_response_cache;
 
 struct SubExplainProvider {
+  std::string backend = "mihomo";
   std::string name;
   std::string tag;
   std::string source_hash;
@@ -1347,6 +1383,7 @@ static std::string serializeSubExplainReport(const SubExplainReport &report,
   writer.StartArray();
   for (const SubExplainProvider &provider : report.providers) {
     writer.StartObject();
+    writeJsonString(writer, "backend", provider.backend);
     writeJsonString(writer, "name", provider.name);
     writeJsonString(writer, "tag", provider.tag);
     writeJsonString(writer, "source_hash", provider.source_hash);
@@ -1946,6 +1983,7 @@ struct EffectiveSubPolicy {
   std::string surge_base;
   std::string mellow_base;
   std::string surfboard_base;
+  std::string stash_base;
   std::string quan_base;
   std::string quanx_base;
   std::string loon_base;
@@ -2002,6 +2040,7 @@ static std::string buildEffectiveSubPolicy(Request &request,
   policy.surge_base = settings.surgeBase;
   policy.mellow_base = settings.mellowBase;
   policy.surfboard_base = settings.surfboardBase;
+  policy.stash_base = settings.stashBase;
   policy.quan_base = settings.quanBase;
   policy.quanx_base = settings.quanXBase;
   policy.loon_base = settings.loonBase;
@@ -2021,10 +2060,20 @@ static std::string buildEffectiveSubPolicy(Request &request,
   }
 
   std::string provider_headers_error;
-  if (!parsed.provider_headers.empty() && parsed.target != "clash") {
+  if (!parsed.provider_headers.empty() && parsed.target != "clash" &&
+      parsed.target != "stash") {
     response.status_code = 400;
-    return "Invalid request: provider_headers is supported only for target=clash.\n"
-           "无效请求：provider_headers 仅支持 target=clash。";
+    return "Invalid request: provider_headers is supported only for "
+           "target=clash or target=stash.\n"
+           "无效请求：provider_headers 仅支持 target=clash 或 "
+           "target=stash。";
+  }
+  if (parsed.target == "stash" && !parsed.provider_proxy_direct.is_undef()) {
+    response.status_code = 400;
+    return "Invalid request: provider_proxy_direct is a Mihomo-only option "
+           "and cannot be applied to Stash proxy-providers.\n"
+           "无效请求：provider_proxy_direct 是 Mihomo 专用选项，不能应用于 "
+           "Stash proxy-provider。";
   }
   if (!providerHeadersFromRequest(request, parsed.provider_headers,
                                   policy.provider_headers,
@@ -2190,6 +2239,10 @@ static std::string buildExternalConfigFetchPlan(
         if (checkExternalBase(extconf.surfboard_rule_base,
                               policy.surfboard_base, context))
           plan.base_fetch_context = context;
+        if (parsed.target == "stash" &&
+            checkExternalBase(extconf.stash_rule_base, policy.stash_base,
+                              context))
+          plan.base_fetch_context = context;
         if (checkExternalBase(extconf.mellow_rule_base, policy.mellow_base,
                               context))
           plan.base_fetch_context = context;
@@ -2259,7 +2312,8 @@ static std::string buildExternalConfigFetchPlan(
         loadExternalConfig(candidate.path, extconf, candidate.context);
     bool effective =
         loaded.ok() && hasEffectiveExternalConfig(
-                           extconf, policy.template_arguments, tpl_args_base);
+                           extconf, policy.template_arguments, tpl_args_base,
+                           parsed.target);
     bool selected_base_valid =
         effective && validateSelectedExternalBase(
                          extconf, parsed.target, parsed.simple_subscription,
@@ -2651,7 +2705,6 @@ static std::string loonRemoteCapabilityReason(
     return "disabled-by-config";
   if (policy.generator.nodelist)
     return "list-mode";
-
   std::vector<LoonProspectiveRemote> remotes;
   int item_group_id = 0;
   size_t generated_index = 0;
@@ -2741,6 +2794,145 @@ static std::string loonRemoteCapabilityReason(
                                      : "no-remote-policy-group";
 }
 
+struct StashProspectiveProvider {
+  int group_id = 0;
+  std::string source_tag;
+  std::string requested_name;
+  std::string selection_name;
+};
+
+static bool stashGroupRuleSelectsProvider(
+    const std::string &rule,
+    const std::vector<StashProspectiveProvider> &providers) {
+  std::string selector, server_pattern;
+  if (parseGroupIdRule(rule, selector, server_pattern)) {
+    return std::any_of(providers.begin(), providers.end(),
+                       [&](const auto &provider) {
+                         return matchRange(selector, provider.group_id);
+                       });
+  }
+  if (parseSourceGroupRule(rule, selector, server_pattern)) {
+    return std::any_of(providers.begin(), providers.end(),
+                       [&](const auto &provider) {
+                         return !provider.source_tag.empty() &&
+                                regFind(provider.source_tag, selector);
+                       });
+  }
+  return !startsWith(rule, "!!") && !startsWith(rule, "script:");
+}
+
+static std::string stashProxyProviderCapabilityReason(
+    const ParsedSubRequest &parsed, const EffectiveSubPolicy &policy) {
+  if (policy.generator.nodelist)
+    return "list-mode";
+  if (parsed.provider_proxy_direct.get(false))
+    return "unsupported-provider-proxy";
+
+  std::vector<StashProspectiveProvider> providers;
+  std::unordered_set<std::string> reserved_provider_keys;
+  int item_group_id = 0;
+  size_t generated_index = 0;
+  for (const std::string &raw_item : split(parsed.url, "|")) {
+    const TaggedLink tagged = parseTaggedLink(regTrim(raw_item));
+    const std::string link = tagged.link.empty() ? raw_item : tagged.link;
+    if (startsWith(regTrim(link), "!!import:"))
+      return "imported-source-list";
+    if (tagged.has_proxy_direct)
+      return "unsupported-provider-proxy";
+    if (tagged.has_interval && tagged.interval <= 0)
+      return "invalid-update-interval";
+    if (tagged.error == TaggedLink::Error::None &&
+        isHttpSubscriptionLink(
+            link, tagged.has_provider || tagged.has_interval)) {
+      std::string selection_name = sanitizeRemoteResourceName(tagged.provider);
+      if (selection_name.empty())
+        selection_name =
+            "SubConverter_Provider_" + std::to_string(++generated_index);
+      selection_name = reserveStashProviderName(selection_name,
+                                                reserved_provider_keys);
+      providers.push_back({item_group_id, tagged.tag, tagged.provider,
+                           std::move(selection_name)});
+    }
+    item_group_id++;
+  }
+  if (providers.empty())
+    return "no-remote-subscription";
+
+  if (policy.requested_remote_node_filter)
+    return "node-filters";
+  if (policy.requested_remote_node_rename)
+    return "provider-rename";
+  if (!parsed.group_name.empty())
+    return "group-override";
+  if (policy.requested_remote_node_transform)
+    return "node-transform";
+  if (policy.requested_remote_node_option_override)
+    return "node-option-override";
+
+  // The built-in Stash base contains a safe `Proxy` selector. When no custom
+  // groups are configured, the generator attaches every provider to that
+  // selector so legacy preference files need no migration.
+  if (policy.custom_proxy_groups.empty())
+    return "native-capable";
+
+  bool selects_remote_provider = false;
+  for (const ProxyGroupConfig &group : policy.custom_proxy_groups) {
+    if (group.Type == ProxyGroupType::Smart ||
+        group.Type == ProxyGroupType::SSID)
+      return "unsupported-group-type";
+    size_t dynamic_selector_count = 0;
+    for (const std::string &rule : group.Proxies) {
+      if (startsWith(rule, "[]") || rule == "DIRECT" || rule == "REJECT")
+        continue;
+      if (startsWith(toLower(rule), "http://") ||
+          startsWith(toLower(rule), "https://"))
+        continue;
+      if (startsWith(rule, "script:") || startsWith(rule, "!!INSERT=") ||
+          startsWith(rule, "!!TYPE=") || startsWith(rule, "!!PORT=") ||
+          startsWith(rule, "!!SERVER="))
+        return "unsupported-group-selector";
+
+      std::string selector, server_pattern;
+      if (parseGroupIdRule(rule, selector, server_pattern) ||
+          parseSourceGroupRule(rule, selector, server_pattern)) {
+        if (startsWith(rule, "!!GROUP=") && !regValid(selector))
+          return "invalid-group-regex";
+        if (!server_pattern.empty() &&
+            (!remotePolicyRegexIsSafe(server_pattern) ||
+             !regValid(server_pattern)))
+          return "unsafe-group-regex";
+      } else if (startsWith(rule, "!!")) {
+        return "unsupported-group-selector";
+      } else if (!remotePolicyRegexIsSafe(rule) || !regValid(rule)) {
+        return "unsafe-group-regex";
+      }
+      if (++dynamic_selector_count > 1)
+        return "multiple-group-selectors";
+      if (stashGroupRuleSelectsProvider(rule, providers))
+        selects_remote_provider = true;
+    }
+
+    if (!group.UsingProvider.empty() && dynamic_selector_count)
+      return "provider-and-rule-selectors";
+    for (const std::string &requested : group.UsingProvider) {
+      const std::string sanitized = sanitizeRemoteResourceName(requested);
+      if (std::any_of(providers.begin(), providers.end(),
+                      [&](const auto &provider) {
+                        return requested == provider.requested_name ||
+                               requested == provider.selection_name ||
+                               sanitized == provider.selection_name;
+                      }))
+        selects_remote_provider = true;
+    }
+    if (group.Type == ProxyGroupType::Relay &&
+        (dynamic_selector_count || !group.UsingProvider.empty()))
+      return "unsupported-group-type";
+  }
+
+  return selects_remote_provider ? "native-capable"
+                                 : "no-remote-policy-group";
+}
+
 static SubStageResponse processSubscriptionNodes(
     Request &request, Response &response, const Settings &settings,
     ParsedSubRequest &parsed, EffectiveSubPolicy &policy,
@@ -2797,13 +2989,18 @@ static SubStageResponse processSubscriptionNodes(
     remote_reason = loonRemoteCapabilityReason(parsed, policy, settings);
     if (remote_reason != "native-capable")
       remote_mode = RemoteSubscriptionMode::ServerSideParse;
+  } else if (remote_mode == RemoteSubscriptionMode::StashProxyProvider) {
+    remote_reason = stashProxyProviderCapabilityReason(parsed, policy);
+    if (remote_reason != "native-capable")
+      remote_mode = RemoteSubscriptionMode::ServerSideParse;
   }
   explain.remote_subscription_backend = remoteSubscriptionModeName(remote_mode);
   explain.remote_subscription_reason = remote_reason;
 
   if (remote_mode == RemoteSubscriptionMode::SurgePolicyPath ||
       remote_mode == RemoteSubscriptionMode::SurfboardPolicyPath ||
-      remote_mode == RemoteSubscriptionMode::LoonRemoteProxy) {
+      remote_mode == RemoteSubscriptionMode::LoonRemoteProxy ||
+      remote_mode == RemoteSubscriptionMode::StashProxyProvider) {
     const size_t configured_filter_count =
         policy.include_remarks.size() + policy.exclude_remarks.size();
     const size_t configured_node_transform_count =
@@ -2828,7 +3025,10 @@ static SubStageResponse processSubscriptionNodes(
                           : remote_mode ==
                                     RemoteSubscriptionMode::SurfboardPolicyPath
                                 ? "SURFBOARD_POLICY_PATH"
-                                : "LOON_REMOTE") +
+                                : remote_mode ==
+                                          RemoteSubscriptionMode::LoonRemoteProxy
+                                      ? "LOON_REMOTE"
+                                      : "STASH_PROXY_PROVIDER") +
               "_TRANSFORM_SCOPE remote_nodes=client "
           "direct_nodes=server configured_filters=" +
               std::to_string(configured_filter_count) +
@@ -2866,7 +3066,8 @@ static SubStageResponse processSubscriptionNodes(
     const size_t remote_count = ext.quanx_server_remotes.size() +
                                 ext.surge_policy_paths.size() +
                                 ext.surfboard_policy_paths.size() +
-                                ext.loon_remote_proxies.size();
+                                ext.loon_remote_proxies.size() +
+                                ext.stash_proxy_providers.size();
     std::string route = "none";
     if ((provider_count || remote_count) && source_calls)
       route = "hybrid";
@@ -2899,7 +3100,9 @@ static SubStageResponse processSubscriptionNodes(
         parsed.target_descriptor->remote_subscription_mode ==
             RemoteSubscriptionMode::SurfboardPolicyPath ||
         parsed.target_descriptor->remote_subscription_mode ==
-            RemoteSubscriptionMode::LoonRemoteProxy) {
+            RemoteSubscriptionMode::LoonRemoteProxy ||
+        parsed.target_descriptor->remote_subscription_mode ==
+            RemoteSubscriptionMode::StashProxyProvider) {
       event += " remote_backend=" +
                std::string(remoteSubscriptionModeName(remote_mode)) +
                " remote_reason=" + remote_reason +
@@ -2953,6 +3156,8 @@ static SubStageResponse processSubscriptionNodes(
       remote_mode == RemoteSubscriptionMode::SurfboardPolicyPath;
   const bool loon_remote_eligible =
       remote_mode == RemoteSubscriptionMode::LoonRemoteProxy;
+  const bool stash_remote_eligible =
+      remote_mode == RemoteSubscriptionMode::StashProxyProvider;
   const bool native_remote_target =
       parsed.target_descriptor->remote_subscription_mode ==
           RemoteSubscriptionMode::QuanXServerRemote ||
@@ -2961,10 +3166,12 @@ static SubStageResponse processSubscriptionNodes(
       parsed.target_descriptor->remote_subscription_mode ==
           RemoteSubscriptionMode::SurfboardPolicyPath ||
       parsed.target_descriptor->remote_subscription_mode ==
-          RemoteSubscriptionMode::LoonRemoteProxy;
+          RemoteSubscriptionMode::LoonRemoteProxy ||
+      parsed.target_descriptor->remote_subscription_mode ==
+          RemoteSubscriptionMode::StashProxyProvider;
   if (!provider_mode_eligible && !quanx_remote_eligible &&
       !surge_remote_eligible && !surfboard_remote_eligible &&
-      !loon_remote_eligible) {
+      !loon_remote_eligible && !stash_remote_eligible) {
     for (size_t index = 0; index < urls.size(); ++index) {
       TaggedLink tagged = parseTaggedLink(regTrim(urls[index]));
       if (tagged.error != TaggedLink::Error::None) {
@@ -3314,6 +3521,131 @@ static SubStageResponse processSubscriptionNodes(
           remoteSubscriptionModeName(remote_mode);
       explain.remote_subscription_reason = remote_reason;
     }
+  } else if (stash_remote_eligible) {
+    struct StashRemoteLinkItem {
+      std::string url;
+      std::string source_tag;
+      std::string requested_name;
+      int interval = 3600;
+      int group_id = 0;
+    };
+    struct StashNodeLinkItem {
+      std::string url;
+      int group_id = 0;
+      bool force_direct_link = false;
+    };
+    std::vector<StashRemoteLinkItem> subscription_urls;
+    std::vector<StashNodeLinkItem> node_urls;
+
+    for (size_t index = 0; index < urls.size(); ++index) {
+      std::string &x = urls[index];
+      x = regTrim(x);
+      TaggedLink tagged = parseTaggedLink(x);
+      if (tagged.error != TaggedLink::Error::None) {
+        *status_code = 400;
+        return {true, providerLinkPrefixError(index, tagged.error)};
+      }
+      const std::string link = tagged.link.empty() ? x : tagged.link;
+      const bool is_remote_subscription = isHttpSubscriptionLink(
+          link, tagged.has_provider || tagged.has_interval);
+      const int item_group_id = groupID++;
+
+      if (is_remote_subscription) {
+        if (tagged.has_proxy_direct) {
+          *status_code = 400;
+          return {true, providerDirectScopeError(index)};
+        }
+        if (tagged.has_interval && tagged.interval <= 0) {
+          *status_code = 400;
+          return {true, surgePolicyPathIntervalError(index)};
+        }
+        if (hasUnsafeQuanXRemoteUrlChar(link)) {
+          *status_code = 400;
+          return {true, stashProxyProviderSourceError(index)};
+        }
+        writeLog(LOG_LEVEL_INFO,
+                 "检测到 Stash proxy-provider 远程订阅：" +
+                     summarizeUrlForLog(link) + "，将由客户端更新。");
+        subscription_urls.push_back(
+            {link, tagged.tag, tagged.provider,
+             tagged.has_interval ? tagged.interval : 3600, item_group_id});
+        explain.subscription_url_count++;
+        continue;
+      }
+
+      if (tagged.has_interval) {
+        *status_code = 400;
+        return {true, providerIntervalScopeError(index)};
+      }
+      if (tagged.has_proxy_direct) {
+        *status_code = 400;
+        return {true, providerDirectScopeError(index)};
+      }
+      std::string node_link = link;
+      if (tagged.has_tag)
+        node_link = "tag:" + tagged.tag + "," + link;
+      node_urls.push_back(
+          {std::move(node_link), item_group_id, isLegacyHttpProxyUri(link)});
+      explain.node_link_count++;
+    }
+
+    std::unordered_set<std::string> provider_names;
+
+    size_t generated_index = 0;
+    for (const StashRemoteLinkItem &item : subscription_urls) {
+      std::string requested = sanitizeRemoteResourceName(item.requested_name);
+      if (requested.empty())
+        requested =
+            "SubConverter_Provider_" + std::to_string(++generated_index);
+
+      StashProxyProvider provider;
+      provider.name = reserveStashProviderName(requested, provider_names);
+      provider.requested_name = item.requested_name;
+      provider.selection_name = provider.name;
+      provider.source_tag = item.source_tag;
+      provider.url = item.url;
+      provider.path = "./providers/" + provider.name + ".yaml";
+      provider.interval = item.interval;
+      provider.group_id = item.group_id;
+      provider.headers = provider_headers;
+      writeLog(LOG_LEVEL_INFO,
+               "STASH_PROXY_PROVIDER_CREATED group_id=" +
+                   std::to_string(provider.group_id) + " interval=" +
+                   std::to_string(provider.interval) + " source=" +
+                   summarizeUrlForLog(provider.url));
+      SubExplainProvider explain_provider;
+      explain_provider.backend = "stash-client";
+      explain_provider.name = provider.name;
+      explain_provider.tag = provider.source_tag;
+      explain_provider.source_summary = summarizeUrlForLog(provider.url);
+      explain_provider.path = provider.path;
+      explain_provider.name_generated = item.requested_name.empty();
+      explain_provider.group_id = provider.group_id;
+      explain_provider.interval = provider.interval;
+      explain_provider.proxy_direct = false;
+      explain.providers.push_back(std::move(explain_provider));
+      ext.stash_proxy_providers.push_back(std::move(provider));
+    }
+
+    for (const StashNodeLinkItem &item : node_urls) {
+      string_array import_urls{item.url};
+      if (importItems(import_urls, true, FetchContext::PublicRequest) != 0) {
+        source_calls++;
+        source_failures++;
+        continue;
+      }
+      for (std::string &x : import_urls) {
+        source_calls++;
+        parse_settings item_parse_set = parse_set;
+        item_parse_set.force_direct_link = item.force_direct_link;
+        if (addNodes(x, nodes, item.group_id, item_parse_set) == -1) {
+          source_failures++;
+          writeLog(LOG_LEVEL_WARNING,
+                   "已跳过无效节点链接：" + summarizeUrlForLog(x) +
+                       "，继续处理其他节点。");
+        }
+      }
+    }
   } else if (loon_remote_eligible) {
     struct LoonRemoteLinkItem {
       std::string url;
@@ -3590,16 +3922,21 @@ static SubStageResponse processSubscriptionNodes(
     }
   }
 
-  explain.provider_count = ext.providers.size();
+  explain.provider_count =
+      ext.providers.size() + ext.stash_proxy_providers.size();
   explain.remote_subscription_count = ext.quanx_server_remotes.size() +
                                       ext.surge_policy_paths.size() +
                                       ext.surfboard_policy_paths.size() +
-                                      ext.loon_remote_proxies.size();
-  explain.proxy_provider_mode = ext.use_proxy_provider && !ext.providers.empty();
+                                      ext.loon_remote_proxies.size() +
+                                      ext.stash_proxy_providers.size();
+  explain.proxy_provider_mode =
+      (ext.use_proxy_provider && !ext.providers.empty()) ||
+      !ext.stash_proxy_providers.empty();
   explain.insert_node_count = insert_nodes.size();
   explain.direct_node_count = nodes.size();
   logRouteSelection();
-  if (!argProviderHeaders.empty() && !ext.nodelist && ext.providers.empty()) {
+  if (!argProviderHeaders.empty() && !ext.nodelist && ext.providers.empty() &&
+      ext.stash_proxy_providers.empty()) {
     *status_code = 400;
     return {true,
             "Invalid request: provider_headers was selected, but no "
@@ -3608,7 +3945,8 @@ static SubStageResponse processSubscriptionNodes(
   }
   if (nodes.empty() && insert_nodes.empty() && ext.providers.empty() &&
       ext.quanx_server_remotes.empty() && ext.surge_policy_paths.empty() &&
-      ext.surfboard_policy_paths.empty() && ext.loon_remote_proxies.empty()) {
+      ext.surfboard_policy_paths.empty() && ext.loon_remote_proxies.empty() &&
+      ext.stash_proxy_providers.empty()) {
     *status_code = 400;
     return {true,
             "Invalid request: no valid proxy nodes or remote resources were "
@@ -3885,6 +4223,34 @@ static SubStageResponse dispatchTargetGenerator(
                  std::string(policy.update_strict ? "true" : "false") +
                  "\n\n" + output;
     }
+    break;
+
+  case "stash"_hash:
+    writeLog(LOG_LEVEL_INFO, "生成目标：Stash");
+    if (render_template(fetchFile(policy.stash_base, proxy,
+                                  settings.cacheConfig, true, base_context),
+                        template_arguments, base_content,
+                        settings.templatePath, base_context) != 0) {
+      *status_code = 400;
+      return {true, base_content};
+    }
+    output = proxyToStash(nodes, base_content, ruleset_content,
+                          policy.custom_proxy_groups, ext);
+    if (!ext.external_rule_error.empty()) {
+      *status_code = 400;
+      return {true, ext.external_rule_error};
+    }
+    if (ext.stash_proxy_providers.size() !=
+        ext.target_generation_stats.remote_references_emitted) {
+      *status_code = 400;
+      return {true,
+              "Invalid request: every Stash proxy-provider must be selected "
+              "by a compatible proxy group.\n"
+              "无效请求：每个 Stash proxy-provider 都必须被兼容的策略组"
+              "选中。"};
+    }
+    if (upload)
+      recordUpload("stash", upload_path, output, false);
     break;
 
   case "mellow"_hash:
@@ -4360,7 +4726,7 @@ static std::string assembleSubResponse(
                      " explicitly selected header(s)",
                  provider_headers.empty() ? "ignored" : "applied",
                  "Only named, present, non-reserved request headers are "
-                 "copied into generated proxy-providers.");
+                 "copied into generated Clash or Stash proxy-providers.");
     addParameter("upload", boolString(argUpload), explain.upload_suppressed
                                                     ? "suppressed"
                                                     : "applied",
@@ -4381,7 +4747,11 @@ static std::string assembleSubResponse(
                              ? "Quantumult X full-config output uses client-managed "
                                "server_remote resources when the request can be "
                                "represented without losing advanced semantics."
-                             : "Clash-compatible output defaults to provider mode."));
+                             : (argTarget == "stash"
+                                    ? "Stash full-config output uses named client-managed "
+                                      "proxy-providers when the request can be represented "
+                                      "without losing advanced semantics."
+                                    : "Clash-compatible output defaults to provider mode.")));
     addSwitchParameter("sort", ext.sort_flag, argSort);
     addParameter("sort_script",
                  argUseSortScript ? "enabled" : "disabled",
@@ -4517,6 +4887,9 @@ static std::string assembleSubResponse(
         remote_section = "surfboard_policy_path";
       else if (explain.remote_subscription_backend == "loon-remote-proxy")
         remote_section = "loon_remote_proxy";
+      else if (explain.remote_subscription_backend ==
+               "stash-proxy-provider")
+        remote_section = "stash_proxy_provider";
       addConfigSection(remote_section, "request", "generated",
                        std::to_string(explain.remote_subscription_count) +
                            " remote resource(s); node-name transformations run "
