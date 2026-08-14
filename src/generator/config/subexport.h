@@ -194,6 +194,8 @@ std::string proxyToSSSub(std::string base_conf, std::vector<Proxy> &nodes,
                          extra_settings &ext);
 std::string proxyToSingle(std::vector<Proxy> &nodes, SingleLinkTypes types,
                            extra_settings &ext);
+std::string proxyToShadowrocket(std::vector<Proxy> &nodes,
+                                extra_settings &ext);
 std::string proxyToV2RayClient(std::vector<Proxy> &nodes,
                                V2RayClientTarget target,
                                extra_settings &ext);

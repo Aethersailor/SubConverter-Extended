@@ -804,6 +804,74 @@ def run_checks(
         if not legacy_v2ray.startswith("vmess://") or "v2rayn://" in legacy_v2ray:
             raise AssertionError("historical target=v2ray output contract changed")
 
+        shadowrocket_params = {
+            "target": "shadowrocket",
+            "url": "|".join(
+                (
+                    SAMPLE_SS_LINK,
+                    V2RAY_CLIENT_VMESS_LINK,
+                    V2RAY_CLIENT_HY2_LINK,
+                )
+            ),
+            "config": DISABLE_RULEGEN_CONFIG,
+            "list": "true",
+        }
+        shadowrocket = fetch(
+            base_url,
+            "/sub",
+            shadowrocket_params,
+            timeout,
+        )
+        if [line.split("://", 1)[0] for line in shadowrocket.splitlines()] != [
+            "ss",
+            "vmess",
+            "hysteria2",
+        ]:
+            raise AssertionError(
+                f"Shadowrocket deployed protocol matrix drifted: {shadowrocket!r}"
+            )
+        mixed = fetch(
+            base_url,
+            "/sub",
+            {**shadowrocket_params, "target": "mixed"},
+            timeout,
+        )
+        if shadowrocket != mixed:
+            raise AssertionError(
+                "target=shadowrocket changed the historical mixed output contract"
+            )
+        auto_shadowrocket, auto_shadowrocket_headers = fetch_response(
+            base_url,
+            "/sub",
+            {**shadowrocket_params, "target": "auto"},
+            timeout,
+            {"User-Agent": "Shadowrocket/2.2.60"},
+        )
+        if auto_shadowrocket != shadowrocket:
+            raise AssertionError(
+                "Shadowrocket deployed auto-target did not select its dedicated path"
+            )
+        if "user-agent" not in {
+            value.strip().lower()
+            for value in auto_shadowrocket_headers.get("vary", "").split(",")
+            if value.strip()
+        }:
+            raise AssertionError(
+                "Shadowrocket deployed auto-target is missing Vary: User-Agent"
+            )
+        assert_rejected(
+            base_url,
+            "/sub",
+            {
+                "target": "shadowrocket",
+                "url": MIERU_OFFICIAL_SIMPLE_URI,
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+            timeout,
+            "Shadowrocket unsupported Mieru link",
+        )
+
     direct_config = fetch(base_url, "/sub", common_params, timeout)
     if "Smoke" not in direct_config or "proxies:" not in direct_config:
         raise AssertionError("direct Clash conversion did not include expected node output")

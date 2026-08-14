@@ -3504,6 +3504,14 @@ std::string proxyToSingle(std::vector<Proxy> &nodes, SingleLinkTypes types,
   return base64Encode(allLinks);
 }
 
+std::string proxyToShadowrocket(std::vector<Proxy> &nodes,
+                                extra_settings &ext) {
+  // Stage one intentionally preserves the established standard-link subset.
+  // Keeping a dedicated entry point lets Shadowrocket evolve independently
+  // without changing the generic target=mixed compatibility contract.
+  return proxyToSingle(nodes, SingleLinkType::Mixed, ext);
+}
+
 std::string proxyToSSSub(std::string base_conf, std::vector<Proxy> &nodes,
                          extra_settings &ext) {
   TargetGenerationStats &generation_stats = ext.target_generation_stats;
