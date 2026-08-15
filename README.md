@@ -154,6 +154,9 @@ proxy_direct:false,https://example.com/sub
 
 ## 🚀 快速开始
 
+> [!NOTE]
+> 公共实例和自行部署都是正常的使用方式，选择依据不是使用时长。公共实例是项目持续维护的公共服务，可以直接用于日常或持续使用；自行部署既可用于测试和短期验证，也可持续运行。两者的主要区别是运维责任、隐私边界和自定义能力。
+
 ### 🌍 直接使用公共实例
 
 公共实例地址：
@@ -170,7 +173,7 @@ https://api.asailor.org
 > [!IMPORTANT]
 > 除 Stash 独立模板外，默认输出通常是最简配置，不包含完整 DNS 设置。客户端需要启用 DNS 覆写，或使用包含 DNS 的自定义基础模板。否则节点域名可能无法解析。
 
-### 🐳 使用 Docker 体验
+### 🐳 使用 Docker 自行部署
 
 ```bash
 docker run -d \
@@ -188,7 +191,7 @@ http://localhost:25500/healthz
 ```
 
 > [!NOTE]
-> 上述命令适合体验，不会持久化自定义配置和统计数据。`-p 25500:25500` 还会把端口发布到宿主机全部接口。长期运行请使用 Wiki 的 [Docker 部署](https://github.com/Aethersailor/SubConverter-Extended/wiki/Docker-Deployment)，并根据实际网络范围选择安全档位。
+> 上述命令是最小启动示例，不会持久化自定义配置和统计数据。`-p 25500:25500` 还会把端口发布到宿主机全部接口。需要保留配置或统计数据时，请按照 Wiki 的 [Docker 部署](https://github.com/Aethersailor/SubConverter-Extended/wiki/Docker-Deployment)完成持久化配置，并根据实际网络范围选择安全档位。
 
 ### 📦 可用交付形式
 
@@ -210,7 +213,7 @@ http://localhost:25500/healthz
 | :--- | :--- |
 | 判断项目是否适合当前客户端 | [客户端与目标格式](https://github.com/Aethersailor/SubConverter-Extended/wiki/Compatibility) |
 | 直接使用公共实例 | [快速开始](https://github.com/Aethersailor/SubConverter-Extended/wiki/Getting-Started) |
-| 使用 Docker 长期部署 | [Docker 部署](https://github.com/Aethersailor/SubConverter-Extended/wiki/Docker-Deployment) |
+| 使用 Docker 自行部署 | [Docker 部署](https://github.com/Aethersailor/SubConverter-Extended/wiki/Docker-Deployment) |
 | 部署到 Linux、Windows 或 OpenWrt | [原生部署](https://github.com/Aethersailor/SubConverter-Extended/wiki/Native-Deployment) |
 | 理解 `/sub` 和常用参数 | [基本转换](https://github.com/Aethersailor/SubConverter-Extended/wiki/Basic-Conversion) |
 | 使用特色参数 | [特色参数与扩展语法](https://github.com/Aethersailor/SubConverter-Extended/wiki/Feature-Parameters) |
