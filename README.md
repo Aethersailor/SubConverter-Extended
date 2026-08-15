@@ -67,12 +67,10 @@ flowchart LR
 > 下图对比的是 `target=clash`、`target=clashr` 处理远程 HTTP 订阅时的默认流程。`list=true` 和其他客户端目标可能仍由后端下载并解析订阅，不能把这组图理解为所有目标的统一行为。
 
 <p align="center">
-  <strong>传统 subconverter：后端下载并解析远程订阅</strong><br>
   <img src="docs/images/readme-flow-legacy.svg" alt="传统 subconverter 远程订阅链接处理流程" width="820">
 </p>
 
 <p align="center">
-  <strong>SubConverter-Extended：由 Mihomo 客户端更新 Proxy Provider</strong><br>
   <img src="docs/images/readme-flow-extended.svg" alt="SubConverter-Extended Mihomo Proxy Provider 处理流程" width="820">
 </p>
 
