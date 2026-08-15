@@ -6,6 +6,7 @@
 #include <iostream>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
@@ -84,6 +85,65 @@ public:
 private:
   TargetGenerationStats &source_;
   TargetGenerationStats &destination_;
+};
+
+class ProxyGroupNodeList {
+public:
+  struct Entry {
+    const Proxy *proxy = nullptr;
+    std::optional<std::string> remark_override;
+
+    const std::string &remark() const {
+      return remark_override ? *remark_override : proxy->Remark;
+    }
+  };
+
+  void reserve(size_t size) { entries_.reserve(size); }
+
+  void add(const Proxy &proxy) {
+    entries_.push_back(Entry{&proxy, std::nullopt});
+    script_nodes_current_ = false;
+  }
+
+  const std::string &add(const Proxy &proxy, std::string remark) {
+    entries_.push_back(Entry{&proxy, std::move(remark)});
+    script_nodes_current_ = false;
+    return *entries_.back().remark_override;
+  }
+
+  bool empty() const { return entries_.empty(); }
+
+  std::vector<Entry>::const_iterator begin() const { return entries_.begin(); }
+  std::vector<Entry>::const_iterator end() const { return entries_.end(); }
+
+#ifndef NO_JS_RUNTIME
+  const std::vector<Proxy> &scriptNodes() const {
+    if (script_nodes_current_)
+      return script_nodes_;
+
+    script_nodes_.clear();
+    script_nodes_.reserve(entries_.size());
+    for (const Entry &entry : entries_) {
+      script_nodes_.push_back(*entry.proxy);
+      if (entry.remark_override)
+        script_nodes_.back().Remark = *entry.remark_override;
+    }
+    script_nodes_current_ = true;
+    return script_nodes_;
+  }
+#endif
+
+private:
+  // The source node vectors outlive group generation and are not resized after
+  // entries are added. Stash owns only the effective remark because it must
+  // preserve the caller's source nodes while applying output-local renames.
+  std::vector<Entry> entries_;
+#ifndef NO_JS_RUNTIME
+  mutable std::vector<Proxy> script_nodes_;
+  mutable bool script_nodes_current_ = false;
+#else
+  bool script_nodes_current_ = false;
+#endif
 };
 
 template <typename Resource> struct PolicyPathSelector {
@@ -924,7 +984,7 @@ void processRemark(std::string &remark, const RemarkSet &used_remarks,
   remark = tempRemark;
 }
 
-void groupGenerate(const std::string &rule, std::vector<Proxy> &nodelist,
+void groupGenerate(const std::string &rule, ProxyGroupNodeList &nodelist,
                    string_array &filtered_nodelist, bool add_direct,
                    extra_settings &ext) {
   std::string real_rule;
@@ -942,7 +1002,7 @@ void groupGenerate(const std::string &rule, std::vector<Proxy> &nodelist,
             auto filter =
                 (std::function<std::string(const std::vector<Proxy> &)>)
                     ctx.eval("filter");
-            std::string result_list = filter(nodelist);
+            std::string result_list = filter(nodelist.scriptNodes());
             filtered_nodelist = split(regTrim(result_list), "\n");
           } catch (qjs::exception) {
             script_print_stack(ctx);
@@ -954,11 +1014,13 @@ void groupGenerate(const std::string &rule, std::vector<Proxy> &nodelist,
   else {
     std::unordered_set<std::string> seen(filtered_nodelist.begin(),
                                          filtered_nodelist.end());
-    for (Proxy &x : nodelist) {
+    for (const ProxyGroupNodeList::Entry &entry : nodelist) {
+      const Proxy &x = *entry.proxy;
+      const std::string &remark = entry.remark();
       if (applyMatcher(rule, real_rule, x) &&
-          (real_rule.empty() || regFind(x.Remark, real_rule)) &&
-          seen.insert(x.Remark).second)
-        filtered_nodelist.emplace_back(x.Remark);
+          (real_rule.empty() || regFind(remark, real_rule)) &&
+          seen.insert(remark).second)
+        filtered_nodelist.emplace_back(remark);
     }
   }
 }
@@ -967,7 +1029,8 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
                   const ProxyGroupConfigs &extra_proxy_group, bool clashR,
                   extra_settings &ext) {
   YAML::Node proxies, original_groups;
-  std::vector<Proxy> nodelist;
+  ProxyGroupNodeList nodelist;
+  nodelist.reserve(nodes.size());
   RemarkSet used_remarks;
   used_remarks.reserve(nodes.size());
   /// proxies style
@@ -1035,7 +1098,7 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
       // Preserve the existing compact representation for Mihomo-parsed nodes.
       singleproxy.SetStyle(YAML::EmitterStyle::Flow);
       proxies.push_back(singleproxy);
-      nodelist.emplace_back(x);
+      nodelist.add(x);
       used_remarks.emplace(x.Remark);
 
       continue;
@@ -1573,7 +1636,7 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
       singleproxy.SetStyle(YAML::EmitterStyle::Flow);
     proxies.push_back(singleproxy);
     used_remarks.emplace(x.Remark);
-    nodelist.emplace_back(x);
+    nodelist.add(x);
   }
 
   if (proxy_compact)
@@ -3154,7 +3217,7 @@ static std::string proxyToStashImpl(
       return fail_base_schema("custom proxy-group name"), std::string();
     base_remark_storage.push_back(group.Name);
   }
-  std::vector<Proxy> emitted_nodes;
+  ProxyGroupNodeList emitted_nodes;
   emitted_nodes.reserve(nodes.size());
   RemarkSet used_remarks;
   used_remarks.reserve(nodes.size() + base_remark_storage.size() +
@@ -3213,8 +3276,7 @@ static std::string proxyToStashImpl(
     if (!buildStashNode(node, generated, udp, tfo, insecure, tls13))
       continue;
     generated_nodes.push_back(generated);
-    emitted_nodes.push_back(node);
-    used_remarks.emplace(emitted_nodes.back().Remark);
+    used_remarks.emplace(emitted_nodes.add(original, std::move(node.Remark)));
     tracker.markEmitted();
   }
   root["proxies"] = generated_nodes;
@@ -3293,9 +3355,9 @@ static std::string proxyToStashImpl(
           for (const YAML::Node &member : group["proxies"])
             if (member.IsScalar())
               existing_members.insert(member.as<std::string>());
-        for (const Proxy &node : emitted_nodes)
-          if (existing_members.insert(node.Remark).second)
-            group["proxies"].push_back(node.Remark);
+        for (const ProxyGroupNodeList::Entry &node : emitted_nodes)
+          if (existing_members.insert(node.remark()).second)
+            group["proxies"].push_back(node.remark());
         std::unordered_set<std::string> existing_uses;
         if (group["use"].IsSequence())
           for (const YAML::Node &use : group["use"])
@@ -3314,8 +3376,8 @@ static std::string proxyToStashImpl(
       group["name"] = "Proxy";
       group["type"] = "select";
       group["proxies"].push_back("DIRECT");
-      for (const Proxy &node : emitted_nodes)
-        group["proxies"].push_back(node.Remark);
+      for (const ProxyGroupNodeList::Entry &node : emitted_nodes)
+        group["proxies"].push_back(node.remark());
       for (const StashProxyProvider &provider : ext.stash_proxy_providers) {
         group["use"].push_back(provider.name);
         referenced_providers.insert(provider.name);
@@ -3749,7 +3811,8 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
   const bool resolve_hostname = effectiveSettings().surgeResolveHostname;
   INIReader ini;
   std::string output_nodelist;
-  std::vector<Proxy> nodelist;
+  ProxyGroupNodeList nodelist;
+  nodelist.reserve(nodes.size());
   unsigned short local_port = 1080;
   RemarkSet used_remarks;
   used_remarks.reserve(nodes.size());
@@ -4147,7 +4210,7 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
       output_nodelist += x.Remark + " = " + proxy + "\n";
     else {
       ini.set("{NONAME}", x.Remark + " = " + proxy);
-      nodelist.emplace_back(x);
+      nodelist.add(x);
     }
     used_remarks.emplace(x.Remark);
     generation_stats.emitted_nodes++;
@@ -5466,7 +5529,8 @@ void proxyToQuan(std::vector<Proxy> &nodes, INIReader &ini,
   generation_stats = TargetGenerationStats{};
   generation_stats.input_nodes = nodes.size();
   std::string proxyStr;
-  std::vector<Proxy> nodelist;
+  ProxyGroupNodeList nodelist;
+  nodelist.reserve(nodes.size());
   RemarkSet used_remarks;
   used_remarks.reserve(nodes.size());
 
@@ -5590,7 +5654,7 @@ void proxyToQuan(std::vector<Proxy> &nodes, INIReader &ini,
 
     ini.set("{NONAME}", proxyStr);
     used_remarks.emplace(x.Remark);
-    nodelist.emplace_back(x);
+    nodelist.add(x);
     generation_tracker.markEmitted();
   }
 
@@ -5904,7 +5968,8 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini,
   generation_stats.input_nodes = nodes.size();
   std::string proxyStr;
   tribool udp, tfo, scv, tls13;
-  std::vector<Proxy> nodelist;
+  ProxyGroupNodeList nodelist;
+  nodelist.reserve(nodes.size());
   RemarkSet used_remarks;
   used_remarks.reserve(nodes.size());
 
@@ -6194,7 +6259,7 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini,
 
     ini.set("{NONAME}", proxyStr);
     used_remarks.emplace(x.Remark);
-    nodelist.emplace_back(x);
+    nodelist.add(x);
     generation_tracker.markEmitted();
   }
 
@@ -6428,7 +6493,8 @@ void proxyToMellow(std::vector<Proxy> &nodes, INIReader &ini,
   std::string proxy;
   std::string url;
   tribool tfo, scv;
-  std::vector<Proxy> nodelist;
+  ProxyGroupNodeList nodelist;
+  nodelist.reserve(nodes.size());
   string_array vArray, remarks_list;
   RemarkSet used_remarks;
   used_remarks.reserve(nodes.size());
@@ -6522,7 +6588,7 @@ void proxyToMellow(std::vector<Proxy> &nodes, INIReader &ini,
     ini.set("{NONAME}", proxy);
     remarks_list.emplace_back(x.Remark);
     used_remarks.emplace(x.Remark);
-    nodelist.emplace_back(x);
+    nodelist.add(x);
     generation_tracker.markEmitted();
   }
 
@@ -6695,7 +6761,8 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
                         extra_settings &ext) {
   INIReader ini;
   std::string output_nodelist;
-  std::vector<Proxy> nodelist;
+  ProxyGroupNodeList nodelist;
+  nodelist.reserve(nodes.size());
   TargetGenerationStats &generation_stats = ext.target_generation_stats;
   generation_stats = TargetGenerationStats{};
   generation_stats.input_nodes = nodes.size();
@@ -7037,7 +7104,7 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
       output_nodelist += x.Remark + " = " + proxy + "\n";
     else {
       ini.set("{NONAME}", x.Remark + " = " + proxy);
-      nodelist.emplace_back(x);
+      nodelist.add(x);
       used_remarks.emplace(x.Remark);
     }
     generation_stats.emitted_nodes++;
@@ -7361,7 +7428,8 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
   if (wireguard_endpoint && json.IsObject() && json.HasMember("endpoints") &&
       json["endpoints"].IsArray())
     endpoints.CopyFrom(json["endpoints"], allocator);
-  std::vector<Proxy> nodelist;
+  ProxyGroupNodeList nodelist;
+  nodelist.reserve(nodes.size());
   string_array remarks_list;
   size_t wireguard_nodes_emitted = 0;
   size_t wireguard_peers_emitted = 0;
@@ -7524,7 +7592,7 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
         if (x.WireGuardWorkers > 0)
           endpoint.AddMember("workers", x.WireGuardWorkers, allocator);
         endpoints.PushBack(endpoint, allocator);
-        nodelist.push_back(x);
+        nodelist.add(x);
         remarks_list.emplace_back(x.Remark);
         used_remarks.emplace(x.Remark);
         generation_tracker.markEmitted();
@@ -7903,7 +7971,7 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
     if (!tfo.is_undef() && x.Type != ProxyType::AnyTLS) {
       proxy.AddMember("tcp_fast_open", buildBooleanValue(tfo), allocator);
     }
-    nodelist.push_back(x);
+    nodelist.add(x);
     remarks_list.emplace_back(x.Remark);
     used_remarks.emplace(x.Remark);
     outbounds.PushBack(proxy, allocator);
