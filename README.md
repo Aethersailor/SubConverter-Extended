@@ -44,20 +44,9 @@ SubConverter-Extended 的长期目标，是把不同客户端的配置转换简�
 
 ### 🔀 两类远程订阅处理方式
 
-```mermaid
-flowchart LR
-    A["用户提交订阅链接或节点链接"] --> B{"目标格式"}
-    B -->|"Clash / ClashR"| C["生成 Mihomo proxy-providers"]
-    B -->|"Surge / QuanX / Loon / Surfboard / Stash"| D["生成客户端原生远程资源"]
-    B -->|"其他目标或 list=true"| E["后端拉取并解析订阅"]
-    C --> F["客户端自行更新远程订阅"]
-    D --> F
-    E --> G["后端生成目标格式"]
-    A -->|"Clash / ClashR 节点链接"| H["Mihomo 解析桥"]
-    A -->|"其他目标的节点链接"| I["兼容解析器"]
-    H --> G
-    I --> G
-```
+<p align="center">
+  <img src="docs/images/readme-flow-overview.svg" alt="SubConverter-Extended 远程订阅与节点链接处理方式" width="1100">
+</p>
 
 远程订阅是否由客户端更新，取决于目标格式、请求参数和输入类型。完整行为见 Wiki 的[远程订阅与客户端拉取](https://github.com/Aethersailor/SubConverter-Extended/wiki/Remote-Subscriptions)。
 
