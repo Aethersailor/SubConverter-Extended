@@ -3213,7 +3213,7 @@ static std::string proxyToStashImpl(
     if (!buildStashNode(node, generated, udp, tfo, insecure, tls13))
       continue;
     generated_nodes.push_back(generated);
-    emitted_nodes.push_back(std::move(node));
+    emitted_nodes.push_back(node);
     used_remarks.emplace(emitted_nodes.back().Remark);
     tracker.markEmitted();
   }
