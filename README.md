@@ -10,7 +10,7 @@
 **面向多种代理客户端的订阅转换后端增强版**
 
 [![GitHub Tag](https://img.shields.io/github/v/tag/Aethersailor/SubConverter-Extended?style=flat&logo=github&label=version&color=blue)](https://github.com/Aethersailor/SubConverter-Extended/releases/latest)
-[![Build](https://img.shields.io/github/actions/workflow/status/Aethersailor/SubConverter-Extended/build-dockerhub.yml?branch=master&style=flat&label=build&logo=githubactions)](https://github.com/Aethersailor/SubConverter-Extended/actions/workflows/build-dockerhub.yml)
+[![Release](https://img.shields.io/github/actions/workflow/status/Aethersailor/SubConverter-Extended/release.yml?style=flat&label=release&logo=githubactions)](https://github.com/Aethersailor/SubConverter-Extended/actions/workflows/release.yml)
 [![Docker Pulls](https://img.shields.io/docker/pulls/aethersailor/subconverter-extended?style=flat&logo=docker)](https://hub.docker.com/r/aethersailor/subconverter-extended)
 [![License](https://img.shields.io/badge/license-GPL--3.0-orange?style=flat)](LICENSE)
 [![Wiki](https://img.shields.io/badge/Wiki-完整用户手册-2f81f7?style=flat&logo=github)](https://github.com/Aethersailor/SubConverter-Extended/wiki)
@@ -37,7 +37,7 @@ SubConverter-Extended 基于 [asdlokj1qpi233/subconverter](https://github.com/as
 SubConverter-Extended 的长期目标，是把不同客户端的配置转换简化为一套统一流程：用户只需维护自己的订阅转换模板，或直接选用公共模板，再附加自己的代理信息（订阅链接或节点链接），即可生成适用于不同客户端的配置文件。
 
 > [!NOTE]
-> 这一目标尚未完全实现。当前不同客户端在配置结构、远程资源表达、协议字段和模板能力方面仍有差异，部分场景仍需按客户端分别配置与处理。现阶段的实际支持范围以稳定版文档为准。
+> 这一目标尚未完全实现。当前不同客户端在配置结构、远程资源表达、协议字段和模板能力方面仍有差异，部分场景仍需按客户端分别配置与处理。现阶段的实际支持范围以当前正式 Release 文档为准。
 
 > [!TIP]
 > 第一次使用时，先阅读 Wiki 的[快速开始](https://github.com/Aethersailor/SubConverter-Extended/wiki/Getting-Started)和[客户端与目标格式](https://github.com/Aethersailor/SubConverter-Extended/wiki/Compatibility)。准备自行部署时，再选择 [Docker](https://github.com/Aethersailor/SubConverter-Extended/wiki/Docker-Deployment) 或[原生部署](https://github.com/Aethersailor/SubConverter-Extended/wiki/Native-Deployment)。
@@ -63,7 +63,7 @@ SubConverter-Extended 的长期目标，是把不同客户端的配置转换简�
   <img src="docs/images/readme-flow-extended.svg" alt="SubConverter-Extended Mihomo Proxy Provider 处理流程" width="820">
 </p>
 
-### 🧩 稳定版目标格式
+### 🧩 当前 Release 目标格式
 
 | 工作方式 | 目标 |
 | :--- | :--- |
@@ -73,7 +73,7 @@ SubConverter-Extended 的长期目标，是把不同客户端的配置转换简�
 | 简单订阅或分享链接输出 | `ss`、`ssd`、`ssr`、`sssub`、`v2ray`、`v2rayn`、`v2rayng`、`shadowrocket`、`trojan`、`vless`、`hysteria2`、`mixed` |
 
 > [!NOTE]
-> 上表按当前稳定版 `master` 的显式目标整理。不同目标的节点类型、传输参数和客户端最低版本并不相同。“能够生成”也不等于已经在对应闭源客户端上完成真机连通测试。使用前请查看[客户端与目标格式](https://github.com/Aethersailor/SubConverter-Extended/wiki/Compatibility)。
+> 上表按当前正式 Release 的显式目标整理。不同目标的节点类型、传输参数和客户端最低版本并不相同。“能够生成”也不等于已经在对应闭源客户端上完成真机连通测试。使用前请查看[客户端与目标格式](https://github.com/Aethersailor/SubConverter-Extended/wiki/Compatibility)。
 
 ---
 
@@ -108,7 +108,7 @@ SubConverter-Extended 保留常见 subconverter 调用方式，并增加请求�
 
 ## ✨ 相比上游的主要改进
 
-| 方面 | SubConverter-Extended 的稳定版行为 |
+| 方面 | SubConverter-Extended 当前 Release 的行为 |
 | :--- | :--- |
 | 多目标远程订阅 | 除 Mihomo Proxy Provider 外，还可为 Surge、Quantumult X、Loon、Surfboard 和 Stash 生成客户端原生远程资源。 |
 | Mihomo 节点解析 | `target=clash`、`target=clashr` 的节点链接只进入 Mihomo 解析桥，协议能力来自锁定的 Mihomo 依赖。 |
@@ -165,7 +165,7 @@ proxy_direct:false,https://example.com/sub
 https://api.asailor.org
 ```
 
-先访问 [`/version`](https://api.asailor.org/version) 查看稳定版身份，再按照[快速开始](https://github.com/Aethersailor/SubConverter-Extended/wiki/Getting-Started)生成第一个请求。
+先访问 [`/version`](https://api.asailor.org/version) 查看当前 Release 身份，再按照[快速开始](https://github.com/Aethersailor/SubConverter-Extended/wiki/Getting-Started)生成第一个请求。
 
 > [!WARNING]
 > 公共实例不会替使用者保管订阅秘密。即使 Provider 模式下后端不下载订阅内容，转换请求仍可能携带订阅 URL；浏览器、网络入口、CDN 或反向代理也可能接触请求信息。敏感订阅建议自行部署，并阅读[安全与隐私](https://github.com/Aethersailor/SubConverter-Extended/wiki/Security-and-Privacy)。
@@ -195,7 +195,7 @@ http://localhost:25500/healthz
 
 ### 📦 可用交付形式
 
-| 交付形式 | 稳定版支持 |
+| 交付形式 | 当前 Release 支持 |
 | :--- | :--- |
 | Docker | Docker Hub 与 GHCR；`linux/amd64`、`linux/arm64`、`linux/arm/v7` |
 | Linux 便携包 | `amd64`、`arm64`、`armv7` |
@@ -240,15 +240,17 @@ http://localhost:25500/healthz
 
 ---
 
-## 📦 发布通道
+## 📦 获取正式版本
 
-| 通道 | 来源 | 用途 |
+用户可用版本统一由正式 Release 提供。Docker `latest` 只在正式 Release 完成验证后更新，并指向该 Release 已验证的版本镜像。
+
+| 交付形式 | 获取方式 | 用途 |
 | :--- | :--- | :--- |
-| `latest` | `master` / 正式 Release | 稳定部署 |
-| 版本标签 | 正式 Release | 固定版本和回滚 |
-| `dev` | `dev` 分支 | 开发验证，不建议作为稳定生产版本 |
+| Docker `latest` | Docker Hub 或 GHCR | 默认安装和更新 |
+| Docker 版本标签 | 与正式 Release 相同的 `vX.Y.Z` | 固定版本和回滚 |
+| 便携包与 OpenWrt APK | [最新 Release](https://github.com/Aethersailor/SubConverter-Extended/releases/latest) | 原生部署与完整性校验 |
 
-`master` 用于正式发布和稳定版 README；日常开发主要在 `dev` 进行。Wiki 默认描述当前稳定版，尚未发布的 dev-only 能力不会写成稳定功能。
+README、Wiki 和用户支持只描述正式 Release 已发布的功能。使用 `/version` 查看实际版本和源代码修订；报告问题时不要只写“最新版”。
 
 ---
 
