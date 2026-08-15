@@ -37,7 +37,7 @@ SubConverter-Extended 基于 [asdlokj1qpi233/subconverter](https://github.com/as
 SubConverter-Extended 的长期目标，是把不同客户端的配置转换简化为一套统一流程：用户只需维护自己的订阅转换模板，或直接选用公共模板，再附加自己的代理信息（订阅链接或节点链接），即可生成适用于不同客户端的配置文件。
 
 > [!NOTE]
-> 这一目标尚未完全实现。当前不同客户端在配置结构、远程资源表达、协议字段和模板能力方面仍有差异，部分场景仍需按客户端分别配置与处理。现阶段的实际支持范围以当前正式 Release 文档为准。
+> 这一目标尚未完全实现。当前不同客户端在配置结构、远程资源表达、协议字段和模板能力方面仍有差异，部分场景仍需按客户端分别配置与处理。当前可用能力以最新正式 Release 和 Wiki 的兼容性说明为准。
 
 > [!TIP]
 > 第一次使用时，先阅读 Wiki 的[快速开始](https://github.com/Aethersailor/SubConverter-Extended/wiki/Getting-Started)和[客户端与目标格式](https://github.com/Aethersailor/SubConverter-Extended/wiki/Compatibility)。准备自行部署时，再选择 [Docker](https://github.com/Aethersailor/SubConverter-Extended/wiki/Docker-Deployment) 或[原生部署](https://github.com/Aethersailor/SubConverter-Extended/wiki/Native-Deployment)。
@@ -53,7 +53,7 @@ SubConverter-Extended 的长期目标，是把不同客户端的配置转换简�
 ### 🛡️ Mihomo Provider 流程对比
 
 > [!NOTE]
-> 下图对比的是 `target=clash`、`target=clashr` 处理远程 HTTP 订阅时的默认流程。`list=true` 和其他客户端目标可能仍由后端下载并解析订阅，不能把这组图理解为所有目标的统一行为。
+> 下图仅对比 `target=clash`、`target=clashr` 处理远程 HTTP 订阅时的默认流程。`list=true` 和其他客户端目标使用各自的处理流程。
 
 <p align="center">
   <img src="docs/images/readme-flow-legacy.svg" alt="传统 subconverter 远程订阅链接处理流程" width="820">
@@ -73,7 +73,7 @@ SubConverter-Extended 的长期目标，是把不同客户端的配置转换简�
 | 简单订阅或分享链接输出 | `ss`、`ssd`、`ssr`、`sssub`、`v2ray`、`v2rayn`、`v2rayng`、`shadowrocket`、`trojan`、`vless`、`hysteria2`、`mixed` |
 
 > [!NOTE]
-> 上表按当前正式 Release 的显式目标整理。不同目标的节点类型、传输参数和客户端最低版本并不相同。“能够生成”也不等于已经在对应闭源客户端上完成真机连通测试。使用前请查看[客户端与目标格式](https://github.com/Aethersailor/SubConverter-Extended/wiki/Compatibility)。
+> 上表按当前正式 Release 的显式目标整理。不同目标支持的节点类型、传输参数和客户端最低版本各不相同。闭源客户端仍需在实际版本中验证导入和连通性；详细范围见[客户端与目标格式](https://github.com/Aethersailor/SubConverter-Extended/wiki/Compatibility)。
 
 ---
 
@@ -93,14 +93,11 @@ SubConverter-Extended 的长期目标，是把不同客户端的配置转换简�
 
 如果目标客户端具有原生远程资源能力，本项目优先生成客户端可直接使用的远程资源配置，让客户端自行更新订阅。Mihomo 使用 `proxy-providers`，Surge、Quantumult X、Loon、Surfboard 和 Stash 使用各自能够表示的远程资源形式。
 
-### 🧑‍💻 普通用户需要可执行的使用流程
+### 🧑‍💻 降低配置和排障门槛
 
 手工维护完整 YAML、INI 或 JSON 配置并不适合所有用户。很多使用者更需要清晰的目标格式选择、可复制的调用方式、部署后的成功检查，以及在失败时能够判断问题位于订阅、后端还是客户端。
 
 SubConverter-Extended 保留常见 subconverter 调用方式，并增加请求诊断台、运行仪表盘、安全档位和完整用户手册，让直接使用公共实例和自行部署都具备可检查、可排障的路径。
-
-> [!IMPORTANT]
-> 最适合普通用户的流程应当从实际使用入口开始：选择客户端和目标格式，生成配置，检查客户端是否成功更新，再在需要时进入参数和排障页面，而不是先学习项目内部实现。
 
 ---
 
@@ -112,7 +109,7 @@ SubConverter-Extended 保留常见 subconverter 调用方式，并增加请求�
 | :--- | :--- |
 | 多目标远程订阅 | 除 Mihomo Proxy Provider 外，还可为 Surge、Quantumult X、Loon、Surfboard 和 Stash 生成客户端原生远程资源。 |
 | Mihomo 节点解析 | `target=clash`、`target=clashr` 的节点链接只进入 Mihomo 解析桥，协议能力来自锁定的 Mihomo 依赖。 |
-| 独立目标生成 | 为 Stash、Shadowrocket、v2rayN、v2rayNG 等目标提供独立输出和能力过滤，不能表示的节点不会伪装成成功结果。 |
+| 独立目标生成 | 为 Stash、Shadowrocket、v2rayN、v2rayNG 等目标提供独立输出和能力过滤；无法表示的节点会按目标能力过滤或返回明确错误。 |
 | 请求诊断 | `explain=true` 返回脱敏 JSON 诊断；`/inspect` 提供可视化诊断台；响应和日志使用服务端生成的 `X-Request-ID` 关联。 |
 | 运行统计 | 可选 `/dashboard` 与 `/dashboard/data`，支持持久化、时间窗口统计、地区分布和可选 Basic Auth。 |
 | 部署安全 | 提供 `lan`、`public`、`strict` 安全档位，并区分请求方可控抓取、可信本地配置和上传权限。 |
@@ -154,8 +151,7 @@ proxy_direct:false,https://example.com/sub
 
 ## 🚀 快速开始
 
-> [!NOTE]
-> 公共实例和自行部署都是正常的使用方式，选择依据不是使用时长。公共实例是项目持续维护的公共服务，可以直接用于日常或持续使用；自行部署既可用于测试和短期验证，也可持续运行。两者的主要区别是运维责任、隐私边界和自定义能力。
+可直接使用公共实例，也可自行部署。公共实例无需自行维护服务；自行部署可独立控制安全策略、出站访问和数据边界。
 
 ### 🌍 直接使用公共实例
 
@@ -191,7 +187,7 @@ http://localhost:25500/healthz
 ```
 
 > [!NOTE]
-> 上述命令是最小启动示例，不会持久化自定义配置和统计数据。`-p 25500:25500` 还会把端口发布到宿主机全部接口。需要保留配置或统计数据时，请按照 Wiki 的 [Docker 部署](https://github.com/Aethersailor/SubConverter-Extended/wiki/Docker-Deployment)完成持久化配置，并根据实际网络范围选择安全档位。
+> 上述命令是最小启动示例，不会持久化自定义配置和统计数据。`-p 25500:25500` 还会把端口发布到宿主机全部接口。需要保留配置或统计数据时，请按照 Wiki 的 [Docker 部署](https://github.com/Aethersailor/SubConverter-Extended/wiki/Docker-Deployment)配置持久化目录，并根据实际网络范围选择安全档位。
 
 ### 📦 可用交付形式
 
@@ -242,7 +238,7 @@ http://localhost:25500/healthz
 
 ## 📦 获取正式版本
 
-用户可用版本统一由正式 Release 提供。Docker `latest` 只在正式 Release 完成验证后更新，并指向该 Release 已验证的版本镜像。
+正式 Release 是面向用户的发布版本。Docker `latest` 在正式 Release 完成验证后更新，并指向该 Release 的版本镜像。
 
 | 交付形式 | 获取方式 | 用途 |
 | :--- | :--- | :--- |
@@ -250,7 +246,7 @@ http://localhost:25500/healthz
 | Docker 版本标签 | 与正式 Release 相同的 `vX.Y.Z` | 固定版本和回滚 |
 | 便携包与 OpenWrt APK | [最新 Release](https://github.com/Aethersailor/SubConverter-Extended/releases/latest) | 原生部署与完整性校验 |
 
-README、Wiki 和用户支持只描述正式 Release 已发布的功能。使用 `/version` 查看实际版本和源代码修订；报告问题时不要只写“最新版”。
+功能说明以当前正式 Release 为准。报告问题时，请提供 `/version` 显示的版本和源代码修订。
 
 ---
 
