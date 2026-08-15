@@ -26,7 +26,13 @@
 
 SubConverter-Extended 基于 [asdlokj1qpi233/subconverter](https://github.com/asdlokj1qpi233/subconverter) 深度演进，是一个面向多种代理客户端和订阅格式的转换后端。
 
-项目针对 Mihomo 提供专用解析桥和 Proxy Provider 优化，同时为 Surge、Quantumult X、Loon、Surfboard、Stash、Sing-box 及传统订阅格式保留相应的远程资源或服务端转换路径。因此，**Mihomo 是重点增强方向，但本项目并非 Mihomo 专用后端**。
+项目为 Mihomo 提供专用解析桥和 Proxy Provider，并可为 Surge、Quantumult X、Loon、Surfboard 和 Stash 生成客户端原生远程资源；Sing-box、Quantumult 及多种传统订阅格式则由后端完成转换。不同目标使用与其配置能力相匹配的处理方式。
+
+### 长期愿景
+
+SubConverter-Extended 的长期目标，是把不同客户端的配置转换简化为一套统一流程：用户只需维护自己的订阅转换模板，或直接选用公共模板，再附加自己的代理信息（订阅链接或节点链接），即可生成适用于不同客户端的配置文件。
+
+这一目标尚未完全实现。当前不同客户端在配置结构、远程资源表达、协议字段和模板能力方面仍有差异，部分场景仍需按客户端分别配置与处理。现阶段的实际支持范围以稳定版文档为准。
 
 > [!TIP]
 > 第一次使用时，先阅读 Wiki 的[快速开始](https://github.com/Aethersailor/SubConverter-Extended/wiki/Getting-Started)和[客户端与目标格式](https://github.com/Aethersailor/SubConverter-Extended/wiki/Compatibility)。准备自行部署时，再选择 [Docker](https://github.com/Aethersailor/SubConverter-Extended/wiki/Docker-Deployment) 或[原生部署](https://github.com/Aethersailor/SubConverter-Extended/wiki/Native-Deployment)。
@@ -54,7 +60,7 @@ flowchart LR
 
 | 工作方式 | 目标 |
 | :--- | :--- |
-| Mihomo 专用解析与 Proxy Provider | `clash`、`clashr` |
+| Mihomo 节点解析与 Proxy Provider | `clash`、`clashr` |
 | 客户端原生远程资源 | `surge`、`quanx`、`loon`、`surfboard`、`stash` |
 | 完整配置转换 | `quan`、`mellow`、`singbox` |
 | 简单订阅或分享链接输出 | `ss`、`ssd`、`ssr`、`sssub`、`v2ray`、`v2rayn`、`v2rayng`、`shadowrocket`、`trojan`、`vless`、`hysteria2`、`mixed` |
