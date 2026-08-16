@@ -80,7 +80,7 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
       with:
         persist-credentials: false
 
@@ -88,7 +88,7 @@ jobs:
     - name: Cache Build Artifacts
       if: matrix.language == 'c-cpp' && github.event_name != 'pull_request'
       id: cache-cpp-deps
-      uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           /usr/lib/quickjs
@@ -241,7 +241,7 @@ jobs:
         cd ..
 
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@988661ebb5e81487b3fb31b2185d2856c0a10679 # v4
+      uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4
       with:
         languages: ${{ matrix.language }}
         build-mode: ${{ matrix.build-mode }}
@@ -257,6 +257,6 @@ jobs:
         cmake --build build -j"$(nproc)"
 
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@988661ebb5e81487b3fb31b2185d2856c0a10679 # v4
+      uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4
       with:
         category: "/language:${{matrix.language}}"
