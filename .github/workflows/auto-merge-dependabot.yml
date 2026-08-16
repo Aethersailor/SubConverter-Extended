@@ -61,15 +61,6 @@ jobs:
               return;
             }
 
-            const { data: repository } = await github.rest.repos.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-            });
-            if (!repository.allow_auto_merge) {
-              core.setFailed('Repository native auto-merge is disabled.');
-              return;
-            }
-
             const { data: currentPull } = await github.rest.pulls.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
