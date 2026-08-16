@@ -57,9 +57,22 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: bridge/go.mod
+          cache: false
+
       - name: Resolve build metadata
         id: metadata
         run: python3 scripts/ci/build_metadata.py --github-output "$GITHUB_OUTPUT"
+
+      - name: Refresh dependency snapshot for a trusted Dependabot candidate
+        if: >-
+          github.actor == 'dependabot[bot]' &&
+          github.event.pull_request.user.login == 'dependabot[bot]' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        run: python3 scripts/ci/dependency_snapshot.py refresh
 
       - name: Validate and activate dependency snapshot
         run: |
@@ -77,8 +90,8 @@ jobs:
           SHA: ${{ steps.metadata.outputs.sha }}
           VERSION: ${{ steps.metadata.outputs.version }}
           BUILD_DATE: ${{ steps.metadata.outputs.build_date }}
-          REFRESH_GO_DEPS: "false"
-          REFRESH_HEADERS: "false"
+          REFRESH_GO_DEPS: ${{ github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && 'true' || 'false' }}
+          REFRESH_HEADERS: ${{ github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && 'true' || 'false' }}
           BUILD_TESTS: "true"
         run: |
           {
@@ -114,10 +127,16 @@ jobs:
           EXTRACT_GENERATED: "true"
         run: bash scripts/ci/extract-builder-output.sh subconverter-temp:amd64-builder shared
 
+      - name: Test refreshed Go bridge
+        working-directory: bridge
+        run: go test -mod=readonly ./...
+
       - name: Check bridge size budget
         run: python3 scripts/ci/check_file_size.py --budget bridge-linux-amd64 build/bridge-output/libmihomo.so
 
       - name: Verify frozen dependency and generated inputs
+        env:
+          TRUSTED_DEPENDABOT_PR: ${{ github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository }}
         run: |
           set -euo pipefail
           paths=(
@@ -129,11 +148,39 @@ jobs:
             include/jpcre2.hpp include/quickjspp.hpp
             include/libcron include/date include/toml.hpp include/toml11
           )
-          if [ -n "$(git status --porcelain -- "${paths[@]}")" ]; then
-            git status --short -- "${paths[@]}"
+
+          mapfile -t changed_paths < <(git diff --name-only -- "${paths[@]}")
+          if [ "${#changed_paths[@]}" -eq 0 ]; then
+            echo "Frozen dependency/generated inputs match the candidate build."
+            exit 0
+          fi
+
+          git status --short -- "${paths[@]}"
+          git diff --stat -- "${paths[@]}"
+
+          if [ "$TRUSTED_DEPENDABOT_PR" != "true" ]; then
             echo "::error::Frozen dependency/generated inputs are stale. Refresh and commit them on dev."
             exit 1
           fi
+
+          for path in "${changed_paths[@]}"; do
+            case "$path" in
+              scripts/ci/dependencies.lock.json|\
+              bridge/go.mod|bridge/go.sum|bridge/libmihomo.h|\
+              bridge/mihomo_capabilities.json|bridge/proxy_validation_generated.go|\
+              src/parser/mihomo_schemes.h|src/parser/param_compat.h|\
+              include/httplib.h|include/nlohmann/json.hpp|include/inja.hpp|\
+              include/jpcre2.hpp|include/quickjspp.hpp|include/toml.hpp|\
+              include/libcron/*|include/date/*|include/toml11/*)
+                ;;
+              *)
+                echo "::error file=$path::Dependabot refresh changed a path outside the generated-input allowlist."
+                exit 1
+                ;;
+            esac
+          done
+
+          echo "Trusted Dependabot refresh changed only approved generated inputs."
 
       - name: Smoke test candidate image
         timeout-minutes: 5
