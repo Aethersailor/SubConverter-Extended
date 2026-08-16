@@ -7,7 +7,8 @@ on:
     types: [opened, synchronize, reopened, ready_for_review, labeled]
 
 permissions:
-  contents: read
+  # Required by GitHub's native auto-merge API; no pull request code is checked out.
+  contents: write
   pull-requests: write
 
 jobs:
