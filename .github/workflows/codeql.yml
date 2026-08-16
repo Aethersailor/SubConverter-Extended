@@ -2,10 +2,12 @@ name: "CodeQL"
 
 on:
   workflow_dispatch:
+  workflow_call:
   push:
     branches: [ "dev" ]
-  pull_request:
-    branches: [ "dev", "master" ]
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -56,7 +58,7 @@ jobs:
     name: Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
     needs: source-head
-    if: needs.source-head.outputs.current == 'true' && github.actor != 'dependabot[bot]'
+    if: needs.source-head.outputs.current == 'true'
     permissions:
       actions: read
       contents: read
@@ -78,15 +80,15 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       with:
-        token: ${{ secrets.PAT_TOKEN || github.token }}
+        persist-credentials: false
 
     # [OPTIMIZATION] Cache build artifacts (QuickJSPP & LibCron)
     - name: Cache Build Artifacts
-      if: matrix.language == 'c-cpp'
+      if: matrix.language == 'c-cpp' && github.event_name != 'pull_request'
       id: cache-cpp-deps
-      uses: actions/cache@v5
+      uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
       with:
         path: |
           /usr/lib/quickjs
@@ -239,7 +241,7 @@ jobs:
         cd ..
 
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@v4
+      uses: github/codeql-action/init@988661ebb5e81487b3fb31b2185d2856c0a10679 # v4
       with:
         languages: ${{ matrix.language }}
         build-mode: ${{ matrix.build-mode }}
@@ -255,6 +257,6 @@ jobs:
         cmake --build build -j"$(nproc)"
 
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v4
+      uses: github/codeql-action/analyze@988661ebb5e81487b3fb31b2185d2856c0a10679 # v4
       with:
         category: "/language:${{matrix.language}}"
