@@ -521,7 +521,9 @@ func TestMieruStandardRejectsUnsupportedConfigAtomically(t *testing.T) {
 		},
 		"future traffic pattern field": func(config *mierupb.ClientConfig) {
 			config.Profiles[0].TrafficPattern = &mierupb.TrafficPattern{}
-			config.Profiles[0].TrafficPattern.ProtoReflect().SetUnknown([]byte{0x32, 0x02, 0x08, 0x01})
+			// Field 6 became the supported lowEntropy option in mieru v3.35.0.
+			// Keep exercising fail-closed handling with an unassigned field number.
+			config.Profiles[0].TrafficPattern.ProtoReflect().SetUnknown([]byte{0xFA, 0x07, 0x02, 0x08, 0x01})
 		},
 		"unknown traffic pattern enum": func(config *mierupb.ClientConfig) {
 			config.Profiles[0].TrafficPattern = &mierupb.TrafficPattern{
