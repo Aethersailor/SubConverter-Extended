@@ -82,9 +82,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          token: ${{ github.event_name == 'pull_request' && github.token || secrets.PAT_TOKEN || github.token }}
+          token: ${{ secrets.PAT_TOKEN || github.token }}
           fetch-depth: 0
-          persist-credentials: ${{ github.event_name != 'pull_request' }}
 
       - name: Resolve build metadata
         id: metadata
@@ -279,9 +278,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          token: ${{ github.event_name == 'pull_request' && github.token || secrets.PAT_TOKEN || github.token }}
+          token: ${{ secrets.PAT_TOKEN || github.token }}
           fetch-depth: 0
-          persist-credentials: ${{ github.event_name != 'pull_request' }}
 
       - name: Download dependency snapshot
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8

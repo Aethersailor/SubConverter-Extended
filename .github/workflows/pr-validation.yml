@@ -13,11 +13,137 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: Build and test
+  source-validation:
+    name: Source validation
+    runs-on: ubuntu-latest
     permissions:
       contents: read
-    uses: ./.github/workflows/build-dockerhub.yml
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: bridge/go.mod
+          cache-dependency-path: bridge/go.sum
+
+      - name: Run maintained Python regressions
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Run Go bridge regressions
+        working-directory: bridge
+        run: go test -mod=readonly ./...
+
+      - name: Validate workflow and delivery scripts
+        run: |
+          set -euo pipefail
+          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          bash -n scripts/ci/*.sh
+          bash tests/ci_delivery_scripts_test.sh
+
+  candidate:
+    name: Build and smoke test candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve build metadata
+        id: metadata
+        run: python3 scripts/ci/build_metadata.py --github-output "$GITHUB_OUTPUT"
+
+      - name: Validate and activate dependency snapshot
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/dependency_snapshot.py check
+          python3 scripts/ci/dependency_snapshot.py emit --github-env "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
+
+      - name: Prepare Docker build args
+        id: docker_args
+        env:
+          THREADS: "16"
+          SHA: ${{ steps.metadata.outputs.sha }}
+          VERSION: ${{ steps.metadata.outputs.version }}
+          BUILD_DATE: ${{ steps.metadata.outputs.build_date }}
+          REFRESH_GO_DEPS: "false"
+          REFRESH_HEADERS: "false"
+          BUILD_TESTS: "true"
+        run: |
+          {
+            echo 'args<<EOF'
+            bash scripts/ci/docker-build-args.sh
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build candidate image
+        env:
+          BUILD_ARGS: ${{ steps.docker_args.outputs.args }}
+        run: |
+          bash scripts/ci/build-candidate-image.sh \
+            amd64 \
+            ./Dockerfile \
+            linux/amd64 \
+            subconverter-alpine \
+            pull_request \
+            pr \
+            "${{ steps.metadata.outputs.version }}"
+
+      - name: Export CI artifacts from the candidate build
+        env:
+          BUILD_ARGS: ${{ steps.docker_args.outputs.args }}
+        run: |
+          bash scripts/ci/export-ci-image.sh \
+            ./Dockerfile \
+            subconverter-temp:amd64-builder \
+            linux/amd64
+
+      - name: Extract builder output
+        env:
+          EXTRACT_GENERATED: "true"
+        run: bash scripts/ci/extract-builder-output.sh subconverter-temp:amd64-builder shared
+
+      - name: Check bridge size budget
+        run: python3 scripts/ci/check_file_size.py --budget bridge-linux-amd64 build/bridge-output/libmihomo.so
+
+      - name: Verify frozen dependency and generated inputs
+        run: |
+          set -euo pipefail
+          paths=(
+            scripts/ci/dependencies.lock.json
+            bridge/go.mod bridge/go.sum bridge/libmihomo.h
+            bridge/mihomo_capabilities.json bridge/proxy_validation_generated.go
+            src/parser/mihomo_schemes.h src/parser/param_compat.h
+            include/httplib.h include/nlohmann/json.hpp include/inja.hpp
+            include/jpcre2.hpp include/quickjspp.hpp
+            include/libcron include/date include/toml.hpp include/toml11
+          )
+          if [ -n "$(git status --porcelain -- "${paths[@]}")" ]; then
+            git status --short -- "${paths[@]}"
+            echo "::error::Frozen dependency/generated inputs are stale. Refresh and commit them on dev."
+            exit 1
+          fi
+
+      - name: Smoke test candidate image
+        timeout-minutes: 5
+        uses: ./.github/actions/smoke-docker-image
+        with:
+          image: subconverter-extended:amd64-ci
+          platform: linux/amd64
+          expected-version: ${{ steps.metadata.outputs.version }}
+          expected-revision: ${{ steps.metadata.outputs.sha }}
+          expected-build-date: ${{ steps.metadata.outputs.build_date }}
 
   codeql:
     name: CodeQL
@@ -33,19 +159,23 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     needs:
-      - build
+      - source-validation
+      - candidate
       - codeql
     permissions: {}
     steps:
       - name: Require all PR validation workflows
         shell: bash
         env:
-          BUILD_RESULT: ${{ needs.build.result }}
+          SOURCE_RESULT: ${{ needs.source-validation.result }}
+          CANDIDATE_RESULT: ${{ needs.candidate.result }}
           CODEQL_RESULT: ${{ needs.codeql.result }}
         run: |
           set -euo pipefail
-          if [ "$BUILD_RESULT" != "success" ] || [ "$CODEQL_RESULT" != "success" ]; then
-            echo "::error::PR validation failed: build=$BUILD_RESULT codeql=$CODEQL_RESULT"
+          if [ "$SOURCE_RESULT" != "success" ] || \
+             [ "$CANDIDATE_RESULT" != "success" ] || \
+             [ "$CODEQL_RESULT" != "success" ]; then
+            echo "::error::PR validation failed: source=$SOURCE_RESULT candidate=$CANDIDATE_RESULT codeql=$CODEQL_RESULT"
             exit 1
           fi
           echo "PR validation succeeded."
