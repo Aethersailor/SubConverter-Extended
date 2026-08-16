@@ -1,0 +1,51 @@
+name: PR Validation
+
+on:
+  pull_request:
+    branches:
+      - dev
+      - master
+
+permissions: {}
+
+concurrency:
+  group: pr-validation-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and test
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-dockerhub.yml
+
+  codeql:
+    name: CodeQL
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+      security-events: write
+    uses: ./.github/workflows/codeql.yml
+
+  gate:
+    name: PR Gate
+    if: always()
+    runs-on: ubuntu-latest
+    needs:
+      - build
+      - codeql
+    permissions: {}
+    steps:
+      - name: Require all PR validation workflows
+        shell: bash
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+          CODEQL_RESULT: ${{ needs.codeql.result }}
+        run: |
+          set -euo pipefail
+          if [ "$BUILD_RESULT" != "success" ] || [ "$CODEQL_RESULT" != "success" ]; then
+            echo "::error::PR validation failed: build=$BUILD_RESULT codeql=$CODEQL_RESULT"
+            exit 1
+          fi
+          echo "PR validation succeeded."

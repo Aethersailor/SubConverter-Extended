@@ -2,7 +2,9 @@ name: Auto-merge Dependabot PRs
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened]
+    branches:
+      - dev
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
 
 permissions:
   contents: write
@@ -11,21 +13,100 @@ permissions:
 jobs:
   auto-merge:
     runs-on: ubuntu-latest
-    if: github.actor == 'dependabot[bot]'
+    if: github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]'
     steps:
-      - name: Merge Dependabot PR
-        uses: actions/github-script@v9
+      - name: Register native auto-merge
+        uses: actions/github-script@373c709c69115d41ff229c7e5df9f8788daa9553 # v9
+        env:
+          AUTOMERGE_MODE: ${{ vars.DEPENDABOT_AUTOMERGE_MODE || 'off' }}
         with:
           script: |
-            const pullNumber = context.payload.pull_request.number;
-            const title = context.payload.pull_request.title;
+            const mode = process.env.AUTOMERGE_MODE.toLowerCase();
+            if (!['off', 'observe', 'active'].includes(mode)) {
+              core.setFailed(`Invalid DEPENDABOT_AUTOMERGE_MODE: ${mode}`);
+              return;
+            }
 
-            await github.rest.pulls.merge({
+            const pullNumber = context.payload.pull_request.number;
+            const expectedRepository = `${context.repo.owner}/${context.repo.repo}`;
+            const conventionalTitle = /^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([^)]+\))?!?: .+/;
+
+            const validate = (pull) => {
+              const labels = new Set(pull.labels.map((label) => label.name));
+              const failures = [];
+              if (pull.user.login !== 'dependabot[bot]') failures.push('author is not dependabot[bot]');
+              if (pull.base.ref !== 'dev') failures.push('base branch is not dev');
+              if (pull.base.repo.full_name !== expectedRepository) failures.push('base repository does not match');
+              if (pull.head.repo?.full_name !== expectedRepository) failures.push('head repository does not match');
+              if (pull.state !== 'open') failures.push('pull request is not open');
+              if (pull.draft) failures.push('pull request is a draft');
+              if (!labels.has('automerge')) failures.push('automerge label is missing');
+              if (!conventionalTitle.test(pull.title)) failures.push('title is not a Conventional Commit title');
+              return failures;
+            };
+
+            const eventPull = context.payload.pull_request;
+            const eventFailures = validate(eventPull);
+            if (eventFailures.length > 0) {
+              core.notice(`Dependabot auto-merge is ineligible: ${eventFailures.join('; ')}`);
+              return;
+            }
+
+            if (mode === 'off') {
+              core.notice('Dependabot auto-merge is disabled.');
+              return;
+            }
+            if (mode === 'observe') {
+              core.notice(`Dependabot PR #${pullNumber} is eligible for native auto-merge.`);
+              return;
+            }
+
+            const { data: repository } = await github.rest.repos.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            if (!repository.allow_auto_merge) {
+              core.setFailed('Repository native auto-merge is disabled.');
+              return;
+            }
+
+            const { data: currentPull } = await github.rest.pulls.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
               pull_number: pullNumber,
-              merge_method: 'squash',
-              commit_title: `${title} (#${pullNumber})`,
             });
+            const currentFailures = validate(currentPull);
+            if (currentPull.head.sha !== eventPull.head.sha) {
+              currentFailures.push(`head changed from ${eventPull.head.sha} to ${currentPull.head.sha}`);
+            }
+            if (currentFailures.length > 0) {
+              core.setFailed(`Refusing stale or ineligible auto-merge: ${currentFailures.join('; ')}`);
+              return;
+            }
 
-            console.log('Dependabot PR merged successfully.');
+            await github.graphql(
+              `mutation EnableAutoMerge(
+                $pullRequestId: ID!
+                $expectedHeadOid: GitObjectID!
+                $commitHeadline: String!
+              ) {
+                enablePullRequestAutoMerge(input: {
+                  pullRequestId: $pullRequestId
+                  expectedHeadOid: $expectedHeadOid
+                  mergeMethod: MERGE
+                  commitHeadline: $commitHeadline
+                }) {
+                  pullRequest {
+                    number
+                    autoMergeRequest { enabledAt mergeMethod }
+                  }
+                }
+              }`,
+              {
+                pullRequestId: currentPull.node_id,
+                expectedHeadOid: currentPull.head.sha,
+                commitHeadline: `${currentPull.title} (#${pullNumber})`,
+              },
+            );
+
+            core.info(`Native auto-merge registered for Dependabot PR #${pullNumber} at ${currentPull.head.sha}.`);
