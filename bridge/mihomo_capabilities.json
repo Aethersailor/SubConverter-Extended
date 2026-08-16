@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "module": "github.com/metacubex/mihomo",
-  "module_version": "v1.19.29",
+  "module_version": "v1.19.30",
   "schemes": [
     "hysteria",
     "hysteria2",
@@ -33,6 +33,10 @@
         "required": false
       },
       "client-fingerprint": {
+        "kind": "string",
+        "required": false
+      },
+      "client-metadata": {
         "kind": "string",
         "required": false
       },
@@ -524,6 +528,10 @@
         "kind": "string",
         "required": false
       },
+      "handshake-timeout": {
+        "kind": "int",
+        "required": false
+      },
       "hop-interval": {
         "kind": "string",
         "required": false
@@ -660,6 +668,10 @@
       },
       "ip": {
         "kind": "string",
+        "required": false
+      },
+      "ip-stack": {
+        "kind": "object",
         "required": false
       },
       "ip-version": {
@@ -854,6 +866,10 @@
         "kind": "string",
         "required": false
       },
+      "ip-stack": {
+        "kind": "object",
+        "required": false
+      },
       "ip-version": {
         "kind": "string",
         "required": false
@@ -928,6 +944,10 @@
       },
       "tls-crypt-v2": {
         "kind": "string",
+        "required": false
+      },
+      "tran-window": {
+        "kind": "int",
         "required": false
       },
       "udp": {
@@ -2342,6 +2362,10 @@
         "kind": "string",
         "required": false
       },
+      "ip-stack": {
+        "kind": "object",
+        "required": false
+      },
       "ip-version": {
         "kind": "string",
         "required": false
@@ -2416,6 +2440,108 @@
       },
       "workers": {
         "kind": "int",
+        "required": false
+      }
+    },
+    "zerotier": {
+      "dialer-proxy": {
+        "kind": "string",
+        "required": false
+      },
+      "dns": {
+        "kind": "array",
+        "required": false
+      },
+      "encrypted-hello": {
+        "kind": "bool",
+        "required": false
+      },
+      "interface-name": {
+        "kind": "string",
+        "required": false
+      },
+      "ip-stack": {
+        "kind": "object",
+        "required": false
+      },
+      "ip-version": {
+        "kind": "string",
+        "required": false
+      },
+      "low-bandwidth": {
+        "kind": "bool",
+        "required": false
+      },
+      "mptcp": {
+        "kind": "bool",
+        "required": false
+      },
+      "mtu": {
+        "kind": "int",
+        "required": false
+      },
+      "name": {
+        "kind": "string",
+        "required": false
+      },
+      "network": {
+        "kind": "string",
+        "required": false
+      },
+      "orbit": {
+        "kind": "array",
+        "required": false
+      },
+      "physical-mtu": {
+        "kind": "int",
+        "required": false
+      },
+      "planet": {
+        "kind": "string",
+        "required": false
+      },
+      "primary-port": {
+        "kind": "int",
+        "required": false
+      },
+      "remote-dns-resolve": {
+        "kind": "bool",
+        "required": false
+      },
+      "remote-trace-level": {
+        "kind": "int",
+        "required": false
+      },
+      "remote-trace-target": {
+        "kind": "string",
+        "required": false
+      },
+      "routing-mark": {
+        "kind": "int",
+        "required": false
+      },
+      "secondary-port": {
+        "kind": "int",
+        "required": false
+      },
+      "state-dir": {
+        "kind": "string",
+        "required": false
+      },
+      "tcp-fallback-mode": {
+        "kind": "string",
+        "required": false
+      },
+      "tcp-fallback-relay": {
+        "kind": "string",
+        "required": false
+      },
+      "tfo": {
+        "kind": "bool",
+        "required": false
+      },
+      "udp": {
+        "kind": "bool",
         "required": false
       }
     }
