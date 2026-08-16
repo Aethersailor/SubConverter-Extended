@@ -6,6 +6,8 @@ updates:
     target-branch: "dev"
     schedule:
       interval: "daily"
+      time: "08:00"
+      timezone: "Asia/Shanghai"
     open-pull-requests-limit: 10
     rebase-strategy: "auto"
     groups:
@@ -23,6 +25,8 @@ updates:
     target-branch: "dev"
     schedule:
       interval: "daily"
+      time: "08:00"
+      timezone: "Asia/Shanghai"
     open-pull-requests-limit: 10
     rebase-strategy: "auto"
     groups:
@@ -40,6 +44,8 @@ updates:
     target-branch: "dev"
     schedule:
       interval: "daily"
+      time: "08:00"
+      timezone: "Asia/Shanghai"
     open-pull-requests-limit: 10
     rebase-strategy: "auto"
     groups:
