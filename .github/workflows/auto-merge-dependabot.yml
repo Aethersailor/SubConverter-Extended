@@ -7,9 +7,8 @@ on:
     types: [opened, synchronize, reopened, ready_for_review, labeled]
 
 permissions:
-  # Required by GitHub's native auto-merge API; no pull request code is checked out.
-  contents: write
-  pull-requests: write
+  contents: read
+  pull-requests: read
 
 jobs:
   auto-merge:
@@ -21,6 +20,9 @@ jobs:
         env:
           AUTOMERGE_MODE: ${{ vars.DEPENDABOT_AUTOMERGE_MODE || 'off' }}
         with:
+          # GITHUB_TOKEN-created events are recursion-suppressed after it enables auto-merge.
+          # The existing PAT keeps the resulting merge commit on the normal push CI path.
+          github-token: ${{ secrets.PAT_TOKEN }}
           script: |
             const mode = process.env.AUTOMERGE_MODE.toLowerCase();
             if (!['off', 'observe', 'active'].includes(mode)) {
@@ -42,6 +44,8 @@ jobs:
               if (pull.state !== 'open') failures.push('pull request is not open');
               if (pull.draft) failures.push('pull request is a draft');
               if (!labels.has('automerge')) failures.push('automerge label is missing');
+              if (!labels.has('minor') && !labels.has('patch')) failures.push('update is not minor or patch');
+              if (labels.has('major')) failures.push('major updates require manual review');
               if (!conventionalTitle.test(pull.title)) failures.push('title is not a Conventional Commit title');
               return failures;
             };
