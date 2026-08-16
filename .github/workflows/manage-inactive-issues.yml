@@ -29,13 +29,13 @@ jobs:
       INACTIVE_ISSUE_DRY_RUN: ${{ inputs.dry_run || 'false' }}
     steps:
       - name: Check out repository automation
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Test issue management rules
         run: node --test .github/scripts/manage-inactive-issues.test.cjs
 
       - name: Close issues without replies for fourteen days
-        uses: actions/github-script@v9
+        uses: actions/github-script@373c709c69115d41ff229c7e5df9f8788daa9553 # v9
         with:
           script: |
             const manageInactiveIssues = require('./.github/scripts/manage-inactive-issues.cjs');
