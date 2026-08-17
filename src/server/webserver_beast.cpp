@@ -181,7 +181,8 @@ private:
 class BeastServerState : public std::enable_shared_from_this<BeastServerState> {
 public:
   BeastServerState(WebServer &server, listener_args *args)
-      : server(server), args(args), context(1), acceptor(context),
+      : server(server), args(args), context(1),
+        work_guard(asio::make_work_guard(context)), acceptor(context),
         handlers(static_cast<std::size_t>(
             std::max(args->max_workers, 1))),
         connection_limit(static_cast<std::size_t>(
@@ -232,20 +233,22 @@ public:
 
   void stop() {
     stopping.store(true);
-    beast::error_code ignored;
-    acceptor.cancel(ignored);
-    acceptor.close(ignored);
-    std::vector<std::shared_ptr<BeastSession>> live;
-    {
-      std::lock_guard<std::mutex> lock(sessions_mutex);
-      for (auto &[key, session] : sessions) {
-        (void)key;
-        if (auto retained = session.lock())
-          live.emplace_back(std::move(retained));
+    asio::post(context, [self = shared_from_this()] {
+      beast::error_code ignored;
+      self->acceptor.cancel(ignored);
+      self->acceptor.close(ignored);
+      std::vector<std::shared_ptr<BeastSession>> live;
+      {
+        std::lock_guard<std::mutex> lock(self->sessions_mutex);
+        for (auto &[key, session] : self->sessions) {
+          (void)key;
+          if (auto retained = session.lock())
+            live.emplace_back(std::move(retained));
+        }
       }
-    }
-    for (auto &session : live)
-      session->stopAccepting();
+      for (auto &session : live)
+        session->stopAccepting();
+    });
   }
 
   void addSession(const std::shared_ptr<BeastSession> &session) {
@@ -264,6 +267,7 @@ public:
   WebServer &server;
   listener_args *args;
   asio::io_context context;
+  asio::executor_work_guard<asio::io_context::executor_type> work_guard;
   tcp::acceptor acceptor;
   asio::thread_pool handlers;
   const std::size_t connection_limit;
@@ -294,8 +298,6 @@ void BeastSession::stopAccepting() {
       beast::error_code ignored;
       self->stream_.socket().shutdown(tcp::socket::shutdown_both, ignored);
       self->stream_.socket().close(ignored);
-    } else if (self->context_) {
-      self->context_->requestCancellation(RequestCancellationReason::Shutdown);
     }
   });
 }
@@ -566,7 +568,6 @@ void BeastSession::process() {
     outgoing.body().clear();
     outgoing.content_length(body_size);
   }
-  processing_.store(false, std::memory_order_release);
   asio::post(state_->context,
              [self = shared_from_this(), response = std::move(outgoing)]() mutable {
                self->writeResponse(std::move(response));
@@ -602,6 +603,7 @@ void BeastSession::writeImmediateError(http::status status,
 void BeastSession::writeResponse(http::response<http::string_body> response) {
   if (finished_.load())
     return;
+  processing_.store(true, std::memory_order_release);
   context_->setCurrentStage(RequestStage::Send);
   sending_started_at_ = RequestContext::Clock::now();
   response_status_ = response.result_int();
@@ -629,6 +631,7 @@ void BeastSession::onWrite(bool keep_alive, beast::error_code error,
                "HTTP_RESPONSE_SEND_FAILED terminal=cancelled failure=client");
     }
   }
+  processing_.store(false, std::memory_order_release);
   if (error || !keep_alive || state_->stopping.load()) {
     finish(!error);
     return;
@@ -682,7 +685,9 @@ int startBeastWebServer(WebServer &server, listener_args *args) {
   for (int attempt = 0; attempt < 300 && state->active_sessions.load() != 0;
        ++attempt)
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  state->context.stop();
+  state->work_guard.reset();
+  if (state->active_sessions.load() != 0)
+    state->context.stop();
   if (io_thread.joinable())
     io_thread.join();
   return 0;
