@@ -22,6 +22,7 @@
 #include "handler/settings.h"
 #include "handler/settings_view.h"
 #include "handler/statistics_v2.h"
+#include "handler/conversion_service.h"
 #include "handler/webget.h"
 #include "server/request_context.h"
 #include "utils/logger.h"
@@ -555,6 +556,34 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(fetch.active);
   writer.Key("buffered_bytes");
   writer.Uint64(fetch.buffered_bytes);
+  writer.EndObject();
+  const WorkloadSchedulerSnapshot scheduler = conversionSchedulerSnapshot();
+  writer.Key("conversion_scheduler");
+  writer.StartObject();
+  writer.Key("queued_entries");
+  writer.Uint64(scheduler.queued_entries);
+  writer.Key("queued_bytes");
+  writer.Uint64(scheduler.queued_bytes);
+  writer.Key("active");
+  writer.Uint64(scheduler.active);
+  writer.Key("accepted");
+  writer.Uint64(scheduler.accepted);
+  writer.Key("rejected");
+  writer.Uint64(scheduler.rejected);
+  writer.Key("cancelled");
+  writer.Uint64(scheduler.cancelled);
+  writer.EndObject();
+  const RequestAdmissionSnapshot admission = requestAdmissionSnapshot();
+  writer.Key("request_admission");
+  writer.StartObject();
+  writer.Key("active_entries");
+  writer.Uint64(admission.active_entries);
+  writer.Key("active_bytes");
+  writer.Uint64(admission.active_bytes);
+  writer.Key("accepted");
+  writer.Uint64(admission.accepted);
+  writer.Key("rejected");
+  writer.Uint64(admission.rejected);
   writer.EndObject();
   writer.EndObject();
   return std::string(buffer.GetString(), buffer.GetSize());

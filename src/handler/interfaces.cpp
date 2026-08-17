@@ -14,6 +14,7 @@
 #include <numeric>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <unordered_set>
 
 #include <inja.hpp>
@@ -1685,7 +1686,7 @@ static void recordTrackedSubRequest(bool track, const Request &request,
 }
 
 static SettingsSnapshot captureSettingsForSubRequest(Request &request) {
-  SettingsSnapshot current = captureSettingsSnapshot();
+  SettingsSnapshot current = captureEffectiveSettingsSnapshot();
   if (!current->reloadConfOnRequest || !current->CFWChildProcess ||
       current->generatorMode)
     return current;
@@ -1704,6 +1705,10 @@ static SettingsSnapshot captureSettingsForSubRequest(Request &request) {
   }
   return current;
 }
+
+static std::string runScheduledConversion(
+    Request &request, Response &response, const SettingsSnapshot &snapshot,
+    RuleConversionStats *stats, bool with_retry);
 
 static std::string subconverterEntry(Request &request, Response &response,
                                      bool track) {
@@ -1740,8 +1745,8 @@ static std::string subconverterEntry(Request &request, Response &response,
 
   if (!shouldCoalesceSubRequest(request, settings)) {
     RuleConversionStats stats;
-    std::string body = subconverter_impl(request, response, settings,
-                                         track ? &stats : nullptr);
+    std::string body = runScheduledConversion(
+        request, response, snapshot, track ? &stats : nullptr, false);
     body = finalizeSubResponse(request, response, std::move(body), age);
     recordTrackedSubRequest(track, request, response, stats.rules);
     return body;
@@ -1752,8 +1757,8 @@ static std::string subconverterEntry(Request &request, Response &response,
                          settings.managedConfigPrefix);
   if (key.empty()) {
     RuleConversionStats stats;
-    std::string body = subconverter_impl(request, response, settings,
-                                         track ? &stats : nullptr);
+    std::string body = runScheduledConversion(
+        request, response, snapshot, track ? &stats : nullptr, false);
     body = finalizeSubResponse(request, response, std::move(body), age);
     recordTrackedSubRequest(track, request, response, stats.rules);
     return body;
@@ -1822,8 +1827,8 @@ static std::string subconverterEntry(Request &request, Response &response,
     writeLog(LOG_LEVEL_DEBUG, "/sub 请求成为同 key 转换 owner。");
     Response owner_response;
     RuleConversionStats stats;
-    std::string body = runSubconverterImplWithRetry(
-        request, owner_response, settings, track ? &stats : nullptr);
+    std::string body = runScheduledConversion(
+        request, owner_response, snapshot, track ? &stats : nullptr, true);
     body = finalizeSubResponse(request, owner_response, std::move(body), age);
     SharedCoalescedResponse result = makeCoalescedResult(
         std::move(body), std::move(owner_response), stats.rules);
@@ -1860,6 +1865,167 @@ static std::string subconverterEntry(Request &request, Response &response,
 
 } // namespace
 
+namespace {
+
+std::atomic<WorkloadScheduler *> conversion_scheduler_instance{nullptr};
+
+WorkloadScheduler &conversionScheduler() {
+  const Settings &settings = effectiveSettings();
+  const unsigned int hardware_threads =
+      std::max(1U, std::thread::hardware_concurrency());
+  const std::size_t workers = static_cast<std::size_t>(
+      std::clamp(std::min(settings.maxConcurThreads,
+                          static_cast<int>(hardware_threads)),
+                 1, 64));
+  const std::size_t entries = static_cast<std::size_t>(
+      std::clamp(settings.maxPendingConns, 64, 2048));
+  static WorkloadScheduler scheduler(workers, entries,
+                                     UINT64_C(64) * 1024 * 1024);
+  conversion_scheduler_instance.store(&scheduler, std::memory_order_release);
+  return scheduler;
+}
+
+RequestCostClass estimateConversionCost(const Request &request) {
+  const std::string target = getUrlArg(request.argument, "target");
+  const std::string url = getUrlArg(request.argument, "url");
+  const bool list = isTruthyRequestValue(getUrlArg(request.argument, "list"));
+  const bool script =
+      isTruthyRequestValue(getUrlArg(request.argument, "script"));
+  const bool expand =
+      isTruthyRequestValue(getUrlArg(request.argument, "expand"));
+  const bool multiple = url.find('|') != std::string::npos;
+  const bool external_config =
+      !getUrlArg(request.argument, "config").empty();
+  if ((target == "clash" || target == "clashr") && !list && !script &&
+      !expand && !multiple && !external_config &&
+      (startsWith(url, "http://") || startsWith(url, "https://")))
+    return RequestCostClass::Low;
+  if (script || expand || multiple || external_config)
+    return RequestCostClass::High;
+  return RequestCostClass::Medium;
+}
+
+ConversionResult schedulerFailureResult(Request &request,
+                                        SchedulerSubmitStatus status) {
+  int http_status = 503;
+  std::string body =
+      "Service temporarily unavailable: conversion capacity is full.\n"
+      "服务暂时不可用：转换容量已满。\n";
+  string_icase_map headers{{"Cache-Control", "private, no-store"}};
+  switch (status) {
+  case SchedulerSubmitStatus::Deadline:
+    http_status = 504;
+    body = "Gateway timeout: request deadline exceeded before conversion.\n"
+           "网关超时：请求在转换开始前已超过截止时间。\n";
+    if (request.context) {
+      request.context->requestCancellation(RequestCancellationReason::Deadline);
+      request.context->suggestFailure(RequestFailureAttribution::Client);
+    }
+    break;
+  case SchedulerSubmitStatus::Cancelled:
+    http_status = 499;
+    body = "Client closed request before conversion started.\n"
+           "客户端在转换开始前关闭了请求。\n";
+    if (request.context) {
+      request.context->requestCancellation(
+          RequestCancellationReason::ClientDisconnected);
+      request.context->suggestFailure(RequestFailureAttribution::Client);
+    }
+    break;
+  case SchedulerSubmitStatus::EntryLimit:
+  case SchedulerSubmitStatus::ByteLimit:
+    headers.emplace("Retry-After", "1");
+    if (request.context)
+      request.context->suggestFailure(RequestFailureAttribution::Capacity);
+    break;
+  case SchedulerSubmitStatus::Stopping:
+    body = "Service is shutting down.\n服务正在关闭。\n";
+    if (request.context)
+      request.context->suggestFailure(RequestFailureAttribution::Server);
+    break;
+  case SchedulerSubmitStatus::Accepted:
+    break;
+  }
+  return ConversionResult(http_status, "text/plain; charset=utf-8",
+                          std::move(headers), std::move(body));
+}
+
+std::string runScheduledConversion(
+    Request &request, Response &response, const SettingsSnapshot &snapshot,
+    RuleConversionStats *stats, bool with_retry) {
+  const std::string scheduler_mode =
+      toLower(getEnv("SUBCONVERTER_CONVERSION_SCHEDULER"));
+  if (scheduler_mode == "direct") {
+    if (with_retry)
+      return runSubconverterImplWithRetry(request, response, *snapshot, stats);
+    return subconverter_impl(request, response, *snapshot, stats);
+  }
+  if (!scheduler_mode.empty() && scheduler_mode != "bounded") {
+    static std::atomic<bool> invalid_mode_logged{false};
+    bool expected = false;
+    if (invalid_mode_logged.compare_exchange_strong(expected, true))
+      writeLog(LOG_LEVEL_ERROR,
+               "CONVERSION_SCHEDULER_INVALID value_length=" +
+                   std::to_string(scheduler_mode.size()) +
+                   " fallback=direct");
+    if (with_retry)
+      return runSubconverterImplWithRetry(request, response, *snapshot, stats);
+    return subconverter_impl(request, response, *snapshot, stats);
+  }
+  const RequestCostClass cost = estimateConversionCost(request);
+  if (request.context)
+    request.context->setCostClass(cost);
+  const uint64_t bytes = request.context
+                             ? request.context->estimatedBytes()
+                             : static_cast<uint64_t>(request.postdata.size());
+  const auto deadline = request.context
+                            ? request.context->deadline()
+                            : RequestContext::Clock::time_point::max();
+  const RequestCancellationToken cancellation =
+      request.context ? request.context->cancellationToken()
+                      : RequestCancellationToken();
+  const std::shared_ptr<RequestContext> context = request.context;
+  const auto queued_at = RequestContext::Clock::now();
+  auto submission = conversionScheduler().submit(
+      cost, bytes, deadline, cancellation,
+      [&request, &response, snapshot, stats, with_retry, context,
+       queued_at]() -> std::string {
+        ScopedSettingsView settings_scope(snapshot);
+        ScopedRequestContext request_scope(context);
+        ScopedLogRequestContext log_scope(context ? context->requestId()
+                                                   : std::string());
+        if (context) {
+          context->addStageDuration(RequestStage::Queue,
+                                    RequestContext::Clock::now() - queued_at);
+          context->setCurrentStage(RequestStage::Parse);
+        }
+        if (with_retry)
+          return runSubconverterImplWithRetry(request, response, *snapshot,
+                                              stats);
+        return subconverter_impl(request, response, *snapshot, stats);
+      });
+  if (submission.status == SchedulerSubmitStatus::Accepted) {
+    try {
+      return submission.future.get();
+    } catch (const SchedulerSubmitError &error) {
+      ConversionResult failure =
+          schedulerFailureResult(request, error.status());
+      response.status_code = failure.statusCode();
+      response.content_type = std::move(failure).releaseContentType();
+      response.headers = std::move(failure).releaseHeaders();
+      return std::move(failure).releaseBody();
+    }
+  }
+  ConversionResult failure =
+      schedulerFailureResult(request, submission.status);
+  response.status_code = failure.statusCode();
+  response.content_type = std::move(failure).releaseContentType();
+  response.headers = std::move(failure).releaseHeaders();
+  return std::move(failure).releaseBody();
+}
+
+} // namespace
+
 ConversionResult ConversionService::convertSubscription(
     Request &request, bool track_statistics) const {
   Response response;
@@ -1872,6 +2038,19 @@ ConversionResult ConversionService::convertSubscription(
 const ConversionService &defaultConversionService() {
   static const ConversionService service;
   return service;
+}
+
+WorkloadSchedulerSnapshot conversionSchedulerSnapshot() {
+  if (WorkloadScheduler *scheduler =
+          conversion_scheduler_instance.load(std::memory_order_acquire))
+    return scheduler->snapshot();
+  return {};
+}
+
+void shutdownConversionScheduler() noexcept {
+  if (WorkloadScheduler *scheduler =
+          conversion_scheduler_instance.load(std::memory_order_acquire))
+    scheduler->shutdown(true);
 }
 
 static std::string applyConversionResult(ConversionResult result,

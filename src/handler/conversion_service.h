@@ -6,6 +6,7 @@
 
 #include "server/webserver.h"
 #include "utils/map_extra.h"
+#include "utils/workload_scheduler.h"
 
 class ConversionResult {
 public:
@@ -41,5 +42,7 @@ public:
 };
 
 const ConversionService &defaultConversionService();
+WorkloadSchedulerSnapshot conversionSchedulerSnapshot();
+void shutdownConversionScheduler() noexcept;
 
 #endif // CONVERSION_SERVICE_H_INCLUDED

@@ -20,6 +20,7 @@ enum class RequestCostClass : uint8_t {
 
 enum class RequestStage : uint8_t {
   Admission,
+  Queue,
   Fetch,
   Parse,
   Template,
@@ -90,6 +91,8 @@ inline const char *requestStageName(RequestStage value) noexcept {
   switch (value) {
   case RequestStage::Admission:
     return "admission";
+  case RequestStage::Queue:
+    return "queue";
   case RequestStage::Fetch:
     return "fetch";
   case RequestStage::Parse:

@@ -39,6 +39,61 @@ namespace {
 
 constexpr const char *kRequestTelemetryKey = "subconverter.request.telemetry";
 
+class RequestAdmissionController {
+public:
+  bool tryAcquire(uint64_t bytes) noexcept {
+    const uint64_t previous_entries =
+        active_entries_.fetch_add(1, std::memory_order_acq_rel);
+    if (previous_entries >= kMaxEntries) {
+      active_entries_.fetch_sub(1, std::memory_order_acq_rel);
+      rejected_.fetch_add(1, std::memory_order_relaxed);
+      return false;
+    }
+    uint64_t current = active_bytes_.load(std::memory_order_acquire);
+    while (bytes <= kMaxBytes && current <= kMaxBytes - bytes) {
+      if (active_bytes_.compare_exchange_weak(
+              current, current + bytes, std::memory_order_acq_rel,
+              std::memory_order_acquire)) {
+        accepted_.fetch_add(1, std::memory_order_relaxed);
+        return true;
+      }
+    }
+    active_entries_.fetch_sub(1, std::memory_order_acq_rel);
+    rejected_.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+
+  void release(uint64_t bytes) noexcept {
+    active_bytes_.fetch_sub(bytes, std::memory_order_acq_rel);
+    active_entries_.fetch_sub(1, std::memory_order_acq_rel);
+  }
+
+  RequestAdmissionSnapshot snapshot() const noexcept {
+    return {active_entries_.load(std::memory_order_relaxed),
+            active_bytes_.load(std::memory_order_relaxed),
+            accepted_.load(std::memory_order_relaxed),
+            rejected_.load(std::memory_order_relaxed)};
+  }
+
+private:
+  static constexpr uint64_t kMaxEntries = 2048;
+  static constexpr uint64_t kMaxBytes = UINT64_C(64) * 1024 * 1024;
+  std::atomic<uint64_t> active_entries_{0};
+  std::atomic<uint64_t> active_bytes_{0};
+  std::atomic<uint64_t> accepted_{0};
+  std::atomic<uint64_t> rejected_{0};
+};
+
+RequestAdmissionController request_admission;
+
+uint64_t requestAdmissionBytes(const httplib::Request &request) {
+  uint64_t bytes = UINT64_C(1024) + request.target.size() +
+                   request.body.size();
+  for (const auto &header : request.headers)
+    bytes += header.first.size() + header.second.size();
+  return bytes;
+}
+
 struct HttpRequestTelemetry {
   std::string request_id;
   std::chrono::steady_clock::time_point started_at;
@@ -52,6 +107,8 @@ struct HttpRequestTelemetry {
     std::function<bool()> is_connection_closed;
     int status_code = 500;
     bool prepared = false;
+    bool admission_acquired = false;
+    uint64_t admission_bytes = 0;
 
     ~Completion() {
       if (!context)
@@ -79,6 +136,8 @@ struct HttpRequestTelemetry {
                  "HTTP_RESPONSE_SEND_FAILED terminal=cancelled "
                  "failure=client");
       }
+      if (admission_acquired)
+        request_admission.release(admission_bytes);
     }
 
     void prepare(const httplib::Request &request, int response_status) {
@@ -201,6 +260,10 @@ bool isExplainRequest(const httplib::Request &request) {
 
 } // namespace
 
+RequestAdmissionSnapshot requestAdmissionSnapshot() noexcept {
+  return request_admission.snapshot();
+}
+
 static inline bool is_request_header_blacklisted(const std::string &header) {
   for (auto &x : request_header_blacklist) {
     if (strcasecmp(x, header.c_str()) == 0) {
@@ -238,12 +301,6 @@ static httplib::Server::Handler makeHandler(const responseRoute &rr,
     req.remote_port = request.remote_port;
     req.client_address = client_ip::parseAddress(request.remote_addr);
     req.context = telemetry.context;
-    uint64_t estimated_bytes = static_cast<uint64_t>(request.target.size()) +
-                               static_cast<uint64_t>(request.body.size());
-    for (const auto &header : request.headers)
-      estimated_bytes += static_cast<uint64_t>(header.first.size()) +
-                         static_cast<uint64_t>(header.second.size());
-    telemetry.context->setEstimatedBytes(estimated_bytes);
     if (request.path == "/healthz" || request.path == "/version" ||
         request.path == "/inspect")
       telemetry.context->setCostClass(RequestCostClass::Low);
@@ -357,6 +414,25 @@ int WebServer::start_web_server_multi(listener_args *args) {
     ScopedLogRequestContext request_log_scope(telemetry.request_id);
     ScopedRequestContext request_context_scope(telemetry.context);
     telemetry.context->recordAdmissionOnce(std::chrono::steady_clock::now());
+    if (req.path != "/healthz" &&
+        !telemetry.completion->admission_acquired) {
+      const uint64_t admission_bytes = requestAdmissionBytes(req);
+      telemetry.context->setEstimatedBytes(admission_bytes);
+      if (!request_admission.tryAcquire(admission_bytes)) {
+        telemetry.context->suggestFailure(
+            RequestFailureAttribution::Capacity);
+        res.status = 503;
+        res.set_header("Cache-Control", "private, no-store");
+        res.set_header("Retry-After", "1");
+        res.set_content(
+            "Service temporarily unavailable: request capacity is full.\n"
+            "服务暂时不可用：请求容量已满。\n",
+            "text/plain; charset=utf-8");
+        return httplib::Server::HandlerResponse::Handled;
+      }
+      telemetry.completion->admission_acquired = true;
+      telemetry.completion->admission_bytes = admission_bytes;
+    }
     if (shouldLog(LOG_LEVEL_DEBUG)) {
       writeLog(LOG_LEVEL_DEBUG,
                "接受客户端连接：" + req.remote_addr + ":" +
@@ -490,7 +566,9 @@ int WebServer::start_web_server_multi(listener_args *args) {
   }
   server.new_task_queue = [args] {
     return new httplib::ThreadPool(args->max_workers,
-                                   global.maxServerThreads);
+                                   global.maxServerThreads,
+                                   static_cast<size_t>(
+                                       std::max(10240, args->max_conn)));
   };
   if (!server.bind_to_port(args->listen_address, args->port, 0)) {
     writeLog(LOG_LEVEL_FATAL,

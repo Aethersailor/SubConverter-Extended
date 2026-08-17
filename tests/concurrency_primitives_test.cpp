@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -10,6 +11,7 @@
 
 #include "utils/bounded_executor.h"
 #include "utils/concurrent_lru_cache.h"
+#include "utils/workload_scheduler.h"
 
 using namespace std::chrono_literals;
 
@@ -34,23 +36,30 @@ static void testBoundedExecutor() {
     std::this_thread::yield();
 
   auto queued = executor.submit([] { return 3; });
-  std::thread::id caller = std::this_thread::get_id();
-  std::thread::id executed;
-  auto caller_runs = executor.submit([&] {
-    executed = std::this_thread::get_id();
+  std::atomic<bool> executed{false};
+  auto queue_full = executor.trySubmit([&] {
+    executed.store(true);
     return 4;
   });
-  assert(caller_runs.get() == 4);
-  assert(executed == caller);
+  assert(queue_full.status == ExecutorSubmitStatus::QueueFull);
+  bool queue_full_error = false;
+  try {
+    (void)queue_full.future.get();
+  } catch (const ExecutorSubmitError &error) {
+    queue_full_error = error.status() == ExecutorSubmitStatus::QueueFull;
+  }
+  assert(queue_full_error);
+  assert(!executed.load());
 
   release.set_value();
   assert(first.get() == 1);
   assert(second.get() == 1);
   assert(queued.get() == 3);
 
-  auto nested = executor.submit(
-      [&] { return executor.submit([] { return 7; }).get(); });
-  assert(nested.get() == 7);
+  auto nested = executor.submit([&] {
+    return executor.trySubmit([] { return 7; }).status;
+  });
+  assert(nested.get() == ExecutorSubmitStatus::Recursive);
 
   auto exceptional = executor.submit([]() -> int {
     throw std::runtime_error("expected");
@@ -65,19 +74,102 @@ static void testBoundedExecutor() {
   executor.shutdown();
 
   bool ran_after_shutdown = false;
-  auto rejected = executor.submit([&] {
+  auto rejected = executor.trySubmit([&] {
     ran_after_shutdown = true;
     return 9;
   });
-  bool broken_promise = false;
+  assert(rejected.status == ExecutorSubmitStatus::Stopping);
+  bool stopping_error = false;
   try {
-    (void)rejected.get();
-  } catch (const std::future_error &error) {
-    broken_promise =
-        error.code() == std::make_error_code(std::future_errc::broken_promise);
+    (void)rejected.future.get();
+  } catch (const ExecutorSubmitError &error) {
+    stopping_error = error.status() == ExecutorSubmitStatus::Stopping;
   }
-  assert(broken_promise);
+  assert(stopping_error);
   assert(!ran_after_shutdown);
+}
+
+static void testWorkloadScheduler() {
+  WorkloadScheduler scheduler(1, 3, 10);
+  std::promise<void> release;
+  std::shared_future<void> released = release.get_future().share();
+  std::promise<void> started;
+  std::future<void> started_future = started.get_future();
+  auto blocker = scheduler.submit(
+      RequestCostClass::Medium, 1,
+      std::chrono::steady_clock::time_point::max(), {}, [&] {
+        started.set_value();
+        released.wait();
+        return 1;
+      });
+  assert(blocker.status == SchedulerSubmitStatus::Accepted);
+  started_future.wait();
+
+  std::mutex order_mutex;
+  std::vector<int> order;
+  auto low = scheduler.submit(
+      RequestCostClass::Low, 4,
+      std::chrono::steady_clock::time_point::max(), {}, [&] {
+        std::lock_guard<std::mutex> lock(order_mutex);
+        order.push_back(1);
+        return 2;
+      });
+  auto high = scheduler.submit(
+      RequestCostClass::High, 4,
+      std::chrono::steady_clock::time_point::max(), {}, [&] {
+        std::lock_guard<std::mutex> lock(order_mutex);
+        order.push_back(3);
+        return 3;
+      });
+  assert(low.status == SchedulerSubmitStatus::Accepted);
+  assert(high.status == SchedulerSubmitStatus::Accepted);
+
+  auto byte_rejected = scheduler.submit(
+      RequestCostClass::Medium, 3,
+      std::chrono::steady_clock::time_point::max(), {}, [] { return 4; });
+  assert(byte_rejected.status == SchedulerSubmitStatus::ByteLimit);
+  bool byte_error = false;
+  try {
+    (void)byte_rejected.future.get();
+  } catch (const SchedulerSubmitError &error) {
+    byte_error = error.status() == SchedulerSubmitStatus::ByteLimit;
+  }
+  assert(byte_error);
+
+  release.set_value();
+  assert(blocker.future.get() == 1);
+  assert(low.future.get() == 2);
+  assert(high.future.get() == 3);
+  assert(order.size() == 2);
+  assert(std::find(order.begin(), order.begin() + 2, 3) !=
+         order.begin() + 2);
+
+  RequestCancellationSource cancellation_source;
+  cancellation_source.cancel(RequestCancellationReason::ClientDisconnected);
+  auto cancelled = scheduler.submit(
+      RequestCostClass::Low, 1,
+      std::chrono::steady_clock::time_point::max(),
+      cancellation_source.token(), [] { return 5; });
+  assert(cancelled.status == SchedulerSubmitStatus::Cancelled);
+
+  auto expired = scheduler.submit(
+      RequestCostClass::Low, 1,
+      std::chrono::steady_clock::now() - 1ms, {}, [] { return 6; });
+  assert(expired.status == SchedulerSubmitStatus::Deadline);
+
+  WorkloadSchedulerSnapshot snapshot;
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    snapshot = scheduler.snapshot();
+    if (snapshot.active == 0)
+      break;
+    std::this_thread::sleep_for(1ms);
+  }
+  assert(snapshot.queued_entries == 0);
+  assert(snapshot.queued_bytes == 0);
+  assert(snapshot.active == 0);
+  assert(snapshot.accepted == 3);
+  assert(snapshot.rejected == 3);
+  scheduler.shutdown(true);
 }
 
 static void testConcurrentLruCache() {
@@ -234,6 +326,7 @@ static void testExternalConfigCacheSemantics() {
 
 int main() {
   testBoundedExecutor();
+  testWorkloadScheduler();
   testConcurrentLruCache();
   testExternalConfigCacheSemantics();
   return 0;

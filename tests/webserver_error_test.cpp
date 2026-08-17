@@ -296,5 +296,10 @@ int main() {
   require(lifecycle.stage_samples[static_cast<std::size_t>(
               RequestStage::Parse)] >= 1,
           "route-level parse timing was not propagated into the handler");
+  const RequestAdmissionSnapshot admission = requestAdmissionSnapshot();
+  require(admission.active_entries == 0 && admission.active_bytes == 0,
+          "request admission permits leaked after server shutdown");
+  require(admission.accepted == 6 && admission.rejected == 0,
+          "request admission did not account for every response path");
   return 0;
 }

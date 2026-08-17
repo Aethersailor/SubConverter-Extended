@@ -34,6 +34,16 @@ struct Response
     string_icase_map headers;
 };
 
+struct RequestAdmissionSnapshot
+{
+    uint64_t active_entries = 0;
+    uint64_t active_bytes = 0;
+    uint64_t accepted = 0;
+    uint64_t rejected = 0;
+};
+
+RequestAdmissionSnapshot requestAdmissionSnapshot() noexcept;
+
 using response_callback = std::string (*)(Request&, Response&); //process arguments and POST data and return served-content
 
 #define RESPONSE_CALLBACK_ARGS Request &request, Response &response

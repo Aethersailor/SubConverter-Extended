@@ -9,10 +9,48 @@
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
+
+enum class ExecutorSubmitStatus {
+  Accepted,
+  QueueFull,
+  Recursive,
+  Stopping,
+};
+
+class ExecutorSubmitError : public std::runtime_error {
+public:
+  explicit ExecutorSubmitError(ExecutorSubmitStatus status)
+      : std::runtime_error(message(status)), status_(status) {}
+
+  ExecutorSubmitStatus status() const noexcept { return status_; }
+
+private:
+  static std::string message(ExecutorSubmitStatus status) {
+    switch (status) {
+    case ExecutorSubmitStatus::QueueFull:
+      return "bounded executor queue is full";
+    case ExecutorSubmitStatus::Recursive:
+      return "bounded executor rejected recursive submission";
+    case ExecutorSubmitStatus::Stopping:
+      return "bounded executor is stopping";
+    case ExecutorSubmitStatus::Accepted:
+      break;
+    }
+    return "bounded executor submission error";
+  }
+
+  ExecutorSubmitStatus status_;
+};
+
+template <class Result> struct ExecutorSubmission {
+  ExecutorSubmitStatus status = ExecutorSubmitStatus::Stopping;
+  std::future<Result> future;
+};
 
 class BoundedExecutor {
 public:
@@ -31,38 +69,44 @@ public:
   ~BoundedExecutor() { shutdown(); }
 
   template <class Function>
-  auto submit(Function &&function)
-      -> std::future<std::invoke_result_t<std::decay_t<Function>>> {
+  auto trySubmit(Function &&function)
+      -> ExecutorSubmission<std::invoke_result_t<std::decay_t<Function>>> {
     using Result = std::invoke_result_t<std::decay_t<Function>>;
     auto task = std::make_shared<std::packaged_task<Result()>>(
         std::forward<Function>(function));
     std::future<Result> future = task->get_future();
     std::function<void()> invoke = [task] { (*task)(); };
-    bool run_inline = false;
-    bool rejected = false;
+    ExecutorSubmitStatus status = ExecutorSubmitStatus::Accepted;
 
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (stopping_) {
-        rejected = true;
-      } else if (current_executor_ == this ||
-                 tasks_.size() >= queue_capacity_) {
-        run_inline = true;
+        status = ExecutorSubmitStatus::Stopping;
+      } else if (current_executor_ == this) {
+        status = ExecutorSubmitStatus::Recursive;
+      } else if (tasks_.size() >= queue_capacity_) {
+        status = ExecutorSubmitStatus::QueueFull;
       } else {
         tasks_.emplace_back(std::move(invoke));
       }
     }
 
-    if (rejected) {
-      // Destroying the packaged task makes the returned future report a
-      // broken promise without starting new work after shutdown begins.
-      return future;
-    } else if (run_inline) {
-      invoke();
-    } else {
+    if (status == ExecutorSubmitStatus::Accepted) {
       cv_.notify_one();
+      return {status, std::move(future)};
     }
-    return future;
+    task.reset();
+    std::promise<Result> rejected;
+    std::future<Result> rejected_future = rejected.get_future();
+    rejected.set_exception(
+        std::make_exception_ptr(ExecutorSubmitError(status)));
+    return {status, std::move(rejected_future)};
+  }
+
+  template <class Function>
+  auto submit(Function &&function)
+      -> std::future<std::invoke_result_t<std::decay_t<Function>>> {
+    return trySubmit(std::forward<Function>(function)).future;
   }
 
   void shutdown(bool cancel_pending = false) {

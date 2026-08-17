@@ -13,6 +13,7 @@
 #include "config/ruleset.h"
 #include "handler/curl_handle_pool.h"
 #include "handler/dashboard_auth.h"
+#include "handler/conversion_service.h"
 #include "handler/dashboard_page.h"
 #include "handler/inspect_page.h"
 #include "handler/interfaces.h"
@@ -180,6 +181,7 @@ void cron_tick_caller() {
 }
 
 void shutdown_runtime() {
+  shutdownConversionScheduler();
   shutdownRulesetExecutor();
   statistics::shutdown();
   shutdownGlobalCurlHandlePool();
