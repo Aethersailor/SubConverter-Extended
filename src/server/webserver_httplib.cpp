@@ -4,6 +4,8 @@
 #include <cctype>
 #include <cstdint>
 #include <iomanip>
+#include <functional>
+#include <memory>
 #include <random>
 #include <sstream>
 #include <string>
@@ -40,6 +42,56 @@ constexpr const char *kRequestTelemetryKey = "subconverter.request.telemetry";
 struct HttpRequestTelemetry {
   std::string request_id;
   std::chrono::steady_clock::time_point started_at;
+  std::shared_ptr<RequestContext> context;
+
+  struct Completion {
+    std::shared_ptr<RequestContext> context;
+    std::string request_id;
+    std::chrono::steady_clock::time_point sending_started_at =
+        std::chrono::steady_clock::time_point::min();
+    std::function<bool()> is_connection_closed;
+    int status_code = 500;
+    bool prepared = false;
+
+    ~Completion() {
+      if (!context)
+        return;
+      if (sending_started_at !=
+          std::chrono::steady_clock::time_point::min())
+        context->addStageDuration(RequestStage::Send,
+                                  std::chrono::steady_clock::now() -
+                                      sending_started_at);
+
+      bool response_sent = true;
+      if (is_connection_closed) {
+        try {
+          response_sent = !is_connection_closed();
+        } catch (...) {
+          response_sent = false;
+        }
+      }
+      if (!prepared)
+        response_sent = false;
+      if (context->finalizeResponse(status_code, response_sent) &&
+          !response_sent) {
+        ScopedLogRequestContext request_log_scope(request_id);
+        writeLog(LOG_LEVEL_WARNING,
+                 "HTTP_RESPONSE_SEND_FAILED terminal=cancelled "
+                 "failure=client");
+      }
+    }
+
+    void prepare(const httplib::Request &request, int response_status) {
+      status_code = response_status;
+      sending_started_at = std::chrono::steady_clock::now();
+      is_connection_closed = request.is_connection_closed;
+      prepared = true;
+      if (context)
+        context->setCurrentStage(RequestStage::Send);
+    }
+  };
+
+  std::shared_ptr<Completion> completion;
 };
 
 uint64_t requestProcessNonce() {
@@ -85,6 +137,11 @@ HttpRequestTelemetry &ensureRequestTelemetry(const httplib::Request &request,
   if (telemetry.started_at ==
       std::chrono::steady_clock::time_point::min())
     telemetry.started_at = std::chrono::steady_clock::now();
+  telemetry.context = std::make_shared<RequestContext>(
+      telemetry.request_id, telemetry.started_at);
+  telemetry.completion = std::make_shared<HttpRequestTelemetry::Completion>();
+  telemetry.completion->context = telemetry.context;
+  telemetry.completion->request_id = telemetry.request_id;
   response.user_data.set(kRequestTelemetryKey, std::move(telemetry));
   return *response.user_data.get<HttpRequestTelemetry>(kRequestTelemetryKey);
 }
@@ -172,6 +229,7 @@ static httplib::Server::Handler makeHandler(const responseRoute &rr,
     HttpRequestTelemetry &telemetry =
         ensureRequestTelemetry(request, response);
     ScopedLogRequestContext request_log_scope(telemetry.request_id);
+    ScopedRequestContext request_context_scope(telemetry.context);
     Request req;
     Response resp;
     req.method = request.method;
@@ -179,6 +237,18 @@ static httplib::Server::Handler makeHandler(const responseRoute &rr,
     req.remote_addr = request.remote_addr;
     req.remote_port = request.remote_port;
     req.client_address = client_ip::parseAddress(request.remote_addr);
+    req.context = telemetry.context;
+    uint64_t estimated_bytes = static_cast<uint64_t>(request.target.size()) +
+                               static_cast<uint64_t>(request.body.size());
+    for (const auto &header : request.headers)
+      estimated_bytes += static_cast<uint64_t>(header.first.size()) +
+                         static_cast<uint64_t>(header.second.size());
+    telemetry.context->setEstimatedBytes(estimated_bytes);
+    if (request.path == "/healthz" || request.path == "/version" ||
+        request.path == "/inspect")
+      telemetry.context->setCostClass(RequestCostClass::Low);
+    else if (request.path == "/getruleset")
+      telemetry.context->setCostClass(RequestCostClass::Medium);
     const client_ip::Policy policy = web_server->client_ip_policy();
     if (policy.enabled()) {
       std::vector<std::string> values;
@@ -210,6 +280,8 @@ static httplib::Server::Handler makeHandler(const responseRoute &rr,
       }
     }
     auto result = rr.rc(req, resp);
+    RequestStageTimer serialize_timer(telemetry.context,
+                                      RequestStage::Serialize);
     response.status = resp.status_code;
     if (resp.status_code >= 400) {
       const auto cache_control = resp.headers.find("Cache-Control");
@@ -283,6 +355,8 @@ int WebServer::start_web_server_multi(listener_args *args) {
     HttpRequestTelemetry &telemetry = ensureRequestTelemetry(req, res);
     setRequestTelemetryHeaders(res, telemetry.request_id);
     ScopedLogRequestContext request_log_scope(telemetry.request_id);
+    ScopedRequestContext request_context_scope(telemetry.context);
+    telemetry.context->recordAdmissionOnce(std::chrono::steady_clock::now());
     if (shouldLog(LOG_LEVEL_DEBUG)) {
       writeLog(LOG_LEVEL_DEBUG,
                "接受客户端连接：" + req.remote_addr + ":" +
@@ -345,6 +419,8 @@ int WebServer::start_web_server_multi(listener_args *args) {
                                    const std::exception_ptr &e) {
     HttpRequestTelemetry &telemetry = ensureRequestTelemetry(req, res);
     ScopedLogRequestContext request_log_scope(telemetry.request_id);
+    ScopedRequestContext request_context_scope(telemetry.context);
+    telemetry.context->suggestFailure(RequestFailureAttribution::Server);
     try {
       if (e)
         std::rethrow_exception(e);
@@ -369,6 +445,8 @@ int WebServer::start_web_server_multi(listener_args *args) {
     HttpRequestTelemetry &telemetry = ensureRequestTelemetry(req, res);
     setRequestTelemetryHeaders(res, telemetry.request_id);
     ScopedLogRequestContext request_log_scope(telemetry.request_id);
+    ScopedRequestContext request_context_scope(telemetry.context);
+    telemetry.context->recordAdmissionOnce(std::chrono::steady_clock::now());
 
     // This also covers errors produced before a route callback (authentication,
     // OPTIONS and the built-in 404 path), which do not pass through makeHandler.
@@ -405,6 +483,7 @@ int WebServer::start_web_server_multi(listener_args *args) {
                  " response_bytes=" + std::to_string(response_bytes) +
                  " response_bytes_known=" +
                  std::string(response_bytes_known ? "true" : "false"));
+    telemetry.completion->prepare(req, res.status);
   });
   if (serve_file) {
     server.set_mount_point("/", serve_file_root);

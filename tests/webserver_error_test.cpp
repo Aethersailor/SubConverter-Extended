@@ -27,7 +27,13 @@ std::string throwingHandler(Request &, Response &) {
       "exception-secret https://example.test/private-exception-token");
 }
 
-std::string okHandler(Request &, Response &) { return "ok"; }
+std::string okHandler(Request &request, Response &response) {
+  if (!request.context)
+    throw std::runtime_error("request context was not propagated");
+  response.headers["X-Test-Request-Context-ID"] = request.context->requestId();
+  RequestStageTimer parse_timer(request.context, RequestStage::Parse);
+  return "ok";
+}
 
 bool validRequestId(const std::string &value) {
   return value.size() == 32 &&
@@ -66,6 +72,7 @@ int unusedPort() {
 } // namespace
 
 int main() {
+  resetRequestLifecycleMetricsForTests();
   global.logLevel = LOG_LEVEL_VERBOSE;
   publishSettingsSnapshot(global);
   bool other_thread_kept_published_level = false;
@@ -162,6 +169,8 @@ int main() {
   require(ok->status == 200 && ok->body == "ok", "normal route failed");
   const std::string ok_request_id = ok->get_header_value("X-Request-ID");
   require(validRequestId(ok_request_id), "normal route request ID is invalid");
+  require(ok->get_header_value("X-Test-Request-Context-ID") == ok_request_id,
+          "route request context does not match its response request ID");
   require(ok_request_id != exception_request_id &&
               ok_request_id != missing_request_id,
           "normal route reused a request ID");
@@ -263,5 +272,28 @@ int main() {
           "exception URL leaked in logs");
   require(logs.find("missing-route-secret") == std::string::npos,
           "missing route query leaked in logs");
+  const RequestLifecycleMetricsSnapshot lifecycle =
+      requestLifecycleMetricsSnapshot();
+  uint64_t terminal_total = 0;
+  for (uint64_t count : lifecycle.terminal)
+    terminal_total += count;
+  require(terminal_total == 6,
+          "HTTP requests did not each reach exactly one terminal state");
+  require(lifecycle.terminal[static_cast<std::size_t>(
+              RequestTerminalState::Completed)] == 4 &&
+              lifecycle.terminal[static_cast<std::size_t>(
+                  RequestTerminalState::Failed)] == 2 &&
+              lifecycle.terminal[static_cast<std::size_t>(
+                  RequestTerminalState::Cancelled)] == 0,
+          "HTTP terminal attribution changed across normal and error paths");
+  require(lifecycle.stage_samples[static_cast<std::size_t>(
+              RequestStage::Admission)] == 6,
+          "HTTP admission timing did not cover every response path");
+  require(lifecycle.stage_samples[static_cast<std::size_t>(
+              RequestStage::Send)] == 6,
+          "HTTP send timing did not cover every response path");
+  require(lifecycle.stage_samples[static_cast<std::size_t>(
+              RequestStage::Parse)] >= 1,
+          "route-level parse timing was not propagated into the handler");
   return 0;
 }

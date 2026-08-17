@@ -20,6 +20,7 @@
 #include "handler/settings.h"
 #include "handler/settings_view.h"
 #include "server/client_ip.h"
+#include "server/request_context.h"
 #include "utils/base64/base64.h"
 #include "utils/defer.h"
 #include "utils/file_extra.h"
@@ -1322,6 +1323,7 @@ std::string buildSocks5ProxyString(const std::string &addr, int port, const std:
 
 std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned int cache_ttl, std::string *response_headers, string_icase_map *request_headers, FetchContext context)
 {
+    RequestStageTimer fetch_timer(RequestStage::Fetch);
     int return_code = 0;
     std::string content;
 
@@ -1536,6 +1538,7 @@ string_array headers_map_to_array(const string_map &headers)
 
 int webGet(const FetchArgument& argument, FetchResult &result)
 {
+    RequestStageTimer fetch_timer(RequestStage::Fetch);
     if (!isFetchUrlAllowed(argument.url, argument.context)) {
         *result.status_code = 403;
         if (result.content)

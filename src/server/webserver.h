@@ -4,10 +4,12 @@
 #include <string>
 #include <map>
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <curl/curlver.h>
 
 #include "server/client_ip.h"
+#include "server/request_context.h"
 #include "utils/map_extra.h"
 #include "utils/string.h"
 #include "version.h"
@@ -22,6 +24,7 @@ struct Request
     string_multimap argument;
     string_icase_map headers;
     std::string postdata;
+    std::shared_ptr<RequestContext> context;
 };
 
 struct Response

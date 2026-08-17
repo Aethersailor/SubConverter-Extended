@@ -22,6 +22,7 @@
 #include "handler/settings.h"
 #include "handler/settings_view.h"
 #include "handler/statistics_v2.h"
+#include "server/request_context.h"
 #include "utils/logger.h"
 #include "utils/redact.h"
 
@@ -439,6 +440,46 @@ void writeGeoWindows(Writer &writer, const DashboardSnapshot &snapshot,
   writer.EndObject();
 }
 
+template <typename Writer> void writeRequestLifecycle(Writer &writer) {
+  const RequestLifecycleMetricsSnapshot snapshot =
+      requestLifecycleMetricsSnapshot();
+  writer.StartObject();
+
+  writer.Key("terminal");
+  writer.StartObject();
+  for (std::size_t index = 1; index < snapshot.terminal.size(); ++index) {
+    const auto state = static_cast<RequestTerminalState>(index);
+    writer.Key(requestTerminalStateName(state));
+    writer.Uint64(snapshot.terminal[index]);
+  }
+  writer.EndObject();
+
+  writer.Key("failure_attribution");
+  writer.StartObject();
+  for (std::size_t index = 0; index < snapshot.failure.size(); ++index) {
+    const auto failure = static_cast<RequestFailureAttribution>(index);
+    writer.Key(requestFailureAttributionName(failure));
+    writer.Uint64(snapshot.failure[index]);
+  }
+  writer.EndObject();
+
+  writer.Key("stages");
+  writer.StartObject();
+  for (std::size_t index = 0; index < snapshot.stage_nanoseconds.size();
+       ++index) {
+    const auto stage = static_cast<RequestStage>(index);
+    writer.Key(requestStageName(stage));
+    writer.StartObject();
+    writer.Key("total_microseconds");
+    writer.Uint64(snapshot.stage_nanoseconds[index] / 1000);
+    writer.Key("samples");
+    writer.Uint64(snapshot.stage_samples[index]);
+    writer.EndObject();
+  }
+  writer.EndObject();
+  writer.EndObject();
+}
+
 std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   rapidjson::StringBuffer buffer;
   rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
@@ -500,6 +541,8 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
     writer.EndObject();
   }
   writer.EndArray();
+  writer.Key("request_lifecycle");
+  writeRequestLifecycle(writer);
   writer.EndObject();
   return std::string(buffer.GetString(), buffer.GetSize());
 }

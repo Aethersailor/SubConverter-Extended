@@ -10,6 +10,7 @@
 #include "handler/settings.h"
 #include "handler/settings_view.h"
 #include "handler/webget.h"
+#include "server/request_context.h"
 #include "utils/logger.h"
 #include "utils/network.h"
 #include "utils/redact.h"
@@ -176,6 +177,7 @@ int render_template(const std::string &content, const template_args &vars,
                     std::string &output, const std::string &include_scope,
                     FetchContext context, bool *fetch_failed)
 {
+    RequestStageTimer template_timer(RequestStage::Template);
     struct TemplateFetchContextGuard
     {
         FetchContext previous;
@@ -437,6 +439,7 @@ std::string findFileName(const std::string &path)
 
 int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_content_array, const std::string &remote_path_prefix, bool script, bool overwrite_original_rules, bool clash_classical_ruleset, RuleConversionStats *stats)
 {
+    RequestStageTimer rules_timer(RequestStage::Rules);
     RuleConversionStats local_stats;
     nlohmann::json data;
     std::string match_group, geoips, retrieved_rules;

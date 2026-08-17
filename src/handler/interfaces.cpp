@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <condition_variable>
@@ -35,6 +36,7 @@
 #include "parser/subparser.h"
 #include "script/cron.h"
 #include "script/script_quickjs.h"
+#include "server/request_context.h"
 #include "server/webserver.h"
 #include "settings.h"
 #include "settings_view.h"
@@ -1056,9 +1058,29 @@ struct InflightSubRequest {
   std::mutex mutex;
   std::condition_variable cv;
   std::string owner_request_id;
+  std::weak_ptr<RequestContext> owner_context;
+  std::atomic<uint32_t> consumers{1};
   bool done = false;
   SharedCoalescedResponse result;
   std::exception_ptr exception;
+};
+
+struct InflightConsumerGuard {
+  explicit InflightConsumerGuard(std::shared_ptr<InflightSubRequest> call)
+      : call(std::move(call)) {}
+  ~InflightConsumerGuard() {
+    if (!call)
+      return;
+    const uint32_t previous =
+        call->consumers.fetch_sub(1, std::memory_order_acq_rel);
+    const uint32_t remaining = previous > 0 ? previous - 1 : 0;
+    if (auto owner = call->owner_context.lock())
+      owner->setConsumerCount(remaining);
+  }
+  InflightConsumerGuard(const InflightConsumerGuard &) = delete;
+  InflightConsumerGuard &operator=(const InflightConsumerGuard &) = delete;
+
+  std::shared_ptr<InflightSubRequest> call;
 };
 
 struct CachedSubResponse {
@@ -1487,6 +1509,7 @@ static std::string rejectAgeRequest(Response &response,
 static std::string finalizeSubResponse(const Request &request,
                                        Response &response, std::string body,
                                        const AgeResponseContext &age) {
+  RequestStageTimer serialize_timer(request.context, RequestStage::Serialize);
   if (isTruthyRequestValue(getUrlArg(request.argument, "explain")))
     applyExplainPrivacyHeaders(response);
   // User-Agent can select target=auto and affects subscription/provider
@@ -1739,6 +1762,8 @@ static std::string subconverterEntry(Request &request, Response &response,
   if (!explain_request &&
       getCachedSubResponse(key, cached_result, settings)) {
     writeLog(LOG_LEVEL_DEBUG, "/sub 响应微缓存命中。");
+    if (request.context)
+      request.context->setCostClass(RequestCostClass::Low);
     copyCoalescedToResponse(*cached_result, response);
     recordTrackedSubRequest(track, request, response,
                             cached_result->rule_conversions);
@@ -1753,6 +1778,11 @@ static std::string subconverterEntry(Request &request, Response &response,
     if (iter == g_sub_inflight.end()) {
       call = std::make_shared<InflightSubRequest>();
       call->owner_request_id = currentLogRequestId();
+      call->owner_context = request.context;
+      if (request.context) {
+        request.context->setSingleflightRole(RequestSingleflightRole::Owner);
+        request.context->setConsumerCount(1);
+      }
       g_sub_inflight.emplace(key, call);
       owner = true;
     } else {
@@ -1761,6 +1791,13 @@ static std::string subconverterEntry(Request &request, Response &response,
   }
 
   if (!owner) {
+    if (request.context)
+      request.context->setSingleflightRole(RequestSingleflightRole::Follower);
+    const uint32_t consumers =
+        call->consumers.fetch_add(1, std::memory_order_acq_rel) + 1;
+    if (auto owner_context = call->owner_context.lock())
+      owner_context->setConsumerCount(consumers);
+    InflightConsumerGuard consumer_guard(call);
     writeLog(LOG_LEVEL_INFO,
              "SUB_REQUEST_COALESCED owner_request_id=" +
                  (call->owner_request_id.empty() ? "unavailable"
@@ -1769,12 +1806,17 @@ static std::string subconverterEntry(Request &request, Response &response,
     call->cv.wait(lock, [&call] { return call->done; });
     if (call->exception)
       std::rethrow_exception(call->exception);
+    if (request.context) {
+      if (auto owner_context = call->owner_context.lock())
+        request.context->setCostClass(owner_context->costClass());
+    }
     copyCoalescedToResponse(*call->result, response);
     recordTrackedSubRequest(track, request, response,
                             call->result->rule_conversions);
     return call->result->body;
   }
 
+  InflightConsumerGuard consumer_guard(call);
   try {
     writeLog(LOG_LEVEL_DEBUG, "/sub 请求成为同 key 转换 owner。");
     Response owner_response;
@@ -4962,28 +5004,53 @@ static std::string subconverter_impl(Request &request, Response &response,
                                      const Settings &settings,
                                      RuleConversionStats *rule_stats) {
   ParsedSubRequest parsed_request;
-  std::string parse_error =
-      parseSubRequestArguments(request, response, settings, parsed_request);
-  if (!parse_error.empty())
-    return parse_error;
-
   EffectiveSubPolicy effective_policy;
-  std::string policy_error = buildEffectiveSubPolicy(
-      request, response, settings, rule_stats, parsed_request, effective_policy);
-  if (!policy_error.empty())
-    return policy_error;
+  {
+    RequestStageTimer parse_timer(request.context, RequestStage::Parse);
+    std::string parse_error =
+        parseSubRequestArguments(request, response, settings, parsed_request);
+    if (!parse_error.empty())
+      return parse_error;
+
+    std::string policy_error = buildEffectiveSubPolicy(
+        request, response, settings, rule_stats, parsed_request,
+        effective_policy);
+    if (!policy_error.empty())
+      return policy_error;
+  }
 
   ExternalConfigFetchPlan fetch_plan;
-  std::string fetch_plan_error = buildExternalConfigFetchPlan(
-      response, settings, parsed_request, effective_policy, fetch_plan);
-  if (!fetch_plan_error.empty())
-    return fetch_plan_error;
+  {
+    RequestStageTimer rules_timer(request.context, RequestStage::Rules);
+    std::string fetch_plan_error = buildExternalConfigFetchPlan(
+        response, settings, parsed_request, effective_policy, fetch_plan);
+    if (!fetch_plan_error.empty())
+      return fetch_plan_error;
+  }
+
   SubscriptionNodeState subscription_state;
-  SubStageResponse subscription_response = processSubscriptionNodes(
-      request, response, settings, parsed_request, effective_policy,
-      subscription_state);
-  if (subscription_response.complete)
-    return subscription_response.body;
+  {
+    RequestStageTimer parse_timer(request.context, RequestStage::Parse);
+    SubStageResponse subscription_response = processSubscriptionNodes(
+        request, response, settings, parsed_request, effective_policy,
+        subscription_state);
+    if (request.context) {
+      const bool high_cost =
+          parsed_request.explain.subscription_url_count > 1 ||
+          effective_policy.custom_rulesets.size() > 1 ||
+          parsed_request.generate_clash_script.get(false) ||
+          !parsed_request.external_config.empty();
+      request.context->setCostClass(
+          parsed_request.explain.proxy_provider_mode
+              ? RequestCostClass::Low
+              : (high_cost ? RequestCostClass::High
+                           : RequestCostClass::Medium));
+    }
+    if (subscription_response.complete)
+      return subscription_response.body;
+  }
+
+  RequestStageTimer serialize_timer(request.context, RequestStage::Serialize);
   TargetGenerationState generation_state;
   SubStageResponse generation_response = dispatchTargetGenerator(
       request, response, settings, parsed_request, effective_policy,

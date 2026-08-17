@@ -10,6 +10,7 @@
 #include "interfaces.h"
 #include "multithread.h"
 #include "script/cron.h"
+#include "server/request_context.h"
 #include "server/webserver.h"
 #include "settings.h"
 #include "settings_view.h"
@@ -712,6 +713,7 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
                      std::vector<RulesetContent> &ruleset_content_array,
                      FetchContext context, RulesetRefreshMode mode,
                      const std::vector<RulesetContent> *reusable_content) {
+  RequestStageTimer rules_timer(RequestStage::Rules);
   ruleset_content_array.clear();
   ruleset_content_array.reserve(ruleset_list.size());
   std::string rule_group, rule_url, rule_url_typed, interval;

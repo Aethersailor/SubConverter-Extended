@@ -448,6 +448,15 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
                     raise ShutdownFailure(
                         "normal graceful shutdown was mislabeled FATAL"
                     )
+                if scenario in ("completed-request", "inflight-request"):
+                    if "HTTP_RESPONSE_PREPARED" not in logs:
+                        raise ShutdownFailure(
+                            "completed request is missing lifecycle completion telemetry"
+                        )
+                    if "HTTP_RESPONSE_SEND_FAILED" in logs:
+                        raise ShutdownFailure(
+                            "a successfully delivered request was misclassified as cancelled"
+                        )
                 if scenario == "background-retry":
                     if fixture.background_attempts < 2:
                         raise ShutdownFailure("controlled background retry was not attempted")

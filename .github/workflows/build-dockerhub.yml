@@ -267,6 +267,157 @@ jobs:
           bash -n scripts/ci/*.sh
           bash tests/ci_delivery_scripts_test.sh
 
+  sanitizer:
+    name: "🧪 ASan/UBSan (dev, non-publishing)"
+    runs-on: ubuntu-latest
+    needs: prepare
+    if: needs.prepare.outputs.mode == 'dev'
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
+
+      - name: Download dependency snapshot
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: dependency-snapshot
+          path: dependency-snapshot
+
+      - name: Activate dependency snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp dependency-snapshot/dependencies.lock.json scripts/ci/dependencies.lock.json
+          python3 scripts/ci/dependency_snapshot.py check
+          python3 scripts/ci/dependency_snapshot.py emit --github-env "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+
+      - name: Prepare sanitizer build arguments
+        id: sanitizer_args
+        shell: bash
+        env:
+          THREADS: "16"
+          SHA: ${{ needs.prepare.outputs.sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
+          REFRESH_GO_DEPS: "false"
+          REFRESH_HEADERS: "false"
+          BUILD_TESTS: "true"
+        run: |
+          {
+            echo 'args<<EOF'
+            bash scripts/ci/docker-build-args.sh
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run ASan and UBSan correctness suite without publishing
+        shell: bash
+        env:
+          BUILD_ARGS: ${{ steps.sanitizer_args.outputs.args }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r arg; do
+            [ -n "$arg" ] && args+=(--build-arg "$arg")
+          done <<< "$BUILD_ARGS"
+          docker buildx build \
+            --file ./Dockerfile \
+            --platform linux/amd64 \
+            --target builder \
+            --output type=cacheonly \
+            --cache-from type=gha,scope=subconverter-sanitizer \
+            --cache-to type=gha,mode=max,scope=subconverter-sanitizer \
+            "${args[@]}" \
+            --build-arg ENABLE_SANITIZERS=true \
+            .
+
+  cross-build:
+    name: "🧭 Non-publishing cross build (${{ matrix.arch }})"
+    runs-on: ${{ matrix.runner }}
+    needs: prepare
+    if: needs.prepare.outputs.mode == 'dev'
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            dockerfile: ./Dockerfile
+            platform: linux/arm64
+            threads: "4"
+          - arch: armv7
+            runner: ubuntu-latest
+            dockerfile: ./docker/Dockerfile.armv7-cross
+            platform: linux/arm/v7
+            threads: "2"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
+
+      - name: Download dependency snapshot
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: dependency-snapshot
+          path: dependency-snapshot
+
+      - name: Activate dependency snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp dependency-snapshot/dependencies.lock.json scripts/ci/dependencies.lock.json
+          python3 scripts/ci/dependency_snapshot.py check
+          python3 scripts/ci/dependency_snapshot.py emit --github-env "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+
+      - name: Prepare cross-build arguments
+        id: cross_args
+        shell: bash
+        env:
+          THREADS: ${{ matrix.threads }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
+          REFRESH_GO_DEPS: "false"
+          REFRESH_HEADERS: "false"
+          BUILD_TESTS: "false"
+        run: |
+          {
+            echo 'args<<EOF'
+            bash scripts/ci/docker-build-args.sh
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Compile without loading or publishing an image
+        shell: bash
+        env:
+          BUILD_ARGS: ${{ steps.cross_args.outputs.args }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r arg; do
+            [ -n "$arg" ] && args+=(--build-arg "$arg")
+          done <<< "$BUILD_ARGS"
+          docker buildx build \
+            --file "${{ matrix.dockerfile }}" \
+            --platform "${{ matrix.platform }}" \
+            --target builder \
+            --output type=cacheonly \
+            --cache-from type=gha,scope="subconverter-cross-${{ matrix.arch }}" \
+            --cache-to type=gha,mode=max,scope="subconverter-cross-${{ matrix.arch }}" \
+            "${args[@]}" \
+            .
+
   build-linux:
     name: "🐳 Docker Build (${{ matrix.arch }})"
     runs-on: ${{ matrix.runner }}
@@ -368,6 +519,24 @@ jobs:
         env:
           EXTRACT_GENERATED: ${{ matrix.extract_generated }}
         run: bash scripts/ci/extract-builder-output.sh "${{ matrix.builder_tag }}" "${{ matrix.extract_mode }}"
+
+      - name: Package dev-only OpenWrt amd64 without publishing
+        if: needs.prepare.outputs.mode == 'dev' && matrix.arch == 'amd64'
+        shell: bash
+        env:
+          SHA: ${{ needs.prepare.outputs.sha }}
+          BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
+          BUILD_TIME: "0"
+        run: |
+          set -euo pipefail
+          bash scripts/ci/build-linux-release.sh v0.0.0 amd64 x86_64
+          python3 scripts/ci/check_file_size.py --budget release-openwrt \
+            SubConverter-Extended-v0.0.0-openwrt-x86_64.apk
+          rm -rf -- \
+            SubConverter-Extended \
+            SubConverter-Extended-v0.0.0-linux-amd64.tar.gz \
+            SubConverter-Extended-v0.0.0-openwrt-x86_64.apk \
+            build/openwrt-apk/amd64
 
       - name: Check bridge size budget (${{ matrix.arch }})
         shell: bash
@@ -581,13 +750,15 @@ jobs:
   merge-manifest:
     name: "🔗 Publish Version Docker Images"
     runs-on: ubuntu-latest
-    needs: [prepare, validate-source, build-linux]
+    needs: [prepare, validate-source, sanitizer, cross-build, build-linux]
     if: >-
       always() &&
       github.event_name != 'pull_request' &&
       needs.prepare.outputs.mode != 'master' &&
       needs.prepare.result == 'success' &&
       needs.build-linux.result == 'success' &&
+      (needs.sanitizer.result == 'success' || needs.prepare.outputs.mode == 'release') &&
+      (needs.cross-build.result == 'success' || needs.prepare.outputs.mode == 'release') &&
       (needs.validate-source.result == 'success' || needs.prepare.outputs.mode == 'release')
     outputs:
       dockerhub_digest: ${{ steps.published.outputs.dockerhub_digest }}

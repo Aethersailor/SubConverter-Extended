@@ -6,6 +6,7 @@
 
 #include "handler/settings.h"
 #include "handler/settings_view.h"
+#include "server/request_context.h"
 #include "utils/network.h"
 #include "utils/bounded_executor.h"
 #include "webget.h"
@@ -146,13 +147,23 @@ std::shared_future<std::string> fetchFileAsync(const std::string &path, const Pr
     std::future<std::string> retVal;
     if(find_local && fileExist(path, scope_limit) &&
        canReadLocalFetchPath(path, context))
+    {
+        std::shared_ptr<RequestContext> request_context =
+            captureCurrentRequestContext();
         retVal = rulesetExecutor().submit(
-            [path, scope_limit](){ return fileGet(path, scope_limit); });
+            [path, scope_limit, request_context](){
+                ScopedRequestContext scope(request_context);
+                return fileGet(path, scope_limit);
+            });
+    }
     else if(isLink(path))
     {
         SettingsSnapshot settings = captureEffectiveSettingsSnapshot();
+        std::shared_ptr<RequestContext> request_context =
+            captureCurrentRequestContext();
         retVal = rulesetExecutor().submit(
-            [path, proxy, cache_ttl, context, settings](){
+            [path, proxy, cache_ttl, context, settings, request_context](){
+                ScopedRequestContext request_scope(request_context);
                 ScopedSettingsView view(settings);
                 return webGet(path, proxy, cache_ttl, nullptr, nullptr,
                               context);
