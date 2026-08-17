@@ -2,6 +2,7 @@
 #define WEBSERVER_H_INCLUDED
 
 #include <string>
+#include <vector>
 #include <map>
 #include <atomic>
 #include <memory>
@@ -43,6 +44,8 @@ struct RequestAdmissionSnapshot
 };
 
 RequestAdmissionSnapshot requestAdmissionSnapshot() noexcept;
+bool tryRequestAdmission(uint64_t bytes) noexcept;
+void releaseRequestAdmission(uint64_t bytes) noexcept;
 
 using response_callback = std::string (*)(Request&, Response&); //process arguments and POST data and return served-content
 
@@ -65,6 +68,15 @@ struct responseRoute
     std::string content_type;
     response_callback rc {};
 };
+
+const responseRoute *findResponseRoute(
+    const std::vector<responseRoute> &routes, const std::string &method,
+    const std::string &path, bool allow_head_as_get = true) noexcept;
+std::string invokeResponseRoute(const responseRoute &route, Request &request,
+                                Response &response);
+void parseHttpTarget(const std::string &target, std::string &path,
+                     string_multimap &arguments);
+std::string httpStaticContentType(const std::string &path);
 
 class WebServer
 {

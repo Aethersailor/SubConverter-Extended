@@ -85,6 +85,7 @@ RUN dpkg --add-architecture armhf && \
       git build-essential crossbuild-essential-armhf \
       cmake ninja-build ccache pkg-config curl ca-certificates file \
       tzdata \
+      libboost-dev \
       libcurl4-openssl-dev:armhf \
       libpcre2-dev:armhf \
       libyaml-cpp-dev:armhf \

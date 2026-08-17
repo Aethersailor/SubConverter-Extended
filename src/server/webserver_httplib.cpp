@@ -30,6 +30,8 @@
 #include "utils/urlencode.h"
 #include "handler/settings.h"
 #include "webserver.h"
+#include "webserver_beast.h"
+#include "utils/system.h"
 
 
 static const char *request_header_blacklist[] = {"host", "accept",
@@ -137,7 +139,7 @@ struct HttpRequestTelemetry {
                  "failure=client");
       }
       if (admission_acquired)
-        request_admission.release(admission_bytes);
+        releaseRequestAdmission(admission_bytes);
     }
 
     void prepare(const httplib::Request &request, int response_status) {
@@ -264,6 +266,58 @@ RequestAdmissionSnapshot requestAdmissionSnapshot() noexcept {
   return request_admission.snapshot();
 }
 
+bool tryRequestAdmission(uint64_t bytes) noexcept {
+  return request_admission.tryAcquire(bytes);
+}
+
+void releaseRequestAdmission(uint64_t bytes) noexcept {
+  request_admission.release(bytes);
+}
+
+const responseRoute *findResponseRoute(
+    const std::vector<responseRoute> &routes, const std::string &method,
+    const std::string &path, bool allow_head_as_get) noexcept {
+  for (const auto &route : routes) {
+    if (route.path == path &&
+        (route.method == method ||
+         (allow_head_as_get && method == "HEAD" && route.method == "GET")))
+      return &route;
+  }
+  return nullptr;
+}
+
+std::string invokeResponseRoute(const responseRoute &route, Request &request,
+                                Response &response) {
+  std::string content = route.rc(request, response);
+  if (response.content_type.empty())
+    response.content_type = route.content_type;
+  return content;
+}
+
+void parseHttpTarget(const std::string &target, std::string &path,
+                     string_multimap &arguments) {
+  std::string normalized = target;
+  const std::size_t fragment = normalized.find('#');
+  if (fragment != std::string::npos)
+    normalized.erase(fragment);
+  httplib::detail::divide(
+      normalized, '?',
+      [&](const char *path_data, std::size_t path_size, const char *query_data,
+          std::size_t query_size) {
+        path = httplib::decode_path_component(
+            std::string(path_data, path_size));
+        httplib::Params parsed;
+        httplib::detail::parse_query_text(query_data, query_size, parsed);
+        arguments.insert(parsed.begin(), parsed.end());
+      });
+}
+
+std::string httpStaticContentType(const std::string &path) {
+  static const std::map<std::string, std::string> custom_types;
+  return httplib::detail::find_content_type(path, custom_types,
+                                             "application/octet-stream");
+}
+
 static inline bool is_request_header_blacklisted(const std::string &header) {
   for (auto &x : request_header_blacklist) {
     if (strcasecmp(x, header.c_str()) == 0) {
@@ -336,7 +390,7 @@ static httplib::Server::Handler makeHandler(const responseRoute &rr,
         req.postdata = request.body;
       }
     }
-    auto result = rr.rc(req, resp);
+    auto result = invokeResponseRoute(rr, req, resp);
     RequestStageTimer serialize_timer(telemetry.context,
                                       RequestStage::Serialize);
     response.status = resp.status_code;
@@ -349,11 +403,7 @@ static httplib::Server::Handler makeHandler(const responseRoute &rr,
     for (auto &h : resp.headers) {
       response.set_header(h.first, h.second);
     }
-    auto content_type = resp.content_type;
-    if (content_type.empty()) {
-      content_type = rr.content_type;
-    }
-    response.set_content(std::move(result), content_type);
+    response.set_content(std::move(result), resp.content_type);
   };
 }
 
@@ -366,6 +416,15 @@ static void setUnhandledExceptionResponse(httplib::Response &response) {
 }
 
 int WebServer::start_web_server_multi(listener_args *args) {
+  const std::string backend = toLower(getEnv("SUBCONVERTER_HTTP_BACKEND"));
+  if (backend == "beast")
+    return startBeastWebServer(*this, args);
+  if (!backend.empty() && backend != "httplib") {
+    writeLog(LOG_LEVEL_FATAL,
+             "HTTP_BACKEND_INVALID value_length=" +
+                 std::to_string(backend.size()));
+    return 1;
+  }
   httplib::Server server;
   for (auto &x : responses) {
     switch (hash_(x.method)) {
@@ -418,7 +477,7 @@ int WebServer::start_web_server_multi(listener_args *args) {
         !telemetry.completion->admission_acquired) {
       const uint64_t admission_bytes = requestAdmissionBytes(req);
       telemetry.context->setEstimatedBytes(admission_bytes);
-      if (!request_admission.tryAcquire(admission_bytes)) {
+      if (!tryRequestAdmission(admission_bytes)) {
         telemetry.context->suggestFailure(
             RequestFailureAttribution::Capacity);
         res.status = 503;

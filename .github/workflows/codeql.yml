@@ -112,6 +112,7 @@ jobs:
             rapidjson-dev \
             libyaml-cpp-dev \
             libcurl4-openssl-dev \
+            libboost-dev \
             libhowardhinnant-date-dev
 
     # [SETUP] Build Go library (libmihomo.a) for C++ linkage
