@@ -32,6 +32,7 @@ std::string okHandler(Request &request, Response &response) {
     throw std::runtime_error("request context was not propagated");
   response.headers["X-Test-Request-Context-ID"] = request.context->requestId();
   RequestStageTimer parse_timer(request.context, RequestStage::Parse);
+  std::this_thread::sleep_for(std::chrono::milliseconds(1));
   return "ok";
 }
 

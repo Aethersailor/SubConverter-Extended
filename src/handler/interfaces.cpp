@@ -28,6 +28,7 @@
 #include "generator/config/ruleconvert.h"
 #include "generator/config/subexport.h"
 #include "generator/template/templates.h"
+#include "conversion_service.h"
 #include "interfaces.h"
 #include "multithread.h"
 #include "ruleset_output.h"
@@ -1859,12 +1860,36 @@ static std::string subconverterEntry(Request &request, Response &response,
 
 } // namespace
 
+ConversionResult ConversionService::convertSubscription(
+    Request &request, bool track_statistics) const {
+  Response response;
+  std::string body =
+      subconverterEntry(request, response, track_statistics);
+  return ConversionResult(response.status_code, std::move(response.content_type),
+                          std::move(response.headers), std::move(body));
+}
+
+const ConversionService &defaultConversionService() {
+  static const ConversionService service;
+  return service;
+}
+
+static std::string applyConversionResult(ConversionResult result,
+                                         Response &response) {
+  response.status_code = result.statusCode();
+  response.content_type = std::move(result).releaseContentType();
+  response.headers = std::move(result).releaseHeaders();
+  return std::move(result).releaseBody();
+}
+
 std::string subconverter(RESPONSE_CALLBACK_ARGS) {
-  return subconverterEntry(request, response, false);
+  return applyConversionResult(
+      defaultConversionService().convertSubscription(request, false), response);
 }
 
 std::string subconverterTracked(RESPONSE_CALLBACK_ARGS) {
-  return subconverterEntry(request, response, true);
+  return applyConversionResult(
+      defaultConversionService().convertSubscription(request, true), response);
 }
 
 namespace {
