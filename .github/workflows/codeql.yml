@@ -241,7 +241,7 @@ jobs:
         cd ..
 
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@988661ebb5e81487b3fb31b2185d2856c0a10679 # v4
+      uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4
       with:
         languages: ${{ matrix.language }}
         build-mode: ${{ matrix.build-mode }}
