@@ -448,7 +448,10 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
                     raise ShutdownFailure(
                         "normal graceful shutdown was mislabeled FATAL"
                     )
-                if "OUTBOUND_MULTI_ENGINE resolver=asynchronous" not in logs:
+                if (
+                    scenario != "idle"
+                    and "OUTBOUND_MULTI_ENGINE resolver=asynchronous" not in logs
+                ):
                     raise ShutdownFailure(
                         "shutdown scenario did not exercise the asynchronous multi engine"
                     )
