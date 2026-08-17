@@ -19,6 +19,7 @@
 #include "utils/md5/md5_interface.h"
 #include "utils/network.h"
 #include "utils/redact.h"
+#include "utils/resource_control.h"
 #include "utils/system.h"
 
 // multi-thread lock
@@ -331,6 +332,13 @@ static void finalizePerformanceSettings() {
     global.maxServerThreads =
         to_int(max_server_threads, global.maxServerThreads);
 
+  std::string resource_control =
+      getEnv("SUBCONVERTER_RESOURCE_CONTROL");
+  if (!resource_control.empty()) {
+    global.resourceControl = resource_control;
+    global.resourceControlSource = "environment";
+  }
+
   std::string response_cache_ttl = getEnv("SUBCONVERTER_RESPONSE_CACHE_TTL");
   if (!response_cache_ttl.empty())
     global.responseCacheTtl = to_int(response_cache_ttl, global.responseCacheTtl);
@@ -341,6 +349,7 @@ static void finalizePerformanceSettings() {
     global.maxConcurThreads = 1;
   if (global.maxServerThreads < global.maxConcurThreads)
     global.maxServerThreads = global.maxConcurThreads;
+  configureResourceControl(global);
   if (global.responseCacheTtl > 5) {
     writeLog(LOG_LEVEL_WARNING,
              "response_cache_ttl 最大允许 5 秒，已自动收敛到 5。");
@@ -1070,6 +1079,10 @@ void readYAMLConf(YAML::Node &node,
   }
 
   if (node["advanced"].IsDefined()) {
+    if (node["advanced"]["resource_control"].IsDefined()) {
+      node["advanced"]["resource_control"] >> global.resourceControl;
+      global.resourceControlSource = "file:yaml";
+    }
     node["advanced"]["max_pending_connections"] >> global.maxPendingConns;
     node["advanced"]["max_concurrent_threads"] >> global.maxConcurThreads;
     node["advanced"]["max_server_threads"] >> global.maxServerThreads;
@@ -1358,6 +1371,12 @@ void readTOMLConf(toml::value &root,
   int cache_subscription = global.cacheSubscription,
       cache_config = global.cacheConfig, cache_ruleset = global.cacheRuleset;
 
+  if (section_advanced.contains("resource_control")) {
+    global.resourceControl =
+        toml::find<std::string>(section_advanced, "resource_control");
+    global.resourceControlSource = "file:toml";
+  }
+
   find_if_exist(
       section_advanced, "max_pending_connections", global.maxPendingConns,
       "max_concurrent_threads", global.maxConcurThreads,
@@ -1486,6 +1505,8 @@ bool readConf() {
     global.dashboardAuthMaxFailures = 5;
     global.dashboardAuthWindowSeconds = 300;
     global.dashboardAuthLockSeconds = 900;
+    global.resourceControl = "compat";
+    global.resourceControlSource = "builtin-default";
     global.fallbackToDefaultExternalConfig = false;
     global.customOpenClashRulesSourceSwitch = false;
     // A removed proxy_bypass setting must return to the upgrade-compatible
@@ -1825,6 +1846,10 @@ bool readConf() {
   global.serveFileRoot = ini.get("serve_file_root");
 
   ini.enter_section("advanced");
+  if (ini.item_exist("resource_control")) {
+    ini.get_if_exist("resource_control", global.resourceControl);
+    global.resourceControlSource = "file:ini";
+  }
   ini.get_int_if_exist("max_pending_connections", global.maxPendingConns);
   ini.get_int_if_exist("max_concurrent_threads", global.maxConcurThreads);
   ini.get_int_if_exist("max_server_threads", global.maxServerThreads);

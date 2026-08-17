@@ -44,15 +44,18 @@ constexpr const char *kRequestTelemetryKey = "subconverter.request.telemetry";
 class RequestAdmissionController {
 public:
   bool tryAcquire(uint64_t bytes) noexcept {
+    const uint64_t max_entries =
+        max_entries_.load(std::memory_order_acquire);
+    const uint64_t max_bytes = max_bytes_.load(std::memory_order_acquire);
     const uint64_t previous_entries =
         active_entries_.fetch_add(1, std::memory_order_acq_rel);
-    if (previous_entries >= kMaxEntries) {
+    if (previous_entries >= max_entries) {
       active_entries_.fetch_sub(1, std::memory_order_acq_rel);
       rejected_.fetch_add(1, std::memory_order_relaxed);
       return false;
     }
     uint64_t current = active_bytes_.load(std::memory_order_acquire);
-    while (bytes <= kMaxBytes && current <= kMaxBytes - bytes) {
+    while (bytes <= max_bytes && current <= max_bytes - bytes) {
       if (active_bytes_.compare_exchange_weak(
               current, current + bytes, std::memory_order_acq_rel,
               std::memory_order_acquire)) {
@@ -74,12 +77,21 @@ public:
     return {active_entries_.load(std::memory_order_relaxed),
             active_bytes_.load(std::memory_order_relaxed),
             accepted_.load(std::memory_order_relaxed),
-            rejected_.load(std::memory_order_relaxed)};
+            rejected_.load(std::memory_order_relaxed),
+            max_entries_.load(std::memory_order_relaxed),
+            max_bytes_.load(std::memory_order_relaxed)};
+  }
+
+  void configure(uint64_t max_entries, uint64_t max_bytes) noexcept {
+    max_entries_.store(std::max<uint64_t>(1, max_entries),
+                       std::memory_order_release);
+    max_bytes_.store(std::max<uint64_t>(1, max_bytes),
+                     std::memory_order_release);
   }
 
 private:
-  static constexpr uint64_t kMaxEntries = 2048;
-  static constexpr uint64_t kMaxBytes = UINT64_C(64) * 1024 * 1024;
+  std::atomic<uint64_t> max_entries_{2048};
+  std::atomic<uint64_t> max_bytes_{UINT64_C(64) * 1024 * 1024};
   std::atomic<uint64_t> active_entries_{0};
   std::atomic<uint64_t> active_bytes_{0};
   std::atomic<uint64_t> accepted_{0};
@@ -266,6 +278,11 @@ RequestAdmissionSnapshot requestAdmissionSnapshot() noexcept {
   return request_admission.snapshot();
 }
 
+void configureRequestAdmissionLimits(uint64_t max_entries,
+                                     uint64_t max_bytes) noexcept {
+  request_admission.configure(max_entries, max_bytes);
+}
+
 bool tryRequestAdmission(uint64_t bytes) noexcept {
   return request_admission.tryAcquire(bytes);
 }
@@ -416,7 +433,9 @@ static void setUnhandledExceptionResponse(httplib::Response &response) {
 }
 
 int WebServer::start_web_server_multi(listener_args *args) {
-  const std::string backend = toLower(getEnv("SUBCONVERTER_HTTP_BACKEND"));
+  std::string backend = toLower(getEnv("SUBCONVERTER_HTTP_BACKEND"));
+  if (backend.empty() && global.resourceControl != "compat")
+    backend = "beast";
   if (backend == "beast")
     return startBeastWebServer(*this, args);
   if (!backend.empty() && backend != "httplib") {
@@ -627,7 +646,9 @@ int WebServer::start_web_server_multi(listener_args *args) {
     return new httplib::ThreadPool(args->max_workers,
                                    global.maxServerThreads,
                                    static_cast<size_t>(
-                                       std::max(10240, args->max_conn)));
+                                       global.resourceControl == "compat"
+                                           ? std::max(10240, args->max_conn)
+                                           : std::max(1, args->max_conn)));
   };
   if (!server.bind_to_port(args->listen_address, args->port, 0)) {
     writeLog(LOG_LEVEL_FATAL,

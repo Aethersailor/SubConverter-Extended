@@ -44,6 +44,8 @@ struct Settings {
               managedConfigPrefix;
   int listenPort = 25500, maxPendingConns = 10, maxConcurThreads = 16,
       maxServerThreads = 128;
+  std::string resourceControl = "compat";
+  std::string resourceControlSource = "builtin-default";
   bool prependInsert = true, skipFailedLinks = false;
   bool fallbackToDefaultExternalConfig = false;
   bool customOpenClashRulesSourceSwitch = false;

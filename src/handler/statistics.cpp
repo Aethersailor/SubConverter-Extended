@@ -27,6 +27,7 @@
 #include "server/request_context.h"
 #include "utils/logger.h"
 #include "utils/redact.h"
+#include "utils/resource_control.h"
 
 namespace {
 
@@ -584,6 +585,72 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(admission.accepted);
   writer.Key("rejected");
   writer.Uint64(admission.rejected);
+  writer.Key("max_entries");
+  writer.Uint64(admission.max_entries);
+  writer.Key("max_bytes");
+  writer.Uint64(admission.max_bytes);
+  writer.EndObject();
+  const ResourceControlSnapshot resources = resourceControlSnapshot();
+  writer.Key("resource_control");
+  writer.StartObject();
+  writer.Key("mode");
+  writer.String(resources.mode.c_str());
+  writer.Key("source");
+  writer.String(resources.source.c_str());
+  writer.Key("controller_state");
+  writer.String(resources.controller_state.c_str());
+  writer.Key("hardware_fingerprint");
+  writer.String(resources.hardware_fingerprint.c_str());
+  writer.Key("sample_count");
+  writer.Uint64(resources.sample_count);
+  writer.Key("effective_cpu_millis");
+  writer.Uint64(resources.effective_cpu_millis);
+  writer.Key("affinity_cpus");
+  writer.Uint64(resources.affinity_cpus);
+  writer.Key("cpuset_cpus");
+  writer.Uint64(resources.cpuset_cpus);
+  writer.Key("cpu_quota_millis");
+  writer.Uint64(resources.cpu_quota_millis);
+  writer.Key("memory_current_bytes");
+  writer.Uint64(resources.memory_current_bytes);
+  writer.Key("memory_high_bytes");
+  writer.Uint64(resources.memory_high_bytes);
+  writer.Key("memory_max_bytes");
+  writer.Uint64(resources.memory_max_bytes);
+  writer.Key("swap_current_bytes");
+  writer.Uint64(resources.swap_current_bytes);
+  writer.Key("host_total_memory_bytes");
+  writer.Uint64(resources.host_total_memory_bytes);
+  writer.Key("host_available_memory_bytes");
+  writer.Uint64(resources.host_available_memory_bytes);
+  writer.Key("nofile_soft");
+  writer.Uint64(resources.nofile_soft);
+  writer.Key("pids_current");
+  writer.Uint64(resources.pids_current);
+  writer.Key("pids_max");
+  writer.Uint64(resources.pids_max);
+  writer.Key("memory_psi_some_milli_percent");
+  writer.Uint64(resources.memory_psi_some_milli_percent);
+  writer.Key("memory_psi_full_milli_percent");
+  writer.Uint64(resources.memory_psi_full_milli_percent);
+  writer.Key("io_psi_some_milli_percent");
+  writer.Uint64(resources.io_psi_some_milli_percent);
+  writer.Key("suggested_cpu_permits");
+  writer.Uint64(resources.suggested_cpu_permits);
+  writer.Key("configured_cpu_cap");
+  writer.Uint64(resources.configured_cpu_cap);
+  writer.Key("suggested_active_flows");
+  writer.Uint64(resources.suggested_active_flows);
+  writer.Key("suggested_outbound_connections");
+  writer.Uint64(resources.suggested_outbound_connections);
+  writer.Key("hardware_complete");
+  writer.Bool(resources.hardware_complete);
+  writer.Key("curve_valid");
+  writer.Bool(resources.curve_valid);
+  writer.Key("permits_applied");
+  writer.Bool(resources.permits_applied);
+  writer.Key("pressure_fallback");
+  writer.Bool(resources.pressure_fallback);
   writer.EndObject();
   writer.EndObject();
   return std::string(buffer.GetString(), buffer.GetSize());

@@ -499,6 +499,9 @@ log_level = "info"
 # 是否强制输出详细调试信息；true 会覆盖 log_level 并使用 verbose 级别，可能包含敏感配置细节。
 # Whether to force verbose diagnostics; true overrides log_level with verbose and may expose sensitive configuration details.
 print_debug_info = false
+# 资源控制模式：compat 保持旧参数语义；force_max 使用硬件感知的保守静态许可；adaptive 目前只输出 shadow 建议。未知值会拒绝启动。
+# Resource mode: compat preserves legacy limits; force_max applies conservative hardware-aware permits; adaptive is shadow-only for now. Unknown values fail startup.
+resource_control = "compat"
 # cpp-httplib 等待队列上限；兼容模式暂时保留 10240 的最低值，显式新资源模式才允许使用更小上限。
 # cpp-httplib pending-task limit; compatibility mode keeps a 10240 floor until an explicit new resource mode allows a lower bound.
 max_pending_connections = 10240

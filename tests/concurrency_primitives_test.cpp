@@ -11,6 +11,7 @@
 
 #include "utils/bounded_executor.h"
 #include "utils/concurrent_lru_cache.h"
+#include "utils/resource_control.h"
 #include "utils/workload_scheduler.h"
 
 using namespace std::chrono_literals;
@@ -324,10 +325,38 @@ static void testExternalConfigCacheSemantics() {
   assert(parses == 6);
 }
 
+static void testResourceControlPrimitives() {
+  assert(parseResourceControlMode("compat") == ResourceControlMode::Compat);
+  assert(parseResourceControlMode("adaptive") ==
+         ResourceControlMode::Adaptive);
+  assert(parseResourceControlMode("force_max") ==
+         ResourceControlMode::ForceMax);
+  assert(!parseResourceControlMode("automatic"));
+
+  assert(parseCpuSetCount("0-2,4,6-7") == 6);
+  assert(parseCpuSetCount(" 1 , 3-5 ") == 4);
+  assert(parseCpuSetCount("4-2") == 0);
+  assert(parseCpuSetCount("0,x") == 0);
+
+  assert(computeEffectiveCpu(8.0, 4.0, 2.5, 16.0) == 2.5);
+  assert(computeEffectiveCpu(8.0, 0.0, 0.0, 16.0) == 8.0);
+  assert(computeEffectiveCpu(0.0, 0.0, 0.0, 3.0) == 3.0);
+
+  const ResourcePermitBudget three_core =
+      computeConservativeResourceBudget(3.75, 16);
+  assert(three_core.cpu_permits == 3);
+  assert(three_core.active_flows == 48);
+  assert(three_core.outbound_connections == 48);
+  const ResourcePermitBudget capped =
+      computeConservativeResourceBudget(8.0, 4);
+  assert(capped.cpu_permits == 4);
+}
+
 int main() {
   testBoundedExecutor();
   testWorkloadScheduler();
   testConcurrentLruCache();
   testExternalConfigCacheSemantics();
+  testResourceControlPrimitives();
   return 0;
 }

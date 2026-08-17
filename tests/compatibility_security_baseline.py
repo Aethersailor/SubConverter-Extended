@@ -10854,6 +10854,31 @@ def main() -> int:
         raise AssertionError("missing provider proxy_direct did not default to true")
     if snapshots[0]["security"]["profile"] != "lan":
         raise AssertionError("historical security profile default changed")
+    if snapshots[0]["advanced"]["resource_control"] != "compat":
+        raise AssertionError("missing resource_control did not default to compat")
+    resource_env = os.environ.copy()
+    resource_env["SUBCONVERTER_RESOURCE_CONTROL"] = "adaptive"
+    adaptive_snapshot = load_settings_snapshot(
+        settings_snapshot_helper,
+        COMPAT_FIXTURES / "legacy-pref.toml",
+        resource_env,
+    )
+    if adaptive_snapshot["advanced"]["resource_control"] != "adaptive":
+        raise AssertionError("resource_control environment override failed")
+    invalid_resource_env = os.environ.copy()
+    invalid_resource_env["SUBCONVERTER_RESOURCE_CONTROL"] = "automatic"
+    invalid_resource = subprocess.run(
+        [str(settings_snapshot_helper), str(COMPAT_FIXTURES / "legacy-pref.toml")],
+        cwd=REPOSITORY,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=invalid_resource_env,
+    )
+    if invalid_resource.returncode == 0:
+        raise AssertionError("invalid resource_control was accepted")
     security_configuration_matrix_baseline(settings_snapshot_helper)
     settings_reload_compatibility_baseline(settings_snapshot_helper)
     settings_singbox_wireguard_endpoint_baseline(settings_snapshot_helper)

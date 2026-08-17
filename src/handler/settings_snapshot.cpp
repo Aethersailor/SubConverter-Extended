@@ -107,6 +107,7 @@ std::string sanitizedSettingsSnapshot(const Settings &settings) {
        }},
       {"advanced",
        {
+           {"resource_control", settings.resourceControl},
            {"max_allowed_rulesets", settings.maxAllowedRulesets},
            {"max_allowed_rules", settings.maxAllowedRules},
            {"max_allowed_download_size", settings.maxAllowedDownloadSize},

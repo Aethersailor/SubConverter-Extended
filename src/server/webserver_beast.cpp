@@ -186,7 +186,8 @@ public:
         handlers(static_cast<std::size_t>(
             std::max(args->max_workers, 1))),
         connection_limit(static_cast<std::size_t>(
-            std::max(10240, args->max_conn))) {}
+            global.resourceControl == "compat" ? std::max(10240, args->max_conn)
+                                                : std::max(1, args->max_conn))) {}
 
   bool bind() {
     beast::error_code error;
@@ -204,7 +205,10 @@ public:
     acceptor.bind(endpoint, error);
     if (error)
       return false;
-    acceptor.listen(std::max(10240, args->max_conn), error);
+    acceptor.listen(global.resourceControl == "compat"
+                        ? std::max(10240, args->max_conn)
+                        : std::max(1, args->max_conn),
+                    error);
     return !error;
   }
 

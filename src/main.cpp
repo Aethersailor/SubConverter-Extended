@@ -28,6 +28,7 @@
 #include "utils/defer.h"
 #include "utils/logger.h"
 #include "utils/rapidjson_extra.h"
+#include "utils/resource_control.h"
 #include "utils/system.h"
 #include "version.h"
 
@@ -181,6 +182,7 @@ void cron_tick_caller() {
 }
 
 void shutdown_runtime() {
+  shutdownResourceControlRuntime();
   shutdownConversionScheduler();
   shutdownRulesetExecutor();
   statistics::shutdown();
@@ -271,6 +273,7 @@ int main(int argc, char *argv[]) {
   // drains accepted requests before returning, so only then may the executor
   // cancel unobserved work and release its curl leases before the pool stops.
   defer(shutdown_runtime();)
+  startResourceControlRuntime();
   statistics::initialize();
   // vfs::vfs_read("vfs.ini");
   if (!global.updateRulesetOnRequest)

@@ -34,6 +34,7 @@
 #include "utils/logger.h"
 #include "utils/network.h"
 #include "utils/redact.h"
+#include "utils/resource_control.h"
 #include "utils/system.h"
 #include "utils/urlencode.h"
 #include "version.h"
@@ -1127,9 +1128,18 @@ public:
         curl_multi_setopt(multi_, CURLMOPT_SOCKETDATA, this);
         curl_multi_setopt(multi_, CURLMOPT_TIMERFUNCTION, timerCallback);
         curl_multi_setopt(multi_, CURLMOPT_TIMERDATA, this);
-        curl_multi_setopt(multi_, CURLMOPT_MAX_TOTAL_CONNECTIONS, 64L);
-        curl_multi_setopt(multi_, CURLMOPT_MAX_HOST_CONNECTIONS, 16L);
-        curl_multi_setopt(multi_, CURLMOPT_MAXCONNECTS, 64L);
+        const ResourceControlSnapshot resources = resourceControlSnapshot();
+        const long total_connections =
+            resources.mode == "force_max"
+                ? static_cast<long>(std::clamp<uint64_t>(
+                      resources.suggested_outbound_connections, 1, 64))
+                : 64L;
+        const long host_connections = std::min(16L, total_connections);
+        curl_multi_setopt(multi_, CURLMOPT_MAX_TOTAL_CONNECTIONS,
+                          total_connections);
+        curl_multi_setopt(multi_, CURLMOPT_MAX_HOST_CONNECTIONS,
+                          host_connections);
+        curl_multi_setopt(multi_, CURLMOPT_MAXCONNECTS, total_connections);
 #ifdef CURLPIPE_MULTIPLEX
         curl_multi_setopt(multi_, CURLMOPT_PIPELINING,
                           static_cast<long>(CURLPIPE_MULTIPLEX));
@@ -1138,7 +1148,8 @@ public:
         worker_ = std::thread([this]() { run(); });
         writeLog(LOG_LEVEL_INFO,
                  "OUTBOUND_MULTI_ENGINE resolver=asynchronous "
-                 "total_connections=64 host_connections=16");
+                 "total_connections=" + std::to_string(total_connections) +
+                 " host_connections=" + std::to_string(host_connections));
     }
 
     ~CurlMultiEngine()

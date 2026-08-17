@@ -41,9 +41,13 @@ struct RequestAdmissionSnapshot
     uint64_t active_bytes = 0;
     uint64_t accepted = 0;
     uint64_t rejected = 0;
+    uint64_t max_entries = 0;
+    uint64_t max_bytes = 0;
 };
 
 RequestAdmissionSnapshot requestAdmissionSnapshot() noexcept;
+void configureRequestAdmissionLimits(uint64_t max_entries,
+                                     uint64_t max_bytes) noexcept;
 bool tryRequestAdmission(uint64_t bytes) noexcept;
 void releaseRequestAdmission(uint64_t bytes) noexcept;
 

@@ -23,6 +23,10 @@ services:
       # confirmed, explicitly select public or strict.
       # SUBCONVERTER_SECURITY_PROFILE: public
       # SUBCONVERTER_ALLOW_PUBLIC_UPLOAD: "false"
+      # 旧部署保持 compat；force_max 目前使用保守硬件许可，adaptive 只记录 shadow 建议。
+      # Existing deployments stay on compat; force_max currently uses conservative
+      # hardware-aware permits, while adaptive records shadow suggestions only.
+      # SUBCONVERTER_RESOURCE_CONTROL: compat
       # Dashboard 防爆破默认只信任 socket peer。只有容器端口不对外直通、且入口代理会覆盖所选头时才同时配置以下两项。
       # Dashboard brute-force protection trusts only the socket peer by default. Set both only when the container is not directly reachable and the edge proxy overwrites the selected header.
       # SUBCONVERTER_DASHBOARD_CLIENT_IP_HEADER: x-forwarded-for
