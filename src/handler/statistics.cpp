@@ -22,6 +22,7 @@
 #include "handler/settings.h"
 #include "handler/settings_view.h"
 #include "handler/statistics_v2.h"
+#include "handler/webget.h"
 #include "server/request_context.h"
 #include "utils/logger.h"
 #include "utils/redact.h"
@@ -543,6 +544,18 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.EndArray();
   writer.Key("request_lifecycle");
   writeRequestLifecycle(writer);
+  const AsyncFetchEngineSnapshot fetch = asyncFetchEngineSnapshot();
+  writer.Key("outbound_fetch");
+  writer.StartObject();
+  writer.Key("available");
+  writer.Bool(fetch.available);
+  writer.Key("pending");
+  writer.Uint64(fetch.pending);
+  writer.Key("active");
+  writer.Uint64(fetch.active);
+  writer.Key("buffered_bytes");
+  writer.Uint64(fetch.buffered_bytes);
+  writer.EndObject();
   writer.EndObject();
   return std::string(buffer.GetString(), buffer.GetSize());
 }

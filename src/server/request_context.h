@@ -171,6 +171,8 @@ class RequestCancellationToken {
 public:
   RequestCancellationToken() = default;
 
+  bool valid() const noexcept { return static_cast<bool>(state_); }
+
   bool isCancellationRequested() const noexcept {
     return reason() != RequestCancellationReason::None;
   }
