@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -90,6 +91,61 @@ static void testBoundedExecutor() {
   assert(!ran_after_shutdown);
 }
 
+static void testBoundedExecutorDeadlineAndCancellation() {
+  BoundedExecutor executor(1, 1);
+  std::promise<void> release;
+  std::shared_future<void> released = release.get_future().share();
+  std::promise<void> started;
+  auto active = executor.submit([&] {
+    started.set_value();
+    released.wait();
+    return 1;
+  });
+  started.get_future().wait();
+  auto queued = executor.submit([&] {
+    released.wait();
+    return 2;
+  });
+
+  std::atomic<bool> deadline_executed{false};
+  auto deadline = executor.submitUntil(
+      std::chrono::steady_clock::now() + 20ms, {}, [&] {
+        deadline_executed.store(true);
+        return 3;
+      });
+  assert(deadline.status == ExecutorSubmitStatus::Deadline);
+  bool deadline_error = false;
+  try {
+    (void)deadline.future.get();
+  } catch (const ExecutorSubmitError &error) {
+    deadline_error = error.status() == ExecutorSubmitStatus::Deadline;
+  }
+  assert(deadline_error && !deadline_executed.load());
+
+  RequestCancellationSource cancellation_source;
+  cancellation_source.cancel(RequestCancellationReason::NoConsumers);
+  std::atomic<bool> cancelled_executed{false};
+  auto cancelled = executor.submitUntil(
+      std::chrono::steady_clock::time_point::max(),
+      cancellation_source.token(), [&] {
+        cancelled_executed.store(true);
+        return 4;
+      });
+  assert(cancelled.status == ExecutorSubmitStatus::Cancelled);
+  bool cancelled_error = false;
+  try {
+    (void)cancelled.future.get();
+  } catch (const ExecutorSubmitError &error) {
+    cancelled_error = error.status() == ExecutorSubmitStatus::Cancelled;
+  }
+  assert(cancelled_error && !cancelled_executed.load());
+
+  release.set_value();
+  assert(active.get() == 1);
+  assert(queued.get() == 2);
+  executor.shutdown();
+}
+
 static void testWorkloadScheduler() {
   WorkloadScheduler scheduler(1, 3, 10);
   std::promise<void> release;
@@ -171,6 +227,186 @@ static void testWorkloadScheduler() {
   assert(snapshot.accepted == 3);
   assert(snapshot.rejected == 3);
   scheduler.shutdown(true);
+}
+
+static void testWorkloadSchedulerActiveQueueWeights() {
+  auto run_sequence = [](RequestCostClass first_class, int first_count,
+                         RequestCostClass second_class, int second_count) {
+    WorkloadScheduler scheduler(1, 128, 1024);
+    std::promise<void> release;
+    std::shared_future<void> released = release.get_future().share();
+    std::promise<void> started;
+    auto blocker = scheduler.submit(
+        RequestCostClass::Medium, 1,
+        std::chrono::steady_clock::time_point::max(), {}, [&] {
+          started.set_value();
+          released.wait();
+        });
+    started.get_future().wait();
+
+    std::mutex mutex;
+    std::vector<RequestCostClass> order;
+    std::vector<std::future<void>> futures;
+    auto enqueue = [&](RequestCostClass cost, int count) {
+      for (int index = 0; index < count; ++index) {
+        auto submitted = scheduler.submit(
+            cost, 1, std::chrono::steady_clock::time_point::max(), {},
+            [&, cost] {
+              std::lock_guard<std::mutex> lock(mutex);
+              order.push_back(cost);
+            });
+        assert(submitted.status == SchedulerSubmitStatus::Accepted);
+        futures.emplace_back(std::move(submitted.future));
+      }
+    };
+    enqueue(first_class, first_count);
+    enqueue(second_class, second_count);
+    release.set_value();
+    blocker.future.get();
+    for (auto &future : futures)
+      future.get();
+    scheduler.shutdown(true);
+    return order;
+  };
+
+  const std::vector<RequestCostClass> low_high =
+      run_sequence(RequestCostClass::Low, 32, RequestCostClass::High, 8);
+  const auto high_in_first_eighteen = std::count(
+      low_high.begin(), low_high.begin() + 18, RequestCostClass::High);
+  assert(high_in_first_eighteen >= 2);
+
+  const std::vector<RequestCostClass> medium_high =
+      run_sequence(RequestCostClass::Medium, 20, RequestCostClass::High, 5);
+  const auto high_in_first_ten = std::count(
+      medium_high.begin(), medium_high.begin() + 10, RequestCostClass::High);
+  assert(high_in_first_ten >= 2);
+
+  WorkloadScheduler all_classes(1, 128, 1024);
+  std::promise<void> release;
+  std::shared_future<void> released = release.get_future().share();
+  std::promise<void> started;
+  auto blocker = all_classes.submit(
+      RequestCostClass::Medium, 1,
+      std::chrono::steady_clock::time_point::max(), {}, [&] {
+        started.set_value();
+        released.wait();
+      });
+  started.get_future().wait();
+  std::mutex all_mutex;
+  std::vector<RequestCostClass> all_order;
+  std::vector<std::future<void>> all_futures;
+  for (const auto [cost, count] :
+       std::array<std::pair<RequestCostClass, int>, 3>{
+           std::pair{RequestCostClass::Low, 32},
+           std::pair{RequestCostClass::Medium, 16},
+           std::pair{RequestCostClass::High, 4}}) {
+    for (int index = 0; index < count; ++index) {
+      auto submitted = all_classes.submit(
+          cost, 1, std::chrono::steady_clock::time_point::max(), {},
+          [&, cost] {
+            std::lock_guard<std::mutex> lock(all_mutex);
+            all_order.push_back(cost);
+          });
+      assert(submitted.status == SchedulerSubmitStatus::Accepted);
+      all_futures.emplace_back(std::move(submitted.future));
+    }
+  }
+  release.set_value();
+  blocker.future.get();
+  for (auto &future : all_futures)
+    future.get();
+  const auto first_cycle_end = all_order.begin() + 13;
+  assert(std::count(all_order.begin(), first_cycle_end,
+                    RequestCostClass::Low) == 8);
+  assert(std::count(all_order.begin(), first_cycle_end,
+                    RequestCostClass::Medium) == 4);
+  assert(std::count(all_order.begin(), first_cycle_end,
+                    RequestCostClass::High) == 1);
+  all_classes.shutdown(true);
+
+  WorkloadScheduler aging(1, 64, 1024);
+  std::promise<void> aging_release;
+  std::shared_future<void> aging_released =
+      aging_release.get_future().share();
+  std::promise<void> aging_started;
+  auto aging_blocker = aging.submit(
+      RequestCostClass::Low, 1,
+      std::chrono::steady_clock::time_point::max(), {}, [&] {
+        aging_started.set_value();
+        aging_released.wait();
+      });
+  aging_started.get_future().wait();
+  std::vector<int> aging_order;
+  auto aged = aging.submit(
+      RequestCostClass::High, 1,
+      std::chrono::steady_clock::time_point::max(), {}, [&] {
+        aging_order.push_back(1);
+      });
+  std::this_thread::sleep_for(520ms);
+  std::vector<std::future<void>> fresh;
+  for (int index = 0; index < 16; ++index) {
+    auto submitted = aging.submit(
+        RequestCostClass::Low, 1,
+        std::chrono::steady_clock::time_point::max(), {}, [&] {
+          aging_order.push_back(2);
+        });
+    fresh.emplace_back(std::move(submitted.future));
+  }
+  aging_release.set_value();
+  aging_blocker.future.get();
+  aged.future.get();
+  for (auto &future : fresh)
+    future.get();
+  assert(!aging_order.empty() && aging_order.front() == 1);
+  aging.shutdown(true);
+}
+
+static void testRetainedResponseByteBudget() {
+  constexpr uint64_t boundary = UINT64_C(64) * 1024 * 1024;
+  configureRetainedResponseByteLimit(boundary);
+  assert(tryRetainResponseBytes(boundary));
+  assert(!tryRetainResponseBytes(1));
+  RetainedResponseByteSnapshot snapshot = retainedResponseByteSnapshot();
+  assert(snapshot.limit == boundary && snapshot.used == boundary &&
+         snapshot.rejected == 1);
+  releaseRetainedResponseBytes(boundary);
+  assert(retainedResponseByteSnapshot().used == 0);
+
+  configureRetainedResponseByteLimit(0);
+  assert(tryRetainResponseBytes(boundary + 1));
+  assert(retainedResponseByteSnapshot().used == boundary + 1);
+  releaseRetainedResponseBytes(boundary + 1);
+
+  configureRetainedResponseByteLimit(boundary);
+  {
+    auto context = std::make_shared<RequestContext>(
+        "byte-budget", RequestContext::Clock::now(),
+        RequestContext::Clock::now() + 1s);
+    assert(context->retainResponseBytes(boundary - 1));
+    std::string completed_result(1, 'x');
+    assert(context->retainResponseBytes(completed_result.size()));
+    assert(retainedResponseByteSnapshot().used == boundary);
+  }
+  assert(retainedResponseByteSnapshot().used == 0);
+  configureRetainedResponseByteLimit(0);
+}
+
+static void testActiveRequestShutdownCancellation() {
+  auto first = std::make_shared<RequestContext>(
+      "active-shutdown-first", RequestContext::Clock::now());
+  auto second = std::make_shared<RequestContext>(
+      "active-shutdown-second", RequestContext::Clock::now());
+  auto sending = std::make_shared<RequestContext>(
+      "active-shutdown-sending", RequestContext::Clock::now());
+  sending->setCurrentStage(RequestStage::Send);
+  second->requestCancellation(RequestCancellationReason::ClientDisconnected);
+  cancelAllActiveRequests(RequestCancellationReason::Shutdown);
+  assert(first->cancellationToken().reason() ==
+         RequestCancellationReason::Shutdown);
+  assert(second->cancellationToken().reason() ==
+         RequestCancellationReason::ClientDisconnected);
+  assert(sending->cancellationToken().reason() ==
+         RequestCancellationReason::None);
 }
 
 static void testConcurrentLruCache() {
@@ -341,6 +577,7 @@ static void testResourceControlPrimitives() {
   assert(computeEffectiveCpu(8.0, 4.0, 2.5, 16.0) == 2.5);
   assert(computeEffectiveCpu(8.0, 0.0, 0.0, 16.0) == 8.0);
   assert(computeEffectiveCpu(0.0, 0.0, 0.0, 3.0) == 3.0);
+  assert(computeEffectiveCpu(8.0, 8.0, 0.5, 16.0) == 1.0);
 
   const ResourcePermitBudget three_core =
       computeConservativeResourceBudget(3.75, 16);
@@ -350,11 +587,26 @@ static void testResourceControlPrimitives() {
   const ResourcePermitBudget capped =
       computeConservativeResourceBudget(8.0, 4);
   assert(capped.cpu_permits == 4);
+  const ResourcePermitBudget fractional =
+      computeConservativeResourceBudget(0.5, 16);
+  assert(fractional.cpu_permits == 1);
+
+  ResourceControlSnapshot uncalibrated;
+  uncalibrated.mode = "force_max";
+  uncalibrated.hardware_fingerprint = "hardware-a";
+  uncalibrated.hardware_complete = true;
+  assert(!resourceCurveMatches(uncalibrated, ""));
+  assert(!resourceCurveMatches(uncalibrated, "hardware-b"));
+  assert(resourceCurveMatches(uncalibrated, "hardware-a"));
 }
 
 int main() {
   testBoundedExecutor();
+  testBoundedExecutorDeadlineAndCancellation();
   testWorkloadScheduler();
+  testWorkloadSchedulerActiveQueueWeights();
+  testRetainedResponseByteBudget();
+  testActiveRequestShutdownCancellation();
   testConcurrentLruCache();
   testExternalConfigCacheSemantics();
   testResourceControlPrimitives();

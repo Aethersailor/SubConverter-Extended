@@ -63,7 +63,20 @@ struct listener_args
     int max_workers;
     void (*looper_callback)() = nullptr;
     uint32_t looper_interval = 200;
+    uint32_t request_deadline_ms = 15000;
+    void (*shutdown_callback)() = nullptr;
 };
+
+struct RequestCancellationResponse
+{
+    int status_code = 0;
+    std::string body;
+    string_icase_map headers;
+};
+
+bool requestCancellationResponse(
+    const std::shared_ptr<RequestContext> &context,
+    RequestCancellationResponse &response) noexcept;
 
 struct responseRoute
 {

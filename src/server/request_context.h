@@ -7,8 +7,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 enum class RequestCostClass : uint8_t {
   Unclassified,
@@ -168,6 +171,7 @@ inline const char *requestSingleflightRoleName(
 
 struct RequestCancellationState {
   std::atomic<RequestCancellationReason> reason{RequestCancellationReason::None};
+  std::atomic<bool> drain_on_shutdown{false};
 };
 
 class RequestCancellationToken {
@@ -206,9 +210,16 @@ public:
   bool cancel(RequestCancellationReason reason) noexcept {
     if (reason == RequestCancellationReason::None)
       return false;
+    if (reason == RequestCancellationReason::Shutdown &&
+        state_->drain_on_shutdown.load(std::memory_order_acquire))
+      return false;
     RequestCancellationReason expected = RequestCancellationReason::None;
     return state_->reason.compare_exchange_strong(
         expected, reason, std::memory_order_acq_rel, std::memory_order_acquire);
+  }
+
+  std::shared_ptr<RequestCancellationState> stateHandle() const noexcept {
+    return state_;
   }
 
 private:
@@ -231,6 +242,148 @@ inline std::array<std::atomic<uint64_t>, kRequestStageCount>
     stage_nanoseconds{};
 inline std::array<std::atomic<uint64_t>, kRequestStageCount> stage_samples{};
 } // namespace request_lifecycle_metrics
+
+struct RetainedResponseByteSnapshot {
+  uint64_t used = 0;
+  uint64_t limit = 0;
+  uint64_t rejected = 0;
+};
+
+namespace retained_response_bytes {
+inline std::atomic<uint64_t> used{0};
+inline std::atomic<uint64_t> limit{0};
+inline std::atomic<uint64_t> rejected{0};
+} // namespace retained_response_bytes
+
+namespace active_request_cancellations {
+inline std::mutex mutex;
+inline std::unordered_map<const RequestCancellationState *,
+                          std::weak_ptr<RequestCancellationState>> states;
+} // namespace active_request_cancellations
+
+inline void registerActiveRequestCancellation(
+    const std::shared_ptr<RequestCancellationState> &state) {
+  if (!state)
+    return;
+  std::lock_guard<std::mutex> lock(active_request_cancellations::mutex);
+  active_request_cancellations::states[state.get()] = state;
+}
+
+inline void unregisterActiveRequestCancellation(
+    const std::shared_ptr<RequestCancellationState> &state) noexcept {
+  if (!state)
+    return;
+  std::lock_guard<std::mutex> lock(active_request_cancellations::mutex);
+  active_request_cancellations::states.erase(state.get());
+}
+
+inline void cancelAllActiveRequests(RequestCancellationReason reason) noexcept {
+  std::vector<std::shared_ptr<RequestCancellationState>> states;
+  {
+    std::lock_guard<std::mutex> lock(active_request_cancellations::mutex);
+    for (auto iter = active_request_cancellations::states.begin();
+         iter != active_request_cancellations::states.end();) {
+      if (auto state = iter->second.lock()) {
+        states.emplace_back(std::move(state));
+        ++iter;
+      } else {
+        iter = active_request_cancellations::states.erase(iter);
+      }
+    }
+  }
+  for (const auto &state : states) {
+    if (reason == RequestCancellationReason::Shutdown &&
+        state->drain_on_shutdown.load(std::memory_order_acquire))
+      continue;
+    RequestCancellationReason expected = RequestCancellationReason::None;
+    state->reason.compare_exchange_strong(
+        expected, reason, std::memory_order_acq_rel,
+        std::memory_order_acquire);
+  }
+}
+
+inline void configureRetainedResponseByteLimit(uint64_t limit) noexcept {
+  retained_response_bytes::limit.store(limit, std::memory_order_release);
+}
+
+inline bool tryRetainResponseBytes(uint64_t bytes) noexcept {
+  if (bytes == 0)
+    return true;
+  const uint64_t limit =
+      retained_response_bytes::limit.load(std::memory_order_acquire);
+  uint64_t current =
+      retained_response_bytes::used.load(std::memory_order_acquire);
+  for (;;) {
+    if (UINT64_MAX - current < bytes ||
+        (limit != 0 && (bytes > limit || current > limit - bytes))) {
+      retained_response_bytes::rejected.fetch_add(1,
+                                                   std::memory_order_relaxed);
+      return false;
+    }
+    if (retained_response_bytes::used.compare_exchange_weak(
+            current, current + bytes, std::memory_order_acq_rel,
+            std::memory_order_acquire))
+      return true;
+  }
+}
+
+inline void releaseRetainedResponseBytes(uint64_t bytes) noexcept {
+  if (bytes != 0)
+    retained_response_bytes::used.fetch_sub(bytes, std::memory_order_acq_rel);
+}
+
+inline RetainedResponseByteSnapshot retainedResponseByteSnapshot() noexcept {
+  return {retained_response_bytes::used.load(std::memory_order_relaxed),
+          retained_response_bytes::limit.load(std::memory_order_relaxed),
+          retained_response_bytes::rejected.load(std::memory_order_relaxed)};
+}
+
+class RetainedResponseByteLease {
+public:
+  RetainedResponseByteLease() = default;
+  explicit RetainedResponseByteLease(uint64_t bytes) { acquire(bytes); }
+  ~RetainedResponseByteLease() { reset(); }
+
+  RetainedResponseByteLease(RetainedResponseByteLease &&other) noexcept
+      : bytes_(std::exchange(other.bytes_, 0)) {}
+  RetainedResponseByteLease &
+  operator=(RetainedResponseByteLease &&other) noexcept {
+    if (this != &other) {
+      reset();
+      bytes_ = std::exchange(other.bytes_, 0);
+    }
+    return *this;
+  }
+
+  RetainedResponseByteLease(const RetainedResponseByteLease &) = delete;
+  RetainedResponseByteLease &
+  operator=(const RetainedResponseByteLease &) = delete;
+
+  bool acquire(uint64_t bytes) noexcept {
+    if (bytes_ != 0 || !tryRetainResponseBytes(bytes))
+      return false;
+    bytes_ = bytes;
+    return true;
+  }
+
+  bool retain(uint64_t bytes) noexcept {
+    if (bytes == 0)
+      return true;
+    if (!tryRetainResponseBytes(bytes))
+      return false;
+    bytes_ += bytes;
+    return true;
+  }
+
+  void reset() noexcept {
+    releaseRetainedResponseBytes(std::exchange(bytes_, 0));
+  }
+
+  uint64_t bytes() const noexcept { return bytes_; }
+
+private:
+  uint64_t bytes_ = 0;
+};
 
 inline RequestLifecycleMetricsSnapshot requestLifecycleMetricsSnapshot() {
   RequestLifecycleMetricsSnapshot result;
@@ -271,6 +424,13 @@ public:
         deadline_(deadline) {
     for (auto &value : stage_nanoseconds_)
       value.store(0, std::memory_order_relaxed);
+    registerActiveRequestCancellation(cancellation_source_.stateHandle());
+  }
+
+  ~RequestContext() {
+    unregisterActiveRequestCancellation(cancellation_source_.stateHandle());
+    releaseRetainedResponseBytes(
+        retained_response_bytes_.load(std::memory_order_relaxed));
   }
 
   const std::string &requestId() const noexcept { return request_id_; }
@@ -304,6 +464,21 @@ public:
 
   uint64_t estimatedBytes() const noexcept {
     return estimated_bytes_.load(std::memory_order_acquire);
+  }
+
+  bool retainResponseBytes(uint64_t bytes) noexcept {
+    if (bytes == 0)
+      return true;
+    if (!tryRetainResponseBytes(bytes)) {
+      suggestFailure(RequestFailureAttribution::Capacity);
+      return false;
+    }
+    retained_response_bytes_.fetch_add(bytes, std::memory_order_acq_rel);
+    return true;
+  }
+
+  uint64_t retainedResponseBytes() const noexcept {
+    return retained_response_bytes_.load(std::memory_order_acquire);
   }
 
   void setSingleflightRole(RequestSingleflightRole value) noexcept {
@@ -358,8 +533,12 @@ public:
   }
 
   void setCurrentStage(RequestStage stage) noexcept {
-    if (stage != RequestStage::Count)
+    if (stage != RequestStage::Count) {
       current_stage_.store(stage, std::memory_order_release);
+      if (stage == RequestStage::Send)
+        cancellation_source_.stateHandle()->drain_on_shutdown.store(
+            true, std::memory_order_release);
+    }
   }
 
   RequestStage currentStage() const noexcept {
@@ -482,6 +661,7 @@ private:
   RequestCancellationSource cancellation_source_;
   std::atomic<RequestCostClass> cost_class_{RequestCostClass::Unclassified};
   std::atomic<uint64_t> estimated_bytes_{0};
+  std::atomic<uint64_t> retained_response_bytes_{0};
   std::atomic<RequestSingleflightRole> singleflight_role_{
       RequestSingleflightRole::None};
   std::atomic<uint32_t> consumers_{1};

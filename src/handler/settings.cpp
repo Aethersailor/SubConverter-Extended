@@ -332,12 +332,24 @@ static void finalizePerformanceSettings() {
     global.maxServerThreads =
         to_int(max_server_threads, global.maxServerThreads);
 
+  std::string request_deadline_ms =
+      getEnv("SUBCONVERTER_REQUEST_DEADLINE_MS");
+  if (!request_deadline_ms.empty())
+    global.requestDeadlineMs =
+        to_int(request_deadline_ms, global.requestDeadlineMs);
+
   std::string resource_control =
       getEnv("SUBCONVERTER_RESOURCE_CONTROL");
   if (!resource_control.empty()) {
     global.resourceControl = resource_control;
     global.resourceControlSource = "environment";
   }
+
+  std::string force_max_curve_fingerprint =
+      getEnv("SUBCONVERTER_FORCE_MAX_CURVE_FINGERPRINT");
+  if (!force_max_curve_fingerprint.empty())
+    global.forceMaxCurveFingerprint =
+        trimWhitespace(force_max_curve_fingerprint, true, true);
 
   std::string response_cache_ttl = getEnv("SUBCONVERTER_RESPONSE_CACHE_TTL");
   if (!response_cache_ttl.empty())
@@ -349,6 +361,8 @@ static void finalizePerformanceSettings() {
     global.maxConcurThreads = 1;
   if (global.maxServerThreads < global.maxConcurThreads)
     global.maxServerThreads = global.maxConcurThreads;
+  global.requestDeadlineMs =
+      std::clamp(global.requestDeadlineMs, 100, 300000);
   configureResourceControl(global);
   if (global.responseCacheTtl > 5) {
     writeLog(LOG_LEVEL_WARNING,
@@ -1083,9 +1097,12 @@ void readYAMLConf(YAML::Node &node,
       node["advanced"]["resource_control"] >> global.resourceControl;
       global.resourceControlSource = "file:yaml";
     }
+    node["advanced"]["force_max_curve_fingerprint"] >>
+        global.forceMaxCurveFingerprint;
     node["advanced"]["max_pending_connections"] >> global.maxPendingConns;
     node["advanced"]["max_concurrent_threads"] >> global.maxConcurThreads;
     node["advanced"]["max_server_threads"] >> global.maxServerThreads;
+    node["advanced"]["request_deadline_ms"] >> global.requestDeadlineMs;
     node["advanced"]["max_allowed_rulesets"] >> global.maxAllowedRulesets;
     node["advanced"]["max_allowed_rules"] >> global.maxAllowedRules;
     node["advanced"]["max_allowed_download_size"] >>
@@ -1377,10 +1394,15 @@ void readTOMLConf(toml::value &root,
     global.resourceControlSource = "file:toml";
   }
 
+  if (section_advanced.contains("force_max_curve_fingerprint"))
+    global.forceMaxCurveFingerprint = toml::find<std::string>(
+        section_advanced, "force_max_curve_fingerprint");
+
   find_if_exist(
       section_advanced, "max_pending_connections", global.maxPendingConns,
       "max_concurrent_threads", global.maxConcurThreads,
-      "max_server_threads", global.maxServerThreads, "max_allowed_rulesets",
+      "max_server_threads", global.maxServerThreads, "request_deadline_ms",
+      global.requestDeadlineMs, "max_allowed_rulesets",
       global.maxAllowedRulesets, "max_allowed_rules", global.maxAllowedRules,
       "max_allowed_download_size", global.maxAllowedDownloadSize,
       "enable_cache", enable_cache, "cache_subscription", cache_subscription,
@@ -1850,9 +1872,12 @@ bool readConf() {
     ini.get_if_exist("resource_control", global.resourceControl);
     global.resourceControlSource = "file:ini";
   }
+  ini.get_if_exist("force_max_curve_fingerprint",
+                   global.forceMaxCurveFingerprint);
   ini.get_int_if_exist("max_pending_connections", global.maxPendingConns);
   ini.get_int_if_exist("max_concurrent_threads", global.maxConcurThreads);
   ini.get_int_if_exist("max_server_threads", global.maxServerThreads);
+  ini.get_int_if_exist("request_deadline_ms", global.requestDeadlineMs);
   ini.get_number_if_exist("max_allowed_rulesets", global.maxAllowedRulesets);
   ini.get_number_if_exist("max_allowed_rules", global.maxAllowedRules);
   ini.get_number_if_exist("max_allowed_download_size",

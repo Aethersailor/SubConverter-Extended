@@ -1,4 +1,6 @@
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <iostream>
@@ -36,6 +38,40 @@ std::string okHandler(Request &request, Response &response) {
   return "ok";
 }
 
+std::atomic<bool> blocking_started{false};
+std::atomic<bool> blocking_release{false};
+std::atomic<bool> cancellation_started{false};
+std::atomic<RequestCancellationReason> observed_cancellation{
+    RequestCancellationReason::None};
+
+std::string healthHandler(Request &, Response &) { return "ok"; }
+
+std::string blockingHandler(Request &, Response &) {
+  blocking_started.store(true, std::memory_order_release);
+  while (!blocking_release.load(std::memory_order_acquire))
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  return "released";
+}
+
+std::string delayedHandler(Request &, Response &) {
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  return "half-close-ok";
+}
+
+std::string cancellationHandler(Request &request, Response &) {
+  require(static_cast<bool>(request.context),
+          "cancellation handler lost request context");
+  cancellation_started.store(true, std::memory_order_release);
+  const auto stop = std::chrono::steady_clock::now() +
+                    std::chrono::seconds(2);
+  while (!request.context->cancellationToken().isCancellationRequested() &&
+         std::chrono::steady_clock::now() < stop)
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  observed_cancellation.store(request.context->cancellationToken().reason(),
+                              std::memory_order_release);
+  return "cancelled";
+}
+
 bool validRequestId(const std::string &value) {
   return value.size() == 32 &&
          std::all_of(value.begin(), value.end(), [](unsigned char ch) {
@@ -68,6 +104,191 @@ int unusedPort() {
   const int port = ntohs(address.sin_port);
   closesocket(socket_fd);
   return port;
+}
+
+bool waitFlag(const std::atomic<bool> &flag,
+              std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (!flag.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  return flag.load(std::memory_order_acquire);
+}
+
+void waitReady(int port) {
+  httplib::Client client("127.0.0.1", port);
+  client.set_connection_timeout(0, 100000);
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    if (auto response = client.Get("/healthz"); response &&
+        response->status == 200)
+      return;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  throw std::runtime_error("test server did not become ready");
+}
+
+void testIndependentHealthChannel() {
+  blocking_started.store(false);
+  blocking_release.store(false);
+  global.maxServerThreads = 1;
+  WebServer server;
+  server.append_response("GET", "/healthz", "text/plain", healthHandler);
+  server.append_response("GET", "/block", "text/plain", blockingHandler);
+  listener_args args;
+  args.listen_address = "127.0.0.1";
+  args.port = unusedPort();
+  args.max_conn = 8;
+  args.max_workers = 1;
+  args.looper_interval = 5;
+  args.request_deadline_ms = 2000;
+  std::thread server_thread([&] { server.start_web_server_multi(&args); });
+  waitReady(args.port);
+
+  auto blocked = std::async(std::launch::async, [&] {
+    httplib::Client client("127.0.0.1", args.port);
+    client.set_read_timeout(3, 0);
+    return client.Get("/block");
+  });
+  require(waitFlag(blocking_started, std::chrono::seconds(1)),
+          "blocking route did not occupy the sole normal handler");
+  httplib::Client health_client("127.0.0.1", args.port);
+  health_client.set_read_timeout(0, 500000);
+  const auto started = std::chrono::steady_clock::now();
+  httplib::Result health = health_client.Get("/healthz");
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  blocking_release.store(true, std::memory_order_release);
+  httplib::Result blocked_response = blocked.get();
+  server.stop_web_server();
+  server_thread.join();
+  require(health && health->status == 200 && health->body == "ok",
+          "health channel was blocked by the normal handler pool");
+  require(elapsed < std::chrono::milliseconds(500),
+          "health channel exceeded its strict response deadline");
+  require(blocked_response && blocked_response->status == 200,
+          "blocking route did not finish after release");
+}
+
+void testAbsoluteDeadline() {
+  cancellation_started.store(false);
+  observed_cancellation.store(RequestCancellationReason::None);
+  WebServer server;
+  server.append_response("GET", "/healthz", "text/plain", healthHandler);
+  server.append_response("GET", "/deadline", "text/plain",
+                         cancellationHandler);
+  listener_args args;
+  args.listen_address = "127.0.0.1";
+  args.port = unusedPort();
+  args.max_conn = 8;
+  args.max_workers = 1;
+  args.looper_interval = 5;
+  args.request_deadline_ms = 100;
+  std::thread server_thread([&] { server.start_web_server_multi(&args); });
+  waitReady(args.port);
+  httplib::Client client("127.0.0.1", args.port);
+  client.set_read_timeout(2, 0);
+  httplib::Result response = client.Get("/deadline");
+  server.stop_web_server();
+  server_thread.join();
+  require(response && response->status == 504,
+          "absolute request deadline did not produce HTTP 504");
+  require(observed_cancellation.load() == RequestCancellationReason::Deadline,
+          "absolute deadline did not reach the handler cancellation token");
+}
+
+void testClientDisconnectCancellation() {
+  cancellation_started.store(false);
+  observed_cancellation.store(RequestCancellationReason::None);
+  WebServer server;
+  server.append_response("GET", "/healthz", "text/plain", healthHandler);
+  server.append_response("GET", "/disconnect", "text/plain",
+                         cancellationHandler);
+  listener_args args;
+  args.listen_address = "127.0.0.1";
+  args.port = unusedPort();
+  args.max_conn = 8;
+  args.max_workers = 1;
+  args.looper_interval = 5;
+  args.request_deadline_ms = 2000;
+  std::thread server_thread([&] { server.start_web_server_multi(&args); });
+  waitReady(args.port);
+
+  SOCKET socket_fd = socket(AF_INET, SOCK_STREAM, 0);
+  require(socket_fd != INVALID_SOCKET, "disconnect socket failed");
+  sockaddr_in address {};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = htons(static_cast<unsigned short>(args.port));
+  require(connect(socket_fd, reinterpret_cast<sockaddr *>(&address),
+                  sizeof(address)) == 0,
+          "disconnect client connect failed");
+  const std::string request =
+      "GET /disconnect HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+  require(send(socket_fd, request.data(), static_cast<int>(request.size()), 0) ==
+              static_cast<int>(request.size()),
+          "disconnect client send failed");
+  require(waitFlag(cancellation_started, std::chrono::seconds(1)),
+          "disconnect handler did not start");
+  closesocket(socket_fd);
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::seconds(1);
+  while (observed_cancellation.load() == RequestCancellationReason::None &&
+         std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  server.stop_web_server();
+  server_thread.join();
+  require(observed_cancellation.load() ==
+              RequestCancellationReason::ClientDisconnected,
+          "socket disconnect did not reach the request cancellation token");
+}
+
+void testClientHalfCloseStillReceivesResponse() {
+  WebServer server;
+  server.append_response("GET", "/healthz", "text/plain", healthHandler);
+  server.append_response("GET", "/half-close", "text/plain", delayedHandler);
+  listener_args args;
+  args.listen_address = "127.0.0.1";
+  args.port = unusedPort();
+  args.max_conn = 8;
+  args.max_workers = 1;
+  args.looper_interval = 5;
+  args.request_deadline_ms = 1000;
+  std::thread server_thread([&] { server.start_web_server_multi(&args); });
+  waitReady(args.port);
+
+  SOCKET socket_fd = socket(AF_INET, SOCK_STREAM, 0);
+  require(socket_fd != INVALID_SOCKET, "half-close socket failed");
+  sockaddr_in address {};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = htons(static_cast<unsigned short>(args.port));
+  require(connect(socket_fd, reinterpret_cast<sockaddr *>(&address),
+                  sizeof(address)) == 0,
+          "half-close client connect failed");
+  const std::string request =
+      "GET /half-close HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+  require(send(socket_fd, request.data(), static_cast<int>(request.size()), 0) ==
+              static_cast<int>(request.size()),
+          "half-close client send failed");
+#ifdef _WIN32
+  require(shutdown(socket_fd, SD_SEND) == 0, "half-close shutdown failed");
+#else
+  require(shutdown(socket_fd, SHUT_WR) == 0, "half-close shutdown failed");
+#endif
+  std::string response;
+  std::array<char, 1024> buffer{};
+  for (;;) {
+    const int received =
+        recv(socket_fd, buffer.data(), static_cast<int>(buffer.size()), 0);
+    if (received <= 0)
+      break;
+    response.append(buffer.data(), static_cast<size_t>(received));
+  }
+  closesocket(socket_fd);
+  server.stop_web_server();
+  server_thread.join();
+  require(response.find(" 499 ") != std::string::npos &&
+              response.find("Client closed request") != std::string::npos,
+          "client half-close did not enter the cancellation path");
 }
 
 } // namespace
@@ -301,5 +522,13 @@ int main() {
           "request admission permits leaked after server shutdown");
   require(admission.accepted == 6 && admission.rejected == 0,
           "request admission did not account for every response path");
+  resetRequestLifecycleMetricsForTests();
+  testIndependentHealthChannel();
+  resetRequestLifecycleMetricsForTests();
+  testAbsoluteDeadline();
+  resetRequestLifecycleMetricsForTests();
+  testClientDisconnectCancellation();
+  resetRequestLifecycleMetricsForTests();
+  testClientHalfCloseStillReceivesResponse();
   return 0;
 }

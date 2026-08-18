@@ -321,6 +321,10 @@ ResourceControlSnapshot discover(const Settings &settings,
           : mode == ResourceControlMode::ForceMax ? "force_max_fallback"
                                                    : "idle";
   snapshot.hardware_fingerprint = fingerprint(snapshot);
+  snapshot.curve_valid =
+      resourceCurveMatches(snapshot, settings.forceMaxCurveFingerprint);
+  if (mode == ResourceControlMode::ForceMax && snapshot.curve_valid)
+    snapshot.controller_state = "force_max";
   return snapshot;
 }
 
@@ -435,7 +439,9 @@ void configureResourceControl(Settings &settings) {
       throw std::invalid_argument(
           "advanced.resource_control changes require a process restart");
   }
-  if (*parsed == ResourceControlMode::ForceMax) {
+  const bool apply_force_max =
+      *parsed == ResourceControlMode::ForceMax && snapshot.curve_valid;
+  if (apply_force_max) {
     settings.maxConcurThreads = static_cast<int>(
         std::min<uint64_t>(snapshot.suggested_cpu_permits, INT_MAX));
     settings.maxServerThreads =
@@ -443,14 +449,19 @@ void configureResourceControl(Settings &settings) {
     snapshot.permits_applied = true;
   }
   uint64_t admission_entries =
-      *parsed == ResourceControlMode::Compat
+      *parsed == ResourceControlMode::Compat ||
+              (*parsed == ResourceControlMode::ForceMax && !apply_force_max)
           ? UINT64_C(2048)
           : static_cast<uint64_t>(std::clamp(settings.maxPendingConns, 1, 2048));
-  if (*parsed == ResourceControlMode::ForceMax)
+  if (apply_force_max)
     admission_entries =
         std::min<uint64_t>(admission_entries, snapshot.suggested_active_flows);
   configureRequestAdmissionLimits(admission_entries,
                                   UINT64_C(64) * 1024 * 1024);
+  configureRetainedResponseByteLimit(
+      *parsed == ResourceControlMode::Adaptive || apply_force_max
+          ? UINT64_C(64) * 1024 * 1024
+          : 0);
   {
     std::lock_guard<std::mutex> lock(runtime.mutex);
     runtime.snapshot = snapshot;
@@ -468,7 +479,8 @@ void configureResourceControl(Settings &settings) {
                std::to_string(snapshot.memory_max_bytes) +
                " cpu_permits=" +
                std::to_string(snapshot.suggested_cpu_permits) +
-               " curve_valid=false applied=" +
+               " curve_valid=" +
+               (snapshot.curve_valid ? "true" : "false") + " applied=" +
                (snapshot.permits_applied ? "true" : "false") +
                " hardware=" + snapshot.hardware_fingerprint);
 }

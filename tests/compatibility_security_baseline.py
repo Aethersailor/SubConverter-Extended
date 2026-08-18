@@ -1029,7 +1029,10 @@ class FixtureHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
 
     def do_POST(self) -> None:  # noqa: N802
         request_path = urllib.parse.urlsplit(self.path).path
@@ -1265,6 +1268,28 @@ def request_with_raw_headers(
         raise AssertionError(f"invalid raw HTTP response: {status_line!r}") from error
 
 
+def disconnect_raw_request(
+    base_url: str,
+    path: str,
+    params: dict[str, str],
+    *,
+    hold_seconds: float = 0.1,
+) -> None:
+    parsed = urllib.parse.urlsplit(base_url)
+    query = urllib.parse.urlencode(params)
+    target = path + (f"?{query}" if query else "")
+    with socket.create_connection((parsed.hostname, parsed.port), timeout=20) as sock:
+        request_lines = [
+            f"GET {target} HTTP/1.1",
+            f"Host: {parsed.hostname}:{parsed.port}",
+            "Connection: close",
+            "",
+            "",
+        ]
+        sock.sendall("\r\n".join(request_lines).encode("ascii"))
+        time.sleep(hold_seconds)
+
+
 def wait_ready(base_url: str, process: subprocess.Popen[bytes]) -> None:
     for _ in range(100):
         if process.poll() is not None:
@@ -1323,6 +1348,7 @@ def running_service(
     log_level: str = "info",
     config_replacements: tuple[tuple[str, str], ...] = (),
     pref_path_capture: list[Path] | None = None,
+    environment: dict[str, str] | None = None,
 ):
     port = unused_port()
     baseline = (COMPAT_FIXTURES / "legacy-pref.toml").read_text(
@@ -1448,6 +1474,8 @@ def running_service(
         env.pop("SUBCONVERTER_GIST_API_BASE", None)
         if gist_api_base is not None:
             env["SUBCONVERTER_GIST_API_BASE"] = gist_api_base
+        if environment:
+            env.update(environment)
         env["PORT"] = str(port)
         env["NO_PROXY"] = "127.0.0.1,localhost"
         env["no_proxy"] = "127.0.0.1,localhost"
@@ -3930,6 +3958,7 @@ def vary_cache_and_coalesce_baseline(binary: Path, fixture_base: str) -> None:
     logs: list[str] = []
     with running_service(
         binary,
+        statistics=True,
         log_capture=logs,
         log_level="debug",
         config_replacements=(("response_cache_ttl = 0", "response_cache_ttl = 5"),),
@@ -3999,12 +4028,159 @@ def vary_cache_and_coalesce_baseline(binary: Path, fixture_base: str) -> None:
         if len(set(coalesced_request_ids)) != len(coalesced_request_ids):
             raise AssertionError("coalesced responses reused the owner request ID")
 
+        FixtureHandler.slow_subscription_started.clear()
+        FixtureHandler.slow_subscription_release.clear()
+        surviving_owner: list[tuple[int, bytes, dict[str, str]]] = []
+        surviving_error: list[BaseException] = []
+        disconnect_params = {
+            **slow_params,
+            "url": fixture_base
+            + "/slow-subscription.txt?case=disconnect-follower",
+        }
+
+        def run_surviving_owner() -> None:
+            try:
+                surviving_owner.append(request(base_url, "/sub", disconnect_params))
+            except BaseException as error:
+                surviving_error.append(error)
+
+        owner = threading.Thread(target=run_surviving_owner)
+        owner.start()
+        if not FixtureHandler.slow_subscription_started.wait(timeout=10):
+            FixtureHandler.slow_subscription_release.set()
+            owner.join(timeout=5)
+            raise AssertionError("disconnect owner did not reach the slow fixture")
+        disconnect_raw_request(base_url, "/sub", disconnect_params)
+        FixtureHandler.slow_subscription_release.set()
+        owner.join(timeout=20)
+        if owner.is_alive() or surviving_error:
+            raise AssertionError(
+                "disconnecting follower prevented the owner from finishing: "
+                f"{surviving_error!r}"
+            )
+        if len(surviving_owner) != 1 or surviving_owner[0][0] != 200:
+            raise AssertionError(
+                f"disconnecting follower changed owner result: {surviving_owner!r}"
+            )
+
+        FixtureHandler.slow_subscription_started.clear()
+        FixtureHandler.slow_subscription_release.clear()
+        abandoned_params = {
+            **slow_params,
+            "url": fixture_base
+            + "/slow-subscription.txt?case=no-consumers",
+        }
+        abandoned = threading.Thread(
+            target=disconnect_raw_request,
+            args=(base_url, "/sub", abandoned_params),
+            kwargs={"hold_seconds": 0.25},
+        )
+        abandoned.start()
+        if not FixtureHandler.slow_subscription_started.wait(timeout=10):
+            FixtureHandler.slow_subscription_release.set()
+            abandoned.join(timeout=5)
+            raise AssertionError("abandoned owner did not reach the slow fixture")
+        abandoned.join(timeout=5)
+        if abandoned.is_alive():
+            FixtureHandler.slow_subscription_release.set()
+            raise AssertionError("abandoned owner socket did not close")
+        time.sleep(0.2)
+        dashboard_headers = {
+            "Authorization": "Basic "
+            + base64.b64encode(
+                b"fixture-admin:fixture-dashboard-secret"
+            ).decode()
+        }
+        time.sleep(1.1)
+        status, body, _ = request(
+            base_url, "/dashboard/data", headers=dashboard_headers
+        )
+        if status != 200:
+            raise AssertionError(
+                f"retained-byte dashboard returned HTTP {status}: {body!r}"
+            )
+        dashboard = json.loads(body)
+        retained = dashboard["retained_response_bytes"]
+        retained_bytes = int(retained["used"])
+        outbound = dashboard["outbound_fetch"]
+        if outbound["active"] != 0 or outbound["pending"] != 0:
+            raise AssertionError(
+                "last-consumer disconnect did not cancel outbound work: "
+                f"{outbound!r}"
+            )
+        if retained_bytes <= 0 or retained_bytes > 8 * 1024 * 1024:
+            raise AssertionError(
+                "completed microcache result did not retain a bounded byte "
+                f"lease: {retained_bytes}"
+            )
+        expected_retained_limit = (
+            64 * 1024 * 1024
+            if os.environ.get("SUBCONVERTER_RESOURCE_CONTROL") == "adaptive"
+            else 0
+        )
+        if retained["limit"] != expected_retained_limit:
+            raise AssertionError(
+                "resource profile retained-byte limit changed: "
+                f"expected={expected_retained_limit}, "
+                f"actual={retained!r}"
+            )
+        FixtureHandler.slow_subscription_release.set()
+
     diagnostics = "".join(logs)
     if "/sub 响应微缓存命中。" not in diagnostics:
         raise AssertionError("microcache Vary probe did not hit the response cache")
     assert_coalesced_request_link(
         diagnostics, coalesced_request_ids, "coalesced Vary probe"
     )
+
+
+def response_microcache_eviction_baseline(binary: Path) -> None:
+    dashboard_headers = {
+        "Authorization": "Basic "
+        + base64.b64encode(
+            b"fixture-admin:fixture-dashboard-secret"
+        ).decode()
+    }
+    with running_service(
+        binary,
+        statistics=True,
+        config_replacements=(
+            ("response_cache_ttl = 0", "response_cache_ttl = 5"),
+        ),
+        environment={"SUBCONVERTER_RESPONSE_CACHE_MAX_BYTES": "1024"},
+    ) as base_url:
+        for index in range(8):
+            uri = SUBSCRIPTION.strip().replace("#Smoke", f"#Cache-{index}")
+            status, body, _ = request(
+                base_url,
+                "/sub",
+                {
+                    "target": "clash",
+                    "url": uri,
+                    "config": DISABLE_RULEGEN_CONFIG,
+                    "list": "true",
+                },
+            )
+            if status != 200 or f"Cache-{index}".encode() not in body:
+                raise AssertionError(
+                    f"microcache eviction fixture {index} failed: "
+                    f"HTTP {status}: {body!r}"
+                )
+        time.sleep(1.1)
+        status, body, _ = request(
+            base_url, "/dashboard/data", headers=dashboard_headers
+        )
+        if status != 200:
+            raise AssertionError(
+                f"microcache dashboard returned HTTP {status}: {body!r}"
+            )
+        cache = json.loads(body)["response_microcache"]
+        if cache["max_bytes"] != 1024:
+            raise AssertionError(f"microcache byte limit changed: {cache!r}")
+        if not (0 < cache["entries"] < 8 and 0 < cache["bytes"] <= 1024):
+            raise AssertionError(
+                f"microcache did not evict by retained bytes: {cache!r}"
+            )
 
 
 def explain_privacy_and_cache_baseline(binary: Path, fixture_base: str) -> None:
@@ -10661,6 +10837,159 @@ def request_generation_reload_baseline(binary: Path, fixture_base: str) -> None:
             )
 
 
+def ruleset_executor_capacity_baseline(binary: Path, fixture_base: str) -> None:
+    logs: list[str] = []
+    FixtureHandler.slow_ruleset_started.clear()
+    FixtureHandler.slow_ruleset_release.clear()
+    slow_sources = "|".join(
+        (
+            fixture_base + "/slow-generation-rules.list?parent=one-a",
+            fixture_base + "/slow-generation-rules.list?parent=one-b",
+        )
+    )
+    second_sources = "|".join(
+        (
+            fixture_base + "/slow-generation-rules.list?parent=two-a",
+            fixture_base + "/slow-generation-rules.list?parent=two-b",
+        )
+    )
+    first_params = {
+        "url": base64.urlsafe_b64encode(slow_sources.encode()).decode(),
+        "type": "6",
+    }
+    second_params = {
+        "url": base64.urlsafe_b64encode(second_sources.encode()).decode(),
+        "type": "6",
+    }
+    first_result: list[tuple[int, bytes, dict[str, str]]] = []
+    first_error: list[BaseException] = []
+    with running_service(
+        binary,
+        log_capture=logs,
+        config_replacements=(
+            ("async_fetch_ruleset = false", "async_fetch_ruleset = true"),
+        ),
+        environment={
+            "SUBCONVERTER_RULESET_EXECUTOR_WORKERS": "1",
+            "SUBCONVERTER_RULESET_EXECUTOR_QUEUE_CAPACITY": "1",
+        },
+    ) as base_url:
+        def run_first_parent() -> None:
+            try:
+                first_result.append(request(base_url, "/getruleset", first_params))
+            except BaseException as error:
+                first_error.append(error)
+
+        first = threading.Thread(target=run_first_parent)
+        first.start()
+        if not FixtureHandler.slow_ruleset_started.wait(timeout=10):
+            FixtureHandler.slow_ruleset_release.set()
+            first.join(timeout=5)
+            raise AssertionError("first ruleset parent did not occupy the executor")
+        status, body, headers = request(base_url, "/getruleset", second_params)
+        if status != 503 or headers.get("retry-after") != "1":
+            FixtureHandler.slow_ruleset_release.set()
+            first.join(timeout=5)
+            raise AssertionError(
+                "ruleset queue saturation did not return deterministic "
+                f"capacity status: HTTP {status}, headers={headers!r}, "
+                f"body={body!r}"
+            )
+        if b"capacity" not in body.lower():
+            raise AssertionError("ruleset capacity response lost its reason")
+        FixtureHandler.slow_ruleset_release.set()
+        first.join(timeout=20)
+        if first.is_alive() or first_error:
+            raise AssertionError(
+                f"first ruleset parent did not drain: {first_error!r}"
+            )
+        if len(first_result) != 1 or first_result[0][0] != 200:
+            raise AssertionError(
+                f"first ruleset parent changed result: {first_result!r}"
+            )
+    diagnostics = "".join(logs)
+    if "path=/getruleset status=500" in diagnostics:
+        raise AssertionError("ruleset executor saturation escaped as HTTP 500")
+
+
+def conversion_cost_classification_baseline(
+    binary: Path, fixture_base: str
+) -> None:
+    logs: list[str] = []
+    with running_service(
+        binary,
+        log_capture=logs,
+        log_level="debug",
+    ) as base_url:
+        cases = (
+            (
+                "provider",
+                {
+                    "target": "clash",
+                    "url": fixture_base + "/subscription.txt",
+                },
+            ),
+            (
+                "filter",
+                {
+                    "target": "clash",
+                    "url": fixture_base + "/subscription.txt",
+                    "include": "Smoke",
+                },
+            ),
+            (
+                "rename",
+                {
+                    "target": "clash",
+                    "url": fixture_base + "/subscription.txt",
+                    "rename": "Smoke@Renamed",
+                },
+            ),
+            (
+                "default-config",
+                {
+                    "target": "clash",
+                    "url": SUBSCRIPTION.strip(),
+                },
+            ),
+            (
+                "multiple",
+                {
+                    "target": "clash",
+                    "url": fixture_base
+                    + "/subscription.txt|"
+                    + SUBSCRIPTION.strip(),
+                },
+            ),
+            (
+                "rules",
+                {
+                    "target": "clash",
+                    "url": SUBSCRIPTION.strip(),
+                    "ruleprepend": "DOMAIN,cost.test,Proxy",
+                },
+            ),
+        )
+        for label, params in cases:
+            status, body, _ = request(base_url, "/sub", params)
+            if status != 200:
+                raise AssertionError(
+                    f"{label} cost probe failed: HTTP {status}: {body!r}"
+                )
+    costs = re.findall(r"CONVERSION_ADMISSION cost=(low|medium|high)", "".join(logs))
+    if len(costs) < len(cases):
+        raise AssertionError(f"conversion cost diagnostics are incomplete: {costs!r}")
+    observed = costs[-len(cases):]
+    if observed[0] == "low" or observed[3] == "low":
+        raise AssertionError(
+            f"unproven provider/default conversion was classified Low: {observed!r}"
+        )
+    if any(observed[index] != "high" for index in (1, 2, 4, 5)):
+        raise AssertionError(
+            f"filter/rename/multiple/rules conversion was not High: {observed!r}"
+        )
+
+
 def getruleset_generation_reload_baseline(binary: Path, fixture_base: str) -> None:
     pref_paths: list[Path] = []
     replacements = (
@@ -10838,8 +11167,21 @@ def main() -> int:
     log_redirection_baseline(binary)
     early_log_level_parsing_baseline(settings_snapshot_helper)
 
+    baseline_environment = os.environ.copy()
+    for name in (
+        "SUBCONVERTER_HTTP_BACKEND",
+        "SUBCONVERTER_RESOURCE_CONTROL",
+        "SUBCONVERTER_FORCE_MAX_CURVE_FINGERPRINT",
+        "SUBCONVERTER_RULESET_EXECUTOR_WORKERS",
+        "SUBCONVERTER_RULESET_EXECUTOR_QUEUE_CAPACITY",
+    ):
+        baseline_environment.pop(name, None)
     snapshots = [
-        load_settings_snapshot(settings_snapshot_helper, COMPAT_FIXTURES / name)
+        load_settings_snapshot(
+            settings_snapshot_helper,
+            COMPAT_FIXTURES / name,
+            baseline_environment,
+        )
         for name in ("legacy-pref.ini", "legacy-pref.yml", "legacy-pref.toml")
     ]
     if snapshots[1:] != snapshots[:1] * 2:
@@ -10856,7 +11198,26 @@ def main() -> int:
         raise AssertionError("historical security profile default changed")
     if snapshots[0]["advanced"]["resource_control"] != "compat":
         raise AssertionError("missing resource_control did not default to compat")
-    resource_env = os.environ.copy()
+    if snapshots[0]["advanced"]["force_max_curve_fingerprint"]:
+        raise AssertionError("force_max curve unexpectedly defaulted to valid")
+    with tempfile.TemporaryDirectory(prefix="sce-unlimited-download-") as temporary:
+        unlimited_pref = Path(temporary) / "pref.toml"
+        unlimited_content = (COMPAT_FIXTURES / "legacy-pref.toml").read_text(
+            encoding="utf-8"
+        ).replace(
+            "max_allowed_download_size = 1048576",
+            "max_allowed_download_size = 0",
+            1,
+        )
+        unlimited_pref.write_text(unlimited_content, encoding="utf-8", newline="\n")
+        unlimited_snapshot = load_settings_snapshot(
+            settings_snapshot_helper,
+            unlimited_pref,
+            baseline_environment,
+        )
+        if unlimited_snapshot["advanced"]["max_allowed_download_size"] != 0:
+            raise AssertionError("max_allowed_download_size=0 lost unlimited semantics")
+    resource_env = baseline_environment.copy()
     resource_env["SUBCONVERTER_RESOURCE_CONTROL"] = "adaptive"
     adaptive_snapshot = load_settings_snapshot(
         settings_snapshot_helper,
@@ -10865,7 +11226,43 @@ def main() -> int:
     )
     if adaptive_snapshot["advanced"]["resource_control"] != "adaptive":
         raise AssertionError("resource_control environment override failed")
-    invalid_resource_env = os.environ.copy()
+    force_env = baseline_environment.copy()
+    force_env["SUBCONVERTER_RESOURCE_CONTROL"] = "force_max"
+    force_snapshot, force_logs = run_settings_snapshot(
+        settings_snapshot_helper,
+        COMPAT_FIXTURES / "legacy-pref.toml",
+        force_env,
+    )
+    if force_snapshot["server"] != snapshots[0]["server"]:
+        raise AssertionError("uncalibrated force_max changed server permits")
+    if "curve_valid=false applied=false" not in force_logs:
+        raise AssertionError("uncalibrated force_max did not stay in fallback")
+    hardware = re.search(r"hardware=([0-9a-f]{16})", force_logs)
+    if hardware is None:
+        raise AssertionError("force_max hardware fingerprint log is missing")
+    mismatch_env = force_env.copy()
+    mismatch_env["SUBCONVERTER_FORCE_MAX_CURVE_FINGERPRINT"] = "0" * 16
+    mismatch_snapshot, mismatch_logs = run_settings_snapshot(
+        settings_snapshot_helper,
+        COMPAT_FIXTURES / "legacy-pref.toml",
+        mismatch_env,
+    )
+    if mismatch_snapshot["server"] != snapshots[0]["server"] or (
+        "curve_valid=false applied=false" not in mismatch_logs
+    ):
+        raise AssertionError("hardware fingerprint change reused a force_max curve")
+    calibrated_env = force_env.copy()
+    calibrated_env["SUBCONVERTER_FORCE_MAX_CURVE_FINGERPRINT"] = hardware.group(1)
+    calibrated_snapshot, calibrated_logs = run_settings_snapshot(
+        settings_snapshot_helper,
+        COMPAT_FIXTURES / "legacy-pref.toml",
+        calibrated_env,
+    )
+    if "curve_valid=true applied=true" not in calibrated_logs:
+        raise AssertionError("matching force_max hardware curve was not applied")
+    if calibrated_snapshot["advanced"]["force_max_curve_fingerprint"] != hardware.group(1):
+        raise AssertionError("force_max curve fingerprint was not retained")
+    invalid_resource_env = baseline_environment.copy()
     invalid_resource_env["SUBCONVERTER_RESOURCE_CONTROL"] = "automatic"
     invalid_resource = subprocess.run(
         [str(settings_snapshot_helper), str(COMPAT_FIXTURES / "legacy-pref.toml")],
@@ -10895,6 +11292,7 @@ def main() -> int:
         parser_failure_level_and_mixed_request_baseline(binary)
         insert_url_parser_route_baseline(binary, fixture_base)
         vary_cache_and_coalesce_baseline(binary, fixture_base)
+        response_microcache_eviction_baseline(binary)
         explain_privacy_and_cache_baseline(binary, fixture_base)
         wireguard_outbound_logs: list[str] = []
         with running_service(
@@ -11028,6 +11426,8 @@ def main() -> int:
         external_config_failure_baseline(binary, fixture_base)
         loopback_proxy_route_baseline(binary, fixture_base)
         loopback_redirect_route_baseline(binary, fixture_base)
+        conversion_cost_classification_baseline(binary, fixture_base)
+        ruleset_executor_capacity_baseline(binary, fixture_base)
         getruleset_generation_reload_baseline(binary, fixture_base)
         request_generation_reload_baseline(binary, fixture_base)
 

@@ -499,9 +499,12 @@ log_level = "info"
 # 是否强制输出详细调试信息；true 会覆盖 log_level 并使用 verbose 级别，可能包含敏感配置细节。
 # Whether to force verbose diagnostics; true overrides log_level with verbose and may expose sensitive configuration details.
 print_debug_info = false
-# 资源控制模式：compat 保持旧参数语义；force_max 使用硬件感知的保守静态许可；adaptive 目前只输出 shadow 建议。未知值会拒绝启动。
-# Resource mode: compat preserves legacy limits; force_max applies conservative hardware-aware permits; adaptive is shadow-only for now. Unknown values fail startup.
+# 资源控制模式：三种模式共用异步入口。compat 映射旧许可；adaptive 只输出 shadow 建议；force_max 仅在下方硬件指纹匹配已验收曲线时应用许可。未知值会拒绝启动。
+# Resource mode: all modes share the async entry. compat maps legacy permits; adaptive is shadow-only; force_max applies permits only when the validated hardware fingerprint below matches. Unknown values fail startup.
 resource_control = "compat"
+# 已完成容量验收的硬件指纹。留空或与当前硬件不匹配时，force_max 回退 compat 静态边界且不应用建议许可。
+# Hardware fingerprint of an accepted capacity curve. When empty or mismatched, force_max falls back to compat static limits without applying suggested permits.
+force_max_curve_fingerprint = ""
 # cpp-httplib 等待队列上限；兼容模式暂时保留 10240 的最低值，显式新资源模式才允许使用更小上限。
 # cpp-httplib pending-task limit; compatibility mode keeps a 10240 floor until an explicit new resource mode allows a lower bound.
 max_pending_connections = 10240
@@ -511,6 +514,9 @@ max_concurrent_threads = 16
 # cpp-httplib 后端在突发流量下的动态工作线程总上限；必须不小于基础线程数，否则会自动提高。SUBCONVERTER_MAX_SERVER_THREADS 可覆盖。
 # Maximum total dynamic workers during bursts on the cpp-httplib backend; it is raised if below the base count. SUBCONVERTER_MAX_SERVER_THREADS overrides it.
 max_server_threads = 128
+# 整个 HTTP 请求的绝对截止时间，单位毫秒；环境变量 SUBCONVERTER_REQUEST_DEADLINE_MS 优先，允许范围 100～300000。
+# Absolute deadline for the whole HTTP request in milliseconds. SUBCONVERTER_REQUEST_DEADLINE_MS takes precedence; accepted range: 100 to 300000.
+request_deadline_ms = 15000
 # 单次配置允许的规则集数量上限；0 表示不限制。
 # Maximum rulesets allowed in one configuration; 0 means unlimited.
 max_allowed_rulesets = 64

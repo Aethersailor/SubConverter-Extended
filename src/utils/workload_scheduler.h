@@ -187,6 +187,11 @@ public:
   }
 
   void shutdown(bool cancel_pending) noexcept {
+    requestShutdown(cancel_pending);
+    join();
+  }
+
+  void requestShutdown(bool cancel_pending) noexcept {
     std::vector<std::shared_ptr<TaskBase>> cancelled;
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -211,6 +216,9 @@ public:
     for (auto &task : cancelled)
       task->cancel(error);
     condition_.notify_all();
+  }
+
+  void join() noexcept {
     for (std::thread &worker : workers_) {
       if (worker.joinable())
         worker.join();
@@ -271,9 +279,19 @@ private:
         now - oldest >= std::chrono::milliseconds(500))
       return popLocked(oldest_index);
 
-    for (std::size_t attempts = 0; attempts < 8; ++attempts) {
-      if (credits_[0] == 0 && credits_[1] == 0 && credits_[2] == 0)
-        credits_ = kWeights;
+    auto activeHasCredit = [this] {
+      for (std::size_t index = 0; index < queues_.size(); ++index) {
+        if (!queues_[index].empty() && credits_[index] != 0)
+          return true;
+      }
+      return false;
+    };
+    if (!activeHasCredit()) {
+      for (std::size_t index = 0; index < queues_.size(); ++index)
+        credits_[index] = queues_[index].empty() ? 0 : kWeights[index];
+    }
+    for (std::size_t attempts = 0; attempts < queues_.size() * 2;
+         ++attempts) {
       const std::size_t index = next_queue_++ % queues_.size();
       if (credits_[index] == 0 || queues_[index].empty())
         continue;

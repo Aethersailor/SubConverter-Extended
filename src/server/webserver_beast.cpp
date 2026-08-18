@@ -2,11 +2,13 @@
 #define BOOST_SYSTEM_NO_DEPRECATED
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iomanip>
 #include <memory>
 #include <mutex>
@@ -150,13 +152,15 @@ public:
   ~BeastSession();
 
   void start();
-  void stopAccepting();
+  void beginShutdown();
 
 private:
   void read();
   void resetParser();
   void onRead(beast::error_code error, std::size_t bytes);
   void process();
+  void armCancellationObservers();
+  void writeHealthResponse();
   void writeImmediateError(http::status status, const std::string &body,
                            const char *retry_after = nullptr);
   void writeResponse(http::response<http::string_body> response);
@@ -164,6 +168,7 @@ private:
   void finish(bool response_sent = false);
 
   beast::tcp_stream stream_;
+  asio::steady_timer deadline_timer_;
   beast::flat_buffer buffer_;
   std::unique_ptr<http::request_parser<http::string_body>> parser_;
   std::shared_ptr<BeastServerState> state_;
@@ -237,7 +242,9 @@ public:
 
   void stop() {
     stopping.store(true);
-    asio::post(context, [self = shared_from_this()] {
+    auto stopped = std::make_shared<std::promise<void>>();
+    std::future<void> stopped_future = stopped->get_future();
+    asio::post(context, [self = shared_from_this(), stopped] {
       beast::error_code ignored;
       self->acceptor.cancel(ignored);
       self->acceptor.close(ignored);
@@ -251,8 +258,10 @@ public:
         }
       }
       for (auto &session : live)
-        session->stopAccepting();
+        session->beginShutdown();
+      stopped->set_value();
     });
+    (void)stopped_future.wait_for(std::chrono::seconds(1));
   }
 
   void addSession(const std::shared_ptr<BeastSession> &session) {
@@ -283,7 +292,8 @@ public:
 
 BeastSession::BeastSession(tcp::socket socket,
                            std::shared_ptr<BeastServerState> state)
-    : stream_(std::move(socket)), state_(std::move(state)) {
+    : stream_(std::move(socket)), deadline_timer_(stream_.get_executor()),
+      state_(std::move(state)) {
   state_->active_sessions.fetch_add(1, std::memory_order_relaxed);
   resetParser();
 }
@@ -296,8 +306,10 @@ BeastSession::~BeastSession() {
 
 void BeastSession::start() { read(); }
 
-void BeastSession::stopAccepting() {
+void BeastSession::beginShutdown() {
   asio::post(stream_.get_executor(), [self = shared_from_this()] {
+    if (self->context_)
+      self->context_->requestCancellation(RequestCancellationReason::Shutdown);
     if (!self->processing_.load(std::memory_order_acquire)) {
       beast::error_code ignored;
       self->stream_.socket().shutdown(tcp::socket::shutdown_both, ignored);
@@ -307,7 +319,11 @@ void BeastSession::stopAccepting() {
 }
 
 void BeastSession::read() {
-  stream_.expires_after(std::chrono::seconds(15));
+  if (context_ &&
+      context_->deadline() != RequestContext::Clock::time_point::max())
+    stream_.expires_at(context_->deadline());
+  else
+    stream_.expires_after(std::chrono::seconds(15));
   http::async_read(stream_, buffer_, *parser_,
                    beast::bind_front_handler(&BeastSession::onRead,
                                              shared_from_this()));
@@ -333,7 +349,10 @@ void BeastSession::onRead(beast::error_code error, std::size_t) {
   if (error) {
     request_id_ = nextBeastRequestId();
     started_at_ = RequestContext::Clock::now();
-    context_ = std::make_shared<RequestContext>(request_id_, started_at_);
+    context_ = std::make_shared<RequestContext>(
+        request_id_, started_at_,
+        started_at_ +
+            std::chrono::milliseconds(state_->args->request_deadline_ms));
     context_->recordAdmissionOnce(RequestContext::Clock::now());
     context_->suggestFailure(RequestFailureAttribution::User);
     writeImmediateError(error == http::error::body_limit
@@ -346,7 +365,10 @@ void BeastSession::onRead(beast::error_code error, std::size_t) {
   }
   request_id_ = nextBeastRequestId();
   started_at_ = RequestContext::Clock::now();
-  context_ = std::make_shared<RequestContext>(request_id_, started_at_);
+  context_ = std::make_shared<RequestContext>(
+      request_id_, started_at_,
+      started_at_ +
+          std::chrono::milliseconds(state_->args->request_deadline_ms));
   context_->recordAdmissionOnce(RequestContext::Clock::now());
   if (parser_->get()[http::field::content_type] ==
           "application/x-www-form-urlencoded" &&
@@ -354,6 +376,14 @@ void BeastSession::onRead(beast::error_code error, std::size_t) {
     context_->suggestFailure(RequestFailureAttribution::User);
     writeImmediateError(http::status::payload_too_large,
                         "Payload too large.\n请求正文过大。\n");
+    return;
+  }
+  if (isHealthTarget(parser_->get().target()) &&
+      (parser_->get().method() == http::verb::get ||
+       parser_->get().method() == http::verb::head)) {
+    context_->setCostClass(RequestCostClass::Low);
+    processing_.store(true, std::memory_order_release);
+    writeHealthResponse();
     return;
   }
   admission_bytes_ = UINT64_C(1024) + parser_->get().target().size() +
@@ -374,8 +404,82 @@ void BeastSession::onRead(beast::error_code error, std::size_t) {
     }
   }
   processing_.store(true, std::memory_order_release);
+  armCancellationObservers();
   asio::post(state_->handlers,
              [self = shared_from_this()] { self->process(); });
+}
+
+void BeastSession::armCancellationObservers() {
+  if (!context_)
+    return;
+  const std::shared_ptr<RequestContext> observed = context_;
+  deadline_timer_.expires_at(observed->deadline());
+  deadline_timer_.async_wait(
+      [self = shared_from_this(), observed](beast::error_code error) {
+        if (!error && self->context_ == observed &&
+            observed->terminalState() == RequestTerminalState::None)
+          observed->requestCancellation(RequestCancellationReason::Deadline);
+      });
+  stream_.socket().async_wait(
+      tcp::socket::wait_read,
+      [self = shared_from_this(), observed](beast::error_code error) {
+        if (error || self->context_ != observed ||
+            observed->terminalState() != RequestTerminalState::None)
+          return;
+        std::array<char, 1> probe{};
+        beast::error_code probe_error;
+        const std::size_t bytes = self->stream_.socket().receive(
+            asio::buffer(probe), asio::socket_base::message_peek,
+            probe_error);
+        if (bytes == 0 || probe_error == asio::error::eof ||
+            probe_error == asio::error::connection_reset ||
+            (probe_error && probe_error != asio::error::eof &&
+             probe_error != asio::error::would_block &&
+             probe_error != asio::error::try_again))
+          observed->requestCancellation(
+              RequestCancellationReason::ClientDisconnected);
+      });
+}
+
+void BeastSession::writeHealthResponse() {
+  const auto &incoming = parser_->get();
+  http::response<http::string_body> response{http::status::ok,
+                                             incoming.version()};
+  response.keep_alive(incoming.keep_alive() && !state_->stopping.load());
+  response.set(http::field::server,
+               "SubConverter-Extended/" VERSION " cURL/" LIBCURL_VERSION);
+  response.set(http::field::content_type, "text/plain; charset=utf-8");
+  response.set(http::field::access_control_allow_origin, "*");
+  response.set("X-Request-ID", request_id_);
+  appendExposeHeader(response, "X-Request-ID");
+  if (state_->server.require_auth &&
+      incoming[http::field::authorization] !=
+          "Basic " + base64Encode(state_->server.auth_user + ":" +
+                                    state_->server.auth_password)) {
+    response.result(http::status::unauthorized);
+    response.set(http::field::www_authenticate,
+                 "Basic realm=" + state_->server.auth_realm +
+                     ", charset=\"UTF-8\"");
+    response.body() = "Unauthorized: missing or invalid credentials.\n"
+                      "未授权：认证凭据缺失或无效。";
+  } else {
+    response.body() = "ok";
+  }
+  writeLog(response.result_int() >= 500 ? LOG_LEVEL_ERROR : LOG_LEVEL_INFO,
+           "HTTP_RESPONSE_PREPARED method=" +
+               std::string(incoming.method_string()) +
+               " path=/healthz status=" +
+               std::to_string(response.result_int()) +
+               " duration_ms=0 response_bytes=" +
+               std::to_string(response.body().size()) +
+               " response_bytes_known=true");
+  const std::size_t body_size = response.body().size();
+  response.prepare_payload();
+  if (incoming.method() == http::verb::head) {
+    response.body().clear();
+    response.content_length(body_size);
+  }
+  writeResponse(std::move(response));
 }
 
 void BeastSession::process() {
@@ -543,6 +647,35 @@ void BeastSession::process() {
                       "处理请求时发生内部服务器错误。\n";
   }
 
+  if (context_->suggestedFailure() == RequestFailureAttribution::Capacity) {
+    outgoing.result(http::status::service_unavailable);
+    outgoing.set(http::field::content_type, "text/plain; charset=utf-8");
+    outgoing.set(http::field::cache_control, "private, no-store");
+    outgoing.set(http::field::retry_after, "1");
+    outgoing.body() =
+        "Service temporarily unavailable: retained byte or execution "
+        "capacity is full.\n服务暂时不可用：保留字节或执行容量已满。\n";
+  }
+
+  RequestCancellationResponse cancellation_response;
+  if (requestCancellationResponse(context_, cancellation_response)) {
+    outgoing.result(
+        static_cast<http::status>(cancellation_response.status_code));
+    outgoing.set(http::field::content_type, "text/plain; charset=utf-8");
+    for (const auto &[name, value] : cancellation_response.headers)
+      outgoing.set(name, value);
+    outgoing.body() = std::move(cancellation_response.body);
+  }
+  if (context_ && !context_->retainResponseBytes(outgoing.body().size())) {
+    outgoing.result(http::status::service_unavailable);
+    outgoing.set(http::field::content_type, "text/plain; charset=utf-8");
+    outgoing.set(http::field::cache_control, "private, no-store");
+    outgoing.set(http::field::retry_after, "1");
+    outgoing.body() =
+        "Service temporarily unavailable: retained response byte capacity "
+        "is full.\n服务暂时不可用：响应字节容量已满。\n";
+  }
+
   if (explain_request) {
     outgoing.set(http::field::cache_control,
                  "private, no-store, max-age=0");
@@ -614,7 +747,14 @@ void BeastSession::writeResponse(http::response<http::string_body> response) {
   auto retained = std::make_shared<http::response<http::string_body>>(
       std::move(response));
   const bool keep_alive = retained->keep_alive();
-  stream_.expires_after(std::chrono::seconds(15));
+  if (context_->deadline() != RequestContext::Clock::time_point::max()) {
+    const auto now = RequestContext::Clock::now();
+    if (now >= context_->deadline())
+      stream_.expires_after(std::chrono::milliseconds(250));
+    else
+      stream_.expires_at(context_->deadline());
+  } else
+    stream_.expires_after(std::chrono::seconds(15));
   http::async_write(stream_, *retained,
                     [self = shared_from_this(), retained, keep_alive](
                         beast::error_code error, std::size_t bytes) {
@@ -636,6 +776,7 @@ void BeastSession::onWrite(bool keep_alive, beast::error_code error,
     }
   }
   processing_.store(false, std::memory_order_release);
+  deadline_timer_.cancel();
   if (error || !keep_alive || state_->stopping.load()) {
     finish(!error);
     return;
@@ -657,6 +798,7 @@ void BeastSession::finish(bool) {
     return;
   if (context_ && context_->terminalState() == RequestTerminalState::None)
     context_->finalizeResponse(500, false);
+  deadline_timer_.cancel();
   beast::error_code ignored;
   stream_.socket().shutdown(tcp::socket::shutdown_both, ignored);
   stream_.socket().close(ignored);
@@ -685,6 +827,9 @@ int startBeastWebServer(WebServer &server, listener_args *args) {
           std::chrono::milliseconds(args->looper_interval));
   }
   state->stop();
+  if (args->shutdown_callback)
+    args->shutdown_callback();
+  state->handlers.stop();
   state->handlers.join();
   for (int attempt = 0; attempt < 300 && state->active_sessions.load() != 0;
        ++attempt)

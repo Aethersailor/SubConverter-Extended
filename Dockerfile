@@ -308,7 +308,7 @@ RUN if [ "${BUILD_TESTS}" = "true" ]; then \
       fi; \
       if [ "${ENABLE_SANITIZERS}" = "true" ] && [ "${SANITIZER_SUITE}" = "focused" ]; then \
         ctest --test-dir . --output-on-failure --timeout 120 \
-          -R '^(shutdown_process|shutdown_process_beast|webserver_error|webserver_error_beast|concurrency_primitives|settings_view|settings_view_invariant_failure|curl_handle_pool|cache_storage)$'; \
+          -R '^(shutdown_process|shutdown_process_httplib|webserver_error|webserver_error_httplib|concurrency_primitives|settings_view|settings_view_invariant_failure|curl_handle_pool|cache_storage)$'; \
       else \
         ctest --test-dir . --output-on-failure --timeout 120; \
       fi; \

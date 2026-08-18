@@ -104,10 +104,13 @@ std::string sanitizedSettingsSnapshot(const Settings &settings) {
            {"max_pending_connections", settings.maxPendingConns},
            {"max_concurrent_threads", settings.maxConcurThreads},
            {"max_server_threads", settings.maxServerThreads},
+           {"request_deadline_ms", settings.requestDeadlineMs},
        }},
       {"advanced",
        {
            {"resource_control", settings.resourceControl},
+           {"force_max_curve_fingerprint",
+            settings.forceMaxCurveFingerprint},
            {"max_allowed_rulesets", settings.maxAllowedRulesets},
            {"max_allowed_rules", settings.maxAllowedRules},
            {"max_allowed_download_size", settings.maxAllowedDownloadSize},

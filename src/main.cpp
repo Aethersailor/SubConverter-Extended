@@ -189,6 +189,13 @@ void shutdown_runtime() {
   shutdownGlobalCurlHandlePool();
 }
 
+void begin_runtime_shutdown() {
+  cancelAllActiveRequests(RequestCancellationReason::Shutdown);
+  shutdownResourceControlRuntime();
+  requestConversionSchedulerShutdown();
+  requestRulesetExecutorShutdown();
+}
+
 int main(int argc, char *argv[]) {
 #ifdef _WIN32
   const UINT original_console_output_code_page = GetConsoleOutputCP();
@@ -367,7 +374,9 @@ int main(int argc, char *argv[]) {
   logSecurityPosture();
   listener_args args = {global.listenAddress,   global.listenPort,
                         global.maxPendingConns, global.maxConcurThreads,
-                        cron_tick_caller,       200};
+                        cron_tick_caller,       200,
+                        static_cast<uint32_t>(global.requestDeadlineMs),
+                        begin_runtime_shutdown};
   // std::cout<<"Serving HTTP @
   // http://"<<listen_address<<":"<<listen_port<<std::endl;
   writeLog(LOG_LEVEL_INFO,

@@ -558,6 +558,28 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Key("buffered_bytes");
   writer.Uint64(fetch.buffered_bytes);
   writer.EndObject();
+  const RetainedResponseByteSnapshot retained =
+      retainedResponseByteSnapshot();
+  writer.Key("retained_response_bytes");
+  writer.StartObject();
+  writer.Key("used");
+  writer.Uint64(retained.used);
+  writer.Key("limit");
+  writer.Uint64(retained.limit);
+  writer.Key("rejected");
+  writer.Uint64(retained.rejected);
+  writer.EndObject();
+  const ResponseMicroCacheSnapshot response_cache =
+      responseMicroCacheSnapshot();
+  writer.Key("response_microcache");
+  writer.StartObject();
+  writer.Key("entries");
+  writer.Uint64(response_cache.entries);
+  writer.Key("bytes");
+  writer.Uint64(response_cache.bytes);
+  writer.Key("max_bytes");
+  writer.Uint64(response_cache.max_bytes);
+  writer.EndObject();
   const WorkloadSchedulerSnapshot scheduler = conversionSchedulerSnapshot();
   writer.Key("conversion_scheduler");
   writer.StartObject();

@@ -41,8 +41,16 @@ public:
                                        bool track_statistics) const;
 };
 
+struct ResponseMicroCacheSnapshot {
+  uint64_t entries = 0;
+  uint64_t bytes = 0;
+  uint64_t max_bytes = 0;
+};
+
 const ConversionService &defaultConversionService();
 WorkloadSchedulerSnapshot conversionSchedulerSnapshot();
+ResponseMicroCacheSnapshot responseMicroCacheSnapshot();
+void requestConversionSchedulerShutdown() noexcept;
 void shutdownConversionScheduler() noexcept;
 
 #endif // CONVERSION_SERVICE_H_INCLUDED

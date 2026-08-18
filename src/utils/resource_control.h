@@ -152,6 +152,14 @@ struct ResourceControlSnapshot {
   bool pressure_fallback = false;
 };
 
+inline bool resourceCurveMatches(
+    const ResourceControlSnapshot &snapshot,
+    std::string_view validated_hardware_fingerprint) noexcept {
+  return !validated_hardware_fingerprint.empty() &&
+         snapshot.hardware_complete &&
+         snapshot.hardware_fingerprint == validated_hardware_fingerprint;
+}
+
 void configureResourceControl(Settings &settings);
 ResourceControlSnapshot resourceControlSnapshot();
 void startResourceControlRuntime();

@@ -69,6 +69,7 @@ enum class AsyncFetchFailure
     Cancelled,
     Deadline,
     SizeLimit,
+    Capacity,
     Dns,
     Tls,
     Proxy,
@@ -94,6 +95,7 @@ struct AsyncFetchRequest
     std::chrono::steady_clock::time_point deadline =
         std::chrono::steady_clock::time_point::max();
     RequestCancellationToken cancellation;
+    std::shared_ptr<RequestContext> request_context;
 };
 
 struct AsyncFetchResult
@@ -106,6 +108,7 @@ struct AsyncFetchResult
     std::string cookies;
     bool used_proxy = false;
     long proxy_error = 0;
+    RetainedResponseByteLease retained_bytes;
 };
 
 struct AsyncFetchEngineSnapshot

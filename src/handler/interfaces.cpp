@@ -12,6 +12,7 @@
 #include <map>
 #include <mutex>
 #include <numeric>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -56,6 +57,7 @@ static string_icase_map buildSubscriptionRequestHeaders() {
 }
 
 #include "utils/base64/base64.h"
+#include "utils/bounded_executor.h"
 #include "utils/file_extra.h"
 #include "utils/ini_reader/ini_reader.h"
 #include "utils/logger.h"
@@ -407,7 +409,59 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS) {
   RulesetConfigs confs = INIBinding::from<RulesetConfig>::from_ini(vArray);
   refreshRulesets(confs, rca, FetchContext::PublicRequest);
   for (RulesetContent &x : rca) {
-    std::string content = x.rule_content.get();
+    std::string content;
+    try {
+      content = x.rule_content.get();
+    } catch (const ExecutorSubmitError &error) {
+      response.content_type = "text/plain; charset=utf-8";
+      response.headers["Cache-Control"] = "private, no-store";
+      switch (error.status()) {
+      case ExecutorSubmitStatus::Deadline:
+        *status_code = 504;
+        if (request.context) {
+          request.context->requestCancellation(
+              RequestCancellationReason::Deadline);
+          request.context->suggestFailure(RequestFailureAttribution::Client);
+        }
+        return "Gateway timeout: ruleset processing exceeded the request "
+               "deadline.\n网关超时：规则集处理已超过请求截止时间。\n";
+      case ExecutorSubmitStatus::Cancelled:
+        if (request.context &&
+            request.context->cancellationToken().reason() ==
+                RequestCancellationReason::Shutdown) {
+          *status_code = 503;
+          request.context->suggestFailure(RequestFailureAttribution::Server);
+          return "Service is shutting down.\n服务正在关闭。\n";
+        }
+        *status_code = 499;
+        if (request.context)
+          request.context->suggestFailure(RequestFailureAttribution::Client);
+        return "Client closed request during ruleset processing.\n"
+               "客户端在规则集处理期间关闭了请求。\n";
+      case ExecutorSubmitStatus::QueueFull:
+      case ExecutorSubmitStatus::Recursive:
+        response.headers["Retry-After"] = "1";
+        if (request.context)
+          request.context->suggestFailure(RequestFailureAttribution::Capacity);
+        *status_code = 503;
+        return "Service temporarily unavailable: ruleset capacity is full.\n"
+               "服务暂时不可用：规则集处理容量已满。\n";
+      case ExecutorSubmitStatus::Stopping:
+        *status_code = 503;
+        if (request.context)
+          request.context->suggestFailure(RequestFailureAttribution::Server);
+        return "Service is shutting down.\n服务正在关闭。\n";
+      case ExecutorSubmitStatus::Accepted:
+        throw;
+      }
+    } catch (const std::future_error &) {
+      *status_code = 503;
+      response.content_type = "text/plain; charset=utf-8";
+      response.headers["Cache-Control"] = "private, no-store";
+      if (request.context)
+        request.context->suggestFailure(RequestFailureAttribution::Server);
+      return "Service is shutting down.\n服务正在关闭。\n";
+    }
     output_content += convertRuleset(content, x.rule_type);
   }
 
@@ -1060,7 +1114,7 @@ struct InflightSubRequest {
   std::mutex mutex;
   std::condition_variable cv;
   std::string owner_request_id;
-  std::weak_ptr<RequestContext> owner_context;
+  std::shared_ptr<RequestContext> owner_context;
   std::atomic<uint32_t> consumers{1};
   bool done = false;
   SharedCoalescedResponse result;
@@ -1076,8 +1130,16 @@ struct InflightConsumerGuard {
     const uint32_t previous =
         call->consumers.fetch_sub(1, std::memory_order_acq_rel);
     const uint32_t remaining = previous > 0 ? previous - 1 : 0;
-    if (auto owner = call->owner_context.lock())
-      owner->setConsumerCount(remaining);
+    if (call->owner_context)
+      call->owner_context->setConsumerCount(remaining);
+    bool done = false;
+    {
+      std::lock_guard<std::mutex> lock(call->mutex);
+      done = call->done;
+    }
+    if (remaining == 0 && !done && call->owner_context)
+      call->owner_context->requestCancellation(
+          RequestCancellationReason::NoConsumers);
   }
   InflightConsumerGuard(const InflightConsumerGuard &) = delete;
   InflightConsumerGuard &operator=(const InflightConsumerGuard &) = delete;
@@ -1088,6 +1150,9 @@ struct InflightConsumerGuard {
 struct CachedSubResponse {
   SharedCoalescedResponse result;
   std::chrono::steady_clock::time_point expires_at;
+  uint64_t bytes = 0;
+  uint64_t sequence = 0;
+  RetainedResponseByteLease retained_bytes;
 };
 
 static std::mutex g_sub_inflight_mutex;
@@ -1095,6 +1160,24 @@ static std::map<std::string, std::shared_ptr<InflightSubRequest>>
     g_sub_inflight;
 static std::mutex g_sub_response_cache_mutex;
 static std::map<std::string, CachedSubResponse> g_sub_response_cache;
+static uint64_t g_sub_response_cache_bytes = 0;
+static uint64_t g_sub_response_cache_sequence = 0;
+
+static uint64_t subResponseCacheMaxBytes() {
+  static const uint64_t limit = [] {
+    const std::string configured =
+        getEnv("SUBCONVERTER_RESPONSE_CACHE_MAX_BYTES");
+    if (configured.empty())
+      return UINT64_C(8) * 1024 * 1024;
+    try {
+      return static_cast<uint64_t>(std::clamp<unsigned long long>(
+          std::stoull(configured), 1024, UINT64_C(64) * 1024 * 1024));
+    } catch (...) {
+      return UINT64_C(8) * 1024 * 1024;
+    }
+  }();
+  return limit;
+}
 
 struct SubExplainProvider {
   std::string backend = "mihomo";
@@ -1586,11 +1669,31 @@ static void pruneExpiredSubResponseCache(
     std::chrono::steady_clock::time_point now) {
   for (auto iter = g_sub_response_cache.begin();
        iter != g_sub_response_cache.end();) {
-    if (iter->second.expires_at <= now)
+    if (iter->second.expires_at <= now) {
+      g_sub_response_cache_bytes -= iter->second.bytes;
       iter = g_sub_response_cache.erase(iter);
-    else
+    } else
       ++iter;
   }
+}
+
+static uint64_t coalescedResponseBytes(const CoalescedResponse &result) {
+  uint64_t bytes = result.body.size() + result.content_type.size();
+  for (const auto &[name, value] : result.headers)
+    bytes += name.size() + value.size();
+  return bytes;
+}
+
+static void evictOldestSubResponseCacheEntry() {
+  if (g_sub_response_cache.empty())
+    return;
+  auto oldest = std::min_element(
+      g_sub_response_cache.begin(), g_sub_response_cache.end(),
+      [](const auto &left, const auto &right) {
+        return left.second.sequence < right.second.sequence;
+      });
+  g_sub_response_cache_bytes -= oldest->second.bytes;
+  g_sub_response_cache.erase(oldest);
 }
 
 static bool getCachedSubResponse(const std::string &key,
@@ -1609,6 +1712,7 @@ static bool getCachedSubResponse(const std::string &key,
     return false;
   }
   result = iter->second.result;
+  iter->second.sequence = ++g_sub_response_cache_sequence;
   return true;
 }
 
@@ -1629,13 +1733,28 @@ static void storeCachedSubResponse(const std::string &key,
   auto now = std::chrono::steady_clock::now();
   std::lock_guard<std::mutex> lock(g_sub_response_cache_mutex);
   pruneExpiredSubResponseCache(now);
-  if (g_sub_response_cache.size() > 2048) {
-    writeLog(LOG_LEVEL_WARNING,
-             "响应微缓存条目数量过多，已清空以避免占用过多内存。");
-    g_sub_response_cache.clear();
+  const uint64_t bytes = coalescedResponseBytes(*result);
+  const uint64_t max_bytes = subResponseCacheMaxBytes();
+  if (bytes > max_bytes)
+    return;
+  auto existing = g_sub_response_cache.find(key);
+  if (existing != g_sub_response_cache.end()) {
+    g_sub_response_cache_bytes -= existing->second.bytes;
+    g_sub_response_cache.erase(existing);
   }
-  g_sub_response_cache[key] = {
-      result, now + std::chrono::seconds(ttl)};
+  while (!g_sub_response_cache.empty() &&
+         (g_sub_response_cache.size() >= 2048 ||
+          g_sub_response_cache_bytes > max_bytes - bytes))
+    evictOldestSubResponseCacheEntry();
+  CachedSubResponse cached;
+  cached.result = result;
+  cached.expires_at = now + std::chrono::seconds(ttl);
+  cached.bytes = bytes;
+  cached.sequence = ++g_sub_response_cache_sequence;
+  if (!cached.retained_bytes.acquire(bytes))
+    return;
+  g_sub_response_cache_bytes += bytes;
+  g_sub_response_cache.emplace(key, std::move(cached));
 }
 
 static std::string runSubconverterImplWithRetry(const Request &original,
@@ -1648,6 +1767,14 @@ static std::string runSubconverterImplWithRetry(const Request &original,
   std::string body = subconverter_impl(first_request, first_response, settings,
                                        stats ? &first_stats : nullptr);
   if (first_response.status_code < 500 || !settings.coalesceRetryOn5xx) {
+    if (stats)
+      *stats = first_stats;
+    response = first_response;
+    return body;
+  }
+  if (original.context &&
+      (original.context->cancellationToken().isCancellationRequested() ||
+       original.context->deadlineExceeded())) {
     if (stats)
       *stats = first_stats;
     response = first_response;
@@ -1801,20 +1928,37 @@ static std::string subconverterEntry(Request &request, Response &response,
       request.context->setSingleflightRole(RequestSingleflightRole::Follower);
     const uint32_t consumers =
         call->consumers.fetch_add(1, std::memory_order_acq_rel) + 1;
-    if (auto owner_context = call->owner_context.lock())
-      owner_context->setConsumerCount(consumers);
+    if (call->owner_context)
+      call->owner_context->setConsumerCount(consumers);
     InflightConsumerGuard consumer_guard(call);
     writeLog(LOG_LEVEL_INFO,
              "SUB_REQUEST_COALESCED owner_request_id=" +
                  (call->owner_request_id.empty() ? "unavailable"
                                                  : call->owner_request_id));
     std::unique_lock<std::mutex> lock(call->mutex);
-    call->cv.wait(lock, [&call] { return call->done; });
+    while (!call->done) {
+      RequestCancellationResponse cancellation_response;
+      if (requestCancellationResponse(request.context,
+                                      cancellation_response)) {
+        lock.unlock();
+        response.status_code = cancellation_response.status_code;
+        response.content_type = "text/plain; charset=utf-8";
+        response.headers = std::move(cancellation_response.headers);
+        return std::move(cancellation_response.body);
+      }
+      auto wake = RequestContext::Clock::now() +
+                  std::chrono::milliseconds(10);
+      if (request.context &&
+          request.context->deadline() !=
+              RequestContext::Clock::time_point::max())
+        wake = std::min(wake, request.context->deadline());
+      call->cv.wait_until(lock, wake);
+    }
     if (call->exception)
       std::rethrow_exception(call->exception);
     if (request.context) {
-      if (auto owner_context = call->owner_context.lock())
-        request.context->setCostClass(owner_context->costClass());
+      if (call->owner_context)
+        request.context->setCostClass(call->owner_context->costClass());
     }
     copyCoalescedToResponse(*call->result, response);
     recordTrackedSubRequest(track, request, response,
@@ -1896,12 +2040,22 @@ RequestCostClass estimateConversionCost(const Request &request) {
   const bool multiple = url.find('|') != std::string::npos;
   const bool external_config =
       !getUrlArg(request.argument, "config").empty();
-  if ((target == "clash" || target == "clashr") && !list && !script &&
-      !expand && !multiple && !external_config &&
-      (startsWith(url, "http://") || startsWith(url, "https://")))
-    return RequestCostClass::Low;
-  if (script || expand || multiple || external_config)
+  static constexpr const char *transform_parameters[] = {
+      "include", "exclude", "rename", "emoji", "add_emoji",
+      "remove_emoji", "append_type", "sort", "filter_deprecated",
+      "udp", "tfo", "scv", "tls13", "group", "ruleprepend",
+      "ruleappend", "ruleset", "provider_headers"};
+  bool transformation = false;
+  for (const char *name : transform_parameters) {
+    if (!getUrlArg(request.argument, name).empty()) {
+      transformation = true;
+      break;
+    }
+  }
+  if (script || expand || multiple || external_config || transformation)
     return RequestCostClass::High;
+  (void)target;
+  (void)list;
   return RequestCostClass::Medium;
 }
 
@@ -1950,6 +2104,55 @@ ConversionResult schedulerFailureResult(Request &request,
                           std::move(headers), std::move(body));
 }
 
+ConversionResult executorFailureResult(Request &request,
+                                       ExecutorSubmitStatus status) {
+  int http_status = 503;
+  std::string body =
+      "Service temporarily unavailable: ruleset capacity is full.\n"
+      "服务暂时不可用：规则集处理容量已满。\n";
+  string_icase_map headers{{"Cache-Control", "private, no-store"}};
+  switch (status) {
+  case ExecutorSubmitStatus::Deadline:
+    http_status = 504;
+    body = "Gateway timeout: ruleset processing exceeded the request "
+           "deadline.\n网关超时：规则集处理已超过请求截止时间。\n";
+    if (request.context) {
+      request.context->requestCancellation(RequestCancellationReason::Deadline);
+      request.context->suggestFailure(RequestFailureAttribution::Client);
+    }
+    break;
+  case ExecutorSubmitStatus::Cancelled:
+    if (request.context &&
+        request.context->cancellationToken().reason() ==
+            RequestCancellationReason::Shutdown) {
+      body = "Service is shutting down.\n服务正在关闭。\n";
+      request.context->suggestFailure(RequestFailureAttribution::Server);
+    } else {
+      http_status = 499;
+      body = "Client closed request during ruleset processing.\n"
+             "客户端在规则集处理期间关闭了请求。\n";
+      if (request.context)
+        request.context->suggestFailure(RequestFailureAttribution::Client);
+    }
+    break;
+  case ExecutorSubmitStatus::QueueFull:
+  case ExecutorSubmitStatus::Recursive:
+    headers.emplace("Retry-After", "1");
+    if (request.context)
+      request.context->suggestFailure(RequestFailureAttribution::Capacity);
+    break;
+  case ExecutorSubmitStatus::Stopping:
+    body = "Service is shutting down.\n服务正在关闭。\n";
+    if (request.context)
+      request.context->suggestFailure(RequestFailureAttribution::Server);
+    break;
+  case ExecutorSubmitStatus::Accepted:
+    break;
+  }
+  return ConversionResult(http_status, "text/plain; charset=utf-8",
+                          std::move(headers), std::move(body));
+}
+
 std::string runScheduledConversion(
     Request &request, Response &response, const SettingsSnapshot &snapshot,
     RuleConversionStats *stats, bool with_retry) {
@@ -1975,6 +2178,9 @@ std::string runScheduledConversion(
   const RequestCostClass cost = estimateConversionCost(request);
   if (request.context)
     request.context->setCostClass(cost);
+  writeLog(LOG_LEVEL_DEBUG,
+           "CONVERSION_ADMISSION cost=" +
+               std::string(requestCostClassName(cost)));
   const uint64_t bytes = request.context
                              ? request.context->estimatedBytes()
                              : static_cast<uint64_t>(request.postdata.size());
@@ -2014,6 +2220,20 @@ std::string runScheduledConversion(
       response.content_type = std::move(failure).releaseContentType();
       response.headers = std::move(failure).releaseHeaders();
       return std::move(failure).releaseBody();
+    } catch (const ExecutorSubmitError &error) {
+      ConversionResult failure =
+          executorFailureResult(request, error.status());
+      response.status_code = failure.statusCode();
+      response.content_type = std::move(failure).releaseContentType();
+      response.headers = std::move(failure).releaseHeaders();
+      return std::move(failure).releaseBody();
+    } catch (const std::future_error &) {
+      ConversionResult failure = executorFailureResult(
+          request, ExecutorSubmitStatus::Stopping);
+      response.status_code = failure.statusCode();
+      response.content_type = std::move(failure).releaseContentType();
+      response.headers = std::move(failure).releaseHeaders();
+      return std::move(failure).releaseBody();
     }
   }
   ConversionResult failure =
@@ -2047,10 +2267,23 @@ WorkloadSchedulerSnapshot conversionSchedulerSnapshot() {
   return {};
 }
 
+ResponseMicroCacheSnapshot responseMicroCacheSnapshot() {
+  std::lock_guard<std::mutex> lock(g_sub_response_cache_mutex);
+  pruneExpiredSubResponseCache(std::chrono::steady_clock::now());
+  return {static_cast<uint64_t>(g_sub_response_cache.size()),
+          g_sub_response_cache_bytes, subResponseCacheMaxBytes()};
+}
+
 void shutdownConversionScheduler() noexcept {
   if (WorkloadScheduler *scheduler =
           conversion_scheduler_instance.load(std::memory_order_acquire))
     scheduler->shutdown(true);
+}
+
+void requestConversionSchedulerShutdown() noexcept {
+  if (WorkloadScheduler *scheduler =
+          conversion_scheduler_instance.load(std::memory_order_acquire))
+    scheduler->requestShutdown(true);
 }
 
 static std::string applyConversionResult(ConversionResult result,
@@ -5207,6 +5440,18 @@ static std::string assembleSubResponse(
 static std::string subconverter_impl(Request &request, Response &response,
                                      const Settings &settings,
                                      RuleConversionStats *rule_stats) {
+  auto cancelled = [&]() -> std::optional<std::string> {
+    RequestCancellationResponse cancellation_response;
+    if (!requestCancellationResponse(request.context,
+                                     cancellation_response))
+      return std::nullopt;
+    response.status_code = cancellation_response.status_code;
+    response.content_type = "text/plain; charset=utf-8";
+    response.headers = std::move(cancellation_response.headers);
+    return std::move(cancellation_response.body);
+  };
+  if (auto body = cancelled())
+    return std::move(*body);
   ParsedSubRequest parsed_request;
   EffectiveSubPolicy effective_policy;
   {
@@ -5222,6 +5467,8 @@ static std::string subconverter_impl(Request &request, Response &response,
     if (!policy_error.empty())
       return policy_error;
   }
+  if (auto body = cancelled())
+    return std::move(*body);
 
   ExternalConfigFetchPlan fetch_plan;
   {
@@ -5231,6 +5478,8 @@ static std::string subconverter_impl(Request &request, Response &response,
     if (!fetch_plan_error.empty())
       return fetch_plan_error;
   }
+  if (auto body = cancelled())
+    return std::move(*body);
 
   SubscriptionNodeState subscription_state;
   {
@@ -5253,6 +5502,8 @@ static std::string subconverter_impl(Request &request, Response &response,
     if (subscription_response.complete)
       return subscription_response.body;
   }
+  if (auto body = cancelled())
+    return std::move(*body);
 
   RequestStageTimer serialize_timer(request.context, RequestStage::Serialize);
   TargetGenerationState generation_state;
@@ -5261,6 +5512,8 @@ static std::string subconverter_impl(Request &request, Response &response,
       fetch_plan, subscription_state, generation_state);
   if (generation_response.complete)
     return generation_response.body;
+  if (auto body = cancelled())
+    return std::move(*body);
   return assembleSubResponse(request, response, settings, parsed_request,
                              effective_policy, fetch_plan, generation_state);
 }

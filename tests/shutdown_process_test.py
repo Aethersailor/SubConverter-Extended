@@ -313,6 +313,7 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
     client_thread: threading.Thread | None = None
     client_result: list[tuple[int, bytes]] = []
     client_error: list[BaseException] = []
+    backlog_sockets: list[socket.socket] = []
 
     with fixture_server() as (fixture, fixture_base):
         with tempfile.TemporaryDirectory(prefix="sce-shutdown-") as temporary:
@@ -389,6 +390,15 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
                         raise ShutdownFailure(
                             "legitimate request did not reach the controlled upstream"
                         )
+                elif scenario == "backlog-shutdown":
+                    for _ in range(16):
+                        pending = socket.create_connection(
+                            ("127.0.0.1", port), timeout=1
+                        )
+                        pending.sendall(
+                            b"GET /sub HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                        )
+                        backlog_sockets.append(pending)
 
                 shutdown_started = time.monotonic()
                 shutdown_deadline = shutdown_started + SHUTDOWN_DEADLINE_SECONDS
@@ -424,9 +434,9 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
                             "legitimate in-flight request produced no response"
                         )
                     status, body = client_result[0]
-                    if status != 200 or b"shutdown.example" not in body:
+                    if status != 503 or b"shutting down" not in body.lower():
                         raise ShutdownFailure(
-                            f"legitimate in-flight request returned HTTP {status}: {body[-1000:]!r}"
+                            f"cancelled in-flight request returned HTTP {status}: {body[-1000:]!r}"
                         )
 
                 returncode = wait_for_exit(process, shutdown_deadline)
@@ -449,7 +459,7 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
                         "normal graceful shutdown was mislabeled FATAL"
                     )
                 if (
-                    scenario != "idle"
+                    scenario not in ("idle", "backlog-shutdown")
                     and "OUTBOUND_MULTI_ENGINE resolver=asynchronous" not in logs
                 ):
                     raise ShutdownFailure(
@@ -460,7 +470,7 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
                         raise ShutdownFailure(
                             "completed request is missing lifecycle completion telemetry"
                         )
-                    if "HTTP_RESPONSE_SEND_FAILED" in logs:
+                    if scenario == "completed-request" and "HTTP_RESPONSE_SEND_FAILED" in logs:
                         raise ShutdownFailure(
                             "a successfully delivered request was misclassified as cancelled"
                         )
@@ -480,6 +490,9 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
                 failure = error
             finally:
                 fixture.release_all()
+                for pending in backlog_sockets:
+                    with contextlib.suppress(OSError):
+                        pending.close()
                 if client_thread is not None and client_thread.is_alive():
                     client_thread.join(timeout=1)
                 if process is not None and process.poll() is None:
@@ -505,7 +518,13 @@ def main() -> int:
     parser.add_argument(
         "--scenario",
         action="append",
-        choices=("idle", "completed-request", "background-retry", "inflight-request"),
+        choices=(
+            "idle",
+            "completed-request",
+            "background-retry",
+            "inflight-request",
+            "backlog-shutdown",
+        ),
         help="Run only selected scenarios; may be repeated.",
     )
     args = parser.parse_args()
@@ -523,6 +542,7 @@ def main() -> int:
         "completed-request",
         "background-retry",
         "inflight-request",
+        "backlog-shutdown",
     ]
     for round_no in range(1, args.rounds + 1):
         for signal_value in (signal.SIGTERM, signal.SIGINT):

@@ -351,15 +351,35 @@ IF(BUILD_TESTS)
         TIMEOUT 120
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     ADD_TEST(
-        NAME compatibility_security_baseline_beast
+        NAME compatibility_security_baseline_adaptive
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/compatibility_security_baseline.py
                 ${COMPATIBILITY_SECURITY_BASELINE_ARGS})
-    SET_TESTS_PROPERTIES(compatibility_security_baseline_beast PROPERTIES
+    SET_TESTS_PROPERTIES(compatibility_security_baseline_adaptive PROPERTIES
         LABELS full
         TIMEOUT 120
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        ENVIRONMENT "SUBCONVERTER_HTTP_BACKEND=beast")
+        ENVIRONMENT "SUBCONVERTER_RESOURCE_CONTROL=adaptive")
+    ADD_TEST(
+        NAME compatibility_security_baseline_force_max
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/compatibility_security_baseline.py
+                ${COMPATIBILITY_SECURITY_BASELINE_ARGS})
+    SET_TESTS_PROPERTIES(compatibility_security_baseline_force_max PROPERTIES
+        LABELS full
+        TIMEOUT 120
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        ENVIRONMENT "SUBCONVERTER_RESOURCE_CONTROL=force_max")
+    ADD_TEST(
+        NAME compatibility_security_baseline_httplib
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/compatibility_security_baseline.py
+                ${COMPATIBILITY_SECURITY_BASELINE_ARGS})
+    SET_TESTS_PROPERTIES(compatibility_security_baseline_httplib PROPERTIES
+        LABELS full
+        TIMEOUT 120
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        ENVIRONMENT "SUBCONVERTER_HTTP_BACKEND=httplib;SUBCONVERTER_RESOURCE_CONTROL=compat")
 
     IF(UNIX)
         ADD_TEST(
@@ -373,16 +393,38 @@ IF(BUILD_TESTS)
             TIMEOUT 120
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
         ADD_TEST(
-            NAME shutdown_process_beast
+            NAME shutdown_process_adaptive
             COMMAND ${Python3_EXECUTABLE}
                     ${CMAKE_SOURCE_DIR}/tests/shutdown_process_test.py
                     --binary $<TARGET_FILE:${BUILD_TARGET_NAME}>)
-        SET_TESTS_PROPERTIES(shutdown_process_beast PROPERTIES
+        SET_TESTS_PROPERTIES(shutdown_process_adaptive PROPERTIES
             LABELS full
             RUN_SERIAL TRUE
             TIMEOUT 120
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-            ENVIRONMENT "SUBCONVERTER_HTTP_BACKEND=beast")
+            ENVIRONMENT "SUBCONVERTER_RESOURCE_CONTROL=adaptive")
+        ADD_TEST(
+            NAME shutdown_process_force_max
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/shutdown_process_test.py
+                    --binary $<TARGET_FILE:${BUILD_TARGET_NAME}>)
+        SET_TESTS_PROPERTIES(shutdown_process_force_max PROPERTIES
+            LABELS full
+            RUN_SERIAL TRUE
+            TIMEOUT 120
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            ENVIRONMENT "SUBCONVERTER_RESOURCE_CONTROL=force_max")
+        ADD_TEST(
+            NAME shutdown_process_httplib
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/shutdown_process_test.py
+                    --binary $<TARGET_FILE:${BUILD_TARGET_NAME}>)
+        SET_TESTS_PROPERTIES(shutdown_process_httplib PROPERTIES
+            LABELS full
+            RUN_SERIAL TRUE
+            TIMEOUT 120
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            ENVIRONMENT "SUBCONVERTER_HTTP_BACKEND=httplib;SUBCONVERTER_RESOURCE_CONTROL=compat")
     ENDIF()
 
     ADD_EXECUTABLE(proxy_policy_test
@@ -421,11 +463,21 @@ IF(BUILD_TESTS)
     ENDIF()
     ADD_TEST(NAME webserver_error COMMAND webserver_error_test)
     SET_TESTS_PROPERTIES(webserver_error PROPERTIES LABELS fast TIMEOUT 30)
-    ADD_TEST(NAME webserver_error_beast COMMAND webserver_error_test)
-    SET_TESTS_PROPERTIES(webserver_error_beast PROPERTIES
+    ADD_TEST(NAME webserver_error_adaptive COMMAND webserver_error_test)
+    SET_TESTS_PROPERTIES(webserver_error_adaptive PROPERTIES
         LABELS fast
         TIMEOUT 30
-        ENVIRONMENT "SUBCONVERTER_HTTP_BACKEND=beast")
+        ENVIRONMENT "SUBCONVERTER_RESOURCE_CONTROL=adaptive")
+    ADD_TEST(NAME webserver_error_force_max COMMAND webserver_error_test)
+    SET_TESTS_PROPERTIES(webserver_error_force_max PROPERTIES
+        LABELS fast
+        TIMEOUT 30
+        ENVIRONMENT "SUBCONVERTER_RESOURCE_CONTROL=force_max")
+    ADD_TEST(NAME webserver_error_httplib COMMAND webserver_error_test)
+    SET_TESTS_PROPERTIES(webserver_error_httplib PROPERTIES
+        LABELS fast
+        TIMEOUT 30
+        ENVIRONMENT "SUBCONVERTER_HTTP_BACKEND=httplib;SUBCONVERTER_RESOURCE_CONTROL=compat")
 
     ADD_EXECUTABLE(client_ip_test
         tests/client_ip_test.cpp
