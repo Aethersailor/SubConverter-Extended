@@ -1186,8 +1186,6 @@ docker run -d \
 
 ## 🤝 致谢
 
-开发者如需从源码构建或运行测试，请参阅 [构建与测试契约](docs/build-and-test.md)。
-
 本项目使用或引用了以下开源项目，在此表示感谢：
 
 * [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) - Clash 内核，提供节点链接解析能力

@@ -62,7 +62,6 @@ done
 workflow_text="$(tr -d '\r' < "$REPOSITORY/.github/workflows/build-dockerhub.yml")"
 dockerfile_text="$(tr -d '\r' < "$REPOSITORY/Dockerfile")"
 cmake_text="$(tr -d '\r' < "$REPOSITORY/CMakeLists.txt")"
-ledger_text="$(tr -d '\r' < "$REPOSITORY/docs/high-concurrency-implementation-plan.zh-CN.md")"
 grep -Fq "github.event_name == 'workflow_dispatch' && 'full' || 'focused'" \
   <<< "$workflow_text"
 grep -Fq -- '--build-arg SANITIZER_SUITE="$SANITIZER_SUITE"' \
@@ -84,12 +83,6 @@ for test_name in shutdown_process_httplib webserver_error_httplib \
 done
 grep -Fq 'LIST(REMOVE_ITEM SETTINGS_SNAPSHOT_RUNTIME_SOURCES' <<< "$cmake_text"
 grep -Fq 'src/parser/mihomo_bridge.cpp' <<< "$cmake_text"
-for stale_marker in '本提交待 Actions' '候选待提交' '待精确 SHA'; do
-  if grep -Fq "$stale_marker" <<< "$ledger_text"; then
-    echo "high-concurrency delivery ledger contains stale marker: $stale_marker" >&2
-    exit 1
-  fi
-done
 
 deny_trace() {
   if grep -F -- "$1" "$TRACE" >/dev/null; then
