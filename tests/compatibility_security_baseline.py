@@ -42,7 +42,40 @@ def _urlsafe_b64(value: str | bytes) -> str:
 SUBSCRIPTION = (
     "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388#Smoke\n"
 )
+SECONDARY_SS_LINK = (
+    "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@second.example.com:8389#Second"
+)
 ENCODED_SUBSCRIPTION = base64.urlsafe_b64encode(SUBSCRIPTION.encode()).decode()
+LOCAL_GROUP_MATCHER_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
+    "\n".join(
+        (
+            "enable_rule_generator=false",
+            "custom_proxy_group=Plain`select`Smoke",
+            "custom_proxy_group=ByGroup`select`!!GROUP=public!!Smoke",
+            "custom_proxy_group=ByGroupCapture`select`!!GROUP=pub(lic)!!Sm(oke)",
+            "custom_proxy_group=BySecondaryGroup`select`!!GROUP=secondary!!Second",
+            "custom_proxy_group=ByGroupId`select`!!GROUPID=1!!Second",
+            "custom_proxy_group=ByInsert`select`!!INSERT=-1!!Second",
+            "custom_proxy_group=ByType`select`!!TYPE=SS",
+            "custom_proxy_group=ByPortExact`select`!!PORT=8388",
+            "custom_proxy_group=ByPortRange`select`!!PORT=8380-8390",
+            "custom_proxy_group=ByPortLess`select`!!PORT=9000-",
+            "custom_proxy_group=ByPortMore`select`!!PORT=8000+",
+            "custom_proxy_group=ByPortNot`select`!!PORT=!8389",
+            "custom_proxy_group=LegacyNotRange`select`!!PORT=8000-9000,!7000-7100",
+            "custom_proxy_group=LegacyNegationOrder`select`!!PORT=!8388,!9999",
+            "custom_proxy_group=ByServer`select`!!SERVER=^example\\.com$",
+            "custom_proxy_group=MalformedGroup`select`!!GROUP=",
+            "custom_proxy_group=NoGroup`select`!!GROUP=missing!!Smoke",
+            "custom_proxy_group=NoPort`select`!!PORT=!8388!!Smoke",
+            "custom_proxy_group=LegacyNotRangeExcluded`select`!!PORT=!8000-9000",
+            "custom_proxy_group=NoInsertPositive`select`!!INSERT=1!!Second",
+            "custom_proxy_group=NoTypePartial`select`!!TYPE=S",
+            "custom_proxy_group=InvalidPlain`select`[",
+            "custom_proxy_group=InvalidGroup`select`!!GROUP=[!!Smoke",
+        )
+    ).encode()
+).decode()
 VLESS_URI = (
     "vless://11111111-1111-1111-1111-111111111111@vless.example.test:443"
     "?security=tls&type=ws&host=vless.example.test&path=%2Fws#VLESSFixture"
@@ -3308,6 +3341,83 @@ def provider_no_fetch_vary_and_route_log_baseline(
         diagnostics, "AUTO_TARGET_UNRESOLVED ua_family=unknown"
     ):
         raise AssertionError("unrecognized auto-target event is missing")
+
+
+def local_group_matcher_baseline(base_url: str) -> None:
+    status, body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "surge",
+            "ver": "4",
+            "url": "|".join(
+                (
+                    "tag:public," + SUBSCRIPTION.strip(),
+                    "tag:secondary," + SECONDARY_SS_LINK,
+                )
+            ),
+            "config": LOCAL_GROUP_MATCHER_CONFIG,
+        },
+    )
+    output = body.decode("utf-8", errors="replace")
+    if status != 200:
+        raise AssertionError(
+            f"local group matcher matrix returned HTTP {status}: {output!r}"
+        )
+
+    group_section = re.search(
+        r"(?ms)^\[Proxy Group\]\s*\n(.*?)(?=^\[|\Z)", output
+    )
+    if group_section is None:
+        raise AssertionError("Surge local matcher output is missing [Proxy Group]")
+    observed_groups: dict[str, list[str]] = {}
+    for line in group_section.group(1).splitlines():
+        if " = " not in line:
+            continue
+        name, value = line.split(" = ", 1)
+        fields = [field.strip() for field in value.split(",")]
+        observed_groups[name] = fields[1:]
+
+    expected_groups = {
+        "Plain": ["Smoke"],
+        "ByGroup": ["Smoke"],
+        "ByGroupCapture": ["Smoke"],
+        "BySecondaryGroup": ["Second"],
+        "ByGroupId": ["Second"],
+        "ByInsert": ["Second"],
+        "ByType": ["Smoke", "Second"],
+        "ByPortExact": ["Smoke"],
+        "ByPortRange": ["Smoke", "Second"],
+        "ByPortLess": ["Smoke", "Second"],
+        "ByPortMore": ["Smoke", "Second"],
+        "ByPortNot": ["Smoke"],
+        "LegacyNotRange": ["Smoke", "Second"],
+        "LegacyNegationOrder": ["Smoke", "Second"],
+        "ByServer": ["Smoke"],
+        "MalformedGroup": ["Smoke", "Second"],
+    }
+    for group_name, expected_members in expected_groups.items():
+        observed = observed_groups.get(group_name)
+        if observed != expected_members:
+            raise AssertionError(
+                f"Surge local matcher group {group_name} changed members: "
+                f"{observed!r}; expected {expected_members!r}"
+            )
+    for group_name in (
+        "NoGroup",
+        "NoPort",
+        "LegacyNotRangeExcluded",
+        "NoInsertPositive",
+        "NoTypePartial",
+        "InvalidPlain",
+        "InvalidGroup",
+    ):
+        observed = observed_groups.get(group_name)
+        if observed is not None:
+            raise AssertionError(
+                f"Surge local matcher negative group {group_name} changed members: "
+                f"{observed!r}; expected the empty group to be omitted"
+            )
 
 
 def quanx_server_remote_baseline(binary: Path, fixture_base: str) -> None:
@@ -11477,6 +11587,7 @@ def main() -> int:
             binary, log_capture=wireguard_outbound_logs
         ) as base_url:
             conversion_baselines(base_url, fixture_base, args.update_golden)
+            local_group_matcher_baseline(base_url)
             singbox_modern_full_profile_baseline(
                 base_url,
                 fixture_base,

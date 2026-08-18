@@ -1,5 +1,6 @@
 #include <string>
 #include <cstdarg>
+#include <memory>
 
 /*
 #ifdef USE_STD_REGEX
@@ -131,6 +132,42 @@ int regGetMatch(const std::string &src, const std::string &match, size_t group_c
 
 #else
 */
+struct CompiledRegex::Impl
+{
+    jp::Regex regex;
+    bool valid = false;
+};
+
+CompiledRegex::CompiledRegex(const std::string &pattern, CompiledRegexMode mode)
+    : impl_(std::make_unique<Impl>())
+{
+    if(mode == CompiledRegexMode::FullMatch)
+    {
+        impl_->regex.setPattern(pattern).addModifier("m").addPcre2Option(
+            PCRE2_ANCHORED | PCRE2_ENDANCHORED | PCRE2_UTF).compile();
+    }
+    else
+    {
+        impl_->regex.setPattern(pattern).addModifier("m").addPcre2Option(
+            PCRE2_UTF | PCRE2_ALT_BSUX).compile();
+    }
+    impl_->valid = !!impl_->regex;
+}
+
+CompiledRegex::~CompiledRegex() = default;
+CompiledRegex::CompiledRegex(CompiledRegex &&) noexcept = default;
+CompiledRegex &CompiledRegex::operator=(CompiledRegex &&) noexcept = default;
+
+bool CompiledRegex::valid() const noexcept
+{
+    return impl_ && impl_->valid;
+}
+
+bool CompiledRegex::matches(const std::string &subject)
+{
+    return valid() && impl_->regex.match(subject, "g");
+}
+
 bool regMatch(const std::string &src, const std::string &match)
 {
     jp::Regex reg;

@@ -23,6 +23,9 @@ from pathlib import Path
 
 
 SAMPLE_SS_LINK = "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388#Smoke"
+SECONDARY_SS_LINK = (
+    "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@second.example.com:8389#Second"
+)
 MIERU_OFFICIAL_SIMPLE_URI = (
     "mierus://baozi:manlianpenfen@1.2.3.4?"
     "handshake-mode=HANDSHAKE_NO_WAIT&mtu=1400&"
@@ -184,6 +187,36 @@ PROVIDER_GROUP_TAG_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode
         )
     )
 ).decode("ascii")
+LOCAL_GROUP_MATCHER_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
+    b"\n".join(
+        (
+            b"enable_rule_generator=false",
+            b"custom_proxy_group=Plain`select`Smoke",
+            b"custom_proxy_group=ByGroup`select`!!GROUP=public!!Smoke",
+            b"custom_proxy_group=ByGroupCapture`select`!!GROUP=pub(lic)!!Sm(oke)",
+            b"custom_proxy_group=BySecondaryGroup`select`!!GROUP=secondary!!Second",
+            b"custom_proxy_group=ByGroupId`select`!!GROUPID=1!!Second",
+            b"custom_proxy_group=ByInsert`select`!!INSERT=-1!!Second",
+            b"custom_proxy_group=ByType`select`!!TYPE=SS",
+            b"custom_proxy_group=ByPortExact`select`!!PORT=8388",
+            b"custom_proxy_group=ByPortRange`select`!!PORT=8380-8390",
+            b"custom_proxy_group=ByPortLess`select`!!PORT=9000-",
+            b"custom_proxy_group=ByPortMore`select`!!PORT=8000+",
+            b"custom_proxy_group=ByPortNot`select`!!PORT=!8389",
+            b"custom_proxy_group=LegacyNotRange`select`!!PORT=8000-9000,!7000-7100",
+            b"custom_proxy_group=LegacyNegationOrder`select`!!PORT=!8388,!9999",
+            b"custom_proxy_group=ByServer`select`!!SERVER=^example\\.com$",
+            b"custom_proxy_group=MalformedGroup`select`!!GROUP=",
+            b"custom_proxy_group=NoGroup`select`!!GROUP=missing!!Smoke",
+            b"custom_proxy_group=NoPort`select`!!PORT=!8388!!Smoke",
+            b"custom_proxy_group=LegacyNotRangeExcluded`select`!!PORT=!8000-9000",
+            b"custom_proxy_group=NoInsertPositive`select`!!INSERT=1!!Second",
+            b"custom_proxy_group=NoTypePartial`select`!!TYPE=S",
+            b"custom_proxy_group=InvalidPlain`select`[",
+            b"custom_proxy_group=InvalidGroup`select`!!GROUP=[!!Smoke",
+        )
+    )
+).decode("ascii")
 QUANX_REMOTE_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
     b"enable_rule_generator=false\ncustom_proxy_group=Remote`select`.*\n"
 ).decode("ascii")
@@ -332,6 +365,66 @@ def proxy_group_filter_from_output(output: str, group_name: str) -> str | None:
     if match is None:
         return None
     return match.group(1) if match.group(1) is not None else match.group(2)
+
+
+def assert_local_group_matcher_matrix(base_url: str, timeout: int) -> None:
+    output = fetch(
+        base_url,
+        "/sub",
+        {
+            "target": "clash",
+            "url": "|".join(
+                (
+                    "tag:public," + SAMPLE_SS_LINK,
+                    "tag:secondary," + SECONDARY_SS_LINK,
+                )
+            ),
+            "config": LOCAL_GROUP_MATCHER_CONFIG,
+        },
+        timeout,
+    )
+    expected_groups = {
+        "Plain": ["Smoke"],
+        "ByGroup": ["Smoke"],
+        "ByGroupCapture": ["Smoke"],
+        "BySecondaryGroup": ["Second"],
+        "ByGroupId": ["Second"],
+        "ByInsert": ["Second"],
+        "ByType": ["Smoke", "Second"],
+        "ByPortExact": ["Smoke"],
+        "ByPortRange": ["Smoke", "Second"],
+        "ByPortLess": ["Smoke", "Second"],
+        "ByPortMore": ["Smoke", "Second"],
+        "ByPortNot": ["Smoke"],
+        "LegacyNotRange": ["Smoke", "Second"],
+        "LegacyNegationOrder": ["Smoke", "Second"],
+        "ByServer": ["Smoke"],
+        "MalformedGroup": ["Smoke", "Second"],
+    }
+    for group_name, expected_members in expected_groups.items():
+        block = proxy_group_block_from_output(output, group_name)
+        members = re.findall(r"(?m)^      - (.+?)\s*$", block)
+        if members != expected_members:
+            raise AssertionError(
+                f"local matcher group {group_name} changed members: {members!r}; "
+                f"expected {expected_members!r}\n{block}"
+            )
+    for group_name in (
+        "NoGroup",
+        "NoPort",
+        "LegacyNotRangeExcluded",
+        "NoInsertPositive",
+        "NoTypePartial",
+        "InvalidPlain",
+        "InvalidGroup",
+    ):
+        block = proxy_group_block_from_output(output, group_name)
+        members = re.findall(r"(?m)^      - (.+?)\s*$", block)
+        if members != ["DIRECT"]:
+            raise AssertionError(
+                f"local matcher negative group {group_name} changed members: "
+                f"{members!r}\n{block}"
+            )
 
 
 def assert_snapshot(name: str, content: str, snapshot_dir: Path | None, update: bool) -> None:
@@ -773,6 +866,8 @@ def run_checks(
         "url": SAMPLE_SS_LINK,
         "config": DISABLE_RULEGEN_CONFIG,
     }
+
+    assert_local_group_matcher_matrix(base_url, timeout)
 
     if verify_non_clash:
         assert_parser_route_isolation(base_url, timeout)
