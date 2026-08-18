@@ -8,7 +8,7 @@
     "inja": {
       "ref": "HEAD",
       "repository": "https://github.com/pantor/inja.git",
-      "revision": "94289188eaee21b6b553ed4c706a1ecea2a03387"
+      "revision": "f5cce3dcb14a66bf51ff1a3f122110339fb8f0c3"
     },
     "jpcre2": {
       "ref": "HEAD",
