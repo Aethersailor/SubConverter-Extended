@@ -1166,7 +1166,7 @@ docker run -d \
 * `SECURITY_UPLOAD_EFFECTIVE`：结合档位和开关计算后的实际上传策略。
 * `SECURITY_EXPOSURE_POSSIBLE`：`lan` 监听所有接口时提示可能暴露，同时明确 `public_reachability=unknown`；程序不会把 `0.0.0.0` 误判成“已经公网可达”。
 
-每个进入应用路由生命周期的 HTTP 响应都包含可关联服务端日志的 `X-Request-ID`。日志保留状态、耗时、解析路径和安全资源摘要，同时隐藏订阅、节点和凭据；轮转策略及完整脱敏边界见[日志与诊断](docs/logging-and-diagnostics.zh-CN.md)。
+每个进入应用路由生命周期的 HTTP 响应都包含可关联服务端日志的 `X-Request-ID`。日志保留状态、耗时、解析路径和安全资源摘要，同时隐藏订阅、节点和凭据。
 
 > [!NOTE]
 > `public` 档位不会阻止正常域名在 OpenClash fake-ip DNS 环境下解析到 `198.18.0.0/15` 后继续访问；但会阻止请求方直接传入 `127.0.0.1`、私有地址或 fake-ip 字面量作为抓取目标。

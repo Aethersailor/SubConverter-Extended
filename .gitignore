@@ -21,7 +21,6 @@ upstream-sync-*.json
 upstream-sync-*.md
 upstream-sync-decisions.raw
 
-# Local development notes and implementation ledgers
-docs/build-and-test.md
-docs/high-concurrency-implementation-plan.zh-CN.md
-docs/stash-cocr-implementation-plan.zh-CN.md
+# Local Markdown files under docs
+docs/*.md
+docs/**/*.md
