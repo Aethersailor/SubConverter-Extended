@@ -398,6 +398,13 @@ static void testActiveRequestShutdownCancellation() {
       "active-shutdown-second", RequestContext::Clock::now());
   auto sending = std::make_shared<RequestContext>(
       "active-shutdown-sending", RequestContext::Clock::now());
+  std::atomic<int> callback_count{0};
+  auto first_callback = first->registerCancellationCallback(
+      [&] { callback_count.fetch_add(1); });
+  (void)first_callback;
+  auto removed = sending->registerCancellationCallback(
+      [&] { callback_count.fetch_add(100); });
+  removed.reset();
   sending->setCurrentStage(RequestStage::Send);
   second->requestCancellation(RequestCancellationReason::ClientDisconnected);
   cancelAllActiveRequests(RequestCancellationReason::Shutdown);
@@ -407,6 +414,13 @@ static void testActiveRequestShutdownCancellation() {
          RequestCancellationReason::ClientDisconnected);
   assert(sending->cancellationToken().reason() ==
          RequestCancellationReason::None);
+  assert(callback_count.load() == 1);
+  auto late_callback = first->registerCancellationCallback(
+      [&] { callback_count.fetch_add(1); });
+  (void)late_callback;
+  assert(callback_count.load() == 2);
+  assert(!first->requestCancellation(RequestCancellationReason::Deadline));
+  assert(callback_count.load() == 2);
 }
 
 static void testConcurrentLruCache() {

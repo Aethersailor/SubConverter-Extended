@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -172,7 +173,102 @@ inline const char *requestSingleflightRoleName(
 struct RequestCancellationState {
   std::atomic<RequestCancellationReason> reason{RequestCancellationReason::None};
   std::atomic<bool> drain_on_shutdown{false};
+  std::mutex callbacks_mutex;
+  std::unordered_map<uint64_t, std::function<void()>> callbacks;
+  uint64_t next_callback_id = 1;
 };
+
+class RequestCancellationRegistration {
+public:
+  RequestCancellationRegistration() = default;
+  RequestCancellationRegistration(
+      const std::shared_ptr<RequestCancellationState> &state, uint64_t id)
+      : state_(state), id_(id) {}
+  ~RequestCancellationRegistration() { reset(); }
+
+  RequestCancellationRegistration(RequestCancellationRegistration &&other)
+      noexcept
+      : state_(std::move(other.state_)), id_(std::exchange(other.id_, 0)) {}
+  RequestCancellationRegistration &
+  operator=(RequestCancellationRegistration &&other) noexcept {
+    if (this != &other) {
+      reset();
+      state_ = std::move(other.state_);
+      id_ = std::exchange(other.id_, 0);
+    }
+    return *this;
+  }
+
+  RequestCancellationRegistration(const RequestCancellationRegistration &) =
+      delete;
+  RequestCancellationRegistration &
+  operator=(const RequestCancellationRegistration &) = delete;
+
+  void reset() noexcept {
+    const uint64_t id = std::exchange(id_, 0);
+    if (id == 0)
+      return;
+    if (auto state = state_.lock()) {
+      std::lock_guard<std::mutex> lock(state->callbacks_mutex);
+      state->callbacks.erase(id);
+    }
+    state_.reset();
+  }
+
+private:
+  std::weak_ptr<RequestCancellationState> state_;
+  uint64_t id_ = 0;
+};
+
+inline RequestCancellationRegistration registerRequestCancellationCallback(
+    const std::shared_ptr<RequestCancellationState> &state,
+    std::function<void()> callback) {
+  if (!state || !callback)
+    return {};
+  uint64_t id = 0;
+  bool invoke_now = false;
+  {
+    std::lock_guard<std::mutex> lock(state->callbacks_mutex);
+    if (state->reason.load(std::memory_order_acquire) !=
+        RequestCancellationReason::None) {
+      invoke_now = true;
+    } else {
+      id = state->next_callback_id++;
+      state->callbacks.emplace(id, std::move(callback));
+    }
+  }
+  if (invoke_now) {
+    try {
+      callback();
+    } catch (...) {
+    }
+  }
+  return RequestCancellationRegistration(state, id);
+}
+
+inline bool cancelRequestCancellationState(
+    const std::shared_ptr<RequestCancellationState> &state,
+    RequestCancellationReason reason) noexcept {
+  if (!state || reason == RequestCancellationReason::None)
+    return false;
+  if (reason == RequestCancellationReason::Shutdown &&
+      state->drain_on_shutdown.load(std::memory_order_acquire))
+    return false;
+  RequestCancellationReason expected = RequestCancellationReason::None;
+  if (!state->reason.compare_exchange_strong(
+          expected, reason, std::memory_order_acq_rel,
+          std::memory_order_acquire))
+    return false;
+  std::lock_guard<std::mutex> lock(state->callbacks_mutex);
+  for (auto &[_, callback] : state->callbacks) {
+    try {
+      callback();
+    } catch (...) {
+    }
+  }
+  state->callbacks.clear();
+  return true;
+}
 
 class RequestCancellationToken {
 public:
@@ -208,14 +304,7 @@ public:
   }
 
   bool cancel(RequestCancellationReason reason) noexcept {
-    if (reason == RequestCancellationReason::None)
-      return false;
-    if (reason == RequestCancellationReason::Shutdown &&
-        state_->drain_on_shutdown.load(std::memory_order_acquire))
-      return false;
-    RequestCancellationReason expected = RequestCancellationReason::None;
-    return state_->reason.compare_exchange_strong(
-        expected, reason, std::memory_order_acq_rel, std::memory_order_acquire);
+    return cancelRequestCancellationState(state_, reason);
   }
 
   std::shared_ptr<RequestCancellationState> stateHandle() const noexcept {
@@ -292,13 +381,7 @@ inline void cancelAllActiveRequests(RequestCancellationReason reason) noexcept {
     }
   }
   for (const auto &state : states) {
-    if (reason == RequestCancellationReason::Shutdown &&
-        state->drain_on_shutdown.load(std::memory_order_acquire))
-      continue;
-    RequestCancellationReason expected = RequestCancellationReason::None;
-    state->reason.compare_exchange_strong(
-        expected, reason, std::memory_order_acq_rel,
-        std::memory_order_acquire);
+    cancelRequestCancellationState(state, reason);
   }
 }
 
@@ -447,6 +530,12 @@ public:
 
   bool requestCancellation(RequestCancellationReason reason) noexcept {
     return cancellation_source_.cancel(reason);
+  }
+
+  RequestCancellationRegistration registerCancellationCallback(
+      std::function<void()> callback) {
+    return registerRequestCancellationCallback(
+        cancellation_source_.stateHandle(), std::move(callback));
   }
 
   void setCostClass(RequestCostClass value) noexcept {

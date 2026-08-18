@@ -619,6 +619,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
     stash_legacy_text_fetch_count = 0
     external_valid_count = 0
     get_request_count = 0
+    slow_subscription_request_count = 0
     counter_lock = threading.Lock()
     slow_subscription_started = threading.Event()
     slow_subscription_release = threading.Event()
@@ -666,6 +667,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
             body = SUBSCRIPTION.encode()
             content_type = "text/plain; charset=utf-8"
         elif request_path == "/slow-subscription.txt":
+            with type(self).counter_lock:
+                type(self).slow_subscription_request_count += 1
             type(self).slow_subscription_started.set()
             if not type(self).slow_subscription_release.wait(timeout=15):
                 self.send_error(504)
@@ -1145,6 +1148,7 @@ def fixture_server():
     FixtureHandler.stash_legacy_text_fetch_count = 0
     FixtureHandler.external_valid_count = 0
     FixtureHandler.get_request_count = 0
+    FixtureHandler.slow_subscription_request_count = 0
     FixtureHandler.stash_invalid_bases = {}
     FixtureHandler.slow_subscription_started.clear()
     FixtureHandler.slow_subscription_release.set()
@@ -1274,6 +1278,7 @@ def disconnect_raw_request(
     params: dict[str, str],
     *,
     hold_seconds: float = 0.1,
+    headers: dict[str, str] | None = None,
 ) -> None:
     parsed = urllib.parse.urlsplit(base_url)
     query = urllib.parse.urlencode(params)
@@ -1283,9 +1288,11 @@ def disconnect_raw_request(
             f"GET {target} HTTP/1.1",
             f"Host: {parsed.hostname}:{parsed.port}",
             "Connection: close",
-            "",
-            "",
         ]
+        request_lines.extend(
+            f"{name}: {value}" for name, value in (headers or {}).items()
+        )
+        request_lines.extend(("", ""))
         sock.sendall("\r\n".join(request_lines).encode("ascii"))
         time.sleep(hold_seconds)
 
@@ -4030,6 +4037,89 @@ def vary_cache_and_coalesce_baseline(binary: Path, fixture_base: str) -> None:
 
         FixtureHandler.slow_subscription_started.clear()
         FixtureHandler.slow_subscription_release.clear()
+        owner_disconnect_result: list[tuple[int, bytes, dict[str, str]]] = []
+        owner_disconnect_error: list[BaseException] = []
+        singleflight_headers = {
+            "User-Agent": "Singleflight-Lifecycle-Test/1.0"
+        }
+        owner_disconnect_params = {
+            **slow_params,
+            "url": fixture_base
+            + "/slow-subscription.txt?case=disconnect-owner",
+        }
+        with FixtureHandler.counter_lock:
+            owner_disconnect_before = (
+                FixtureHandler.slow_subscription_request_count
+            )
+
+        def run_owner_disconnect_follower() -> None:
+            try:
+                owner_disconnect_result.append(
+                    request(
+                        base_url,
+                        "/sub",
+                        owner_disconnect_params,
+                        singleflight_headers,
+                    )
+                )
+            except BaseException as error:
+                owner_disconnect_error.append(error)
+
+        disconnected_owner = threading.Thread(
+            target=disconnect_raw_request,
+            args=(base_url, "/sub", owner_disconnect_params),
+            kwargs={
+                "hold_seconds": 1.0,
+                "headers": singleflight_headers,
+            },
+        )
+        disconnected_owner.start()
+        if not FixtureHandler.slow_subscription_started.wait(timeout=10):
+            FixtureHandler.slow_subscription_release.set()
+            disconnected_owner.join(timeout=5)
+            raise AssertionError(
+                "disconnecting owner did not reach the slow fixture"
+            )
+        surviving_follower = threading.Thread(
+            target=run_owner_disconnect_follower
+        )
+        surviving_follower.start()
+        time.sleep(0.3)
+        disconnected_owner.join(timeout=5)
+        if disconnected_owner.is_alive():
+            FixtureHandler.slow_subscription_release.set()
+            surviving_follower.join(timeout=5)
+            raise AssertionError("singleflight owner socket did not close")
+        time.sleep(0.2)
+        FixtureHandler.slow_subscription_release.set()
+        surviving_follower.join(timeout=20)
+        if surviving_follower.is_alive() or owner_disconnect_error:
+            raise AssertionError(
+                "disconnecting owner prevented the follower from finishing: "
+                f"{owner_disconnect_error!r}"
+            )
+        if (
+            len(owner_disconnect_result) != 1
+            or owner_disconnect_result[0][0] != 200
+            or b"Smoke" not in owner_disconnect_result[0][1]
+        ):
+            raise AssertionError(
+                "surviving follower did not receive the shared result after "
+                f"owner disconnect: {owner_disconnect_result!r}"
+            )
+        with FixtureHandler.counter_lock:
+            owner_disconnect_requests = (
+                FixtureHandler.slow_subscription_request_count
+                - owner_disconnect_before
+            )
+        if owner_disconnect_requests != 1:
+            raise AssertionError(
+                "owner disconnect started more than one upstream request: "
+                f"{owner_disconnect_requests}"
+            )
+
+        FixtureHandler.slow_subscription_started.clear()
+        FixtureHandler.slow_subscription_release.clear()
         surviving_owner: list[tuple[int, bytes, dict[str, str]]] = []
         surviving_error: list[BaseException] = []
         disconnect_params = {
@@ -4040,7 +4130,14 @@ def vary_cache_and_coalesce_baseline(binary: Path, fixture_base: str) -> None:
 
         def run_surviving_owner() -> None:
             try:
-                surviving_owner.append(request(base_url, "/sub", disconnect_params))
+                surviving_owner.append(
+                    request(
+                        base_url,
+                        "/sub",
+                        disconnect_params,
+                        singleflight_headers,
+                    )
+                )
             except BaseException as error:
                 surviving_error.append(error)
 
@@ -4050,7 +4147,12 @@ def vary_cache_and_coalesce_baseline(binary: Path, fixture_base: str) -> None:
             FixtureHandler.slow_subscription_release.set()
             owner.join(timeout=5)
             raise AssertionError("disconnect owner did not reach the slow fixture")
-        disconnect_raw_request(base_url, "/sub", disconnect_params)
+        disconnect_raw_request(
+            base_url,
+            "/sub",
+            disconnect_params,
+            headers=singleflight_headers,
+        )
         FixtureHandler.slow_subscription_release.set()
         owner.join(timeout=20)
         if owner.is_alive() or surviving_error:
@@ -4070,20 +4172,35 @@ def vary_cache_and_coalesce_baseline(binary: Path, fixture_base: str) -> None:
             "url": fixture_base
             + "/slow-subscription.txt?case=no-consumers",
         }
-        abandoned = threading.Thread(
+        with FixtureHandler.counter_lock:
+            abandoned_before = FixtureHandler.slow_subscription_request_count
+        abandoned_owner = threading.Thread(
             target=disconnect_raw_request,
             args=(base_url, "/sub", abandoned_params),
-            kwargs={"hold_seconds": 0.25},
+            kwargs={
+                "hold_seconds": 1.0,
+                "headers": singleflight_headers,
+            },
         )
-        abandoned.start()
+        abandoned_owner.start()
         if not FixtureHandler.slow_subscription_started.wait(timeout=10):
             FixtureHandler.slow_subscription_release.set()
-            abandoned.join(timeout=5)
+            abandoned_owner.join(timeout=5)
             raise AssertionError("abandoned owner did not reach the slow fixture")
-        abandoned.join(timeout=5)
-        if abandoned.is_alive():
+        abandoned_follower = threading.Thread(
+            target=disconnect_raw_request,
+            args=(base_url, "/sub", abandoned_params),
+            kwargs={
+                "hold_seconds": 0.4,
+                "headers": singleflight_headers,
+            },
+        )
+        abandoned_follower.start()
+        abandoned_follower.join(timeout=5)
+        abandoned_owner.join(timeout=5)
+        if abandoned_owner.is_alive() or abandoned_follower.is_alive():
             FixtureHandler.slow_subscription_release.set()
-            raise AssertionError("abandoned owner socket did not close")
+            raise AssertionError("abandoned consumer sockets did not close")
         time.sleep(0.2)
         dashboard_headers = {
             "Authorization": "Basic "
@@ -4105,8 +4222,18 @@ def vary_cache_and_coalesce_baseline(binary: Path, fixture_base: str) -> None:
         outbound = dashboard["outbound_fetch"]
         if outbound["active"] != 0 or outbound["pending"] != 0:
             raise AssertionError(
-                "last-consumer disconnect did not cancel outbound work: "
+                "all-consumer disconnect did not cancel outbound work: "
                 f"{outbound!r}"
+            )
+        with FixtureHandler.counter_lock:
+            abandoned_requests = (
+                FixtureHandler.slow_subscription_request_count
+                - abandoned_before
+            )
+        if abandoned_requests != 1:
+            raise AssertionError(
+                "all-consumer disconnect did not remain singleflight: "
+                f"upstream requests={abandoned_requests}"
             )
         if retained_bytes <= 0 or retained_bytes > 8 * 1024 * 1024:
             raise AssertionError(
@@ -4141,6 +4268,57 @@ def response_microcache_eviction_baseline(binary: Path) -> None:
             b"fixture-admin:fixture-dashboard-secret"
         ).decode()
     }
+    with running_service(
+        binary,
+        statistics=True,
+        config_replacements=(
+            ("response_cache_ttl = 0", "response_cache_ttl = 2"),
+        ),
+    ) as base_url:
+        params = {
+            "target": "clash",
+            "url": SUBSCRIPTION.strip(),
+            "config": DISABLE_RULEGEN_CONFIG,
+            "list": "true",
+        }
+        status, body, _ = request(base_url, "/sub", params)
+        if status != 200 or b"Smoke" not in body:
+            raise AssertionError(
+                f"microcache expiry setup failed: HTTP {status}: {body!r}"
+            )
+        status, body, _ = request(
+            base_url, "/dashboard/data", headers=dashboard_headers
+        )
+        if status != 200:
+            raise AssertionError(
+                f"microcache setup dashboard returned HTTP {status}: {body!r}"
+            )
+        before = json.loads(body)["response_microcache"]
+        if before["entries"] != 1 or before["bytes"] <= 0:
+            raise AssertionError(
+                f"microcache expiry setup did not retain one entry: {before!r}"
+            )
+
+        time.sleep(2.2)
+        status, body, _ = request(base_url, "/sub", params)
+        if status != 200 or b"Smoke" not in body:
+            raise AssertionError(
+                f"expired microcache refill failed: HTTP {status}: {body!r}"
+            )
+        status, body, _ = request(
+            base_url, "/dashboard/data", headers=dashboard_headers
+        )
+        if status != 200:
+            raise AssertionError(
+                f"microcache refill dashboard returned HTTP {status}: {body!r}"
+            )
+        after = json.loads(body)["response_microcache"]
+        if after["entries"] != 1 or after["bytes"] != before["bytes"]:
+            raise AssertionError(
+                "expired microcache replacement retained stale byte "
+                f"accounting: before={before!r}, after={after!r}"
+            )
+
     with running_service(
         binary,
         statistics=True,

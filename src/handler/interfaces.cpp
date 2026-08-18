@@ -1114,37 +1114,92 @@ struct InflightSubRequest {
   std::mutex mutex;
   std::condition_variable cv;
   std::string owner_request_id;
-  std::shared_ptr<RequestContext> owner_context;
+  std::shared_ptr<RequestContext> work_context;
   std::atomic<uint32_t> consumers{1};
   bool done = false;
   SharedCoalescedResponse result;
   std::exception_ptr exception;
+
+  uint32_t tryAddConsumer() noexcept {
+    uint32_t current = consumers.load(std::memory_order_acquire);
+    while (current != 0 && current != UINT32_MAX) {
+      if (consumers.compare_exchange_weak(current, current + 1,
+                                          std::memory_order_acq_rel,
+                                          std::memory_order_acquire))
+        return current + 1;
+    }
+    return 0;
+  }
+
+  uint32_t releaseConsumer() noexcept {
+    uint32_t current = consumers.load(std::memory_order_acquire);
+    while (current != 0) {
+      if (consumers.compare_exchange_weak(current, current - 1,
+                                          std::memory_order_acq_rel,
+                                          std::memory_order_acquire))
+        return current - 1;
+    }
+    return 0;
+  }
 };
 
-struct InflightConsumerGuard {
-  explicit InflightConsumerGuard(std::shared_ptr<InflightSubRequest> call)
+struct InflightConsumerState {
+  explicit InflightConsumerState(std::shared_ptr<InflightSubRequest> call)
       : call(std::move(call)) {}
-  ~InflightConsumerGuard() {
+
+  void release() noexcept {
+    bool expected = false;
+    if (!released.compare_exchange_strong(expected, true,
+                                          std::memory_order_acq_rel,
+                                          std::memory_order_acquire))
+      return;
     if (!call)
       return;
-    const uint32_t previous =
-        call->consumers.fetch_sub(1, std::memory_order_acq_rel);
-    const uint32_t remaining = previous > 0 ? previous - 1 : 0;
-    if (call->owner_context)
-      call->owner_context->setConsumerCount(remaining);
+    const uint32_t remaining = call->releaseConsumer();
+    if (call->work_context)
+      call->work_context->setConsumerCount(remaining);
     bool done = false;
     {
       std::lock_guard<std::mutex> lock(call->mutex);
       done = call->done;
     }
-    if (remaining == 0 && !done && call->owner_context)
-      call->owner_context->requestCancellation(
+    if (remaining == 0 && !done && call->work_context)
+      call->work_context->requestCancellation(
           RequestCancellationReason::NoConsumers);
   }
+
+  std::shared_ptr<InflightSubRequest> call;
+  std::atomic<bool> released{false};
+};
+
+struct InflightConsumerGuard {
+  InflightConsumerGuard(std::shared_ptr<InflightSubRequest> call,
+                        const std::shared_ptr<RequestContext> &client_context)
+      : state(std::make_shared<InflightConsumerState>(std::move(call))) {
+    if (client_context) {
+      const std::weak_ptr<InflightConsumerState> weak_state = state;
+      cancellation_registration = client_context->registerCancellationCallback(
+          [weak_state] {
+            if (auto current = weak_state.lock())
+              current->release();
+          });
+    }
+  }
+  ~InflightConsumerGuard() {
+    cancellation_registration.reset();
+    release();
+  }
+
+  void release() noexcept {
+    if (state)
+      state->release();
+  }
+
   InflightConsumerGuard(const InflightConsumerGuard &) = delete;
   InflightConsumerGuard &operator=(const InflightConsumerGuard &) = delete;
 
-  std::shared_ptr<InflightSubRequest> call;
+  std::shared_ptr<InflightConsumerState> state;
+  RequestCancellationRegistration cancellation_registration;
 };
 
 struct CachedSubResponse {
@@ -1162,6 +1217,26 @@ static std::mutex g_sub_response_cache_mutex;
 static std::map<std::string, CachedSubResponse> g_sub_response_cache;
 static uint64_t g_sub_response_cache_bytes = 0;
 static uint64_t g_sub_response_cache_sequence = 0;
+
+static void eraseInflightSubRequest(
+    const std::string &key,
+    const std::shared_ptr<InflightSubRequest> &expected_call) {
+  std::lock_guard<std::mutex> lock(g_sub_inflight_mutex);
+  auto iter = g_sub_inflight.find(key);
+  if (iter != g_sub_inflight.end() && iter->second == expected_call)
+    g_sub_inflight.erase(iter);
+}
+
+static std::map<std::string, CachedSubResponse>::iterator
+eraseSubResponseCacheEntry(
+    std::map<std::string, CachedSubResponse>::iterator iter) {
+  const uint64_t bytes = iter->second.bytes;
+  g_sub_response_cache_bytes =
+      bytes <= g_sub_response_cache_bytes
+          ? g_sub_response_cache_bytes - bytes
+          : 0;
+  return g_sub_response_cache.erase(iter);
+}
 
 static uint64_t subResponseCacheMaxBytes() {
   static const uint64_t limit = [] {
@@ -1670,8 +1745,7 @@ static void pruneExpiredSubResponseCache(
   for (auto iter = g_sub_response_cache.begin();
        iter != g_sub_response_cache.end();) {
     if (iter->second.expires_at <= now) {
-      g_sub_response_cache_bytes -= iter->second.bytes;
-      iter = g_sub_response_cache.erase(iter);
+      iter = eraseSubResponseCacheEntry(iter);
     } else
       ++iter;
   }
@@ -1692,8 +1766,7 @@ static void evictOldestSubResponseCacheEntry() {
       [](const auto &left, const auto &right) {
         return left.second.sequence < right.second.sequence;
       });
-  g_sub_response_cache_bytes -= oldest->second.bytes;
-  g_sub_response_cache.erase(oldest);
+  eraseSubResponseCacheEntry(oldest);
 }
 
 static bool getCachedSubResponse(const std::string &key,
@@ -1708,7 +1781,7 @@ static bool getCachedSubResponse(const std::string &key,
   if (iter == g_sub_response_cache.end())
     return false;
   if (iter->second.expires_at <= now) {
-    g_sub_response_cache.erase(iter);
+    eraseSubResponseCacheEntry(iter);
     return false;
   }
   result = iter->second.result;
@@ -1738,10 +1811,8 @@ static void storeCachedSubResponse(const std::string &key,
   if (bytes > max_bytes)
     return;
   auto existing = g_sub_response_cache.find(key);
-  if (existing != g_sub_response_cache.end()) {
-    g_sub_response_cache_bytes -= existing->second.bytes;
-    g_sub_response_cache.erase(existing);
-  }
+  if (existing != g_sub_response_cache.end())
+    eraseSubResponseCacheEntry(existing);
   while (!g_sub_response_cache.empty() &&
          (g_sub_response_cache.size() >= 2048 ||
           g_sub_response_cache_bytes > max_bytes - bytes))
@@ -1905,32 +1976,43 @@ static std::string subconverterEntry(Request &request, Response &response,
 
   std::shared_ptr<InflightSubRequest> call;
   bool owner = false;
+  uint32_t follower_consumers = 0;
   {
     std::lock_guard<std::mutex> lock(g_sub_inflight_mutex);
     auto iter = g_sub_inflight.find(key);
-    if (iter == g_sub_inflight.end()) {
+    if (iter != g_sub_inflight.end()) {
+      follower_consumers = iter->second->tryAddConsumer();
+      if (follower_consumers != 0) {
+        call = iter->second;
+      } else {
+        g_sub_inflight.erase(iter);
+      }
+    }
+    if (!call) {
       call = std::make_shared<InflightSubRequest>();
       call->owner_request_id = currentLogRequestId();
-      call->owner_context = request.context;
+      const auto work_started = RequestContext::Clock::now();
+      call->work_context = std::make_shared<RequestContext>(
+          call->owner_request_id, work_started,
+          work_started +
+              std::chrono::milliseconds(
+                  std::max(1, settings.requestDeadlineMs)));
+      call->work_context->setConsumerCount(1);
       if (request.context) {
         request.context->setSingleflightRole(RequestSingleflightRole::Owner);
         request.context->setConsumerCount(1);
       }
       g_sub_inflight.emplace(key, call);
       owner = true;
-    } else {
-      call = iter->second;
     }
   }
 
   if (!owner) {
     if (request.context)
       request.context->setSingleflightRole(RequestSingleflightRole::Follower);
-    const uint32_t consumers =
-        call->consumers.fetch_add(1, std::memory_order_acq_rel) + 1;
-    if (call->owner_context)
-      call->owner_context->setConsumerCount(consumers);
-    InflightConsumerGuard consumer_guard(call);
+    if (call->work_context)
+      call->work_context->setConsumerCount(follower_consumers);
+    InflightConsumerGuard consumer_guard(call, request.context);
     writeLog(LOG_LEVEL_INFO,
              "SUB_REQUEST_COALESCED owner_request_id=" +
                  (call->owner_request_id.empty() ? "unavailable"
@@ -1957,8 +2039,8 @@ static std::string subconverterEntry(Request &request, Response &response,
     if (call->exception)
       std::rethrow_exception(call->exception);
     if (request.context) {
-      if (call->owner_context)
-        request.context->setCostClass(call->owner_context->costClass());
+      if (call->work_context)
+        request.context->setCostClass(call->work_context->costClass());
     }
     copyCoalescedToResponse(*call->result, response);
     recordTrackedSubRequest(track, request, response,
@@ -1966,26 +2048,30 @@ static std::string subconverterEntry(Request &request, Response &response,
     return call->result->body;
   }
 
-  InflightConsumerGuard consumer_guard(call);
+  InflightConsumerGuard consumer_guard(call, request.context);
   try {
     writeLog(LOG_LEVEL_DEBUG, "/sub 请求成为同 key 转换 owner。");
+    Request work_request = request;
+    work_request.context = call->work_context;
+    ScopedRequestContext work_scope(call->work_context);
     Response owner_response;
     RuleConversionStats stats;
     std::string body = runScheduledConversion(
-        request, owner_response, snapshot, track ? &stats : nullptr, true);
-    body = finalizeSubResponse(request, owner_response, std::move(body), age);
+        work_request, owner_response, snapshot, track ? &stats : nullptr,
+        true);
+    body = finalizeSubResponse(work_request, owner_response, std::move(body),
+                               age);
     SharedCoalescedResponse result = makeCoalescedResult(
         std::move(body), std::move(owner_response), stats.rules);
+    if (request.context && call->work_context)
+      request.context->setCostClass(call->work_context->costClass());
     copyCoalescedToResponse(*result, response);
     {
       std::lock_guard<std::mutex> lock(call->mutex);
       call->result = result;
       call->done = true;
     }
-    {
-      std::lock_guard<std::mutex> lock(g_sub_inflight_mutex);
-      g_sub_inflight.erase(key);
-    }
+    eraseInflightSubRequest(key, call);
     if (!age.requested && !explain_request)
       storeCachedSubResponse(key, result, settings);
     call->cv.notify_all();
@@ -1998,10 +2084,7 @@ static std::string subconverterEntry(Request &request, Response &response,
       call->exception = std::current_exception();
       call->done = true;
     }
-    {
-      std::lock_guard<std::mutex> lock(g_sub_inflight_mutex);
-      g_sub_inflight.erase(key);
-    }
+    eraseInflightSubRequest(key, call);
     call->cv.notify_all();
     throw;
   }
