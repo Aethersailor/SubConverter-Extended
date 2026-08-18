@@ -15,6 +15,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -323,30 +324,61 @@ def detach_reachable_transient_tags(
 
     for tag in detach:
         before, _manifest = client.manifest(tag)
-        annotation = f"index:io.github.aethersailor.registry-cleanup={time.time_ns()}"
-        command = [
-            "docker",
-            "buildx",
-            "imagetools",
-            "create",
-            "--annotation",
-            annotation,
-            "--tag",
-            f"{client.image}:{tag}",
-            f"{client.image}:{tag}",
-        ]
-        completed = subprocess.run(
-            command,
-            stdout=subprocess.DEVNULL,
+        source = f"{client.image}:{tag}"
+        dry_run = subprocess.run(
+            ["docker", "buildx", "imagetools", "create", "--dry-run", source],
+            stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             check=False,
         )
-        if completed.returncode != 0:
-            raise CleanupError(f"could not detach transient GHCR tag {tag}")
+        try:
+            preview = json.loads(dry_run.stdout.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CleanupError(
+                f"could not inspect transient GHCR tag {tag} for detachment"
+            ) from exc
+        descriptors = preview.get("manifests", []) if isinstance(preview, dict) else []
+        if dry_run.returncode != 0 or not isinstance(descriptors, list) or not descriptors:
+            raise CleanupError(f"could not inspect transient GHCR tag {tag}")
+
+        nonce = time.time_ns()
+        with tempfile.TemporaryDirectory(prefix="registry-cleanup-") as directory:
+            command = [
+                "docker",
+                "buildx",
+                "imagetools",
+                "create",
+                "--tag",
+                source,
+            ]
+            for index, descriptor in enumerate(descriptors):
+                if not isinstance(descriptor, dict):
+                    raise CleanupError("imagetools returned an invalid descriptor")
+                platform = descriptor.get("platform")
+                if platform is None:
+                    platform = {}
+                    descriptor["platform"] = platform
+                if not isinstance(platform, dict):
+                    raise CleanupError("imagetools returned an invalid platform")
+                platform["os.version"] = f"registry-cleanup-{nonce}-{index}"
+                path = os.path.join(directory, f"descriptor-{index}.json")
+                with open(path, "w", encoding="utf-8", newline="\n") as handle:
+                    json.dump(descriptor, handle, sort_keys=True, separators=(",", ":"))
+                    handle.write("\n")
+                command.extend(("--file", path))
+
+            completed = subprocess.run(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            if completed.returncode != 0:
+                raise CleanupError(f"could not detach transient GHCR tag {tag}")
         for _attempt in range(12):
             time.sleep(2)
             after, _manifest = client.manifest(tag)
-            if after != before:
+            if after != before and after not in reachable:
                 print(f"Detached transient GHCR tag: {tag}")
                 break
         else:
@@ -360,12 +392,15 @@ def wait_for_package_tag_digests(
     token: str,
     client: GhcrManifestClient,
     tags: list[str],
+    target_tags: set[str],
 ) -> list[dict[str, Any]]:
-    for _attempt in range(12):
+    for _attempt in range(30):
         versions = list_github_versions(owner, package, token)
         by_tag = tag_versions(versions)
         if all(
-            tag in by_tag and version_digest(by_tag[tag]) == client.manifest(tag)[0]
+            tag in by_tag
+            and version_digest(by_tag[tag]) == client.manifest(tag)[0]
+            and all(item in target_tags for item in version_tags(by_tag[tag]))
             for tag in tags
         ):
             return versions
@@ -467,6 +502,7 @@ def main() -> int:
             github_token,
             client,
             detach,
+            ghcr_targets,
         )
     else:
         versions = list_github_versions(args.github_owner, args.repository, github_token)
