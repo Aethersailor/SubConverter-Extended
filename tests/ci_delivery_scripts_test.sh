@@ -95,10 +95,12 @@ deny_trace() {
 : > "$TRACE"
 : > "$GITHUB_OUTPUT"
 bash "$REPOSITORY/scripts/ci/build-candidate-image.sh" \
-  amd64 ./Dockerfile linux/amd64 subconverter-alpine push dev dev
-assert_trace "--push"
-assert_trace "aethersailor/subconverter-extended:ci-dev-amd64"
-assert_trace "--provenance=false"
+  amd64 ./Dockerfile linux/amd64
+assert_trace "--load"
+assert_trace "subconverter-extended:amd64-ci"
+deny_trace "--push"
+deny_trace "aethersailor/subconverter-extended"
+deny_trace "ghcr.io/aethersailor/subconverter-extended"
 deny_trace "buildcache-"
 assert_trace "--build-arg THREADS=16"
 grep -Eq '^digest=sha256:[0-9]{64}$' "$GITHUB_OUTPUT"
@@ -106,20 +108,19 @@ grep -Eq '^digest=sha256:[0-9]{64}$' "$GITHUB_OUTPUT"
 : > "$TRACE"
 : > "$GITHUB_OUTPUT"
 bash "$REPOSITORY/scripts/ci/build-candidate-image.sh" \
-  amd64 ./Dockerfile linux/amd64 subconverter-alpine pull_request pr pr-deadbee
+  amd64 ./Dockerfile linux/amd64
 assert_trace "--load"
 assert_trace "subconverter-extended:amd64-ci"
 deny_trace "--push"
-deny_trace "--provenance=false"
 deny_trace "buildcache-"
 
 : > "$TRACE"
 : > "$GITHUB_OUTPUT"
 bash "$REPOSITORY/scripts/ci/build-candidate-image.sh" \
-  arm64 ./Dockerfile linux/arm64 subconverter-alpine-arm64 push release v1.3.1
-assert_trace "ci-v1.3.1-42-3-arm64"
+  arm64 ./Dockerfile linux/arm64
+assert_trace "subconverter-extended:arm64-ci"
 assert_trace "--platform linux/arm64"
-assert_trace "--provenance=false"
+deny_trace "--push"
 
 : > "$TRACE"
 bash "$REPOSITORY/scripts/ci/export-ci-image.sh" \
@@ -136,6 +137,29 @@ CLEANUP_WORKFLOW="$REPOSITORY/.github/workflows/cleanup-container-registry.yml"
 grep -Fq 'group: build-core-${{ github.ref }}' "$BUILD_WORKFLOW"
 grep -Fq 'group: container-registry-cleanup' "$BUILD_WORKFLOW"
 grep -Fq 'group: container-registry-cleanup' "$CLEANUP_WORKFLOW"
+
+build_linux_block="$(sed -n '/^  build-linux:/,/^  build-windows-amd64:/p' "$BUILD_WORKFLOW")"
+deny_build_linux_registry_write=false
+if grep -Eq 'docker login|docker push|--push|aethersailor/subconverter-extended:ci-|ghcr.io/aethersailor/subconverter-extended:ci-' <<<"$build_linux_block"; then
+  deny_build_linux_registry_write=true
+fi
+if [ "$deny_build_linux_registry_write" = true ]; then
+  echo "build-linux still writes to a container registry" >&2
+  exit 1
+fi
+grep -Fq 'image: subconverter-extended:${{ matrix.arch }}-ci' <<<"$build_linux_block"
+grep -Fq 'docker save "subconverter-extended:${{ matrix.arch }}-ci"' <<<"$build_linux_block"
+grep -Fq 'name: docker-image-${{ matrix.arch }}' <<<"$build_linux_block"
+
+publish_block="$(sed -n '/^  merge-manifest:/,/^  create-release:/p' "$BUILD_WORKFLOW")"
+grep -Fq 'needs: [prepare, validate-source, sanitizer, cross-build, build-linux, build-windows-amd64]' <<<"$publish_block"
+grep -Fq "needs.build-windows-amd64.result == 'success'" <<<"$publish_block"
+grep -Fq 'pattern: docker-image-*' <<<"$publish_block"
+grep -Fq 'gzip -dc "images/$archive" | docker load' <<<"$publish_block"
+grep -Fq 'actual_platform="$(docker image inspect' <<<"$publish_block"
+grep -Fq 'docker push "$dockerhub_candidate"' <<<"$publish_block"
+grep -Fq 'docker push "$ghcr_candidate"' <<<"$publish_block"
+grep -Fq 'Candidate digest differs across registries' <<<"$publish_block"
 
 cleanup_block="$(sed -n '/^  cleanup-transient-images:/,$p' "$BUILD_WORKFLOW")"
 grep -Fq 'always() &&' <<<"$cleanup_block"

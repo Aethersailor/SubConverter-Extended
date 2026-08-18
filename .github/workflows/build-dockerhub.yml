@@ -457,22 +457,6 @@ jobs:
           docker buildx create --name sce-builder --driver docker-container --use
           docker buildx inspect --bootstrap
 
-      - name: Log in to Docker Hub
-        if: github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'
-        shell: bash
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        run: echo "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
-
-      - name: Log in to GHCR
-        if: github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'
-        shell: bash
-        env:
-          GHCR_USERNAME: ${{ github.actor }}
-          GHCR_TOKEN: ${{ github.token }}
-        run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin
-
       - name: Prepare Docker build args
         id: docker_args
         shell: bash
@@ -500,11 +484,7 @@ jobs:
           bash scripts/ci/build-candidate-image.sh \
             "${{ matrix.arch }}" \
             "${{ matrix.dockerfile }}" \
-            "${{ matrix.image_platform }}" \
-            "${{ matrix.cache_scope }}" \
-            "${{ github.event_name }}" \
-            "${{ needs.prepare.outputs.mode }}" \
-            "${{ needs.prepare.outputs.version }}"
+            "${{ matrix.image_platform }}"
 
       - name: Export CI artifacts from the existing cache
         shell: bash
@@ -622,31 +602,40 @@ jobs:
           echo "::error::Frozen dependency/generated inputs are stale. Refresh and commit them on dev before building master or a release."
           exit 1
 
-      - name: Save image digest
-        if: github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'
-        shell: bash
-        run: |
-          mkdir -p docker-digests
-          printf '%s\n' "${{ steps.build_image.outputs.digest }}" > "docker-digests/${{ matrix.arch }}.txt"
-
-      - name: Upload image digest
-        if: github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: docker-digest-${{ matrix.arch }}
-          path: docker-digests/${{ matrix.arch }}.txt
-          retention-days: 1
-
       - name: Smoke test image (${{ matrix.arch }})
         if: github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'
         timeout-minutes: 3
         uses: ./.github/actions/smoke-docker-image
         with:
-          image: ghcr.io/aethersailor/subconverter-extended@${{ steps.build_image.outputs.digest }}
+          image: subconverter-extended:${{ matrix.arch }}-ci
           platform: ${{ matrix.image_platform }}
           expected-version: ${{ needs.prepare.outputs.version }}
           expected-revision: ${{ needs.prepare.outputs.sha }}
           expected-build-date: ${{ needs.prepare.outputs.build_date }}
+
+      - name: Export tested image archive (${{ matrix.arch }})
+        if: github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p docker-images
+          archive="subconverter-extended-${{ matrix.arch }}.tar.gz"
+          docker save "subconverter-extended:${{ matrix.arch }}-ci" | \
+            gzip -1 > "docker-images/$archive"
+          (
+            cd docker-images
+            sha256sum "$archive" > "$archive.sha256"
+          )
+
+      - name: Upload tested image archive (${{ matrix.arch }})
+        if: github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: docker-image-${{ matrix.arch }}
+          path: docker-images/subconverter-extended-${{ matrix.arch }}.tar.gz*
+          compression-level: 0
+          overwrite: true
+          retention-days: 1
 
       - name: Commit and push generated development files
         if: steps.check_changes.outputs.changed == 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/dev'
@@ -753,13 +742,14 @@ jobs:
   merge-manifest:
     name: "🔗 Publish Version Docker Images"
     runs-on: ubuntu-latest
-    needs: [prepare, validate-source, sanitizer, cross-build, build-linux]
+    needs: [prepare, validate-source, sanitizer, cross-build, build-linux, build-windows-amd64]
     if: >-
       always() &&
       github.event_name != 'pull_request' &&
       needs.prepare.outputs.mode != 'master' &&
       needs.prepare.result == 'success' &&
       needs.build-linux.result == 'success' &&
+      (needs.build-windows-amd64.result == 'success' || needs.prepare.outputs.mode == 'dev') &&
       (needs.sanitizer.result == 'success' || needs.prepare.outputs.mode == 'release') &&
       (needs.cross-build.result == 'success' || needs.prepare.outputs.mode == 'release') &&
       (needs.validate-source.result == 'success' || needs.prepare.outputs.mode == 'release')
@@ -830,12 +820,44 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download image digests
+      - name: Download tested image archives
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          path: digests
-          pattern: docker-digest-*
+          path: images
+          pattern: docker-image-*
           merge-multiple: true
+
+      - name: Load and verify tested image archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ needs.prepare.outputs.mode }}" = "dev" ]; then
+            ARCHES=(amd64)
+          else
+            ARCHES=(amd64 arm64 armv7)
+          fi
+          for arch in "${ARCHES[@]}"; do
+            archive="subconverter-extended-${arch}.tar.gz"
+            test -s "images/$archive"
+            test -s "images/$archive.sha256"
+            (
+              cd images
+              sha256sum -c "$archive.sha256"
+            )
+            gzip -dc "images/$archive" | docker load
+            image="subconverter-extended:${arch}-ci"
+            case "$arch" in
+              amd64) expected_platform="linux/amd64" ;;
+              arm64) expected_platform="linux/arm64" ;;
+              armv7) expected_platform="linux/arm/v7" ;;
+              *) echo "::error::Unsupported image archive architecture: $arch"; exit 1 ;;
+            esac
+            actual_platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}{{if .Variant}}/{{.Variant}}{{end}}' "$image")"
+            test "$actual_platform" = "$expected_platform"
+            test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")" = "${{ needs.prepare.outputs.sha }}"
+            test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$image")" = "${{ needs.prepare.outputs.version }}"
+            test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.created" }}' "$image")" = "${{ needs.prepare.outputs.build_date }}"
+          done
 
       - name: Re-verify formal version tags are absent
         if: needs.prepare.outputs.mode == 'release'
@@ -881,7 +903,7 @@ jobs:
             aethersailor/subconverter-extended \
             "https://ghcr.io/token?service=ghcr.io&scope=repository:aethersailor/subconverter-extended:pull"
 
-      - name: Promote tested candidates
+      - name: Push tested candidates and publish manifests
         shell: bash
         run: |
           set -euo pipefail
@@ -891,16 +913,49 @@ jobs:
           else
             ARCHES=(amd64 arm64 armv7)
           fi
-          for arch in "${ARCHES[@]}"; do
-            test -s "digests/${arch}.txt"
-            grep -Eq '^sha256:[0-9a-f]{64}$' "digests/${arch}.txt"
-          done
-
           TAGS="${{ needs.prepare.outputs.tags }}"
           IMAGE_NAMES=(
             "aethersailor/subconverter-extended"
             "ghcr.io/aethersailor/subconverter-extended"
           )
+
+          resolve_digest() {
+            local reference="$1"
+            local output
+            local digest
+            for attempt in $(seq 1 6); do
+              if output="$(docker buildx imagetools inspect "$reference" 2>/dev/null)"; then
+                digest="$(awk '$1 == "Digest:" {print $2; exit}' <<< "$output")"
+                if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                  printf '%s\n' "$digest"
+                  return 0
+                fi
+              fi
+              sleep 5
+            done
+            echo "::error::Could not resolve candidate digest for $reference." >&2
+            return 1
+          }
+
+          for arch in "${ARCHES[@]}"; do
+            candidate="ci-${{ needs.prepare.outputs.mode }}-${arch}"
+            if [ "${{ needs.prepare.outputs.mode }}" = "release" ]; then
+              candidate="ci-${{ needs.prepare.outputs.version }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${arch}"
+            fi
+            local_image="subconverter-extended:${arch}-ci"
+            dockerhub_candidate="aethersailor/subconverter-extended:${candidate}"
+            ghcr_candidate="ghcr.io/aethersailor/subconverter-extended:${candidate}"
+            docker tag "$local_image" "$dockerhub_candidate"
+            docker tag "$local_image" "$ghcr_candidate"
+            docker push "$dockerhub_candidate"
+            docker push "$ghcr_candidate"
+            dockerhub_candidate_digest="$(resolve_digest "$dockerhub_candidate")"
+            ghcr_candidate_digest="$(resolve_digest "$ghcr_candidate")"
+            if [ "$dockerhub_candidate_digest" != "$ghcr_candidate_digest" ]; then
+              echo "::error::Candidate digest differs across registries for $arch."
+              exit 1
+            fi
+          done
 
           for IMAGE_NAME in "${IMAGE_NAMES[@]}"; do
             SOURCES=()

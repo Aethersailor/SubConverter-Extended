@@ -107,11 +107,7 @@ jobs:
           bash scripts/ci/build-candidate-image.sh \
             amd64 \
             ./Dockerfile \
-            linux/amd64 \
-            subconverter-alpine \
-            pull_request \
-            pr \
-            "${{ steps.metadata.outputs.version }}"
+            linux/amd64
 
       - name: Export CI artifacts from the candidate build
         env:
