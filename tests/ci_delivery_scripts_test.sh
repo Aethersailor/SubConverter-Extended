@@ -50,13 +50,39 @@ mapfile -t bridge_sources < <(
 )
 bridge_dockerfiles=(Dockerfile docker/Dockerfile.debian docker/Dockerfile.armv7-cross)
 for dockerfile in "${bridge_dockerfiles[@]}"; do
+  dockerfile_content="$(tr -d '\r' < "$REPOSITORY/$dockerfile")"
   for source in "${bridge_sources[@]}"; do
-    tr -d '\r' < "$REPOSITORY/$dockerfile" | grep -Fqx "COPY bridge/$source ./" || {
+    grep -Fqx "COPY bridge/$source ./" <<< "$dockerfile_content" || {
       echo "missing bridge source in $dockerfile: $source" >&2
       exit 1
     }
   done
 done
+
+workflow_text="$(tr -d '\r' < "$REPOSITORY/.github/workflows/build-dockerhub.yml")"
+dockerfile_text="$(tr -d '\r' < "$REPOSITORY/Dockerfile")"
+cmake_text="$(tr -d '\r' < "$REPOSITORY/CMakeLists.txt")"
+grep -Fq "github.event_name == 'workflow_dispatch' && 'full' || 'focused'" \
+  <<< "$workflow_text"
+grep -Fq -- '--build-arg SANITIZER_SUITE="$SANITIZER_SUITE"' \
+  <<< "$workflow_text"
+grep -Fq 'ARG SANITIZER_SUITE=full' <<< "$dockerfile_text"
+for target in subconverter webserver_error_test concurrency_primitives_test \
+  settings_view_test curl_handle_pool_test cache_storage_test; do
+  grep -Fq "$target" <<< "$dockerfile_text" || {
+    echo "focused sanitizer target missing: $target" >&2
+    exit 1
+  }
+done
+for test_name in shutdown_process_beast webserver_error_beast \
+  concurrency_primitives curl_handle_pool; do
+  grep -Fq "$test_name" <<< "$dockerfile_text" || {
+    echo "focused sanitizer test missing: $test_name" >&2
+    exit 1
+  }
+done
+grep -Fq 'LIST(REMOVE_ITEM SETTINGS_SNAPSHOT_RUNTIME_SOURCES' <<< "$cmake_text"
+grep -Fq 'src/parser/mihomo_bridge.cpp' <<< "$cmake_text"
 
 deny_trace() {
   if grep -F -- "$1" "$TRACE" >/dev/null; then

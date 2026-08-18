@@ -268,7 +268,7 @@ jobs:
           bash tests/ci_delivery_scripts_test.sh
 
   sanitizer:
-    name: "🧪 ASan/UBSan (dev, non-publishing)"
+    name: "🧪 ASan/UBSan (${{ github.event_name == 'workflow_dispatch' && 'full' || 'focused' }}, dev, non-publishing)"
     runs-on: ubuntu-latest
     needs: prepare
     if: needs.prepare.outputs.mode == 'dev'
@@ -319,6 +319,7 @@ jobs:
         shell: bash
         env:
           BUILD_ARGS: ${{ steps.sanitizer_args.outputs.args }}
+          SANITIZER_SUITE: ${{ github.event_name == 'workflow_dispatch' && 'full' || 'focused' }}
         run: |
           set -euo pipefail
           args=()
@@ -334,6 +335,7 @@ jobs:
             --cache-to type=gha,mode=max,scope=subconverter-sanitizer \
             "${args[@]}" \
             --build-arg ENABLE_SANITIZERS=true \
+            --build-arg SANITIZER_SUITE="$SANITIZER_SUITE" \
             .
 
   cross-build:

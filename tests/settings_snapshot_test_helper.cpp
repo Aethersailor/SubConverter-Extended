@@ -1,14 +1,37 @@
 #include <filesystem>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 
 #include "handler/interfaces.h"
 #include "handler/settings.h"
 #include "handler/settings_snapshot.h"
+#include "parser/mihomo_bridge.h"
 #include "server/webserver.h"
 #include "utils/logger.h"
 
 WebServer webServer;
+
+namespace mihomo {
+
+std::vector<ProxyNode> parseSubscription(const std::string &) {
+  throw std::runtime_error(
+      "Mihomo parsing is unavailable in the settings snapshot helper");
+}
+
+bool isMihomoParserAvailable() { return false; }
+
+AgeRecipient resolveAgeRecipient(const std::string &) {
+  throw std::runtime_error(
+      "Age recipient resolution is unavailable in the settings snapshot helper");
+}
+
+std::string encryptAgeArmored(const std::string &, const std::string &) {
+  throw std::runtime_error(
+      "Age encryption is unavailable in the settings snapshot helper");
+}
+
+} // namespace mihomo
 
 int main(int argc, char *argv[]) {
   const bool expect_reload_failure =

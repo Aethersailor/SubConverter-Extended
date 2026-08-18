@@ -286,8 +286,11 @@ IF(BUILD_TESTS)
     ADD_TEST(NAME user_agent COMMAND user_agent_test)
     SET_TESTS_PROPERTIES(user_agent PROPERTIES LABELS fast)
 
+    SET(SETTINGS_SNAPSHOT_RUNTIME_SOURCES ${SUBCONVERTER_RUNTIME_SOURCES})
+    LIST(REMOVE_ITEM SETTINGS_SNAPSHOT_RUNTIME_SOURCES
+        src/parser/mihomo_bridge.cpp)
     ADD_EXECUTABLE(settings_snapshot_test_helper
-        ${SUBCONVERTER_RUNTIME_SOURCES}
+        ${SETTINGS_SNAPSHOT_RUNTIME_SOURCES}
         src/handler/settings_snapshot.cpp
         tests/settings_snapshot_test_helper.cpp)
     ADD_DEPENDENCIES(settings_snapshot_test_helper dashboard_resource)
