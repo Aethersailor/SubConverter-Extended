@@ -899,6 +899,16 @@ static YAML::Node providersMatchingGroupId(
   return use_node;
 }
 
+static YAML::Node providersMatchingGroupTag(
+    const std::string &target, const std::vector<ProxyProvider> &providers) {
+  YAML::Node use_node(YAML::NodeType::Sequence);
+  for (const ProxyProvider &p : providers) {
+    if (!p.tag.empty() && regFind(p.tag, target))
+      use_node.push_back(p.name);
+  }
+  return use_node;
+}
+
 using RemarkSet = std::unordered_set<std::string_view>;
 
 void processRemark(std::string &remark, const RemarkSet &used_remarks,
@@ -1706,8 +1716,8 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
       // 检查策略组是否包含正则表达式（用于匹配节点）
       bool has_regex = false;
       std::string regex_pattern;
-      bool has_groupid_provider_match = false;
-      YAML::Node groupid_use_node(YAML::NodeType::Sequence);
+      bool has_provider_match = false;
+      YAML::Node provider_use_node(YAML::NodeType::Sequence);
 
       for (const auto &proxy : x.Proxies) {
         // 如果不是以 [] 开头，则认为是正则表达式
@@ -1718,9 +1728,22 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
             YAML::Node matched_providers =
                 providersMatchingGroupId(groupid_target, ext.providers);
             if (matched_providers.size() > 0) {
-              has_groupid_provider_match = true;
-              groupid_use_node = matched_providers;
+              has_provider_match = true;
+              provider_use_node = matched_providers;
               regex_pattern = groupid_filter;
+              has_regex = !regex_pattern.empty();
+              break;
+            }
+          }
+
+          std::string group_target, group_filter;
+          if (splitRenameGroupRule(proxy, group_target, group_filter)) {
+            YAML::Node matched_providers =
+                providersMatchingGroupTag(group_target, ext.providers);
+            if (matched_providers.size() > 0) {
+              has_provider_match = true;
+              provider_use_node = matched_providers;
+              regex_pattern = group_filter;
               has_regex = !regex_pattern.empty();
               break;
             }
@@ -1732,8 +1755,8 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
         }
       }
 
-      if (has_groupid_provider_match) {
-        singlegroup["use"] = groupid_use_node;
+      if (has_provider_match) {
+        singlegroup["use"] = provider_use_node;
         if (has_regex)
           singlegroup["filter"] = regex_pattern;
       } else if (has_regex && !regex_pattern.empty()) {

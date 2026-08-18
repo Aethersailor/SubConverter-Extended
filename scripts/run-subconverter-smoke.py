@@ -167,6 +167,23 @@ PROVIDER_FILTER_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
         )
     )
 ).decode("ascii")
+PROVIDER_GROUP_TAG_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
+    b"\n".join(
+        (
+            b"enable_rule_generator=false",
+            b"custom_proxy_group=Plain`url-test`Smoke`"
+            b"https://www.gstatic.com/generate_204`1800,5,100",
+            b"custom_proxy_group=OnlyPublic`url-test`!!GROUP=public!!Smoke`"
+            b"https://www.gstatic.com/generate_204`1800,5,100",
+            b"custom_proxy_group=ExcludePrivate`url-test`"
+            b"!!GROUP=^(?!.*(myvps|home)).*$!!Smoke`"
+            b"https://www.gstatic.com/generate_204`1800,5,100",
+            b"custom_proxy_group=PublicAll`select`!!GROUP=public",
+            b"custom_proxy_group=ByGroupId`select`!!GROUPID=2!!Smoke",
+            b"custom_proxy_group=ExplicitProvider`select`!!PROVIDER=Public",
+        )
+    )
+).decode("ascii")
 QUANX_REMOTE_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
     b"enable_rule_generator=false\ncustom_proxy_group=Remote`select`.*\n"
 ).decode("ascii")
@@ -287,6 +304,34 @@ def provider_interval_from_output(output: str, provider_name: str) -> int:
 def provider_proxy_direct_from_output(output: str, provider_name: str) -> bool:
     block = provider_block_from_output(output, provider_name)
     return re.search(r"(?m)^    proxy: DIRECT\s*$", block) is not None
+
+
+def proxy_group_block_from_output(output: str, group_name: str) -> str:
+    marker = f"  - name: {group_name}\n"
+    start = output.find(marker)
+    if start < 0:
+        raise AssertionError(f"proxy group block is missing: {group_name}")
+    following = output[start + len(marker) :]
+    next_group = re.search(r"(?m)^  - name: ", following)
+    end = len(following) if next_group is None else next_group.start()
+    return marker + following[:end]
+
+
+def proxy_group_use_from_output(output: str, group_name: str) -> list[str]:
+    block = proxy_group_block_from_output(output, group_name)
+    use = re.search(r"(?m)^    use:\s*$", block)
+    if use is None:
+        return []
+    following = block[use.end() :]
+    return re.findall(r"(?m)^      - (.+?)\s*$", following)
+
+
+def proxy_group_filter_from_output(output: str, group_name: str) -> str | None:
+    block = proxy_group_block_from_output(output, group_name)
+    match = re.search(r'(?m)^    filter: (?:"([^"]*)"|([^\r\n]+))\s*$', block)
+    if match is None:
+        return None
+    return match.group(1) if match.group(1) is not None else match.group(2)
 
 
 def assert_snapshot(name: str, content: str, snapshot_dir: Path | None, update: bool) -> None:
@@ -1557,6 +1602,55 @@ def run_checks(
                     f"{case_name} failed: missing={missing}, unexpected={unexpected}\n"
                     f"{output}"
                 )
+
+        provider_group_output = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "clash",
+                "url": "|".join(
+                    (
+                        f"tag:myvps,provider:MyVPS,{remote_subscription_url}",
+                        f"tag:home,provider:Home,{remote_subscription_url}",
+                        f"tag:public,provider:Public,{remote_subscription_url}",
+                    )
+                ),
+                "config": PROVIDER_GROUP_TAG_CONFIG,
+            },
+            timeout,
+        )
+        expected_provider_groups = {
+            "Plain": (["MyVPS", "Home", "Public"], "Smoke"),
+            "OnlyPublic": (["Public"], "Smoke"),
+            "ExcludePrivate": (["Public"], "Smoke"),
+            "PublicAll": (["Public"], None),
+            "ByGroupId": (["Public"], "Smoke"),
+            "ExplicitProvider": (["Public"], None),
+        }
+        for group_name, (
+            expected_use,
+            expected_filter,
+        ) in expected_provider_groups.items():
+            actual_use = proxy_group_use_from_output(
+                provider_group_output, group_name
+            )
+            actual_filter = proxy_group_filter_from_output(
+                provider_group_output, group_name
+            )
+            if actual_use != expected_use or actual_filter != expected_filter:
+                raise AssertionError(
+                    f"provider group {group_name} mismatch: "
+                    f"use={actual_use!r}, filter={actual_filter!r}; "
+                    f"expected use={expected_use!r}, filter={expected_filter!r}\n"
+                    f"{proxy_group_block_from_output(provider_group_output, group_name)}"
+                )
+        if (
+            "filter: !!GROUP=" in provider_group_output
+            or 'filter: "!!GROUP=' in provider_group_output
+        ):
+            raise AssertionError(
+                "provider GROUP selector leaked into the Mihomo node filter"
+            )
 
         def assert_provider_ua_present(label: str, output: str, user_agent: str) -> None:
             required = ("proxy-providers:", "header:", "User-Agent:", user_agent)
