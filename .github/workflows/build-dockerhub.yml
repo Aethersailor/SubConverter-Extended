@@ -1428,12 +1428,9 @@ jobs:
     needs: [prepare, merge-manifest, verify-release-complete]
     if: >-
       always() &&
-      !cancelled() &&
       github.event_name != 'pull_request' &&
       needs.prepare.result == 'success' &&
-      needs.merge-manifest.result == 'success' &&
-      needs.prepare.outputs.mode != 'master' &&
-      (needs.prepare.outputs.mode == 'dev' || needs.verify-release-complete.result == 'success')
+      (needs.prepare.outputs.mode == 'dev' || needs.prepare.outputs.mode == 'release')
     permissions:
       contents: read
       packages: write
@@ -1454,7 +1451,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      - name: Remove this run's temporary container data
+      - name: Remove this run's temporary and unreachable container data
         id: cleanup
         continue-on-error: ${{ needs.prepare.outputs.mode == 'release' }}
         shell: bash
@@ -1472,6 +1469,7 @@ jobs:
             selector=(--current-prefix "ci-${VERSION}-${GITHUB_RUN_ID}-")
           fi
           python3 scripts/ci/cleanup_container_registry.py \
+            --prune-orphans \
             --apply \
             "${selector[@]}"
 
@@ -1479,4 +1477,4 @@ jobs:
         if: steps.cleanup.outcome == 'failure' && needs.prepare.outputs.mode == 'release'
         shell: bash
         run: |
-          echo "::warning::Release publication succeeded, but temporary container cleanup failed. Run the manual registry cleanup workflow."
+          echo "::warning::Temporary container cleanup failed. The scheduled registry cleanup workflow will retry it."

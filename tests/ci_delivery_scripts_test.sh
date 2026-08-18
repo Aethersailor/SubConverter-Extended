@@ -129,3 +129,29 @@ assert_trace "--tag subconverter-temp:amd64-builder"
 assert_trace "--load"
 
 echo "CI delivery script contract passed"
+
+BUILD_WORKFLOW="$REPOSITORY/.github/workflows/build-dockerhub.yml"
+CLEANUP_WORKFLOW="$REPOSITORY/.github/workflows/cleanup-container-registry.yml"
+
+grep -Fq 'group: build-core-${{ github.ref }}' "$BUILD_WORKFLOW"
+grep -Fq 'group: container-registry-cleanup' "$BUILD_WORKFLOW"
+grep -Fq 'group: container-registry-cleanup' "$CLEANUP_WORKFLOW"
+
+cleanup_block="$(sed -n '/^  cleanup-transient-images:/,$p' "$BUILD_WORKFLOW")"
+grep -Fq 'always() &&' <<<"$cleanup_block"
+grep -Fq "needs.prepare.outputs.mode == 'dev'" <<<"$cleanup_block"
+grep -Fq "needs.prepare.outputs.mode == 'release'" <<<"$cleanup_block"
+grep -Fq -- '--prune-orphans' <<<"$cleanup_block"
+grep -Fq -- '--current-tag ci-dev-amd64' <<<"$cleanup_block"
+grep -Fq -- '--current-prefix "ci-${VERSION}-${GITHUB_RUN_ID}-"' <<<"$cleanup_block"
+if grep -Fq '!cancelled()' <<<"$cleanup_block" || \
+   grep -Fq "needs.merge-manifest.result == 'success'" <<<"$cleanup_block" || \
+   grep -Fq "needs.verify-release-complete.result == 'success'" <<<"$cleanup_block"; then
+  echo "cleanup job is still restricted to successful publication" >&2
+  exit 1
+fi
+
+grep -Fq 'schedule:' "$CLEANUP_WORKFLOW"
+grep -Fq 'python3 scripts/ci/cleanup_container_registry.py --prune-all --apply' "$CLEANUP_WORKFLOW"
+
+echo "Container registry cleanup contract passed"

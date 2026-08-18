@@ -2,6 +2,8 @@ name: 清理容器注册表临时镜像
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '23 3 * * *'
 
 permissions:
   actions: read

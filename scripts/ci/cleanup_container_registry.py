@@ -315,7 +315,7 @@ def detach_reachable_transient_tags(
             continue
         tags = version_tags(version)
         digest = version_digest(version)
-        if digest in reachable or any(ALLOWED_TAG_RE.fullmatch(item) for item in tags):
+        if digest in reachable or any(item not in target_tags for item in tags):
             detach.append(tag)
 
     if not apply:
@@ -380,6 +380,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dockerhub-namespace", default="aethersailor")
     parser.add_argument("--current-tag", action="append", default=[])
     parser.add_argument("--current-prefix", action="append", default=[])
+    parser.add_argument("--prune-orphans", action="store_true")
     parser.add_argument("--prune-all", action="store_true")
     parser.add_argument("--apply", action="store_true")
     return parser.parse_args()
@@ -422,12 +423,18 @@ def main() -> int:
     allowed_tags = sorted(tag for tag in package_tags if ALLOWED_TAG_RE.fullmatch(tag))
     client = GhcrManifestClient(args.github_owner, args.repository)
     ghcr_allowed_before = allowed_snapshot(client, package_tags)
-    reachable = client.reachable(allowed_tags)
     ghcr_targets = {
         tag
         for tag in package_tags
         if TRANSIENT_TAG_RE.match(tag) and (args.prune_all or selected(tag))
     }
+    protected_roots = sorted(
+        tag
+        for tag in package_tags
+        if ALLOWED_TAG_RE.fullmatch(tag)
+        or (TRANSIENT_TAG_RE.match(tag) and tag not in ghcr_targets)
+    )
+    reachable = client.reachable(protected_roots)
     detach = detach_reachable_transient_tags(
         client, versions, reachable, ghcr_targets, apply=args.apply
     )
@@ -442,7 +449,8 @@ def main() -> int:
         f"Docker Hub tags={len(docker_targets)}, "
         f"GHCR tags={len(ghcr_targets)}, detach={len(detach)}, "
         f"unreachable untagged GHCR versions="
-        f"{len(untagged_orphans) if args.prune_all else 0}."
+        f"{len(untagged_orphans)}"
+        f"{' (report only)' if not (args.prune_all or args.prune_orphans) else ''}."
     )
     if not args.apply:
         return 0
@@ -481,9 +489,15 @@ def main() -> int:
         args.github_owner, args.repository, github_token, tagged_delete
     )
 
-    if args.prune_all:
+    if args.prune_all or args.prune_orphans:
         versions = list_github_versions(args.github_owner, args.repository, github_token)
-        reachable = client.reachable(allowed_tags)
+        tags_for_prune = all_package_tags(versions)
+        protected_roots = sorted(
+            tag
+            for tag in tags_for_prune
+            if ALLOWED_TAG_RE.fullmatch(tag) or TRANSIENT_TAG_RE.match(tag)
+        )
+        reachable = client.reachable(protected_roots)
         orphan_delete = [
             version
             for version in versions
@@ -510,9 +524,14 @@ def main() -> int:
         raise CleanupError("transient GHCR tags remain after cleanup")
     if allowed_snapshot(client, tags_after) != ghcr_allowed_before:
         raise CleanupError("allowed GHCR tags changed during cleanup")
-    if args.prune_all:
+    if args.prune_all or args.prune_orphans:
+        protected_roots = sorted(
+            tag
+            for tag in tags_after
+            if ALLOWED_TAG_RE.fullmatch(tag) or TRANSIENT_TAG_RE.match(tag)
+        )
         reachable_after = client.reachable(
-            sorted(tag for tag in tags_after if ALLOWED_TAG_RE.fullmatch(tag))
+            protected_roots
         )
         leftovers = [
             version
