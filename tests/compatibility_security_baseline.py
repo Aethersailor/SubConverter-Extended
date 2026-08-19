@@ -42,7 +42,70 @@ def _urlsafe_b64(value: str | bytes) -> str:
 SUBSCRIPTION = (
     "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388#Smoke\n"
 )
+SECONDARY_SS_LINK = (
+    "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@second.example.com:8389#Second"
+)
 ENCODED_SUBSCRIPTION = base64.urlsafe_b64encode(SUBSCRIPTION.encode()).decode()
+LOCAL_GROUP_MATCHER_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
+    "\n".join(
+        (
+            "enable_rule_generator=false",
+            "custom_proxy_group=Plain`select`Smoke",
+            "custom_proxy_group=ByGroup`select`!!GROUP=public!!Smoke",
+            "custom_proxy_group=ByGroupCapture`select`!!GROUP=pub(lic)!!Sm(oke)",
+            "custom_proxy_group=BySecondaryGroup`select`!!GROUP=secondary!!Second",
+            "custom_proxy_group=ByPrimaryGroupId`select`!!GROUPID=0!!Smoke",
+            "custom_proxy_group=ByGroupId`select`!!GROUPID=1!!Second",
+            "custom_proxy_group=ByInsert`select`!!INSERT=-1!!Second",
+            "custom_proxy_group=ByType`select`!!TYPE=SS",
+            "custom_proxy_group=ByPortExact`select`!!PORT=8388",
+            "custom_proxy_group=ByPortRange`select`!!PORT=8380-8390",
+            "custom_proxy_group=ByPortLess`select`!!PORT=9000-",
+            "custom_proxy_group=ByPortMore`select`!!PORT=8000+",
+            "custom_proxy_group=ByPortNot`select`!!PORT=!8389",
+            "custom_proxy_group=LegacyNotRange`select`!!PORT=8000-9000,!7000-7100",
+            "custom_proxy_group=LegacyNegationOrder`select`!!PORT=!8388,!9999",
+            "custom_proxy_group=ByServer`select`!!SERVER=^example\\.com$",
+            "custom_proxy_group=MalformedGroup`select`!!GROUP=",
+            "custom_proxy_group=NoGroup`select`!!GROUP=missing!!Smoke",
+            "custom_proxy_group=NoPort`select`!!PORT=!8388!!Smoke",
+            "custom_proxy_group=LegacyNotRangeExcluded`select`!!PORT=!8000-9000",
+            "custom_proxy_group=NoInsertPositive`select`!!INSERT=1!!Second",
+            "custom_proxy_group=NoTypePartial`select`!!TYPE=S",
+            "custom_proxy_group=InvalidPlain`select`[",
+            "custom_proxy_group=InvalidGroup`select`!!GROUP=[!!Smoke",
+        )
+    ).encode()
+).decode()
+SELECT_HEALTH_HTTP_URL = "http://wifi.vivo.com.cn/generate_204"
+SELECT_HEALTH_HTTPS_URL = "https://cp.cloudflare.com/generate_204"
+SELECT_HEALTH_INI_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
+    "\n".join(
+        (
+            "enable_rule_generator=false",
+            "custom_proxy_group=DIRECT-HEALTH-HTTP`select`[]DIRECT`"
+            + SELECT_HEALTH_HTTP_URL,
+            "custom_proxy_group=DIRECT-HEALTH-HTTPS`select`[]DIRECT`"
+            + SELECT_HEALTH_HTTPS_URL,
+        )
+    ).encode()
+).decode()
+SELECT_HEALTH_TOML_CONFIG = "\n".join(
+    (
+        "version = 1",
+        "[custom]",
+        "enable_rule_generator = false",
+        "[[custom_groups]]",
+        'name = "DIRECT-HEALTH-TOML"',
+        'type = "select"',
+        'rule = ["[]DIRECT"]',
+        f'url = "{SELECT_HEALTH_HTTPS_URL}"',
+        "[[custom_groups]]",
+        'name = "DIRECT-HEALTH-TOML-RULE"',
+        'type = "select"',
+        f'rule = ["[]DIRECT", "{SELECT_HEALTH_HTTP_URL}"]',
+    )
+)
 VLESS_URI = (
     "vless://11111111-1111-1111-1111-111111111111@vless.example.test:443"
     "?security=tls&type=ws&host=vless.example.test&path=%2Fws#VLESSFixture"
@@ -619,6 +682,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
     stash_legacy_text_fetch_count = 0
     external_valid_count = 0
     get_request_count = 0
+    slow_subscription_request_count = 0
     counter_lock = threading.Lock()
     slow_subscription_started = threading.Event()
     slow_subscription_release = threading.Event()
@@ -635,6 +699,9 @@ class FixtureHandler(BaseHTTPRequestHandler):
         request_query = urllib.parse.parse_qs(request_url.query)
         if request_path == "/subscription.txt":
             body = ENCODED_SUBSCRIPTION.encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/select-health.toml":
+            body = SELECT_HEALTH_TOML_CONFIG.encode()
             content_type = "text/plain; charset=utf-8"
         elif request_path == "/provider-must-not-fetch.txt":
             type(self).provider_never_fetch_count += 1
@@ -666,6 +733,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
             body = SUBSCRIPTION.encode()
             content_type = "text/plain; charset=utf-8"
         elif request_path == "/slow-subscription.txt":
+            with type(self).counter_lock:
+                type(self).slow_subscription_request_count += 1
             type(self).slow_subscription_started.set()
             if not type(self).slow_subscription_release.wait(timeout=15):
                 self.send_error(504)
@@ -1029,7 +1098,10 @@ class FixtureHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
 
     def do_POST(self) -> None:  # noqa: N802
         request_path = urllib.parse.urlsplit(self.path).path
@@ -1142,6 +1214,7 @@ def fixture_server():
     FixtureHandler.stash_legacy_text_fetch_count = 0
     FixtureHandler.external_valid_count = 0
     FixtureHandler.get_request_count = 0
+    FixtureHandler.slow_subscription_request_count = 0
     FixtureHandler.stash_invalid_bases = {}
     FixtureHandler.slow_subscription_started.clear()
     FixtureHandler.slow_subscription_release.set()
@@ -1265,6 +1338,31 @@ def request_with_raw_headers(
         raise AssertionError(f"invalid raw HTTP response: {status_line!r}") from error
 
 
+def disconnect_raw_request(
+    base_url: str,
+    path: str,
+    params: dict[str, str],
+    *,
+    hold_seconds: float = 0.1,
+    headers: dict[str, str] | None = None,
+) -> None:
+    parsed = urllib.parse.urlsplit(base_url)
+    query = urllib.parse.urlencode(params)
+    target = path + (f"?{query}" if query else "")
+    with socket.create_connection((parsed.hostname, parsed.port), timeout=20) as sock:
+        request_lines = [
+            f"GET {target} HTTP/1.1",
+            f"Host: {parsed.hostname}:{parsed.port}",
+            "Connection: close",
+        ]
+        request_lines.extend(
+            f"{name}: {value}" for name, value in (headers or {}).items()
+        )
+        request_lines.extend(("", ""))
+        sock.sendall("\r\n".join(request_lines).encode("ascii"))
+        time.sleep(hold_seconds)
+
+
 def wait_ready(base_url: str, process: subprocess.Popen[bytes]) -> None:
     for _ in range(100):
         if process.poll() is not None:
@@ -1323,6 +1421,7 @@ def running_service(
     log_level: str = "info",
     config_replacements: tuple[tuple[str, str], ...] = (),
     pref_path_capture: list[Path] | None = None,
+    environment: dict[str, str] | None = None,
 ):
     port = unused_port()
     baseline = (COMPAT_FIXTURES / "legacy-pref.toml").read_text(
@@ -1428,6 +1527,9 @@ def running_service(
         elif invalid_statistics_path:
             statistics_path.write_text("not a directory", encoding="utf-8")
         pref = temporary_path / "pref.toml"
+        # The temporary preference contains deterministic fixture credentials
+        # used to prove runtime redaction; it never contains a production secret.
+        # codeql[py/clear-text-storage-sensitive-data]
         pref.write_text(baseline, encoding="utf-8", newline="\n")
         if pref_path_capture is not None:
             pref_path_capture.append(pref)
@@ -1448,6 +1550,8 @@ def running_service(
         env.pop("SUBCONVERTER_GIST_API_BASE", None)
         if gist_api_base is not None:
             env["SUBCONVERTER_GIST_API_BASE"] = gist_api_base
+        if environment:
+            env.update(environment)
         env["PORT"] = str(port)
         env["NO_PROXY"] = "127.0.0.1,localhost"
         env["no_proxy"] = "127.0.0.1,localhost"
@@ -3275,6 +3379,84 @@ def provider_no_fetch_vary_and_route_log_baseline(
         raise AssertionError("unrecognized auto-target event is missing")
 
 
+def local_group_matcher_baseline(base_url: str) -> None:
+    status, body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "surge",
+            "ver": "4",
+            "url": "|".join(
+                (
+                    "tag:public," + SUBSCRIPTION.strip(),
+                    "tag:secondary," + SECONDARY_SS_LINK,
+                )
+            ),
+            "config": LOCAL_GROUP_MATCHER_CONFIG,
+        },
+    )
+    output = body.decode("utf-8", errors="replace")
+    if status != 200:
+        raise AssertionError(
+            f"local group matcher matrix returned HTTP {status}: {output!r}"
+        )
+
+    group_section = re.search(
+        r"(?ms)^\[Proxy Group\]\s*\n(.*?)(?=^\[|\Z)", output
+    )
+    if group_section is None:
+        raise AssertionError("Surge local matcher output is missing [Proxy Group]")
+    observed_groups: dict[str, list[str]] = {}
+    for line in group_section.group(1).splitlines():
+        if " = " not in line:
+            continue
+        name, value = line.split(" = ", 1)
+        fields = [field.strip() for field in value.split(",")]
+        observed_groups[name] = fields[1:]
+
+    expected_groups = {
+        "Plain": ["Smoke"],
+        "ByGroup": ["Smoke"],
+        "ByGroupCapture": ["Smoke"],
+        "BySecondaryGroup": ["Second"],
+        "ByPrimaryGroupId": ["Smoke"],
+        "ByGroupId": ["Second"],
+        "ByInsert": ["Second"],
+        "ByType": ["Smoke", "Second"],
+        "ByPortExact": ["Smoke"],
+        "ByPortRange": ["Smoke", "Second"],
+        "ByPortLess": ["Smoke", "Second"],
+        "ByPortMore": ["Smoke", "Second"],
+        "ByPortNot": ["Smoke"],
+        "LegacyNotRange": ["Smoke", "Second"],
+        "LegacyNegationOrder": ["Smoke", "Second"],
+        "ByServer": ["Smoke"],
+        "MalformedGroup": ["Smoke", "Second"],
+    }
+    for group_name, expected_members in expected_groups.items():
+        observed = observed_groups.get(group_name)
+        if observed != expected_members:
+            raise AssertionError(
+                f"Surge local matcher group {group_name} changed members: "
+                f"{observed!r}; expected {expected_members!r}"
+            )
+    for group_name in (
+        "NoGroup",
+        "NoPort",
+        "LegacyNotRangeExcluded",
+        "NoInsertPositive",
+        "NoTypePartial",
+        "InvalidPlain",
+        "InvalidGroup",
+    ):
+        observed = observed_groups.get(group_name)
+        if observed is not None:
+            raise AssertionError(
+                f"Surge local matcher negative group {group_name} changed members: "
+                f"{observed!r}; expected the empty group to be omitted"
+            )
+
+
 def quanx_server_remote_baseline(binary: Path, fixture_base: str) -> None:
     def data_url(content: str) -> str:
         encoded = base64.urlsafe_b64encode(content.encode()).decode()
@@ -3930,6 +4112,7 @@ def vary_cache_and_coalesce_baseline(binary: Path, fixture_base: str) -> None:
     logs: list[str] = []
     with running_service(
         binary,
+        statistics=True,
         log_capture=logs,
         log_level="debug",
         config_replacements=(("response_cache_ttl = 0", "response_cache_ttl = 5"),),
@@ -3999,12 +4182,334 @@ def vary_cache_and_coalesce_baseline(binary: Path, fixture_base: str) -> None:
         if len(set(coalesced_request_ids)) != len(coalesced_request_ids):
             raise AssertionError("coalesced responses reused the owner request ID")
 
+        FixtureHandler.slow_subscription_started.clear()
+        FixtureHandler.slow_subscription_release.clear()
+        owner_disconnect_result: list[tuple[int, bytes, dict[str, str]]] = []
+        owner_disconnect_error: list[BaseException] = []
+        singleflight_headers = {
+            "User-Agent": "Singleflight-Lifecycle-Test/1.0"
+        }
+        owner_disconnect_params = {
+            **slow_params,
+            "url": fixture_base
+            + "/slow-subscription.txt?case=disconnect-owner",
+        }
+        with FixtureHandler.counter_lock:
+            owner_disconnect_before = (
+                FixtureHandler.slow_subscription_request_count
+            )
+
+        def run_owner_disconnect_follower() -> None:
+            try:
+                owner_disconnect_result.append(
+                    request(
+                        base_url,
+                        "/sub",
+                        owner_disconnect_params,
+                        singleflight_headers,
+                    )
+                )
+            except BaseException as error:
+                owner_disconnect_error.append(error)
+
+        disconnected_owner = threading.Thread(
+            target=disconnect_raw_request,
+            args=(base_url, "/sub", owner_disconnect_params),
+            kwargs={
+                "hold_seconds": 1.0,
+                "headers": singleflight_headers,
+            },
+        )
+        disconnected_owner.start()
+        if not FixtureHandler.slow_subscription_started.wait(timeout=10):
+            FixtureHandler.slow_subscription_release.set()
+            disconnected_owner.join(timeout=5)
+            raise AssertionError(
+                "disconnecting owner did not reach the slow fixture"
+            )
+        surviving_follower = threading.Thread(
+            target=run_owner_disconnect_follower
+        )
+        surviving_follower.start()
+        time.sleep(0.3)
+        disconnected_owner.join(timeout=5)
+        if disconnected_owner.is_alive():
+            FixtureHandler.slow_subscription_release.set()
+            surviving_follower.join(timeout=5)
+            raise AssertionError("singleflight owner socket did not close")
+        time.sleep(0.2)
+        FixtureHandler.slow_subscription_release.set()
+        surviving_follower.join(timeout=20)
+        if surviving_follower.is_alive() or owner_disconnect_error:
+            raise AssertionError(
+                "disconnecting owner prevented the follower from finishing: "
+                f"{owner_disconnect_error!r}"
+            )
+        if (
+            len(owner_disconnect_result) != 1
+            or owner_disconnect_result[0][0] != 200
+            or b"Smoke" not in owner_disconnect_result[0][1]
+        ):
+            raise AssertionError(
+                "surviving follower did not receive the shared result after "
+                f"owner disconnect: {owner_disconnect_result!r}"
+            )
+        with FixtureHandler.counter_lock:
+            owner_disconnect_requests = (
+                FixtureHandler.slow_subscription_request_count
+                - owner_disconnect_before
+            )
+        if owner_disconnect_requests != 1:
+            raise AssertionError(
+                "owner disconnect started more than one upstream request: "
+                f"{owner_disconnect_requests}"
+            )
+
+        FixtureHandler.slow_subscription_started.clear()
+        FixtureHandler.slow_subscription_release.clear()
+        surviving_owner: list[tuple[int, bytes, dict[str, str]]] = []
+        surviving_error: list[BaseException] = []
+        disconnect_params = {
+            **slow_params,
+            "url": fixture_base
+            + "/slow-subscription.txt?case=disconnect-follower",
+        }
+
+        def run_surviving_owner() -> None:
+            try:
+                surviving_owner.append(
+                    request(
+                        base_url,
+                        "/sub",
+                        disconnect_params,
+                        singleflight_headers,
+                    )
+                )
+            except BaseException as error:
+                surviving_error.append(error)
+
+        owner = threading.Thread(target=run_surviving_owner)
+        owner.start()
+        if not FixtureHandler.slow_subscription_started.wait(timeout=10):
+            FixtureHandler.slow_subscription_release.set()
+            owner.join(timeout=5)
+            raise AssertionError("disconnect owner did not reach the slow fixture")
+        disconnect_raw_request(
+            base_url,
+            "/sub",
+            disconnect_params,
+            headers=singleflight_headers,
+        )
+        FixtureHandler.slow_subscription_release.set()
+        owner.join(timeout=20)
+        if owner.is_alive() or surviving_error:
+            raise AssertionError(
+                "disconnecting follower prevented the owner from finishing: "
+                f"{surviving_error!r}"
+            )
+        if len(surviving_owner) != 1 or surviving_owner[0][0] != 200:
+            raise AssertionError(
+                f"disconnecting follower changed owner result: {surviving_owner!r}"
+            )
+
+        FixtureHandler.slow_subscription_started.clear()
+        FixtureHandler.slow_subscription_release.clear()
+        abandoned_params = {
+            **slow_params,
+            "url": fixture_base
+            + "/slow-subscription.txt?case=no-consumers",
+        }
+        with FixtureHandler.counter_lock:
+            abandoned_before = FixtureHandler.slow_subscription_request_count
+        abandoned_owner = threading.Thread(
+            target=disconnect_raw_request,
+            args=(base_url, "/sub", abandoned_params),
+            kwargs={
+                "hold_seconds": 1.0,
+                "headers": singleflight_headers,
+            },
+        )
+        abandoned_owner.start()
+        if not FixtureHandler.slow_subscription_started.wait(timeout=10):
+            FixtureHandler.slow_subscription_release.set()
+            abandoned_owner.join(timeout=5)
+            raise AssertionError("abandoned owner did not reach the slow fixture")
+        abandoned_follower = threading.Thread(
+            target=disconnect_raw_request,
+            args=(base_url, "/sub", abandoned_params),
+            kwargs={
+                "hold_seconds": 0.4,
+                "headers": singleflight_headers,
+            },
+        )
+        abandoned_follower.start()
+        abandoned_follower.join(timeout=5)
+        abandoned_owner.join(timeout=5)
+        if abandoned_owner.is_alive() or abandoned_follower.is_alive():
+            FixtureHandler.slow_subscription_release.set()
+            raise AssertionError("abandoned consumer sockets did not close")
+        time.sleep(0.2)
+        dashboard_headers = {
+            "Authorization": "Basic "
+            + base64.b64encode(
+                b"fixture-admin:fixture-dashboard-secret"
+            ).decode()
+        }
+        time.sleep(1.1)
+        status, body, _ = request(
+            base_url, "/dashboard/data", headers=dashboard_headers
+        )
+        if status != 200:
+            raise AssertionError(
+                f"retained-byte dashboard returned HTTP {status}: {body!r}"
+            )
+        dashboard = json.loads(body)
+        retained = dashboard["retained_response_bytes"]
+        retained_bytes = int(retained["used"])
+        outbound = dashboard["outbound_fetch"]
+        if outbound["active"] != 0 or outbound["pending"] != 0:
+            raise AssertionError(
+                "all-consumer disconnect did not cancel outbound work: "
+                f"{outbound!r}"
+            )
+        with FixtureHandler.counter_lock:
+            abandoned_requests = (
+                FixtureHandler.slow_subscription_request_count
+                - abandoned_before
+            )
+        if abandoned_requests != 1:
+            raise AssertionError(
+                "all-consumer disconnect did not remain singleflight: "
+                f"upstream requests={abandoned_requests}"
+            )
+        if retained_bytes <= 0 or retained_bytes > 8 * 1024 * 1024:
+            raise AssertionError(
+                "completed microcache result did not retain a bounded byte "
+                f"lease: {retained_bytes}"
+            )
+        resource_mode = os.environ.get("SUBCONVERTER_RESOURCE_CONTROL")
+        if resource_mode == "adaptive":
+            valid_retained_limit = retained["limit"] == 64 * 1024 * 1024
+        elif resource_mode == "force_max":
+            valid_retained_limit = (
+                retained["limit"] >= 64 * 1024 * 1024
+                and retained["used"] <= retained["limit"]
+            )
+        else:
+            valid_retained_limit = retained["limit"] == 0
+        if not valid_retained_limit:
+            raise AssertionError(
+                "resource profile retained-byte limit changed: "
+                f"mode={resource_mode!r}, actual={retained!r}"
+            )
+        FixtureHandler.slow_subscription_release.set()
+
     diagnostics = "".join(logs)
     if "/sub 响应微缓存命中。" not in diagnostics:
         raise AssertionError("microcache Vary probe did not hit the response cache")
     assert_coalesced_request_link(
         diagnostics, coalesced_request_ids, "coalesced Vary probe"
     )
+
+
+def response_microcache_eviction_baseline(binary: Path) -> None:
+    dashboard_headers = {
+        "Authorization": "Basic "
+        + base64.b64encode(
+            b"fixture-admin:fixture-dashboard-secret"
+        ).decode()
+    }
+    with running_service(
+        binary,
+        statistics=True,
+        config_replacements=(
+            ("response_cache_ttl = 0", "response_cache_ttl = 2"),
+        ),
+    ) as base_url:
+        params = {
+            "target": "clash",
+            "url": SUBSCRIPTION.strip(),
+            "config": DISABLE_RULEGEN_CONFIG,
+            "list": "true",
+        }
+        status, body, _ = request(base_url, "/sub", params)
+        if status != 200 or b"Smoke" not in body:
+            raise AssertionError(
+                f"microcache expiry setup failed: HTTP {status}: {body!r}"
+            )
+        status, body, _ = request(
+            base_url, "/dashboard/data", headers=dashboard_headers
+        )
+        if status != 200:
+            raise AssertionError(
+                f"microcache setup dashboard returned HTTP {status}: {body!r}"
+            )
+        before = json.loads(body)["response_microcache"]
+        if before["entries"] != 1 or before["bytes"] <= 0:
+            raise AssertionError(
+                f"microcache expiry setup did not retain one entry: {before!r}"
+            )
+
+        time.sleep(2.2)
+        status, body, _ = request(base_url, "/sub", params)
+        if status != 200 or b"Smoke" not in body:
+            raise AssertionError(
+                f"expired microcache refill failed: HTTP {status}: {body!r}"
+            )
+        status, body, _ = request(
+            base_url, "/dashboard/data", headers=dashboard_headers
+        )
+        if status != 200:
+            raise AssertionError(
+                f"microcache refill dashboard returned HTTP {status}: {body!r}"
+            )
+        after = json.loads(body)["response_microcache"]
+        if after["entries"] != 1 or after["bytes"] != before["bytes"]:
+            raise AssertionError(
+                "expired microcache replacement retained stale byte "
+                f"accounting: before={before!r}, after={after!r}"
+            )
+
+    with running_service(
+        binary,
+        statistics=True,
+        config_replacements=(
+            ("response_cache_ttl = 0", "response_cache_ttl = 5"),
+        ),
+        environment={"SUBCONVERTER_RESPONSE_CACHE_MAX_BYTES": "1024"},
+    ) as base_url:
+        for index in range(8):
+            uri = SUBSCRIPTION.strip().replace("#Smoke", f"#Cache-{index}")
+            status, body, _ = request(
+                base_url,
+                "/sub",
+                {
+                    "target": "clash",
+                    "url": uri,
+                    "config": DISABLE_RULEGEN_CONFIG,
+                    "list": "true",
+                },
+            )
+            if status != 200 or f"Cache-{index}".encode() not in body:
+                raise AssertionError(
+                    f"microcache eviction fixture {index} failed: "
+                    f"HTTP {status}: {body!r}"
+                )
+        time.sleep(1.1)
+        status, body, _ = request(
+            base_url, "/dashboard/data", headers=dashboard_headers
+        )
+        if status != 200:
+            raise AssertionError(
+                f"microcache dashboard returned HTTP {status}: {body!r}"
+            )
+        cache = json.loads(body)["response_microcache"]
+        if cache["max_bytes"] != 1024:
+            raise AssertionError(f"microcache byte limit changed: {cache!r}")
+        if not (0 < cache["entries"] < 8 and 0 < cache["bytes"] <= 1024):
+            raise AssertionError(
+                f"microcache did not evict by retained bytes: {cache!r}"
+            )
 
 
 def explain_privacy_and_cache_baseline(binary: Path, fixture_base: str) -> None:
@@ -4474,6 +4979,133 @@ def provider_block_from_output(output: str, provider_name: str) -> str:
     next_provider = re.search(r"(?m)^  [^ ].*:\s*$", following)
     end = len(following) if next_provider is None else next_provider.start()
     return marker + following[:end]
+
+
+def proxy_group_block_from_output(output: str, group_name: str) -> str:
+    marker = f"  - name: {group_name}\n"
+    start = output.find(marker)
+    if start < 0:
+        raise AssertionError(f"proxy group block is missing: {group_name}")
+    following = output[start + len(marker) :]
+    next_group = re.search(r"(?m)^  - name: ", following)
+    end = len(following) if next_group is None else next_group.start()
+    return marker + following[:end]
+
+
+def assert_select_health_group(
+    output: str, group_name: str, expected_url: str, label: str
+) -> None:
+    block = proxy_group_block_from_output(output, group_name)
+    url_match = re.search(
+        r'(?m)^    url: ["\']?' + re.escape(expected_url) + r'["\']?\s*$',
+        block,
+    )
+    if url_match is None:
+        raise AssertionError(
+            f"{label} did not preserve the select health-check URL\n{block}"
+        )
+
+    members = re.findall(r"(?m)^      - (.+?)\s*$", block)
+    if not members:
+        compact = re.search(r"(?m)^    proxies: \[(.*?)\]\s*$", block)
+        if compact is not None:
+            members = [
+                value.strip().strip('"\'')
+                for value in compact.group(1).split(",")
+                if value.strip()
+            ]
+    if members != ["DIRECT"]:
+        raise AssertionError(
+            f"{label} changed select health group members: {members!r}\n{block}"
+        )
+    if re.search(r"(?m)^    (?:use|filter):", block):
+        raise AssertionError(
+            f"{label} added provider selection to a DIRECT-only group\n{block}"
+        )
+
+
+def select_health_check_output_baseline(base_url: str, fixture_base: str) -> None:
+    provider_source = fixture_base + "/subscription.txt"
+    cases = (
+        ("INI direct", SUBSCRIPTION.strip(), SELECT_HEALTH_INI_CONFIG, False),
+        (
+            "INI provider",
+            f"provider:HealthOne,{provider_source}?case=select-health-one",
+            SELECT_HEALTH_INI_CONFIG,
+            True,
+        ),
+        (
+            "INI providers",
+            "|".join(
+                (
+                    f"provider:HealthOne,{provider_source}?case=select-health-a",
+                    f"provider:HealthTwo,{provider_source}?case=select-health-b",
+                )
+            ),
+            SELECT_HEALTH_INI_CONFIG,
+            True,
+        ),
+        (
+            "INI mixed",
+            "|".join(
+                (
+                    SUBSCRIPTION.strip(),
+                    f"provider:HealthOne,{provider_source}?case=select-health-mixed",
+                )
+            ),
+            SELECT_HEALTH_INI_CONFIG,
+            True,
+        ),
+        (
+            "TOML provider",
+            f"provider:HealthOne,{provider_source}?case=select-health-toml",
+            fixture_base + "/select-health.toml",
+            True,
+        ),
+    )
+
+    for label, source, config, expects_provider in cases:
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {"target": "clash", "url": source, "config": config},
+        )
+        output = body.decode("utf-8", errors="replace")
+        if status != 200:
+            raise AssertionError(
+                f"{label} select health request returned HTTP {status}: {output!r}"
+            )
+        if ("proxy-providers:" in output) is not expects_provider:
+            raise AssertionError(
+                f"{label} did not exercise the intended provider mode\n{output}"
+            )
+
+        if label.startswith("INI"):
+            assert_select_health_group(
+                output,
+                "DIRECT-HEALTH-HTTP",
+                SELECT_HEALTH_HTTP_URL,
+                label,
+            )
+            assert_select_health_group(
+                output,
+                "DIRECT-HEALTH-HTTPS",
+                SELECT_HEALTH_HTTPS_URL,
+                label,
+            )
+        else:
+            assert_select_health_group(
+                output,
+                "DIRECT-HEALTH-TOML",
+                SELECT_HEALTH_HTTPS_URL,
+                label,
+            )
+            assert_select_health_group(
+                output,
+                "DIRECT-HEALTH-TOML-RULE",
+                SELECT_HEALTH_HTTP_URL,
+                label,
+            )
 
 
 def provider_interval_from_output(output: str, provider_name: str) -> int:
@@ -10102,6 +10734,9 @@ def settings_parser_diagnostic_redaction_baseline(helper: Path) -> None:
     runtime_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=runtime_dir) as temporary:
         malformed = Path(temporary) / "malformed-secret.yml"
+        # Persisting this synthetic canary is the subject of the diagnostic
+        # non-leakage test below, not storage of a real credential.
+        # codeql[py/clear-text-storage-sensitive-data]
         malformed.write_text(
             "common:\n"
             f"  token: {secret}\n"
@@ -10661,6 +11296,159 @@ def request_generation_reload_baseline(binary: Path, fixture_base: str) -> None:
             )
 
 
+def ruleset_executor_capacity_baseline(binary: Path, fixture_base: str) -> None:
+    logs: list[str] = []
+    FixtureHandler.slow_ruleset_started.clear()
+    FixtureHandler.slow_ruleset_release.clear()
+    slow_sources = "|".join(
+        (
+            fixture_base + "/slow-generation-rules.list?parent=one-a",
+            fixture_base + "/slow-generation-rules.list?parent=one-b",
+        )
+    )
+    second_sources = "|".join(
+        (
+            fixture_base + "/slow-generation-rules.list?parent=two-a",
+            fixture_base + "/slow-generation-rules.list?parent=two-b",
+        )
+    )
+    first_params = {
+        "url": base64.urlsafe_b64encode(slow_sources.encode()).decode(),
+        "type": "6",
+    }
+    second_params = {
+        "url": base64.urlsafe_b64encode(second_sources.encode()).decode(),
+        "type": "6",
+    }
+    first_result: list[tuple[int, bytes, dict[str, str]]] = []
+    first_error: list[BaseException] = []
+    with running_service(
+        binary,
+        log_capture=logs,
+        config_replacements=(
+            ("async_fetch_ruleset = false", "async_fetch_ruleset = true"),
+        ),
+        environment={
+            "SUBCONVERTER_RULESET_EXECUTOR_WORKERS": "1",
+            "SUBCONVERTER_RULESET_EXECUTOR_QUEUE_CAPACITY": "1",
+        },
+    ) as base_url:
+        def run_first_parent() -> None:
+            try:
+                first_result.append(request(base_url, "/getruleset", first_params))
+            except BaseException as error:
+                first_error.append(error)
+
+        first = threading.Thread(target=run_first_parent)
+        first.start()
+        if not FixtureHandler.slow_ruleset_started.wait(timeout=10):
+            FixtureHandler.slow_ruleset_release.set()
+            first.join(timeout=5)
+            raise AssertionError("first ruleset parent did not occupy the executor")
+        status, body, headers = request(base_url, "/getruleset", second_params)
+        if status != 503 or headers.get("retry-after") != "1":
+            FixtureHandler.slow_ruleset_release.set()
+            first.join(timeout=5)
+            raise AssertionError(
+                "ruleset queue saturation did not return deterministic "
+                f"capacity status: HTTP {status}, headers={headers!r}, "
+                f"body={body!r}"
+            )
+        if b"capacity" not in body.lower():
+            raise AssertionError("ruleset capacity response lost its reason")
+        FixtureHandler.slow_ruleset_release.set()
+        first.join(timeout=20)
+        if first.is_alive() or first_error:
+            raise AssertionError(
+                f"first ruleset parent did not drain: {first_error!r}"
+            )
+        if len(first_result) != 1 or first_result[0][0] != 200:
+            raise AssertionError(
+                f"first ruleset parent changed result: {first_result!r}"
+            )
+    diagnostics = "".join(logs)
+    if "path=/getruleset status=500" in diagnostics:
+        raise AssertionError("ruleset executor saturation escaped as HTTP 500")
+
+
+def conversion_cost_classification_baseline(
+    binary: Path, fixture_base: str
+) -> None:
+    logs: list[str] = []
+    with running_service(
+        binary,
+        log_capture=logs,
+        log_level="debug",
+    ) as base_url:
+        cases = (
+            (
+                "provider",
+                {
+                    "target": "clash",
+                    "url": fixture_base + "/subscription.txt",
+                },
+            ),
+            (
+                "filter",
+                {
+                    "target": "clash",
+                    "url": fixture_base + "/subscription.txt",
+                    "include": "Smoke",
+                },
+            ),
+            (
+                "rename",
+                {
+                    "target": "clash",
+                    "url": fixture_base + "/subscription.txt",
+                    "rename": "Smoke@Renamed",
+                },
+            ),
+            (
+                "default-config",
+                {
+                    "target": "clash",
+                    "url": SUBSCRIPTION.strip(),
+                },
+            ),
+            (
+                "multiple",
+                {
+                    "target": "clash",
+                    "url": fixture_base
+                    + "/subscription.txt|"
+                    + SUBSCRIPTION.strip(),
+                },
+            ),
+            (
+                "rules",
+                {
+                    "target": "clash",
+                    "url": SUBSCRIPTION.strip(),
+                    "ruleprepend": "DOMAIN,cost.test,Proxy",
+                },
+            ),
+        )
+        for label, params in cases:
+            status, body, _ = request(base_url, "/sub", params)
+            if status != 200:
+                raise AssertionError(
+                    f"{label} cost probe failed: HTTP {status}: {body!r}"
+                )
+    costs = re.findall(r"CONVERSION_ADMISSION cost=(low|medium|high)", "".join(logs))
+    if len(costs) < len(cases):
+        raise AssertionError(f"conversion cost diagnostics are incomplete: {costs!r}")
+    observed = costs[-len(cases):]
+    if observed[0] == "low" or observed[3] == "low":
+        raise AssertionError(
+            f"unproven provider/default conversion was classified Low: {observed!r}"
+        )
+    if any(observed[index] != "high" for index in (1, 2, 4, 5)):
+        raise AssertionError(
+            f"filter/rename/multiple/rules conversion was not High: {observed!r}"
+        )
+
+
 def getruleset_generation_reload_baseline(binary: Path, fixture_base: str) -> None:
     pref_paths: list[Path] = []
     replacements = (
@@ -10838,8 +11626,21 @@ def main() -> int:
     log_redirection_baseline(binary)
     early_log_level_parsing_baseline(settings_snapshot_helper)
 
+    baseline_environment = os.environ.copy()
+    for name in (
+        "SUBCONVERTER_HTTP_BACKEND",
+        "SUBCONVERTER_RESOURCE_CONTROL",
+        "SUBCONVERTER_FORCE_MAX_CURVE_FINGERPRINT",
+        "SUBCONVERTER_RULESET_EXECUTOR_WORKERS",
+        "SUBCONVERTER_RULESET_EXECUTOR_QUEUE_CAPACITY",
+    ):
+        baseline_environment.pop(name, None)
     snapshots = [
-        load_settings_snapshot(settings_snapshot_helper, COMPAT_FIXTURES / name)
+        load_settings_snapshot(
+            settings_snapshot_helper,
+            COMPAT_FIXTURES / name,
+            baseline_environment,
+        )
         for name in ("legacy-pref.ini", "legacy-pref.yml", "legacy-pref.toml")
     ]
     if snapshots[1:] != snapshots[:1] * 2:
@@ -10854,6 +11655,90 @@ def main() -> int:
         raise AssertionError("missing provider proxy_direct did not default to true")
     if snapshots[0]["security"]["profile"] != "lan":
         raise AssertionError("historical security profile default changed")
+    if snapshots[0]["advanced"]["resource_control"] != "compat":
+        raise AssertionError("missing resource_control did not default to compat")
+    if snapshots[0]["advanced"]["force_max_curve_fingerprint"]:
+        raise AssertionError("force_max curve unexpectedly defaulted to valid")
+    with tempfile.TemporaryDirectory(prefix="sce-unlimited-download-") as temporary:
+        unlimited_pref = Path(temporary) / "pref.toml"
+        unlimited_content = (COMPAT_FIXTURES / "legacy-pref.toml").read_text(
+            encoding="utf-8"
+        ).replace(
+            "max_allowed_download_size = 1048576",
+            "max_allowed_download_size = 0",
+            1,
+        )
+        unlimited_pref.write_text(unlimited_content, encoding="utf-8", newline="\n")
+        unlimited_snapshot = load_settings_snapshot(
+            settings_snapshot_helper,
+            unlimited_pref,
+            baseline_environment,
+        )
+        if unlimited_snapshot["advanced"]["max_allowed_download_size"] != 0:
+            raise AssertionError("max_allowed_download_size=0 lost unlimited semantics")
+    resource_env = baseline_environment.copy()
+    resource_env["SUBCONVERTER_RESOURCE_CONTROL"] = "adaptive"
+    adaptive_snapshot = load_settings_snapshot(
+        settings_snapshot_helper,
+        COMPAT_FIXTURES / "legacy-pref.toml",
+        resource_env,
+    )
+    if adaptive_snapshot["advanced"]["resource_control"] != "adaptive":
+        raise AssertionError("resource_control environment override failed")
+    force_env = baseline_environment.copy()
+    force_env["SUBCONVERTER_RESOURCE_CONTROL"] = "force_max"
+    force_snapshot, force_logs = run_settings_snapshot(
+        settings_snapshot_helper,
+        COMPAT_FIXTURES / "legacy-pref.toml",
+        force_env,
+    )
+    if (
+        force_snapshot["server"]["request_deadline_ms"] != 2147483647
+        or force_snapshot["server"]["max_pending_connections"] < 64
+        or force_snapshot["server"]["max_concurrent_threads"] < 1
+    ):
+        raise AssertionError("automatic force_max did not apply hardware budgets")
+    if "curve_valid=true applied=true" not in force_logs:
+        raise AssertionError("automatic force_max did not activate")
+    hardware = re.search(r"hardware=([0-9a-f]{16})", force_logs)
+    if hardware is None:
+        raise AssertionError("force_max hardware fingerprint log is missing")
+    mismatch_env = force_env.copy()
+    mismatch_env["SUBCONVERTER_FORCE_MAX_CURVE_FINGERPRINT"] = "0" * 16
+    mismatch_snapshot, mismatch_logs = run_settings_snapshot(
+        settings_snapshot_helper,
+        COMPAT_FIXTURES / "legacy-pref.toml",
+        mismatch_env,
+    )
+    if mismatch_snapshot["server"] != snapshots[0]["server"] or (
+        "curve_valid=false applied=false" not in mismatch_logs
+    ):
+        raise AssertionError("hardware fingerprint change reused a force_max curve")
+    calibrated_env = force_env.copy()
+    calibrated_env["SUBCONVERTER_FORCE_MAX_CURVE_FINGERPRINT"] = hardware.group(1)
+    calibrated_snapshot, calibrated_logs = run_settings_snapshot(
+        settings_snapshot_helper,
+        COMPAT_FIXTURES / "legacy-pref.toml",
+        calibrated_env,
+    )
+    if "curve_valid=true applied=true" not in calibrated_logs:
+        raise AssertionError("matching force_max hardware curve was not applied")
+    if calibrated_snapshot["advanced"]["force_max_curve_fingerprint"] != hardware.group(1):
+        raise AssertionError("force_max curve fingerprint was not retained")
+    invalid_resource_env = baseline_environment.copy()
+    invalid_resource_env["SUBCONVERTER_RESOURCE_CONTROL"] = "automatic"
+    invalid_resource = subprocess.run(
+        [str(settings_snapshot_helper), str(COMPAT_FIXTURES / "legacy-pref.toml")],
+        cwd=REPOSITORY,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=invalid_resource_env,
+    )
+    if invalid_resource.returncode == 0:
+        raise AssertionError("invalid resource_control was accepted")
     security_configuration_matrix_baseline(settings_snapshot_helper)
     settings_reload_compatibility_baseline(settings_snapshot_helper)
     settings_singbox_wireguard_endpoint_baseline(settings_snapshot_helper)
@@ -10870,12 +11755,14 @@ def main() -> int:
         parser_failure_level_and_mixed_request_baseline(binary)
         insert_url_parser_route_baseline(binary, fixture_base)
         vary_cache_and_coalesce_baseline(binary, fixture_base)
+        response_microcache_eviction_baseline(binary)
         explain_privacy_and_cache_baseline(binary, fixture_base)
         wireguard_outbound_logs: list[str] = []
         with running_service(
             binary, log_capture=wireguard_outbound_logs
         ) as base_url:
             conversion_baselines(base_url, fixture_base, args.update_golden)
+            local_group_matcher_baseline(base_url)
             singbox_modern_full_profile_baseline(
                 base_url,
                 fixture_base,
@@ -10941,6 +11828,7 @@ def main() -> int:
             quanx_current_node_output_baseline(base_url, fixture_base)
             simple_target_protocol_baseline(base_url, fixture_base)
             provider_direct_default_output_baseline(base_url, fixture_base)
+            select_health_check_output_baseline(base_url, fixture_base)
         if not wireguard_outbound_logs or (
             "SINGBOX_WIREGUARD_GENERATION schema=outbound nodes=1 peers=2"
             not in wireguard_outbound_logs[0]
@@ -11003,6 +11891,8 @@ def main() -> int:
         external_config_failure_baseline(binary, fixture_base)
         loopback_proxy_route_baseline(binary, fixture_base)
         loopback_redirect_route_baseline(binary, fixture_base)
+        conversion_cost_classification_baseline(binary, fixture_base)
+        ruleset_executor_capacity_baseline(binary, fixture_base)
         getruleset_generation_reload_baseline(binary, fixture_base)
         request_generation_reload_baseline(binary, fixture_base)
 

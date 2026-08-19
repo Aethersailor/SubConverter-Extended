@@ -15,6 +15,7 @@ import os
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -33,6 +34,7 @@ RULESET = "DOMAIN-SUFFIX,shutdown.example,Proxy\n"
 SHUTDOWN_DEADLINE_SECONDS = 5.0
 LISTENER_CLOSE_DEADLINE_SECONDS = 2.0
 STARTUP_DEADLINE_SECONDS = 10.0
+HIGH_FD_BACKLOG_CONNECTIONS = 1100
 
 
 class ShutdownFailure(AssertionError):
@@ -298,6 +300,29 @@ def wait_for_exit(process: subprocess.Popen[bytes], deadline: float) -> int:
     return process.wait(timeout=remaining)
 
 
+def wait_for_process_fd_count(
+    process: subprocess.Popen[bytes], minimum: int, deadline: float
+) -> None:
+    fd_directory = Path(f"/proc/{process.pid}/fd")
+    if not fd_directory.is_dir():
+        raise ShutdownFailure("high-fd shutdown regression requires Linux /proc")
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise ShutdownFailure(
+                f"service exited before reaching {minimum} file descriptors"
+            )
+        try:
+            count = sum(1 for _ in fd_directory.iterdir())
+        except FileNotFoundError:
+            count = 0
+        if count >= minimum:
+            return
+        time.sleep(0.01)
+    raise ShutdownFailure(
+        f"service did not reach {minimum} file descriptors before timeout"
+    )
+
+
 def complete_ruleset_request(base_url: str, source_url: str) -> tuple[int, bytes]:
     return request(
         base_url,
@@ -313,6 +338,7 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
     client_thread: threading.Thread | None = None
     client_result: list[tuple[int, bytes]] = []
     client_error: list[BaseException] = []
+    backlog_sockets: list[socket.socket] = []
 
     with fixture_server() as (fixture, fixture_base):
         with tempfile.TemporaryDirectory(prefix="sce-shutdown-") as temporary:
@@ -370,7 +396,21 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
                         raise ShutdownFailure(
                             "asynchronous ruleset fetch did not enter its controlled retry"
                         )
-                elif scenario == "inflight-request":
+                elif scenario in ("inflight-request", "high-fd-shutdown"):
+                    if scenario == "high-fd-shutdown":
+                        for _ in range(HIGH_FD_BACKLOG_CONNECTIONS):
+                            pending = socket.create_connection(
+                                ("127.0.0.1", port), timeout=1
+                            )
+                            pending.sendall(
+                                b"GET /sub HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                            )
+                            backlog_sockets.append(pending)
+                        wait_for_process_fd_count(
+                            process,
+                            HIGH_FD_BACKLOG_CONNECTIONS,
+                            time.monotonic() + 5.0,
+                        )
                     source_url = fixture_base + "/inflight-rules.list"
 
                     def make_inflight_request() -> None:
@@ -389,6 +429,15 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
                         raise ShutdownFailure(
                             "legitimate request did not reach the controlled upstream"
                         )
+                elif scenario == "backlog-shutdown":
+                    for _ in range(16):
+                        pending = socket.create_connection(
+                            ("127.0.0.1", port), timeout=1
+                        )
+                        pending.sendall(
+                            b"GET /sub HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                        )
+                        backlog_sockets.append(pending)
 
                 shutdown_started = time.monotonic()
                 shutdown_deadline = shutdown_started + SHUTDOWN_DEADLINE_SECONDS
@@ -405,7 +454,7 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
                 )
                 wait_listener_closed(port, process, shutdown_deadline)
 
-                if scenario == "inflight-request":
+                if scenario in ("inflight-request", "high-fd-shutdown"):
                     fixture.inflight_release.set()
                     assert client_thread is not None
                     client_thread.join(
@@ -424,9 +473,9 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
                             "legitimate in-flight request produced no response"
                         )
                     status, body = client_result[0]
-                    if status != 200 or b"shutdown.example" not in body:
+                    if status != 503 or b"shutting down" not in body.lower():
                         raise ShutdownFailure(
-                            f"legitimate in-flight request returned HTTP {status}: {body[-1000:]!r}"
+                            f"cancelled in-flight request returned HTTP {status}: {body[-1000:]!r}"
                         )
 
                 returncode = wait_for_exit(process, shutdown_deadline)
@@ -448,6 +497,26 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
                     raise ShutdownFailure(
                         "normal graceful shutdown was mislabeled FATAL"
                     )
+                if (
+                    scenario not in ("idle", "backlog-shutdown")
+                    and "OUTBOUND_MULTI_ENGINE resolver=asynchronous" not in logs
+                ):
+                    raise ShutdownFailure(
+                        "shutdown scenario did not exercise the asynchronous multi engine"
+                    )
+                if scenario in (
+                    "completed-request",
+                    "inflight-request",
+                    "high-fd-shutdown",
+                ):
+                    if "HTTP_RESPONSE_PREPARED" not in logs:
+                        raise ShutdownFailure(
+                            "completed request is missing lifecycle completion telemetry"
+                        )
+                    if scenario == "completed-request" and "HTTP_RESPONSE_SEND_FAILED" in logs:
+                        raise ShutdownFailure(
+                            "a successfully delivered request was misclassified as cancelled"
+                        )
                 if scenario == "background-retry":
                     if fixture.background_attempts < 2:
                         raise ShutdownFailure("controlled background retry was not attempted")
@@ -464,6 +533,9 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
                 failure = error
             finally:
                 fixture.release_all()
+                for pending in backlog_sockets:
+                    with contextlib.suppress(OSError):
+                        pending.close()
                 if client_thread is not None and client_thread.is_alive():
                     client_thread.join(timeout=1)
                 if process is not None and process.poll() is None:
@@ -489,7 +561,14 @@ def main() -> int:
     parser.add_argument(
         "--scenario",
         action="append",
-        choices=("idle", "completed-request", "background-retry", "inflight-request"),
+        choices=(
+            "idle",
+            "completed-request",
+            "background-retry",
+            "inflight-request",
+            "backlog-shutdown",
+            "high-fd-shutdown",
+        ),
         help="Run only selected scenarios; may be repeated.",
     )
     args = parser.parse_args()
@@ -507,7 +586,16 @@ def main() -> int:
         "completed-request",
         "background-retry",
         "inflight-request",
+        "backlog-shutdown",
     ]
+    if (
+        args.scenario is None
+        and sys.platform.startswith("linux")
+        and os.environ.get("SUBCONVERTER_HTTP_BACKEND", "beast") == "beast"
+        and os.environ.get("SUBCONVERTER_RESOURCE_CONTROL", "compat")
+        != "adaptive"
+    ):
+        scenarios.append("high-fd-shutdown")
     for round_no in range(1, args.rounds + 1):
         for signal_value in (signal.SIGTERM, signal.SIGINT):
             for scenario in scenarios:

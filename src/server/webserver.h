@@ -2,12 +2,15 @@
 #define WEBSERVER_H_INCLUDED
 
 #include <string>
+#include <vector>
 #include <map>
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <curl/curlver.h>
 
 #include "server/client_ip.h"
+#include "server/request_context.h"
 #include "utils/map_extra.h"
 #include "utils/string.h"
 #include "version.h"
@@ -22,6 +25,7 @@ struct Request
     string_multimap argument;
     string_icase_map headers;
     std::string postdata;
+    std::shared_ptr<RequestContext> context;
 };
 
 struct Response
@@ -30,6 +34,22 @@ struct Response
     std::string content_type;
     string_icase_map headers;
 };
+
+struct RequestAdmissionSnapshot
+{
+    uint64_t active_entries = 0;
+    uint64_t active_bytes = 0;
+    uint64_t accepted = 0;
+    uint64_t rejected = 0;
+    uint64_t max_entries = 0;
+    uint64_t max_bytes = 0;
+};
+
+RequestAdmissionSnapshot requestAdmissionSnapshot() noexcept;
+void configureRequestAdmissionLimits(uint64_t max_entries,
+                                     uint64_t max_bytes) noexcept;
+bool tryRequestAdmission(uint64_t bytes) noexcept;
+void releaseRequestAdmission(uint64_t bytes) noexcept;
 
 using response_callback = std::string (*)(Request&, Response&); //process arguments and POST data and return served-content
 
@@ -43,7 +63,20 @@ struct listener_args
     int max_workers;
     void (*looper_callback)() = nullptr;
     uint32_t looper_interval = 200;
+    uint32_t request_deadline_ms = 15000;
+    void (*shutdown_callback)() = nullptr;
 };
+
+struct RequestCancellationResponse
+{
+    int status_code = 0;
+    std::string body;
+    string_icase_map headers;
+};
+
+bool requestCancellationResponse(
+    const std::shared_ptr<RequestContext> &context,
+    RequestCancellationResponse &response) noexcept;
 
 struct responseRoute
 {
@@ -52,6 +85,15 @@ struct responseRoute
     std::string content_type;
     response_callback rc {};
 };
+
+const responseRoute *findResponseRoute(
+    const std::vector<responseRoute> &routes, const std::string &method,
+    const std::string &path, bool allow_head_as_get = true) noexcept;
+std::string invokeResponseRoute(const responseRoute &route, Request &request,
+                                Response &response);
+void parseHttpTarget(const std::string &target, std::string &path,
+                     string_multimap &arguments);
+std::string httpStaticContentType(const std::string &path);
 
 class WebServer
 {

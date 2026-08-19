@@ -43,7 +43,10 @@ struct Settings {
   std::string listenAddress = "127.0.0.1", defaultUrls, insertUrls,
               managedConfigPrefix;
   int listenPort = 25500, maxPendingConns = 10, maxConcurThreads = 16,
-      maxServerThreads = 128;
+      maxServerThreads = 128, requestDeadlineMs = 15000;
+  std::string resourceControl = "compat";
+  std::string resourceControlSource = "builtin-default";
+  std::string forceMaxCurveFingerprint;
   bool prependInsert = true, skipFailedLinks = false;
   bool fallbackToDefaultExternalConfig = false;
   bool customOpenClashRulesSourceSwitch = false;

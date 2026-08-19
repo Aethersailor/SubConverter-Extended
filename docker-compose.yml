@@ -23,6 +23,14 @@ services:
       # confirmed, explicitly select public or strict.
       # SUBCONVERTER_SECURITY_PROFILE: public
       # SUBCONVERTER_ALLOW_PUBLIC_UPLOAD: "false"
+      # 三种模式共用异步入口。force_max 留空指纹时自动按当前硬件应用预算，填写后要求精确匹配；adaptive 只记录 shadow 建议。
+      # All modes share the async entry. force_max auto-applies current hardware
+      # budgets with an empty fingerprint, or requires an exact configured match;
+      # adaptive records shadow suggestions only.
+      # SUBCONVERTER_RESOURCE_CONTROL: compat
+      # SUBCONVERTER_FORCE_MAX_CURVE_FINGERPRINT: ""
+      # SUBCONVERTER_REQUEST_DEADLINE_MS: "15000"
+      # SUBCONVERTER_RESPONSE_CACHE_MAX_BYTES: "8388608"
       # Dashboard 防爆破默认只信任 socket peer。只有容器端口不对外直通、且入口代理会覆盖所选头时才同时配置以下两项。
       # Dashboard brute-force protection trusts only the socket peer by default. Set both only when the container is not directly reachable and the edge proxy overwrites the selected header.
       # SUBCONVERTER_DASHBOARD_CLIENT_IP_HEADER: x-forwarded-for

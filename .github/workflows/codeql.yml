@@ -2,10 +2,12 @@ name: "CodeQL"
 
 on:
   workflow_dispatch:
+  workflow_call:
   push:
     branches: [ "dev" ]
-  pull_request:
-    branches: [ "dev", "master" ]
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -54,9 +56,10 @@ jobs:
 
   analyze:
     name: Analyze (${{ matrix.language }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     needs: source-head
-    if: needs.source-head.outputs.current == 'true' && github.actor != 'dependabot[bot]'
+    if: needs.source-head.outputs.current == 'true'
     permissions:
       actions: read
       contents: read
@@ -78,15 +81,15 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
       with:
-        token: ${{ secrets.PAT_TOKEN || github.token }}
+        persist-credentials: false
 
     # [OPTIMIZATION] Cache build artifacts (QuickJSPP & LibCron)
     - name: Cache Build Artifacts
-      if: matrix.language == 'c-cpp'
+      if: matrix.language == 'c-cpp' && github.event_name != 'pull_request'
       id: cache-cpp-deps
-      uses: actions/cache@v5
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           /usr/lib/quickjs
@@ -101,27 +104,52 @@ jobs:
     # [SETUP] Install C++ dependencies
     - name: Install C++ dependencies
       if: matrix.language == 'c-cpp'
+      timeout-minutes: 8
+      shell: bash
       run: |
-        sudo apt-get update
-        sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            cmake \
+        set -euo pipefail
+        test -f /usr/share/keyrings/ubuntu-archive-keyring.gpg
+        printf '%s\n' \
+          'Types: deb' \
+          'URIs: http://archive.ubuntu.com/ubuntu' \
+          'Suites: noble noble-updates noble-backports' \
+          'Components: main universe restricted multiverse' \
+          'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
+          '' \
+          'Types: deb' \
+          'URIs: http://security.ubuntu.com/ubuntu' \
+          'Suites: noble-security' \
+          'Components: main universe restricted multiverse' \
+          'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
+          | sudo tee /etc/apt/sources.list.d/codeql.sources >/dev/null
+        apt_options=(
+          -o Acquire::Retries=2
+          -o Acquire::http::Timeout=20
+          -o Acquire::https::Timeout=20
+          -o Dpkg::Use-Pty=0
+          -o Dir::Etc::sourcelist=sources.list.d/codeql.sources
+          -o Dir::Etc::sourceparts=-
+        )
+        sudo env DEBIAN_FRONTEND=noninteractive \
+          timeout --signal=TERM --kill-after=15s 180s \
+          apt-get "${apt_options[@]}" update
+        sudo env DEBIAN_FRONTEND=noninteractive \
+          timeout --signal=TERM --kill-after=15s 240s \
+          apt-get "${apt_options[@]}" install -y --no-install-recommends \
             libpcre2-dev \
             rapidjson-dev \
             libyaml-cpp-dev \
             libcurl4-openssl-dev \
+            libboost-dev \
             libhowardhinnant-date-dev
 
     # [SETUP] Build Go library (libmihomo.a) for C++ linkage
     - name: Setup Go
       if: matrix.language == 'c-cpp'
-      shell: bash
-      run: |
-        if ! command -v go >/dev/null 2>&1; then
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends golang-go
-        fi
-        go version
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: bridge/go.mod
+        cache-dependency-path: bridge/go.sum
 
     - name: Build libmihomo.a
       if: matrix.language == 'c-cpp'
@@ -239,7 +267,7 @@ jobs:
         cd ..
 
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@v4
+      uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4
       with:
         languages: ${{ matrix.language }}
         build-mode: ${{ matrix.build-mode }}
@@ -255,6 +283,6 @@ jobs:
         cmake --build build -j"$(nproc)"
 
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v4
+      uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4
       with:
         category: "/language:${{matrix.language}}"

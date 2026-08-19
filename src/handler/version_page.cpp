@@ -889,12 +889,16 @@ std::string page(Request &request, Response &response) {
                 <span data-lang="en">Overview</span>
                 <span data-lang="zh">项目概览</span>
             </div>
-            <p class="description" data-lang="en">SubConverter-Extended is an enhanced implementation aligned with the <a href="https://github.com/MetaCubeX/mihomo/tree/Meta" target="_blank" rel="noopener noreferrer">Mihomo</a> <a href="https://wiki.metacubex.one/config/" target="_blank" rel="noopener noreferrer">configuration</a>.</p>
-            <p class="description" data-lang="zh">SubConverter-Extended 是适配 <a href="https://github.com/MetaCubeX/mihomo/tree/Meta" target="_blank" rel="noopener noreferrer">Mihomo</a> <a href="https://wiki.metacubex.one/config/" target="_blank" rel="noopener noreferrer">配置规范</a>的增强实现。</p>
-            <p class="description" data-lang="en">Primarily for <a href="https://github.com/vernesong/OpenClash" target="_blank" rel="noopener noreferrer">OpenClash</a>, while compatible with other Clash clients.</p>
-            <p class="description" data-lang="zh">主要面向 <a href="https://github.com/vernesong/OpenClash" target="_blank" rel="noopener noreferrer">OpenClash</a>，同时兼容其他 Clash 客户端。</p>
-            <p class="description" data-lang="en">A conversion backend compatible with remotely hosted <a href="https://github.com/Aethersailor/Custom_OpenClash_Rules" target="_blank" rel="noopener noreferrer">Custom_OpenClash_Rules</a> resources.</p>
-            <p class="description" data-lang="zh">兼容使用独立站点托管的 <a href="https://github.com/Aethersailor/Custom_OpenClash_Rules" target="_blank" rel="noopener noreferrer">Custom_OpenClash_Rules</a> 资源的转换后端。</p>
+            <p class="description" data-lang="en">SubConverter-Extended is a modern subscription conversion and configuration integration backend focused on improving configuration generation for clients powered by <a href="https://github.com/MetaCubeX/mihomo/tree/Meta" target="_blank" rel="noopener noreferrer">Mihomo</a>.</p>
+            <p class="description" data-lang="zh">SubConverter-Extended 是现代化的订阅转换与配置融合后端，重点优化 <a href="https://github.com/MetaCubeX/mihomo/tree/Meta" target="_blank" rel="noopener noreferrer">Mihomo</a> 内核客户端的配置生成体验。</p>
+            <p class="description" data-lang="en">Designed primarily for <a href="https://github.com/vernesong/OpenClash" target="_blank" rel="noopener noreferrer">OpenClash</a> users, while remaining compatible with other Clash clients and output formats for a range of mainstream clients.</p>
+            <p class="description" data-lang="zh">主要面向 <a href="https://github.com/vernesong/OpenClash" target="_blank" rel="noopener noreferrer">OpenClash</a> 用户，同时兼容其他 Clash 客户端及多种主流客户端输出格式。</p>
+            <p class="description" data-lang="en">For clients powered by <a href="https://github.com/MetaCubeX/mihomo/tree/Meta" target="_blank" rel="noopener noreferrer">Mihomo</a>, remote subscriptions are delegated through proxy providers, while directly supplied node links use Mihomo parsing capabilities to keep pace with protocol and parameter support.</p>
+            <p class="description" data-lang="zh">对于 <a href="https://github.com/MetaCubeX/mihomo/tree/Meta" target="_blank" rel="noopener noreferrer">Mihomo</a> 内核客户端，远程订阅通过 proxy-provider 交由客户端更新，直接输入的节点链接则使用 Mihomo 解析能力，以跟进协议与参数支持。</p>
+            <p class="description" data-lang="en">For other supported clients, the project uses client-native remote resources or compatible conversion paths according to each target format, while continuing to strengthen compatibility, operational stability, security boundaries, and diagnostics.</p>
+            <p class="description" data-lang="zh">对于其他受支持客户端，项目根据目标格式采用客户端原生远程资源或兼容转换路径，并持续加强兼容性、运行稳定性、安全边界与诊断能力。</p>
+            <p class="description" data-lang="en">It also serves as the companion conversion backend for <a href="https://github.com/Aethersailor/Custom_OpenClash_Rules" target="_blank" rel="noopener noreferrer">Custom_OpenClash_Rules</a>, integrating remote subscriptions, rule sets, and external configurations.</p>
+            <p class="description" data-lang="zh">项目同时也是 <a href="https://github.com/Aethersailor/Custom_OpenClash_Rules" target="_blank" rel="noopener noreferrer">Custom_OpenClash_Rules</a> 的配套转换后端，支持整合远程订阅、规则集与外部配置。</p>
         </div>
 
         <div class="section">

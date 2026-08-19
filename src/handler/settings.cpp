@@ -10,6 +10,7 @@
 #include "interfaces.h"
 #include "multithread.h"
 #include "script/cron.h"
+#include "server/request_context.h"
 #include "server/webserver.h"
 #include "settings.h"
 #include "settings_view.h"
@@ -18,6 +19,7 @@
 #include "utils/md5/md5_interface.h"
 #include "utils/network.h"
 #include "utils/redact.h"
+#include "utils/resource_control.h"
 #include "utils/system.h"
 
 // multi-thread lock
@@ -330,6 +332,25 @@ static void finalizePerformanceSettings() {
     global.maxServerThreads =
         to_int(max_server_threads, global.maxServerThreads);
 
+  std::string request_deadline_ms =
+      getEnv("SUBCONVERTER_REQUEST_DEADLINE_MS");
+  if (!request_deadline_ms.empty())
+    global.requestDeadlineMs =
+        to_int(request_deadline_ms, global.requestDeadlineMs);
+
+  std::string resource_control =
+      getEnv("SUBCONVERTER_RESOURCE_CONTROL");
+  if (!resource_control.empty()) {
+    global.resourceControl = resource_control;
+    global.resourceControlSource = "environment";
+  }
+
+  std::string force_max_curve_fingerprint =
+      getEnv("SUBCONVERTER_FORCE_MAX_CURVE_FINGERPRINT");
+  if (!force_max_curve_fingerprint.empty())
+    global.forceMaxCurveFingerprint =
+        trimWhitespace(force_max_curve_fingerprint, true, true);
+
   std::string response_cache_ttl = getEnv("SUBCONVERTER_RESPONSE_CACHE_TTL");
   if (!response_cache_ttl.empty())
     global.responseCacheTtl = to_int(response_cache_ttl, global.responseCacheTtl);
@@ -340,6 +361,9 @@ static void finalizePerformanceSettings() {
     global.maxConcurThreads = 1;
   if (global.maxServerThreads < global.maxConcurThreads)
     global.maxServerThreads = global.maxConcurThreads;
+  global.requestDeadlineMs =
+      std::clamp(global.requestDeadlineMs, 100, 300000);
+  configureResourceControl(global);
   if (global.responseCacheTtl > 5) {
     writeLog(LOG_LEVEL_WARNING,
              "response_cache_ttl 最大允许 5 秒，已自动收敛到 5。");
@@ -712,6 +736,7 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
                      std::vector<RulesetContent> &ruleset_content_array,
                      FetchContext context, RulesetRefreshMode mode,
                      const std::vector<RulesetContent> *reusable_content) {
+  RequestStageTimer rules_timer(RequestStage::Rules);
   ruleset_content_array.clear();
   ruleset_content_array.reserve(ruleset_list.size());
   std::string rule_group, rule_url, rule_url_typed, interval;
@@ -1068,9 +1093,16 @@ void readYAMLConf(YAML::Node &node,
   }
 
   if (node["advanced"].IsDefined()) {
+    if (node["advanced"]["resource_control"].IsDefined()) {
+      node["advanced"]["resource_control"] >> global.resourceControl;
+      global.resourceControlSource = "file:yaml";
+    }
+    node["advanced"]["force_max_curve_fingerprint"] >>
+        global.forceMaxCurveFingerprint;
     node["advanced"]["max_pending_connections"] >> global.maxPendingConns;
     node["advanced"]["max_concurrent_threads"] >> global.maxConcurThreads;
     node["advanced"]["max_server_threads"] >> global.maxServerThreads;
+    node["advanced"]["request_deadline_ms"] >> global.requestDeadlineMs;
     node["advanced"]["max_allowed_rulesets"] >> global.maxAllowedRulesets;
     node["advanced"]["max_allowed_rules"] >> global.maxAllowedRules;
     node["advanced"]["max_allowed_download_size"] >>
@@ -1356,10 +1388,21 @@ void readTOMLConf(toml::value &root,
   int cache_subscription = global.cacheSubscription,
       cache_config = global.cacheConfig, cache_ruleset = global.cacheRuleset;
 
+  if (section_advanced.contains("resource_control")) {
+    global.resourceControl =
+        toml::find<std::string>(section_advanced, "resource_control");
+    global.resourceControlSource = "file:toml";
+  }
+
+  if (section_advanced.contains("force_max_curve_fingerprint"))
+    global.forceMaxCurveFingerprint = toml::find<std::string>(
+        section_advanced, "force_max_curve_fingerprint");
+
   find_if_exist(
       section_advanced, "max_pending_connections", global.maxPendingConns,
       "max_concurrent_threads", global.maxConcurThreads,
-      "max_server_threads", global.maxServerThreads, "max_allowed_rulesets",
+      "max_server_threads", global.maxServerThreads, "request_deadline_ms",
+      global.requestDeadlineMs, "max_allowed_rulesets",
       global.maxAllowedRulesets, "max_allowed_rules", global.maxAllowedRules,
       "max_allowed_download_size", global.maxAllowedDownloadSize,
       "enable_cache", enable_cache, "cache_subscription", cache_subscription,
@@ -1484,6 +1527,8 @@ bool readConf() {
     global.dashboardAuthMaxFailures = 5;
     global.dashboardAuthWindowSeconds = 300;
     global.dashboardAuthLockSeconds = 900;
+    global.resourceControl = "compat";
+    global.resourceControlSource = "builtin-default";
     global.fallbackToDefaultExternalConfig = false;
     global.customOpenClashRulesSourceSwitch = false;
     // A removed proxy_bypass setting must return to the upgrade-compatible
@@ -1823,9 +1868,16 @@ bool readConf() {
   global.serveFileRoot = ini.get("serve_file_root");
 
   ini.enter_section("advanced");
+  if (ini.item_exist("resource_control")) {
+    ini.get_if_exist("resource_control", global.resourceControl);
+    global.resourceControlSource = "file:ini";
+  }
+  ini.get_if_exist("force_max_curve_fingerprint",
+                   global.forceMaxCurveFingerprint);
   ini.get_int_if_exist("max_pending_connections", global.maxPendingConns);
   ini.get_int_if_exist("max_concurrent_threads", global.maxConcurThreads);
   ini.get_int_if_exist("max_server_threads", global.maxServerThreads);
+  ini.get_int_if_exist("request_deadline_ms", global.requestDeadlineMs);
   ini.get_number_if_exist("max_allowed_rulesets", global.maxAllowedRulesets);
   ini.get_number_if_exist("max_allowed_rules", global.maxAllowedRules);
   ini.get_number_if_exist("max_allowed_download_size",

@@ -23,6 +23,9 @@ from pathlib import Path
 
 
 SAMPLE_SS_LINK = "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388#Smoke"
+SECONDARY_SS_LINK = (
+    "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@second.example.com:8389#Second"
+)
 MIERU_OFFICIAL_SIMPLE_URI = (
     "mierus://baozi:manlianpenfen@1.2.3.4?"
     "handshake-mode=HANDSHAKE_NO_WAIT&mtu=1400&"
@@ -167,6 +170,64 @@ PROVIDER_FILTER_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
         )
     )
 ).decode("ascii")
+PROVIDER_GROUP_TAG_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
+    b"\n".join(
+        (
+            b"enable_rule_generator=false",
+            b"custom_proxy_group=Plain`url-test`Smoke`"
+            b"https://www.gstatic.com/generate_204`1800,5,100",
+            b"custom_proxy_group=OnlyPublic`url-test`!!GROUP=public!!Smoke`"
+            b"https://www.gstatic.com/generate_204`1800,5,100",
+            b"custom_proxy_group=ExcludePrivate`url-test`"
+            b"!!GROUP=^(?!.*(myvps|home)).*$!!Smoke`"
+            b"https://www.gstatic.com/generate_204`1800,5,100",
+            b"custom_proxy_group=PublicAll`select`!!GROUP=public",
+            b"custom_proxy_group=ByGroupId`select`!!GROUPID=2!!Smoke",
+            b"custom_proxy_group=ExplicitProvider`select`!!PROVIDER=Public",
+        )
+    )
+).decode("ascii")
+LOCAL_GROUP_MATCHER_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
+    b"\n".join(
+        (
+            b"enable_rule_generator=false",
+            b"custom_proxy_group=Plain`select`Smoke",
+            b"custom_proxy_group=ByGroup`select`!!GROUP=public!!Smoke",
+            b"custom_proxy_group=ByGroupCapture`select`!!GROUP=pub(lic)!!Sm(oke)",
+            b"custom_proxy_group=BySecondaryGroup`select`!!GROUP=secondary!!Second",
+            b"custom_proxy_group=ByPrimaryGroupId`select`!!GROUPID=0!!Smoke",
+            b"custom_proxy_group=ByGroupId`select`!!GROUPID=1!!Second",
+            b"custom_proxy_group=ByInsert`select`!!INSERT=-1!!Second",
+            b"custom_proxy_group=ByType`select`!!TYPE=SS",
+            b"custom_proxy_group=ByPortExact`select`!!PORT=8388",
+            b"custom_proxy_group=ByPortRange`select`!!PORT=8380-8390",
+            b"custom_proxy_group=ByPortLess`select`!!PORT=9000-",
+            b"custom_proxy_group=ByPortMore`select`!!PORT=8000+",
+            b"custom_proxy_group=ByPortNot`select`!!PORT=!8389",
+            b"custom_proxy_group=LegacyNotRange`select`!!PORT=8000-9000,!7000-7100",
+            b"custom_proxy_group=LegacyNegationOrder`select`!!PORT=!8388,!9999",
+            b"custom_proxy_group=ByServer`select`!!SERVER=^example\\.com$",
+            b"custom_proxy_group=MalformedGroup`select`!!GROUP=",
+            b"custom_proxy_group=NoGroup`select`!!GROUP=missing!!Smoke",
+            b"custom_proxy_group=NoPort`select`!!PORT=!8388!!Smoke",
+            b"custom_proxy_group=LegacyNotRangeExcluded`select`!!PORT=!8000-9000",
+            b"custom_proxy_group=NoInsertPositive`select`!!INSERT=1!!Second",
+            b"custom_proxy_group=NoTypePartial`select`!!TYPE=S",
+            b"custom_proxy_group=InvalidPlain`select`[",
+            b"custom_proxy_group=InvalidGroup`select`!!GROUP=[!!Smoke",
+        )
+    )
+).decode("ascii")
+SELECT_HEALTH_URL = "http://wifi.vivo.com.cn/generate_204"
+SELECT_HEALTH_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
+    "\n".join(
+        (
+            "enable_rule_generator=false",
+            "custom_proxy_group=DIRECT-HEALTH`select`[]DIRECT`"
+            + SELECT_HEALTH_URL,
+        )
+    ).encode()
+).decode("ascii")
 QUANX_REMOTE_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
     b"enable_rule_generator=false\ncustom_proxy_group=Remote`select`.*\n"
 ).decode("ascii")
@@ -191,6 +252,17 @@ def build_url(base_url: str, path: str, params: dict[str, str] | None = None) ->
     base = base_url.rstrip("/")
     query = urllib.parse.urlencode(params or {})
     return f"{base}{path}" + (f"?{query}" if query else "")
+
+
+def surge_contains_fixture_proxy(config: str, name: str, host: str) -> bool:
+    for line in config.splitlines():
+        entry_name, separator, definition = line.partition("=")
+        if not separator:
+            continue
+        fields = [field.strip() for field in definition.split(",")]
+        if entry_name.strip() == name or (len(fields) > 1 and fields[1] == host):
+            return True
+    return False
 
 
 def decode_v2ray_internal_subscription(content: str) -> list[tuple[str, dict]]:
@@ -287,6 +359,167 @@ def provider_interval_from_output(output: str, provider_name: str) -> int:
 def provider_proxy_direct_from_output(output: str, provider_name: str) -> bool:
     block = provider_block_from_output(output, provider_name)
     return re.search(r"(?m)^    proxy: DIRECT\s*$", block) is not None
+
+
+def proxy_group_block_from_output(output: str, group_name: str) -> str:
+    marker = f"  - name: {group_name}\n"
+    start = output.find(marker)
+    if start < 0:
+        raise AssertionError(f"proxy group block is missing: {group_name}")
+    following = output[start + len(marker) :]
+    next_group = re.search(r"(?m)^  - name: ", following)
+    end = len(following) if next_group is None else next_group.start()
+    return marker + following[:end]
+
+
+def proxy_group_use_from_output(output: str, group_name: str) -> list[str]:
+    block = proxy_group_block_from_output(output, group_name)
+    use = re.search(r"(?m)^    use:\s*$", block)
+    if use is None:
+        return []
+    following = block[use.end() :]
+    return re.findall(r"(?m)^      - (.+?)\s*$", following)
+
+
+def proxy_group_filter_from_output(output: str, group_name: str) -> str | None:
+    block = proxy_group_block_from_output(output, group_name)
+    match = re.search(r'(?m)^    filter: (?:"([^"]*)"|([^\r\n]+))\s*$', block)
+    if match is None:
+        return None
+    return match.group(1) if match.group(1) is not None else match.group(2)
+
+
+def assert_local_group_matcher_matrix(base_url: str, timeout: int) -> None:
+    output = fetch(
+        base_url,
+        "/sub",
+        {
+            "target": "clash",
+            "url": "|".join(
+                (
+                    "tag:public," + SAMPLE_SS_LINK,
+                    "tag:secondary," + SECONDARY_SS_LINK,
+                )
+            ),
+            "config": LOCAL_GROUP_MATCHER_CONFIG,
+        },
+        timeout,
+    )
+    expected_groups = {
+        "Plain": ["Smoke"],
+        "ByGroup": ["Smoke"],
+        "ByGroupCapture": ["Smoke"],
+        "BySecondaryGroup": ["Second"],
+        "ByPrimaryGroupId": ["Smoke"],
+        "ByGroupId": ["Second"],
+        "ByInsert": ["Second"],
+        "ByType": ["Smoke", "Second"],
+        "ByPortExact": ["Smoke"],
+        "ByPortRange": ["Smoke", "Second"],
+        "ByPortLess": ["Smoke", "Second"],
+        "ByPortMore": ["Smoke", "Second"],
+        "ByPortNot": ["Smoke"],
+        "LegacyNotRange": ["Smoke", "Second"],
+        "LegacyNegationOrder": ["Smoke", "Second"],
+        "ByServer": ["Smoke"],
+        "MalformedGroup": ["Smoke", "Second"],
+    }
+    for group_name, expected_members in expected_groups.items():
+        block = proxy_group_block_from_output(output, group_name)
+        members = re.findall(r"(?m)^      - (.+?)\s*$", block)
+        if members != expected_members:
+            raise AssertionError(
+                f"local matcher group {group_name} changed members: {members!r}; "
+                f"expected {expected_members!r}\n{block}"
+            )
+    for group_name in (
+        "NoGroup",
+        "NoPort",
+        "LegacyNotRangeExcluded",
+        "NoInsertPositive",
+        "NoTypePartial",
+        "InvalidPlain",
+        "InvalidGroup",
+    ):
+        block = proxy_group_block_from_output(output, group_name)
+        members = re.findall(r"(?m)^      - (.+?)\s*$", block)
+        if members != ["DIRECT"]:
+            raise AssertionError(
+                f"local matcher negative group {group_name} changed members: "
+                f"{members!r}\n{block}"
+            )
+
+
+def assert_select_health_check(
+    base_url: str, timeout: int, remote_subscription_url: str | None
+) -> None:
+    cases = [("direct", SAMPLE_SS_LINK, False)]
+    if remote_subscription_url:
+        cases.extend(
+            (
+                (
+                    "provider",
+                    f"provider:HealthOne,{remote_subscription_url}",
+                    True,
+                ),
+                (
+                    "providers",
+                    "|".join(
+                        (
+                            f"provider:HealthOne,{remote_subscription_url}",
+                            f"provider:HealthTwo,{remote_subscription_url}",
+                        )
+                    ),
+                    True,
+                ),
+                (
+                    "mixed",
+                    "|".join(
+                        (
+                            SAMPLE_SS_LINK,
+                            f"provider:HealthOne,{remote_subscription_url}",
+                        )
+                    ),
+                    True,
+                ),
+            )
+        )
+
+    for label, source, expects_provider in cases:
+        output = fetch(
+            base_url,
+            "/sub",
+            {"target": "clash", "url": source, "config": SELECT_HEALTH_CONFIG},
+            timeout,
+        )
+        block = proxy_group_block_from_output(output, "DIRECT-HEALTH")
+        members = re.findall(r"(?m)^      - (.+?)\s*$", block)
+        if members != ["DIRECT"]:
+            raise AssertionError(
+                f"select health {label} changed members: {members!r}\n{block}"
+            )
+        if (
+            re.search(
+                r'(?m)^    url: ["\']?'
+                + re.escape(SELECT_HEALTH_URL)
+                + r'["\']?\s*$',
+                block,
+            )
+            is None
+        ):
+            raise AssertionError(
+                f"select health {label} lost its health-check URL\n{block}"
+            )
+        if proxy_group_use_from_output(output, "DIRECT-HEALTH") or (
+            proxy_group_filter_from_output(output, "DIRECT-HEALTH") is not None
+        ):
+            raise AssertionError(
+                f"select health {label} added provider selection\n{block}"
+            )
+        if ("proxy-providers:" in output) is not expects_provider:
+            raise AssertionError(
+                f"select health {label} did not exercise the intended provider mode"
+            )
 
 
 def assert_snapshot(name: str, content: str, snapshot_dir: Path | None, update: bool) -> None:
@@ -728,6 +961,9 @@ def run_checks(
         "url": SAMPLE_SS_LINK,
         "config": DISABLE_RULEGEN_CONFIG,
     }
+
+    assert_local_group_matcher_matrix(base_url, timeout)
+    assert_select_health_check(base_url, timeout, remote_subscription_url)
 
     if verify_non_clash:
         assert_parser_route_isolation(base_url, timeout)
@@ -1558,6 +1794,55 @@ def run_checks(
                     f"{output}"
                 )
 
+        provider_group_output = fetch(
+            base_url,
+            "/sub",
+            {
+                "target": "clash",
+                "url": "|".join(
+                    (
+                        f"tag:myvps,provider:MyVPS,{remote_subscription_url}",
+                        f"tag:home,provider:Home,{remote_subscription_url}",
+                        f"tag:public,provider:Public,{remote_subscription_url}",
+                    )
+                ),
+                "config": PROVIDER_GROUP_TAG_CONFIG,
+            },
+            timeout,
+        )
+        expected_provider_groups = {
+            "Plain": (["MyVPS", "Home", "Public"], "Smoke"),
+            "OnlyPublic": (["Public"], "Smoke"),
+            "ExcludePrivate": (["Public"], "Smoke"),
+            "PublicAll": (["Public"], None),
+            "ByGroupId": (["Public"], "Smoke"),
+            "ExplicitProvider": (["Public"], None),
+        }
+        for group_name, (
+            expected_use,
+            expected_filter,
+        ) in expected_provider_groups.items():
+            actual_use = proxy_group_use_from_output(
+                provider_group_output, group_name
+            )
+            actual_filter = proxy_group_filter_from_output(
+                provider_group_output, group_name
+            )
+            if actual_use != expected_use or actual_filter != expected_filter:
+                raise AssertionError(
+                    f"provider group {group_name} mismatch: "
+                    f"use={actual_use!r}, filter={actual_filter!r}; "
+                    f"expected use={expected_use!r}, filter={expected_filter!r}\n"
+                    f"{proxy_group_block_from_output(provider_group_output, group_name)}"
+                )
+        if (
+            "filter: !!GROUP=" in provider_group_output
+            or 'filter: "!!GROUP=' in provider_group_output
+        ):
+            raise AssertionError(
+                "provider GROUP selector leaked into the Mihomo node filter"
+            )
+
         def assert_provider_ua_present(label: str, output: str, user_agent: str) -> None:
             required = ("proxy-providers:", "header:", "User-Agent:", user_agent)
             missing = [value for value in required if value not in output]
@@ -2057,7 +2342,7 @@ def run_checks(
                 raise AssertionError(
                     "remote Surge conversion did not emit policy-path"
                 )
-            if "Smoke" in surge_config or "example.com" in surge_config:
+            if surge_contains_fixture_proxy(surge_config, "Smoke", "example.com"):
                 raise AssertionError(
                     "remote Surge conversion unexpectedly expanded the subscription"
                 )

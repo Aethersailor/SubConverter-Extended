@@ -1,7 +1,9 @@
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cctype>
+#include <climits>
 #include <condition_variable>
 #include <cstdint>
 #include <ctime>
@@ -11,8 +13,10 @@
 #include <map>
 #include <mutex>
 #include <numeric>
+#include <optional>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <unordered_set>
 
 #include <inja.hpp>
@@ -27,6 +31,7 @@
 #include "generator/config/ruleconvert.h"
 #include "generator/config/subexport.h"
 #include "generator/template/templates.h"
+#include "conversion_service.h"
 #include "interfaces.h"
 #include "multithread.h"
 #include "ruleset_output.h"
@@ -35,6 +40,7 @@
 #include "parser/subparser.h"
 #include "script/cron.h"
 #include "script/script_quickjs.h"
+#include "server/request_context.h"
 #include "server/webserver.h"
 #include "settings.h"
 #include "settings_view.h"
@@ -52,6 +58,7 @@ static string_icase_map buildSubscriptionRequestHeaders() {
 }
 
 #include "utils/base64/base64.h"
+#include "utils/bounded_executor.h"
 #include "utils/file_extra.h"
 #include "utils/ini_reader/ini_reader.h"
 #include "utils/logger.h"
@@ -403,7 +410,59 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS) {
   RulesetConfigs confs = INIBinding::from<RulesetConfig>::from_ini(vArray);
   refreshRulesets(confs, rca, FetchContext::PublicRequest);
   for (RulesetContent &x : rca) {
-    std::string content = x.rule_content.get();
+    std::string content;
+    try {
+      content = x.rule_content.get();
+    } catch (const ExecutorSubmitError &error) {
+      response.content_type = "text/plain; charset=utf-8";
+      response.headers["Cache-Control"] = "private, no-store";
+      switch (error.status()) {
+      case ExecutorSubmitStatus::Deadline:
+        *status_code = 504;
+        if (request.context) {
+          request.context->requestCancellation(
+              RequestCancellationReason::Deadline);
+          request.context->suggestFailure(RequestFailureAttribution::Client);
+        }
+        return "Gateway timeout: ruleset processing exceeded the request "
+               "deadline.\n网关超时：规则集处理已超过请求截止时间。\n";
+      case ExecutorSubmitStatus::Cancelled:
+        if (request.context &&
+            request.context->cancellationToken().reason() ==
+                RequestCancellationReason::Shutdown) {
+          *status_code = 503;
+          request.context->suggestFailure(RequestFailureAttribution::Server);
+          return "Service is shutting down.\n服务正在关闭。\n";
+        }
+        *status_code = 499;
+        if (request.context)
+          request.context->suggestFailure(RequestFailureAttribution::Client);
+        return "Client closed request during ruleset processing.\n"
+               "客户端在规则集处理期间关闭了请求。\n";
+      case ExecutorSubmitStatus::QueueFull:
+      case ExecutorSubmitStatus::Recursive:
+        response.headers["Retry-After"] = "1";
+        if (request.context)
+          request.context->suggestFailure(RequestFailureAttribution::Capacity);
+        *status_code = 503;
+        return "Service temporarily unavailable: ruleset capacity is full.\n"
+               "服务暂时不可用：规则集处理容量已满。\n";
+      case ExecutorSubmitStatus::Stopping:
+        *status_code = 503;
+        if (request.context)
+          request.context->suggestFailure(RequestFailureAttribution::Server);
+        return "Service is shutting down.\n服务正在关闭。\n";
+      case ExecutorSubmitStatus::Accepted:
+        throw;
+      }
+    } catch (const std::future_error &) {
+      *status_code = 503;
+      response.content_type = "text/plain; charset=utf-8";
+      response.headers["Cache-Control"] = "private, no-store";
+      if (request.context)
+        request.context->suggestFailure(RequestFailureAttribution::Server);
+      return "Service is shutting down.\n服务正在关闭。\n";
+    }
     output_content += convertRuleset(content, x.rule_type);
   }
 
@@ -1056,14 +1115,100 @@ struct InflightSubRequest {
   std::mutex mutex;
   std::condition_variable cv;
   std::string owner_request_id;
+  std::shared_ptr<RequestContext> work_context;
+  std::atomic<uint32_t> consumers{1};
   bool done = false;
   SharedCoalescedResponse result;
   std::exception_ptr exception;
+
+  uint32_t tryAddConsumer() noexcept {
+    uint32_t current = consumers.load(std::memory_order_acquire);
+    while (current != 0 && current != UINT32_MAX) {
+      if (consumers.compare_exchange_weak(current, current + 1,
+                                          std::memory_order_acq_rel,
+                                          std::memory_order_acquire))
+        return current + 1;
+    }
+    return 0;
+  }
+
+  uint32_t releaseConsumer() noexcept {
+    uint32_t current = consumers.load(std::memory_order_acquire);
+    while (current != 0) {
+      if (consumers.compare_exchange_weak(current, current - 1,
+                                          std::memory_order_acq_rel,
+                                          std::memory_order_acquire))
+        return current - 1;
+    }
+    return 0;
+  }
+};
+
+struct InflightConsumerState {
+  explicit InflightConsumerState(std::shared_ptr<InflightSubRequest> call)
+      : call(std::move(call)) {}
+
+  void release() noexcept {
+    bool expected = false;
+    if (!released.compare_exchange_strong(expected, true,
+                                          std::memory_order_acq_rel,
+                                          std::memory_order_acquire))
+      return;
+    if (!call)
+      return;
+    const uint32_t remaining = call->releaseConsumer();
+    if (call->work_context)
+      call->work_context->setConsumerCount(remaining);
+    bool done = false;
+    {
+      std::lock_guard<std::mutex> lock(call->mutex);
+      done = call->done;
+    }
+    if (remaining == 0 && !done && call->work_context)
+      call->work_context->requestCancellation(
+          RequestCancellationReason::NoConsumers);
+  }
+
+  std::shared_ptr<InflightSubRequest> call;
+  std::atomic<bool> released{false};
+};
+
+struct InflightConsumerGuard {
+  InflightConsumerGuard(std::shared_ptr<InflightSubRequest> call,
+                        const std::shared_ptr<RequestContext> &client_context)
+      : state(std::make_shared<InflightConsumerState>(std::move(call))) {
+    if (client_context) {
+      const std::weak_ptr<InflightConsumerState> weak_state = state;
+      cancellation_registration = client_context->registerCancellationCallback(
+          [weak_state] {
+            if (auto current = weak_state.lock())
+              current->release();
+          });
+    }
+  }
+  ~InflightConsumerGuard() {
+    cancellation_registration.reset();
+    release();
+  }
+
+  void release() noexcept {
+    if (state)
+      state->release();
+  }
+
+  InflightConsumerGuard(const InflightConsumerGuard &) = delete;
+  InflightConsumerGuard &operator=(const InflightConsumerGuard &) = delete;
+
+  std::shared_ptr<InflightConsumerState> state;
+  RequestCancellationRegistration cancellation_registration;
 };
 
 struct CachedSubResponse {
   SharedCoalescedResponse result;
   std::chrono::steady_clock::time_point expires_at;
+  uint64_t bytes = 0;
+  uint64_t sequence = 0;
+  RetainedResponseByteLease retained_bytes;
 };
 
 static std::mutex g_sub_inflight_mutex;
@@ -1071,6 +1216,44 @@ static std::map<std::string, std::shared_ptr<InflightSubRequest>>
     g_sub_inflight;
 static std::mutex g_sub_response_cache_mutex;
 static std::map<std::string, CachedSubResponse> g_sub_response_cache;
+static uint64_t g_sub_response_cache_bytes = 0;
+static uint64_t g_sub_response_cache_sequence = 0;
+
+static void eraseInflightSubRequest(
+    const std::string &key,
+    const std::shared_ptr<InflightSubRequest> &expected_call) {
+  std::lock_guard<std::mutex> lock(g_sub_inflight_mutex);
+  auto iter = g_sub_inflight.find(key);
+  if (iter != g_sub_inflight.end() && iter->second == expected_call)
+    g_sub_inflight.erase(iter);
+}
+
+static std::map<std::string, CachedSubResponse>::iterator
+eraseSubResponseCacheEntry(
+    std::map<std::string, CachedSubResponse>::iterator iter) {
+  const uint64_t bytes = iter->second.bytes;
+  g_sub_response_cache_bytes =
+      bytes <= g_sub_response_cache_bytes
+          ? g_sub_response_cache_bytes - bytes
+          : 0;
+  return g_sub_response_cache.erase(iter);
+}
+
+static uint64_t subResponseCacheMaxBytes() {
+  static const uint64_t limit = [] {
+    const std::string configured =
+        getEnv("SUBCONVERTER_RESPONSE_CACHE_MAX_BYTES");
+    if (configured.empty())
+      return UINT64_C(8) * 1024 * 1024;
+    try {
+      return static_cast<uint64_t>(std::clamp<unsigned long long>(
+          std::stoull(configured), 1024, UINT64_C(64) * 1024 * 1024));
+    } catch (...) {
+      return UINT64_C(8) * 1024 * 1024;
+    }
+  }();
+  return limit;
+}
 
 struct SubExplainProvider {
   std::string backend = "mihomo";
@@ -1487,6 +1670,7 @@ static std::string rejectAgeRequest(Response &response,
 static std::string finalizeSubResponse(const Request &request,
                                        Response &response, std::string body,
                                        const AgeResponseContext &age) {
+  RequestStageTimer serialize_timer(request.context, RequestStage::Serialize);
   if (isTruthyRequestValue(getUrlArg(request.argument, "explain")))
     applyExplainPrivacyHeaders(response);
   // User-Agent can select target=auto and affects subscription/provider
@@ -1561,11 +1745,29 @@ static void pruneExpiredSubResponseCache(
     std::chrono::steady_clock::time_point now) {
   for (auto iter = g_sub_response_cache.begin();
        iter != g_sub_response_cache.end();) {
-    if (iter->second.expires_at <= now)
-      iter = g_sub_response_cache.erase(iter);
-    else
+    if (iter->second.expires_at <= now) {
+      iter = eraseSubResponseCacheEntry(iter);
+    } else
       ++iter;
   }
+}
+
+static uint64_t coalescedResponseBytes(const CoalescedResponse &result) {
+  uint64_t bytes = result.body.size() + result.content_type.size();
+  for (const auto &[name, value] : result.headers)
+    bytes += name.size() + value.size();
+  return bytes;
+}
+
+static void evictOldestSubResponseCacheEntry() {
+  if (g_sub_response_cache.empty())
+    return;
+  auto oldest = std::min_element(
+      g_sub_response_cache.begin(), g_sub_response_cache.end(),
+      [](const auto &left, const auto &right) {
+        return left.second.sequence < right.second.sequence;
+      });
+  eraseSubResponseCacheEntry(oldest);
 }
 
 static bool getCachedSubResponse(const std::string &key,
@@ -1580,10 +1782,11 @@ static bool getCachedSubResponse(const std::string &key,
   if (iter == g_sub_response_cache.end())
     return false;
   if (iter->second.expires_at <= now) {
-    g_sub_response_cache.erase(iter);
+    eraseSubResponseCacheEntry(iter);
     return false;
   }
   result = iter->second.result;
+  iter->second.sequence = ++g_sub_response_cache_sequence;
   return true;
 }
 
@@ -1604,13 +1807,26 @@ static void storeCachedSubResponse(const std::string &key,
   auto now = std::chrono::steady_clock::now();
   std::lock_guard<std::mutex> lock(g_sub_response_cache_mutex);
   pruneExpiredSubResponseCache(now);
-  if (g_sub_response_cache.size() > 2048) {
-    writeLog(LOG_LEVEL_WARNING,
-             "响应微缓存条目数量过多，已清空以避免占用过多内存。");
-    g_sub_response_cache.clear();
-  }
-  g_sub_response_cache[key] = {
-      result, now + std::chrono::seconds(ttl)};
+  const uint64_t bytes = coalescedResponseBytes(*result);
+  const uint64_t max_bytes = subResponseCacheMaxBytes();
+  if (bytes > max_bytes)
+    return;
+  auto existing = g_sub_response_cache.find(key);
+  if (existing != g_sub_response_cache.end())
+    eraseSubResponseCacheEntry(existing);
+  while (!g_sub_response_cache.empty() &&
+         (g_sub_response_cache.size() >= 2048 ||
+          g_sub_response_cache_bytes > max_bytes - bytes))
+    evictOldestSubResponseCacheEntry();
+  CachedSubResponse cached;
+  cached.result = result;
+  cached.expires_at = now + std::chrono::seconds(ttl);
+  cached.bytes = bytes;
+  cached.sequence = ++g_sub_response_cache_sequence;
+  if (!cached.retained_bytes.acquire(bytes))
+    return;
+  g_sub_response_cache_bytes += bytes;
+  g_sub_response_cache.emplace(key, std::move(cached));
 }
 
 static std::string runSubconverterImplWithRetry(const Request &original,
@@ -1623,6 +1839,14 @@ static std::string runSubconverterImplWithRetry(const Request &original,
   std::string body = subconverter_impl(first_request, first_response, settings,
                                        stats ? &first_stats : nullptr);
   if (first_response.status_code < 500 || !settings.coalesceRetryOn5xx) {
+    if (stats)
+      *stats = first_stats;
+    response = first_response;
+    return body;
+  }
+  if (original.context &&
+      (original.context->cancellationToken().isCancellationRequested() ||
+       original.context->deadlineExceeded())) {
     if (stats)
       *stats = first_stats;
     response = first_response;
@@ -1661,7 +1885,7 @@ static void recordTrackedSubRequest(bool track, const Request &request,
 }
 
 static SettingsSnapshot captureSettingsForSubRequest(Request &request) {
-  SettingsSnapshot current = captureSettingsSnapshot();
+  SettingsSnapshot current = captureEffectiveSettingsSnapshot();
   if (!current->reloadConfOnRequest || !current->CFWChildProcess ||
       current->generatorMode)
     return current;
@@ -1680,6 +1904,10 @@ static SettingsSnapshot captureSettingsForSubRequest(Request &request) {
   }
   return current;
 }
+
+static std::string runScheduledConversion(
+    Request &request, Response &response, const SettingsSnapshot &snapshot,
+    RuleConversionStats *stats, bool with_retry);
 
 static std::string subconverterEntry(Request &request, Response &response,
                                      bool track) {
@@ -1716,8 +1944,8 @@ static std::string subconverterEntry(Request &request, Response &response,
 
   if (!shouldCoalesceSubRequest(request, settings)) {
     RuleConversionStats stats;
-    std::string body = subconverter_impl(request, response, settings,
-                                         track ? &stats : nullptr);
+    std::string body = runScheduledConversion(
+        request, response, snapshot, track ? &stats : nullptr, false);
     body = finalizeSubResponse(request, response, std::move(body), age);
     recordTrackedSubRequest(track, request, response, stats.rules);
     return body;
@@ -1728,8 +1956,8 @@ static std::string subconverterEntry(Request &request, Response &response,
                          settings.managedConfigPrefix);
   if (key.empty()) {
     RuleConversionStats stats;
-    std::string body = subconverter_impl(request, response, settings,
-                                         track ? &stats : nullptr);
+    std::string body = runScheduledConversion(
+        request, response, snapshot, track ? &stats : nullptr, false);
     body = finalizeSubResponse(request, response, std::move(body), age);
     recordTrackedSubRequest(track, request, response, stats.rules);
     return body;
@@ -1739,6 +1967,8 @@ static std::string subconverterEntry(Request &request, Response &response,
   if (!explain_request &&
       getCachedSubResponse(key, cached_result, settings)) {
     writeLog(LOG_LEVEL_DEBUG, "/sub 响应微缓存命中。");
+    if (request.context)
+      request.context->setCostClass(RequestCostClass::Low);
     copyCoalescedToResponse(*cached_result, response);
     recordTrackedSubRequest(track, request, response,
                             cached_result->rule_conversions);
@@ -1747,53 +1977,102 @@ static std::string subconverterEntry(Request &request, Response &response,
 
   std::shared_ptr<InflightSubRequest> call;
   bool owner = false;
+  uint32_t follower_consumers = 0;
   {
     std::lock_guard<std::mutex> lock(g_sub_inflight_mutex);
     auto iter = g_sub_inflight.find(key);
-    if (iter == g_sub_inflight.end()) {
+    if (iter != g_sub_inflight.end()) {
+      follower_consumers = iter->second->tryAddConsumer();
+      if (follower_consumers != 0) {
+        call = iter->second;
+      } else {
+        g_sub_inflight.erase(iter);
+      }
+    }
+    if (!call) {
       call = std::make_shared<InflightSubRequest>();
       call->owner_request_id = currentLogRequestId();
+      const auto work_started = RequestContext::Clock::now();
+      call->work_context = std::make_shared<RequestContext>(
+          call->owner_request_id, work_started,
+          work_started +
+              std::chrono::milliseconds(
+                  std::max(1, settings.requestDeadlineMs)));
+      call->work_context->setConsumerCount(1);
+      if (request.context) {
+        request.context->setSingleflightRole(RequestSingleflightRole::Owner);
+        request.context->setConsumerCount(1);
+      }
       g_sub_inflight.emplace(key, call);
       owner = true;
-    } else {
-      call = iter->second;
     }
   }
 
   if (!owner) {
+    if (request.context)
+      request.context->setSingleflightRole(RequestSingleflightRole::Follower);
+    if (call->work_context)
+      call->work_context->setConsumerCount(follower_consumers);
+    InflightConsumerGuard consumer_guard(call, request.context);
     writeLog(LOG_LEVEL_INFO,
              "SUB_REQUEST_COALESCED owner_request_id=" +
                  (call->owner_request_id.empty() ? "unavailable"
                                                  : call->owner_request_id));
     std::unique_lock<std::mutex> lock(call->mutex);
-    call->cv.wait(lock, [&call] { return call->done; });
+    while (!call->done) {
+      RequestCancellationResponse cancellation_response;
+      if (requestCancellationResponse(request.context,
+                                      cancellation_response)) {
+        lock.unlock();
+        response.status_code = cancellation_response.status_code;
+        response.content_type = "text/plain; charset=utf-8";
+        response.headers = std::move(cancellation_response.headers);
+        return std::move(cancellation_response.body);
+      }
+      auto wake = RequestContext::Clock::now() +
+                  std::chrono::milliseconds(10);
+      if (request.context &&
+          request.context->deadline() !=
+              RequestContext::Clock::time_point::max())
+        wake = std::min(wake, request.context->deadline());
+      call->cv.wait_until(lock, wake);
+    }
     if (call->exception)
       std::rethrow_exception(call->exception);
+    if (request.context) {
+      if (call->work_context)
+        request.context->setCostClass(call->work_context->costClass());
+    }
     copyCoalescedToResponse(*call->result, response);
     recordTrackedSubRequest(track, request, response,
                             call->result->rule_conversions);
     return call->result->body;
   }
 
+  InflightConsumerGuard consumer_guard(call, request.context);
   try {
     writeLog(LOG_LEVEL_DEBUG, "/sub 请求成为同 key 转换 owner。");
+    Request work_request = request;
+    work_request.context = call->work_context;
+    ScopedRequestContext work_scope(call->work_context);
     Response owner_response;
     RuleConversionStats stats;
-    std::string body = runSubconverterImplWithRetry(
-        request, owner_response, settings, track ? &stats : nullptr);
-    body = finalizeSubResponse(request, owner_response, std::move(body), age);
+    std::string body = runScheduledConversion(
+        work_request, owner_response, snapshot, track ? &stats : nullptr,
+        true);
+    body = finalizeSubResponse(work_request, owner_response, std::move(body),
+                               age);
     SharedCoalescedResponse result = makeCoalescedResult(
         std::move(body), std::move(owner_response), stats.rules);
+    if (request.context && call->work_context)
+      request.context->setCostClass(call->work_context->costClass());
     copyCoalescedToResponse(*result, response);
     {
       std::lock_guard<std::mutex> lock(call->mutex);
       call->result = result;
       call->done = true;
     }
-    {
-      std::lock_guard<std::mutex> lock(g_sub_inflight_mutex);
-      g_sub_inflight.erase(key);
-    }
+    eraseInflightSubRequest(key, call);
     if (!age.requested && !explain_request)
       storeCachedSubResponse(key, result, settings);
     call->cv.notify_all();
@@ -1806,10 +2085,7 @@ static std::string subconverterEntry(Request &request, Response &response,
       call->exception = std::current_exception();
       call->done = true;
     }
-    {
-      std::lock_guard<std::mutex> lock(g_sub_inflight_mutex);
-      g_sub_inflight.erase(key);
-    }
+    eraseInflightSubRequest(key, call);
     call->cv.notify_all();
     throw;
   }
@@ -1817,12 +2093,299 @@ static std::string subconverterEntry(Request &request, Response &response,
 
 } // namespace
 
+namespace {
+
+std::atomic<WorkloadScheduler *> conversion_scheduler_instance{nullptr};
+
+WorkloadScheduler &conversionScheduler() {
+  const Settings &settings = effectiveSettings();
+  const unsigned int hardware_threads =
+      std::max(1U, std::thread::hardware_concurrency());
+  const std::size_t workers = static_cast<std::size_t>(
+      std::clamp(std::min(settings.maxConcurThreads,
+                          static_cast<int>(hardware_threads)),
+                 1, INT_MAX));
+  const std::size_t entries = static_cast<std::size_t>(
+      std::max(settings.maxPendingConns, 1));
+  static WorkloadScheduler scheduler(workers, entries,
+                                     requestAdmissionSnapshot().max_bytes);
+  conversion_scheduler_instance.store(&scheduler, std::memory_order_release);
+  return scheduler;
+}
+
+RequestCostClass estimateConversionCost(const Request &request) {
+  const std::string target = getUrlArg(request.argument, "target");
+  const std::string url = getUrlArg(request.argument, "url");
+  const bool list = isTruthyRequestValue(getUrlArg(request.argument, "list"));
+  const bool script =
+      isTruthyRequestValue(getUrlArg(request.argument, "script"));
+  const bool expand =
+      isTruthyRequestValue(getUrlArg(request.argument, "expand"));
+  const bool multiple = url.find('|') != std::string::npos;
+  const bool external_config =
+      !getUrlArg(request.argument, "config").empty();
+  static constexpr const char *transform_parameters[] = {
+      "include", "exclude", "rename", "emoji", "add_emoji",
+      "remove_emoji", "append_type", "sort", "filter_deprecated",
+      "udp", "tfo", "scv", "tls13", "group", "ruleprepend",
+      "ruleappend", "ruleset", "provider_headers"};
+  bool transformation = false;
+  for (const char *name : transform_parameters) {
+    if (!getUrlArg(request.argument, name).empty()) {
+      transformation = true;
+      break;
+    }
+  }
+  if (script || expand || multiple || external_config || transformation)
+    return RequestCostClass::High;
+  (void)target;
+  (void)list;
+  return RequestCostClass::Medium;
+}
+
+ConversionResult schedulerFailureResult(Request &request,
+                                        SchedulerSubmitStatus status) {
+  int http_status = 503;
+  std::string body =
+      "Service temporarily unavailable: conversion capacity is full.\n"
+      "服务暂时不可用：转换容量已满。\n";
+  string_icase_map headers{{"Cache-Control", "private, no-store"}};
+  switch (status) {
+  case SchedulerSubmitStatus::Deadline:
+    http_status = 504;
+    body = "Gateway timeout: request deadline exceeded before conversion.\n"
+           "网关超时：请求在转换开始前已超过截止时间。\n";
+    if (request.context) {
+      request.context->requestCancellation(RequestCancellationReason::Deadline);
+      request.context->suggestFailure(RequestFailureAttribution::Client);
+    }
+    break;
+  case SchedulerSubmitStatus::Cancelled:
+    http_status = 499;
+    body = "Client closed request before conversion started.\n"
+           "客户端在转换开始前关闭了请求。\n";
+    if (request.context) {
+      request.context->requestCancellation(
+          RequestCancellationReason::ClientDisconnected);
+      request.context->suggestFailure(RequestFailureAttribution::Client);
+    }
+    break;
+  case SchedulerSubmitStatus::EntryLimit:
+  case SchedulerSubmitStatus::ByteLimit:
+    headers.emplace("Retry-After", "1");
+    if (request.context)
+      request.context->suggestFailure(RequestFailureAttribution::Capacity);
+    break;
+  case SchedulerSubmitStatus::Stopping:
+    body = "Service is shutting down.\n服务正在关闭。\n";
+    if (request.context)
+      request.context->suggestFailure(RequestFailureAttribution::Server);
+    break;
+  case SchedulerSubmitStatus::Accepted:
+    break;
+  }
+  return ConversionResult(http_status, "text/plain; charset=utf-8",
+                          std::move(headers), std::move(body));
+}
+
+ConversionResult executorFailureResult(Request &request,
+                                       ExecutorSubmitStatus status) {
+  int http_status = 503;
+  std::string body =
+      "Service temporarily unavailable: ruleset capacity is full.\n"
+      "服务暂时不可用：规则集处理容量已满。\n";
+  string_icase_map headers{{"Cache-Control", "private, no-store"}};
+  switch (status) {
+  case ExecutorSubmitStatus::Deadline:
+    http_status = 504;
+    body = "Gateway timeout: ruleset processing exceeded the request "
+           "deadline.\n网关超时：规则集处理已超过请求截止时间。\n";
+    if (request.context) {
+      request.context->requestCancellation(RequestCancellationReason::Deadline);
+      request.context->suggestFailure(RequestFailureAttribution::Client);
+    }
+    break;
+  case ExecutorSubmitStatus::Cancelled:
+    if (request.context &&
+        request.context->cancellationToken().reason() ==
+            RequestCancellationReason::Shutdown) {
+      body = "Service is shutting down.\n服务正在关闭。\n";
+      request.context->suggestFailure(RequestFailureAttribution::Server);
+    } else {
+      http_status = 499;
+      body = "Client closed request during ruleset processing.\n"
+             "客户端在规则集处理期间关闭了请求。\n";
+      if (request.context)
+        request.context->suggestFailure(RequestFailureAttribution::Client);
+    }
+    break;
+  case ExecutorSubmitStatus::QueueFull:
+  case ExecutorSubmitStatus::Recursive:
+    headers.emplace("Retry-After", "1");
+    if (request.context)
+      request.context->suggestFailure(RequestFailureAttribution::Capacity);
+    break;
+  case ExecutorSubmitStatus::Stopping:
+    body = "Service is shutting down.\n服务正在关闭。\n";
+    if (request.context)
+      request.context->suggestFailure(RequestFailureAttribution::Server);
+    break;
+  case ExecutorSubmitStatus::Accepted:
+    break;
+  }
+  return ConversionResult(http_status, "text/plain; charset=utf-8",
+                          std::move(headers), std::move(body));
+}
+
+std::string runScheduledConversion(
+    Request &request, Response &response, const SettingsSnapshot &snapshot,
+    RuleConversionStats *stats, bool with_retry) {
+  const std::string scheduler_mode =
+      toLower(getEnv("SUBCONVERTER_CONVERSION_SCHEDULER"));
+  if (scheduler_mode == "direct") {
+    if (with_retry)
+      return runSubconverterImplWithRetry(request, response, *snapshot, stats);
+    return subconverter_impl(request, response, *snapshot, stats);
+  }
+  if (!scheduler_mode.empty() && scheduler_mode != "bounded") {
+    static std::atomic<bool> invalid_mode_logged{false};
+    bool expected = false;
+    if (invalid_mode_logged.compare_exchange_strong(expected, true))
+      writeLog(LOG_LEVEL_ERROR,
+               "CONVERSION_SCHEDULER_INVALID value_length=" +
+                   std::to_string(scheduler_mode.size()) +
+                   " fallback=direct");
+    if (with_retry)
+      return runSubconverterImplWithRetry(request, response, *snapshot, stats);
+    return subconverter_impl(request, response, *snapshot, stats);
+  }
+  const RequestCostClass cost = estimateConversionCost(request);
+  if (request.context)
+    request.context->setCostClass(cost);
+  writeLog(LOG_LEVEL_DEBUG,
+           "CONVERSION_ADMISSION cost=" +
+               std::string(requestCostClassName(cost)));
+  const uint64_t bytes = request.context
+                             ? request.context->estimatedBytes()
+                             : static_cast<uint64_t>(request.postdata.size());
+  const auto deadline = request.context
+                            ? request.context->deadline()
+                            : RequestContext::Clock::time_point::max();
+  const RequestCancellationToken cancellation =
+      request.context ? request.context->cancellationToken()
+                      : RequestCancellationToken();
+  const std::shared_ptr<RequestContext> context = request.context;
+  const auto queued_at = RequestContext::Clock::now();
+  auto submission = conversionScheduler().submit(
+      cost, bytes, deadline, cancellation,
+      [&request, &response, snapshot, stats, with_retry, context,
+       queued_at]() -> std::string {
+        ScopedSettingsView settings_scope(snapshot);
+        ScopedRequestContext request_scope(context);
+        ScopedLogRequestContext log_scope(context ? context->requestId()
+                                                   : std::string());
+        if (context) {
+          context->addStageDuration(RequestStage::Queue,
+                                    RequestContext::Clock::now() - queued_at);
+          context->setCurrentStage(RequestStage::Parse);
+        }
+        if (with_retry)
+          return runSubconverterImplWithRetry(request, response, *snapshot,
+                                              stats);
+        return subconverter_impl(request, response, *snapshot, stats);
+      });
+  if (submission.status == SchedulerSubmitStatus::Accepted) {
+    try {
+      return submission.future.get();
+    } catch (const SchedulerSubmitError &error) {
+      ConversionResult failure =
+          schedulerFailureResult(request, error.status());
+      response.status_code = failure.statusCode();
+      response.content_type = std::move(failure).releaseContentType();
+      response.headers = std::move(failure).releaseHeaders();
+      return std::move(failure).releaseBody();
+    } catch (const ExecutorSubmitError &error) {
+      ConversionResult failure =
+          executorFailureResult(request, error.status());
+      response.status_code = failure.statusCode();
+      response.content_type = std::move(failure).releaseContentType();
+      response.headers = std::move(failure).releaseHeaders();
+      return std::move(failure).releaseBody();
+    } catch (const std::future_error &) {
+      ConversionResult failure = executorFailureResult(
+          request, ExecutorSubmitStatus::Stopping);
+      response.status_code = failure.statusCode();
+      response.content_type = std::move(failure).releaseContentType();
+      response.headers = std::move(failure).releaseHeaders();
+      return std::move(failure).releaseBody();
+    }
+  }
+  ConversionResult failure =
+      schedulerFailureResult(request, submission.status);
+  response.status_code = failure.statusCode();
+  response.content_type = std::move(failure).releaseContentType();
+  response.headers = std::move(failure).releaseHeaders();
+  return std::move(failure).releaseBody();
+}
+
+} // namespace
+
+ConversionResult ConversionService::convertSubscription(
+    Request &request, bool track_statistics) const {
+  Response response;
+  std::string body =
+      subconverterEntry(request, response, track_statistics);
+  return ConversionResult(response.status_code, std::move(response.content_type),
+                          std::move(response.headers), std::move(body));
+}
+
+const ConversionService &defaultConversionService() {
+  static const ConversionService service;
+  return service;
+}
+
+WorkloadSchedulerSnapshot conversionSchedulerSnapshot() {
+  if (WorkloadScheduler *scheduler =
+          conversion_scheduler_instance.load(std::memory_order_acquire))
+    return scheduler->snapshot();
+  return {};
+}
+
+ResponseMicroCacheSnapshot responseMicroCacheSnapshot() {
+  std::lock_guard<std::mutex> lock(g_sub_response_cache_mutex);
+  pruneExpiredSubResponseCache(std::chrono::steady_clock::now());
+  return {static_cast<uint64_t>(g_sub_response_cache.size()),
+          g_sub_response_cache_bytes, subResponseCacheMaxBytes()};
+}
+
+void shutdownConversionScheduler() noexcept {
+  if (WorkloadScheduler *scheduler =
+          conversion_scheduler_instance.load(std::memory_order_acquire))
+    scheduler->shutdown(true);
+}
+
+void requestConversionSchedulerShutdown() noexcept {
+  if (WorkloadScheduler *scheduler =
+          conversion_scheduler_instance.load(std::memory_order_acquire))
+    scheduler->requestShutdown(true);
+}
+
+static std::string applyConversionResult(ConversionResult result,
+                                         Response &response) {
+  response.status_code = result.statusCode();
+  response.content_type = std::move(result).releaseContentType();
+  response.headers = std::move(result).releaseHeaders();
+  return std::move(result).releaseBody();
+}
+
 std::string subconverter(RESPONSE_CALLBACK_ARGS) {
-  return subconverterEntry(request, response, false);
+  return applyConversionResult(
+      defaultConversionService().convertSubscription(request, false), response);
 }
 
 std::string subconverterTracked(RESPONSE_CALLBACK_ARGS) {
-  return subconverterEntry(request, response, true);
+  return applyConversionResult(
+      defaultConversionService().convertSubscription(request, true), response);
 }
 
 namespace {
@@ -4961,35 +5524,80 @@ static std::string assembleSubResponse(
 static std::string subconverter_impl(Request &request, Response &response,
                                      const Settings &settings,
                                      RuleConversionStats *rule_stats) {
+  auto cancelled = [&]() -> std::optional<std::string> {
+    RequestCancellationResponse cancellation_response;
+    if (!requestCancellationResponse(request.context,
+                                     cancellation_response))
+      return std::nullopt;
+    response.status_code = cancellation_response.status_code;
+    response.content_type = "text/plain; charset=utf-8";
+    response.headers = std::move(cancellation_response.headers);
+    return std::move(cancellation_response.body);
+  };
+  if (auto body = cancelled())
+    return std::move(*body);
   ParsedSubRequest parsed_request;
-  std::string parse_error =
-      parseSubRequestArguments(request, response, settings, parsed_request);
-  if (!parse_error.empty())
-    return parse_error;
-
   EffectiveSubPolicy effective_policy;
-  std::string policy_error = buildEffectiveSubPolicy(
-      request, response, settings, rule_stats, parsed_request, effective_policy);
-  if (!policy_error.empty())
-    return policy_error;
+  {
+    RequestStageTimer parse_timer(request.context, RequestStage::Parse);
+    std::string parse_error =
+        parseSubRequestArguments(request, response, settings, parsed_request);
+    if (!parse_error.empty())
+      return parse_error;
+
+    std::string policy_error = buildEffectiveSubPolicy(
+        request, response, settings, rule_stats, parsed_request,
+        effective_policy);
+    if (!policy_error.empty())
+      return policy_error;
+  }
+  if (auto body = cancelled())
+    return std::move(*body);
 
   ExternalConfigFetchPlan fetch_plan;
-  std::string fetch_plan_error = buildExternalConfigFetchPlan(
-      response, settings, parsed_request, effective_policy, fetch_plan);
-  if (!fetch_plan_error.empty())
-    return fetch_plan_error;
+  {
+    RequestStageTimer rules_timer(request.context, RequestStage::Rules);
+    std::string fetch_plan_error = buildExternalConfigFetchPlan(
+        response, settings, parsed_request, effective_policy, fetch_plan);
+    if (!fetch_plan_error.empty())
+      return fetch_plan_error;
+  }
+  if (auto body = cancelled())
+    return std::move(*body);
+
   SubscriptionNodeState subscription_state;
-  SubStageResponse subscription_response = processSubscriptionNodes(
-      request, response, settings, parsed_request, effective_policy,
-      subscription_state);
-  if (subscription_response.complete)
-    return subscription_response.body;
+  {
+    RequestStageTimer parse_timer(request.context, RequestStage::Parse);
+    SubStageResponse subscription_response = processSubscriptionNodes(
+        request, response, settings, parsed_request, effective_policy,
+        subscription_state);
+    if (request.context) {
+      const bool high_cost =
+          parsed_request.explain.subscription_url_count > 1 ||
+          effective_policy.custom_rulesets.size() > 1 ||
+          parsed_request.generate_clash_script.get(false) ||
+          !parsed_request.external_config.empty();
+      request.context->setCostClass(
+          parsed_request.explain.proxy_provider_mode
+              ? RequestCostClass::Low
+              : (high_cost ? RequestCostClass::High
+                           : RequestCostClass::Medium));
+    }
+    if (subscription_response.complete)
+      return subscription_response.body;
+  }
+  if (auto body = cancelled())
+    return std::move(*body);
+
+  RequestStageTimer serialize_timer(request.context, RequestStage::Serialize);
   TargetGenerationState generation_state;
   SubStageResponse generation_response = dispatchTargetGenerator(
       request, response, settings, parsed_request, effective_policy,
       fetch_plan, subscription_state, generation_state);
   if (generation_response.complete)
     return generation_response.body;
+  if (auto body = cancelled())
+    return std::move(*body);
   return assembleSubResponse(request, response, settings, parsed_request,
                              effective_policy, fetch_plan, generation_state);
 }

@@ -16,6 +16,8 @@
 #include <sys/types.h>
 #include <dirent.h>
 
+// scope_limit=false intentionally permits trusted local configuration to read
+// an arbitrary operator-selected path. Request-controlled paths must pass true.
 std::string fileGet(const std::string &path, bool scope_limit = false);
 bool fileExist(const std::string &path, bool scope_limit = false);
 bool isInScope(const std::string &path);

@@ -6,8 +6,11 @@
 
 #include "handler/settings.h"
 #include "handler/settings_view.h"
+#include "server/request_context.h"
 #include "utils/network.h"
 #include "utils/bounded_executor.h"
+#include "utils/resource_control.h"
+#include "utils/system.h"
 #include "webget.h"
 #include "multithread.h"
 //#include "vfs.h"
@@ -15,14 +18,35 @@
 //safety lock for multi-thread
 std::mutex on_emoji, on_rename, on_stream, on_time;
 
+static bool forceMaxResourceBudgetApplied()
+{
+    const ResourceControlSnapshot resources = resourceControlSnapshot();
+    return resources.mode == "force_max" && resources.permits_applied;
+}
+
 static size_t configuredWorkerCount()
 {
+    const std::string configured =
+        getEnv("SUBCONVERTER_RULESET_EXECUTOR_WORKERS");
+    if(!configured.empty())
+        return static_cast<size_t>(std::clamp(to_int(configured, 2), 1, 8));
+    if(forceMaxResourceBudgetApplied())
+        return static_cast<size_t>(
+            std::max(1, effectiveSettings().maxConcurThreads));
     return static_cast<size_t>(
         std::clamp(effectiveSettings().maxConcurThreads / 2, 2, 8));
 }
 
 static size_t configuredQueueCapacity()
 {
+    const std::string configured =
+        getEnv("SUBCONVERTER_RULESET_EXECUTOR_QUEUE_CAPACITY");
+    if(!configured.empty())
+        return static_cast<size_t>(
+            std::clamp(to_int(configured, 64), 1, 1024));
+    if(forceMaxResourceBudgetApplied())
+        return static_cast<size_t>(
+            std::max(1, effectiveSettings().maxPendingConns));
     return std::max<size_t>(64, configuredWorkerCount() * 16);
 }
 
@@ -62,6 +86,15 @@ void shutdownRulesetExecutor()
         activeRulesetExecutor.load(std::memory_order_acquire);
     if(executor)
         executor->shutdown(true);
+}
+
+void requestRulesetExecutorShutdown()
+{
+    requestOutboundFetchShutdown();
+    BoundedExecutor *executor =
+        activeRulesetExecutor.load(std::memory_order_acquire);
+    if(executor)
+        executor->requestShutdown(true);
 }
 
 RegexMatchConfigs safe_get_emojis()
@@ -146,17 +179,43 @@ std::shared_future<std::string> fetchFileAsync(const std::string &path, const Pr
     std::future<std::string> retVal;
     if(find_local && fileExist(path, scope_limit) &&
        canReadLocalFetchPath(path, context))
-        retVal = rulesetExecutor().submit(
-            [path, scope_limit](){ return fileGet(path, scope_limit); });
+    {
+        std::shared_ptr<RequestContext> request_context =
+            captureCurrentRequestContext();
+        const auto deadline = request_context
+            ? request_context->deadline()
+            : RequestContext::Clock::time_point::max();
+        const RequestCancellationToken cancellation = request_context
+            ? request_context->cancellationToken()
+            : RequestCancellationToken();
+        auto submission = rulesetExecutor().submitUntil(
+            deadline, cancellation,
+            [path, scope_limit, request_context](){
+                ScopedRequestContext scope(request_context);
+                return fileGet(path, scope_limit);
+            });
+        retVal = std::move(submission.future);
+    }
     else if(isLink(path))
     {
         SettingsSnapshot settings = captureEffectiveSettingsSnapshot();
-        retVal = rulesetExecutor().submit(
-            [path, proxy, cache_ttl, context, settings](){
+        std::shared_ptr<RequestContext> request_context =
+            captureCurrentRequestContext();
+        const auto deadline = request_context
+            ? request_context->deadline()
+            : RequestContext::Clock::time_point::max();
+        const RequestCancellationToken cancellation = request_context
+            ? request_context->cancellationToken()
+            : RequestCancellationToken();
+        auto submission = rulesetExecutor().submitUntil(
+            deadline, cancellation,
+            [path, proxy, cache_ttl, context, settings, request_context](){
+                ScopedRequestContext request_scope(request_context);
                 ScopedSettingsView view(settings);
                 return webGet(path, proxy, cache_ttl, nullptr, nullptr,
                               context);
             });
+        retVal = std::move(submission.future);
     }
     else
         return makeReadyStringFuture(std::string());

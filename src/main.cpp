@@ -13,6 +13,7 @@
 #include "config/ruleset.h"
 #include "handler/curl_handle_pool.h"
 #include "handler/dashboard_auth.h"
+#include "handler/conversion_service.h"
 #include "handler/dashboard_page.h"
 #include "handler/inspect_page.h"
 #include "handler/interfaces.h"
@@ -27,6 +28,7 @@
 #include "utils/defer.h"
 #include "utils/logger.h"
 #include "utils/rapidjson_extra.h"
+#include "utils/resource_control.h"
 #include "utils/system.h"
 #include "version.h"
 
@@ -112,6 +114,10 @@ void chkArg(int argc, char *argv[]) {
     } else if (strcmp(argv[i], "-l") == 0 || strcmp(argv[i], "--log") == 0) {
       if (i < argc - 1) {
         const char *log_path = argv[++i];
+        // --log is an explicit local-operator destination, not a path derived
+        // from an HTTP request. Arbitrary absolute paths are part of the CLI
+        // contract and are opened without invoking a shell.
+        // codeql[cpp/path-injection]
         const LogRedirectResult result = redirectStderrToAppendFile(log_path);
         if (result.success) {
           writeLog(LOG_LEVEL_INFO,
@@ -180,9 +186,18 @@ void cron_tick_caller() {
 }
 
 void shutdown_runtime() {
+  shutdownResourceControlRuntime();
+  shutdownConversionScheduler();
   shutdownRulesetExecutor();
   statistics::shutdown();
   shutdownGlobalCurlHandlePool();
+}
+
+void begin_runtime_shutdown() {
+  cancelAllActiveRequests(RequestCancellationReason::Shutdown);
+  shutdownResourceControlRuntime();
+  requestConversionSchedulerShutdown();
+  requestRulesetExecutorShutdown();
 }
 
 int main(int argc, char *argv[]) {
@@ -269,6 +284,7 @@ int main(int argc, char *argv[]) {
   // drains accepted requests before returning, so only then may the executor
   // cancel unobserved work and release its curl leases before the pool stops.
   defer(shutdown_runtime();)
+  startResourceControlRuntime();
   statistics::initialize();
   // vfs::vfs_read("vfs.ini");
   if (!global.updateRulesetOnRequest)
@@ -362,7 +378,9 @@ int main(int argc, char *argv[]) {
   logSecurityPosture();
   listener_args args = {global.listenAddress,   global.listenPort,
                         global.maxPendingConns, global.maxConcurThreads,
-                        cron_tick_caller,       200};
+                        cron_tick_caller,       200,
+                        static_cast<uint32_t>(global.requestDeadlineMs),
+                        begin_runtime_shutdown};
   // std::cout<<"Serving HTTP @
   // http://"<<listen_address<<":"<<listen_port<<std::endl;
   writeLog(LOG_LEVEL_INFO,

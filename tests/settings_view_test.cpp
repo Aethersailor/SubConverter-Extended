@@ -6,6 +6,7 @@
 #include <thread>
 #include <vector>
 
+#include "handler/conversion_service.h"
 #include "handler/settings.h"
 #include "handler/settings_view.h"
 
@@ -49,6 +50,24 @@ int main(int argc, char *argv[]) {
     require(false, "injected invariant failure");
   if (argc != 1)
     fail("unexpected argument");
+
+  string_icase_map conversion_headers;
+  conversion_headers.emplace("X-Test", "immutable");
+  ConversionResult conversion_result(202, "text/plain",
+                                     std::move(conversion_headers), "body");
+  const ConversionResult &conversion_view = conversion_result;
+  require(conversion_view.statusCode() == 202 &&
+              conversion_view.contentType() == "text/plain" &&
+              conversion_view.headers().at("X-Test") == "immutable" &&
+              conversion_view.body() == "body",
+          "conversion result did not preserve immutable response data");
+  require(std::move(conversion_result).releaseContentType() == "text/plain",
+          "conversion result did not transfer content type ownership");
+  require(std::move(conversion_result).releaseHeaders().at("X-Test") ==
+              "immutable",
+          "conversion result did not transfer header ownership");
+  require(std::move(conversion_result).releaseBody() == "body",
+          "conversion result did not transfer body ownership");
 
   Settings first = generation(1);
   Settings second = generation(2);

@@ -6,9 +6,11 @@
 #include <iostream>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "config/regmatch.h"
 #include "external_rules.h"
@@ -782,6 +784,203 @@ std::string vmessLinkConstruct(const Proxy &proxy) {
   return sb.GetString();
 }
 
+namespace {
+
+class PreparedRangeMatcher {
+public:
+  explicit PreparedRangeMatcher(const std::string &range) {
+    const string_array values = split(range, ",");
+    std::string range_begin_str, range_end_str;
+    static const std::string reg_num = "-?\\d+",
+                             reg_range = "(\\d+)-(\\d+)",
+                             reg_not = "\\!-?(\\d+)",
+                             reg_not_range = "\\!(\\d+)-(\\d+)",
+                             reg_less = "(\\d+)-",
+                             reg_more = "(\\d+)\\+";
+    for (const std::string &value : values) {
+      if (regMatch(value, reg_num)) {
+        terms_.push_back({TermKind::Equal, to_int(value, INT_MAX), 0});
+      } else if (regMatch(value, reg_range)) {
+        regGetMatch(value, reg_range, 3,
+                    static_cast<std::string *>(nullptr), &range_begin_str,
+                    &range_end_str);
+        terms_.push_back({TermKind::Range,
+                          to_int(range_begin_str, INT_MAX),
+                          to_int(range_end_str, INT_MIN)});
+      } else if (regMatch(value, reg_not)) {
+        terms_.push_back({TermKind::NotEqual,
+                          to_int(regReplace(value, reg_not, "$1"), INT_MAX),
+                          0});
+      } else if (regMatch(value, reg_not_range)) {
+        // Preserve the historical two-step parse and ordered overwrite
+        // behavior instead of redefining the range grammar in this change.
+        regGetMatch(value, reg_range, 3,
+                    static_cast<std::string *>(nullptr), &range_begin_str,
+                    &range_end_str);
+        terms_.push_back({TermKind::NotRange,
+                          to_int(range_begin_str, INT_MAX),
+                          to_int(range_end_str, INT_MIN)});
+      } else if (regMatch(value, reg_less)) {
+        terms_.push_back({TermKind::LessOrEqual,
+                          to_int(regReplace(value, reg_less, "$1"), INT_MAX),
+                          0});
+      } else if (regMatch(value, reg_more)) {
+        terms_.push_back({TermKind::GreaterOrEqual,
+                          to_int(regReplace(value, reg_more, "$1"), INT_MIN),
+                          0});
+      }
+    }
+  }
+
+  bool matches(int target) const {
+    bool match = false;
+    for (const Term &term : terms_) {
+      switch (term.kind) {
+      case TermKind::Equal:
+        if (term.first == target)
+          match = true;
+        break;
+      case TermKind::Range:
+        if (target >= term.first && target <= term.second)
+          match = true;
+        break;
+      case TermKind::NotEqual:
+        match = term.first != target;
+        break;
+      case TermKind::NotRange:
+        match = !(target >= term.first && target <= term.second);
+        break;
+      case TermKind::LessOrEqual:
+        if (term.first >= target)
+          match = true;
+        break;
+      case TermKind::GreaterOrEqual:
+        if (term.first <= target)
+          match = true;
+        break;
+      }
+    }
+    return match;
+  }
+
+private:
+  enum class TermKind {
+    Equal,
+    Range,
+    NotEqual,
+    NotRange,
+    LessOrEqual,
+    GreaterOrEqual,
+  };
+
+  struct Term {
+    TermKind kind;
+    int first;
+    int second;
+  };
+
+  std::vector<Term> terms_;
+};
+
+class PreparedGroupRule {
+public:
+  explicit PreparedGroupRule(const std::string &rule) {
+    std::string target;
+    static const std::string groupid_regex =
+        R"(^!!(?:GROUPID|INSERT)=([\d\-+!,]+)(?:!!(.*))?$)";
+    static const std::string group_regex =
+        R"(^!!(?:GROUP)=(.+?)(?:!!(.*))?$)";
+    static const std::string type_regex =
+        R"(^!!(?:TYPE)=(.+?)(?:!!(.*))?$)";
+    static const std::string port_regex =
+        R"(^!!(?:PORT)=(.+?)(?:!!(.*))?$)";
+    static const std::string server_regex =
+        R"(^!!(?:SERVER)=(.+?)(?:!!(.*))?$)";
+
+    if (startsWith(rule, "!!GROUP=")) {
+      kind_ = Kind::Group;
+      regGetMatch(rule, group_regex, 3,
+                  static_cast<std::string *>(nullptr), &target, &real_rule_);
+      selector_regex_.emplace(target, CompiledRegexMode::Search);
+    } else if (startsWith(rule, "!!GROUPID=") ||
+               startsWith(rule, "!!INSERT=")) {
+      kind_ = startsWith(rule, "!!INSERT=") ? Kind::Insert : Kind::GroupId;
+      regGetMatch(rule, groupid_regex, 3,
+                  static_cast<std::string *>(nullptr), &target, &real_rule_);
+      range_matcher_.emplace(target);
+    } else if (startsWith(rule, "!!TYPE=")) {
+      kind_ = Kind::Type;
+      regGetMatch(rule, type_regex, 3,
+                  static_cast<std::string *>(nullptr), &target, &real_rule_);
+      selector_regex_.emplace(target, CompiledRegexMode::FullMatch);
+    } else if (startsWith(rule, "!!PORT=")) {
+      kind_ = Kind::Port;
+      regGetMatch(rule, port_regex, 3,
+                  static_cast<std::string *>(nullptr), &target, &real_rule_);
+      range_matcher_.emplace(target);
+    } else if (startsWith(rule, "!!SERVER=")) {
+      kind_ = Kind::Server;
+      regGetMatch(rule, server_regex, 3,
+                  static_cast<std::string *>(nullptr), &target, &real_rule_);
+      selector_regex_.emplace(target, CompiledRegexMode::Search);
+    } else {
+      real_rule_ = rule;
+    }
+  }
+
+  bool matches(const Proxy &node) {
+    if (!matchesSelector(node))
+      return false;
+    if (real_rule_.empty())
+      return true;
+    if (!remark_regex_)
+      remark_regex_.emplace(real_rule_, CompiledRegexMode::Search);
+    return remark_regex_->matches(node.Remark);
+  }
+
+private:
+  enum class Kind { Plain, Group, GroupId, Insert, Type, Port, Server };
+
+  bool matchesSelector(const Proxy &node) {
+    static const std::map<ProxyType, const char *> types = {
+        {ProxyType::Shadowsocks, "SS"},      {ProxyType::ShadowsocksR, "SSR"},
+        {ProxyType::VMess, "VMESS"},         {ProxyType::Trojan, "TROJAN"},
+        {ProxyType::Snell, "SNELL"},         {ProxyType::HTTP, "HTTP"},
+        {ProxyType::HTTPS, "HTTPS"},         {ProxyType::SOCKS5, "SOCKS5"},
+        {ProxyType::WireGuard, "WIREGUARD"}, {ProxyType::VLESS, "VLESS"},
+        {ProxyType::Hysteria, "HYSTERIA"},   {ProxyType::Hysteria2, "HYSTERIA2"},
+        {ProxyType::TUIC, "TUIC"},           {ProxyType::AnyTLS, "ANYTLS"},
+        {ProxyType::Naive, "NAIVE"},         {ProxyType::Mieru, "MIERU"}};
+
+    switch (kind_) {
+    case Kind::Plain:
+      return true;
+    case Kind::Group:
+      return selector_regex_ && selector_regex_->matches(node.Group);
+    case Kind::GroupId:
+      return range_matcher_ && range_matcher_->matches(node.GroupId);
+    case Kind::Insert:
+      return range_matcher_ && range_matcher_->matches(-node.GroupId);
+    case Kind::Type:
+      return node.Type != ProxyType::Unknown && selector_regex_ &&
+             selector_regex_->matches(types.at(node.Type));
+    case Kind::Port:
+      return range_matcher_ && range_matcher_->matches(node.Port);
+    case Kind::Server:
+      return selector_regex_ && selector_regex_->matches(node.Hostname);
+    }
+    return false;
+  }
+
+  Kind kind_ = Kind::Plain;
+  std::string real_rule_;
+  std::optional<CompiledRegex> selector_regex_;
+  std::optional<PreparedRangeMatcher> range_matcher_;
+  std::optional<CompiledRegex> remark_regex_;
+};
+
+} // namespace
+
 bool matchRange(const std::string &range, int target) {
   string_array vArray = split(range, ",");
   bool match = false;
@@ -899,6 +1098,16 @@ static YAML::Node providersMatchingGroupId(
   return use_node;
 }
 
+static YAML::Node providersMatchingGroupTag(
+    const std::string &target, const std::vector<ProxyProvider> &providers) {
+  YAML::Node use_node(YAML::NodeType::Sequence);
+  for (const ProxyProvider &p : providers) {
+    if (!p.tag.empty() && regFind(p.tag, target))
+      use_node.push_back(p.name);
+  }
+  return use_node;
+}
+
 using RemarkSet = std::unordered_set<std::string_view>;
 
 void processRemark(std::string &remark, const RemarkSet &used_remarks,
@@ -927,7 +1136,6 @@ void processRemark(std::string &remark, const RemarkSet &used_remarks,
 void groupGenerate(const std::string &rule, std::vector<Proxy> &nodelist,
                    string_array &filtered_nodelist, bool add_direct,
                    extra_settings &ext) {
-  std::string real_rule;
   if (startsWith(rule, "[]") && add_direct) {
     filtered_nodelist.emplace_back(rule.substr(2));
   }
@@ -952,12 +1160,11 @@ void groupGenerate(const std::string &rule, std::vector<Proxy> &nodelist,
   }
 #endif // NO_JS_RUNTIME
   else {
+    PreparedGroupRule prepared(rule);
     std::unordered_set<std::string> seen(filtered_nodelist.begin(),
                                          filtered_nodelist.end());
     for (Proxy &x : nodelist) {
-      if (applyMatcher(rule, real_rule, x) &&
-          (real_rule.empty() || regFind(x.Remark, real_rule)) &&
-          seen.insert(x.Remark).second)
+      if (prepared.matches(x) && seen.insert(x.Remark).second)
         filtered_nodelist.emplace_back(x.Remark);
     }
   }
@@ -1674,6 +1881,9 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
 
     switch (x.Type) {
     case ProxyGroupType::Select:
+      if (!x.Url.empty())
+        singlegroup["url"] = x.Url;
+      break;
     case ProxyGroupType::Relay:
       break;
     case ProxyGroupType::LoadBalance:
@@ -1706,8 +1916,8 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
       // 检查策略组是否包含正则表达式（用于匹配节点）
       bool has_regex = false;
       std::string regex_pattern;
-      bool has_groupid_provider_match = false;
-      YAML::Node groupid_use_node(YAML::NodeType::Sequence);
+      bool has_provider_match = false;
+      YAML::Node provider_use_node(YAML::NodeType::Sequence);
 
       for (const auto &proxy : x.Proxies) {
         // 如果不是以 [] 开头，则认为是正则表达式
@@ -1718,9 +1928,22 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
             YAML::Node matched_providers =
                 providersMatchingGroupId(groupid_target, ext.providers);
             if (matched_providers.size() > 0) {
-              has_groupid_provider_match = true;
-              groupid_use_node = matched_providers;
+              has_provider_match = true;
+              provider_use_node = matched_providers;
               regex_pattern = groupid_filter;
+              has_regex = !regex_pattern.empty();
+              break;
+            }
+          }
+
+          std::string group_target, group_filter;
+          if (splitRenameGroupRule(proxy, group_target, group_filter)) {
+            YAML::Node matched_providers =
+                providersMatchingGroupTag(group_target, ext.providers);
+            if (matched_providers.size() > 0) {
+              has_provider_match = true;
+              provider_use_node = matched_providers;
+              regex_pattern = group_filter;
               has_regex = !regex_pattern.empty();
               break;
             }
@@ -1732,8 +1955,8 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
         }
       }
 
-      if (has_groupid_provider_match) {
-        singlegroup["use"] = groupid_use_node;
+      if (has_provider_match) {
+        singlegroup["use"] = provider_use_node;
         if (has_regex)
           singlegroup["filter"] = regex_pattern;
       } else if (has_regex && !regex_pattern.empty()) {

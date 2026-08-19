@@ -145,6 +145,7 @@ SET(SUBCONVERTER_RUNTIME_SOURCES
     src/script/cron.cpp
     src/script/script_quickjs.cpp
     src/server/client_ip.cpp
+    src/server/webserver_beast.cpp
     src/server/webserver_httplib.cpp
     src/utils/base64/base64.cpp
     src/utils/codepage.cpp
@@ -154,6 +155,7 @@ SET(SUBCONVERTER_RUNTIME_SOURCES
     src/utils/network.cpp
     src/utils/redact.cpp
     src/utils/regexp.cpp
+    src/utils/resource_control.cpp
     src/utils/string.cpp
     src/utils/system.cpp
     src/utils/urlencode.cpp)
@@ -261,7 +263,7 @@ ELSE()
 ENDIF()
 
 IF(WIN32)
-    TARGET_LINK_LIBRARIES(${BUILD_TARGET_NAME} wsock32 ws2_32)
+    TARGET_LINK_LIBRARIES(${BUILD_TARGET_NAME} wsock32 ws2_32 mswsock)
 ELSE()
     INCLUDE(GNUInstallDirs)
     INSTALL(TARGETS ${BUILD_TARGET_NAME} DESTINATION ${CMAKE_INSTALL_BINDIR}/${BUILD_TARGET_NAME})
@@ -284,8 +286,11 @@ IF(BUILD_TESTS)
     ADD_TEST(NAME user_agent COMMAND user_agent_test)
     SET_TESTS_PROPERTIES(user_agent PROPERTIES LABELS fast)
 
+    SET(SETTINGS_SNAPSHOT_RUNTIME_SOURCES ${SUBCONVERTER_RUNTIME_SOURCES})
+    LIST(REMOVE_ITEM SETTINGS_SNAPSHOT_RUNTIME_SOURCES
+        src/parser/mihomo_bridge.cpp)
     ADD_EXECUTABLE(settings_snapshot_test_helper
-        ${SUBCONVERTER_RUNTIME_SOURCES}
+        ${SETTINGS_SNAPSHOT_RUNTIME_SOURCES}
         src/handler/settings_snapshot.cpp
         tests/settings_snapshot_test_helper.cpp)
     ADD_DEPENDENCIES(settings_snapshot_test_helper dashboard_resource)
@@ -345,6 +350,36 @@ IF(BUILD_TESTS)
         LABELS full
         TIMEOUT 120
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    ADD_TEST(
+        NAME compatibility_security_baseline_adaptive
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/compatibility_security_baseline.py
+                ${COMPATIBILITY_SECURITY_BASELINE_ARGS})
+    SET_TESTS_PROPERTIES(compatibility_security_baseline_adaptive PROPERTIES
+        LABELS full
+        TIMEOUT 120
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        ENVIRONMENT "SUBCONVERTER_RESOURCE_CONTROL=adaptive")
+    ADD_TEST(
+        NAME compatibility_security_baseline_force_max
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/compatibility_security_baseline.py
+                ${COMPATIBILITY_SECURITY_BASELINE_ARGS})
+    SET_TESTS_PROPERTIES(compatibility_security_baseline_force_max PROPERTIES
+        LABELS full
+        TIMEOUT 120
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        ENVIRONMENT "SUBCONVERTER_RESOURCE_CONTROL=force_max")
+    ADD_TEST(
+        NAME compatibility_security_baseline_httplib
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/compatibility_security_baseline.py
+                ${COMPATIBILITY_SECURITY_BASELINE_ARGS})
+    SET_TESTS_PROPERTIES(compatibility_security_baseline_httplib PROPERTIES
+        LABELS full
+        TIMEOUT 120
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        ENVIRONMENT "SUBCONVERTER_HTTP_BACKEND=httplib;SUBCONVERTER_RESOURCE_CONTROL=compat")
 
     IF(UNIX)
         ADD_TEST(
@@ -357,6 +392,39 @@ IF(BUILD_TESTS)
             RUN_SERIAL TRUE
             TIMEOUT 120
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+        ADD_TEST(
+            NAME shutdown_process_adaptive
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/shutdown_process_test.py
+                    --binary $<TARGET_FILE:${BUILD_TARGET_NAME}>)
+        SET_TESTS_PROPERTIES(shutdown_process_adaptive PROPERTIES
+            LABELS full
+            RUN_SERIAL TRUE
+            TIMEOUT 120
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            ENVIRONMENT "SUBCONVERTER_RESOURCE_CONTROL=adaptive")
+        ADD_TEST(
+            NAME shutdown_process_force_max
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/shutdown_process_test.py
+                    --binary $<TARGET_FILE:${BUILD_TARGET_NAME}>)
+        SET_TESTS_PROPERTIES(shutdown_process_force_max PROPERTIES
+            LABELS full
+            RUN_SERIAL TRUE
+            TIMEOUT 120
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            ENVIRONMENT "SUBCONVERTER_RESOURCE_CONTROL=force_max")
+        ADD_TEST(
+            NAME shutdown_process_httplib
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/shutdown_process_test.py
+                    --binary $<TARGET_FILE:${BUILD_TARGET_NAME}>)
+        SET_TESTS_PROPERTIES(shutdown_process_httplib PROPERTIES
+            LABELS full
+            RUN_SERIAL TRUE
+            TIMEOUT 120
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            ENVIRONMENT "SUBCONVERTER_HTTP_BACKEND=httplib;SUBCONVERTER_RESOURCE_CONTROL=compat")
     ENDIF()
 
     ADD_EXECUTABLE(proxy_policy_test
@@ -378,21 +446,38 @@ IF(BUILD_TESTS)
         tests/webserver_error_test.cpp
         src/handler/settings_view.cpp
         src/server/client_ip.cpp
+        src/server/webserver_beast.cpp
         src/server/webserver_httplib.cpp
         src/utils/base64/base64.cpp
         src/utils/logger.cpp
         src/utils/redact.cpp
         src/utils/string.cpp
+        src/utils/system.cpp
         src/utils/urlencode.cpp)
     TARGET_INCLUDE_DIRECTORIES(webserver_error_test PRIVATE src)
     TARGET_COMPILE_DEFINITIONS(webserver_error_test PRIVATE
         $<TARGET_PROPERTY:${BUILD_TARGET_NAME},COMPILE_DEFINITIONS>)
     TARGET_LINK_LIBRARIES(webserver_error_test ${CMAKE_THREAD_LIBS_INIT})
     IF(WIN32)
-        TARGET_LINK_LIBRARIES(webserver_error_test ws2_32)
+        TARGET_LINK_LIBRARIES(webserver_error_test ws2_32 mswsock)
     ENDIF()
     ADD_TEST(NAME webserver_error COMMAND webserver_error_test)
     SET_TESTS_PROPERTIES(webserver_error PROPERTIES LABELS fast TIMEOUT 30)
+    ADD_TEST(NAME webserver_error_adaptive COMMAND webserver_error_test)
+    SET_TESTS_PROPERTIES(webserver_error_adaptive PROPERTIES
+        LABELS fast
+        TIMEOUT 30
+        ENVIRONMENT "SUBCONVERTER_RESOURCE_CONTROL=adaptive")
+    ADD_TEST(NAME webserver_error_force_max COMMAND webserver_error_test)
+    SET_TESTS_PROPERTIES(webserver_error_force_max PROPERTIES
+        LABELS fast
+        TIMEOUT 30
+        ENVIRONMENT "SUBCONVERTER_RESOURCE_CONTROL=force_max")
+    ADD_TEST(NAME webserver_error_httplib COMMAND webserver_error_test)
+    SET_TESTS_PROPERTIES(webserver_error_httplib PROPERTIES
+        LABELS fast
+        TIMEOUT 30
+        ENVIRONMENT "SUBCONVERTER_HTTP_BACKEND=httplib;SUBCONVERTER_RESOURCE_CONTROL=compat")
 
     ADD_EXECUTABLE(client_ip_test
         tests/client_ip_test.cpp

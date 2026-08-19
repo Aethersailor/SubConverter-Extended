@@ -1,4 +1,5 @@
 #include "handler/statistics_v2.h"
+#include "server/request_context.h"
 
 #include <atomic>
 #include <chrono>
@@ -12,6 +13,10 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 
 namespace {
 
@@ -54,6 +59,16 @@ void writeBytes(const std::filesystem::path &path,
   file.write(reinterpret_cast<const char *>(bytes.data()),
              static_cast<std::streamsize>(bytes.size()));
 }
+
+#ifndef _WIN32
+void expectNotWorldWritable(const std::filesystem::path &path,
+                            const std::string &name) {
+  struct stat status {};
+  expect(::stat(path.c_str(), &status) == 0,
+         name + " permissions are inspectable");
+  expect((status.st_mode & S_IWOTH) == 0, name + " is not world-writable");
+}
+#endif
 
 uint32_t readU32(const std::vector<uint8_t> &bytes, std::size_t offset) {
   uint32_t value = 0;
@@ -331,6 +346,10 @@ void persistenceRoundTripTest() {
     expect(store.appendPatch(patch), "dirty absolute patch appends");
     expect(store.walRecords() == 1 && store.walBytes() > 0,
            "WAL records only dirty state");
+#ifndef _WIN32
+    expectNotWorldWritable(dir / "statistics-v2-a.bin", "checkpoint");
+    expectNotWorldWritable(dir / "statistics-v2.wal", "WAL");
+#endif
   }
   {
     Store store(dir.string());
@@ -866,6 +885,113 @@ void persistenceFaultInjectionTest() {
   setTestWriteFault(TestWriteFault::None);
 }
 
+void requestLifecycleContextTest() {
+  resetRequestLifecycleMetricsForTests();
+  const auto now = RequestContext::Clock::now();
+  auto completed = std::make_shared<RequestContext>(
+      "request-context-completed", now,
+      now + std::chrono::seconds(30));
+  expect(completed->requestId() == "request-context-completed",
+         "request context preserves its generated ID");
+  expect(completed->recordAdmissionOnce(now + std::chrono::milliseconds(2)),
+         "request context records admission once");
+  expect(!completed->recordAdmissionOnce(now + std::chrono::milliseconds(3)),
+         "request context rejects duplicate admission samples");
+  completed->setCostClass(RequestCostClass::High);
+  completed->setEstimatedBytes(4096);
+  completed->setSingleflightRole(RequestSingleflightRole::Owner);
+  expect(completed->addConsumer() && completed->consumerCount() == 2,
+         "request context tracks added consumers");
+  expect(completed->releaseConsumer() == 1,
+         "request context tracks released consumers");
+  {
+    RequestStageTimer timer(completed, RequestStage::Parse);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  expect(completed->finalizeResponse(200, true),
+         "completed response reaches one terminal state");
+  expect(!completed->finalizeResponse(500, false),
+         "completed response rejects a second terminal state");
+  expect(completed->terminalState() == RequestTerminalState::Completed &&
+             completed->failureAttribution() ==
+                 RequestFailureAttribution::None,
+         "completed response preserves terminal attribution");
+  expect(completed->costClass() == RequestCostClass::High &&
+             completed->estimatedBytes() == 4096 &&
+             completed->singleflightRole() ==
+                 RequestSingleflightRole::Owner,
+         "request context preserves bounded classification metadata");
+
+  auto cancelled = std::make_shared<RequestContext>(
+      "request-context-cancelled", now,
+      now + std::chrono::seconds(30));
+  const RequestCancellationToken token = cancelled->cancellationToken();
+  expect(!token.isCancellationRequested(),
+         "fresh request cancellation token is clear");
+  expect(cancelled->requestCancellation(
+             RequestCancellationReason::ClientDisconnected),
+         "first cancellation request wins");
+  expect(!cancelled->requestCancellation(RequestCancellationReason::Shutdown),
+         "cancellation reason is immutable");
+  expect(token.reason() == RequestCancellationReason::ClientDisconnected,
+         "cancellation token observes the source reason");
+  expect(cancelled->finalizeResponse(200, true) &&
+             cancelled->terminalState() == RequestTerminalState::Cancelled &&
+             cancelled->failureAttribution() ==
+                 RequestFailureAttribution::Client,
+         "cancelled response is attributed to the client");
+
+  auto expired = std::make_shared<RequestContext>(
+      "request-context-expired", now,
+      now - std::chrono::milliseconds(1));
+  expect(expired->finalizeResponse(200, true) &&
+             expired->terminalState() ==
+                 RequestTerminalState::DeadlineExceeded,
+         "expired request cannot complete as successful");
+
+  auto raced = std::make_shared<RequestContext>(
+      "request-context-raced", now,
+      now + std::chrono::seconds(30));
+  std::atomic<int> terminal_winners{0};
+  std::vector<std::thread> contenders;
+  for (int index = 0; index < 16; ++index) {
+    contenders.emplace_back([&, index] {
+      const bool won = index % 2 == 0
+                           ? raced->tryFinish(
+                                 RequestTerminalState::Failed,
+                                 RequestFailureAttribution::Server)
+                           : raced->tryFinish(
+                                 RequestTerminalState::Cancelled,
+                                 RequestFailureAttribution::Client);
+      if (won)
+        terminal_winners.fetch_add(1, std::memory_order_relaxed);
+    });
+  }
+  for (std::thread &thread : contenders)
+    thread.join();
+  expect(terminal_winners.load(std::memory_order_relaxed) == 1,
+         "terminal transition has exactly one concurrent winner");
+
+  const RequestLifecycleMetricsSnapshot metrics =
+      requestLifecycleMetricsSnapshot();
+  uint64_t terminal_total = 0;
+  for (uint64_t count : metrics.terminal)
+    terminal_total += count;
+  expect(terminal_total == 4,
+         "lifecycle metrics record each request terminal exactly once");
+  expect(metrics.terminal[static_cast<std::size_t>(
+             RequestTerminalState::Completed)] == 1,
+         "lifecycle metrics record completed requests");
+  expect(metrics.terminal[static_cast<std::size_t>(
+             RequestTerminalState::DeadlineExceeded)] == 1,
+         "lifecycle metrics record deadline failures");
+  expect(metrics.stage_samples[static_cast<std::size_t>(RequestStage::Parse)] ==
+             1 &&
+             metrics.stage_nanoseconds[static_cast<std::size_t>(
+                 RequestStage::Parse)] > 0,
+         "lifecycle metrics record bounded stage timings");
+}
+
 } // namespace
 
 int main() {
@@ -884,6 +1010,7 @@ int main() {
   persistenceFileLimitTest();
   directoryAndLegacyTest();
   persistenceFaultInjectionTest();
+  requestLifecycleContextTest();
   if (failures != 0) {
     std::cerr << failures << " Statistics v2 checks failed\n";
     return 1;

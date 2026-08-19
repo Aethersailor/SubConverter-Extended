@@ -16,6 +16,22 @@ inline void warnUnknownRulesetOptions(const StrArray &unknown_options)
         writeLog(LOG_LEVEL_WARNING, "未知规则集选项 '" + option + "'，已忽略。");
 }
 
+inline bool isSelectHealthCheckUrl(const String &value)
+{
+    String scheme = toLower(value);
+    return startsWith(scheme, "http://") || startsWith(scheme, "https://");
+}
+
+inline void normalizeSelectHealthCheck(ProxyGroupConfig &conf)
+{
+    if(conf.Type != ProxyGroupType::Select || !conf.Url.empty() ||
+       conf.Proxies.empty() || !isSelectHealthCheckUrl(conf.Proxies.back()))
+        return;
+
+    conf.Url = std::move(conf.Proxies.back());
+    conf.Proxies.pop_back();
+}
+
 namespace toml
 {
     template<>
@@ -31,6 +47,7 @@ namespace toml
             {
             case "select"_hash:
                 conf.Type = ProxyGroupType::Select;
+                conf.Url = find_or<String>(v, "url", "");
                 break;
             case "url-test"_hash:
                 conf.Type = ProxyGroupType::URLTest;
@@ -87,6 +104,7 @@ namespace toml
             conf.Timeout = find_or(v, "timeout", 5);
             conf.Proxies = find_or<StrArray>(v, "rule", {});
             conf.UsingProvider = find_or<StrArray>(v, "use", {});
+            normalizeSelectHealthCheck(conf);
             if(conf.Proxies.empty() && conf.UsingProvider.empty())
                 throw serialization_error(format_error("Proxy Group must contains at least one of proxy match rule or provider!", v.location(), "here"), v.location());
             if(v.contains("disable-udp"))
@@ -269,6 +287,7 @@ namespace INIBinding
                     else
                         conf.Proxies.emplace_back(std::move(vArray[i]));
                 }
+                normalizeSelectHealthCheck(conf);
                 confs.emplace_back(std::move(conf));
             }
             return confs;

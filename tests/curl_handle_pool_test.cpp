@@ -8,6 +8,7 @@
 
 #include "handler/curl_handle_pool.h"
 #include "httplib.h"
+#include "server/request_context.h"
 
 using namespace std::chrono_literals;
 
@@ -17,6 +18,24 @@ static size_t collect(char *data, size_t size, size_t count, void *output) {
 }
 
 int main() {
+  constexpr uint64_t response_limit = UINT64_C(64) * 1024 * 1024;
+  configureRetainedResponseByteLimit(response_limit);
+  auto first_context = std::make_shared<RequestContext>(
+      "curl-budget-first", RequestContext::Clock::now());
+  auto second_context = std::make_shared<RequestContext>(
+      "curl-budget-second", RequestContext::Clock::now());
+  assert(first_context->retainResponseBytes(response_limit));
+  assert(!second_context->retainResponseBytes(1));
+  std::shared_ptr<RequestContext> completed_result_owner = first_context;
+  first_context.reset();
+  assert(retainedResponseByteSnapshot().used == response_limit);
+  completed_result_owner.reset();
+  assert(retainedResponseByteSnapshot().used == 0);
+  assert(second_context->retainResponseBytes(response_limit));
+  second_context.reset();
+  assert(retainedResponseByteSnapshot().used == 0);
+  configureRetainedResponseByteLimit(0);
+
   assert(curl_global_init(CURL_GLOBAL_ALL) == CURLE_OK);
   {
     CurlHandlePool pool(1);

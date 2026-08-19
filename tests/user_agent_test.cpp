@@ -1,5 +1,8 @@
+#include "utils/regexp.h"
+
 #include <iostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "handler/user_agent.h"
@@ -104,6 +107,30 @@ int main() {
   if (unmatched.matched || target != "auto" || !clash_new_name.is_undef() ||
       surge_version != 3) {
     std::cerr << "unrecognized UA changed auto-target state\n";
+    return 1;
+  }
+
+  CompiledRegex search("^(US|HK)-[0-9]+$", CompiledRegexMode::Search);
+  if (!search.valid() || !search.matches("US-1") ||
+      !search.matches("HK-200") || search.matches("JP-1")) {
+    std::cerr << "compiled search regex changed repeated-match semantics\n";
+    return 1;
+  }
+  CompiledRegex moved(std::move(search));
+  if (!moved.valid() || !moved.matches("US-3")) {
+    std::cerr << "compiled search regex did not preserve move ownership\n";
+    return 1;
+  }
+
+  CompiledRegex full("SS", CompiledRegexMode::FullMatch);
+  if (!full.valid() || !full.matches("SS") || full.matches("SSR")) {
+    std::cerr << "compiled full-match regex changed anchored semantics\n";
+    return 1;
+  }
+
+  CompiledRegex invalid("[", CompiledRegexMode::Search);
+  if (invalid.valid() || invalid.matches("anything")) {
+    std::cerr << "invalid compiled regex did not fail closed\n";
     return 1;
   }
   return 0;

@@ -31,6 +31,7 @@ void safe_replace_settings(Settings &&settings);
 std::shared_future<std::string> makeReadyStringFuture(std::string value);
 size_t rulesetExecutorWorkerCount();
 size_t rulesetExecutorQueueCapacity();
+void requestRulesetExecutorShutdown();
 void shutdownRulesetExecutor();
 std::shared_future<std::string> fetchFileAsync(
     const std::string &path, const ProxyPolicy &proxy, int cache_ttl,
