@@ -108,13 +108,26 @@ jobs:
       shell: bash
       run: |
         set -euo pipefail
-        test -f /etc/apt/sources.list.d/ubuntu.sources
+        test -f /usr/share/keyrings/ubuntu-archive-keyring.gpg
+        printf '%s\n' \
+          'Types: deb' \
+          'URIs: http://archive.ubuntu.com/ubuntu' \
+          'Suites: noble noble-updates noble-backports' \
+          'Components: main universe restricted multiverse' \
+          'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
+          '' \
+          'Types: deb' \
+          'URIs: http://security.ubuntu.com/ubuntu' \
+          'Suites: noble-security' \
+          'Components: main universe restricted multiverse' \
+          'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
+          | sudo tee /etc/apt/sources.list.d/codeql.sources >/dev/null
         apt_options=(
           -o Acquire::Retries=2
           -o Acquire::http::Timeout=20
           -o Acquire::https::Timeout=20
           -o Dpkg::Use-Pty=0
-          -o Dir::Etc::sourcelist=sources.list.d/ubuntu.sources
+          -o Dir::Etc::sourcelist=sources.list.d/codeql.sources
           -o Dir::Etc::sourceparts=-
         )
         sudo env DEBIAN_FRONTEND=noninteractive \
