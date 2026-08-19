@@ -3,7 +3,7 @@
     "cpp_httplib": {
       "ref": "HEAD",
       "repository": "https://github.com/yhirose/cpp-httplib.git",
-      "revision": "7ae9ffad3ef24054db984bae6714bac4a4bc741a"
+      "revision": "0151b3e23e8d897675b1e5392e55565d71f91316"
     },
     "inja": {
       "ref": "HEAD",
