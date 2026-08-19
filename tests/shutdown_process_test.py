@@ -15,6 +15,7 @@ import os
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -33,6 +34,7 @@ RULESET = "DOMAIN-SUFFIX,shutdown.example,Proxy\n"
 SHUTDOWN_DEADLINE_SECONDS = 5.0
 LISTENER_CLOSE_DEADLINE_SECONDS = 2.0
 STARTUP_DEADLINE_SECONDS = 10.0
+HIGH_FD_BACKLOG_CONNECTIONS = 1100
 
 
 class ShutdownFailure(AssertionError):
@@ -298,6 +300,29 @@ def wait_for_exit(process: subprocess.Popen[bytes], deadline: float) -> int:
     return process.wait(timeout=remaining)
 
 
+def wait_for_process_fd_count(
+    process: subprocess.Popen[bytes], minimum: int, deadline: float
+) -> None:
+    fd_directory = Path(f"/proc/{process.pid}/fd")
+    if not fd_directory.is_dir():
+        raise ShutdownFailure("high-fd shutdown regression requires Linux /proc")
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise ShutdownFailure(
+                f"service exited before reaching {minimum} file descriptors"
+            )
+        try:
+            count = sum(1 for _ in fd_directory.iterdir())
+        except FileNotFoundError:
+            count = 0
+        if count >= minimum:
+            return
+        time.sleep(0.01)
+    raise ShutdownFailure(
+        f"service did not reach {minimum} file descriptors before timeout"
+    )
+
+
 def complete_ruleset_request(base_url: str, source_url: str) -> tuple[int, bytes]:
     return request(
         base_url,
@@ -371,7 +396,21 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
                         raise ShutdownFailure(
                             "asynchronous ruleset fetch did not enter its controlled retry"
                         )
-                elif scenario == "inflight-request":
+                elif scenario in ("inflight-request", "high-fd-shutdown"):
+                    if scenario == "high-fd-shutdown":
+                        for _ in range(HIGH_FD_BACKLOG_CONNECTIONS):
+                            pending = socket.create_connection(
+                                ("127.0.0.1", port), timeout=1
+                            )
+                            pending.sendall(
+                                b"GET /sub HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                            )
+                            backlog_sockets.append(pending)
+                        wait_for_process_fd_count(
+                            process,
+                            HIGH_FD_BACKLOG_CONNECTIONS,
+                            time.monotonic() + 5.0,
+                        )
                     source_url = fixture_base + "/inflight-rules.list"
 
                     def make_inflight_request() -> None:
@@ -415,7 +454,7 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
                 )
                 wait_listener_closed(port, process, shutdown_deadline)
 
-                if scenario == "inflight-request":
+                if scenario in ("inflight-request", "high-fd-shutdown"):
                     fixture.inflight_release.set()
                     assert client_thread is not None
                     client_thread.join(
@@ -465,7 +504,11 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
                     raise ShutdownFailure(
                         "shutdown scenario did not exercise the asynchronous multi engine"
                     )
-                if scenario in ("completed-request", "inflight-request"):
+                if scenario in (
+                    "completed-request",
+                    "inflight-request",
+                    "high-fd-shutdown",
+                ):
                     if "HTTP_RESPONSE_PREPARED" not in logs:
                         raise ShutdownFailure(
                             "completed request is missing lifecycle completion telemetry"
@@ -524,6 +567,7 @@ def main() -> int:
             "background-retry",
             "inflight-request",
             "backlog-shutdown",
+            "high-fd-shutdown",
         ),
         help="Run only selected scenarios; may be repeated.",
     )
@@ -544,6 +588,12 @@ def main() -> int:
         "inflight-request",
         "backlog-shutdown",
     ]
+    if (
+        args.scenario is None
+        and sys.platform.startswith("linux")
+        and os.environ.get("SUBCONVERTER_HTTP_BACKEND", "beast") == "beast"
+    ):
+        scenarios.append("high-fd-shutdown")
     for round_no in range(1, args.rounds + 1):
         for signal_value in (signal.SIGTERM, signal.SIGINT):
             for scenario in scenarios:

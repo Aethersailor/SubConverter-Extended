@@ -1180,10 +1180,6 @@ public:
         multi_ = curl_multi_init();
         if(multi_ == nullptr)
             return;
-        curl_multi_setopt(multi_, CURLMOPT_SOCKETFUNCTION, socketCallback);
-        curl_multi_setopt(multi_, CURLMOPT_SOCKETDATA, this);
-        curl_multi_setopt(multi_, CURLMOPT_TIMERFUNCTION, timerCallback);
-        curl_multi_setopt(multi_, CURLMOPT_TIMERDATA, this);
         const ResourceControlSnapshot resources = resourceControlSnapshot();
         const long total_connections =
             resources.mode == "force_max" && resources.permits_applied
@@ -1284,33 +1280,6 @@ public:
     }
 
 private:
-    static int socketCallback(CURL *, curl_socket_t socket, int action,
-                              void *user_data, void *)
-    {
-        auto *engine = static_cast<CurlMultiEngine *>(user_data);
-        if(action == CURL_POLL_REMOVE)
-            engine->sockets_.erase(socket);
-        else
-            engine->sockets_[socket] = action;
-        return 0;
-    }
-
-    static int timerCallback(CURLM *, long timeout_ms, void *user_data)
-    {
-        auto *engine = static_cast<CurlMultiEngine *>(user_data);
-        if(timeout_ms < 0)
-        {
-            engine->timer_armed_ = false;
-        }
-        else
-        {
-            engine->timer_armed_ = true;
-            engine->timer_deadline_ = std::chrono::steady_clock::now() +
-                std::chrono::milliseconds(timeout_ms);
-        }
-        return 0;
-    }
-
     static size_t bodyWriter(char *data, size_t size, size_t nmemb,
                              void *user_data)
     {
@@ -1565,17 +1534,15 @@ private:
             }
             active_[transfer->easy] = transfer;
             active_count_.fetch_add(1, std::memory_order_relaxed);
-            drive(CURL_SOCKET_TIMEOUT, 0);
         }
     }
 
-    void drive(curl_socket_t socket, int events)
+    void performTransfers()
     {
         CURLMcode code;
         do
         {
-            code = curl_multi_socket_action(multi_, socket, events,
-                                            &running_handles_);
+            code = curl_multi_perform(multi_, &running_handles_);
         }
         while(code == CURLM_CALL_MULTI_PERFORM);
         drainMessages();
@@ -1596,22 +1563,8 @@ private:
 
     void waitForActivity()
     {
-        const auto now = std::chrono::steady_clock::now();
-        if(timer_armed_ && now >= timer_deadline_)
-        {
-            drive(CURL_SOCKET_TIMEOUT, 0);
-            return;
-        }
-
-        int timeout_ms = 50;
-        if(timer_armed_)
-        {
-            const auto remaining = std::chrono::duration_cast<
-                std::chrono::milliseconds>(timer_deadline_ - now).count();
-            timeout_ms = static_cast<int>(
-                std::clamp<int64_t>(remaining, 0, timeout_ms));
-        }
-        if(sockets_.empty())
+        constexpr int timeout_ms = 50;
+        if(active_.empty())
         {
             std::unique_lock<std::mutex> lock(mutex_);
             condition_.wait_for(lock, std::chrono::milliseconds(timeout_ms),
@@ -1621,55 +1574,24 @@ private:
             return;
         }
 
-        fd_set read_set;
-        fd_set write_set;
-        fd_set error_set;
-        FD_ZERO(&read_set);
-        FD_ZERO(&write_set);
-        FD_ZERO(&error_set);
-        curl_socket_t max_socket = 0;
-        std::vector<std::pair<curl_socket_t, int>> watches(
-            sockets_.begin(), sockets_.end());
-        for(const auto &[socket, action] : watches)
-        {
-            if(action == CURL_POLL_IN || action == CURL_POLL_INOUT)
-                FD_SET(socket, &read_set);
-            if(action == CURL_POLL_OUT || action == CURL_POLL_INOUT)
-                FD_SET(socket, &write_set);
-            FD_SET(socket, &error_set);
-            if(socket > max_socket)
-                max_socket = socket;
-        }
-        timeval timeout {};
-        timeout.tv_sec = timeout_ms / 1000;
-        timeout.tv_usec = (timeout_ms % 1000) * 1000;
-#ifdef _WIN32
-        const int ready = select(0, &read_set, &write_set, &error_set,
-                                 &timeout);
+        int ready = 0;
+        // Let libcurl use poll-capable primitives. The HTTP server may already
+        // hold thousands of client sockets, so outbound descriptors can exceed
+        // FD_SETSIZE even when the multi handle itself has few connections.
+#if LIBCURL_VERSION_NUM >= 0x074200
+        const CURLMcode code =
+            curl_multi_poll(multi_, nullptr, 0, timeout_ms, &ready);
 #else
-        const int ready = select(static_cast<int>(max_socket + 1), &read_set,
-                                 &write_set, &error_set, &timeout);
+        const CURLMcode code =
+            curl_multi_wait(multi_, nullptr, 0, timeout_ms, &ready);
 #endif
-        if(ready > 0)
+        if(code != CURLM_OK || ready == 0)
         {
-            for(const auto &[socket, action] : watches)
-            {
-                (void)action;
-                int events = 0;
-                if(FD_ISSET(socket, &read_set))
-                    events |= CURL_CSELECT_IN;
-                if(FD_ISSET(socket, &write_set))
-                    events |= CURL_CSELECT_OUT;
-                if(FD_ISSET(socket, &error_set))
-                    events |= CURL_CSELECT_ERR;
-                if(events)
-                    drive(socket, events);
-            }
-        }
-        else if(timer_armed_ &&
-                std::chrono::steady_clock::now() >= timer_deadline_)
-        {
-            drive(CURL_SOCKET_TIMEOUT, 0);
+            std::unique_lock<std::mutex> lock(mutex_);
+            condition_.wait_for(lock, std::chrono::milliseconds(1),
+                                [this]() {
+                                    return stopping_ || !pending_.empty();
+                                });
         }
     }
 
@@ -1722,6 +1644,7 @@ private:
         for(;;)
         {
             processPending();
+            performTransfers();
             cancelExpired();
             {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -1752,11 +1675,8 @@ private:
     std::condition_variable condition_;
     std::deque<std::shared_ptr<Transfer>> pending_;
     std::unordered_map<CURL *, std::shared_ptr<Transfer>> active_;
-    std::unordered_map<curl_socket_t, int> sockets_;
     std::atomic<uint64_t> pending_count_{0};
     std::atomic<uint64_t> active_count_{0};
-    std::chrono::steady_clock::time_point timer_deadline_{};
-    bool timer_armed_ = false;
     std::atomic<bool> stopping_{false};
     int running_handles_ = 0;
 };
