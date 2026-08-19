@@ -77,6 +77,35 @@ LOCAL_GROUP_MATCHER_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encod
         )
     ).encode()
 ).decode()
+SELECT_HEALTH_HTTP_URL = "http://wifi.vivo.com.cn/generate_204"
+SELECT_HEALTH_HTTPS_URL = "https://cp.cloudflare.com/generate_204"
+SELECT_HEALTH_INI_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
+    "\n".join(
+        (
+            "enable_rule_generator=false",
+            "custom_proxy_group=DIRECT-HEALTH-HTTP`select`[]DIRECT`"
+            + SELECT_HEALTH_HTTP_URL,
+            "custom_proxy_group=DIRECT-HEALTH-HTTPS`select`[]DIRECT`"
+            + SELECT_HEALTH_HTTPS_URL,
+        )
+    ).encode()
+).decode()
+SELECT_HEALTH_TOML_CONFIG = "\n".join(
+    (
+        "version = 1",
+        "[custom]",
+        "enable_rule_generator = false",
+        "[[custom_groups]]",
+        'name = "DIRECT-HEALTH-TOML"',
+        'type = "select"',
+        'rule = ["[]DIRECT"]',
+        f'url = "{SELECT_HEALTH_HTTPS_URL}"',
+        "[[custom_groups]]",
+        'name = "DIRECT-HEALTH-TOML-RULE"',
+        'type = "select"',
+        f'rule = ["[]DIRECT", "{SELECT_HEALTH_HTTP_URL}"]',
+    )
+)
 VLESS_URI = (
     "vless://11111111-1111-1111-1111-111111111111@vless.example.test:443"
     "?security=tls&type=ws&host=vless.example.test&path=%2Fws#VLESSFixture"
@@ -670,6 +699,9 @@ class FixtureHandler(BaseHTTPRequestHandler):
         request_query = urllib.parse.parse_qs(request_url.query)
         if request_path == "/subscription.txt":
             body = ENCODED_SUBSCRIPTION.encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/select-health.toml":
+            body = SELECT_HEALTH_TOML_CONFIG.encode()
             content_type = "text/plain; charset=utf-8"
         elif request_path == "/provider-must-not-fetch.txt":
             type(self).provider_never_fetch_count += 1
@@ -4940,6 +4972,133 @@ def provider_block_from_output(output: str, provider_name: str) -> str:
     next_provider = re.search(r"(?m)^  [^ ].*:\s*$", following)
     end = len(following) if next_provider is None else next_provider.start()
     return marker + following[:end]
+
+
+def proxy_group_block_from_output(output: str, group_name: str) -> str:
+    marker = f"  - name: {group_name}\n"
+    start = output.find(marker)
+    if start < 0:
+        raise AssertionError(f"proxy group block is missing: {group_name}")
+    following = output[start + len(marker) :]
+    next_group = re.search(r"(?m)^  - name: ", following)
+    end = len(following) if next_group is None else next_group.start()
+    return marker + following[:end]
+
+
+def assert_select_health_group(
+    output: str, group_name: str, expected_url: str, label: str
+) -> None:
+    block = proxy_group_block_from_output(output, group_name)
+    url_match = re.search(
+        r'(?m)^    url: ["\']?' + re.escape(expected_url) + r'["\']?\s*$',
+        block,
+    )
+    if url_match is None:
+        raise AssertionError(
+            f"{label} did not preserve the select health-check URL\n{block}"
+        )
+
+    members = re.findall(r"(?m)^      - (.+?)\s*$", block)
+    if not members:
+        compact = re.search(r"(?m)^    proxies: \[(.*?)\]\s*$", block)
+        if compact is not None:
+            members = [
+                value.strip().strip('"\'')
+                for value in compact.group(1).split(",")
+                if value.strip()
+            ]
+    if members != ["DIRECT"]:
+        raise AssertionError(
+            f"{label} changed select health group members: {members!r}\n{block}"
+        )
+    if re.search(r"(?m)^    (?:use|filter):", block):
+        raise AssertionError(
+            f"{label} added provider selection to a DIRECT-only group\n{block}"
+        )
+
+
+def select_health_check_output_baseline(base_url: str, fixture_base: str) -> None:
+    provider_source = fixture_base + "/subscription.txt"
+    cases = (
+        ("INI direct", SUBSCRIPTION.strip(), SELECT_HEALTH_INI_CONFIG, False),
+        (
+            "INI provider",
+            f"provider:HealthOne,{provider_source}?case=select-health-one",
+            SELECT_HEALTH_INI_CONFIG,
+            True,
+        ),
+        (
+            "INI providers",
+            "|".join(
+                (
+                    f"provider:HealthOne,{provider_source}?case=select-health-a",
+                    f"provider:HealthTwo,{provider_source}?case=select-health-b",
+                )
+            ),
+            SELECT_HEALTH_INI_CONFIG,
+            True,
+        ),
+        (
+            "INI mixed",
+            "|".join(
+                (
+                    SUBSCRIPTION.strip(),
+                    f"provider:HealthOne,{provider_source}?case=select-health-mixed",
+                )
+            ),
+            SELECT_HEALTH_INI_CONFIG,
+            True,
+        ),
+        (
+            "TOML provider",
+            f"provider:HealthOne,{provider_source}?case=select-health-toml",
+            fixture_base + "/select-health.toml",
+            True,
+        ),
+    )
+
+    for label, source, config, expects_provider in cases:
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {"target": "clash", "url": source, "config": config},
+        )
+        output = body.decode("utf-8", errors="replace")
+        if status != 200:
+            raise AssertionError(
+                f"{label} select health request returned HTTP {status}: {output!r}"
+            )
+        if ("proxy-providers:" in output) is not expects_provider:
+            raise AssertionError(
+                f"{label} did not exercise the intended provider mode\n{output}"
+            )
+
+        if label.startswith("INI"):
+            assert_select_health_group(
+                output,
+                "DIRECT-HEALTH-HTTP",
+                SELECT_HEALTH_HTTP_URL,
+                label,
+            )
+            assert_select_health_group(
+                output,
+                "DIRECT-HEALTH-HTTPS",
+                SELECT_HEALTH_HTTPS_URL,
+                label,
+            )
+        else:
+            assert_select_health_group(
+                output,
+                "DIRECT-HEALTH-TOML",
+                SELECT_HEALTH_HTTPS_URL,
+                label,
+            )
+            assert_select_health_group(
+                output,
+                "DIRECT-HEALTH-TOML-RULE",
+                SELECT_HEALTH_HTTP_URL,
+                label,
+            )
 
 
 def provider_interval_from_output(output: str, provider_name: str) -> int:
@@ -11655,6 +11814,7 @@ def main() -> int:
             quanx_current_node_output_baseline(base_url, fixture_base)
             simple_target_protocol_baseline(base_url, fixture_base)
             provider_direct_default_output_baseline(base_url, fixture_base)
+            select_health_check_output_baseline(base_url, fixture_base)
         if not wireguard_outbound_logs or (
             "SINGBOX_WIREGUARD_GENERATION schema=outbound nodes=1 peers=2"
             not in wireguard_outbound_logs[0]

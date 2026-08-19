@@ -1881,6 +1881,9 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
 
     switch (x.Type) {
     case ProxyGroupType::Select:
+      if (!x.Url.empty())
+        singlegroup["url"] = x.Url;
+      break;
     case ProxyGroupType::Relay:
       break;
     case ProxyGroupType::LoadBalance:

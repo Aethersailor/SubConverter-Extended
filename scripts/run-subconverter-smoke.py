@@ -218,6 +218,16 @@ LOCAL_GROUP_MATCHER_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encod
         )
     )
 ).decode("ascii")
+SELECT_HEALTH_URL = "http://wifi.vivo.com.cn/generate_204"
+SELECT_HEALTH_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
+    "\n".join(
+        (
+            "enable_rule_generator=false",
+            "custom_proxy_group=DIRECT-HEALTH`select`[]DIRECT`"
+            + SELECT_HEALTH_URL,
+        )
+    ).encode()
+).decode("ascii")
 QUANX_REMOTE_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
     b"enable_rule_generator=false\ncustom_proxy_group=Remote`select`.*\n"
 ).decode("ascii")
@@ -426,6 +436,78 @@ def assert_local_group_matcher_matrix(base_url: str, timeout: int) -> None:
             raise AssertionError(
                 f"local matcher negative group {group_name} changed members: "
                 f"{members!r}\n{block}"
+            )
+
+
+def assert_select_health_check(
+    base_url: str, timeout: int, remote_subscription_url: str | None
+) -> None:
+    cases = [("direct", SAMPLE_SS_LINK, False)]
+    if remote_subscription_url:
+        cases.extend(
+            (
+                (
+                    "provider",
+                    f"provider:HealthOne,{remote_subscription_url}",
+                    True,
+                ),
+                (
+                    "providers",
+                    "|".join(
+                        (
+                            f"provider:HealthOne,{remote_subscription_url}",
+                            f"provider:HealthTwo,{remote_subscription_url}",
+                        )
+                    ),
+                    True,
+                ),
+                (
+                    "mixed",
+                    "|".join(
+                        (
+                            SAMPLE_SS_LINK,
+                            f"provider:HealthOne,{remote_subscription_url}",
+                        )
+                    ),
+                    True,
+                ),
+            )
+        )
+
+    for label, source, expects_provider in cases:
+        output = fetch(
+            base_url,
+            "/sub",
+            {"target": "clash", "url": source, "config": SELECT_HEALTH_CONFIG},
+            timeout,
+        )
+        block = proxy_group_block_from_output(output, "DIRECT-HEALTH")
+        members = re.findall(r"(?m)^      - (.+?)\s*$", block)
+        if members != ["DIRECT"]:
+            raise AssertionError(
+                f"select health {label} changed members: {members!r}\n{block}"
+            )
+        if (
+            re.search(
+                r'(?m)^    url: ["\']?'
+                + re.escape(SELECT_HEALTH_URL)
+                + r'["\']?\s*$',
+                block,
+            )
+            is None
+        ):
+            raise AssertionError(
+                f"select health {label} lost its health-check URL\n{block}"
+            )
+        if proxy_group_use_from_output(output, "DIRECT-HEALTH") or (
+            proxy_group_filter_from_output(output, "DIRECT-HEALTH") is not None
+        ):
+            raise AssertionError(
+                f"select health {label} added provider selection\n{block}"
+            )
+        if ("proxy-providers:" in output) is not expects_provider:
+            raise AssertionError(
+                f"select health {label} did not exercise the intended provider mode"
             )
 
 
@@ -870,6 +952,7 @@ def run_checks(
     }
 
     assert_local_group_matcher_matrix(base_url, timeout)
+    assert_select_health_check(base_url, timeout, remote_subscription_url)
 
     if verify_non_clash:
         assert_parser_route_isolation(base_url, timeout)
