@@ -56,7 +56,8 @@ jobs:
 
   analyze:
     name: Analyze (${{ matrix.language }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     needs: source-head
     if: needs.source-head.outputs.current == 'true'
     permissions:
@@ -103,11 +104,25 @@ jobs:
     # [SETUP] Install C++ dependencies
     - name: Install C++ dependencies
       if: matrix.language == 'c-cpp'
+      timeout-minutes: 8
+      shell: bash
       run: |
-        sudo apt-get update
-        sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            cmake \
+        set -euo pipefail
+        test -f /etc/apt/sources.list.d/ubuntu.sources
+        apt_options=(
+          -o Acquire::Retries=2
+          -o Acquire::http::Timeout=20
+          -o Acquire::https::Timeout=20
+          -o Dpkg::Use-Pty=0
+          -o Dir::Etc::sourcelist=sources.list.d/ubuntu.sources
+          -o Dir::Etc::sourceparts=-
+        )
+        sudo env DEBIAN_FRONTEND=noninteractive \
+          timeout --signal=TERM --kill-after=15s 180s \
+          apt-get "${apt_options[@]}" update
+        sudo env DEBIAN_FRONTEND=noninteractive \
+          timeout --signal=TERM --kill-after=15s 240s \
+          apt-get "${apt_options[@]}" install -y --no-install-recommends \
             libpcre2-dev \
             rapidjson-dev \
             libyaml-cpp-dev \
@@ -118,13 +133,10 @@ jobs:
     # [SETUP] Build Go library (libmihomo.a) for C++ linkage
     - name: Setup Go
       if: matrix.language == 'c-cpp'
-      shell: bash
-      run: |
-        if ! command -v go >/dev/null 2>&1; then
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends golang-go
-        fi
-        go version
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: bridge/go.mod
+        cache-dependency-path: bridge/go.sum
 
     - name: Build libmihomo.a
       if: matrix.language == 'c-cpp'
