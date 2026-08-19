@@ -592,6 +592,8 @@ def main() -> int:
         args.scenario is None
         and sys.platform.startswith("linux")
         and os.environ.get("SUBCONVERTER_HTTP_BACKEND", "beast") == "beast"
+        and os.environ.get("SUBCONVERTER_RESOURCE_CONTROL", "compat")
+        != "adaptive"
     ):
         scenarios.append("high-fd-shutdown")
     for round_no in range(1, args.rounds + 1):
