@@ -14,6 +14,10 @@
 #include <thread>
 #include <vector>
 
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
+
 namespace {
 
 using namespace statistics_v2;
@@ -55,6 +59,16 @@ void writeBytes(const std::filesystem::path &path,
   file.write(reinterpret_cast<const char *>(bytes.data()),
              static_cast<std::streamsize>(bytes.size()));
 }
+
+#ifndef _WIN32
+void expectNotWorldWritable(const std::filesystem::path &path,
+                            const std::string &name) {
+  struct stat status {};
+  expect(::stat(path.c_str(), &status) == 0,
+         name + " permissions are inspectable");
+  expect((status.st_mode & S_IWOTH) == 0, name + " is not world-writable");
+}
+#endif
 
 uint32_t readU32(const std::vector<uint8_t> &bytes, std::size_t offset) {
   uint32_t value = 0;
@@ -332,6 +346,10 @@ void persistenceRoundTripTest() {
     expect(store.appendPatch(patch), "dirty absolute patch appends");
     expect(store.walRecords() == 1 && store.walBytes() > 0,
            "WAL records only dirty state");
+#ifndef _WIN32
+    expectNotWorldWritable(dir / "statistics-v2-a.bin", "checkpoint");
+    expectNotWorldWritable(dir / "statistics-v2.wal", "WAL");
+#endif
   }
   {
     Store store(dir.string());

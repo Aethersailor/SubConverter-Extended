@@ -581,6 +581,27 @@ bool readFile(const std::string &path, std::vector<uint8_t> &bytes,
   return ok;
 }
 
+std::FILE *openPersistenceFile(const std::string &path, bool append) {
+#ifdef _WIN32
+  return std::fopen(path.c_str(), append ? "ab" : "wb");
+#else
+  const int flags = O_WRONLY | O_CREAT | O_CLOEXEC |
+                    (append ? O_APPEND : O_TRUNC);
+  const int descriptor =
+      ::open(path.c_str(), flags,
+             S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+  if (descriptor < 0)
+    return nullptr;
+  std::FILE *file = fdopen(descriptor, append ? "ab" : "wb");
+  if (file)
+    return file;
+  const int error_number = errno;
+  ::close(descriptor);
+  errno = error_number;
+  return nullptr;
+#endif
+}
+
 bool flushFile(std::FILE *file) {
 #ifdef STATISTICS_V2_TESTING
   if (g_test_write_fault == TestWriteFault::FlushFailure) {
@@ -1501,11 +1522,11 @@ bool Store::replaceFile(const std::string &target,
   std::FILE *file =
       g_test_write_fault == TestWriteFault::OpenFailure
           ? nullptr
-          : std::fopen(temporary.c_str(), "wb");
+          : openPersistenceFile(temporary, false);
   if (!file && g_test_write_fault == TestWriteFault::OpenFailure)
     errno = EACCES;
 #else
-  std::FILE *file = std::fopen(temporary.c_str(), "wb");
+  std::FILE *file = openPersistenceFile(temporary, false);
 #endif
   if (!file) {
     setError("cannot open temporary persistence file");
@@ -1564,11 +1585,11 @@ bool Store::appendFile(const std::string &target,
   std::FILE *file =
       g_test_write_fault == TestWriteFault::OpenFailure
           ? nullptr
-          : std::fopen(target.c_str(), "ab");
+          : openPersistenceFile(target, true);
   if (!file && g_test_write_fault == TestWriteFault::OpenFailure)
     errno = EACCES;
 #else
-  std::FILE *file = std::fopen(target.c_str(), "ab");
+  std::FILE *file = openPersistenceFile(target, true);
 #endif
   if (!file) {
     setError("cannot open statistics WAL");

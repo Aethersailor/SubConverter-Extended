@@ -67,7 +67,13 @@ class FixtureHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         with self.recorder.lock:
             self.recorder.target_hits.append(self.path)
-        if self.headers.get("Host", "").startswith("raw.githubusercontent.com"):
+        try:
+            request_hostname = urllib.parse.urlsplit(
+                f"//{self.headers.get('Host', '')}"
+            ).hostname
+        except ValueError:
+            request_hostname = None
+        if request_hostname == "raw.githubusercontent.com":
             self.send_response(503)
             self.end_headers()
             return

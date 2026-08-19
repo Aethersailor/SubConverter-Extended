@@ -254,6 +254,17 @@ def build_url(base_url: str, path: str, params: dict[str, str] | None = None) ->
     return f"{base}{path}" + (f"?{query}" if query else "")
 
 
+def surge_contains_fixture_proxy(config: str, name: str, host: str) -> bool:
+    for line in config.splitlines():
+        entry_name, separator, definition = line.partition("=")
+        if not separator:
+            continue
+        fields = [field.strip() for field in definition.split(",")]
+        if entry_name.strip() == name or (len(fields) > 1 and fields[1] == host):
+            return True
+    return False
+
+
 def decode_v2ray_internal_subscription(content: str) -> list[tuple[str, dict]]:
     profiles: list[tuple[str, dict]] = []
     for line in content.splitlines():
@@ -2331,7 +2342,7 @@ def run_checks(
                 raise AssertionError(
                     "remote Surge conversion did not emit policy-path"
                 )
-            if "Smoke" in surge_config or "example.com" in surge_config:
+            if surge_contains_fixture_proxy(surge_config, "Smoke", "example.com"):
                 raise AssertionError(
                     "remote Surge conversion unexpectedly expanded the subscription"
                 )

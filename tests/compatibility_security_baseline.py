@@ -1527,6 +1527,9 @@ def running_service(
         elif invalid_statistics_path:
             statistics_path.write_text("not a directory", encoding="utf-8")
         pref = temporary_path / "pref.toml"
+        # The temporary preference contains deterministic fixture credentials
+        # used to prove runtime redaction; it never contains a production secret.
+        # codeql[py/clear-text-storage-sensitive-data]
         pref.write_text(baseline, encoding="utf-8", newline="\n")
         if pref_path_capture is not None:
             pref_path_capture.append(pref)
@@ -10727,6 +10730,9 @@ def settings_parser_diagnostic_redaction_baseline(helper: Path) -> None:
     runtime_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=runtime_dir) as temporary:
         malformed = Path(temporary) / "malformed-secret.yml"
+        # Persisting this synthetic canary is the subject of the diagnostic
+        # non-leakage test below, not storage of a real credential.
+        # codeql[py/clear-text-storage-sensitive-data]
         malformed.write_text(
             "common:\n"
             f"  token: {secret}\n"

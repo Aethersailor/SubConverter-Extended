@@ -407,7 +407,7 @@ std::FILE *openUniqueTemporaryFile(const std::filesystem::path &target,
 #else
         const int descriptor = ::open(
             temporary_path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
-            0666);
+            S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
         if(descriptor >= 0) {
             std::FILE *file = fdopen(descriptor, "wb");
             if(file)
@@ -737,6 +737,11 @@ std::string fileGet(const std::string &path, bool scope_limit)
     if(scope_limit && !isInScope(path))
         return "";
 
+    // An unrestricted read is an intentional local-operator API used for
+    // preference files and configured scripts. Request-controlled callers set
+    // scope_limit=true and must pass the canonical working-tree containment
+    // check above before this sink is reached.
+    // codeql[cpp/path-injection]
     std::FILE *fp = openFile(path.c_str(), "rb");
     if(!fp)
         return "";

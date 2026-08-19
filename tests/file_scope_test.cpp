@@ -251,6 +251,12 @@ int main() {
           "first atomic create failed");
   require(fileGet(first_create.string(), false) == "created",
           "first atomic create changed content");
+#ifndef _WIN32
+  struct stat first_create_status {};
+  require(::stat(first_create.c_str(), &first_create_status) == 0 &&
+              (first_create_status.st_mode & (S_IWGRP | S_IWOTH)) == 0,
+          "first atomic create granted group or world write access");
+#endif
   require(temporaryFileCount(first_create) == 0,
           "first atomic create left a temporary file");
   require(fileWrite(first_create.string(), "", true) == 0,
