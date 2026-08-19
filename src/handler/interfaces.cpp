@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <cctype>
+#include <climits>
 #include <condition_variable>
 #include <cstdint>
 #include <ctime>
@@ -2103,11 +2104,11 @@ WorkloadScheduler &conversionScheduler() {
   const std::size_t workers = static_cast<std::size_t>(
       std::clamp(std::min(settings.maxConcurThreads,
                           static_cast<int>(hardware_threads)),
-                 1, 64));
+                 1, INT_MAX));
   const std::size_t entries = static_cast<std::size_t>(
-      std::clamp(settings.maxPendingConns, 64, 2048));
+      std::max(settings.maxPendingConns, 1));
   static WorkloadScheduler scheduler(workers, entries,
-                                     UINT64_C(64) * 1024 * 1024);
+                                     requestAdmissionSnapshot().max_bytes);
   conversion_scheduler_instance.store(&scheduler, std::memory_order_release);
   return scheduler;
 }

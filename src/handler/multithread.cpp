@@ -9,6 +9,7 @@
 #include "server/request_context.h"
 #include "utils/network.h"
 #include "utils/bounded_executor.h"
+#include "utils/resource_control.h"
 #include "utils/system.h"
 #include "webget.h"
 #include "multithread.h"
@@ -17,12 +18,21 @@
 //safety lock for multi-thread
 std::mutex on_emoji, on_rename, on_stream, on_time;
 
+static bool forceMaxResourceBudgetApplied()
+{
+    const ResourceControlSnapshot resources = resourceControlSnapshot();
+    return resources.mode == "force_max" && resources.permits_applied;
+}
+
 static size_t configuredWorkerCount()
 {
     const std::string configured =
         getEnv("SUBCONVERTER_RULESET_EXECUTOR_WORKERS");
     if(!configured.empty())
         return static_cast<size_t>(std::clamp(to_int(configured, 2), 1, 8));
+    if(forceMaxResourceBudgetApplied())
+        return static_cast<size_t>(
+            std::max(1, effectiveSettings().maxConcurThreads));
     return static_cast<size_t>(
         std::clamp(effectiveSettings().maxConcurThreads / 2, 2, 8));
 }
@@ -34,6 +44,9 @@ static size_t configuredQueueCapacity()
     if(!configured.empty())
         return static_cast<size_t>(
             std::clamp(to_int(configured, 64), 1, 1024));
+    if(forceMaxResourceBudgetApplied())
+        return static_cast<size_t>(
+            std::max(1, effectiveSettings().maxPendingConns));
     return std::max<size_t>(64, configuredWorkerCount() * 16);
 }
 

@@ -4387,16 +4387,20 @@ def vary_cache_and_coalesce_baseline(binary: Path, fixture_base: str) -> None:
                 "completed microcache result did not retain a bounded byte "
                 f"lease: {retained_bytes}"
             )
-        expected_retained_limit = (
-            64 * 1024 * 1024
-            if os.environ.get("SUBCONVERTER_RESOURCE_CONTROL") == "adaptive"
-            else 0
-        )
-        if retained["limit"] != expected_retained_limit:
+        resource_mode = os.environ.get("SUBCONVERTER_RESOURCE_CONTROL")
+        if resource_mode == "adaptive":
+            valid_retained_limit = retained["limit"] == 64 * 1024 * 1024
+        elif resource_mode == "force_max":
+            valid_retained_limit = (
+                retained["limit"] >= 64 * 1024 * 1024
+                and retained["used"] <= retained["limit"]
+            )
+        else:
+            valid_retained_limit = retained["limit"] == 0
+        if not valid_retained_limit:
             raise AssertionError(
                 "resource profile retained-byte limit changed: "
-                f"expected={expected_retained_limit}, "
-                f"actual={retained!r}"
+                f"mode={resource_mode!r}, actual={retained!r}"
             )
         FixtureHandler.slow_subscription_release.set()
 
@@ -11688,10 +11692,14 @@ def main() -> int:
         COMPAT_FIXTURES / "legacy-pref.toml",
         force_env,
     )
-    if force_snapshot["server"] != snapshots[0]["server"]:
-        raise AssertionError("uncalibrated force_max changed server permits")
-    if "curve_valid=false applied=false" not in force_logs:
-        raise AssertionError("uncalibrated force_max did not stay in fallback")
+    if (
+        force_snapshot["server"]["request_deadline_ms"] != 2147483647
+        or force_snapshot["server"]["max_pending_connections"] < 64
+        or force_snapshot["server"]["max_concurrent_threads"] < 1
+    ):
+        raise AssertionError("automatic force_max did not apply hardware budgets")
+    if "curve_valid=true applied=true" not in force_logs:
+        raise AssertionError("automatic force_max did not activate")
     hardware = re.search(r"hardware=([0-9a-f]{16})", force_logs)
     if hardware is None:
         raise AssertionError("force_max hardware fingerprint log is missing")

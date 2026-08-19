@@ -2,6 +2,7 @@
 #define RESOURCE_CONTROL_H_INCLUDED
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -104,6 +105,42 @@ struct ResourcePermitBudget {
   uint32_t outbound_connections = 16;
 };
 
+inline uint64_t computeForceMaxAdmissionEntries(
+    uint64_t memory_bytes, uint64_t nofile_soft,
+    uint64_t outbound_connections) noexcept {
+  uint64_t result = memory_bytes == 0
+                        ? UINT64_C(2048)
+                        : std::max<uint64_t>(
+                              64, memory_bytes / 8 /
+                                      (UINT64_C(64) * 1024));
+  result = std::min<uint64_t>(result, INT_MAX);
+  if (nofile_soft != 0) {
+    const uint64_t reserved = std::min<uint64_t>(
+        nofile_soft, std::max<uint64_t>(64, outbound_connections + 64));
+    const uint64_t fd_bound =
+        nofile_soft > reserved ? nofile_soft - reserved
+                               : std::max<uint64_t>(1, nofile_soft / 2);
+    result = std::min(result, fd_bound);
+  }
+  return std::max<uint64_t>(1, result);
+}
+
+inline uint64_t computeForceMaxRequestByteLimit(
+    uint64_t memory_bytes) noexcept {
+  if (memory_bytes == 0)
+    return UINT64_C(64) * 1024 * 1024;
+  return std::max<uint64_t>(memory_bytes / 16,
+                            UINT64_C(64) * 1024 * 1024);
+}
+
+inline uint64_t computeForceMaxRetainedByteLimit(
+    uint64_t memory_bytes) noexcept {
+  if (memory_bytes == 0)
+    return UINT64_C(64) * 1024 * 1024;
+  return std::max<uint64_t>(memory_bytes / 4,
+                            UINT64_C(64) * 1024 * 1024);
+}
+
 inline ResourcePermitBudget
 computeConservativeResourceBudget(double effective_cpu,
                                   uint32_t configured_cpu_cap) noexcept {
@@ -158,6 +195,14 @@ inline bool resourceCurveMatches(
   return !validated_hardware_fingerprint.empty() &&
          snapshot.hardware_complete &&
          snapshot.hardware_fingerprint == validated_hardware_fingerprint;
+}
+
+inline bool forceMaxHardwareAccepted(
+    const ResourceControlSnapshot &snapshot,
+    std::string_view validated_hardware_fingerprint) noexcept {
+  return snapshot.hardware_complete &&
+         (validated_hardware_fingerprint.empty() ||
+          resourceCurveMatches(snapshot, validated_hardware_fingerprint));
 }
 
 void configureResourceControl(Settings &settings);

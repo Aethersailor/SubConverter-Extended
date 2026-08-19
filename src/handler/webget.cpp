@@ -15,6 +15,7 @@
 #include <vector>
 #include <atomic>
 #include <cctype>
+#include <climits>
 #include <cstdio>
 #include <cstdint>
 
@@ -918,6 +919,35 @@ static CURLcode curl_set_platform_tls_trust(CURL *curl_handle)
 #endif
 }
 
+static bool forceMaxResourceBudgetApplied() noexcept
+{
+    const ResourceControlSnapshot resources = resourceControlSnapshot();
+    return resources.mode == "force_max" && resources.permits_applied;
+}
+
+static std::chrono::steady_clock::time_point networkFetchDeadline(
+    std::chrono::steady_clock::time_point requested)
+{
+    const std::shared_ptr<RequestContext> context =
+        captureCurrentRequestContext();
+    const auto context_deadline =
+        context ? context->deadline()
+                : std::chrono::steady_clock::time_point::max();
+    if(requested == std::chrono::steady_clock::time_point::max())
+    {
+        if(forceMaxResourceBudgetApplied() &&
+           context_deadline !=
+               std::chrono::steady_clock::time_point::max())
+            requested = context_deadline;
+        else
+            requested = std::chrono::steady_clock::now() +
+                        std::chrono::seconds(15);
+    }
+    if(context_deadline != std::chrono::steady_clock::time_point::max())
+        requested = std::min(requested, context_deadline);
+    return requested;
+}
+
 static inline void curl_set_common_options(CURL *curl_handle, const char *url,
                                            curl_progress_data *data,
                                            bool allow_insecure_tls)
@@ -946,8 +976,12 @@ static inline void curl_set_common_options(CURL *curl_handle, const char *url,
         const auto remaining = std::chrono::duration_cast<
             std::chrono::milliseconds>(data->deadline -
                                       std::chrono::steady_clock::now());
+        const int64_t timeout_cap =
+            forceMaxResourceBudgetApplied()
+                ? static_cast<int64_t>(LONG_MAX)
+                : INT64_C(15000);
         timeout_ms = static_cast<long>(
-            std::clamp<int64_t>(remaining.count(), 1, 15000));
+            std::clamp<int64_t>(remaining.count(), 1, timeout_cap));
     }
     curl_easy_setopt(curl_handle, CURLOPT_TIMEOUT_MS, timeout_ms);
     curl_easy_setopt(curl_handle, CURLOPT_COOKIEFILE, "");
@@ -1154,9 +1188,13 @@ public:
         const long total_connections =
             resources.mode == "force_max" && resources.permits_applied
                 ? static_cast<long>(std::clamp<uint64_t>(
-                      resources.suggested_outbound_connections, 1, 64))
+                      resources.suggested_outbound_connections, 1,
+                      static_cast<uint64_t>(LONG_MAX)))
                 : 64L;
-        const long host_connections = std::min(16L, total_connections);
+        const long host_connections =
+            resources.mode == "force_max" && resources.permits_applied
+                ? total_connections
+                : std::min(16L, total_connections);
         curl_multi_setopt(multi_, CURLMOPT_MAX_TOTAL_CONNECTIONS,
                           total_connections);
         curl_multi_setopt(multi_, CURLMOPT_MAX_HOST_CONNECTIONS,
@@ -1794,15 +1832,7 @@ AsyncFetchFuture webGetAsync(AsyncFetchRequest request)
         return promise.get_future().share();
     }
     if(request.deadline == std::chrono::steady_clock::time_point::max())
-    {
-        request.deadline = std::chrono::steady_clock::now() +
-                           std::chrono::seconds(15);
-        if(auto context = captureCurrentRequestContext(); context &&
-           context->deadline() !=
-               std::chrono::steady_clock::time_point::max())
-            request.deadline = std::min(request.deadline,
-                                        context->deadline());
-    }
+        request.deadline = networkFetchDeadline(request.deadline);
     if(!request.cancellation.valid())
     {
         if(auto context = captureCurrentRequestContext())
@@ -1882,11 +1912,7 @@ static int curlGetSyncLegacy(const FetchArgument &argument,
                                         "X-Requested-With: SubConverter-Extended " VERSION);
     curl_progress_data limit;
     limit.size_limit = effectiveSettings().maxAllowedDownloadSize;
-    limit.deadline = argument.deadline ==
-                             std::chrono::steady_clock::time_point::max()
-                         ? std::chrono::steady_clock::now() +
-                               std::chrono::seconds(15)
-                         : argument.deadline;
+    limit.deadline = networkFetchDeadline(argument.deadline);
     limit.cancellation = argument.cancellation.valid()
                              ? argument.cancellation
                              : (captureCurrentRequestContext()
@@ -2009,7 +2035,10 @@ static int curlGetSyncLegacy(const FetchArgument &argument,
         {
             curl_easy_setopt(curl_handle, CURLOPT_TIMEOUT_MS,
                              static_cast<long>(std::clamp<int64_t>(
-                                 remaining.count(), 1, 15000)));
+                                 remaining.count(), 1,
+                                 forceMaxResourceBudgetApplied()
+                                     ? static_cast<int64_t>(LONG_MAX)
+                                     : INT64_C(15000))));
             retVal = curl_easy_perform(curl_handle);
         }
     }
@@ -2094,11 +2123,7 @@ static AsyncFetchRequest makeAsyncFetchRequest(
     request.context = argument.context;
     request.public_fetch_restricted =
         isPublicFetchRestricted(argument.context);
-    request.deadline = argument.deadline ==
-                               std::chrono::steady_clock::time_point::max()
-                           ? std::chrono::steady_clock::now() +
-                                 std::chrono::seconds(15)
-                           : argument.deadline;
+    request.deadline = networkFetchDeadline(argument.deadline);
     request.cancellation = argument.cancellation;
     request.request_context = captureCurrentRequestContext();
     if(!request.cancellation.valid())
@@ -2311,15 +2336,7 @@ static int curlGetWithGitHubFallback(
 static int executeNetworkFetch(const FetchArgument &argument,
                                FetchResult &result)
 {
-    auto deadline = argument.deadline ==
-                            std::chrono::steady_clock::time_point::max()
-                        ? std::chrono::steady_clock::now() +
-                              std::chrono::seconds(15)
-                        : argument.deadline;
-    if(auto context = captureCurrentRequestContext(); context &&
-       context->deadline() !=
-           std::chrono::steady_clock::time_point::max())
-        deadline = std::min(deadline, context->deadline());
+    const auto deadline = networkFetchDeadline(argument.deadline);
     RequestCancellationToken cancellation = argument.cancellation;
     if(!cancellation.valid())
     {

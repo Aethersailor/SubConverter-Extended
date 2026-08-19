@@ -306,12 +306,19 @@ ResourceControlSnapshot discover(const Settings &settings,
   detectMemory(snapshot);
   detectFileLimits(snapshot);
   const ResourcePermitBudget budget = computeConservativeResourceBudget(
-      effective, static_cast<uint32_t>(std::max(1, settings.maxConcurThreads)));
+      effective, mode == ResourceControlMode::ForceMax
+                     ? 0
+                     : static_cast<uint32_t>(
+                           std::max(1, settings.maxConcurThreads)));
   snapshot.suggested_cpu_permits = budget.cpu_permits;
   snapshot.configured_cpu_cap =
       static_cast<uint64_t>(std::max(1, settings.maxConcurThreads));
   snapshot.suggested_active_flows = budget.active_flows;
   snapshot.suggested_outbound_connections = budget.outbound_connections;
+  if (snapshot.nofile_soft != 0)
+    snapshot.suggested_outbound_connections = std::min<uint64_t>(
+        snapshot.suggested_outbound_connections,
+        std::max<uint64_t>(1, snapshot.nofile_soft / 4));
   snapshot.hardware_complete = affinity > 0.0 &&
                                (snapshot.memory_max_bytes > 0 ||
                                 snapshot.host_total_memory_bytes > 0);
@@ -322,7 +329,7 @@ ResourceControlSnapshot discover(const Settings &settings,
                                                    : "idle";
   snapshot.hardware_fingerprint = fingerprint(snapshot);
   snapshot.curve_valid =
-      resourceCurveMatches(snapshot, settings.forceMaxCurveFingerprint);
+      forceMaxHardwareAccepted(snapshot, settings.forceMaxCurveFingerprint);
   if (mode == ResourceControlMode::ForceMax && snapshot.curve_valid)
     snapshot.controller_state = "force_max";
   return snapshot;
@@ -371,11 +378,17 @@ void controllerLoop() noexcept {
     ResourceControlSnapshot next = runtime.snapshot;
     const ResourcePermitBudget baseline = computeConservativeResourceBudget(
         static_cast<double>(next.effective_cpu_millis) / 1000.0,
-        static_cast<uint32_t>(std::min<uint64_t>(next.configured_cpu_cap,
-                                                 UINT32_MAX)));
+        next.mode == "force_max"
+            ? 0
+            : static_cast<uint32_t>(std::min<uint64_t>(
+                  next.configured_cpu_cap, UINT32_MAX)));
     next.suggested_cpu_permits = baseline.cpu_permits;
     next.suggested_active_flows = baseline.active_flows;
     next.suggested_outbound_connections = baseline.outbound_connections;
+    if (next.nofile_soft != 0)
+      next.suggested_outbound_connections = std::min<uint64_t>(
+          next.suggested_outbound_connections,
+          std::max<uint64_t>(1, next.nofile_soft / 4));
     lock.unlock();
     try {
       const RequestAdmissionSnapshot admission = requestAdmissionSnapshot();
@@ -441,27 +454,36 @@ void configureResourceControl(Settings &settings) {
   }
   const bool apply_force_max =
       *parsed == ResourceControlMode::ForceMax && snapshot.curve_valid;
+  uint64_t memory_boundary =
+      snapshot.memory_max_bytes != 0 ? snapshot.memory_max_bytes
+                                     : snapshot.host_total_memory_bytes;
+  if (snapshot.memory_high_bytes != 0 &&
+      (memory_boundary == 0 || snapshot.memory_high_bytes < memory_boundary))
+    memory_boundary = snapshot.memory_high_bytes;
+  uint64_t admission_entries = UINT64_C(2048);
+  uint64_t admission_bytes = UINT64_C(64) * 1024 * 1024;
+  uint64_t retained_bytes = 0;
   if (apply_force_max) {
     settings.maxConcurThreads = static_cast<int>(
         std::min<uint64_t>(snapshot.suggested_cpu_permits, INT_MAX));
     settings.maxServerThreads =
         std::max(settings.maxServerThreads, settings.maxConcurThreads);
+    admission_entries = computeForceMaxAdmissionEntries(
+        memory_boundary, snapshot.nofile_soft,
+        snapshot.suggested_outbound_connections);
+    admission_bytes = computeForceMaxRequestByteLimit(memory_boundary);
+    retained_bytes = computeForceMaxRetainedByteLimit(memory_boundary);
+    settings.maxPendingConns = static_cast<int>(
+        std::min<uint64_t>(admission_entries, INT_MAX));
+    settings.requestDeadlineMs = INT_MAX;
     snapshot.permits_applied = true;
-  }
-  uint64_t admission_entries =
-      *parsed == ResourceControlMode::Compat ||
-              (*parsed == ResourceControlMode::ForceMax && !apply_force_max)
-          ? UINT64_C(2048)
-          : static_cast<uint64_t>(std::clamp(settings.maxPendingConns, 1, 2048));
-  if (apply_force_max)
+  } else if (*parsed == ResourceControlMode::Adaptive) {
     admission_entries =
-        std::min<uint64_t>(admission_entries, snapshot.suggested_active_flows);
-  configureRequestAdmissionLimits(admission_entries,
-                                  UINT64_C(64) * 1024 * 1024);
-  configureRetainedResponseByteLimit(
-      *parsed == ResourceControlMode::Adaptive || apply_force_max
-          ? UINT64_C(64) * 1024 * 1024
-          : 0);
+        static_cast<uint64_t>(std::clamp(settings.maxPendingConns, 1, 2048));
+    retained_bytes = UINT64_C(64) * 1024 * 1024;
+  }
+  configureRequestAdmissionLimits(admission_entries, admission_bytes);
+  configureRetainedResponseByteLimit(retained_bytes);
   {
     std::lock_guard<std::mutex> lock(runtime.mutex);
     runtime.snapshot = snapshot;
@@ -482,7 +504,11 @@ void configureResourceControl(Settings &settings) {
                " curve_valid=" +
                (snapshot.curve_valid ? "true" : "false") + " applied=" +
                (snapshot.permits_applied ? "true" : "false") +
-               " hardware=" + snapshot.hardware_fingerprint);
+               " hardware=" + snapshot.hardware_fingerprint +
+               " admission_entries=" + std::to_string(admission_entries) +
+               " admission_bytes=" + std::to_string(admission_bytes) +
+               " retained_bytes=" + std::to_string(retained_bytes) +
+               " deadline_ms=" + std::to_string(settings.requestDeadlineMs));
 }
 
 ResourceControlSnapshot resourceControlSnapshot() {

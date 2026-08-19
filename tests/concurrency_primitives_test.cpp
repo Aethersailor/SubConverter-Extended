@@ -605,6 +605,32 @@ static void testResourceControlPrimitives() {
       computeConservativeResourceBudget(0.5, 16);
   assert(fractional.cpu_permits == 1);
 
+  assert(computeForceMaxAdmissionEntries(UINT64_C(1) * 1024 * 1024 * 1024,
+                                         0, 16) == 2048);
+  assert(computeForceMaxAdmissionEntries(UINT64_C(1) * 1024 * 1024 * 1024,
+                                         1024, 64) == 896);
+  assert(computeForceMaxAdmissionEntries(UINT64_C(2) * 1024 * 1024 * 1024,
+                                         0, 32) == 4096);
+  assert(computeForceMaxAdmissionEntries(UINT64_C(4) * 1024 * 1024 * 1024,
+                                         0, 64) == 8192);
+  assert(computeForceMaxAdmissionEntries(UINT64_C(32) * 1024 * 1024 * 1024,
+                                         0, 512) == 65536);
+  assert(computeForceMaxAdmissionEntries(UINT64_C(128) * 1024 * 1024 * 1024,
+                                         0, 2048) == 262144);
+  assert(computeForceMaxRequestByteLimit(UINT64_C(1) * 1024 * 1024 * 1024) ==
+         UINT64_C(64) * 1024 * 1024);
+  assert(computeForceMaxRequestByteLimit(UINT64_C(4) * 1024 * 1024 * 1024) ==
+         UINT64_C(256) * 1024 * 1024);
+  assert(computeForceMaxRetainedByteLimit(
+             UINT64_C(1) * 1024 * 1024 * 1024) ==
+         UINT64_C(256) * 1024 * 1024);
+  assert(computeForceMaxRetainedByteLimit(
+             UINT64_C(4) * 1024 * 1024 * 1024) ==
+         UINT64_C(1) * 1024 * 1024 * 1024);
+  assert(computeForceMaxRetainedByteLimit(
+             UINT64_C(32) * 1024 * 1024 * 1024) ==
+         UINT64_C(8) * 1024 * 1024 * 1024);
+
   ResourceControlSnapshot uncalibrated;
   uncalibrated.mode = "force_max";
   uncalibrated.hardware_fingerprint = "hardware-a";
@@ -612,6 +638,11 @@ static void testResourceControlPrimitives() {
   assert(!resourceCurveMatches(uncalibrated, ""));
   assert(!resourceCurveMatches(uncalibrated, "hardware-b"));
   assert(resourceCurveMatches(uncalibrated, "hardware-a"));
+  assert(forceMaxHardwareAccepted(uncalibrated, ""));
+  assert(!forceMaxHardwareAccepted(uncalibrated, "hardware-b"));
+  assert(forceMaxHardwareAccepted(uncalibrated, "hardware-a"));
+  uncalibrated.hardware_complete = false;
+  assert(!forceMaxHardwareAccepted(uncalibrated, ""));
 }
 
 int main() {
