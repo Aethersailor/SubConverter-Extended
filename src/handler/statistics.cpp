@@ -466,6 +466,11 @@ template <typename Writer> void writeRequestLifecycle(Writer &writer) {
   }
   writer.EndObject();
 
+  writer.Key("successful_owners");
+  writer.Uint64(snapshot.successful_owners);
+  writer.Key("successful_responses");
+  writer.Uint64(snapshot.successful_responses);
+
   writer.Key("stages");
   writer.StartObject();
   for (std::size_t index = 0; index < snapshot.stage_nanoseconds.size();
@@ -477,6 +482,15 @@ template <typename Writer> void writeRequestLifecycle(Writer &writer) {
     writer.Uint64(snapshot.stage_nanoseconds[index] / 1000);
     writer.Key("samples");
     writer.Uint64(snapshot.stage_samples[index]);
+    writer.Key("p50_microseconds");
+    writer.Uint64(requestStageLatencyQuantileMicroseconds(
+        snapshot, stage, 50, 100));
+    writer.Key("p95_microseconds");
+    writer.Uint64(requestStageLatencyQuantileMicroseconds(
+        snapshot, stage, 95, 100));
+    writer.Key("p99_microseconds");
+    writer.Uint64(requestStageLatencyQuantileMicroseconds(
+        snapshot, stage, 99, 100));
     writer.EndObject();
   }
   writer.EndObject();

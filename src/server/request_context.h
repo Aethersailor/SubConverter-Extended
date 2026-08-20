@@ -1,6 +1,7 @@
 #ifndef REQUEST_CONTEXT_H_INCLUDED
 #define REQUEST_CONTEXT_H_INCLUDED
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -70,6 +71,7 @@ enum class RequestCancellationReason : uint8_t {
 
 inline constexpr std::size_t kRequestStageCount =
     static_cast<std::size_t>(RequestStage::Count);
+inline constexpr std::size_t kRequestStageLatencyBucketCount = 32;
 inline constexpr std::size_t kRequestTerminalStateCount =
     static_cast<std::size_t>(RequestTerminalState::Count);
 inline constexpr std::size_t kRequestFailureAttributionCount =
@@ -320,6 +322,11 @@ struct RequestLifecycleMetricsSnapshot {
   std::array<uint64_t, kRequestFailureAttributionCount> failure{};
   std::array<uint64_t, kRequestStageCount> stage_nanoseconds{};
   std::array<uint64_t, kRequestStageCount> stage_samples{};
+  std::array<std::array<uint64_t, kRequestStageLatencyBucketCount>,
+             kRequestStageCount>
+      stage_latency_buckets{};
+  uint64_t successful_owners = 0;
+  uint64_t successful_responses = 0;
 };
 
 namespace request_lifecycle_metrics {
@@ -330,7 +337,50 @@ inline std::array<std::atomic<uint64_t>, kRequestFailureAttributionCount>
 inline std::array<std::atomic<uint64_t>, kRequestStageCount>
     stage_nanoseconds{};
 inline std::array<std::atomic<uint64_t>, kRequestStageCount> stage_samples{};
+inline std::array<
+    std::array<std::atomic<uint64_t>, kRequestStageLatencyBucketCount>,
+    kRequestStageCount>
+    stage_latency_buckets{};
+inline std::atomic<uint64_t> successful_owners{0};
+inline std::atomic<uint64_t> successful_responses{0};
 } // namespace request_lifecycle_metrics
+
+inline std::size_t requestStageLatencyBucket(uint64_t nanoseconds) noexcept {
+  uint64_t microseconds = std::max<uint64_t>(1, (nanoseconds + 999) / 1000);
+  std::size_t bucket = 0;
+  uint64_t upper = 1;
+  while (upper < microseconds &&
+         bucket + 1 < kRequestStageLatencyBucketCount) {
+    upper <<= 1;
+    ++bucket;
+  }
+  return bucket;
+}
+
+inline uint64_t requestStageLatencyQuantileMicroseconds(
+    const RequestLifecycleMetricsSnapshot &snapshot, RequestStage stage,
+    uint64_t numerator, uint64_t denominator) noexcept {
+  const std::size_t stage_index = static_cast<std::size_t>(stage);
+  if (stage_index >= snapshot.stage_latency_buckets.size() ||
+      denominator == 0 || numerator > denominator)
+    return 0;
+  uint64_t total = 0;
+  for (uint64_t count : snapshot.stage_latency_buckets[stage_index])
+    total += count;
+  if (total == 0)
+    return 0;
+  const uint64_t target =
+      std::max<uint64_t>(1, (total * numerator + denominator - 1) /
+                                denominator);
+  uint64_t cumulative = 0;
+  for (std::size_t bucket = 0;
+       bucket < snapshot.stage_latency_buckets[stage_index].size(); ++bucket) {
+    cumulative += snapshot.stage_latency_buckets[stage_index][bucket];
+    if (cumulative >= target)
+      return UINT64_C(1) << bucket;
+  }
+  return UINT64_C(1) << (kRequestStageLatencyBucketCount - 1);
+}
 
 struct RetainedResponseByteSnapshot {
   uint64_t used = 0;
@@ -482,7 +532,19 @@ inline RequestLifecycleMetricsSnapshot requestLifecycleMetricsSnapshot() {
             std::memory_order_relaxed);
     result.stage_samples[index] = request_lifecycle_metrics::stage_samples[index]
                                       .load(std::memory_order_relaxed);
+    for (std::size_t bucket = 0;
+         bucket < result.stage_latency_buckets[index].size(); ++bucket) {
+      result.stage_latency_buckets[index][bucket] =
+          request_lifecycle_metrics::stage_latency_buckets[index][bucket].load(
+              std::memory_order_relaxed);
+    }
   }
+  result.successful_owners =
+      request_lifecycle_metrics::successful_owners.load(
+          std::memory_order_relaxed);
+  result.successful_responses =
+      request_lifecycle_metrics::successful_responses.load(
+          std::memory_order_relaxed);
   return result;
 }
 
@@ -495,6 +557,13 @@ inline void resetRequestLifecycleMetricsForTests() noexcept {
     value.store(0, std::memory_order_relaxed);
   for (auto &value : request_lifecycle_metrics::stage_samples)
     value.store(0, std::memory_order_relaxed);
+  for (auto &stage : request_lifecycle_metrics::stage_latency_buckets)
+    for (auto &value : stage)
+      value.store(0, std::memory_order_relaxed);
+  request_lifecycle_metrics::successful_owners.store(
+      0, std::memory_order_relaxed);
+  request_lifecycle_metrics::successful_responses.store(
+      0, std::memory_order_relaxed);
 }
 
 class RequestContext {
@@ -693,6 +762,17 @@ public:
           duration, std::memory_order_relaxed);
       request_lifecycle_metrics::stage_samples[index].fetch_add(
           1, std::memory_order_relaxed);
+      request_lifecycle_metrics::stage_latency_buckets[index]
+          [requestStageLatencyBucket(duration)]
+              .fetch_add(1, std::memory_order_relaxed);
+    }
+    if (terminal == RequestTerminalState::Completed &&
+        failure == RequestFailureAttribution::None) {
+      request_lifecycle_metrics::successful_responses.fetch_add(
+          1, std::memory_order_relaxed);
+      if (singleflightRole() == RequestSingleflightRole::Owner)
+        request_lifecycle_metrics::successful_owners.fetch_add(
+            1, std::memory_order_relaxed);
     }
     return true;
   }
