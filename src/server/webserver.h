@@ -2,6 +2,7 @@
 #define WEBSERVER_H_INCLUDED
 
 #include <string>
+#include <utility>
 #include <vector>
 #include <map>
 #include <atomic>
@@ -29,11 +30,20 @@ struct Request
     std::shared_ptr<RequestContext> context;
 };
 
+struct ImmutableResponseBody
+{
+    std::string content;
+    RetainedResponseByteLease retained_bytes;
+};
+
+using shared_response_body = std::shared_ptr<const ImmutableResponseBody>;
+
 struct Response
 {
     int status_code = 200;
     std::string content_type;
     string_icase_map headers;
+    shared_response_body shared_body;
 };
 
 struct RequestAdmissionSnapshot

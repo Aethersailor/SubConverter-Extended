@@ -98,7 +98,8 @@ bool isHealthTarget(beast::string_view target) {
          (target.size() == path.size() || target[path.size()] == '?');
 }
 
-void appendExposeHeader(http::response<http::string_body> &response,
+template <class Body>
+void appendExposeHeader(http::response<Body> &response,
                         const std::string &name) {
   std::string current = response[http::field::access_control_expose_headers];
   if (!current.empty())
@@ -167,6 +168,8 @@ private:
   void writeImmediateError(http::status status, const std::string &body,
                            const char *retry_after = nullptr);
   void writeResponse(http::response<http::string_body> response);
+  void writeSharedResponse(http::response<http::buffer_body> response,
+                           shared_response_body body);
   void onWrite(bool keep_alive, beast::error_code error, std::size_t bytes);
   void finish(bool response_sent = false);
 
@@ -756,7 +759,8 @@ void BeastSession::process() {
              });
 }
 
-void BeastSession::completeAsyncResponse(Response response, std::string body,
+void BeastSession::completeAsyncResponse(Response response,
+                                         std::string body,
                                          bool explain_request,
                                          std::string client_address) {
   if (async_completed_.exchange(true, std::memory_order_acq_rel) ||
@@ -765,88 +769,115 @@ void BeastSession::completeAsyncResponse(Response response, std::string body,
   ScopedLogRequestContext log_scope(request_id_);
   ScopedRequestContext request_scope(context_);
   const auto &incoming = parser_->get();
-  http::response<http::string_body> outgoing{http::status::ok,
-                                             incoming.version()};
-  outgoing.keep_alive(incoming.keep_alive() && !state_->stopping.load());
-  outgoing.set(http::field::server,
-               "SubConverter-Extended/" VERSION " cURL/" LIBCURL_VERSION);
-  outgoing.set(http::field::access_control_allow_origin, "*");
-  if (incoming.find(http::field::access_control_request_headers) !=
-      incoming.end())
-    outgoing.set(http::field::access_control_allow_headers,
-                 incoming[http::field::access_control_request_headers]);
-  outgoing.set("X-Request-ID", request_id_);
-  appendExposeHeader(outgoing, "X-Request-ID");
-  outgoing.result(static_cast<http::status>(response.status_code));
-  for (const auto &[name, value] : response.headers)
-    outgoing.set(name, value);
-  if (!response.content_type.empty())
-    outgoing.set(http::field::content_type, response.content_type);
-  if (response.status_code >= 400 &&
-      !hasNoStoreDirective(
-          std::string(outgoing[http::field::cache_control])))
-    outgoing.set(http::field::cache_control, "private, no-store");
-  outgoing.set("X-Client-IP", client_address);
-  outgoing.body() = std::move(body);
+  shared_response_body shared_body = std::move(response.shared_body);
 
   if (context_->suggestedFailure() == RequestFailureAttribution::Capacity) {
-    outgoing.result(http::status::service_unavailable);
-    outgoing.set(http::field::content_type, "text/plain; charset=utf-8");
-    outgoing.set(http::field::cache_control, "private, no-store");
-    outgoing.set(http::field::retry_after, "1");
-    outgoing.body() =
+    shared_body.reset();
+    response.status_code = 503;
+    response.content_type = "text/plain; charset=utf-8";
+    response.headers = {{"Cache-Control", "private, no-store"},
+                        {"Retry-After", "1"}};
+    std::string capacity_body =
         "Service temporarily unavailable: retained byte or execution "
         "capacity is full.\n服务暂时不可用：保留字节或执行容量已满。\n";
+    body.swap(capacity_body);
   }
 
   RequestCancellationResponse cancellation_response;
   if (requestCancellationResponse(context_, cancellation_response)) {
-    outgoing.result(
-        static_cast<http::status>(cancellation_response.status_code));
-    outgoing.set(http::field::content_type, "text/plain; charset=utf-8");
+    shared_body.reset();
+    response.status_code = cancellation_response.status_code;
+    response.content_type = "text/plain; charset=utf-8";
     for (const auto &[name, value] : cancellation_response.headers)
-      outgoing.set(name, value);
-    outgoing.body() = std::move(cancellation_response.body);
+      response.headers[name] = value;
+    body = std::move(cancellation_response.body);
   }
-  if (!context_->retainResponseBytes(outgoing.body().size())) {
-    outgoing.result(http::status::service_unavailable);
-    outgoing.set(http::field::content_type, "text/plain; charset=utf-8");
-    outgoing.set(http::field::cache_control, "private, no-store");
-    outgoing.set(http::field::retry_after, "1");
-    outgoing.body() =
+  if (!shared_body && !context_->retainResponseBytes(body.size())) {
+    response.status_code = 503;
+    response.content_type = "text/plain; charset=utf-8";
+    response.headers = {{"Cache-Control", "private, no-store"},
+                        {"Retry-After", "1"}};
+    std::string capacity_body =
         "Service temporarily unavailable: retained response byte capacity "
         "is full.\n服务暂时不可用：响应字节容量已满。\n";
+    body.swap(capacity_body);
   }
   if (explain_request) {
-    outgoing.set(http::field::cache_control,
-                 "private, no-store, max-age=0");
-    outgoing.set(http::field::pragma, "no-cache");
+    response.headers["Cache-Control"] = "private, no-store, max-age=0";
+    response.headers["Pragma"] = "no-cache";
   }
+  if (response.status_code >= 400) {
+    const auto cache_control = response.headers.find("Cache-Control");
+    if (cache_control == response.headers.end() ||
+        !hasNoStoreDirective(cache_control->second))
+      response.headers["Cache-Control"] = "private, no-store";
+  }
+
+  const std::size_t body_size =
+      shared_body ? shared_body->content.size() : body.size();
+  auto configure_outgoing = [&](auto &outgoing) {
+    outgoing.keep_alive(incoming.keep_alive() && !state_->stopping.load());
+    outgoing.set(http::field::server,
+                 "SubConverter-Extended/" VERSION " cURL/" LIBCURL_VERSION);
+    outgoing.set(http::field::access_control_allow_origin, "*");
+    if (incoming.find(http::field::access_control_request_headers) !=
+        incoming.end())
+      outgoing.set(http::field::access_control_allow_headers,
+                   incoming[http::field::access_control_request_headers]);
+    outgoing.set("X-Request-ID", request_id_);
+    appendExposeHeader(outgoing, "X-Request-ID");
+    outgoing.result(static_cast<http::status>(response.status_code));
+    for (const auto &[name, value] : response.headers)
+      outgoing.set(name, value);
+    if (!response.content_type.empty())
+      outgoing.set(http::field::content_type, response.content_type);
+    outgoing.set("X-Client-IP", client_address);
+  };
 
   const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
       RequestContext::Clock::now() - started_at_);
   const uint64_t response_bytes =
       incoming.method() == http::verb::head
           ? 0
-          : static_cast<uint64_t>(outgoing.body().size());
-  writeLog(outgoing.result_int() >= 500 ? LOG_LEVEL_ERROR : LOG_LEVEL_INFO,
+          : static_cast<uint64_t>(body_size);
+  writeLog(response.status_code >= 500 ? LOG_LEVEL_ERROR : LOG_LEVEL_INFO,
            "HTTP_RESPONSE_PREPARED method=" +
                std::string(incoming.method_string()) + " path=" +
                requestPathForLog(std::string(incoming.target()).substr(
                    0, incoming.target().find('?'))) +
-               " status=" + std::to_string(outgoing.result_int()) +
+               " status=" + std::to_string(response.status_code) +
                " duration_ms=" +
                std::to_string(std::max<int64_t>(0, elapsed.count())) +
                " response_bytes=" + std::to_string(response_bytes) +
                " response_bytes_known=true");
 
-  const std::size_t body_size = outgoing.body().size();
-  outgoing.prepare_payload();
-  if (incoming.method() == http::verb::head) {
-    outgoing.body().clear();
+  if (shared_body) {
+    http::response<http::buffer_body> outgoing{http::status::ok,
+                                               incoming.version()};
+    configure_outgoing(outgoing);
     outgoing.content_length(body_size);
+    if (incoming.method() == http::verb::head || body_size == 0) {
+      outgoing.body().data = nullptr;
+      outgoing.body().size = 0;
+    } else {
+      outgoing.body().data =
+          const_cast<char *>(shared_body->content.data());
+      outgoing.body().size = body_size;
+    }
+    outgoing.body().more = false;
+    writeSharedResponse(std::move(outgoing), std::move(shared_body));
+  } else {
+    http::response<http::string_body> outgoing{http::status::ok,
+                                               incoming.version()};
+    configure_outgoing(outgoing);
+    outgoing.body() = std::move(body);
+    outgoing.prepare_payload();
+    if (incoming.method() == http::verb::head) {
+      outgoing.body().clear();
+      outgoing.content_length(body_size);
+    }
+    writeResponse(std::move(outgoing));
   }
-  writeResponse(std::move(outgoing));
 }
 
 void BeastSession::writeImmediateError(http::status status,
@@ -898,6 +929,40 @@ void BeastSession::writeResponse(http::response<http::string_body> response) {
                         beast::error_code error, std::size_t bytes) {
                       self->onWrite(keep_alive, error, bytes);
                     });
+}
+
+void BeastSession::writeSharedResponse(
+    http::response<http::buffer_body> response,
+    shared_response_body body) {
+  if (finished_.load())
+    return;
+  processing_.store(true, std::memory_order_release);
+  context_->setCurrentStage(RequestStage::Send);
+  sending_started_at_ = RequestContext::Clock::now();
+  response_status_ = response.result_int();
+  auto retained_response =
+      std::make_shared<http::response<http::buffer_body>>(
+          std::move(response));
+  auto serializer =
+      std::make_shared<http::response_serializer<http::buffer_body>>(
+          *retained_response);
+  const bool keep_alive = retained_response->keep_alive();
+  if (context_->deadline() != RequestContext::Clock::time_point::max()) {
+    const auto now = RequestContext::Clock::now();
+    if (now >= context_->deadline())
+      stream_.expires_after(std::chrono::milliseconds(250));
+    else
+      stream_.expires_at(context_->deadline());
+  } else {
+    stream_.expires_after(std::chrono::seconds(15));
+  }
+  http::async_write(
+      stream_, *serializer,
+      [self = shared_from_this(), retained_response, serializer,
+       body = std::move(body), keep_alive](beast::error_code error,
+                                           std::size_t bytes) {
+        self->onWrite(keep_alive, error, bytes);
+      });
 }
 
 void BeastSession::onWrite(bool keep_alive, beast::error_code error,

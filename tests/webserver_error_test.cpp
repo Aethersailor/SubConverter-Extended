@@ -57,7 +57,12 @@ void asyncHandler(Request request, async_response_completion completion) {
     response.headers["X-Test-Request-Context-ID"] =
         request.context->requestId();
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    completion(std::move(response), "async-ok");
+    auto shared_body = std::make_shared<ImmutableResponseBody>();
+    shared_body->content = "async-ok";
+    require(shared_body->retained_bytes.acquire(shared_body->content.size()),
+            "async test could not retain its shared body");
+    response.shared_body = std::move(shared_body);
+    completion(std::move(response), {});
   }).detach();
 }
 
@@ -570,6 +575,8 @@ int main() {
           "request admission permits leaked after server shutdown");
   require(admission.accepted == 8 && admission.rejected == 0,
           "request admission did not account for every response path");
+  require(retainedResponseByteSnapshot().used == 0,
+          "shared response byte lease leaked after server shutdown");
   resetRequestLifecycleMetricsForTests();
   testIndependentHealthChannel();
   resetRequestLifecycleMetricsForTests();

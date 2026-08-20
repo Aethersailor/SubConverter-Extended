@@ -1108,7 +1108,9 @@ struct CoalescedResponse {
   int status_code = 200;
   std::string content_type;
   string_icase_map headers;
-  std::string body;
+  shared_response_body body;
+  std::string fallback_body;
+  bool capacity_rejected = false;
   uint64_t rule_conversions = 0;
 };
 
@@ -1211,7 +1213,6 @@ struct CachedSubResponse {
   std::chrono::steady_clock::time_point expires_at;
   uint64_t bytes = 0;
   uint64_t sequence = 0;
-  RetainedResponseByteLease retained_bytes;
 };
 
 static std::mutex g_sub_inflight_mutex;
@@ -1726,21 +1727,56 @@ static bool shouldCoalesceSubRequest(const Request &request,
   return true;
 }
 
-static void copyCoalescedToResponse(const CoalescedResponse &result,
-                                    Response &response) {
+static std::string applyCoalescedToResponse(
+    const CoalescedResponse &result,
+    const std::shared_ptr<RequestContext> &client_context,
+    Response &response) {
   response.status_code = result.status_code;
   response.content_type = result.content_type;
   response.headers = result.headers;
+  response.shared_body = result.body;
+  if (result.capacity_rejected && client_context)
+    client_context->suggestFailure(RequestFailureAttribution::Capacity);
+  return result.body ? std::string() : result.fallback_body;
+}
+
+static shared_response_body tryMakeRetainedResponseBody(
+    std::string body) noexcept {
+  const uint64_t content_bytes = static_cast<uint64_t>(body.size());
+  RetainedResponseByteLease lease;
+  if (!lease.acquire(content_bytes))
+    return {};
+  try {
+    auto result = std::make_shared<ImmutableResponseBody>();
+    result->content = std::move(body);
+    result->retained_bytes = std::move(lease);
+    return result;
+  } catch (...) {
+    return {};
+  }
 }
 
 static SharedCoalescedResponse makeCoalescedResult(
     std::string &&body, Response &&response, uint64_t rule_conversions) {
   auto result = std::make_shared<CoalescedResponse>();
+  result->body = tryMakeRetainedResponseBody(std::move(body));
+  if (!result->body) {
+    if (const std::shared_ptr<RequestContext> context =
+            captureCurrentRequestContext())
+      context->suggestFailure(RequestFailureAttribution::Capacity);
+    response.status_code = 503;
+    response.content_type = "text/plain; charset=utf-8";
+    response.headers = {{"Cache-Control", "private, no-store"},
+                        {"Retry-After", "1"}};
+    result->fallback_body =
+        "Service temporarily unavailable: retained response byte capacity "
+        "is full.\n服务暂时不可用：响应字节容量已满。\n";
+    result->capacity_rejected = true;
+  }
   result->status_code = response.status_code;
   result->content_type = std::move(response.content_type);
   result->headers = std::move(response.headers);
-  result->body = std::move(body);
-  result->rule_conversions = rule_conversions;
+  result->rule_conversions = result->body ? rule_conversions : 0;
   return result;
 }
 
@@ -1756,7 +1792,9 @@ static void pruneExpiredSubResponseCache(
 }
 
 static uint64_t coalescedResponseBytes(const CoalescedResponse &result) {
-  uint64_t bytes = result.body.size() + result.content_type.size();
+  uint64_t bytes = (result.body ? result.body->content.size()
+                                : result.fallback_body.size()) +
+                   result.content_type.size();
   for (const auto &[name, value] : result.headers)
     bytes += name.size() + value.size();
   return bytes;
@@ -1826,8 +1864,6 @@ static void storeCachedSubResponse(const std::string &key,
   cached.expires_at = now + std::chrono::seconds(ttl);
   cached.bytes = bytes;
   cached.sequence = ++g_sub_response_cache_sequence;
-  if (!cached.retained_bytes.acquire(bytes))
-    return;
   g_sub_response_cache_bytes += bytes;
   g_sub_response_cache.emplace(key, std::move(cached));
 }
@@ -1972,10 +2008,11 @@ static std::string subconverterEntry(Request &request, Response &response,
     writeLog(LOG_LEVEL_DEBUG, "/sub 响应微缓存命中。");
     if (request.context)
       request.context->setCostClass(RequestCostClass::Low);
-    copyCoalescedToResponse(*cached_result, response);
+    std::string body = applyCoalescedToResponse(
+        *cached_result, request.context, response);
     recordTrackedSubRequest(track, request, response,
                             cached_result->rule_conversions);
-    return cached_result->body;
+    return body;
   }
 
   std::shared_ptr<InflightSubRequest> call;
@@ -2053,10 +2090,11 @@ static std::string subconverterEntry(Request &request, Response &response,
       if (call->work_context)
         request.context->setCostClass(call->work_context->costClass());
     }
-    copyCoalescedToResponse(*call->result, response);
+    std::string body = applyCoalescedToResponse(
+        *call->result, request.context, response);
     recordTrackedSubRequest(track, request, response,
                             call->result->rule_conversions);
-    return call->result->body;
+    return body;
   }
 
   InflightConsumerGuard consumer_guard(call, request.context);
@@ -2076,7 +2114,8 @@ static std::string subconverterEntry(Request &request, Response &response,
         std::move(body), std::move(owner_response), stats.rules);
     if (request.context && call->work_context)
       request.context->setCostClass(call->work_context->costClass());
-    copyCoalescedToResponse(*result, response);
+    std::string response_body = applyCoalescedToResponse(
+        *result, request.context, response);
     {
       std::lock_guard<std::mutex> lock(call->mutex);
       call->result = result;
@@ -2088,7 +2127,7 @@ static std::string subconverterEntry(Request &request, Response &response,
     call->cv.notify_all();
     recordTrackedSubRequest(track, request, response,
                             result->rule_conversions);
-    return result->body;
+    return response_body;
   } catch (...) {
     {
       std::lock_guard<std::mutex> lock(call->mutex);
@@ -2428,15 +2467,25 @@ std::string runScheduledConversion(
 
 } // namespace
 
+static ConversionResult makeConversionResult(Response response,
+                                             std::string body) {
+  if (response.shared_body)
+    return ConversionResult(response.status_code,
+                            std::move(response.content_type),
+                            std::move(response.headers),
+                            std::move(response.shared_body));
+  return ConversionResult(response.status_code,
+                          std::move(response.content_type),
+                          std::move(response.headers), std::move(body));
+}
+
 ConversionResult ConversionService::convertSubscription(
     Request &request, bool track_statistics) const {
   if (cooperativeCpuPermitActive()) {
     Response response;
     std::string body =
         subconverterEntry(request, response, track_statistics);
-    return ConversionResult(response.status_code,
-                            std::move(response.content_type),
-                            std::move(response.headers), std::move(body));
+    return makeConversionResult(std::move(response), std::move(body));
   }
   auto completion = std::make_shared<std::promise<ConversionResult>>();
   std::future<ConversionResult> future = completion->get_future();
@@ -2505,9 +2554,7 @@ void ConversionService::convertSubscriptionAsync(Request request,
         Response response;
         std::string body =
             subconverterEntry(request, response, track_statistics);
-        return ConversionResult(response.status_code,
-                                std::move(response.content_type),
-                                std::move(response.headers), std::move(body));
+        return makeConversionResult(std::move(response), std::move(body));
       },
       [context, completion = std::move(completion)](
           SchedulerAsyncResult<ConversionResult> result) mutable {
@@ -2611,6 +2658,7 @@ static std::string applyConversionResult(ConversionResult result,
   response.status_code = result.statusCode();
   response.content_type = std::move(result).releaseContentType();
   response.headers = std::move(result).releaseHeaders();
+  response.shared_body = std::move(result).releaseSharedBody();
   return std::move(result).releaseBody();
 }
 
@@ -2630,6 +2678,7 @@ static void applyAsyncConversionResult(
   response.status_code = result.statusCode();
   response.content_type = std::move(result).releaseContentType();
   response.headers = std::move(result).releaseHeaders();
+  response.shared_body = std::move(result).releaseSharedBody();
   std::string body = std::move(result).releaseBody();
   completion(std::move(response), std::move(body));
 }
