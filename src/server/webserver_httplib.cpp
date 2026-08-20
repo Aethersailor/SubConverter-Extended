@@ -890,7 +890,8 @@ int WebServer::start_web_server_multi(listener_args *args) {
     return new httplib::ThreadPool(base_workers,
                                    std::max(base_workers + 1, bounded_max),
                                    static_cast<size_t>(
-                                       global.resourceControl == "compat"
+                                       global.resourceControlEffective ==
+                                               "compat"
                                            ? std::max(10240, args->max_conn)
                                            : std::max(1, args->max_conn)));
   };

@@ -158,10 +158,13 @@ computeConservativeResourceBudget(double effective_cpu,
 
 struct ResourceControlSnapshot {
   std::string mode = "compat";
+  std::string effective_mode = "compat";
   std::string source = "builtin-default";
   std::string controller_state = "compat";
+  std::string controller_reason = "compat";
   std::string hardware_fingerprint;
   uint64_t sample_count = 0;
+  uint64_t sample_age_ms = 0;
   uint64_t affinity_cpus = 0;
   uint64_t cpuset_cpus = 0;
   uint64_t cpu_quota_millis = 0;
@@ -176,6 +179,15 @@ struct ResourceControlSnapshot {
   uint64_t nofile_hard = 0;
   uint64_t pids_current = 0;
   uint64_t pids_max = 0;
+  uint64_t open_fds = 0;
+  uint64_t memory_peak_bytes = 0;
+  uint64_t memory_events_high = 0;
+  uint64_t memory_events_max = 0;
+  uint64_t memory_events_oom = 0;
+  uint64_t memory_events_oom_kill = 0;
+  uint64_t memory_events_sock_throttled = 0;
+  uint64_t cpu_psi_some_milli_percent = 0;
+  uint64_t cpu_psi_full_milli_percent = 0;
   uint64_t memory_psi_some_milli_percent = 0;
   uint64_t memory_psi_full_milli_percent = 0;
   uint64_t io_psi_some_milli_percent = 0;
@@ -183,26 +195,33 @@ struct ResourceControlSnapshot {
   uint64_t configured_cpu_cap = 1;
   uint64_t suggested_active_flows = 16;
   uint64_t suggested_outbound_connections = 16;
+  uint64_t configured_pending_connections = 0;
+  uint64_t configured_server_threads = 0;
+  uint64_t configured_deadline_ms = 0;
+  std::string hardware_pin;
+  bool cpu_pressure_available = false;
+  bool memory_pressure_available = false;
+  bool io_pressure_available = false;
+  bool memory_events_available = false;
+  bool open_fds_available = false;
+  bool cgroup_scope_known = true;
+  bool hardware_detected = false;
+  bool hardware_pin_matched = false;
+  bool startup_budget_applied = false;
+  // Deprecated compatibility aliases. New code must use the explicit fields
+  // above; no persisted capacity curve is learned or loaded.
   bool hardware_complete = false;
   bool curve_valid = false;
   bool permits_applied = false;
   bool pressure_fallback = false;
 };
 
-inline bool resourceCurveMatches(
+inline bool hardwarePinMatches(
     const ResourceControlSnapshot &snapshot,
-    std::string_view validated_hardware_fingerprint) noexcept {
-  return !validated_hardware_fingerprint.empty() &&
-         snapshot.hardware_complete &&
-         snapshot.hardware_fingerprint == validated_hardware_fingerprint;
-}
-
-inline bool forceMaxHardwareAccepted(
-    const ResourceControlSnapshot &snapshot,
-    std::string_view validated_hardware_fingerprint) noexcept {
-  return snapshot.hardware_complete &&
-         (validated_hardware_fingerprint.empty() ||
-          resourceCurveMatches(snapshot, validated_hardware_fingerprint));
+    std::string_view configured_hardware_pin) noexcept {
+  return configured_hardware_pin.empty() ||
+         (snapshot.hardware_detected &&
+          snapshot.hardware_fingerprint == configured_hardware_pin);
 }
 
 void configureResourceControl(Settings &settings);

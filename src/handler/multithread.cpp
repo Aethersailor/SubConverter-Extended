@@ -21,7 +21,8 @@ std::mutex on_emoji, on_rename, on_stream, on_time;
 static bool forceMaxResourceBudgetApplied()
 {
     const ResourceControlSnapshot resources = resourceControlSnapshot();
-    return resources.mode == "force_max" && resources.permits_applied;
+    return resources.effective_mode == "force_max" &&
+           resources.startup_budget_applied;
 }
 
 static size_t configuredWorkerCount()

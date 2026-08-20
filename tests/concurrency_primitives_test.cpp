@@ -634,15 +634,15 @@ static void testResourceControlPrimitives() {
   ResourceControlSnapshot uncalibrated;
   uncalibrated.mode = "force_max";
   uncalibrated.hardware_fingerprint = "hardware-a";
+  uncalibrated.hardware_detected = true;
   uncalibrated.hardware_complete = true;
-  assert(!resourceCurveMatches(uncalibrated, ""));
-  assert(!resourceCurveMatches(uncalibrated, "hardware-b"));
-  assert(resourceCurveMatches(uncalibrated, "hardware-a"));
-  assert(forceMaxHardwareAccepted(uncalibrated, ""));
-  assert(!forceMaxHardwareAccepted(uncalibrated, "hardware-b"));
-  assert(forceMaxHardwareAccepted(uncalibrated, "hardware-a"));
+  assert(hardwarePinMatches(uncalibrated, ""));
+  assert(!hardwarePinMatches(uncalibrated, "hardware-b"));
+  assert(hardwarePinMatches(uncalibrated, "hardware-a"));
+  uncalibrated.hardware_detected = false;
   uncalibrated.hardware_complete = false;
-  assert(!forceMaxHardwareAccepted(uncalibrated, ""));
+  assert(hardwarePinMatches(uncalibrated, ""));
+  assert(!hardwarePinMatches(uncalibrated, "hardware-a"));
 }
 
 int main() {

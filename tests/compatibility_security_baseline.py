@@ -11693,16 +11693,34 @@ def main() -> int:
         force_env,
     )
     if (
-        force_snapshot["server"]["request_deadline_ms"] != 2147483647
+        force_snapshot["server"]["request_deadline_ms"]
+        != snapshots[0]["server"]["request_deadline_ms"]
         or force_snapshot["server"]["max_pending_connections"] < 64
         or force_snapshot["server"]["max_concurrent_threads"] < 1
+        or force_snapshot["advanced"]["resource_control_effective"]
+        != "force_max"
     ):
         raise AssertionError("automatic force_max did not apply hardware budgets")
-    if "curve_valid=true applied=true" not in force_logs:
+    if (
+        "effective_mode=force_max" not in force_logs
+        or "state=max_ready_static" not in force_logs
+        or "hardware_detected=true" not in force_logs
+        or "hardware_pin_matched=true" not in force_logs
+        or "startup_budget_applied=true" not in force_logs
+    ):
         raise AssertionError("automatic force_max did not activate")
     hardware = re.search(r"hardware=([0-9a-f]{16})", force_logs)
     if hardware is None:
         raise AssertionError("force_max hardware fingerprint log is missing")
+    force_deadline_env = force_env.copy()
+    force_deadline_env["SUBCONVERTER_REQUEST_DEADLINE_MS"] = "4321"
+    force_deadline_snapshot = load_settings_snapshot(
+        settings_snapshot_helper,
+        COMPAT_FIXTURES / "legacy-pref.toml",
+        force_deadline_env,
+    )
+    if force_deadline_snapshot["server"]["request_deadline_ms"] != 4321:
+        raise AssertionError("force_max changed the configured finite deadline")
     mismatch_env = force_env.copy()
     mismatch_env["SUBCONVERTER_FORCE_MAX_CURVE_FINGERPRINT"] = "0" * 16
     mismatch_snapshot, mismatch_logs = run_settings_snapshot(
@@ -11710,10 +11728,21 @@ def main() -> int:
         COMPAT_FIXTURES / "legacy-pref.toml",
         mismatch_env,
     )
-    if mismatch_snapshot["server"] != snapshots[0]["server"] or (
-        "curve_valid=false applied=false" not in mismatch_logs
+    if (
+        mismatch_snapshot["server"] != snapshots[0]["server"]
+        or mismatch_snapshot["advanced"]["resource_control_effective"]
+        != "compat"
+        or any(
+            expected not in mismatch_logs
+            for expected in (
+                "effective_mode=compat",
+                "state=safe_fallback",
+                "hardware_pin_matched=false",
+                "startup_budget_applied=false",
+            )
+        )
     ):
-        raise AssertionError("hardware fingerprint change reused a force_max curve")
+        raise AssertionError("hardware pin mismatch did not use compat limits")
     calibrated_env = force_env.copy()
     calibrated_env["SUBCONVERTER_FORCE_MAX_CURVE_FINGERPRINT"] = hardware.group(1)
     calibrated_snapshot, calibrated_logs = run_settings_snapshot(
@@ -11721,10 +11750,17 @@ def main() -> int:
         COMPAT_FIXTURES / "legacy-pref.toml",
         calibrated_env,
     )
-    if "curve_valid=true applied=true" not in calibrated_logs:
-        raise AssertionError("matching force_max hardware curve was not applied")
+    if any(
+        expected not in calibrated_logs
+        for expected in (
+            "effective_mode=force_max",
+            "hardware_pin_matched=true",
+            "startup_budget_applied=true",
+        )
+    ):
+        raise AssertionError("matching force_max hardware pin was not applied")
     if calibrated_snapshot["advanced"]["force_max_curve_fingerprint"] != hardware.group(1):
-        raise AssertionError("force_max curve fingerprint was not retained")
+        raise AssertionError("force_max hardware pin was not retained")
     invalid_resource_env = baseline_environment.copy()
     invalid_resource_env["SUBCONVERTER_RESOURCE_CONTROL"] = "automatic"
     invalid_resource = subprocess.run(

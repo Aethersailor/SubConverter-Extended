@@ -69,6 +69,7 @@ struct WorkloadSchedulerSnapshot {
   uint64_t accepted = 0;
   uint64_t rejected = 0;
   uint64_t cancelled = 0;
+  uint64_t oldest_queued_age_ms = 0;
 };
 
 class WorkloadScheduler {
@@ -227,8 +228,20 @@ public:
 
   WorkloadSchedulerSnapshot snapshot() const {
     std::lock_guard<std::mutex> lock(mutex_);
+    Clock::time_point oldest = Clock::time_point::max();
+    for (const auto &queue : queues_) {
+      if (!queue.empty())
+        oldest = std::min(oldest, queue.front()->enqueued_at);
+    }
+    const uint64_t oldest_age_ms =
+        oldest == Clock::time_point::max()
+            ? 0
+            : static_cast<uint64_t>(std::max<int64_t>(
+                  0, std::chrono::duration_cast<std::chrono::milliseconds>(
+                         Clock::now() - oldest)
+                         .count()));
     return {queued_entries_, queued_bytes_, active_, accepted_, rejected_,
-            cancelled_};
+            cancelled_, oldest_age_ms};
   }
 
   std::size_t workerCount() const noexcept { return workers_.size(); }

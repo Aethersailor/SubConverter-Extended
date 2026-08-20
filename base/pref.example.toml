@@ -419,9 +419,9 @@ serve_file_root = "web"
 log_level = "info"
 # 是否强制输出详细调试信息；true 会覆盖 log_level 并使用 verbose 级别，可能包含敏感配置细节。
 print_debug_info = false
-# 资源控制模式：三种模式共用异步入口。compat 映射旧许可；adaptive 只输出 shadow 建议；force_max 自动按硬件开放最大安全预算，可用下方指纹固定硬件边界。未知值会拒绝启动。
+# 资源控制模式：三种模式共用同一执行路径。compat 保留旧许可；adaptive 当前只输出观测建议；force_max 在硬件探测完整时应用硬件感知的静态启动预算。未知值会拒绝启动。
 resource_control = "compat"
-# 可选的硬件指纹固定值。留空时 force_max 自动按当前 cgroup、CPU 和内存应用硬件预算；填写后仅在精确匹配时启用，硬件变化会回退 compat。
+# 已弃用的可选硬件 pin。留空时不固定硬件；填写后仅在精确匹配时启用 force_max。该值不代表已验证容量曲线。
 force_max_curve_fingerprint = ""
 # 普通模式的 HTTP 等待队列上限；force_max 会忽略此静态值，按可用内存和文件描述符上限计算。
 max_pending_connections = 10240
@@ -429,7 +429,7 @@ max_pending_connections = 10240
 max_concurrent_threads = 16
 # cpp-httplib 后端在突发流量下的动态工作线程总上限；必须不小于基础线程数，否则会自动提高。SUBCONVERTER_MAX_SERVER_THREADS 可覆盖。
 max_server_threads = 128
-# 整个 HTTP 请求的绝对截止时间，单位毫秒；普通模式可由 SUBCONVERTER_REQUEST_DEADLINE_MS 覆盖，允许范围 100～300000。force_max 会提高到当前整数类型边界，并依靠客户端取消、上游超时和关闭信号回收请求。
+# 整个 HTTP 请求的绝对截止时间，单位毫秒；所有资源模式使用同一有限截止时间。SUBCONVERTER_REQUEST_DEADLINE_MS 可覆盖，允许范围 100～300000。
 request_deadline_ms = 15000
 # 单次配置允许的规则集数量上限；0 表示不限制。
 max_allowed_rulesets = 64
