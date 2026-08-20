@@ -2096,6 +2096,23 @@ static std::string subconverterEntry(Request &request, Response &response,
 namespace {
 
 std::atomic<WorkloadScheduler *> conversion_scheduler_instance{nullptr};
+std::atomic<WorkloadScheduler *> legacy_request_flow_instance{nullptr};
+
+WorkloadScheduler &legacyRequestFlowScheduler() {
+  const Settings &settings = effectiveSettings();
+  const unsigned int hardware_threads =
+      std::max(1U, std::thread::hardware_concurrency());
+  const std::size_t workers = static_cast<std::size_t>(
+      std::clamp(std::min(settings.maxConcurThreads,
+                          static_cast<int>(hardware_threads)),
+                 1, INT_MAX));
+  const std::size_t entries = static_cast<std::size_t>(
+      std::max(settings.maxPendingConns, 1));
+  static WorkloadScheduler scheduler(workers, entries,
+                                     requestAdmissionSnapshot().max_bytes);
+  legacy_request_flow_instance.store(&scheduler, std::memory_order_release);
+  return scheduler;
+}
 
 WorkloadScheduler &conversionScheduler() {
   const Settings &settings = effectiveSettings();
@@ -2344,9 +2361,72 @@ const ConversionService &defaultConversionService() {
   return service;
 }
 
+void ConversionService::convertSubscriptionAsync(Request request,
+                                                 bool track_statistics,
+                                                 Completion completion) const {
+  if (!completion)
+    return;
+  const RequestCostClass cost = estimateConversionCost(request);
+  if (request.context)
+    request.context->setCostClass(cost);
+  const uint64_t bytes = request.context
+                             ? request.context->estimatedBytes()
+                             : static_cast<uint64_t>(request.postdata.size());
+  const auto deadline = request.context
+                            ? request.context->deadline()
+                            : RequestContext::Clock::time_point::max();
+  const RequestCancellationToken cancellation =
+      request.context ? request.context->cancellationToken()
+                      : RequestCancellationToken();
+  const std::shared_ptr<RequestContext> context = request.context;
+  legacyRequestFlowScheduler().submitAsync(
+      cost, bytes, deadline, cancellation,
+      [request = std::move(request), track_statistics]() mutable {
+        ScopedRequestContext request_scope(request.context);
+        ScopedLogRequestContext log_scope(
+            request.context ? request.context->requestId() : std::string());
+        Response response;
+        std::string body =
+            subconverterEntry(request, response, track_statistics);
+        return ConversionResult(response.status_code,
+                                std::move(response.content_type),
+                                std::move(response.headers), std::move(body));
+      },
+      [context, completion = std::move(completion)](
+          SchedulerAsyncResult<ConversionResult> result) mutable {
+        if (result.status == SchedulerSubmitStatus::Accepted &&
+            !result.error && result.value) {
+          completion(std::move(*result.value));
+          return;
+        }
+        Request failure_request;
+        failure_request.context = context;
+        if (result.status != SchedulerSubmitStatus::Accepted) {
+          completion(schedulerFailureResult(failure_request, result.status));
+          return;
+        }
+        if (context)
+          context->suggestFailure(RequestFailureAttribution::Server);
+        writeLog(LOG_LEVEL_ERROR,
+                 "ASYNC_REQUEST_FLOW_FAILED reason=unexpected_exception");
+        completion(ConversionResult(
+            500, "text/plain; charset=utf-8",
+            {{"Cache-Control", "private, no-store"}},
+            "Internal server error while processing request.\n"
+            "处理请求时发生内部服务器错误。\n"));
+      });
+}
+
 WorkloadSchedulerSnapshot conversionSchedulerSnapshot() {
   if (WorkloadScheduler *scheduler =
           conversion_scheduler_instance.load(std::memory_order_acquire))
+    return scheduler->snapshot();
+  return {};
+}
+
+WorkloadSchedulerSnapshot legacyRequestFlowSnapshot() {
+  if (WorkloadScheduler *scheduler =
+          legacy_request_flow_instance.load(std::memory_order_acquire))
     return scheduler->snapshot();
   return {};
 }
@@ -2362,9 +2442,15 @@ void shutdownConversionScheduler() noexcept {
   if (WorkloadScheduler *scheduler =
           conversion_scheduler_instance.load(std::memory_order_acquire))
     scheduler->shutdown(true);
+  if (WorkloadScheduler *scheduler =
+          legacy_request_flow_instance.load(std::memory_order_acquire))
+    scheduler->shutdown(true);
 }
 
 void requestConversionSchedulerShutdown() noexcept {
+  if (WorkloadScheduler *scheduler =
+          legacy_request_flow_instance.load(std::memory_order_acquire))
+    scheduler->requestShutdown(true);
   if (WorkloadScheduler *scheduler =
           conversion_scheduler_instance.load(std::memory_order_acquire))
     scheduler->requestShutdown(true);
@@ -2386,6 +2472,33 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS) {
 std::string subconverterTracked(RESPONSE_CALLBACK_ARGS) {
   return applyConversionResult(
       defaultConversionService().convertSubscription(request, true), response);
+}
+
+static void applyAsyncConversionResult(
+    ConversionResult result, async_response_completion completion) {
+  Response response;
+  response.status_code = result.statusCode();
+  response.content_type = std::move(result).releaseContentType();
+  response.headers = std::move(result).releaseHeaders();
+  std::string body = std::move(result).releaseBody();
+  completion(std::move(response), std::move(body));
+}
+
+void subconverterAsync(Request request, async_response_completion completion) {
+  defaultConversionService().convertSubscriptionAsync(
+      std::move(request), false,
+      [completion = std::move(completion)](ConversionResult result) mutable {
+        applyAsyncConversionResult(std::move(result), std::move(completion));
+      });
+}
+
+void subconverterTrackedAsync(Request request,
+                              async_response_completion completion) {
+  defaultConversionService().convertSubscriptionAsync(
+      std::move(request), true,
+      [completion = std::move(completion)](ConversionResult result) mutable {
+        applyAsyncConversionResult(std::move(result), std::move(completion));
+      });
 }
 
 namespace {

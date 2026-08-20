@@ -38,6 +38,29 @@ std::string okHandler(Request &request, Response &response) {
   return "ok";
 }
 
+std::string asyncSyncHandler(Request &request, Response &response) {
+  if (!request.context)
+    throw std::runtime_error("async sync fallback lost request context");
+  response.headers["X-Test-Request-Context-ID"] = request.context->requestId();
+  return "async-ok";
+}
+
+void asyncHandler(Request request, async_response_completion completion) {
+  std::thread([request = std::move(request),
+               completion = std::move(completion)]() mutable {
+    Response response;
+    if (!request.context) {
+      response.status_code = 500;
+      completion(std::move(response), "missing-context");
+      return;
+    }
+    response.headers["X-Test-Request-Context-ID"] =
+        request.context->requestId();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    completion(std::move(response), "async-ok");
+  }).detach();
+}
+
 std::atomic<bool> blocking_started{false};
 std::atomic<bool> blocking_release{false};
 std::atomic<bool> cancellation_started{false};
@@ -315,6 +338,8 @@ int main() {
   WebServer server;
   server.append_response("GET", "/throw", "text/plain", throwingHandler);
   server.append_response("GET", "/ok", "text/plain", okHandler);
+  server.append_async_response("GET", "/async", "text/plain",
+                               asyncSyncHandler, asyncHandler);
 
   listener_args args;
   args.listen_address = "127.0.0.1";
@@ -348,6 +373,8 @@ int main() {
   const httplib::Result not_found =
       client.Get("/missing?token=missing-route-secret");
   const httplib::Result ok = client.Get("/ok");
+  const httplib::Result async_first = client.Get("/async");
+  const httplib::Result async_second = client.Get("/async");
   const httplib::Result head = client.Head("/ok");
   const httplib::Result options = client.Options("/ok");
   const httplib::Result explain_error = client.Get("/throw?explain=true");
@@ -396,6 +423,27 @@ int main() {
   require(ok_request_id != exception_request_id &&
               ok_request_id != missing_request_id,
           "normal route reused a request ID");
+  require(static_cast<bool>(async_first) && async_first->status == 200 &&
+              async_first->body == "async-ok",
+          "first async route failed");
+  require(async_first->get_header_value("Content-Type").find("text/plain") !=
+              std::string::npos,
+          "async route lost its default content type");
+  require(static_cast<bool>(async_second) && async_second->status == 200 &&
+              async_second->body == "async-ok",
+          "second keep-alive async route failed");
+  const std::string async_first_id =
+      async_first->get_header_value("X-Request-ID");
+  const std::string async_second_id =
+      async_second->get_header_value("X-Request-ID");
+  require(validRequestId(async_first_id) && validRequestId(async_second_id) &&
+              async_first_id != async_second_id,
+          "async route request IDs are invalid or reused");
+  require(async_first->get_header_value("X-Test-Request-Context-ID") ==
+              async_first_id &&
+              async_second->get_header_value("X-Test-Request-Context-ID") ==
+                  async_second_id,
+          "async route lost its owned request context");
   require(static_cast<bool>(head) && head->status == 200,
           "HEAD route failed");
   const std::string head_request_id = head->get_header_value("X-Request-ID");
@@ -499,20 +547,20 @@ int main() {
   uint64_t terminal_total = 0;
   for (uint64_t count : lifecycle.terminal)
     terminal_total += count;
-  require(terminal_total == 6,
+  require(terminal_total == 8,
           "HTTP requests did not each reach exactly one terminal state");
   require(lifecycle.terminal[static_cast<std::size_t>(
-              RequestTerminalState::Completed)] == 4 &&
+              RequestTerminalState::Completed)] == 6 &&
               lifecycle.terminal[static_cast<std::size_t>(
                   RequestTerminalState::Failed)] == 2 &&
               lifecycle.terminal[static_cast<std::size_t>(
                   RequestTerminalState::Cancelled)] == 0,
           "HTTP terminal attribution changed across normal and error paths");
   require(lifecycle.stage_samples[static_cast<std::size_t>(
-              RequestStage::Admission)] == 6,
+              RequestStage::Admission)] == 8,
           "HTTP admission timing did not cover every response path");
   require(lifecycle.stage_samples[static_cast<std::size_t>(
-              RequestStage::Send)] == 6,
+              RequestStage::Send)] == 8,
           "HTTP send timing did not cover every response path");
   require(lifecycle.stage_samples[static_cast<std::size_t>(
               RequestStage::Parse)] >= 1,
@@ -520,7 +568,7 @@ int main() {
   const RequestAdmissionSnapshot admission = requestAdmissionSnapshot();
   require(admission.active_entries == 0 && admission.active_bytes == 0,
           "request admission permits leaked after server shutdown");
-  require(admission.accepted == 6 && admission.rejected == 0,
+  require(admission.accepted == 8 && admission.rejected == 0,
           "request admission did not account for every response path");
   resetRequestLifecycleMetricsForTests();
   testIndependentHealthChannel();

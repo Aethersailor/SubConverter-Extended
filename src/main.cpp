@@ -354,13 +354,15 @@ int main(int argc, char *argv[]) {
                               return "ok\n";
                             });
 
-  webServer.append_response("GET", "/sub", "text/plain;charset=utf-8",
-                            global.statisticsEnabled ? subconverterTracked
-                                                     : subconverter);
+  webServer.append_async_response(
+      "GET", "/sub", "text/plain;charset=utf-8",
+      global.statisticsEnabled ? subconverterTracked : subconverter,
+      global.statisticsEnabled ? subconverterTrackedAsync : subconverterAsync);
 
-  webServer.append_response("HEAD", "/sub", "text/plain",
-                            global.statisticsEnabled ? subconverterTracked
-                                                     : subconverter);
+  webServer.append_async_response(
+      "HEAD", "/sub", "text/plain",
+      global.statisticsEnabled ? subconverterTracked : subconverter,
+      global.statisticsEnabled ? subconverterTrackedAsync : subconverterAsync);
 
   webServer.append_response("GET", "/getruleset", "text/plain;charset=utf-8",
                             getRuleset);

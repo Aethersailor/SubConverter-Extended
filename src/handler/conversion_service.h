@@ -1,6 +1,7 @@
 #ifndef CONVERSION_SERVICE_H_INCLUDED
 #define CONVERSION_SERVICE_H_INCLUDED
 
+#include <functional>
 #include <string>
 #include <utility>
 
@@ -37,8 +38,12 @@ private:
 
 class ConversionService {
 public:
+  using Completion = std::function<void(ConversionResult)>;
+
   ConversionResult convertSubscription(Request &request,
                                        bool track_statistics) const;
+  void convertSubscriptionAsync(Request request, bool track_statistics,
+                                Completion completion) const;
 };
 
 struct ResponseMicroCacheSnapshot {
@@ -49,6 +54,7 @@ struct ResponseMicroCacheSnapshot {
 
 const ConversionService &defaultConversionService();
 WorkloadSchedulerSnapshot conversionSchedulerSnapshot();
+WorkloadSchedulerSnapshot legacyRequestFlowSnapshot();
 ResponseMicroCacheSnapshot responseMicroCacheSnapshot();
 void requestConversionSchedulerShutdown() noexcept;
 void shutdownConversionScheduler() noexcept;
