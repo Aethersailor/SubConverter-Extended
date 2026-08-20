@@ -59,12 +59,14 @@ static string_icase_map buildSubscriptionRequestHeaders() {
 
 #include "utils/base64/base64.h"
 #include "utils/bounded_executor.h"
+#include "utils/cooperative_cpu.h"
 #include "utils/file_extra.h"
 #include "utils/ini_reader/ini_reader.h"
 #include "utils/logger.h"
 #include "utils/md5/md5_interface.h"
 #include "utils/network.h"
 #include "utils/redact.h"
+#include "utils/resource_control.h"
 #include "utils/regexp.h"
 #include "utils/stl_extra.h"
 #include "utils/string.h"
@@ -412,7 +414,7 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS) {
   for (RulesetContent &x : rca) {
     std::string content;
     try {
-      content = x.rule_content.get();
+      content = waitWithoutCpuPermit([&] { return x.rule_content.get(); });
     } catch (const ExecutorSubmitError &error) {
       response.content_type = "text/plain; charset=utf-8";
       response.headers["Cache-Control"] = "private, no-store";
@@ -2018,24 +2020,31 @@ static std::string subconverterEntry(Request &request, Response &response,
              "SUB_REQUEST_COALESCED owner_request_id=" +
                  (call->owner_request_id.empty() ? "unavailable"
                                                  : call->owner_request_id));
-    std::unique_lock<std::mutex> lock(call->mutex);
-    while (!call->done) {
-      RequestCancellationResponse cancellation_response;
-      if (requestCancellationResponse(request.context,
-                                      cancellation_response)) {
-        lock.unlock();
-        response.status_code = cancellation_response.status_code;
-        response.content_type = "text/plain; charset=utf-8";
-        response.headers = std::move(cancellation_response.headers);
-        return std::move(cancellation_response.body);
-      }
-      auto wake = RequestContext::Clock::now() +
-                  std::chrono::milliseconds(10);
-      if (request.context &&
-          request.context->deadline() !=
-              RequestContext::Clock::time_point::max())
-        wake = std::min(wake, request.context->deadline());
-      call->cv.wait_until(lock, wake);
+    std::optional<RequestCancellationResponse> follower_cancellation =
+        waitWithoutCpuPermit([&]()
+                                 -> std::optional<
+                                     RequestCancellationResponse> {
+          std::unique_lock<std::mutex> lock(call->mutex);
+          while (!call->done) {
+            RequestCancellationResponse cancellation_response;
+            if (requestCancellationResponse(request.context,
+                                            cancellation_response))
+              return cancellation_response;
+            auto wake = RequestContext::Clock::now() +
+                        std::chrono::milliseconds(10);
+            if (request.context &&
+                request.context->deadline() !=
+                    RequestContext::Clock::time_point::max())
+              wake = std::min(wake, request.context->deadline());
+            call->cv.wait_until(lock, wake);
+          }
+          return std::nullopt;
+        });
+    if (follower_cancellation) {
+      response.status_code = follower_cancellation->status_code;
+      response.content_type = "text/plain; charset=utf-8";
+      response.headers = std::move(follower_cancellation->headers);
+      return std::move(follower_cancellation->body);
     }
     if (call->exception)
       std::rethrow_exception(call->exception);
@@ -2097,20 +2106,69 @@ namespace {
 
 std::atomic<WorkloadScheduler *> conversion_scheduler_instance{nullptr};
 std::atomic<WorkloadScheduler *> legacy_request_flow_instance{nullptr};
+std::atomic<CpuPermitGate *> conversion_cpu_gate_instance{nullptr};
+std::atomic<bool> conversion_shutdown_requested{false};
 
-WorkloadScheduler &legacyRequestFlowScheduler() {
-  const Settings &settings = effectiveSettings();
+CpuPermitGate &conversionCpuGate() {
+  static CpuPermitGate gate(static_cast<std::size_t>(
+      std::max(1, effectiveSettings().maxConcurThreads)));
+  conversion_cpu_gate_instance.store(&gate, std::memory_order_release);
+  if (conversion_shutdown_requested.load(std::memory_order_acquire))
+    gate.requestShutdown();
+  return gate;
+}
+
+std::size_t legacyRequestFlowWorkerCount(const Settings &settings) {
   const unsigned int hardware_threads =
       std::max(1U, std::thread::hardware_concurrency());
-  const std::size_t workers = static_cast<std::size_t>(
+  const std::size_t cpu_workers = static_cast<std::size_t>(
       std::clamp(std::min(settings.maxConcurThreads,
                           static_cast<int>(hardware_threads)),
                  1, INT_MAX));
+  const ResourceControlSnapshot resources = resourceControlSnapshot();
+  if (resources.effective_mode != "force_max" ||
+      !resources.startup_budget_applied)
+    return cpu_workers;
+
+  uint64_t flow_workers = std::max<uint64_t>(
+      cpu_workers, resources.suggested_active_flows);
+  flow_workers = std::min<uint64_t>(
+      flow_workers, static_cast<uint64_t>(std::max(1, settings.maxPendingConns)));
+  flow_workers = std::min<uint64_t>(flow_workers, 256);
+  uint64_t memory_boundary = 0;
+  const auto include_memory_boundary = [&memory_boundary](uint64_t value) {
+    if (value != 0)
+      memory_boundary = memory_boundary == 0
+                            ? value
+                            : std::min(memory_boundary, value);
+  };
+  include_memory_boundary(resources.memory_high_bytes);
+  include_memory_boundary(resources.memory_max_bytes);
+  include_memory_boundary(resources.host_total_memory_bytes);
+  if (memory_boundary != 0)
+    flow_workers = std::min<uint64_t>(
+        flow_workers,
+        std::max<uint64_t>(1, memory_boundary / (UINT64_C(4) * 1024 * 1024)));
+  if (resources.pids_max != 0) {
+    const uint64_t remaining = resources.pids_max > resources.pids_current
+                                   ? resources.pids_max - resources.pids_current
+                                   : 0;
+    const uint64_t pids_headroom = remaining > 16 ? remaining - 16 : 1;
+    flow_workers = std::min<uint64_t>(flow_workers, pids_headroom);
+  }
+  return static_cast<std::size_t>(std::max<uint64_t>(1, flow_workers));
+}
+
+WorkloadScheduler &legacyRequestFlowScheduler() {
+  const Settings &settings = effectiveSettings();
   const std::size_t entries = static_cast<std::size_t>(
       std::max(settings.maxPendingConns, 1));
-  static WorkloadScheduler scheduler(workers, entries,
+  static WorkloadScheduler scheduler(legacyRequestFlowWorkerCount(settings),
+                                     entries,
                                      requestAdmissionSnapshot().max_bytes);
   legacy_request_flow_instance.store(&scheduler, std::memory_order_release);
+  if (conversion_shutdown_requested.load(std::memory_order_acquire))
+    scheduler.requestShutdown(true);
   return scheduler;
 }
 
@@ -2127,6 +2185,8 @@ WorkloadScheduler &conversionScheduler() {
   static WorkloadScheduler scheduler(workers, entries,
                                      requestAdmissionSnapshot().max_bytes);
   conversion_scheduler_instance.store(&scheduler, std::memory_order_release);
+  if (conversion_shutdown_requested.load(std::memory_order_acquire))
+    scheduler.requestShutdown(true);
   return scheduler;
 }
 
@@ -2257,6 +2317,12 @@ ConversionResult executorFailureResult(Request &request,
 std::string runScheduledConversion(
     Request &request, Response &response, const SettingsSnapshot &snapshot,
     RuleConversionStats *stats, bool with_retry) {
+  if (cooperativeCpuPermitActive()) {
+    ScopedSettingsView settings_scope(snapshot);
+    if (with_retry)
+      return runSubconverterImplWithRetry(request, response, *snapshot, stats);
+    return subconverter_impl(request, response, *snapshot, stats);
+  }
   const std::string scheduler_mode =
       toLower(getEnv("SUBCONVERTER_CONVERSION_SCHEDULER"));
   if (scheduler_mode == "direct") {
@@ -2349,11 +2415,25 @@ std::string runScheduledConversion(
 
 ConversionResult ConversionService::convertSubscription(
     Request &request, bool track_statistics) const {
-  Response response;
-  std::string body =
-      subconverterEntry(request, response, track_statistics);
-  return ConversionResult(response.status_code, std::move(response.content_type),
-                          std::move(response.headers), std::move(body));
+  if (cooperativeCpuPermitActive()) {
+    Response response;
+    std::string body =
+        subconverterEntry(request, response, track_statistics);
+    return ConversionResult(response.status_code,
+                            std::move(response.content_type),
+                            std::move(response.headers), std::move(body));
+  }
+  auto completion = std::make_shared<std::promise<ConversionResult>>();
+  std::future<ConversionResult> future = completion->get_future();
+  convertSubscriptionAsync(
+      Request(request), track_statistics,
+      [completion](ConversionResult result) mutable {
+        try {
+          completion->set_value(std::move(result));
+        } catch (...) {
+        }
+      });
+  return future.get();
 }
 
 const ConversionService &defaultConversionService() {
@@ -2366,9 +2446,19 @@ void ConversionService::convertSubscriptionAsync(Request request,
                                                  Completion completion) const {
   if (!completion)
     return;
+  if (conversion_shutdown_requested.load(std::memory_order_acquire)) {
+    Request failure_request;
+    failure_request.context = request.context;
+    completion(schedulerFailureResult(failure_request,
+                                      SchedulerSubmitStatus::Stopping));
+    return;
+  }
   const RequestCostClass cost = estimateConversionCost(request);
   if (request.context)
     request.context->setCostClass(cost);
+  writeLog(LOG_LEVEL_DEBUG,
+           "CONVERSION_ADMISSION cost=" +
+               std::string(requestCostClassName(cost)));
   const uint64_t bytes = request.context
                              ? request.context->estimatedBytes()
                              : static_cast<uint64_t>(request.postdata.size());
@@ -2379,12 +2469,24 @@ void ConversionService::convertSubscriptionAsync(Request request,
       request.context ? request.context->cancellationToken()
                       : RequestCancellationToken();
   const std::shared_ptr<RequestContext> context = request.context;
+  const auto queued_at = RequestContext::Clock::now();
   legacyRequestFlowScheduler().submitAsync(
       cost, bytes, deadline, cancellation,
-      [request = std::move(request), track_statistics]() mutable {
+      [request = std::move(request), track_statistics, deadline, cancellation,
+       queued_at]() mutable {
         ScopedRequestContext request_scope(request.context);
         ScopedLogRequestContext log_scope(
             request.context ? request.context->requestId() : std::string());
+        if (request.context) {
+          request.context->addStageDuration(
+              RequestStage::Queue, RequestContext::Clock::now() - queued_at);
+          request.context->setCurrentStage(RequestStage::Parse);
+        }
+        CpuPermitLease permit(conversionCpuGate(), deadline, cancellation);
+        const SchedulerSubmitStatus permit_status = permit.acquire();
+        if (permit_status != SchedulerSubmitStatus::Accepted)
+          throw SchedulerSubmitError(permit_status);
+        ScopedCpuPermit permit_scope(permit);
         Response response;
         std::string body =
             subconverterEntry(request, response, track_statistics);
@@ -2404,6 +2506,16 @@ void ConversionService::convertSubscriptionAsync(Request request,
         if (result.status != SchedulerSubmitStatus::Accepted) {
           completion(schedulerFailureResult(failure_request, result.status));
           return;
+        }
+        if (result.error) {
+          try {
+            std::rethrow_exception(result.error);
+          } catch (const SchedulerSubmitError &error) {
+            completion(schedulerFailureResult(failure_request,
+                                              error.status()));
+            return;
+          } catch (...) {
+          }
         }
         if (context)
           context->suggestFailure(RequestFailureAttribution::Server);
@@ -2431,6 +2543,13 @@ WorkloadSchedulerSnapshot legacyRequestFlowSnapshot() {
   return {};
 }
 
+CpuPermitSnapshot conversionCpuPermitSnapshot() {
+  if (CpuPermitGate *gate =
+          conversion_cpu_gate_instance.load(std::memory_order_acquire))
+    return gate->snapshot();
+  return {};
+}
+
 ResponseMicroCacheSnapshot responseMicroCacheSnapshot() {
   std::lock_guard<std::mutex> lock(g_sub_response_cache_mutex);
   pruneExpiredSubResponseCache(std::chrono::steady_clock::now());
@@ -2439,6 +2558,7 @@ ResponseMicroCacheSnapshot responseMicroCacheSnapshot() {
 }
 
 void shutdownConversionScheduler() noexcept {
+  requestConversionSchedulerShutdown();
   if (WorkloadScheduler *scheduler =
           conversion_scheduler_instance.load(std::memory_order_acquire))
     scheduler->shutdown(true);
@@ -2448,12 +2568,16 @@ void shutdownConversionScheduler() noexcept {
 }
 
 void requestConversionSchedulerShutdown() noexcept {
+  conversion_shutdown_requested.store(true, std::memory_order_release);
   if (WorkloadScheduler *scheduler =
           legacy_request_flow_instance.load(std::memory_order_acquire))
     scheduler->requestShutdown(true);
   if (WorkloadScheduler *scheduler =
           conversion_scheduler_instance.load(std::memory_order_acquire))
     scheduler->requestShutdown(true);
+  if (CpuPermitGate *gate =
+          conversion_cpu_gate_instance.load(std::memory_order_acquire))
+    gate->requestShutdown();
 }
 
 static std::string applyConversionResult(ConversionResult result,

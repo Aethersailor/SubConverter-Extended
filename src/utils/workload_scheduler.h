@@ -174,8 +174,15 @@ public:
       throw std::invalid_argument(
           "WorkloadScheduler requires at least one worker");
     workers_.reserve(worker_count);
-    for (std::size_t index = 0; index < worker_count; ++index)
-      workers_.emplace_back([this] { workerLoop(); });
+    for (std::size_t index = 0; index < worker_count; ++index) {
+      try {
+        workers_.emplace_back([this] { workerLoop(); });
+      } catch (...) {
+        if (workers_.empty())
+          throw;
+        break;
+      }
+    }
   }
 
   ~WorkloadScheduler() { shutdown(true); }

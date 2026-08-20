@@ -70,6 +70,7 @@ struct listener_args
     uint32_t looper_interval = 200;
     uint32_t request_deadline_ms = 15000;
     void (*shutdown_callback)() = nullptr;
+    void (*drain_callback)() = nullptr;
 };
 
 struct RequestCancellationResponse

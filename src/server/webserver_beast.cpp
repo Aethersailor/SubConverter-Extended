@@ -968,8 +968,9 @@ int startBeastWebServer(WebServer &server, listener_args *args) {
   state->stop();
   if (args->shutdown_callback)
     args->shutdown_callback();
-  state->handlers.stop();
   state->handlers.join();
+  if (args->drain_callback)
+    args->drain_callback();
   for (int attempt = 0; attempt < 300 && state->active_sessions.load() != 0;
        ++attempt)
     std::this_thread::sleep_for(std::chrono::milliseconds(10));

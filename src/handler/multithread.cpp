@@ -9,6 +9,7 @@
 #include "server/request_context.h"
 #include "utils/network.h"
 #include "utils/bounded_executor.h"
+#include "utils/cooperative_cpu.h"
 #include "utils/resource_control.h"
 #include "utils/system.h"
 #include "webget.h"
@@ -52,6 +53,7 @@ static size_t configuredQueueCapacity()
 }
 
 static std::atomic<BoundedExecutor *> activeRulesetExecutor {nullptr};
+static std::atomic<bool> rulesetExecutorShutdownRequested {false};
 
 static BoundedExecutor &rulesetExecutor()
 {
@@ -60,6 +62,8 @@ static BoundedExecutor &rulesetExecutor()
     static const bool registered =
         (activeRulesetExecutor.store(&executor, std::memory_order_release), true);
     (void)registered;
+    if(rulesetExecutorShutdownRequested.load(std::memory_order_acquire))
+        executor.requestShutdown(true);
     return executor;
 }
 
@@ -82,6 +86,7 @@ size_t rulesetExecutorQueueCapacity()
 
 void shutdownRulesetExecutor()
 {
+    rulesetExecutorShutdownRequested.store(true, std::memory_order_release);
     requestOutboundFetchShutdown();
     BoundedExecutor *executor =
         activeRulesetExecutor.load(std::memory_order_acquire);
@@ -91,6 +96,7 @@ void shutdownRulesetExecutor()
 
 void requestRulesetExecutorShutdown()
 {
+    rulesetExecutorShutdownRequested.store(true, std::memory_order_release);
     requestOutboundFetchShutdown();
     BoundedExecutor *executor =
         activeRulesetExecutor.load(std::memory_order_acquire);
@@ -189,12 +195,14 @@ std::shared_future<std::string> fetchFileAsync(const std::string &path, const Pr
         const RequestCancellationToken cancellation = request_context
             ? request_context->cancellationToken()
             : RequestCancellationToken();
-        auto submission = rulesetExecutor().submitUntil(
-            deadline, cancellation,
-            [path, scope_limit, request_context](){
-                ScopedRequestContext scope(request_context);
-                return fileGet(path, scope_limit);
-            });
+        auto submission = waitWithoutCpuPermit([&] {
+            return rulesetExecutor().submitUntil(
+                deadline, cancellation,
+                [path, scope_limit, request_context](){
+                    ScopedRequestContext scope(request_context);
+                    return fileGet(path, scope_limit);
+                });
+        });
         retVal = std::move(submission.future);
     }
     else if(isLink(path))
@@ -208,14 +216,16 @@ std::shared_future<std::string> fetchFileAsync(const std::string &path, const Pr
         const RequestCancellationToken cancellation = request_context
             ? request_context->cancellationToken()
             : RequestCancellationToken();
-        auto submission = rulesetExecutor().submitUntil(
-            deadline, cancellation,
-            [path, proxy, cache_ttl, context, settings, request_context](){
-                ScopedRequestContext request_scope(request_context);
-                ScopedSettingsView view(settings);
-                return webGet(path, proxy, cache_ttl, nullptr, nullptr,
-                              context);
-            });
+        auto submission = waitWithoutCpuPermit([&] {
+            return rulesetExecutor().submitUntil(
+                deadline, cancellation,
+                [path, proxy, cache_ttl, context, settings, request_context](){
+                    ScopedRequestContext request_scope(request_context);
+                    ScopedSettingsView view(settings);
+                    return webGet(path, proxy, cache_ttl, nullptr, nullptr,
+                                  context);
+                });
+        });
         retVal = std::move(submission.future);
     }
     else

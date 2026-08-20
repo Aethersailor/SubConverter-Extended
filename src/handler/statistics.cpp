@@ -630,6 +630,16 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Key("oldest_queued_age_ms");
   writer.Uint64(legacy_flow.oldest_queued_age_ms);
   writer.EndObject();
+  const CpuPermitSnapshot cpu_permits = conversionCpuPermitSnapshot();
+  writer.Key("cpu_permits");
+  writer.StartObject();
+  writer.Key("limit");
+  writer.Uint64(cpu_permits.limit);
+  writer.Key("active");
+  writer.Uint64(cpu_permits.active);
+  writer.Key("waiting");
+  writer.Uint64(cpu_permits.waiting);
+  writer.EndObject();
   const RequestAdmissionSnapshot admission = requestAdmissionSnapshot();
   writer.Key("request_admission");
   writer.StartObject();

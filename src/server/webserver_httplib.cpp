@@ -922,6 +922,8 @@ int WebServer::start_web_server_multi(listener_args *args) {
   server.stop();
   if (args->shutdown_callback)
     args->shutdown_callback();
+  if (args->drain_callback)
+    args->drain_callback();
   thread.join();
   return 0;
 }

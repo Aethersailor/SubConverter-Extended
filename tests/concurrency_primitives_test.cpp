@@ -12,6 +12,7 @@
 
 #include "utils/bounded_executor.h"
 #include "utils/concurrent_lru_cache.h"
+#include "utils/cooperative_cpu.h"
 #include "utils/resource_control.h"
 #include "utils/workload_scheduler.h"
 
@@ -254,6 +255,100 @@ static void testWorkloadScheduler() {
   assert(cancelled_async == SchedulerSubmitStatus::Cancelled);
   assert(cancellation_callbacks.load(std::memory_order_relaxed) == 1);
   scheduler.shutdown(true);
+}
+
+static void testCooperativeCpuPermit() {
+  CpuPermitGate gate(1);
+  CpuPermitLease owner(gate, std::chrono::steady_clock::time_point::max(), {});
+  assert(owner.acquire() == SchedulerSubmitStatus::Accepted);
+  ScopedCpuPermit owner_scope(owner);
+  assert(gate.snapshot().active == 1);
+
+  std::promise<void> second_acquired;
+  std::shared_future<void> acquired = second_acquired.get_future().share();
+  const int result = waitWithoutCpuPermit([&] {
+    std::thread second([&] {
+      CpuPermitLease lease(gate,
+                           std::chrono::steady_clock::time_point::max(), {});
+      assert(lease.acquire() == SchedulerSubmitStatus::Accepted);
+      second_acquired.set_value();
+    });
+    acquired.wait();
+    second.join();
+    return 42;
+  });
+  assert(result == 42);
+  assert(owner.held());
+  assert(gate.snapshot().active == 1);
+  bool exception_seen = false;
+  try {
+    waitWithoutCpuPermit([]() -> int {
+      throw std::runtime_error("blocking dependency failed");
+    });
+  } catch (const std::runtime_error &) {
+    exception_seen = true;
+  }
+  assert(exception_seen && owner.held());
+
+  const int nested = waitWithoutCpuPermit(
+      [] { return waitWithoutCpuPermit([] { return 7; }); });
+  assert(nested == 7 && owner.held());
+
+  RequestCancellationSource cancelled;
+  cancelled.cancel(RequestCancellationReason::NoConsumers);
+  CpuPermitLease rejected(gate,
+                          std::chrono::steady_clock::time_point::max(),
+                          cancelled.token());
+  assert(rejected.acquire() == SchedulerSubmitStatus::Cancelled);
+
+  CpuPermitGate stopping_gate(1);
+  CpuPermitLease stopping_owner(
+      stopping_gate, std::chrono::steady_clock::time_point::max(), {});
+  assert(stopping_owner.acquire() == SchedulerSubmitStatus::Accepted);
+  std::future<SchedulerSubmitStatus> stopped_waiter =
+      std::async(std::launch::async, [&] {
+        CpuPermitLease waiter(
+            stopping_gate, std::chrono::steady_clock::time_point::max(), {});
+        return waiter.acquire();
+      });
+  while (stopping_gate.snapshot().waiting == 0)
+    std::this_thread::yield();
+  stopping_gate.requestShutdown();
+  assert(stopped_waiter.get() == SchedulerSubmitStatus::Stopping);
+
+  CpuPermitGate flow_gate(1);
+  WorkloadScheduler flows(2, 2, 1024);
+  std::promise<void> blocking_started;
+  std::shared_future<void> blocking = blocking_started.get_future().share();
+  std::promise<void> release_blocking;
+  std::shared_future<void> release = release_blocking.get_future().share();
+  auto blocked_flow = flows.submit(
+      RequestCostClass::Medium, 1,
+      std::chrono::steady_clock::time_point::max(), {}, [&] {
+        CpuPermitLease lease(
+            flow_gate, std::chrono::steady_clock::time_point::max(), {});
+        assert(lease.acquire() == SchedulerSubmitStatus::Accepted);
+        ScopedCpuPermit scope(lease);
+        return waitWithoutCpuPermit([&] {
+          blocking_started.set_value();
+          release.wait();
+          return 1;
+        });
+      });
+  blocking.wait();
+  auto runnable_flow = flows.submit(
+      RequestCostClass::Medium, 1,
+      std::chrono::steady_clock::time_point::max(), {}, [&] {
+        CpuPermitLease lease(
+            flow_gate, std::chrono::steady_clock::time_point::max(), {});
+        assert(lease.acquire() == SchedulerSubmitStatus::Accepted);
+        return 2;
+      });
+  assert(runnable_flow.future.wait_for(1s) == std::future_status::ready);
+  assert(runnable_flow.future.get() == 2);
+  release_blocking.set_value();
+  assert(blocked_flow.future.get() == 1);
+  flows.shutdown(true);
 }
 
 static void testWorkloadSchedulerActiveQueueWeights() {
@@ -676,6 +771,7 @@ int main() {
   testBoundedExecutor();
   testBoundedExecutorDeadlineAndCancellation();
   testWorkloadScheduler();
+  testCooperativeCpuPermit();
   testWorkloadSchedulerActiveQueueWeights();
   testRetainedResponseByteBudget();
   testActiveRequestShutdownCancellation();

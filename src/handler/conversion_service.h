@@ -7,7 +7,7 @@
 
 #include "server/webserver.h"
 #include "utils/map_extra.h"
-#include "utils/workload_scheduler.h"
+#include "utils/cooperative_cpu.h"
 
 class ConversionResult {
 public:
@@ -55,6 +55,7 @@ struct ResponseMicroCacheSnapshot {
 const ConversionService &defaultConversionService();
 WorkloadSchedulerSnapshot conversionSchedulerSnapshot();
 WorkloadSchedulerSnapshot legacyRequestFlowSnapshot();
+CpuPermitSnapshot conversionCpuPermitSnapshot();
 ResponseMicroCacheSnapshot responseMicroCacheSnapshot();
 void requestConversionSchedulerShutdown() noexcept;
 void shutdownConversionScheduler() noexcept;

@@ -29,6 +29,7 @@
 #include "server/client_ip.h"
 #include "server/request_context.h"
 #include "utils/base64/base64.h"
+#include "utils/cooperative_cpu.h"
 #include "utils/defer.h"
 #include "utils/file_extra.h"
 #include "utils/lock.h"
@@ -2077,7 +2078,9 @@ static int curlGet(const FetchArgument &argument,
         use_sync = true;
     }
     if(use_sync || !asyncFetchEngineAvailable())
-        return curlGetSyncLegacy(argument, route, result, return_code);
+        return waitWithoutCpuPermit([&] {
+            return curlGetSyncLegacy(argument, route, result, return_code);
+        });
 
     AsyncFetchRequest request = makeAsyncFetchRequest(argument, result);
     const Settings &settings = effectiveSettings();
@@ -2089,7 +2092,8 @@ static int curlGet(const FetchArgument &argument,
             settings.maxAllowedDownloadSize);
         if(!future.valid())
             throw std::future_error(std::future_errc::no_state);
-        SharedAsyncFetchResult shared = future.get();
+        SharedAsyncFetchResult shared =
+            waitWithoutCpuPermit([&] { return future.get(); });
         if(!shared)
             throw std::future_error(std::future_errc::broken_promise);
         fetched = std::move(*shared);
@@ -2112,14 +2116,15 @@ static int curlGet(const FetchArgument &argument,
     {
         writeLog(LOG_LEVEL_WARNING,
                  "出站请求遇到可恢复网络错误，200ms 后重试一次。");
-        sleepMs(200);
+        waitWithoutCpuPermit([] { sleepMs(200); });
         request.cookies = fetched.cookies.empty()
                               ? request.cookies
                               : std::move(fetched.cookies);
-        SharedAsyncFetchResult shared = multiEngine()
-            .submit(std::move(request), route, settings.allowInsecureTls,
-                    settings.maxAllowedDownloadSize)
-            .get();
+        AsyncFetchFuture retry_future = multiEngine().submit(
+            std::move(request), route, settings.allowInsecureTls,
+            settings.maxAllowedDownloadSize);
+        SharedAsyncFetchResult shared = waitWithoutCpuPermit(
+            [&] { return retry_future.get(); });
         if(!shared)
             throw std::future_error(std::future_errc::broken_promise);
         fetched = std::move(*shared);
@@ -2424,7 +2429,8 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned in
             }
         }
 
-        CacheFetchResult fetched = fetch_future.get();
+        CacheFetchResult fetched =
+            waitWithoutCpuPermit([&] { return fetch_future.get(); });
         return_code = fetched.status_code;
         content = std::move(fetched.content);
         if(response_headers)

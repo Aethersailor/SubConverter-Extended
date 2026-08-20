@@ -12,6 +12,7 @@
 #include "handler/webget.h"
 #include "server/request_context.h"
 #include "utils/logger.h"
+#include "utils/cooperative_cpu.h"
 #include "utils/network.h"
 #include "utils/redact.h"
 #include "utils/regexp.h"
@@ -462,7 +463,9 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
         rule_path_typed = x.rule_path_typed;
         if(rule_path.empty())
         {
-            strLine = x.rule_content.get().substr(2);
+            strLine = waitWithoutCpuPermit(
+                          [&] { return x.rule_content.get(); })
+                          .substr(2);
             if(script)
             {
                 if(startsWith(strLine, "MATCH") || startsWith(strLine, "FINAL"))
@@ -553,7 +556,8 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                     continue;
             }
 
-            retrieved_rules = x.rule_content.get();
+            retrieved_rules =
+                waitWithoutCpuPermit([&] { return x.rule_content.get(); });
             if(retrieved_rules.empty())
             {
                 writeLog(LOG_LEVEL_WARNING, "获取规则集失败或规则集为空：" +

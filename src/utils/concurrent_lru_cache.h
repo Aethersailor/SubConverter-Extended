@@ -11,6 +11,8 @@
 #include <unordered_map>
 #include <utility>
 
+#include "utils/cooperative_cpu.h"
+
 template <class Key, class Value, class Hash = std::hash<Key>>
 class ConcurrentLruCache {
 public:
@@ -55,7 +57,7 @@ public:
     }
 
     if (!owner)
-      return future.get();
+      return waitWithoutCpuPermit([&] { return future.get(); });
 
     try {
       Value value = compute();
@@ -73,7 +75,7 @@ public:
       std::lock_guard<std::mutex> lock(mutex_);
       inflight_.erase(key);
     }
-    return future.get();
+    return waitWithoutCpuPermit([&] { return future.get(); });
   }
 
   size_t size() const {
