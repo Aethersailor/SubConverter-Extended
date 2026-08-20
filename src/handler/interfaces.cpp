@@ -2483,23 +2483,12 @@ static ConversionResult makeConversionResult(Response response,
 
 ConversionResult ConversionService::convertSubscription(
     Request &request, bool track_statistics) const {
-  if (cooperativeCpuPermitActive()) {
-    Response response;
-    std::string body =
-        subconverterEntry(request, response, track_statistics);
-    return makeConversionResult(std::move(response), std::move(body));
-  }
-  auto completion = std::make_shared<std::promise<ConversionResult>>();
-  std::future<ConversionResult> future = completion->get_future();
-  convertSubscriptionAsync(
-      Request(request), track_statistics,
-      [completion](ConversionResult result) mutable {
-        try {
-          completion->set_value(std::move(result));
-        } catch (...) {
-        }
-      });
-  return future.get();
+  if (conversion_shutdown_requested.load(std::memory_order_acquire))
+    return schedulerFailureResult(request, SchedulerSubmitStatus::Stopping);
+  Response response;
+  std::string body =
+      subconverterEntry(request, response, track_statistics);
+  return makeConversionResult(std::move(response), std::move(body));
 }
 
 const ConversionService &defaultConversionService() {

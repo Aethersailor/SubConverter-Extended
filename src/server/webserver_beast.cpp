@@ -629,6 +629,18 @@ void BeastSession::process() {
           return;
         }
         outgoing.body() = invokeResponseRoute(*route, request, response);
+        if (response.shared_body) {
+          asio::post(
+              stream_.get_executor(),
+              [self = shared_from_this(), response = std::move(response),
+               body = std::move(outgoing.body()), explain_request,
+               client_address = request.remote_addr]() mutable {
+                self->completeAsyncResponse(
+                    std::move(response), std::move(body), explain_request,
+                    std::move(client_address));
+              });
+          return;
+        }
       }
       if (!routed) {
         const auto redirect = state_->server.redirect_map.find(request.url);

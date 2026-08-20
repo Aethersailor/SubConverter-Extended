@@ -267,7 +267,7 @@ advanced:
   log_level: info
   # 是否强制输出详细调试信息；true 会覆盖 log_level 并使用 verbose 级别，可能包含敏感配置细节。
   print_debug_info: false
-  # 资源控制模式：三种模式共用同一执行路径。compat 保留旧许可；adaptive 当前只输出观测建议；force_max 在硬件探测完整时应用硬件感知的静态启动预算。未知值会拒绝启动。
+  # 资源控制模式：默认 Beast 后端下，compat 使用同步有界转换路径，adaptive 和 force_max 使用协作式异步路径；显式 httplib 后端始终使用同步兼容路径。force_max 仅在硬件探测和可选硬件 pin 通过时应用硬件感知的启动预算，否则回退到 compat。未知值会拒绝启动。
   resource_control: compat
   # 已弃用的可选硬件 pin。留空时不固定硬件；填写后仅在精确匹配时启用 force_max。该值不代表已验证容量曲线。
   force_max_curve_fingerprint: ""

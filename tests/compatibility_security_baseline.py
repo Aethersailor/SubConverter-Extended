@@ -11449,6 +11449,54 @@ def conversion_cost_classification_baseline(
         )
 
 
+def resource_control_execution_path_baseline(binary: Path) -> None:
+    dashboard_headers = {
+        "Authorization": "Basic "
+        + base64.b64encode(
+            b"fixture-admin:fixture-dashboard-secret"
+        ).decode()
+    }
+    with running_service(
+        binary,
+        statistics=True,
+        environment={"SUBCONVERTER_RESOURCE_CONTROL": "compat"},
+    ) as base_url:
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "mixed",
+                "url": SUBSCRIPTION.strip(),
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+        )
+        if status != 200 or not body:
+            raise AssertionError(
+                f"compat execution probe failed: HTTP {status}: {body!r}"
+            )
+        status, body, _ = request(
+            base_url, "/dashboard/data", headers=dashboard_headers
+        )
+        if status != 200:
+            raise AssertionError(
+                f"compat execution dashboard returned HTTP {status}"
+            )
+        dashboard = json.loads(body)
+        resources = dashboard["resource_control"]
+        conversion = dashboard["conversion_scheduler"]
+        flow = dashboard["legacy_request_flow"]
+        if (
+            resources["effective_mode"] != "compat"
+            or conversion["accepted"] < 1
+            or flow["accepted"] != 0
+        ):
+            raise AssertionError(
+                "compat request did not stay on the bounded synchronous path: "
+                f"resources={resources!r} conversion={conversion!r} flow={flow!r}"
+            )
+
+
 def force_max_controller_runtime_baseline(binary: Path) -> None:
     dashboard_headers = {
         "Authorization": "Basic "
@@ -11461,6 +11509,21 @@ def force_max_controller_runtime_baseline(binary: Path) -> None:
         statistics=True,
         environment={"SUBCONVERTER_RESOURCE_CONTROL": "force_max"},
     ) as base_url:
+        request_status, request_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "mixed",
+                "url": SUBSCRIPTION.strip(),
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+        )
+        if request_status != 200 or not request_body:
+            raise AssertionError(
+                "force_max execution probe failed: "
+                f"HTTP {request_status}: {request_body!r}"
+            )
         time.sleep(2.2)
         status, body, _ = request(
             base_url, "/dashboard/data", headers=dashboard_headers
@@ -11472,16 +11535,26 @@ def force_max_controller_runtime_baseline(binary: Path) -> None:
         dashboard = json.loads(body)
         resources = dashboard["resource_control"]
         permits = dashboard["cpu_permits"]
+        conversion = dashboard["conversion_scheduler"]
+        flow = dashboard["legacy_request_flow"]
+        backend = os.environ.get("SUBCONVERTER_HTTP_BACKEND", "beast").lower()
+        execution_path_ok = (
+            conversion["accepted"] >= 1 and flow["accepted"] == 0
+            if backend == "httplib"
+            else conversion["accepted"] == 0 and flow["accepted"] >= 1
+        )
         if (
             resources["controller_state"] != "max_ready"
             or resources["sample_count"] < 1
             or resources["suggested_cpu_permits"]
             != resources["max_cpu_permits"]
             or permits["limit"] != resources["max_cpu_permits"]
+            or not execution_path_ok
         ):
             raise AssertionError(
                 "idle force_max did not hold the hardware CPU limit: "
-                f"resources={resources!r} permits={permits!r}"
+                f"resources={resources!r} permits={permits!r} "
+                f"conversion={conversion!r} flow={flow!r}"
             )
 
 
@@ -11964,6 +12037,7 @@ def main() -> int:
         loopback_proxy_route_baseline(binary, fixture_base)
         loopback_redirect_route_baseline(binary, fixture_base)
         conversion_cost_classification_baseline(binary, fixture_base)
+        resource_control_execution_path_baseline(binary)
         force_max_controller_runtime_baseline(binary)
         ruleset_executor_capacity_baseline(binary, fixture_base)
         getruleset_generation_reload_baseline(binary, fixture_base)
