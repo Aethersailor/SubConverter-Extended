@@ -295,7 +295,7 @@ jobs:
           python3 scripts/ci/dependency_snapshot.py emit --github-env "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
 
       - name: Prepare sanitizer build arguments
         id: sanitizer_args
@@ -380,7 +380,7 @@ jobs:
           python3 scripts/ci/dependency_snapshot.py emit --github-env "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
 
       - name: Prepare cross-build arguments
         id: cross_args
@@ -805,7 +805,7 @@ jobs:
             );
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
 
       - name: Log in to Docker Hub
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
@@ -1254,18 +1254,18 @@ jobs:
         run: |
           set -euo pipefail
 
-          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.apk' \) -print | sort | while read -r file; do
+          find artifacts -type f \( -name 'SubConverter-Extended-*.tar.gz' -o -name 'SubConverter-Extended-*.zip' -o -name 'SubConverter-Extended-*.apk' \) -print | sort | while read -r file; do
             sha256sum "$file" | sed 's#  artifacts/[^/]*/#  #'
           done > SHA256SUMS
 
           cat SHA256SUMS
-          duplicate_names="$(find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.apk' \) -printf '%f\n' | sort | uniq -d)"
+          duplicate_names="$(find artifacts -type f \( -name 'SubConverter-Extended-*.tar.gz' -o -name 'SubConverter-Extended-*.zip' -o -name 'SubConverter-Extended-*.apk' \) -printf '%f\n' | sort | uniq -d)"
           if [ -n "$duplicate_names" ]; then
             echo "::error::Duplicate release asset names: $duplicate_names"
             exit 1
           fi
           mkdir release-assets
-          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.apk' \) \
+          find artifacts -type f \( -name 'SubConverter-Extended-*.tar.gz' -o -name 'SubConverter-Extended-*.zip' -o -name 'SubConverter-Extended-*.apk' \) \
             -exec cp '{}' release-assets/ \;
           cp SHA256SUMS release-assets/SHA256SUMS
 
@@ -1499,7 +1499,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
 
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4

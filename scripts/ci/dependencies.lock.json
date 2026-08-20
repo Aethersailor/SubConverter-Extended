@@ -3,7 +3,7 @@
     "cpp_httplib": {
       "ref": "HEAD",
       "repository": "https://github.com/yhirose/cpp-httplib.git",
-      "revision": "0151b3e23e8d897675b1e5392e55565d71f91316"
+      "revision": "6494edd8c03c55165825ae3078e2f55c595d8cb6"
     },
     "inja": {
       "ref": "HEAD",
@@ -60,7 +60,7 @@
       "source": "mirror.gcr.io/library/debian:trixie-slim"
     },
     "golang": {
-      "pinned": "mirror.gcr.io/library/golang@sha256:0d1d3a794be25f809dd2cb3160d8c73276c4056a9f8242a138e908ddeee7b6b6",
+      "pinned": "mirror.gcr.io/library/golang@sha256:65b6f280bf050ec5af12716857e8ea8439d694dbba8f31ceeb7630670071f2bb",
       "source": "mirror.gcr.io/library/golang:latest"
     }
   },
