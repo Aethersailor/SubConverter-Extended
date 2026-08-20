@@ -565,6 +565,8 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.StartObject();
   writer.Key("available");
   writer.Bool(fetch.available);
+  writer.Key("wakeup_available");
+  writer.Bool(fetch.wakeup_available);
   writer.Key("pending");
   writer.Uint64(fetch.pending);
   writer.Key("active");

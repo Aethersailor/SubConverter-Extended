@@ -114,6 +114,7 @@ struct AsyncFetchResult
 struct AsyncFetchEngineSnapshot
 {
     bool available = false;
+    bool wakeup_available = false;
     uint64_t pending = 0;
     uint64_t active = 0;
     uint64_t buffered_bytes = 0;

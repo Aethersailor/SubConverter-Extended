@@ -287,6 +287,11 @@ public:
                   : RequestCancellationReason::None;
   }
 
+  RequestCancellationRegistration
+  registerCallback(std::function<void()> callback) const {
+    return registerRequestCancellationCallback(state_, std::move(callback));
+  }
+
 private:
   explicit RequestCancellationToken(
       std::shared_ptr<RequestCancellationState> state)

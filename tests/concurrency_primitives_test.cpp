@@ -767,6 +767,30 @@ static void testResourceControlPrimitives() {
   assert(!hardwarePinMatches(uncalibrated, "hardware-a"));
 }
 
+static void testCancellationTokenCallbacks() {
+  RequestCancellationSource source;
+  std::atomic<int> callbacks{0};
+  RequestCancellationRegistration registration =
+      source.token().registerCallback(
+          [&] { callbacks.fetch_add(1, std::memory_order_relaxed); });
+  assert(source.cancel(RequestCancellationReason::ClientDisconnected));
+  assert(!source.cancel(RequestCancellationReason::Shutdown));
+  assert(callbacks.load(std::memory_order_relaxed) == 1);
+
+  RequestCancellationSource reset_source;
+  RequestCancellationRegistration reset_registration =
+      reset_source.token().registerCallback(
+          [&] { callbacks.fetch_add(1, std::memory_order_relaxed); });
+  reset_registration.reset();
+  assert(reset_source.cancel(RequestCancellationReason::Shutdown));
+  assert(callbacks.load(std::memory_order_relaxed) == 1);
+
+  int immediate = 0;
+  RequestCancellationRegistration immediate_registration =
+      source.token().registerCallback([&] { ++immediate; });
+  assert(immediate == 1);
+}
+
 int main() {
   testBoundedExecutor();
   testBoundedExecutorDeadlineAndCancellation();
@@ -775,6 +799,7 @@ int main() {
   testWorkloadSchedulerActiveQueueWeights();
   testRetainedResponseByteBudget();
   testActiveRequestShutdownCancellation();
+  testCancellationTokenCallbacks();
   testConcurrentLruCache();
   testExternalConfigCacheSemantics();
   testResourceControlPrimitives();

@@ -1149,6 +1149,7 @@ class CurlMultiEngine
         std::string effective_url;
         curl_prereq_data prereq_context;
         curl_progress_data progress;
+        RequestCancellationRegistration cancellation_registration;
         AsyncFetchResult result;
         std::promise<SharedAsyncFetchResult> promise;
     };
@@ -1198,7 +1199,9 @@ public:
         writeLog(LOG_LEVEL_INFO,
                  "OUTBOUND_MULTI_ENGINE resolver=asynchronous "
                  "total_connections=" + std::to_string(total_connections) +
-                 " host_connections=" + std::to_string(host_connections));
+                 " host_connections=" + std::to_string(host_connections) +
+                 " wakeup=" +
+                 (wakeupAvailable() ? "enabled" : "legacy-poll"));
     }
 
     ~CurlMultiEngine()
@@ -1226,6 +1229,9 @@ public:
         transfer->route = std::move(route);
         transfer->allow_insecure_tls = allow_insecure_tls;
         transfer->size_limit = size_limit;
+        transfer->cancellation_registration =
+            transfer->request.cancellation.registerCallback(
+                [this] { wakeWorker(); });
         AsyncFetchFuture future = transfer->promise.get_future().share();
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1243,7 +1249,7 @@ public:
             pending_.emplace_back(std::move(transfer));
             pending_count_.fetch_add(1, std::memory_order_relaxed);
         }
-        condition_.notify_one();
+        wakeWorker();
         return future;
     }
 
@@ -1255,7 +1261,7 @@ public:
                 return;
             stopping_ = true;
         }
-        condition_.notify_all();
+        wakeWorker();
         if(worker_.joinable())
             worker_.join();
         available_.store(false, std::memory_order_release);
@@ -1266,13 +1272,31 @@ public:
         const RetainedResponseByteSnapshot retained =
             retainedResponseByteSnapshot();
         return AsyncFetchEngineSnapshot{
-            available(),
+            available(), wakeupAvailable(),
             pending_count_.load(std::memory_order_relaxed),
             active_count_.load(std::memory_order_relaxed),
             retained.used};
     }
 
 private:
+    static constexpr bool wakeupAvailable() noexcept
+    {
+#if LIBCURL_VERSION_NUM >= 0x074400
+        return true;
+#else
+        return false;
+#endif
+    }
+
+    void wakeWorker() noexcept
+    {
+        condition_.notify_all();
+#if LIBCURL_VERSION_NUM >= 0x074400
+        if(multi_)
+            (void)curl_multi_wakeup(multi_);
+#endif
+    }
+
     static size_t bodyWriter(char *data, size_t size, size_t nmemb,
                              void *user_data)
     {
@@ -1425,6 +1449,7 @@ private:
     void finish(std::shared_ptr<Transfer> transfer, CURLcode code,
                 bool added)
     {
+        transfer->cancellation_registration.reset();
         if(added)
             active_count_.fetch_sub(1, std::memory_order_relaxed);
         if(added && multi_ && transfer->easy)
@@ -1556,17 +1581,37 @@ private:
 
     void waitForActivity()
     {
-        constexpr int timeout_ms = 50;
         if(active_.empty())
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            condition_.wait_for(lock, std::chrono::milliseconds(timeout_ms),
-                                [this]() {
-                                    return stopping_ || !pending_.empty();
-                                });
+            condition_.wait(lock, [this]() {
+                return stopping_ || !pending_.empty();
+            });
             return;
         }
 
+        int timeout_ms = 50;
+#if LIBCURL_VERSION_NUM >= 0x074400
+        timeout_ms = 1000;
+        long curl_timeout_ms = -1;
+        if(curl_multi_timeout(multi_, &curl_timeout_ms) == CURLM_OK &&
+           curl_timeout_ms >= 0)
+            timeout_ms = static_cast<int>(
+                std::clamp<long>(curl_timeout_ms, 0, timeout_ms));
+        const auto now = std::chrono::steady_clock::now();
+        for(const auto &[easy, transfer] : active_)
+        {
+            (void)easy;
+            if(transfer->request.deadline ==
+               std::chrono::steady_clock::time_point::max())
+                continue;
+            const auto remaining = std::chrono::duration_cast<
+                std::chrono::milliseconds>(transfer->request.deadline - now);
+            const int deadline_timeout = static_cast<int>(
+                std::clamp<int64_t>(remaining.count(), 0, timeout_ms));
+            timeout_ms = std::min(timeout_ms, deadline_timeout);
+        }
+#endif
         int ready = 0;
         // Let libcurl use poll-capable primitives. The HTTP server may already
         // hold thousands of client sockets, so outbound descriptors can exceed
@@ -1578,14 +1623,10 @@ private:
         const CURLMcode code =
             curl_multi_wait(multi_, nullptr, 0, timeout_ms, &ready);
 #endif
-        if(code != CURLM_OK || ready == 0)
-        {
-            std::unique_lock<std::mutex> lock(mutex_);
-            condition_.wait_for(lock, std::chrono::milliseconds(1),
-                                [this]() {
-                                    return stopping_ || !pending_.empty();
-                                });
-        }
+        if(code != CURLM_OK)
+            writeLog(LOG_LEVEL_ERROR,
+                     "OUTBOUND_MULTI_POLL_ERROR code=" +
+                         std::to_string(static_cast<int>(code)));
     }
 
     void cancelActive()
@@ -1694,7 +1735,7 @@ AsyncFetchEngineSnapshot asyncFetchEngineSnapshot() noexcept
         return engine->snapshot();
     const RetainedResponseByteSnapshot retained =
         retainedResponseByteSnapshot();
-    return {false, 0, 0, retained.used};
+    return {false, false, 0, 0, retained.used};
 }
 
 AsyncFetchFuture webGetAsync(AsyncFetchRequest request)
