@@ -1254,18 +1254,18 @@ jobs:
         run: |
           set -euo pipefail
 
-          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.apk' \) -print | sort | while read -r file; do
+          find artifacts -type f \( -name 'SubConverter-Extended-*.tar.gz' -o -name 'SubConverter-Extended-*.zip' -o -name 'SubConverter-Extended-*.apk' \) -print | sort | while read -r file; do
             sha256sum "$file" | sed 's#  artifacts/[^/]*/#  #'
           done > SHA256SUMS
 
           cat SHA256SUMS
-          duplicate_names="$(find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.apk' \) -printf '%f\n' | sort | uniq -d)"
+          duplicate_names="$(find artifacts -type f \( -name 'SubConverter-Extended-*.tar.gz' -o -name 'SubConverter-Extended-*.zip' -o -name 'SubConverter-Extended-*.apk' \) -printf '%f\n' | sort | uniq -d)"
           if [ -n "$duplicate_names" ]; then
             echo "::error::Duplicate release asset names: $duplicate_names"
             exit 1
           fi
           mkdir release-assets
-          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.apk' \) \
+          find artifacts -type f \( -name 'SubConverter-Extended-*.tar.gz' -o -name 'SubConverter-Extended-*.zip' -o -name 'SubConverter-Extended-*.apk' \) \
             -exec cp '{}' release-assets/ \;
           cp SHA256SUMS release-assets/SHA256SUMS
 
