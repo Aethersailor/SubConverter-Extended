@@ -4,6 +4,7 @@
 #include <cassert>
 #include <chrono>
 #include <future>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -258,6 +259,12 @@ static void testWorkloadScheduler() {
 }
 
 static void testCooperativeCpuPermit() {
+  assert(cooperativeFlowWorkerCap(1) == 16);
+  assert(cooperativeFlowWorkerCap(4) == 16);
+  assert(cooperativeFlowWorkerCap(16) == 64);
+  assert(cooperativeFlowWorkerCap(64) == 256);
+  assert(cooperativeFlowWorkerCap(std::numeric_limits<std::size_t>::max()) ==
+         256);
   CpuPermitGate gate(1);
   CpuPermitLease owner(gate, std::chrono::steady_clock::time_point::max(), {});
   assert(owner.acquire() == SchedulerSubmitStatus::Accepted);

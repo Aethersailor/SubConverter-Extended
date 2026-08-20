@@ -19,6 +19,15 @@ struct CpuPermitSnapshot {
   uint64_t waiting = 0;
 };
 
+inline std::size_t cooperativeFlowWorkerCap(
+    std::size_t cpu_permits) noexcept {
+  if (cpu_permits >= 64)
+    return 256;
+  return std::min<std::size_t>(
+      256, std::max<std::size_t>(
+               16, std::max<std::size_t>(1, cpu_permits) * 4));
+}
+
 class CpuPermitGate {
 public:
   explicit CpuPermitGate(std::size_t limit) : limit_(std::max<size_t>(1, limit)) {}

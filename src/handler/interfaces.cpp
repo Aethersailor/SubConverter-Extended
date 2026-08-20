@@ -2186,9 +2186,11 @@ std::size_t legacyRequestFlowWorkerCount(const Settings &settings) {
 
   uint64_t flow_workers = std::max<uint64_t>(
       cpu_workers, resources.suggested_active_flows);
+  const uint64_t cooperative_thread_cap =
+      cooperativeFlowWorkerCap(cpu_workers);
+  flow_workers = std::min(flow_workers, cooperative_thread_cap);
   flow_workers = std::min<uint64_t>(
       flow_workers, static_cast<uint64_t>(std::max(1, settings.maxPendingConns)));
-  flow_workers = std::min<uint64_t>(flow_workers, 256);
   uint64_t memory_boundary = 0;
   const auto include_memory_boundary = [&memory_boundary](uint64_t value) {
     if (value != 0)
