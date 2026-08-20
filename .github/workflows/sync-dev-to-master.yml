@@ -101,8 +101,12 @@ jobs:
             if ! git merge "$DEV_SHA" --no-commit --no-ff; then
               while IFS= read -r file; do
                 if [[ "$file" == README*.md || "$file" == docs/images/readme-flow-*.svg ]]; then
-                  git checkout --ours -- "$file"
-                  git add -- "$file"
+                  if git cat-file -e "HEAD:$file" 2>/dev/null; then
+                    git checkout --ours -- "$file"
+                    git add -- "$file"
+                  else
+                    git rm --ignore-unmatch -- "$file"
+                  fi
                 fi
               done < <(git diff --name-only --diff-filter=U)
 
@@ -114,10 +118,18 @@ jobs:
               fi
             fi
 
-            git checkout HEAD -- README.md 2>/dev/null || true
-            git checkout HEAD -- 'README-*.md' 2>/dev/null || true
-            git checkout HEAD -- 'docs/images/readme-flow-*.svg' 2>/dev/null || true
-            git add README.md README-*.md docs/images/readme-flow-*.svg 2>/dev/null || true
+            master_tree="$(mktemp)"
+            git ls-tree -rz --name-only HEAD > "$master_tree"
+            master_docs=()
+            while IFS= read -r -d '' file; do
+              if [[ "$file" == README*.md || "$file" == docs/images/readme-flow-*.svg ]]; then
+                master_docs+=("$file")
+              fi
+            done < "$master_tree"
+            rm -f "$master_tree"
+            if [ "${#master_docs[@]}" -gt 0 ]; then
+              git restore --source=HEAD --staged --worktree -- "${master_docs[@]}"
+            fi
             git commit -m "chore: sync dev to master"
           fi
 

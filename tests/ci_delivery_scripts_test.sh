@@ -133,6 +133,7 @@ echo "CI delivery script contract passed"
 
 BUILD_WORKFLOW="$REPOSITORY/.github/workflows/build-dockerhub.yml"
 CLEANUP_WORKFLOW="$REPOSITORY/.github/workflows/cleanup-container-registry.yml"
+SYNC_WORKFLOW="$REPOSITORY/.github/workflows/sync-dev-to-master.yml"
 
 grep -Fq 'group: build-core-${{ github.ref }}' "$BUILD_WORKFLOW"
 grep -Fq 'group: container-registry-cleanup' "$BUILD_WORKFLOW"
@@ -179,3 +180,70 @@ grep -Fq 'schedule:' "$CLEANUP_WORKFLOW"
 grep -Fq 'python3 scripts/ci/cleanup_container_registry.py --prune-all --apply' "$CLEANUP_WORKFLOW"
 
 echo "Container registry cleanup contract passed"
+
+grep -Fq 'git cat-file -e "HEAD:$file"' "$SYNC_WORKFLOW"
+grep -Fq 'git ls-tree -rz --name-only HEAD > "$master_tree"' "$SYNC_WORKFLOW"
+grep -Fq 'master_docs+=("$file")' "$SYNC_WORKFLOW"
+grep -Fq 'git restore --source=HEAD --staged --worktree -- "${master_docs[@]}"' "$SYNC_WORKFLOW"
+
+SYNC_REPOSITORY="$TEST_ROOT/sync-repository"
+mkdir -p "$SYNC_REPOSITORY"
+git -C "$SYNC_REPOSITORY" init --initial-branch=master >/dev/null
+git -C "$SYNC_REPOSITORY" config user.name test
+git -C "$SYNC_REPOSITORY" config user.email test@example.com
+printf 'shared documentation\n' > "$SYNC_REPOSITORY/README.md"
+printf 'base\n' > "$SYNC_REPOSITORY/source.txt"
+git -C "$SYNC_REPOSITORY" add README.md source.txt
+git -C "$SYNC_REPOSITORY" commit -m base >/dev/null
+git -C "$SYNC_REPOSITORY" branch dev
+
+printf 'master documentation\n' > "$SYNC_REPOSITORY/README.md"
+git -C "$SYNC_REPOSITORY" add README.md
+git -C "$SYNC_REPOSITORY" commit -m master-docs >/dev/null
+
+git -C "$SYNC_REPOSITORY" switch dev >/dev/null
+git -C "$SYNC_REPOSITORY" rm README.md >/dev/null
+printf 'development source\n' > "$SYNC_REPOSITORY/source.txt"
+git -C "$SYNC_REPOSITORY" add source.txt
+git -C "$SYNC_REPOSITORY" commit -m dev-without-readme >/dev/null
+DEV_SHA="$(git -C "$SYNC_REPOSITORY" rev-parse HEAD)"
+if git -C "$SYNC_REPOSITORY" cat-file -e "$DEV_SHA:README.md" 2>/dev/null; then
+  echo "dev unexpectedly contains README.md" >&2
+  exit 1
+fi
+
+git -C "$SYNC_REPOSITORY" switch master >/dev/null
+if ! git -C "$SYNC_REPOSITORY" merge "$DEV_SHA" --no-commit --no-ff >/dev/null 2>&1; then
+  while IFS= read -r file; do
+    if [[ "$file" == README*.md || "$file" == docs/images/readme-flow-*.svg ]]; then
+      if git -C "$SYNC_REPOSITORY" cat-file -e "HEAD:$file" 2>/dev/null; then
+        git -C "$SYNC_REPOSITORY" checkout --ours -- "$file"
+        git -C "$SYNC_REPOSITORY" add -- "$file"
+      else
+        git -C "$SYNC_REPOSITORY" rm --ignore-unmatch -- "$file"
+      fi
+    fi
+  done < <(git -C "$SYNC_REPOSITORY" diff --name-only --diff-filter=U)
+fi
+MASTER_TREE="$TEST_ROOT/master-tree"
+git -C "$SYNC_REPOSITORY" ls-tree -rz --name-only HEAD > "$MASTER_TREE"
+master_docs=()
+while IFS= read -r -d '' file; do
+  if [[ "$file" == README*.md || "$file" == docs/images/readme-flow-*.svg ]]; then
+    master_docs+=("$file")
+  fi
+done < "$MASTER_TREE"
+if [ "${#master_docs[@]}" -gt 0 ]; then
+  git -C "$SYNC_REPOSITORY" restore --source=HEAD --staged --worktree -- "${master_docs[@]}"
+fi
+if [ -n "$(git -C "$SYNC_REPOSITORY" diff --name-only --diff-filter=U)" ]; then
+  echo "dev-to-master simulation left unresolved conflicts" >&2
+  exit 1
+fi
+git -C "$SYNC_REPOSITORY" commit -m sync >/dev/null
+git -C "$SYNC_REPOSITORY" tag -a v1.0.0 -m release
+grep -Fqx 'master documentation' "$SYNC_REPOSITORY/README.md"
+test "$(git -C "$SYNC_REPOSITORY" show v1.0.0:README.md)" = 'master documentation'
+test "$(git -C "$SYNC_REPOSITORY" show HEAD:source.txt)" = 'development source'
+
+echo "Dev-to-master README deletion contract passed"
