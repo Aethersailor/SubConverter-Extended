@@ -123,7 +123,6 @@ ARG NLOHMANN_JSON_REF
 ARG INJA_REF
 ARG JPCRE2_REF
 ARG ENABLE_SANITIZERS=false
-ARG SANITIZER_SUITE=full
 
 WORKDIR /
 
@@ -287,31 +286,15 @@ RUN set -xe && \
     -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
     -DCMAKE_POSITION_INDEPENDENT_CODE=OFF \
     . && \
-    case "${SANITIZER_SUITE}" in focused|full) ;; *) echo "Invalid SANITIZER_SUITE=${SANITIZER_SUITE}" >&2; exit 1;; esac && \
-    if [ "${ENABLE_SANITIZERS}" = "true" ] && [ "${SANITIZER_SUITE}" = "focused" ]; then \
-      ninja -j ${THREADS} \
-        subconverter \
-        webserver_error_test \
-        concurrency_primitives_test \
-        settings_view_test \
-        curl_handle_pool_test \
-        cache_storage_test; \
-    else \
-      ninja -j ${THREADS}; \
-    fi
+    ninja -j ${THREADS}
 
 RUN if [ "${BUILD_TESTS}" = "true" ]; then \
       if [ "${ENABLE_SANITIZERS}" = "true" ]; then \
         export ASAN_OPTIONS="detect_leaks=1:strict_string_checks=1:halt_on_error=1:abort_on_error=1"; \
         export UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1"; \
-        echo "Sanitizer suite: ${SANITIZER_SUITE}; production runtime instrumented"; \
+        echo "Sanitizers enabled; production runtime and full correctness suite instrumented"; \
       fi; \
-      if [ "${ENABLE_SANITIZERS}" = "true" ] && [ "${SANITIZER_SUITE}" = "focused" ]; then \
-        ctest --test-dir . --output-on-failure --timeout 120 \
-          -R '^(shutdown_process|shutdown_process_httplib|webserver_error|webserver_error_httplib|concurrency_primitives|settings_view|settings_view_invariant_failure|curl_handle_pool|cache_storage)$'; \
-      else \
-        ctest --test-dir . --output-on-failure --timeout 120; \
-      fi; \
+      ctest --test-dir . --output-on-failure --timeout 120; \
     fi
 
 # 收集 glibc 运行时依赖（动态探测，避免固定版本）
