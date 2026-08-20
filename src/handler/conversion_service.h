@@ -56,6 +56,7 @@ const ConversionService &defaultConversionService();
 WorkloadSchedulerSnapshot conversionSchedulerSnapshot();
 WorkloadSchedulerSnapshot legacyRequestFlowSnapshot();
 CpuPermitSnapshot conversionCpuPermitSnapshot();
+void setConversionCpuPermitLimit(uint64_t limit) noexcept;
 ResponseMicroCacheSnapshot responseMicroCacheSnapshot();
 void requestConversionSchedulerShutdown() noexcept;
 void shutdownConversionScheduler() noexcept;

@@ -349,6 +349,28 @@ static void testCooperativeCpuPermit() {
   release_blocking.set_value();
   assert(blocked_flow.future.get() == 1);
   flows.shutdown(true);
+
+  CpuPermitGate shrinking_gate(2);
+  CpuPermitLease first(
+      shrinking_gate, std::chrono::steady_clock::time_point::max(), {});
+  CpuPermitLease second(
+      shrinking_gate, std::chrono::steady_clock::time_point::max(), {});
+  assert(first.acquire() == SchedulerSubmitStatus::Accepted);
+  assert(second.acquire() == SchedulerSubmitStatus::Accepted);
+  shrinking_gate.setLimit(1);
+  std::future<SchedulerSubmitStatus> after_shrink =
+      std::async(std::launch::async, [&] {
+        CpuPermitLease waiter(
+            shrinking_gate, std::chrono::steady_clock::time_point::max(), {});
+        return waiter.acquire();
+      });
+  while (shrinking_gate.snapshot().waiting == 0)
+    std::this_thread::yield();
+  first.release();
+  assert(after_shrink.wait_for(20ms) == std::future_status::timeout);
+  second.release();
+  assert(after_shrink.get() == SchedulerSubmitStatus::Accepted);
+  assert(shrinking_gate.snapshot().active == 0);
 }
 
 static void testWorkloadSchedulerActiveQueueWeights() {
@@ -726,6 +748,57 @@ static void testResourceControlPrimitives() {
   const ResourcePermitBudget fractional =
       computeConservativeResourceBudget(0.5, 16);
   assert(fractional.cpu_permits == 1);
+  assert(governorDecreaseCpuPermits(1) == 1);
+  assert(governorDecreaseCpuPermits(2) == 1);
+  assert(governorDecreaseCpuPermits(8) == 6);
+  assert(governorRecoverCpuPermits(1, 8) == 2);
+  assert(governorRecoverCpuPermits(8, 8) == 8);
+
+  ResourceGovernorState force_governor{8, 0, 0};
+  ResourceGovernorDecision decision = governorStep(
+      force_governor, {8, true, true, false, false, false});
+  assert(decision.permits == 8 &&
+         std::string(decision.state) == "max_ready");
+  decision = governorStep(
+      force_governor, {8, true, true, true, false, true});
+  assert(decision.permits == 6 &&
+         std::string(decision.state) == "pressure_guarded");
+  decision = governorStep(
+      force_governor, {8, true, true, false, false, false});
+  assert(decision.permits == 6 &&
+         std::string(decision.state) == "recovering");
+  decision = governorStep(
+      force_governor, {8, true, true, false, false, false});
+  assert(decision.permits == 7);
+  (void)governorStep(
+      force_governor, {8, true, true, false, false, false});
+  decision = governorStep(
+      force_governor, {8, true, true, false, false, false});
+  assert(decision.permits == 8);
+
+  ResourceGovernorState invalid_governor{8, 0, 0};
+  decision = governorStep(
+      invalid_governor, {8, true, false, false, false, false});
+  assert(decision.permits == 6 && decision.pressure_fallback &&
+         std::string(decision.reason) == "telemetry_unavailable");
+  ResourceGovernorState event_governor{8, 0, 0};
+  decision = governorStep(
+      event_governor, {8, true, true, false, true, true});
+  assert(decision.permits == 6 &&
+         std::string(decision.reason) == "memory_event");
+
+  ResourceGovernorState adaptive_governor{4, 0, 0};
+  (void)governorStep(
+      adaptive_governor, {8, false, true, false, false, true});
+  decision = governorStep(
+      adaptive_governor, {8, false, true, false, false, true});
+  assert(decision.permits == 5 &&
+         std::string(decision.state) == "recovering");
+  for (int sample = 0; sample < 30; ++sample)
+    decision = governorStep(
+        adaptive_governor, {8, false, true, false, false, false});
+  assert(decision.permits == 4 &&
+         std::string(decision.state) == "idle_reduced");
 
   assert(computeForceMaxAdmissionEntries(UINT64_C(1) * 1024 * 1024 * 1024,
                                          0, 16) == 2048);

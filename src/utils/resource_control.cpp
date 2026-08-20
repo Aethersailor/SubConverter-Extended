@@ -16,6 +16,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <psapi.h>
 #else
 #include <pthread.h>
 #include <sys/resource.h>
@@ -60,6 +61,21 @@ std::string readFirstLine(const std::filesystem::path &path) {
 bool readableFile(const std::filesystem::path &path) noexcept {
   std::ifstream file(path);
   return file.good();
+}
+
+uint64_t linuxAvailableMemoryBytes() noexcept {
+  try {
+    std::ifstream file("/proc/meminfo");
+    std::string name;
+    uint64_t value = 0;
+    std::string unit;
+    while (file >> name >> value >> unit) {
+      if (name == "MemAvailable:")
+        return value <= UINT64_MAX / 1024 ? value * 1024 : 0;
+    }
+  } catch (...) {
+  }
+  return 0;
 }
 
 std::string selfCgroupRelativePath(const char *controller) noexcept {
@@ -328,22 +344,68 @@ double detectCpuQuota() noexcept {
 #endif
 }
 
-void detectMemory(ResourceControlSnapshot &snapshot) noexcept {
 #ifdef _WIN32
+bool sampleWindowsMemory(ResourceControlSnapshot &snapshot) noexcept {
   MEMORYSTATUSEX status{};
   status.dwLength = sizeof(status);
-  if (GlobalMemoryStatusEx(&status))
-    snapshot.host_total_memory_bytes = status.ullTotalPhys;
-  if (status.ullAvailPhys != 0)
-    snapshot.host_available_memory_bytes = status.ullAvailPhys;
+  const bool host_valid = GlobalMemoryStatusEx(&status) != FALSE;
+
   BOOL in_job = FALSE;
-  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limit{};
-  if (IsProcessInJob(GetCurrentProcess(), nullptr, &in_job) && in_job &&
+  const bool job_membership_valid =
+      IsProcessInJob(GetCurrentProcess(), nullptr, &in_job) != FALSE;
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION job{};
+  const bool job_valid = !job_membership_valid || !in_job ||
       QueryInformationJobObject(nullptr, JobObjectExtendedLimitInformation,
-                                &limit, sizeof(limit), nullptr) &&
-      (limit.BasicLimitInformation.LimitFlags &
-       JOB_OBJECT_LIMIT_PROCESS_MEMORY))
-    snapshot.memory_max_bytes = limit.ProcessMemoryLimit;
+                                &job, sizeof(job), nullptr) != FALSE;
+
+  uint64_t memory_limit = 0;
+  const auto include_limit = [&memory_limit](uint64_t value) {
+    if (value != 0)
+      memory_limit = memory_limit == 0 ? value
+                                       : std::min(memory_limit, value);
+  };
+  if (job_membership_valid && in_job && job_valid) {
+    if (job.BasicLimitInformation.LimitFlags &
+        JOB_OBJECT_LIMIT_PROCESS_MEMORY)
+      include_limit(job.ProcessMemoryLimit);
+    if (job.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_JOB_MEMORY)
+      include_limit(job.JobMemoryLimit);
+  }
+
+  PROCESS_MEMORY_COUNTERS_EX process{};
+  process.cb = sizeof(process);
+  const bool process_valid =
+      K32GetProcessMemoryInfo(
+          GetCurrentProcess(),
+          reinterpret_cast<PROCESS_MEMORY_COUNTERS *>(&process),
+          sizeof(process)) != FALSE;
+
+  snapshot.host_total_memory_bytes =
+      host_valid ? status.ullTotalPhys : 0;
+  snapshot.host_available_memory_bytes =
+      host_valid ? status.ullAvailPhys : 0;
+  snapshot.memory_max_bytes = memory_limit;
+  snapshot.memory_current_bytes = 0;
+  if (!job_membership_valid || !job_valid)
+    return false;
+  if (memory_limit != 0) {
+    snapshot.memory_peak_bytes =
+        static_cast<uint64_t>(job.PeakJobMemoryUsed);
+    if (!process_valid)
+      return false;
+    snapshot.memory_current_bytes = process.PrivateUsage;
+    return snapshot.memory_current_bytes != 0;
+  }
+  if (!host_valid || status.ullAvailPhys > status.ullTotalPhys)
+    return false;
+  snapshot.memory_current_bytes = status.ullTotalPhys - status.ullAvailPhys;
+  return true;
+}
+#endif
+
+void detectMemory(ResourceControlSnapshot &snapshot) noexcept {
+#ifdef _WIN32
+  (void)sampleWindowsMemory(snapshot);
 #else
 #ifdef __linux__
   const bool cgroup_v2_member =
@@ -354,8 +416,11 @@ void detectMemory(ResourceControlSnapshot &snapshot) noexcept {
       cgroup_v2_member ? !cgroupV2Base().empty()
                        : !cgroup_v1_memory_member ||
                              !cgroupV1Base("memory").empty();
+  snapshot.memory_events_supported = cgroup_v2_member;
   snapshot.memory_events_available =
       readableFile(cgroupV2File("memory.events"));
+  snapshot.memory_events_sample_valid =
+      snapshot.memory_events_available;
   snapshot.cpu_pressure_available =
       readableFile(cgroupV2File("cpu.pressure")) ||
       readableFile("/proc/pressure/cpu");
@@ -431,7 +496,8 @@ void detectMemory(ResourceControlSnapshot &snapshot) noexcept {
   if (sysinfo(&info) == 0)
     snapshot.host_total_memory_bytes =
         static_cast<uint64_t>(info.totalram) * info.mem_unit;
-  if (info.freeram != 0)
+  snapshot.host_available_memory_bytes = linuxAvailableMemoryBytes();
+  if (snapshot.host_available_memory_bytes == 0 && info.freeram != 0)
     snapshot.host_available_memory_bytes =
         static_cast<uint64_t>(info.freeram) * info.mem_unit;
   if (snapshot.host_total_memory_bytes != 0 &&
@@ -503,11 +569,12 @@ ResourceControlSnapshot discover(const Settings &settings,
   detectMemory(snapshot);
   detectFileLimits(snapshot);
   const ResourcePermitBudget budget = computeConservativeResourceBudget(
-      effective, mode == ResourceControlMode::ForceMax
-                     ? 0
-                     : static_cast<uint32_t>(
-                           std::max(1, settings.maxConcurThreads)));
+      effective, mode == ResourceControlMode::Compat
+                     ? static_cast<uint32_t>(
+                           std::max(1, settings.maxConcurThreads))
+                     : 0);
   snapshot.suggested_cpu_permits = budget.cpu_permits;
+  snapshot.max_cpu_permits = budget.cpu_permits;
   snapshot.configured_cpu_cap =
       static_cast<uint64_t>(std::max(1, settings.maxConcurThreads));
   snapshot.configured_pending_connections =
@@ -559,13 +626,74 @@ ResourceControlSnapshot discover(const Settings &settings,
   return snapshot;
 }
 
-bool memoryPressure(ResourceControlSnapshot &snapshot) noexcept {
+struct MemoryPressureSample {
+  bool valid = false;
+  bool events_valid = false;
+  bool pressure = false;
+};
+
 #ifdef __linux__
-  snapshot.memory_current_bytes =
-      parseFiniteBytes(readFirstLine(cgroupV2File("memory.current")));
-  if (snapshot.memory_current_bytes == 0)
-    snapshot.memory_current_bytes = parseFiniteBytes(
-        readFirstLine(cgroupV1File("memory", "memory.usage_in_bytes")));
+bool sampleMemoryEvents(ResourceControlSnapshot &snapshot) noexcept {
+  try {
+    std::ifstream file(cgroupV2File("memory.events"));
+    if (!file)
+      return false;
+    std::string name;
+    uint64_t value = 0;
+    bool found = false;
+    while (file >> name >> value) {
+      if (name == "high")
+        snapshot.memory_events_high = value;
+      else if (name == "max")
+        snapshot.memory_events_max = value;
+      else if (name == "oom")
+        snapshot.memory_events_oom = value;
+      else if (name == "oom_kill")
+        snapshot.memory_events_oom_kill = value;
+      else if (name == "sock_throttled")
+        snapshot.memory_events_sock_throttled = value;
+      else
+        continue;
+      found = true;
+    }
+    return found;
+  } catch (...) {
+    return false;
+  }
+}
+#endif
+
+MemoryPressureSample memoryPressure(
+    ResourceControlSnapshot &snapshot) noexcept {
+  MemoryPressureSample sample;
+#ifdef __linux__
+  std::string memory_current =
+      readFirstLine(cgroupV2File("memory.current"));
+  if (memory_current.empty())
+    memory_current =
+        readFirstLine(cgroupV1File("memory", "memory.usage_in_bytes"));
+  if (!memory_current.empty()) {
+    snapshot.memory_current_bytes = parseFiniteBytes(memory_current);
+    sample.valid = true;
+  } else {
+    struct sysinfo info {};
+    if (sysinfo(&info) == 0) {
+      snapshot.host_total_memory_bytes =
+          static_cast<uint64_t>(info.totalram) * info.mem_unit;
+      snapshot.host_available_memory_bytes = linuxAvailableMemoryBytes();
+      if (snapshot.host_available_memory_bytes == 0)
+        snapshot.host_available_memory_bytes =
+            static_cast<uint64_t>(info.freeram) * info.mem_unit;
+      if (snapshot.host_total_memory_bytes != 0 &&
+          snapshot.host_available_memory_bytes <=
+              snapshot.host_total_memory_bytes) {
+        snapshot.memory_current_bytes =
+            snapshot.host_total_memory_bytes -
+            snapshot.host_available_memory_bytes;
+        sample.valid = true;
+      }
+    }
+  }
   snapshot.swap_current_bytes =
       parseFiniteBytes(readFirstLine(cgroupV2File("memory.swap.current")));
   if (snapshot.swap_current_bytes == 0) {
@@ -578,16 +706,8 @@ bool memoryPressure(ResourceControlSnapshot &snapshot) noexcept {
   }
   snapshot.memory_peak_bytes =
       parseFiniteBytes(readFirstLine(cgroupV2File("memory.peak")));
-  snapshot.memory_events_high =
-      parseFlatCounter(cgroupV2File("memory.events"), "high");
-  snapshot.memory_events_max =
-      parseFlatCounter(cgroupV2File("memory.events"), "max");
-  snapshot.memory_events_oom =
-      parseFlatCounter(cgroupV2File("memory.events"), "oom");
-  snapshot.memory_events_oom_kill =
-      parseFlatCounter(cgroupV2File("memory.events"), "oom_kill");
-  snapshot.memory_events_sock_throttled =
-      parseFlatCounter(cgroupV2File("memory.events"), "sock_throttled");
+  sample.events_valid = sampleMemoryEvents(snapshot);
+  snapshot.memory_events_sample_valid = sample.events_valid;
   snapshot.cpu_psi_some_milli_percent = parsePsiAvg10WithFallback(
       cgroupV2File("cpu.pressure"), "/proc/pressure/cpu", "some");
   snapshot.cpu_psi_full_milli_percent = parsePsiAvg10WithFallback(
@@ -600,22 +720,34 @@ bool memoryPressure(ResourceControlSnapshot &snapshot) noexcept {
       cgroupV2File("io.pressure"), "/proc/pressure/io", "some");
   snapshot.open_fds = countOpenFileDescriptors();
   snapshot.open_fds_available = snapshot.open_fds != 0;
+#elif defined(_WIN32)
+  sample.valid = sampleWindowsMemory(snapshot);
 #endif
-  const uint64_t boundary = snapshot.memory_high_bytes != 0
-                                ? snapshot.memory_high_bytes
-                                : snapshot.memory_max_bytes;
+  uint64_t boundary = snapshot.memory_max_bytes;
+  if (snapshot.memory_high_bytes != 0)
+    boundary = boundary == 0 ? snapshot.memory_high_bytes
+                             : std::min(boundary,
+                                        snapshot.memory_high_bytes);
+  if (boundary == 0)
+    boundary = snapshot.host_total_memory_bytes;
   const bool near_boundary =
-      boundary != 0 && snapshot.memory_current_bytes != 0 &&
+      sample.valid && boundary != 0 && snapshot.memory_current_bytes != 0 &&
       snapshot.memory_current_bytes >= boundary - boundary / 10;
-  return near_boundary ||
-         (snapshot.memory_pressure_available &&
-          snapshot.memory_psi_full_milli_percent != 0);
+  sample.pressure = near_boundary;
+  return sample;
 }
 
 void controllerLoop() noexcept {
-  uint64_t previous_accepted = requestAdmissionSnapshot().accepted;
-  uint64_t previous_arrivals = 0;
   std::unique_lock<std::mutex> lock(runtime.mutex);
+  uint64_t previous_accepted = requestAdmissionSnapshot().accepted;
+  uint64_t previous_successful =
+      requestLifecycleMetricsSnapshot().successful_owners;
+  uint64_t previous_memory_high = runtime.snapshot.memory_events_high;
+  uint64_t previous_memory_max = runtime.snapshot.memory_events_max;
+  uint64_t previous_oom = runtime.snapshot.memory_events_oom;
+  uint64_t previous_oom_kill = runtime.snapshot.memory_events_oom_kill;
+  ResourceGovernorState governor{
+      std::max<uint64_t>(1, runtime.snapshot.suggested_cpu_permits), 0, 0};
   while (!runtime.stopping) {
     if (runtime.condition.wait_for(lock, std::chrono::seconds(1),
                                    [] { return runtime.stopping; }))
@@ -623,11 +755,8 @@ void controllerLoop() noexcept {
     ResourceControlSnapshot next = runtime.snapshot;
     const ResourcePermitBudget baseline = computeConservativeResourceBudget(
         static_cast<double>(next.effective_cpu_millis) / 1000.0,
-        next.effective_mode == "force_max"
-            ? 0
-            : static_cast<uint32_t>(std::min<uint64_t>(
-                  next.configured_cpu_cap, UINT32_MAX)));
-    next.suggested_cpu_permits = baseline.cpu_permits;
+        0);
+    next.max_cpu_permits = baseline.cpu_permits;
     next.suggested_active_flows = baseline.active_flows;
     next.suggested_outbound_connections = baseline.outbound_connections;
     if (next.nofile_soft != 0)
@@ -637,39 +766,53 @@ void controllerLoop() noexcept {
     lock.unlock();
     try {
       const RequestAdmissionSnapshot admission = requestAdmissionSnapshot();
-      const WorkloadSchedulerSnapshot scheduler = conversionSchedulerSnapshot();
+      const WorkloadSchedulerSnapshot scheduler = legacyRequestFlowSnapshot();
+      const RequestLifecycleMetricsSnapshot lifecycle =
+          requestLifecycleMetricsSnapshot();
       const uint64_t arrivals = admission.accepted - previous_accepted;
       previous_accepted = admission.accepted;
-      const bool pressure = memoryPressure(next);
-      const uint64_t effective_cpus =
-          std::max<uint64_t>(1, next.effective_cpu_millis / 1000);
-      next.controller_state = "observe_only";
-      if (pressure) {
-        next.controller_reason = "memory_pressure";
-        next.pressure_fallback = true;
-        next.suggested_cpu_permits =
-            std::max<uint64_t>(1, next.suggested_cpu_permits / 2);
-      } else if (scheduler.queued_entries > effective_cpus ||
-                 arrivals >= effective_cpus * 2) {
-        next.controller_reason = "backlog_observed";
-        next.pressure_fallback = false;
-      } else if (arrivals > previous_arrivals + 2 && arrivals > 1) {
-        next.controller_reason = "arrival_growth_observed";
-        next.pressure_fallback = false;
-      } else if (arrivals != 0 || scheduler.active != 0 ||
-                 scheduler.queued_entries != 0) {
-        next.controller_reason = "active_observed";
-        next.pressure_fallback = false;
-      } else {
-        next.controller_reason = "idle_observed";
-        next.pressure_fallback = false;
+      const uint64_t successful =
+          lifecycle.successful_owners - previous_successful;
+      previous_successful = lifecycle.successful_owners;
+      const MemoryPressureSample memory = memoryPressure(next);
+      const bool memory_event = memory.events_valid &&
+          (next.memory_events_high > previous_memory_high ||
+           next.memory_events_max > previous_memory_max ||
+           next.memory_events_oom > previous_oom ||
+           next.memory_events_oom_kill > previous_oom_kill);
+      if (memory.events_valid) {
+        previous_memory_high = next.memory_events_high;
+        previous_memory_max = next.memory_events_max;
+        previous_oom = next.memory_events_oom;
+        previous_oom_kill = next.memory_events_oom_kill;
       }
-      previous_arrivals = arrivals;
+      const bool pressure = memory.pressure || memory_event;
+      const bool active = arrivals != 0 || successful != 0 ||
+                          scheduler.active != 0 ||
+                          scheduler.queued_entries != 0;
+      const bool force_max = next.effective_mode == "force_max";
+      const bool telemetry_valid = memory.valid &&
+          (!next.memory_events_supported || memory.events_valid);
+      const ResourceGovernorDecision decision = governorStep(
+          governor,
+          {next.max_cpu_permits, force_max, telemetry_valid,
+           pressure && !memory_event, memory_event, active});
+      next.suggested_cpu_permits = decision.permits;
+      next.controller_state = decision.state;
+      next.controller_reason = decision.reason;
+      next.pressure_fallback = decision.pressure_fallback;
+      setConversionCpuPermitLimit(decision.permits);
       ++next.sample_count;
     } catch (...) {
-      next.controller_state = "observe_only";
+      const ResourceGovernorDecision decision = governorStep(
+          governor, {next.max_cpu_permits,
+                     next.effective_mode == "force_max", false, false,
+                     false, false});
+      next.suggested_cpu_permits = decision.permits;
+      next.controller_state = decision.state;
       next.controller_reason = "telemetry_error";
       next.pressure_fallback = true;
+      setConversionCpuPermitLimit(decision.permits);
     }
     lock.lock();
     runtime.snapshot = std::move(next);
@@ -739,6 +882,8 @@ void configureResourceControl(Settings &settings) {
     admission_entries =
         static_cast<uint64_t>(std::clamp(settings.maxPendingConns, 1, 2048));
     retained_bytes = UINT64_C(64) * 1024 * 1024;
+    snapshot.suggested_cpu_permits =
+        std::max<uint64_t>(1, snapshot.max_cpu_permits / 2);
   }
   configureRequestAdmissionLimits(admission_entries, admission_bytes);
   configureRetainedResponseByteLimit(retained_bytes);
@@ -797,11 +942,11 @@ void startResourceControlRuntime() {
   if (runtime.snapshot.effective_mode != "adaptive" &&
       runtime.snapshot.effective_mode != "force_max")
     return;
-  (void)conversionSchedulerSnapshot();
-  if (runtime.snapshot.effective_mode == "adaptive") {
-    runtime.stopping = false;
-    runtime.thread = std::thread(controllerLoop);
-  }
+  setConversionCpuPermitLimit(runtime.snapshot.suggested_cpu_permits);
+  runtime.snapshot.controller_state = "starting";
+  runtime.snapshot.controller_reason = "controller_start";
+  runtime.stopping = false;
+  runtime.thread = std::thread(controllerLoop);
   runtime.running = true;
 }
 

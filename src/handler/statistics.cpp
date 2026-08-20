@@ -729,6 +729,8 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(resources.io_psi_some_milli_percent);
   writer.Key("suggested_cpu_permits");
   writer.Uint64(resources.suggested_cpu_permits);
+  writer.Key("max_cpu_permits");
+  writer.Uint64(resources.max_cpu_permits);
   writer.Key("configured_cpu_cap");
   writer.Uint64(resources.configured_cpu_cap);
   writer.Key("suggested_active_flows");
@@ -744,7 +746,9 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Key("io_pressure");
   writer.Bool(resources.io_pressure_available);
   writer.Key("memory_events");
-  writer.Bool(resources.memory_events_available);
+  writer.Bool(resources.memory_events_supported);
+  writer.Key("memory_events_sample_valid");
+  writer.Bool(resources.memory_events_sample_valid);
   writer.Key("open_fds");
   writer.Bool(resources.open_fds_available);
   writer.Key("cgroup_scope_known");

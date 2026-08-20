@@ -9,6 +9,7 @@
 #include <ctime>
 #include <exception>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <map>
 #include <mutex>
@@ -2108,11 +2109,25 @@ std::atomic<WorkloadScheduler *> conversion_scheduler_instance{nullptr};
 std::atomic<WorkloadScheduler *> legacy_request_flow_instance{nullptr};
 std::atomic<CpuPermitGate *> conversion_cpu_gate_instance{nullptr};
 std::atomic<bool> conversion_shutdown_requested{false};
+std::atomic<uint64_t> desired_cpu_permits{0};
 
 CpuPermitGate &conversionCpuGate() {
+  const uint64_t desired = desired_cpu_permits.load(std::memory_order_acquire);
   static CpuPermitGate gate(static_cast<std::size_t>(
-      std::max(1, effectiveSettings().maxConcurThreads)));
+      std::max<uint64_t>(1, desired != 0
+                                ? desired
+                                : static_cast<uint64_t>(std::max(
+                                      1, effectiveSettings().maxConcurThreads)))));
   conversion_cpu_gate_instance.store(&gate, std::memory_order_release);
+  uint64_t published_desired = 0;
+  do {
+    published_desired =
+        desired_cpu_permits.load(std::memory_order_acquire);
+    if (published_desired != 0)
+      gate.setLimit(static_cast<std::size_t>(std::min<uint64_t>(
+          published_desired, std::numeric_limits<std::size_t>::max())));
+  } while (desired_cpu_permits.load(std::memory_order_acquire) !=
+           published_desired);
   if (conversion_shutdown_requested.load(std::memory_order_acquire))
     gate.requestShutdown();
   return gate;
@@ -2547,7 +2562,18 @@ CpuPermitSnapshot conversionCpuPermitSnapshot() {
   if (CpuPermitGate *gate =
           conversion_cpu_gate_instance.load(std::memory_order_acquire))
     return gate->snapshot();
-  return {};
+  return {std::max<uint64_t>(
+              1, desired_cpu_permits.load(std::memory_order_acquire)),
+          0, 0};
+}
+
+void setConversionCpuPermitLimit(uint64_t limit) noexcept {
+  const uint64_t normalized = std::max<uint64_t>(1, limit);
+  desired_cpu_permits.store(normalized, std::memory_order_release);
+  if (CpuPermitGate *gate =
+          conversion_cpu_gate_instance.load(std::memory_order_acquire))
+    gate->setLimit(static_cast<std::size_t>(std::min<uint64_t>(
+        normalized, std::numeric_limits<std::size_t>::max())));
 }
 
 ResponseMicroCacheSnapshot responseMicroCacheSnapshot() {

@@ -11449,6 +11449,42 @@ def conversion_cost_classification_baseline(
         )
 
 
+def force_max_controller_runtime_baseline(binary: Path) -> None:
+    dashboard_headers = {
+        "Authorization": "Basic "
+        + base64.b64encode(
+            b"fixture-admin:fixture-dashboard-secret"
+        ).decode()
+    }
+    with running_service(
+        binary,
+        statistics=True,
+        environment={"SUBCONVERTER_RESOURCE_CONTROL": "force_max"},
+    ) as base_url:
+        time.sleep(2.2)
+        status, body, _ = request(
+            base_url, "/dashboard/data", headers=dashboard_headers
+        )
+        if status != 200:
+            raise AssertionError(
+                f"force_max controller dashboard returned HTTP {status}"
+            )
+        dashboard = json.loads(body)
+        resources = dashboard["resource_control"]
+        permits = dashboard["cpu_permits"]
+        if (
+            resources["controller_state"] != "max_ready"
+            or resources["sample_count"] < 1
+            or resources["suggested_cpu_permits"]
+            != resources["max_cpu_permits"]
+            or permits["limit"] != resources["max_cpu_permits"]
+        ):
+            raise AssertionError(
+                "idle force_max did not hold the hardware CPU limit: "
+                f"resources={resources!r} permits={permits!r}"
+            )
+
+
 def getruleset_generation_reload_baseline(binary: Path, fixture_base: str) -> None:
     pref_paths: list[Path] = []
     replacements = (
@@ -11928,6 +11964,7 @@ def main() -> int:
         loopback_proxy_route_baseline(binary, fixture_base)
         loopback_redirect_route_baseline(binary, fixture_base)
         conversion_cost_classification_baseline(binary, fixture_base)
+        force_max_controller_runtime_baseline(binary)
         ruleset_executor_capacity_baseline(binary, fixture_base)
         getruleset_generation_reload_baseline(binary, fixture_base)
         request_generation_reload_baseline(binary, fixture_base)
