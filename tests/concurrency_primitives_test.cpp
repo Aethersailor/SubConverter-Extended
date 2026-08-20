@@ -226,6 +226,33 @@ static void testWorkloadScheduler() {
   assert(snapshot.active == 0);
   assert(snapshot.accepted == 3);
   assert(snapshot.rejected == 3);
+
+  std::promise<SchedulerAsyncResult<int>> async_promise;
+  const SchedulerSubmitStatus async_status = scheduler.submitAsync(
+      RequestCostClass::Medium, 1,
+      std::chrono::steady_clock::time_point::max(), {}, [] { return 42; },
+      [&](SchedulerAsyncResult<int> result) {
+        async_promise.set_value(std::move(result));
+      });
+  assert(async_status == SchedulerSubmitStatus::Accepted);
+  SchedulerAsyncResult<int> async_result = async_promise.get_future().get();
+  assert(async_result.status == SchedulerSubmitStatus::Accepted);
+  assert(!async_result.error && async_result.value == 42);
+
+  RequestCancellationSource async_cancellation;
+  async_cancellation.cancel(RequestCancellationReason::NoConsumers);
+  std::atomic<int> cancellation_callbacks{0};
+  SchedulerSubmitStatus cancelled_async = scheduler.submitAsync(
+      RequestCostClass::Low, 1,
+      std::chrono::steady_clock::time_point::max(),
+      async_cancellation.token(), [] { return 0; },
+      [&](SchedulerAsyncResult<int> result) {
+        assert(result.status == SchedulerSubmitStatus::Cancelled);
+        assert(result.error && !result.value);
+        cancellation_callbacks.fetch_add(1, std::memory_order_relaxed);
+      });
+  assert(cancelled_async == SchedulerSubmitStatus::Cancelled);
+  assert(cancellation_callbacks.load(std::memory_order_relaxed) == 1);
   scheduler.shutdown(true);
 }
 

@@ -2,6 +2,7 @@
 #define WORKLOAD_SCHEDULER_H_INCLUDED
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -11,6 +12,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 #include <type_traits>
@@ -62,6 +64,12 @@ template <class Result> struct SchedulerSubmission {
   std::future<Result> future;
 };
 
+template <class Result> struct SchedulerAsyncResult {
+  SchedulerSubmitStatus status = SchedulerSubmitStatus::Stopping;
+  std::exception_ptr error;
+  std::optional<Result> value;
+};
+
 struct WorkloadSchedulerSnapshot {
   uint64_t queued_entries = 0;
   uint64_t queued_bytes = 0;
@@ -78,7 +86,7 @@ class WorkloadScheduler {
   struct TaskBase {
     virtual ~TaskBase() = default;
     virtual void run() noexcept = 0;
-    virtual void cancel(std::exception_ptr error) noexcept = 0;
+    virtual void cancel(SchedulerSubmitStatus status) noexcept = 0;
 
     RequestCostClass cost = RequestCostClass::Medium;
     uint64_t bytes = 0;
@@ -108,15 +116,53 @@ class WorkloadScheduler {
       }
     }
 
-    void cancel(std::exception_ptr error) noexcept override {
+    void cancel(SchedulerSubmitStatus status) noexcept override {
       try {
-        promise.set_exception(std::move(error));
+        promise.set_exception(
+            std::make_exception_ptr(SchedulerSubmitError(status)));
       } catch (...) {
       }
     }
 
     Function function;
     std::promise<Result> promise;
+  };
+
+  template <class Function, class Completion, class Result>
+  struct CallbackTask final : TaskBase {
+    CallbackTask(Function &&function, Completion &&completion)
+        : function(std::move(function)), completion(std::move(completion)) {}
+
+    void run() noexcept override {
+      SchedulerAsyncResult<Result> result;
+      result.status = SchedulerSubmitStatus::Accepted;
+      try {
+        result.value.emplace(function());
+      } catch (...) {
+        result.error = std::current_exception();
+      }
+      complete(std::move(result));
+    }
+
+    void cancel(SchedulerSubmitStatus status) noexcept override {
+      SchedulerAsyncResult<Result> result;
+      result.status = status;
+      result.error = std::make_exception_ptr(SchedulerSubmitError(status));
+      complete(std::move(result));
+    }
+
+    void complete(SchedulerAsyncResult<Result> result) noexcept {
+      if (completed.exchange(true, std::memory_order_acq_rel))
+        return;
+      try {
+        completion(std::move(result));
+      } catch (...) {
+      }
+    }
+
+    Function function;
+    Completion completion;
+    std::atomic<bool> completed{false};
   };
 
 public:
@@ -183,8 +229,62 @@ public:
       condition_.notify_one();
       return {status, std::move(future)};
     }
-    task->cancel(std::make_exception_ptr(SchedulerSubmitError(status)));
+    task->cancel(status);
     return {status, std::move(future)};
+  }
+
+  template <class Function, class Completion>
+  auto submitAsync(RequestCostClass cost, uint64_t bytes,
+                   Clock::time_point deadline,
+                   RequestCancellationToken cancellation, Function &&function,
+                   Completion &&completion) -> SchedulerSubmitStatus {
+    using StoredFunction = std::decay_t<Function>;
+    using StoredCompletion = std::decay_t<Completion>;
+    using Result = std::invoke_result_t<StoredFunction>;
+    static_assert(!std::is_void_v<Result>,
+                  "WorkloadScheduler async tasks require a result");
+    using StoredTask =
+        CallbackTask<StoredFunction, StoredCompletion, Result>;
+
+    auto task = std::make_shared<StoredTask>(
+        StoredFunction(std::forward<Function>(function)),
+        StoredCompletion(std::forward<Completion>(completion)));
+    task->cost = normalizedCost(cost);
+    task->bytes = bytes;
+    task->enqueued_at = Clock::now();
+    task->deadline = deadline;
+    task->cancellation = std::move(cancellation);
+
+    SchedulerSubmitStatus status = SchedulerSubmitStatus::Accepted;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (stopping_) {
+        status = SchedulerSubmitStatus::Stopping;
+      } else if (task->cancellation.isCancellationRequested()) {
+        status = SchedulerSubmitStatus::Cancelled;
+      } else if (deadline != Clock::time_point::max() &&
+                 task->enqueued_at >= deadline) {
+        status = SchedulerSubmitStatus::Deadline;
+      } else if (queued_entries_ >= max_entries_) {
+        status = SchedulerSubmitStatus::EntryLimit;
+      } else if (bytes > max_bytes_ || queued_bytes_ > max_bytes_ - bytes) {
+        status = SchedulerSubmitStatus::ByteLimit;
+      } else {
+        queues_[queueIndex(task->cost)].emplace_back(task);
+        ++queued_entries_;
+        queued_bytes_ += bytes;
+        ++accepted_;
+      }
+      if (status != SchedulerSubmitStatus::Accepted)
+        ++rejected_;
+    }
+
+    if (status == SchedulerSubmitStatus::Accepted) {
+      condition_.notify_one();
+    } else {
+      task->cancel(status);
+    }
+    return status;
   }
 
   void shutdown(bool cancel_pending) noexcept {
@@ -211,11 +311,8 @@ public:
         cancelled_ += cancelled.size();
       }
     }
-    const auto error =
-        std::make_exception_ptr(SchedulerSubmitError(
-            SchedulerSubmitStatus::Stopping));
     for (auto &task : cancelled)
-      task->cancel(error);
+      task->cancel(SchedulerSubmitStatus::Stopping);
     condition_.notify_all();
   }
 
@@ -349,8 +446,7 @@ private:
       if (cancelled == SchedulerSubmitStatus::Accepted) {
         task->run();
       } else {
-        task->cancel(
-            std::make_exception_ptr(SchedulerSubmitError(cancelled)));
+        task->cancel(cancelled);
         std::lock_guard<std::mutex> lock(mutex_);
         ++cancelled_;
       }
