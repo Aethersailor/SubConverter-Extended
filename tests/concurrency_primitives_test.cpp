@@ -869,6 +869,32 @@ static void testCancellationTokenCallbacks() {
   RequestCancellationRegistration immediate_registration =
       source.token().registerCallback([&] { ++immediate; });
   assert(immediate == 1);
+
+  RequestCancellationSource reentrant_source;
+  RequestCancellationRegistration reentrant_registration;
+  std::atomic<int> reentrant_callbacks{0};
+  reentrant_registration = reentrant_source.token().registerCallback([&] {
+    reentrant_registration.reset();
+    reentrant_callbacks.fetch_add(1, std::memory_order_relaxed);
+  });
+  assert(reentrant_source.cancel(RequestCancellationReason::NoConsumers));
+  assert(reentrant_callbacks.load(std::memory_order_relaxed) == 1);
+
+  for (int iteration = 0; iteration < 256; ++iteration) {
+    RequestCancellationSource concurrent_source;
+    RequestCancellationRegistration concurrent_registration;
+    std::atomic<int> concurrent_callbacks{0};
+    concurrent_registration = concurrent_source.token().registerCallback([&] {
+      concurrent_callbacks.fetch_add(1, std::memory_order_relaxed);
+    });
+    std::thread cancel_thread([&] {
+      concurrent_source.cancel(RequestCancellationReason::ClientDisconnected);
+    });
+    std::thread reset_thread([&] { concurrent_registration.reset(); });
+    cancel_thread.join();
+    reset_thread.join();
+    assert(concurrent_callbacks.load(std::memory_order_relaxed) <= 1);
+  }
 }
 
 int main() {

@@ -261,14 +261,17 @@ inline bool cancelRequestCancellationState(
           expected, reason, std::memory_order_acq_rel,
           std::memory_order_acquire))
     return false;
-  std::lock_guard<std::mutex> lock(state->callbacks_mutex);
-  for (auto &[_, callback] : state->callbacks) {
+  std::unordered_map<uint64_t, std::function<void()>> callbacks;
+  {
+    std::lock_guard<std::mutex> lock(state->callbacks_mutex);
+    callbacks.swap(state->callbacks);
+  }
+  for (auto &[_, callback] : callbacks) {
     try {
       callback();
     } catch (...) {
     }
   }
-  state->callbacks.clear();
   return true;
 }
 
