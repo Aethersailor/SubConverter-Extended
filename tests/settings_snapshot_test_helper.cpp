@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <future>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -83,12 +84,34 @@ int main(int argc, char *argv[]) {
       request.cache_ttl = static_cast<unsigned int>(cache_ttl);
       request.capture_response_headers = true;
       request.context = FetchContext::TrustedConfig;
+      request.retention = OwnedWebGetRequest::RetentionPolicy::Result;
       return webGetOwned(std::move(request));
     };
     const OwnedWebGetResult first = fetch();
     if (delay_ms > 0)
       std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
     const OwnedWebGetResult second = fetch();
+    const std::string payload_url =
+        std::string(argv[3]) + "?payload-singleflight=1";
+    auto fetch_payload = [&]() {
+      OwnedWebGetRequest request;
+      request.url = payload_url;
+      request.proxy = ProxyPolicy::direct();
+      request.cache_ttl = static_cast<unsigned int>(cache_ttl);
+      request.capture_response_headers = true;
+      request.context = FetchContext::TrustedConfig;
+      request.retention = OwnedWebGetRequest::RetentionPolicy::Result;
+      return webGetOwned(std::move(request));
+    };
+    std::future<OwnedWebGetResult> payload_owner =
+        std::async(std::launch::async, fetch_payload);
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    std::future<OwnedWebGetResult> payload_follower =
+        std::async(std::launch::async, fetch_payload);
+    const OwnedWebGetResult payload_owner_result = payload_owner.get();
+    const OwnedWebGetResult payload_follower_result = payload_follower.get();
+    const CacheFetchPayloadSnapshot payload_snapshot =
+        cacheFetchPayloadSnapshot();
     std::string early_headers = "sentinel-header-state";
     const std::string early_body = webGet(
         "data:,owned-webget-early", ProxyPolicy::direct(), 0,
@@ -106,6 +129,8 @@ int main(int argc, char *argv[]) {
     writer.String(
         first.response_headers.c_str(),
         static_cast<rapidjson::SizeType>(first.response_headers.size()));
+    writer.Key("first_retained_bytes");
+    writer.Uint64(first.retained_bytes.bytes());
     writer.Key("second_status");
     writer.Int(second.status_code);
     writer.Key("second_body");
@@ -115,6 +140,15 @@ int main(int argc, char *argv[]) {
     writer.String(
         second.response_headers.c_str(),
         static_cast<rapidjson::SizeType>(second.response_headers.size()));
+    writer.Key("second_retained_bytes");
+    writer.Uint64(second.retained_bytes.bytes());
+    writer.Key("payload_bodies_equal");
+    writer.Bool(!payload_owner_result.content.empty() &&
+                payload_owner_result.content == payload_follower_result.content);
+    writer.Key("payload_retained_bytes");
+    writer.Uint64(payload_snapshot.retained_bytes);
+    writer.Key("payload_peak_retained_bytes");
+    writer.Uint64(payload_snapshot.peak_retained_bytes);
     writer.Key("early_header_preserved");
     writer.Bool(early_body == "owned-webget-early" &&
                 early_headers == "sentinel-header-state");

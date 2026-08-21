@@ -69,12 +69,44 @@ struct curl_progress_data
     AsyncFetchFailure abort_reason = AsyncFetchFailure::None;
 };
 
-struct CacheFetchResult
+static std::atomic<uint64_t> cache_fetch_payload_retained_bytes{0};
+static std::atomic<uint64_t> cache_fetch_payload_peak_retained_bytes{0};
+
+struct CacheFetchPayload
 {
     int status_code = 0;
+    AsyncFetchFailure failure = AsyncFetchFailure::None;
     std::string content;
     std::string response_headers;
+    RetainedResponseByteLease retained_bytes;
+
+    ~CacheFetchPayload()
+    {
+        cache_fetch_payload_retained_bytes.fetch_sub(
+            retained_bytes.bytes(), std::memory_order_relaxed);
+    }
+
+    bool retainPayloadBytes()
+    {
+        const uint64_t bytes = content.size() + response_headers.size();
+        if(!retained_bytes.retain(bytes))
+            return false;
+        const uint64_t current = cache_fetch_payload_retained_bytes.fetch_add(
+                                     bytes, std::memory_order_relaxed) +
+                                 bytes;
+        uint64_t peak = cache_fetch_payload_peak_retained_bytes.load(
+            std::memory_order_relaxed);
+        while(current > peak &&
+              !cache_fetch_payload_peak_retained_bytes.compare_exchange_weak(
+                  peak, current, std::memory_order_relaxed,
+                  std::memory_order_relaxed))
+        {
+        }
+        return true;
+    }
 };
+
+using SharedCacheFetchPayload = std::shared_ptr<const CacheFetchPayload>;
 
 struct GitHubFileRef
 {
@@ -400,7 +432,8 @@ static ResolvedProxyRoute resolveProxyRoute(
 }
 
 static std::mutex cache_fetch_mutex;
-static std::map<std::string, std::shared_future<CacheFetchResult>> cache_fetches;
+static std::map<std::string, std::shared_future<SharedCacheFetchPayload>>
+    cache_fetches;
 static std::atomic_bool outbound_fetch_shutdown_requested {false};
 
 void requestOutboundFetchShutdown() noexcept
@@ -1878,7 +1911,8 @@ static void shutdownAsyncFetchEngine() noexcept
 static int curlGetSyncLegacy(const FetchArgument &argument,
                              const ResolvedProxyRoute &route,
                              FetchResult &result,
-                             CURLcode *return_code = nullptr)
+                             CURLcode *return_code = nullptr,
+                             AsyncFetchFailure *return_failure = nullptr)
 {
     CURL *curl_handle;
     std::string new_url = argument.url;
@@ -1891,6 +1925,8 @@ static int curlGetSyncLegacy(const FetchArgument &argument,
         *result.status_code = 0;
         if(return_code)
             *return_code = CURLE_ABORTED_BY_CALLBACK;
+        if(return_failure)
+            *return_failure = AsyncFetchFailure::Shutdown;
         return 0;
     }
 
@@ -1900,6 +1936,11 @@ static int curlGetSyncLegacy(const FetchArgument &argument,
         *result.status_code = 0;
         if(return_code)
             *return_code = retVal;
+        if(return_failure)
+        {
+            curl_progress_data progress;
+            *return_failure = classify_async_failure(retVal, progress);
+        }
         writeLog(LOG_LEVEL_ERROR, "curl_global_init 失败：" + std::string(curl_easy_strerror(retVal)));
         return 0;
     }
@@ -1916,6 +1957,11 @@ static int curlGetSyncLegacy(const FetchArgument &argument,
         *result.status_code = 0;
         if(return_code)
             *return_code = retVal;
+        if(return_failure)
+        {
+            curl_progress_data progress;
+            *return_failure = classify_async_failure(retVal, progress);
+        }
         writeLog(LOG_LEVEL_ERROR, "curl_easy_init 失败。");
         return 0;
     }
@@ -1925,6 +1971,11 @@ static int curlGetSyncLegacy(const FetchArgument &argument,
         *result.status_code = 0;
         if(return_code)
             *return_code = retVal;
+        if(return_failure)
+        {
+            curl_progress_data progress;
+            *return_failure = classify_async_failure(retVal, progress);
+        }
         return 0;
     }
     if(route.proxy.mode == ProxyMode::Cors)
@@ -1948,6 +1999,8 @@ static int curlGetSyncLegacy(const FetchArgument &argument,
         *result.status_code = 0;
         if(return_code)
             *return_code = retVal;
+        if(return_failure)
+            *return_failure = classify_async_failure(retVal, limit);
         writeLog(LOG_LEVEL_ERROR,
                  "Windows 原生 TLS 信任库配置失败：" +
                      std::string(curl_easy_strerror(retVal)));
@@ -2066,6 +2119,8 @@ static int curlGetSyncLegacy(const FetchArgument &argument,
     *result.status_code = code;
     if(return_code)
         *return_code = retVal;
+    if(return_failure)
+        *return_failure = classify_async_failure(retVal, limit);
 
 #if LIBCURL_VERSION_NUM >= 0x080700
     long used_proxy = 0;
@@ -2167,9 +2222,72 @@ static void copyAsyncFetchResult(AsyncFetchResult &&source,
         *return_code = static_cast<CURLcode>(source.transport_code);
 }
 
+static void applyAsyncFetchFailure(
+    const std::shared_ptr<RequestContext> &context,
+    AsyncFetchFailure failure,
+    const RequestCancellationToken &cancellation) noexcept
+{
+    if(!context)
+        return;
+    switch(failure)
+    {
+    case AsyncFetchFailure::Cancelled:
+        if(cancellation.reason() == RequestCancellationReason::None)
+        {
+            context->suggestFailure(RequestFailureAttribution::Upstream);
+        }
+        else if(cancellation.reason() == RequestCancellationReason::Shutdown)
+        {
+            context->requestCancellation(RequestCancellationReason::Shutdown);
+            context->suggestFailure(RequestFailureAttribution::Server);
+        }
+        else if(cancellation.reason() == RequestCancellationReason::Deadline)
+        {
+            context->requestCancellation(RequestCancellationReason::Deadline);
+            context->suggestFailure(RequestFailureAttribution::Client);
+        }
+        else
+        {
+            context->requestCancellation(
+                RequestCancellationReason::ClientDisconnected);
+            context->suggestFailure(RequestFailureAttribution::Client);
+        }
+        break;
+    case AsyncFetchFailure::Deadline:
+        if(cancellation.reason() == RequestCancellationReason::Deadline ||
+           context->deadlineExceeded())
+        {
+            context->requestCancellation(RequestCancellationReason::Deadline);
+            context->suggestFailure(RequestFailureAttribution::Client);
+        }
+        else
+            context->suggestFailure(RequestFailureAttribution::Upstream);
+        break;
+    case AsyncFetchFailure::Shutdown:
+        context->requestCancellation(RequestCancellationReason::Shutdown);
+        context->suggestFailure(RequestFailureAttribution::Server);
+        break;
+    case AsyncFetchFailure::Dns:
+    case AsyncFetchFailure::Tls:
+    case AsyncFetchFailure::Proxy:
+    case AsyncFetchFailure::Transport:
+        context->suggestFailure(RequestFailureAttribution::Upstream);
+        break;
+    case AsyncFetchFailure::SizeLimit:
+        context->suggestFailure(RequestFailureAttribution::User);
+        break;
+    case AsyncFetchFailure::Capacity:
+        context->suggestFailure(RequestFailureAttribution::Capacity);
+        break;
+    case AsyncFetchFailure::None:
+        break;
+    }
+}
+
 static int curlGet(const FetchArgument &argument,
                    const ResolvedProxyRoute &route, FetchResult &result,
-                   CURLcode *return_code = nullptr)
+                   CURLcode *return_code = nullptr,
+                   AsyncFetchFailure *return_failure = nullptr)
 {
     const std::string engine = toLower(getEnv("SUBCONVERTER_FETCH_ENGINE"));
     bool use_sync = engine == "sync";
@@ -2185,9 +2303,19 @@ static int curlGet(const FetchArgument &argument,
         use_sync = true;
     }
     if(use_sync || !asyncFetchEngineAvailable())
-        return waitWithoutCpuPermit([&] {
-            return curlGetSyncLegacy(argument, route, result, return_code);
+    {
+        CURLcode sync_code = CURLE_OK;
+        AsyncFetchFailure sync_failure = AsyncFetchFailure::None;
+        const int status = waitWithoutCpuPermit([&] {
+            return curlGetSyncLegacy(argument, route, result, &sync_code,
+                                     &sync_failure);
         });
+        if(return_code)
+            *return_code = sync_code;
+        if(return_failure)
+            *return_failure = sync_failure;
+        return status;
+    }
 
     AsyncFetchRequest request = makeAsyncFetchRequest(argument, result);
     const Settings &settings = effectiveSettings();
@@ -2250,48 +2378,10 @@ static int curlGet(const FetchArgument &argument,
             writeLog(LOG_LEVEL_VERBOSE, "出站请求错误类别：" +
                          std::string(classify_curl_error(code)) + "。");
     }
-    if(auto context = captureCurrentRequestContext(); context)
-    {
-        switch(fetched.failure)
-        {
-        case AsyncFetchFailure::Cancelled:
-            if(request.cancellation.reason() ==
-               RequestCancellationReason::Shutdown)
-            {
-                context->requestCancellation(RequestCancellationReason::Shutdown);
-                context->suggestFailure(RequestFailureAttribution::Server);
-            }
-            else
-            {
-                context->requestCancellation(
-                    RequestCancellationReason::ClientDisconnected);
-                context->suggestFailure(RequestFailureAttribution::Client);
-            }
-            break;
-        case AsyncFetchFailure::Deadline:
-            context->requestCancellation(RequestCancellationReason::Deadline);
-            context->suggestFailure(RequestFailureAttribution::Client);
-            break;
-        case AsyncFetchFailure::Shutdown:
-            context->requestCancellation(RequestCancellationReason::Shutdown);
-            context->suggestFailure(RequestFailureAttribution::Server);
-            break;
-        case AsyncFetchFailure::Dns:
-        case AsyncFetchFailure::Tls:
-        case AsyncFetchFailure::Proxy:
-        case AsyncFetchFailure::Transport:
-            context->suggestFailure(RequestFailureAttribution::Upstream);
-            break;
-        case AsyncFetchFailure::SizeLimit:
-            context->suggestFailure(RequestFailureAttribution::User);
-            break;
-        case AsyncFetchFailure::Capacity:
-            context->suggestFailure(RequestFailureAttribution::Capacity);
-            break;
-        case AsyncFetchFailure::None:
-            break;
-        }
-    }
+    applyAsyncFetchFailure(captureCurrentRequestContext(), fetched.failure,
+                           request.cancellation);
+    if(return_failure)
+        *return_failure = fetched.failure;
     const int status = fetched.status_code;
     copyAsyncFetchResult(std::move(fetched), result, return_code);
     return status;
@@ -2299,11 +2389,16 @@ static int curlGet(const FetchArgument &argument,
 
 static int curlGetWithGitHubFallback(
     const FetchArgument &argument, const ResolvedProxyPolicy &snapshot,
-    const ResolvedProxyRoute &initial_route, FetchResult &result)
+    const ResolvedProxyRoute &initial_route, FetchResult &result,
+    AsyncFetchFailure *return_failure = nullptr)
 {
     CURLcode original_code = CURLE_OK;
+    AsyncFetchFailure original_failure = AsyncFetchFailure::None;
     int original_status =
-        curlGet(argument, initial_route, result, &original_code);
+        curlGet(argument, initial_route, result, &original_code,
+                &original_failure);
+    if(return_failure)
+        *return_failure = original_failure;
 
     std::string fallback_url;
     if(argument.method != HTTP_GET || argument.keep_resp_on_fail ||
@@ -2337,6 +2432,8 @@ static int curlGetWithGitHubFallback(
         curlGet(fallback_argument, fallback_route, result, &fallback_code);
     if(fallback_code == CURLE_OK && fallback_status == 200)
     {
+        if(return_failure)
+            *return_failure = AsyncFetchFailure::None;
         writeLog(LOG_LEVEL_INFO,
                  "GitHub Raw 已通过 jsDelivr 回退源获取成功：" +
                       summarizeUrlForLog(fallback_url));
@@ -2430,6 +2527,7 @@ public:
     explicit OwnedWebGetState(OwnedWebGetRequest request)
         : request_(std::move(request))
     {
+        request_context_ = captureCurrentRequestContext();
         if(request_.capture_response_headers)
             result_.response_headers = request_.initial_response_headers;
     }
@@ -2513,7 +2611,7 @@ public:
 
     void finalizeCached(const std::string &path,
                         const std::string &header_path,
-                        const CacheFetchResult &fetched, bool owner)
+                        const CacheFetchPayload &fetched, bool owner)
     {
         if(result_.status_code == 200)
         {
@@ -2550,6 +2648,7 @@ public:
                 writeLog(LOG_LEVEL_VERBOSE, "获取失败，返回缓存内容。");
             cache_rw_lock.readLock();
             defer(cache_rw_lock.readUnlock();)
+            result_.retained_bytes.reset();
             result_.content = fileGet(path, true);
             if(request_.capture_response_headers)
             {
@@ -2589,7 +2688,11 @@ public:
         return FetchArgument{
             HTTP_GET, effective_url_, request_.proxy, nullptr,
             request_.has_request_headers ? &request_.request_headers : nullptr,
-            nullptr, request_.cache_ttl, false, request_.context};
+            nullptr, request_.cache_ttl, false, request_.context,
+            request_context_ ? request_context_->deadline()
+                             : RequestContext::Clock::time_point::max(),
+            request_context_ ? request_context_->cancellationToken()
+                             : RequestCancellationToken{}};
     }
 
     void executeNetwork()
@@ -2600,20 +2703,50 @@ public:
             request_.capture_response_headers ? &result_.response_headers
                                               : nullptr,
             nullptr};
-        curlGetWithGitHubFallback(argument, proxy_snapshot_, initial_route_,
-                                  fetch_result);
+        AsyncFetchFailure failure = AsyncFetchFailure::None;
+        if(request_.retention ==
+           OwnedWebGetRequest::RetentionPolicy::Result)
+        {
+            ScopedRequestContext no_request_context(
+                std::shared_ptr<RequestContext>{});
+            curlGetWithGitHubFallback(argument, proxy_snapshot_,
+                                      initial_route_, fetch_result, &failure);
+            applyAsyncFetchFailure(request_context_, failure,
+                                   argument.cancellation);
+        }
+        else
+            curlGetWithGitHubFallback(argument, proxy_snapshot_,
+                                      initial_route_, fetch_result);
         if(request_.capture_response_headers &&
            result_.response_headers != request_.initial_response_headers)
             result_.response_headers_touched = true;
+        if(request_.retention ==
+               OwnedWebGetRequest::RetentionPolicy::Result &&
+           !retainBytes(result_.content.size() +
+                        result_.response_headers.size()))
+            handleRetentionFailure();
     }
 
     bool retainBytes(uint64_t bytes)
     {
-        return retainCurrentFetchBytes(bytes);
+        if(request_.retention ==
+           OwnedWebGetRequest::RetentionPolicy::CurrentRequest)
+            return retainCurrentFetchBytes(bytes);
+        return result_.retained_bytes.retain(bytes);
     }
 
     void handleRetentionFailure()
     {
+        if(request_.retention ==
+           OwnedWebGetRequest::RetentionPolicy::Result)
+        {
+            std::string().swap(result_.content);
+            std::string().swap(result_.response_headers);
+            result_.response_headers_touched =
+                request_.capture_response_headers;
+            result_.retained_bytes.reset();
+            return;
+        }
         result_.content.clear();
     }
 
@@ -2631,8 +2764,8 @@ public:
                      "缓存不存在：" + summarizeUrlForLog(effective_url_) +
                          "，正在创建新缓存。");
 
-        std::shared_future<CacheFetchResult> fetch_future;
-        std::shared_ptr<std::promise<CacheFetchResult>> fetch_promise;
+        std::shared_future<SharedCacheFetchPayload> fetch_future;
+        std::shared_ptr<std::promise<SharedCacheFetchPayload>> fetch_promise;
         bool owner = false;
         {
             std::lock_guard<std::mutex> lock(cache_fetch_mutex);
@@ -2640,7 +2773,7 @@ public:
             if(iter == cache_fetches.end())
             {
                 fetch_promise =
-                    std::make_shared<std::promise<CacheFetchResult>>();
+                    std::make_shared<std::promise<SharedCacheFetchPayload>>();
                 fetch_future = fetch_promise->get_future().share();
                 cache_fetches.emplace(cache_key, fetch_future);
                 owner = true;
@@ -2653,14 +2786,27 @@ public:
         {
             try
             {
-                CacheFetchResult fetched;
+                auto fetched = std::make_shared<CacheFetchPayload>();
                 FetchArgument argument = fetchArgument();
                 FetchResult fetch_result{
-                    &fetched.status_code, &fetched.content,
-                    &fetched.response_headers, nullptr};
-                curlGetWithGitHubFallback(argument, proxy_snapshot_,
-                                          initial_route_, fetch_result);
-                fetch_promise->set_value(std::move(fetched));
+                    &fetched->status_code, &fetched->content,
+                    &fetched->response_headers, nullptr};
+                {
+                    ScopedRequestContext no_request_context(
+                        std::shared_ptr<RequestContext>{});
+                    curlGetWithGitHubFallback(argument, proxy_snapshot_,
+                                              initial_route_, fetch_result,
+                                              &fetched->failure);
+                }
+                if(!fetched->retainPayloadBytes())
+                {
+                    std::string().swap(fetched->content);
+                    std::string().swap(fetched->response_headers);
+                    fetched->status_code = 0;
+                    fetched->failure = AsyncFetchFailure::Capacity;
+                }
+                fetch_promise->set_value(
+                    std::static_pointer_cast<const CacheFetchPayload>(fetched));
             }
             catch(...)
             {
@@ -2668,27 +2814,33 @@ public:
             }
         }
 
-        CacheFetchResult fetched =
+        SharedCacheFetchPayload fetched =
             waitWithoutCpuPermit([&] { return fetch_future.get(); });
-        result_.status_code = fetched.status_code;
-        result_.content = std::move(fetched.content);
+        if(!fetched)
+            throw std::future_error(std::future_errc::broken_promise);
+        applyAsyncFetchFailure(request_context_, fetched->failure,
+                               request_context_
+                                   ? request_context_->cancellationToken()
+                                   : RequestCancellationToken{});
+        result_.status_code = fetched->status_code;
+        result_.content = fetched->content;
         if(request_.capture_response_headers)
         {
-            result_.response_headers = fetched.response_headers;
+            result_.response_headers = fetched->response_headers;
             result_.response_headers_touched = true;
         }
-        if(!owner && !retainBytes(result_.content.size() +
-                                  fetched.response_headers.size()))
+        if(!retainBytes(result_.content.size() + result_.response_headers.size()))
         {
             handleRetentionFailure();
             return;
         }
-        finalizeCached(path, header_path, fetched, owner);
+        finalizeCached(path, header_path, *fetched, owner);
     }
 
 private:
     OwnedWebGetRequest request_;
     OwnedWebGetResult result_;
+    std::shared_ptr<RequestContext> request_context_;
     std::string effective_url_;
     ResolvedProxyPolicy proxy_snapshot_;
     ResolvedProxyRoute initial_route_;
@@ -2700,6 +2852,15 @@ private:
 OwnedWebGetResult webGetOwned(OwnedWebGetRequest request)
 {
     return OwnedWebGetState(std::move(request)).runSync();
+}
+
+CacheFetchPayloadSnapshot cacheFetchPayloadSnapshot() noexcept
+{
+    return {
+        cache_fetch_payload_retained_bytes.load(std::memory_order_relaxed),
+        cache_fetch_payload_peak_retained_bytes.load(
+            std::memory_order_relaxed),
+    };
 }
 
 std::string webGet(const std::string &url, const ProxyPolicy &proxy,

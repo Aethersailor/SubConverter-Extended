@@ -128,6 +128,12 @@ using AsyncFetchCompletion =
 
 struct OwnedWebGetRequest
 {
+    enum class RetentionPolicy
+    {
+        CurrentRequest,
+        Result,
+    };
+
     std::string url;
     ProxyPolicy proxy;
     unsigned int cache_ttl = 0;
@@ -136,6 +142,7 @@ struct OwnedWebGetRequest
     bool has_request_headers = false;
     string_icase_map request_headers;
     FetchContext context = FetchContext::TrustedConfig;
+    RetentionPolicy retention = RetentionPolicy::CurrentRequest;
 };
 
 struct OwnedWebGetResult
@@ -144,14 +151,22 @@ struct OwnedWebGetResult
     std::string content;
     std::string response_headers;
     bool response_headers_touched = false;
+    RetainedResponseByteLease retained_bytes;
+};
+
+struct CacheFetchPayloadSnapshot
+{
+    uint64_t retained_bytes = 0;
+    uint64_t peak_retained_bytes = 0;
 };
 
 void webGetAsync(AsyncFetchRequest request, AsyncFetchCompletion completion);
 AsyncFetchFuture webGetAsync(AsyncFetchRequest request);
 // Synchronous ownership boundary used to share prepare/cache/finalize logic.
-// Its byte accounting belongs to the current RequestContext; do not retain
-// this result across that context or use it as an async callback payload.
+// CurrentRequest preserves the legacy request-scoped accounting; Result makes
+// the move-only result own its byte lease for later continuation work.
 OwnedWebGetResult webGetOwned(OwnedWebGetRequest request);
+CacheFetchPayloadSnapshot cacheFetchPayloadSnapshot() noexcept;
 bool asyncFetchEngineAvailable() noexcept;
 AsyncFetchEngineSnapshot asyncFetchEngineSnapshot() noexcept;
 

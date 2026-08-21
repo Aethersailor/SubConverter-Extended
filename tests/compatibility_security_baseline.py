@@ -1070,6 +1070,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
             with type(self).counter_lock:
                 count = type(self).webget_probe_counts.get(request_path, 0) + 1
                 type(self).webget_probe_counts[request_path] = count
+            if request_query.get("payload-singleflight") == ["1"]:
+                time.sleep(0.25)
             body = ("owned-webget:" + request_path).encode()
             content_type = "text/plain; charset=utf-8"
         else:
@@ -1759,12 +1761,17 @@ def owned_webget_boundary_baseline(helper: Path, fixture_base: str) -> None:
                 - hit_before
             )
         if (
-            hit_requests != 1
+            hit_requests != 2
             or hit["first_status"] != 200
             or hit["second_status"] != 200
             or hit["first_body"] != hit["second_body"]
             or hit["early_header_preserved"] is not True
             or "X-WebGet-Probe: present" not in str(hit["second_headers"])
+            or int(hit["first_retained_bytes"]) < len(str(hit["first_body"]))
+            or int(hit["second_retained_bytes"]) < len(str(hit["second_body"]))
+            or hit["payload_bodies_equal"] is not True
+            or int(hit["payload_peak_retained_bytes"]) <= 0
+            or int(hit["payload_retained_bytes"]) != 0
         ):
             raise AssertionError(
                 f"owned webGet TTL hit contract changed: requests={hit_requests}, "
