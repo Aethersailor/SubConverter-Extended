@@ -2424,17 +2424,17 @@ std::string buildSocks5ProxyString(const std::string &addr, int port, const std:
 namespace
 {
 
-class OwnedWebGetExecution
+class OwnedWebGetState
 {
 public:
-    explicit OwnedWebGetExecution(OwnedWebGetRequest request)
+    explicit OwnedWebGetState(OwnedWebGetRequest request)
         : request_(std::move(request))
     {
         if(request_.capture_response_headers)
             result_.response_headers = request_.initial_response_headers;
     }
 
-    OwnedWebGetResult run()
+    OwnedWebGetResult runSync()
     {
         RequestStageTimer fetch_timer(RequestStage::Fetch);
         if(!prepare())
@@ -2446,13 +2446,6 @@ public:
         else
             executeNetwork();
         return std::move(result_);
-    }
-
-private:
-    string_icase_map *requestHeaders() noexcept
-    {
-        return request_.has_request_headers ? &request_.request_headers
-                                            : nullptr;
     }
 
     bool prepare()
@@ -2471,8 +2464,8 @@ private:
         if(startsWith(effective_url_, "data:"))
         {
             result_.content = dataGet(effective_url_);
-            if(!retainCurrentFetchBytes(result_.content.size()))
-                result_.content.clear();
+            if(!retainBytes(result_.content.size()))
+                handleRetentionFailure();
             result_.status_code = result_.content.empty() ? 400 : 200;
             prepared_data_ = true;
             return true;
@@ -2481,29 +2474,6 @@ private:
         initial_route_ = resolveProxyRoute(
             proxy_snapshot_, effective_url_, request_.context);
         return true;
-    }
-
-    FetchArgument fetchArgument() const
-    {
-        return FetchArgument{
-            HTTP_GET, effective_url_, request_.proxy, nullptr,
-            request_.has_request_headers ? &request_.request_headers : nullptr,
-            nullptr, request_.cache_ttl, false, request_.context};
-    }
-
-    void executeNetwork()
-    {
-        FetchArgument argument = fetchArgument();
-        FetchResult fetch_result{
-            &result_.status_code, &result_.content,
-            request_.capture_response_headers ? &result_.response_headers
-                                              : nullptr,
-            nullptr};
-        curlGetWithGitHubFallback(argument, proxy_snapshot_, initial_route_,
-                                  fetch_result);
-        if(request_.capture_response_headers &&
-           result_.response_headers != request_.initial_response_headers)
-            result_.response_headers_touched = true;
     }
 
     bool loadFreshCache(const std::string &path,
@@ -2535,9 +2505,8 @@ private:
             result_.response_headers_touched = true;
         }
         result_.content = fileGet(path, true);
-        if(!retainCurrentFetchBytes(result_.content.size() +
-                                    cached_headers.size()))
-            result_.content.clear();
+        if(!retainBytes(result_.content.size() + cached_headers.size()))
+            handleRetentionFailure();
         result_.status_code = result_.content.empty() ? 0 : 200;
         return true;
     }
@@ -2588,13 +2557,64 @@ private:
                     header_path);
                 result_.response_headers_touched = true;
             }
-            if(!retainCurrentFetchBytes(
+            if(!retainBytes(
                    result_.content.size() + result_.response_headers.size()))
-                result_.content.clear();
+                handleRetentionFailure();
         }
         else if(shouldLog(LOG_LEVEL_VERBOSE))
             writeLog(LOG_LEVEL_VERBOSE,
                      "获取失败，且没有可用的本地缓存。");
+    }
+
+    const OwnedWebGetRequest &request() const noexcept { return request_; }
+    OwnedWebGetResult &result() noexcept { return result_; }
+    const std::string &effectiveUrl() const noexcept { return effective_url_; }
+    const ResolvedProxyPolicy &proxySnapshot() const noexcept {
+        return proxy_snapshot_;
+    }
+    const ResolvedProxyRoute &initialRoute() const noexcept {
+        return initial_route_;
+    }
+    bool preparedData() const noexcept { return prepared_data_; }
+
+public:
+    string_icase_map *requestHeaders() noexcept
+    {
+        return request_.has_request_headers ? &request_.request_headers
+                                            : nullptr;
+    }
+
+    FetchArgument fetchArgument() const
+    {
+        return FetchArgument{
+            HTTP_GET, effective_url_, request_.proxy, nullptr,
+            request_.has_request_headers ? &request_.request_headers : nullptr,
+            nullptr, request_.cache_ttl, false, request_.context};
+    }
+
+    void executeNetwork()
+    {
+        FetchArgument argument = fetchArgument();
+        FetchResult fetch_result{
+            &result_.status_code, &result_.content,
+            request_.capture_response_headers ? &result_.response_headers
+                                              : nullptr,
+            nullptr};
+        curlGetWithGitHubFallback(argument, proxy_snapshot_, initial_route_,
+                                  fetch_result);
+        if(request_.capture_response_headers &&
+           result_.response_headers != request_.initial_response_headers)
+            result_.response_headers_touched = true;
+    }
+
+    bool retainBytes(uint64_t bytes)
+    {
+        return retainCurrentFetchBytes(bytes);
+    }
+
+    void handleRetentionFailure()
+    {
+        result_.content.clear();
     }
 
     void executeCached()
@@ -2657,16 +2677,16 @@ private:
             result_.response_headers = fetched.response_headers;
             result_.response_headers_touched = true;
         }
-        if(!owner && !retainCurrentFetchBytes(
-                         result_.content.size() +
-                         fetched.response_headers.size()))
+        if(!owner && !retainBytes(result_.content.size() +
+                                  fetched.response_headers.size()))
         {
-            result_.content.clear();
+            handleRetentionFailure();
             return;
         }
         finalizeCached(path, header_path, fetched, owner);
     }
 
+private:
     OwnedWebGetRequest request_;
     OwnedWebGetResult result_;
     std::string effective_url_;
@@ -2679,7 +2699,7 @@ private:
 
 OwnedWebGetResult webGetOwned(OwnedWebGetRequest request)
 {
-    return OwnedWebGetExecution(std::move(request)).run();
+    return OwnedWebGetState(std::move(request)).runSync();
 }
 
 std::string webGet(const std::string &url, const ProxyPolicy &proxy,
