@@ -99,6 +99,11 @@ struct AsyncFetchRequest
         std::chrono::steady_clock::time_point::max();
     RequestCancellationToken cancellation;
     std::shared_ptr<RequestContext> request_context;
+    // Keep response bytes alive with the returned result instead of charging
+    // them to whichever request context happened to submit the transfer.
+    // Async cache owners use this so one consumer's cancellation/lifetime
+    // cannot invalidate the payload shared with the remaining consumers.
+    bool retain_result_bytes = false;
 };
 
 struct AsyncFetchResult
@@ -183,6 +188,7 @@ struct CacheFetchPayloadSnapshot
 {
     uint64_t retained_bytes = 0;
     uint64_t peak_retained_bytes = 0;
+    uint64_t registry_entries = 0;
 };
 
 struct CacheFetchOperationProbeSnapshot

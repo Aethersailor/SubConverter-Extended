@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <future>
@@ -6,6 +7,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -148,6 +150,41 @@ int main(int argc, char *argv[]) {
             });
     const SchedulerSubmitStatus preinit_status =
         preinit_completion.get_future().get();
+    std::promise<OwnedWebGetAsyncOutcome> rejected_cache_completion;
+    std::atomic<uint64_t> rejected_cache_completion_count{0};
+    OwnedWebGetRequest rejected_cache_request;
+    rejected_cache_request.url =
+        std::string(argv[3]) + "?owned-async-rejected=1";
+    rejected_cache_request.proxy = ProxyPolicy::direct();
+    rejected_cache_request.cache_ttl =
+        static_cast<unsigned int>(cache_ttl);
+    rejected_cache_request.context = FetchContext::TrustedConfig;
+    webGetOwnedAsync(
+        std::move(rejected_cache_request),
+        std::make_shared<RequestContext>(
+            "owned-async-cache-rejected",
+            RequestContext::Clock::now(),
+            RequestContext::Clock::now() + std::chrono::seconds(10)),
+        [&](OwnedWebGetAsyncOutcome outcome) {
+          rejected_cache_completion_count.fetch_add(
+              1, std::memory_order_relaxed);
+          rejected_cache_completion.set_value(std::move(outcome));
+        });
+    const OwnedWebGetAsyncOutcome rejected_cache_outcome =
+        rejected_cache_completion.get_future().get();
+    const auto rejected_cache_cleanup_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (cacheFetchPayloadSnapshot().registry_entries != 0 &&
+           std::chrono::steady_clock::now() <
+               rejected_cache_cleanup_deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    const bool async_cache_rejection_ok =
+        rejected_cache_completion_count.load(std::memory_order_relaxed) == 1 &&
+        rejected_cache_outcome.payload &&
+        rejected_cache_outcome.failure == AsyncFetchFailure::Shutdown &&
+        rejected_cache_outcome.payload->failure ==
+            AsyncFetchFailure::Shutdown &&
+        cacheFetchPayloadSnapshot().registry_entries == 0;
     const OwnedWebGetContinuationBudget continuation_budget{
         2, 8, 1024 * 1024};
     const OwnedWebGetContinuationInitStatus invalid_init =
@@ -158,6 +195,161 @@ int main(int argc, char *argv[]) {
         initializeOwnedWebGetContinuationRuntime(continuation_budget);
     const OwnedWebGetContinuationInitStatus different_budget_init =
         initializeOwnedWebGetContinuationRuntime({2, 9, 1024 * 1024});
+    constexpr size_t async_cache_consumers = 16;
+    const uint64_t retained_before_async_cache =
+        retainedResponseByteSnapshot().used;
+    std::vector<std::shared_ptr<RequestContext>> async_cache_contexts;
+    std::vector<std::shared_ptr<std::promise<OwnedWebGetAsyncOutcome>>>
+        async_cache_promises;
+    std::vector<std::future<OwnedWebGetAsyncOutcome>> async_cache_futures;
+    std::vector<std::shared_ptr<std::atomic<uint64_t>>>
+        async_cache_completion_counts;
+    async_cache_contexts.reserve(async_cache_consumers);
+    async_cache_promises.reserve(async_cache_consumers);
+    async_cache_futures.reserve(async_cache_consumers);
+    async_cache_completion_counts.reserve(async_cache_consumers);
+    const std::string async_cache_url =
+        std::string(argv[3]) + "?owned-async-cache=1";
+    for (size_t index = 0; index < async_cache_consumers; ++index) {
+      auto context = std::make_shared<RequestContext>(
+          "owned-async-cache-" + std::to_string(index),
+          RequestContext::Clock::now(),
+          RequestContext::Clock::now() + std::chrono::seconds(10));
+      auto promise =
+          std::make_shared<std::promise<OwnedWebGetAsyncOutcome>>();
+      auto completion_count = std::make_shared<std::atomic<uint64_t>>(0);
+      async_cache_futures.emplace_back(promise->get_future());
+      async_cache_contexts.emplace_back(context);
+      async_cache_promises.emplace_back(promise);
+      async_cache_completion_counts.emplace_back(completion_count);
+      OwnedWebGetRequest async_cache_request;
+      async_cache_request.url = async_cache_url;
+      async_cache_request.proxy = ProxyPolicy::direct();
+      async_cache_request.cache_ttl = static_cast<unsigned int>(cache_ttl);
+      async_cache_request.capture_response_headers = true;
+      async_cache_request.context = FetchContext::TrustedConfig;
+      webGetOwnedAsync(
+          std::move(async_cache_request), std::move(context),
+          [promise, completion_count](OwnedWebGetAsyncOutcome outcome) {
+            completion_count->fetch_add(1, std::memory_order_relaxed);
+            promise->set_value(std::move(outcome));
+          });
+    }
+    const size_t cancelled_async_cache_consumers[] = {0, 3, 7, 11};
+    for (const size_t index : cancelled_async_cache_consumers)
+      async_cache_contexts[index]->requestCancellation(
+          RequestCancellationReason::ClientDisconnected);
+
+    bool async_cache_ok = true;
+    const OwnedWebGetAsyncPayload *shared_async_cache_payload = nullptr;
+    for (size_t index = 0; index < async_cache_consumers; ++index) {
+      OwnedWebGetAsyncOutcome outcome = async_cache_futures[index].get();
+      const bool was_cancelled =
+          std::find(std::begin(cancelled_async_cache_consumers),
+                    std::end(cancelled_async_cache_consumers), index) !=
+          std::end(cancelled_async_cache_consumers);
+      if (was_cancelled) {
+        async_cache_ok =
+            async_cache_ok && !outcome.payload &&
+            outcome.failure == AsyncFetchFailure::Cancelled &&
+            outcome.cancellation ==
+                RequestCancellationReason::ClientDisconnected;
+      } else {
+        async_cache_ok =
+            async_cache_ok && outcome.payload &&
+            outcome.failure == AsyncFetchFailure::None &&
+            outcome.cancellation == RequestCancellationReason::None &&
+            outcome.payload->status_code == 200 &&
+            outcome.payload->content ==
+                "owned-webget:/webget-probe-hit" &&
+            outcome.payload->response_headers_touched &&
+            outcome.payload->retained_bytes.bytes() >=
+                outcome.payload->content.size();
+        if (outcome.payload) {
+          if (shared_async_cache_payload == nullptr)
+            shared_async_cache_payload = outcome.payload.get();
+          else
+            async_cache_ok =
+                async_cache_ok &&
+                shared_async_cache_payload == outcome.payload.get();
+        }
+      }
+    }
+    for (const auto &count : async_cache_completion_counts)
+      async_cache_ok = async_cache_ok &&
+                       count->load(std::memory_order_relaxed) == 1;
+    const auto committed_cache_registry_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (cacheFetchPayloadSnapshot().registry_entries != 0 &&
+           std::chrono::steady_clock::now() <
+               committed_cache_registry_deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    async_cache_ok = async_cache_ok &&
+                     cacheFetchPayloadSnapshot().registry_entries == 0;
+    std::promise<OwnedWebGetAsyncOutcome> committed_cache_completion;
+    OwnedWebGetRequest committed_cache_request;
+    committed_cache_request.url = async_cache_url;
+    committed_cache_request.proxy = ProxyPolicy::direct();
+    committed_cache_request.cache_ttl =
+        static_cast<unsigned int>(cache_ttl);
+    committed_cache_request.capture_response_headers = true;
+    committed_cache_request.context = FetchContext::TrustedConfig;
+    webGetOwnedAsync(
+        std::move(committed_cache_request),
+        std::make_shared<RequestContext>(
+            "owned-async-cache-committed",
+            RequestContext::Clock::now(),
+            RequestContext::Clock::now() + std::chrono::seconds(10)),
+        [&](OwnedWebGetAsyncOutcome outcome) {
+          committed_cache_completion.set_value(std::move(outcome));
+        });
+    {
+      const OwnedWebGetAsyncOutcome committed_cache_outcome =
+          committed_cache_completion.get_future().get();
+      async_cache_ok =
+          async_cache_ok && committed_cache_outcome.payload &&
+          committed_cache_outcome.failure == AsyncFetchFailure::None &&
+          committed_cache_outcome.payload->status_code == 200 &&
+          committed_cache_outcome.payload->content ==
+              "owned-webget:/webget-probe-hit";
+    }
+    async_cache_promises.clear();
+    async_cache_futures.clear();
+    async_cache_contexts.clear();
+    async_cache_completion_counts.clear();
+
+    const auto async_cache_cleanup_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    CacheFetchPayloadSnapshot async_cache_payload_snapshot;
+    AsyncFetchEngineSnapshot async_cache_engine_snapshot;
+    OwnedWebGetContinuationRuntimeSnapshot async_cache_runtime_snapshot;
+    do {
+      async_cache_payload_snapshot = cacheFetchPayloadSnapshot();
+      async_cache_engine_snapshot = asyncFetchEngineSnapshot();
+      async_cache_runtime_snapshot =
+          ownedWebGetContinuationRuntimeSnapshot();
+      if (async_cache_payload_snapshot.retained_bytes == 0 &&
+          async_cache_payload_snapshot.registry_entries == 0 &&
+          async_cache_engine_snapshot.pending == 0 &&
+          async_cache_engine_snapshot.active == 0 &&
+          async_cache_runtime_snapshot.scheduler.queued_entries == 0 &&
+          async_cache_runtime_snapshot.scheduler.queued_bytes == 0 &&
+          async_cache_runtime_snapshot.scheduler.active == 0)
+        break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    } while (std::chrono::steady_clock::now() <
+             async_cache_cleanup_deadline);
+    const bool async_cache_resources_ok =
+        async_cache_payload_snapshot.retained_bytes == 0 &&
+        async_cache_payload_snapshot.registry_entries == 0 &&
+        async_cache_engine_snapshot.pending == 0 &&
+        async_cache_engine_snapshot.active == 0 &&
+        async_cache_runtime_snapshot.scheduler.queued_entries == 0 &&
+        async_cache_runtime_snapshot.scheduler.queued_bytes == 0 &&
+        async_cache_runtime_snapshot.scheduler.active == 0 &&
+        retainedResponseByteSnapshot().used ==
+            retained_before_async_cache;
+
     std::promise<void> throwing_completion_called;
     (void)submitOwnedWebGetContinuation(
         RequestCostClass::Low, 0,
@@ -286,6 +478,12 @@ int main(int argc, char *argv[]) {
                 async_consumer_probe.payload_lease_released);
     writer.Key("async_data_ok");
     writer.Bool(async_data_ok);
+    writer.Key("async_cache_ok");
+    writer.Bool(async_cache_ok);
+    writer.Key("async_cache_rejection_ok");
+    writer.Bool(async_cache_rejection_ok);
+    writer.Key("async_cache_resources_ok");
+    writer.Bool(async_cache_resources_ok);
     writer.Key("continuation_runtime_ok");
     writer.Bool(continuation_was_uninitialized &&
                 preinit_submit == SchedulerSubmitStatus::Stopping &&

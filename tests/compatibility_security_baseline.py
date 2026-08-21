@@ -1070,7 +1070,10 @@ class FixtureHandler(BaseHTTPRequestHandler):
             with type(self).counter_lock:
                 count = type(self).webget_probe_counts.get(request_path, 0) + 1
                 type(self).webget_probe_counts[request_path] = count
-            if request_query.get("payload-singleflight") == ["1"]:
+            if (
+                request_query.get("payload-singleflight") == ["1"]
+                or request_query.get("owned-async-cache") == ["1"]
+            ):
                 time.sleep(0.25)
             body = ("owned-webget:" + request_path).encode()
             content_type = "text/plain; charset=utf-8"
@@ -1761,7 +1764,7 @@ def owned_webget_boundary_baseline(helper: Path, fixture_base: str) -> None:
                 - hit_before
             )
         if (
-            hit_requests != 2
+            hit_requests != 3
             or hit["first_status"] != 200
             or hit["second_status"] != 200
             or hit["first_body"] != hit["second_body"]
@@ -1781,6 +1784,9 @@ def owned_webget_boundary_baseline(helper: Path, fixture_base: str) -> None:
             or hit["operation_owner_kinds_isolated"] is not True
             or hit["async_consumer_probe_ok"] is not True
             or hit["async_data_ok"] is not True
+            or hit["async_cache_ok"] is not True
+            or hit["async_cache_rejection_ok"] is not True
+            or hit["async_cache_resources_ok"] is not True
             or hit["continuation_runtime_ok"] is not True
         ):
             raise AssertionError(

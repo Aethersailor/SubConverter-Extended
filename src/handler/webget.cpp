@@ -72,25 +72,25 @@ struct curl_progress_data
 static std::atomic<uint64_t> cache_fetch_payload_retained_bytes{0};
 static std::atomic<uint64_t> cache_fetch_payload_peak_retained_bytes{0};
 
-struct CacheFetchPayload
+struct CacheFetchPayload : OwnedWebGetAsyncPayload
 {
-    int status_code = 0;
-    AsyncFetchFailure failure = AsyncFetchFailure::None;
-    std::string content;
-    std::string response_headers;
-    RetainedResponseByteLease retained_bytes;
-
     ~CacheFetchPayload()
     {
         cache_fetch_payload_retained_bytes.fetch_sub(
-            retained_bytes.bytes(), std::memory_order_relaxed);
+            tracked_retained_bytes_, std::memory_order_relaxed);
     }
 
     bool retainPayloadBytes()
     {
         const uint64_t bytes = content.size() + response_headers.size();
+        return reservePayloadBytes(bytes);
+    }
+
+    bool reservePayloadBytes(uint64_t bytes)
+    {
         if(!retained_bytes.retain(bytes))
             return false;
+        tracked_retained_bytes_ = bytes;
         const uint64_t current = cache_fetch_payload_retained_bytes.fetch_add(
                                      bytes, std::memory_order_relaxed) +
                                  bytes;
@@ -104,6 +104,35 @@ struct CacheFetchPayload
         }
         return true;
     }
+
+    void adoptPayloadBytes(RetainedResponseByteLease lease)
+    {
+        retained_bytes = std::move(lease);
+        const uint64_t bytes = retained_bytes.bytes();
+        tracked_retained_bytes_ = bytes;
+        const uint64_t current = cache_fetch_payload_retained_bytes.fetch_add(
+                                     bytes, std::memory_order_relaxed) +
+                                 bytes;
+        uint64_t peak = cache_fetch_payload_peak_retained_bytes.load(
+            std::memory_order_relaxed);
+        while(current > peak &&
+              !cache_fetch_payload_peak_retained_bytes.compare_exchange_weak(
+                  peak, current, std::memory_order_relaxed,
+                  std::memory_order_relaxed))
+        {
+        }
+    }
+
+    void releasePayloadBytes() noexcept
+    {
+        cache_fetch_payload_retained_bytes.fetch_sub(
+            tracked_retained_bytes_, std::memory_order_relaxed);
+        tracked_retained_bytes_ = 0;
+        retained_bytes.reset();
+    }
+
+private:
+    uint64_t tracked_retained_bytes_ = 0;
 };
 
 using SharedCacheFetchPayload = std::shared_ptr<const CacheFetchPayload>;
@@ -127,8 +156,11 @@ public:
     using Callback = std::function<void(SharedCacheFetchPayload,
                                         std::exception_ptr)>;
 
-    explicit CacheFetchOperation(CacheFetchOwnerKind owner_kind)
-        : owner_kind_(owner_kind) {}
+    explicit CacheFetchOperation(
+        CacheFetchOwnerKind owner_kind,
+        std::chrono::steady_clock::time_point work_deadline =
+            std::chrono::steady_clock::time_point::max())
+        : owner_kind_(owner_kind), work_deadline_(work_deadline) {}
 
     CacheFetchOwnerKind ownerKind() const noexcept { return owner_kind_; }
 
@@ -162,6 +194,11 @@ public:
     RequestCancellationToken workCancellationToken() const
     {
         return work_cancellation_.token();
+    }
+
+    std::chrono::steady_clock::time_point workDeadline() const noexcept
+    {
+        return work_deadline_;
     }
 
     SharedCacheFetchPayload wait()
@@ -253,6 +290,7 @@ private:
     bool done_ = false;
     bool abandoned_ = false;
     const CacheFetchOwnerKind owner_kind_;
+    const std::chrono::steady_clock::time_point work_deadline_;
     uint64_t consumers_ = 0;
     uint64_t next_callback_id_ = 1;
     RequestCancellationSource work_cancellation_;
@@ -675,6 +713,47 @@ static std::string build_cache_key(const std::string &url,
         }
     }
     return getMD5(identity);
+}
+
+static std::string build_async_disk_cache_identity(
+    const OwnedWebGetRequest &request, const std::string &effective_url,
+    const ResolvedProxyRoute &route)
+{
+    const Settings &settings = effectiveSettings();
+    std::string identity =
+        "url:" + std::to_string(effective_url.size()) + ":" + effective_url;
+    const std::string route_identity = route.cacheIdentity();
+    identity += "\nroute:" + std::to_string(route_identity.size()) + ":" +
+                route_identity;
+    identity += "\ncontext:" +
+                std::to_string(static_cast<int>(request.context));
+    identity += "\ntls:" + std::to_string(settings.allowInsecureTls);
+    identity += "\nmax-download:" +
+                std::to_string(settings.maxAllowedDownloadSize);
+    for(const auto &[name, value] : request.request_headers)
+    {
+        const std::string lower_name = toLower(name);
+        identity += "\nheader:" + std::to_string(lower_name.size()) + ":" +
+                    lower_name + ":" + std::to_string(value.size()) + ":" +
+                    value;
+    }
+    if(!request.has_request_headers ||
+       !request.request_headers.contains("User-Agent"))
+        identity += "\ndefault-user-agent:" +
+                    std::string(user_agent_str);
+    return identity;
+}
+
+static std::string build_async_cache_identity(
+    const OwnedWebGetRequest &request, const std::string &effective_url,
+    const ResolvedProxyRoute &route)
+{
+    const Settings &settings = effectiveSettings();
+    return build_async_disk_cache_identity(request, effective_url, route) +
+           "\ngeneration:" + std::to_string(settings.configGeneration) +
+           "\nttl:" + std::to_string(request.cache_ttl) +
+           "\nheaders-captured:" +
+           std::to_string(request.capture_response_headers);
 }
 
 static std::string strip_url_query_fragment(const std::string &url)
@@ -1556,9 +1635,11 @@ private:
             transfer->progress.abort_reason = AsyncFetchFailure::SizeLimit;
             return 0;
         }
-        const bool retained = transfer->request.request_context
-            ? transfer->request.request_context->retainResponseBytes(bytes)
-            : transfer->result->retained_bytes.retain(bytes);
+        const bool retained =
+            transfer->request.request_context &&
+                    !transfer->request.retain_result_bytes
+                ? transfer->request.request_context->retainResponseBytes(bytes)
+                : transfer->result->retained_bytes.retain(bytes);
         if(!retained)
         {
             transfer->progress.abort_reason = AsyncFetchFailure::Capacity;
@@ -1575,9 +1656,12 @@ private:
         const size_t bytes = size * nmemb;
         if(transfer->request.capture_response_headers)
         {
-            const bool retained = transfer->request.request_context
-                ? transfer->request.request_context->retainResponseBytes(bytes)
-                : transfer->result->retained_bytes.retain(bytes);
+            const bool retained =
+                transfer->request.request_context &&
+                        !transfer->request.retain_result_bytes
+                    ? transfer->request.request_context->retainResponseBytes(
+                          bytes)
+                    : transfer->result->retained_bytes.retain(bytes);
             if(!retained)
             {
                 transfer->progress.abort_reason = AsyncFetchFailure::Capacity;
@@ -2128,7 +2212,7 @@ void webGetAsync(AsyncFetchRequest request, AsyncFetchCompletion completion)
 {
     if(!completion)
         return;
-    if(!request.request_context)
+    if(!request.request_context && !request.retain_result_bytes)
         request.request_context = captureCurrentRequestContext();
     request.public_fetch_restricted =
         isPublicFetchRestricted(request.context);
@@ -2153,10 +2237,11 @@ void webGetAsync(AsyncFetchRequest request, AsyncFetchCompletion completion)
             result.content = dataGet(request.url);
         if(!result.content.empty())
         {
-            const bool retained = request.request_context
-                ? request.request_context->retainResponseBytes(
-                      result.content.size())
-                : result.retained_bytes.retain(result.content.size());
+            const bool retained =
+                request.request_context && !request.retain_result_bytes
+                    ? request.request_context->retainResponseBytes(
+                          result.content.size())
+                    : result.retained_bytes.retain(result.content.size());
             if(!retained)
             {
                 result.content.clear();
@@ -3156,10 +3241,16 @@ OwnedWebGetResult webGetOwned(OwnedWebGetRequest request)
 
 CacheFetchPayloadSnapshot cacheFetchPayloadSnapshot() noexcept
 {
+    uint64_t registry_entries = 0;
+    {
+        std::lock_guard<std::mutex> lock(cache_fetch_mutex);
+        registry_entries = cache_fetches.size();
+    }
     return {
         cache_fetch_payload_retained_bytes.load(std::memory_order_relaxed),
         cache_fetch_payload_peak_retained_bytes.load(
             std::memory_order_relaxed),
+        registry_entries,
     };
 }
 
@@ -3248,12 +3339,76 @@ struct OwnedWebGetAsyncConsumer
     std::shared_ptr<RequestContext> context;
     OwnedWebGetAsyncCompletion completion;
     RequestCancellationRegistration cancellation_registration;
+    std::mutex subscription_mutex;
+    std::shared_ptr<CacheFetchOperation> operation;
+    uint64_t subscription_id = 0;
+    bool operation_attached = false;
+    bool subscription_detached = false;
     std::atomic<bool> completion_claimed{false};
-    std::atomic<bool> detached{false};
 };
 
 OwnedWebGetAsyncOutcome cancellationOutcome(
     RequestCancellationReason reason) noexcept;
+
+void detachOwnedWebGetAsyncConsumer(
+    const std::shared_ptr<OwnedWebGetAsyncConsumer> &consumer) noexcept
+{
+    if(!consumer)
+        return;
+    std::shared_ptr<CacheFetchOperation> operation;
+    uint64_t subscription_id = 0;
+    bool operation_attached = false;
+    {
+        std::lock_guard<std::mutex> lock(consumer->subscription_mutex);
+        if(consumer->subscription_detached)
+            return;
+        consumer->subscription_detached = true;
+        operation = std::move(consumer->operation);
+        subscription_id = consumer->subscription_id;
+        consumer->subscription_id = 0;
+        operation_attached = consumer->operation_attached;
+        consumer->operation_attached = false;
+    }
+    if(operation && subscription_id != 0)
+        (void)operation->unsubscribe(subscription_id);
+    if(operation && operation_attached)
+        operation->releaseConsumer();
+}
+
+bool attachOwnedWebGetAsyncConsumer(
+    const std::shared_ptr<OwnedWebGetAsyncConsumer> &consumer,
+    const std::shared_ptr<CacheFetchOperation> &operation,
+    bool operation_attached) noexcept
+{
+    if(!consumer || !operation)
+        return false;
+    std::lock_guard<std::mutex> lock(consumer->subscription_mutex);
+    if(consumer->subscription_detached ||
+       consumer->completion_claimed.load(std::memory_order_acquire))
+        return false;
+    consumer->operation = operation;
+    consumer->operation_attached = operation_attached;
+    return true;
+}
+
+void setOwnedWebGetAsyncSubscription(
+    const std::shared_ptr<OwnedWebGetAsyncConsumer> &consumer,
+    const std::shared_ptr<CacheFetchOperation> &operation,
+    uint64_t subscription_id) noexcept
+{
+    if(!consumer || !operation || subscription_id == 0)
+        return;
+    bool detach = false;
+    {
+        std::lock_guard<std::mutex> lock(consumer->subscription_mutex);
+        if(consumer->subscription_detached || consumer->operation != operation)
+            detach = true;
+        else
+            consumer->subscription_id = subscription_id;
+    }
+    if(detach)
+        (void)operation->unsubscribe(subscription_id);
+}
 
 bool completeOwnedWebGetAsyncConsumer(
     std::shared_ptr<OwnedWebGetAsyncConsumer> consumer,
@@ -3268,7 +3423,11 @@ bool completeOwnedWebGetAsyncConsumer(
             consumer->context->cancellationToken().reason();
         if(reason != RequestCancellationReason::None)
             outcome = cancellationOutcome(reason);
+        else
+            applyAsyncFetchFailure(consumer->context, outcome.failure,
+                                   consumer->context->cancellationToken());
     }
+    detachOwnedWebGetAsyncConsumer(consumer);
     try
     {
         if(consumer->completion)
@@ -3319,6 +3478,454 @@ void registerOwnedWebGetAsyncCancellation(
         });
     consumer->cancellation_registration = std::move(registration);
 }
+
+struct AsyncOwnedCacheFetch
+{
+    OwnedWebGetRequest request;
+    std::string effective_url;
+    ResolvedProxyPolicy proxy_snapshot;
+    ResolvedProxyRoute initial_route;
+    bool allow_insecure_tls = false;
+    long max_download_size = 0;
+    bool serve_cache_on_fetch_fail = false;
+    std::string path;
+    std::string header_path;
+    CacheFetchRegistryKey registry_key;
+    std::shared_ptr<CacheFetchOperation> operation;
+};
+
+void eraseAsyncOwnedCacheFetch(
+    const CacheFetchRegistryKey &registry_key,
+    const std::shared_ptr<CacheFetchOperation> &operation) noexcept
+{
+    if(!operation)
+        return;
+    std::lock_guard<std::mutex> lock(cache_fetch_mutex);
+    const auto iter = cache_fetches.find(registry_key);
+    if(iter != cache_fetches.end() && iter->second == operation)
+        cache_fetches.erase(iter);
+}
+
+void eraseAsyncOwnedCacheFetch(
+    const std::shared_ptr<AsyncOwnedCacheFetch> &state) noexcept
+{
+    if(state)
+        eraseAsyncOwnedCacheFetch(state->registry_key, state->operation);
+}
+
+void publishAsyncOwnedCacheException(
+    const std::shared_ptr<AsyncOwnedCacheFetch> &state,
+    std::exception_ptr error) noexcept
+{
+    if(!state || !state->operation)
+        return;
+    if(!error)
+    {
+        try
+        {
+            error = std::make_exception_ptr(
+                std::runtime_error("async owned cache continuation failed"));
+        }
+        catch(...)
+        {
+            error = std::current_exception();
+        }
+    }
+    if(state->operation->publishException(std::move(error)))
+        eraseAsyncOwnedCacheFetch(state);
+}
+
+void publishAsyncOwnedCachePayload(
+    const std::shared_ptr<AsyncOwnedCacheFetch> &state,
+    std::shared_ptr<CacheFetchPayload> payload) noexcept
+{
+    if(!state || !state->operation || !payload)
+        return;
+    if(state->operation->publish(
+           std::static_pointer_cast<const CacheFetchPayload>(payload)))
+        eraseAsyncOwnedCacheFetch(state);
+}
+
+AsyncFetchFailure asyncOwnedCacheFailure(
+    const std::shared_ptr<AsyncOwnedCacheFetch> &state) noexcept
+{
+    if(!state || !state->operation)
+        return AsyncFetchFailure::Capacity;
+    switch(state->operation->workCancellationToken().reason())
+    {
+    case RequestCancellationReason::Shutdown:
+        return AsyncFetchFailure::Shutdown;
+    case RequestCancellationReason::Deadline:
+        return AsyncFetchFailure::Deadline;
+    case RequestCancellationReason::ClientDisconnected:
+    case RequestCancellationReason::NoConsumers:
+        return AsyncFetchFailure::Cancelled;
+    case RequestCancellationReason::None:
+        return AsyncFetchFailure::Cancelled;
+    }
+    return AsyncFetchFailure::Cancelled;
+}
+
+void publishAsyncOwnedCacheFailure(
+    const std::shared_ptr<AsyncOwnedCacheFetch> &state,
+    AsyncFetchFailure failure) noexcept
+{
+    try
+    {
+        auto payload = std::make_shared<CacheFetchPayload>();
+        payload->failure = failure;
+        publishAsyncOwnedCachePayload(state, std::move(payload));
+    }
+    catch(...)
+    {
+        publishAsyncOwnedCacheException(state, std::current_exception());
+    }
+}
+
+void completeAsyncOwnedCacheContinuation(
+    const std::shared_ptr<AsyncOwnedCacheFetch> &state,
+    SchedulerSubmitStatus status, std::exception_ptr error) noexcept
+{
+    if(status == SchedulerSubmitStatus::Accepted && !error)
+        return;
+    switch(status)
+    {
+    case SchedulerSubmitStatus::Deadline:
+        publishAsyncOwnedCacheFailure(state, AsyncFetchFailure::Deadline);
+        return;
+    case SchedulerSubmitStatus::Cancelled:
+        publishAsyncOwnedCacheFailure(state, asyncOwnedCacheFailure(state));
+        return;
+    case SchedulerSubmitStatus::Stopping:
+        publishAsyncOwnedCacheFailure(state, AsyncFetchFailure::Shutdown);
+        return;
+    case SchedulerSubmitStatus::EntryLimit:
+    case SchedulerSubmitStatus::ByteLimit:
+        writeLog(LOG_LEVEL_ERROR,
+                 "OWNED_WEBGET_CONTINUATION_INVARIANT_BROKEN status=" +
+                     std::to_string(static_cast<int>(status)));
+        publishAsyncOwnedCacheFailure(state, AsyncFetchFailure::Capacity);
+        return;
+    case SchedulerSubmitStatus::Accepted:
+        break;
+    }
+    publishAsyncOwnedCacheFailure(
+        state, error ? AsyncFetchFailure::Transport
+                     : AsyncFetchFailure::Capacity);
+}
+
+bool loadFreshAsyncOwnedCache(
+    const std::shared_ptr<AsyncOwnedCacheFetch> &state)
+{
+    auto payload = std::make_shared<CacheFetchPayload>();
+    bool reserved_payload = true;
+    bool cache_is_fresh = false;
+    cache_rw_lock.readLock();
+    {
+        defer(cache_rw_lock.readUnlock();)
+        struct stat body_information {};
+        struct stat header_information {};
+        if(stat(state->path.c_str(), &body_information) != 0 ||
+           difftime(time(nullptr), body_information.st_mtime) >
+               state->request.cache_ttl)
+            return false;
+        cache_is_fresh = true;
+        const uint64_t body_bytes =
+            body_information.st_size > 0
+                ? static_cast<uint64_t>(body_information.st_size)
+                : 0;
+        const uint64_t header_bytes =
+            stat(state->header_path.c_str(), &header_information) == 0 &&
+                    header_information.st_size > 0
+                ? static_cast<uint64_t>(header_information.st_size)
+                : 0;
+        const uint64_t reserved =
+            body_bytes > UINT64_MAX - header_bytes
+                ? UINT64_MAX : body_bytes + header_bytes;
+        if(!payload->reservePayloadBytes(reserved))
+        {
+            reserved_payload = false;
+        }
+        else
+        {
+            payload->response_headers =
+                readCachedResponseHeaders(state->header_path);
+            payload->content = fileGet(state->path, true);
+        }
+    }
+    if(!cache_is_fresh)
+        return false;
+    if(!reserved_payload)
+        payload->failure = AsyncFetchFailure::Capacity;
+    payload->response_headers_touched = true;
+    payload->status_code = payload->content.empty() ? 0 : 200;
+    publishAsyncOwnedCachePayload(state, std::move(payload));
+    return true;
+}
+
+void commitOrServeStaleAsyncOwnedCache(
+    const std::shared_ptr<AsyncOwnedCacheFetch> &state,
+    const std::shared_ptr<CacheFetchPayload> &payload)
+{
+    if(state->operation->workCancellationToken().reason() ==
+       RequestCancellationReason::NoConsumers)
+    {
+        payload->releasePayloadBytes();
+        std::string().swap(payload->content);
+        std::string().swap(payload->response_headers);
+        payload->status_code = 0;
+        payload->failure = AsyncFetchFailure::Cancelled;
+        return;
+    }
+    if(payload->status_code == 200 &&
+       payload->failure == AsyncFetchFailure::None)
+    {
+        cache_rw_lock.writeLock();
+        {
+            defer(cache_rw_lock.writeUnlock();)
+            const CacheUpdateResult cache_update = updateCacheFiles(
+                state->path, state->header_path, payload->content,
+                payload->response_headers);
+            if(cache_update == CacheUpdateResult::Unchanged)
+                writeLog(LOG_LEVEL_WARNING,
+                         "CACHE_UPDATE_FAILED body=unchanged headers=unchanged; "
+                         "本次已获取内容仍将直接返回。");
+            else if(cache_update ==
+                    CacheUpdateResult::UnchangedHeadersInvalidated)
+                writeLog(LOG_LEVEL_WARNING,
+                         "CACHE_UPDATE_FAILED body=unchanged "
+                         "headers=invalidated; 本次已获取内容仍将直接返回。");
+            else if(cache_update == CacheUpdateResult::BodyCommittedUnsynced)
+                writeLog(LOG_LEVEL_WARNING,
+                         "CACHE_BODY_COMMITTED durability=unconfirmed "
+                         "headers=invalidated; 本次已获取内容仍将直接返回。");
+            else if(cache_update == CacheUpdateResult::HeadersInvalidated)
+                writeLog(LOG_LEVEL_WARNING,
+                         "CACHE_BODY_COMMITTED durability=confirmed "
+                         "headers=invalidated; 本次已获取内容仍将直接返回。");
+        }
+        return;
+    }
+
+    if(!state->serve_cache_on_fetch_fail)
+        return;
+    std::string stale_content;
+    std::string stale_headers;
+    const int original_status = payload->status_code;
+    const AsyncFetchFailure original_failure = payload->failure;
+    cache_rw_lock.readLock();
+    {
+        defer(cache_rw_lock.readUnlock();)
+        struct stat body_information {};
+        struct stat header_information {};
+        if(stat(state->path.c_str(), &body_information) != 0 ||
+           body_information.st_size <= 0)
+            return;
+        const uint64_t body_bytes =
+            static_cast<uint64_t>(body_information.st_size);
+        const uint64_t header_bytes =
+            stat(state->header_path.c_str(), &header_information) == 0 &&
+                    header_information.st_size > 0
+                ? static_cast<uint64_t>(header_information.st_size)
+                : 0;
+        const uint64_t reserved =
+            body_bytes > UINT64_MAX - header_bytes
+                ? UINT64_MAX : body_bytes + header_bytes;
+        payload->releasePayloadBytes();
+        std::string().swap(payload->content);
+        std::string().swap(payload->response_headers);
+        if(!payload->reservePayloadBytes(reserved))
+        {
+            std::string().swap(payload->content);
+            std::string().swap(payload->response_headers);
+            payload->status_code = 0;
+            payload->failure = AsyncFetchFailure::Capacity;
+            return;
+        }
+        stale_content = fileGet(state->path, true);
+        stale_headers = readCachedResponseHeaders(state->header_path);
+    }
+    if(stale_content.empty())
+    {
+        payload->releasePayloadBytes();
+        payload->status_code = original_status;
+        payload->failure = original_failure;
+        return;
+    }
+    payload->content = std::move(stale_content);
+    payload->response_headers = std::move(stale_headers);
+    payload->response_headers_touched = true;
+    payload->status_code = 200;
+    payload->failure = AsyncFetchFailure::None;
+}
+
+void submitAsyncOwnedCacheFinalize(
+    const std::shared_ptr<AsyncOwnedCacheFetch> &state,
+    SharedAsyncFetchResult result)
+{
+    const uint64_t bytes = result
+                               ? static_cast<uint64_t>(result->content.size()) +
+                                     result->response_headers.size()
+                               : 0;
+    (void)submitOwnedWebGetContinuation(
+        RequestCostClass::Low, bytes,
+        state->operation->workDeadline(),
+        state->operation->workCancellationToken(),
+        [state, result = std::move(result)]() mutable {
+            auto payload = std::make_shared<CacheFetchPayload>();
+            if(result)
+            {
+                payload->status_code = result->status_code;
+                payload->failure = result->failure;
+                payload->content = std::move(result->content);
+                payload->response_headers =
+                    std::move(result->response_headers);
+                payload->response_headers_touched = true;
+                payload->adoptPayloadBytes(
+                    std::move(result->retained_bytes));
+            }
+            else
+                payload->failure = AsyncFetchFailure::Transport;
+            commitOrServeStaleAsyncOwnedCache(state, payload);
+            publishAsyncOwnedCachePayload(state, std::move(payload));
+        },
+        [state](SchedulerSubmitStatus status,
+                std::exception_ptr error) noexcept {
+            completeAsyncOwnedCacheContinuation(
+                state, status, std::move(error));
+        });
+}
+
+AsyncFetchRequest makeAsyncOwnedCacheRequest(
+    const std::shared_ptr<AsyncOwnedCacheFetch> &state,
+    std::string url)
+{
+    AsyncFetchRequest request;
+    request.method = HTTP_GET;
+    request.url = std::move(url);
+    request.proxy = state->request.proxy;
+    if(state->request.has_request_headers)
+        request.request_headers = state->request.request_headers;
+    request.capture_content = true;
+    request.capture_response_headers = true;
+    request.keep_resp_on_fail = false;
+    request.context = state->request.context;
+    request.deadline = state->operation->workDeadline();
+    request.cancellation = state->operation->workCancellationToken();
+    request.retain_result_bytes = true;
+    request.public_fetch_restricted =
+        isPublicFetchRestricted(request.context);
+    return request;
+}
+
+void finishAsyncOwnedCacheNetwork(
+    const std::shared_ptr<AsyncOwnedCacheFetch> &state,
+    SharedAsyncFetchResult result) noexcept
+{
+    try
+    {
+        submitAsyncOwnedCacheFinalize(state, std::move(result));
+    }
+    catch(...)
+    {
+        publishAsyncOwnedCacheException(state, std::current_exception());
+    }
+}
+
+void startAsyncOwnedCacheNetwork(
+    const std::shared_ptr<AsyncOwnedCacheFetch> &state)
+{
+    AsyncFetchRequest request = makeAsyncOwnedCacheRequest(
+        state, state->effective_url);
+    multiEngine().submit(
+        std::move(request), state->initial_route,
+        state->allow_insecure_tls, state->max_download_size,
+        [state](SharedAsyncFetchResult original) mutable noexcept {
+            try
+            {
+                const CURLcode original_code = original
+                    ? static_cast<CURLcode>(original->transport_code)
+                    : CURLE_FAILED_INIT;
+                const int original_status = original
+                    ? original->status_code : 0;
+                std::string fallback_url;
+                if(original && original_status != 200 &&
+                   !outbound_fetch_shutdown_requested.load(
+                       std::memory_order_relaxed) &&
+                   should_try_jsdelivr_fallback(original_code,
+                                                 original_status) &&
+                   build_jsdelivr_github_url(state->effective_url,
+                                             fallback_url))
+                {
+                    writeLog(LOG_LEVEL_WARNING,
+                             "GitHub Raw 获取失败，正在尝试 jsDelivr 回退源：" +
+                                 summarizeUrlForLog(fallback_url));
+                    const ResolvedProxyRoute fallback_route =
+                        resolveProxyRoute(state->proxy_snapshot,
+                                          fallback_url,
+                                          state->request.context);
+                    AsyncFetchRequest fallback_request =
+                        makeAsyncOwnedCacheRequest(state, fallback_url);
+                    multiEngine().submit(
+                        std::move(fallback_request), fallback_route,
+                        state->allow_insecure_tls,
+                        state->max_download_size,
+                        [state, original = std::move(original)](
+                            SharedAsyncFetchResult fallback) mutable noexcept {
+                            if(fallback &&
+                               fallback->transport_code == CURLE_OK &&
+                               fallback->status_code == 200)
+                            {
+                                writeLog(LOG_LEVEL_INFO,
+                                         "GitHub Raw 已通过 jsDelivr 回退源获取成功。" );
+                                finishAsyncOwnedCacheNetwork(
+                                    state, std::move(fallback));
+                            }
+                            else
+                            {
+                                writeLog(LOG_LEVEL_WARNING,
+                                         "GitHub Raw 通过 jsDelivr 回退源获取失败。" );
+                                finishAsyncOwnedCacheNetwork(
+                                    state, std::move(original));
+                            }
+                        });
+                    return;
+                }
+                finishAsyncOwnedCacheNetwork(state, std::move(original));
+            }
+            catch(...)
+            {
+                publishAsyncOwnedCacheException(
+                    state, std::current_exception());
+            }
+        });
+}
+
+void startAsyncOwnedCacheOwner(
+    const std::shared_ptr<AsyncOwnedCacheFetch> &state) noexcept
+{
+    try
+    {
+        (void)submitOwnedWebGetContinuation(
+            RequestCostClass::Low, 0,
+            state->operation->workDeadline(),
+            state->operation->workCancellationToken(),
+            [state] {
+                md("cache");
+                if(!loadFreshAsyncOwnedCache(state))
+                    startAsyncOwnedCacheNetwork(state);
+            },
+            [state](SchedulerSubmitStatus status,
+                    std::exception_ptr error) noexcept {
+                completeAsyncOwnedCacheContinuation(
+                    state, status, std::move(error));
+            });
+    }
+    catch(...)
+    {
+        publishAsyncOwnedCacheException(state, std::current_exception());
+    }
+}
 } // namespace
 
 void webGetOwnedAsync(OwnedWebGetRequest request,
@@ -3347,6 +3954,13 @@ void webGetOwnedAsync(OwnedWebGetRequest request,
     }
     consumer->context = std::move(consumer_context);
     consumer->completion = std::move(completion);
+    if(!consumer->context)
+    {
+        completeOwnedWebGetAsyncConsumer(
+            consumer, {{}, AsyncFetchFailure::Capacity,
+                       RequestCancellationReason::None});
+        return;
+    }
     try
     {
         registerOwnedWebGetAsyncCancellation(consumer);
@@ -3360,14 +3974,196 @@ void webGetOwnedAsync(OwnedWebGetRequest request,
     }
     if(consumer->completion_claimed.load(std::memory_order_acquire))
         return;
-    if(!startsWith(request.url, "data:"))
+
+    try
+    {
+    if(!isFetchUrlAllowed(request.url, request.context))
+    {
+        try
+        {
+            auto payload = std::make_shared<OwnedWebGetAsyncPayload>();
+            payload->status_code = 403;
+            completeOwnedWebGetAsyncConsumer(
+                consumer,
+                {std::static_pointer_cast<const OwnedWebGetAsyncPayload>(
+                     payload),
+                 AsyncFetchFailure::None,
+                 RequestCancellationReason::None});
+        }
+        catch(...)
+        {
+            completeOwnedWebGetAsyncConsumer(
+                consumer, {{}, AsyncFetchFailure::Capacity,
+                           RequestCancellationReason::None});
+        }
+        return;
+    }
+
+    const CocrSourceResolution source = resolveCocrSourceUrl(
+        request.url,
+        effectiveSettings().customOpenClashRulesSourceSwitch);
+    request.url = source.effective_url;
+    request.retention = OwnedWebGetRequest::RetentionPolicy::Result;
+    if(!startsWith(request.url, "data:") && request.cache_ttl == 0)
     {
         completeOwnedWebGetAsyncConsumer(
             consumer, {{}, AsyncFetchFailure::Transport,
                        RequestCancellationReason::None});
         return;
     }
-    request.retention = OwnedWebGetRequest::RetentionPolicy::Result;
+    if(!startsWith(request.url, "data:"))
+    {
+        std::shared_ptr<CacheFetchOperation> operation;
+        CacheFetchRegistryKey registry_key;
+        bool owner = false;
+        bool operation_attached = false;
+        try
+        {
+            const auto work_deadline =
+                std::chrono::steady_clock::now() +
+                std::chrono::milliseconds(std::max(
+                    1, effectiveSettings().requestDeadlineMs));
+            const ResolvedProxyPolicy proxy_snapshot =
+                request.proxy.snapshot();
+            const ResolvedProxyRoute initial_route = resolveProxyRoute(
+                proxy_snapshot, request.url, request.context);
+            const std::string legacy_cache_key = build_cache_key(
+                request.url, initial_route,
+                request.has_request_headers ? &request.request_headers
+                                            : nullptr);
+            const std::string registry_identity =
+                build_async_cache_identity(request, request.url,
+                                           initial_route);
+            const std::string disk_identity =
+                build_async_disk_cache_identity(request, request.url,
+                                                initial_route);
+            const std::string cache_key = getMD5(
+                "owned-async-cache:" + disk_identity +
+                ":legacy:" + legacy_cache_key);
+            registry_key = CacheFetchRegistryKey{
+                registry_identity,
+                CacheFetchOwnerKind::Async};
+            CacheFetchOperation::AttachResult attach_result =
+                CacheFetchOperation::AttachResult::Abandoned;
+            for(;;)
+            {
+                {
+                    std::lock_guard<std::mutex> lock(cache_fetch_mutex);
+                    const auto iter = cache_fetches.find(registry_key);
+                    if(iter == cache_fetches.end())
+                    {
+                        operation = std::make_shared<CacheFetchOperation>(
+                            CacheFetchOwnerKind::Async, work_deadline);
+                        cache_fetches.emplace(registry_key, operation);
+                        owner = true;
+                    }
+                    else
+                    {
+                        operation = iter->second;
+                        owner = false;
+                    }
+                }
+                attach_result = operation->attachConsumer();
+                if(attach_result !=
+                   CacheFetchOperation::AttachResult::Abandoned)
+                    break;
+                std::lock_guard<std::mutex> lock(cache_fetch_mutex);
+                const auto iter = cache_fetches.find(registry_key);
+                if(iter != cache_fetches.end() &&
+                   iter->second == operation)
+                    cache_fetches.erase(iter);
+            }
+
+            operation_attached =
+                attach_result ==
+                CacheFetchOperation::AttachResult::Attached;
+            if(!attachOwnedWebGetAsyncConsumer(
+                   consumer, operation, operation_attached))
+            {
+                if(operation_attached)
+                    operation->releaseConsumer();
+                if(owner)
+                {
+                    std::exception_ptr error;
+                    try
+                    {
+                        error = std::make_exception_ptr(std::runtime_error(
+                            "async owned cache owner cancelled before start"));
+                    }
+                    catch(...)
+                    {
+                        error = std::current_exception();
+                    }
+                    (void)operation->publishException(std::move(error));
+                    eraseAsyncOwnedCacheFetch(registry_key, operation);
+                }
+                return;
+            }
+            // The consumer subscription owns the operation attachment now.
+            operation_attached = false;
+
+            const uint64_t subscription_id = operation->subscribe(
+                [consumer](SharedCacheFetchPayload payload,
+                           std::exception_ptr error) mutable {
+                    if(error || !payload)
+                    {
+                        completeOwnedWebGetAsyncConsumer(
+                            consumer,
+                            {{}, AsyncFetchFailure::Transport,
+                             RequestCancellationReason::None});
+                        return;
+                    }
+                    completeOwnedWebGetAsyncConsumer(
+                        consumer,
+                        {std::static_pointer_cast<
+                             const OwnedWebGetAsyncPayload>(payload),
+                         payload->failure,
+                         RequestCancellationReason::None});
+                });
+            setOwnedWebGetAsyncSubscription(
+                consumer, operation, subscription_id);
+
+            if(owner)
+            {
+                auto state = std::make_shared<AsyncOwnedCacheFetch>();
+                state->request = std::move(request);
+                state->effective_url = state->request.url;
+                state->proxy_snapshot = proxy_snapshot;
+                state->initial_route = initial_route;
+                state->allow_insecure_tls =
+                    effectiveSettings().allowInsecureTls;
+                state->max_download_size =
+                    effectiveSettings().maxAllowedDownloadSize;
+                state->serve_cache_on_fetch_fail =
+                    effectiveSettings().serveCacheOnFetchFail;
+                state->path = "cache/" + cache_key;
+                state->header_path = state->path + "_header";
+                state->registry_key = registry_key;
+                state->operation = std::move(operation);
+                startAsyncOwnedCacheOwner(state);
+            }
+        }
+        catch(...)
+        {
+            const std::exception_ptr error = std::current_exception();
+            if(operation_attached && operation)
+            {
+                operation->releaseConsumer();
+                operation_attached = false;
+            }
+            if(owner && operation)
+            {
+                (void)operation->publishException(error);
+                eraseAsyncOwnedCacheFetch(registry_key, operation);
+            }
+            completeOwnedWebGetAsyncConsumer(
+                consumer, {{}, owner ? AsyncFetchFailure::Transport
+                                     : AsyncFetchFailure::Capacity,
+                           RequestCancellationReason::None});
+        }
+        return;
+    }
+
     try
     {
         ScopedRequestContext no_request_context(
@@ -3384,6 +4180,13 @@ void webGetOwnedAsync(OwnedWebGetRequest request,
             consumer,
             {std::static_pointer_cast<const OwnedWebGetAsyncPayload>(payload),
              payload->failure, RequestCancellationReason::None});
+    }
+    catch(...)
+    {
+        completeOwnedWebGetAsyncConsumer(
+            consumer, {{}, AsyncFetchFailure::Capacity,
+                       RequestCancellationReason::None});
+    }
     }
     catch(...)
     {
