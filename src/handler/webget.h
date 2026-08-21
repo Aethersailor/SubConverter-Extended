@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <future>
 #include <memory>
 #include <string>
@@ -122,7 +123,10 @@ struct AsyncFetchEngineSnapshot
 
 using SharedAsyncFetchResult = std::shared_ptr<AsyncFetchResult>;
 using AsyncFetchFuture = std::shared_future<SharedAsyncFetchResult>;
+using AsyncFetchCompletion =
+    std::function<void(SharedAsyncFetchResult)>;
 
+void webGetAsync(AsyncFetchRequest request, AsyncFetchCompletion completion);
 AsyncFetchFuture webGetAsync(AsyncFetchRequest request);
 bool asyncFetchEngineAvailable() noexcept;
 AsyncFetchEngineSnapshot asyncFetchEngineSnapshot() noexcept;

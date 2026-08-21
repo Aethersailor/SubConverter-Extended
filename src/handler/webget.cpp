@@ -1150,8 +1150,10 @@ class CurlMultiEngine
         curl_prereq_data prereq_context;
         curl_progress_data progress;
         RequestCancellationRegistration cancellation_registration;
-        AsyncFetchResult result;
-        std::promise<SharedAsyncFetchResult> promise;
+        SharedAsyncFetchResult result =
+            std::make_shared<AsyncFetchResult>();
+        AsyncFetchCompletion completion;
+        std::atomic<bool> completed{false};
     };
 
 public:
@@ -1220,36 +1222,63 @@ public:
         return available_.load(std::memory_order_acquire);
     }
 
-    AsyncFetchFuture submit(
+    void submit(
         AsyncFetchRequest request, ResolvedProxyRoute route,
-        bool allow_insecure_tls, long size_limit)
+        bool allow_insecure_tls, long size_limit,
+        AsyncFetchCompletion completion)
     {
         auto transfer = std::make_shared<Transfer>();
         transfer->request = std::move(request);
         transfer->route = std::move(route);
         transfer->allow_insecure_tls = allow_insecure_tls;
         transfer->size_limit = size_limit;
+        transfer->completion = std::move(completion);
         transfer->cancellation_registration =
             transfer->request.cancellation.registerCallback(
                 [this] { wakeWorker(); });
-        AsyncFetchFuture future = transfer->promise.get_future().share();
+        bool rejected = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if(stopping_ || !available())
             {
-                transfer->result.transport_code = CURLE_ABORTED_BY_CALLBACK;
-                transfer->result.failure = stopping_
+                transfer->result->transport_code = CURLE_ABORTED_BY_CALLBACK;
+                transfer->result->failure = stopping_
                     ? AsyncFetchFailure::Shutdown
                     : AsyncFetchFailure::Transport;
-                transfer->promise.set_value(
-                    std::make_shared<AsyncFetchResult>(
-                        std::move(transfer->result)));
-                return future;
+                rejected = true;
             }
-            pending_.emplace_back(std::move(transfer));
-            pending_count_.fetch_add(1, std::memory_order_relaxed);
+            else
+            {
+                pending_.emplace_back(transfer);
+                pending_count_.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        if(rejected)
+        {
+            complete(transfer);
+            return;
         }
         wakeWorker();
+    }
+
+    AsyncFetchFuture submit(
+        AsyncFetchRequest request, ResolvedProxyRoute route,
+        bool allow_insecure_tls, long size_limit)
+    {
+        auto promise =
+            std::make_shared<std::promise<SharedAsyncFetchResult>>();
+        AsyncFetchFuture future = promise->get_future().share();
+        submit(std::move(request), std::move(route), allow_insecure_tls,
+               size_limit,
+               [promise](SharedAsyncFetchResult result) noexcept {
+                   try
+                   {
+                       promise->set_value(std::move(result));
+                   }
+                   catch(...)
+                   {
+                   }
+               });
         return future;
     }
 
@@ -1307,7 +1336,7 @@ private:
         if(transfer->size_limit > 0 &&
            bytes > static_cast<size_t>(transfer->size_limit) -
                        std::min<size_t>(
-                           transfer->result.content.size(),
+                           transfer->result->content.size(),
                            static_cast<size_t>(transfer->size_limit)))
         {
             transfer->progress.abort_reason = AsyncFetchFailure::SizeLimit;
@@ -1315,13 +1344,13 @@ private:
         }
         const bool retained = transfer->request.request_context
             ? transfer->request.request_context->retainResponseBytes(bytes)
-            : transfer->result.retained_bytes.retain(bytes);
+            : transfer->result->retained_bytes.retain(bytes);
         if(!retained)
         {
             transfer->progress.abort_reason = AsyncFetchFailure::Capacity;
             return 0;
         }
-        transfer->result.content.append(data, bytes);
+        transfer->result->content.append(data, bytes);
         return bytes;
     }
 
@@ -1334,13 +1363,13 @@ private:
         {
             const bool retained = transfer->request.request_context
                 ? transfer->request.request_context->retainResponseBytes(bytes)
-                : transfer->result.retained_bytes.retain(bytes);
+                : transfer->result->retained_bytes.retain(bytes);
             if(!retained)
             {
                 transfer->progress.abort_reason = AsyncFetchFailure::Capacity;
                 return 0;
             }
-            transfer->result.response_headers.append(data, bytes);
+            transfer->result->response_headers.append(data, bytes);
         }
         return bytes;
     }
@@ -1458,16 +1487,16 @@ private:
         {
             long status = 0;
             curl_easy_getinfo(transfer->easy, CURLINFO_HTTP_CODE, &status);
-            transfer->result.status_code = static_cast<int>(status);
+            transfer->result->status_code = static_cast<int>(status);
 #if LIBCURL_VERSION_NUM >= 0x080700
             long used_proxy = 0;
             if(curl_easy_getinfo(transfer->easy, CURLINFO_USED_PROXY,
                                  &used_proxy) == CURLE_OK)
-                transfer->result.used_proxy = used_proxy != 0;
+                transfer->result->used_proxy = used_proxy != 0;
 #endif
 #if LIBCURL_VERSION_NUM >= 0x074900
             curl_easy_getinfo(transfer->easy, CURLINFO_PROXY_ERROR,
-                              &transfer->result.proxy_error);
+                              &transfer->result->proxy_error);
 #endif
             if(transfer->request.capture_cookies)
             {
@@ -1476,18 +1505,18 @@ private:
                                   &cookies);
                 for(curl_slist *item = cookies; item; item = item->next)
                 {
-                    transfer->result.cookies.append(item->data);
-                    transfer->result.cookies += "\r\n";
+                    transfer->result->cookies.append(item->data);
+                    transfer->result->cookies += "\r\n";
                 }
                 curl_slist_free_all(cookies);
             }
         }
-        transfer->result.transport_code = static_cast<int>(code);
-        transfer->result.failure = classify_async_failure(
+        transfer->result->transport_code = static_cast<int>(code);
+        transfer->result->failure = classify_async_failure(
             code, transfer->progress);
         if(!transfer->request.keep_resp_on_fail &&
-           (code != CURLE_OK || transfer->result.status_code != 200))
-            transfer->result.content.clear();
+           (code != CURLE_OK || transfer->result->status_code != 200))
+            transfer->result->content.clear();
         curl_slist_free_all(transfer->header_list);
         transfer->header_list = nullptr;
         if(transfer->easy)
@@ -1496,9 +1525,24 @@ private:
             curl_easy_cleanup(transfer->easy);
             transfer->easy = nullptr;
         }
-        transfer->promise.set_value(
-            std::make_shared<AsyncFetchResult>(
-                std::move(transfer->result)));
+        complete(transfer);
+    }
+
+    static void complete(const std::shared_ptr<Transfer> &transfer) noexcept
+    {
+        if(!transfer ||
+           transfer->completed.exchange(true, std::memory_order_acq_rel))
+            return;
+        AsyncFetchCompletion completion = std::move(transfer->completion);
+        if(!completion)
+            return;
+        try
+        {
+            completion(std::move(transfer->result));
+        }
+        catch(...)
+        {
+        }
     }
 
     void processPending()
@@ -1680,23 +1724,28 @@ private:
             processPending();
             performTransfers();
             cancelExpired();
+            bool stopping = false;
+            std::deque<std::shared_ptr<Transfer>> pending;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if(stopping_)
+                stopping = stopping_;
+                if(stopping)
                 {
-                    cancelActive();
-                    std::deque<std::shared_ptr<Transfer>> pending;
                     pending.swap(pending_);
                     pending_count_.fetch_sub(pending.size(),
                                              std::memory_order_relaxed);
-                    for(auto &transfer : pending)
-                    {
-                        transfer->progress.abort_reason =
-                            AsyncFetchFailure::Shutdown;
-                        finish(transfer, CURLE_ABORTED_BY_CALLBACK, false);
-                    }
-                    break;
                 }
+            }
+            if(stopping)
+            {
+                cancelActive();
+                for(auto &transfer : pending)
+                {
+                    transfer->progress.abort_reason =
+                        AsyncFetchFailure::Shutdown;
+                    finish(transfer, CURLE_ABORTED_BY_CALLBACK, false);
+                }
+                break;
             }
             waitForActivity();
         }
@@ -1738,20 +1787,20 @@ AsyncFetchEngineSnapshot asyncFetchEngineSnapshot() noexcept
     return {false, false, 0, 0, retained.used};
 }
 
-AsyncFetchFuture webGetAsync(AsyncFetchRequest request)
+void webGetAsync(AsyncFetchRequest request, AsyncFetchCompletion completion)
 {
+    if(!completion)
+        return;
     if(!request.request_context)
         request.request_context = captureCurrentRequestContext();
     request.public_fetch_restricted =
         isPublicFetchRestricted(request.context);
     if(!isFetchUrlAllowed(request.url, request.context))
     {
-        std::promise<SharedAsyncFetchResult> promise;
         AsyncFetchResult result;
         result.status_code = 403;
-        promise.set_value(
-            std::make_shared<AsyncFetchResult>(std::move(result)));
-        return promise.get_future().share();
+        completion(std::make_shared<AsyncFetchResult>(std::move(result)));
+        return;
     }
     if(request.method == HTTP_GET)
     {
@@ -1762,7 +1811,6 @@ AsyncFetchFuture webGetAsync(AsyncFetchRequest request)
     }
     if(startsWith(request.url, "data:"))
     {
-        std::promise<SharedAsyncFetchResult> promise;
         AsyncFetchResult result;
         if(request.capture_content)
             result.content = dataGet(request.url);
@@ -1781,9 +1829,8 @@ AsyncFetchFuture webGetAsync(AsyncFetchRequest request)
         result.status_code = !request.capture_content || !result.content.empty()
                                  ? 200
                                  : 400;
-        promise.set_value(
-            std::make_shared<AsyncFetchResult>(std::move(result)));
-        return promise.get_future().share();
+        completion(std::make_shared<AsyncFetchResult>(std::move(result)));
+        return;
     }
     if(request.deadline == std::chrono::steady_clock::time_point::max())
         request.deadline = networkFetchDeadline(request.deadline);
@@ -1796,9 +1843,28 @@ AsyncFetchFuture webGetAsync(AsyncFetchRequest request)
     const ResolvedProxyPolicy snapshot = request.proxy.snapshot();
     ResolvedProxyRoute route =
         resolveProxyRoute(snapshot, request.url, request.context);
-    return multiEngine().submit(std::move(request), std::move(route),
-                                settings.allowInsecureTls,
-                                settings.maxAllowedDownloadSize);
+    multiEngine().submit(std::move(request), std::move(route),
+                         settings.allowInsecureTls,
+                         settings.maxAllowedDownloadSize,
+                         std::move(completion));
+}
+
+AsyncFetchFuture webGetAsync(AsyncFetchRequest request)
+{
+    auto promise =
+        std::make_shared<std::promise<SharedAsyncFetchResult>>();
+    AsyncFetchFuture future = promise->get_future().share();
+    webGetAsync(std::move(request),
+                [promise](SharedAsyncFetchResult result) noexcept {
+                    try
+                    {
+                        promise->set_value(std::move(result));
+                    }
+                    catch(...)
+                    {
+                    }
+                });
+    return future;
 }
 
 static void shutdownAsyncFetchEngine() noexcept
