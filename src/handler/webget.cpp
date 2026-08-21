@@ -1278,6 +1278,9 @@ class CurlMultiEngine
             std::make_shared<AsyncFetchResult>();
         AsyncFetchCompletion completion;
         std::atomic<bool> completed{false};
+        bool retry_attempted = false;
+        std::chrono::steady_clock::time_point retry_at =
+            std::chrono::steady_clock::time_point::max();
     };
 
 public:
@@ -1443,6 +1446,7 @@ private:
 
     void wakeWorker() noexcept
     {
+        wake_generation_.fetch_add(1, std::memory_order_release);
         condition_.notify_all();
 #if LIBCURL_VERSION_NUM >= 0x074400
         if(multi_)
@@ -1638,6 +1642,14 @@ private:
         transfer->result->transport_code = static_cast<int>(code);
         transfer->result->failure = classify_async_failure(
             code, transfer->progress);
+        const bool retry = code != CURLE_OK && !transfer->retry_attempted &&
+            (transfer->request.method == HTTP_GET ||
+             transfer->request.method == HTTP_HEAD) &&
+            is_recoverable_curl_error(code) &&
+            !stopping_.load(std::memory_order_acquire) &&
+            !transfer->request.cancellation.isCancellationRequested() &&
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(200) <
+                transfer->request.deadline;
         if(!transfer->request.keep_resp_on_fail &&
            (code != CURLE_OK || transfer->result->status_code != 200))
             transfer->result->content.clear();
@@ -1648,6 +1660,25 @@ private:
             active_.erase(transfer->easy);
             curl_easy_cleanup(transfer->easy);
             transfer->easy = nullptr;
+        }
+        if(retry)
+        {
+            writeLog(LOG_LEVEL_WARNING,
+                     "出站请求遇到可恢复网络错误，200ms 后重试一次。");
+            if(!transfer->result->cookies.empty())
+                transfer->request.cookies = transfer->result->cookies;
+            transfer->result = std::make_shared<AsyncFetchResult>();
+            transfer->progress = {};
+            transfer->prereq_context = {};
+            transfer->cancellation_registration =
+                transfer->request.cancellation.registerCallback(
+                    [this] { wakeWorker(); });
+            transfer->retry_attempted = true;
+            transfer->retry_at = std::chrono::steady_clock::now() +
+                                 std::chrono::milliseconds(200);
+            delayed_.emplace_back(std::move(transfer));
+            pending_count_.fetch_add(1, std::memory_order_relaxed);
+            return;
         }
         complete(transfer);
     }
@@ -1679,47 +1710,97 @@ private:
                                      std::memory_order_relaxed);
         }
         for(auto &transfer : pending)
+            startTransfer(std::move(transfer));
+    }
+
+    void startTransfer(std::shared_ptr<Transfer> transfer)
+    {
+        if(!transfer)
+            return;
+        transfer->retry_at = std::chrono::steady_clock::time_point::max();
+        if(stopping_)
         {
-            if(stopping_)
+            transfer->progress.abort_reason = AsyncFetchFailure::Shutdown;
+            finish(transfer, CURLE_ABORTED_BY_CALLBACK, false);
+            return;
+        }
+        if(transfer->request.cancellation.isCancellationRequested())
+        {
+            transfer->progress.abort_reason =
+                transfer->request.cancellation.reason() ==
+                        RequestCancellationReason::Shutdown
+                    ? AsyncFetchFailure::Shutdown
+                    : AsyncFetchFailure::Cancelled;
+            finish(transfer, CURLE_ABORTED_BY_CALLBACK, false);
+            return;
+        }
+        if(transfer->request.deadline !=
+               std::chrono::steady_clock::time_point::max() &&
+           std::chrono::steady_clock::now() >= transfer->request.deadline)
+        {
+            transfer->progress.abort_reason = AsyncFetchFailure::Deadline;
+            finish(transfer, CURLE_OPERATION_TIMEDOUT, false);
+            return;
+        }
+        const CURLcode code = configure(transfer);
+        if(code != CURLE_OK)
+        {
+            finish(transfer, code, false);
+            return;
+        }
+        const CURLMcode multi_code =
+            curl_multi_add_handle(multi_, transfer->easy);
+        if(multi_code != CURLM_OK)
+        {
+            finish(transfer, CURLE_FAILED_INIT, false);
+            return;
+        }
+        active_[transfer->easy] = transfer;
+        active_count_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void processDelayed()
+    {
+        const auto now = std::chrono::steady_clock::now();
+        for(auto iter = delayed_.begin(); iter != delayed_.end();)
+        {
+            const std::shared_ptr<Transfer> transfer = *iter;
+            if(stopping_ ||
+               transfer->request.cancellation.isCancellationRequested() ||
+               (transfer->request.deadline !=
+                    std::chrono::steady_clock::time_point::max() &&
+                now >= transfer->request.deadline))
             {
-                transfer->progress.abort_reason = AsyncFetchFailure::Shutdown;
-                finish(transfer, CURLE_ABORTED_BY_CALLBACK, false);
+                iter = delayed_.erase(iter);
+                pending_count_.fetch_sub(1, std::memory_order_relaxed);
+                if(stopping_ || transfer->request.cancellation.reason() ==
+                                     RequestCancellationReason::Shutdown)
+                    transfer->progress.abort_reason =
+                        AsyncFetchFailure::Shutdown;
+                else if(transfer->request.cancellation.reason() ==
+                            RequestCancellationReason::Deadline ||
+                        now >= transfer->request.deadline)
+                    transfer->progress.abort_reason =
+                        AsyncFetchFailure::Deadline;
+                else
+                    transfer->progress.abort_reason =
+                        AsyncFetchFailure::Cancelled;
+                finish(transfer,
+                       transfer->progress.abort_reason ==
+                               AsyncFetchFailure::Deadline
+                           ? CURLE_OPERATION_TIMEDOUT
+                           : CURLE_ABORTED_BY_CALLBACK,
+                       false);
                 continue;
             }
-            if(transfer->request.cancellation.isCancellationRequested())
+            if(now < transfer->retry_at)
             {
-                transfer->progress.abort_reason =
-                    transfer->request.cancellation.reason() ==
-                            RequestCancellationReason::Shutdown
-                        ? AsyncFetchFailure::Shutdown
-                        : AsyncFetchFailure::Cancelled;
-                finish(transfer, CURLE_ABORTED_BY_CALLBACK, false);
+                ++iter;
                 continue;
             }
-            if(transfer->request.deadline !=
-                   std::chrono::steady_clock::time_point::max() &&
-               std::chrono::steady_clock::now() >=
-                   transfer->request.deadline)
-            {
-                transfer->progress.abort_reason = AsyncFetchFailure::Deadline;
-                finish(transfer, CURLE_OPERATION_TIMEDOUT, false);
-                continue;
-            }
-            const CURLcode code = configure(transfer);
-            if(code != CURLE_OK)
-            {
-                finish(transfer, code, false);
-                continue;
-            }
-            const CURLMcode multi_code =
-                curl_multi_add_handle(multi_, transfer->easy);
-            if(multi_code != CURLM_OK)
-            {
-                finish(transfer, CURLE_FAILED_INIT, false);
-                continue;
-            }
-            active_[transfer->easy] = transfer;
-            active_count_.fetch_add(1, std::memory_order_relaxed);
+            iter = delayed_.erase(iter);
+            pending_count_.fetch_sub(1, std::memory_order_relaxed);
+            startTransfer(transfer);
         }
     }
 
@@ -1752,9 +1833,35 @@ private:
         if(active_.empty())
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            condition_.wait(lock, [this]() {
-                return stopping_ || !pending_.empty();
-            });
+            const uint64_t generation =
+                wake_generation_.load(std::memory_order_acquire);
+            if(stopping_ || !pending_.empty())
+                return;
+            for(const auto &transfer : delayed_)
+            {
+                if(transfer->request.cancellation.isCancellationRequested() ||
+                   (transfer->request.deadline !=
+                        std::chrono::steady_clock::time_point::max() &&
+                    std::chrono::steady_clock::now() >=
+                        transfer->request.deadline))
+                    return;
+            }
+            const auto awakened = [this, generation]() {
+                return stopping_ || !pending_.empty() ||
+                       wake_generation_.load(std::memory_order_acquire) !=
+                           generation;
+            };
+            if(delayed_.empty())
+                condition_.wait(lock, awakened);
+            else
+            {
+                const auto next = std::min_element(
+                    delayed_.begin(), delayed_.end(),
+                    [](const auto &left, const auto &right) {
+                        return left->retry_at < right->retry_at;
+                    });
+                condition_.wait_until(lock, (*next)->retry_at, awakened);
+            }
             return;
         }
 
@@ -1778,6 +1885,14 @@ private:
             const int deadline_timeout = static_cast<int>(
                 std::clamp<int64_t>(remaining.count(), 0, timeout_ms));
             timeout_ms = std::min(timeout_ms, deadline_timeout);
+        }
+        for(const auto &transfer : delayed_)
+        {
+            const auto remaining = std::chrono::duration_cast<
+                std::chrono::milliseconds>(transfer->retry_at - now);
+            timeout_ms = std::min(
+                timeout_ms, static_cast<int>(std::clamp<int64_t>(
+                                remaining.count(), 0, timeout_ms)));
         }
 #endif
         int ready = 0;
@@ -1846,6 +1961,7 @@ private:
         for(;;)
         {
             processPending();
+            processDelayed();
             performTransfers();
             cancelExpired();
             bool stopping = false;
@@ -1869,6 +1985,15 @@ private:
                         AsyncFetchFailure::Shutdown;
                     finish(transfer, CURLE_ABORTED_BY_CALLBACK, false);
                 }
+                while(!delayed_.empty())
+                {
+                    auto transfer = std::move(delayed_.front());
+                    delayed_.pop_front();
+                    pending_count_.fetch_sub(1, std::memory_order_relaxed);
+                    transfer->progress.abort_reason =
+                        AsyncFetchFailure::Shutdown;
+                    finish(transfer, CURLE_ABORTED_BY_CALLBACK, false);
+                }
                 break;
             }
             waitForActivity();
@@ -1881,9 +2006,11 @@ private:
     std::mutex mutex_;
     std::condition_variable condition_;
     std::deque<std::shared_ptr<Transfer>> pending_;
+    std::deque<std::shared_ptr<Transfer>> delayed_;
     std::unordered_map<CURL *, std::shared_ptr<Transfer>> active_;
     std::atomic<uint64_t> pending_count_{0};
     std::atomic<uint64_t> active_count_{0};
+    std::atomic<uint64_t> wake_generation_{0};
     std::atomic<bool> stopping_{false};
     int running_handles_ = 0;
 };
@@ -2431,31 +2558,6 @@ static int curlGet(const FetchArgument &argument,
         throw;
     }
     CURLcode code = static_cast<CURLcode>(fetched.transport_code);
-
-    if(code != CURLE_OK &&
-       !outbound_fetch_shutdown_requested.load(std::memory_order_relaxed) &&
-       (argument.method == HTTP_GET || argument.method == HTTP_HEAD) &&
-       is_recoverable_curl_error(code) &&
-       !request.cancellation.isCancellationRequested() &&
-       std::chrono::steady_clock::now() + std::chrono::milliseconds(200) <
-           request.deadline)
-    {
-        writeLog(LOG_LEVEL_WARNING,
-                 "出站请求遇到可恢复网络错误，200ms 后重试一次。");
-        waitWithoutCpuPermit([] { sleepMs(200); });
-        request.cookies = fetched.cookies.empty()
-                              ? request.cookies
-                              : std::move(fetched.cookies);
-        AsyncFetchFuture retry_future = multiEngine().submit(
-            std::move(request), route, settings.allowInsecureTls,
-            settings.maxAllowedDownloadSize);
-        SharedAsyncFetchResult shared = waitWithoutCpuPermit(
-            [&] { return retry_future.get(); });
-        if(!shared)
-            throw std::future_error(std::future_errc::broken_promise);
-        fetched = std::move(*shared);
-        code = static_cast<CURLcode>(fetched.transport_code);
-    }
 
     if(shouldLog(LOG_LEVEL_VERBOSE))
     {
