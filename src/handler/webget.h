@@ -164,8 +164,11 @@ struct CacheFetchOperationProbeSnapshot
 {
     uint64_t success_callbacks = 0;
     uint64_t exception_callbacks = 0;
+    uint64_t unsubscribed_callbacks = 0;
     bool duplicate_publish_rejected = false;
     bool exception_rethrown_to_waiter = false;
+    bool no_consumers_cancelled = false;
+    bool owner_kinds_isolated = false;
 };
 
 void webGetAsync(AsyncFetchRequest request, AsyncFetchCompletion completion);

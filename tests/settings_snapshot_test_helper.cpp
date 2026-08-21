@@ -155,10 +155,16 @@ int main(int argc, char *argv[]) {
     writer.Uint64(operation_probe.success_callbacks);
     writer.Key("operation_exception_callbacks");
     writer.Uint64(operation_probe.exception_callbacks);
+    writer.Key("operation_unsubscribed_callbacks");
+    writer.Uint64(operation_probe.unsubscribed_callbacks);
     writer.Key("operation_duplicate_publish_rejected");
     writer.Bool(operation_probe.duplicate_publish_rejected);
     writer.Key("operation_exception_rethrown_to_waiter");
     writer.Bool(operation_probe.exception_rethrown_to_waiter);
+    writer.Key("operation_no_consumers_cancelled");
+    writer.Bool(operation_probe.no_consumers_cancelled);
+    writer.Key("operation_owner_kinds_isolated");
+    writer.Bool(operation_probe.owner_kinds_isolated);
     writer.Key("early_header_preserved");
     writer.Bool(early_body == "owned-webget-early" &&
                 early_headers == "sentinel-header-state");

@@ -108,11 +108,61 @@ struct CacheFetchPayload
 
 using SharedCacheFetchPayload = std::shared_ptr<const CacheFetchPayload>;
 
+enum class CacheFetchOwnerKind : uint8_t
+{
+    Sync,
+    Async,
+};
+
 class CacheFetchOperation
 {
 public:
+    enum class AttachResult
+    {
+        Attached,
+        Completed,
+        Abandoned,
+    };
+
     using Callback = std::function<void(SharedCacheFetchPayload,
                                         std::exception_ptr)>;
+
+    explicit CacheFetchOperation(CacheFetchOwnerKind owner_kind)
+        : owner_kind_(owner_kind) {}
+
+    CacheFetchOwnerKind ownerKind() const noexcept { return owner_kind_; }
+
+    AttachResult attachConsumer()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(done_)
+            return AttachResult::Completed;
+        if(abandoned_)
+            return AttachResult::Abandoned;
+        ++consumers_;
+        return AttachResult::Attached;
+    }
+
+    void releaseConsumer() noexcept
+    {
+        bool cancel = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if(consumers_ == 0)
+                return;
+            --consumers_;
+            cancel = consumers_ == 0 && !done_;
+            if(cancel)
+                abandoned_ = true;
+        }
+        if(cancel)
+            work_cancellation_.cancel(RequestCancellationReason::NoConsumers);
+    }
+
+    RequestCancellationToken workCancellationToken() const
+    {
+        return work_cancellation_.token();
+    }
 
     SharedCacheFetchPayload wait()
     {
@@ -126,23 +176,35 @@ public:
         return payload;
     }
 
-    void subscribe(Callback callback)
+    uint64_t subscribe(Callback callback)
     {
         if(!callback)
-            return;
+            return 0;
         SharedCacheFetchPayload payload;
         std::exception_ptr error;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if(abandoned_)
+                return 0;
             if(!done_)
             {
-                callbacks_.emplace_back(std::move(callback));
-                return;
+                const uint64_t id = next_callback_id_++;
+                callbacks_.emplace(id, std::move(callback));
+                return id;
             }
             payload = payload_;
             error = error_;
         }
         invoke(callback, std::move(payload), std::move(error));
+        return 0;
+    }
+
+    bool unsubscribe(uint64_t id) noexcept
+    {
+        if(id == 0)
+            return false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        return callbacks_.erase(id) != 0;
     }
 
     bool publish(SharedCacheFetchPayload payload)
@@ -170,7 +232,7 @@ private:
 
     bool finish(SharedCacheFetchPayload payload, std::exception_ptr error)
     {
-        std::vector<Callback> callbacks;
+        std::unordered_map<uint64_t, Callback> callbacks;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if(done_)
@@ -181,7 +243,7 @@ private:
             callbacks.swap(callbacks_);
         }
         condition_.notify_all();
-        for(Callback &callback : callbacks)
+        for(auto &[_, callback] : callbacks)
             invoke(callback, payload_, error_);
         return true;
     }
@@ -189,9 +251,14 @@ private:
     std::mutex mutex_;
     std::condition_variable condition_;
     bool done_ = false;
+    bool abandoned_ = false;
+    const CacheFetchOwnerKind owner_kind_;
+    uint64_t consumers_ = 0;
+    uint64_t next_callback_id_ = 1;
+    RequestCancellationSource work_cancellation_;
     SharedCacheFetchPayload payload_;
     std::exception_ptr error_;
-    std::vector<Callback> callbacks_;
+    std::unordered_map<uint64_t, Callback> callbacks_;
 };
 
 struct GitHubFileRef
@@ -518,7 +585,9 @@ static ResolvedProxyRoute resolveProxyRoute(
 }
 
 static std::mutex cache_fetch_mutex;
-static std::map<std::string, std::shared_ptr<CacheFetchOperation>>
+using CacheFetchRegistryKey =
+    std::pair<std::string, CacheFetchOwnerKind>;
+static std::map<CacheFetchRegistryKey, std::shared_ptr<CacheFetchOperation>>
     cache_fetches;
 static std::atomic_bool outbound_fetch_shutdown_requested {false};
 
@@ -531,7 +600,7 @@ void requestOutboundFetchShutdown() noexcept
 class CacheFetchOwnerCleanup
 {
 public:
-    CacheFetchOwnerCleanup(bool owner, std::string key,
+    CacheFetchOwnerCleanup(bool owner, CacheFetchRegistryKey key,
                            std::shared_ptr<CacheFetchOperation> operation)
         : owner_(owner), key_(std::move(key)),
           operation_(std::move(operation)) {}
@@ -547,8 +616,25 @@ public:
 
 private:
     bool owner_;
-    std::string key_;
+    CacheFetchRegistryKey key_;
     std::shared_ptr<CacheFetchOperation> operation_;
+};
+
+class CacheFetchConsumerGuard
+{
+public:
+    CacheFetchConsumerGuard(std::shared_ptr<CacheFetchOperation> operation,
+                            bool attached)
+        : operation_(std::move(operation)), attached_(attached) {}
+    ~CacheFetchConsumerGuard()
+    {
+        if(attached_ && operation_)
+            operation_->releaseConsumer();
+    }
+
+private:
+    std::shared_ptr<CacheFetchOperation> operation_;
+    bool attached_ = false;
 };
 
 static CURLcode curl_init()
@@ -2959,19 +3045,40 @@ public:
 
         std::shared_ptr<CacheFetchOperation> operation;
         bool owner = false;
+        const CacheFetchRegistryKey registry_key{
+            cache_key, CacheFetchOwnerKind::Sync};
+        CacheFetchOperation::AttachResult attach_result =
+            CacheFetchOperation::AttachResult::Abandoned;
+        for(;;)
         {
-            std::lock_guard<std::mutex> lock(cache_fetch_mutex);
-            auto iter = cache_fetches.find(cache_key);
-            if(iter == cache_fetches.end())
             {
-                operation = std::make_shared<CacheFetchOperation>();
-                cache_fetches.emplace(cache_key, operation);
-                owner = true;
+                std::lock_guard<std::mutex> lock(cache_fetch_mutex);
+                auto iter = cache_fetches.find(registry_key);
+                if(iter == cache_fetches.end())
+                {
+                    operation = std::make_shared<CacheFetchOperation>(
+                        CacheFetchOwnerKind::Sync);
+                    cache_fetches.emplace(registry_key, operation);
+                    owner = true;
+                }
+                else
+                {
+                    operation = iter->second;
+                    owner = false;
+                }
             }
-            else
-                operation = iter->second;
+            attach_result = operation->attachConsumer();
+            if(attach_result != CacheFetchOperation::AttachResult::Abandoned)
+                break;
+            std::lock_guard<std::mutex> lock(cache_fetch_mutex);
+            auto iter = cache_fetches.find(registry_key);
+            if(iter != cache_fetches.end() && iter->second == operation)
+                cache_fetches.erase(iter);
         }
-        CacheFetchOwnerCleanup owner_cleanup(owner, cache_key, operation);
+        const bool consumer_attached =
+            attach_result == CacheFetchOperation::AttachResult::Attached;
+        CacheFetchConsumerGuard consumer_guard(operation, consumer_attached);
+        CacheFetchOwnerCleanup owner_cleanup(owner, registry_key, operation);
         if(owner)
         {
             try
@@ -3056,7 +3163,8 @@ CacheFetchPayloadSnapshot cacheFetchPayloadSnapshot() noexcept
 CacheFetchOperationProbeSnapshot cacheFetchOperationProbe()
 {
     CacheFetchOperationProbeSnapshot snapshot;
-    auto success = std::make_shared<CacheFetchOperation>();
+    auto success = std::make_shared<CacheFetchOperation>(
+        CacheFetchOwnerKind::Async);
     success->subscribe([&](SharedCacheFetchPayload payload,
                            std::exception_ptr error) {
         if(!payload || error)
@@ -3075,7 +3183,8 @@ CacheFetchOperationProbeSnapshot cacheFetchOperationProbe()
         std::static_pointer_cast<const CacheFetchPayload>(payload));
     snapshot.duplicate_publish_rejected = !success->publish({});
 
-    auto failure = std::make_shared<CacheFetchOperation>();
+    auto failure = std::make_shared<CacheFetchOperation>(
+        CacheFetchOwnerKind::Async);
     failure->subscribe([&](SharedCacheFetchPayload failed_payload,
                            std::exception_ptr error) {
         if(!failed_payload && error)
@@ -3090,6 +3199,41 @@ CacheFetchOperationProbeSnapshot cacheFetchOperationProbe()
     catch(const std::runtime_error &)
     {
         snapshot.exception_rethrown_to_waiter = true;
+    }
+
+    auto unsubscribe = std::make_shared<CacheFetchOperation>(
+        CacheFetchOwnerKind::Async);
+    const uint64_t subscription = unsubscribe->subscribe(
+        [&](SharedCacheFetchPayload, std::exception_ptr) {
+            ++snapshot.unsubscribed_callbacks;
+        });
+    (void)unsubscribe->unsubscribe(subscription);
+    unsubscribe->publish(
+        std::static_pointer_cast<const CacheFetchPayload>(payload));
+
+    auto consumers = std::make_shared<CacheFetchOperation>(
+        CacheFetchOwnerKind::Async);
+    (void)consumers->attachConsumer();
+    (void)consumers->attachConsumer();
+    consumers->releaseConsumer();
+    consumers->releaseConsumer();
+    snapshot.no_consumers_cancelled =
+        consumers->workCancellationToken().reason() ==
+            RequestCancellationReason::NoConsumers &&
+        consumers->attachConsumer() ==
+            CacheFetchOperation::AttachResult::Abandoned;
+
+    const CacheFetchRegistryKey sync_key{"operation-kind-probe",
+                                         CacheFetchOwnerKind::Sync};
+    const CacheFetchRegistryKey async_key{"operation-kind-probe",
+                                          CacheFetchOwnerKind::Async};
+    {
+        std::lock_guard<std::mutex> lock(cache_fetch_mutex);
+        cache_fetches[sync_key] = std::make_shared<CacheFetchOperation>(
+            CacheFetchOwnerKind::Sync);
+        snapshot.owner_kinds_isolated =
+            cache_fetches.find(async_key) == cache_fetches.end();
+        cache_fetches.erase(sync_key);
     }
     return snapshot;
 }
