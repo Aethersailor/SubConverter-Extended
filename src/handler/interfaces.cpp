@@ -1948,7 +1948,8 @@ static SettingsSnapshot captureSettingsForSubRequest(Request &request) {
 
 static std::string runScheduledConversion(
     Request &request, Response &response, const SettingsSnapshot &snapshot,
-    RuleConversionStats *stats, bool with_retry);
+    RuleConversionStats *stats, bool with_retry,
+    std::shared_ptr<RequestContext> admission_context = {});
 
 struct PreparedSubRequest {
   SettingsSnapshot settings;
@@ -2053,11 +2054,13 @@ static PreparedSubRequest prepareSubRequest(Request &request,
 
 static SharedCoalescedResponse executePreparedSubRequestOwner(
     Request &request, const PreparedSubRequest &prepared,
-    RuleConversionStats *stats) {
+    RuleConversionStats *stats,
+    std::shared_ptr<RequestContext> admission_context = {}) {
   ScopedSettingsView settings_scope(prepared.settings);
   Response owner_response;
   std::string body = runScheduledConversion(
-      request, owner_response, prepared.settings, stats, true);
+      request, owner_response, prepared.settings, stats, true,
+      std::move(admission_context));
   body = finalizeSubResponse(request, owner_response, std::move(body),
                              prepared.age);
   return makeCoalescedResult(std::move(body), std::move(owner_response),
@@ -2089,6 +2092,8 @@ static std::string subconverterEntry(Request &request, Response &response,
     writeLog(LOG_LEVEL_DEBUG, "/sub 响应微缓存命中。");
     if (request.context)
       request.context->setCostClass(RequestCostClass::Low);
+    if (request.context)
+      request.context->markWorkAdmitted();
     std::string body = applyCoalescedToResponse(
         *cached_result, request.context, response);
     recordTrackedSubRequest(track, request, response,
@@ -2118,7 +2123,8 @@ static std::string subconverterEntry(Request &request, Response &response,
           call->owner_request_id, work_started,
           work_started +
               std::chrono::milliseconds(
-                  std::max(1, settings.requestDeadlineMs)));
+                  std::max(1, settings.requestDeadlineMs)),
+          RequestContextKind::InternalWork);
       call->work_context->setConsumerCount(1);
       if (request.context) {
         request.context->setSingleflightRole(RequestSingleflightRole::Owner);
@@ -2130,6 +2136,8 @@ static std::string subconverterEntry(Request &request, Response &response,
   }
 
   if (!owner) {
+    if (request.context)
+      request.context->markWorkAdmitted();
     if (request.context)
       request.context->setSingleflightRole(RequestSingleflightRole::Follower);
     if (call->work_context)
@@ -2186,7 +2194,7 @@ static std::string subconverterEntry(Request &request, Response &response,
     ScopedRequestContext work_scope(call->work_context);
     RuleConversionStats stats;
     SharedCoalescedResponse result = executePreparedSubRequestOwner(
-        work_request, prepared, track ? &stats : nullptr);
+        work_request, prepared, track ? &stats : nullptr, request.context);
     if (request.context && call->work_context)
       request.context->setCostClass(call->work_context->costClass());
     std::string response_body = applyCoalescedToResponse(
@@ -2447,8 +2455,13 @@ ConversionResult executorFailureResult(Request &request,
 
 std::string runScheduledConversion(
     Request &request, Response &response, const SettingsSnapshot &snapshot,
-    RuleConversionStats *stats, bool with_retry) {
+    RuleConversionStats *stats, bool with_retry,
+    std::shared_ptr<RequestContext> admission_context) {
+  const std::shared_ptr<RequestContext> admitted_context =
+      admission_context ? std::move(admission_context) : request.context;
   if (cooperativeCpuPermitActive()) {
+    if (admitted_context)
+      admitted_context->markWorkAdmitted();
     ScopedSettingsView settings_scope(snapshot);
     if (with_retry)
       return runSubconverterImplWithRetry(request, response, *snapshot, stats);
@@ -2457,6 +2470,8 @@ std::string runScheduledConversion(
   const std::string scheduler_mode =
       toLower(getEnv("SUBCONVERTER_CONVERSION_SCHEDULER"));
   if (scheduler_mode == "direct") {
+    if (admitted_context)
+      admitted_context->markWorkAdmitted();
     if (with_retry)
       return runSubconverterImplWithRetry(request, response, *snapshot, stats);
     return subconverter_impl(request, response, *snapshot, stats);
@@ -2469,6 +2484,8 @@ std::string runScheduledConversion(
                "CONVERSION_SCHEDULER_INVALID value_length=" +
                    std::to_string(scheduler_mode.size()) +
                    " fallback=direct");
+    if (admitted_context)
+      admitted_context->markWorkAdmitted();
     if (with_retry)
       return runSubconverterImplWithRetry(request, response, *snapshot, stats);
     return subconverter_impl(request, response, *snapshot, stats);
@@ -2509,6 +2526,8 @@ std::string runScheduledConversion(
         return subconverter_impl(request, response, *snapshot, stats);
       });
   if (submission.status == SchedulerSubmitStatus::Accepted) {
+    if (admitted_context)
+      admitted_context->markWorkAdmitted();
     try {
       return submission.future.get();
     } catch (const SchedulerSubmitError &error) {
@@ -2933,6 +2952,8 @@ void ConversionService::convertSubscriptionAsync(Request request,
       writeLog(LOG_LEVEL_DEBUG, "/sub 响应微缓存命中。");
       if (context)
         context->setCostClass(RequestCostClass::Low);
+      if (context)
+        context->markWorkAdmitted();
       Response response;
       std::string body =
           applyCoalescedToResponse(*cached_result, context, response);
@@ -2960,7 +2981,8 @@ void ConversionService::convertSubscriptionAsync(Request request,
           call->work_context = std::make_shared<RequestContext>(
               call->owner_request_id, work_started,
               work_started + std::chrono::milliseconds(std::max(
-                                 1, prepared.settings->requestDeadlineMs)));
+                                 1, prepared.settings->requestDeadlineMs)),
+              RequestContextKind::InternalWork);
           call->work_context->setCostClass(cost);
           call->work_context->setEstimatedBytes(bytes);
           owner_consumer = makeAsyncSubRequestConsumer(
@@ -3045,6 +3067,8 @@ void ConversionService::convertSubscriptionAsync(Request request,
           continue;
         }
         if (context)
+          context->markWorkAdmitted();
+        if (context)
           context->setSingleflightRole(RequestSingleflightRole::Follower);
         g_async_singleflight_followers_attached.fetch_add(
             1, std::memory_order_relaxed);
@@ -3074,7 +3098,8 @@ void ConversionService::convertSubscriptionAsync(Request request,
         const RequestCancellationToken work_cancellation =
             call->work_context->cancellationToken();
         const auto queued_at = RequestContext::Clock::now();
-        legacyRequestFlowScheduler().submitAsync(
+        const SchedulerSubmitStatus owner_submit_status =
+            legacyRequestFlowScheduler().submitAsync(
             cost, bytes, work_deadline, work_cancellation,
             [work_request = std::move(work_request), prepared_owner, call,
              track_statistics, work_deadline, work_cancellation,
@@ -3109,6 +3134,8 @@ void ConversionService::convertSubscriptionAsync(Request request,
               publishAsyncSubRequestFailure(call, result.status,
                                             std::move(result.error));
             });
+        if (owner_submit_status == SchedulerSubmitStatus::Accepted && context)
+          context->markWorkAdmitted();
       } catch (...) {
         g_async_singleflight_owner_flow_rejections.fetch_add(
             1, std::memory_order_relaxed);
@@ -3127,7 +3154,8 @@ void ConversionService::convertSubscriptionAsync(Request request,
   auto prepared_standalone =
       std::make_shared<const PreparedSubRequest>(std::move(prepared));
   const auto queued_at = RequestContext::Clock::now();
-  legacyRequestFlowScheduler().submitAsync(
+  const SchedulerSubmitStatus standalone_submit_status =
+      legacyRequestFlowScheduler().submitAsync(
       cost, bytes, deadline, cancellation,
       [request = std::move(request), prepared_standalone, track_statistics,
        deadline, cancellation, queued_at]() mutable {
@@ -3180,6 +3208,8 @@ void ConversionService::convertSubscriptionAsync(Request request,
             "Internal server error while processing request.\n"
             "处理请求时发生内部服务器错误。\n"));
       });
+  if (standalone_submit_status == SchedulerSubmitStatus::Accepted && context)
+    context->markWorkAdmitted();
 }
 
 WorkloadSchedulerSnapshot conversionSchedulerSnapshot() {
@@ -3193,6 +3223,31 @@ WorkloadSchedulerSnapshot legacyRequestFlowSnapshot() {
   if (WorkloadScheduler *scheduler =
           legacy_request_flow_instance.load(std::memory_order_acquire))
     return scheduler->snapshot();
+  return {};
+}
+
+SubscriptionOwnerAdmissionSnapshot subscriptionOwnerAdmissionSnapshot() {
+  auto make_snapshot = [](const char *source, WorkloadScheduler *scheduler) {
+    SubscriptionOwnerAdmissionSnapshot result;
+    result.source = source;
+    const WorkloadSchedulerSnapshot snapshot = scheduler->snapshot();
+    result.waiting_entries = snapshot.queued_entries;
+    result.waiting_bytes = snapshot.queued_bytes;
+    result.active = snapshot.active;
+    result.accepted_total = snapshot.accepted;
+    result.rejected_total = snapshot.rejected;
+    result.cancelled_total = snapshot.cancelled;
+    result.max_wait_entries = scheduler->maxEntries();
+    result.max_wait_bytes = scheduler->maxBytes();
+    result.oldest_wait_ms = snapshot.oldest_queued_age_ms;
+    return result;
+  };
+  if (WorkloadScheduler *scheduler =
+          legacy_request_flow_instance.load(std::memory_order_acquire))
+    return make_snapshot("legacy_request_flow", scheduler);
+  if (WorkloadScheduler *scheduler =
+          conversion_scheduler_instance.load(std::memory_order_acquire))
+    return make_snapshot("conversion_scheduler", scheduler);
   return {};
 }
 

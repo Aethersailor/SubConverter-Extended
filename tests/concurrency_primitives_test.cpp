@@ -542,6 +542,45 @@ static void testRetainedResponseByteBudget() {
   configureRetainedResponseByteLimit(0);
 }
 
+static void testWorkAdmissionLifecycle() {
+  resetRequestLifecycleMetricsForTests();
+
+  auto envelope_only = std::make_shared<RequestContext>(
+      "envelope-only", RequestContext::Clock::now());
+  envelope_only->suggestFailure(RequestFailureAttribution::Capacity);
+  RequestLifecycleMetricsSnapshot metrics = requestLifecycleMetricsSnapshot();
+  assert(metrics.work_admitted == 0);
+  assert(metrics.server_capacity_failure_after_admission == 0);
+
+  auto admitted = std::make_shared<RequestContext>(
+      "admitted-client", RequestContext::Clock::now());
+  assert(admitted->markWorkAdmitted());
+  assert(!admitted->markWorkAdmitted());
+  admitted->suggestFailure(RequestFailureAttribution::Capacity);
+  admitted->suggestFailure(RequestFailureAttribution::Capacity);
+  metrics = requestLifecycleMetricsSnapshot();
+  assert(metrics.work_admitted == 1);
+  assert(metrics.server_capacity_failure_after_admission == 1);
+
+  auto raced = std::make_shared<RequestContext>(
+      "admission-race", RequestContext::Clock::now());
+  raced->suggestFailure(RequestFailureAttribution::Capacity);
+  assert(raced->markWorkAdmitted());
+  metrics = requestLifecycleMetricsSnapshot();
+  assert(metrics.work_admitted == 2);
+  assert(metrics.server_capacity_failure_after_admission == 2);
+
+  auto internal = std::make_shared<RequestContext>(
+      "internal-work", RequestContext::Clock::now(),
+      RequestContext::Clock::time_point::max(),
+      RequestContextKind::InternalWork);
+  assert(!internal->markWorkAdmitted());
+  internal->suggestFailure(RequestFailureAttribution::Capacity);
+  metrics = requestLifecycleMetricsSnapshot();
+  assert(metrics.work_admitted == 2);
+  assert(metrics.server_capacity_failure_after_admission == 2);
+}
+
 static void testActiveRequestShutdownCancellation() {
   auto first = std::make_shared<RequestContext>(
       "active-shutdown-first", RequestContext::Clock::now());
@@ -904,6 +943,7 @@ int main() {
   testCooperativeCpuPermit();
   testWorkloadSchedulerActiveQueueWeights();
   testRetainedResponseByteBudget();
+  testWorkAdmissionLifecycle();
   testActiveRequestShutdownCancellation();
   testCancellationTokenCallbacks();
   testConcurrentLruCache();

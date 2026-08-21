@@ -470,6 +470,10 @@ template <typename Writer> void writeRequestLifecycle(Writer &writer) {
   writer.Uint64(snapshot.successful_owners);
   writer.Key("successful_responses");
   writer.Uint64(snapshot.successful_responses);
+  writer.Key("work_admitted");
+  writer.Uint64(snapshot.work_admitted);
+  writer.Key("server_capacity_failure_after_admission");
+  writer.Uint64(snapshot.server_capacity_failure_after_admission);
 
   writer.Key("stages");
   writer.StartObject();
@@ -614,6 +618,31 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(singleflight.owners_cancelled_no_consumers_total);
   writer.Key("owner_flow_rejected_total");
   writer.Uint64(singleflight.owner_flow_rejected_total);
+  writer.EndObject();
+  const SubscriptionOwnerAdmissionSnapshot owner_admission =
+      subscriptionOwnerAdmissionSnapshot();
+  writer.Key("owner_admission");
+  writer.StartObject();
+  writer.Key("source");
+  writer.String(owner_admission.source.c_str());
+  writer.Key("waiting_entries");
+  writer.Uint64(owner_admission.waiting_entries);
+  writer.Key("waiting_bytes");
+  writer.Uint64(owner_admission.waiting_bytes);
+  writer.Key("active");
+  writer.Uint64(owner_admission.active);
+  writer.Key("accepted_total");
+  writer.Uint64(owner_admission.accepted_total);
+  writer.Key("rejected_total");
+  writer.Uint64(owner_admission.rejected_total);
+  writer.Key("cancelled_total");
+  writer.Uint64(owner_admission.cancelled_total);
+  writer.Key("max_wait_entries");
+  writer.Uint64(owner_admission.max_wait_entries);
+  writer.Key("max_wait_bytes");
+  writer.Uint64(owner_admission.max_wait_bytes);
+  writer.Key("oldest_wait_ms");
+  writer.Uint64(owner_admission.oldest_wait_ms);
   writer.EndObject();
   const WorkloadSchedulerSnapshot scheduler = conversionSchedulerSnapshot();
   writer.Key("conversion_scheduler");

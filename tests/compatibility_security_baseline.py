@@ -11618,6 +11618,14 @@ def force_max_arrival_singleflight_baseline(
         before_followers = int(
             before["subscription_singleflight"]["followers_attached_total"]
         )
+        before_work_admitted = int(
+            before["request_lifecycle"]["work_admitted"]
+        )
+        before_post_admission_capacity = int(
+            before["request_lifecycle"][
+                "server_capacity_failure_after_admission"
+            ]
+        )
         before_subscriptions = int(
             before["windows"]["lifetime"]["subscription_requests"]
         )
@@ -11670,6 +11678,7 @@ def force_max_arrival_singleflight_baseline(
         flow = observed["legacy_request_flow"]
         singleflight = observed["subscription_singleflight"]
         admission = observed["request_admission"]
+        owner_admission = observed["owner_admission"]
         if (
             int(flow["accepted"]) - before_flow != 1
             or int(flow["active"]) != 1
@@ -11679,6 +11688,9 @@ def force_max_arrival_singleflight_baseline(
             or int(singleflight["owners_created_total"]) - before_owners != 1
             or int(singleflight["followers_attached_total"]) - before_followers
             != 15
+            or owner_admission["source"] != "legacy_request_flow"
+            or int(owner_admission["accepted_total"]) - before_flow != 1
+            or int(owner_admission["active"]) != 1
         ):
             FixtureHandler.slow_subscription_release.set()
             for worker in workers:
@@ -11686,7 +11698,8 @@ def force_max_arrival_singleflight_baseline(
             raise AssertionError(
                 "arrival followers consumed owner flow capacity: "
                 f"flow={flow!r} admission={admission!r} "
-                f"singleflight={singleflight!r}"
+                f"singleflight={singleflight!r} "
+                f"owner_admission={owner_admission!r}"
             )
 
         FixtureHandler.slow_subscription_release.set()
@@ -11729,6 +11742,15 @@ def force_max_arrival_singleflight_baseline(
             or int(after["windows"]["lifetime"]["subscription_requests"])
             - before_subscriptions
             != 16
+            or int(after["request_lifecycle"]["work_admitted"])
+            - before_work_admitted
+            != 16
+            or int(
+                after["request_lifecycle"][
+                    "server_capacity_failure_after_admission"
+                ]
+            )
+            != before_post_admission_capacity
         ):
             raise AssertionError(
                 "arrival singleflight counters did not return to zero: "
@@ -11741,6 +11763,9 @@ def force_max_arrival_singleflight_baseline(
         )
         distinct_before_followers = int(
             after["subscription_singleflight"]["followers_attached_total"]
+        )
+        distinct_before_work_admitted = int(
+            after["request_lifecycle"]["work_admitted"]
         )
         distinct_results: list[tuple[int, bytes, dict[str, str]]] = []
         distinct_errors: list[BaseException] = []
@@ -11811,6 +11836,17 @@ def force_max_arrival_singleflight_baseline(
             )
             - before_subscriptions
             != 24
+            or int(
+                distinct_after["request_lifecycle"]["work_admitted"]
+            )
+            - distinct_before_work_admitted
+            != 8
+            or int(
+                distinct_after["request_lifecycle"][
+                    "server_capacity_failure_after_admission"
+                ]
+            )
+            != before_post_admission_capacity
         ):
             raise AssertionError(
                 "distinct keys no longer map one-to-one to owner flow tasks: "

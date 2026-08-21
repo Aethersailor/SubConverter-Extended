@@ -78,6 +78,19 @@ struct SubscriptionSingleflightSnapshot {
   uint64_t owner_flow_rejected_total = 0;
 };
 
+struct SubscriptionOwnerAdmissionSnapshot {
+  std::string source = "not_initialized";
+  uint64_t waiting_entries = 0;
+  uint64_t waiting_bytes = 0;
+  uint64_t active = 0;
+  uint64_t accepted_total = 0;
+  uint64_t rejected_total = 0;
+  uint64_t cancelled_total = 0;
+  uint64_t max_wait_entries = 0;
+  uint64_t max_wait_bytes = 0;
+  uint64_t oldest_wait_ms = 0;
+};
+
 const ConversionService &defaultConversionService();
 WorkloadSchedulerSnapshot conversionSchedulerSnapshot();
 WorkloadSchedulerSnapshot legacyRequestFlowSnapshot();
@@ -85,6 +98,7 @@ CpuPermitSnapshot conversionCpuPermitSnapshot();
 void setConversionCpuPermitLimit(uint64_t limit) noexcept;
 ResponseMicroCacheSnapshot responseMicroCacheSnapshot();
 SubscriptionSingleflightSnapshot subscriptionSingleflightSnapshot() noexcept;
+SubscriptionOwnerAdmissionSnapshot subscriptionOwnerAdmissionSnapshot();
 void requestConversionSchedulerShutdown() noexcept;
 void shutdownConversionScheduler() noexcept;
 

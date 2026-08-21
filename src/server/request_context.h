@@ -335,6 +335,8 @@ struct RequestLifecycleMetricsSnapshot {
       stage_latency_buckets{};
   uint64_t successful_owners = 0;
   uint64_t successful_responses = 0;
+  uint64_t work_admitted = 0;
+  uint64_t server_capacity_failure_after_admission = 0;
 };
 
 namespace request_lifecycle_metrics {
@@ -351,7 +353,14 @@ inline std::array<
     stage_latency_buckets{};
 inline std::atomic<uint64_t> successful_owners{0};
 inline std::atomic<uint64_t> successful_responses{0};
+inline std::atomic<uint64_t> work_admitted{0};
+inline std::atomic<uint64_t> server_capacity_failure_after_admission{0};
 } // namespace request_lifecycle_metrics
+
+enum class RequestContextKind : uint8_t {
+  Client,
+  InternalWork,
+};
 
 inline std::size_t requestStageLatencyBucket(uint64_t nanoseconds) noexcept {
   uint64_t microseconds = std::max<uint64_t>(1, (nanoseconds + 999) / 1000);
@@ -553,6 +562,11 @@ inline RequestLifecycleMetricsSnapshot requestLifecycleMetricsSnapshot() {
   result.successful_responses =
       request_lifecycle_metrics::successful_responses.load(
           std::memory_order_relaxed);
+  result.work_admitted = request_lifecycle_metrics::work_admitted.load(
+      std::memory_order_relaxed);
+  result.server_capacity_failure_after_admission =
+      request_lifecycle_metrics::server_capacity_failure_after_admission.load(
+          std::memory_order_relaxed);
   return result;
 }
 
@@ -572,6 +586,10 @@ inline void resetRequestLifecycleMetricsForTests() noexcept {
       0, std::memory_order_relaxed);
   request_lifecycle_metrics::successful_responses.store(
       0, std::memory_order_relaxed);
+  request_lifecycle_metrics::work_admitted.store(0,
+                                                  std::memory_order_relaxed);
+  request_lifecycle_metrics::server_capacity_failure_after_admission.store(
+      0, std::memory_order_relaxed);
 }
 
 class RequestContext {
@@ -579,9 +597,10 @@ public:
   using Clock = std::chrono::steady_clock;
 
   RequestContext(std::string request_id, Clock::time_point received_at,
-                 Clock::time_point deadline = Clock::time_point::max())
+                 Clock::time_point deadline = Clock::time_point::max(),
+                 RequestContextKind kind = RequestContextKind::Client)
       : request_id_(std::move(request_id)), received_at_(received_at),
-        deadline_(deadline) {
+        deadline_(deadline), kind_(kind) {
     for (auto &value : stage_nanoseconds_)
       value.store(0, std::memory_order_relaxed);
     registerActiveRequestCancellation(cancellation_source_.stateHandle());
@@ -630,6 +649,24 @@ public:
 
   uint64_t estimatedBytes() const noexcept {
     return estimated_bytes_.load(std::memory_order_acquire);
+  }
+
+  bool markWorkAdmitted() noexcept {
+    if (kind_ != RequestContextKind::Client)
+      return false;
+    bool expected = false;
+    if (!work_admitted_.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel,
+            std::memory_order_acquire))
+      return false;
+    request_lifecycle_metrics::work_admitted.fetch_add(
+        1, std::memory_order_relaxed);
+    recordPostAdmissionCapacityFailureIfNeeded();
+    return true;
+  }
+
+  bool workAdmitted() const noexcept {
+    return work_admitted_.load(std::memory_order_acquire);
   }
 
   bool retainResponseBytes(uint64_t bytes) noexcept {
@@ -692,6 +729,10 @@ public:
     RequestFailureAttribution expected = RequestFailureAttribution::None;
     suggested_failure_.compare_exchange_strong(
         expected, value, std::memory_order_acq_rel, std::memory_order_acquire);
+    if (value == RequestFailureAttribution::Capacity) {
+      capacity_failure_seen_.store(true, std::memory_order_release);
+      recordPostAdmissionCapacityFailureIfNeeded();
+    }
   }
 
   RequestFailureAttribution suggestedFailure() const noexcept {
@@ -832,9 +873,24 @@ public:
   }
 
 private:
+  void recordPostAdmissionCapacityFailureIfNeeded() noexcept {
+    if (kind_ != RequestContextKind::Client ||
+        !work_admitted_.load(std::memory_order_acquire) ||
+        !capacity_failure_seen_.load(std::memory_order_acquire))
+      return;
+    bool expected = false;
+    if (post_admission_capacity_recorded_.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel,
+            std::memory_order_acquire)) {
+      request_lifecycle_metrics::server_capacity_failure_after_admission
+          .fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+
   const std::string request_id_;
   const Clock::time_point received_at_;
   const Clock::time_point deadline_;
+  const RequestContextKind kind_;
   RequestCancellationSource cancellation_source_;
   std::atomic<RequestCostClass> cost_class_{RequestCostClass::Unclassified};
   std::atomic<uint64_t> estimated_bytes_{0};
@@ -844,6 +900,9 @@ private:
   std::atomic<uint32_t> consumers_{1};
   std::atomic<RequestFailureAttribution> suggested_failure_{
       RequestFailureAttribution::None};
+  std::atomic<bool> work_admitted_{false};
+  std::atomic<bool> capacity_failure_seen_{false};
+  std::atomic<bool> post_admission_capacity_recorded_{false};
   std::atomic<RequestStage> current_stage_{RequestStage::Admission};
   std::array<std::atomic<uint64_t>, kRequestStageCount> stage_nanoseconds_{};
   std::atomic<bool> admission_recorded_{false};
