@@ -156,6 +156,28 @@ struct OwnedWebGetResult
     RetainedResponseByteLease retained_bytes;
 };
 
+struct OwnedWebGetAsyncPayload
+{
+    int status_code = 0;
+    AsyncFetchFailure failure = AsyncFetchFailure::None;
+    std::string content;
+    std::string response_headers;
+    bool response_headers_touched = false;
+    RetainedResponseByteLease retained_bytes;
+};
+using SharedOwnedWebGetAsyncPayload =
+    std::shared_ptr<const OwnedWebGetAsyncPayload>;
+
+struct OwnedWebGetAsyncOutcome
+{
+    SharedOwnedWebGetAsyncPayload payload;
+    AsyncFetchFailure failure = AsyncFetchFailure::None;
+    RequestCancellationReason cancellation =
+        RequestCancellationReason::None;
+};
+using OwnedWebGetAsyncCompletion =
+    std::function<void(OwnedWebGetAsyncOutcome)>;
+
 struct CacheFetchPayloadSnapshot
 {
     uint64_t retained_bytes = 0;
@@ -173,6 +195,13 @@ struct CacheFetchOperationProbeSnapshot
     bool owner_kinds_isolated = false;
 };
 
+struct OwnedWebGetAsyncConsumerProbeSnapshot
+{
+    uint64_t raced_completions = 0;
+    uint64_t precancelled_completions = 0;
+    bool payload_lease_released = false;
+};
+
 void webGetAsync(AsyncFetchRequest request, AsyncFetchCompletion completion);
 AsyncFetchFuture webGetAsync(AsyncFetchRequest request);
 // Synchronous ownership boundary used to share prepare/cache/finalize logic.
@@ -181,6 +210,7 @@ AsyncFetchFuture webGetAsync(AsyncFetchRequest request);
 OwnedWebGetResult webGetOwned(OwnedWebGetRequest request);
 CacheFetchPayloadSnapshot cacheFetchPayloadSnapshot() noexcept;
 CacheFetchOperationProbeSnapshot cacheFetchOperationProbe();
+OwnedWebGetAsyncConsumerProbeSnapshot ownedWebGetAsyncConsumerProbe();
 struct OwnedWebGetContinuationRuntimeSnapshot
 {
     bool initialized = false;

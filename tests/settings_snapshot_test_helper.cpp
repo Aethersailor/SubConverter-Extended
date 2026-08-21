@@ -114,6 +114,8 @@ int main(int argc, char *argv[]) {
         cacheFetchPayloadSnapshot();
     const CacheFetchOperationProbeSnapshot operation_probe =
         cacheFetchOperationProbe();
+    const OwnedWebGetAsyncConsumerProbeSnapshot async_consumer_probe =
+        ownedWebGetAsyncConsumerProbe();
     const bool continuation_was_uninitialized =
         !ownedWebGetContinuationRuntimeSnapshot().initialized;
     std::promise<SchedulerSubmitStatus> preinit_completion;
@@ -258,6 +260,10 @@ int main(int argc, char *argv[]) {
     writer.Bool(operation_probe.no_consumers_cancelled);
     writer.Key("operation_owner_kinds_isolated");
     writer.Bool(operation_probe.owner_kinds_isolated);
+    writer.Key("async_consumer_probe_ok");
+    writer.Bool(async_consumer_probe.raced_completions == 1 &&
+                async_consumer_probe.precancelled_completions == 1 &&
+                async_consumer_probe.payload_lease_released);
     writer.Key("continuation_runtime_ok");
     writer.Bool(continuation_was_uninitialized &&
                 preinit_submit == SchedulerSubmitStatus::Stopping &&

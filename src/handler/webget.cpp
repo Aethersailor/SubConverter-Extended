@@ -3240,6 +3240,140 @@ CacheFetchOperationProbeSnapshot cacheFetchOperationProbe()
 
 namespace
 {
+struct OwnedWebGetAsyncConsumer
+{
+    std::shared_ptr<RequestContext> context;
+    OwnedWebGetAsyncCompletion completion;
+    RequestCancellationRegistration cancellation_registration;
+    std::atomic<bool> completion_claimed{false};
+    std::atomic<bool> detached{false};
+};
+
+OwnedWebGetAsyncOutcome cancellationOutcome(
+    RequestCancellationReason reason) noexcept;
+
+bool completeOwnedWebGetAsyncConsumer(
+    std::shared_ptr<OwnedWebGetAsyncConsumer> consumer,
+    OwnedWebGetAsyncOutcome outcome) noexcept
+{
+    if(!consumer ||
+       consumer->completion_claimed.exchange(true, std::memory_order_acq_rel))
+        return false;
+    if(consumer->context)
+    {
+        const RequestCancellationReason reason =
+            consumer->context->cancellationToken().reason();
+        if(reason != RequestCancellationReason::None)
+            outcome = cancellationOutcome(reason);
+    }
+    try
+    {
+        if(consumer->completion)
+            consumer->completion(std::move(outcome));
+    }
+    catch(...)
+    {
+    }
+    return true;
+}
+
+OwnedWebGetAsyncOutcome cancellationOutcome(
+    RequestCancellationReason reason) noexcept
+{
+    OwnedWebGetAsyncOutcome outcome;
+    outcome.cancellation = reason;
+    switch(reason)
+    {
+    case RequestCancellationReason::Deadline:
+        outcome.failure = AsyncFetchFailure::Deadline;
+        break;
+    case RequestCancellationReason::Shutdown:
+        outcome.failure = AsyncFetchFailure::Shutdown;
+        break;
+    case RequestCancellationReason::ClientDisconnected:
+    case RequestCancellationReason::NoConsumers:
+        outcome.failure = AsyncFetchFailure::Cancelled;
+        break;
+    case RequestCancellationReason::None:
+        break;
+    }
+    return outcome;
+}
+
+void registerOwnedWebGetAsyncCancellation(
+    std::shared_ptr<OwnedWebGetAsyncConsumer> consumer)
+{
+    if(!consumer || !consumer->context)
+        return;
+    const std::weak_ptr<OwnedWebGetAsyncConsumer> weak = consumer;
+    RequestCancellationRegistration registration =
+        consumer->context->registerCancellationCallback([weak] {
+            if(auto current = weak.lock())
+                completeOwnedWebGetAsyncConsumer(
+                    current,
+                    cancellationOutcome(
+                        current->context->cancellationToken().reason()));
+        });
+    consumer->cancellation_registration = std::move(registration);
+}
+} // namespace
+
+OwnedWebGetAsyncConsumerProbeSnapshot ownedWebGetAsyncConsumerProbe()
+{
+    OwnedWebGetAsyncConsumerProbeSnapshot snapshot;
+    const uint64_t retained_before = retainedResponseByteSnapshot().used;
+    auto payload = std::make_shared<OwnedWebGetAsyncPayload>();
+    payload->content = "owned-async-probe";
+    if(!payload->retained_bytes.retain(payload->content.size()))
+        return snapshot;
+    auto raced = std::make_shared<OwnedWebGetAsyncConsumer>();
+    raced->context = std::make_shared<RequestContext>(
+        "owned-async-race", RequestContext::Clock::now());
+    std::atomic<uint64_t> raced_count{0};
+    raced->completion = [&](OwnedWebGetAsyncOutcome) {
+        raced_count.fetch_add(1, std::memory_order_relaxed);
+    };
+    registerOwnedWebGetAsyncCancellation(raced);
+    std::thread publish_thread([&] {
+        completeOwnedWebGetAsyncConsumer(
+            raced,
+            {std::static_pointer_cast<const OwnedWebGetAsyncPayload>(payload),
+             AsyncFetchFailure::None, RequestCancellationReason::None});
+    });
+    std::thread cancel_thread([&] {
+        raced->context->requestCancellation(
+            RequestCancellationReason::ClientDisconnected);
+    });
+    publish_thread.join();
+    cancel_thread.join();
+    snapshot.raced_completions =
+        raced_count.load(std::memory_order_relaxed);
+
+    auto precancelled = std::make_shared<OwnedWebGetAsyncConsumer>();
+    precancelled->context = std::make_shared<RequestContext>(
+        "owned-async-precancelled", RequestContext::Clock::now());
+    precancelled->context->requestCancellation(
+        RequestCancellationReason::Deadline);
+    std::atomic<uint64_t> precancelled_count{0};
+    precancelled->completion = [&](OwnedWebGetAsyncOutcome outcome) {
+        if(outcome.failure == AsyncFetchFailure::Deadline)
+            precancelled_count.fetch_add(1, std::memory_order_relaxed);
+        precancelled.reset();
+    };
+    registerOwnedWebGetAsyncCancellation(precancelled);
+    snapshot.precancelled_completions =
+        precancelled_count.load(std::memory_order_relaxed);
+
+    raced.reset();
+    precancelled.reset();
+    payload.reset();
+    snapshot.payload_lease_released =
+        retainedResponseByteSnapshot().used == retained_before;
+    return snapshot;
+}
+
+namespace
+{
 struct OwnedWebGetContinuationRuntime
 {
     std::mutex mutex;
