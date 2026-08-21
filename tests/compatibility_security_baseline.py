@@ -683,6 +683,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
     external_valid_count = 0
     get_request_count = 0
     slow_subscription_request_count = 0
+    webget_probe_counts: dict[str, int] = {}
     counter_lock = threading.Lock()
     slow_subscription_started = threading.Event()
     slow_subscription_release = threading.Event()
@@ -1065,11 +1066,19 @@ class FixtureHandler(BaseHTTPRequestHandler):
         elif request_path == "/template-marker":
             body = b"template-ok"
             content_type = "text/plain; charset=utf-8"
+        elif request_path == "/webget-probe-hit":
+            with type(self).counter_lock:
+                count = type(self).webget_probe_counts.get(request_path, 0) + 1
+                type(self).webget_probe_counts[request_path] = count
+            body = ("owned-webget:" + request_path).encode()
+            content_type = "text/plain; charset=utf-8"
         else:
             self.send_error(404)
             return
         self.send_response(200)
         self.send_header("Content-Type", content_type)
+        if request_path.startswith("/webget-probe-"):
+            self.send_header("X-WebGet-Probe", "present")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -1215,6 +1224,7 @@ def fixture_server():
     FixtureHandler.external_valid_count = 0
     FixtureHandler.get_request_count = 0
     FixtureHandler.slow_subscription_request_count = 0
+    FixtureHandler.webget_probe_counts = {}
     FixtureHandler.stash_invalid_bases = {}
     FixtureHandler.slow_subscription_started.clear()
     FixtureHandler.slow_subscription_release.set()
@@ -1694,6 +1704,73 @@ def load_settings_snapshot(
 ) -> dict[str, object]:
     snapshot, _ = run_settings_snapshot(helper, fixture, environment)
     return snapshot
+
+
+def owned_webget_boundary_baseline(helper: Path, fixture_base: str) -> None:
+    with tempfile.TemporaryDirectory(
+        dir=REPOSITORY / "build", prefix="owned-webget-boundary-"
+    ) as temporary:
+        temporary_path = Path(temporary)
+        pref = temporary_path / "pref.toml"
+        pref.write_text(
+            (COMPAT_FIXTURES / "legacy-pref.toml").read_text(encoding="utf-8"),
+            encoding="utf-8",
+            newline="\n",
+        )
+        environment = os.environ.copy()
+        environment["SUBCONVERTER_FETCH_ENGINE"] = "multi"
+        environment["NO_PROXY"] = "127.0.0.1,localhost"
+        environment["no_proxy"] = "127.0.0.1,localhost"
+
+        def run_probe(path: str, ttl: int, delay_ms: int) -> dict[str, object]:
+            completed = subprocess.run(
+                [
+                    str(helper),
+                    "--webget-probe",
+                    str(pref),
+                    fixture_base + path,
+                    str(ttl),
+                    str(delay_ms),
+                ],
+                cwd=temporary_path,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=20,
+            )
+            if completed.returncode != 0:
+                raise AssertionError(
+                    "owned webGet helper failed: "
+                    f"exit={completed.returncode}, stderr={completed.stderr[-4000:]!r}"
+                )
+            return json.loads(completed.stdout)
+
+        with FixtureHandler.counter_lock:
+            hit_before = FixtureHandler.webget_probe_counts.get(
+                "/webget-probe-hit", 0
+            )
+        hit = run_probe("/webget-probe-hit", 60, 0)
+        with FixtureHandler.counter_lock:
+            hit_requests = (
+                FixtureHandler.webget_probe_counts.get("/webget-probe-hit", 0)
+                - hit_before
+            )
+        if (
+            hit_requests != 1
+            or hit["first_status"] != 200
+            or hit["second_status"] != 200
+            or hit["first_body"] != hit["second_body"]
+            or hit["early_header_preserved"] is not True
+            or "X-WebGet-Probe: present" not in str(hit["second_headers"])
+        ):
+            raise AssertionError(
+                f"owned webGet TTL hit contract changed: requests={hit_requests}, "
+                f"result={hit!r}"
+            )
+
 
 
 def early_log_level_parsing_baseline(helper: Path) -> None:
@@ -12190,6 +12267,7 @@ def main() -> int:
     settings_dashboard_client_ip_baseline(settings_snapshot_helper)
 
     with fixture_server() as fixture_base:
+        owned_webget_boundary_baseline(settings_snapshot_helper, fixture_base)
         parser_invocation_log_baseline(binary, fixture_base)
         provider_no_fetch_vary_and_route_log_baseline(binary, fixture_base)
         quanx_server_remote_baseline(binary, fixture_base)

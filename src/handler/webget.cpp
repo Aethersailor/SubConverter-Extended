@@ -2421,114 +2421,226 @@ std::string buildSocks5ProxyString(const std::string &addr, int port, const std:
     return proxystr;
 }
 
-std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned int cache_ttl, std::string *response_headers, string_icase_map *request_headers, FetchContext context)
+namespace
 {
-    RequestStageTimer fetch_timer(RequestStage::Fetch);
-    int return_code = 0;
-    std::string content;
 
-    if (!isFetchUrlAllowed(url, context))
-        return "";
-
-    CocrSourceResolution source =
-        resolveCocrSourceUrl(
-            url, effectiveSettings().customOpenClashRulesSourceSwitch);
-    const std::string &effective_url = source.effective_url;
-    if(source.rewritten && shouldLog(LOG_LEVEL_VERBOSE))
-        writeLog(LOG_LEVEL_VERBOSE, "COCR 服务端取源切换：" + summarizeUrlForLog(url) +
-                        " -> " + summarizeUrlForLog(effective_url) + "。");
-
-    FetchArgument argument {HTTP_GET, effective_url, proxy, nullptr,
-                            request_headers, nullptr, cache_ttl, false,
-                            context};
-    FetchResult fetch_res {&return_code, &content, response_headers, nullptr};
-
-    if (startsWith(effective_url, "data:"))
+class OwnedWebGetExecution
+{
+public:
+    explicit OwnedWebGetExecution(OwnedWebGetRequest request)
+        : request_(std::move(request))
     {
-        std::string data = dataGet(effective_url);
-        return retainCurrentFetchBytes(data.size()) ? std::move(data)
-                                                    : std::string();
+        if(request_.capture_response_headers)
+            result_.response_headers = request_.initial_response_headers;
     }
 
-    const ResolvedProxyPolicy proxy_snapshot = proxy.snapshot();
-    const ResolvedProxyRoute initial_route =
-        resolveProxyRoute(proxy_snapshot, effective_url, context);
-    // cache system
-    if(cache_ttl > 0)
+    OwnedWebGetResult run()
+    {
+        RequestStageTimer fetch_timer(RequestStage::Fetch);
+        if(!prepare())
+            return std::move(result_);
+        if(prepared_data_)
+            return std::move(result_);
+        if(request_.cache_ttl > 0)
+            executeCached();
+        else
+            executeNetwork();
+        return std::move(result_);
+    }
+
+private:
+    string_icase_map *requestHeaders() noexcept
+    {
+        return request_.has_request_headers ? &request_.request_headers
+                                            : nullptr;
+    }
+
+    bool prepare()
+    {
+        if(!isFetchUrlAllowed(request_.url, request_.context))
+            return false;
+        const CocrSourceResolution source = resolveCocrSourceUrl(
+            request_.url,
+            effectiveSettings().customOpenClashRulesSourceSwitch);
+        effective_url_ = source.effective_url;
+        if(source.rewritten && shouldLog(LOG_LEVEL_VERBOSE))
+            writeLog(LOG_LEVEL_VERBOSE,
+                     "COCR 服务端取源切换：" +
+                         summarizeUrlForLog(request_.url) + " -> " +
+                         summarizeUrlForLog(effective_url_) + "。");
+        if(startsWith(effective_url_, "data:"))
+        {
+            result_.content = dataGet(effective_url_);
+            if(!retainCurrentFetchBytes(result_.content.size()))
+                result_.content.clear();
+            result_.status_code = result_.content.empty() ? 400 : 200;
+            prepared_data_ = true;
+            return true;
+        }
+        proxy_snapshot_ = request_.proxy.snapshot();
+        initial_route_ = resolveProxyRoute(
+            proxy_snapshot_, effective_url_, request_.context);
+        return true;
+    }
+
+    FetchArgument fetchArgument() const
+    {
+        return FetchArgument{
+            HTTP_GET, effective_url_, request_.proxy, nullptr,
+            request_.has_request_headers ? &request_.request_headers : nullptr,
+            nullptr, request_.cache_ttl, false, request_.context};
+    }
+
+    void executeNetwork()
+    {
+        FetchArgument argument = fetchArgument();
+        FetchResult fetch_result{
+            &result_.status_code, &result_.content,
+            request_.capture_response_headers ? &result_.response_headers
+                                              : nullptr,
+            nullptr};
+        curlGetWithGitHubFallback(argument, proxy_snapshot_, initial_route_,
+                                  fetch_result);
+        if(request_.capture_response_headers &&
+           result_.response_headers != request_.initial_response_headers)
+            result_.response_headers_touched = true;
+    }
+
+    bool loadFreshCache(const std::string &path,
+                        const std::string &header_path)
+    {
+        struct stat information {};
+        if(stat(path.c_str(), &information) != 0)
+            return false;
+        const time_t now = time(nullptr);
+        if(difftime(now, information.st_mtime) > request_.cache_ttl)
+        {
+            if(shouldLog(LOG_LEVEL_VERBOSE))
+                writeLog(LOG_LEVEL_VERBOSE,
+                         "缓存过期：" + summarizeUrlForLog(effective_url_) +
+                             "，正在创建新缓存。");
+            return false;
+        }
+        if(shouldLog(LOG_LEVEL_VERBOSE))
+            writeLog(LOG_LEVEL_VERBOSE,
+                     "缓存命中：" + summarizeUrlForLog(effective_url_) +
+                         "，使用本地缓存。");
+        cache_rw_lock.readLock();
+        defer(cache_rw_lock.readUnlock();)
+        std::string cached_headers;
+        if(request_.capture_response_headers)
+        {
+            cached_headers = readCachedResponseHeaders(header_path);
+            result_.response_headers = cached_headers;
+            result_.response_headers_touched = true;
+        }
+        result_.content = fileGet(path, true);
+        if(!retainCurrentFetchBytes(result_.content.size() +
+                                    cached_headers.size()))
+            result_.content.clear();
+        result_.status_code = result_.content.empty() ? 0 : 200;
+        return true;
+    }
+
+    void finalizeCached(const std::string &path,
+                        const std::string &header_path,
+                        const CacheFetchResult &fetched, bool owner)
+    {
+        if(result_.status_code == 200)
+        {
+            if(!owner)
+                return;
+            cache_rw_lock.writeLock();
+            defer(cache_rw_lock.writeUnlock();)
+            const CacheUpdateResult cache_update = updateCacheFiles(
+                path, header_path, result_.content,
+                fetched.response_headers);
+            if(cache_update == CacheUpdateResult::Unchanged)
+                writeLog(LOG_LEVEL_WARNING,
+                         "CACHE_UPDATE_FAILED body=unchanged headers=unchanged; "
+                         "本次已获取内容仍将直接返回。");
+            else if(cache_update ==
+                    CacheUpdateResult::UnchangedHeadersInvalidated)
+                writeLog(LOG_LEVEL_WARNING,
+                         "CACHE_UPDATE_FAILED body=unchanged "
+                         "headers=invalidated; 本次已获取内容仍将直接返回。");
+            else if(cache_update == CacheUpdateResult::BodyCommittedUnsynced)
+                writeLog(LOG_LEVEL_WARNING,
+                         "CACHE_BODY_COMMITTED durability=unconfirmed "
+                         "headers=invalidated; 本次已获取内容仍将直接返回。");
+            else if(cache_update == CacheUpdateResult::HeadersInvalidated)
+                writeLog(LOG_LEVEL_WARNING,
+                         "CACHE_BODY_COMMITTED durability=confirmed "
+                         "headers=invalidated; 本次已获取内容仍将直接返回。");
+            return;
+        }
+
+        if(fileExist(path) && effectiveSettings().serveCacheOnFetchFail)
+        {
+            if(shouldLog(LOG_LEVEL_VERBOSE))
+                writeLog(LOG_LEVEL_VERBOSE, "获取失败，返回缓存内容。");
+            cache_rw_lock.readLock();
+            defer(cache_rw_lock.readUnlock();)
+            result_.content = fileGet(path, true);
+            if(request_.capture_response_headers)
+            {
+                result_.response_headers = readCachedResponseHeaders(
+                    header_path);
+                result_.response_headers_touched = true;
+            }
+            if(!retainCurrentFetchBytes(
+                   result_.content.size() + result_.response_headers.size()))
+                result_.content.clear();
+        }
+        else if(shouldLog(LOG_LEVEL_VERBOSE))
+            writeLog(LOG_LEVEL_VERBOSE,
+                     "获取失败，且没有可用的本地缓存。");
+    }
+
+    void executeCached()
     {
         md("cache");
-        const std::string url_md5 =
-            build_cache_key(effective_url, initial_route, request_headers);
-        const std::string path = "cache/" + url_md5, path_header = path + "_header";
-        struct stat result {};
-        if(stat(path.data(), &result) == 0) // cache exist
-        {
-            time_t mtime = result.st_mtime, now = time(nullptr); // get cache modified time and current time
-            if(difftime(now, mtime) <= cache_ttl) // within TTL
-            {
-                if(shouldLog(LOG_LEVEL_VERBOSE))
-                    writeLog(LOG_LEVEL_VERBOSE,
-                             "缓存命中：" +
-                                 summarizeUrlForLog(effective_url) +
-                                 "，使用本地缓存。");
-                //guarded_mutex guard(cache_rw_lock);
-                cache_rw_lock.readLock();
-                defer(cache_rw_lock.readUnlock();)
-                std::string cached_headers;
-                if(response_headers)
-                {
-                    cached_headers = readCachedResponseHeaders(path_header);
-                    *response_headers = cached_headers;
-                }
-                std::string cached = fileGet(path, true);
-                return retainCurrentFetchBytes(cached.size() +
-                                               cached_headers.size())
-                           ? std::move(cached)
-                           : std::string();
-            }
-            if(shouldLog(LOG_LEVEL_VERBOSE))
-                writeLog(LOG_LEVEL_VERBOSE,
-                         "缓存过期：" + summarizeUrlForLog(effective_url) +
-                             "，正在创建新缓存。"); // out of TTL
-        }
-        else
-        {
-            if(shouldLog(LOG_LEVEL_VERBOSE))
-                writeLog(LOG_LEVEL_VERBOSE,
-                         "缓存不存在：" +
-                             summarizeUrlForLog(effective_url) +
-                             "，正在创建新缓存。");
-        }
+        const std::string cache_key = build_cache_key(
+            effective_url_, initial_route_, requestHeaders());
+        const std::string path = "cache/" + cache_key;
+        const std::string header_path = path + "_header";
+        if(loadFreshCache(path, header_path))
+            return;
+        if(!fileExist(path) && shouldLog(LOG_LEVEL_VERBOSE))
+            writeLog(LOG_LEVEL_VERBOSE,
+                     "缓存不存在：" + summarizeUrlForLog(effective_url_) +
+                         "，正在创建新缓存。");
+
         std::shared_future<CacheFetchResult> fetch_future;
         std::shared_ptr<std::promise<CacheFetchResult>> fetch_promise;
         bool owner = false;
         {
             std::lock_guard<std::mutex> lock(cache_fetch_mutex);
-            auto iter = cache_fetches.find(url_md5);
+            auto iter = cache_fetches.find(cache_key);
             if(iter == cache_fetches.end())
             {
                 fetch_promise =
                     std::make_shared<std::promise<CacheFetchResult>>();
                 fetch_future = fetch_promise->get_future().share();
-                cache_fetches.emplace(url_md5, fetch_future);
+                cache_fetches.emplace(cache_key, fetch_future);
                 owner = true;
             }
             else
                 fetch_future = iter->second;
         }
-        CacheFetchOwnerCleanup owner_cleanup(owner, url_md5);
-
+        CacheFetchOwnerCleanup owner_cleanup(owner, cache_key);
         if(owner)
         {
             try
             {
-                CacheFetchResult result;
-                FetchResult fetch_result {
-                    &result.status_code, &result.content,
-                    &result.response_headers, nullptr};
-                curlGetWithGitHubFallback(argument, proxy_snapshot,
-                                          initial_route, fetch_result);
-                fetch_promise->set_value(std::move(result));
+                CacheFetchResult fetched;
+                FetchArgument argument = fetchArgument();
+                FetchResult fetch_result{
+                    &fetched.status_code, &fetched.content,
+                    &fetched.response_headers, nullptr};
+                curlGetWithGitHubFallback(argument, proxy_snapshot_,
+                                          initial_route_, fetch_result);
+                fetch_promise->set_value(std::move(fetched));
             }
             catch(...)
             {
@@ -2538,78 +2650,57 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy, unsigned in
 
         CacheFetchResult fetched =
             waitWithoutCpuPermit([&] { return fetch_future.get(); });
-        return_code = fetched.status_code;
-        content = std::move(fetched.content);
-        if(response_headers)
-            *response_headers = fetched.response_headers;
+        result_.status_code = fetched.status_code;
+        result_.content = std::move(fetched.content);
+        if(request_.capture_response_headers)
+        {
+            result_.response_headers = fetched.response_headers;
+            result_.response_headers_touched = true;
+        }
         if(!owner && !retainCurrentFetchBytes(
-                         content.size() + fetched.response_headers.size()))
-            return std::string();
-        if(return_code == 200) // success, save new cache
+                         result_.content.size() +
+                         fetched.response_headers.size()))
         {
-            if(owner)
-            {
-                //guarded_mutex guard(cache_rw_lock);
-                cache_rw_lock.writeLock();
-                defer(cache_rw_lock.writeUnlock();)
-                const CacheUpdateResult cache_update = updateCacheFiles(
-                    path, path_header, content, fetched.response_headers);
-                if(cache_update == CacheUpdateResult::Unchanged) {
-                    writeLog(LOG_LEVEL_WARNING,
-                             "CACHE_UPDATE_FAILED body=unchanged headers=unchanged; "
-                             "本次已获取内容仍将直接返回。");
-                }
-                else if(cache_update ==
-                        CacheUpdateResult::UnchangedHeadersInvalidated) {
-                    writeLog(LOG_LEVEL_WARNING,
-                             "CACHE_UPDATE_FAILED body=unchanged "
-                             "headers=invalidated; 本次已获取内容仍将直接返回。");
-                }
-                else if(cache_update ==
-                        CacheUpdateResult::BodyCommittedUnsynced) {
-                    writeLog(LOG_LEVEL_WARNING,
-                             "CACHE_BODY_COMMITTED durability=unconfirmed "
-                             "headers=invalidated; 本次已获取内容仍将直接返回。");
-                }
-                else if(cache_update == CacheUpdateResult::HeadersInvalidated) {
-                    writeLog(LOG_LEVEL_WARNING,
-                             "CACHE_BODY_COMMITTED durability=confirmed "
-                             "headers=invalidated; 本次已获取内容仍将直接返回。");
-                }
-            }
+            result_.content.clear();
+            return;
         }
-        else
-        {
-            if(fileExist(path) && effectiveSettings().serveCacheOnFetchFail) // failed, check if cache exist
-            {
-                if(shouldLog(LOG_LEVEL_VERBOSE))
-                    writeLog(LOG_LEVEL_VERBOSE,
-                             "获取失败，返回缓存内容。"); // cache exist, serving cache
-                //guarded_mutex guard(cache_rw_lock);
-                cache_rw_lock.readLock();
-                defer(cache_rw_lock.readUnlock();)
-                content = fileGet(path, true);
-                if(response_headers)
-                    *response_headers =
-                        readCachedResponseHeaders(path_header);
-                if(!retainCurrentFetchBytes(
-                       content.size() +
-                       (response_headers ? response_headers->size() : 0)))
-                    content.clear();
-            }
-            else
-            {
-                if(shouldLog(LOG_LEVEL_VERBOSE))
-                    writeLog(LOG_LEVEL_VERBOSE,
-                             "获取失败，且没有可用的本地缓存。"); // cache not exist or not allow to serve cache, serving nothing
-            }
-        }
-        return content;
+        finalizeCached(path, header_path, fetched, owner);
     }
-    //return curlGet(url, proxy, response_headers, return_code);
-    curlGetWithGitHubFallback(argument, proxy_snapshot, initial_route,
-                              fetch_res);
-    return content;
+
+    OwnedWebGetRequest request_;
+    OwnedWebGetResult result_;
+    std::string effective_url_;
+    ResolvedProxyPolicy proxy_snapshot_;
+    ResolvedProxyRoute initial_route_;
+    bool prepared_data_ = false;
+};
+
+} // namespace
+
+OwnedWebGetResult webGetOwned(OwnedWebGetRequest request)
+{
+    return OwnedWebGetExecution(std::move(request)).run();
+}
+
+std::string webGet(const std::string &url, const ProxyPolicy &proxy,
+                   unsigned int cache_ttl, std::string *response_headers,
+                   string_icase_map *request_headers, FetchContext context)
+{
+    OwnedWebGetRequest request;
+    request.url = url;
+    request.proxy = proxy;
+    request.cache_ttl = cache_ttl;
+    request.capture_response_headers = response_headers != nullptr;
+    if(response_headers)
+        request.initial_response_headers = *response_headers;
+    request.has_request_headers = request_headers != nullptr;
+    if(request_headers)
+        request.request_headers = *request_headers;
+    request.context = context;
+    OwnedWebGetResult result = webGetOwned(std::move(request));
+    if(response_headers && result.response_headers_touched)
+        *response_headers = std::move(result.response_headers);
+    return std::move(result.content);
 }
 
 void flushCache()

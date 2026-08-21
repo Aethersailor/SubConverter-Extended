@@ -126,8 +126,32 @@ using AsyncFetchFuture = std::shared_future<SharedAsyncFetchResult>;
 using AsyncFetchCompletion =
     std::function<void(SharedAsyncFetchResult)>;
 
+struct OwnedWebGetRequest
+{
+    std::string url;
+    ProxyPolicy proxy;
+    unsigned int cache_ttl = 0;
+    bool capture_response_headers = false;
+    std::string initial_response_headers;
+    bool has_request_headers = false;
+    string_icase_map request_headers;
+    FetchContext context = FetchContext::TrustedConfig;
+};
+
+struct OwnedWebGetResult
+{
+    int status_code = 0;
+    std::string content;
+    std::string response_headers;
+    bool response_headers_touched = false;
+};
+
 void webGetAsync(AsyncFetchRequest request, AsyncFetchCompletion completion);
 AsyncFetchFuture webGetAsync(AsyncFetchRequest request);
+// Synchronous ownership boundary used to share prepare/cache/finalize logic.
+// Its byte accounting belongs to the current RequestContext; do not retain
+// this result across that context or use it as an async callback payload.
+OwnedWebGetResult webGetOwned(OwnedWebGetRequest request);
 bool asyncFetchEngineAvailable() noexcept;
 AsyncFetchEngineSnapshot asyncFetchEngineSnapshot() noexcept;
 
