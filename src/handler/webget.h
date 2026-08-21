@@ -160,6 +160,14 @@ struct CacheFetchPayloadSnapshot
     uint64_t peak_retained_bytes = 0;
 };
 
+struct CacheFetchOperationProbeSnapshot
+{
+    uint64_t success_callbacks = 0;
+    uint64_t exception_callbacks = 0;
+    bool duplicate_publish_rejected = false;
+    bool exception_rethrown_to_waiter = false;
+};
+
 void webGetAsync(AsyncFetchRequest request, AsyncFetchCompletion completion);
 AsyncFetchFuture webGetAsync(AsyncFetchRequest request);
 // Synchronous ownership boundary used to share prepare/cache/finalize logic.
@@ -167,6 +175,7 @@ AsyncFetchFuture webGetAsync(AsyncFetchRequest request);
 // the move-only result own its byte lease for later continuation work.
 OwnedWebGetResult webGetOwned(OwnedWebGetRequest request);
 CacheFetchPayloadSnapshot cacheFetchPayloadSnapshot() noexcept;
+CacheFetchOperationProbeSnapshot cacheFetchOperationProbe();
 bool asyncFetchEngineAvailable() noexcept;
 AsyncFetchEngineSnapshot asyncFetchEngineSnapshot() noexcept;
 

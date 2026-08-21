@@ -112,6 +112,8 @@ int main(int argc, char *argv[]) {
     const OwnedWebGetResult payload_follower_result = payload_follower.get();
     const CacheFetchPayloadSnapshot payload_snapshot =
         cacheFetchPayloadSnapshot();
+    const CacheFetchOperationProbeSnapshot operation_probe =
+        cacheFetchOperationProbe();
     std::string early_headers = "sentinel-header-state";
     const std::string early_body = webGet(
         "data:,owned-webget-early", ProxyPolicy::direct(), 0,
@@ -149,6 +151,14 @@ int main(int argc, char *argv[]) {
     writer.Uint64(payload_snapshot.retained_bytes);
     writer.Key("payload_peak_retained_bytes");
     writer.Uint64(payload_snapshot.peak_retained_bytes);
+    writer.Key("operation_success_callbacks");
+    writer.Uint64(operation_probe.success_callbacks);
+    writer.Key("operation_exception_callbacks");
+    writer.Uint64(operation_probe.exception_callbacks);
+    writer.Key("operation_duplicate_publish_rejected");
+    writer.Bool(operation_probe.duplicate_publish_rejected);
+    writer.Key("operation_exception_rethrown_to_waiter");
+    writer.Bool(operation_probe.exception_rethrown_to_waiter);
     writer.Key("early_header_preserved");
     writer.Bool(early_body == "owned-webget-early" &&
                 early_headers == "sentinel-header-state");

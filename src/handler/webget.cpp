@@ -108,6 +108,92 @@ struct CacheFetchPayload
 
 using SharedCacheFetchPayload = std::shared_ptr<const CacheFetchPayload>;
 
+class CacheFetchOperation
+{
+public:
+    using Callback = std::function<void(SharedCacheFetchPayload,
+                                        std::exception_ptr)>;
+
+    SharedCacheFetchPayload wait()
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        condition_.wait(lock, [this] { return done_; });
+        const std::exception_ptr error = error_;
+        SharedCacheFetchPayload payload = payload_;
+        lock.unlock();
+        if(error)
+            std::rethrow_exception(error);
+        return payload;
+    }
+
+    void subscribe(Callback callback)
+    {
+        if(!callback)
+            return;
+        SharedCacheFetchPayload payload;
+        std::exception_ptr error;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if(!done_)
+            {
+                callbacks_.emplace_back(std::move(callback));
+                return;
+            }
+            payload = payload_;
+            error = error_;
+        }
+        invoke(callback, std::move(payload), std::move(error));
+    }
+
+    bool publish(SharedCacheFetchPayload payload)
+    {
+        return finish(std::move(payload), {});
+    }
+
+    bool publishException(std::exception_ptr error)
+    {
+        return finish({}, std::move(error));
+    }
+
+private:
+    static void invoke(Callback &callback, SharedCacheFetchPayload payload,
+                       std::exception_ptr error) noexcept
+    {
+        try
+        {
+            callback(std::move(payload), std::move(error));
+        }
+        catch(...)
+        {
+        }
+    }
+
+    bool finish(SharedCacheFetchPayload payload, std::exception_ptr error)
+    {
+        std::vector<Callback> callbacks;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if(done_)
+                return false;
+            payload_ = std::move(payload);
+            error_ = std::move(error);
+            done_ = true;
+            callbacks.swap(callbacks_);
+        }
+        condition_.notify_all();
+        for(Callback &callback : callbacks)
+            invoke(callback, payload_, error_);
+        return true;
+    }
+
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    bool done_ = false;
+    SharedCacheFetchPayload payload_;
+    std::exception_ptr error_;
+    std::vector<Callback> callbacks_;
+};
+
 struct GitHubFileRef
 {
     std::string owner;
@@ -432,7 +518,7 @@ static ResolvedProxyRoute resolveProxyRoute(
 }
 
 static std::mutex cache_fetch_mutex;
-static std::map<std::string, std::shared_future<SharedCacheFetchPayload>>
+static std::map<std::string, std::shared_ptr<CacheFetchOperation>>
     cache_fetches;
 static std::atomic_bool outbound_fetch_shutdown_requested {false};
 
@@ -445,19 +531,24 @@ void requestOutboundFetchShutdown() noexcept
 class CacheFetchOwnerCleanup
 {
 public:
-    CacheFetchOwnerCleanup(bool owner, std::string key)
-        : owner_(owner), key_(std::move(key)) {}
+    CacheFetchOwnerCleanup(bool owner, std::string key,
+                           std::shared_ptr<CacheFetchOperation> operation)
+        : owner_(owner), key_(std::move(key)),
+          operation_(std::move(operation)) {}
     ~CacheFetchOwnerCleanup()
     {
         if(!owner_)
             return;
         std::lock_guard<std::mutex> lock(cache_fetch_mutex);
-        cache_fetches.erase(key_);
+        auto iter = cache_fetches.find(key_);
+        if(iter != cache_fetches.end() && iter->second == operation_)
+            cache_fetches.erase(iter);
     }
 
 private:
     bool owner_;
     std::string key_;
+    std::shared_ptr<CacheFetchOperation> operation_;
 };
 
 static CURLcode curl_init()
@@ -2764,24 +2855,21 @@ public:
                      "缓存不存在：" + summarizeUrlForLog(effective_url_) +
                          "，正在创建新缓存。");
 
-        std::shared_future<SharedCacheFetchPayload> fetch_future;
-        std::shared_ptr<std::promise<SharedCacheFetchPayload>> fetch_promise;
+        std::shared_ptr<CacheFetchOperation> operation;
         bool owner = false;
         {
             std::lock_guard<std::mutex> lock(cache_fetch_mutex);
             auto iter = cache_fetches.find(cache_key);
             if(iter == cache_fetches.end())
             {
-                fetch_promise =
-                    std::make_shared<std::promise<SharedCacheFetchPayload>>();
-                fetch_future = fetch_promise->get_future().share();
-                cache_fetches.emplace(cache_key, fetch_future);
+                operation = std::make_shared<CacheFetchOperation>();
+                cache_fetches.emplace(cache_key, operation);
                 owner = true;
             }
             else
-                fetch_future = iter->second;
+                operation = iter->second;
         }
-        CacheFetchOwnerCleanup owner_cleanup(owner, cache_key);
+        CacheFetchOwnerCleanup owner_cleanup(owner, cache_key, operation);
         if(owner)
         {
             try
@@ -2805,17 +2893,17 @@ public:
                     fetched->status_code = 0;
                     fetched->failure = AsyncFetchFailure::Capacity;
                 }
-                fetch_promise->set_value(
+                operation->publish(
                     std::static_pointer_cast<const CacheFetchPayload>(fetched));
             }
             catch(...)
             {
-                fetch_promise->set_exception(std::current_exception());
+                operation->publishException(std::current_exception());
             }
         }
 
         SharedCacheFetchPayload fetched =
-            waitWithoutCpuPermit([&] { return fetch_future.get(); });
+            waitWithoutCpuPermit([&] { return operation->wait(); });
         if(!fetched)
             throw std::future_error(std::future_errc::broken_promise);
         applyAsyncFetchFailure(request_context_, fetched->failure,
@@ -2861,6 +2949,47 @@ CacheFetchPayloadSnapshot cacheFetchPayloadSnapshot() noexcept
         cache_fetch_payload_peak_retained_bytes.load(
             std::memory_order_relaxed),
     };
+}
+
+CacheFetchOperationProbeSnapshot cacheFetchOperationProbe()
+{
+    CacheFetchOperationProbeSnapshot snapshot;
+    auto success = std::make_shared<CacheFetchOperation>();
+    success->subscribe([&](SharedCacheFetchPayload payload,
+                           std::exception_ptr error) {
+        if(!payload || error)
+            return;
+        ++snapshot.success_callbacks;
+        success->subscribe([&](SharedCacheFetchPayload nested_payload,
+                               std::exception_ptr nested_error) {
+            if(nested_payload && !nested_error)
+                ++snapshot.success_callbacks;
+        });
+    });
+    auto payload = std::make_shared<CacheFetchPayload>();
+    payload->status_code = 200;
+    payload->content = "probe";
+    success->publish(
+        std::static_pointer_cast<const CacheFetchPayload>(payload));
+    snapshot.duplicate_publish_rejected = !success->publish({});
+
+    auto failure = std::make_shared<CacheFetchOperation>();
+    failure->subscribe([&](SharedCacheFetchPayload failed_payload,
+                           std::exception_ptr error) {
+        if(!failed_payload && error)
+            ++snapshot.exception_callbacks;
+    });
+    failure->publishException(
+        std::make_exception_ptr(std::runtime_error("cache fetch probe")));
+    try
+    {
+        (void)failure->wait();
+    }
+    catch(const std::runtime_error &)
+    {
+        snapshot.exception_rethrown_to_waiter = true;
+    }
+    return snapshot;
 }
 
 std::string webGet(const std::string &url, const ProxyPolicy &proxy,

@@ -1772,6 +1772,10 @@ def owned_webget_boundary_baseline(helper: Path, fixture_base: str) -> None:
             or hit["payload_bodies_equal"] is not True
             or int(hit["payload_peak_retained_bytes"]) <= 0
             or int(hit["payload_retained_bytes"]) != 0
+            or int(hit["operation_success_callbacks"]) != 2
+            or int(hit["operation_exception_callbacks"]) != 1
+            or hit["operation_duplicate_publish_rejected"] is not True
+            or hit["operation_exception_rethrown_to_waiter"] is not True
         ):
             raise AssertionError(
                 f"owned webGet TTL hit contract changed: requests={hit_requests}, "
