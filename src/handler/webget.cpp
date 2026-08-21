@@ -3238,6 +3238,249 @@ CacheFetchOperationProbeSnapshot cacheFetchOperationProbe()
     return snapshot;
 }
 
+namespace
+{
+struct OwnedWebGetContinuationRuntime
+{
+    std::mutex mutex;
+    std::condition_variable condition;
+    std::unique_ptr<WorkloadScheduler> scheduler;
+    OwnedWebGetContinuationBudget budget;
+    bool stopping = false;
+    bool joining = false;
+    bool joined = false;
+    std::atomic<uint64_t> completion_exception_total{0};
+};
+
+OwnedWebGetContinuationRuntime owned_webget_continuations;
+
+struct OwnedWebGetContinuationCompletionState
+{
+    explicit OwnedWebGetContinuationCompletionState(
+        OwnedWebGetContinuationCompletion callback)
+        : completion(std::move(callback)) {}
+
+    OwnedWebGetContinuationCompletion completion;
+    std::atomic<bool> completed{false};
+};
+
+constexpr uint64_t kOwnedWebGetContinuationMetadataBytes = 256;
+
+std::exception_ptr continuationStatusError(
+    SchedulerSubmitStatus status) noexcept
+{
+    try
+    {
+        return std::make_exception_ptr(SchedulerSubmitError(status));
+    }
+    catch(...)
+    {
+        return std::current_exception();
+    }
+}
+
+void completeOwnedWebGetContinuation(
+    const std::shared_ptr<OwnedWebGetContinuationCompletionState> &state,
+    SchedulerSubmitStatus status, std::exception_ptr error) noexcept
+{
+    if(!state || state->completed.exchange(true, std::memory_order_acq_rel) ||
+       !state->completion)
+        return;
+    try
+    {
+        state->completion(status, std::move(error));
+    }
+    catch(...)
+    {
+        owned_webget_continuations.completion_exception_total.fetch_add(
+            1, std::memory_order_relaxed);
+    }
+}
+} // namespace
+
+OwnedWebGetContinuationInitStatus initializeOwnedWebGetContinuationRuntime(
+    OwnedWebGetContinuationBudget budget)
+{
+    std::lock_guard<std::mutex> lock(owned_webget_continuations.mutex);
+    if(budget.workers == 0 || budget.max_entries == 0 ||
+       budget.max_bytes < kOwnedWebGetContinuationMetadataBytes)
+        return OwnedWebGetContinuationInitStatus::InvalidBudget;
+    if(owned_webget_continuations.stopping ||
+       owned_webget_continuations.joining ||
+       owned_webget_continuations.joined)
+        return OwnedWebGetContinuationInitStatus::Stopping;
+    if(owned_webget_continuations.scheduler)
+        return owned_webget_continuations.budget == budget
+                   ? OwnedWebGetContinuationInitStatus::AlreadyInitialized
+                   : OwnedWebGetContinuationInitStatus::BudgetMismatch;
+    try
+    {
+        auto scheduler = std::make_unique<WorkloadScheduler>(
+            budget.workers, budget.max_entries, budget.max_bytes);
+        if(scheduler->workerCount() != budget.workers)
+            return OwnedWebGetContinuationInitStatus::InitializationFailed;
+        owned_webget_continuations.budget = budget;
+        owned_webget_continuations.scheduler = std::move(scheduler);
+    }
+    catch(...)
+    {
+        return OwnedWebGetContinuationInitStatus::InitializationFailed;
+    }
+    return OwnedWebGetContinuationInitStatus::Initialized;
+}
+
+SchedulerSubmitStatus submitOwnedWebGetContinuation(
+    RequestCostClass cost, uint64_t bytes,
+    std::chrono::steady_clock::time_point deadline,
+    RequestCancellationToken cancellation,
+    OwnedWebGetContinuation continuation,
+    OwnedWebGetContinuationCompletion completion)
+{
+    std::shared_ptr<OwnedWebGetContinuationCompletionState> completion_state;
+    try
+    {
+        completion_state =
+            std::make_shared<OwnedWebGetContinuationCompletionState>(
+                std::move(completion));
+    }
+    catch(...)
+    {
+        const std::exception_ptr error = std::current_exception();
+        if(completion)
+        {
+            try
+            {
+                completion(SchedulerSubmitStatus::Stopping, error);
+            }
+            catch(...)
+            {
+                owned_webget_continuations.completion_exception_total.fetch_add(
+                    1, std::memory_order_relaxed);
+            }
+        }
+        return SchedulerSubmitStatus::Stopping;
+    }
+    WorkloadScheduler *scheduler = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(owned_webget_continuations.mutex);
+        if(!owned_webget_continuations.scheduler ||
+           owned_webget_continuations.stopping)
+            scheduler = nullptr;
+        else
+            scheduler = owned_webget_continuations.scheduler.get();
+    }
+    if(!scheduler)
+    {
+        completeOwnedWebGetContinuation(
+            completion_state, SchedulerSubmitStatus::Stopping,
+            continuationStatusError(SchedulerSubmitStatus::Stopping));
+        return SchedulerSubmitStatus::Stopping;
+    }
+    const uint64_t charged_bytes =
+        bytes > UINT64_MAX - kOwnedWebGetContinuationMetadataBytes
+            ? UINT64_MAX
+            : bytes + kOwnedWebGetContinuationMetadataBytes;
+    try
+    {
+        return scheduler->submitAsync(
+            cost, charged_bytes, deadline, std::move(cancellation),
+            [continuation = std::move(continuation)] {
+                if(continuation)
+                    continuation();
+                return true;
+            },
+            [completion_state](SchedulerAsyncResult<bool> result) mutable {
+                completeOwnedWebGetContinuation(
+                    completion_state, result.status, std::move(result.error));
+            });
+    }
+    catch(...)
+    {
+        completeOwnedWebGetContinuation(
+            completion_state, SchedulerSubmitStatus::Stopping,
+            std::current_exception());
+        return SchedulerSubmitStatus::Stopping;
+    }
+}
+
+OwnedWebGetContinuationRuntimeSnapshot
+ownedWebGetContinuationRuntimeSnapshot()
+{
+    std::lock_guard<std::mutex> lock(owned_webget_continuations.mutex);
+    if(!owned_webget_continuations.scheduler)
+        return {false,
+                owned_webget_continuations.stopping,
+                owned_webget_continuations.joining,
+                owned_webget_continuations.joined,
+                0,
+                0,
+                0,
+                owned_webget_continuations.completion_exception_total.load(
+                    std::memory_order_relaxed),
+                {}};
+    return {
+        true,
+        owned_webget_continuations.stopping,
+        owned_webget_continuations.joining,
+        owned_webget_continuations.joined,
+        owned_webget_continuations.budget.workers,
+        owned_webget_continuations.budget.max_entries,
+        owned_webget_continuations.budget.max_bytes,
+        owned_webget_continuations.completion_exception_total.load(
+            std::memory_order_relaxed),
+        owned_webget_continuations.scheduler->snapshot()};
+}
+
+void requestOwnedWebGetContinuationShutdown() noexcept
+{
+    WorkloadScheduler *scheduler = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(owned_webget_continuations.mutex);
+        owned_webget_continuations.stopping = true;
+        scheduler = owned_webget_continuations.scheduler.get();
+    }
+    if(scheduler)
+        scheduler->requestShutdown(true);
+}
+
+bool joinOwnedWebGetContinuationRuntime() noexcept
+{
+    WorkloadScheduler *scheduler = nullptr;
+    {
+        std::unique_lock<std::mutex> lock(owned_webget_continuations.mutex);
+        scheduler = owned_webget_continuations.scheduler.get();
+        if(scheduler && scheduler->isCurrentWorkerThread())
+        {
+            owned_webget_continuations.stopping = true;
+            lock.unlock();
+            scheduler->requestShutdown(true);
+            return false;
+        }
+        while(owned_webget_continuations.joining &&
+              !owned_webget_continuations.joined)
+            owned_webget_continuations.condition.wait(lock);
+        if(owned_webget_continuations.joined)
+            return true;
+        owned_webget_continuations.stopping = true;
+        if(!scheduler)
+        {
+            owned_webget_continuations.joined = true;
+            owned_webget_continuations.condition.notify_all();
+            return true;
+        }
+        owned_webget_continuations.joining = true;
+    }
+    scheduler->requestShutdown(true);
+    const bool joined = scheduler->join();
+    {
+        std::lock_guard<std::mutex> lock(owned_webget_continuations.mutex);
+        owned_webget_continuations.joining = false;
+        owned_webget_continuations.joined = joined;
+    }
+    owned_webget_continuations.condition.notify_all();
+    return joined;
+}
+
 std::string webGet(const std::string &url, const ProxyPolicy &proxy,
                    unsigned int cache_ttl, std::string *response_headers,
                    string_icase_map *request_headers, FetchContext context)

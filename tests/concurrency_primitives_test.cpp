@@ -255,6 +255,12 @@ static void testWorkloadScheduler() {
       });
   assert(cancelled_async == SchedulerSubmitStatus::Cancelled);
   assert(cancellation_callbacks.load(std::memory_order_relaxed) == 1);
+  auto self_join = scheduler.submit(
+      RequestCostClass::Low, 1,
+      std::chrono::steady_clock::time_point::max(), {},
+      [&scheduler] { return scheduler.join(); });
+  assert(self_join.status == SchedulerSubmitStatus::Accepted);
+  assert(!self_join.future.get());
   scheduler.shutdown(true);
 }
 

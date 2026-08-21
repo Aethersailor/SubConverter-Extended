@@ -114,6 +114,99 @@ int main(int argc, char *argv[]) {
         cacheFetchPayloadSnapshot();
     const CacheFetchOperationProbeSnapshot operation_probe =
         cacheFetchOperationProbe();
+    const bool continuation_was_uninitialized =
+        !ownedWebGetContinuationRuntimeSnapshot().initialized;
+    std::promise<SchedulerSubmitStatus> preinit_completion;
+    const SchedulerSubmitStatus preinit_submit =
+        submitOwnedWebGetContinuation(
+            RequestCostClass::Low, 0,
+            std::chrono::steady_clock::time_point::max(), {}, [] {},
+            [&](SchedulerSubmitStatus status, std::exception_ptr) {
+              preinit_completion.set_value(status);
+            });
+    const SchedulerSubmitStatus preinit_status =
+        preinit_completion.get_future().get();
+    const OwnedWebGetContinuationBudget continuation_budget{
+        2, 8, 1024 * 1024};
+    const OwnedWebGetContinuationInitStatus invalid_init =
+        initializeOwnedWebGetContinuationRuntime({0, 8, 1024 * 1024});
+    const OwnedWebGetContinuationInitStatus continuation_init =
+        initializeOwnedWebGetContinuationRuntime(continuation_budget);
+    const OwnedWebGetContinuationInitStatus same_budget_init =
+        initializeOwnedWebGetContinuationRuntime(continuation_budget);
+    const OwnedWebGetContinuationInitStatus different_budget_init =
+        initializeOwnedWebGetContinuationRuntime({2, 9, 1024 * 1024});
+    std::promise<void> throwing_completion_called;
+    (void)submitOwnedWebGetContinuation(
+        RequestCostClass::Low, 0,
+        std::chrono::steady_clock::time_point::max(), {}, [] {},
+        [&](SchedulerSubmitStatus, std::exception_ptr) {
+          throwing_completion_called.set_value();
+          throw std::runtime_error("injected continuation completion failure");
+        });
+    throwing_completion_called.get_future().wait();
+    std::promise<void> continuation_started;
+    std::promise<void> continuation_started_second;
+    std::promise<void> continuation_release;
+    std::shared_future<void> release_future =
+        continuation_release.get_future().share();
+    std::promise<SchedulerSubmitStatus> active_completion;
+    std::promise<SchedulerSubmitStatus> active_completion_second;
+    std::promise<SchedulerSubmitStatus> pending_completion;
+    (void)submitOwnedWebGetContinuation(
+        RequestCostClass::Medium, 1,
+        std::chrono::steady_clock::time_point::max(), {},
+        [&] {
+          continuation_started.set_value();
+          release_future.wait();
+        },
+        [&](SchedulerSubmitStatus status, std::exception_ptr error) {
+          active_completion.set_value(
+              error ? SchedulerSubmitStatus::Stopping : status);
+        });
+    continuation_started.get_future().wait();
+    (void)submitOwnedWebGetContinuation(
+        RequestCostClass::Medium, 1,
+        std::chrono::steady_clock::time_point::max(), {},
+        [&] {
+          continuation_started_second.set_value();
+          release_future.wait();
+        },
+        [&](SchedulerSubmitStatus status, std::exception_ptr error) {
+          active_completion_second.set_value(
+              error ? SchedulerSubmitStatus::Stopping : status);
+        });
+    continuation_started_second.get_future().wait();
+    (void)submitOwnedWebGetContinuation(
+        RequestCostClass::Medium, 1,
+        std::chrono::steady_clock::time_point::max(), {}, [] {},
+        [&](SchedulerSubmitStatus status, std::exception_ptr) {
+          pending_completion.set_value(status);
+        });
+    std::future<bool> first_join = std::async(
+        std::launch::async, [] { return joinOwnedWebGetContinuationRuntime(); });
+    std::future<bool> second_join = std::async(
+        std::launch::async, [] { return joinOwnedWebGetContinuationRuntime(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    continuation_release.set_value();
+    const bool first_joined = first_join.get();
+    const bool second_joined = second_join.get();
+    const SchedulerSubmitStatus active_status = active_completion.get_future().get();
+    const SchedulerSubmitStatus active_status_second =
+        active_completion_second.get_future().get();
+    const SchedulerSubmitStatus pending_status = pending_completion.get_future().get();
+    const OwnedWebGetContinuationRuntimeSnapshot continuation_snapshot =
+        ownedWebGetContinuationRuntimeSnapshot();
+    std::promise<SchedulerSubmitStatus> stopped_completion;
+    const SchedulerSubmitStatus stopped_submit =
+        submitOwnedWebGetContinuation(
+            RequestCostClass::Low, 0,
+            std::chrono::steady_clock::time_point::max(), {}, [] {},
+            [&](SchedulerSubmitStatus status, std::exception_ptr) {
+              stopped_completion.set_value(status);
+            });
+    const SchedulerSubmitStatus stopped_status =
+        stopped_completion.get_future().get();
     std::string early_headers = "sentinel-header-state";
     const std::string early_body = webGet(
         "data:,owned-webget-early", ProxyPolicy::direct(), 0,
@@ -165,6 +258,38 @@ int main(int argc, char *argv[]) {
     writer.Bool(operation_probe.no_consumers_cancelled);
     writer.Key("operation_owner_kinds_isolated");
     writer.Bool(operation_probe.owner_kinds_isolated);
+    writer.Key("continuation_runtime_ok");
+    writer.Bool(continuation_was_uninitialized &&
+                preinit_submit == SchedulerSubmitStatus::Stopping &&
+                preinit_status == SchedulerSubmitStatus::Stopping &&
+                invalid_init ==
+                    OwnedWebGetContinuationInitStatus::InvalidBudget &&
+                continuation_init ==
+                    OwnedWebGetContinuationInitStatus::Initialized &&
+                same_budget_init ==
+                    OwnedWebGetContinuationInitStatus::AlreadyInitialized &&
+                different_budget_init ==
+                    OwnedWebGetContinuationInitStatus::BudgetMismatch &&
+                active_status == SchedulerSubmitStatus::Accepted &&
+                active_status_second == SchedulerSubmitStatus::Accepted &&
+                pending_status == SchedulerSubmitStatus::Stopping &&
+                first_joined && second_joined &&
+                stopped_submit == SchedulerSubmitStatus::Stopping &&
+                stopped_status == SchedulerSubmitStatus::Stopping &&
+                continuation_snapshot.initialized &&
+                continuation_snapshot.stopping &&
+                continuation_snapshot.joined &&
+                !continuation_snapshot.joining &&
+                continuation_snapshot.workers == continuation_budget.workers &&
+                continuation_snapshot.max_entries ==
+                    continuation_budget.max_entries &&
+                continuation_snapshot.max_bytes ==
+                    continuation_budget.max_bytes &&
+                continuation_snapshot.completion_exception_total >= 1 &&
+                continuation_snapshot.scheduler.rejected == 0 &&
+                continuation_snapshot.scheduler.queued_entries == 0 &&
+                continuation_snapshot.scheduler.queued_bytes == 0 &&
+                continuation_snapshot.scheduler.active == 0);
     writer.Key("early_header_preserved");
     writer.Bool(early_body == "owned-webget-early" &&
                 early_headers == "sentinel-header-state");

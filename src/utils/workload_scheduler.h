@@ -147,7 +147,12 @@ class WorkloadScheduler {
     void cancel(SchedulerSubmitStatus status) noexcept override {
       SchedulerAsyncResult<Result> result;
       result.status = status;
-      result.error = std::make_exception_ptr(SchedulerSubmitError(status));
+      try {
+        result.error =
+            std::make_exception_ptr(SchedulerSubmitError(status));
+      } catch (...) {
+        result.error = std::current_exception();
+      }
       complete(std::move(result));
     }
 
@@ -296,38 +301,59 @@ public:
 
   void shutdown(bool cancel_pending) noexcept {
     requestShutdown(cancel_pending);
-    join();
+    (void)join();
   }
 
   void requestShutdown(bool cancel_pending) noexcept {
-    std::vector<std::shared_ptr<TaskBase>> cancelled;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (stopping_)
         return;
       stopping_ = true;
       if (cancel_pending) {
-        for (auto &queue : queues_) {
-          while (!queue.empty()) {
-            cancelled.emplace_back(std::move(queue.front()));
-            queue.pop_front();
-          }
-        }
+        cancelled_ += queued_entries_;
         queued_entries_ = 0;
         queued_bytes_ = 0;
-        cancelled_ += cancelled.size();
       }
     }
-    for (auto &task : cancelled)
-      task->cancel(SchedulerSubmitStatus::Stopping);
+    if (cancel_pending) {
+      for (;;) {
+        std::shared_ptr<TaskBase> task;
+        {
+          std::lock_guard<std::mutex> lock(mutex_);
+          for (auto &queue : queues_) {
+            if (queue.empty())
+              continue;
+            task = std::move(queue.front());
+            queue.pop_front();
+            break;
+          }
+        }
+        if (!task)
+          break;
+        task->cancel(SchedulerSubmitStatus::Stopping);
+      }
+    }
     condition_.notify_all();
   }
 
-  void join() noexcept {
+  bool join() noexcept {
+    if (isCurrentWorkerThread())
+      return false;
     for (std::thread &worker : workers_) {
-      if (worker.joinable())
+      if (!worker.joinable())
+        continue;
+      try {
         worker.join();
+      } catch (...) {
+        return false;
+      }
     }
+    return true;
+  }
+
+  bool isCurrentWorkerThread() const noexcept {
+    return current_worker_scheduler_ == this;
   }
 
   WorkloadSchedulerSnapshot snapshot() const {
@@ -430,6 +456,14 @@ private:
   }
 
   void workerLoop() {
+    struct WorkerScope {
+      explicit WorkerScope(WorkloadScheduler *scheduler) noexcept
+          : previous(current_worker_scheduler_) {
+        current_worker_scheduler_ = scheduler;
+      }
+      ~WorkerScope() { current_worker_scheduler_ = previous; }
+      WorkloadScheduler *previous;
+    } worker_scope(this);
     for (;;) {
       std::shared_ptr<TaskBase> task;
       {
@@ -465,6 +499,8 @@ private:
   }
 
   inline static constexpr std::array<uint8_t, 3> kWeights{8, 4, 1};
+  inline static thread_local WorkloadScheduler *current_worker_scheduler_ =
+      nullptr;
   const std::size_t max_entries_;
   const uint64_t max_bytes_;
   mutable std::mutex mutex_;

@@ -1779,6 +1779,7 @@ def owned_webget_boundary_baseline(helper: Path, fixture_base: str) -> None:
             or hit["operation_exception_rethrown_to_waiter"] is not True
             or hit["operation_no_consumers_cancelled"] is not True
             or hit["operation_owner_kinds_isolated"] is not True
+            or hit["continuation_runtime_ok"] is not True
         ):
             raise AssertionError(
                 f"owned webGet TTL hit contract changed: requests={hit_requests}, "

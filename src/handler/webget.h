@@ -2,6 +2,7 @@
 #define WEBGET_H_INCLUDED
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <future>
@@ -15,6 +16,7 @@
 #include "server/request_context.h"
 #include "utils/map_extra.h"
 #include "utils/string.h"
+#include "utils/workload_scheduler.h"
 
 enum http_method
 {
@@ -179,6 +181,50 @@ AsyncFetchFuture webGetAsync(AsyncFetchRequest request);
 OwnedWebGetResult webGetOwned(OwnedWebGetRequest request);
 CacheFetchPayloadSnapshot cacheFetchPayloadSnapshot() noexcept;
 CacheFetchOperationProbeSnapshot cacheFetchOperationProbe();
+struct OwnedWebGetContinuationRuntimeSnapshot
+{
+    bool initialized = false;
+    bool stopping = false;
+    bool joining = false;
+    bool joined = false;
+    size_t workers = 0;
+    size_t max_entries = 0;
+    uint64_t max_bytes = 0;
+    uint64_t completion_exception_total = 0;
+    WorkloadSchedulerSnapshot scheduler;
+};
+struct OwnedWebGetContinuationBudget
+{
+    size_t workers = 0;
+    size_t max_entries = 0;
+    uint64_t max_bytes = 0;
+
+    bool operator==(const OwnedWebGetContinuationBudget &) const = default;
+};
+enum class OwnedWebGetContinuationInitStatus
+{
+    Initialized,
+    AlreadyInitialized,
+    InvalidBudget,
+    BudgetMismatch,
+    InitializationFailed,
+    Stopping,
+};
+using OwnedWebGetContinuation = std::function<void()>;
+using OwnedWebGetContinuationCompletion =
+    std::function<void(SchedulerSubmitStatus, std::exception_ptr)>;
+OwnedWebGetContinuationInitStatus initializeOwnedWebGetContinuationRuntime(
+    OwnedWebGetContinuationBudget budget);
+SchedulerSubmitStatus submitOwnedWebGetContinuation(
+    RequestCostClass cost, uint64_t bytes,
+    std::chrono::steady_clock::time_point deadline,
+    RequestCancellationToken cancellation,
+    OwnedWebGetContinuation continuation,
+    OwnedWebGetContinuationCompletion completion);
+OwnedWebGetContinuationRuntimeSnapshot
+ownedWebGetContinuationRuntimeSnapshot();
+void requestOwnedWebGetContinuationShutdown() noexcept;
+bool joinOwnedWebGetContinuationRuntime() noexcept;
 bool asyncFetchEngineAvailable() noexcept;
 AsyncFetchEngineSnapshot asyncFetchEngineSnapshot() noexcept;
 
