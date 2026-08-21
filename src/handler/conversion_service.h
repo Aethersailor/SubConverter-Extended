@@ -51,6 +51,9 @@ private:
 
 class ConversionService {
 public:
+  // Completion may run synchronously or from handler, flow-worker, shutdown,
+  // or request-cancellation threads. Transport adapters must marshal socket
+  // work back to the connection executor.
   using Completion = std::function<void(ConversionResult)>;
 
   ConversionResult convertSubscription(Request &request,
@@ -65,12 +68,23 @@ struct ResponseMicroCacheSnapshot {
   uint64_t max_bytes = 0;
 };
 
+struct SubscriptionSingleflightSnapshot {
+  uint64_t active_owners = 0;
+  uint64_t waiting_followers = 0;
+  uint64_t owners_created_total = 0;
+  uint64_t followers_attached_total = 0;
+  uint64_t followers_cancelled_total = 0;
+  uint64_t owners_cancelled_no_consumers_total = 0;
+  uint64_t owner_flow_rejected_total = 0;
+};
+
 const ConversionService &defaultConversionService();
 WorkloadSchedulerSnapshot conversionSchedulerSnapshot();
 WorkloadSchedulerSnapshot legacyRequestFlowSnapshot();
 CpuPermitSnapshot conversionCpuPermitSnapshot();
 void setConversionCpuPermitLimit(uint64_t limit) noexcept;
 ResponseMicroCacheSnapshot responseMicroCacheSnapshot();
+SubscriptionSingleflightSnapshot subscriptionSingleflightSnapshot() noexcept;
 void requestConversionSchedulerShutdown() noexcept;
 void shutdownConversionScheduler() noexcept;
 

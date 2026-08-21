@@ -4108,13 +4108,21 @@ def insert_url_parser_route_baseline(binary: Path, fixture_base: str) -> None:
         raise AssertionError("configured insert credentials leaked into logs")
 
 
-def vary_cache_and_coalesce_baseline(binary: Path, fixture_base: str) -> None:
+def vary_cache_and_coalesce_baseline(
+    binary: Path, fixture_base: str, resource_mode: str | None = None
+) -> None:
     logs: list[str] = []
+    environment = (
+        {"SUBCONVERTER_RESOURCE_CONTROL": resource_mode}
+        if resource_mode is not None
+        else None
+    )
     with running_service(
         binary,
         statistics=True,
         log_capture=logs,
         log_level="debug",
+        environment=environment,
         config_replacements=(("response_cache_ttl = 0", "response_cache_ttl = 5"),),
     ) as base_url:
         cached_params = {
@@ -4387,10 +4395,14 @@ def vary_cache_and_coalesce_baseline(binary: Path, fixture_base: str) -> None:
                 "completed microcache result did not retain a bounded byte "
                 f"lease: {retained_bytes}"
             )
-        resource_mode = os.environ.get("SUBCONVERTER_RESOURCE_CONTROL")
-        if resource_mode == "adaptive":
+        effective_resource_mode = (
+            resource_mode
+            if resource_mode is not None
+            else os.environ.get("SUBCONVERTER_RESOURCE_CONTROL")
+        )
+        if effective_resource_mode == "adaptive":
             valid_retained_limit = retained["limit"] == 64 * 1024 * 1024
-        elif resource_mode == "force_max":
+        elif effective_resource_mode == "force_max":
             valid_retained_limit = (
                 retained["limit"] >= 64 * 1024 * 1024
                 and retained["used"] <= retained["limit"]
@@ -4400,8 +4412,19 @@ def vary_cache_and_coalesce_baseline(binary: Path, fixture_base: str) -> None:
         if not valid_retained_limit:
             raise AssertionError(
                 "resource profile retained-byte limit changed: "
-                f"mode={resource_mode!r}, actual={retained!r}"
+                f"mode={effective_resource_mode!r}, actual={retained!r}"
             )
+        if effective_resource_mode == "force_max":
+            singleflight = dashboard["subscription_singleflight"]
+            if (
+                int(singleflight["active_owners"]) != 0
+                or int(singleflight["waiting_followers"]) != 0
+                or int(singleflight["followers_cancelled_total"]) < 2
+            ):
+                raise AssertionError(
+                    "force_max cancellation fanout telemetry did not settle: "
+                    f"{singleflight!r}"
+                )
         FixtureHandler.slow_subscription_release.set()
 
     diagnostics = "".join(logs)
@@ -11537,6 +11560,7 @@ def force_max_controller_runtime_baseline(binary: Path) -> None:
         permits = dashboard["cpu_permits"]
         conversion = dashboard["conversion_scheduler"]
         flow = dashboard["legacy_request_flow"]
+        singleflight = dashboard["subscription_singleflight"]
         backend = os.environ.get("SUBCONVERTER_HTTP_BACKEND", "beast").lower()
         execution_path_ok = (
             conversion["accepted"] >= 1 and flow["accepted"] == 0
@@ -11550,11 +11574,247 @@ def force_max_controller_runtime_baseline(binary: Path) -> None:
             != resources["max_cpu_permits"]
             or permits["limit"] != resources["max_cpu_permits"]
             or not execution_path_ok
+            or singleflight["active_owners"] != 0
+            or singleflight["waiting_followers"] != 0
+            or (backend != "httplib" and
+                singleflight["owners_created_total"] < 1)
         ):
             raise AssertionError(
                 "idle force_max did not hold the hardware CPU limit: "
                 f"resources={resources!r} permits={permits!r} "
                 f"conversion={conversion!r} flow={flow!r}"
+            )
+
+
+def force_max_arrival_singleflight_baseline(
+    binary: Path, fixture_base: str
+) -> None:
+    if os.environ.get("SUBCONVERTER_HTTP_BACKEND", "beast").lower() == "httplib":
+        return
+    dashboard_headers = {
+        "Authorization": "Basic "
+        + base64.b64encode(
+            b"fixture-admin:fixture-dashboard-secret"
+        ).decode()
+    }
+    logs: list[str] = []
+    with running_service(
+        binary,
+        statistics=True,
+        log_capture=logs,
+        log_level="debug",
+        environment={"SUBCONVERTER_RESOURCE_CONTROL": "force_max"},
+    ) as base_url:
+        status, body, _ = request(
+            base_url, "/dashboard/data", headers=dashboard_headers
+        )
+        if status != 200:
+            raise AssertionError("arrival singleflight setup dashboard failed")
+        before = json.loads(body)
+        before_flow = int(before["legacy_request_flow"]["accepted"])
+        before_owners = int(
+            before["subscription_singleflight"]["owners_created_total"]
+        )
+        before_followers = int(
+            before["subscription_singleflight"]["followers_attached_total"]
+        )
+        before_subscriptions = int(
+            before["windows"]["lifetime"]["subscription_requests"]
+        )
+
+        FixtureHandler.slow_subscription_started.clear()
+        FixtureHandler.slow_subscription_release.clear()
+        with FixtureHandler.counter_lock:
+            upstream_before = FixtureHandler.slow_subscription_request_count
+        params = {
+            "target": "singbox",
+            "url": fixture_base + "/slow-subscription.txt?case=arrival-singleflight",
+            "config": DISABLE_RULEGEN_CONFIG,
+        }
+        results: list[tuple[int, bytes, dict[str, str]]] = []
+        errors: list[BaseException] = []
+
+        def run_request() -> None:
+            try:
+                results.append(request(base_url, "/sub", params))
+            except BaseException as error:
+                errors.append(error)
+
+        workers = [threading.Thread(target=run_request) for _ in range(16)]
+        workers[0].start()
+        if not FixtureHandler.slow_subscription_started.wait(timeout=10):
+            FixtureHandler.slow_subscription_release.set()
+            workers[0].join(timeout=5)
+            raise AssertionError("arrival owner did not reach the slow fixture")
+        for worker in workers[1:]:
+            worker.start()
+
+        observed = None
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            status, body, _ = request(
+                base_url, "/dashboard/data", headers=dashboard_headers
+            )
+            if status == 200:
+                candidate = json.loads(body)
+                singleflight = candidate["subscription_singleflight"]
+                if int(singleflight["waiting_followers"]) >= 15:
+                    observed = candidate
+                    break
+            time.sleep(0.05)
+        if observed is None:
+            FixtureHandler.slow_subscription_release.set()
+            for worker in workers:
+                worker.join(timeout=5)
+            raise AssertionError("arrival followers did not attach before scheduling")
+        flow = observed["legacy_request_flow"]
+        singleflight = observed["subscription_singleflight"]
+        admission = observed["request_admission"]
+        if (
+            int(flow["accepted"]) - before_flow != 1
+            or int(flow["active"]) != 1
+            or int(flow["queued_entries"]) != 0
+            or int(admission["active_entries"]) < 16
+            or int(singleflight["active_owners"]) != 1
+            or int(singleflight["owners_created_total"]) - before_owners != 1
+            or int(singleflight["followers_attached_total"]) - before_followers
+            != 15
+        ):
+            FixtureHandler.slow_subscription_release.set()
+            for worker in workers:
+                worker.join(timeout=5)
+            raise AssertionError(
+                "arrival followers consumed owner flow capacity: "
+                f"flow={flow!r} admission={admission!r} "
+                f"singleflight={singleflight!r}"
+            )
+
+        FixtureHandler.slow_subscription_release.set()
+        for worker in workers:
+            worker.join(timeout=30)
+        if any(worker.is_alive() for worker in workers):
+            raise AssertionError("arrival singleflight workers did not finish")
+        if errors:
+            raise errors[0]
+        if len(results) != 16:
+            raise AssertionError(f"arrival fanout returned {len(results)} results")
+        bodies = {hashlib.sha256(body).hexdigest() for status, body, _ in results}
+        request_ids = {
+            assert_request_id(headers, "arrival singleflight response")
+            for _, _, headers in results
+        }
+        if (
+            any(status != 200 or b"Smoke" not in body
+                for status, body, _ in results)
+            or len(bodies) != 1
+            or len(request_ids) != 16
+        ):
+            raise AssertionError("arrival fanout responses changed semantics")
+        with FixtureHandler.counter_lock:
+            upstream_requests = (
+                FixtureHandler.slow_subscription_request_count - upstream_before
+            )
+        if upstream_requests != 1:
+            raise AssertionError(
+                f"arrival fanout started {upstream_requests} upstream requests"
+            )
+        time.sleep(1.1)
+        status, body, _ = request(
+            base_url, "/dashboard/data", headers=dashboard_headers
+        )
+        after = json.loads(body)
+        if (
+            int(after["subscription_singleflight"]["active_owners"]) != 0
+            or int(after["subscription_singleflight"]["waiting_followers"]) != 0
+            or int(after["windows"]["lifetime"]["subscription_requests"])
+            - before_subscriptions
+            != 16
+        ):
+            raise AssertionError(
+                "arrival singleflight counters did not return to zero: "
+                f"{after['subscription_singleflight']!r}"
+            )
+
+        distinct_before_flow = int(after["legacy_request_flow"]["accepted"])
+        distinct_before_owners = int(
+            after["subscription_singleflight"]["owners_created_total"]
+        )
+        distinct_before_followers = int(
+            after["subscription_singleflight"]["followers_attached_total"]
+        )
+        distinct_results: list[tuple[int, bytes, dict[str, str]]] = []
+        distinct_errors: list[BaseException] = []
+
+        def run_distinct(index: int) -> None:
+            try:
+                distinct_results.append(
+                    request(
+                        base_url,
+                        "/sub",
+                        {
+                            "target": "mixed",
+                            "url": SUBSCRIPTION.strip().replace(
+                                "#Smoke", f"#Arrival-{index}"
+                            ),
+                            "config": DISABLE_RULEGEN_CONFIG,
+                            "list": "true",
+                        },
+                    )
+                )
+            except BaseException as error:
+                distinct_errors.append(error)
+
+        distinct_workers = [
+            threading.Thread(target=run_distinct, args=(index,))
+            for index in range(8)
+        ]
+        for worker in distinct_workers:
+            worker.start()
+        for worker in distinct_workers:
+            worker.join(timeout=20)
+        if any(worker.is_alive() for worker in distinct_workers):
+            raise AssertionError("distinct arrival owners did not finish")
+        if distinct_errors:
+            raise distinct_errors[0]
+        if len(distinct_results) != 8 or any(
+            status != 200 for status, _, _ in distinct_results
+        ):
+            raise AssertionError(
+                f"distinct arrival owner responses failed: {distinct_results!r}"
+            )
+        time.sleep(1.1)
+        status, body, _ = request(
+            base_url, "/dashboard/data", headers=dashboard_headers
+        )
+        distinct_after = json.loads(body)
+        if (
+            int(distinct_after["legacy_request_flow"]["accepted"])
+            - distinct_before_flow
+            != 8
+            or int(
+                distinct_after["subscription_singleflight"][
+                    "owners_created_total"
+                ]
+            )
+            - distinct_before_owners
+            != 8
+            or int(
+                distinct_after["subscription_singleflight"][
+                    "followers_attached_total"
+                ]
+            )
+            != distinct_before_followers
+            or int(
+                distinct_after["windows"]["lifetime"][
+                    "subscription_requests"
+                ]
+            )
+            - before_subscriptions
+            != 24
+        ):
+            raise AssertionError(
+                "distinct keys no longer map one-to-one to owner flow tasks: "
+                f"{distinct_after!r}"
             )
 
 
@@ -11900,6 +12160,10 @@ def main() -> int:
         parser_failure_level_and_mixed_request_baseline(binary)
         insert_url_parser_route_baseline(binary, fixture_base)
         vary_cache_and_coalesce_baseline(binary, fixture_base)
+        if os.environ.get("SUBCONVERTER_HTTP_BACKEND", "beast").lower() != "httplib":
+            vary_cache_and_coalesce_baseline(
+                binary, fixture_base, resource_mode="force_max"
+            )
         response_microcache_eviction_baseline(binary)
         explain_privacy_and_cache_baseline(binary, fixture_base)
         wireguard_outbound_logs: list[str] = []
@@ -12039,6 +12303,7 @@ def main() -> int:
         conversion_cost_classification_baseline(binary, fixture_base)
         resource_control_execution_path_baseline(binary)
         force_max_controller_runtime_baseline(binary)
+        force_max_arrival_singleflight_baseline(binary, fixture_base)
         ruleset_executor_capacity_baseline(binary, fixture_base)
         getruleset_generation_reload_baseline(binary, fixture_base)
         request_generation_reload_baseline(binary, fixture_base)

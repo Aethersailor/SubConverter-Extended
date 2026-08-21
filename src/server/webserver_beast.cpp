@@ -601,7 +601,7 @@ void BeastSession::process() {
                   if (async_response.content_type.empty())
                     async_response.content_type = default_content_type;
                   asio::post(
-                      self->state_->context,
+                      self->stream_.get_executor(),
                       [self, response = std::move(async_response),
                        body = std::move(body), explain_request,
                        client_address]() mutable {
@@ -616,7 +616,7 @@ void BeastSession::process() {
             failure.content_type = "text/plain; charset=utf-8";
             failure.headers["Cache-Control"] = "private, no-store";
             asio::post(
-                state_->context,
+                self->stream_.get_executor(),
                 [self, failure = std::move(failure), explain_request,
                  client_address]() mutable {
                   self->completeAsyncResponse(

@@ -596,6 +596,25 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Key("max_bytes");
   writer.Uint64(response_cache.max_bytes);
   writer.EndObject();
+  const SubscriptionSingleflightSnapshot singleflight =
+      subscriptionSingleflightSnapshot();
+  writer.Key("subscription_singleflight");
+  writer.StartObject();
+  writer.Key("active_owners");
+  writer.Uint64(singleflight.active_owners);
+  writer.Key("waiting_followers");
+  writer.Uint64(singleflight.waiting_followers);
+  writer.Key("owners_created_total");
+  writer.Uint64(singleflight.owners_created_total);
+  writer.Key("followers_attached_total");
+  writer.Uint64(singleflight.followers_attached_total);
+  writer.Key("followers_cancelled_total");
+  writer.Uint64(singleflight.followers_cancelled_total);
+  writer.Key("owners_cancelled_no_consumers_total");
+  writer.Uint64(singleflight.owners_cancelled_no_consumers_total);
+  writer.Key("owner_flow_rejected_total");
+  writer.Uint64(singleflight.owner_flow_rejected_total);
+  writer.EndObject();
   const WorkloadSchedulerSnapshot scheduler = conversionSchedulerSnapshot();
   writer.Key("conversion_scheduler");
   writer.StartObject();
@@ -861,15 +880,33 @@ void tick() {
 
 void recordSubscriptionConversion(const Request &request,
                                   uint64_t rule_conversions) {
+  recordSubscriptionConversion(prepareSubscriptionConversionMetadata(request),
+                               rule_conversions);
+}
+
+SubscriptionConversionMetadata
+prepareSubscriptionConversionMetadata(const Request &request) {
+  SubscriptionConversionMetadata metadata;
   if (!effectiveSettings().statisticsEnabled || request.method != "GET")
-    return;
+    return metadata;
   const GeoLocation location = geoLocation(request, g_engine.geo);
+  metadata.country = location.country;
+  metadata.china_region = location.china_region;
+  metadata.eligible = true;
+  return metadata;
+}
+
+void recordSubscriptionConversion(
+    const SubscriptionConversionMetadata &metadata,
+    uint64_t rule_conversions) {
+  if (!metadata.eligible)
+    return;
   {
     std::lock_guard<std::mutex> lock(g_engine.mutex);
     if (!g_engine.initialized)
       return;
-    g_engine.core.record(nowSeconds(), location.country,
-                         location.china_region, rule_conversions);
+    g_engine.core.record(nowSeconds(), metadata.country,
+                         metadata.china_region, rule_conversions);
   }
 }
 
