@@ -1780,6 +1780,7 @@ def owned_webget_boundary_baseline(helper: Path, fixture_base: str) -> None:
             or hit["operation_no_consumers_cancelled"] is not True
             or hit["operation_owner_kinds_isolated"] is not True
             or hit["async_consumer_probe_ok"] is not True
+            or hit["async_data_ok"] is not True
             or hit["continuation_runtime_ok"] is not True
         ):
             raise AssertionError(

@@ -116,6 +116,26 @@ int main(int argc, char *argv[]) {
         cacheFetchOperationProbe();
     const OwnedWebGetAsyncConsumerProbeSnapshot async_consumer_probe =
         ownedWebGetAsyncConsumerProbe();
+    std::promise<OwnedWebGetAsyncOutcome> async_data_completion;
+    OwnedWebGetRequest async_data_request;
+    async_data_request.url = "data:,owned-async-data";
+    async_data_request.proxy = ProxyPolicy::direct();
+    webGetOwnedAsync(
+        std::move(async_data_request),
+        std::make_shared<RequestContext>("owned-async-data",
+                                         RequestContext::Clock::now()),
+        [&](OwnedWebGetAsyncOutcome outcome) {
+          async_data_completion.set_value(std::move(outcome));
+        });
+    OwnedWebGetAsyncOutcome async_data_outcome =
+        async_data_completion.get_future().get();
+    const bool async_data_ok =
+        async_data_outcome.payload &&
+        async_data_outcome.failure == AsyncFetchFailure::None &&
+        async_data_outcome.payload->status_code == 200 &&
+        async_data_outcome.payload->content == "owned-async-data" &&
+        async_data_outcome.payload->retained_bytes.bytes() >=
+            async_data_outcome.payload->content.size();
     const bool continuation_was_uninitialized =
         !ownedWebGetContinuationRuntimeSnapshot().initialized;
     std::promise<SchedulerSubmitStatus> preinit_completion;
@@ -264,6 +284,8 @@ int main(int argc, char *argv[]) {
     writer.Bool(async_consumer_probe.raced_completions == 1 &&
                 async_consumer_probe.precancelled_completions == 1 &&
                 async_consumer_probe.payload_lease_released);
+    writer.Key("async_data_ok");
+    writer.Bool(async_data_ok);
     writer.Key("continuation_runtime_ok");
     writer.Bool(continuation_was_uninitialized &&
                 preinit_submit == SchedulerSubmitStatus::Stopping &&

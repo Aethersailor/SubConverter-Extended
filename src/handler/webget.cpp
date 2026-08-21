@@ -2990,6 +2990,7 @@ public:
                 std::shared_ptr<RequestContext>{});
             curlGetWithGitHubFallback(argument, proxy_snapshot_,
                                       initial_route_, fetch_result, &failure);
+            result_.failure = failure;
             applyAsyncFetchFailure(request_context_, failure,
                                    argument.cancellation);
         }
@@ -3024,6 +3025,7 @@ public:
             result_.response_headers_touched =
                 request_.capture_response_headers;
             result_.retained_bytes.reset();
+            result_.failure = AsyncFetchFailure::Capacity;
             return;
         }
         result_.content.clear();
@@ -3120,6 +3122,7 @@ public:
                                    ? request_context_->cancellationToken()
                                    : RequestCancellationToken{});
         result_.status_code = fetched->status_code;
+        result_.failure = fetched->failure;
         result_.content = fetched->content;
         if(request_.capture_response_headers)
         {
@@ -3317,6 +3320,78 @@ void registerOwnedWebGetAsyncCancellation(
     consumer->cancellation_registration = std::move(registration);
 }
 } // namespace
+
+void webGetOwnedAsync(OwnedWebGetRequest request,
+                      std::shared_ptr<RequestContext> consumer_context,
+                      OwnedWebGetAsyncCompletion completion)
+{
+    std::shared_ptr<OwnedWebGetAsyncConsumer> consumer;
+    try
+    {
+        consumer = std::make_shared<OwnedWebGetAsyncConsumer>();
+    }
+    catch(...)
+    {
+        if(completion)
+        {
+            try
+            {
+                completion({{}, AsyncFetchFailure::Capacity,
+                            RequestCancellationReason::None});
+            }
+            catch(...)
+            {
+            }
+        }
+        return;
+    }
+    consumer->context = std::move(consumer_context);
+    consumer->completion = std::move(completion);
+    try
+    {
+        registerOwnedWebGetAsyncCancellation(consumer);
+    }
+    catch(...)
+    {
+        completeOwnedWebGetAsyncConsumer(
+            consumer, {{}, AsyncFetchFailure::Capacity,
+                       RequestCancellationReason::None});
+        return;
+    }
+    if(consumer->completion_claimed.load(std::memory_order_acquire))
+        return;
+    if(!startsWith(request.url, "data:"))
+    {
+        completeOwnedWebGetAsyncConsumer(
+            consumer, {{}, AsyncFetchFailure::Transport,
+                       RequestCancellationReason::None});
+        return;
+    }
+    request.retention = OwnedWebGetRequest::RetentionPolicy::Result;
+    try
+    {
+        ScopedRequestContext no_request_context(
+            std::shared_ptr<RequestContext>{});
+        OwnedWebGetResult result = webGetOwned(std::move(request));
+        auto payload = std::make_shared<OwnedWebGetAsyncPayload>();
+        payload->status_code = result.status_code;
+        payload->failure = result.failure;
+        payload->content = std::move(result.content);
+        payload->response_headers = std::move(result.response_headers);
+        payload->response_headers_touched = result.response_headers_touched;
+        payload->retained_bytes = std::move(result.retained_bytes);
+        completeOwnedWebGetAsyncConsumer(
+            consumer,
+            {std::static_pointer_cast<const OwnedWebGetAsyncPayload>(payload),
+             payload->failure, RequestCancellationReason::None});
+    }
+    catch(...)
+    {
+        completeOwnedWebGetAsyncConsumer(
+            consumer, {{}, AsyncFetchFailure::Capacity,
+                       RequestCancellationReason::None});
+    }
+}
 
 OwnedWebGetAsyncConsumerProbeSnapshot ownedWebGetAsyncConsumerProbe()
 {

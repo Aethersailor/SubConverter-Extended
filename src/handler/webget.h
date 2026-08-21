@@ -150,6 +150,7 @@ struct OwnedWebGetRequest
 struct OwnedWebGetResult
 {
     int status_code = 0;
+    AsyncFetchFailure failure = AsyncFetchFailure::None;
     std::string content;
     std::string response_headers;
     bool response_headers_touched = false;
@@ -204,6 +205,9 @@ struct OwnedWebGetAsyncConsumerProbeSnapshot
 
 void webGetAsync(AsyncFetchRequest request, AsyncFetchCompletion completion);
 AsyncFetchFuture webGetAsync(AsyncFetchRequest request);
+void webGetOwnedAsync(OwnedWebGetRequest request,
+                      std::shared_ptr<RequestContext> consumer_context,
+                      OwnedWebGetAsyncCompletion completion);
 // Synchronous ownership boundary used to share prepare/cache/finalize logic.
 // CurrentRequest preserves the legacy request-scoped accounting; Result makes
 // the move-only result own its byte lease for later continuation work.
