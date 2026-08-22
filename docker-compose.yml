@@ -23,10 +23,10 @@ services:
       # confirmed, explicitly select public or strict.
       # SUBCONVERTER_SECURITY_PROFILE: public
       # SUBCONVERTER_ALLOW_PUBLIC_UPLOAD: "false"
-      # 三种模式共用异步入口。force_max 留空指纹时自动按当前硬件应用预算，填写后要求精确匹配；adaptive 只记录 shadow 建议。
-      # All modes share the async entry. force_max auto-applies current hardware
-      # budgets with an empty fingerprint, or requires an exact configured match;
-      # adaptive records shadow suggestions only.
+      # 三种模式共用同一执行路径。force_max 在硬件探测完整时应用静态启动预算；旧指纹只作为已弃用的可选硬件 pin。所有模式保留有限请求截止时间。
+      # All modes share one execution path. force_max applies a static startup
+      # budget when hardware detection is complete; the legacy fingerprint is
+      # only an optional deprecated hardware pin. Deadlines stay finite.
       # SUBCONVERTER_RESOURCE_CONTROL: compat
       # SUBCONVERTER_FORCE_MAX_CURVE_FINGERPRINT: ""
       # SUBCONVERTER_REQUEST_DEADLINE_MS: "15000"

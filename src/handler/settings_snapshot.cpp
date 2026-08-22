@@ -109,6 +109,7 @@ std::string sanitizedSettingsSnapshot(const Settings &settings) {
       {"advanced",
        {
            {"resource_control", settings.resourceControl},
+           {"resource_control_effective", settings.resourceControlEffective},
            {"force_max_curve_fingerprint",
             settings.forceMaxCurveFingerprint},
            {"max_allowed_rulesets", settings.maxAllowedRulesets},

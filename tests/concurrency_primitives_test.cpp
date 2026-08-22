@@ -4,6 +4,7 @@
 #include <cassert>
 #include <chrono>
 #include <future>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -12,6 +13,7 @@
 
 #include "utils/bounded_executor.h"
 #include "utils/concurrent_lru_cache.h"
+#include "utils/cooperative_cpu.h"
 #include "utils/resource_control.h"
 #include "utils/workload_scheduler.h"
 
@@ -226,7 +228,162 @@ static void testWorkloadScheduler() {
   assert(snapshot.active == 0);
   assert(snapshot.accepted == 3);
   assert(snapshot.rejected == 3);
+
+  std::promise<SchedulerAsyncResult<int>> async_promise;
+  const SchedulerSubmitStatus async_status = scheduler.submitAsync(
+      RequestCostClass::Medium, 1,
+      std::chrono::steady_clock::time_point::max(), {}, [] { return 42; },
+      [&](SchedulerAsyncResult<int> result) {
+        async_promise.set_value(std::move(result));
+      });
+  assert(async_status == SchedulerSubmitStatus::Accepted);
+  SchedulerAsyncResult<int> async_result = async_promise.get_future().get();
+  assert(async_result.status == SchedulerSubmitStatus::Accepted);
+  assert(!async_result.error && async_result.value == 42);
+
+  RequestCancellationSource async_cancellation;
+  async_cancellation.cancel(RequestCancellationReason::NoConsumers);
+  std::atomic<int> cancellation_callbacks{0};
+  SchedulerSubmitStatus cancelled_async = scheduler.submitAsync(
+      RequestCostClass::Low, 1,
+      std::chrono::steady_clock::time_point::max(),
+      async_cancellation.token(), [] { return 0; },
+      [&](SchedulerAsyncResult<int> result) {
+        assert(result.status == SchedulerSubmitStatus::Cancelled);
+        assert(result.error && !result.value);
+        cancellation_callbacks.fetch_add(1, std::memory_order_relaxed);
+      });
+  assert(cancelled_async == SchedulerSubmitStatus::Cancelled);
+  assert(cancellation_callbacks.load(std::memory_order_relaxed) == 1);
+  auto self_join = scheduler.submit(
+      RequestCostClass::Low, 1,
+      std::chrono::steady_clock::time_point::max(), {},
+      [&scheduler] { return scheduler.join(); });
+  assert(self_join.status == SchedulerSubmitStatus::Accepted);
+  assert(!self_join.future.get());
   scheduler.shutdown(true);
+}
+
+static void testCooperativeCpuPermit() {
+  assert(cooperativeFlowWorkerCap(1) == 16);
+  assert(cooperativeFlowWorkerCap(4) == 16);
+  assert(cooperativeFlowWorkerCap(16) == 64);
+  assert(cooperativeFlowWorkerCap(64) == 256);
+  assert(cooperativeFlowWorkerCap(std::numeric_limits<std::size_t>::max()) ==
+         256);
+  CpuPermitGate gate(1);
+  CpuPermitLease owner(gate, std::chrono::steady_clock::time_point::max(), {});
+  assert(owner.acquire() == SchedulerSubmitStatus::Accepted);
+  ScopedCpuPermit owner_scope(owner);
+  assert(gate.snapshot().active == 1);
+
+  std::promise<void> second_acquired;
+  std::shared_future<void> acquired = second_acquired.get_future().share();
+  const int result = waitWithoutCpuPermit([&] {
+    std::thread second([&] {
+      CpuPermitLease lease(gate,
+                           std::chrono::steady_clock::time_point::max(), {});
+      assert(lease.acquire() == SchedulerSubmitStatus::Accepted);
+      second_acquired.set_value();
+    });
+    acquired.wait();
+    second.join();
+    return 42;
+  });
+  assert(result == 42);
+  assert(owner.held());
+  assert(gate.snapshot().active == 1);
+  bool exception_seen = false;
+  try {
+    waitWithoutCpuPermit([]() -> int {
+      throw std::runtime_error("blocking dependency failed");
+    });
+  } catch (const std::runtime_error &) {
+    exception_seen = true;
+  }
+  assert(exception_seen && owner.held());
+
+  const int nested = waitWithoutCpuPermit(
+      [] { return waitWithoutCpuPermit([] { return 7; }); });
+  assert(nested == 7 && owner.held());
+
+  RequestCancellationSource cancelled;
+  cancelled.cancel(RequestCancellationReason::NoConsumers);
+  CpuPermitLease rejected(gate,
+                          std::chrono::steady_clock::time_point::max(),
+                          cancelled.token());
+  assert(rejected.acquire() == SchedulerSubmitStatus::Cancelled);
+
+  CpuPermitGate stopping_gate(1);
+  CpuPermitLease stopping_owner(
+      stopping_gate, std::chrono::steady_clock::time_point::max(), {});
+  assert(stopping_owner.acquire() == SchedulerSubmitStatus::Accepted);
+  std::future<SchedulerSubmitStatus> stopped_waiter =
+      std::async(std::launch::async, [&] {
+        CpuPermitLease waiter(
+            stopping_gate, std::chrono::steady_clock::time_point::max(), {});
+        return waiter.acquire();
+      });
+  while (stopping_gate.snapshot().waiting == 0)
+    std::this_thread::yield();
+  stopping_gate.requestShutdown();
+  assert(stopped_waiter.get() == SchedulerSubmitStatus::Stopping);
+
+  CpuPermitGate flow_gate(1);
+  WorkloadScheduler flows(2, 2, 1024);
+  std::promise<void> blocking_started;
+  std::shared_future<void> blocking = blocking_started.get_future().share();
+  std::promise<void> release_blocking;
+  std::shared_future<void> release = release_blocking.get_future().share();
+  auto blocked_flow = flows.submit(
+      RequestCostClass::Medium, 1,
+      std::chrono::steady_clock::time_point::max(), {}, [&] {
+        CpuPermitLease lease(
+            flow_gate, std::chrono::steady_clock::time_point::max(), {});
+        assert(lease.acquire() == SchedulerSubmitStatus::Accepted);
+        ScopedCpuPermit scope(lease);
+        return waitWithoutCpuPermit([&] {
+          blocking_started.set_value();
+          release.wait();
+          return 1;
+        });
+      });
+  blocking.wait();
+  auto runnable_flow = flows.submit(
+      RequestCostClass::Medium, 1,
+      std::chrono::steady_clock::time_point::max(), {}, [&] {
+        CpuPermitLease lease(
+            flow_gate, std::chrono::steady_clock::time_point::max(), {});
+        assert(lease.acquire() == SchedulerSubmitStatus::Accepted);
+        return 2;
+      });
+  assert(runnable_flow.future.wait_for(1s) == std::future_status::ready);
+  assert(runnable_flow.future.get() == 2);
+  release_blocking.set_value();
+  assert(blocked_flow.future.get() == 1);
+  flows.shutdown(true);
+
+  CpuPermitGate shrinking_gate(2);
+  CpuPermitLease first(
+      shrinking_gate, std::chrono::steady_clock::time_point::max(), {});
+  CpuPermitLease second(
+      shrinking_gate, std::chrono::steady_clock::time_point::max(), {});
+  assert(first.acquire() == SchedulerSubmitStatus::Accepted);
+  assert(second.acquire() == SchedulerSubmitStatus::Accepted);
+  shrinking_gate.setLimit(1);
+  std::future<SchedulerSubmitStatus> after_shrink =
+      std::async(std::launch::async, [&] {
+        CpuPermitLease waiter(
+            shrinking_gate, std::chrono::steady_clock::time_point::max(), {});
+        return waiter.acquire();
+      });
+  while (shrinking_gate.snapshot().waiting == 0)
+    std::this_thread::yield();
+  first.release();
+  assert(after_shrink.wait_for(20ms) == std::future_status::timeout);
+  second.release();
+  assert(after_shrink.get() == SchedulerSubmitStatus::Accepted);
+  assert(shrinking_gate.snapshot().active == 0);
 }
 
 static void testWorkloadSchedulerActiveQueueWeights() {
@@ -386,9 +543,54 @@ static void testRetainedResponseByteBudget() {
     std::string completed_result(1, 'x');
     assert(context->retainResponseBytes(completed_result.size()));
     assert(retainedResponseByteSnapshot().used == boundary);
+    assert(context->releaseResponseBytes(boundary / 2) == boundary / 2);
+    assert(context->retainedResponseBytes() == boundary / 2);
+    assert(retainedResponseByteSnapshot().used == boundary / 2);
+    assert(context->releaseResponseBytes(boundary) == boundary / 2);
+    assert(context->retainedResponseBytes() == 0);
+    assert(retainedResponseByteSnapshot().used == 0);
   }
   assert(retainedResponseByteSnapshot().used == 0);
   configureRetainedResponseByteLimit(0);
+}
+
+static void testWorkAdmissionLifecycle() {
+  resetRequestLifecycleMetricsForTests();
+
+  auto envelope_only = std::make_shared<RequestContext>(
+      "envelope-only", RequestContext::Clock::now());
+  envelope_only->suggestFailure(RequestFailureAttribution::Capacity);
+  RequestLifecycleMetricsSnapshot metrics = requestLifecycleMetricsSnapshot();
+  assert(metrics.work_admitted == 0);
+  assert(metrics.server_capacity_failure_after_admission == 0);
+
+  auto admitted = std::make_shared<RequestContext>(
+      "admitted-client", RequestContext::Clock::now());
+  assert(admitted->markWorkAdmitted());
+  assert(!admitted->markWorkAdmitted());
+  admitted->suggestFailure(RequestFailureAttribution::Capacity);
+  admitted->suggestFailure(RequestFailureAttribution::Capacity);
+  metrics = requestLifecycleMetricsSnapshot();
+  assert(metrics.work_admitted == 1);
+  assert(metrics.server_capacity_failure_after_admission == 1);
+
+  auto raced = std::make_shared<RequestContext>(
+      "admission-race", RequestContext::Clock::now());
+  raced->suggestFailure(RequestFailureAttribution::Capacity);
+  assert(raced->markWorkAdmitted());
+  metrics = requestLifecycleMetricsSnapshot();
+  assert(metrics.work_admitted == 2);
+  assert(metrics.server_capacity_failure_after_admission == 2);
+
+  auto internal = std::make_shared<RequestContext>(
+      "internal-work", RequestContext::Clock::now(),
+      RequestContext::Clock::time_point::max(),
+      RequestContextKind::InternalWork);
+  assert(!internal->markWorkAdmitted());
+  internal->suggestFailure(RequestFailureAttribution::Capacity);
+  metrics = requestLifecycleMetricsSnapshot();
+  assert(metrics.work_admitted == 2);
+  assert(metrics.server_capacity_failure_after_admission == 2);
 }
 
 static void testActiveRequestShutdownCancellation() {
@@ -604,6 +806,57 @@ static void testResourceControlPrimitives() {
   const ResourcePermitBudget fractional =
       computeConservativeResourceBudget(0.5, 16);
   assert(fractional.cpu_permits == 1);
+  assert(governorDecreaseCpuPermits(1) == 1);
+  assert(governorDecreaseCpuPermits(2) == 1);
+  assert(governorDecreaseCpuPermits(8) == 6);
+  assert(governorRecoverCpuPermits(1, 8) == 2);
+  assert(governorRecoverCpuPermits(8, 8) == 8);
+
+  ResourceGovernorState force_governor{8, 0, 0};
+  ResourceGovernorDecision decision = governorStep(
+      force_governor, {8, true, true, false, false, false});
+  assert(decision.permits == 8 &&
+         std::string(decision.state) == "max_ready");
+  decision = governorStep(
+      force_governor, {8, true, true, true, false, true});
+  assert(decision.permits == 6 &&
+         std::string(decision.state) == "pressure_guarded");
+  decision = governorStep(
+      force_governor, {8, true, true, false, false, false});
+  assert(decision.permits == 6 &&
+         std::string(decision.state) == "recovering");
+  decision = governorStep(
+      force_governor, {8, true, true, false, false, false});
+  assert(decision.permits == 7);
+  (void)governorStep(
+      force_governor, {8, true, true, false, false, false});
+  decision = governorStep(
+      force_governor, {8, true, true, false, false, false});
+  assert(decision.permits == 8);
+
+  ResourceGovernorState invalid_governor{8, 0, 0};
+  decision = governorStep(
+      invalid_governor, {8, true, false, false, false, false});
+  assert(decision.permits == 6 && decision.pressure_fallback &&
+         std::string(decision.reason) == "telemetry_unavailable");
+  ResourceGovernorState event_governor{8, 0, 0};
+  decision = governorStep(
+      event_governor, {8, true, true, false, true, true});
+  assert(decision.permits == 6 &&
+         std::string(decision.reason) == "memory_event");
+
+  ResourceGovernorState adaptive_governor{4, 0, 0};
+  (void)governorStep(
+      adaptive_governor, {8, false, true, false, false, true});
+  decision = governorStep(
+      adaptive_governor, {8, false, true, false, false, true});
+  assert(decision.permits == 5 &&
+         std::string(decision.state) == "recovering");
+  for (int sample = 0; sample < 30; ++sample)
+    decision = governorStep(
+        adaptive_governor, {8, false, true, false, false, false});
+  assert(decision.permits == 4 &&
+         std::string(decision.state) == "idle_reduced");
 
   assert(computeForceMaxAdmissionEntries(UINT64_C(1) * 1024 * 1024 * 1024,
                                          0, 16) == 2048);
@@ -634,24 +887,77 @@ static void testResourceControlPrimitives() {
   ResourceControlSnapshot uncalibrated;
   uncalibrated.mode = "force_max";
   uncalibrated.hardware_fingerprint = "hardware-a";
+  uncalibrated.hardware_detected = true;
   uncalibrated.hardware_complete = true;
-  assert(!resourceCurveMatches(uncalibrated, ""));
-  assert(!resourceCurveMatches(uncalibrated, "hardware-b"));
-  assert(resourceCurveMatches(uncalibrated, "hardware-a"));
-  assert(forceMaxHardwareAccepted(uncalibrated, ""));
-  assert(!forceMaxHardwareAccepted(uncalibrated, "hardware-b"));
-  assert(forceMaxHardwareAccepted(uncalibrated, "hardware-a"));
+  assert(hardwarePinMatches(uncalibrated, ""));
+  assert(!hardwarePinMatches(uncalibrated, "hardware-b"));
+  assert(hardwarePinMatches(uncalibrated, "hardware-a"));
+  uncalibrated.hardware_detected = false;
   uncalibrated.hardware_complete = false;
-  assert(!forceMaxHardwareAccepted(uncalibrated, ""));
+  assert(hardwarePinMatches(uncalibrated, ""));
+  assert(!hardwarePinMatches(uncalibrated, "hardware-a"));
+}
+
+static void testCancellationTokenCallbacks() {
+  RequestCancellationSource source;
+  std::atomic<int> callbacks{0};
+  RequestCancellationRegistration registration =
+      source.token().registerCallback(
+          [&] { callbacks.fetch_add(1, std::memory_order_relaxed); });
+  assert(source.cancel(RequestCancellationReason::ClientDisconnected));
+  assert(!source.cancel(RequestCancellationReason::Shutdown));
+  assert(callbacks.load(std::memory_order_relaxed) == 1);
+
+  RequestCancellationSource reset_source;
+  RequestCancellationRegistration reset_registration =
+      reset_source.token().registerCallback(
+          [&] { callbacks.fetch_add(1, std::memory_order_relaxed); });
+  reset_registration.reset();
+  assert(reset_source.cancel(RequestCancellationReason::Shutdown));
+  assert(callbacks.load(std::memory_order_relaxed) == 1);
+
+  int immediate = 0;
+  RequestCancellationRegistration immediate_registration =
+      source.token().registerCallback([&] { ++immediate; });
+  assert(immediate == 1);
+
+  RequestCancellationSource reentrant_source;
+  RequestCancellationRegistration reentrant_registration;
+  std::atomic<int> reentrant_callbacks{0};
+  reentrant_registration = reentrant_source.token().registerCallback([&] {
+    reentrant_registration.reset();
+    reentrant_callbacks.fetch_add(1, std::memory_order_relaxed);
+  });
+  assert(reentrant_source.cancel(RequestCancellationReason::NoConsumers));
+  assert(reentrant_callbacks.load(std::memory_order_relaxed) == 1);
+
+  for (int iteration = 0; iteration < 256; ++iteration) {
+    RequestCancellationSource concurrent_source;
+    RequestCancellationRegistration concurrent_registration;
+    std::atomic<int> concurrent_callbacks{0};
+    concurrent_registration = concurrent_source.token().registerCallback([&] {
+      concurrent_callbacks.fetch_add(1, std::memory_order_relaxed);
+    });
+    std::thread cancel_thread([&] {
+      concurrent_source.cancel(RequestCancellationReason::ClientDisconnected);
+    });
+    std::thread reset_thread([&] { concurrent_registration.reset(); });
+    cancel_thread.join();
+    reset_thread.join();
+    assert(concurrent_callbacks.load(std::memory_order_relaxed) <= 1);
+  }
 }
 
 int main() {
   testBoundedExecutor();
   testBoundedExecutorDeadlineAndCancellation();
   testWorkloadScheduler();
+  testCooperativeCpuPermit();
   testWorkloadSchedulerActiveQueueWeights();
   testRetainedResponseByteBudget();
+  testWorkAdmissionLifecycle();
   testActiveRequestShutdownCancellation();
+  testCancellationTokenCallbacks();
   testConcurrentLruCache();
   testExternalConfigCacheSemantics();
   testResourceControlPrimitives();

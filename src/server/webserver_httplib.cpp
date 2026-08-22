@@ -610,31 +610,40 @@ static httplib::Server::Handler makeHandler(const responseRoute &rr,
     auto result = invokeResponseRoute(rr, req, resp);
     if (telemetry.context->suggestedFailure() ==
         RequestFailureAttribution::Capacity) {
+      resp.shared_body.reset();
       resp.status_code = 503;
       resp.content_type = "text/plain; charset=utf-8";
       resp.headers = {{"Cache-Control", "private, no-store"},
                       {"Retry-After", "1"}};
-      result = "Service temporarily unavailable: retained byte or execution "
-               "capacity is full.\n"
-               "服务暂时不可用：保留字节或执行容量已满。\n";
+      std::string capacity_result =
+          "Service temporarily unavailable: retained byte or execution "
+          "capacity is full.\n"
+          "服务暂时不可用：保留字节或执行容量已满。\n";
+      result.swap(capacity_result);
     }
     RequestCancellationResponse cancellation_response;
     if (requestCancellationResponse(telemetry.context,
                                     cancellation_response)) {
+      resp.shared_body.reset();
       resp.status_code = cancellation_response.status_code;
       resp.content_type = "text/plain; charset=utf-8";
       resp.headers = std::move(cancellation_response.headers);
       result = std::move(cancellation_response.body);
     }
+    if (resp.shared_body)
+      result = resp.shared_body->content;
     if (telemetry.context &&
         !telemetry.context->retainResponseBytes(result.size())) {
+      resp.shared_body.reset();
       resp.status_code = 503;
       resp.content_type = "text/plain; charset=utf-8";
       resp.headers = {{"Cache-Control", "private, no-store"},
                       {"Retry-After", "1"}};
-      result = "Service temporarily unavailable: retained response byte "
-               "capacity is full.\n"
-               "服务暂时不可用：响应字节容量已满。\n";
+      std::string capacity_result =
+          "Service temporarily unavailable: retained response byte "
+          "capacity is full.\n"
+          "服务暂时不可用：响应字节容量已满。\n";
+      result.swap(capacity_result);
     }
     RequestStageTimer serialize_timer(telemetry.context,
                                       RequestStage::Serialize);
@@ -890,7 +899,8 @@ int WebServer::start_web_server_multi(listener_args *args) {
     return new httplib::ThreadPool(base_workers,
                                    std::max(base_workers + 1, bounded_max),
                                    static_cast<size_t>(
-                                       global.resourceControl == "compat"
+                                       global.resourceControlEffective ==
+                                               "compat"
                                            ? std::max(10240, args->max_conn)
                                            : std::max(1, args->max_conn)));
   };
@@ -921,6 +931,8 @@ int WebServer::start_web_server_multi(listener_args *args) {
   server.stop();
   if (args->shutdown_callback)
     args->shutdown_callback();
+  if (args->drain_callback)
+    args->drain_callback();
   thread.join();
   return 0;
 }

@@ -2,12 +2,14 @@
 #define WEBSERVER_H_INCLUDED
 
 #include <string>
+#include <utility>
 #include <vector>
 #include <map>
 #include <atomic>
 #include <memory>
 #include <mutex>
 #include <curl/curlver.h>
+#include <functional>
 
 #include "server/client_ip.h"
 #include "server/request_context.h"
@@ -28,11 +30,20 @@ struct Request
     std::shared_ptr<RequestContext> context;
 };
 
+struct ImmutableResponseBody
+{
+    std::string content;
+    RetainedResponseByteLease retained_bytes;
+};
+
+using shared_response_body = std::shared_ptr<const ImmutableResponseBody>;
+
 struct Response
 {
     int status_code = 200;
     std::string content_type;
     string_icase_map headers;
+    shared_response_body shared_body;
 };
 
 struct RequestAdmissionSnapshot
@@ -52,6 +63,10 @@ bool tryRequestAdmission(uint64_t bytes) noexcept;
 void releaseRequestAdmission(uint64_t bytes) noexcept;
 
 using response_callback = std::string (*)(Request&, Response&); //process arguments and POST data and return served-content
+using async_response_completion =
+    std::function<void(Response, std::string)>;
+using async_response_callback =
+    std::function<void(Request, async_response_completion)>;
 
 #define RESPONSE_CALLBACK_ARGS Request &request, Response &response
 
@@ -65,6 +80,7 @@ struct listener_args
     uint32_t looper_interval = 200;
     uint32_t request_deadline_ms = 15000;
     void (*shutdown_callback)() = nullptr;
+    void (*drain_callback)() = nullptr;
 };
 
 struct RequestCancellationResponse
@@ -84,6 +100,7 @@ struct responseRoute
     std::string path;
     std::string content_type;
     response_callback rc {};
+    async_response_callback async_rc;
 };
 
 const responseRoute *findResponseRoute(
@@ -118,6 +135,21 @@ public:
         rr.path = uri;
         rr.content_type = content_type;
         rr.rc = response;
+        responses.emplace_back(std::move(rr));
+    }
+
+    void append_async_response(const std::string &method,
+                               const std::string &uri,
+                               const std::string &content_type,
+                               response_callback sync_response,
+                               async_response_callback async_response)
+    {
+        responseRoute rr;
+        rr.method = method;
+        rr.path = uri;
+        rr.content_type = content_type;
+        rr.rc = sync_response;
+        rr.async_rc = std::move(async_response);
         responses.emplace_back(std::move(rr));
     }
 

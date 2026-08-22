@@ -98,7 +98,8 @@ bool isHealthTarget(beast::string_view target) {
          (target.size() == path.size() || target[path.size()] == '?');
 }
 
-void appendExposeHeader(http::response<http::string_body> &response,
+template <class Body>
+void appendExposeHeader(http::response<Body> &response,
                         const std::string &name) {
   std::string current = response[http::field::access_control_expose_headers];
   if (!current.empty())
@@ -159,11 +160,16 @@ private:
   void resetParser();
   void onRead(beast::error_code error, std::size_t bytes);
   void process();
+  void completeAsyncResponse(Response response, std::string body,
+                             bool explain_request,
+                             std::string client_address);
   void armCancellationObservers();
   void writeHealthResponse();
   void writeImmediateError(http::status status, const std::string &body,
                            const char *retry_after = nullptr);
   void writeResponse(http::response<http::string_body> response);
+  void writeSharedResponse(http::response<http::buffer_body> response,
+                           shared_response_body body);
   void onWrite(bool keep_alive, beast::error_code error, std::size_t bytes);
   void finish(bool response_sent = false);
 
@@ -181,6 +187,7 @@ private:
   int response_status_ = 500;
   std::atomic<bool> processing_{false};
   std::atomic<bool> finished_{false};
+  std::atomic<bool> async_completed_{false};
 };
 
 class BeastServerState : public std::enable_shared_from_this<BeastServerState> {
@@ -191,8 +198,9 @@ public:
         handlers(static_cast<std::size_t>(
             std::max(args->max_workers, 1))),
         connection_limit(static_cast<std::size_t>(
-            global.resourceControl == "compat" ? std::max(10240, args->max_conn)
-                                                : std::max(1, args->max_conn))) {}
+            global.resourceControlEffective == "compat"
+                ? std::max(10240, args->max_conn)
+                : std::max(1, args->max_conn))) {}
 
   bool bind() {
     beast::error_code error;
@@ -210,7 +218,7 @@ public:
     acceptor.bind(endpoint, error);
     if (error)
       return false;
-    acceptor.listen(global.resourceControl == "compat"
+    acceptor.listen(global.resourceControlEffective == "compat"
                         ? std::max(10240, args->max_conn)
                         : std::max(1, args->max_conn),
                     error);
@@ -580,7 +588,59 @@ void BeastSession::process() {
       if (const responseRoute *route = findResponseRoute(
               state_->server.responses, request.method, request.url)) {
         routed = true;
+        if (route->async_rc) {
+          const std::string client_address = request.remote_addr;
+          const std::string default_content_type = route->content_type;
+          auto self = shared_from_this();
+          try {
+            route->async_rc(
+                std::move(request),
+                [self, explain_request, default_content_type,
+                 client_address](Response async_response,
+                                 std::string body) mutable {
+                  if (async_response.content_type.empty())
+                    async_response.content_type = default_content_type;
+                  asio::post(
+                      self->stream_.get_executor(),
+                      [self, response = std::move(async_response),
+                       body = std::move(body), explain_request,
+                       client_address]() mutable {
+                        self->completeAsyncResponse(
+                            std::move(response), std::move(body),
+                            explain_request, std::move(client_address));
+                      });
+                });
+          } catch (...) {
+            Response failure;
+            failure.status_code = 500;
+            failure.content_type = "text/plain; charset=utf-8";
+            failure.headers["Cache-Control"] = "private, no-store";
+            asio::post(
+                self->stream_.get_executor(),
+                [self, failure = std::move(failure), explain_request,
+                 client_address]() mutable {
+                  self->completeAsyncResponse(
+                      std::move(failure),
+                      "Internal server error while processing request.\n"
+                      "处理请求时发生内部服务器错误。\n",
+                      explain_request, std::move(client_address));
+                });
+          }
+          return;
+        }
         outgoing.body() = invokeResponseRoute(*route, request, response);
+        if (response.shared_body) {
+          asio::post(
+              stream_.get_executor(),
+              [self = shared_from_this(), response = std::move(response),
+               body = std::move(outgoing.body()), explain_request,
+               client_address = request.remote_addr]() mutable {
+                self->completeAsyncResponse(
+                    std::move(response), std::move(body), explain_request,
+                    std::move(client_address));
+              });
+          return;
+        }
       }
       if (!routed) {
         const auto redirect = state_->server.redirect_map.find(request.url);
@@ -711,6 +771,127 @@ void BeastSession::process() {
              });
 }
 
+void BeastSession::completeAsyncResponse(Response response,
+                                         std::string body,
+                                         bool explain_request,
+                                         std::string client_address) {
+  if (async_completed_.exchange(true, std::memory_order_acq_rel) ||
+      finished_.load(std::memory_order_acquire))
+    return;
+  ScopedLogRequestContext log_scope(request_id_);
+  ScopedRequestContext request_scope(context_);
+  const auto &incoming = parser_->get();
+  shared_response_body shared_body = std::move(response.shared_body);
+
+  if (context_->suggestedFailure() == RequestFailureAttribution::Capacity) {
+    shared_body.reset();
+    response.status_code = 503;
+    response.content_type = "text/plain; charset=utf-8";
+    response.headers = {{"Cache-Control", "private, no-store"},
+                        {"Retry-After", "1"}};
+    std::string capacity_body =
+        "Service temporarily unavailable: retained byte or execution "
+        "capacity is full.\n服务暂时不可用：保留字节或执行容量已满。\n";
+    body.swap(capacity_body);
+  }
+
+  RequestCancellationResponse cancellation_response;
+  if (requestCancellationResponse(context_, cancellation_response)) {
+    shared_body.reset();
+    response.status_code = cancellation_response.status_code;
+    response.content_type = "text/plain; charset=utf-8";
+    for (const auto &[name, value] : cancellation_response.headers)
+      response.headers[name] = value;
+    body = std::move(cancellation_response.body);
+  }
+  if (!shared_body && !context_->retainResponseBytes(body.size())) {
+    response.status_code = 503;
+    response.content_type = "text/plain; charset=utf-8";
+    response.headers = {{"Cache-Control", "private, no-store"},
+                        {"Retry-After", "1"}};
+    std::string capacity_body =
+        "Service temporarily unavailable: retained response byte capacity "
+        "is full.\n服务暂时不可用：响应字节容量已满。\n";
+    body.swap(capacity_body);
+  }
+  if (explain_request) {
+    response.headers["Cache-Control"] = "private, no-store, max-age=0";
+    response.headers["Pragma"] = "no-cache";
+  }
+  if (response.status_code >= 400) {
+    const auto cache_control = response.headers.find("Cache-Control");
+    if (cache_control == response.headers.end() ||
+        !hasNoStoreDirective(cache_control->second))
+      response.headers["Cache-Control"] = "private, no-store";
+  }
+
+  const std::size_t body_size =
+      shared_body ? shared_body->content.size() : body.size();
+  auto configure_outgoing = [&](auto &outgoing) {
+    outgoing.keep_alive(incoming.keep_alive() && !state_->stopping.load());
+    outgoing.set(http::field::server,
+                 "SubConverter-Extended/" VERSION " cURL/" LIBCURL_VERSION);
+    outgoing.set(http::field::access_control_allow_origin, "*");
+    if (incoming.find(http::field::access_control_request_headers) !=
+        incoming.end())
+      outgoing.set(http::field::access_control_allow_headers,
+                   incoming[http::field::access_control_request_headers]);
+    outgoing.set("X-Request-ID", request_id_);
+    appendExposeHeader(outgoing, "X-Request-ID");
+    outgoing.result(static_cast<http::status>(response.status_code));
+    for (const auto &[name, value] : response.headers)
+      outgoing.set(name, value);
+    if (!response.content_type.empty())
+      outgoing.set(http::field::content_type, response.content_type);
+    outgoing.set("X-Client-IP", client_address);
+  };
+
+  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      RequestContext::Clock::now() - started_at_);
+  const uint64_t response_bytes =
+      incoming.method() == http::verb::head
+          ? 0
+          : static_cast<uint64_t>(body_size);
+  writeLog(response.status_code >= 500 ? LOG_LEVEL_ERROR : LOG_LEVEL_INFO,
+           "HTTP_RESPONSE_PREPARED method=" +
+               std::string(incoming.method_string()) + " path=" +
+               requestPathForLog(std::string(incoming.target()).substr(
+                   0, incoming.target().find('?'))) +
+               " status=" + std::to_string(response.status_code) +
+               " duration_ms=" +
+               std::to_string(std::max<int64_t>(0, elapsed.count())) +
+               " response_bytes=" + std::to_string(response_bytes) +
+               " response_bytes_known=true");
+
+  if (shared_body) {
+    http::response<http::buffer_body> outgoing{http::status::ok,
+                                               incoming.version()};
+    configure_outgoing(outgoing);
+    outgoing.content_length(body_size);
+    if (incoming.method() == http::verb::head || body_size == 0) {
+      outgoing.body().data = nullptr;
+      outgoing.body().size = 0;
+    } else {
+      outgoing.body().data =
+          const_cast<char *>(shared_body->content.data());
+      outgoing.body().size = body_size;
+    }
+    outgoing.body().more = false;
+    writeSharedResponse(std::move(outgoing), std::move(shared_body));
+  } else {
+    http::response<http::string_body> outgoing{http::status::ok,
+                                               incoming.version()};
+    configure_outgoing(outgoing);
+    outgoing.body() = std::move(body);
+    outgoing.prepare_payload();
+    if (incoming.method() == http::verb::head) {
+      outgoing.body().clear();
+      outgoing.content_length(body_size);
+    }
+    writeResponse(std::move(outgoing));
+  }
+}
+
 void BeastSession::writeImmediateError(http::status status,
                                        const std::string &body,
                                        const char *retry_after) {
@@ -762,6 +943,40 @@ void BeastSession::writeResponse(http::response<http::string_body> response) {
                     });
 }
 
+void BeastSession::writeSharedResponse(
+    http::response<http::buffer_body> response,
+    shared_response_body body) {
+  if (finished_.load())
+    return;
+  processing_.store(true, std::memory_order_release);
+  context_->setCurrentStage(RequestStage::Send);
+  sending_started_at_ = RequestContext::Clock::now();
+  response_status_ = response.result_int();
+  auto retained_response =
+      std::make_shared<http::response<http::buffer_body>>(
+          std::move(response));
+  auto serializer =
+      std::make_shared<http::response_serializer<http::buffer_body>>(
+          *retained_response);
+  const bool keep_alive = retained_response->keep_alive();
+  if (context_->deadline() != RequestContext::Clock::time_point::max()) {
+    const auto now = RequestContext::Clock::now();
+    if (now >= context_->deadline())
+      stream_.expires_after(std::chrono::milliseconds(250));
+    else
+      stream_.expires_at(context_->deadline());
+  } else {
+    stream_.expires_after(std::chrono::seconds(15));
+  }
+  http::async_write(
+      stream_, *serializer,
+      [self = shared_from_this(), retained_response, serializer,
+       body = std::move(body), keep_alive](beast::error_code error,
+                                           std::size_t bytes) {
+        self->onWrite(keep_alive, error, bytes);
+      });
+}
+
 void BeastSession::onWrite(bool keep_alive, beast::error_code error,
                            std::size_t) {
   if (context_) {
@@ -788,6 +1003,7 @@ void BeastSession::onWrite(bool keep_alive, beast::error_code error,
   context_.reset();
   request_id_.clear();
   admission_bytes_ = 0;
+  async_completed_.store(false, std::memory_order_release);
   resetParser();
   read();
 }
@@ -829,8 +1045,9 @@ int startBeastWebServer(WebServer &server, listener_args *args) {
   state->stop();
   if (args->shutdown_callback)
     args->shutdown_callback();
-  state->handlers.stop();
   state->handlers.join();
+  if (args->drain_callback)
+    args->drain_callback();
   for (int attempt = 0; attempt < 300 && state->active_sessions.load() != 0;
        ++attempt)
     std::this_thread::sleep_for(std::chrono::milliseconds(10));

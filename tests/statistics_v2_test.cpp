@@ -989,7 +989,21 @@ void requestLifecycleContextTest() {
              1 &&
              metrics.stage_nanoseconds[static_cast<std::size_t>(
                  RequestStage::Parse)] > 0,
-         "lifecycle metrics record bounded stage timings");
+          "lifecycle metrics record bounded stage timings");
+  expect(metrics.successful_owners == 1 &&
+             metrics.successful_responses == 1,
+         "lifecycle metrics record successful owner goodput");
+  expect(requestStageLatencyQuantileMicroseconds(
+             metrics, RequestStage::Parse, 50, 100) > 0 &&
+             requestStageLatencyQuantileMicroseconds(
+                 metrics, RequestStage::Parse, 95, 100) >=
+                 requestStageLatencyQuantileMicroseconds(
+                     metrics, RequestStage::Parse, 50, 100) &&
+             requestStageLatencyQuantileMicroseconds(
+                 metrics, RequestStage::Parse, 99, 100) >=
+                 requestStageLatencyQuantileMicroseconds(
+                     metrics, RequestStage::Parse, 95, 100),
+         "lifecycle metrics expose monotonic latency quantiles");
 }
 
 } // namespace

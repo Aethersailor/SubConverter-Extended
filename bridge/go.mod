@@ -1,9 +1,9 @@
 module github.com/aethersailor/subconverter-extended/bridge
 
-go 1.25.5
+go 1.26.0
 
 require (
-	github.com/enfein/mieru/v3 v3.35.0
+	github.com/enfein/mieru/v3 v3.36.0
 	github.com/metacubex/mihomo v1.19.30
 	google.golang.org/protobuf v1.36.12
 )
@@ -41,7 +41,7 @@ require (
 	gitlab.com/go-extension/aes-ccm v0.0.0-20230221065045-e58665ef23c7 // indirect
 	gitlab.com/yawning/bsaes.git v0.0.0-20190805113838-0a714cd429ec // indirect
 	golang.org/x/crypto v0.55.0 // indirect
-	golang.org/x/exp v0.0.0-20260813180055-c1d0aacb2297 // indirect
+	golang.org/x/exp v0.0.0-20260820142414-ca536658362e // indirect
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect

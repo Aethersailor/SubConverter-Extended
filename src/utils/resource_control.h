@@ -156,12 +156,113 @@ computeConservativeResourceBudget(double effective_cpu,
           static_cast<uint32_t>(scaled)};
 }
 
+inline uint64_t governorDecreaseCpuPermits(uint64_t current) noexcept {
+  current = std::max<uint64_t>(1, current);
+  if (current == 1)
+    return 1;
+  return std::max<uint64_t>(1, current - std::max<uint64_t>(1, current / 4));
+}
+
+inline uint64_t governorRecoverCpuPermits(uint64_t current,
+                                          uint64_t maximum) noexcept {
+  maximum = std::max<uint64_t>(1, maximum);
+  return std::min<uint64_t>(maximum, std::max<uint64_t>(1, current) + 1);
+}
+
+struct ResourceGovernorState {
+  uint64_t current_permits = 1;
+  uint32_t stable_samples = 0;
+  uint32_t idle_samples = 0;
+};
+
+struct ResourceGovernorInput {
+  uint64_t maximum_permits = 1;
+  bool force_max = false;
+  bool telemetry_valid = true;
+  bool memory_pressure = false;
+  bool memory_event = false;
+  bool active = false;
+};
+
+struct ResourceGovernorDecision {
+  uint64_t permits = 1;
+  const char *state = "max_ready";
+  const char *reason = "hardware_limit_idle";
+  bool pressure_fallback = false;
+};
+
+inline ResourceGovernorDecision governorStep(
+    ResourceGovernorState &state,
+    const ResourceGovernorInput &input) noexcept {
+  const uint64_t maximum = std::max<uint64_t>(1, input.maximum_permits);
+  state.current_permits =
+      std::clamp<uint64_t>(state.current_permits, 1, maximum);
+  ResourceGovernorDecision decision;
+  if (!input.telemetry_valid) {
+    state.current_permits =
+        governorDecreaseCpuPermits(state.current_permits);
+    state.stable_samples = 0;
+    state.idle_samples = 0;
+    decision.state = "pressure_guarded";
+    decision.reason = "telemetry_unavailable";
+    decision.pressure_fallback = true;
+  } else if (input.memory_pressure || input.memory_event) {
+    state.current_permits =
+        governorDecreaseCpuPermits(state.current_permits);
+    state.stable_samples = 0;
+    state.idle_samples = 0;
+    decision.state = "pressure_guarded";
+    decision.reason = input.memory_event ? "memory_event"
+                                         : "memory_pressure";
+    decision.pressure_fallback = true;
+  } else if (state.current_permits < maximum) {
+    if (input.force_max || input.active) {
+      if (++state.stable_samples >= 2) {
+        state.current_permits = governorRecoverCpuPermits(
+            state.current_permits, maximum);
+        state.stable_samples = 0;
+      }
+      state.idle_samples = 0;
+      decision.state = "recovering";
+      decision.reason = input.active ? "stable_throughput"
+                                     : "force_max_idle_restore";
+    } else {
+      state.stable_samples = 0;
+      if (++state.idle_samples >= 30 && state.current_permits > 1) {
+        --state.current_permits;
+        state.idle_samples = 0;
+      }
+      decision.state = "idle_reduced";
+      decision.reason = "adaptive_idle";
+    }
+  } else {
+    state.stable_samples = 0;
+    decision.state = "max_ready";
+    decision.reason = input.active ? "hardware_limit_active"
+                                   : "hardware_limit_idle";
+    if (!input.force_max && !input.active &&
+        ++state.idle_samples >= 30 && state.current_permits > 1) {
+      --state.current_permits;
+      state.idle_samples = 0;
+      decision.state = "idle_reduced";
+      decision.reason = "adaptive_idle";
+    } else if (input.active) {
+      state.idle_samples = 0;
+    }
+  }
+  decision.permits = state.current_permits;
+  return decision;
+}
+
 struct ResourceControlSnapshot {
   std::string mode = "compat";
+  std::string effective_mode = "compat";
   std::string source = "builtin-default";
   std::string controller_state = "compat";
+  std::string controller_reason = "compat";
   std::string hardware_fingerprint;
   uint64_t sample_count = 0;
+  uint64_t sample_age_ms = 0;
   uint64_t affinity_cpus = 0;
   uint64_t cpuset_cpus = 0;
   uint64_t cpu_quota_millis = 0;
@@ -176,33 +277,52 @@ struct ResourceControlSnapshot {
   uint64_t nofile_hard = 0;
   uint64_t pids_current = 0;
   uint64_t pids_max = 0;
+  uint64_t open_fds = 0;
+  uint64_t memory_peak_bytes = 0;
+  uint64_t memory_events_high = 0;
+  uint64_t memory_events_max = 0;
+  uint64_t memory_events_oom = 0;
+  uint64_t memory_events_oom_kill = 0;
+  uint64_t memory_events_sock_throttled = 0;
+  uint64_t cpu_psi_some_milli_percent = 0;
+  uint64_t cpu_psi_full_milli_percent = 0;
   uint64_t memory_psi_some_milli_percent = 0;
   uint64_t memory_psi_full_milli_percent = 0;
   uint64_t io_psi_some_milli_percent = 0;
   uint64_t suggested_cpu_permits = 1;
+  uint64_t max_cpu_permits = 1;
   uint64_t configured_cpu_cap = 1;
   uint64_t suggested_active_flows = 16;
   uint64_t suggested_outbound_connections = 16;
+  uint64_t configured_pending_connections = 0;
+  uint64_t configured_server_threads = 0;
+  uint64_t configured_deadline_ms = 0;
+  std::string hardware_pin;
+  bool cpu_pressure_available = false;
+  bool memory_pressure_available = false;
+  bool io_pressure_available = false;
+  bool memory_events_available = false;
+  bool memory_events_supported = false;
+  bool memory_events_sample_valid = false;
+  bool open_fds_available = false;
+  bool cgroup_scope_known = true;
+  bool hardware_detected = false;
+  bool hardware_pin_matched = false;
+  bool startup_budget_applied = false;
+  // Deprecated compatibility aliases. New code must use the explicit fields
+  // above; no persisted capacity curve is learned or loaded.
   bool hardware_complete = false;
   bool curve_valid = false;
   bool permits_applied = false;
   bool pressure_fallback = false;
 };
 
-inline bool resourceCurveMatches(
+inline bool hardwarePinMatches(
     const ResourceControlSnapshot &snapshot,
-    std::string_view validated_hardware_fingerprint) noexcept {
-  return !validated_hardware_fingerprint.empty() &&
-         snapshot.hardware_complete &&
-         snapshot.hardware_fingerprint == validated_hardware_fingerprint;
-}
-
-inline bool forceMaxHardwareAccepted(
-    const ResourceControlSnapshot &snapshot,
-    std::string_view validated_hardware_fingerprint) noexcept {
-  return snapshot.hardware_complete &&
-         (validated_hardware_fingerprint.empty() ||
-          resourceCurveMatches(snapshot, validated_hardware_fingerprint));
+    std::string_view configured_hardware_pin) noexcept {
+  return configured_hardware_pin.empty() ||
+         (snapshot.hardware_detected &&
+          snapshot.hardware_fingerprint == configured_hardware_pin);
 }
 
 void configureResourceControl(Settings &settings);

@@ -466,6 +466,15 @@ template <typename Writer> void writeRequestLifecycle(Writer &writer) {
   }
   writer.EndObject();
 
+  writer.Key("successful_owners");
+  writer.Uint64(snapshot.successful_owners);
+  writer.Key("successful_responses");
+  writer.Uint64(snapshot.successful_responses);
+  writer.Key("work_admitted");
+  writer.Uint64(snapshot.work_admitted);
+  writer.Key("server_capacity_failure_after_admission");
+  writer.Uint64(snapshot.server_capacity_failure_after_admission);
+
   writer.Key("stages");
   writer.StartObject();
   for (std::size_t index = 0; index < snapshot.stage_nanoseconds.size();
@@ -477,6 +486,15 @@ template <typename Writer> void writeRequestLifecycle(Writer &writer) {
     writer.Uint64(snapshot.stage_nanoseconds[index] / 1000);
     writer.Key("samples");
     writer.Uint64(snapshot.stage_samples[index]);
+    writer.Key("p50_microseconds");
+    writer.Uint64(requestStageLatencyQuantileMicroseconds(
+        snapshot, stage, 50, 100));
+    writer.Key("p95_microseconds");
+    writer.Uint64(requestStageLatencyQuantileMicroseconds(
+        snapshot, stage, 95, 100));
+    writer.Key("p99_microseconds");
+    writer.Uint64(requestStageLatencyQuantileMicroseconds(
+        snapshot, stage, 99, 100));
     writer.EndObject();
   }
   writer.EndObject();
@@ -551,10 +569,24 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.StartObject();
   writer.Key("available");
   writer.Bool(fetch.available);
+  writer.Key("wakeup_available");
+  writer.Bool(fetch.wakeup_available);
   writer.Key("pending");
   writer.Uint64(fetch.pending);
   writer.Key("active");
   writer.Uint64(fetch.active);
+  writer.Key("running");
+  writer.Uint64(fetch.running);
+  writer.Key("handle_window");
+  writer.Uint64(fetch.handle_window);
+  writer.Key("active_connection_limit");
+  writer.Uint64(fetch.active_connection_limit);
+  writer.Key("open_connection_limit");
+  writer.Uint64(fetch.open_connection_limit);
+  writer.Key("connection_cache_limit");
+  writer.Uint64(fetch.connection_cache_limit);
+  writer.Key("recoverable_retry_limit");
+  writer.Uint64(fetch.recoverable_retry_limit);
   writer.Key("buffered_bytes");
   writer.Uint64(fetch.buffered_bytes);
   writer.EndObject();
@@ -569,6 +601,19 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Key("rejected");
   writer.Uint64(retained.rejected);
   writer.EndObject();
+  const SubscriptionCacheAdmissionSnapshot cache_admission =
+      subscriptionCacheAdmissionSnapshot();
+  writer.Key("subscription_cache_admission");
+  writer.StartObject();
+  writer.Key("enabled");
+  writer.Bool(cache_admission.enabled);
+  writer.Key("entries");
+  writer.Uint64(cache_admission.entries);
+  writer.Key("first_seen_bypassed_total");
+  writer.Uint64(cache_admission.first_seen_bypassed_total);
+  writer.Key("reuse_admitted_total");
+  writer.Uint64(cache_admission.reuse_admitted_total);
+  writer.EndObject();
   const ResponseMicroCacheSnapshot response_cache =
       responseMicroCacheSnapshot();
   writer.Key("response_microcache");
@@ -579,6 +624,50 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(response_cache.bytes);
   writer.Key("max_bytes");
   writer.Uint64(response_cache.max_bytes);
+  writer.EndObject();
+  const SubscriptionSingleflightSnapshot singleflight =
+      subscriptionSingleflightSnapshot();
+  writer.Key("subscription_singleflight");
+  writer.StartObject();
+  writer.Key("active_owners");
+  writer.Uint64(singleflight.active_owners);
+  writer.Key("waiting_followers");
+  writer.Uint64(singleflight.waiting_followers);
+  writer.Key("owners_created_total");
+  writer.Uint64(singleflight.owners_created_total);
+  writer.Key("followers_attached_total");
+  writer.Uint64(singleflight.followers_attached_total);
+  writer.Key("followers_cancelled_total");
+  writer.Uint64(singleflight.followers_cancelled_total);
+  writer.Key("owners_cancelled_no_consumers_total");
+  writer.Uint64(singleflight.owners_cancelled_no_consumers_total);
+  writer.Key("owner_flow_rejected_total");
+  writer.Uint64(singleflight.owner_flow_rejected_total);
+  writer.EndObject();
+  const SubscriptionOwnerAdmissionSnapshot owner_admission =
+      subscriptionOwnerAdmissionSnapshot();
+  writer.Key("owner_admission");
+  writer.StartObject();
+  writer.Key("source");
+  writer.String(owner_admission.source.c_str());
+  writer.Key("waiting_entries");
+  writer.Uint64(owner_admission.waiting_entries);
+  writer.Key("waiting_bytes");
+  writer.Uint64(owner_admission.waiting_bytes);
+  writer.Key("active");
+  writer.Uint64(owner_admission.active);
+  writer.Key("accepted_total");
+  writer.Uint64(owner_admission.accepted_total);
+  writer.Key("rejected_total");
+  writer.Uint64(owner_admission.rejected_total);
+  writer.Key("cancelled_total");
+  writer.Uint64(owner_admission.cancelled_total);
+  writer.Key("max_wait_entries");
+  writer.Uint64(owner_admission.max_wait_entries);
+  writer.Key("max_wait_bytes");
+  writer.Uint64(owner_admission.max_wait_bytes);
+  writer.Key("oldest_wait_ms");
+  writer.Uint64(owner_admission.oldest_wait_ms);
   writer.EndObject();
   const WorkloadSchedulerSnapshot scheduler = conversionSchedulerSnapshot();
   writer.Key("conversion_scheduler");
@@ -595,6 +684,36 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(scheduler.rejected);
   writer.Key("cancelled");
   writer.Uint64(scheduler.cancelled);
+  writer.Key("oldest_queued_age_ms");
+  writer.Uint64(scheduler.oldest_queued_age_ms);
+  writer.EndObject();
+  const WorkloadSchedulerSnapshot legacy_flow = legacyRequestFlowSnapshot();
+  writer.Key("legacy_request_flow");
+  writer.StartObject();
+  writer.Key("queued_entries");
+  writer.Uint64(legacy_flow.queued_entries);
+  writer.Key("queued_bytes");
+  writer.Uint64(legacy_flow.queued_bytes);
+  writer.Key("active");
+  writer.Uint64(legacy_flow.active);
+  writer.Key("accepted");
+  writer.Uint64(legacy_flow.accepted);
+  writer.Key("rejected");
+  writer.Uint64(legacy_flow.rejected);
+  writer.Key("cancelled");
+  writer.Uint64(legacy_flow.cancelled);
+  writer.Key("oldest_queued_age_ms");
+  writer.Uint64(legacy_flow.oldest_queued_age_ms);
+  writer.EndObject();
+  const CpuPermitSnapshot cpu_permits = conversionCpuPermitSnapshot();
+  writer.Key("cpu_permits");
+  writer.StartObject();
+  writer.Key("limit");
+  writer.Uint64(cpu_permits.limit);
+  writer.Key("active");
+  writer.Uint64(cpu_permits.active);
+  writer.Key("waiting");
+  writer.Uint64(cpu_permits.waiting);
   writer.EndObject();
   const RequestAdmissionSnapshot admission = requestAdmissionSnapshot();
   writer.Key("request_admission");
@@ -617,14 +736,20 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.StartObject();
   writer.Key("mode");
   writer.String(resources.mode.c_str());
+  writer.Key("effective_mode");
+  writer.String(resources.effective_mode.c_str());
   writer.Key("source");
   writer.String(resources.source.c_str());
   writer.Key("controller_state");
   writer.String(resources.controller_state.c_str());
+  writer.Key("controller_reason");
+  writer.String(resources.controller_reason.c_str());
   writer.Key("hardware_fingerprint");
   writer.String(resources.hardware_fingerprint.c_str());
   writer.Key("sample_count");
   writer.Uint64(resources.sample_count);
+  writer.Key("sample_age_ms");
+  writer.Uint64(resources.sample_age_ms);
   writer.Key("effective_cpu_millis");
   writer.Uint64(resources.effective_cpu_millis);
   writer.Key("affinity_cpus");
@@ -651,6 +776,24 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(resources.pids_current);
   writer.Key("pids_max");
   writer.Uint64(resources.pids_max);
+  writer.Key("open_fds");
+  writer.Uint64(resources.open_fds);
+  writer.Key("memory_peak_bytes");
+  writer.Uint64(resources.memory_peak_bytes);
+  writer.Key("memory_events_high");
+  writer.Uint64(resources.memory_events_high);
+  writer.Key("memory_events_max");
+  writer.Uint64(resources.memory_events_max);
+  writer.Key("memory_events_oom");
+  writer.Uint64(resources.memory_events_oom);
+  writer.Key("memory_events_oom_kill");
+  writer.Uint64(resources.memory_events_oom_kill);
+  writer.Key("memory_events_sock_throttled");
+  writer.Uint64(resources.memory_events_sock_throttled);
+  writer.Key("cpu_psi_some_milli_percent");
+  writer.Uint64(resources.cpu_psi_some_milli_percent);
+  writer.Key("cpu_psi_full_milli_percent");
+  writer.Uint64(resources.cpu_psi_full_milli_percent);
   writer.Key("memory_psi_some_milli_percent");
   writer.Uint64(resources.memory_psi_some_milli_percent);
   writer.Key("memory_psi_full_milli_percent");
@@ -659,12 +802,37 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(resources.io_psi_some_milli_percent);
   writer.Key("suggested_cpu_permits");
   writer.Uint64(resources.suggested_cpu_permits);
+  writer.Key("max_cpu_permits");
+  writer.Uint64(resources.max_cpu_permits);
   writer.Key("configured_cpu_cap");
   writer.Uint64(resources.configured_cpu_cap);
   writer.Key("suggested_active_flows");
   writer.Uint64(resources.suggested_active_flows);
   writer.Key("suggested_outbound_connections");
   writer.Uint64(resources.suggested_outbound_connections);
+  writer.Key("telemetry_capabilities");
+  writer.StartObject();
+  writer.Key("cpu_pressure");
+  writer.Bool(resources.cpu_pressure_available);
+  writer.Key("memory_pressure");
+  writer.Bool(resources.memory_pressure_available);
+  writer.Key("io_pressure");
+  writer.Bool(resources.io_pressure_available);
+  writer.Key("memory_events");
+  writer.Bool(resources.memory_events_supported);
+  writer.Key("memory_events_sample_valid");
+  writer.Bool(resources.memory_events_sample_valid);
+  writer.Key("open_fds");
+  writer.Bool(resources.open_fds_available);
+  writer.Key("cgroup_scope_known");
+  writer.Bool(resources.cgroup_scope_known);
+  writer.EndObject();
+  writer.Key("hardware_detected");
+  writer.Bool(resources.hardware_detected);
+  writer.Key("hardware_pin_matched");
+  writer.Bool(resources.hardware_pin_matched);
+  writer.Key("startup_budget_applied");
+  writer.Bool(resources.startup_budget_applied);
   writer.Key("hardware_complete");
   writer.Bool(resources.hardware_complete);
   writer.Key("curve_valid");
@@ -766,15 +934,33 @@ void tick() {
 
 void recordSubscriptionConversion(const Request &request,
                                   uint64_t rule_conversions) {
+  recordSubscriptionConversion(prepareSubscriptionConversionMetadata(request),
+                               rule_conversions);
+}
+
+SubscriptionConversionMetadata
+prepareSubscriptionConversionMetadata(const Request &request) {
+  SubscriptionConversionMetadata metadata;
   if (!effectiveSettings().statisticsEnabled || request.method != "GET")
-    return;
+    return metadata;
   const GeoLocation location = geoLocation(request, g_engine.geo);
+  metadata.country = location.country;
+  metadata.china_region = location.china_region;
+  metadata.eligible = true;
+  return metadata;
+}
+
+void recordSubscriptionConversion(
+    const SubscriptionConversionMetadata &metadata,
+    uint64_t rule_conversions) {
+  if (!metadata.eligible)
+    return;
   {
     std::lock_guard<std::mutex> lock(g_engine.mutex);
     if (!g_engine.initialized)
       return;
-    g_engine.core.record(nowSeconds(), location.country,
-                         location.china_region, rule_conversions);
+    g_engine.core.record(nowSeconds(), metadata.country,
+                         metadata.china_region, rule_conversions);
   }
 }
 

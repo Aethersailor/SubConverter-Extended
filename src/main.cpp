@@ -200,6 +200,11 @@ void begin_runtime_shutdown() {
   requestRulesetExecutorShutdown();
 }
 
+void drain_runtime_shutdown() {
+  shutdownRulesetExecutor();
+  shutdownConversionScheduler();
+}
+
 int main(int argc, char *argv[]) {
 #ifdef _WIN32
   const UINT original_console_output_code_page = GetConsoleOutputCP();
@@ -354,13 +359,25 @@ int main(int argc, char *argv[]) {
                               return "ok\n";
                             });
 
-  webServer.append_response("GET", "/sub", "text/plain;charset=utf-8",
-                            global.statisticsEnabled ? subconverterTracked
-                                                     : subconverter);
-
-  webServer.append_response("HEAD", "/sub", "text/plain",
-                            global.statisticsEnabled ? subconverterTracked
-                                                     : subconverter);
+  if (global.resourceControlEffective == "compat") {
+    webServer.append_response(
+        "GET", "/sub", "text/plain;charset=utf-8",
+        global.statisticsEnabled ? subconverterTracked : subconverter);
+    webServer.append_response(
+        "HEAD", "/sub", "text/plain",
+        global.statisticsEnabled ? subconverterTracked : subconverter);
+  } else {
+    webServer.append_async_response(
+        "GET", "/sub", "text/plain;charset=utf-8",
+        global.statisticsEnabled ? subconverterTracked : subconverter,
+        global.statisticsEnabled ? subconverterTrackedAsync
+                                 : subconverterAsync);
+    webServer.append_async_response(
+        "HEAD", "/sub", "text/plain",
+        global.statisticsEnabled ? subconverterTracked : subconverter,
+        global.statisticsEnabled ? subconverterTrackedAsync
+                                 : subconverterAsync);
+  }
 
   webServer.append_response("GET", "/getruleset", "text/plain;charset=utf-8",
                             getRuleset);
@@ -380,7 +397,7 @@ int main(int argc, char *argv[]) {
                         global.maxPendingConns, global.maxConcurThreads,
                         cron_tick_caller,       200,
                         static_cast<uint32_t>(global.requestDeadlineMs),
-                        begin_runtime_shutdown};
+                        begin_runtime_shutdown, drain_runtime_shutdown};
   // std::cout<<"Serving HTTP @
   // http://"<<listen_address<<":"<<listen_port<<std::endl;
   writeLog(LOG_LEVEL_INFO,

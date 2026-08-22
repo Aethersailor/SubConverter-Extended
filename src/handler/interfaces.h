@@ -25,6 +25,9 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS);
 
 std::string subconverter(RESPONSE_CALLBACK_ARGS);
 std::string subconverterTracked(RESPONSE_CALLBACK_ARGS);
+void subconverterAsync(Request request, async_response_completion completion);
+void subconverterTrackedAsync(Request request,
+                              async_response_completion completion);
 std::string simpleToClashR(RESPONSE_CALLBACK_ARGS);
 std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS);
 
