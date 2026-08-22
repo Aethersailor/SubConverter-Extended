@@ -682,6 +682,9 @@ class FixtureHandler(BaseHTTPRequestHandler):
     stash_legacy_text_fetch_count = 0
     external_valid_count = 0
     get_request_count = 0
+    subscription_request_count = 0
+    recoverable_retry_request_count = 0
+    recoverable_retry_failures = 0
     slow_subscription_request_count = 0
     webget_probe_counts: dict[str, int] = {}
     counter_lock = threading.Lock()
@@ -699,6 +702,19 @@ class FixtureHandler(BaseHTTPRequestHandler):
         request_path = request_url.path
         request_query = urllib.parse.parse_qs(request_url.query)
         if request_path == "/subscription.txt":
+            with type(self).counter_lock:
+                type(self).subscription_request_count += 1
+            body = ENCODED_SUBSCRIPTION.encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/recoverable-retry-subscription.txt":
+            with type(self).counter_lock:
+                type(self).recoverable_retry_request_count += 1
+                attempt = type(self).recoverable_retry_request_count
+                failures = type(self).recoverable_retry_failures
+            if attempt <= failures:
+                self.close_connection = True
+                self.connection.close()
+                return
             body = ENCODED_SUBSCRIPTION.encode()
             content_type = "text/plain; charset=utf-8"
         elif request_path == "/select-health.toml":
@@ -1228,6 +1244,9 @@ def fixture_server():
     FixtureHandler.stash_legacy_text_fetch_count = 0
     FixtureHandler.external_valid_count = 0
     FixtureHandler.get_request_count = 0
+    FixtureHandler.subscription_request_count = 0
+    FixtureHandler.recoverable_retry_request_count = 0
+    FixtureHandler.recoverable_retry_failures = 0
     FixtureHandler.slow_subscription_request_count = 0
     FixtureHandler.webget_probe_counts = {}
     FixtureHandler.stash_invalid_bases = {}
@@ -1793,6 +1812,57 @@ def owned_webget_boundary_baseline(helper: Path, fixture_base: str) -> None:
                 f"owned webGet TTL hit contract changed: requests={hit_requests}, "
                 f"result={hit!r}"
             )
+
+
+def fetch_shutdown_construction_race_baseline(helper: Path) -> None:
+    with tempfile.TemporaryDirectory(
+        dir=REPOSITORY / "build", prefix="fetch-shutdown-race-"
+    ) as temporary:
+        temporary_path = Path(temporary)
+        pref = temporary_path / "pref.toml"
+        pref.write_text(
+            (COMPAT_FIXTURES / "legacy-pref.toml").read_text(
+                encoding="utf-8"
+            ),
+            encoding="utf-8",
+            newline="\n",
+        )
+        environment = os.environ.copy()
+        environment["SUBCONVERTER_FETCH_ENGINE"] = "multi"
+        for iteration in range(20):
+            completed = subprocess.run(
+                [
+                    str(helper),
+                    "--fetch-shutdown-race",
+                    str(pref),
+                ],
+                cwd=temporary_path,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+            )
+            if completed.returncode != 0:
+                raise AssertionError(
+                    "fetch construction/shutdown race did not join: "
+                    f"iteration={iteration} exit={completed.returncode} "
+                    f"stdout={completed.stdout!r} "
+                    f"stderr={completed.stderr[-2000:]!r}"
+                )
+            snapshot = json.loads(completed.stdout)
+            if snapshot != {
+                "available": False,
+                "pending": 0,
+                "active": 0,
+                "running": 0,
+            }:
+                raise AssertionError(
+                    "fetch construction/shutdown race leaked runtime state: "
+                    f"iteration={iteration} snapshot={snapshot!r}"
+                )
 
 
 
@@ -11609,10 +11679,12 @@ def resource_control_execution_path_baseline(binary: Path) -> None:
         resources = dashboard["resource_control"]
         conversion = dashboard["conversion_scheduler"]
         flow = dashboard["legacy_request_flow"]
+        cache_admission = dashboard["subscription_cache_admission"]
         if (
             resources["effective_mode"] != "compat"
             or conversion["accepted"] < 1
             or flow["accepted"] != 0
+            or cache_admission["enabled"] is not False
         ):
             raise AssertionError(
                 "compat request did not stay on the bounded synchronous path: "
@@ -11684,6 +11756,332 @@ def force_max_controller_runtime_baseline(binary: Path) -> None:
                 f"resources={resources!r} permits={permits!r} "
                 f"conversion={conversion!r} flow={flow!r}"
             )
+
+
+def force_max_subscription_cache_admission_baseline(
+    binary: Path, fixture_base: str
+) -> None:
+    dashboard_headers = {
+        "Authorization": "Basic "
+        + base64.b64encode(
+            b"fixture-admin:fixture-dashboard-secret"
+        ).decode()
+    }
+    with running_service(
+        binary,
+        statistics=True,
+        environment={
+            "SUBCONVERTER_RESOURCE_CONTROL": "force_max",
+            "SUBCONVERTER_RESPONSE_CACHE_TTL": "0",
+        },
+    ) as base_url:
+        status, body, _ = request(
+            base_url, "/dashboard/data", headers=dashboard_headers
+        )
+        before = json.loads(body)
+        admission_before = before["subscription_cache_admission"]
+        params = {
+            "target": "mixed",
+            "url": fixture_base + "/subscription.txt?cache-admission=repeat",
+            "config": DISABLE_RULEGEN_CONFIG,
+            "list": "true",
+        }
+        with FixtureHandler.counter_lock:
+            upstream_before = FixtureHandler.subscription_request_count
+        responses = [request(base_url, "/sub", params) for _ in range(3)]
+        if any(status != 200 or b"Smoke" not in content
+               for status, content, _ in responses):
+            raise AssertionError(
+                f"force_max cache admission responses failed: {responses!r}"
+            )
+        with FixtureHandler.counter_lock:
+            repeated_upstream = (
+                FixtureHandler.subscription_request_count - upstream_before
+            )
+        if repeated_upstream != 2:
+            raise AssertionError(
+                "two-hit cache admission did not bypass once then persist: "
+                f"upstream={repeated_upstream}"
+            )
+
+        for index in range(8):
+            unique = dict(params)
+            unique["url"] = (
+                fixture_base
+                + f"/subscription.txt?cache-admission=unique-{index}"
+            )
+            status, content, _ = request(base_url, "/sub", unique)
+            if status != 200 or b"Smoke" not in content:
+                raise AssertionError(
+                    f"unique cache admission request {index} failed"
+                )
+        with FixtureHandler.counter_lock:
+            total_upstream = (
+                FixtureHandler.subscription_request_count - upstream_before
+            )
+        if total_upstream != 10:
+            raise AssertionError(
+                f"unique cache admission changed upstream count: {total_upstream}"
+            )
+
+        FixtureHandler.slow_subscription_started.clear()
+        FixtureHandler.slow_subscription_release.clear()
+        concurrent_params = dict(params)
+        concurrent_params["url"] = (
+            fixture_base
+            + "/slow-subscription.txt?cache-admission=concurrent-reuse"
+        )
+        concurrent_responses: list[tuple[int, bytes, dict[str, str]]] = []
+
+        def run_concurrent_cache_request(
+            request_params: dict[str, str]
+        ) -> None:
+            concurrent_responses.append(
+                request(base_url, "/sub", request_params)
+            )
+
+        with FixtureHandler.counter_lock:
+            slow_upstream_before = FixtureHandler.slow_subscription_request_count
+        follower_params = dict(concurrent_params)
+        follower_params["emoji"] = "true"
+        owner = threading.Thread(
+            target=run_concurrent_cache_request, args=(concurrent_params,)
+        )
+        follower = threading.Thread(
+            target=run_concurrent_cache_request, args=(follower_params,)
+        )
+        try:
+            owner.start()
+            if not FixtureHandler.slow_subscription_started.wait(timeout=10):
+                raise AssertionError(
+                    "cache admission owner did not reach slow upstream"
+                )
+            follower.start()
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                _, dashboard_body, _ = request(
+                    base_url, "/dashboard/data", headers=dashboard_headers
+                )
+                current = json.loads(dashboard_body)[
+                    "subscription_cache_admission"
+                ]
+                if (
+                    int(current["reuse_admitted_total"])
+                    - int(admission_before["reuse_admitted_total"])
+                    >= 2
+                ):
+                    break
+                time.sleep(0.02)
+            else:
+                raise AssertionError(
+                    "concurrent follower did not request cache persistence"
+                )
+        finally:
+            FixtureHandler.slow_subscription_release.set()
+            owner.join(timeout=15)
+            follower.join(timeout=15)
+        if owner.is_alive() or follower.is_alive():
+            raise AssertionError("concurrent cache admission requests hung")
+        cached_response = request(base_url, "/sub", concurrent_params)
+        concurrent_responses.append(cached_response)
+        if any(
+            response_status != 200 or b"Smoke" not in response_body
+            for response_status, response_body, _ in concurrent_responses
+        ):
+            raise AssertionError(
+                "concurrent cache persistence responses failed: "
+                f"{concurrent_responses!r}"
+            )
+        with FixtureHandler.counter_lock:
+            concurrent_upstream = (
+                FixtureHandler.slow_subscription_request_count
+                - slow_upstream_before
+            )
+        if concurrent_upstream != 1:
+            raise AssertionError(
+                "admitted follower did not persist the shared fetch: "
+                f"upstream={concurrent_upstream}"
+            )
+
+        time.sleep(1.1)
+        status, body, _ = request(
+            base_url, "/dashboard/data", headers=dashboard_headers
+        )
+        after = json.loads(body)
+        admission = after["subscription_cache_admission"]
+        outbound = after["outbound_fetch"]
+        if (
+            status != 200
+            or admission["enabled"] is not True
+            or int(admission["first_seen_bypassed_total"])
+            - int(admission_before["first_seen_bypassed_total"])
+            != 10
+            or int(admission["reuse_admitted_total"])
+            - int(admission_before["reuse_admitted_total"])
+            != 2
+            or int(after["retained_response_bytes"]["used"]) != 0
+            or int(outbound["active"]) != 0
+            or int(outbound["running"]) != 0
+            or int(outbound["handle_window"])
+            != int(outbound["active_connection_limit"])
+            or int(outbound["open_connection_limit"])
+            < int(outbound["active_connection_limit"])
+            or int(outbound["connection_cache_limit"])
+            > int(outbound["open_connection_limit"])
+            or int(outbound["recoverable_retry_limit"]) != 3
+        ):
+            raise AssertionError(
+                "force_max subscription cache admission counters changed: "
+                f"{admission!r}"
+            )
+
+    compat_params = {
+        "target": "mixed",
+        "url": fixture_base + "/subscription.txt?cache-admission=compat",
+        "config": DISABLE_RULEGEN_CONFIG,
+        "list": "true",
+    }
+    with running_service(
+        binary,
+        statistics=True,
+        environment={
+            "SUBCONVERTER_RESOURCE_CONTROL": "compat",
+            "SUBCONVERTER_RESPONSE_CACHE_TTL": "0",
+        },
+    ) as base_url:
+        with FixtureHandler.counter_lock:
+            upstream_before = FixtureHandler.subscription_request_count
+        responses = [request(base_url, "/sub", compat_params) for _ in range(2)]
+        with FixtureHandler.counter_lock:
+            upstream_delta = (
+                FixtureHandler.subscription_request_count - upstream_before
+            )
+        _, dashboard_body, _ = request(
+            base_url, "/dashboard/data", headers=dashboard_headers
+        )
+        dashboard = json.loads(dashboard_body)
+        admission = dashboard["subscription_cache_admission"]
+        outbound = dashboard["outbound_fetch"]
+        if (
+            upstream_delta != 1
+            or any(status != 200 for status, _, _ in responses)
+            or admission != {
+                "enabled": False,
+                "entries": 0,
+                "first_seen_bypassed_total": 0,
+                "reuse_admitted_total": 0,
+            }
+            or int(outbound["handle_window"]) != 0
+            or int(outbound["active_connection_limit"]) != 64
+            or int(outbound["open_connection_limit"]) != 64
+            or int(outbound["connection_cache_limit"]) != 64
+            or int(outbound["recoverable_retry_limit"]) != 1
+        ):
+            raise AssertionError(
+                "compat cache persistence or isolation changed: "
+                f"upstream={upstream_delta} admission={admission!r}"
+            )
+
+    adaptive_params = dict(compat_params)
+    adaptive_params["url"] = (
+        fixture_base + "/subscription.txt?cache-admission=adaptive"
+    )
+    with running_service(
+        binary,
+        statistics=True,
+        environment={
+            "SUBCONVERTER_RESOURCE_CONTROL": "adaptive",
+            "SUBCONVERTER_RESPONSE_CACHE_TTL": "0",
+        },
+    ) as base_url:
+        with FixtureHandler.counter_lock:
+            upstream_before = FixtureHandler.subscription_request_count
+        responses = [
+            request(base_url, "/sub", adaptive_params) for _ in range(3)
+        ]
+        with FixtureHandler.counter_lock:
+            upstream_delta = (
+                FixtureHandler.subscription_request_count - upstream_before
+            )
+        _, dashboard_body, _ = request(
+            base_url, "/dashboard/data", headers=dashboard_headers
+        )
+        dashboard = json.loads(dashboard_body)
+        admission = dashboard["subscription_cache_admission"]
+        outbound = dashboard["outbound_fetch"]
+        if (
+            upstream_delta != 2
+            or any(
+                status != 200 or b"Smoke" not in content
+                for status, content, _ in responses
+            )
+            or admission["enabled"] is not True
+            or int(admission["first_seen_bypassed_total"]) != 1
+            or int(admission["reuse_admitted_total"]) != 1
+            or int(outbound["handle_window"])
+            != int(outbound["active_connection_limit"])
+            or int(outbound["open_connection_limit"])
+            < int(outbound["active_connection_limit"])
+            or int(outbound["connection_cache_limit"])
+            > int(outbound["open_connection_limit"])
+            or int(outbound["recoverable_retry_limit"]) != 3
+        ):
+            raise AssertionError(
+                "adaptive cache admission did not match force_max: "
+                f"upstream={upstream_delta} admission={admission!r}"
+            )
+
+
+def recoverable_fetch_retry_baseline(binary: Path, fixture_base: str) -> None:
+    cases = (
+        ("force_max", "multi", 200, 4),
+        ("adaptive", "multi", 200, 4),
+        ("force_max", "sync", 200, 4),
+        ("compat", "multi", 400, 2),
+    )
+    for mode, engine, expected_status, expected_attempts in cases:
+        with FixtureHandler.counter_lock:
+            FixtureHandler.recoverable_retry_request_count = 0
+            FixtureHandler.recoverable_retry_failures = 3
+        try:
+            with running_service(
+                binary,
+                environment={
+                    "SUBCONVERTER_RESOURCE_CONTROL": mode,
+                    "SUBCONVERTER_FETCH_ENGINE": engine,
+                    "SUBCONVERTER_RESPONSE_CACHE_TTL": "0",
+                },
+                config_replacements=(
+                    ("cache_subscription = 60", "cache_subscription = 0"),
+                ),
+            ) as base_url:
+                status, content, _ = request(
+                    base_url,
+                    "/sub",
+                    {
+                        "target": "mixed",
+                        "url": fixture_base
+                        + "/recoverable-retry-subscription.txt"
+                        + f"?mode={mode}&engine={engine}",
+                        "config": DISABLE_RULEGEN_CONFIG,
+                        "list": "true",
+                    },
+                )
+            with FixtureHandler.counter_lock:
+                attempts = FixtureHandler.recoverable_retry_request_count
+            if (
+                status != expected_status
+                or attempts != expected_attempts
+                or (expected_status == 200 and b"Smoke" not in content)
+            ):
+                raise AssertionError(
+                    "recoverable retry policy changed: "
+                    f"mode={mode} engine={engine} HTTP={status} "
+                    f"attempts={attempts} body={content!r}"
+                )
+        finally:
+            with FixtureHandler.counter_lock:
+                FixtureHandler.recoverable_retry_failures = 0
 
 
 def force_max_arrival_singleflight_baseline(
@@ -12288,6 +12686,7 @@ def main() -> int:
     settings_provider_interval_compatibility_baseline(settings_snapshot_helper)
     settings_provider_direct_compatibility_baseline(settings_snapshot_helper)
     settings_dashboard_client_ip_baseline(settings_snapshot_helper)
+    fetch_shutdown_construction_race_baseline(settings_snapshot_helper)
 
     with fixture_server() as fixture_base:
         owned_webget_boundary_baseline(settings_snapshot_helper, fixture_base)
@@ -12440,6 +12839,8 @@ def main() -> int:
         conversion_cost_classification_baseline(binary, fixture_base)
         resource_control_execution_path_baseline(binary)
         force_max_controller_runtime_baseline(binary)
+        force_max_subscription_cache_admission_baseline(binary, fixture_base)
+        recoverable_fetch_retry_baseline(binary, fixture_base)
         force_max_arrival_singleflight_baseline(binary, fixture_base)
         ruleset_executor_capacity_baseline(binary, fixture_base)
         getruleset_generation_reload_baseline(binary, fixture_base)

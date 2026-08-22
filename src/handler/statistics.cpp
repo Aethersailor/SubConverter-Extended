@@ -575,6 +575,18 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(fetch.pending);
   writer.Key("active");
   writer.Uint64(fetch.active);
+  writer.Key("running");
+  writer.Uint64(fetch.running);
+  writer.Key("handle_window");
+  writer.Uint64(fetch.handle_window);
+  writer.Key("active_connection_limit");
+  writer.Uint64(fetch.active_connection_limit);
+  writer.Key("open_connection_limit");
+  writer.Uint64(fetch.open_connection_limit);
+  writer.Key("connection_cache_limit");
+  writer.Uint64(fetch.connection_cache_limit);
+  writer.Key("recoverable_retry_limit");
+  writer.Uint64(fetch.recoverable_retry_limit);
   writer.Key("buffered_bytes");
   writer.Uint64(fetch.buffered_bytes);
   writer.EndObject();
@@ -588,6 +600,19 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(retained.limit);
   writer.Key("rejected");
   writer.Uint64(retained.rejected);
+  writer.EndObject();
+  const SubscriptionCacheAdmissionSnapshot cache_admission =
+      subscriptionCacheAdmissionSnapshot();
+  writer.Key("subscription_cache_admission");
+  writer.StartObject();
+  writer.Key("enabled");
+  writer.Bool(cache_admission.enabled);
+  writer.Key("entries");
+  writer.Uint64(cache_admission.entries);
+  writer.Key("first_seen_bypassed_total");
+  writer.Uint64(cache_admission.first_seen_bypassed_total);
+  writer.Key("reuse_admitted_total");
+  writer.Uint64(cache_admission.reuse_admitted_total);
   writer.EndObject();
   const ResponseMicroCacheSnapshot response_cache =
       responseMicroCacheSnapshot();

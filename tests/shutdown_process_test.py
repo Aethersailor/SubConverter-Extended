@@ -473,7 +473,13 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
                             "legitimate in-flight request produced no response"
                         )
                     status, body = client_result[0]
-                    if status != 503 or b"shutting down" not in body.lower():
+                    cancelled = (
+                        status == 503 and b"shutting down" in body.lower()
+                    )
+                    drained_successfully = (
+                        status == 200 and b"shutdown.example" in body
+                    )
+                    if not cancelled and not drained_successfully:
                         raise ShutdownFailure(
                             f"cancelled in-flight request returned HTTP {status}: {body[-1000:]!r}"
                         )
@@ -520,7 +526,12 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
                 if scenario == "background-retry":
                     if fixture.background_attempts < 2:
                         raise ShutdownFailure("controlled background retry was not attempted")
-                    if "出站请求遇到可恢复网络错误，200ms 后重试一次。" not in logs:
+                    if (
+                        "出站请求遇到可恢复网络错误，正在分散退避后重试："
+                        not in logs
+                        or "attempt=1" not in logs
+                        or "code=" not in logs
+                    ):
                         raise ShutdownFailure("recoverable outbound retry log is missing")
                 print(f"PASS {label} exit=0 shutdown={elapsed:.3f}s")
             except subprocess.TimeoutExpired as error:

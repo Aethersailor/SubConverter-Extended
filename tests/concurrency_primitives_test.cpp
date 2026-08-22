@@ -543,6 +543,12 @@ static void testRetainedResponseByteBudget() {
     std::string completed_result(1, 'x');
     assert(context->retainResponseBytes(completed_result.size()));
     assert(retainedResponseByteSnapshot().used == boundary);
+    assert(context->releaseResponseBytes(boundary / 2) == boundary / 2);
+    assert(context->retainedResponseBytes() == boundary / 2);
+    assert(retainedResponseByteSnapshot().used == boundary / 2);
+    assert(context->releaseResponseBytes(boundary) == boundary / 2);
+    assert(context->retainedResponseBytes() == 0);
+    assert(retainedResponseByteSnapshot().used == 0);
   }
   assert(retainedResponseByteSnapshot().used == 0);
   configureRetainedResponseByteLimit(0);

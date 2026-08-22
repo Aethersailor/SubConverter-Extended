@@ -46,19 +46,26 @@ std::string encryptAgeArmored(const std::string &, const std::string &) {
 int main(int argc, char *argv[]) {
   const bool webget_probe =
       argc == 6 && std::string(argv[1]) == "--webget-probe";
+  const bool fetch_shutdown_race =
+      argc == 3 && std::string(argv[1]) == "--fetch-shutdown-race";
   const bool expect_reload_failure =
       argc == 4 && std::string(argv[3]) == "--expect-reload-failure";
-  if ((!webget_probe && argc != 2 && argc != 3 && argc != 4) ||
+  if ((!webget_probe && !fetch_shutdown_race && argc != 2 && argc != 3 &&
+       argc != 4) ||
       (argc == 4 && !expect_reload_failure)) {
     std::cerr << "usage: settings_snapshot_test_helper <config> "
                  "[reload-config [--expect-reload-failure]]\n"
                  "       settings_snapshot_test_helper --webget-probe "
-                 "<config> <url> <cache-ttl> <delay-ms>\n";
+                 "<config> <url> <cache-ttl> <delay-ms>\n"
+                 "       settings_snapshot_test_helper "
+                 "--fetch-shutdown-race <config>\n";
     return 2;
   }
 
   const std::filesystem::path config =
-      std::filesystem::absolute(argv[webget_probe ? 2 : 1]).lexically_normal();
+      std::filesystem::absolute(
+          argv[webget_probe || fetch_shutdown_race ? 2 : 1])
+          .lexically_normal();
   if (!config.has_filename()) {
     std::cerr << "configuration path has no filename\n";
     return 2;
@@ -68,6 +75,48 @@ int main(int argc, char *argv[]) {
   global.prefPath = config.filename().string();
   if (!readConf())
     return 1;
+
+  if (fetch_shutdown_race) {
+    std::atomic<int> ready{0};
+    std::atomic<bool> start{false};
+    auto rendezvous = [&] {
+      ready.fetch_add(1, std::memory_order_release);
+      while (!start.load(std::memory_order_acquire))
+        std::this_thread::yield();
+    };
+    std::thread initialize([&] {
+      rendezvous();
+      (void)asyncFetchEngineAvailable();
+    });
+    std::thread shutdown([&] {
+      rendezvous();
+      requestOutboundFetchShutdown();
+    });
+    while (ready.load(std::memory_order_acquire) != 2)
+      std::this_thread::yield();
+    start.store(true, std::memory_order_release);
+    initialize.join();
+    shutdown.join();
+    requestOutboundFetchShutdown();
+    const AsyncFetchEngineSnapshot snapshot = asyncFetchEngineSnapshot();
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    writer.StartObject();
+    writer.Key("available");
+    writer.Bool(snapshot.available);
+    writer.Key("pending");
+    writer.Uint64(snapshot.pending);
+    writer.Key("active");
+    writer.Uint64(snapshot.active);
+    writer.Key("running");
+    writer.Uint64(snapshot.running);
+    writer.EndObject();
+    std::cout << buffer.GetString() << '\n';
+    return snapshot.available || snapshot.pending != 0 ||
+                   snapshot.active != 0 || snapshot.running != 0
+               ? 1
+               : 0;
+  }
 
   if (webget_probe) {
     int cache_ttl = 0;

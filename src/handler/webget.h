@@ -125,6 +125,12 @@ struct AsyncFetchEngineSnapshot
     bool wakeup_available = false;
     uint64_t pending = 0;
     uint64_t active = 0;
+    uint64_t running = 0;
+    uint64_t handle_window = 0;
+    uint64_t active_connection_limit = 0;
+    uint64_t open_connection_limit = 0;
+    uint64_t connection_cache_limit = 0;
+    uint64_t recoverable_retry_limit = 0;
     uint64_t buffered_bytes = 0;
 };
 
@@ -150,6 +156,7 @@ struct OwnedWebGetRequest
     string_icase_map request_headers;
     FetchContext context = FetchContext::TrustedConfig;
     RetentionPolicy retention = RetentionPolicy::CurrentRequest;
+    bool high_cardinality_cache_admission = false;
 };
 
 struct OwnedWebGetResult
@@ -191,6 +198,14 @@ struct CacheFetchPayloadSnapshot
     uint64_t registry_entries = 0;
 };
 
+struct SubscriptionCacheAdmissionSnapshot
+{
+    bool enabled = false;
+    uint64_t entries = 0;
+    uint64_t first_seen_bypassed_total = 0;
+    uint64_t reuse_admitted_total = 0;
+};
+
 struct CacheFetchOperationProbeSnapshot
 {
     uint64_t success_callbacks = 0;
@@ -219,6 +234,8 @@ void webGetOwnedAsync(OwnedWebGetRequest request,
 // the move-only result own its byte lease for later continuation work.
 OwnedWebGetResult webGetOwned(OwnedWebGetRequest request);
 CacheFetchPayloadSnapshot cacheFetchPayloadSnapshot() noexcept;
+SubscriptionCacheAdmissionSnapshot
+subscriptionCacheAdmissionSnapshot() noexcept;
 CacheFetchOperationProbeSnapshot cacheFetchOperationProbe();
 OwnedWebGetAsyncConsumerProbeSnapshot ownedWebGetAsyncConsumerProbe();
 struct OwnedWebGetContinuationRuntimeSnapshot

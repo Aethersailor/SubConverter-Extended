@@ -680,6 +680,20 @@ public:
     return true;
   }
 
+  uint64_t releaseResponseBytes(uint64_t bytes) noexcept {
+    uint64_t current = retained_response_bytes_.load(std::memory_order_acquire);
+    while (current != 0 && bytes != 0) {
+      const uint64_t released = std::min(current, bytes);
+      if (retained_response_bytes_.compare_exchange_weak(
+              current, current - released, std::memory_order_acq_rel,
+              std::memory_order_acquire)) {
+        releaseRetainedResponseBytes(released);
+        return released;
+      }
+    }
+    return 0;
+  }
+
   uint64_t retainedResponseBytes() const noexcept {
     return retained_response_bytes_.load(std::memory_order_acquire);
   }
