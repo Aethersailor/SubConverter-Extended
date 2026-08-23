@@ -261,9 +261,9 @@ apk mkpkg \\
 
 apk adbdump "${OUT_FILE}" > "${OUT_FILE}.metadata"
 if ! awk '
-  $1 == "user:" && $2 != "root" { exit 1 }
-  $1 == "group:" && $2 != "root" { exit 1 }
-  $1 == "mode:" && $2 != "0644" && $2 != "0755" { exit 1 }
+  \$1 == "user:" && \$2 != "root" { exit 1 }
+  \$1 == "group:" && \$2 != "root" { exit 1 }
+  \$1 == "mode:" && \$2 != "0644" && \$2 != "0755" { exit 1 }
 ' "${OUT_FILE}.metadata"; then
   echo "Refusing APK with non-canonical ownership or modes: ${OUT_FILE}" >&2
   rm -f "${OUT_FILE}.metadata" "${OUT_FILE}"
