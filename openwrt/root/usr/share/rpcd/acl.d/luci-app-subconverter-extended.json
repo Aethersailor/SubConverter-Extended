@@ -1,0 +1,17 @@
+{
+	"luci-app-subconverter-extended": {
+		"description": "Grant access to fixed SubConverter-Extended management actions",
+		"read": {
+			"ubus": {
+				"luci.subconverter_extended": [ "status", "update_status", "logs" ]
+			},
+			"uci": [ "subconverter-extended" ]
+		},
+		"write": {
+			"ubus": {
+				"luci.subconverter_extended": [ "service_action", "update_action" ]
+			},
+			"uci": [ "subconverter-extended" ]
+		}
+	}
+}

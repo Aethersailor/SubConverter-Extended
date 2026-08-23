@@ -188,6 +188,64 @@ static bool isRecognizedBoolSetting(const std::string &value) {
          normalized == "no" || normalized == "off";
 }
 
+static int requireEnvironmentPort(const char *name, const std::string &value) {
+  const std::string normalized = trimWhitespace(value, true, true);
+  std::size_t consumed = 0;
+  long long parsed = 0;
+  try {
+    parsed = std::stoll(normalized, &consumed, 10);
+  } catch (const std::exception &) {
+    throw std::invalid_argument(std::string(name) +
+                                " must be an integer from 1 to 65535");
+  }
+  if (consumed != normalized.size() || parsed < 1 || parsed > 65535) {
+    throw std::invalid_argument(std::string(name) +
+                                " must be an integer from 1 to 65535");
+  }
+  return static_cast<int>(parsed);
+}
+
+static void finalizeBasicEnvironmentSettings() {
+  std::string listen_address = getEnv("SUBCONVERTER_LISTEN_ADDRESS");
+  if (!listen_address.empty()) {
+    listen_address = trimWhitespace(listen_address, true, true);
+    if (listen_address.empty())
+      throw std::invalid_argument(
+          "SUBCONVERTER_LISTEN_ADDRESS must not be blank");
+    global.listenAddress = listen_address;
+  }
+
+  const std::string listen_port = getEnv("SUBCONVERTER_LISTEN_PORT");
+  if (!listen_port.empty())
+    global.listenPort =
+        requireEnvironmentPort("SUBCONVERTER_LISTEN_PORT", listen_port);
+
+  const std::string log_level = getEnv("SUBCONVERTER_LOG_LEVEL");
+  if (!log_level.empty()) {
+    const std::string normalized =
+        toLower(trimWhitespace(log_level, true, true));
+    if (normalized != "fatal" && normalized != "error" &&
+        normalized != "warn" && normalized != "info" &&
+        normalized != "debug" && normalized != "verbose") {
+      throw std::invalid_argument(
+          "SUBCONVERTER_LOG_LEVEL must be fatal, error, warn, info, debug, "
+          "or verbose");
+    }
+    global.printDbgInfo = false;
+    global.logLevel = configuredLogLevel(normalized, false);
+  }
+
+  const std::string statistics_enabled =
+      getEnv("SUBCONVERTER_STATISTICS_ENABLED");
+  if (!statistics_enabled.empty()) {
+    if (!isRecognizedBoolSetting(statistics_enabled)) {
+      throw std::invalid_argument(
+          "SUBCONVERTER_STATISTICS_ENABLED must be a boolean value");
+    }
+    global.statisticsEnabled = parseBoolSetting(statistics_enabled);
+  }
+}
+
 static std::string securityLogValue(const std::string &value) {
   static const char hex[] = "0123456789ABCDEF";
   std::string escaped;
@@ -413,6 +471,7 @@ static void finalizeRuntimeSettings() {
     throw std::invalid_argument(
         "proxy_provider.interval 必须是非负整数。");
   }
+  finalizeBasicEnvironmentSettings();
   finalizeSecuritySettings();
   finalizePerformanceSettings();
   finalizeDashboardAuthSettings();

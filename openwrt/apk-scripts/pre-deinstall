@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+
+root="${IPKG_INSTROOT:-}"
+pkgname='subconverter-extended'
+export root pkgname
+
+[ -s "$root/lib/functions.sh" ] || exit 0
+. "$root/lib/functions.sh"
+
+default_prerm

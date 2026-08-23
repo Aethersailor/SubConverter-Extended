@@ -1,0 +1,2135 @@
+#!/bin/sh
+
+# SubConverter-Extended transactional updater for apk based OpenWrt systems.
+# The only network trust root is the project's published GitHub Release. Public
+# proxies are intentionally trusted as transport sources, but repository,
+# release, asset name, architecture, size and digests remain fail closed.
+
+set -u
+
+PATH='/usr/sbin:/usr/bin:/sbin:/bin'
+export PATH
+umask 077
+
+PACKAGE_NAME='subconverter-extended'
+DISPLAY_NAME='SubConverter-Extended'
+GITHUB_REPOSITORY='Aethersailor/SubConverter-Extended'
+GITHUB_API_PATH="repos/${GITHUB_REPOSITORY}/releases"
+GITHUB_DOWNLOAD_ROOT="https://github.com/${GITHUB_REPOSITORY}/releases/download"
+USER_AGENT='SubConverter-Extended-OpenWrt-Updater/1'
+MAX_RELEASE_MANIFEST_SIZE=1048576
+MAX_RELEASE_SUMS_SIZE=1048576
+# Keep this aligned with scripts/ci/size-budgets.json release-openwrt.
+MAX_RELEASE_APK_SIZE=26214400
+
+PROGRAM_ROOT='/opt/subconverter-extended'
+BUILD_INFO="${PROGRAM_ROOT}/BUILD-INFO.json"
+SERVICE_INIT='/etc/init.d/subconverter-extended'
+SELF_PATH='/usr/libexec/subconverter-extended-update'
+
+RUNTIME_DIR='/tmp/subconverter-extended'
+STATE_FILE="${RUNTIME_DIR}/update-state.json"
+RUNTIME_STATE_FILE="${RUNTIME_DIR}/runtime.json"
+LOG_FILE="${RUNTIME_DIR}/update.log"
+LOCK_DIR="${RUNTIME_DIR}/update.lock"
+METADATA_DIR="${RUNTIME_DIR}/metadata"
+WORKER_PATH="${RUNTIME_DIR}/updater-worker"
+DEFERRED_MAIN_RELOAD="${RUNTIME_DIR}/deferred-main-reload"
+DEFERRED_UPDATER_RELOAD="${RUNTIME_DIR}/deferred-updater-reload"
+
+PERSIST_DIR='/etc/subconverter/update'
+PENDING_FILE="${PERSIST_DIR}/pending.json"
+LAST_GOOD_FILE="${PERSIST_DIR}/last-good.json"
+ROLLBACK_FILE="${PERSIST_DIR}/rollback.json"
+LAST_FAILURE_FILE="${PERSIST_DIR}/last-failure.json"
+
+UPDATE_ROOT='/opt/subconverter-extended-update'
+DEFAULT_APK_CACHE="${UPDATE_ROOT}/apk-cache"
+STAGING_DIR="${UPDATE_ROOT}/staging"
+ROLLBACK_DIR="${UPDATE_ROOT}/rollback"
+
+LOCK_HELD=0
+APK_CACHE_DIR=''
+ARCH=''
+PROXY_MODE='auto'
+
+STATE_OK='true'
+STATE_NAME='idle'
+STATE_CURRENT_VERSION='unknown'
+STATE_LATEST_VERSION='unknown'
+STATE_AVAILABLE='false'
+STATE_SOURCE=''
+STATE_API_SOURCE=''
+STATE_DOWNLOAD_SOURCE=''
+STATE_OPERATION=''
+STATE_MESSAGE=''
+STATE_ERROR=''
+STATE_PROGRESS='0'
+STATE_ROLLBACK_AVAILABLE='false'
+STATE_LAST_GOOD_VERSION=''
+STATE_LAST_GOOD_AT=''
+STATE_LAST_FAILURE_VERSION=''
+STATE_LAST_FAILURE_AT=''
+
+REL_TAG=''
+REL_ASSET_NAME=''
+REL_ASSET_URL=''
+REL_ASSET_SIZE=''
+REL_ASSET_SHA256=''
+REL_REVISION=''
+REL_BUILD_DATE=''
+REL_PUBLISHED_AT=''
+
+now_epoch() {
+  date +%s
+}
+
+sanitize_text() {
+  printf '%s' "$1" | tr '\r\n\t' '   ' | cut -c 1-600
+}
+
+json_escape() {
+  sanitize_text "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+log_message() {
+  level="$1"
+  shift
+  message="$(sanitize_text "$*")"
+  mkdir -p "$RUNTIME_DIR"
+  if [ -f "$LOG_FILE" ]; then
+    log_size="$(wc -c < "$LOG_FILE" 2>/dev/null || printf '0')"
+    case "$log_size" in
+      ''|*[!0-9]*) log_size=0 ;;
+    esac
+    if [ "$log_size" -gt 262144 ]; then
+      tail -c 131072 "$LOG_FILE" > "${LOG_FILE}.tmp" 2>/dev/null || :
+      mv -f "${LOG_FILE}.tmp" "$LOG_FILE" 2>/dev/null || :
+    fi
+  fi
+  printf '%s [%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$level" "$message" >> "$LOG_FILE"
+  logger -t subconverter-extended-update -p "user.${level}" -- "$message" 2>/dev/null || :
+}
+
+refresh_rollback_available() {
+  STATE_ROLLBACK_AVAILABLE='false'
+  if [ -s "$ROLLBACK_FILE" ]; then
+    rollback_path="$(json_one "$ROLLBACK_FILE" '@.cache_file' 2>/dev/null || :)"
+    rollback_sha="$(json_one "$ROLLBACK_FILE" '@.sha256' 2>/dev/null || :)"
+    if [ -n "$rollback_path" ] && [ -f "$rollback_path" ] && is_sha256 "$rollback_sha"; then
+      actual_sha="$(sha256sum "$rollback_path" 2>/dev/null | awk '{print $1}')"
+      if [ "$actual_sha" = "$rollback_sha" ]; then
+        STATE_ROLLBACK_AVAILABLE='true'
+      fi
+    fi
+  fi
+}
+
+write_state() {
+  mkdir -p "$RUNTIME_DIR"
+  refresh_persistent_summary
+  state_tmp="${STATE_FILE}.$$"
+  cat > "$state_tmp" <<EOF
+{"ok":${STATE_OK},"state":"$(json_escape "$STATE_NAME")","current_version":"$(json_escape "$STATE_CURRENT_VERSION")","latest_version":"$(json_escape "$STATE_LATEST_VERSION")","architecture":"$(json_escape "$ARCH")","available":${STATE_AVAILABLE},"updated_at":$(now_epoch),"source":"$(json_escape "$STATE_SOURCE")","api_source":"$(json_escape "$STATE_API_SOURCE")","download_source":"$(json_escape "$STATE_DOWNLOAD_SOURCE")","operation":"$(json_escape "$STATE_OPERATION")","message":"$(json_escape "$STATE_MESSAGE")","error":"$(json_escape "$STATE_ERROR")","progress":${STATE_PROGRESS},"rollback_available":${STATE_ROLLBACK_AVAILABLE},"last_good_version":"$(json_escape "$STATE_LAST_GOOD_VERSION")","last_good_at":"$(json_escape "$STATE_LAST_GOOD_AT")","last_failure_version":"$(json_escape "$STATE_LAST_FAILURE_VERSION")","last_failure_at":"$(json_escape "$STATE_LAST_FAILURE_AT")"}
+EOF
+  mv -f "$state_tmp" "$STATE_FILE"
+}
+
+refresh_persistent_summary() {
+  STATE_LAST_GOOD_VERSION="$(json_one "$LAST_GOOD_FILE" '@.version' 2>/dev/null || :)"
+  STATE_LAST_GOOD_AT="$(json_one "$LAST_GOOD_FILE" '@.installed_at' 2>/dev/null || :)"
+  STATE_LAST_FAILURE_VERSION="$(json_one "$LAST_FAILURE_FILE" '@.version' 2>/dev/null || :)"
+  STATE_LAST_FAILURE_AT="$(json_one "$LAST_FAILURE_FILE" '@.failed_at' 2>/dev/null || :)"
+}
+
+set_state() {
+  STATE_NAME="$1"
+  STATE_OK="$2"
+  STATE_PROGRESS="$3"
+  STATE_MESSAGE="$4"
+  STATE_ERROR="$5"
+  refresh_rollback_available
+  write_state
+}
+
+emit_state() {
+  if [ -s "$STATE_FILE" ] && json_one "$STATE_FILE" '@.state' >/dev/null 2>&1; then
+    cat "$STATE_FILE"
+    return 0
+  fi
+  refresh_current_version
+  STATE_OK='true'
+  STATE_NAME='idle'
+  STATE_AVAILABLE='false'
+  STATE_MESSAGE='Updater is idle.'
+  STATE_ERROR=''
+  STATE_PROGRESS='0'
+  refresh_rollback_available
+  write_state
+  cat "$STATE_FILE"
+}
+
+json_one() {
+  json_file="$1"
+  expression="$2"
+  [ -s "$json_file" ] || return 1
+  json_output="$(jsonfilter -i "$json_file" -e "$expression" 2>/dev/null)" || return 1
+  [ -n "$json_output" ] || return 1
+  json_lines="$(printf '%s\n' "$json_output" | awk 'END { print NR }')"
+  [ "$json_lines" = '1' ] || return 1
+  printf '%s\n' "$json_output"
+}
+
+is_release_tag() {
+  printf '%s\n' "$1" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
+}
+
+is_sha256() {
+  printf '%s\n' "$1" | grep -Eq '^[0-9a-f]{64}$'
+}
+
+is_revision() {
+  printf '%s\n' "$1" | grep -Eq '^[0-9a-f]{40}$'
+}
+
+is_uint() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+file_size() {
+  wc -c < "$1" | tr -d '[:space:]'
+}
+
+file_sha256() {
+  sha256sum "$1" | awk '{print $1}'
+}
+
+read_build_info() {
+  field="$1"
+  json_one "$BUILD_INFO" "@.${field}" 2>/dev/null
+}
+
+refresh_current_version() {
+  current="$(read_build_info version 2>/dev/null || :)"
+  if is_release_tag "$current"; then
+    STATE_CURRENT_VERSION="$current"
+  elif [ -n "$current" ]; then
+    STATE_CURRENT_VERSION="$(sanitize_text "$current")"
+  else
+    STATE_CURRENT_VERSION='unknown'
+  fi
+}
+
+require_root() {
+  if [ "$(id -u)" != '0' ]; then
+    printf '%s\n' 'This updater must run as root.' >&2
+    return 1
+  fi
+}
+
+require_commands() {
+  missing=''
+  for command_name in apk curl jsonfilter sha256sum uci ucode ubus sync awk sed grep wc df readlink nohup; do
+    if ! command -v "$command_name" >/dev/null 2>&1; then
+      missing="${missing} ${command_name}"
+    fi
+  done
+  if [ -n "$missing" ]; then
+    STATE_ERROR="Missing required command(s):${missing}."
+    return 1
+  fi
+  return 0
+}
+
+read_architecture() {
+  arch_value="$(apk --print-arch 2>/dev/null | sed -n '1p' | tr -d '[:space:]')"
+  if [ -z "$arch_value" ] && [ -f /etc/apk/arch ]; then
+    arch_value="$(sed -n '1p' /etc/apk/arch | tr -d '[:space:]')"
+  fi
+  case "$arch_value" in
+    x86_64|aarch64_generic|aarch64_cortex-a53|aarch64_cortex-a72|\
+    arm_cortex-a5_vfpv4|arm_cortex-a7|arm_cortex-a7_vfpv4|\
+    arm_cortex-a7_neon-vfpv4|arm_cortex-a8_vfpv3|arm_cortex-a9|\
+    arm_cortex-a9_neon|arm_cortex-a9_vfpv3-d16|arm_cortex-a15_neon-vfpv4)
+      ARCH="$arch_value"
+      return 0
+      ;;
+    *)
+      STATE_ERROR="Unsupported or unknown OpenWrt APK architecture: $(sanitize_text "$arch_value")."
+      return 1
+      ;;
+  esac
+}
+
+uci_get() {
+  option="$1"
+  default_value="$2"
+  value="$(uci -q get "subconverter-extended.update.${option}" 2>/dev/null || :)"
+  if [ -n "$value" ]; then
+    printf '%s\n' "$value"
+  else
+    printf '%s\n' "$default_value"
+  fi
+}
+
+read_proxy_mode() {
+  PROXY_MODE="$(uci_get proxy_mode auto)"
+  case "$PROXY_MODE" in
+    auto|gh-proxy|yylx|direct) return 0 ;;
+    *)
+      STATE_ERROR="Unsupported update proxy mode: $(sanitize_text "$PROXY_MODE")."
+      return 1
+      ;;
+  esac
+}
+
+api_sources() {
+  case "$PROXY_MODE" in
+    auto) printf '%s\n' gh-proxy yylx direct ;;
+    gh-proxy) printf '%s\n' gh-proxy ;;
+    yylx) printf '%s\n' yylx ;;
+    direct) printf '%s\n' direct ;;
+  esac
+}
+
+download_sources() {
+  case "$PROXY_MODE" in
+    auto) printf '%s\n' ghfast gh-proxy yylx direct ;;
+    gh-proxy) printf '%s\n' gh-proxy ;;
+    yylx) printf '%s\n' yylx ;;
+    direct) printf '%s\n' direct ;;
+  esac
+}
+
+api_url() {
+  source_name="$1"
+  api_suffix="$2"
+  direct_url="https://api.github.com/${GITHUB_API_PATH}/${api_suffix}"
+  case "$source_name" in
+    gh-proxy) printf '%s\n' "https://gh-proxy.com/${direct_url}" ;;
+    yylx) printf '%s\n' "https://git.yylx.win/${direct_url}" ;;
+    direct) printf '%s\n' "$direct_url" ;;
+    *) return 1 ;;
+  esac
+}
+
+proxied_download_url() {
+  source_name="$1"
+  direct_url="$2"
+  case "$source_name" in
+    ghfast) printf '%s\n' "https://ghfast.top/${direct_url}" ;;
+    gh-proxy) printf '%s\n' "https://gh-proxy.com/${direct_url}" ;;
+    yylx) printf '%s\n' "https://git.yylx.win/${direct_url}" ;;
+    direct) printf '%s\n' "$direct_url" ;;
+    *) return 1 ;;
+  esac
+}
+
+curl_to_file() {
+  url="$1"
+  output_file="$2"
+  max_time="$3"
+  maximum_size="${4:-0}"
+  error_file="${RUNTIME_DIR}/curl-error.$$"
+  rm -f "$error_file"
+  set -- \
+    --fail \
+    --location \
+    --silent \
+    --show-error \
+    --connect-timeout 15 \
+    --max-time "$max_time" \
+    --proto '=https' \
+    --proto-redir '=https' \
+    --header 'Accept: application/vnd.github+json' \
+    --header 'X-GitHub-Api-Version: 2022-11-28' \
+    --user-agent "$USER_AGENT" \
+    --output "$output_file"
+  if is_uint "$maximum_size" && [ "$maximum_size" -gt 0 ]; then
+    set -- "$@" --max-filesize "$maximum_size"
+  fi
+  if curl "$@" "$url" 2> "$error_file"; then
+    rm -f "$error_file"
+    return 0
+  fi
+  CURL_LAST_ERROR="$(sanitize_text "$(cat "$error_file" 2>/dev/null || :)")"
+  rm -f "$error_file" "$output_file"
+  return 1
+}
+
+acquire_lock() {
+  mkdir -p "$RUNTIME_DIR"
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    printf '%s\n' "$$" > "${LOCK_DIR}/pid"
+    LOCK_HELD=1
+    return 0
+  fi
+
+  lock_pid="$(sed -n '1p' "${LOCK_DIR}/pid" 2>/dev/null || :)"
+  case "$lock_pid" in
+    ''|*[!0-9]*) lock_pid='' ;;
+  esac
+  if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+    return 1
+  fi
+
+  rm -f "${LOCK_DIR}/pid" 2>/dev/null || :
+  rmdir "$LOCK_DIR" 2>/dev/null || return 1
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    printf '%s\n' "$$" > "${LOCK_DIR}/pid"
+    LOCK_HELD=1
+    return 0
+  fi
+  return 1
+}
+
+release_lock() {
+  if [ "$LOCK_HELD" = '1' ]; then
+    rm -f "${LOCK_DIR}/pid" 2>/dev/null || :
+    rmdir "$LOCK_DIR" 2>/dev/null || :
+    LOCK_HELD=0
+  fi
+}
+
+cleanup_worker() {
+  release_lock
+  if [ "${0}" = "$WORKER_PATH" ]; then
+    rm -f "$WORKER_PATH" 2>/dev/null || :
+  fi
+}
+
+handle_signal() {
+  signal_number="$1"
+  exit "$signal_number"
+}
+
+trap cleanup_worker EXIT
+trap 'handle_signal 129' HUP
+trap 'handle_signal 130' INT
+trap 'handle_signal 143' TERM
+
+ensure_apk_cache() {
+  mkdir -p "$UPDATE_ROOT" "$STAGING_DIR" "$ROLLBACK_DIR"
+  if [ -L /etc/apk/cache ]; then
+    APK_CACHE_DIR="$(readlink -f /etc/apk/cache 2>/dev/null || :)"
+    if [ -z "$APK_CACHE_DIR" ] || [ ! -d "$APK_CACHE_DIR" ]; then
+      STATE_ERROR='The existing /etc/apk/cache symlink has no usable target.'
+      return 1
+    fi
+  elif [ -d /etc/apk/cache ]; then
+    APK_CACHE_DIR='/etc/apk/cache'
+  elif [ -e /etc/apk/cache ]; then
+    STATE_ERROR='The existing /etc/apk/cache is not a usable directory or symlink.'
+    return 1
+  else
+    mkdir -p "$DEFAULT_APK_CACHE" /etc/apk
+    ln -s "$DEFAULT_APK_CACHE" /etc/apk/cache || {
+      STATE_ERROR='Unable to create the persistent /etc/apk/cache symlink.'
+      return 1
+    }
+    APK_CACHE_DIR="$DEFAULT_APK_CACHE"
+  fi
+
+  cache_source="$(df -P "$APK_CACHE_DIR" 2>/dev/null | awk 'END { print $1 }')"
+  case "$cache_source" in
+    ''|tmpfs|ramfs)
+      STATE_ERROR='The APK cache must reside on persistent non-tmpfs storage.'
+      return 1
+      ;;
+  esac
+  if [ ! -w "$APK_CACHE_DIR" ]; then
+    STATE_ERROR='The persistent APK cache is not writable.'
+    return 1
+  fi
+  update_source="$(df -P "$UPDATE_ROOT" 2>/dev/null | awk 'END { print $1 }')"
+  case "$update_source" in
+    ''|tmpfs|ramfs)
+      STATE_ERROR='The staging and rollback directories must reside on persistent storage.'
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+world_constraint() {
+  [ -f /etc/apk/world ] || return 1
+  grep -E '^subconverter-extended($|[=<>~])' /etc/apk/world | sed -n '1p'
+}
+
+verify_package_database() {
+  if ! apk info -e "$PACKAGE_NAME" >/dev/null 2>&1; then
+    VERIFY_ERROR='APK database does not contain subconverter-extended.'
+    return 1
+  fi
+  constraint="$(world_constraint 2>/dev/null || :)"
+  constraint_count="$(grep -Ec '^subconverter-extended($|[=<>~])' /etc/apk/world 2>/dev/null || printf '0')"
+  if [ -z "$constraint" ] || [ "$constraint_count" != '1' ]; then
+    VERIFY_ERROR='APK world has no persistent subconverter-extended constraint.'
+    return 1
+  fi
+  return 0
+}
+
+verify_cached_apk() {
+  cache_file="$1"
+  expected_size="$2"
+  expected_sha="$3"
+  [ -f "$cache_file" ] || return 1
+  [ "$(file_size "$cache_file")" = "$expected_size" ] || return 1
+  [ "$(file_sha256 "$cache_file")" = "$expected_sha" ] || return 1
+}
+
+cached_package_copy_matches() {
+  expected_sha="$1"
+  for cached_copy in "${APK_CACHE_DIR}"/"${PACKAGE_NAME}"-*.apk; do
+    [ -f "$cached_copy" ] || continue
+    [ "$(file_sha256 "$cached_copy" 2>/dev/null || :)" = "$expected_sha" ] && return 0
+  done
+  return 1
+}
+
+matching_cached_package_copy() {
+  expected_sha="$1"
+  for cached_copy in "${APK_CACHE_DIR}"/"${PACKAGE_NAME}"-*.apk; do
+    [ -f "$cached_copy" ] || continue
+    if [ "$(file_sha256 "$cached_copy" 2>/dev/null || :)" = "$expected_sha" ]; then
+      printf '%s\n' "$cached_copy"
+      return 0
+    fi
+  done
+  return 1
+}
+
+available_kib() {
+  df -Pk "$1" 2>/dev/null | awk 'END { print $4 }'
+}
+
+ensure_free_space() {
+  required_bytes="$1"
+  free_kib="$(available_kib "$APK_CACHE_DIR")"
+  is_uint "$free_kib" || {
+    STATE_ERROR='Unable to determine free space for the persistent APK cache.'
+    return 1
+  }
+  # apk --cache-packages may retain a canonical package-cache copy in addition
+  # to the verified Release filename. Budget both before stopping the service.
+  required_kib=$(( ((required_bytes * 2) + 1023) / 1024 + 16384 ))
+  if [ "$free_kib" -lt "$required_kib" ]; then
+    STATE_ERROR="Insufficient persistent storage: need at least ${required_kib} KiB free for update and rollback."
+    return 1
+  fi
+  update_free_kib="$(available_kib "$UPDATE_ROOT")"
+  is_uint "$update_free_kib" || {
+    STATE_ERROR='Unable to determine free staging/rollback storage space.'
+    return 1
+  }
+  if [ "$update_free_kib" -lt "$required_kib" ]; then
+    STATE_ERROR="Insufficient staging/rollback storage: need at least ${required_kib} KiB free."
+    return 1
+  fi
+  return 0
+}
+
+ensure_root_space() {
+  package_bytes="$1"
+  root_free_kib="$(available_kib /)"
+  is_uint "$root_free_kib" || {
+    STATE_ERROR='Unable to determine free root filesystem space.'
+    return 1
+  }
+  root_required_kib=$(( ((package_bytes * 4) + 1023) / 1024 + 16384 ))
+  if [ "$root_free_kib" -lt "$root_required_kib" ]; then
+    STATE_ERROR="Insufficient root filesystem space: need at least ${root_required_kib} KiB free."
+    return 1
+  fi
+  return 0
+}
+
+canonical_asset_url() {
+  tag="$1"
+  asset_name="$2"
+  printf '%s/%s/%s\n' "$GITHUB_DOWNLOAD_ROOT" "$tag" "$asset_name"
+}
+
+validate_release_json() {
+  release_file="$1"
+  expected_tag="$2"
+
+  tag="$(json_one "$release_file" '@.tag_name' 2>/dev/null || :)"
+  draft="$(json_one "$release_file" '@.draft' 2>/dev/null || :)"
+  prerelease="$(json_one "$release_file" '@.prerelease' 2>/dev/null || :)"
+  published_at="$(json_one "$release_file" '@.published_at' 2>/dev/null || :)"
+  if ! is_release_tag "$tag" || [ "$draft" != 'false' ] || [ "$prerelease" != 'false' ]; then
+    return 1
+  fi
+  if [ -n "$expected_tag" ] && [ "$tag" != "$expected_tag" ]; then
+    return 1
+  fi
+
+  asset_name="${DISPLAY_NAME}-${tag}-openwrt-${ARCH}.apk"
+  manifest_name='RELEASE-MANIFEST.json'
+  sums_name='SHA256SUMS'
+
+  asset_url="$(json_one "$release_file" "@.assets[@.name=\"${asset_name}\"].browser_download_url" 2>/dev/null || :)"
+  asset_size="$(json_one "$release_file" "@.assets[@.name=\"${asset_name}\"].size" 2>/dev/null || :)"
+  asset_digest="$(json_one "$release_file" "@.assets[@.name=\"${asset_name}\"].digest" 2>/dev/null || :)"
+  asset_state="$(json_one "$release_file" "@.assets[@.name=\"${asset_name}\"].state" 2>/dev/null || :)"
+  manifest_url="$(json_one "$release_file" "@.assets[@.name=\"${manifest_name}\"].browser_download_url" 2>/dev/null || :)"
+  manifest_size="$(json_one "$release_file" "@.assets[@.name=\"${manifest_name}\"].size" 2>/dev/null || :)"
+  manifest_digest="$(json_one "$release_file" "@.assets[@.name=\"${manifest_name}\"].digest" 2>/dev/null || :)"
+  manifest_state="$(json_one "$release_file" "@.assets[@.name=\"${manifest_name}\"].state" 2>/dev/null || :)"
+  sums_url="$(json_one "$release_file" "@.assets[@.name=\"${sums_name}\"].browser_download_url" 2>/dev/null || :)"
+  sums_size="$(json_one "$release_file" "@.assets[@.name=\"${sums_name}\"].size" 2>/dev/null || :)"
+  sums_digest="$(json_one "$release_file" "@.assets[@.name=\"${sums_name}\"].digest" 2>/dev/null || :)"
+  sums_state="$(json_one "$release_file" "@.assets[@.name=\"${sums_name}\"].state" 2>/dev/null || :)"
+
+  [ "$asset_state" = 'uploaded' ] && [ "$manifest_state" = 'uploaded' ] && [ "$sums_state" = 'uploaded' ] || return 1
+  is_uint "$asset_size" && [ "$asset_size" -gt 0 ] && \
+    [ "$asset_size" -le "$MAX_RELEASE_APK_SIZE" ] || return 1
+  is_uint "$manifest_size" && [ "$manifest_size" -gt 0 ] && \
+    [ "$manifest_size" -le "$MAX_RELEASE_MANIFEST_SIZE" ] || return 1
+  is_uint "$sums_size" && [ "$sums_size" -gt 0 ] && \
+    [ "$sums_size" -le "$MAX_RELEASE_SUMS_SIZE" ] || return 1
+  case "$asset_digest" in sha256:*) asset_sha="${asset_digest#sha256:}" ;; *) return 1 ;; esac
+  case "$manifest_digest" in sha256:*) manifest_sha="${manifest_digest#sha256:}" ;; *) return 1 ;; esac
+  case "$sums_digest" in sha256:*) sums_sha="${sums_digest#sha256:}" ;; *) return 1 ;; esac
+  is_sha256 "$asset_sha" && is_sha256 "$manifest_sha" && is_sha256 "$sums_sha" || return 1
+
+  [ "$asset_url" = "$(canonical_asset_url "$tag" "$asset_name")" ] || return 1
+  [ "$manifest_url" = "$(canonical_asset_url "$tag" "$manifest_name")" ] || return 1
+  [ "$sums_url" = "$(canonical_asset_url "$tag" "$sums_name")" ] || return 1
+
+  PARSED_TAG="$tag"
+  PARSED_PUBLISHED_AT="$published_at"
+  PARSED_ASSET_NAME="$asset_name"
+  PARSED_ASSET_URL="$asset_url"
+  PARSED_ASSET_SIZE="$asset_size"
+  PARSED_ASSET_SHA256="$asset_sha"
+  PARSED_MANIFEST_URL="$manifest_url"
+  PARSED_MANIFEST_SIZE="$manifest_size"
+  PARSED_MANIFEST_SHA256="$manifest_sha"
+  PARSED_SUMS_URL="$sums_url"
+  PARSED_SUMS_SIZE="$sums_size"
+  PARSED_SUMS_SHA256="$sums_sha"
+  return 0
+}
+
+fetch_release_json() {
+  selector="$1"
+  expected_tag="$2"
+  destination="$3"
+  mkdir -p "$METADATA_DIR"
+  api_error=''
+  for source_name in $(api_sources); do
+    request_url="$(api_url "$source_name" "$selector")" || continue
+    candidate_file="${destination}.${source_name}.tmp"
+    rm -f "$candidate_file"
+    if curl_to_file "$request_url" "$candidate_file" 30 && validate_release_json "$candidate_file" "$expected_tag" && \
+       mv -f "$candidate_file" "$destination"; then
+      STATE_API_SOURCE="$source_name"
+      STATE_SOURCE="$source_name"
+      return 0
+    fi
+    api_error="${CURL_LAST_ERROR:-invalid Release metadata}"
+    rm -f "$candidate_file"
+    log_message warning "Release API source ${source_name} failed validation: ${api_error}"
+  done
+  STATE_ERROR="All configured Release API sources failed: $(sanitize_text "$api_error")."
+  return 1
+}
+
+download_verified_file() {
+  canonical_url="$1"
+  destination="$2"
+  expected_size="$3"
+  expected_sha="$4"
+  max_time="$5"
+  download_error=''
+
+  for source_name in $(download_sources); do
+    request_url="$(proxied_download_url "$source_name" "$canonical_url")" || continue
+    candidate_file="${destination}.${source_name}.tmp"
+    rm -f "$candidate_file"
+    if curl_to_file "$request_url" "$candidate_file" "$max_time" "$expected_size"; then
+      actual_size="$(file_size "$candidate_file" 2>/dev/null || :)"
+      actual_sha="$(file_sha256 "$candidate_file" 2>/dev/null || :)"
+      if [ "$actual_size" = "$expected_size" ] && [ "$actual_sha" = "$expected_sha" ]; then
+        mv -f "$candidate_file" "$destination" || {
+          download_error="unable to commit verified download from ${source_name}"
+          rm -f "$candidate_file"
+          continue
+        }
+        STATE_DOWNLOAD_SOURCE="$source_name"
+        STATE_SOURCE="$source_name"
+        return 0
+      fi
+      download_error="integrity mismatch from ${source_name}"
+    else
+      download_error="${CURL_LAST_ERROR:-download failed}"
+    fi
+    rm -f "$candidate_file"
+    log_message warning "Download source ${source_name} failed for $(basename "$destination"): ${download_error}"
+  done
+  STATE_ERROR="All configured download sources failed for $(basename "$destination"): $(sanitize_text "$download_error")."
+  return 1
+}
+
+download_bounded_file() {
+  canonical_url="$1"
+  destination="$2"
+  maximum_size="$3"
+  max_time="$4"
+  download_error=''
+
+  for source_name in $(download_sources); do
+    request_url="$(proxied_download_url "$source_name" "$canonical_url")" || continue
+    candidate_file="${destination}.${source_name}.tmp"
+    rm -f "$candidate_file"
+    if curl_to_file "$request_url" "$candidate_file" "$max_time" "$maximum_size"; then
+      actual_size="$(file_size "$candidate_file" 2>/dev/null || :)"
+      if is_uint "$actual_size" && [ "$actual_size" -gt 0 ] && \
+         [ "$actual_size" -le "$maximum_size" ]; then
+        mv -f "$candidate_file" "$destination" || {
+          download_error="unable to commit bounded download from ${source_name}"
+          rm -f "$candidate_file"
+          continue
+        }
+        STATE_DOWNLOAD_SOURCE="$source_name"
+        STATE_SOURCE="$source_name"
+        return 0
+      fi
+      download_error="invalid or oversized response from ${source_name}"
+    else
+      download_error="${CURL_LAST_ERROR:-download failed}"
+    fi
+    rm -f "$candidate_file"
+    log_message warning "Download source ${source_name} failed for $(basename "$destination"): ${download_error}"
+  done
+  STATE_ERROR="All configured download sources failed for $(basename "$destination"): $(sanitize_text "$download_error")."
+  return 1
+}
+
+validate_release_manifest() {
+  manifest_file="$1"
+  sums_file="$2"
+
+  manifest_schema="$(json_one "$manifest_file" '@.schema' 2>/dev/null || :)"
+  manifest_version="$(json_one "$manifest_file" '@.version' 2>/dev/null || :)"
+  manifest_tag="$(json_one "$manifest_file" '@.tag' 2>/dev/null || :)"
+  manifest_revision="$(json_one "$manifest_file" '@.revision' 2>/dev/null || :)"
+  manifest_build_date="$(json_one "$manifest_file" '@.build_date' 2>/dev/null || :)"
+  manifest_asset_sha="$(json_one "$manifest_file" "@.assets[@.name=\"${PARSED_ASSET_NAME}\"].sha256" 2>/dev/null || :)"
+  manifest_asset_size="$(json_one "$manifest_file" "@.assets[@.name=\"${PARSED_ASSET_NAME}\"].size" 2>/dev/null || :)"
+  manifest_sums_sha="$(json_one "$manifest_file" '@.assets[@.name="SHA256SUMS"].sha256' 2>/dev/null || :)"
+  manifest_sums_size="$(json_one "$manifest_file" '@.assets[@.name="SHA256SUMS"].size' 2>/dev/null || :)"
+
+  [ "$manifest_schema" = '1' ] || return 1
+  [ "$manifest_version" = "$PARSED_TAG" ] && [ "$manifest_tag" = "$PARSED_TAG" ] || return 1
+  is_revision "$manifest_revision" || return 1
+  [ -n "$manifest_build_date" ] || return 1
+  [ "$manifest_asset_sha" = "$PARSED_ASSET_SHA256" ] || return 1
+  [ "$manifest_asset_size" = "$PARSED_ASSET_SIZE" ] || return 1
+  [ "$manifest_sums_sha" = "$PARSED_SUMS_SHA256" ] || return 1
+  [ "$manifest_sums_size" = "$PARSED_SUMS_SIZE" ] || return 1
+
+  sums_match="$(awk -v wanted="$PARSED_ASSET_NAME" '
+    $2 == wanted { count++; digest=$1 }
+    END { if (count == 1) print digest }
+  ' "$sums_file")"
+  [ "$sums_match" = "$PARSED_ASSET_SHA256" ] || return 1
+
+  REL_TAG="$PARSED_TAG"
+  REL_PUBLISHED_AT="$PARSED_PUBLISHED_AT"
+  REL_ASSET_NAME="$PARSED_ASSET_NAME"
+  REL_ASSET_URL="$PARSED_ASSET_URL"
+  REL_ASSET_SIZE="$PARSED_ASSET_SIZE"
+  REL_ASSET_SHA256="$PARSED_ASSET_SHA256"
+  REL_REVISION="$manifest_revision"
+  REL_BUILD_DATE="$manifest_build_date"
+  return 0
+}
+
+resolve_release_api_bundle() {
+  selector="$1"
+  expected_tag="$2"
+  bundle_id="$3"
+  release_file="${METADATA_DIR}/${bundle_id}-release.json"
+  manifest_file="${METADATA_DIR}/${bundle_id}-manifest.json"
+  sums_file="${METADATA_DIR}/${bundle_id}-SHA256SUMS"
+
+  if ! fetch_release_json "$selector" "$expected_tag" "$release_file"; then
+    return 10
+  fi
+  # fetch_release_json leaves the parsed release fields in PARSED_*.
+  if ! download_verified_file "$PARSED_MANIFEST_URL" "$manifest_file" "$PARSED_MANIFEST_SIZE" "$PARSED_MANIFEST_SHA256" 120; then
+    return 1
+  fi
+  if ! download_verified_file "$PARSED_SUMS_URL" "$sums_file" "$PARSED_SUMS_SIZE" "$PARSED_SUMS_SHA256" 120; then
+    return 1
+  fi
+  if ! validate_release_manifest "$manifest_file" "$sums_file"; then
+    STATE_ERROR="Release manifest or SHA256SUMS validation failed for ${PARSED_TAG}."
+    return 1
+  fi
+  return 0
+}
+
+release_manifest_url() {
+  selector="$1"
+  expected_tag="$2"
+  case "$selector" in
+    latest)
+      [ -z "$expected_tag" ] || return 1
+      printf '%s\n' "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/RELEASE-MANIFEST.json"
+      ;;
+    tags/*)
+      selector_tag="${selector#tags/}"
+      [ "$selector_tag" = "$expected_tag" ] && is_release_tag "$selector_tag" || return 1
+      canonical_asset_url "$selector_tag" 'RELEASE-MANIFEST.json'
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+resolve_release_manifest_bundle() {
+  selector="$1"
+  expected_tag="$2"
+  bundle_id="$3"
+  manifest_file="${METADATA_DIR}/${bundle_id}-fallback-manifest.json"
+  sums_file="${METADATA_DIR}/${bundle_id}-fallback-SHA256SUMS"
+  manifest_url="$(release_manifest_url "$selector" "$expected_tag")" || {
+    STATE_ERROR='Invalid Release Manifest selector.'
+    return 1
+  }
+
+  if ! download_bounded_file "$manifest_url" "$manifest_file" \
+      "$MAX_RELEASE_MANIFEST_SIZE" 120; then
+    return 1
+  fi
+  manifest_source="$STATE_DOWNLOAD_SOURCE"
+  manifest_schema="$(json_one "$manifest_file" '@.schema' 2>/dev/null || :)"
+  manifest_version="$(json_one "$manifest_file" '@.version' 2>/dev/null || :)"
+  manifest_tag="$(json_one "$manifest_file" '@.tag' 2>/dev/null || :)"
+  manifest_revision="$(json_one "$manifest_file" '@.revision' 2>/dev/null || :)"
+  manifest_build_date="$(json_one "$manifest_file" '@.build_date' 2>/dev/null || :)"
+  manifest_asset_name="${DISPLAY_NAME}-${manifest_tag}-openwrt-${ARCH}.apk"
+  manifest_asset_sha="$(json_one "$manifest_file" "@.assets[@.name=\"${manifest_asset_name}\"].sha256" 2>/dev/null || :)"
+  manifest_asset_size="$(json_one "$manifest_file" "@.assets[@.name=\"${manifest_asset_name}\"].size" 2>/dev/null || :)"
+  manifest_sums_sha="$(json_one "$manifest_file" '@.assets[@.name="SHA256SUMS"].sha256' 2>/dev/null || :)"
+  manifest_sums_size="$(json_one "$manifest_file" '@.assets[@.name="SHA256SUMS"].size' 2>/dev/null || :)"
+
+  if [ "$manifest_schema" != '1' ] || \
+     ! is_release_tag "$manifest_tag" || \
+     [ "$manifest_version" != "$manifest_tag" ] || \
+     { [ -n "$expected_tag" ] && [ "$manifest_tag" != "$expected_tag" ]; } || \
+     ! is_revision "$manifest_revision" || [ -z "$manifest_build_date" ] || \
+     ! is_uint "$manifest_asset_size" || [ "$manifest_asset_size" -le 0 ] || \
+     [ "$manifest_asset_size" -gt "$MAX_RELEASE_APK_SIZE" ] || \
+     ! is_sha256 "$manifest_asset_sha" || \
+     ! is_uint "$manifest_sums_size" || [ "$manifest_sums_size" -le 0 ] || \
+     [ "$manifest_sums_size" -gt "$MAX_RELEASE_SUMS_SIZE" ] || \
+     ! is_sha256 "$manifest_sums_sha"; then
+    STATE_ERROR='The proxied Release Manifest failed identity or asset validation.'
+    return 1
+  fi
+
+  sums_url="$(canonical_asset_url "$manifest_tag" 'SHA256SUMS')"
+  if ! download_verified_file "$sums_url" "$sums_file" \
+      "$manifest_sums_size" "$manifest_sums_sha" 120; then
+    return 1
+  fi
+  sums_match="$(awk -v wanted="$manifest_asset_name" '
+    $2 == wanted { count++; digest=$1 }
+    END { if (count == 1) print digest }
+  ' "$sums_file")"
+  if [ "$sums_match" != "$manifest_asset_sha" ]; then
+    STATE_ERROR='The proxied Release Manifest and SHA256SUMS disagree.'
+    return 1
+  fi
+
+  REL_TAG="$manifest_tag"
+  REL_PUBLISHED_AT=''
+  REL_ASSET_NAME="$manifest_asset_name"
+  REL_ASSET_URL="$(canonical_asset_url "$manifest_tag" "$manifest_asset_name")"
+  REL_ASSET_SIZE="$manifest_asset_size"
+  REL_ASSET_SHA256="$manifest_asset_sha"
+  REL_REVISION="$manifest_revision"
+  REL_BUILD_DATE="$manifest_build_date"
+  STATE_API_SOURCE="${manifest_source}-release-manifest"
+  STATE_SOURCE="$manifest_source"
+  return 0
+}
+
+resolve_release_bundle() {
+  selector="$1"
+  expected_tag="$2"
+  bundle_id="$3"
+
+  if resolve_release_api_bundle "$selector" "$expected_tag" "$bundle_id"; then
+    return 0
+  else
+    api_bundle_result=$?
+  fi
+  api_bundle_error="$STATE_ERROR"
+  if [ "$api_bundle_result" -ne 10 ]; then
+    return 1
+  fi
+  log_message warning "Release API bundle validation failed; trying the proxied project Release Manifest: ${api_bundle_error}"
+  if resolve_release_manifest_bundle "$selector" "$expected_tag" "$bundle_id"; then
+    return 0
+  fi
+  manifest_bundle_error="$STATE_ERROR"
+  STATE_ERROR="Release API failed ($(sanitize_text "$api_bundle_error")); Release Manifest fallback failed ($(sanitize_text "$manifest_bundle_error"))."
+  return 1
+}
+
+compare_versions() {
+  current_tag="$1"
+  latest_tag="$2"
+  apk version -t "${current_tag#v}" "${latest_tag#v}" 2>/dev/null | sed -n '1p'
+}
+
+save_bundle_values() {
+  prefix="$1"
+  case "$prefix" in
+    TARGET)
+      TARGET_TAG="$REL_TAG"
+      TARGET_ASSET_NAME="$REL_ASSET_NAME"
+      TARGET_ASSET_URL="$REL_ASSET_URL"
+      TARGET_ASSET_SIZE="$REL_ASSET_SIZE"
+      TARGET_ASSET_SHA256="$REL_ASSET_SHA256"
+      TARGET_REVISION="$REL_REVISION"
+      TARGET_BUILD_DATE="$REL_BUILD_DATE"
+      ;;
+    RECOVERY)
+      RECOVERY_TAG="$REL_TAG"
+      RECOVERY_ASSET_NAME="$REL_ASSET_NAME"
+      RECOVERY_ASSET_URL="$REL_ASSET_URL"
+      RECOVERY_ASSET_SIZE="$REL_ASSET_SIZE"
+      RECOVERY_ASSET_SHA256="$REL_ASSET_SHA256"
+      RECOVERY_REVISION="$REL_REVISION"
+      RECOVERY_BUILD_DATE="$REL_BUILD_DATE"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+write_persistent_json() {
+  destination="$1"
+  content="$2"
+  mkdir -p "$PERSIST_DIR" || return 1
+  persistent_tmp="${destination}.$$"
+  if ! printf '%s\n' "$content" > "$persistent_tmp"; then
+    rm -f "$persistent_tmp"
+    return 1
+  fi
+  if ! mv -f "$persistent_tmp" "$destination"; then
+    rm -f "$persistent_tmp"
+    return 1
+  fi
+  # Update transactions are infrequent; a global sync makes the journal and
+  # retained APK durable before any service stop or package replacement.
+  sync || return 1
+  return 0
+}
+
+remove_pending_durably() {
+  rm -f "$PENDING_FILE" || return 1
+  sync || return 1
+}
+
+write_pending() {
+  phase="$1"
+  operation="$2"
+  previous_version="$3"
+  target_version="$4"
+  target_cache_file="$5"
+  target_size="$6"
+  target_sha="$7"
+  target_revision="$8"
+  target_build_date="$9"
+  shift 9
+  recovery_cache_file="$1"
+  recovery_size="$2"
+  recovery_sha="$3"
+  recovery_version="$4"
+  recovery_revision="$5"
+  recovery_build_date="$6"
+  was_running="$7"
+  was_enabled="$8"
+  world_before="$9"
+  content="{\"schema\":1,\"phase\":\"$(json_escape "$phase")\",\"operation\":\"$(json_escape "$operation")\",\"previous_version\":\"$(json_escape "$previous_version")\",\"target_version\":\"$(json_escape "$target_version")\",\"target_cache_file\":\"$(json_escape "$target_cache_file")\",\"target_size\":${target_size},\"target_sha256\":\"${target_sha}\",\"target_revision\":\"${target_revision}\",\"target_build_date\":\"$(json_escape "$target_build_date")\",\"recovery_cache_file\":\"$(json_escape "$recovery_cache_file")\",\"recovery_size\":${recovery_size},\"recovery_sha256\":\"${recovery_sha}\",\"recovery_version\":\"$(json_escape "$recovery_version")\",\"recovery_revision\":\"${recovery_revision}\",\"recovery_build_date\":\"$(json_escape "$recovery_build_date")\",\"was_running\":${was_running},\"was_enabled\":${was_enabled},\"world_before\":\"$(json_escape "$world_before")\",\"updated_at\":$(now_epoch)}"
+  write_persistent_json "$PENDING_FILE" "$content"
+}
+
+write_last_good() {
+  version="$1"
+  cache_file="$2"
+  size="$3"
+  sha="$4"
+  revision="$5"
+  build_date="$6"
+  world="$(world_constraint 2>/dev/null || :)"
+  content="{\"schema\":1,\"version\":\"$(json_escape "$version")\",\"arch\":\"$(json_escape "$ARCH")\",\"cache_file\":\"$(json_escape "$cache_file")\",\"size\":${size},\"sha256\":\"${sha}\",\"revision\":\"${revision}\",\"build_date\":\"$(json_escape "$build_date")\",\"world_constraint\":\"$(json_escape "$world")\",\"installed_at\":$(now_epoch)}"
+  write_persistent_json "$LAST_GOOD_FILE" "$content"
+}
+
+write_rollback_metadata() {
+  version="$1"
+  cache_file="$2"
+  size="$3"
+  sha="$4"
+  revision="$5"
+  build_date="$6"
+  content="{\"schema\":1,\"version\":\"$(json_escape "$version")\",\"arch\":\"$(json_escape "$ARCH")\",\"cache_file\":\"$(json_escape "$cache_file")\",\"size\":${size},\"sha256\":\"${sha}\",\"revision\":\"${revision}\",\"build_date\":\"$(json_escape "$build_date")\",\"created_at\":$(now_epoch)}"
+  write_persistent_json "$ROLLBACK_FILE" "$content"
+}
+
+write_last_failure() {
+  version="$1"
+  reason="$2"
+  content="{\"schema\":1,\"version\":\"$(json_escape "$version")\",\"failed_at\":$(now_epoch),\"reason\":\"$(json_escape "$reason")\"}"
+  write_persistent_json "$LAST_FAILURE_FILE" "$content"
+}
+
+service_is_running() {
+  [ -x "$SERVICE_INIT" ] && "$SERVICE_INIT" running >/dev/null 2>&1
+}
+
+service_is_enabled() {
+  [ -x "$SERVICE_INIT" ] && "$SERVICE_INIT" enabled >/dev/null 2>&1
+}
+
+wait_service_stopped() {
+  count=0
+  while service_is_running; do
+    count=$((count + 1))
+    [ "$count" -lt 40 ] || return 1
+    sleep 1
+  done
+  return 0
+}
+
+restore_enable_state() {
+  expected_enabled="$1"
+  if [ "$expected_enabled" = 'true' ]; then
+    "$SERVICE_INIT" enable >/dev/null 2>&1 || return 1
+  else
+    "$SERVICE_INIT" disable >/dev/null 2>&1 || return 1
+  fi
+  return 0
+}
+
+refresh_luci_rpcd() {
+  rpc_module='/usr/share/rpcd/ucode/luci.subconverter_extended'
+  rpc_bytecode="${RUNTIME_DIR}/luci.subconverter_extended.$$"
+  if [ ! -x /etc/init.d/rpcd ] || \
+     ! ucode -c -s -o "$rpc_bytecode" "$rpc_module" >/dev/null 2>&1; then
+    rm -f "$rpc_bytecode" 2>/dev/null || :
+    return 1
+  fi
+  rm -f "$rpc_bytecode" 2>/dev/null || :
+  rm -f /tmp/luci-indexcache /tmp/luci-indexcache.* 2>/dev/null || :
+  rm -rf /tmp/luci-modulecache
+  /etc/init.d/rpcd reload >/dev/null 2>&1 || return 1
+  # rpcd reloads its modules asynchronously after receiving SIGHUP. Avoid
+  # accepting a response from the pre-reload ucode object.
+  sleep 1
+  rpc_wait=0
+  while [ "$rpc_wait" -lt 15 ]; do
+    rpc_status="$(ubus call luci.subconverter_extended status 2>/dev/null || :)"
+    if printf '%s\n' "$rpc_status" | \
+       jsonfilter -e '@.ok' 2>/dev/null | grep -qx true; then
+      return 0
+    fi
+    rpc_wait=$((rpc_wait + 1))
+    sleep 1
+  done
+  return 1
+}
+
+reload_updater_daemon() {
+  if [ -x /etc/init.d/subconverter-extended-updater ]; then
+    if ! SUBCONVERTER_UPDATE_TRANSACTION=1 \
+        /etc/init.d/subconverter-extended-updater reload >/dev/null 2>&1; then
+      touch "$DEFERRED_UPDATER_RELOAD" 2>/dev/null || :
+      return 1
+    fi
+    updater_enabled="$(uci_get enabled 1)"
+    if [ "$updater_enabled" = '1' ]; then
+      /etc/init.d/subconverter-extended-updater running >/dev/null 2>&1 || {
+        touch "$DEFERRED_UPDATER_RELOAD" 2>/dev/null || :
+        return 1
+      }
+    elif /etc/init.d/subconverter-extended-updater running >/dev/null 2>&1; then
+      touch "$DEFERRED_UPDATER_RELOAD" 2>/dev/null || :
+      return 1
+    fi
+  fi
+  return 0
+}
+
+apply_deferred_main_reload() {
+  expected_version="$1"
+  expected_running="$2"
+  [ -e "$DEFERRED_MAIN_RELOAD" ] || return 0
+
+  SUBCONVERTER_UPDATE_TRANSACTION=1 \
+    "$SERVICE_INIT" reload >/dev/null 2>&1 || return 1
+  if [ "$expected_running" = 'true' ]; then
+    service_is_running || return 1
+    verify_http_runtime "$expected_version" || return 1
+  elif service_is_running; then
+    return 1
+  fi
+  rm -f "$DEFERRED_MAIN_RELOAD" || return 1
+  return 0
+}
+
+runtime_port() {
+  port="$(json_one "$RUNTIME_STATE_FILE" '@.listen_port' 2>/dev/null || :)"
+  [ -n "$port" ] || port="$(uci -q get subconverter-extended.service.listen_port 2>/dev/null || :)"
+  case "$port" in
+    ''|*[!0-9]*) port=25500 ;;
+  esac
+  if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+    port=25500
+  fi
+  printf '%s\n' "$port"
+}
+
+runtime_host() {
+  address="$(json_one "$RUNTIME_STATE_FILE" '@.listen_address' 2>/dev/null || :)"
+  case "$address" in
+    ''|0.0.0.0|'*') printf '%s\n' '127.0.0.1' ;;
+    '::') printf '%s\n' '[::1]' ;;
+    \[*\])
+      unbracketed="${address#\[}"
+      unbracketed="${unbracketed%\]}"
+      if [ "$unbracketed" = '::' ]; then
+        printf '%s\n' '[::1]'
+        return 0
+      fi
+      printf '%s\n' "$unbracketed" | grep -Eq '^[0-9A-Fa-f:.]+$' || return 1
+      printf '[%s]\n' "$unbracketed"
+      ;;
+    *:*)
+      printf '%s\n' "$address" | grep -Eq '^[0-9A-Fa-f:.]+$' || return 1
+      printf '[%s]\n' "$address"
+      ;;
+    *)
+      printf '%s\n' "$address" | grep -Eq '^[A-Za-z0-9._-]+$' || return 1
+      printf '%s\n' "$address"
+      ;;
+  esac
+}
+
+verify_required_files() {
+  for required_file in \
+    /usr/bin/subconverter-extended \
+    /etc/init.d/subconverter-extended \
+    /usr/libexec/subconverter-extended-update \
+    /usr/share/luci/menu.d/luci-app-subconverter-extended.json \
+    /usr/share/rpcd/acl.d/luci-app-subconverter-extended.json \
+    /usr/share/rpcd/ucode/luci.subconverter_extended \
+    /www/luci-static/resources/subconverter_extended/api.js \
+    /www/luci-static/resources/view/subconverter_extended/overview.js \
+    /www/luci-static/resources/view/subconverter_extended/settings.js \
+    /www/luci-static/resources/view/subconverter_extended/update.js \
+    /www/luci-static/resources/view/subconverter_extended/log.js
+  do
+    if [ ! -f "$required_file" ]; then
+      VERIFY_ERROR="Required installed file is missing: ${required_file}."
+      return 1
+    fi
+    if ! apk info -W "$required_file" 2>/dev/null | grep -q "$PACKAGE_NAME"; then
+      VERIFY_ERROR="APK ownership is missing for required file: ${required_file}."
+      return 1
+    fi
+  done
+  [ -x /usr/bin/subconverter-extended ] || {
+    VERIFY_ERROR='Installed launcher is not executable.'
+    return 1
+  }
+  [ -x /etc/init.d/subconverter-extended ] || {
+    VERIFY_ERROR='Installed service init script is not executable.'
+    return 1
+  }
+  [ -x /usr/libexec/subconverter-extended-update ] || {
+    VERIFY_ERROR='Installed updater is not executable.'
+    return 1
+  }
+  return 0
+}
+
+verify_build_identity() {
+  expected_version="$1"
+  expected_revision="$2"
+  expected_build_date="$3"
+  actual_version="$(read_build_info version 2>/dev/null || :)"
+  actual_revision="$(read_build_info revision 2>/dev/null || :)"
+  actual_build_date="$(read_build_info build_date 2>/dev/null || :)"
+  if [ "$actual_version" != "$expected_version" ] || \
+     [ "$actual_revision" != "$expected_revision" ] || \
+     [ "$actual_build_date" != "$expected_build_date" ]; then
+    VERIFY_ERROR='Installed BUILD-INFO.json does not match the selected Release manifest.'
+    return 1
+  fi
+  return 0
+}
+
+verify_http_runtime() {
+  expected_version="$1"
+  attempt=0
+  while [ "$attempt" -lt 30 ]; do
+    runtime_version="$(json_one "$RUNTIME_STATE_FILE" '@.version' 2>/dev/null || :)"
+    runtime_pid="$(json_one "$RUNTIME_STATE_FILE" '@.pid' 2>/dev/null || :)"
+    port="$(runtime_port)"
+    host="$(runtime_host 2>/dev/null || :)"
+    if [ "$runtime_version" != "$expected_version" ] || ! is_uint "$runtime_pid" || \
+       [ ! -d "/proc/${runtime_pid}" ] || [ -z "$host" ]; then
+      attempt=$((attempt + 1))
+      sleep 1
+      continue
+    fi
+    health_file="${RUNTIME_DIR}/health.$$"
+    version_file="${RUNTIME_DIR}/version.$$"
+    if curl --fail --silent --show-error --max-time 3 \
+          --noproxy '*' --output "$health_file" "http://${host}:${port}/healthz" 2>/dev/null && \
+       [ "$(tr -d '\r\n' < "$health_file")" = 'ok' ] && \
+       curl --fail --silent --show-error --max-time 3 \
+         --header 'Origin: http://127.0.0.1' \
+          --noproxy '*' --output "$version_file" "http://${host}:${port}/version" 2>/dev/null && \
+       grep -Eq "^SubConverter-Extended ${expected_version}(-[0-9a-f]{7})? backend$" "$version_file" && \
+       curl --fail --silent --show-error --max-time 5 \
+         --output "${RUNTIME_DIR}/conversion.$$" \
+         --noproxy '*' "http://${host}:${port}/sub?target=clash&url=ss%3A%2F%2FYWVzLTEyOC1nY206cGFzc3dvcmQ%40example.com%3A8388%23Smoke&insert=false&emoji=false&list=true" 2>/dev/null && \
+       grep -Fq 'name: Smoke' "${RUNTIME_DIR}/conversion.$$" && \
+       grep -Fq 'server: example.com' "${RUNTIME_DIR}/conversion.$$"; then
+      rm -f "$health_file" "$version_file"
+      rm -f "${RUNTIME_DIR}/conversion.$$"
+      return 0
+    fi
+    rm -f "$health_file" "$version_file" "${RUNTIME_DIR}/conversion.$$"
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  VERIFY_ERROR="Service health/version/conversion verification failed on ${host}:${port}."
+  return 1
+}
+
+verify_installed_release() {
+  expected_version="$1"
+  expected_revision="$2"
+  expected_build_date="$3"
+  expected_cache_file="$4"
+  expected_size="$5"
+  expected_sha="$6"
+
+  verify_package_database || return 1
+  verify_cached_apk "$expected_cache_file" "$expected_size" "$expected_sha" || {
+    VERIFY_ERROR='The exact installed Release APK is not retained in the persistent APK cache.'
+    return 1
+  }
+  cached_package_copy_matches "$expected_sha" || {
+    VERIFY_ERROR='APK did not retain a canonical package-cache copy for reboot persistence.'
+    return 1
+  }
+  verify_required_files || return 1
+  verify_build_identity "$expected_version" "$expected_revision" "$expected_build_date" || return 1
+  service_is_running || {
+    VERIFY_ERROR='The procd service did not enter the running state.'
+    return 1
+  }
+  verify_http_runtime "$expected_version" || return 1
+  return 0
+}
+
+install_cached_apk() {
+  apk_file="$1"
+  if ! SUBCONVERTER_UPDATE_TRANSACTION=1 apk \
+      --preserve-env \
+      --wait 60 \
+      --allow-untrusted \
+      --force-non-repository \
+      --cache-packages \
+      --simulate \
+      add "$apk_file" >/dev/null 2>&1; then
+    INSTALL_ERROR='APK simulation rejected the selected local Release package.'
+    return 1
+  fi
+  if ! SUBCONVERTER_UPDATE_TRANSACTION=1 apk \
+      --preserve-env \
+      --wait 60 \
+      --allow-untrusted \
+      --force-non-repository \
+      --cache-packages \
+      add "$apk_file" > "${RUNTIME_DIR}/apk-install.log" 2>&1; then
+    INSTALL_ERROR="APK installation failed: $(sanitize_text "$(tail -n 8 "${RUNTIME_DIR}/apk-install.log" 2>/dev/null || :)")."
+    return 1
+  fi
+  return 0
+}
+
+stop_service_for_transaction() {
+  if service_is_running; then
+    "$SERVICE_INIT" stop >/dev/null 2>&1 || {
+      INSTALL_ERROR='Unable to request a graceful service stop.'
+      return 1
+    }
+    wait_service_stopped || {
+      INSTALL_ERROR='Service did not stop gracefully within 20 seconds.'
+      return 1
+    }
+  fi
+  return 0
+}
+
+start_for_validation() {
+  SUBCONVERTER_UPDATE_TRANSACTION=1 "$SERVICE_INIT" start >/dev/null 2>&1 || {
+    VERIFY_ERROR='Unable to start the installed service for validation.'
+    return 1
+  }
+  return 0
+}
+
+restore_running_state_after_success() {
+  was_running="$1"
+  if [ "$was_running" = 'false' ]; then
+    "$SERVICE_INIT" stop >/dev/null 2>&1 || return 1
+    wait_service_stopped || return 1
+  fi
+  return 0
+}
+
+cleanup_project_cache() {
+  current_asset="$1"
+  rollback_asset="$2"
+  current_sha="$(file_sha256 "$current_asset" 2>/dev/null || :)"
+  cleanup_failed=0
+  for cache_entry in "${APK_CACHE_DIR}"/"${DISPLAY_NAME}"-v*-openwrt-"${ARCH}".apk; do
+    [ -f "$cache_entry" ] || continue
+    rm -f "$cache_entry" || cleanup_failed=1
+  done
+  for cache_entry in "${APK_CACHE_DIR}"/"${PACKAGE_NAME}"-*.apk; do
+    [ -f "$cache_entry" ] || continue
+    cache_sha="$(file_sha256 "$cache_entry" 2>/dev/null || :)"
+    if [ "$cache_sha" != "$current_sha" ]; then
+      rm -f "$cache_entry" || cleanup_failed=1
+    fi
+  done
+  for staged_entry in "${STAGING_DIR}"/*.apk; do
+    [ -f "$staged_entry" ] || continue
+    rm -f "$staged_entry" || cleanup_failed=1
+  done
+  for rollback_entry in "${ROLLBACK_DIR}"/*.apk; do
+    [ -f "$rollback_entry" ] || continue
+    [ "$rollback_entry" = "$rollback_asset" ] || rm -f "$rollback_entry" || cleanup_failed=1
+  done
+  [ "$cleanup_failed" -eq 0 ]
+}
+
+rollback_transaction() {
+  recovery_cache_file="$1"
+  recovery_size="$2"
+  recovery_sha="$3"
+  recovery_version="$4"
+  recovery_revision="$5"
+  recovery_build_date="$6"
+  was_running="$7"
+  was_enabled="$8"
+  failure_reason="$9"
+
+  STATE_NAME='rolling_back'
+  STATE_OK='false'
+  STATE_PROGRESS='85'
+  STATE_MESSAGE='Validation failed; restoring the previous package.'
+  STATE_ERROR="$failure_reason"
+  write_state
+  log_message err "Update validation failed; rolling back: ${failure_reason}"
+
+  if ! "$SERVICE_INIT" stop >/dev/null 2>&1 || ! wait_service_stopped; then
+    STATE_ERROR='Unable to stop the failed target before rollback.'
+    set_state recovery_failed false 100 '' "$STATE_ERROR"
+    return 1
+  fi
+  if ! verify_cached_apk "$recovery_cache_file" "$recovery_size" "$recovery_sha"; then
+    STATE_ERROR="Rollback package integrity check failed after update failure: ${failure_reason}"
+    write_last_failure "$STATE_LATEST_VERSION" "$STATE_ERROR"
+    write_state
+    return 1
+  fi
+  if ! install_cached_apk "$recovery_cache_file"; then
+    STATE_ERROR="Rollback APK installation failed after update failure: ${INSTALL_ERROR}"
+    write_last_failure "$STATE_LATEST_VERSION" "$STATE_ERROR"
+    write_state
+    return 1
+  fi
+  if ! restore_enable_state "$was_enabled" || ! refresh_luci_rpcd; then
+    STATE_ERROR='Rollback installed, but service enable state or LuCI/rpcd restoration failed.'
+    set_state recovery_failed false 100 '' "$STATE_ERROR"
+    return 1
+  fi
+  if ! start_for_validation || \
+     ! verify_installed_release "$recovery_version" "$recovery_revision" "$recovery_build_date" "$recovery_cache_file" "$recovery_size" "$recovery_sha"; then
+    STATE_ERROR="Rollback package did not pass acceptance: ${VERIFY_ERROR:-unknown rollback error}."
+    write_last_failure "$STATE_LATEST_VERSION" "$STATE_ERROR"
+    write_state
+    return 1
+  fi
+  if ! restore_running_state_after_success "$was_running" || \
+     ! restore_enable_state "$was_enabled"; then
+    STATE_ERROR='Rollback package passed, but the original service state was not restored.'
+    set_state recovery_failed false 100 '' "$STATE_ERROR"
+    return 1
+  fi
+  expected_world="$(json_one "$PENDING_FILE" '@.world_before' 2>/dev/null || :)"
+  if [ -n "$expected_world" ] && [ "$(world_constraint 2>/dev/null || :)" != "$expected_world" ]; then
+    STATE_ERROR='Rollback package passed, but the APK world constraint was not restored.'
+    set_state recovery_failed false 100 '' "$STATE_ERROR"
+    return 1
+  fi
+  canonical_recovery="$(matching_cached_package_copy "$recovery_sha" 2>/dev/null || :)"
+  [ -n "$canonical_recovery" ] || {
+    STATE_ERROR='Rollback succeeded but its canonical reboot cache entry is missing.'
+    write_state
+    return 1
+  }
+  if ! write_last_good "$recovery_version" "$canonical_recovery" "$recovery_size" "$recovery_sha" "$recovery_revision" "$recovery_build_date" || \
+     ! write_last_failure "$STATE_LATEST_VERSION" "$failure_reason"; then
+    STATE_ERROR='Rollback passed, but its persistent recovery metadata could not be committed.'
+    set_state recovery_failed false 100 '' "$STATE_ERROR"
+    return 1
+  fi
+  if ! cleanup_project_cache "$recovery_cache_file" "$recovery_cache_file" || ! sync; then
+    STATE_ERROR='Rollback passed, but its persistent package cache could not be committed.'
+    set_state recovery_failed false 100 '' "$STATE_ERROR"
+    return 1
+  fi
+  if ! verify_cached_apk "$canonical_recovery" "$recovery_size" "$recovery_sha" || \
+     ! verify_cached_apk "$recovery_cache_file" "$recovery_size" "$recovery_sha" || \
+     ! remove_pending_durably; then
+    STATE_ERROR='Rollback passed, but its transaction journal could not be committed.'
+    set_state recovery_failed false 100 '' "$STATE_ERROR"
+    return 1
+  fi
+  if ! apply_deferred_main_reload "$recovery_version" "$was_running"; then
+    STATE_ERROR='Rollback restored the package, but a deferred configuration reload failed.'
+    set_state configuration_error false 100 \
+      'The previous package is installed; review the saved runtime settings.' "$STATE_ERROR"
+    reload_updater_daemon || :
+    return 1
+  fi
+  cleanup_project_cache "$recovery_cache_file" '' && sync || \
+    log_message warning 'Rollback committed, but non-critical stale package cleanup failed.'
+  refresh_current_version
+  STATE_NAME='rolled_back'
+  STATE_OK='false'
+  STATE_AVAILABLE='true'
+  STATE_PROGRESS='100'
+  STATE_MESSAGE='The previous package was restored and validated.'
+  STATE_ERROR="$failure_reason"
+  refresh_rollback_available
+  write_state
+  if ! reload_updater_daemon; then
+    STATE_ERROR='The rollback committed, but the automatic update daemon did not reload.'
+    set_state updater_error false 100 \
+      'The previous package is installed; retry the updater service reload.' "$STATE_ERROR"
+    return 1
+  fi
+  return 1
+}
+
+perform_transaction() {
+  operation="$1"
+  target_version="$2"
+  target_cache_file="$3"
+  target_size="$4"
+  target_sha="$5"
+  target_revision="$6"
+  target_build_date="$7"
+  recovery_version="$8"
+  recovery_cache_file="$9"
+  shift 9
+  recovery_size="$1"
+  recovery_sha="$2"
+  recovery_revision="$3"
+  recovery_build_date="$4"
+
+  if [ -e "$PENDING_FILE" ]; then
+    STATE_ERROR='A previous update transaction requires recovery before another package change.'
+    set_state recovery_failed false 100 '' "$STATE_ERROR"
+    return 1
+  fi
+
+  if service_is_running; then was_running='true'; else was_running='false'; fi
+  if service_is_enabled; then was_enabled='true'; else was_enabled='false'; fi
+  world_before="$(world_constraint 2>/dev/null || :)"
+
+  if ! write_pending ready "$operation" "$recovery_version" "$target_version" \
+    "$target_cache_file" "$target_size" "$target_sha" "$target_revision" "$target_build_date" \
+    "$recovery_cache_file" "$recovery_size" "$recovery_sha" "$recovery_version" "$recovery_revision" "$recovery_build_date" \
+    "$was_running" "$was_enabled" "$world_before"; then
+    STATE_ERROR='Unable to persist the ready update transaction.'
+    if [ -e "$PENDING_FILE" ] && ! remove_pending_durably; then
+      set_state recovery_failed false 100 '' "$STATE_ERROR"
+    else
+      set_state error false 100 '' "$STATE_ERROR"
+    fi
+    return 1
+  fi
+
+  set_state stopping true 55 'Stopping the service gracefully.' ''
+  if ! stop_service_for_transaction; then
+    STATE_ERROR="$INSTALL_ERROR"
+    restore_enable_state "$was_enabled" || :
+    if [ "$was_running" = 'true' ]; then
+      SUBCONVERTER_UPDATE_TRANSACTION=1 \
+        "$SERVICE_INIT" start >/dev/null 2>&1 || {
+        set_state recovery_failed false 100 '' "$STATE_ERROR"
+        return 1
+      }
+    fi
+    remove_pending_durably || {
+      set_state recovery_failed false 100 '' 'Unable to clear the failed pre-install transaction.'
+      return 1
+    }
+    set_state error false 100 '' "$STATE_ERROR"
+    return 1
+  fi
+
+  if ! write_pending installing "$operation" "$recovery_version" "$target_version" \
+    "$target_cache_file" "$target_size" "$target_sha" "$target_revision" "$target_build_date" \
+    "$recovery_cache_file" "$recovery_size" "$recovery_sha" "$recovery_version" "$recovery_revision" "$recovery_build_date" \
+    "$was_running" "$was_enabled" "$world_before"; then
+    STATE_ERROR='Unable to persist the installing transaction.'
+    restore_failed=0
+    restore_enable_state "$was_enabled" || restore_failed=1
+    if [ "$was_running" = 'true' ]; then
+      SUBCONVERTER_UPDATE_TRANSACTION=1 \
+        "$SERVICE_INIT" start >/dev/null 2>&1 || restore_failed=1
+    fi
+    if [ "$restore_failed" -ne 0 ] || ! remove_pending_durably; then
+      set_state recovery_failed false 100 '' "$STATE_ERROR"
+      return 1
+    fi
+    set_state error false 100 '' "$STATE_ERROR"
+    return 1
+  fi
+  set_state installing true 65 "Installing ${target_version}." ''
+  if ! install_cached_apk "$target_cache_file"; then
+    rollback_transaction "$recovery_cache_file" "$recovery_size" "$recovery_sha" \
+      "$recovery_version" "$recovery_revision" "$recovery_build_date" \
+      "$was_running" "$was_enabled" "$INSTALL_ERROR"
+    return $?
+  fi
+
+  if ! write_pending validating "$operation" "$recovery_version" "$target_version" \
+    "$target_cache_file" "$target_size" "$target_sha" "$target_revision" "$target_build_date" \
+    "$recovery_cache_file" "$recovery_size" "$recovery_sha" "$recovery_version" "$recovery_revision" "$recovery_build_date" \
+    "$was_running" "$was_enabled" "$world_before"; then
+    rollback_transaction "$recovery_cache_file" "$recovery_size" "$recovery_sha" \
+      "$recovery_version" "$recovery_revision" "$recovery_build_date" \
+      "$was_running" "$was_enabled" 'Unable to persist the validating transaction.'
+    return $?
+  fi
+  set_state validating true 78 'Refreshing LuCI/rpcd and validating the installed release.' ''
+
+  validation_error=''
+  restore_enable_state "$was_enabled" || validation_error='Unable to restore the service enable state.'
+  if [ -z "$validation_error" ] && ! refresh_luci_rpcd; then
+    validation_error='rpcd did not recover after refreshing LuCI metadata.'
+  fi
+  if [ -z "$validation_error" ] && ! start_for_validation; then
+    validation_error="$VERIFY_ERROR"
+  fi
+  if [ -z "$validation_error" ] && ! verify_installed_release \
+      "$target_version" "$target_revision" "$target_build_date" \
+      "$target_cache_file" "$target_size" "$target_sha"; then
+    validation_error="$VERIFY_ERROR"
+  fi
+  if [ -n "$validation_error" ]; then
+    rollback_transaction "$recovery_cache_file" "$recovery_size" "$recovery_sha" \
+      "$recovery_version" "$recovery_revision" "$recovery_build_date" \
+      "$was_running" "$was_enabled" "$validation_error"
+    return $?
+  fi
+
+  if ! restore_running_state_after_success "$was_running" || ! restore_enable_state "$was_enabled"; then
+    validation_error='Unable to restore the pre-update service running/enable state.'
+    rollback_transaction "$recovery_cache_file" "$recovery_size" "$recovery_sha" \
+      "$recovery_version" "$recovery_revision" "$recovery_build_date" \
+      "$was_running" "$was_enabled" "$validation_error"
+    return $?
+  fi
+
+  canonical_target="$(matching_cached_package_copy "$target_sha" 2>/dev/null || :)"
+  if [ -z "$canonical_target" ]; then
+    validation_error='Installed package has no canonical reboot cache entry.'
+    rollback_transaction "$recovery_cache_file" "$recovery_size" "$recovery_sha" \
+      "$recovery_version" "$recovery_revision" "$recovery_build_date" \
+      "$was_running" "$was_enabled" "$validation_error"
+    return $?
+  fi
+  if ! write_last_good "$target_version" "$canonical_target" "$target_size" "$target_sha" "$target_revision" "$target_build_date" || \
+     ! write_rollback_metadata "$recovery_version" "$recovery_cache_file" "$recovery_size" "$recovery_sha" "$recovery_revision" "$recovery_build_date"; then
+    rollback_transaction "$recovery_cache_file" "$recovery_size" "$recovery_sha" \
+      "$recovery_version" "$recovery_revision" "$recovery_build_date" \
+      "$was_running" "$was_enabled" 'Unable to persist last-good or rollback metadata.'
+    return $?
+  fi
+  if [ "$operation" = 'rollback' ]; then
+    if ! write_last_failure "$recovery_version" 'Manual rollback cooldown prevents immediate automatic reinstall.'; then
+      rollback_transaction "$recovery_cache_file" "$recovery_size" "$recovery_sha" \
+        "$recovery_version" "$recovery_revision" "$recovery_build_date" \
+        "$was_running" "$was_enabled" 'Unable to persist manual rollback cooldown.'
+      return $?
+    fi
+  else
+    if ! rm -f "$LAST_FAILURE_FILE"; then
+      rollback_transaction "$recovery_cache_file" "$recovery_size" "$recovery_sha" \
+        "$recovery_version" "$recovery_revision" "$recovery_build_date" \
+        "$was_running" "$was_enabled" 'Unable to clear obsolete failure metadata.'
+      return $?
+    fi
+  fi
+  if ! cleanup_project_cache "$target_cache_file" "$recovery_cache_file" || ! sync || \
+     ! verify_cached_apk "$canonical_target" "$target_size" "$target_sha" || \
+     ! verify_cached_apk "$recovery_cache_file" "$recovery_size" "$recovery_sha"; then
+    rollback_transaction "$recovery_cache_file" "$recovery_size" "$recovery_sha" \
+      "$recovery_version" "$recovery_revision" "$recovery_build_date" \
+      "$was_running" "$was_enabled" 'Unable to commit the persistent package cache.'
+    return $?
+  fi
+  if ! remove_pending_durably; then
+    rollback_transaction "$recovery_cache_file" "$recovery_size" "$recovery_sha" \
+      "$recovery_version" "$recovery_revision" "$recovery_build_date" \
+      "$was_running" "$was_enabled" 'Unable to commit the completed transaction.'
+    return $?
+  fi
+  if ! apply_deferred_main_reload "$target_version" "$was_running"; then
+    STATE_LATEST_VERSION="$target_version"
+    STATE_AVAILABLE='false'
+    STATE_ERROR='The package update committed, but a deferred configuration reload failed.'
+    set_state configuration_error false 100 \
+      "${target_version} is installed and rollback-ready; review the saved runtime settings." "$STATE_ERROR"
+    reload_updater_daemon || :
+    return 1
+  fi
+  if ! reload_updater_daemon; then
+    STATE_LATEST_VERSION="$target_version"
+    STATE_AVAILABLE='false'
+    STATE_ERROR='The package update committed, but the automatic update daemon did not reload.'
+    set_state updater_error false 100 \
+      "${target_version} is installed and rollback-ready; retry the updater service reload." "$STATE_ERROR"
+    return 1
+  fi
+  refresh_current_version
+  STATE_LATEST_VERSION="$target_version"
+  STATE_AVAILABLE='false'
+  STATE_ERROR=''
+  set_state success true 100 "${target_version} is installed, validated and rollback-ready." ''
+  log_message info "${operation} transaction completed successfully at ${target_version}."
+  return 0
+}
+
+check_impl() {
+  STATE_OPERATION='check'
+  refresh_current_version
+  STATE_LATEST_VERSION='unknown'
+  STATE_AVAILABLE='false'
+  STATE_API_SOURCE=''
+  STATE_DOWNLOAD_SOURCE=''
+  STATE_SOURCE=''
+  set_state checking true 10 'Checking the latest formal GitHub Release.' ''
+
+  if ! is_release_tag "$STATE_CURRENT_VERSION"; then
+    STATE_ERROR="Installed build identity ${STATE_CURRENT_VERSION} is not an upgradable formal version."
+    set_state error false 100 '' "$STATE_ERROR"
+    return 1
+  fi
+  if ! resolve_release_bundle latest '' latest; then
+    set_state error false 100 '' "$STATE_ERROR"
+    return 1
+  fi
+
+  STATE_LATEST_VERSION="$REL_TAG"
+  relation="$(compare_versions "$STATE_CURRENT_VERSION" "$STATE_LATEST_VERSION")"
+  case "$relation" in
+    '<')
+      STATE_AVAILABLE='true'
+      set_state available true 100 "${STATE_LATEST_VERSION} is available." ''
+      ;;
+    '=')
+      STATE_AVAILABLE='false'
+      set_state up_to_date true 100 "${STATE_CURRENT_VERSION} is current." ''
+      ;;
+    '>')
+      STATE_AVAILABLE='false'
+      set_state newer_local true 100 "Installed ${STATE_CURRENT_VERSION} is newer than the latest formal Release." ''
+      ;;
+    *)
+      STATE_ERROR='Unable to compare installed and latest Release versions.'
+      set_state error false 100 '' "$STATE_ERROR"
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+apply_worker() {
+  STATE_OPERATION='apply'
+  refresh_current_version
+  set_state checking true 5 'Resolving target and rollback Releases.' ''
+
+  if ! verify_package_database; then
+    STATE_ERROR="$VERIFY_ERROR"
+    set_state error false 100 '' "$STATE_ERROR"
+    return 1
+  fi
+  if ! is_release_tag "$STATE_CURRENT_VERSION"; then
+    STATE_ERROR="Installed build identity ${STATE_CURRENT_VERSION} cannot be backed up from a formal Release."
+    set_state error false 100 '' "$STATE_ERROR"
+    return 1
+  fi
+
+  if ! resolve_release_bundle latest '' apply-target; then
+    set_state error false 100 '' "$STATE_ERROR"
+    return 1
+  fi
+  save_bundle_values TARGET
+  STATE_LATEST_VERSION="$TARGET_TAG"
+  relation="$(compare_versions "$STATE_CURRENT_VERSION" "$TARGET_TAG")"
+  if [ "$relation" != '<' ]; then
+    if [ "$relation" = '=' ]; then
+      STATE_AVAILABLE='false'
+      set_state up_to_date true 100 "${STATE_CURRENT_VERSION} is already current." ''
+      return 0
+    fi
+    STATE_ERROR='Refusing a downgrade or incomparable automatic update.'
+    set_state error false 100 '' "$STATE_ERROR"
+    return 1
+  fi
+
+  if ! resolve_release_bundle "tags/${STATE_CURRENT_VERSION}" "$STATE_CURRENT_VERSION" apply-recovery; then
+    STATE_ERROR="Cannot prepare a verified rollback APK for ${STATE_CURRENT_VERSION}: ${STATE_ERROR}"
+    set_state error false 100 '' "$STATE_ERROR"
+    return 1
+  fi
+  save_bundle_values RECOVERY
+
+  target_cache_file="${STAGING_DIR}/${TARGET_ASSET_NAME}"
+  recovery_cache_file="${ROLLBACK_DIR}/${RECOVERY_ASSET_NAME}"
+  required_bytes="$TARGET_ASSET_SIZE"
+  verify_cached_apk "$target_cache_file" "$TARGET_ASSET_SIZE" "$TARGET_ASSET_SHA256" || required_bytes=$((required_bytes + TARGET_ASSET_SIZE))
+  verify_cached_apk "$recovery_cache_file" "$RECOVERY_ASSET_SIZE" "$RECOVERY_ASSET_SHA256" || required_bytes=$((required_bytes + RECOVERY_ASSET_SIZE))
+  ensure_free_space "$required_bytes" || {
+    set_state error false 100 '' "$STATE_ERROR"
+    return 1
+  }
+  ensure_root_space "$TARGET_ASSET_SIZE" || {
+    set_state error false 100 '' "$STATE_ERROR"
+    return 1
+  }
+
+  set_state downloading true 25 'Downloading the target and rollback APKs into persistent cache.' ''
+  if ! verify_cached_apk "$target_cache_file" "$TARGET_ASSET_SIZE" "$TARGET_ASSET_SHA256"; then
+    download_verified_file "$TARGET_ASSET_URL" "$target_cache_file" "$TARGET_ASSET_SIZE" "$TARGET_ASSET_SHA256" 1200 || {
+      set_state error false 100 '' "$STATE_ERROR"
+      return 1
+    }
+  fi
+  if ! verify_cached_apk "$recovery_cache_file" "$RECOVERY_ASSET_SIZE" "$RECOVERY_ASSET_SHA256"; then
+    download_verified_file "$RECOVERY_ASSET_URL" "$recovery_cache_file" "$RECOVERY_ASSET_SIZE" "$RECOVERY_ASSET_SHA256" 1200 || {
+      set_state error false 100 '' "$STATE_ERROR"
+      return 1
+    }
+  fi
+
+  set_state verified true 45 'Release API digest, manifest, SHA256SUMS and APK bytes all match.' ''
+  perform_transaction apply \
+    "$TARGET_TAG" "$target_cache_file" "$TARGET_ASSET_SIZE" "$TARGET_ASSET_SHA256" "$TARGET_REVISION" "$TARGET_BUILD_DATE" \
+    "$RECOVERY_TAG" "$recovery_cache_file" "$RECOVERY_ASSET_SIZE" "$RECOVERY_ASSET_SHA256" "$RECOVERY_REVISION" "$RECOVERY_BUILD_DATE"
+}
+
+rollback_worker() {
+  STATE_OPERATION='rollback'
+  refresh_current_version
+  set_state preparing true 10 'Preparing the retained rollback release.' ''
+  if [ ! -s "$ROLLBACK_FILE" ]; then
+    STATE_ERROR='No validated rollback release is recorded.'
+    set_state error false 100 '' "$STATE_ERROR"
+    return 1
+  fi
+
+  rollback_version="$(json_one "$ROLLBACK_FILE" '@.version' 2>/dev/null || :)"
+  rollback_cache_file="$(json_one "$ROLLBACK_FILE" '@.cache_file' 2>/dev/null || :)"
+  rollback_size="$(json_one "$ROLLBACK_FILE" '@.size' 2>/dev/null || :)"
+  rollback_sha="$(json_one "$ROLLBACK_FILE" '@.sha256' 2>/dev/null || :)"
+  rollback_revision="$(json_one "$ROLLBACK_FILE" '@.revision' 2>/dev/null || :)"
+  rollback_build_date="$(json_one "$ROLLBACK_FILE" '@.build_date' 2>/dev/null || :)"
+  if ! is_release_tag "$rollback_version" || ! is_uint "$rollback_size" || \
+     ! is_sha256 "$rollback_sha" || ! is_revision "$rollback_revision" || \
+     ! verify_cached_apk "$rollback_cache_file" "$rollback_size" "$rollback_sha"; then
+    STATE_ERROR='Recorded rollback release or cached APK failed integrity validation.'
+    set_state error false 100 '' "$STATE_ERROR"
+    return 1
+  fi
+  if [ "$rollback_version" = "$STATE_CURRENT_VERSION" ]; then
+    STATE_ERROR='Recorded rollback release is already installed.'
+    set_state error false 100 '' "$STATE_ERROR"
+    return 1
+  fi
+  if ! is_release_tag "$STATE_CURRENT_VERSION"; then
+    STATE_ERROR='Current package is not a formal Release and cannot be transactionally preserved.'
+    set_state error false 100 '' "$STATE_ERROR"
+    return 1
+  fi
+
+  if ! resolve_release_bundle "tags/${STATE_CURRENT_VERSION}" "$STATE_CURRENT_VERSION" rollback-recovery; then
+    STATE_ERROR="Cannot prepare recovery for the currently installed Release: ${STATE_ERROR}"
+    set_state error false 100 '' "$STATE_ERROR"
+    return 1
+  fi
+  save_bundle_values RECOVERY
+  recovery_cache_file="${ROLLBACK_DIR}/${RECOVERY_ASSET_NAME}"
+  required_bytes=0
+  verify_cached_apk "$recovery_cache_file" "$RECOVERY_ASSET_SIZE" "$RECOVERY_ASSET_SHA256" || required_bytes="$RECOVERY_ASSET_SIZE"
+  ensure_free_space "$required_bytes" || {
+    set_state error false 100 '' "$STATE_ERROR"
+    return 1
+  }
+  ensure_root_space "$rollback_size" || {
+    set_state error false 100 '' "$STATE_ERROR"
+    return 1
+  }
+  if ! verify_cached_apk "$recovery_cache_file" "$RECOVERY_ASSET_SIZE" "$RECOVERY_ASSET_SHA256"; then
+    set_state downloading true 30 'Downloading the current Release as rollback recovery.' ''
+    download_verified_file "$RECOVERY_ASSET_URL" "$recovery_cache_file" "$RECOVERY_ASSET_SIZE" "$RECOVERY_ASSET_SHA256" 1200 || {
+      set_state error false 100 '' "$STATE_ERROR"
+      return 1
+    }
+  fi
+
+  STATE_LATEST_VERSION="$rollback_version"
+  set_state verified true 45 'Rollback and recovery APKs are both verified.' ''
+  perform_transaction rollback \
+    "$rollback_version" "$rollback_cache_file" "$rollback_size" "$rollback_sha" "$rollback_revision" "$rollback_build_date" \
+    "$RECOVERY_TAG" "$recovery_cache_file" "$RECOVERY_ASSET_SIZE" "$RECOVERY_ASSET_SHA256" "$RECOVERY_REVISION" "$RECOVERY_BUILD_DATE"
+}
+
+recover_impl() {
+  STATE_OPERATION='recover'
+  refresh_current_version
+  if [ ! -s "$PENDING_FILE" ]; then
+    return 0
+  fi
+
+  pending_target="$(json_one "$PENDING_FILE" '@.target_version' 2>/dev/null || :)"
+  pending_schema="$(json_one "$PENDING_FILE" '@.schema' 2>/dev/null || :)"
+  pending_phase="$(json_one "$PENDING_FILE" '@.phase' 2>/dev/null || :)"
+  pending_previous="$(json_one "$PENDING_FILE" '@.recovery_version' 2>/dev/null || :)"
+  recovery_cache_file="$(json_one "$PENDING_FILE" '@.recovery_cache_file' 2>/dev/null || :)"
+  recovery_size="$(json_one "$PENDING_FILE" '@.recovery_size' 2>/dev/null || :)"
+  recovery_sha="$(json_one "$PENDING_FILE" '@.recovery_sha256' 2>/dev/null || :)"
+  recovery_revision="$(json_one "$PENDING_FILE" '@.recovery_revision' 2>/dev/null || :)"
+  recovery_build_date="$(json_one "$PENDING_FILE" '@.recovery_build_date' 2>/dev/null || :)"
+  was_running="$(json_one "$PENDING_FILE" '@.was_running' 2>/dev/null || :)"
+  was_enabled="$(json_one "$PENDING_FILE" '@.was_enabled' 2>/dev/null || :)"
+  world_before="$(json_one "$PENDING_FILE" '@.world_before' 2>/dev/null || :)"
+
+  case "$pending_phase" in ready|installing|validating) ;; *) pending_phase='' ;; esac
+  if [ "$pending_schema" != '1' ] || [ -z "$pending_phase" ] || \
+     ! is_release_tag "$pending_target" || ! is_release_tag "$pending_previous" || \
+     ! is_uint "$recovery_size" || ! is_sha256 "$recovery_sha" || \
+     ! is_revision "$recovery_revision" || [ -z "$recovery_build_date" ] || \
+     ! verify_cached_apk "$recovery_cache_file" "$recovery_size" "$recovery_sha"; then
+    STATE_ERROR='An interrupted update exists, but its recovery package is unavailable or invalid.'
+    set_state recovery_failed false 100 '' "$STATE_ERROR"
+    log_message crit "$STATE_ERROR"
+    return 1
+  fi
+  case "$was_running" in true|false) ;; *) was_running='true' ;; esac
+  case "$was_enabled" in true|false) ;; *) was_enabled='true' ;; esac
+
+  # If installation never changed the package, clearing the transaction is safe.
+  if [ "$pending_phase" = 'ready' ] && \
+     [ "$STATE_CURRENT_VERSION" = "$pending_previous" ] && \
+     verify_package_database && verify_required_files && \
+     verify_build_identity "$pending_previous" "$recovery_revision" "$recovery_build_date" && \
+     { [ -z "$world_before" ] || [ "$(world_constraint 2>/dev/null || :)" = "$world_before" ]; }; then
+    if ! remove_pending_durably; then
+      STATE_ERROR='The pre-install transaction was unchanged, but its journal could not be cleared.'
+      set_state recovery_failed false 100 '' "$STATE_ERROR"
+      return 1
+    fi
+    set_state recovered true 100 'Cleared an interrupted pre-install update transaction.' ''
+    return 0
+  fi
+
+  # A boot with any other installed identity is fail closed: restore the exact
+  # pre-transaction Release before the normal service is allowed to start.
+  set_state recovering true 40 "Restoring ${pending_previous} after an interrupted update." ''
+  if ! "$SERVICE_INIT" stop >/dev/null 2>&1 || ! wait_service_stopped; then
+    STATE_ERROR='Interrupted update recovery could not stop the current service.'
+    set_state recovery_failed false 100 '' "$STATE_ERROR"
+    return 1
+  fi
+  if ! install_cached_apk "$recovery_cache_file"; then
+    STATE_ERROR="Interrupted update recovery install failed: ${INSTALL_ERROR}"
+    set_state recovery_failed false 100 '' "$STATE_ERROR"
+    log_message crit "$STATE_ERROR"
+    return 1
+  fi
+  if ! restore_enable_state "$was_enabled" || ! refresh_luci_rpcd; then
+    STATE_ERROR='Interrupted update restored the package but not its enable state or LuCI/rpcd.'
+    set_state recovery_failed false 100 '' "$STATE_ERROR"
+    return 1
+  fi
+  refresh_current_version
+  if [ "$STATE_CURRENT_VERSION" != "$pending_previous" ] || \
+     ! verify_package_database || ! verify_required_files || \
+     ! verify_build_identity "$pending_previous" "$recovery_revision" "$recovery_build_date" || \
+     ! cached_package_copy_matches "$recovery_sha" || \
+     { [ -n "$world_before" ] && [ "$(world_constraint 2>/dev/null || :)" != "$world_before" ]; }; then
+    STATE_ERROR='Interrupted update recovery did not restore the expected package identity.'
+    set_state recovery_failed false 100 '' "$STATE_ERROR"
+    log_message crit "$STATE_ERROR"
+    return 1
+  fi
+  canonical_recovery="$(matching_cached_package_copy "$recovery_sha" 2>/dev/null || :)"
+  if [ -z "$canonical_recovery" ] || \
+     ! write_last_good "$pending_previous" "$canonical_recovery" "$recovery_size" "$recovery_sha" "$recovery_revision" "$recovery_build_date" || \
+     ! write_last_failure "$pending_target" 'Recovered an interrupted update before starting the service.' || \
+     ! remove_pending_durably; then
+    STATE_ERROR='Interrupted update recovery passed, but its persistent recovery state could not be committed.'
+    set_state recovery_failed false 100 '' "$STATE_ERROR"
+    return 1
+  fi
+  rm -f "$DEFERRED_MAIN_RELOAD" 2>/dev/null || :
+  set_state recovered true 100 "Restored ${pending_previous}; normal service startup may continue." ''
+  log_message warning "Recovered interrupted update targeting ${pending_target}."
+  return 10
+}
+
+spawn_worker() {
+  worker_action="$1"
+  cp "$SELF_PATH" "$WORKER_PATH" || return 1
+  chmod 0700 "$WORKER_PATH" || return 1
+  # The copied worker survives replacement of /usr/libexec during apk add.
+  nohup "$WORKER_PATH" "__${worker_action}_worker" >> "$LOG_FILE" 2>&1 </dev/null &
+  worker_pid=$!
+  LOCK_HELD=0
+  printf '%s\n' "$worker_pid" > "${LOCK_DIR}/pid" 2>/dev/null || :
+  if ! kill -0 "$worker_pid" 2>/dev/null; then
+    rm -f "${LOCK_DIR}/pid" "$WORKER_PATH" 2>/dev/null || :
+    rmdir "$LOCK_DIR" 2>/dev/null || :
+    return 1
+  fi
+  return 0
+}
+
+queue_worker() {
+  worker_action="$1"
+  if ! acquire_lock; then
+    emit_state
+    return 1
+  fi
+  refresh_current_version
+  STATE_OPERATION="$worker_action"
+  set_state queued true 1 "${worker_action} operation queued." ''
+  if ! spawn_worker "$worker_action"; then
+    LOCK_HELD=1
+    release_lock
+    STATE_ERROR='Unable to start the detached update worker.'
+    set_state error false 100 '' "$STATE_ERROR"
+    cat "$STATE_FILE"
+    return 1
+  fi
+  cat "$STATE_FILE"
+  return 0
+}
+
+valid_interval() {
+  interval="$1"
+  is_uint "$interval" || return 1
+  [ "$interval" -ge 3600 ] && [ "$interval" -le 604800 ]
+}
+
+valid_hhmm() {
+  printf '%s\n' "$1" | grep -Eq '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+}
+
+hhmm_to_minutes() {
+  hhmm_value="$1"
+  hhmm_hour="${hhmm_value%:*}"
+  hhmm_minute="${hhmm_value#*:}"
+  hhmm_hour="${hhmm_hour#0}"
+  hhmm_minute="${hhmm_minute#0}"
+  [ -n "$hhmm_hour" ] || hhmm_hour=0
+  [ -n "$hhmm_minute" ] || hhmm_minute=0
+  printf '%s\n' $((hhmm_hour * 60 + hhmm_minute))
+}
+
+inside_install_window() {
+  start_time="$(uci_get install_start '03:00')"
+  end_time="$(uci_get install_end '05:00')"
+  valid_hhmm "$start_time" || start_time='03:00'
+  valid_hhmm "$end_time" || end_time='05:00'
+  start_minutes="$(hhmm_to_minutes "$start_time")"
+  end_minutes="$(hhmm_to_minutes "$end_time")"
+  now_time="$(date '+%H:%M')"
+  now_minutes="$(hhmm_to_minutes "$now_time")"
+  if [ "$start_minutes" -eq "$end_minutes" ]; then
+    return 0
+  fi
+  if [ "$start_minutes" -lt "$end_minutes" ]; then
+    [ "$now_minutes" -ge "$start_minutes" ] && [ "$now_minutes" -lt "$end_minutes" ]
+  else
+    [ "$now_minutes" -ge "$start_minutes" ] || [ "$now_minutes" -lt "$end_minutes" ]
+  fi
+}
+
+daemon_loop() {
+  # Avoid competing with network/service initialization during boot.
+  sleep 60
+  last_check=0
+  while :; do
+    enabled="$(uci_get enabled 0)"
+    auto_check="$(uci_get auto_check 1)"
+    auto_install="$(uci_get auto_install 0)"
+    interval="$(uci_get check_interval 86400)"
+    valid_interval "$interval" || interval=86400
+
+    now="$(now_epoch)"
+    if [ "$enabled" = '1' ] && [ "$auto_check" = '1' ] && \
+       [ $((now - last_check)) -ge "$interval" ]; then
+      "$SELF_PATH" check >/dev/null 2>&1 || :
+      last_check="$now"
+    fi
+    if [ "$enabled" = '1' ] && [ "$auto_check" = '1' ]; then
+      available="$(json_one "$STATE_FILE" '@.available' 2>/dev/null || :)"
+      latest="$(json_one "$STATE_FILE" '@.latest_version' 2>/dev/null || :)"
+      if [ "$available" = 'true' ] && [ "$auto_install" = '1' ] && inside_install_window; then
+        failed_version="$(json_one "$LAST_FAILURE_FILE" '@.version' 2>/dev/null || :)"
+        failed_at="$(json_one "$LAST_FAILURE_FILE" '@.failed_at' 2>/dev/null || :)"
+        retry_ok='true'
+        if [ "$failed_version" = "$latest" ] && is_uint "$failed_at"; then
+          age=$(( $(now_epoch) - failed_at ))
+          [ "$age" -ge 604800 ] || retry_ok='false'
+        fi
+        if [ "$retry_ok" = 'true' ]; then
+          "$SELF_PATH" apply >/dev/null 2>&1 || :
+        else
+          log_message warning "Automatic retry for ${latest} is cooling down after a validated rollback."
+        fi
+      fi
+    fi
+    sleep 300
+  done
+}
+
+initialize() {
+  require_root || return 1
+  mkdir -p "$RUNTIME_DIR" "$METADATA_DIR" "$PERSIST_DIR"
+  require_commands || return 1
+  read_architecture || return 1
+  read_proxy_mode || return 1
+  ensure_apk_cache || return 1
+  refresh_current_version
+  return 0
+}
+
+command_name="${1:-status}"
+case "$command_name" in
+  status)
+    if ! require_root || ! require_commands; then
+      STATE_OK='false'
+      STATE_NAME='error'
+      STATE_ERROR='Updater runtime dependencies are unavailable.'
+      write_state
+    fi
+    read_architecture >/dev/null 2>&1 || :
+    emit_state
+    ;;
+  check)
+    if ! initialize; then
+      set_state error false 100 '' "$STATE_ERROR"
+      emit_state
+      exit 1
+    fi
+    if ! acquire_lock; then
+      emit_state
+      exit 1
+    fi
+    check_impl
+    result=$?
+    emit_state
+    exit "$result"
+    ;;
+  apply)
+    if ! initialize; then
+      set_state error false 100 '' "$STATE_ERROR"
+      emit_state
+      exit 1
+    fi
+    queue_worker apply
+    exit $?
+    ;;
+  rollback)
+    if ! initialize; then
+      set_state error false 100 '' "$STATE_ERROR"
+      emit_state
+      exit 1
+    fi
+    queue_worker rollback
+    exit $?
+    ;;
+  recover)
+    if ! initialize; then
+      set_state recovery_failed false 100 '' "$STATE_ERROR"
+      exit 1
+    fi
+    if ! acquire_lock; then
+      STATE_ERROR='Cannot recover while another update operation is active.'
+      set_state recovery_failed false 100 '' "$STATE_ERROR"
+      exit 1
+    fi
+    recover_impl
+    exit $?
+    ;;
+  daemon)
+    if ! initialize; then
+      set_state error false 100 '' "$STATE_ERROR"
+      exit 1
+    fi
+    daemon_loop
+    ;;
+  __apply_worker)
+    LOCK_HELD=1
+    if ! initialize; then
+      set_state error false 100 '' "$STATE_ERROR"
+      exit 1
+    fi
+    printf '%s\n' "$$" > "${LOCK_DIR}/pid"
+    apply_worker
+    exit $?
+    ;;
+  __rollback_worker)
+    LOCK_HELD=1
+    if ! initialize; then
+      set_state error false 100 '' "$STATE_ERROR"
+      exit 1
+    fi
+    printf '%s\n' "$$" > "${LOCK_DIR}/pid"
+    rollback_worker
+    exit $?
+    ;;
+  *)
+    printf 'Usage: %s {status|check|apply|rollback|recover|daemon}\n' "$0" >&2
+    exit 2
+    ;;
+esac

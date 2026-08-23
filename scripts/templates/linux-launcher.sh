@@ -50,6 +50,23 @@ create_config() {
   printf '%s\n' "$target"
 }
 
+ensure_openwrt_resource_links() {
+  mkdir -p "$CONFIG_DIR" /tmp/subconverter-extended/cache
+
+  # Older OpenWrt packages copied pref.example.* to /etc unchanged.  These
+  # compatibility links repair the resulting relative base/ and snippets/
+  # paths without rewriting a possibly user-edited preference file.
+  if [ ! -e "$CONFIG_DIR/base" ] && [ ! -L "$CONFIG_DIR/base" ]; then
+    ln -s "$ROOT/base/base" "$CONFIG_DIR/base"
+  fi
+  if [ ! -e "$CONFIG_DIR/snippets" ] && [ ! -L "$CONFIG_DIR/snippets" ]; then
+    ln -s "$ROOT/base/snippets" "$CONFIG_DIR/snippets"
+  fi
+  if [ ! -e "$CONFIG_DIR/cache" ] && [ ! -L "$CONFIG_DIR/cache" ]; then
+    ln -s /tmp/subconverter-extended/cache "$CONFIG_DIR/cache"
+  fi
+}
+
 resolve_portable_config() {
   if [ -n "${PREF_PATH:-}" ]; then
     conf="$(join_config_path "$PREF_PATH")"
@@ -137,6 +154,7 @@ else
 fi
 
 if [ "$CONFIG_MODE" = "openwrt" ]; then
+  ensure_openwrt_resource_links
   CONF="$(resolve_openwrt_config)"
 else
   CONF="$(resolve_portable_config)"

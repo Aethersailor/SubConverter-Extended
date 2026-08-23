@@ -1,0 +1,8 @@
+#!/bin/sh
+
+root="${IPKG_INSTROOT:-}"
+
+rm -rf "$root/tmp/subconverter-extended"
+rm -f "$root"/tmp/luci-indexcache.*
+
+exit 0

@@ -1,0 +1,53 @@
+#!/bin/sh
+set -e
+
+[ "${SUBCONVERTER_UPDATE_TRANSACTION:-0}" = '1' ] && exit 0
+[ -n "${IPKG_INSTROOT:-}" ] && exit 0
+[ ! -d /tmp/subconverter-extended/update.lock ] || exit 1
+[ ! -s /etc/subconverter/update/pending.json ] || exit 1
+
+state_file='/tmp/subconverter-extended-package-upgrade-state'
+was_running=false
+was_enabled=false
+# The legacy package had no updater. Treat first integration as enabled/running.
+updater_running=true
+
+restore_on_failure() {
+	[ "$was_enabled" = 'true' ] && /etc/init.d/subconverter-extended enable >/dev/null 2>&1 || true
+	[ "$was_running" = 'true' ] && /etc/init.d/subconverter-extended start >/dev/null 2>&1 || true
+	[ "$updater_running" = 'true' ] && /etc/init.d/subconverter-extended-updater start >/dev/null 2>&1 || true
+}
+
+trap restore_on_failure EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if [ -x /etc/init.d/subconverter-extended ]; then
+	/etc/init.d/subconverter-extended running >/dev/null 2>&1 && was_running=true
+	/etc/init.d/subconverter-extended enabled >/dev/null 2>&1 && was_enabled=true
+	/etc/init.d/subconverter-extended stop >/dev/null 2>&1 || exit 1
+	stop_wait=0
+	while /etc/init.d/subconverter-extended running >/dev/null 2>&1; do
+		stop_wait=$((stop_wait + 1))
+		[ "$stop_wait" -lt 40 ] || exit 1
+		sleep 1
+	done
+fi
+
+if [ -x /etc/init.d/subconverter-extended-updater ]; then
+	updater_running=false
+	/etc/init.d/subconverter-extended-updater running >/dev/null 2>&1 && updater_running=true
+	/etc/init.d/subconverter-extended-updater stop >/dev/null 2>&1 || exit 1
+	updater_wait=0
+	while /etc/init.d/subconverter-extended-updater running >/dev/null 2>&1; do
+		updater_wait=$((updater_wait + 1))
+		[ "$updater_wait" -lt 40 ] || exit 1
+		sleep 1
+	done
+fi
+
+printf 'running=%s\nenabled=%s\nupdater_running=%s\n' \
+	"$was_running" "$was_enabled" "$updater_running" > "$state_file"
+trap - EXIT HUP INT TERM
+exit 0
