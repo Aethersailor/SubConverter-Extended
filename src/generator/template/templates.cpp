@@ -17,7 +17,7 @@
 #include "utils/network.h"
 #include "utils/redact.h"
 #include "utils/regexp.h"
-#include "utils/sha256.h"
+#include "utils/string_hash.h"
 #include "utils/time_compat.h"
 #include "utils/urlencode.h"
 #include "utils/yamlcpp_extra.h"
@@ -31,6 +31,19 @@ static thread_local FetchContext current_template_fetch_context =
 static thread_local bool *current_template_fetch_failed = nullptr;
 static constexpr std::size_t rule_provider_file_name_max_length = 64;
 static constexpr std::size_t rule_provider_url_hash_hex_length = 16;
+
+static std::string ruleProviderUrlFingerprint(const std::string &source_url)
+{
+    static constexpr char hex[] = "0123456789abcdef";
+    hash_t value = hash_(source_url);
+    std::string result(rule_provider_url_hash_hex_length, '0');
+    for(std::size_t index = result.size(); index > 0; --index)
+    {
+        result[index - 1] = hex[value & 0x0f];
+        value >>= 4;
+    }
+    return result;
+}
 
 static bool hasExtension(const std::string &path_or_url,
                          const std::string &extension)
@@ -140,8 +153,7 @@ static std::string reserveRuleProviderPath(
     const std::string safe_name =
         sanitizeRuleProviderFileName(provider_name);
     const std::string url_hash =
-        hashing::sha256Hex(source_url).substr(
-            0, rule_provider_url_hash_hex_length);
+        ruleProviderUrlFingerprint(source_url);
     for(std::size_t index = 1;; ++index)
     {
         std::string unique_name = safe_name;
