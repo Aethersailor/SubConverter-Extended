@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <numeric>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -406,5 +405,12 @@ std::string join(const string_array &arr, const std::string &delimiter)
         return "";
     if(arr.size() == 1)
         return arr[0];
-    return std::accumulate(arr.begin() + 1, arr.end(), arr[0], [&](const std::string &a, const std::string &b) {return a + delimiter + b; });
+
+    std::string result = arr[0];
+    for(auto iter = arr.begin() + 1; iter != arr.end(); ++iter)
+    {
+        result.append(delimiter);
+        result.append(*iter);
+    }
+    return result;
 }

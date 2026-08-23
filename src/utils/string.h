@@ -1,6 +1,7 @@
 #ifndef STRING_H_INCLUDED
 #define STRING_H_INCLUDED
 
+#include <iterator>
 #include <numeric>
 #include <string>
 #include <sstream>
@@ -27,7 +28,14 @@ std::string join(InputIt first, InputIt last, const std::string &delimiter)
         return "";
     if(std::next(first) == last)
         return *first;
-    return std::accumulate(std::next(first), last, *first, [&](const std::string &a, const std::string &b) {return a + delimiter + b; });
+
+    std::string result = *first;
+    for(++first; first != last; ++first)
+    {
+        result.append(delimiter);
+        result.append(*first);
+    }
+    return result;
 }
 
 std::string getUrlArg(const std::string &url, const std::string &request);
