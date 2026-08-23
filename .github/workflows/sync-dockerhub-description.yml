@@ -37,14 +37,14 @@ jobs:
           fi
 
           login_payload="$(jq -cn \
-            --arg username "$DOCKERHUB_USERNAME" \
-            --arg password "$DOCKERHUB_TOKEN" \
-            '{username: $username, password: $password}')"
-          jwt="$(curl --fail-with-body --silent --show-error \
+            --arg identifier "$DOCKERHUB_USERNAME" \
+            --arg secret "$DOCKERHUB_TOKEN" \
+            '{identifier: $identifier, secret: $secret}')"
+          access_token="$(curl --fail-with-body --silent --show-error \
             --request POST \
             --header 'Content-Type: application/json' \
             --data "$login_payload" \
-            https://hub.docker.com/v2/users/login/ | jq -er '.token // .access_token')"
+            https://hub.docker.com/v2/auth/token | jq -er '.access_token')"
 
           update_payload="$(jq -cn \
             --arg description '面向多种代理客户端的订阅转换后端增强版，重点完善 Mihomo 解析与 Proxy Provider。' \
@@ -53,13 +53,13 @@ jobs:
 
           curl --fail-with-body --silent --show-error \
             --request PATCH \
-            --header "Authorization: JWT ${jwt}" \
+            --header "Authorization: Bearer ${access_token}" \
             --header 'Content-Type: application/json' \
             --data "$update_payload" \
-            https://hub.docker.com/v2/repositories/aethersailor/subconverter-extended/ \
+            https://hub.docker.com/v2/namespaces/aethersailor/repositories/subconverter-extended \
             >/dev/null
 
-          unset login_payload update_payload jwt
+          unset login_payload update_payload access_token
           current="$(curl --fail-with-body --silent --show-error \
             https://hub.docker.com/v2/namespaces/aethersailor/repositories/subconverter-extended)"
           jq -e \
