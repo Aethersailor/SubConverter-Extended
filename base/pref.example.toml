@@ -291,7 +291,7 @@ update_ruleset_on_request = false
 # 规则集数组字段：ruleset 为本地文件或 URL，group 为目标策略组，type 支持 surge-ruleset、quantumultx、clash-domain、clash-ipcidr、clash-classic，interval 为更新秒数。
 # [[rulesets]]
 # group = "Proxy"
-# ruleset = "https://raw.githubusercontent.com/DivineEngine/Profiles/master/Surge/Ruleset/Unbreak.list"
+# ruleset = "https://example.com/rules/direct.list"
 # type = "surge-ruleset"
 # interval = 86400
 # SubConverter-Extended 对非 Script Clash/Mihomo IP-CIDR 规则的扩展：
@@ -394,10 +394,6 @@ target = "/sub?target=v2ray"
 [[aliases]]
 uri = "/trojan"
 target = "/sub?target=trojan"
-
-[[aliases]]
-uri = "/test"
-target = "/render?path=templates/test.tpl"
 
 # 定时 JavaScript 任务数组：name 为任务名，cronexp 使用 Quartz 风格 Cron，path 为脚本路径，timeout 为执行超时秒数；无表项时不运行任务。
 #[[tasks]]

@@ -195,13 +195,13 @@ rulesets:
   # 规则项字段：rule 表示内联规则；ruleset 表示本地文件或 URL；group 为目标策略组；interval 为更新秒数；可用 surge/quanx/clash-domain/clash-ipcidr/clash-classic 类型前缀。
   rulesets:
 #  - {rule: "GEOIP,CN", group: "DIRECT"}
-#  - {ruleset: "rules/LocalAreaNetwork.list", group: "DIRECT"}
-#  - {ruleset: "surge:rules/LocalAreaNetwork.list", group: "DIRECT"}
-#  - {ruleset: "quanx:https://raw.githubusercontent.com/ConnersHua/Profiles/master/Quantumult/X/Filter/Advertising.list", group: "Advertising", interval: 86400}
+#  - {ruleset: "https://example.com/rules/lan.list", group: "DIRECT"}
+#  - {ruleset: "surge:https://example.com/rules/lan.list", group: "DIRECT"}
+#  - {ruleset: "quanx:https://example.com/rules/advertising.list", group: "Advertising", interval: 86400}
 #  - {ruleset: "clash-domain:https://ruleset.dev/clash_domestic_services_domains", group: "Domestic Services", interval: 86400}
 #  - {ruleset: "clash-ipcidr:https://ruleset.dev/clash_domestic_services_ips", group: "Domestic Services", interval: 86400}
 #  - {ruleset: "clash-ipcidr:https://example.com/cn-ip.yaml", group: "🎯 全球直连", interval: 28800, options: ["no-resolve"]}
-#  - {ruleset: "clash-classic:https://raw.githubusercontent.com/DivineEngine/Profiles/master/Clash/RuleSet/China.yaml", group: "DIRECT", interval: 86400}
+#  - {ruleset: "clash-classic:https://example.com/rules/direct.yaml", group: "DIRECT", interval: 86400}
   - {import: snippets/rulesets.txt}
 
 proxy_groups:

@@ -1,0 +1,69 @@
+name: Sync Docker Hub description
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - .github/DOCKERHUB_DESCRIPTION.md
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-dockerhub-description
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Update Docker Hub repository description
+        shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DOCKERHUB_USERNAME:-}" ] || [ -z "${DOCKERHUB_TOKEN:-}" ]; then
+            echo "::error::DOCKERHUB_USERNAME and DOCKERHUB_TOKEN are required."
+            exit 1
+          fi
+
+          login_payload="$(jq -cn \
+            --arg username "$DOCKERHUB_USERNAME" \
+            --arg password "$DOCKERHUB_TOKEN" \
+            '{username: $username, password: $password}')"
+          jwt="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --data "$login_payload" \
+            https://hub.docker.com/v2/users/login/ | jq -er '.token // .access_token')"
+
+          update_payload="$(jq -cn \
+            --arg description '面向多种代理客户端的订阅转换后端增强版，重点完善 Mihomo 解析与 Proxy Provider。' \
+            --rawfile full_description .github/DOCKERHUB_DESCRIPTION.md \
+            '{description: $description, full_description: $full_description}')"
+
+          curl --fail-with-body --silent --show-error \
+            --request PATCH \
+            --header "Authorization: JWT ${jwt}" \
+            --header 'Content-Type: application/json' \
+            --data "$update_payload" \
+            https://hub.docker.com/v2/repositories/aethersailor/subconverter-extended/ \
+            >/dev/null
+
+          unset login_payload update_payload jwt
+          current="$(curl --fail-with-body --silent --show-error \
+            https://hub.docker.com/v2/namespaces/aethersailor/repositories/subconverter-extended)"
+          jq -e \
+            --arg description '面向多种代理客户端的订阅转换后端增强版，重点完善 Mihomo 解析与 Proxy Provider。' \
+            --rawfile full_description .github/DOCKERHUB_DESCRIPTION.md \
+            '.description == $description and .full_description == $full_description' \
+            <<<"$current" >/dev/null

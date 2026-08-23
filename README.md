@@ -15,7 +15,7 @@
 [![License](https://img.shields.io/badge/license-GPL--3.0-orange?style=flat)](LICENSE)
 [![Wiki](https://img.shields.io/badge/Wiki-完整用户手册-2f81f7?style=flat&logo=github)](https://github.com/Aethersailor/SubConverter-Extended/wiki)
 
-[📖 项目介绍](#项目介绍) · [💡 立项原因](#立项原因) · [✨ 相比上游](#相比上游的主要改进) · [🚀 快速开始](#快速开始) · [📚 完整 Wiki](https://github.com/Aethersailor/SubConverter-Extended/wiki)
+[🧭 按任务开始](#按任务开始) · [🔗 相关项目](#与相关项目的关系) · [💡 立项原因](#立项原因) · [🚀 快速开始](#快速开始) · [📚 完整 Wiki](https://github.com/Aethersailor/SubConverter-Extended/wiki)
 
 </div>
 
@@ -31,6 +31,31 @@ SubConverter-Extended 基于 [asdlokj1qpi233/subconverter](https://github.com/as
 
 > [!IMPORTANT]
 > **维护重点**：Mihomo 相关需求是项目的首要优化方向。`clash`、`clashr` 的解析、Provider 和协议参数支持会优先完善；对其他客户端的支持也会持续优化，并在各自格式能力范围内尽量提供完整、可靠的转换结果。
+
+<a id="按任务开始"></a>
+
+### 🧭 按任务开始
+
+| 想完成的任务 | 入口 |
+| :--- | :--- |
+| 使用公共实例生成第一份配置 | [快速开始](https://github.com/Aethersailor/SubConverter-Extended/wiki/Getting-Started) |
+| 确认客户端应使用哪个 `target` | [客户端与目标格式](https://github.com/Aethersailor/SubConverter-Extended/wiki/Compatibility) |
+| 自行部署服务 | [Docker 部署](https://github.com/Aethersailor/SubConverter-Extended/wiki/Docker-Deployment) · [原生部署](https://github.com/Aethersailor/SubConverter-Extended/wiki/Native-Deployment) |
+| 使用 OpenClash 模板和规则 | [Custom_OpenClash_Rules](https://github.com/Aethersailor/Custom_OpenClash_Rules) |
+| 排查失败或提交脱敏反馈 | [故障排查](https://github.com/Aethersailor/SubConverter-Extended/wiki/Troubleshooting) · [Bug 反馈](https://github.com/Aethersailor/SubConverter-Extended/issues/new?template=bug_report.yml) |
+
+<a id="与相关项目的关系"></a>
+
+### 🔗 与相关项目的关系
+
+| 项目 | 用户可见职责 | 与 SubConverter-Extended 的关系 |
+| :--- | :--- | :--- |
+| [Custom_OpenClash_Rules](https://github.com/Aethersailor/Custom_OpenClash_Rules) | 提供 OpenClash 模板、规则和使用教程 | 可作为转换模板和规则来源；也可直接供 OpenClash 使用。 |
+| **SubConverter-Extended** | 转换订阅、模板和规则，生成目标客户端配置 | 不负责收集 Mihomo `MATCH` 域名，也不供应订阅或节点。 |
+| [Rule-Bot Client](https://github.com/Aethersailor/Rule-Bot-Client) | 从 Mihomo `MATCH` 连接中收集域名，默认保存在本地，可选发送 | 可用于发现需要补充的规则；不是订阅转换的必需组件。 |
+| [Rule-Bot](https://github.com/Aethersailor/Rule-Bot) | 检查域名并按策略提交到目标规则仓库 | 项目公共实例的目标是 Custom_OpenClash_Rules；自建服务可维护其他仓库。 |
+
+常见使用方式是「Custom_OpenClash_Rules 模板 → 可选的 SubConverter-Extended 转换 → Mihomo/OpenClash」。规则反馈是独立流程：「Mihomo `MATCH` → 可选的 Rule-Bot Client 发送 → Rule-Bot → 目标规则仓库」。两条流程相互独立，无需成套部署。
 
 ### 🎯 长期愿景
 
@@ -249,6 +274,7 @@ http://localhost:25500/healthz
 - 自行部署者需要自行管理 TLS、访问控制、防火墙、日志、备份和更新。
 - `lan` 是兼容旧部署的默认安全档位，不代表服务可以安全地直接暴露到公网。
 - 项目日志会对已知敏感字段进行脱敏，但这不是通用数据防泄漏系统。
+- 未修复的安全漏洞请按 [安全策略](SECURITY.md) 私密报告，不要在公开 Issue 中披露利用细节。
 
 > [!WARNING]
 > 本项目保持中立，不提供规避监管制度的功能。项目仅用于计算机技术学习和合法场景中的配置转换。使用者需要遵守所在地法律法规及远程服务提供者的使用条款。

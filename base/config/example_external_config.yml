@@ -13,7 +13,7 @@ custom:
   - {import: snippets/groups_forcerule.txt}
 
 #  rulesets:
-#  - {import: snippets/ruleset_remote.txt}
+#  - {import: snippets/rulesets_remote.txt}
 #  - {ruleset: "clash-ipcidr:https://example.com/cn-ip.yaml", group: "🎯 全球直连", interval: 28800, options: ["no-resolve"]}
 
   clash_rule_base: base/forcerule.yml
@@ -28,7 +28,7 @@ custom:
 #  stash_rule_base: base/stash.yaml
 
 #  rename_node:
-#  - {import: snippet/rename.txt}
+#  - {import: snippets/rename_node.txt}
 
 #  add_emoji: true
 #  remove_old_emoji: true

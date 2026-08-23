@@ -1,90 +1,116 @@
 name: Bug 反馈
-description: 功能运行不正常 / 失效
+description: 报告可在当前正式 Release 复现的转换、配置或部署问题
 title: "[BUG] "
 body:
   - type: markdown
     attributes:
       value: |
-         遇到问题请先尝试使用最新版本镜像。
-         如果是使用公共转换服务中遇到的问题，请先联系服务的提供者。
+        请先阅读 [故障排查](https://github.com/Aethersailor/SubConverter-Extended/wiki/Troubleshooting) 并检索现有 Issue。第三方公共实例的运行问题，请先联系对应服务提供者。
+
+        **敏感信息警告：** 不要提交真实订阅 URL、节点凭据、Token、Cookie、密码、私有主机名或未脱敏日志。`explain=true` 会隐藏已知敏感字段，但提交前仍需人工检查输出。未修复的安全漏洞请使用 [GitHub 私密报告](https://github.com/Aethersailor/SubConverter-Extended/security/advisories/new)。
   - type: checkboxes
-    id: version-check
+    id: preflight
     attributes:
-      label: 确认版本最新
-      description: 对于您遇到的 Bug，是否尝试在最新 Action 编译的版本中复现？
+      label: 提交前确认
       options:
-      - label: 我已经确认在最新 Action 编译的版本中复现
-        required: true
-  - type: checkboxes
-    id: public-check
+        - label: 我已在最新正式 Release 或与之对应的 Docker `latest` 中尝试复现。
+          required: true
+        - label: 我已检索现有 Issue，没有找到相同问题。
+          required: true
+        - label: 我已删除或替换订阅、节点、凭据和其他敏感信息。
+          required: true
+  - type: dropdown
+    id: public-instance
     attributes:
-      label: 已尝试使用公共实例
-      description: 对于您遇到的 Bug，是否尝试在本项目的公共实例(api.asailor.org)中复现？
+      label: 公共实例复现情况（可选）
+      description: 不要为了测试而向公共实例提交敏感订阅。
       options:
-      - label: 我已经确认在公共实例中复现
-        required: true
-  - type: checkboxes
-    id: issue-check
-    attributes:
-      label: 检索issue
-      description: 对于您遇到的 Bug，是否已经确认之前没有其他 Issue 涉及？
-      options:
-      - label: 我已经确认之前没有 Issue 涉及此 Bug
-        required: true
+        - 未测试
+        - 可以复现
+        - 无法复现
+        - 不适用
   - type: input
-    id: subconverter-version
+    id: version-revision
     attributes:
-      label: SubConverter-Extended 版本
-      description: SubConverter-Extended 版本
-      placeholder: 请输入详细的版本号
+      label: 版本与源代码修订
+      description: 从 `/version` 复制版本和修订；不要只填写 `latest`。
+      placeholder: "例：vX.Y.Z，revision abcdef12"
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: 部署方式
+      options:
+        - 官方公共实例
+        - Docker
+        - Linux 便携包
+        - Windows 便携包
+        - OpenWrt APK
+        - 其他自建方式
     validations:
       required: true
   - type: input
-    id: convert
+    id: client
     attributes:
-      label: 转换过程
-      description: Bug 发生在什么配置转换为什么配置的过程中？
-      placeholder: 请输入“xxx转换为xxx配置”
+      label: 客户端与版本（可选）
+      description: 如果问题发生在导入、更新或运行配置时，请提供客户端名称和版本。
+      placeholder: "例：Mihomo / OpenClash 及具体版本"
+  - type: input
+    id: conversion
+    attributes:
+      label: 输入类型与目标格式
+      description: 说明输入是订阅、节点链接还是本地文件，以及使用的 `target`。不要填写真实 URL。
+      placeholder: "例：远程订阅 -> target=clash"
+    validations:
+      required: true
+  - type: input
+    id: status-code
+    attributes:
+      label: HTTP 状态码（可选）
+      placeholder: "例：400"
+  - type: input
+    id: request-id
+    attributes:
+      label: X-Request-ID（可选）
+      description: 从失败响应头或相关日志中复制；请不要上传整份原始请求日志。
+      placeholder: "例：服务端生成的请求 ID"
+  - type: textarea
+    id: redacted-request
+    attributes:
+      label: 脱敏后的请求与配置
+      description: 保留参数名、配置结构和触发问题的最小内容；用 `https://example.com/sub`、`<redacted>` 等占位符替换秘密。
+      render: text
     validations:
       required: true
   - type: textarea
-    id: config
+    id: explain
     attributes:
-      label: 转换设置
-      description: 转换时使用的配置文件或外部配置链接
-      placeholder: 请输入
-    validations:
-      required: true
+      label: 脱敏 explain 报告（可选）
+      description: 在同一请求中增加 `explain=true`，人工检查输出后粘贴 JSON。
+      render: json
   - type: textarea
-    id: description
+    id: reproduction
     attributes:
       label: 复现步骤
-      description: Bug 的详细复现步骤
-      placeholder: 请输入
+      description: 从干净配置或最小输入开始，按实际执行顺序列出步骤。
     validations:
       required: true
   - type: textarea
     id: expected
     attributes:
-      label: 期望结果
-      description: 您期望的结果是？
-      placeholder: 请输入
+      label: 预期结果
     validations:
       required: true
   - type: textarea
     id: actual
     attributes:
       label: 实际结果
-      description: 实际得到的结果是？
-      placeholder: 请输入
     validations:
       required: true
   - type: textarea
     id: logs
     attributes:
-      label: 错误信息
-      description: SubConverter-Extended 转换时的日志/信息输出
+      label: 脱敏日志（可选）
+      description: 只提供首个相关错误及必要上下文，并再次检查 URL、凭据和请求参数。
       render: shell
-      placeholder: 请输入
-    validations:
-      required: false
