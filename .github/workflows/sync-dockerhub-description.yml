@@ -48,7 +48,7 @@ jobs:
               "repositories/subconverter-extended"
           )
           expected = {
-              "description": "面向多种代理客户端的订阅转换后端增强版，重点完善 Mihomo 解析与 Proxy Provider。",
+              "description": "多客户端订阅转换后端，重点增强 Mihomo Provider 与远程资源。",
               "full_description": Path(
                   ".github/DOCKERHUB_DESCRIPTION.md"
               ).read_text(encoding="utf-8"),
