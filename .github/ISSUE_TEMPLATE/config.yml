@@ -1,5 +1,11 @@
 blank_issues_enabled: false
 contact_links:
-  - name: 阅读文档
-    url: https://github.com/Aethersailor/SubConverter-Extended/blob/master/README-cn.md
-    about: 建议您发布issue前先仔细阅读项目文档
+  - name: 阅读 README
+    url: https://github.com/Aethersailor/SubConverter-Extended/blob/master/README.md
+    about: 先了解项目用途、支持边界和快速开始。
+  - name: 查看完整 Wiki
+    url: https://github.com/Aethersailor/SubConverter-Extended/wiki
+    about: 查找安装、配置、API 参考和故障排查说明。
+  - name: 私密报告安全漏洞
+    url: https://github.com/Aethersailor/SubConverter-Extended/security/advisories/new
+    about: 请不要在公开 Issue 中披露未修复的安全漏洞。

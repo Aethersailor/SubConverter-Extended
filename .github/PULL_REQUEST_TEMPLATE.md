@@ -1,20 +1,9 @@
-<!-- 
-🛑 必读警告 (CRITICAL WARNING) 🛑
-所有的 PR 必须指向 `dev` 分支！请不要给 `master` 分支提 PR！
-All PRs MUST point to the `dev` branch! Please DO NOT submit PRs to `master`!
--->
+提交前请阅读 [CONTRIBUTING.md](https://github.com/Aethersailor/SubConverter-Extended/blob/dev/CONTRIBUTING.md)。
 
-## 📝 更新内容 (Description of Changes)
-
-- 
-- 
-
-## 🔗 相关 Issue (Related Issues)
-
-- Fixes #
-
-## ✅ 提交前的自查 (Checklist)
-
-- [ ] 我确认当前 PR 的目标分支是 `dev`，而不是 `master`。(I confirm the target branch is `dev`, not `master`.)
-- [ ] 我已经在本地测试了我的代码。(I have tested my code locally.)
+- [ ] PR 的目标分支是 `dev`，不是 `master`。
+- [ ] PR 描述已说明问题、修改范围、兼容性影响和验证结果。
+- [ ] 已运行与改动相关的现有测试或检查，并在 PR 描述中记录结果。
+- [ ] 新增或修改的用户文档只描述已发布的正式 Release 和 Docker `latest`。
+- [ ] 日志、截图、样例和测试数据不包含订阅 URL、节点凭据、Token、Cookie 或其他秘密。
+- [ ] 提交信息符合 Conventional Commits。
 

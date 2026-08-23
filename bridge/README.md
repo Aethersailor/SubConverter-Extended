@@ -41,24 +41,28 @@ stable and easier to package.
 
 ## Local development
 
-If your IDE reports that `libmihomo.h` is missing, build the bridge locally:
+Install Go and a working C compiler for the target platform before building the
+CGO archive. If your IDE reports that `libmihomo.h` is missing, build the
+bridge locally:
 
 ```bash
 cd bridge
 bash build.sh
 ```
 
-The generated artifacts are:
+`build.sh` first regenerates the capability manifest and all derived parser
+metadata, then builds the static `c-archive`. The generated artifacts are:
 
 - `bridge/libmihomo.h`
-- `bridge/libmihomo.a` or `bridge/libmihomo.so`, depending on the build path
-
-The Docker build also regenerates:
-
+- `bridge/libmihomo.a`
 - `bridge/mihomo_capabilities.json`
 - `bridge/proxy_validation_generated.go`
 - `src/parser/mihomo_schemes.h`
 - `src/parser/param_compat.h`
+
+The Alpine Docker build follows the same generation sequence but produces
+`bridge/libmihomo.so`. Review changes to generated, checked-in metadata before
+committing them.
 
 `mihomo_capabilities.json` is the single generated description of the pinned
 Mihomo module. The validation source and both C++ headers are derived from that
@@ -76,7 +80,8 @@ go get github.com/metacubex/mihomo@<version-or-ref>
 go mod tidy
 ```
 
-Then regenerate the parser compatibility headers and rebuild the Docker image.
+Then run `bash build.sh`, or execute the equivalent generation sequence below
+before rebuilding the Docker image:
 
 ```bash
 go run ../scripts/generate_proxy_validation.go \
