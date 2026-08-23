@@ -29,41 +29,40 @@ jobs:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
-          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
 
-          if [ -z "${DOCKERHUB_USERNAME:-}" ] || [ -z "${DOCKERHUB_TOKEN:-}" ]; then
-            echo "::error::DOCKERHUB_USERNAME and DOCKERHUB_TOKEN are required."
-            exit 1
-          fi
+          from scripts.ci.cleanup_container_registry import (
+              CleanupError,
+              _json_request,
+              _request,
+              dockerhub_token,
+          )
 
-          login_payload="$(jq -cn \
-            --arg identifier "$DOCKERHUB_USERNAME" \
-            --arg secret "$DOCKERHUB_TOKEN" \
-            '{identifier: $identifier, secret: $secret}')"
-          access_token="$(curl --fail-with-body --silent --show-error \
-            --request POST \
-            --header 'Content-Type: application/json' \
-            --data "$login_payload" \
-            https://hub.docker.com/v2/auth/token | jq -er '.access_token')"
-
-          update_payload="$(jq -cn \
-            --arg description '面向多种代理客户端的订阅转换后端增强版，重点完善 Mihomo 解析与 Proxy Provider。' \
-            --rawfile full_description .github/DOCKERHUB_DESCRIPTION.md \
-            '{description: $description, full_description: $full_description}')"
-
-          curl --fail-with-body --silent --show-error \
-            --request PATCH \
-            --header "Authorization: Bearer ${access_token}" \
-            --header 'Content-Type: application/json' \
-            --data "$update_payload" \
-            https://hub.docker.com/v2/namespaces/aethersailor/repositories/subconverter-extended \
-            >/dev/null
-
-          unset login_payload update_payload access_token
-          current="$(curl --fail-with-body --silent --show-error \
-            https://hub.docker.com/v2/namespaces/aethersailor/repositories/subconverter-extended)"
-          jq -e \
-            --arg description '面向多种代理客户端的订阅转换后端增强版，重点完善 Mihomo 解析与 Proxy Provider。' \
-            --rawfile full_description .github/DOCKERHUB_DESCRIPTION.md \
-            '.description == $description and .full_description == $full_description' \
-            <<<"$current" >/dev/null
+          username = os.environ.get("DOCKERHUB_USERNAME", "")
+          secret = os.environ.get("DOCKERHUB_TOKEN", "")
+          token = dockerhub_token(username, secret)
+          url = (
+              "https://hub.docker.com/v2/namespaces/aethersailor/"
+              "repositories/subconverter-extended"
+          )
+          expected = {
+              "description": "面向多种代理客户端的订阅转换后端增强版，重点完善 Mihomo 解析与 Proxy Provider。",
+              "full_description": Path(
+                  ".github/DOCKERHUB_DESCRIPTION.md"
+              ).read_text(encoding="utf-8"),
+          }
+          _request(
+              "PATCH",
+              url,
+              headers={"Authorization": f"Bearer {token}"},
+              payload=expected,
+              expected=(200, 202, 204),
+          )
+          current, _headers = _json_request("GET", url)
+          if not isinstance(current, dict) or any(
+              current.get(key) != value for key, value in expected.items()
+          ):
+              raise CleanupError("Docker Hub description readback mismatch")
+          PY
