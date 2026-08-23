@@ -156,6 +156,7 @@ SET(SUBCONVERTER_RUNTIME_SOURCES
     src/utils/redact.cpp
     src/utils/regexp.cpp
     src/utils/resource_control.cpp
+    src/utils/sha256.cpp
     src/utils/string.cpp
     src/utils/system.cpp
     src/utils/urlencode.cpp)
@@ -681,6 +682,7 @@ ADD_LIBRARY(${BUILD_TARGET_NAME} STATIC
     src/utils/network.cpp
     src/utils/redact.cpp
     src/utils/regexp.cpp
+    src/utils/sha256.cpp
     src/utils/string.cpp
     src/utils/urlencode.cpp)
 TARGET_COMPILE_DEFINITIONS(${BUILD_TARGET_NAME} PRIVATE NO_JS_RUNTIME NO_WEBGET)

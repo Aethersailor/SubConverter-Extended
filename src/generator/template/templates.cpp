@@ -3,6 +3,7 @@
 #include <map>
 #include <sstream>
 #include <filesystem>
+#include <unordered_set>
 #include <inja.hpp>
 #include <nlohmann/json.hpp>
 
@@ -16,6 +17,7 @@
 #include "utils/network.h"
 #include "utils/redact.h"
 #include "utils/regexp.h"
+#include "utils/sha256.h"
 #include "utils/time_compat.h"
 #include "utils/urlencode.h"
 #include "utils/yamlcpp_extra.h"
@@ -27,6 +29,8 @@ extern string_array ClashRuleTypes;
 static thread_local FetchContext current_template_fetch_context =
     FetchContext::TrustedConfig;
 static thread_local bool *current_template_fetch_failed = nullptr;
+static constexpr std::size_t rule_provider_file_name_max_length = 64;
+static constexpr std::size_t rule_provider_url_hash_hex_length = 16;
 
 static bool hasExtension(const std::string &path_or_url,
                          const std::string &extension)
@@ -38,6 +42,117 @@ static bool hasExtension(const std::string &path_or_url,
     return dot != std::string::npos &&
            (slash == std::string::npos || dot > slash) &&
            toLower(path.substr(dot)) == extension;
+}
+
+static bool isRuleProviderFileNameCharacter(unsigned char c)
+{
+    return (c >= 'a' && c <= 'z') ||
+           (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') ||
+           c == '.' || c == '_' || c == '-';
+}
+
+static std::string sanitizeRuleProviderFileName(const std::string &name)
+{
+    std::string result;
+    result.reserve(std::min(name.size(), rule_provider_file_name_max_length));
+    bool pending_separator = false;
+    for(unsigned char c : name)
+    {
+        if(isRuleProviderFileNameCharacter(c))
+        {
+            if(pending_separator && !result.empty())
+                result += '_';
+            result += static_cast<char>(c);
+            pending_separator = false;
+        }
+        else
+            pending_separator = true;
+    }
+
+    const std::string trim_characters = "._-";
+    const std::size_t first = result.find_first_not_of(trim_characters);
+    if(first == std::string::npos)
+        return "provider";
+    result.erase(0, first);
+    const std::size_t last = result.find_last_not_of(trim_characters);
+    result.erase(last + 1);
+    if(result.size() > rule_provider_file_name_max_length)
+    {
+        result.resize(rule_provider_file_name_max_length);
+        const std::size_t truncated_last =
+            result.find_last_not_of(trim_characters);
+        if(truncated_last == std::string::npos)
+            return "provider";
+        result.erase(truncated_last + 1);
+    }
+    return result.empty() ? "provider" : result;
+}
+
+static std::string normalizeRuleProviderPathKey(std::string path)
+{
+    std::replace(path.begin(), path.end(), '\\', '/');
+    while(startsWith(path, "./"))
+        path.erase(0, 2);
+    for(char &c : path)
+    {
+        if(c >= 'A' && c <= 'Z')
+            c = static_cast<char>(c - 'A' + 'a');
+    }
+    return path;
+}
+
+static std::unordered_set<std::string>
+collectRuleProviderPaths(const YAML::Node &base_rule)
+{
+    std::unordered_set<std::string> paths;
+    YAML::Node providers;
+    if(base_rule.IsMap())
+    {
+        for(const auto &entry : base_rule)
+        {
+            if(entry.first.IsScalar() &&
+               entry.first.as<std::string>() == "rule-providers")
+            {
+                providers = entry.second;
+                break;
+            }
+        }
+    }
+    if(!providers.IsMap())
+        return paths;
+    for(const auto &provider : providers)
+    {
+        if(!provider.second.IsMap())
+            continue;
+        const YAML::Node path = provider.second["path"];
+        if(path.IsScalar())
+            paths.emplace(normalizeRuleProviderPathKey(path.as<std::string>()));
+    }
+    return paths;
+}
+
+static std::string reserveRuleProviderPath(
+    const std::string &provider_name, const std::string &behavior,
+    const std::string &source_url, const std::string &extension,
+    std::unordered_set<std::string> &used_paths)
+{
+    const std::string safe_name =
+        sanitizeRuleProviderFileName(provider_name);
+    const std::string url_hash =
+        hashing::sha256Hex(source_url).substr(
+            0, rule_provider_url_hash_hex_length);
+    for(std::size_t index = 1;; ++index)
+    {
+        std::string unique_name = safe_name;
+        if(index > 1)
+            unique_name += "-" + std::to_string(index);
+        const std::string path =
+            "./providers/" + unique_name + "-" + behavior + "-" +
+            url_hash + "." + extension;
+        if(used_paths.emplace(normalizeRuleProviderPathKey(path)).second)
+            return path;
+    }
 }
 
 namespace inja
@@ -447,7 +562,7 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
     std::string strLine, rule_group, rule_path, rule_path_typed, rule_name, old_rule_name;
     std::stringstream strStrm;
     string_array vArray, groups;
-    string_map keywords, urls, names;
+    string_map keywords, urls, source_urls, names;
     std::map<std::string, bool> has_domain, has_ipcidr;
     std::map<std::string, int> ruleset_interval, rule_type;
     string_array rules;
@@ -498,6 +613,7 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                     rule_name = old_rule_name + " " + std::to_string(idx++);
                 names[rule_name] = rule_group;
                 urls[rule_name] = "*" + rule_path;
+                source_urls[rule_name] = rule_path;
                 rule_type[rule_name] = x.rule_type;
                 ruleset_interval[rule_name] = x.update_interval;
                 switch(x.rule_type)
@@ -539,6 +655,7 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                         rule_name = old_rule_name + " " + std::to_string(idx++);
                     names[rule_name] = rule_group;
                     urls[rule_name] = rule_path_typed;
+                    source_urls[rule_name] = rule_path;
                     rule_type[rule_name] = x.rule_type;
                     ruleset_interval[rule_name] = x.update_interval;
                     if(clash_classical_ruleset)
@@ -642,6 +759,8 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                 groups.emplace_back(rule_name);
         }
     }
+    std::unordered_set<std::string> used_provider_paths =
+        collectRuleProviderPaths(base_rule);
     for(std::string &x : groups)
     {
         std::string url = urls[x], keyword = keywords[x], name = names[x];
@@ -659,65 +778,52 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
             direct_mrs ? "mrs" :
             direct_txt ? "text" :
             (direct_url.empty() || direct_yaml) ? "yaml" : "";
+        const std::string provider_extension =
+            direct_mrs ? "mrs" : direct_txt ? "txt" : "yaml";
         bool group_has_domain = has_domain[x], group_has_ipcidr = has_ipcidr[x];
         int interval = ruleset_interval[x];
+
+        auto emit_provider = [&](const std::string &yaml_key,
+                                 const std::string &behavior,
+                                 int conversion_type)
+        {
+            YAML::Node provider = base_rule["rule-providers"][yaml_key];
+            provider["type"] = "http";
+            provider["behavior"] = behavior;
+            if(url[0] == '*')
+                provider["url"] = url.substr(1);
+            else
+                provider["url"] =
+                    remote_path_prefix + "/getruleset?type=" +
+                    std::to_string(conversion_type) + "&url=" +
+                    urlSafeBase64Encode(url);
+            provider["path"] = reserveRuleProviderPath(
+                x, behavior, source_urls[x], provider_extension,
+                used_provider_paths);
+            if(!provider_format.empty())
+                provider["format"] = provider_format;
+            if(interval)
+                provider["interval"] = interval;
+        };
 
         if(group_has_domain)
         {
             std::string yaml_key = x;
             if(rule_type[x] != RULESET_CLASH_DOMAIN)
                 yaml_key += " (Domain)";
-            base_rule["rule-providers"][yaml_key]["type"] = "http";
-            base_rule["rule-providers"][yaml_key]["behavior"] = "domain";
-            if(url[0] == '*')
-                base_rule["rule-providers"][yaml_key]["url"] = url.substr(1);
-            else
-                base_rule["rule-providers"][yaml_key]["url"] = remote_path_prefix + "/getruleset?type=3&url=" + urlSafeBase64Encode(url);
-            base_rule["rule-providers"][yaml_key]["path"] =
-                "./providers/" + std::to_string(hash_(url)) +
-                (direct_mrs ? "_domain.mrs" :
-                 direct_txt ? "_domain.txt" : "_domain.yaml");
-            if(!provider_format.empty())
-                base_rule["rule-providers"][yaml_key]["format"] = provider_format;
-            if(interval)
-                base_rule["rule-providers"][yaml_key]["interval"] = interval;
+            emit_provider(yaml_key, "domain", 3);
         }
         if(group_has_ipcidr)
         {
             std::string yaml_key = x;
             if(rule_type[x] != RULESET_CLASH_IPCIDR)
                 yaml_key += " (IP-CIDR)";
-            base_rule["rule-providers"][yaml_key]["type"] = "http";
-            base_rule["rule-providers"][yaml_key]["behavior"] = "ipcidr";
-            if(url[0] == '*')
-                base_rule["rule-providers"][yaml_key]["url"] = url.substr(1);
-            else
-                base_rule["rule-providers"][yaml_key]["url"] = remote_path_prefix + "/getruleset?type=4&url=" + urlSafeBase64Encode(url);
-            base_rule["rule-providers"][yaml_key]["path"] =
-                "./providers/" + std::to_string(hash_(url)) +
-                (direct_mrs ? "_ipcidr.mrs" :
-                 direct_txt ? "_ipcidr.txt" : "_ipcidr.yaml");
-            if(!provider_format.empty())
-                base_rule["rule-providers"][yaml_key]["format"] = provider_format;
-            if(interval)
-                base_rule["rule-providers"][yaml_key]["interval"] = interval;
+            emit_provider(yaml_key, "ipcidr", 4);
         }
         if(!group_has_domain && !group_has_ipcidr)
         {
             std::string yaml_key = x;
-            base_rule["rule-providers"][yaml_key]["type"] = "http";
-            base_rule["rule-providers"][yaml_key]["behavior"] = "classical";
-            if(url[0] == '*')
-                base_rule["rule-providers"][yaml_key]["url"] = url.substr(1);
-            else
-                base_rule["rule-providers"][yaml_key]["url"] = remote_path_prefix + "/getruleset?type=6&url=" + urlSafeBase64Encode(url);
-            base_rule["rule-providers"][yaml_key]["path"] =
-                "./providers/" + std::to_string(hash_(url)) +
-                (direct_mrs ? ".mrs" : direct_txt ? ".txt" : ".yaml");
-            if(!provider_format.empty())
-                base_rule["rule-providers"][yaml_key]["format"] = provider_format;
-            if(interval)
-                base_rule["rule-providers"][yaml_key]["interval"] = interval;
+            emit_provider(yaml_key, "classical", 6);
         }
         if(script)
         {
