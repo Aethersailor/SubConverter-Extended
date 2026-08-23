@@ -3203,10 +3203,14 @@ StashGroupProviderSelection stashProvidersForGroup(
 
   bool saw_dynamic_selector = false;
   for (const std::string &rule : group.Proxies) {
-    if (startsWith(rule, "[]") || rule == "DIRECT" || rule == "REJECT" ||
-        startsWith(toLower(rule), "http://") ||
-        startsWith(toLower(rule), "https://"))
+    if (startsWith(rule, "[]") || rule == "DIRECT" || rule == "REJECT")
       continue;
+    {
+      const std::string normalized_rule = toLower(rule);
+      if (startsWith(normalized_rule, "http://") ||
+          startsWith(normalized_rule, "https://"))
+        continue;
+    }
     std::string selector, server_pattern;
     bool matched_dynamic_selector = false;
     if (parseProviderGroupIdMatcher(rule, selector, server_pattern)) {
@@ -7320,9 +7324,12 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
     for (const std::string &rule : x.Proxies) {
       if (startsWith(rule, "[]") || rule == "DIRECT" || rule == "REJECT")
         continue;
-      if (startsWith(toLower(rule), "http://") ||
-          startsWith(toLower(rule), "https://"))
-        continue;
+      {
+        const std::string normalized_rule = toLower(rule);
+        if (startsWith(normalized_rule, "http://") ||
+            startsWith(normalized_rule, "https://"))
+          continue;
+      }
       std::string server_pattern;
       std::vector<LoonRemoteProxyResource *> selected =
           loonResourcesForRule(rule, ext.loon_remote_proxies, server_pattern);

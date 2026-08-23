@@ -4307,9 +4307,12 @@ static std::string loonRemoteCapabilityReason(
     for (const std::string &rule : group.Proxies) {
       if (startsWith(rule, "[]") || rule == "DIRECT" || rule == "REJECT")
         continue;
-      if (startsWith(toLower(rule), "http://") ||
-          startsWith(toLower(rule), "https://"))
-        continue;
+      {
+        const std::string normalized_rule = toLower(rule);
+        if (startsWith(normalized_rule, "http://") ||
+            startsWith(normalized_rule, "https://"))
+          continue;
+      }
       group_has_dynamic_selector = true;
       if (startsWith(rule, "script:") || startsWith(rule, "!!INSERT=") ||
           startsWith(rule, "!!TYPE=") || startsWith(rule, "!!PORT=") ||
@@ -4445,9 +4448,12 @@ static std::string stashProxyProviderCapabilityReason(
     for (const std::string &rule : group.Proxies) {
       if (startsWith(rule, "[]") || rule == "DIRECT" || rule == "REJECT")
         continue;
-      if (startsWith(toLower(rule), "http://") ||
-          startsWith(toLower(rule), "https://"))
-        continue;
+      {
+        const std::string normalized_rule = toLower(rule);
+        if (startsWith(normalized_rule, "http://") ||
+            startsWith(normalized_rule, "https://"))
+          continue;
+      }
       if (startsWith(rule, "script:") || startsWith(rule, "!!INSERT=") ||
           startsWith(rule, "!!TYPE=") || startsWith(rule, "!!PORT=") ||
           startsWith(rule, "!!SERVER="))

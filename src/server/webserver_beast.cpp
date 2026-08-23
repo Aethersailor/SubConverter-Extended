@@ -529,9 +529,14 @@ void BeastSession::process() {
     if (policy.enabled()) {
       std::vector<std::string> values;
       const char *header = client_ip::headerName(policy.header);
-      for (const auto &field : incoming) {
-        if (toLower(std::string(field.name_string())) == toLower(header))
-          values.emplace_back(field.value());
+      auto field = incoming.begin();
+      const auto field_end = incoming.end();
+      if (field != field_end) {
+        const std::string normalized_header = toLower(header);
+        do {
+          if (toLower(std::string(field->name_string())) == normalized_header)
+            values.emplace_back(field->value());
+        } while (++field != field_end);
       }
       request.client_address =
           client_ip::resolve(request.client_address, values, policy).address;
