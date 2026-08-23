@@ -14,6 +14,8 @@ const update_state = '/tmp/subconverter-extended/update-state.json';
 const update_lock = '/tmp/subconverter-extended/update.lock';
 const update_pending = '/etc/subconverter/update/pending.json';
 const runtime_state = '/tmp/subconverter-extended/runtime.json';
+const service_log = '/tmp/subconverter-extended/service.log';
+const previous_service_log = '/tmp/subconverter-extended/service.log.1';
 const build_info = '/opt/subconverter-extended/BUILD-INFO.json';
 const ubus = connect();
 
@@ -95,6 +97,15 @@ function service_config() {
 	return result;
 }
 
+function complete_log_lines(output, limit) {
+	if (!output || length(output) <= limit)
+		return output || '';
+
+	output = substr(output, length(output) - limit);
+	const newline = index(output, '\n');
+	return newline >= 0 ? substr(output, newline + 1) : '';
+}
+
 function health_status(running, runtime) {
 	if (!running)
 		return 'stopped';
@@ -130,9 +141,17 @@ function status() {
 }
 
 function logs() {
-	let output = read_command('logread -e subconverter-extended -l 200 2>/dev/null') || '';
-	if (length(output) > 65536)
-		output = substr(output, length(output) - 65536);
+	const previous = access(previous_service_log)
+		? complete_log_lines(read_command(`tail -c 24001 ${previous_service_log} 2>/dev/null`), 24000) : '';
+	const application = access(service_log)
+		? complete_log_lines(read_command(`tail -c 24001 ${service_log} 2>/dev/null`), 24000) : '';
+	const system = complete_log_lines(read_command(
+		'logread -e subconverter-extended -l 100 2>/dev/null | tail -c 16001'
+	), 16000);
+	let output = previous + (previous && application ? '\n' : '') + application;
+	if (output && system)
+		output += '\n';
+	output += system;
 
 	return { ok: true, lines: output };
 }

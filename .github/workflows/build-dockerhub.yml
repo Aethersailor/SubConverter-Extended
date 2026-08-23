@@ -556,7 +556,7 @@ jobs:
 
       - name: Smoke test APKs (OpenWrt ${{ matrix.arch }})
         if: needs.prepare.outputs.is_release == 'true'
-        timeout-minutes: 3
+        timeout-minutes: 15
         uses: ./.github/actions/smoke-openwrt-apk
         with:
           artifacts: SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-*.apk

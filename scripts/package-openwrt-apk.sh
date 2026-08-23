@@ -145,7 +145,14 @@ normalize_package_modes() {
   local root="$1"
 
   # Windows and DrvFS worktrees commonly expose every file as executable.
-  # Normalize the staged tree before apk records mode bits in package metadata.
+  # Normalize staged executable text and mode bits before apk records metadata.
+  find "${root}/etc/config" "${root}/etc/init.d" \
+       "${root}/etc/uci-defaults" "${root}/lib/upgrade/keep.d" \
+       "${root}/usr/libexec" "${root}/usr/share/luci/menu.d" \
+       "${root}/usr/share/rpcd/acl.d" "${root}/usr/share/rpcd/ucode" \
+       "${root}/www/luci-static/resources/subconverter_extended" \
+       "${root}/www/luci-static/resources/view/subconverter_extended" \
+       -type f -exec sed -i 's/\r$//' {} +
   find "${root}" -type d -exec chmod 0755 {} +
   find "${root}" -type f -exec chmod 0644 {} +
 
@@ -182,7 +189,7 @@ write_package_file_list() {
   mkdir -p "${metadata_dir}"
   (
     cd "${root}"
-    find . \( -type f -o -type l \) -printf '/%P\n' | sort
+    find . \( -type f -o -type l \) -printf '/%P\n' | LC_ALL=C sort
   ) > "${temporary_list}"
   mv -f "${temporary_list}" "${metadata_dir}/${PACKAGE_NAME}.list"
 }
@@ -230,6 +237,7 @@ for OPENWRT_ARCH in "${ARCH_ARRAY[@]}"; do
   write_package_file_list "${PKG_ROOT}"
   mkdir -p "${PKG_SCRIPT_DIR}"
   cp -a "${APK_SCRIPTS_DIR}/." "${PKG_SCRIPT_DIR}/"
+  sed -i 's/\r$//' "${PKG_SCRIPT_DIR}"/*
   chmod 0755 "${PKG_SCRIPT_DIR}"/*
   PKG_OWNER="$(stat -c '%u:%g' "${PKG_ROOT}")"
 
@@ -260,12 +268,16 @@ apk mkpkg \\
   --script "post-deinstall:${PKG_SCRIPT_DIR}/post-deinstall"
 
 apk adbdump "${OUT_FILE}" > "${OUT_FILE}.metadata"
-if ! awk '
-  \$1 == "user:" && \$2 != "root" { exit 1 }
-  \$1 == "group:" && \$2 != "root" { exit 1 }
-  \$1 == "mode:" && \$2 != "0644" && \$2 != "0755" { exit 1 }
+if grep -q "\$(printf '\r')" "${OUT_FILE}.metadata" || ! awk '
+  \$1 == "user:"  { users++;  if (\$2 != "root") exit 1 }
+  \$1 == "group:" { groups++; if (\$2 != "root") exit 1 }
+  \$1 == "mode:"  {
+    modes++
+    if (\$2 != "0644" && \$2 != "0755") exit 1
+  }
+  END { if (!users || !groups || !modes) exit 1 }
 ' "${OUT_FILE}.metadata"; then
-  echo "Refusing APK with non-canonical ownership or modes: ${OUT_FILE}" >&2
+  echo "Refusing APK with CRLF scripts or non-canonical ownership/modes: ${OUT_FILE}" >&2
   rm -f "${OUT_FILE}.metadata" "${OUT_FILE}"
   exit 1
 fi

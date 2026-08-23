@@ -1,2 +1,12 @@
 *.sh text eol=lf
 resources/dashboard/*.html text eol=lf
+openwrt/apk-scripts/* text eol=lf
+openwrt/root/etc/config/* text eol=lf
+openwrt/root/etc/init.d/* text eol=lf
+openwrt/root/etc/uci-defaults/* text eol=lf
+openwrt/root/lib/upgrade/keep.d/* text eol=lf
+openwrt/root/usr/libexec/* text eol=lf
+openwrt/root/usr/share/luci/menu.d/*.json text eol=lf
+openwrt/root/usr/share/rpcd/acl.d/*.json text eol=lf
+openwrt/root/usr/share/rpcd/ucode/* text eol=lf
+openwrt/root/www/luci-static/resources/**/*.js text eol=lf

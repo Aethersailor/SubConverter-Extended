@@ -1,9 +1,9 @@
 name: Smoke test OpenWrt APK artifacts
-description: Verify that OpenWrt APK artifacts install into an apk root.
+description: Install and validate OpenWrt APK artifacts in official OpenWrt 25.12.5 root filesystems.
 
 inputs:
   artifacts:
-    description: Shell glob matching APK artifacts.
+    description: Shell glob matching APK artifacts from one CPU family.
     required: true
   expected-version:
     description: Exact formal vX.Y.Z identity.
@@ -18,61 +18,460 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install APKs into apk roots
+    - name: Validate APKs in official OpenWrt rootfs
       shell: bash
+      env:
+        ARTIFACT_PATTERN: ${{ inputs.artifacts }}
+        EXPECTED_VERSION: ${{ inputs.expected-version }}
+        EXPECTED_REVISION: ${{ inputs.expected-revision }}
+        EXPECTED_BUILD_DATE: ${{ inputs.expected-build-date }}
       run: |
         set -euo pipefail
-        shopt -s nullglob
 
-        artifacts=( ${{ inputs.artifacts }} )
-        if [ "${#artifacts[@]}" -eq 0 ]; then
-          echo "No APK artifacts matched: ${{ inputs.artifacts }}" >&2
+        if [[ ! "$EXPECTED_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "Invalid expected version: $EXPECTED_VERSION" >&2
+          exit 1
+        fi
+        if [[ ! "$EXPECTED_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+          echo "Invalid expected revision: $EXPECTED_REVISION" >&2
+          exit 1
+        fi
+        if [[ ! "$EXPECTED_BUILD_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+          echo "Invalid expected build date: $EXPECTED_BUILD_DATE" >&2
           exit 1
         fi
 
-        for artifact in "${artifacts[@]}"; do
-          file="$(basename "$artifact")"
-          arch="${file%.apk}"
-          arch="${arch##*-openwrt-}"
+        mapfile -t artifacts < <(compgen -G "$ARTIFACT_PATTERN" | sort)
+        if [ "${#artifacts[@]}" -eq 0 ]; then
+          echo "No APK artifacts matched: $ARTIFACT_PATTERN" >&2
+          exit 1
+        fi
 
-            docker run --rm \
-              -v "$PWD:/work" \
-              -w /work \
-              -e "APK_ARTIFACT=$artifact" \
-              -e "OPENWRT_ARCH=$arch" \
-              -e "EXPECTED_VERSION=${{ inputs.expected-version }}" \
-              -e "EXPECTED_REVISION=${{ inputs.expected-revision }}" \
-              -e "EXPECTED_BUILD_DATE=${{ inputs.expected-build-date }}" \
-              mirror.gcr.io/library/alpine@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b \
-              sh -ec '
-              apk add --root /tmp/apk-root --initdb --arch "$OPENWRT_ARCH" --allow-untrusted "/work/$APK_ARTIFACT"
-              test -x /tmp/apk-root/usr/bin/subconverter-extended
-              test -x /tmp/apk-root/etc/init.d/subconverter-extended
-              test -d /tmp/apk-root/etc/subconverter
-              test -x /tmp/apk-root/opt/subconverter-extended/subconverter
-              test -f /tmp/apk-root/opt/subconverter-extended/base/pref.example.toml
-              test ! -e /tmp/apk-root/opt/subconverter-extended/base/Custom_OpenClash_Rules
-              test -f /tmp/apk-root/usr/share/doc/subconverter-extended/README.OpenWrt
-              test -f /tmp/apk-root/opt/subconverter-extended/BUILD-INFO.json
-              grep -Fq "\"version\": \"$EXPECTED_VERSION\"" /tmp/apk-root/opt/subconverter-extended/BUILD-INFO.json
-              grep -Fq "\"revision\": \"$EXPECTED_REVISION\"" /tmp/apk-root/opt/subconverter-extended/BUILD-INFO.json
-              grep -Fq "\"build_date\": \"$EXPECTED_BUILD_DATE\"" /tmp/apk-root/opt/subconverter-extended/BUILD-INFO.json
-              grep -q "/etc/subconverter/pref.toml" /tmp/apk-root/usr/share/doc/subconverter-extended/README.OpenWrt
-              grep -q "CONFIG_DIR=\"/etc/subconverter\"" /tmp/apk-root/usr/bin/subconverter-extended
-              unexpected_owner="$(
-                find \
-                  /tmp/apk-root/etc/init.d/subconverter-extended \
-                  /tmp/apk-root/usr/bin/subconverter-extended \
-                  /tmp/apk-root/etc/subconverter \
-                  /tmp/apk-root/opt/subconverter-extended \
-                  /tmp/apk-root/usr/share/doc/subconverter-extended \
-                  -exec stat -c "%u:%g %n" {} \; |
-                  awk "\$1 != \"0:0\" { print; exit }"
-              )"
-              if [ -n "$unexpected_owner" ]; then
-                echo "APK contains a path not owned by root:root: $unexpected_owner" >&2
+        workspace_root="$(realpath "$PWD")"
+        expected_prefix="SubConverter-Extended-${EXPECTED_VERSION}-openwrt-"
+        family=""
+        declare -a artifact_paths=()
+        declare -a artifact_arches=()
+        declare -A seen_arches=()
+
+        family_for_arch() {
+          case "$1" in
+            x86_64) printf '%s\n' x86_64 ;;
+            aarch64_generic|aarch64_cortex-a53|aarch64_cortex-a72)
+              printf '%s\n' arm64
+              ;;
+            arm_cortex-a5_vfpv4|arm_cortex-a7|arm_cortex-a7_vfpv4|\
+            arm_cortex-a7_neon-vfpv4|arm_cortex-a8_vfpv3|arm_cortex-a9|\
+            arm_cortex-a9_neon|arm_cortex-a9_vfpv3-d16|arm_cortex-a15_neon-vfpv4)
+              printf '%s\n' armv7
+              ;;
+            *) return 1 ;;
+          esac
+        }
+
+        for artifact in "${artifacts[@]}"; do
+          artifact_abs="$(realpath "$artifact")"
+          case "$artifact_abs" in
+            "$workspace_root"/*) ;;
+            *)
+              echo "APK artifact is outside the workspace: $artifact_abs" >&2
+              exit 1
+              ;;
+          esac
+
+          file="$(basename "$artifact_abs")"
+          case "$file" in
+            "${expected_prefix}"*.apk) ;;
+            *)
+              echo "Unexpected OpenWrt APK filename: $file" >&2
+              exit 1
+              ;;
+          esac
+          arch="${file#"$expected_prefix"}"
+          arch="${arch%.apk}"
+          artifact_family="$(family_for_arch "$arch")" || {
+            echo "Unsupported OpenWrt APK architecture: $arch" >&2
+            exit 1
+          }
+          if [ -n "${seen_arches[$arch]:-}" ]; then
+            echo "Duplicate OpenWrt APK architecture: $arch" >&2
+            exit 1
+          fi
+          seen_arches[$arch]=1
+
+          if [ -z "$family" ]; then
+            family="$artifact_family"
+          elif [ "$family" != "$artifact_family" ]; then
+            echo "One smoke invocation must not mix OpenWrt CPU families." >&2
+            exit 1
+          fi
+
+          artifact_paths+=("${artifact_abs#"$workspace_root"/}")
+          artifact_arches+=("$arch")
+        done
+
+        case "$family" in
+          x86_64)
+            rootfs_target='x86/64'
+            rootfs_stem='x86-64'
+            rootfs_sha256='2dae4250b1b742062ed5787adcdc9dd6d26c7f69f94ced46548eb512d5957e8a'
+            platform='linux/amd64'
+            base_arch='x86_64'
+            preferred_runtime_arch='x86_64'
+            ;;
+          arm64)
+            rootfs_target='armsr/armv8'
+            rootfs_stem='armsr-armv8'
+            rootfs_sha256='493336e176fdc1d6a377763e87a58c5854c24f51e83e586b209783e4bb648d42'
+            platform='linux/arm64'
+            base_arch='aarch64_generic'
+            preferred_runtime_arch='aarch64_generic'
+            ;;
+          armv7)
+            rootfs_target='armsr/armv7'
+            rootfs_stem='armsr-armv7'
+            rootfs_sha256='aa40a60971d4d2588540792e1e48ab9c6a64861c9396d916b479a05ef8060042'
+            platform='linux/arm/v7'
+            base_arch='arm_cortex-a15_neon-vfpv4'
+            preferred_runtime_arch='arm_cortex-a15_neon-vfpv4'
+            ;;
+          *)
+            echo "Unable to select an official OpenWrt rootfs." >&2
+            exit 1
+            ;;
+        esac
+
+        runtime_arch="${artifact_arches[0]}"
+        if [ -n "${seen_arches[$preferred_runtime_arch]:-}" ]; then
+          runtime_arch="$preferred_runtime_arch"
+        fi
+
+        workdir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/subconverter-openwrt-smoke.XXXXXX")"
+        results_dir="$workdir/results"
+        mkdir -p "$results_dir"
+        token="${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-${RANDOM}"
+        base_image="subconverter-openwrt-smoke-base:${token}"
+        prepared_image="subconverter-openwrt-smoke-prepared:${token}"
+        prep_container="subconverter-openwrt-smoke-prep-${token}"
+
+        cleanup() {
+          docker rm -f "$prep_container" >/dev/null 2>&1 || true
+          docker image rm -f "$prepared_image" "$base_image" >/dev/null 2>&1 || true
+          rm -rf -- "$workdir"
+        }
+        trap cleanup EXIT
+
+        rootfs_file="$workdir/openwrt-rootfs.tar.gz"
+        rootfs_url="https://downloads.openwrt.org/releases/25.12.5/targets/${rootfs_target}/openwrt-25.12.5-${rootfs_stem}-rootfs.tar.gz"
+        curl --fail --location --silent --show-error \
+          --retry 3 --retry-all-errors --connect-timeout 20 --max-time 300 \
+          --output "$rootfs_file" "$rootfs_url"
+        printf '%s  %s\n' "$rootfs_sha256" "$rootfs_file" | sha256sum -c -
+
+        gzip -dc "$rootfs_file" | \
+          docker import --platform "$platform" - "$base_image" >/dev/null
+
+        docker run --platform "$platform" --name "$prep_container" \
+          -i -e "BASE_ARCH=$base_arch" "$base_image" /bin/sh -s <<'OPENWRT_PREP'
+        set -eu
+        test "$(apk --print-arch)" = "$BASE_ARCH"
+        apk --version | grep -Fq 'apk-tools 3.0.5'
+        mkdir -p /var/lock
+        attempt=1
+        while :; do
+          if apk update && apk add luci-base curl jsonfilter ca-bundle; then
+            break
+          fi
+          if [ "$attempt" -ge 3 ]; then
+            echo 'Unable to prepare dependencies from signed OpenWrt repositories.' >&2
+            exit 1
+          fi
+          attempt=$((attempt + 1))
+          sleep 5
+        done
+        for package in luci-base curl jsonfilter ca-bundle; do
+          apk info -e "$package" >/dev/null
+        done
+        OPENWRT_PREP
+        docker commit "$prep_container" "$prepared_image" >/dev/null
+        docker rm "$prep_container" >/dev/null
+
+        for index in "${!artifact_paths[@]}"; do
+          artifact_path="${artifact_paths[$index]}"
+          arch="${artifact_arches[$index]}"
+          run_runtime=0
+          [ "$arch" = "$runtime_arch" ] && run_runtime=1
+
+          docker run --rm --platform "$platform" -i \
+            -v "$workspace_root:/work:ro" \
+            -v "$results_dir:/results" \
+            -e "APK_ARTIFACT=$artifact_path" \
+            -e "OPENWRT_ARCH=$arch" \
+            -e "BASE_ARCH=$base_arch" \
+            -e "EXPECTED_VERSION=$EXPECTED_VERSION" \
+            -e "EXPECTED_REVISION=$EXPECTED_REVISION" \
+            -e "EXPECTED_BUILD_DATE=$EXPECTED_BUILD_DATE" \
+            -e "RUN_RUNTIME=$run_runtime" \
+            "$prepared_image" /bin/sh -s <<'OPENWRT_SMOKE'
+          set -eu
+          package='subconverter-extended'
+          source_apk="/work/$APK_ARTIFACT"
+          metadata='/tmp/subconverter-package.adb'
+          package_list="/lib/apk/packages/${package}.list"
+          conffiles="/lib/apk/packages/${package}.conffiles"
+          conffiles_static="/lib/apk/packages/${package}.conffiles_static"
+
+          test -f "$source_apk"
+          test "$(apk --print-arch)" = "$BASE_ARCH"
+          apk adbdump "$source_apk" > "$metadata"
+          if grep -q "$(printf '\r')" "$metadata"; then
+            echo 'APK lifecycle metadata contains CRLF line endings.' >&2
+            exit 1
+          fi
+
+          test "$(awk '$1 == "name:" { print $2; exit }' "$metadata")" = "$package"
+          test "$(awk '$1 == "arch:" { print $2; exit }' "$metadata")" = "$OPENWRT_ARCH"
+          test "$(awk '$1 == "repo-commit:" { print $2; exit }' "$metadata")" = "$EXPECTED_REVISION"
+          apk_version="$(awk '$1 == "version:" { print $2; exit }' "$metadata")"
+          case "$apk_version" in
+            "${EXPECTED_VERSION#v}"-r*) ;;
+            *) echo "Unexpected APK version: $apk_version" >&2; exit 1 ;;
+          esac
+          apk_release="${apk_version##*-r}"
+          case "$apk_release" in ''|*[!0-9]*) exit 1 ;; esac
+
+          actual_depends="$(awk '
+            /^  depends:/ { active=1; next }
+            active && /^    - / { sub(/^    - /, ""); print; next }
+            active { exit }
+          ' "$metadata" | sort)"
+          expected_depends="$(printf '%s\n' ca-bundle curl jsonfilter luci-base | sort)"
+          test "$actual_depends" = "$expected_depends"
+
+          for lifecycle in post-install pre-upgrade post-upgrade pre-deinstall post-deinstall; do
+            grep -Fqx "  ${lifecycle}: |" "$metadata"
+          done
+          awk '
+            $1 == "user:"  { users++;  if ($2 != "root") exit 1 }
+            $1 == "group:" { groups++; if ($2 != "root") exit 1 }
+            $1 == "mode:"  {
+              modes++
+              if ($2 != "0644" && $2 != "0755") exit 1
+            }
+            END { if (!users || !groups || !modes) exit 1 }
+          ' "$metadata"
+
+          mkdir -p /opt/subconverter-extended-update/apk-cache
+          if [ -L /etc/apk/cache ]; then
+            apk_cache="$(readlink -f /etc/apk/cache)"
+          elif [ -d /etc/apk/cache ]; then
+            apk_cache='/etc/apk/cache'
+          elif [ ! -e /etc/apk/cache ]; then
+            apk_cache='/opt/subconverter-extended-update/apk-cache'
+            ln -s "$apk_cache" /etc/apk/cache
+          else
+            echo 'Unsupported /etc/apk/cache in official rootfs.' >&2
+            exit 1
+          fi
+          mkdir -p "$apk_cache"
+          release_apk="$apk_cache/$(basename "$source_apk")"
+          cp "$source_apk" "$release_apk"
+
+          if [ "$OPENWRT_ARCH" != "$BASE_ARCH" ]; then
+            # apk only persists multiple compatible architectures when they
+            # are recorded in the database arch file. Keep the official
+            # rootfs architecture primary so its signed repositories and
+            # installed dependencies remain valid, then allow the exact APK
+            # variant as a compatible secondary architecture.
+            printf '%s\n%s\n' "$BASE_ARCH" "$OPENWRT_ARCH" > /etc/apk/arch
+          fi
+          test "$(sed -n '1p' /etc/apk/arch)" = "$BASE_ARCH"
+          grep -Fxq "$OPENWRT_ARCH" /etc/apk/arch
+          IPKG_NO_SCRIPT=1 apk \
+            --no-network --preserve-env --wait 60 --allow-untrusted \
+            --force-non-repository --cache-packages add "$release_apk"
+
+          apk info -e "$package" >/dev/null
+          apk list -I "$package" | grep -Fq "${package}-${apk_version} "
+          constraint_count="$(grep -Ec "^${package}(\$|[=<>~])" /etc/apk/world)"
+          test "$constraint_count" = '1'
+
+          release_sha="$(sha256sum "$release_apk" | awk '{ print $1 }')"
+          canonical_matches=0
+          for cached_apk in "$apk_cache"/subconverter-extended-*.apk; do
+            [ -f "$cached_apk" ] || continue
+            if [ "$(sha256sum "$cached_apk" | awk '{ print $1 }')" = "$release_sha" ]; then
+              canonical_matches=$((canonical_matches + 1))
+            fi
+          done
+          test "$canonical_matches" = '1'
+
+          required_files='
+          /usr/bin/subconverter-extended
+          /etc/init.d/subconverter-extended
+          /etc/init.d/subconverter-extended-updater
+          /etc/config/subconverter-extended
+          /etc/uci-defaults/90_subconverter-extended
+          /lib/upgrade/keep.d/subconverter-extended
+          /usr/libexec/subconverter-extended-update
+          /usr/share/luci/menu.d/luci-app-subconverter-extended.json
+          /usr/share/rpcd/acl.d/luci-app-subconverter-extended.json
+          /usr/share/rpcd/ucode/luci.subconverter_extended
+          /www/luci-static/resources/subconverter_extended/api.js
+          /www/luci-static/resources/view/subconverter_extended/overview.js
+          /www/luci-static/resources/view/subconverter_extended/settings.js
+          /www/luci-static/resources/view/subconverter_extended/update.js
+          /www/luci-static/resources/view/subconverter_extended/log.js
+          /usr/share/doc/subconverter-extended/README.OpenWrt
+          /opt/subconverter-extended/BUILD-INFO.json
+          /opt/subconverter-extended/subconverter
+          /opt/subconverter-extended/base/pref.example.toml'
+          for required_file in $required_files; do
+            test -f "$required_file"
+            apk info -W "$required_file" | grep -Fq "$package"
+          done
+          test -x /usr/bin/subconverter-extended
+          test -x /etc/init.d/subconverter-extended
+          test -x /etc/init.d/subconverter-extended-updater
+          test -x /usr/libexec/subconverter-extended-update
+          test -x /opt/subconverter-extended/subconverter
+          for shell_file in \
+            /usr/bin/subconverter-extended \
+            /etc/init.d/subconverter-extended \
+            /etc/init.d/subconverter-extended-updater \
+            /etc/uci-defaults/90_subconverter-extended \
+            /usr/libexec/subconverter-extended-update; do
+            busybox ash -n "$shell_file"
+          done
+          test ! -e /opt/subconverter-extended/base/Custom_OpenClash_Rules
+          grep -Fq 'CONFIG_DIR="/etc/subconverter"' /usr/bin/subconverter-extended
+          grep -Fq '/etc/subconverter/pref.toml' /usr/share/doc/subconverter-extended/README.OpenWrt
+
+          test "$(jsonfilter -i /opt/subconverter-extended/BUILD-INFO.json -e '@.version')" = "$EXPECTED_VERSION"
+          test "$(jsonfilter -i /opt/subconverter-extended/BUILD-INFO.json -e '@.revision')" = "$EXPECTED_REVISION"
+          test "$(jsonfilter -i /opt/subconverter-extended/BUILD-INFO.json -e '@.build_date')" = "$EXPECTED_BUILD_DATE"
+
+          test "$(wc -l < "$conffiles" | tr -d ' ')" = '1'
+          test "$(cat "$conffiles")" = '/etc/config/subconverter-extended'
+          read -r conffile_path conffile_sha < "$conffiles_static"
+          test "$conffile_path" = '/etc/config/subconverter-extended'
+          test -n "$conffile_sha"
+          printf '%s  %s\n' "$conffile_sha" "$conffile_path" | sha256sum -c -
+
+          test -f "$package_list"
+          test -z "$(grep -F '.tmp' "$package_list" || :)"
+          test -z "$(uniq -d "$package_list")"
+          LC_ALL=C sort "$package_list" > /tmp/subconverter-package-list.sorted
+          cmp -s /tmp/subconverter-package-list.sorted "$package_list"
+          for listed_path in \
+            /etc/init.d/subconverter-extended \
+            /etc/init.d/subconverter-extended-updater \
+            /etc/uci-defaults/90_subconverter-extended \
+            /usr/libexec/subconverter-extended-update \
+            /usr/share/rpcd/ucode/luci.subconverter_extended; do
+            grep -Fxq "$listed_path" "$package_list"
+          done
+          while IFS= read -r listed_path; do
+            test -e "$listed_path" || test -L "$listed_path"
+            if ! find "$listed_path" -user root -group root \
+                \( -perm 0644 -o -perm 0755 \) -print | grep -Fxq "$listed_path"; then
+              echo "Unexpected installed ownership/mode: $listed_path" >&2
+              exit 1
+            fi
+          done < "$package_list"
+
+          uci set subconverter-extended.service.listen_port='25432'
+          uci set subconverter-extended.update.proxy_mode='direct'
+          uci -q delete subconverter-extended.update.check_interval || :
+          uci commit subconverter-extended
+          /bin/sh /etc/uci-defaults/90_subconverter-extended
+          test "$(uci -q get subconverter-extended.service.listen_port)" = '25432'
+          test "$(uci -q get subconverter-extended.update.proxy_mode)" = 'direct'
+          test "$(uci -q get subconverter-extended.update.check_interval)" = '86400'
+          cp /etc/config/subconverter-extended /tmp/subconverter-uci-first
+          /bin/sh /etc/uci-defaults/90_subconverter-extended
+          cmp -s /tmp/subconverter-uci-first /etc/config/subconverter-extended
+          test "$(readlink /etc/subconverter/base)" = '/opt/subconverter-extended/base/base'
+          test "$(readlink /etc/subconverter/snippets)" = '/opt/subconverter-extended/base/snippets'
+          test "$(readlink /etc/subconverter/cache)" = '/tmp/subconverter-extended/cache'
+
+          ucode -c -s -o /tmp/luci.subconverter_extended.uc \
+            /usr/share/rpcd/ucode/luci.subconverter_extended
+          test -s /tmp/luci.subconverter_extended.uc
+          ucode -e "import { init_enabled } from 'luci.sys'; if (type(init_enabled) != 'function') exit(1);"
+
+          sha256sum /opt/subconverter-extended/subconverter | awk '{ print $1 }' > "/results/${OPENWRT_ARCH}.binary"
+          sha256sum /usr/bin/subconverter-extended | awk '{ print $1 }' > "/results/${OPENWRT_ARCH}.launcher"
+
+          if [ "$RUN_RUNTIME" = '1' ]; then
+            runtime_pid=''
+            runtime_cleanup() {
+              if [ -n "$runtime_pid" ] && kill -0 "$runtime_pid" 2>/dev/null; then
+                kill -KILL "$runtime_pid" 2>/dev/null || :
+                wait "$runtime_pid" 2>/dev/null || :
+              fi
+            }
+            trap runtime_cleanup EXIT
+            trap 'runtime_cleanup; exit 1' HUP INT TERM
+            PREF_PATH=/etc/subconverter/pref.toml \
+            SUBCONVERTER_LISTEN_ADDRESS=127.0.0.1 \
+            SUBCONVERTER_LISTEN_PORT=25500 \
+            SUBCONVERTER_RUNTIME_STATE_FILE=/tmp/subconverter-runtime.json \
+              /usr/bin/subconverter-extended >/tmp/subconverter.stdout 2>/tmp/subconverter.stderr &
+            runtime_pid=$!
+
+            ready=0
+            for _ in $(seq 1 60); do
+              if curl --fail --silent --show-error --noproxy '*' \
+                  http://127.0.0.1:25500/healthz >/tmp/subconverter-health; then
+                ready=1
+                break
+              fi
+              if ! kill -0 "$runtime_pid" 2>/dev/null; then
+                cat /tmp/subconverter.stdout /tmp/subconverter.stderr >&2 || :
                 exit 1
               fi
-              apk info --root /tmp/apk-root subconverter-extended
-            '
+              sleep 1
+            done
+            test "$ready" = '1'
+            test "$(tr -d '\r\n' < /tmp/subconverter-health)" = 'ok'
+            curl --fail --silent --show-error --noproxy '*' \
+              --header 'Origin: http://127.0.0.1' \
+              http://127.0.0.1:25500/version >/tmp/subconverter-version
+            grep -Eq "^SubConverter-Extended ${EXPECTED_VERSION}(-[0-9a-f]{7})? backend$" \
+              /tmp/subconverter-version
+            curl --fail --silent --show-error --noproxy '*' \
+              'http://127.0.0.1:25500/sub?target=clash&url=ss%3A%2F%2FYWVzLTEyOC1nY206cGFzc3dvcmQ%40example.com%3A8388%23Smoke&insert=false&emoji=false&list=true' \
+              >/tmp/subconverter-conversion
+            grep -Fq 'name: Smoke' /tmp/subconverter-conversion
+            grep -Fq 'server: example.com' /tmp/subconverter-conversion
+            test "$(jsonfilter -i /tmp/subconverter-runtime.json -e '@.listen_address')" = '127.0.0.1'
+            test "$(jsonfilter -i /tmp/subconverter-runtime.json -e '@.listen_port')" = '25500'
+            test "$(jsonfilter -i /tmp/subconverter-runtime.json -e '@.version')" = "$EXPECTED_VERSION"
+
+            kill -TERM "$runtime_pid"
+            stopped=0
+            for _ in $(seq 1 30); do
+              if ! kill -0 "$runtime_pid" 2>/dev/null; then
+                stopped=1
+                break
+              fi
+              sleep 1
+            done
+            if [ "$stopped" != '1' ]; then
+              cat /tmp/subconverter.stdout /tmp/subconverter.stderr >&2 || :
+              exit 1
+            fi
+            runtime_status=0
+            wait "$runtime_pid" || runtime_status=$?
+            runtime_pid=''
+            test "$runtime_status" = '0'
+            test ! -e /tmp/subconverter-runtime.json
+            grep -Fq 'SHUTDOWN_REQUESTED signal=SIGTERM' /tmp/subconverter.stdout /tmp/subconverter.stderr
+            trap - EXIT HUP INT TERM
+          fi
+        OPENWRT_SMOKE
         done
+
+        test "$(cat "$results_dir"/*.binary | sort -u | wc -l | tr -d ' ')" = '1'
+        test "$(cat "$results_dir"/*.launcher | sort -u | wc -l | tr -d ' ')" = '1'

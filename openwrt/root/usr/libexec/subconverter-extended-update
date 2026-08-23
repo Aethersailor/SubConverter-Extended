@@ -232,7 +232,7 @@ require_root() {
 
 require_commands() {
   missing=''
-  for command_name in apk curl jsonfilter sha256sum uci ucode ubus sync awk sed grep wc df readlink nohup; do
+  for command_name in apk curl jsonfilter sha256sum uci ucode ubus sync awk sed grep wc df readlink setsid; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
       missing="${missing} ${command_name}"
     fi
@@ -1920,7 +1920,7 @@ spawn_worker() {
   cp "$SELF_PATH" "$WORKER_PATH" || return 1
   chmod 0700 "$WORKER_PATH" || return 1
   # The copied worker survives replacement of /usr/libexec during apk add.
-  nohup "$WORKER_PATH" "__${worker_action}_worker" >> "$LOG_FILE" 2>&1 </dev/null &
+  setsid "$WORKER_PATH" "__${worker_action}_worker" >> "$LOG_FILE" 2>&1 </dev/null &
   worker_pid=$!
   LOCK_HELD=0
   printf '%s\n' "$worker_pid" > "${LOCK_DIR}/pid" 2>/dev/null || :

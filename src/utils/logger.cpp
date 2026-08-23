@@ -1,4 +1,7 @@
 #include <atomic>
+#include <cerrno>
+#include <cstdlib>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <string>
@@ -6,6 +9,7 @@
 #include <thread>
 #include <utility>
 #include <sys/time.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -72,6 +76,41 @@ thread_local bool log_level_override_active = false;
 thread_local LogLevel log_level_override = LOG_LEVEL_INFO;
 
 namespace {
+
+#ifndef _WIN32
+off_t configuredLogFileMaxBytes() {
+    static const off_t configured = []() -> off_t {
+        const char *value = std::getenv("SUBCONVERTER_LOG_FILE_MAX_BYTES");
+        if (value == nullptr || *value == '\0')
+            return 0;
+        errno = 0;
+        char *end = nullptr;
+        const unsigned long long parsed = std::strtoull(value, &end, 10);
+        if (errno != 0 || end == value || *end != '\0' || parsed == 0 ||
+            parsed > static_cast<unsigned long long>(
+                         std::numeric_limits<off_t>::max()))
+            return 0;
+        return static_cast<off_t>(parsed);
+    }();
+    return configured;
+}
+
+void truncateBoundedStderrLog() {
+    const off_t maximum = configuredLogFileMaxBytes();
+    if (maximum == 0)
+        return;
+
+    struct stat status = {};
+    if (fstat(STDERR_FILENO, &status) != 0 || !S_ISREG(status.st_mode) ||
+        status.st_size < maximum)
+        return;
+    std::cerr.flush();
+    if (ftruncate(STDERR_FILENO, 0) == 0)
+        (void)lseek(STDERR_FILENO, 0, SEEK_SET);
+}
+#else
+void truncateBoundedStderrLog() {}
+#endif
 
 LogLevel effectiveLogThreshold() {
 #ifdef NO_WEBGET
@@ -150,6 +189,7 @@ void writeLog(LogLevel level, const std::string &content)
     const std::string safe_content = sanitizeLogLine(content);
     const std::string request_id = currentLogRequestId();
     std::lock_guard<std::mutex> lock(log_mutex);
+    truncateBoundedStderrLog();
     std::cerr<<getTime(2)<<" ["<<getpid()<<" "<<get_thread_name()<<"]"<<logLevelLabel(level);
     if (!request_id.empty())
         std::cerr<<" request_id="<<request_id;

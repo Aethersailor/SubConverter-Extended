@@ -6,6 +6,7 @@ STOP=10
 
 PROG=/usr/bin/subconverter-extended
 UPDATER=/usr/libexec/subconverter-extended-update
+SERVICE_LOG=/tmp/subconverter-extended/service.log
 
 append_env_override() {
 	local name="$1"
@@ -27,8 +28,16 @@ start_service() {
 	config_get resource_control service resource_control
 	config_get log_level service log_level
 	config_get statistics_enabled service statistics_enabled
-	mkdir -p /tmp/subconverter-extended
-	rm -f /tmp/subconverter-extended/runtime.json
+	mkdir -p /tmp/subconverter-extended || return 1
+	chmod 0700 /tmp/subconverter-extended || return 1
+	rm -f /tmp/subconverter-extended/runtime.json || return 1
+	if [ -s "$SERVICE_LOG" ]; then
+		tail -c 262144 "$SERVICE_LOG" > "${SERVICE_LOG}.1.tmp" || return 1
+		mv -f "${SERVICE_LOG}.1.tmp" "${SERVICE_LOG}.1" || return 1
+		chmod 0600 "${SERVICE_LOG}.1" || return 1
+	fi
+	: > "$SERVICE_LOG" || return 1
+	chmod 0600 "$SERVICE_LOG" || return 1
 
 	if [ -s /etc/subconverter/update/pending.json ] && \
 	   [ "${SUBCONVERTER_UPDATE_TRANSACTION:-0}" != '1' ] && [ -x "$UPDATER" ]; then
@@ -51,9 +60,11 @@ start_service() {
 	fi
 
 	procd_open_instance 'main'
-	procd_set_param command "$PROG"
+	procd_set_param command /bin/sh -c \
+		"umask 077; exec \"$PROG\" >>\"$SERVICE_LOG\" 2>&1"
 	procd_set_param env "PREF_PATH=$config_file"
 	procd_append_param env 'SUBCONVERTER_RUNTIME_STATE_FILE=/tmp/subconverter-extended/runtime.json'
+	procd_append_param env 'SUBCONVERTER_LOG_FILE_MAX_BYTES=262144'
 	append_env_override SUBCONVERTER_LISTEN_ADDRESS "$listen_address"
 	append_env_override SUBCONVERTER_LISTEN_PORT "$listen_port"
 	append_env_override SUBCONVERTER_SECURITY_PROFILE "$security_profile"
@@ -62,8 +73,6 @@ start_service() {
 	append_env_override SUBCONVERTER_LOG_LEVEL "$log_level"
 	append_env_override SUBCONVERTER_STATISTICS_ENABLED "$statistics_enabled"
 	procd_set_param respawn 3600 5 5
-	procd_set_param stdout 1
-	procd_set_param stderr 1
 	procd_set_param term_timeout 30
 	procd_close_instance
 	rm -f /tmp/subconverter-extended/deferred-main-reload
