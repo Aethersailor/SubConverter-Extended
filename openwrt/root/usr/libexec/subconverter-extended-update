@@ -247,10 +247,10 @@ require_commands() {
 read_architecture() {
   arch_value=''
   if [ -f /etc/apk/arch ]; then
-    arch_value="$(sed -n '1p' /etc/apk/arch | tr -d '[:space:]')"
+    arch_value="$(sed -n '1{s/[[:space:]]//g;p;}' /etc/apk/arch)"
   fi
   if [ -z "$arch_value" ]; then
-    arch_value="$(apk --print-arch 2>/dev/null | sed -n '1p' | tr -d '[:space:]')"
+    arch_value="$(apk --print-arch 2>/dev/null | sed -n '1{s/[[:space:]]//g;p;}')"
   fi
   case "$arch_value" in
     x86_64|aarch64_generic|aarch64_cortex-a53|aarch64_cortex-a72|\
