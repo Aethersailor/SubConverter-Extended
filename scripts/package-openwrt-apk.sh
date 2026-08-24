@@ -19,7 +19,7 @@ RENDER_LAUNCHER="${SCRIPT_DIR}/ci/render-linux-launcher.sh"
 OPENWRT_DIR="${SCRIPT_DIR}/../openwrt"
 OVERLAY_DIR="${OPENWRT_DIR}/root"
 APK_SCRIPTS_DIR="${OPENWRT_DIR}/apk-scripts"
-PACKAGE_DEPENDS="luci-base curl jsonfilter ca-bundle"
+PACKAGE_DEPENDS="luci-base luci-i18n-base-zh-cn curl jsonfilter ca-bundle"
 
 if [ ! -d "${SOURCE_DIR}" ]; then
   echo "Package source directory not found: ${SOURCE_DIR}" >&2
@@ -125,8 +125,10 @@ resource paths and keep older generated configurations working after an
 in-place package upgrade.
 
 The package includes LuCI under Services -> SubConverter-Extended and an
-external updater. Stable GitHub Releases are the only update source; public
-GitHub proxy endpoints may be used for both metadata and assets.
+external updater. LuCI pages provide English and Simplified Chinese and follow
+the LuCI language setting automatically. Stable GitHub Releases are the only
+update source; public GitHub proxy endpoints may be used for both metadata and
+assets.
 EOF
 }
 

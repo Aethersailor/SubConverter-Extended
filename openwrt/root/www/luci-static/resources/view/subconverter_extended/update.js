@@ -41,6 +41,48 @@ function stateLabel(state) {
 	return labels[state] || text(state, _('Not checked'));
 }
 
+function statusMessage(status) {
+	const state = status && status.state;
+	const current = text(field(status, 'current_version'), '');
+	const latest = text(field(status, 'latest_version'), '');
+	const messages = {
+		idle: _('The updater is idle.'),
+		queued: _('The update task is queued.'),
+		preparing: _('Preparing the update transaction.'),
+		checking: _('Checking the latest stable GitHub Release.'),
+		downloading: _('Downloading verified update packages into persistent cache.'),
+		verifying: _('Verifying Release metadata and package integrity.'),
+		verified: _('Release metadata and package integrity are verified.'),
+		stopping: _('Stopping the service gracefully.'),
+		validating: _('Refreshing LuCI and validating the installed version.'),
+		rolling_back: _('Validation failed; restoring the previous package.'),
+		rolled_back: _('The previous package was restored and validated.'),
+		recovering: _('Recovering an interrupted update transaction.'),
+		recovered: _('The interrupted update transaction was recovered.'),
+		recovery_failed: _('The update transaction could not be recovered.'),
+		failed: _('The update transaction failed.'),
+		error: _('The update transaction failed.'),
+		configuration_error: _('The package is installed; review the saved runtime settings.'),
+		updater_error: _('The package is installed; retry the updater service reload.'),
+		unavailable: _('Update status is unavailable.')
+	};
+
+	if (state === 'available')
+		return latest ? _('Version %s is available.').format(latest) : _('An update is available.');
+	if (state === 'up_to_date')
+		return current ? _('Version %s is current.').format(current) : _('The installed version is current.');
+	if (state === 'newer_local')
+		return current ? _('Installed version %s is newer than the latest stable Release.').format(current) : _('The installed version is newer than the latest stable Release.');
+	if (state === 'installing')
+		return latest ? _('Installing version %s.').format(latest) : _('Installing the update package.');
+	if (state === 'success' || state === 'completed') {
+		const installed = current || latest;
+		return installed ? _('Version %s is installed, validated and rollback-ready.').format(installed) : _('The update is installed, validated and rollback-ready.');
+	}
+
+	return messages[state] || text(field(status, 'message'), '');
+}
+
 function busy(status) {
 	return [ 'queued', 'preparing', 'checking', 'downloading', 'verified', 'stopping',
 		'installing', 'validating', 'rolling_back', 'recovering' ].indexOf(status && status.state) >= 0;
@@ -77,7 +119,7 @@ function renderUpdateStatus(status, panel) {
 	const isBusy = busy(status);
 	const available = field(status, 'available') === true;
 	const error = field(status, 'error');
-	const message = field(status, 'message');
+	const message = statusMessage(status);
 	const rows = [
 		[ _('State'), stateLabel(status && status.state) ],
 		[ _('Current version'), text(field(status, 'current_version'), _('Unavailable')) ],

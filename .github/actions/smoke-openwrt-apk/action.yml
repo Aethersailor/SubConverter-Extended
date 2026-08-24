@@ -180,7 +180,7 @@ runs:
         mkdir -p /var/lock
         attempt=1
         while :; do
-          if apk update && apk add luci-base curl jsonfilter ca-bundle; then
+          if apk update && apk add luci-base luci-i18n-base-zh-cn curl jsonfilter ca-bundle; then
             break
           fi
           if [ "$attempt" -ge 3 ]; then
@@ -190,7 +190,7 @@ runs:
           attempt=$((attempt + 1))
           sleep 5
         done
-        for package in luci-base curl jsonfilter ca-bundle; do
+        for package in luci-base luci-i18n-base-zh-cn curl jsonfilter ca-bundle; do
           apk info -e "$package" >/dev/null
         done
         OPENWRT_PREP
@@ -247,7 +247,7 @@ runs:
             active && /^    - / { sub(/^    - /, ""); print; next }
             active { exit }
           ' "$metadata" | sort)"
-          expected_depends="$(printf '%s\n' ca-bundle curl jsonfilter luci-base | sort)"
+          expected_depends="$(printf '%s\n' ca-bundle curl jsonfilter luci-base luci-i18n-base-zh-cn | sort)"
           test "$actual_depends" = "$expected_depends"
 
           for lifecycle in post-install pre-upgrade post-upgrade pre-deinstall post-deinstall; do
@@ -323,6 +323,7 @@ runs:
           /etc/uci-defaults/90_subconverter-extended
           /lib/upgrade/keep.d/subconverter-extended
           /usr/libexec/subconverter-extended-update
+          /usr/lib/lua/luci/i18n/subconverter-extended.zh-cn.lmo
           /usr/share/luci/menu.d/luci-app-subconverter-extended.json
           /usr/share/rpcd/acl.d/luci-app-subconverter-extended.json
           /usr/share/rpcd/ucode/luci.subconverter_extended
@@ -344,6 +345,8 @@ runs:
           test -x /etc/init.d/subconverter-extended-updater
           test -x /usr/libexec/subconverter-extended-update
           test -x /opt/subconverter-extended/subconverter
+          test -s /usr/lib/lua/luci/i18n/subconverter-extended.zh-cn.lmo
+          grep -aFq '软件更新' /usr/lib/lua/luci/i18n/subconverter-extended.zh-cn.lmo
           for portable_only in \
             /opt/subconverter-extended/subconverter-update \
             /opt/subconverter-extended/update.sh \
@@ -385,6 +388,7 @@ runs:
             /etc/init.d/subconverter-extended-updater \
             /etc/uci-defaults/90_subconverter-extended \
             /usr/libexec/subconverter-extended-update \
+            /usr/lib/lua/luci/i18n/subconverter-extended.zh-cn.lmo \
             /usr/share/rpcd/ucode/luci.subconverter_extended; do
             grep -Fxq "$listed_path" "$package_list"
           done
