@@ -26,7 +26,9 @@ PowerShell 命令：
   .\update.ps1 set-proxy yylx
   .\update.ps1 set-proxy direct
 
-默认不自动检查或安装。执行 enable-auto 后，start.ps1 和 start.bat 会在主程序启动前检查稳定 Release；有新版时，更新器先在独立端口验证候选程序，再切换程序目录。更新期间不要同时启动主程序。
+默认不自动检查或安装。执行 enable-auto 后，start.ps1 和 start.bat 会在主程序启动前检查稳定 Release；有新版时，更新器先在独立端口验证候选程序，再切换程序目录。升级会继承 pref.toml、pref.yml、pref.yaml、pref.ini、generate.ini、gistconf.ini、profiles、cache，以及默认的 stats 或 base\stats 目录。更新期间不要同时启动主程序。
+
+自定义模板、规则、脚本或非默认统计目录建议放在程序目录之外，并通过配置文件引用。更新前仍应保留独立备份。
 
 持久更新数据保存在 SubConverter-Extended.update 目录。该目录与 SubConverter-Extended 程序目录位于同一父目录。移动便携版时，需要同时移动这两个目录。
 

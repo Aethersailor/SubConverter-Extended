@@ -325,8 +325,12 @@ func (u *updater) preserveMutableFiles(sourceRoot, destinationRoot string) error
 		filepath.Join("base", "pref.yml"),
 		filepath.Join("base", "pref.yaml"),
 		filepath.Join("base", "pref.ini"),
+		filepath.Join("base", "generate.ini"),
+		filepath.Join("base", "gistconf.ini"),
 		filepath.Join("base", "profiles"),
 		filepath.Join("base", "cache"),
+		filepath.Join("base", "stats"),
+		"stats",
 	}
 	if configured := os.Getenv("PREF_PATH"); configured != "" {
 		configuredPath := configured
