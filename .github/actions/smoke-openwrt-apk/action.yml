@@ -335,6 +335,12 @@ runs:
           test -x /etc/init.d/subconverter-extended-updater
           test -x /usr/libexec/subconverter-extended-update
           test -x /opt/subconverter-extended/subconverter
+          for portable_only in \
+            /opt/subconverter-extended/subconverter-update \
+            /opt/subconverter-extended/update.sh \
+            /opt/subconverter-extended/UPDATE-README.txt; do
+            test ! -e "$portable_only"
+          done
           for shell_file in \
             /usr/bin/subconverter-extended \
             /etc/init.d/subconverter-extended \

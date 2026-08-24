@@ -44,13 +44,29 @@ runs:
         tar -xzf "$ARTIFACT" -C "$WORKDIR"
         cd "$WORKDIR/SubConverter-Extended"
         test ! -e base/Custom_OpenClash_Rules
+        test -x subconverter-update
+        test -x update.sh
+        test -s UPDATE-README.txt
         python3 "$GITHUB_WORKSPACE/scripts/ci/write_build_info.py" verify \
           --path BUILD-INFO.json \
           --version "${{ inputs.expected-version }}" \
           --revision "${{ inputs.expected-revision }}" \
           --build-date "${{ inputs.expected-build-date }}"
+        ./update.sh status >"$WORKDIR/update-status.json"
+        python3 - "$WORKDIR/update-status.json" "${{ inputs.expected-version }}" <<'PY'
+        import json
+        import sys
 
-        PORT="$PORT" PREF_PATH="$PWD/base/pref.toml" ./start.sh >"$WORKDIR/stdout.log" 2>"$WORKDIR/stderr.log" &
+        status = json.load(open(sys.argv[1], encoding="utf-8"))
+        if status["state"] != "idle" or status["current_version"] != sys.argv[2]:
+            raise SystemExit(f"unexpected portable updater status: {status!r}")
+        if status["rollback_available"] or status["available"]:
+            raise SystemExit(f"unexpected new-install update state: {status!r}")
+        PY
+
+        PORT="$PORT" PREF_PATH="$PWD/base/pref.toml" \
+          SUBCONVERTER_SKIP_AUTO_UPDATE=1 \
+          ./start.sh >"$WORKDIR/stdout.log" 2>"$WORKDIR/stderr.log" &
         PID="$!"
 
         URL="http://127.0.0.1:${PORT}/version"

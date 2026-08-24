@@ -13,6 +13,48 @@ if [ "$CONFIG_DIR" = "__ROOT_BASE__" ]; then
   CONFIG_DIR="$ROOT/base"
 fi
 
+if [ "$CONFIG_MODE" = "portable" ]; then
+  UPDATE_STATE_DIR="${ROOT}.update"
+  umask 077
+  mkdir -p "$UPDATE_STATE_DIR"
+  if [ -z "${SUBCONVERTER_RUNTIME_STATE_FILE:-}" ]; then
+    SUBCONVERTER_RUNTIME_STATE_FILE="$UPDATE_STATE_DIR/runtime.json"
+    export SUBCONVERTER_RUNTIME_STATE_FILE
+  fi
+
+  if [ "${SUBCONVERTER_UPDATE_VALIDATION:-0}" != "1" ] && \
+     [ -x "$ROOT/subconverter-update" ]; then
+    if "$ROOT/subconverter-update" recover; then
+      recovery_result=0
+    else
+      recovery_result=$?
+    fi
+    case "$recovery_result" in
+      0) ;;
+      10) exec "$ROOT/start.sh" "$@" ;;
+      *)
+        echo "Portable update recovery failed; refusing to start from an uncertain root." >&2
+        exit "$recovery_result"
+        ;;
+    esac
+
+    if [ "${SUBCONVERTER_SKIP_AUTO_UPDATE:-0}" != "1" ]; then
+      if "$ROOT/subconverter-update" auto; then
+        automatic_result=0
+      else
+        automatic_result=$?
+      fi
+      case "$automatic_result" in
+        0) ;;
+        10) exec "$ROOT/start.sh" "$@" ;;
+        *)
+          echo "Automatic update failed; starting the currently validated portable version." >&2
+          ;;
+      esac
+    fi
+  fi
+fi
+
 join_config_path() {
   case "$1" in
     /*) printf '%s\n' "$1" ;;

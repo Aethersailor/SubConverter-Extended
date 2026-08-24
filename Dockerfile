@@ -28,6 +28,7 @@ COPY bridge/age.go ./
 COPY bridge/parser.go ./
 COPY bridge/preprocess.go ./
 COPY bridge/mieru.go ./
+COPY bridge/cmd/portable-updater/ ./cmd/portable-updater/
 
 RUN set -xe && \
     if [ "${REFRESH_GO_DEPS}" = "true" ]; then \
@@ -54,6 +55,12 @@ COPY scripts/ ../scripts/
 RUN go run ../scripts/generate_proxy_validation.go -o proxy_validation_generated.go -manifest mihomo_capabilities.json
 RUN go run ../scripts/generate_schemes.go -manifest mihomo_capabilities.json -o mihomo_schemes.h
 RUN go run ../scripts/generate_param_compat.go -manifest mihomo_capabilities.json -o param_compat.h
+
+RUN CGO_ENABLED=0 go build \
+    -trimpath \
+    -ldflags='-s -w' \
+    -o subconverter-update \
+    ./cmd/portable-updater
 
 # Build the shared library used by the normal Alpine runtime and a glibc archive
 # for build/test consumers.  The sanitizer build instruments the Go archive so
@@ -85,7 +92,7 @@ RUN set -xe && \
     .
 
 # Verify build output
-RUN ls -lh libmihomo.so libmihomo.a libmihomo.h
+RUN ls -lh libmihomo.so libmihomo.a libmihomo.h subconverter-update
 
 # Build the config validator from the exact Mihomo module selected by the
 # bridge. It is test-only and never copied into the runtime or CI export image.
@@ -318,6 +325,7 @@ RUN set -xe && \
 # loading the full compiler toolchain into the runner's Docker daemon.
 FROM scratch AS ci-export
 COPY --from=builder /src/subconverter /src/subconverter
+COPY --from=go-builder /build/bridge/subconverter-update /src/subconverter-update
 COPY --from=builder /runtime-libs /runtime-libs
 COPY --from=builder /src/bridge /src/bridge
 COPY --from=builder /src/src/parser/mihomo_schemes.h /src/src/parser/mihomo_schemes.h

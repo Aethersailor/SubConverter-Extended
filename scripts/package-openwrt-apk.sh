@@ -228,7 +228,11 @@ for OPENWRT_ARCH in "${ARCH_ARRAY[@]}"; do
     "${PKG_ROOT}/usr/share/doc/${PACKAGE_NAME}"
 
   cp -a "${SOURCE_DIR}/." "${PKG_ROOT}${ROOT_DIR}/"
-  rm -f "${PKG_ROOT}${ROOT_DIR}/start.sh"
+  rm -f \
+    "${PKG_ROOT}${ROOT_DIR}/start.sh" \
+    "${PKG_ROOT}${ROOT_DIR}/subconverter-update" \
+    "${PKG_ROOT}${ROOT_DIR}/update.sh" \
+    "${PKG_ROOT}${ROOT_DIR}/UPDATE-README.txt"
   install_overlay "${PKG_ROOT}"
   create_launcher "${PKG_ROOT}/usr/bin/subconverter-extended"
   create_readme "${PKG_ROOT}/usr/share/doc/${PACKAGE_NAME}/README.OpenWrt"
