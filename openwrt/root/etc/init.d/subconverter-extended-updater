@@ -17,8 +17,7 @@ start_service() {
 		case "$recovery_result" in
 			0) ;;
 			10)
-				/etc/init.d/subconverter-extended-updater start
-				return $?
+				exec /etc/init.d/subconverter-extended-updater start
 				;;
 			*)
 				logger -t subconverter-extended-update \

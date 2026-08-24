@@ -54,6 +54,7 @@ if [ "${SUBCONVERTER_UPDATE_TRANSACTION:-0}" = '1' ]; then
 			fi
 		done
 		[ "$migration_failed" -eq 0 ] || exit 1
+		rm -f /etc/config/subconverter-extended.apk-new || exit 1
 		refresh_luci_rpcd || exit 1
 	fi
 	exit 0
@@ -63,6 +64,9 @@ result=0
 default_postinst || result=$?
 if [ -z "$root" ]; then
 	[ ! -e /etc/uci-defaults/90_subconverter-extended ] || result=1
+	if [ "$result" -eq 0 ]; then
+		rm -f /etc/config/subconverter-extended.apk-new || result=1
+	fi
 	refresh_luci_rpcd || result=1
 fi
 exit "$result"

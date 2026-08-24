@@ -48,8 +48,7 @@ start_service() {
 			10)
 				# The package was replaced during recovery. Re-enter through the
 				# init script now present on disk instead of continuing stale code.
-				/etc/init.d/subconverter-extended start
-				return $?
+				exec /etc/init.d/subconverter-extended start
 				;;
 			*)
 				logger -t subconverter-extended \

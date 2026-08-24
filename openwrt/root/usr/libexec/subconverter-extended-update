@@ -1994,10 +1994,32 @@ inside_install_window() {
 }
 
 daemon_loop() {
+  daemon_stop=0
+  daemon_sleep_pid=''
+
+  daemon_handle_signal() {
+    daemon_stop=1
+    if [ -n "$daemon_sleep_pid" ]; then
+      kill "$daemon_sleep_pid" 2>/dev/null || :
+    fi
+  }
+
+  daemon_sleep() {
+    sleep "$1" &
+    daemon_sleep_pid=$!
+    wait "$daemon_sleep_pid" 2>/dev/null || :
+    daemon_sleep_pid=''
+    [ "$daemon_stop" = '0' ]
+  }
+
+  # BusyBox ash defers a trap while a foreground sleep is running. Keep the
+  # delay as a child process so procd reloads can interrupt it immediately.
+  trap daemon_handle_signal HUP INT TERM
+
   # Avoid competing with network/service initialization during boot.
-  sleep 60
+  daemon_sleep 60 || return 0
   last_check=0
-  while :; do
+  while [ "$daemon_stop" = '0' ]; do
     enabled="$(uci_get enabled 0)"
     auto_check="$(uci_get auto_check 1)"
     auto_install="$(uci_get auto_install 0)"
@@ -2028,7 +2050,7 @@ daemon_loop() {
         fi
       fi
     fi
-    sleep 300
+    daemon_sleep 300 || return 0
   done
 }
 
