@@ -51,6 +51,8 @@ fi
   go run ../scripts/generate_proxy_validation.go -o proxy_validation_generated.go -manifest mihomo_capabilities.json
   go run ../scripts/generate_schemes.go -manifest mihomo_capabilities.json -o ../src/parser/mihomo_schemes.h
   go run ../scripts/generate_param_compat.go -manifest mihomo_capabilities.json -o ../src/parser/param_compat.h
+  CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
+    go build -trimpath -ldflags="-s -w" -o "${WORK_DIR}/subconverter-update.exe" ./cmd/portable-updater
   CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=gcc \
     go build -trimpath -buildmode=c-archive -ldflags="-s -w" -o libmihomo.a .
 )

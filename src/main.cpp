@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <fcntl.h>
 #include <iostream>
+#include <rapidjson/stringbuffer.h>
 #include <string>
 #include <unistd.h>
 
@@ -26,6 +27,7 @@
 #include "server/socket.h"
 #include "server/webserver.h"
 #include "utils/defer.h"
+#include "utils/file.h"
 #include "utils/logger.h"
 #include "utils/rapidjson_extra.h"
 #include "utils/resource_control.h"
@@ -203,6 +205,37 @@ void begin_runtime_shutdown() {
 void drain_runtime_shutdown() {
   shutdownRulesetExecutor();
   shutdownConversionScheduler();
+}
+
+std::string publishRuntimeState() {
+  const std::string path = getEnv("SUBCONVERTER_RUNTIME_STATE_FILE");
+  if (path.empty())
+    return "";
+
+  rapidjson::StringBuffer buffer;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+  writer.StartObject();
+  writer.Key("schema");
+  writer.Int(1);
+  writer.Key("pid");
+  writer.Int64(static_cast<int64_t>(getpid()));
+  writer.Key("listen_address");
+  writer.String(global.listenAddress.c_str());
+  writer.Key("listen_port");
+  writer.Int(global.listenPort);
+  writer.Key("version");
+  writer.String(VERSION);
+  writer.Key("build_id");
+  writer.String(BUILD_ID);
+  writer.EndObject();
+
+  const int result = fileWrite(path, buffer.GetString(), true);
+  if (fileCommitFailed(result)) {
+    writeLog(LOG_LEVEL_WARNING,
+             "RUNTIME_STATE_WRITE_FAILED action=continue-without-state");
+    return "";
+  }
+  return path;
 }
 
 int main(int argc, char *argv[]) {
@@ -383,9 +416,12 @@ int main(int argc, char *argv[]) {
                             getRuleset);
 
   std::string env_port = getEnv("PORT");
-  if (!env_port.empty())
+  if (getEnv("SUBCONVERTER_LISTEN_PORT").empty() && !env_port.empty())
     global.listenPort = to_int(env_port, global.listenPort);
   publishSettingsSnapshot(global);
+  const std::string runtime_state_path = publishRuntimeState();
+  defer(if (!runtime_state_path.empty())
+            std::remove(runtime_state_path.c_str());)
   if (global.securityProfile == "lan" &&
       (global.listenAddress == "0.0.0.0" || global.listenAddress == "::")) {
     writeLog(LOG_LEVEL_WARNING,

@@ -1,0 +1,55 @@
+#!/bin/sh
+set -e
+
+PACKAGE='subconverter-extended'
+
+ensure_section() {
+	local section="$1"
+	local type="$2"
+
+	uci -q get "$PACKAGE.$section" >/dev/null || \
+		uci set "$PACKAGE.$section=$type"
+}
+
+ensure_option() {
+	local section="$1"
+	local option="$2"
+	local value="$3"
+
+	uci -q get "$PACKAGE.$section.$option" >/dev/null || \
+		uci set "$PACKAGE.$section.$option=$value"
+}
+
+ensure_section service service || exit 1
+ensure_option service config_version 1 || exit 1
+ensure_option service config_file /etc/subconverter/pref.toml || exit 1
+
+ensure_section update update || exit 1
+ensure_option update enabled 1 || exit 1
+ensure_option update auto_check 1 || exit 1
+ensure_option update auto_install 0 || exit 1
+ensure_option update check_interval 86400 || exit 1
+ensure_option update install_start 03:00 || exit 1
+ensure_option update install_end 05:00 || exit 1
+ensure_option update proxy_mode auto || exit 1
+
+uci commit "$PACKAGE" || exit 1
+
+mkdir -p /etc/subconverter/update \
+	/opt/subconverter-extended-update/apk-cache \
+	/tmp/subconverter-extended/cache || exit 1
+
+if [ ! -e /etc/subconverter/base ] && [ ! -L /etc/subconverter/base ]; then
+	ln -s /opt/subconverter-extended/base/base /etc/subconverter/base || exit 1
+fi
+if [ ! -e /etc/subconverter/snippets ] && [ ! -L /etc/subconverter/snippets ]; then
+	ln -s /opt/subconverter-extended/base/snippets /etc/subconverter/snippets || exit 1
+fi
+if [ ! -e /etc/subconverter/cache ] && [ ! -L /etc/subconverter/cache ]; then
+	ln -s /tmp/subconverter-extended/cache /etc/subconverter/cache || exit 1
+fi
+if [ ! -e /etc/apk/cache ] && [ ! -L /etc/apk/cache ]; then
+	ln -s /opt/subconverter-extended-update/apk-cache /etc/apk/cache || exit 1
+fi
+
+exit 0

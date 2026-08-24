@@ -21,6 +21,8 @@ trap cleanup EXIT
 
 docker cp "${CID}:/src/subconverter" ./subconverter
 chmod +x ./subconverter
+docker cp "${CID}:/src/subconverter-update" ./subconverter-update
+chmod +x ./subconverter-update
 
 rm -rf build/bridge-output
 mkdir -p build/bridge-output

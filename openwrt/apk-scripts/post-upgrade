@@ -1,0 +1,101 @@
+#!/bin/sh
+set -e
+
+export PKG_UPGRADE=1
+
+[ "${IPKG_NO_SCRIPT:-}" = '1' ] && exit 0
+
+root="${IPKG_INSTROOT:-}"
+pkgname='subconverter-extended'
+export root pkgname
+
+[ -s "$root/lib/functions.sh" ] || exit 1
+. "$root/lib/functions.sh"
+add_group_and_user
+
+refresh_luci_rpcd() {
+	rpc_bytecode="/tmp/luci.subconverter_extended.apk.$$"
+	if ! command -v ucode >/dev/null 2>&1 || \
+	   ! command -v ubus >/dev/null 2>&1 || \
+	   ! command -v jsonfilter >/dev/null 2>&1 || \
+	   ! ucode -c -s -o "$rpc_bytecode" \
+		/usr/share/rpcd/ucode/luci.subconverter_extended >/dev/null 2>&1; then
+		rm -f "$rpc_bytecode" || return 1
+		return 1
+	fi
+	rm -f "$rpc_bytecode" || return 1
+	rm -f /tmp/luci-indexcache /tmp/luci-indexcache.* || return 1
+	rm -rf /tmp/luci-modulecache || return 1
+	/etc/init.d/rpcd reload >/dev/null 2>&1 || return 1
+	sleep 1 || return 1
+	rpc_wait=0
+	while [ "$rpc_wait" -lt 15 ]; do
+		rpc_status="$(ubus call luci.subconverter_extended status 2>/dev/null || :)"
+		if printf '%s\n' "$rpc_status" | \
+		   jsonfilter -e '@.ok' 2>/dev/null | grep -qx true; then
+			return 0
+		fi
+		rpc_wait=$((rpc_wait + 1))
+		sleep 1 || return 1
+	done
+	return 1
+}
+
+if [ "${SUBCONVERTER_UPDATE_TRANSACTION:-0}" = '1' ]; then
+	filelist="$root/lib/apk/packages/$pkgname.list"
+	if [ -z "$root" ]; then
+		[ -f "$filelist" ] || exit 1
+		grep -Fxq '/etc/uci-defaults/90_subconverter-extended' "$filelist" || exit 1
+		mkdir -p /tmp/.uci
+		migration_failed=0
+		for script in $(grep -s '^/etc/uci-defaults/' "$filelist"); do
+			if [ -f "$script" ] && /bin/sh "$script"; then
+				rm -f "$script"
+			else
+				migration_failed=1
+			fi
+		done
+		[ "$migration_failed" -eq 0 ] || exit 1
+		rm -f /etc/config/subconverter-extended.apk-new || exit 1
+		refresh_luci_rpcd || exit 1
+	fi
+	exit 0
+fi
+
+state_file='/tmp/subconverter-extended-package-upgrade-state'
+if [ -z "$root" ]; then
+	[ -f "$state_file" ] || exit 1
+	was_running="$(sed -n 's/^running=//p' "$state_file")"
+	was_enabled="$(sed -n 's/^enabled=//p' "$state_file")"
+	updater_running="$(sed -n 's/^updater_running=//p' "$state_file")"
+	case "$was_running:$was_enabled:$updater_running" in
+		true:true:true|true:true:false|true:false:true|true:false:false|\
+		false:true:true|false:true:false|false:false:true|false:false:false) ;;
+		*) exit 1 ;;
+	esac
+fi
+
+result=0
+default_postinst || result=$?
+if [ -z "$root" ]; then
+	[ ! -e /etc/uci-defaults/90_subconverter-extended ] || result=1
+	if [ "$result" -eq 0 ]; then
+		rm -f /etc/config/subconverter-extended.apk-new || result=1
+	fi
+fi
+
+if [ -z "$root" ]; then
+	[ "$was_enabled" = 'true' ] || /etc/init.d/subconverter-extended disable >/dev/null 2>&1 || result=1
+	[ "$was_running" = 'true' ] || /etc/init.d/subconverter-extended stop >/dev/null 2>&1 || result=1
+	[ "$updater_running" = 'true' ] || /etc/init.d/subconverter-extended-updater stop >/dev/null 2>&1 || result=1
+	rm -f "$state_file"
+fi
+
+if [ -z "$root" ]; then
+	# The legacy package had no updater init link. Keep the integrated updater
+	# boot-persistent; its UCI enabled flag still decides whether it does work.
+	/etc/init.d/subconverter-extended-updater enable >/dev/null 2>&1 || result=1
+	refresh_luci_rpcd || result=1
+fi
+
+exit "$result"

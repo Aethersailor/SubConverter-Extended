@@ -45,6 +45,7 @@ assert_trace() {
 
 mapfile -t bridge_sources < <(
   git -C "$REPOSITORY" ls-files 'bridge/*.go' |
+    awk -F/ 'NF == 2' |
     sed 's#^bridge/##' |
     grep -Ev '(_test\.go$|^proxy_validation_generated\.go$)'
 )
@@ -58,6 +59,11 @@ for dockerfile in "${bridge_dockerfiles[@]}"; do
     }
   done
 done
+
+grep -Fq 'COPY bridge/cmd/portable-updater/ ./cmd/portable-updater/' "$REPOSITORY/Dockerfile"
+grep -Fq 'COPY bridge/cmd/portable-updater/ ./cmd/portable-updater/' "$REPOSITORY/docker/Dockerfile.armv7-cross"
+grep -Fq 'COPY --from=go-builder /build/bridge/subconverter-update /src/subconverter-update' "$REPOSITORY/Dockerfile"
+grep -Fq 'COPY --from=go-builder /build/bridge/subconverter-update /src/subconverter-update' "$REPOSITORY/docker/Dockerfile.armv7-cross"
 
 cmake_text="$(tr -d '\r' < "$REPOSITORY/CMakeLists.txt")"
 grep -Fq 'LIST(REMOVE_ITEM SETTINGS_SNAPSHOT_RUNTIME_SOURCES' <<< "$cmake_text"

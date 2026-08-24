@@ -1,0 +1,107 @@
+#!/bin/sh /etc/rc.common
+
+USE_PROCD=1
+START=99
+STOP=10
+
+PROG=/usr/bin/subconverter-extended
+UPDATER=/usr/libexec/subconverter-extended-update
+SERVICE_LOG=/tmp/subconverter-extended/service.log
+
+append_env_override() {
+	local name="$1"
+	local value="$2"
+
+	[ -n "$value" ] && procd_append_param env "$name=$value"
+}
+
+start_service() {
+	local config_file listen_address listen_port security_profile
+	local allow_public_upload resource_control log_level statistics_enabled
+
+	config_load 'subconverter-extended'
+	config_get config_file service config_file '/etc/subconverter/pref.toml'
+	config_get listen_address service listen_address
+	config_get listen_port service listen_port
+	config_get security_profile service security_profile
+	config_get allow_public_upload service allow_public_upload
+	config_get resource_control service resource_control
+	config_get log_level service log_level
+	config_get statistics_enabled service statistics_enabled
+	mkdir -p /tmp/subconverter-extended || return 1
+	chmod 0700 /tmp/subconverter-extended || return 1
+	rm -f /tmp/subconverter-extended/runtime.json || return 1
+	if [ -s "$SERVICE_LOG" ]; then
+		tail -c 262144 "$SERVICE_LOG" > "${SERVICE_LOG}.1.tmp" || return 1
+		mv -f "${SERVICE_LOG}.1.tmp" "${SERVICE_LOG}.1" || return 1
+		chmod 0600 "${SERVICE_LOG}.1" || return 1
+	fi
+	: > "$SERVICE_LOG" || return 1
+	chmod 0600 "$SERVICE_LOG" || return 1
+
+	if [ -s /etc/subconverter/update/pending.json ] && \
+	   [ "${SUBCONVERTER_UPDATE_TRANSACTION:-0}" != '1' ] && [ -x "$UPDATER" ]; then
+		"$UPDATER" recover
+		recovery_result=$?
+		case "$recovery_result" in
+			0) ;;
+			10)
+				# The package was replaced during recovery. Re-enter through the
+				# init script now present on disk instead of continuing stale code.
+				exec /etc/init.d/subconverter-extended start
+				;;
+			*)
+				logger -t subconverter-extended \
+					'Update recovery failed; refusing to start the main service'
+				return 1
+				;;
+		esac
+	fi
+
+	procd_open_instance 'main'
+	procd_set_param command /bin/sh -c \
+		"umask 077; exec \"$PROG\" >>\"$SERVICE_LOG\" 2>&1"
+	procd_set_param env "PREF_PATH=$config_file"
+	procd_append_param env 'SUBCONVERTER_RUNTIME_STATE_FILE=/tmp/subconverter-extended/runtime.json'
+	procd_append_param env 'SUBCONVERTER_LOG_FILE_MAX_BYTES=262144'
+	append_env_override SUBCONVERTER_LISTEN_ADDRESS "$listen_address"
+	append_env_override SUBCONVERTER_LISTEN_PORT "$listen_port"
+	append_env_override SUBCONVERTER_SECURITY_PROFILE "$security_profile"
+	append_env_override SUBCONVERTER_ALLOW_PUBLIC_UPLOAD "$allow_public_upload"
+	append_env_override SUBCONVERTER_RESOURCE_CONTROL "$resource_control"
+	append_env_override SUBCONVERTER_LOG_LEVEL "$log_level"
+	append_env_override SUBCONVERTER_STATISTICS_ENABLED "$statistics_enabled"
+	procd_set_param respawn 3600 5 5
+	procd_set_param term_timeout 30
+	procd_close_instance
+	rm -f /tmp/subconverter-extended/deferred-main-reload
+}
+
+reload_service() {
+	if [ "${SUBCONVERTER_UPDATE_TRANSACTION:-0}" != '1' ] && \
+	   [ -s /etc/subconverter/update/pending.json ]; then
+		logger -t subconverter-extended \
+			'Deferring configuration reload while an update transaction is active'
+		touch /tmp/subconverter-extended/deferred-main-reload
+		return 0
+	fi
+	was_running=0
+	/etc/init.d/subconverter-extended running >/dev/null 2>&1 && was_running=1
+	if [ "$was_running" -ne 1 ]; then
+		rm -f /tmp/subconverter-extended/deferred-main-reload
+		return 0
+	fi
+	stop
+	wait_count=0
+	while /etc/init.d/subconverter-extended running >/dev/null 2>&1; do
+		wait_count=$((wait_count + 1))
+		[ "$wait_count" -lt 40 ] || return 1
+		sleep 1
+	done
+	start || return 1
+	rm -f /tmp/subconverter-extended/deferred-main-reload
+}
+
+service_triggers() {
+	procd_add_reload_trigger 'subconverter-extended'
+}

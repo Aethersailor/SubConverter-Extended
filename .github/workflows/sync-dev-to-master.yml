@@ -100,7 +100,10 @@ jobs:
           if ! git merge-base --is-ancestor "$DEV_SHA" HEAD; then
             if ! git merge "$DEV_SHA" --no-commit --no-ff; then
               while IFS= read -r file; do
-                if [[ "$file" == README*.md || "$file" == docs/images/readme-flow-*.svg ]]; then
+                if [[ "$file" == .github/workflows/sync-dockerhub-description.yml ]]; then
+                  git checkout --theirs -- "$file"
+                  git add -- "$file"
+                elif [[ "$file" == README*.md || "$file" == docs/images/readme-flow-*.svg ]]; then
                   if git cat-file -e "HEAD:$file" 2>/dev/null; then
                     git checkout --ours -- "$file"
                     git add -- "$file"

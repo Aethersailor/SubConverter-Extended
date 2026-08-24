@@ -556,7 +556,7 @@ jobs:
 
       - name: Smoke test APKs (OpenWrt ${{ matrix.arch }})
         if: needs.prepare.outputs.is_release == 'true'
-        timeout-minutes: 3
+        timeout-minutes: 15
         uses: ./.github/actions/smoke-openwrt-apk
         with:
           artifacts: SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-*.apk
@@ -581,7 +581,7 @@ jobs:
       - name: Clean release packaging files
         if: needs.prepare.outputs.is_release == 'true'
         shell: bash
-        run: rm -rf SubConverter-Extended SubConverter-Extended-*.tar.gz SubConverter-Extended-*.apk subconverter runtime-libs runtime-root libmihomo.so build/openwrt-apk
+        run: rm -rf SubConverter-Extended SubConverter-Extended-*.tar.gz SubConverter-Extended-*.apk subconverter subconverter-update runtime-libs runtime-root libmihomo.so build/openwrt-apk
 
       - name: Check for file changes
         id: check_changes

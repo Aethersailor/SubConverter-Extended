@@ -1,0 +1,222 @@
+#!/usr/bin/ucode
+
+'use strict';
+
+import { access, popen, readfile } from 'fs';
+import { cursor } from 'uci';
+import { connect } from 'ubus';
+import { init_enabled } from 'luci.sys';
+
+const service_name = 'subconverter-extended';
+const config_name = 'subconverter-extended';
+const updater = '/usr/libexec/subconverter-extended-update';
+const update_state = '/tmp/subconverter-extended/update-state.json';
+const update_lock = '/tmp/subconverter-extended/update.lock';
+const update_pending = '/etc/subconverter/update/pending.json';
+const runtime_state = '/tmp/subconverter-extended/runtime.json';
+const service_log = '/tmp/subconverter-extended/service.log';
+const previous_service_log = '/tmp/subconverter-extended/service.log.1';
+const build_info = '/opt/subconverter-extended/BUILD-INFO.json';
+const ubus = connect();
+
+function parse_json(content) {
+	if (!content)
+		return null;
+
+	try {
+		return json(content);
+	} catch (error) {
+		return null;
+	}
+}
+
+function read_command(command) {
+	const process = popen(command, 'r');
+	if (!process)
+		return null;
+
+	const output = process.read('all');
+	process.close();
+	return output;
+}
+
+function updater_status() {
+	let result = null;
+
+	if (access(updater))
+		result = parse_json(read_command(`${updater} status 2>/dev/null`));
+
+	if (!result)
+		result = parse_json(readfile(update_state));
+
+	if (!result) {
+		return {
+			ok: false,
+			state: 'unavailable',
+			error_code: 'update_status_unavailable',
+			error: 'The updater did not return a valid status document'
+		};
+	}
+
+	if (result.ok == null)
+		result.ok = true;
+
+	return result;
+}
+
+function service_running() {
+	const listing = ubus.call('service', 'list', { name: service_name }) || {};
+	const instances = listing?.[service_name]?.instances || {};
+
+	for (let name, instance in instances)
+		if (instance?.running === true)
+			return true;
+
+	return false;
+}
+
+function update_in_progress() {
+	return access(update_lock) || access(update_pending);
+}
+
+function service_config() {
+	const uci = cursor();
+	const listen_port = +(uci.get(config_name, 'service', 'listen_port') || 0);
+	const statistics_enabled = uci.get(config_name, 'service', 'statistics_enabled');
+	const result = {
+		config_file: uci.get(config_name, 'service', 'config_file') || '/etc/subconverter/pref.toml',
+		listen_address: uci.get(config_name, 'service', 'listen_address') || null,
+		listen_port: listen_port >= 1 && listen_port <= 65535 ? listen_port : null,
+		security_profile: uci.get(config_name, 'service', 'security_profile') || null,
+		allow_public_upload: uci.get(config_name, 'service', 'allow_public_upload') || null,
+		resource_control: uci.get(config_name, 'service', 'resource_control') || null,
+		log_level: uci.get(config_name, 'service', 'log_level') || null,
+		statistics_enabled: statistics_enabled == null || statistics_enabled == '' ? null : statistics_enabled == '1'
+	};
+	uci.unload(config_name);
+	return result;
+}
+
+function complete_log_lines(output, limit) {
+	if (!output || length(output) <= limit)
+		return output || '';
+
+	output = substr(output, length(output) - limit);
+	const newline = index(output, '\n');
+	return newline >= 0 ? substr(output, newline + 1) : '';
+}
+
+function health_status(running, runtime) {
+	if (!running)
+		return 'stopped';
+	return +runtime.pid > 0 && +runtime.listen_port > 0 ? 'configured' : 'starting';
+}
+
+function status() {
+	const running = service_running();
+	const config = service_config();
+	const identity = parse_json(readfile(build_info)) || {};
+	const runtime = parse_json(readfile(runtime_state)) || {};
+	const effective_port = +runtime.listen_port >= 1 && +runtime.listen_port <= 65535
+		? +runtime.listen_port : (config.listen_port || 25500);
+
+	return {
+		ok: true,
+		service: {
+			running,
+			enabled: init_enabled(service_name),
+			health: health_status(running, runtime)
+		},
+		config: {
+			...config,
+			effective_listen_address: runtime.listen_address || null,
+			effective_listen_port: effective_port
+		},
+		build: {
+			version: identity.version || null,
+			revision: identity.revision || null,
+			build_date: identity.build_date || null
+		}
+	};
+}
+
+function logs() {
+	const previous = access(previous_service_log)
+		? complete_log_lines(read_command(`tail -c 24001 ${previous_service_log} 2>/dev/null`), 24000) : '';
+	const application = access(service_log)
+		? complete_log_lines(read_command(`tail -c 24001 ${service_log} 2>/dev/null`), 24000) : '';
+	const system = complete_log_lines(read_command(
+		'logread -e subconverter-extended -l 100 2>/dev/null | tail -c 16001'
+	), 16000);
+	let output = previous + (previous && application ? '\n' : '') + application;
+	if (output && system)
+		output += '\n';
+	output += system;
+
+	return { ok: true, lines: output };
+}
+
+const methods = {
+	status: {
+		call: function() {
+			return status();
+		}
+	},
+	update_status: {
+		call: function() {
+			return updater_status();
+		}
+	},
+	logs: {
+		call: function() {
+			return logs();
+		}
+	},
+	service_action: {
+		args: { action: '' },
+		call: function(request) {
+			const action = request.args?.action;
+			if (index([ 'start', 'stop', 'restart', 'enable', 'disable' ], action) < 0)
+				return { ok: false, error_code: 'invalid_service_action', error: 'Unsupported service action' };
+			if (update_in_progress())
+				return { ok: false, error_code: 'update_in_progress', error: 'Service controls are locked during an update transaction' };
+
+			const result = system([ `/etc/init.d/${service_name}`, action ]);
+
+			return {
+				ok: result == 0,
+				action,
+				result,
+				error_code: result == 0 ? null : 'service_action_failed',
+				error: result == 0 ? null : 'The requested service action failed'
+			};
+		}
+	},
+	update_action: {
+		args: { action: '' },
+		call: function(request) {
+			const action = request.args?.action;
+			if (index([ 'check', 'apply', 'rollback' ], action) < 0)
+				return { ok: false, error_code: 'invalid_update_action', error: 'Unsupported update action' };
+			if (update_in_progress())
+				return { ok: false, error_code: 'update_in_progress', error: 'Another update or recovery transaction is active' };
+
+			if (!access(updater))
+				return { ok: false, error_code: 'updater_missing', error: 'The SubConverter-Extended updater is unavailable' };
+
+			// The command contains only a fixed absolute path and an allowlisted token.
+			// Background execution keeps the RPC request alive while its own package,
+			// LuCI resources and rpcd plugin are replaced by an upgrade.
+			const result = system(`${updater} ${action} >/dev/null 2>&1 &`);
+			return {
+				ok: result == 0,
+				accepted: result == 0,
+				action,
+				error_code: result == 0 ? null : 'updater_start_failed',
+				error: result == 0 ? null : 'Unable to start the updater'
+			};
+		}
+	}
+};
+
+return { 'luci.subconverter_extended': methods };
