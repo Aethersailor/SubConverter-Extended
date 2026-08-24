@@ -366,7 +366,7 @@ runs:
           test "$(jsonfilter -i /opt/subconverter-extended/BUILD-INFO.json -e '@.revision')" = "$EXPECTED_REVISION"
           test "$(jsonfilter -i /opt/subconverter-extended/BUILD-INFO.json -e '@.build_date')" = "$EXPECTED_BUILD_DATE"
           updater_status="$(/usr/libexec/subconverter-extended-update status)"
-          test "$(jsonfilter -s "$updater_status" -e '@.architecture')" = "$OPENWRT_ARCH"
+          test "$(jsonfilter -s "$updater_status" -e '@.architecture')" = "$BASE_ARCH"
 
           test "$(wc -l < "$conffiles" | tr -d ' ')" = '1'
           test "$(cat "$conffiles")" = '/etc/config/subconverter-extended'
