@@ -273,13 +273,20 @@ apk mkpkg \\
 
 apk adbdump "${OUT_FILE}" > "${OUT_FILE}.metadata"
 if grep -q "\$(printf '\r')" "${OUT_FILE}.metadata" || ! awk '
+  function finish_entry() {
+    if (entry_mode == "") return
+    modes++
+    if (entry_mode == "0777" && !entry_target) exit 1
+    if (entry_mode != "0644" && entry_mode != "0755" && entry_mode != "0777") exit 1
+    entry_mode = ""
+    entry_target = 0
+  }
+  \$1 == "-" && \$2 == "name:" { finish_entry(); next }
   \$1 == "user:"  { users++;  if (\$2 != "root") exit 1 }
   \$1 == "group:" { groups++; if (\$2 != "root") exit 1 }
-  \$1 == "mode:"  {
-    modes++
-    if (\$2 != "0644" && \$2 != "0755") exit 1
-  }
-  END { if (!users || !groups || !modes) exit 1 }
+  \$1 == "mode:"  { entry_mode = \$2; next }
+  \$1 == "target:" { entry_target = 1; next }
+  END { finish_entry(); if (!users || !groups || !modes) exit 1 }
 ' "${OUT_FILE}.metadata"; then
   echo "Refusing APK with CRLF scripts or non-canonical ownership/modes: ${OUT_FILE}" >&2
   rm -f "${OUT_FILE}.metadata" "${OUT_FILE}"
