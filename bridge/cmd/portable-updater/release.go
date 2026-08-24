@@ -22,7 +22,6 @@ import (
 const (
 	maxAPIResponseSize     int64 = 4 << 20
 	maxReleaseManifestSize int64 = 1 << 20
-	maxLinuxArchiveSize    int64 = 26_214_400
 	userAgent                    = "SubConverter-Extended-Portable-Updater/1"
 )
 
@@ -389,7 +388,7 @@ func (u *updater) metadataFromAPI(ctx context.Context, source string) (releaseMe
 			return releaseMetadata{}, true, err
 		}
 	}
-	if targetAsset.Size > maxLinuxArchiveSize || manifestAPIAsset.Size > maxReleaseManifestSize {
+	if targetAsset.Size > u.maxArchive || manifestAPIAsset.Size > maxReleaseManifestSize {
 		return releaseMetadata{}, true, errors.New("Release asset exceeds the portable updater size budget")
 	}
 	manifestDigest, _ := parseAPIDigest(manifestAPIAsset.Digest)
@@ -471,7 +470,7 @@ func (u *updater) metadataFromLatestManifest(ctx context.Context) (releaseMetada
 			failures = append(failures, fmt.Sprintf("%s: %v", source, err))
 			continue
 		}
-		if asset.Size > maxLinuxArchiveSize {
+		if asset.Size > u.maxArchive {
 			return releaseMetadata{}, errors.New("portable archive exceeds the updater size budget")
 		}
 		return releaseMetadata{
@@ -585,7 +584,7 @@ func (u *updater) downloadRelease(ctx context.Context, metadata releaseMetadata)
 		}
 		temporaryPath := temporary.Name()
 		_ = temporary.Close()
-		err = downloadExpectedFile(ctx, target, temporaryPath, metadata.AssetSize, metadata.AssetSHA256)
+		err = downloadExpectedFile(ctx, target, temporaryPath, metadata.AssetSize, metadata.AssetSHA256, u.maxArchive)
 		if err != nil {
 			_ = os.Remove(temporaryPath)
 			failures = append(failures, fmt.Sprintf("%s: %v", source, err))
@@ -603,8 +602,8 @@ func (u *updater) downloadRelease(ctx context.Context, metadata releaseMetadata)
 	return "", "", fmt.Errorf("all portable archive sources failed: %s", strings.Join(failures, "; "))
 }
 
-func downloadExpectedFile(ctx context.Context, target, destination string, expectedSize int64, expectedSHA string) error {
-	if expectedSize < 1 || expectedSize > maxLinuxArchiveSize || !validSHA256(expectedSHA) {
+func downloadExpectedFile(ctx context.Context, target, destination string, expectedSize int64, expectedSHA string, maximumSize int64) error {
+	if expectedSize < 1 || expectedSize > maximumSize || !validSHA256(expectedSHA) {
 		return errors.New("invalid expected archive identity")
 	}
 	response, err := request(ctx, target)
@@ -612,7 +611,7 @@ func downloadExpectedFile(ctx context.Context, target, destination string, expec
 		return err
 	}
 	defer response.Body.Close()
-	if response.ContentLength > maxLinuxArchiveSize || (response.ContentLength >= 0 && response.ContentLength != expectedSize) {
+	if response.ContentLength > maximumSize || (response.ContentLength >= 0 && response.ContentLength != expectedSize) {
 		return fmt.Errorf("archive Content-Length mismatch: %d != %d", response.ContentLength, expectedSize)
 	}
 	file, err := os.OpenFile(destination, os.O_WRONLY|os.O_TRUNC, 0o600)
@@ -620,7 +619,7 @@ func downloadExpectedFile(ctx context.Context, target, destination string, expec
 		return err
 	}
 	hash := sha256.New()
-	written, copyErr := io.Copy(io.MultiWriter(file, hash), io.LimitReader(response.Body, maxLinuxArchiveSize+1))
+	written, copyErr := io.Copy(io.MultiWriter(file, hash), io.LimitReader(response.Body, maximumSize+1))
 	if copyErr != nil {
 		file.Close()
 		return copyErr

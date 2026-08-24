@@ -42,6 +42,16 @@ runs:
           if (Test-Path (Join-Path $root "base\Custom_OpenClash_Rules")) {
             throw "Windows artifact still contains removed Custom_OpenClash_Rules assets."
           }
+          foreach ($required in @(
+            "subconverter-update.exe",
+            "update.ps1",
+            "update.bat",
+            "UPDATE-README.txt"
+          )) {
+            if (-not (Test-Path -LiteralPath (Join-Path $root $required) -PathType Leaf)) {
+              throw "Windows artifact is missing $required."
+            }
+          }
 
           python "$env:GITHUB_WORKSPACE\scripts\ci\write_build_info.py" verify `
             --path (Join-Path $root "BUILD-INFO.json") `
@@ -51,6 +61,19 @@ runs:
           if ($LASTEXITCODE -ne 0) {
             throw "Windows package identity verification failed."
           }
+          $statusPath = Join-Path $workDir "update-status.json"
+          & pwsh -NoProfile -ExecutionPolicy Bypass `
+            -File (Join-Path $root "update.ps1") status | Set-Content -LiteralPath $statusPath
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows updater status command failed."
+          }
+          $updateStatus = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json
+          if ($updateStatus.state -cne "idle" -or
+              $updateStatus.current_version -cne "${{ inputs.expected-version }}" -or
+              $updateStatus.rollback_available -or
+              $updateStatus.available) {
+            throw "Unexpected Windows updater status: $($updateStatus | ConvertTo-Json -Compress)"
+          }
 
           Remove-Item (Join-Path $root "base\pref.toml") -ErrorAction SilentlyContinue
           Remove-Item (Join-Path $root "base\pref.yml") -ErrorAction SilentlyContinue
@@ -58,8 +81,10 @@ runs:
 
           $previousPort = $env:PORT
           $previousPath = $env:PATH
+          $previousSkipAutoUpdate = $env:SUBCONVERTER_SKIP_AUTO_UPDATE
           $env:PORT = $port
           $env:PATH = "$root;$env:PATH"
+          $env:SUBCONVERTER_SKIP_AUTO_UPDATE = "1"
 
           $process = Start-Process `
             -FilePath "pwsh" `
@@ -155,5 +180,10 @@ runs:
             ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
           if ($null -ne $previousPort) { $env:PORT = $previousPort } else { Remove-Item Env:PORT -ErrorAction SilentlyContinue }
           if ($null -ne $previousPath) { $env:PATH = $previousPath }
+          if ($null -ne $previousSkipAutoUpdate) {
+            $env:SUBCONVERTER_SKIP_AUTO_UPDATE = $previousSkipAutoUpdate
+          } else {
+            Remove-Item Env:SUBCONVERTER_SKIP_AUTO_UPDATE -ErrorAction SilentlyContinue
+          }
           Remove-Item -Recurse -Force $workDir -ErrorAction SilentlyContinue
         }

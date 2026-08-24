@@ -1,9 +1,7 @@
 package main
 
 import (
-	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -21,9 +18,7 @@ import (
 )
 
 const (
-	maxExtractedArchiveBytes int64 = 512 << 20
-	maxExtractedFileCount          = 8192
-	maxMutableFileSize       int64 = 32 << 20
+	maxMutableFileSize int64 = 32 << 20
 )
 
 type runtimeIdentity struct {
@@ -35,6 +30,9 @@ func (u *updater) apply() (int, error) {
 		return u.recover()
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return 1, err
+	}
+	if u.applicationRunning() && !canUpdateWhileRunning() {
+		return 1, errors.New("stop the Windows portable runtime before applying an update")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
@@ -167,6 +165,9 @@ func (u *updater) rollback() (int, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return 1, err
 	}
+	if u.applicationRunning() && !canUpdateWhileRunning() {
+		return 1, errors.New("stop the Windows portable runtime before rolling back")
+	}
 	rollbackRoot := u.rollbackRoot()
 	current, err := u.currentBuildInfo(u.root)
 	if err != nil {
@@ -235,6 +236,9 @@ func (u *updater) recover() (int, error) {
 	if !pathWithin(u.stateDir, pending.CandidateRoot) {
 		return 1, errors.New("pending candidate root is outside the persistent updater directory")
 	}
+	if err := repairInterruptedSwap(u.root, pending.CandidateRoot); err != nil {
+		return 1, fmt.Errorf("repair interrupted portable root exchange: %w", err)
+	}
 	rootInfo, rootErr := u.currentBuildInfo(u.root)
 	candidateInfo, candidateErr := u.currentBuildInfo(pending.CandidateRoot)
 
@@ -289,113 +293,12 @@ func (u *updater) extractCandidate(archivePath string) (string, error) {
 	if err := os.MkdirAll(stagingRoot, 0o700); err != nil {
 		return "", err
 	}
-	archive, err := os.Open(archivePath)
+	candidateRoot, err := extractPortableArchive(archivePath, stagingRoot)
 	if err != nil {
 		return "", err
 	}
-	defer archive.Close()
-	gzipReader, err := gzip.NewReader(archive)
-	if err != nil {
+	if err := validateCandidateLayout(candidateRoot); err != nil {
 		return "", err
-	}
-	defer gzipReader.Close()
-	tarReader := tar.NewReader(gzipReader)
-	candidateRoot := filepath.Join(stagingRoot, "SubConverter-Extended")
-	fileCount := 0
-	var totalBytes int64
-	for {
-		header, err := tarReader.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return "", err
-		}
-		fileCount++
-		if fileCount > maxExtractedFileCount {
-			return "", errors.New("portable archive contains too many entries")
-		}
-		name := strings.TrimPrefix(header.Name, "./")
-		if strings.Contains(name, "\\") || (name != "SubConverter-Extended" && !strings.HasPrefix(name, "SubConverter-Extended/")) {
-			return "", fmt.Errorf("portable archive entry is outside the expected root: %q", header.Name)
-		}
-		relative := strings.TrimPrefix(name, "SubConverter-Extended")
-		relative = strings.TrimPrefix(relative, "/")
-		cleanRelative := filepath.Clean(filepath.FromSlash(relative))
-		if relative == "" {
-			cleanRelative = "."
-		}
-		if cleanRelative == ".." || strings.HasPrefix(cleanRelative, ".."+string(filepath.Separator)) || filepath.IsAbs(cleanRelative) {
-			return "", fmt.Errorf("unsafe portable archive path: %q", header.Name)
-		}
-		target := filepath.Join(candidateRoot, cleanRelative)
-		if !pathWithin(candidateRoot, target) {
-			return "", fmt.Errorf("portable archive path escapes candidate root: %q", header.Name)
-		}
-		switch header.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o755); err != nil {
-				return "", err
-			}
-		case tar.TypeReg, tar.TypeRegA:
-			if header.Size < 0 || totalBytes+header.Size > maxExtractedArchiveBytes {
-				return "", errors.New("portable archive exceeds the extracted-size limit")
-			}
-			totalBytes += header.Size
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return "", err
-			}
-			mode := os.FileMode(0o644)
-			if header.Mode&0o111 != 0 {
-				mode = 0o755
-			}
-			output, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
-			if err != nil {
-				return "", err
-			}
-			written, copyErr := io.CopyN(output, tarReader, header.Size)
-			if copyErr == nil {
-				copyErr = output.Sync()
-			}
-			closeErr := output.Close()
-			if copyErr != nil {
-				return "", copyErr
-			}
-			if closeErr != nil {
-				return "", closeErr
-			}
-			if written != header.Size {
-				return "", errors.New("portable archive entry was truncated")
-			}
-		case tar.TypeSymlink:
-			if filepath.IsAbs(header.Linkname) || strings.Contains(header.Linkname, "\\") {
-				return "", fmt.Errorf("unsafe absolute symlink in portable archive: %q", header.Name)
-			}
-			resolved := filepath.Clean(filepath.Join(filepath.Dir(cleanRelative), filepath.FromSlash(header.Linkname)))
-			if resolved == ".." || strings.HasPrefix(resolved, ".."+string(filepath.Separator)) {
-				return "", fmt.Errorf("portable archive symlink escapes candidate root: %q", header.Name)
-			}
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return "", err
-			}
-			if err := os.Symlink(filepath.FromSlash(header.Linkname), target); err != nil {
-				return "", err
-			}
-		default:
-			return "", fmt.Errorf("unsupported portable archive entry type %d for %q", header.Typeflag, header.Name)
-		}
-	}
-	for _, required := range []string{"subconverter", "subconverter-update", "start.sh", "update.sh", "BUILD-INFO.json", "base/pref.example.toml"} {
-		info, err := os.Lstat(filepath.Join(candidateRoot, required))
-		if err != nil || !info.Mode().IsRegular() {
-			return "", fmt.Errorf("portable candidate is missing regular file %s", required)
-		}
-	}
-	for _, executable := range []string{"subconverter", "subconverter-update", "start.sh", "update.sh"} {
-		info, _ := os.Stat(filepath.Join(candidateRoot, executable))
-		if info.Mode()&0o111 == 0 {
-			return "", fmt.Errorf("portable candidate executable bit is missing: %s", executable)
-		}
 	}
 	if err := syncDirectory(stagingRoot); err != nil {
 		return "", err
@@ -553,8 +456,10 @@ func (u *updater) validateRuntime(root, expectedVersion string) error {
 	runtimeState := filepath.Join(u.stateDir, fmt.Sprintf("validation-runtime-%d.json", os.Getpid()))
 	_ = os.Remove(runtimeState)
 
-	command := exec.Command(filepath.Join(root, "start.sh"))
-	command.Dir = root
+	command, err := validationCommand(root)
+	if err != nil {
+		return err
+	}
 	command.Env = append(os.Environ(),
 		"PREF_PATH="+filepath.Join(root, "base", "pref.toml"),
 		"PORT="+strconv.Itoa(port),
@@ -642,7 +547,7 @@ func (u *updater) validateRuntime(root, expectedVersion string) error {
 	}
 	select {
 	case processErr := <-waited:
-		if processErr != nil {
+		if processErr != nil && requiresCleanRuntimeShutdown() {
 			return fmt.Errorf("portable runtime did not stop cleanly: %w", processErr)
 		}
 	case <-time.After(20 * time.Second):
@@ -652,7 +557,9 @@ func (u *updater) validateRuntime(root, expectedVersion string) error {
 	}
 	if _, err := os.Stat(runtimeState); !errors.Is(err, os.ErrNotExist) {
 		_ = os.Remove(runtimeState)
-		return errors.New("portable runtime state was not removed after shutdown")
+		if requiresCleanRuntimeShutdown() {
+			return errors.New("portable runtime state was not removed after shutdown")
+		}
 	}
 	return nil
 }

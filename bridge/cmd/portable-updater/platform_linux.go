@@ -6,11 +6,51 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"syscall"
 
 	"golang.org/x/sys/unix"
 )
+
+func validationCommand(root string) (*exec.Cmd, error) {
+	command := exec.Command(filepath.Join(root, "start.sh"))
+	command.Dir = root
+	return command, nil
+}
+
+func requiresCleanRuntimeShutdown() bool {
+	return true
+}
+
+func canUpdateWhileRunning() bool {
+	return true
+}
+
+func resolvePortableRoot(executable string) (string, error) {
+	return filepath.Abs(filepath.Dir(executable))
+}
+
+func portableTarget() (portableTargetInfo, error) {
+	architecture := ""
+	switch runtime.GOARCH {
+	case "amd64":
+		architecture = "amd64"
+	case "arm64":
+		architecture = "arm64"
+	case "arm":
+		architecture = "armv7"
+	default:
+		return portableTargetInfo{}, fmt.Errorf("unsupported portable Linux architecture: %s", runtime.GOARCH)
+	}
+	return portableTargetInfo{
+		Platform:       "linux",
+		Architecture:   architecture,
+		AssetName:      "SubConverter-Extended-%s-linux-" + architecture + ".tar.gz",
+		MaxArchiveSize: 26_214_400,
+	}, nil
+}
 
 func atomicSwapDirectories(left, right string) error {
 	leftInfo, err := os.Stat(left)
@@ -33,6 +73,10 @@ func atomicSwapDirectories(left, right string) error {
 	if filepath.Dir(left) != filepath.Dir(right) {
 		return syncDirectory(filepath.Dir(right))
 	}
+	return nil
+}
+
+func repairInterruptedSwap(_, _ string) error {
 	return nil
 }
 

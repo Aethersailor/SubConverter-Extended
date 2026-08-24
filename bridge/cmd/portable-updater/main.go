@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -76,9 +75,18 @@ type updater struct {
 	pending    string
 	lockPath   string
 	logPath    string
+	platform   string
 	arch       string
 	assetName  string
+	maxArchive int64
 	config     updateConfig
+}
+
+type portableTargetInfo struct {
+	Platform       string
+	Architecture   string
+	AssetName      string
+	MaxArchiveSize int64
 }
 
 func defaultConfig() updateConfig {
@@ -101,8 +109,7 @@ func newUpdater() (*updater, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve updater executable symlinks: %w", err)
 	}
-	root := filepath.Dir(executable)
-	root, err = filepath.Abs(root)
+	root, err := resolvePortableRoot(executable)
 	if err != nil {
 		return nil, fmt.Errorf("resolve portable root: %w", err)
 	}
@@ -110,7 +117,7 @@ func newUpdater() (*updater, error) {
 		return nil, errors.New("refusing to use the filesystem root as the portable root")
 	}
 
-	arch, assetArch, err := portableArchitecture()
+	target, err := portableTarget()
 	if err != nil {
 		return nil, err
 	}
@@ -123,8 +130,10 @@ func newUpdater() (*updater, error) {
 		pending:    filepath.Join(stateDir, "pending.json"),
 		lockPath:   filepath.Join(stateDir, "update.lock"),
 		logPath:    filepath.Join(stateDir, "update.log"),
-		arch:       arch,
-		assetName:  "SubConverter-Extended-%s-linux-" + assetArch + ".tar.gz",
+		platform:   target.Platform,
+		arch:       target.Architecture,
+		assetName:  target.AssetName,
+		maxArchive: target.MaxArchiveSize,
 	}
 	if info, err := os.Lstat(stateDir); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
@@ -144,19 +153,6 @@ func newUpdater() (*updater, error) {
 		return nil, err
 	}
 	return u, nil
-}
-
-func portableArchitecture() (string, string, error) {
-	switch runtime.GOARCH {
-	case "amd64":
-		return "amd64", "amd64", nil
-	case "arm64":
-		return "arm64", "arm64", nil
-	case "arm":
-		return "armv7", "armv7", nil
-	default:
-		return "", "", fmt.Errorf("unsupported portable Linux architecture: %s", runtime.GOARCH)
-	}
 }
 
 func (u *updater) loadConfig() error {
