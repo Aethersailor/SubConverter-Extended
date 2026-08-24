@@ -174,7 +174,8 @@ runs:
         docker run --platform "$platform" --name "$prep_container" \
           -i -e "BASE_ARCH=$base_arch" "$base_image" /bin/sh -s <<'OPENWRT_PREP'
         set -eu
-        test "$(apk --print-arch)" = "$BASE_ARCH"
+        test -n "$(apk --print-arch)"
+        test "$(sed -n '1p' /etc/apk/arch)" = "$BASE_ARCH"
         apk --version | grep -Fq 'apk-tools 3.0.5'
         mkdir -p /var/lock
         attempt=1
@@ -222,7 +223,8 @@ runs:
           conffiles_static="/lib/apk/packages/${package}.conffiles_static"
 
           test -f "$source_apk"
-          test "$(apk --print-arch)" = "$BASE_ARCH"
+          test -n "$(apk --print-arch)"
+          test "$(sed -n '1p' /etc/apk/arch)" = "$BASE_ARCH"
           apk adbdump "$source_apk" > "$metadata"
           if grep -q "$(printf '\r')" "$metadata"; then
             echo 'APK lifecycle metadata contains CRLF line endings.' >&2
