@@ -388,7 +388,13 @@ runs:
           done
           while IFS= read -r listed_path; do
             test -e "$listed_path" || test -L "$listed_path"
-            if ! find "$listed_path" -user root -group root \
+            if [ -L "$listed_path" ]; then
+              if ! find "$listed_path" -type l -user root -group root -print | \
+                  grep -Fxq "$listed_path" || [ -z "$(readlink "$listed_path")" ]; then
+                echo "Unexpected installed symlink ownership/target: $listed_path" >&2
+                exit 1
+              fi
+            elif ! find "$listed_path" -user root -group root \
                 \( -perm 0644 -o -perm 0755 \) -print | grep -Fxq "$listed_path"; then
               echo "Unexpected installed ownership/mode: $listed_path" >&2
               exit 1
