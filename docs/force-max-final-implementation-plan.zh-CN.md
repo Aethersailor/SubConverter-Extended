@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：已授权实施；阶段 0～2 已完成，阶段 3 待开始。
+- 状态：已授权实施；阶段 0～3 已完成，阶段 4 待开始。
 - 目标分支：`dev`。
 - 阶段 0 规划基线：`6d5dcddd2810bbe95fb7e2bbf4f924c7a4cc536f`。
 - 范围：源码、测试、dev CI、dev OCI、HostBrr 测试实例和公开测试路径。
@@ -17,7 +17,7 @@
 | 0 基线与账本 | 已完成 | `6d5dcddd2810bbe95fb7e2bbf4f924c7a4cc536f` | Linux CTest 28/28；Python 36/36；Go/Shell/Actionlint；本地 OCI smoke | 账本提交 `cb834f69` |
 | 1 pipeline 拆分 | 已完成 | `f6c66b70271f7f816a3b5b85e94a40753116774a` | Linux CTest 28/28；本地 force_max OCI smoke；既有输出哈希断言 | 纯机械拆分；无线程和行为变化 |
 | 2 预算数据合同 | 已完成 | `a3c219e4d277008657c9970d73de87adf3045095` | Linux CTest 28/28；确定性/单调/溢出/分数 CPU/低 FD 测试；OCI smoke | provisional 预算只进入诊断，未应用到运行参数 |
-| 3 ComputeExecutor | 待开始 | — | — | — |
+| 3 ComputeExecutor | 已完成 | `d252740ffc7edb9ee533a21497868078b9e507e8` | Release 与 ASan/UBSan CTest 各 28/28；生命周期/边界/取消/自 join 测试 | 尚未承载正式 flow |
 | 4 async fetch 合同 | 待开始 | — | — | — |
 | 5 ConversionFlow | 待开始 | — | — | — |
 | 6 external config/import | 待开始 | — | — | — |
@@ -58,6 +58,16 @@
 - 扩展既有 `concurrency_primitives_test`，覆盖确定性、CPU/内存单调性、500m CPU、无 cgroup/无 PSI、低 `nofile`、FD 耗尽和整数溢出拒绝；未新增测试文件。
 - Linux Release 构建完成 202 个 C++/测试目标，完整 CTest `28/28` 通过；本地真实 `force_max` OCI smoke 和固定历史输出哈希断言通过，`restart=0`、`OOM=false`。
 - 新预算只写入设置快照、Dashboard 诊断和启动日志，`applied=false`；现有 force_max 运行容量仍走 legacy adapter，本阶段没有提前切换容量。
+- 本阶段未访问或修改 HostBrr，未部署远端容器，未触及 `master`、正式实例、tag、Release 或 `:latest`。
+
+## 阶段 3 验证证据
+
+- 新增单一有界 `ComputeExecutor`：任务同时受 queue entries、queue bytes、绝对 deadline 和取消令牌约束；拒绝或关闭路径均使 future/completion 确定结束。
+- worker 使用独立缓存行指标，提供软亲和提示、线程命名、ready barrier、低/中/高 cost 公平调度和 500ms 老化；软亲和只在同一 cost 队列的有限窗口内选择，不绕过公平类别。
+- 关闭分为 request 与逆序 join；worker 自 join 明确失败而不死锁，pending completion 使用原子 exactly-once claim，执行器内没有 caller-runs、busy-spin 或 worker 对同一执行器的同步等待。
+- 扩展既有 `concurrency_primitives_test`，覆盖 entry/byte limit、deadline、取消、软亲和、自 join、pending shutdown、completion exactly-once、队列字节恢复和 worker-local 指标；未新增测试文件。
+- Linux Release 完整 CTest `28/28` 通过；完整 ASan/UBSan CTest `28/28` 通过，包含 Beast/httplib 两组兼容与安全基线及两组 shutdown。
+- 全局执行器接口和 Dashboard 诊断已建立，但本阶段未初始化全局实例，也未承载正式请求或改变现有线程拓扑。
 - 本阶段未访问或修改 HostBrr，未部署远端容器，未触及 `master`、正式实例、tag、Release 或 `:latest`。
 
 ## 一、固定范围与不可改变的决策
