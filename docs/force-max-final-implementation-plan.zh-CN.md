@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：已授权实施；阶段 0～11 已完成，阶段 12 待开始。
+- 状态：已授权实施；阶段 0～12 已完成，阶段 13 待开始。
 - 目标分支：`dev`。
 - 阶段 0 规划基线：`6d5dcddd2810bbe95fb7e2bbf4f924c7a4cc536f`。
 - 范围：源码、测试、dev CI、dev OCI、HostBrr 测试实例和公开测试路径。
@@ -26,7 +26,7 @@
 | 9 owner admission | 已完成 | `e11de11f39d993707596f57269e59ddef5e2adbd` | Release 与 ASan/UBSan CTest 各 28/28；force_max OCI smoke | cache/singleflight/owner 顺序已接通，follower 豁免 |
 | 10 transport admission | 已完成 | `d5a8b6beaa63a70038841f46dcd787e09b27d75f` | Release 与 ASan/UBSan CTest 各 28/28；Beast hard-capacity/health；force_max OCI smoke | 软容量等待；硬包络返回完整响应 |
 | 11 候选 flow/多线程 | 已完成 | `33b003c394d5b9c6ca7ba0df4bb1457d0f499bc7` | Release 与 ASan/UBSan CTest 各 28/28；legacy/candidate ABBA；force_max OCI smoke | simple target 默认走 flow；复杂路径暂保留 legacy |
-| 12 全维度预算消费者 | 待开始 | — | — | — |
+| 12 全维度预算消费者 | 已完成 | `47196f0262218fa42eb9236b1d511088ceb07692` | 精确 SHA 的 Release 与 ASan/UBSan CTest 各 28/28；6C/12GiB OCI smoke | 全部容量在监听前一次性冻结并逐项核对 `applied=true` |
 | 13 离线公式标定 | 待开始 | — | — | — |
 | 14 PressureGuard | 待开始 | — | — | — |
 | 15 原子启动/旧路径清理 | 待开始 | — | — | — |
@@ -156,6 +156,16 @@
 - 显式 ABBA 基线分别以 `legacy` 与 `candidate` 转换同一订阅，要求最终响应字节完全一致；Dashboard 同时证明 legacy 只增加旧 scheduler 计数，candidate 只增加 ConversionFlow created/completed，active 最终归零。
 - 未在缺少 profile 证据时加入请求内 CPU sibling、中央队列分片、work stealing 重写或 PCRE2 compiled-plan 缓存；这些可选项为本阶段 No-Go，不阻塞已验证的异步 flow。
 - 精确提交的 Linux Release 与完整 ASan/UBSan CTest 均为 `28/28`，真实 force_max OCI smoke 通过。Release image ID 为 `sha256:879f38ae9a7f49cf8e515d0dd054a365e9b646cbc9fa3541b1856502dcc091d0`，插桩 image ID 为 `sha256:3e52ad859c4612534eabd1293023197038399787f90f107e5396b6fcfce8e8d0`；容器 `restart=0`、`OOM=false`。
+- 本阶段未访问或修改 HostBrr，未部署远端容器，未触及 `master`、正式实例、tag、Release 或 `:latest`。
+
+## 阶段 12 验证证据
+
+- 将预算公式升级为 `force-max-provisional-v2`，显式拆分 transport、owner、flow、blocking I/O 队列和 active byte 预算。`maxConcurThreads`、handler permit、active flow、请求/响应驻留、Curl active/open/idle、各队列和 listener backlog 均直接消费同一份启动预算，不再各自重新推导。
+- 新增独立有界 blocking I/O executor，本地文件读取不再占普通 ComputeExecutor；ruleset executor 使用同一 I/O worker 数和 blocking I/O 队列条目边界。QuickJS 全局 lane、blocking I/O executor 和 Curl multi 均在 bind/listen 前构造并通过 ready 检查，初始化失败时不监听。
+- response micro-cache、ruleset conversion cache 和 external config cache 从 `cache_bytes` 按固定比例分配，并支持启动时原子收紧；动态 LRU limit 的读写和淘汰均受同一互斥保护。运行期遥测只刷新可观测资源包络，不再重算已经下发的 `ForceMaxBudget`。
+- Dashboard 的 `calculated_force_max_budget.applied` 不再是占位值，而是同时核对 Compute、blocking I/O、QuickJS、transport/owner admission、Curl、retained response、三个 cache、CPU permit 和服务设置的实际维度；任一消费者漂移都会显示 `false`。既有兼容基线要求 force_max 运行 2 秒后仍保持逐项相等。
+- 精确产品提交的 Linux Release 与完整 ASan/UBSan CTest 均为 `28/28`。Release image ID 为 `sha256:b04999bca988cd65dc335d60bb521c00b4312cfa78ee27e9eca72045abbc4cb4`，插桩 image ID 为 `sha256:ad493c098935c8eb6cf4824009bb56c35884d00c3c82fdae4d76dc969cf2e92f`，两者 OCI revision 均精确等于产品 SHA。
+- 使用 6 CPU、12 GiB、`pids=4096`、`nofile=524288` 的临时 OCI 包络验证当前 HostBrr 规格：预算自动得到 compute/I/O/QuickJS worker `6/2/3`、active flow `96`、active owner `48`、outbound active `96`，Dashboard 为 `applied=true`，完整 smoke 通过；优雅退出码为 0，`restart=0`、`OOM=false`。这些数值是当前包络的计算结果，不是项目硬编码上限，迁移到更强服务器会随探测结果重新计算。
 - 本阶段未访问或修改 HostBrr，未部署远端容器，未触及 `master`、正式实例、tag、Release 或 `:latest`。
 
 ## 一、固定范围与不可改变的决策
