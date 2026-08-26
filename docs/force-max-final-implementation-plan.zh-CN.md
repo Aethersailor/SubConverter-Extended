@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：已授权实施；阶段 0～3 已完成，阶段 4 待开始。
+- 状态：已授权实施；阶段 0～4 已完成，阶段 5 待开始。
 - 目标分支：`dev`。
 - 阶段 0 规划基线：`6d5dcddd2810bbe95fb7e2bbf4f924c7a4cc536f`。
 - 范围：源码、测试、dev CI、dev OCI、HostBrr 测试实例和公开测试路径。
@@ -18,7 +18,7 @@
 | 1 pipeline 拆分 | 已完成 | `f6c66b70271f7f816a3b5b85e94a40753116774a` | Linux CTest 28/28；本地 force_max OCI smoke；既有输出哈希断言 | 纯机械拆分；无线程和行为变化 |
 | 2 预算数据合同 | 已完成 | `a3c219e4d277008657c9970d73de87adf3045095` | Linux CTest 28/28；确定性/单调/溢出/分数 CPU/低 FD 测试；OCI smoke | provisional 预算只进入诊断，未应用到运行参数 |
 | 3 ComputeExecutor | 已完成 | `d252740ffc7edb9ee533a21497868078b9e507e8` | Release 与 ASan/UBSan CTest 各 28/28；生命周期/边界/取消/自 join 测试 | 尚未承载正式 flow |
-| 4 async fetch 合同 | 待开始 | — | — | — |
+| 4 async fetch 合同 | 已完成 | `ac810e50ea38b8cd37b56ed17e8430bb20634995` | Release 与 ASan/UBSan CTest 各 28/28；force_max OCI smoke | 无缓存 GET、绝对 deadline、冻结设置和启动/关闭已接通 |
 | 5 ConversionFlow | 待开始 | — | — | — |
 | 6 external config/import | 待开始 | — | — | — |
 | 7 subscription/ruleset/base | 待开始 | — | — | — |
@@ -68,6 +68,16 @@
 - 扩展既有 `concurrency_primitives_test`，覆盖 entry/byte limit、deadline、取消、软亲和、自 join、pending shutdown、completion exactly-once、队列字节恢复和 worker-local 指标；未新增测试文件。
 - Linux Release 完整 CTest `28/28` 通过；完整 ASan/UBSan CTest `28/28` 通过，包含 Beast/httplib 两组兼容与安全基线及两组 shutdown。
 - 全局执行器接口和 Dashboard 诊断已建立，但本阶段未初始化全局实例，也未承载正式请求或改变现有线程拓扑。
+- 本阶段未访问或修改 HostBrr，未部署远端容器，未触及 `master`、正式实例、tag、Release 或 `:latest`。
+
+## 阶段 4 验证证据
+
+- `webGetOwnedAsync` 支持 `cache_ttl=0` 的真实 Curl multi GET，不再把无缓存请求直接归为 Transport failure；GitHub Raw/jsDelivr fallback、代理路由、header 和 retained result lease 沿用同一异步传输合同。
+- cache 与 no-cache 子操作均继承消费者的单一绝对 deadline；过期 deadline 在发起网络请求前确定完成，阶段内部不再生成新的 `now + requestDeadlineMs`。
+- 每次异步 owned fetch 捕获一个不可变 `SettingsSnapshot`，冻结取源开关、TLS、安全、下载大小和 stale-cache fallback；异步 continuation 重新建立 scoped settings view，不跨挂起保存 thread-local RAII。
+- owned fetch continuation 已从独立 WorkloadScheduler 迁入单一 `ComputeExecutor`；force_max 在监听前按 provisional budget 完成 worker ready，初始化失败在监听前退出，并显式 request shutdown 与并发安全 join。
+- 扩展既有 settings snapshot/兼容基线，覆盖同步 completion、无缓存 GET、响应 header/正文/retained lease、绝对 deadline、cache owner/follower、部分消费者取消、pre-init failure、双 join 和资源归零；未新增测试文件。
+- Linux Release 与完整 ASan/UBSan CTest 均为 `28/28`；本地真实 `force_max` OCI smoke 和固定历史输出哈希断言通过，启动日志确认 16 个 WSL 预算 worker 在监听前 ready，容器 `restart=0`、`OOM=false`。
 - 本阶段未访问或修改 HostBrr，未部署远端容器，未触及 `master`、正式实例、tag、Release 或 `:latest`。
 
 ## 一、固定范围与不可改变的决策
