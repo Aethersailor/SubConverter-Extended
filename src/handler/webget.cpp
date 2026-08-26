@@ -267,6 +267,19 @@ public:
                    true, std::memory_order_acq_rel);
     }
 
+    void requestAsyncCachePersistence(bool requested) noexcept
+    {
+        if(requested)
+            async_cache_persistence_requested_.store(
+                true, std::memory_order_release);
+    }
+
+    bool asyncCachePersistenceRequested() const noexcept
+    {
+        return async_cache_persistence_requested_.load(
+            std::memory_order_acquire);
+    }
+
 private:
     static void invoke(Callback &callback, SharedCacheFetchPayload payload,
                        std::exception_ptr error) noexcept
@@ -308,6 +321,7 @@ private:
     uint64_t next_callback_id_ = 1;
     RequestCancellationSource work_cancellation_;
     std::atomic_bool cache_persistence_claimed_{false};
+    std::atomic_bool async_cache_persistence_requested_{false};
     SharedCacheFetchPayload payload_;
     std::exception_ptr error_;
     std::unordered_map<uint64_t, Callback> callbacks_;
@@ -4029,6 +4043,8 @@ struct AsyncOwnedCacheFetch
     bool serve_cache_on_fetch_fail = false;
     std::string path;
     std::string header_path;
+    bool admission_cold_operation = false;
+    bool gated_cache_persistence = false;
     CacheFetchRegistryKey registry_key;
     std::shared_ptr<CacheFetchOperation> operation;
 };
@@ -4219,6 +4235,10 @@ void commitOrServeStaleAsyncOwnedCache(
     if(payload->status_code == 200 &&
        payload->failure == AsyncFetchFailure::None)
     {
+        if(state->admission_cold_operation &&
+           state->gated_cache_persistence &&
+           !state->operation->asyncCachePersistenceRequested())
+            return;
         cache_rw_lock.writeLock();
         {
             defer(cache_rw_lock.writeUnlock();)
@@ -4747,6 +4767,18 @@ void webGetOwnedAsync(OwnedWebGetRequest request,
             const std::string cache_key = getMD5(
                 "owned-async-cache:" + disk_identity +
                 ":legacy:" + legacy_cache_key);
+            const std::string async_cache_path = "cache/" + cache_key;
+            const bool admission_cold_operation =
+                subscriptionCacheAdmissionEnabled() &&
+                !fileExist(async_cache_path);
+            const bool gated_cache_persistence =
+                admission_cold_operation &&
+                request.high_cardinality_cache_admission;
+            const bool request_cache_persistence =
+                gated_cache_persistence
+                    ? subscriptionCacheDoorkeeper().admit(
+                          legacy_cache_key, request.cache_ttl)
+                    : admission_cold_operation;
             registry_key = CacheFetchRegistryKey{
                 registry_identity,
                 CacheFetchOwnerKind::Async};
@@ -4806,6 +4838,8 @@ void webGetOwnedAsync(OwnedWebGetRequest request,
                 }
                 return;
             }
+            operation->requestAsyncCachePersistence(
+                request_cache_persistence);
             // The consumer subscription owns the operation attachment now.
             operation_attached = false;
 
@@ -4844,8 +4878,12 @@ void webGetOwnedAsync(OwnedWebGetRequest request,
                     settings_snapshot->maxAllowedDownloadSize;
                 state->serve_cache_on_fetch_fail =
                     settings_snapshot->serveCacheOnFetchFail;
-                state->path = "cache/" + cache_key;
+                state->path = async_cache_path;
                 state->header_path = state->path + "_header";
+                state->admission_cold_operation =
+                    admission_cold_operation;
+                state->gated_cache_persistence =
+                    gated_cache_persistence;
                 state->registry_key = registry_key;
                 state->operation = std::move(operation);
                 startAsyncOwnedCacheOwner(state);

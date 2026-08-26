@@ -189,6 +189,31 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
   std::vector<Proxy> nodes;
   Proxy node;
   std::string strSub, extra_headers, custom_group;
+  const string_icase_map empty_request_headers;
+  auto resolveSubscription = [&](const std::string &source) {
+    if(parse_set.resolved_subscription_content)
+    {
+      strSub = *parse_set.resolved_subscription_content;
+      if(parse_set.resolved_subscription_headers)
+        extra_headers = *parse_set.resolved_subscription_headers;
+      return 1;
+    }
+    const string_icase_map &headers =
+        request_headers ? *request_headers : empty_request_headers;
+    if(parse_set.resolved_subscription_lookup &&
+       parse_set.resolved_subscription_lookup(
+           source, parse_set.fetch_context, headers, strSub,
+           extra_headers))
+      return 1;
+    if(!parse_set.require_resolved_subscription)
+      return 0;
+    if(parse_set.missing_subscription_sources)
+      parse_set.missing_subscription_sources->push_back(
+          {source, parse_set.fetch_context, headers});
+    writeLog(LOG_LEVEL_DEBUG,
+             "NODE_SOURCE_SUSPENDED branch=sub reason=needs_fetch");
+    return -1;
+  };
 
   // TODO: replace with startsWith if appropriate
   link = replaceAllDistinct(link, "\"", "");
@@ -401,19 +426,10 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
         }
       }
 
-      if(parse_set.resolved_subscription_content)
-      {
-        strSub = *parse_set.resolved_subscription_content;
-        if(parse_set.resolved_subscription_headers)
-          extra_headers = *parse_set.resolved_subscription_headers;
-      }
-      else if(parse_set.require_resolved_subscription)
-      {
-        writeLog(LOG_LEVEL_ERROR,
-                 "NODE_SOURCE_FAILED branch=sub reason=unresolved_async_source");
-        return -1;
-      }
-      else
+      const int resolved = resolveSubscription(link);
+      if(resolved < 0)
+        return kAddNodesNeedsFetch;
+      if(resolved == 0)
         strSub = webGet(link, proxy, effectiveSettings().cacheSubscription,
                         &extra_headers, request_headers,
                         parse_set.fetch_context);
@@ -437,19 +453,10 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
         }
       }
 
-      if(parse_set.resolved_subscription_content)
-      {
-        strSub = *parse_set.resolved_subscription_content;
-        if(parse_set.resolved_subscription_headers)
-          extra_headers = *parse_set.resolved_subscription_headers;
-      }
-      else if(parse_set.require_resolved_subscription)
-      {
-        writeLog(LOG_LEVEL_ERROR,
-                 "NODE_SOURCE_FAILED branch=sub reason=unresolved_async_source");
-        return -1;
-      }
-      else
+      const int resolved = resolveSubscription(link);
+      if(resolved < 0)
+        return kAddNodesNeedsFetch;
+      if(resolved == 0)
         strSub = webGet(link, proxy, effectiveSettings().cacheSubscription,
                         &extra_headers, request_headers,
                         parse_set.fetch_context);

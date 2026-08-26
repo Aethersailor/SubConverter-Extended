@@ -1962,6 +1962,22 @@ struct PreparedSubRequest {
   bool early_complete = false;
 };
 
+struct ForceMaxFlowOutput {
+  Response response;
+  std::string body;
+  uint64_t rule_conversions = 0;
+};
+
+using ForceMaxFlowCompletion =
+    std::function<void(ForceMaxFlowOutput, ConversionFlowTerminal)>;
+
+static bool forceMaxSimpleFlowEligible(
+    const Request &request, const PreparedSubRequest &prepared);
+static bool startForceMaxSimpleFlow(
+    Request request, std::shared_ptr<const PreparedSubRequest> prepared,
+    bool track_statistics, bool record_direct_statistics,
+    ForceMaxFlowCompletion completion);
+
 enum class AsyncInflightPhase {
   Accepting,
   Publishing,
@@ -2422,6 +2438,25 @@ SchedulerSubmitStatus ownerAdmissionSchedulerStatus(
     return SchedulerSubmitStatus::Deadline;
   case OwnerAdmissionStatus::Shutdown:
     return SchedulerSubmitStatus::Stopping;
+  }
+  return SchedulerSubmitStatus::Stopping;
+}
+
+SchedulerSubmitStatus conversionFlowSchedulerStatus(
+    ConversionFlowTerminalState state) noexcept {
+  switch (state) {
+  case ConversionFlowTerminalState::Completed:
+    return SchedulerSubmitStatus::Accepted;
+  case ConversionFlowTerminalState::Cancelled:
+    return SchedulerSubmitStatus::Cancelled;
+  case ConversionFlowTerminalState::Deadline:
+    return SchedulerSubmitStatus::Deadline;
+  case ConversionFlowTerminalState::Shutdown:
+    return SchedulerSubmitStatus::Stopping;
+  case ConversionFlowTerminalState::Capacity:
+    return SchedulerSubmitStatus::EntryLimit;
+  case ConversionFlowTerminalState::Failed:
+    return SchedulerSubmitStatus::Accepted;
   }
   return SchedulerSubmitStatus::Stopping;
 }
@@ -3144,6 +3179,35 @@ void ConversionService::convertSubscriptionAsync(Request request,
                 if (context)
                   context->markWorkAdmitted();
               }
+              if (forceMaxSimpleFlowEligible(work_request,
+                                             *prepared_owner)) {
+                const bool flow_started = startForceMaxSimpleFlow(
+                    std::move(work_request), prepared_owner,
+                    track_statistics, false,
+                    [call, prepared_owner](
+                        ForceMaxFlowOutput output,
+                        ConversionFlowTerminal terminal) mutable {
+                      if (terminal.state ==
+                          ConversionFlowTerminalState::Completed) {
+                        SharedCoalescedResponse result =
+                            makeCoalescedResult(
+                                std::move(output.body),
+                                std::move(output.response),
+                                output.rule_conversions);
+                        publishAsyncSubRequestSuccess(
+                            call, prepared_owner, std::move(result));
+                        return;
+                      }
+                      publishAsyncSubRequestFailure(
+                          call,
+                          conversionFlowSchedulerStatus(terminal.state),
+                          std::move(terminal.error));
+                    });
+                if (!flow_started)
+                  publishAsyncSubRequestFailure(
+                      call, SchedulerSubmitStatus::EntryLimit, {});
+                return;
+              }
               const auto work_deadline = call->work_context->deadline();
               const RequestCancellationToken work_cancellation =
                   call->work_context->cancellationToken();
@@ -3250,6 +3314,39 @@ void ConversionService::convertSubscriptionAsync(Request request,
         }
         if (governed && context)
           context->markWorkAdmitted();
+        if (forceMaxSimpleFlowEligible(request,
+                                       *prepared_standalone)) {
+          auto flow_admission =
+              std::make_shared<OwnerAdmissionLease>(
+                  std::move(admission_result.lease));
+          const bool flow_started = startForceMaxSimpleFlow(
+              std::move(request), prepared_standalone,
+              track_statistics, true,
+              [context, completion, flow_admission](
+                  ForceMaxFlowOutput output,
+                  ConversionFlowTerminal terminal) mutable {
+                (void)flow_admission;
+                if (terminal.state ==
+                    ConversionFlowTerminalState::Completed) {
+                  completion(makeConversionResult(
+                      std::move(output.response),
+                      std::move(output.body)));
+                  return;
+                }
+                Request failure_request;
+                failure_request.context = context;
+                completion(schedulerFailureResult(
+                    failure_request,
+                    conversionFlowSchedulerStatus(terminal.state)));
+              });
+          if (!flow_started) {
+            Request failure_request;
+            failure_request.context = context;
+            completion(schedulerFailureResult(
+                failure_request, SchedulerSubmitStatus::EntryLimit));
+          }
+          return;
+        }
         const auto queued_at = RequestContext::Clock::now();
         const SchedulerSubmitStatus standalone_submit_status =
             legacyRequestFlowScheduler().submitAsync(
@@ -3863,9 +3960,17 @@ struct ExternalConfigFetchPlan {
   std::vector<RulesetContent> ruleset_content;
 };
 
+struct ResolvedExternalConfigSelection {
+  ExternalConfig config;
+  template_args template_arguments;
+  FetchContext context = FetchContext::TrustedConfig;
+  bool fallback = false;
+};
+
 static std::string buildExternalConfigFetchPlan(
     Response &response, const Settings &settings, ParsedSubRequest &parsed,
-    EffectiveSubPolicy &policy, ExternalConfigFetchPlan &plan) {
+    EffectiveSubPolicy &policy, ExternalConfigFetchPlan &plan,
+    const ResolvedExternalConfigSelection *resolved_config = nullptr) {
   plan.user_provided_external_config = !parsed.external_config.empty();
   FetchContext rulesetFetchContext = FetchContext::TrustedConfig;
   bool configLoadSuccess = false;
@@ -3991,43 +4096,56 @@ static std::string buildExternalConfigFetchPlan(
     parsed.remove_emoji.define(extconf.remove_old_emoji);
   };
 
-  for (const ExternalConfigCandidate &candidate : config_candidates) {
-    policy.template_arguments.local_vars = tpl_args_base;
-    writeLog((candidate.fallback ? LOG_LEVEL_WARNING : LOG_LEVEL_INFO),
-             candidate.fallback
-                 ? "用户外部配置失败，显式尝试默认外部配置：" +
-                       summarizeUrlForLog(candidate.path)
-                 : "正在加载外部配置：" +
-                       summarizeUrlForLog(candidate.path));
+  if (resolved_config) {
+    policy.template_arguments = resolved_config->template_arguments;
+    applyExternalConfig(resolved_config->config,
+                        resolved_config->context);
+    configLoadSuccess = true;
+    plan.config_load_success = true;
+    parsed.explain.external_config_loaded = true;
+    parsed.explain.fallback_config_used = resolved_config->fallback;
+  } else {
+    for (const ExternalConfigCandidate &candidate : config_candidates) {
+      policy.template_arguments.local_vars = tpl_args_base;
+      writeLog((candidate.fallback ? LOG_LEVEL_WARNING : LOG_LEVEL_INFO),
+               candidate.fallback
+                   ? "用户外部配置失败，显式尝试默认外部配置：" +
+                         summarizeUrlForLog(candidate.path)
+                   : "正在加载外部配置：" +
+                         summarizeUrlForLog(candidate.path));
 
-    ExternalConfig extconf;
-    extconf.tpl_args = &policy.template_arguments;
-    ExternalConfigLoadResult loaded =
-        loadExternalConfig(candidate.path, extconf, candidate.context);
-    bool effective =
-        loaded.ok() && hasEffectiveExternalConfig(
-                           extconf, policy.template_arguments, tpl_args_base,
-                           parsed.target);
-    bool selected_base_valid =
-        effective && validateSelectedExternalBase(
-                         extconf, parsed.target, parsed.simple_subscription,
-                         policy.generator.nodelist, candidate.context);
-    if (loaded.ok() && effective && selected_base_valid) {
-      applyExternalConfig(extconf, candidate.context);
-      configLoadSuccess = true;
-      plan.config_load_success = true;
-      parsed.explain.external_config_loaded = true;
-      parsed.explain.fallback_config_used = candidate.fallback;
-      break;
+      ExternalConfig extconf;
+      extconf.tpl_args = &policy.template_arguments;
+      ExternalConfigLoadResult loaded =
+          loadExternalConfig(candidate.path, extconf, candidate.context);
+      bool effective =
+          loaded.ok() && hasEffectiveExternalConfig(
+                             extconf, policy.template_arguments,
+                             tpl_args_base, parsed.target);
+      bool selected_base_valid =
+          effective && validateSelectedExternalBase(
+                           extconf, parsed.target,
+                           parsed.simple_subscription,
+                           policy.generator.nodelist,
+                           candidate.context);
+      if (loaded.ok() && effective && selected_base_valid) {
+        applyExternalConfig(extconf, candidate.context);
+        configLoadSuccess = true;
+        plan.config_load_success = true;
+        parsed.explain.external_config_loaded = true;
+        parsed.explain.fallback_config_used = candidate.fallback;
+        break;
+      }
+
+      policy.template_arguments.local_vars = tpl_args_base;
+      std::string reason = !loaded.ok()
+                               ? loadStatusName(loaded.status)
+                               : (!effective ? "no_effective_settings"
+                                             : "selected_base_invalid");
+      writeLog(LOG_LEVEL_WARNING,
+               "外部配置不可用，原因：" + reason + "，来源：" +
+                   summarizeUrlForLog(candidate.path));
     }
-
-    policy.template_arguments.local_vars = tpl_args_base;
-    std::string reason = !loaded.ok()
-                             ? loadStatusName(loaded.status)
-                             : (!effective ? "no_effective_settings"
-                                           : "selected_base_invalid");
-    writeLog(LOG_LEVEL_WARNING, "外部配置不可用，原因：" + reason + "，来源：" +
-                    summarizeUrlForLog(candidate.path));
   }
 
   if (!configLoadSuccess) {
@@ -4153,6 +4271,12 @@ static std::string buildExternalConfigFetchPlan(
 struct SubscriptionNodeState {
   std::vector<Proxy> nodes;
   std::string subscription_info;
+};
+
+struct SubscriptionResolutionView {
+  ResolvedSubscriptionLookup lookup;
+  std::vector<UnresolvedSubscriptionSource> *missing = nullptr;
+  bool require_resolved = false;
 };
 
 using SubStageResponse = ConversionPipelineStepResult;
@@ -4644,7 +4768,8 @@ static std::string stashProxyProviderCapabilityReason(
 static SubStageResponse processSubscriptionNodes(
     Request &request, Response &response, const Settings &settings,
     ParsedSubRequest &parsed, EffectiveSubPolicy &policy,
-    SubscriptionNodeState &state) {
+    SubscriptionNodeState &state,
+    const SubscriptionResolutionView *resolution = nullptr) {
   int *status_code = &response.status_code;
   std::string &argTarget = parsed.target;
   std::string &argUrl = parsed.url;
@@ -4768,6 +4893,12 @@ static SubStageResponse processSubscriptionNodes(
   parse_set.fetch_context = FetchContext::TrustedConfig;
   parse_set.js_runtime = ext.js_runtime;
   parse_set.js_context = ext.js_context;
+  if (resolution) {
+    parse_set.resolved_subscription_lookup = resolution->lookup;
+    parse_set.missing_subscription_sources = resolution->missing;
+    parse_set.require_resolved_subscription =
+        resolution->require_resolved;
+  }
 
   auto logRouteSelection = [&]() {
     const size_t provider_count = ext.providers.size();
@@ -6716,6 +6847,512 @@ static std::string subconverter_impl(Request &request, Response &response,
       },
   });
 }
+
+namespace {
+
+static bool forceMaxSimpleFlowEligible(
+    const Request &request, const PreparedSubRequest &prepared) {
+  if (!prepared.settings ||
+      prepared.settings->resourceControlEffective != "force_max")
+    return false;
+  const std::string mode =
+      toLower(trimWhitespace(getEnv("SUBCONVERTER_FORCE_MAX_FLOW"),
+                             true, true));
+  if (mode == "legacy")
+    return false;
+  if (!mode.empty() && mode != "candidate") {
+    static std::atomic<bool> logged{false};
+    bool expected = false;
+    if (logged.compare_exchange_strong(expected, true))
+      writeLog(LOG_LEVEL_ERROR,
+               "FORCE_MAX_FLOW_MODE_INVALID value_length=" +
+                   std::to_string(mode.size()) + " fallback=legacy");
+    return false;
+  }
+  const std::string target = getUrlArg(request.argument, "target");
+  if (target.empty() || target == "auto")
+    return false;
+  const TargetDescriptor *descriptor = findTargetDescriptor(target);
+  if (!descriptor || !descriptor->simple_subscription)
+    return false;
+  if (isTruthyRequestValue(getUrlArg(request.argument, "upload")) ||
+      isTruthyRequestValue(getUrlArg(request.argument, "script")) ||
+      !prepared.settings->filterScript.empty() ||
+      (prepared.settings->enableSort &&
+       !prepared.settings->sortScript.empty()))
+    return false;
+  const std::string url = getUrlArg(request.argument, "url");
+  if (url.find("!!import:") != std::string::npos ||
+      prepared.settings->insertUrls.find("!!import:") !=
+          std::string::npos)
+    return false;
+
+  const std::string requested_config =
+      getUrlArg(request.argument, "config");
+  auto supported_config = [](const std::string &path) {
+    return path.empty() || startsWith(path, "data:");
+  };
+  if (!supported_config(requested_config))
+    return false;
+  if ((requested_config.empty() ||
+       prepared.settings->fallbackToDefaultExternalConfig) &&
+      !supported_config(prepared.settings->defaultExtConfig))
+    return false;
+  return true;
+}
+
+class ForceMaxSimpleFlowState
+    : public std::enable_shared_from_this<ForceMaxSimpleFlowState> {
+public:
+  ForceMaxSimpleFlowState(
+      Request request, std::shared_ptr<const PreparedSubRequest> prepared,
+      bool track_statistics, bool record_direct_statistics,
+      ForceMaxFlowCompletion completion)
+      : request_(std::move(request)), prepared_(std::move(prepared)),
+        settings_(prepared_->settings),
+        track_statistics_(track_statistics),
+        record_direct_statistics_(record_direct_statistics),
+        completion_(std::move(completion)) {}
+
+  bool start() {
+    ComputeExecutor *executor = globalComputeExecutor();
+    if (!executor || !settings_ || !request_.context)
+      return false;
+    const ResourceControlSnapshot resources = resourceControlSnapshot();
+    const ForceMaxBudget &budget =
+        resources.calculated_force_max_budget;
+    const uint64_t flows = std::max<uint64_t>(1, budget.active_flows);
+    const ConversionFlowBudget flow_budget{
+        std::max<uint64_t>(8, budget.flow_queue_entries / flows),
+        std::max<uint64_t>(UINT64_C(64) * 1024,
+                           budget.flow_queue_bytes / flows)};
+    try {
+      auto self = shared_from_this();
+      flow_ = ConversionFlow::create(
+          *executor, flow_budget, settings_, request_.context,
+          [self](ConversionFlowTerminal terminal) mutable {
+            self->terminal(std::move(terminal));
+          });
+      return flow_ && flow_->start(
+          [self](ConversionFlow &flow) { self->parse(flow); },
+          request_.context->estimatedBytes());
+    } catch (...) {
+      flow_.reset();
+      return false;
+    }
+  }
+
+private:
+  struct ConfigCandidate {
+    std::string path;
+    FetchContext context = FetchContext::TrustedConfig;
+    bool fallback = false;
+  };
+
+  void parse(ConversionFlow &flow) {
+    try {
+      parsed_ = std::make_unique<ParsedSubRequest>();
+      policy_ = std::make_unique<EffectiveSubPolicy>();
+      fetch_plan_ = std::make_unique<ExternalConfigFetchPlan>();
+      subscription_ = std::make_unique<SubscriptionNodeState>();
+      generation_ = std::make_unique<TargetGenerationState>();
+      response_ = {};
+      {
+        RequestStageTimer timer(request_.context, RequestStage::Parse);
+        std::string error = parseSubRequestArguments(
+            request_, response_, *settings_, *parsed_);
+        if (!error.empty()) {
+          finishBody(flow, std::move(error));
+          return;
+        }
+        error = buildEffectiveSubPolicy(
+            request_, response_, *settings_,
+            track_statistics_ ? &rule_stats_ : nullptr,
+            *parsed_, *policy_);
+        if (!error.empty()) {
+          finishBody(flow, std::move(error));
+          return;
+        }
+      }
+      template_local_base_ =
+          policy_->template_arguments.local_vars;
+      buildConfigCandidates();
+      if (config_candidates_.empty()) {
+        failExternalConfig(flow);
+        return;
+      }
+      if (!flow.setPhase(
+              ConversionFlowPhase::FetchingExternalConfig)) {
+        throw std::runtime_error("failed to enter external config phase");
+      }
+      loadNextConfig(flow);
+    } catch (...) {
+      (void)flow.fail(std::current_exception());
+    }
+  }
+
+  void buildConfigCandidates() {
+    config_candidates_.clear();
+    const bool requested = !parsed_->external_config.empty();
+    if (requested) {
+      config_candidates_.push_back(
+          {parsed_->external_config, FetchContext::PublicRequest, false});
+      if (settings_->fallbackToDefaultExternalConfig &&
+          !settings_->defaultExtConfig.empty() &&
+          settings_->defaultExtConfig != parsed_->external_config)
+        config_candidates_.push_back(
+            {settings_->defaultExtConfig,
+             FetchContext::TrustedConfig, true});
+    } else if (!settings_->defaultExtConfig.empty()) {
+      config_candidates_.push_back(
+          {settings_->defaultExtConfig,
+           FetchContext::TrustedConfig, false});
+    }
+    config_candidate_index_ = 0;
+  }
+
+  void loadNextConfig(ConversionFlow &flow) {
+    if (config_candidate_index_ >= config_candidates_.size()) {
+      failExternalConfig(flow);
+      return;
+    }
+    const ConfigCandidate candidate =
+        config_candidates_[config_candidate_index_++];
+    template_args arguments = policy_->template_arguments;
+    arguments.local_vars = template_local_base_;
+    writeLog(candidate.fallback ? LOG_LEVEL_WARNING : LOG_LEVEL_INFO,
+             candidate.fallback
+                 ? "用户外部配置失败，显式尝试默认外部配置：" +
+                       summarizeUrlForLog(candidate.path)
+                 : "正在异步加载外部配置：" +
+                       summarizeUrlForLog(candidate.path));
+    auto self = shared_from_this();
+    const bool started = resolveExternalConfigOnFlow(
+        flow, candidate.path, candidate.context, settings_,
+        request_.context, std::move(arguments),
+        [self, candidate](ConversionFlow &resumed,
+                          AsyncExternalConfigResult result) mutable {
+          self->externalConfigReady(resumed, candidate,
+                                    std::move(result));
+        });
+    if (!started)
+      throw std::runtime_error("failed to start external config fetch");
+  }
+
+  void externalConfigReady(ConversionFlow &flow,
+                           const ConfigCandidate &candidate,
+                           AsyncExternalConfigResult result) {
+    try {
+      const bool loaded =
+          result.status == ExternalConfigLoadStatus::Success;
+      const bool effective =
+          loaded && hasEffectiveExternalConfig(
+                        result.config, result.template_arguments,
+                        template_local_base_, parsed_->target);
+      const bool base_valid =
+          effective && validateSelectedExternalBase(
+                           result.config, parsed_->target,
+                           parsed_->simple_subscription,
+                           policy_->generator.nodelist,
+                           candidate.context);
+      if (!loaded || !effective || !base_valid) {
+        writeLog(LOG_LEVEL_WARNING,
+                 "异步外部配置不可用，继续候选：status=" +
+                     std::to_string(static_cast<int>(result.status)) +
+                     " effective=" +
+                     std::string(effective ? "true" : "false") +
+                     " base_valid=" +
+                     std::string(base_valid ? "true" : "false"));
+        loadNextConfig(flow);
+        return;
+      }
+      selected_config_.emplace();
+      selected_config_->config = std::move(result.config);
+      selected_config_->template_arguments =
+          std::move(result.template_arguments);
+      selected_config_->context = candidate.context;
+      selected_config_->fallback = candidate.fallback;
+      preparePlan(flow);
+    } catch (...) {
+      (void)flow.fail(std::current_exception());
+    }
+  }
+
+  void failExternalConfig(ConversionFlow &flow) {
+    response_.status_code = parsed_ && !parsed_->external_config.empty()
+                                ? 400
+                                : 500;
+    response_.content_type = "text/plain; charset=utf-8";
+    response_.headers["Cache-Control"] = "private, no-store";
+    finishBody(
+        flow,
+        response_.status_code == 400
+            ? "Invalid request: selected external configuration could not "
+              "be loaded or applied.\n"
+              "无效请求：无法加载或应用用户选择的外部配置。"
+            : "Server configuration error: default external configuration "
+              "could not be loaded or applied.\n"
+              "服务器配置错误：无法加载或应用默认外部配置。");
+  }
+
+  void preparePlan(ConversionFlow &flow) {
+    try {
+      {
+        RequestStageTimer timer(request_.context, RequestStage::Rules);
+        std::string error = buildExternalConfigFetchPlan(
+            response_, *settings_, *parsed_, *policy_, *fetch_plan_,
+            &*selected_config_);
+        if (!error.empty()) {
+          finishBody(flow, std::move(error));
+          return;
+        }
+      }
+      if (!flow.setPhase(
+              ConversionFlowPhase::FetchingSubscriptions))
+        throw std::runtime_error("failed to enter subscription phase");
+      missing_subscriptions_.clear();
+      SubscriptionResolutionView planning;
+      planning.missing = &missing_subscriptions_;
+      planning.require_resolved = true;
+      const SubStageResponse planned = processSubscriptionNodes(
+          request_, response_, *settings_, *parsed_, *policy_,
+          *subscription_, &planning);
+      if (missing_subscriptions_.empty()) {
+        if (planned.complete) {
+          finishBody(flow, planned.body);
+          return;
+        }
+        generate(flow);
+        return;
+      }
+      fetchSubscriptions(flow);
+    } catch (...) {
+      (void)flow.fail(std::current_exception());
+    }
+  }
+
+  static bool sameSource(const UnresolvedSubscriptionSource &left,
+                         const UnresolvedSubscriptionSource &right) {
+    return left.url == right.url && left.context == right.context &&
+           left.request_headers == right.request_headers;
+  }
+
+  void fetchSubscriptions(ConversionFlow &flow) {
+    resolved_keys_.clear();
+    for (UnresolvedSubscriptionSource &source : missing_subscriptions_) {
+      if (std::find_if(resolved_keys_.begin(), resolved_keys_.end(),
+                       [&](const UnresolvedSubscriptionSource &current) {
+                         return sameSource(current, source);
+                       }) == resolved_keys_.end())
+        resolved_keys_.push_back(std::move(source));
+    }
+    if (settings_->maxAllowedRulesets != 0 &&
+        resolved_keys_.size() > settings_->maxAllowedRulesets) {
+      response_.status_code = 400;
+      finishBody(flow,
+                 "Invalid request: subscription fan-out exceeds the "
+                 "configured resource limit.\n"
+                 "无效请求：订阅扇出数量超过配置的资源限制。\n");
+      return;
+    }
+    std::vector<AsyncSubscriptionRequest> requests;
+    requests.reserve(resolved_keys_.size());
+    for (size_t index = 0; index < resolved_keys_.size(); ++index) {
+      const UnresolvedSubscriptionSource &source = resolved_keys_[index];
+      AsyncSubscriptionRequest request;
+      request.source_index = index;
+      request.url = source.url;
+      request.proxy = policy_->subscription_proxy;
+      request.request_headers = source.request_headers;
+      request.cache_ttl = static_cast<unsigned int>(
+          std::max(0, settings_->cacheSubscription));
+      request.context = source.context;
+      requests.emplace_back(std::move(request));
+    }
+    auto self = shared_from_this();
+    if (!resolveSubscriptionsOnFlow(
+            flow, std::move(requests), settings_, request_.context,
+            [self](ConversionFlow &resumed,
+                   AsyncSubscriptionBatchResult result) mutable {
+              self->subscriptionsReady(resumed, std::move(result));
+            }))
+      throw std::runtime_error("failed to start subscription fan-out");
+  }
+
+  void rebuildPolicy() {
+    response_ = {};
+    parsed_ = std::make_unique<ParsedSubRequest>();
+    policy_ = std::make_unique<EffectiveSubPolicy>();
+    fetch_plan_ = std::make_unique<ExternalConfigFetchPlan>();
+    subscription_ = std::make_unique<SubscriptionNodeState>();
+    generation_ = std::make_unique<TargetGenerationState>();
+    std::string error = parseSubRequestArguments(
+        request_, response_, *settings_, *parsed_);
+    if (!error.empty())
+      throw std::runtime_error("force max flow reparse failed");
+    error = buildEffectiveSubPolicy(
+        request_, response_, *settings_,
+        track_statistics_ ? &rule_stats_ : nullptr,
+        *parsed_, *policy_);
+    if (!error.empty())
+      throw std::runtime_error("force max flow policy rebuild failed");
+    error = buildExternalConfigFetchPlan(
+        response_, *settings_, *parsed_, *policy_, *fetch_plan_,
+        &*selected_config_);
+    if (!error.empty())
+      throw std::runtime_error("force max flow config rebuild failed");
+  }
+
+  bool lookupSubscription(
+      const std::string &url, FetchContext context,
+      const string_icase_map &headers, std::string &content,
+      std::string &response_headers) const {
+    for (size_t index = 0;
+         index < resolved_keys_.size() &&
+         index < resolved_subscriptions_.slots.size(); ++index) {
+      const UnresolvedSubscriptionSource &key = resolved_keys_[index];
+      if (key.url != url || key.context != context ||
+          key.request_headers != headers)
+        continue;
+      const AsyncSubscriptionSlot &slot =
+          resolved_subscriptions_.slots[index];
+      if (slot.payload && slot.failure == AsyncFetchFailure::None) {
+        content = slot.payload->content;
+        response_headers = slot.payload->response_headers;
+      } else {
+        content.clear();
+        response_headers.clear();
+      }
+      return true;
+    }
+    return false;
+  }
+
+  void subscriptionsReady(ConversionFlow &flow,
+                          AsyncSubscriptionBatchResult result) {
+    try {
+      resolved_subscriptions_ = std::move(result);
+      if (!flow.setPhase(ConversionFlowPhase::Parsing))
+        throw std::runtime_error("failed to enter final parse phase");
+      rebuildPolicy();
+      std::vector<UnresolvedSubscriptionSource> missing;
+      SubscriptionResolutionView resolved;
+      resolved.require_resolved = true;
+      resolved.missing = &missing;
+      resolved.lookup =
+          [self = shared_from_this()](
+              const std::string &url, FetchContext context,
+              const string_icase_map &headers, std::string &content,
+              std::string &response_headers) {
+            return self->lookupSubscription(
+                url, context, headers, content, response_headers);
+          };
+      const SubStageResponse parsed = processSubscriptionNodes(
+          request_, response_, *settings_, *parsed_, *policy_,
+          *subscription_, &resolved);
+      if (!missing.empty())
+        throw std::runtime_error(
+            "resolved subscription set was incomplete");
+      if (parsed.complete) {
+        finishBody(flow, parsed.body);
+        return;
+      }
+      generate(flow);
+    } catch (...) {
+      (void)flow.fail(std::current_exception());
+    }
+  }
+
+  void generate(ConversionFlow &flow) {
+    try {
+      if (flow.snapshot().phase != ConversionFlowPhase::Parsing &&
+          !flow.setPhase(ConversionFlowPhase::Parsing))
+        throw std::runtime_error("failed to enter parse phase");
+      if (!flow.setPhase(ConversionFlowPhase::Generating))
+        throw std::runtime_error("failed to enter generation phase");
+      RequestStageTimer timer(request_.context, RequestStage::Serialize);
+      const SubStageResponse generated = dispatchTargetGenerator(
+          request_, response_, *settings_, *parsed_, *policy_,
+          *fetch_plan_, *subscription_, *generation_);
+      if (generated.complete) {
+        finishBody(flow, generated.body);
+        return;
+      }
+      std::string body = assembleSubResponse(
+          request_, response_, *settings_, *parsed_, *policy_,
+          *fetch_plan_, *generation_);
+      finishBody(flow, std::move(body));
+    } catch (...) {
+      (void)flow.fail(std::current_exception());
+    }
+  }
+
+  void finishBody(ConversionFlow &flow, std::string body) {
+    body = finalizeSubResponse(request_, response_, std::move(body),
+                               prepared_->age);
+    if (record_direct_statistics_)
+      recordTrackedSubRequest(track_statistics_, request_, response_,
+                              rule_stats_.rules);
+    output_.response = std::move(response_);
+    output_.body = std::move(body);
+    output_.rule_conversions = rule_stats_.rules;
+    if (flow.snapshot().phase != ConversionFlowPhase::Publishing)
+      (void)flow.setPhase(ConversionFlowPhase::Publishing);
+    (void)flow.complete();
+  }
+
+  void terminal(ConversionFlowTerminal terminal) noexcept {
+    ForceMaxFlowCompletion completion = std::move(completion_);
+    flow_.reset();
+    if (!completion)
+      return;
+    try {
+      completion(std::move(output_), std::move(terminal));
+    } catch (...) {
+    }
+  }
+
+  Request request_;
+  const std::shared_ptr<const PreparedSubRequest> prepared_;
+  const SettingsSnapshot settings_;
+  const bool track_statistics_;
+  const bool record_direct_statistics_;
+  ForceMaxFlowCompletion completion_;
+  std::shared_ptr<ConversionFlow> flow_;
+  std::unique_ptr<ParsedSubRequest> parsed_;
+  std::unique_ptr<EffectiveSubPolicy> policy_;
+  std::unique_ptr<ExternalConfigFetchPlan> fetch_plan_;
+  std::unique_ptr<SubscriptionNodeState> subscription_;
+  std::unique_ptr<TargetGenerationState> generation_;
+  Response response_;
+  RuleConversionStats rule_stats_;
+  string_map template_local_base_;
+  std::vector<ConfigCandidate> config_candidates_;
+  size_t config_candidate_index_ = 0;
+  std::optional<ResolvedExternalConfigSelection> selected_config_;
+  std::vector<UnresolvedSubscriptionSource> missing_subscriptions_;
+  std::vector<UnresolvedSubscriptionSource> resolved_keys_;
+  AsyncSubscriptionBatchResult resolved_subscriptions_;
+  ForceMaxFlowOutput output_;
+};
+
+static bool startForceMaxSimpleFlow(
+    Request request, std::shared_ptr<const PreparedSubRequest> prepared,
+    bool track_statistics, bool record_direct_statistics,
+    ForceMaxFlowCompletion completion) {
+  if (!prepared || !completion)
+    return false;
+  try {
+    auto state = std::make_shared<ForceMaxSimpleFlowState>(
+        std::move(request), std::move(prepared), track_statistics,
+        record_direct_statistics, std::move(completion));
+    return state->start();
+  } catch (...) {
+    return false;
+  }
+}
+
+} // namespace
 
 std::string simpleToClashR(RESPONSE_CALLBACK_ARGS) {
   auto argument = joinArguments(request.argument);

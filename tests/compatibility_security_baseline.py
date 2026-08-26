@@ -11767,12 +11767,19 @@ def force_max_controller_runtime_baseline(binary: Path) -> None:
         permits = dashboard["cpu_permits"]
         conversion = dashboard["conversion_scheduler"]
         flow = dashboard["legacy_request_flow"]
+        conversion_flows = dashboard["conversion_flows"]
         singleflight = dashboard["subscription_singleflight"]
         backend = os.environ.get("SUBCONVERTER_HTTP_BACKEND", "beast").lower()
         execution_path_ok = (
             conversion["accepted"] >= 1 and flow["accepted"] == 0
             if backend == "httplib"
-            else conversion["accepted"] == 0 and flow["accepted"] >= 1
+            else (
+                conversion["accepted"] == 0
+                and flow["accepted"] == 0
+                and conversion_flows["created_total"] >= 1
+                and conversion_flows["completed_total"] >= 1
+                and conversion_flows["active"] == 0
+            )
         )
         if (
             resources["controller_state"] != "max_ready"
@@ -11789,7 +11796,8 @@ def force_max_controller_runtime_baseline(binary: Path) -> None:
             raise AssertionError(
                 "idle force_max did not hold the hardware CPU limit: "
                 f"resources={resources!r} permits={permits!r} "
-                f"conversion={conversion!r} flow={flow!r}"
+                f"conversion={conversion!r} flow={flow!r} "
+                f"conversion_flows={conversion_flows!r} backend={backend}"
             )
 
 
@@ -12299,6 +12307,12 @@ def force_max_arrival_singleflight_baseline(
             )
 
         distinct_before_flow = int(after["legacy_request_flow"]["accepted"])
+        distinct_before_conversion_flows = int(
+            after["conversion_flows"]["created_total"]
+        )
+        distinct_before_completed_flows = int(
+            after["conversion_flows"]["completed_total"]
+        )
         distinct_before_owners = int(
             after["subscription_singleflight"]["owners_created_total"]
         )
@@ -12356,7 +12370,14 @@ def force_max_arrival_singleflight_baseline(
         if (
             int(distinct_after["legacy_request_flow"]["accepted"])
             - distinct_before_flow
+            != 0
+            or int(distinct_after["conversion_flows"]["created_total"])
+            - distinct_before_conversion_flows
             != 8
+            or int(distinct_after["conversion_flows"]["completed_total"])
+            - distinct_before_completed_flows
+            != 8
+            or int(distinct_after["conversion_flows"]["active"]) != 0
             or int(
                 distinct_after["subscription_singleflight"][
                     "owners_created_total"
@@ -12393,6 +12414,69 @@ def force_max_arrival_singleflight_baseline(
                 "distinct keys no longer map one-to-one to owner flow tasks: "
                 f"{distinct_after!r}"
             )
+
+
+def force_max_simple_flow_abba_baseline(
+    binary: Path, fixture_base: str
+) -> None:
+    if os.environ.get("SUBCONVERTER_HTTP_BACKEND", "beast").lower() == "httplib":
+        return
+    dashboard_headers = {
+        "Authorization": "Basic "
+        + base64.b64encode(
+            b"fixture-admin:fixture-dashboard-secret"
+        ).decode()
+    }
+
+    def run(mode: str) -> tuple[bytes, dict[str, object]]:
+        with running_service(
+            binary,
+            statistics=True,
+            environment={
+                "SUBCONVERTER_RESOURCE_CONTROL": "force_max",
+                "SUBCONVERTER_FORCE_MAX_FLOW": mode,
+            },
+        ) as base_url:
+            status, body, _ = request(
+                base_url,
+                "/sub",
+                {
+                    "target": "mixed",
+                    "url": fixture_base
+                    + f"/subscription.txt?force-max-flow-abba={mode}",
+                    "config": DISABLE_RULEGEN_CONFIG,
+                    "list": "true",
+                },
+            )
+            if status != 200 or b"Smoke" not in body:
+                raise AssertionError(
+                    f"force_max {mode} flow probe failed: HTTP {status}"
+                )
+            dashboard_status, dashboard_body, _ = request(
+                base_url, "/dashboard/data", headers=dashboard_headers
+            )
+            if dashboard_status != 200:
+                raise AssertionError(
+                    f"force_max {mode} flow dashboard failed"
+                )
+            return body, json.loads(dashboard_body)
+
+    legacy_body, legacy = run("legacy")
+    candidate_body, candidate = run("candidate")
+    if legacy_body != candidate_body:
+        raise AssertionError("force_max flow ABBA output bytes changed")
+    if (
+        int(legacy["legacy_request_flow"]["accepted"]) < 1
+        or int(legacy["conversion_flows"]["created_total"]) != 0
+        or int(candidate["legacy_request_flow"]["accepted"]) != 0
+        or int(candidate["conversion_flows"]["created_total"]) < 1
+        or int(candidate["conversion_flows"]["completed_total"]) < 1
+        or int(candidate["conversion_flows"]["active"]) != 0
+    ):
+        raise AssertionError(
+            "force_max flow ABBA execution paths were not isolated: "
+            f"legacy={legacy!r}, candidate={candidate!r}"
+        )
 
 
 def beast_hard_connection_response_baseline(binary: Path) -> None:
@@ -12946,6 +13030,7 @@ def main() -> int:
         force_max_subscription_cache_admission_baseline(binary, fixture_base)
         recoverable_fetch_retry_baseline(binary, fixture_base)
         force_max_arrival_singleflight_baseline(binary, fixture_base)
+        force_max_simple_flow_abba_baseline(binary, fixture_base)
         beast_hard_connection_response_baseline(binary)
         ruleset_executor_capacity_baseline(binary, fixture_base)
         getruleset_generation_reload_baseline(binary, fixture_base)

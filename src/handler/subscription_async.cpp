@@ -38,6 +38,9 @@ public:
       request.has_request_headers = !source.request_headers.empty();
       request.request_headers = source.request_headers;
       request.context = source.context;
+      request.high_cardinality_cache_admission =
+          source.context == FetchContext::PublicRequest &&
+          !source.request_headers.empty();
       request.retention = OwnedWebGetRequest::RetentionPolicy::Result;
       ScopedSettingsView settings_view(settings_);
       webGetOwnedAsync(
