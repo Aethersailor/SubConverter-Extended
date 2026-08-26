@@ -137,6 +137,7 @@ SET(SUBCONVERTER_RUNTIME_SOURCES
     src/handler/statistics_v2.cpp
     src/handler/subscription_async.cpp
     src/handler/upload.cpp
+    src/handler/upload_async.cpp
     src/handler/user_agent.cpp
     src/handler/version_page.cpp
     src/handler/webget.cpp

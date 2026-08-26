@@ -3,6 +3,7 @@
 #include <chrono>
 #include <filesystem>
 #include <future>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -450,6 +451,42 @@ int main(int argc, char *argv[]) {
         async_template_result.status == AsyncTemplateStatus::Success &&
         async_template_result.output == "marker=template-ok" &&
         async_template_result.dependency_count == 1;
+    {
+      std::ofstream gist_config("gistconf.ini", std::ios::trunc);
+      gist_config << "[common]\n"
+                     "token=fixture-token\n";
+    }
+    std::promise<AsyncUploadResult> async_upload_completion;
+    auto async_upload_context = std::make_shared<RequestContext>(
+        "async-upload", RequestContext::Clock::now(),
+        RequestContext::Clock::now() + std::chrono::seconds(10));
+    uploadGistAsync(
+        "async-direct", "async-direct", "async-upload-content", false,
+        captureEffectiveSettingsSnapshot(), async_upload_context,
+        [&](AsyncUploadResult result) {
+          async_upload_completion.set_value(result);
+        });
+    const AsyncUploadResult async_upload_result =
+        async_upload_completion.get_future().get();
+    auto cancelled_upload_context = std::make_shared<RequestContext>(
+        "async-upload-cancelled", RequestContext::Clock::now(),
+        RequestContext::Clock::now() + std::chrono::seconds(10));
+    cancelled_upload_context->requestCancellation(
+        RequestCancellationReason::ClientDisconnected);
+    std::promise<AsyncUploadResult> cancelled_upload_completion;
+    uploadGistAsync(
+        "async-cancelled", "async-cancelled", "must-not-upload", false,
+        captureEffectiveSettingsSnapshot(), cancelled_upload_context,
+        [&](AsyncUploadResult result) {
+          cancelled_upload_completion.set_value(result);
+        });
+    const AsyncUploadResult cancelled_upload_result =
+        cancelled_upload_completion.get_future().get();
+    const bool async_upload_ok =
+        async_upload_result.status == AsyncUploadStatus::Success &&
+        async_upload_result.remote_status == 201 &&
+        cancelled_upload_result.status == AsyncUploadStatus::Cancelled &&
+        cancelled_upload_result.remote_status == 0;
     constexpr size_t async_cache_consumers = 16;
     const uint64_t retained_before_async_cache =
         retainedResponseByteSnapshot().used;
@@ -854,6 +891,46 @@ int main(int argc, char *argv[]) {
         template_flow_terminal =
             template_flow_completion.get_future().get();
 
+      auto upload_flow_context = std::make_shared<RequestContext>(
+          "conversion-flow-upload", RequestContext::Clock::now(),
+          RequestContext::Clock::now() + std::chrono::seconds(10));
+      std::promise<ConversionFlowTerminal> upload_flow_completion;
+      std::atomic<bool> upload_flow_result_ok{false};
+      std::atomic<bool> upload_flow_dependency_started{false};
+      std::shared_ptr<ConversionFlow> upload_flow =
+          ConversionFlow::create(
+              *compute_executor, {8, 1024 * 1024}, flow_settings,
+              upload_flow_context,
+              [&](ConversionFlowTerminal terminal) {
+                upload_flow_completion.set_value(std::move(terminal));
+              });
+      const bool upload_flow_started = upload_flow &&
+          upload_flow->start([&](ConversionFlow &current) {
+            if (!current.setPhase(ConversionFlowPhase::Uploading))
+              throw std::runtime_error("failed to enter upload phase");
+            const bool dependency_started = uploadGistOnFlow(
+                current, "async-flow", "async-flow",
+                "async-flow-content", false, flow_settings,
+                upload_flow_context,
+                [&](ConversionFlow &resumed, AsyncUploadResult result) {
+                  upload_flow_result_ok.store(
+                      result.status == AsyncUploadStatus::Success &&
+                          result.remote_status == 200 &&
+                          resumed.setPhase(
+                              ConversionFlowPhase::Publishing),
+                      std::memory_order_release);
+                  (void)resumed.complete();
+                });
+            upload_flow_dependency_started.store(
+                dependency_started, std::memory_order_release);
+            if (!dependency_started)
+              throw std::runtime_error("failed to start async upload");
+          });
+      ConversionFlowTerminal upload_flow_terminal;
+      if (upload_flow_started)
+        upload_flow_terminal =
+            upload_flow_completion.get_future().get();
+
       auto cancelled_context = std::make_shared<RequestContext>(
           "conversion-flow-cancel", RequestContext::Clock::now(),
           RequestContext::Clock::now() + std::chrono::seconds(10));
@@ -967,6 +1044,12 @@ int main(int argc, char *argv[]) {
           template_flow_result_ok.load(std::memory_order_acquire) &&
           template_flow_terminal.state ==
               ConversionFlowTerminalState::Completed &&
+          upload_flow_started &&
+          upload_flow_dependency_started.load(
+              std::memory_order_acquire) &&
+          upload_flow_result_ok.load(std::memory_order_acquire) &&
+          upload_flow_terminal.state ==
+              ConversionFlowTerminalState::Completed &&
           cancelled_started &&
           cancel_phase_ok.load(std::memory_order_acquire) &&
           cancel_operation_valid.load(std::memory_order_acquire) &&
@@ -981,8 +1064,8 @@ int main(int argc, char *argv[]) {
           shutdown_terminal.cancellation ==
               RequestCancellationReason::Shutdown &&
           !rejected_after_shutdown && flow_registry.active == 0 &&
-          flow_registry.created_total == 7 &&
-          flow_registry.completed_total == 7 &&
+          flow_registry.created_total == 8 &&
+          flow_registry.completed_total == 8 &&
           flow_registry.rejected_total >= 1 && flow_registry.stopping;
     }
 
@@ -1140,6 +1223,14 @@ int main(int argc, char *argv[]) {
     writer.Bool(async_conversion_resources_ok);
     writer.Key("async_template_ok");
     writer.Bool(async_template_ok);
+    writer.Key("async_upload_ok");
+    writer.Bool(async_upload_ok);
+    writer.Key("async_upload_status");
+    writer.Int(static_cast<int>(async_upload_result.status));
+    writer.Key("async_upload_remote_status");
+    writer.Int(async_upload_result.remote_status);
+    writer.Key("async_cancelled_upload_status");
+    writer.Int(static_cast<int>(cancelled_upload_result.status));
     writer.Key("continuation_runtime_ok");
     writer.Bool(continuation_was_uninitialized &&
                 preinit_submit == SchedulerSubmitStatus::Stopping &&
@@ -1168,7 +1259,9 @@ int main(int argc, char *argv[]) {
                 continuation_snapshot.max_bytes ==
                     continuation_budget.max_bytes &&
                 continuation_snapshot.completion_exception_total >= 1 &&
-                continuation_snapshot.scheduler.rejected == 0 &&
+                // The pre-cancelled upload is deliberately rejected before
+                // any network work can start.
+                continuation_snapshot.scheduler.rejected == 1 &&
                 continuation_snapshot.scheduler.queued_entries == 0 &&
                 continuation_snapshot.scheduler.queued_bytes == 0 &&
                 continuation_snapshot.scheduler.active == 0);

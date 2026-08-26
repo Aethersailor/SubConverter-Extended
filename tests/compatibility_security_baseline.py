@@ -1766,6 +1766,7 @@ def owned_webget_boundary_baseline(helper: Path, fixture_base: str) -> None:
         environment["SUBCONVERTER_FETCH_ENGINE"] = "multi"
         environment["NO_PROXY"] = "127.0.0.1,localhost"
         environment["no_proxy"] = "127.0.0.1,localhost"
+        environment["SUBCONVERTER_GIST_API_BASE"] = fixture_base
 
         def run_probe(path: str, ttl: int, delay_ms: int) -> dict[str, object]:
             completed = subprocess.run(
@@ -1797,14 +1798,17 @@ def owned_webget_boundary_baseline(helper: Path, fixture_base: str) -> None:
             hit_before = FixtureHandler.webget_probe_counts.get(
                 "/webget-probe-hit", 0
             )
+            gist_before = FixtureHandler.gist_request_count
         hit = run_probe("/webget-probe-hit", 60, 0)
         with FixtureHandler.counter_lock:
             hit_requests = (
                 FixtureHandler.webget_probe_counts.get("/webget-probe-hit", 0)
                 - hit_before
             )
+            gist_requests = FixtureHandler.gist_request_count - gist_before
         if (
             hit_requests != 4
+            or gist_requests != 2
             or hit["first_status"] != 200
             or hit["second_status"] != 200
             or hit["first_body"] != hit["second_body"]
@@ -1834,10 +1838,12 @@ def owned_webget_boundary_baseline(helper: Path, fixture_base: str) -> None:
             or hit["async_subscription_ok"] is not True
             or hit["async_conversion_resources_ok"] is not True
             or hit["async_template_ok"] is not True
+            or hit["async_upload_ok"] is not True
             or hit["continuation_runtime_ok"] is not True
         ):
             raise AssertionError(
                 f"owned webGet TTL hit contract changed: requests={hit_requests}, "
+                f"gist_requests={gist_requests}, "
                 f"result={hit!r}"
             )
 

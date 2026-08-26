@@ -8,6 +8,7 @@
 #include "handler/external_config_async.h"
 #include "handler/conversion_resource_async.h"
 #include "generator/template/template_async.h"
+#include "handler/upload_async.h"
 #include "handler/subscription_async.h"
 #include "runtime/conversion_flow.h"
 
@@ -67,5 +68,15 @@ bool renderTemplateOnFlow(
     FetchContext context, SettingsSnapshot settings,
     std::shared_ptr<RequestContext> request_context,
     ConversionFlowTemplateCompletion completion);
+
+using ConversionFlowUploadCompletion =
+    std::function<void(ConversionFlow &, AsyncUploadResult)>;
+
+bool uploadGistOnFlow(
+    ConversionFlow &flow, std::string name, std::string path,
+    std::string content, bool write_manage_url,
+    SettingsSnapshot settings,
+    std::shared_ptr<RequestContext> request_context,
+    ConversionFlowUploadCompletion completion);
 
 #endif // CONVERSION_PIPELINE_H_INCLUDED

@@ -155,3 +155,27 @@ bool renderTemplateOnFlow(
       });
   return true;
 }
+
+bool uploadGistOnFlow(
+    ConversionFlow &flow, std::string name, std::string path,
+    std::string content, bool write_manage_url,
+    SettingsSnapshot settings,
+    std::shared_ptr<RequestContext> request_context,
+    ConversionFlowUploadCompletion completion) {
+  const ConversionFlowOperation operation = flow.beginOperation();
+  if (!operation.valid() || !completion)
+    return false;
+  uploadGistAsync(
+      std::move(name), std::move(path), std::move(content),
+      write_manage_url, std::move(settings),
+      std::move(request_context),
+      [operation, completion = std::move(completion)](
+          AsyncUploadResult result) mutable {
+        (void)operation.post(
+            [completion = std::move(completion), result](
+                ConversionFlow &resumed) mutable {
+              completion(resumed, result);
+            });
+      });
+  return true;
+}
