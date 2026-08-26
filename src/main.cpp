@@ -27,6 +27,7 @@
 #include "handler/webget.h"
 #include "runtime/conversion_flow.h"
 #include "runtime/owner_admission.h"
+#include "runtime/transport_admission.h"
 #include "script/cron.h"
 #include "server/socket.h"
 #include "server/webserver.h"
@@ -192,6 +193,8 @@ void cron_tick_caller() {
 }
 
 void shutdown_runtime() {
+  requestGlobalTransportAdmissionShutdown();
+  (void)joinGlobalTransportAdmission();
   requestGlobalOwnerAdmissionShutdown();
   (void)joinGlobalOwnerAdmission();
   shutdownResourceControlRuntime();
@@ -205,6 +208,7 @@ void shutdown_runtime() {
 }
 
 void begin_runtime_shutdown() {
+  requestGlobalTransportAdmissionShutdown();
   requestGlobalOwnerAdmissionShutdown();
   cancelAllActiveRequests(RequestCancellationReason::Shutdown);
   shutdownResourceControlRuntime();
@@ -215,6 +219,7 @@ void begin_runtime_shutdown() {
 }
 
 void drain_runtime_shutdown() {
+  (void)joinGlobalTransportAdmission();
   (void)joinGlobalOwnerAdmission();
   (void)joinOwnedWebGetContinuationRuntime();
   shutdownRulesetExecutor();
@@ -279,6 +284,45 @@ bool initializeForceMaxOwnerAdmissionRuntime() {
   }
   writeLog(LOG_LEVEL_INFO,
            "FORCE_MAX_OWNER_ADMISSION_READY active_entries=" +
+               std::to_string(budget.max_active_entries) +
+               " active_bytes=" +
+               std::to_string(budget.max_active_bytes) +
+               " wait_entries=" +
+               std::to_string(budget.max_wait_entries) +
+               " wait_bytes=" +
+               std::to_string(budget.max_wait_bytes));
+  return true;
+}
+
+bool initializeForceMaxTransportAdmissionRuntime() {
+  const ResourceControlSnapshot resources = resourceControlSnapshot();
+  if (resources.effective_mode != "force_max")
+    return true;
+  const ForceMaxBudget &force_max =
+      resources.calculated_force_max_budget;
+  const RequestAdmissionSnapshot legacy = requestAdmissionSnapshot();
+  if (!force_max.valid || legacy.max_bytes == 0) {
+    writeLog(LOG_LEVEL_ERROR,
+             "FORCE_MAX_TRANSPORT_ADMISSION_INIT_FAILED "
+             "reason=invalid_budget");
+    return false;
+  }
+  const OwnerAdmissionBudget budget{
+      force_max.active_flows, legacy.max_bytes,
+      force_max.transport_queue_entries,
+      force_max.transport_queue_bytes};
+  const GlobalTransportAdmissionInitStatus status =
+      initializeGlobalTransportAdmission(budget);
+  if (status != GlobalTransportAdmissionInitStatus::Initialized &&
+      status !=
+          GlobalTransportAdmissionInitStatus::AlreadyInitialized) {
+    writeLog(LOG_LEVEL_ERROR,
+             "FORCE_MAX_TRANSPORT_ADMISSION_INIT_FAILED status=" +
+                 std::to_string(static_cast<int>(status)));
+    return false;
+  }
+  writeLog(LOG_LEVEL_INFO,
+           "FORCE_MAX_TRANSPORT_ADMISSION_READY active_entries=" +
                std::to_string(budget.max_active_entries) +
                " active_bytes=" +
                std::to_string(budget.max_active_bytes) +
@@ -440,6 +484,8 @@ int main(int argc, char *argv[]) {
   if (!initializeForceMaxContinuationRuntime())
     return 1;
   if (!initializeForceMaxOwnerAdmissionRuntime())
+    return 1;
+  if (!initializeForceMaxTransportAdmissionRuntime())
     return 1;
 
   webServer.append_response("GET", "/version/favicon-dark.svg",

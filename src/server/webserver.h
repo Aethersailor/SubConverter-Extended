@@ -54,6 +54,14 @@ struct RequestAdmissionSnapshot
     uint64_t rejected = 0;
     uint64_t max_entries = 0;
     uint64_t max_bytes = 0;
+    std::string source = "legacy_try";
+    uint64_t waiting_entries = 0;
+    uint64_t waiting_bytes = 0;
+    uint64_t cancelled = 0;
+    uint64_t deadline = 0;
+    uint64_t shutdown = 0;
+    uint64_t max_wait_entries = 0;
+    uint64_t max_wait_bytes = 0;
 };
 
 RequestAdmissionSnapshot requestAdmissionSnapshot() noexcept;

@@ -114,6 +114,7 @@ SET(SUBCONVERTER_RUNTIME_SOURCES
     src/runtime/conversion_flow.cpp
     src/runtime/owner_admission.cpp
     src/runtime/quickjs_lane.cpp
+    src/runtime/transport_admission.cpp
     src/config/preference_file.cpp
     src/config/ruleset.cpp
     src/generator/config/clash_proxy.cpp
@@ -415,6 +416,8 @@ IF(BUILD_TESTS)
     ADD_EXECUTABLE(webserver_error_test
         tests/webserver_error_test.cpp
         src/handler/settings_view.cpp
+        src/runtime/owner_admission.cpp
+        src/runtime/transport_admission.cpp
         src/server/client_ip.cpp
         src/server/webserver_beast.cpp
         src/server/webserver_httplib.cpp

@@ -24,6 +24,7 @@
 #include <boost/beast/version.hpp>
 
 #include "handler/settings.h"
+#include "runtime/transport_admission.h"
 #include "server/webserver.h"
 #include "server/webserver_beast.h"
 #include "utils/base64/base64.h"
@@ -149,7 +150,8 @@ class BeastServerState;
 
 class BeastSession : public std::enable_shared_from_this<BeastSession> {
 public:
-  BeastSession(tcp::socket socket, std::shared_ptr<BeastServerState> state);
+  BeastSession(tcp::socket socket, std::shared_ptr<BeastServerState> state,
+               bool overload_slot = false);
   ~BeastSession();
 
   void start();
@@ -159,6 +161,7 @@ private:
   void read();
   void resetParser();
   void onRead(beast::error_code error, std::size_t bytes);
+  void onTransportAdmission(OwnerAdmissionResult result);
   void process();
   void completeAsyncResponse(Response response, std::string body,
                              bool explain_request,
@@ -184,6 +187,8 @@ private:
   RequestContext::Clock::time_point sending_started_at_{};
   uint64_t admission_bytes_ = 0;
   bool admitted_ = false;
+  const bool overload_slot_ = false;
+  OwnerAdmissionLease waitable_admission_;
   int response_status_ = 500;
   std::atomic<bool> processing_{false};
   std::atomic<bool> finished_{false};
@@ -200,7 +205,9 @@ public:
         connection_limit(static_cast<std::size_t>(
             global.resourceControlEffective == "compat"
                 ? std::max(10240, args->max_conn)
-                : std::max(1, args->max_conn))) {}
+                : std::max(1, args->max_conn))),
+        overload_limit(static_cast<std::size_t>(
+            std::max(1, std::max(args->max_workers, 1) / 2))) {}
 
   bool bind() {
     beast::error_code error;
@@ -226,26 +233,106 @@ public:
   }
 
   void accept() {
+    if (stopping.load() || accept_pending || pending_socket)
+      return;
+    accept_pending = true;
     acceptor.async_accept(asio::make_strand(context),
                           [self = shared_from_this()](
                               beast::error_code error, tcp::socket socket) {
-                            if (!error && !self->stopping.load() &&
-                                self->active_sessions.load(
-                                    std::memory_order_relaxed) <
-                                    self->connection_limit) {
-                              auto session = std::make_shared<BeastSession>(
-                                  std::move(socket), self);
-                              self->addSession(session);
-                              session->start();
-                            } else if (!error) {
-                              beast::error_code ignored;
-                              socket.shutdown(tcp::socket::shutdown_both,
-                                              ignored);
-                              socket.close(ignored);
-                            }
-                            if (!self->stopping.load())
+                            self->accept_pending = false;
+                            if (!error)
+                              self->dispatchAccepted(std::move(socket));
+                            else if (!self->stopping.load())
                               self->accept();
                           });
+  }
+
+  void dispatchAccepted(tcp::socket socket) {
+    if (stopping.load()) {
+      startOverloadResponse(std::move(socket));
+      return;
+    }
+    if (business_sessions.load(std::memory_order_relaxed) <
+            connection_limit) {
+      auto session = std::make_shared<BeastSession>(
+          std::move(socket), shared_from_this(), false);
+      addSession(session);
+      session->start();
+      accept();
+      return;
+    }
+    if (reserved_sessions.load(std::memory_order_relaxed) <
+        overload_limit) {
+      auto session = std::make_shared<BeastSession>(
+          std::move(socket), shared_from_this(), true);
+      addSession(session);
+      session->start();
+      accept();
+      return;
+    }
+    // One already-accepted spill socket is retained without reading. Pausing
+    // accept here keeps the hard overload lane bounded and lets the kernel
+    // backlog absorb later arrivals instead of resetting this connection.
+    pending_socket =
+        std::make_unique<tcp::socket>(std::move(socket));
+  }
+
+  void startOverloadResponse(tcp::socket socket) {
+    overload_sessions.fetch_add(1, std::memory_order_relaxed);
+    auto stream =
+        std::make_shared<beast::tcp_stream>(std::move(socket));
+    auto response =
+        std::make_shared<http::response<http::string_body>>(
+            http::status::service_unavailable, 11);
+    response->keep_alive(false);
+    response->set(http::field::server,
+                  "SubConverter-Extended/" VERSION " cURL/" LIBCURL_VERSION);
+    response->set(http::field::content_type,
+                  "text/plain; charset=utf-8");
+    response->set(http::field::cache_control, "private, no-store");
+    response->set(http::field::retry_after, "1");
+    response->set("X-Request-ID", nextBeastRequestId());
+    response->set(http::field::access_control_allow_origin, "*");
+    appendExposeHeader(*response, "X-Request-ID");
+    response->body() =
+        stopping.load()
+            ? "Service is shutting down.\n服务正在关闭。\n"
+            : "Service temporarily unavailable: connection capacity is "
+              "outside the hard resource envelope.\n"
+              "服务暂时不可用：连接容量超出硬资源包络。\n";
+    response->prepare_payload();
+    stream->expires_after(std::chrono::seconds(1));
+    http::async_write(
+        *stream, *response,
+        [self = shared_from_this(), stream, response](
+            beast::error_code, std::size_t) {
+          beast::error_code ignored;
+          stream->socket().shutdown(tcp::socket::shutdown_both, ignored);
+          stream->socket().close(ignored);
+          self->overload_sessions.fetch_sub(1,
+                                             std::memory_order_relaxed);
+          self->resumeCapacity();
+        });
+  }
+
+  void resumeCapacity() {
+    if (pending_socket) {
+      tcp::socket socket = std::move(*pending_socket);
+      pending_socket.reset();
+      if (stopping.load()) {
+        if (overload_sessions.load(std::memory_order_relaxed) <
+            overload_limit)
+          startOverloadResponse(std::move(socket));
+        else
+          pending_socket =
+              std::make_unique<tcp::socket>(std::move(socket));
+        return;
+      }
+      dispatchAccepted(std::move(socket));
+      return;
+    }
+    if (!stopping.load())
+      accept();
   }
 
   void stop() {
@@ -256,6 +343,13 @@ public:
       beast::error_code ignored;
       self->acceptor.cancel(ignored);
       self->acceptor.close(ignored);
+      if (self->pending_socket &&
+          self->overload_sessions.load(std::memory_order_relaxed) <
+              self->overload_limit) {
+        tcp::socket socket = std::move(*self->pending_socket);
+        self->pending_socket.reset();
+        self->startOverloadResponse(std::move(socket));
+      }
       std::vector<std::shared_ptr<BeastSession>> live;
       {
         std::lock_guard<std::mutex> lock(self->sessions_mutex);
@@ -277,12 +371,18 @@ public:
     sessions.emplace(session.get(), session);
   }
 
-  void sessionFinished(BeastSession *session) {
+  void sessionFinished(BeastSession *session, bool overload_slot) {
     {
       std::lock_guard<std::mutex> lock(sessions_mutex);
       sessions.erase(session);
     }
     active_sessions.fetch_sub(1, std::memory_order_relaxed);
+    if (overload_slot)
+      reserved_sessions.fetch_sub(1, std::memory_order_relaxed);
+    else
+      business_sessions.fetch_sub(1, std::memory_order_relaxed);
+    asio::post(context,
+               [self = shared_from_this()] { self->resumeCapacity(); });
   }
 
   WebServer &server;
@@ -292,24 +392,35 @@ public:
   tcp::acceptor acceptor;
   asio::thread_pool handlers;
   const std::size_t connection_limit;
+  const std::size_t overload_limit;
   std::atomic<bool> stopping{false};
   std::atomic<uint64_t> active_sessions{0};
+  std::atomic<uint64_t> business_sessions{0};
+  std::atomic<uint64_t> reserved_sessions{0};
+  std::atomic<uint64_t> overload_sessions{0};
+  bool accept_pending = false;
+  std::unique_ptr<tcp::socket> pending_socket;
   std::mutex sessions_mutex;
   std::unordered_map<BeastSession *, std::weak_ptr<BeastSession>> sessions;
 };
 
 BeastSession::BeastSession(tcp::socket socket,
-                           std::shared_ptr<BeastServerState> state)
+                           std::shared_ptr<BeastServerState> state,
+                           bool overload_slot)
     : stream_(std::move(socket)), deadline_timer_(stream_.get_executor()),
-      state_(std::move(state)) {
+      state_(std::move(state)), overload_slot_(overload_slot) {
   state_->active_sessions.fetch_add(1, std::memory_order_relaxed);
+  if (overload_slot_)
+    state_->reserved_sessions.fetch_add(1, std::memory_order_relaxed);
+  else
+    state_->business_sessions.fetch_add(1, std::memory_order_relaxed);
   resetParser();
 }
 
 BeastSession::~BeastSession() {
   if (admitted_)
     releaseRequestAdmission(admission_bytes_);
-  state_->sessionFinished(this);
+  state_->sessionFinished(this, overload_slot_);
 }
 
 void BeastSession::start() { read(); }
@@ -327,7 +438,9 @@ void BeastSession::beginShutdown() {
 }
 
 void BeastSession::read() {
-  if (context_ &&
+  if (overload_slot_)
+    stream_.expires_after(std::chrono::seconds(1));
+  else if (context_ &&
       context_->deadline() != RequestContext::Clock::time_point::max())
     stream_.expires_at(context_->deadline());
   else
@@ -377,11 +490,11 @@ void BeastSession::onRead(beast::error_code error, std::size_t) {
       request_id_, started_at_,
       started_at_ +
           std::chrono::milliseconds(state_->args->request_deadline_ms));
-  context_->recordAdmissionOnce(RequestContext::Clock::now());
   if (parser_->get()[http::field::content_type] ==
           "application/x-www-form-urlencoded" &&
       parser_->get().body().size() > kMaxFormBytes) {
     context_->suggestFailure(RequestFailureAttribution::User);
+    context_->recordAdmissionOnce(RequestContext::Clock::now());
     writeImmediateError(http::status::payload_too_large,
                         "Payload too large.\n请求正文过大。\n");
     return;
@@ -390,6 +503,7 @@ void BeastSession::onRead(beast::error_code error, std::size_t) {
       (parser_->get().method() == http::verb::get ||
        parser_->get().method() == http::verb::head)) {
     context_->setCostClass(RequestCostClass::Low);
+    context_->recordAdmissionOnce(RequestContext::Clock::now());
     processing_.store(true, std::memory_order_release);
     writeHealthResponse();
     return;
@@ -398,11 +512,40 @@ void BeastSession::onRead(beast::error_code error, std::size_t) {
                      parser_->get().body().size();
   for (const auto &header : parser_->get())
     admission_bytes_ += header.name_string().size() + header.value().size();
-  if (!isHealthTarget(parser_->get().target())) {
-    admitted_ = tryRequestAdmission(admission_bytes_);
+  if (overload_slot_) {
     context_->setEstimatedBytes(admission_bytes_);
+    context_->suggestFailure(RequestFailureAttribution::Capacity);
+    context_->recordAdmissionOnce(RequestContext::Clock::now());
+    writeImmediateError(
+        http::status::service_unavailable,
+        "Service temporarily unavailable: connection capacity is outside "
+        "the hard resource envelope.\n"
+        "服务暂时不可用：连接容量超出硬资源包络。\n",
+        "1");
+    return;
+  }
+  if (!isHealthTarget(parser_->get().target())) {
+    context_->setEstimatedBytes(admission_bytes_);
+    if (OwnerAdmission *admission = globalTransportAdmission()) {
+      processing_.store(true, std::memory_order_release);
+      armCancellationObservers();
+      (void)admission->admit(
+          {.cost = RequestCostClass::Medium,
+           .bytes = admission_bytes_,
+           .request_context = context_},
+          [self = shared_from_this()](OwnerAdmissionResult result) mutable {
+            asio::post(
+                self->stream_.get_executor(),
+                [self, result = std::move(result)]() mutable {
+                  self->onTransportAdmission(std::move(result));
+                });
+          });
+      return;
+    }
+    admitted_ = tryRequestAdmission(admission_bytes_);
     if (!admitted_) {
       context_->suggestFailure(RequestFailureAttribution::Capacity);
+      context_->recordAdmissionOnce(RequestContext::Clock::now());
       writeImmediateError(
           http::status::service_unavailable,
           "Service temporarily unavailable: request capacity is full.\n"
@@ -411,6 +554,7 @@ void BeastSession::onRead(beast::error_code error, std::size_t) {
       return;
     }
   }
+  context_->recordAdmissionOnce(RequestContext::Clock::now());
   processing_.store(true, std::memory_order_release);
   armCancellationObservers();
   asio::post(state_->handlers,
@@ -453,7 +597,8 @@ void BeastSession::writeHealthResponse() {
   const auto &incoming = parser_->get();
   http::response<http::string_body> response{http::status::ok,
                                              incoming.version()};
-  response.keep_alive(incoming.keep_alive() && !state_->stopping.load());
+  response.keep_alive(!overload_slot_ && incoming.keep_alive() &&
+                      !state_->stopping.load());
   response.set(http::field::server,
                "SubConverter-Extended/" VERSION " cURL/" LIBCURL_VERSION);
   response.set(http::field::content_type, "text/plain; charset=utf-8");
@@ -776,6 +921,45 @@ void BeastSession::process() {
              });
 }
 
+void BeastSession::onTransportAdmission(OwnerAdmissionResult result) {
+  if (finished_.load(std::memory_order_acquire))
+    return;
+  if (result.status != OwnerAdmissionStatus::Granted) {
+    if (result.status == OwnerAdmissionStatus::Deadline)
+      context_->requestCancellation(RequestCancellationReason::Deadline);
+    else if (result.status == OwnerAdmissionStatus::Shutdown)
+      context_->requestCancellation(RequestCancellationReason::Shutdown);
+    context_->recordAdmissionOnce(RequestContext::Clock::now());
+    RequestCancellationResponse cancellation;
+    if (requestCancellationResponse(context_, cancellation)) {
+      writeImmediateError(
+          static_cast<http::status>(cancellation.status_code),
+          cancellation.body);
+      return;
+    }
+    context_->suggestFailure(RequestFailureAttribution::Capacity);
+    writeImmediateError(
+        http::status::service_unavailable,
+        "Service temporarily unavailable: request capacity is outside the "
+        "hard resource envelope.\n"
+        "服务暂时不可用：请求容量超出硬资源包络。\n",
+        "1");
+    return;
+  }
+
+  waitable_admission_ = std::move(result.lease);
+  context_->recordAdmissionOnce(RequestContext::Clock::now());
+  RequestCancellationResponse cancellation;
+  if (requestCancellationResponse(context_, cancellation)) {
+    writeImmediateError(
+        static_cast<http::status>(cancellation.status_code),
+        cancellation.body);
+    return;
+  }
+  asio::post(state_->handlers,
+             [self = shared_from_this()] { self->process(); });
+}
+
 void BeastSession::completeAsyncResponse(Response response,
                                          std::string body,
                                          bool explain_request,
@@ -1005,6 +1189,7 @@ void BeastSession::onWrite(bool keep_alive, beast::error_code error,
     releaseRequestAdmission(admission_bytes_);
     admitted_ = false;
   }
+  waitable_admission_.reset();
   context_.reset();
   request_id_.clear();
   admission_bytes_ = 0;

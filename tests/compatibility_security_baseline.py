@@ -12219,6 +12219,8 @@ def force_max_arrival_singleflight_baseline(
             int(flow["accepted"]) - before_flow != 1
             or int(flow["active"]) != 1
             or int(flow["queued_entries"]) != 0
+            or admission["source"] != "force_max_waitable"
+            or int(admission["waiting_entries"]) != 0
             or int(admission["active_entries"]) < 16
             or int(singleflight["active_owners"]) != 1
             or int(singleflight["owners_created_total"]) - before_owners != 1
@@ -12239,6 +12241,7 @@ def force_max_arrival_singleflight_baseline(
                 f"singleflight={singleflight!r} "
                 f"owner_admission={owner_admission!r}"
             )
+
 
         FixtureHandler.slow_subscription_release.set()
         for worker in workers:
@@ -12390,6 +12393,67 @@ def force_max_arrival_singleflight_baseline(
                 "distinct keys no longer map one-to-one to owner flow tasks: "
                 f"{distinct_after!r}"
             )
+
+
+def beast_hard_connection_response_baseline(binary: Path) -> None:
+    if os.environ.get("SUBCONVERTER_HTTP_BACKEND", "").lower() == "httplib":
+        return
+    with running_service(
+        binary,
+        config_replacements=(
+            ("max_pending_connections = 16", "max_pending_connections = 1"),
+        ),
+        environment={"SUBCONVERTER_RESOURCE_CONTROL": "adaptive"},
+    ) as base_url:
+        parsed = urllib.parse.urlsplit(base_url)
+        if parsed.hostname is None or parsed.port is None:
+            raise AssertionError("invalid Beast hard-capacity fixture URL")
+        held = socket.create_connection((parsed.hostname, parsed.port), timeout=5)
+        try:
+            connection = http.client.HTTPConnection(
+                parsed.hostname, parsed.port, timeout=5
+            )
+            try:
+                connection.request("GET", "/version")
+                response = connection.getresponse()
+                body = response.read()
+                headers = {
+                    name.lower(): value for name, value in response.getheaders()
+                }
+            finally:
+                connection.close()
+            if (
+                response.status != 503
+                or b"hard resource envelope" not in body
+                or headers.get("retry-after") != "1"
+                or not headers.get("x-request-id")
+            ):
+                raise AssertionError(
+                    "accepted Beast overload connection lacked a complete "
+                    f"response: status={response.status}, headers={headers!r}, "
+                    f"body={body!r}"
+                )
+            health_status, health_body, _ = request(base_url, "/healthz")
+            if health_status != 200 or health_body.strip() != b"ok":
+                raise AssertionError(
+                    "reserved Beast health capacity was starved while the "
+                    "business connection limit was full"
+                )
+        finally:
+            held.close()
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                status, body, _ = request(base_url, "/healthz")
+                if status == 200 and body.strip() == b"ok":
+                    break
+            except OSError:
+                pass
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    "health endpoint did not recover after Beast hard capacity"
+                )
+            time.sleep(0.05)
 
 
 def getruleset_generation_reload_baseline(binary: Path, fixture_base: str) -> None:
@@ -12882,6 +12946,7 @@ def main() -> int:
         force_max_subscription_cache_admission_baseline(binary, fixture_base)
         recoverable_fetch_retry_baseline(binary, fixture_base)
         force_max_arrival_singleflight_baseline(binary, fixture_base)
+        beast_hard_connection_response_baseline(binary)
         ruleset_executor_capacity_baseline(binary, fixture_base)
         getruleset_generation_reload_baseline(binary, fixture_base)
         request_generation_reload_baseline(binary, fixture_base)
