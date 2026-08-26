@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：已授权实施；阶段 0～8 已完成，阶段 9 待开始。
+- 状态：已授权实施；阶段 0～9 已完成，阶段 10 待开始。
 - 目标分支：`dev`。
 - 阶段 0 规划基线：`6d5dcddd2810bbe95fb7e2bbf4f924c7a4cc536f`。
 - 范围：源码、测试、dev CI、dev OCI、HostBrr 测试实例和公开测试路径。
@@ -23,7 +23,7 @@
 | 6 external config/import | 已完成 | `2729408a36ba4be2b42256284f50ed72024fd01a` | Release 与 ASan/UBSan CTest 各 28/28；异步嵌套 import + flow 恢复 | 候选路径完成，正式入口尚未切换 |
 | 7 subscription/ruleset/base | 已完成 | `2414a6a6be39926fa49a29ceff723f11f635a19f`、`5eb577d3328d7a4d7db192f5b322fb0ed59034f1` | 两个子阶段 Release 与 ASan/UBSan CTest 各 28/28 | 候选路径完成，正式入口尚未切换 |
 | 8 inja/upload/QuickJS | 已完成 | `4cfff0240f1615d14ed2d5ff164cd5cef9211b74`、`722ba148ace373226610e887cc0316ddaf2d9918`、`28c3596af6be24f34f8746aa495104a8efc3d668` | 三个子阶段 Release 与 ASan/UBSan CTest 各 28/28 | 候选路径完成，正式入口尚未切换 |
-| 9 owner admission | 待开始 | — | — | — |
+| 9 owner admission | 已完成 | `e11de11f39d993707596f57269e59ddef5e2adbd` | Release 与 ASan/UBSan CTest 各 28/28；force_max OCI smoke | cache/singleflight/owner 顺序已接通，follower 豁免 |
 | 10 transport admission | 待开始 | — | — | — |
 | 11 候选 flow/多线程 | 待开始 | — | — | — |
 | 12 全维度预算消费者 | 待开始 | — | — | — |
@@ -121,6 +121,18 @@
 - `runQuickJsOnFlow` 将 lane completion 仅作为 mailbox event 恢复；同步拒绝、正常完成、取消、deadline 和 shutdown 均走 exactly-once completion。候选测试证明脚本 sleep 期间普通 executor 仍可前进，queue count/bytes 可恢复，Runtime/Context 销毁后 lane 可逆序 join。
 - 扩展既有测试而未新增测试文件；inja、上传和 QuickJS 三个独立子提交分别通过 Linux Release `28/28` 与完整 ASan/UBSan `28/28`。QuickJS 最终 Release OCI image ID 为 `sha256:e3fa1d4f55b426821c1c15300f1cc2ee96961d10c192cb29a0a94a0de09e499c`，插桩 image ID 为 `sha256:9142a32e6da29a7afc7137b23b57827955b097e9dbae3aba00252b230d203235`。
 - 本阶段仍未把正式 force_max 请求切入 ConversionFlow 或 QuickJS lane；未访问或修改 HostBrr，未部署远端容器，未触及 `master`、正式实例、tag、Release 或 `:latest`。
+
+## 阶段 9 验证证据
+
+- 新增独立 `OwnerAdmission`，将准入等待与任务执行彻底分离；controller 只维护 active count/bytes、wait count/bytes 和 permit lease，不为每个等待请求占用 worker 或 OS 线程。
+- 正式 force_max 异步 `/sub` 顺序已固定为 response micro-cache -> singleflight -> owner admission；同 key follower 直接附着并只计 socket、请求元数据和等待响应字节，不消耗 owner permit。
+- 等待队列按 low/medium/high cost 使用 8:4:1 加权轮转，同 cost 保持 FIFO；等待超过 500ms 后由最老且当前可合法授予的 owner 优先，较大请求在字节恢复后不会被新小请求永久绕过。
+- 每个 waiter 同时继承父请求的绝对 deadline 与取消状态；取消回调通过保存的 `std::list` iterator O(1) 移除，单一 timer 线程处理 deadline，不使用轮询线程或占用 ComputeExecutor。grant、取消、deadline、shutdown 均使用单次 claim。
+- owner permit 由 move-only lease 持有：coalesced owner 持有到不可变结果发布，standalone owner 持有到转换 completion；同步拒绝、消费者全部离开、调度失败和异常均释放 count/bytes。shutdown 先停止新 owner 并清空 waiter，再继续现有 flow/cleanup。
+- force_max 在 bind/listen 前按 `ForceMaxBudget` 初始化全局 admission；预算不合法、重复预算不一致或初始化失败均在监听前失败。Dashboard 使用 `force_max_waitable` 数据源公开 active/wait count/bytes、硬边界、取消、deadline、shutdown 和拒绝计数。
+- 扩展既有并发测试，覆盖立即 grant、等待后 grant、O(1) 取消、timer deadline、硬 count/bytes 边界、加权公平、500ms 老化、shutdown、lease 归零、全局重复初始化与预算不匹配；未新增测试文件。
+- Linux Release 与完整 ASan/UBSan CTest 均为 `28/28`。真实 force_max OCI smoke 通过，Release image ID 为 `sha256:b8e42cd4c0f79c611621fc132fc9f1a82303ed0dddfada4ed748b767b26d72a5`，插桩 image ID 为 `sha256:5a04a738bb825cc647f031c5e80437e8ed17876a8fa8aafa11ecb496bd6a0094`；容器 `restart=0`、`OOM=false`。
+- 本阶段仍使用 legacy request-flow worker 执行转换，正式 `ConversionFlow` 切换留在阶段 11；未访问或修改 HostBrr，未部署远端容器，未触及 `master`、正式实例、tag、Release 或 `:latest`。
 
 ## 一、固定范围与不可改变的决策
 
