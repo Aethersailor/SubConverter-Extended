@@ -10,6 +10,9 @@
 #include <string>
 #include <string_view>
 
+#include "utils/force_max_budget.h"
+#include "utils/resource_probe.h"
+
 struct Settings;
 
 enum class ResourceControlMode {
@@ -315,6 +318,8 @@ struct ResourceControlSnapshot {
   bool curve_valid = false;
   bool permits_applied = false;
   bool pressure_fallback = false;
+  ResourceEnvelope envelope;
+  ForceMaxBudget calculated_force_max_budget;
 };
 
 inline bool hardwarePinMatches(

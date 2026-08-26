@@ -156,6 +156,8 @@ SET(SUBCONVERTER_RUNTIME_SOURCES
     src/utils/network.cpp
     src/utils/redact.cpp
     src/utils/regexp.cpp
+    src/utils/resource_probe.cpp
+    src/utils/force_max_budget.cpp
     src/utils/resource_control.cpp
     src/utils/string.cpp
     src/utils/system.cpp
@@ -505,7 +507,9 @@ IF(BUILD_TESTS)
     SET_TESTS_PROPERTIES(clash_proxy PROPERTIES LABELS fast)
 
     ADD_EXECUTABLE(concurrency_primitives_test
-        tests/concurrency_primitives_test.cpp)
+        tests/concurrency_primitives_test.cpp
+        src/utils/force_max_budget.cpp
+        src/utils/resource_probe.cpp)
     TARGET_INCLUDE_DIRECTORIES(concurrency_primitives_test PRIVATE src)
     TARGET_LINK_LIBRARIES(concurrency_primitives_test
         ${CMAKE_THREAD_LIBS_INIT})

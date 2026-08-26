@@ -1,0 +1,58 @@
+#ifndef FORCE_MAX_BUDGET_H_INCLUDED
+#define FORCE_MAX_BUDGET_H_INCLUDED
+
+#include <cstdint>
+#include <string>
+
+#include "utils/resource_probe.h"
+
+inline constexpr const char *kProvisionalForceMaxFormulaRevision =
+    "force-max-provisional-v1";
+
+struct ForceMaxBudget {
+  std::string formula_revision = kProvisionalForceMaxFormulaRevision;
+  bool valid = false;
+  bool envelope_complete = false;
+  std::string validation_error;
+
+  uint64_t compute_workers = 0;
+  uint64_t compute_permits = 0;
+  uint64_t io_runners = 0;
+  uint64_t handler_permits = 0;
+  uint64_t active_owners = 0;
+  uint64_t active_flows = 0;
+
+  uint64_t outbound_active = 0;
+  uint64_t outbound_per_host = 0;
+  uint64_t outbound_open = 0;
+  uint64_t outbound_idle_cache = 0;
+
+  uint64_t transport_queue_entries = 0;
+  uint64_t transport_queue_bytes = 0;
+  uint64_t owner_queue_entries = 0;
+  uint64_t owner_queue_bytes = 0;
+  uint64_t flow_queue_entries = 0;
+  uint64_t flow_queue_bytes = 0;
+
+  uint64_t retained_response_bytes = 0;
+  uint64_t fetch_bytes = 0;
+  uint64_t cache_bytes = 0;
+  uint64_t working_memory_bytes = 0;
+  uint64_t memory_budget_total = 0;
+
+  uint64_t quickjs_workers = 0;
+  uint64_t quickjs_queue_entries = 0;
+  uint64_t quickjs_queue_bytes = 0;
+
+  uint64_t reserved_fds = 0;
+  uint64_t reserved_memory_bytes = 0;
+
+  bool operator==(const ForceMaxBudget &) const = default;
+};
+
+ForceMaxBudget calculateProvisionalForceMaxBudget(
+    const ResourceEnvelope &envelope) noexcept;
+bool validateForceMaxBudget(const ForceMaxBudget &budget,
+                            std::string *error = nullptr) noexcept;
+
+#endif // FORCE_MAX_BUDGET_H_INCLUDED

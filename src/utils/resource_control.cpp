@@ -597,6 +597,9 @@ ResourceControlSnapshot discover(const Settings &settings,
   snapshot.hardware_fingerprint = fingerprint(snapshot);
   snapshot.hardware_pin_matched =
       hardwarePinMatches(snapshot, settings.forceMaxCurveFingerprint);
+  snapshot.envelope = resourceEnvelopeFromSnapshot(snapshot);
+  snapshot.calculated_force_max_budget =
+      calculateProvisionalForceMaxBudget(snapshot.envelope);
   snapshot.controller_state = mode == ResourceControlMode::Compat
                                   ? "compat"
                                   : mode == ResourceControlMode::Adaptive
@@ -802,6 +805,9 @@ void controllerLoop() noexcept {
       next.controller_reason = decision.reason;
       next.pressure_fallback = decision.pressure_fallback;
       setConversionCpuPermitLimit(decision.permits);
+      next.envelope = resourceEnvelopeFromSnapshot(next);
+      next.calculated_force_max_budget =
+          calculateProvisionalForceMaxBudget(next.envelope);
       ++next.sample_count;
     } catch (...) {
       const ResourceGovernorDecision decision = governorStep(
@@ -921,6 +927,11 @@ void configureResourceControl(Settings &settings) {
                " admission_entries=" + std::to_string(admission_entries) +
                " admission_bytes=" + std::to_string(admission_bytes) +
                " retained_bytes=" + std::to_string(retained_bytes) +
+               " formula_revision=" +
+               snapshot.calculated_force_max_budget.formula_revision +
+               " calculated_budget_valid=" +
+               (snapshot.calculated_force_max_budget.valid ? "true"
+                                                            : "false") +
                " deadline_ms=" + std::to_string(settings.requestDeadlineMs));
 }
 
