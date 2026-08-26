@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：已授权实施；阶段 0～10 已完成，阶段 11 待开始。
+- 状态：已授权实施；阶段 0～11 已完成，阶段 12 待开始。
 - 目标分支：`dev`。
 - 阶段 0 规划基线：`6d5dcddd2810bbe95fb7e2bbf4f924c7a4cc536f`。
 - 范围：源码、测试、dev CI、dev OCI、HostBrr 测试实例和公开测试路径。
@@ -25,7 +25,7 @@
 | 8 inja/upload/QuickJS | 已完成 | `4cfff0240f1615d14ed2d5ff164cd5cef9211b74`、`722ba148ace373226610e887cc0316ddaf2d9918`、`28c3596af6be24f34f8746aa495104a8efc3d668` | 三个子阶段 Release 与 ASan/UBSan CTest 各 28/28 | 候选路径完成，正式入口尚未切换 |
 | 9 owner admission | 已完成 | `e11de11f39d993707596f57269e59ddef5e2adbd` | Release 与 ASan/UBSan CTest 各 28/28；force_max OCI smoke | cache/singleflight/owner 顺序已接通，follower 豁免 |
 | 10 transport admission | 已完成 | `d5a8b6beaa63a70038841f46dcd787e09b27d75f` | Release 与 ASan/UBSan CTest 各 28/28；Beast hard-capacity/health；force_max OCI smoke | 软容量等待；硬包络返回完整响应 |
-| 11 候选 flow/多线程 | 待开始 | — | — | — |
+| 11 候选 flow/多线程 | 已完成 | `33b003c394d5b9c6ca7ba0df4bb1457d0f499bc7` | Release 与 ASan/UBSan CTest 各 28/28；legacy/candidate ABBA；force_max OCI smoke | simple target 默认走 flow；复杂路径暂保留 legacy |
 | 12 全维度预算消费者 | 待开始 | — | — | — |
 | 13 离线公式标定 | 待开始 | — | — | — |
 | 14 PressureGuard | 待开始 | — | — | — |
@@ -145,6 +145,18 @@
 - 扩展既有兼容基线：业务连接上限为 1 时，第二个已 accept 请求必须收到完整硬包络 503；第一个连接仍占满业务槽时 health 必须返回 200；释放后 health 持续可用。未新增测试文件。
 - 最终 Linux Release 与完整 ASan/UBSan CTest 均为 `28/28`。真实 force_max OCI smoke 通过，Release image ID 为 `sha256:3dd126f10d74d457a6a65c716fe57e6e229fa856167eec4b386311c4076e070c`，插桩 image ID 为 `sha256:4808b52f2bee067858c5e3d9a1fe2c5444bfbcd7a56e5ecb481d9905eb040eb3`；容器 `restart=0`、`OOM=false`。
 - 本阶段仍未切正式 `ConversionFlow`；未访问或修改 HostBrr，未部署远端容器，未触及 `master`、正式实例、tag、Release 或 `:latest`。
+
+## 阶段 11 验证证据
+
+- force_max Beast 的显式 simple target 已默认切入 `ConversionFlow`；`SUBCONVERTER_FORCE_MAX_FLOW=legacy` 可立即回到旧 request-flow，`candidate` 可显式锁定新路径。auto target、脚本、上传、import、本地/远程外部配置和需要 base/ruleset 的复杂目标暂留 legacy，避免半异步路径隐式阻塞 ComputeExecutor。
+- 候选 flow 在 Preparing 阶段完成参数/策略纯解析，以 data URI 外部配置进入异步配置阶段；对订阅先运行无网络规划，收集全部确需服务端展开的 URL，再通过 Curl multi 一次 fan-out。client-managed provider/remote 资源不会被多余下载。
+- 订阅 payload 按 URL、FetchContext 和请求头三元组去重并保持原 source index；全部完成后重建策略并以 `require_resolved_subscription=true` 解析，任何未解析回网企图均成为内部失败，ComputeExecutor worker 不调用同步 `webGet` 或等待 future。
+- `addNodes` 增加 request-scoped resolver/missing-source 合同；legacy 直接正文指针和同步路径不变。异步缓存 owner/follower 同样执行高基数订阅 doorkeeper：首次旁路、复用请求声明持久化、并发 follower 可为同一 owner 请求落盘。
+- flow mailbox 预算由 `ForceMaxBudget.flow_queue_entries/bytes ÷ active_flows` 派生；网络完成只投递 mailbox，解析和生成继续保持单 flow 串行，跨阶段使用既有软亲和与 worker-local 指标。多订阅的并行度来自请求间并行和 Curl fan-out，不新增线程池。
+- 显式 ABBA 基线分别以 `legacy` 与 `candidate` 转换同一订阅，要求最终响应字节完全一致；Dashboard 同时证明 legacy 只增加旧 scheduler 计数，candidate 只增加 ConversionFlow created/completed，active 最终归零。
+- 未在缺少 profile 证据时加入请求内 CPU sibling、中央队列分片、work stealing 重写或 PCRE2 compiled-plan 缓存；这些可选项为本阶段 No-Go，不阻塞已验证的异步 flow。
+- 精确提交的 Linux Release 与完整 ASan/UBSan CTest 均为 `28/28`，真实 force_max OCI smoke 通过。Release image ID 为 `sha256:879f38ae9a7f49cf8e515d0dd054a365e9b646cbc9fa3541b1856502dcc091d0`，插桩 image ID 为 `sha256:3e52ad859c4612534eabd1293023197038399787f90f107e5396b6fcfce8e8d0`；容器 `restart=0`、`OOM=false`。
+- 本阶段未访问或修改 HostBrr，未部署远端容器，未触及 `master`、正式实例、tag、Release 或 `:latest`。
 
 ## 一、固定范围与不可改变的决策
 
