@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：已授权实施；阶段 0～4 已完成，阶段 5 待开始。
+- 状态：已授权实施；阶段 0～5 已完成，阶段 6 待开始。
 - 目标分支：`dev`。
 - 阶段 0 规划基线：`6d5dcddd2810bbe95fb7e2bbf4f924c7a4cc536f`。
 - 范围：源码、测试、dev CI、dev OCI、HostBrr 测试实例和公开测试路径。
@@ -19,7 +19,7 @@
 | 2 预算数据合同 | 已完成 | `a3c219e4d277008657c9970d73de87adf3045095` | Linux CTest 28/28；确定性/单调/溢出/分数 CPU/低 FD 测试；OCI smoke | provisional 预算只进入诊断，未应用到运行参数 |
 | 3 ComputeExecutor | 已完成 | `d252740ffc7edb9ee533a21497868078b9e507e8` | Release 与 ASan/UBSan CTest 各 28/28；生命周期/边界/取消/自 join 测试 | 尚未承载正式 flow |
 | 4 async fetch 合同 | 已完成 | `ac810e50ea38b8cd37b56ed17e8430bb20634995` | Release 与 ASan/UBSan CTest 各 28/28；force_max OCI smoke | 无缓存 GET、绝对 deadline、冻结设置和启动/关闭已接通 |
-| 5 ConversionFlow | 待开始 | — | — | — |
+| 5 ConversionFlow | 已完成 | `cbd0b2d5d1e9fb0e6a011b2732dd988ee34aa011` | Release 与 ASan/UBSan CTest 各 28/28；同步/重复 callback、取消、shutdown 矩阵 | 尚未切正式 force_max 入口 |
 | 6 external config/import | 待开始 | — | — | — |
 | 7 subscription/ruleset/base | 待开始 | — | — | — |
 | 8 inja/upload/QuickJS | 待开始 | — | — | — |
@@ -79,6 +79,16 @@
 - 扩展既有 settings snapshot/兼容基线，覆盖同步 completion、无缓存 GET、响应 header/正文/retained lease、绝对 deadline、cache owner/follower、部分消费者取消、pre-init failure、双 join 和资源归零；未新增测试文件。
 - Linux Release 与完整 ASan/UBSan CTest 均为 `28/28`；本地真实 `force_max` OCI smoke 和固定历史输出哈希断言通过，启动日志确认 16 个 WSL 预算 worker 在监听前 ready，容器 `restart=0`、`OOM=false`。
 - 本阶段未访问或修改 HostBrr，未部署远端容器，未触及 `master`、正式实例、tag、Release 或 `:latest`。
+
+## 阶段 5 验证证据
+
+- 新增 self-held `ConversionFlow` actor、串行 mailbox、明确 phase、operation ID + generation、weak callback handle 和 exactly-once terminal claim；flow 可变 phase/outstanding operation 只在 drain 中修改。
+- 每个 mailbox event 执行前重建 `ScopedSettingsView` 与 `ScopedRequestContext`，事件返回即销毁；同步 callback 只入 mailbox，不重入当前阶段，重复 callback 在 operation claim 后被拒绝。
+- ComputeExecutor 增加独立有界 control queue；普通 count/bytes 队列饱和时，已接受 flow 的 completion、取消、shutdown 和 lease cleanup 仍有前进通道，且 control task 不走 caller-runs。
+- 全局 flow registry 只保留 weak reference；每个 flow 自保持到 terminal，terminal 时在锁内交换 mailbox/completion，在锁外销毁 event、注销取消回调、移除 registry 并调用外部 completion，避免锁内回调和引用环。
+- 扩展既有 settings snapshot/兼容基线，覆盖 thread-local 恢复、phase generation、同步 callback、重复 callback、mailbox bytes 归零、client cancellation、shutdown、创建停止和 registry 归零；未新增测试文件。
+- 首轮测试曾因 Release helper 中把有副作用的操作写进 `assert(expr)` 而超时；已改为显式执行并单独记录结果。修正后 Linux Release 与完整 ASan/UBSan CTest 均为 `28/28`，两种 HTTP 后端结果一致。
+- 本阶段仍未把正式 force_max 请求切入 ConversionFlow；未访问或修改 HostBrr，未部署远端容器，未触及 `master`、正式实例、tag、Release 或 `:latest`。
 
 ## 一、固定范围与不可改变的决策
 
