@@ -13,6 +13,8 @@
 #include <rapidjson/writer.h>
 
 #include "handler/interfaces.h"
+#include "handler/external_config_async.h"
+#include "handler/conversion_pipeline.h"
 #include "handler/settings.h"
 #include "handler/settings_snapshot.h"
 #include "handler/webget.h"
@@ -294,6 +296,28 @@ int main(int argc, char *argv[]) {
         initializeOwnedWebGetContinuationRuntime(continuation_budget);
     const OwnedWebGetContinuationInitStatus different_budget_init =
         initializeOwnedWebGetContinuationRuntime({2, 9, 1024 * 1024});
+    const std::string fixture_root =
+        std::string(argv[3]).substr(0, std::string(argv[3]).rfind('/'));
+    std::promise<AsyncExternalConfigResult> async_external_completion;
+    template_args async_external_arguments;
+    loadExternalConfigAsync(
+        fixture_root + "/async-external-config.toml",
+        FetchContext::TrustedConfig, captureEffectiveSettingsSnapshot(),
+        std::make_shared<RequestContext>(
+            "async-external-config", RequestContext::Clock::now(),
+            RequestContext::Clock::now() + std::chrono::seconds(10)),
+        std::move(async_external_arguments),
+        [&](AsyncExternalConfigResult result) {
+          async_external_completion.set_value(std::move(result));
+        });
+    AsyncExternalConfigResult async_external_result =
+        async_external_completion.get_future().get();
+    const bool async_external_config_ok =
+        async_external_result.status ==
+            ExternalConfigLoadStatus::Success &&
+        async_external_result.config.custom_proxy_group.size() == 1 &&
+        async_external_result.config.custom_proxy_group.front().Name ==
+            "AsyncImported";
     constexpr size_t async_cache_consumers = 16;
     const uint64_t retained_before_async_cache =
         retainedResponseByteSnapshot().used;
@@ -515,6 +539,53 @@ int main(int argc, char *argv[]) {
         completed_snapshot = flow->snapshot();
       }
 
+      auto async_flow_context = std::make_shared<RequestContext>(
+          "conversion-flow-external-config",
+          RequestContext::Clock::now(),
+          RequestContext::Clock::now() + std::chrono::seconds(10));
+      std::promise<ConversionFlowTerminal> async_flow_completion;
+      std::atomic<bool> async_flow_result_ok{false};
+      std::atomic<bool> async_flow_started_dependency{false};
+      std::shared_ptr<ConversionFlow> async_flow =
+          ConversionFlow::create(
+              *compute_executor, {8, 1024 * 1024}, flow_settings,
+              async_flow_context,
+              [&](ConversionFlowTerminal terminal) {
+                async_flow_completion.set_value(std::move(terminal));
+              });
+      const bool async_flow_started = async_flow && async_flow->start(
+          [&](ConversionFlow &current) {
+            if (!current.setPhase(
+                    ConversionFlowPhase::FetchingExternalConfig))
+              throw std::runtime_error("failed to enter external config phase");
+            template_args arguments;
+            const bool dependency_started = resolveExternalConfigOnFlow(
+                    current,
+                    fixture_root + "/async-external-config.toml",
+                    FetchContext::TrustedConfig, flow_settings,
+                    async_flow_context, std::move(arguments),
+                    [&](ConversionFlow &resumed,
+                        AsyncExternalConfigResult result) {
+                      async_flow_result_ok.store(
+                          result.status ==
+                                  ExternalConfigLoadStatus::Success &&
+                              result.config.custom_proxy_group.size() == 1 &&
+                              result.config.custom_proxy_group.front().Name ==
+                                  "AsyncImported" &&
+                              resumed.setPhase(
+                                  ConversionFlowPhase::Parsing),
+                          std::memory_order_release);
+                      (void)resumed.complete();
+                    });
+            async_flow_started_dependency.store(
+                dependency_started, std::memory_order_release);
+            if (!dependency_started)
+              throw std::runtime_error("failed to start external config");
+          });
+      ConversionFlowTerminal async_flow_terminal;
+      if (async_flow_started)
+        async_flow_terminal = async_flow_completion.get_future().get();
+
       auto cancelled_context = std::make_shared<RequestContext>(
           "conversion-flow-cancel", RequestContext::Clock::now(),
           RequestContext::Clock::now() + std::chrono::seconds(10));
@@ -605,6 +676,11 @@ int main(int argc, char *argv[]) {
           completed_snapshot.mailbox_bytes == 0 &&
           completed_snapshot.outstanding_operations == 0 &&
           completed_snapshot.duplicate_callbacks == 1 &&
+          async_flow_started &&
+          async_flow_started_dependency.load(std::memory_order_acquire) &&
+          async_flow_result_ok.load(std::memory_order_acquire) &&
+          async_flow_terminal.state ==
+              ConversionFlowTerminalState::Completed &&
           cancelled_started &&
           cancel_phase_ok.load(std::memory_order_acquire) &&
           cancel_operation_valid.load(std::memory_order_acquire) &&
@@ -619,8 +695,8 @@ int main(int argc, char *argv[]) {
           shutdown_terminal.cancellation ==
               RequestCancellationReason::Shutdown &&
           !rejected_after_shutdown && flow_registry.active == 0 &&
-          flow_registry.created_total == 3 &&
-          flow_registry.completed_total == 3 &&
+          flow_registry.created_total == 4 &&
+          flow_registry.completed_total == 4 &&
           flow_registry.rejected_total >= 1 && flow_registry.stopping;
     }
 
@@ -764,6 +840,14 @@ int main(int argc, char *argv[]) {
     writer.Bool(async_cache_resources_ok);
     writer.Key("conversion_flow_ok");
     writer.Bool(conversion_flow_ok);
+    writer.Key("async_external_config_ok");
+    writer.Bool(async_external_config_ok);
+    writer.Key("async_external_config_status");
+    writer.Int(static_cast<int>(async_external_result.status));
+    writer.Key("async_external_config_group_count");
+    writer.Uint64(async_external_result.config.custom_proxy_group.size());
+    writer.Key("async_external_config_failure_stage");
+    writer.String(async_external_result.failure_stage.c_str());
     writer.Key("continuation_runtime_ok");
     writer.Bool(continuation_was_uninitialized &&
                 preinit_submit == SchedulerSubmitStatus::Stopping &&

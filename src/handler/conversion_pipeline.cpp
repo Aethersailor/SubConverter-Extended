@@ -30,3 +30,26 @@ std::string runConversionPipeline(ConversionPipelineHooks hooks) {
 
   return hooks.assembly ? hooks.assembly() : std::string();
 }
+
+bool resolveExternalConfigOnFlow(
+    ConversionFlow &flow, std::string path, FetchContext context,
+    SettingsSnapshot settings,
+    std::shared_ptr<RequestContext> request_context,
+    template_args template_arguments,
+    ConversionFlowExternalConfigCompletion completion) {
+  const ConversionFlowOperation operation = flow.beginOperation();
+  if (!operation.valid() || !completion)
+    return false;
+  loadExternalConfigAsync(
+      std::move(path), context, std::move(settings),
+      std::move(request_context), std::move(template_arguments),
+      [operation, completion = std::move(completion)](
+          AsyncExternalConfigResult result) mutable {
+        (void)operation.post(
+            [completion = std::move(completion),
+             result = std::move(result)](ConversionFlow &resumed) mutable {
+              completion(resumed, std::move(result));
+            });
+      });
+  return true;
+}

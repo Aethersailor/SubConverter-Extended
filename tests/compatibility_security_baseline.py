@@ -1082,6 +1082,24 @@ class FixtureHandler(BaseHTTPRequestHandler):
         elif request_path == "/template-marker":
             body = b"template-ok"
             content_type = "text/plain; charset=utf-8"
+        elif request_path == "/async-external-config.toml":
+            host = self.headers.get("Host", "127.0.0.1")
+            body = (
+                "version = 1\n"
+                "[custom]\n"
+                "enable_rule_generator = false\n"
+                "[[custom_groups]]\n"
+                f'import = "http://{host}/async-external-groups.toml"\n'
+            ).encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/async-external-groups.toml":
+            body = (
+                "[[custom_groups]]\n"
+                'name = "AsyncImported"\n'
+                'type = "select"\n'
+                'rule = ["[]DIRECT"]\n'
+            ).encode()
+            content_type = "text/plain; charset=utf-8"
         elif request_path == "/webget-probe-hit":
             with type(self).counter_lock:
                 count = type(self).webget_probe_counts.get(request_path, 0) + 1
@@ -1809,6 +1827,7 @@ def owned_webget_boundary_baseline(helper: Path, fixture_base: str) -> None:
             or hit["async_cache_rejection_ok"] is not True
             or hit["async_cache_resources_ok"] is not True
             or hit["conversion_flow_ok"] is not True
+            or hit["async_external_config_ok"] is not True
             or hit["continuation_runtime_ok"] is not True
         ):
             raise AssertionError(

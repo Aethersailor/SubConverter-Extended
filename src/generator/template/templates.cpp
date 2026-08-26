@@ -353,7 +353,8 @@ int render_template(const std::string &content, const template_args &vars,
         }
         all_args += "&";
     }
-    all_args.erase(all_args.size() - 1);
+    if(!all_args.empty())
+        all_args.pop_back();
     parse_json_pointer(data["request"], "_args", all_args);
     for(auto &x : vars.local_vars)
         parse_json_pointer(data["local"], x.first, x.second);

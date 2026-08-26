@@ -5,6 +5,9 @@
 #include <optional>
 #include <string>
 
+#include "handler/external_config_async.h"
+#include "runtime/conversion_flow.h"
+
 struct ConversionPipelineStepResult {
   bool complete = false;
   std::string body;
@@ -20,5 +23,15 @@ struct ConversionPipelineHooks {
 };
 
 std::string runConversionPipeline(ConversionPipelineHooks hooks);
+
+using ConversionFlowExternalConfigCompletion =
+    std::function<void(ConversionFlow &, AsyncExternalConfigResult)>;
+
+bool resolveExternalConfigOnFlow(
+    ConversionFlow &flow, std::string path, FetchContext context,
+    SettingsSnapshot settings,
+    std::shared_ptr<RequestContext> request_context,
+    template_args template_arguments,
+    ConversionFlowExternalConfigCompletion completion);
 
 #endif // CONVERSION_PIPELINE_H_INCLUDED

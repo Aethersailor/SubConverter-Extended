@@ -201,6 +201,12 @@ int importItems(string_array &target, bool scope_limit = true,
 ExternalConfigLoadResult
 loadExternalConfig(const std::string &path, ExternalConfig &ext,
                    FetchContext context = FetchContext::TrustedConfig);
+ExternalConfigLoadResult loadExternalConfigFromContent(
+    const std::string &path, const std::string &content,
+    ExternalConfig &ext,
+    FetchContext context = FetchContext::TrustedConfig,
+    const string_map *resolved_imports = nullptr,
+    string_array *missing_imports = nullptr);
 bool isExternalConfigCacheableContent(const std::string &content);
 size_t externalConfigCacheMaxEntries();
 size_t externalConfigCacheMaxBytes();
