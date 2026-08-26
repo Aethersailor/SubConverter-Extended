@@ -1640,19 +1640,31 @@ public:
             return;
         const ResourceControlSnapshot resources = resourceControlSnapshot();
         performance_mode_ = performanceFetchMode(resources);
-        const long total_connections = performance_mode_
-                                           ? static_cast<long>(
-                                                 std::clamp<uint64_t>(
-                                                     resources
-                                                         .suggested_outbound_connections,
-                                                     1, 1024))
-                                           : 64L;
-        const long host_connections = performance_mode_
-                                          ? total_connections
-                                          : std::min(16L, total_connections);
+        const ForceMaxBudget &force_max =
+            resources.calculated_force_max_budget;
+        const bool deterministic_force_max =
+            resources.effective_mode == "force_max" && force_max.valid;
+        const long total_connections = deterministic_force_max
+            ? static_cast<long>(std::min<uint64_t>(
+                  force_max.outbound_active, LONG_MAX))
+            : (performance_mode_
+                   ? static_cast<long>(std::clamp<uint64_t>(
+                         resources.suggested_outbound_connections,
+                         1, 1024))
+                   : 64L);
+        const long host_connections = deterministic_force_max
+            ? static_cast<long>(std::min<uint64_t>(
+                  force_max.outbound_per_host, LONG_MAX))
+            : (performance_mode_ ? total_connections
+                                 : std::min(16L, total_connections));
         const uint64_t active_limit = static_cast<uint64_t>(total_connections);
-        uint64_t cached_connections = active_limit;
-        if(performance_mode_)
+        uint64_t cached_connections = deterministic_force_max
+                                          ? force_max.outbound_idle_cache
+                                          : active_limit;
+        uint64_t open_connections = deterministic_force_max
+                                        ? force_max.outbound_open
+                                        : active_limit;
+        if(performance_mode_ && !deterministic_force_max)
         {
             const RequestAdmissionSnapshot admission =
                 requestAdmissionSnapshot();
@@ -1687,14 +1699,21 @@ public:
                     std::max<uint64_t>(
                         std::min<uint64_t>(active_limit, 1024),
                         memory_boundary / (UINT64_C(512) * 1024)));
-            handle_window_ = static_cast<size_t>(active_limit);
+            handle_window_ = static_cast<size_t>(std::min<uint64_t>(
+                active_limit, std::numeric_limits<size_t>::max()));
         }
+        else if(deterministic_force_max)
+            handle_window_ = static_cast<size_t>(std::min<uint64_t>(
+                active_limit, std::numeric_limits<size_t>::max()));
         const long max_cached_connections = static_cast<long>(
             std::min<uint64_t>(cached_connections,
                                static_cast<uint64_t>(LONG_MAX)));
         const long max_open_connections = static_cast<long>(
             std::min<uint64_t>(
-                std::max<uint64_t>(active_limit, cached_connections),
+                deterministic_force_max
+                    ? open_connections
+                    : std::max<uint64_t>(active_limit,
+                                         cached_connections),
                 static_cast<uint64_t>(LONG_MAX)));
         active_connection_limit_ = active_limit;
         open_connection_limit_ = static_cast<uint64_t>(max_open_connections);
@@ -2680,6 +2699,18 @@ CurlMultiEngine &multiEngine()
 bool asyncFetchEngineAvailable() noexcept
 {
     return multiEngine().available();
+}
+
+bool initializeAsyncFetchEngine() noexcept
+{
+    try
+    {
+        return multiEngine().available();
+    }
+    catch(...)
+    {
+        return false;
+    }
 }
 
 AsyncFetchEngineSnapshot asyncFetchEngineSnapshot() noexcept

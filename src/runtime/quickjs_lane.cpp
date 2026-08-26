@@ -23,6 +23,15 @@
 
 namespace {
 
+struct GlobalQuickJsLaneRuntime {
+  std::mutex mutex;
+  std::unique_ptr<QuickJsLane> lane;
+  QuickJsLaneBudget budget;
+  bool stopping = false;
+};
+
+GlobalQuickJsLaneRuntime global_quickjs_lane;
+
 void setQuickJsThreadName(std::size_t index) noexcept {
   try {
     const std::string name = "sc-quickjs-" + std::to_string(index);
@@ -421,6 +430,10 @@ QuickJsLaneSnapshot QuickJsLane::snapshot() const noexcept {
       joined_,
       budget_.workers,
       ready_workers_,
+      budget_.max_queue_entries,
+      budget_.max_queue_bytes,
+      budget_.heap_bytes_per_worker,
+      budget_.stack_bytes_per_worker,
       static_cast<uint64_t>(queue_.size()),
       queued_bytes_,
       active_,
@@ -431,4 +444,61 @@ QuickJsLaneSnapshot QuickJsLane::snapshot() const noexcept {
       deadline_total_.load(std::memory_order_relaxed),
       script_error_total_.load(std::memory_order_relaxed),
   };
+}
+
+GlobalQuickJsLaneInitStatus initializeGlobalQuickJsLane(
+    QuickJsLaneBudget budget) noexcept {
+  if (budget.workers == 0 || budget.max_queue_entries == 0 ||
+      budget.max_queue_bytes == 0 ||
+      budget.heap_bytes_per_worker == 0 ||
+      budget.stack_bytes_per_worker == 0)
+    return GlobalQuickJsLaneInitStatus::InvalidBudget;
+  std::lock_guard<std::mutex> lock(global_quickjs_lane.mutex);
+  if (global_quickjs_lane.stopping)
+    return GlobalQuickJsLaneInitStatus::Stopping;
+  if (global_quickjs_lane.lane)
+    return global_quickjs_lane.budget == budget
+               ? GlobalQuickJsLaneInitStatus::AlreadyInitialized
+               : GlobalQuickJsLaneInitStatus::BudgetMismatch;
+  try {
+    global_quickjs_lane.lane =
+        std::make_unique<QuickJsLane>(budget);
+    global_quickjs_lane.budget = budget;
+    return GlobalQuickJsLaneInitStatus::Initialized;
+  } catch (...) {
+    global_quickjs_lane.lane.reset();
+    return GlobalQuickJsLaneInitStatus::InvalidBudget;
+  }
+}
+
+QuickJsLane *globalQuickJsLane() noexcept {
+  std::lock_guard<std::mutex> lock(global_quickjs_lane.mutex);
+  return global_quickjs_lane.lane.get();
+}
+
+QuickJsLaneSnapshot globalQuickJsLaneSnapshot() noexcept {
+  std::lock_guard<std::mutex> lock(global_quickjs_lane.mutex);
+  return global_quickjs_lane.lane
+             ? global_quickjs_lane.lane->snapshot()
+             : QuickJsLaneSnapshot{};
+}
+
+void requestGlobalQuickJsLaneShutdown() noexcept {
+  QuickJsLane *lane = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(global_quickjs_lane.mutex);
+    global_quickjs_lane.stopping = true;
+    lane = global_quickjs_lane.lane.get();
+  }
+  if (lane)
+    lane->requestShutdown(true);
+}
+
+bool joinGlobalQuickJsLane() noexcept {
+  QuickJsLane *lane = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(global_quickjs_lane.mutex);
+    lane = global_quickjs_lane.lane.get();
+  }
+  return !lane || lane->join();
 }

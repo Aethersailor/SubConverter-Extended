@@ -2377,10 +2377,16 @@ bool isExternalConfigCacheableContent(const std::string &content) {
 }
 
 size_t externalConfigCacheMaxEntries() {
-  return kExternalConfigCacheEntries;
+  return external_config_cache.maxEntries();
 }
 
-size_t externalConfigCacheMaxBytes() { return kExternalConfigCacheBytes; }
+size_t externalConfigCacheMaxBytes() {
+  return external_config_cache.maxBytes();
+}
+
+void configureExternalConfigCache(size_t max_entries, size_t max_bytes) {
+  external_config_cache.setLimits(max_entries, max_bytes);
+}
 
 ExternalConfigLoadResult loadExternalConfigFromContent(
     const std::string &path, const std::string &config,

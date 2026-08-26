@@ -110,6 +110,7 @@ ADD_CUSTOM_TARGET(dashboard_resource
     DEPENDS "${DASHBOARD_HTML_GENERATED}")
 
 SET(SUBCONVERTER_RUNTIME_SOURCES
+    src/runtime/blocking_io_executor.cpp
     src/runtime/compute_executor.cpp
     src/runtime/conversion_flow.cpp
     src/runtime/owner_admission.cpp
@@ -520,6 +521,7 @@ IF(BUILD_TESTS)
 
     ADD_EXECUTABLE(concurrency_primitives_test
         tests/concurrency_primitives_test.cpp
+        src/runtime/blocking_io_executor.cpp
         src/runtime/compute_executor.cpp
         src/runtime/owner_admission.cpp
         src/utils/force_max_budget.cpp

@@ -490,6 +490,7 @@ int main(int argc, char *argv[]) {
         cancelled_upload_result.status == AsyncUploadStatus::Cancelled &&
         cancelled_upload_result.remote_status == 0;
     bool quickjs_lane_ok = true;
+    bool quickjs_global_ok = true;
 #ifndef NO_JS_RUNTIME
     {
       QuickJsLane lane({1, 1, 1024 * 1024,
@@ -671,6 +672,53 @@ int main(int argc, char *argv[]) {
           lane_snapshot.cancelled_total == 1 &&
           lane_snapshot.deadline_total == 1 &&
           lane_snapshot.script_error_total == 0;
+    }
+    {
+      const GlobalQuickJsLaneInitStatus invalid =
+          initializeGlobalQuickJsLane({0, 1, 1, 1, 1});
+      const GlobalQuickJsLaneInitStatus initialized =
+          initializeGlobalQuickJsLane(
+              {1, 2, 1024 * 1024, 64 * 1024 * 1024,
+               1024 * 1024});
+      const GlobalQuickJsLaneInitStatus same =
+          initializeGlobalQuickJsLane(
+              {1, 2, 1024 * 1024, 64 * 1024 * 1024,
+               1024 * 1024});
+      const GlobalQuickJsLaneInitStatus mismatch =
+          initializeGlobalQuickJsLane(
+              {2, 2, 1024 * 1024, 64 * 1024 * 1024,
+               1024 * 1024});
+      std::promise<QuickJsTaskResult> completion;
+      std::future<QuickJsTaskResult> completed = completion.get_future();
+      auto context = std::make_shared<RequestContext>(
+          "quickjs-global", RequestContext::Clock::now(),
+          RequestContext::Clock::now() + std::chrono::seconds(10));
+      QuickJsLane *global_lane = globalQuickJsLane();
+      const QuickJsSubmitStatus submitted = global_lane
+          ? global_lane->submit(
+                {.bytes = 32,
+                 .settings = captureEffectiveSettingsSnapshot(),
+                 .request_context = context},
+                [](qjs::Context &quickjs) { quickjs.eval("6 * 7"); },
+                [&](QuickJsTaskResult result) {
+                  completion.set_value(result);
+                })
+          : QuickJsSubmitStatus::Unavailable;
+      QuickJsTaskResult result;
+      if (submitted == QuickJsSubmitStatus::Accepted)
+        result = completed.get();
+      requestGlobalQuickJsLaneShutdown();
+      const bool joined = joinGlobalQuickJsLane();
+      const QuickJsLaneSnapshot snapshot = globalQuickJsLaneSnapshot();
+      quickjs_global_ok =
+          invalid == GlobalQuickJsLaneInitStatus::InvalidBudget &&
+          initialized == GlobalQuickJsLaneInitStatus::Initialized &&
+          same == GlobalQuickJsLaneInitStatus::AlreadyInitialized &&
+          mismatch == GlobalQuickJsLaneInitStatus::BudgetMismatch &&
+          submitted == QuickJsSubmitStatus::Accepted &&
+          result.status == QuickJsTaskStatus::Success && joined &&
+          snapshot.ready && snapshot.stopping && snapshot.joined &&
+          snapshot.queued_entries == 0 && snapshot.active == 0;
     }
 #endif
     constexpr size_t async_cache_consumers = 16;
@@ -1482,6 +1530,8 @@ int main(int argc, char *argv[]) {
     writer.Int(static_cast<int>(cancelled_upload_result.status));
     writer.Key("quickjs_lane_ok");
     writer.Bool(quickjs_lane_ok);
+    writer.Key("quickjs_global_ok");
+    writer.Bool(quickjs_global_ok);
     writer.Key("continuation_runtime_ok");
     writer.Bool(continuation_was_uninitialized &&
                 preinit_submit == SchedulerSubmitStatus::Stopping &&

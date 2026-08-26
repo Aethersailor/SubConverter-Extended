@@ -8,6 +8,7 @@
 
 #include "handler/proxy_policy.h"
 #include "handler/webget.h"
+#include "runtime/blocking_io_executor.h"
 #include "utils/file_extra.h"
 #include "utils/logger.h"
 #include "utils/network.h"
@@ -121,9 +122,12 @@ private:
     auto self = shared_from_this();
     auto completion_state =
         std::make_shared<SourceCompletionState>(std::move(completion));
-    const SchedulerSubmitStatus status = submitOwnedWebGetContinuation(
-        RequestCostClass::Low, 0, request_context_->deadline(),
-        request_context_->cancellationToken(),
+    const SchedulerSubmitStatus status = submitBlockingIo(
+        {.cost = RequestCostClass::Low,
+         .bytes = 0,
+         .deadline = request_context_->deadline(),
+         .cancellation = request_context_->cancellationToken(),
+         .preferred_worker = std::nullopt},
         [self, source = std::move(source), context,
          completion_state]() mutable {
           ScopedSettingsView settings_view(self->settings_);

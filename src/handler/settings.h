@@ -210,6 +210,7 @@ ExternalConfigLoadResult loadExternalConfigFromContent(
 bool isExternalConfigCacheableContent(const std::string &content);
 size_t externalConfigCacheMaxEntries();
 size_t externalConfigCacheMaxBytes();
+void configureExternalConfigCache(size_t max_entries, size_t max_bytes);
 // template <class T, class... U>
 // void find_if_exist(const toml::value &v, const toml::key &k, T& target,
 // U&&... args)

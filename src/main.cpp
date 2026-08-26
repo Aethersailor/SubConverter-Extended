@@ -1,4 +1,5 @@
 #include <cerrno>
+#include <climits>
 #include <csignal>
 #include <cstdio>
 #include <cstdint>
@@ -26,7 +27,9 @@
 #include "handler/version_page.h"
 #include "handler/webget.h"
 #include "runtime/conversion_flow.h"
+#include "runtime/blocking_io_executor.h"
 #include "runtime/owner_admission.h"
+#include "runtime/quickjs_lane.h"
 #include "runtime/transport_admission.h"
 #include "script/cron.h"
 #include "server/socket.h"
@@ -192,17 +195,12 @@ void cron_tick_caller() {
     statistics::tick();
 }
 
+void begin_runtime_shutdown();
+void drain_runtime_shutdown();
+
 void shutdown_runtime() {
-  requestGlobalTransportAdmissionShutdown();
-  (void)joinGlobalTransportAdmission();
-  requestGlobalOwnerAdmissionShutdown();
-  (void)joinGlobalOwnerAdmission();
-  shutdownResourceControlRuntime();
-  shutdownConversionScheduler();
-  requestAllConversionFlowsShutdown();
-  requestOwnedWebGetContinuationShutdown();
-  (void)joinOwnedWebGetContinuationRuntime();
-  shutdownRulesetExecutor();
+  begin_runtime_shutdown();
+  drain_runtime_shutdown();
   statistics::shutdown();
   shutdownGlobalCurlHandlePool();
 }
@@ -214,6 +212,8 @@ void begin_runtime_shutdown() {
   shutdownResourceControlRuntime();
   requestConversionSchedulerShutdown();
   requestAllConversionFlowsShutdown();
+  requestGlobalQuickJsLaneShutdown();
+  requestBlockingIoExecutorShutdown();
   requestOwnedWebGetContinuationShutdown();
   requestRulesetExecutorShutdown();
 }
@@ -221,6 +221,8 @@ void begin_runtime_shutdown() {
 void drain_runtime_shutdown() {
   (void)joinGlobalTransportAdmission();
   (void)joinGlobalOwnerAdmission();
+  (void)joinGlobalQuickJsLane();
+  (void)joinBlockingIoExecutor();
   (void)joinOwnedWebGetContinuationRuntime();
   shutdownRulesetExecutor();
   shutdownConversionScheduler();
@@ -242,7 +244,7 @@ bool initializeForceMaxContinuationRuntime() {
   const OwnedWebGetContinuationBudget budget{
       static_cast<size_t>(force_max.compute_workers),
       static_cast<size_t>(force_max.flow_queue_entries),
-      force_max.working_memory_bytes};
+      force_max.flow_queue_bytes};
   const OwnedWebGetContinuationInitStatus status =
       initializeOwnedWebGetContinuationRuntime(budget);
   if (status != OwnedWebGetContinuationInitStatus::Initialized &&
@@ -300,15 +302,14 @@ bool initializeForceMaxTransportAdmissionRuntime() {
     return true;
   const ForceMaxBudget &force_max =
       resources.calculated_force_max_budget;
-  const RequestAdmissionSnapshot legacy = requestAdmissionSnapshot();
-  if (!force_max.valid || legacy.max_bytes == 0) {
+  if (!force_max.valid || force_max.transport_active_bytes == 0) {
     writeLog(LOG_LEVEL_ERROR,
              "FORCE_MAX_TRANSPORT_ADMISSION_INIT_FAILED "
              "reason=invalid_budget");
     return false;
   }
   const OwnerAdmissionBudget budget{
-      force_max.active_flows, legacy.max_bytes,
+      force_max.active_flows, force_max.transport_active_bytes,
       force_max.transport_queue_entries,
       force_max.transport_queue_bytes};
   const GlobalTransportAdmissionInitStatus status =
@@ -330,6 +331,92 @@ bool initializeForceMaxTransportAdmissionRuntime() {
                std::to_string(budget.max_wait_entries) +
                " wait_bytes=" +
                std::to_string(budget.max_wait_bytes));
+  return true;
+}
+
+bool initializeForceMaxAuxiliaryRuntimes() {
+  const ResourceControlSnapshot resources = resourceControlSnapshot();
+  if (resources.effective_mode != "force_max")
+    return true;
+  const ForceMaxBudget &force_max =
+      resources.calculated_force_max_budget;
+  if (!force_max.valid) {
+    writeLog(LOG_LEVEL_ERROR,
+             "FORCE_MAX_AUXILIARY_INIT_FAILED reason=invalid_budget");
+    return false;
+  }
+  if (!initializeAsyncFetchEngine()) {
+    writeLog(LOG_LEVEL_ERROR,
+             "FORCE_MAX_ASYNC_FETCH_INIT_FAILED");
+    return false;
+  }
+  const BlockingIoExecutorBudget io_budget{
+      force_max.io_runners, force_max.blocking_io_queue_entries,
+      force_max.blocking_io_queue_bytes};
+  const BlockingIoExecutorInitStatus io_status =
+      initializeBlockingIoExecutor(io_budget);
+  if (io_status != BlockingIoExecutorInitStatus::Initialized &&
+      io_status != BlockingIoExecutorInitStatus::AlreadyInitialized) {
+    writeLog(LOG_LEVEL_ERROR,
+             "FORCE_MAX_BLOCKING_IO_INIT_FAILED status=" +
+                 std::to_string(static_cast<int>(io_status)));
+    return false;
+  }
+  const QuickJsLaneBudget quickjs_budget =
+      quickJsLaneBudgetFromForceMax(force_max);
+  const GlobalQuickJsLaneInitStatus quickjs_status =
+      initializeGlobalQuickJsLane(quickjs_budget);
+  if (quickjs_status != GlobalQuickJsLaneInitStatus::Initialized &&
+      quickjs_status !=
+          GlobalQuickJsLaneInitStatus::AlreadyInitialized) {
+    writeLog(LOG_LEVEL_ERROR,
+             "FORCE_MAX_QUICKJS_INIT_FAILED status=" +
+                 std::to_string(static_cast<int>(quickjs_status)));
+    return false;
+  }
+  writeLog(LOG_LEVEL_INFO,
+           "FORCE_MAX_AUXILIARY_READY io_workers=" +
+               std::to_string(io_budget.workers) +
+               " io_queue_entries=" +
+               std::to_string(io_budget.max_queue_entries) +
+               " io_queue_bytes=" +
+               std::to_string(io_budget.max_queue_bytes) +
+               " quickjs_workers=" +
+               std::to_string(quickjs_budget.workers));
+  return true;
+}
+
+bool configureForceMaxCaches() {
+  const ResourceControlSnapshot resources = resourceControlSnapshot();
+  if (resources.effective_mode != "force_max")
+    return true;
+  const ForceMaxBudget &budget =
+      resources.calculated_force_max_budget;
+  if (!budget.valid || budget.cache_bytes < 3) {
+    writeLog(LOG_LEVEL_ERROR,
+             "FORCE_MAX_CACHE_INIT_FAILED reason=invalid_budget");
+    return false;
+  }
+  const uint64_t response_bytes = budget.cache_bytes / 2;
+  const uint64_t ruleset_bytes = budget.cache_bytes / 4;
+  const uint64_t external_bytes =
+      budget.cache_bytes - response_bytes - ruleset_bytes;
+  configureResponseMicroCacheLimit(response_bytes);
+  configureRulesetConversionCache(
+      static_cast<size_t>(std::min<uint64_t>(
+          std::max<uint64_t>(1, ruleset_bytes / (UINT64_C(64) * 1024)),
+          SIZE_MAX)),
+      static_cast<size_t>(std::min<uint64_t>(ruleset_bytes, SIZE_MAX)));
+  configureExternalConfigCache(
+      static_cast<size_t>(std::min<uint64_t>(
+          std::max<uint64_t>(1, external_bytes / (UINT64_C(128) * 1024)),
+          SIZE_MAX)),
+      static_cast<size_t>(std::min<uint64_t>(external_bytes, SIZE_MAX)));
+  writeLog(LOG_LEVEL_INFO,
+           "FORCE_MAX_CACHE_READY response_bytes=" +
+               std::to_string(response_bytes) +
+               " ruleset_bytes=" + std::to_string(ruleset_bytes) +
+               " external_bytes=" + std::to_string(external_bytes));
   return true;
 }
 
@@ -449,6 +536,8 @@ int main(int argc, char *argv[]) {
   // cancel unobserved work and release its curl leases before the pool stops.
   defer(shutdown_runtime();)
   startResourceControlRuntime();
+  if (!configureForceMaxCaches())
+    return 1;
   statistics::initialize();
   // vfs::vfs_read("vfs.ini");
   if (!global.updateRulesetOnRequest)
@@ -486,6 +575,8 @@ int main(int argc, char *argv[]) {
   if (!initializeForceMaxOwnerAdmissionRuntime())
     return 1;
   if (!initializeForceMaxTransportAdmissionRuntime())
+    return 1;
+  if (!initializeForceMaxAuxiliaryRuntimes())
     return 1;
 
   webServer.append_response("GET", "/version/favicon-dark.svg",
@@ -562,11 +653,26 @@ int main(int argc, char *argv[]) {
              "security.profile=public。");
   }
   logSecurityPosture();
-  listener_args args = {global.listenAddress,   global.listenPort,
-                        global.maxPendingConns, global.maxConcurThreads,
-                        cron_tick_caller,       200,
-                        static_cast<uint32_t>(global.requestDeadlineMs),
-                        begin_runtime_shutdown, drain_runtime_shutdown};
+  int listen_backlog = global.maxPendingConns;
+  const ResourceControlSnapshot listener_resources =
+      resourceControlSnapshot();
+  if (listener_resources.effective_mode == "force_max" &&
+      listener_resources.calculated_force_max_budget.valid)
+    listen_backlog = static_cast<int>(std::min<uint64_t>(
+        listener_resources.calculated_force_max_budget
+            .transport_queue_entries,
+        INT_MAX));
+  listener_args args = {
+      global.listenAddress,
+      global.listenPort,
+      global.maxPendingConns,
+      listen_backlog,
+      global.maxConcurThreads,
+      cron_tick_caller,
+      200,
+      static_cast<uint32_t>(global.requestDeadlineMs),
+      begin_runtime_shutdown,
+      drain_runtime_shutdown};
   // std::cout<<"Serving HTTP @
   // http://"<<listen_address<<":"<<listen_port<<std::endl;
   writeLog(LOG_LEVEL_INFO,

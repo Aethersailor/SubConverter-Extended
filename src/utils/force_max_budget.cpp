@@ -69,13 +69,16 @@ bool validateForceMaxBudget(const ForceMaxBudget &budget,
     return invalid("invalid_outbound_capacity");
   if (budget.transport_queue_entries == 0 ||
       budget.owner_queue_entries == 0 || budget.flow_queue_entries == 0 ||
+      budget.blocking_io_queue_entries == 0 ||
       budget.transport_queue_bytes == 0 || budget.owner_queue_bytes == 0 ||
-      budget.flow_queue_bytes == 0)
+      budget.flow_queue_bytes == 0 || budget.blocking_io_queue_bytes == 0)
     return invalid("zero_queue_capacity");
   uint64_t queue_total = 0;
   if (!checkedAdd(budget.transport_queue_bytes,
                   budget.owner_queue_bytes, queue_total) ||
-      !checkedAdd(queue_total, budget.flow_queue_bytes, queue_total))
+      !checkedAdd(queue_total, budget.flow_queue_bytes, queue_total) ||
+      !checkedAdd(queue_total, budget.blocking_io_queue_bytes,
+                  queue_total))
     return invalid("queue_budget_overflow");
   uint64_t memory_total = 0;
   for (uint64_t component :
@@ -103,6 +106,16 @@ bool validateForceMaxBudget(const ForceMaxBudget &budget,
                   quickjs_total_bytes) ||
       quickjs_total_bytes > budget.working_memory_bytes)
     return invalid("quickjs_budget_exceeds_working_memory");
+  if (budget.transport_active_bytes == 0 ||
+      budget.owner_active_bytes == 0)
+    return invalid("invalid_active_byte_budget");
+  uint64_t active_memory_total = 0;
+  if (!checkedAdd(quickjs_total_bytes, budget.transport_active_bytes,
+                  active_memory_total) ||
+      !checkedAdd(active_memory_total, budget.owner_active_bytes,
+                  active_memory_total) ||
+      active_memory_total > budget.working_memory_bytes)
+    return invalid("active_bytes_exceed_working_memory");
   if (error)
     error->clear();
   return true;
@@ -195,8 +208,10 @@ ForceMaxBudget calculateProvisionalForceMaxBudget(
       budget.cache_bytes - budget.working_memory_bytes;
   budget.transport_queue_bytes = queue_bytes / 2;
   budget.owner_queue_bytes = queue_bytes / 4;
-  budget.flow_queue_bytes = queue_bytes - budget.transport_queue_bytes -
-                            budget.owner_queue_bytes;
+  budget.flow_queue_bytes = queue_bytes / 8;
+  budget.blocking_io_queue_bytes =
+      queue_bytes - budget.transport_queue_bytes -
+      budget.owner_queue_bytes - budget.flow_queue_bytes;
   budget.transport_queue_entries = std::max<uint64_t>(
       1, std::min<uint64_t>(usable_fds,
                             budget.transport_queue_bytes / 4096));
@@ -204,6 +219,8 @@ ForceMaxBudget calculateProvisionalForceMaxBudget(
       1, budget.owner_queue_bytes / (UINT64_C(64) * 1024));
   budget.flow_queue_entries = std::max<uint64_t>(
       1, budget.flow_queue_bytes / (UINT64_C(16) * 1024));
+  budget.blocking_io_queue_entries = std::max<uint64_t>(
+      1, budget.blocking_io_queue_bytes / (UINT64_C(64) * 1024));
 
   budget.active_owners = std::min(
       budget.active_owners,
@@ -234,6 +251,17 @@ ForceMaxBudget calculateProvisionalForceMaxBudget(
         std::max<uint64_t>(1, quickjs_worker_bytes / 4);
   budget.quickjs_heap_bytes_per_worker =
       quickjs_worker_bytes - budget.quickjs_stack_bytes_per_worker;
+  uint64_t quickjs_total = budget.quickjs_queue_bytes;
+  const uint64_t quickjs_per_worker =
+      budget.quickjs_heap_bytes_per_worker +
+      budget.quickjs_stack_bytes_per_worker;
+  quickjs_total += quickjs_per_worker * budget.quickjs_workers;
+  budget.transport_active_bytes =
+      std::max<uint64_t>(1, budget.working_memory_bytes / 4);
+  budget.owner_active_bytes =
+      std::max<uint64_t>(
+          1, budget.working_memory_bytes - quickjs_total -
+                 budget.transport_active_bytes);
 
   std::string error;
   budget.valid = validateForceMaxBudget(budget, &error);

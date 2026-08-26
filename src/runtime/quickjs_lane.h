@@ -82,6 +82,10 @@ struct QuickJsLaneSnapshot {
   bool joined = false;
   uint64_t workers = 0;
   uint64_t ready_workers = 0;
+  uint64_t max_queue_entries = 0;
+  uint64_t max_queue_bytes = 0;
+  uint64_t heap_bytes_per_worker = 0;
+  uint64_t stack_bytes_per_worker = 0;
   uint64_t queued_entries = 0;
   uint64_t queued_bytes = 0;
   uint64_t active = 0;
@@ -141,5 +145,20 @@ private:
   std::atomic<uint64_t> deadline_total_{0};
   std::atomic<uint64_t> script_error_total_{0};
 };
+
+enum class GlobalQuickJsLaneInitStatus : uint8_t {
+  Initialized,
+  AlreadyInitialized,
+  BudgetMismatch,
+  InvalidBudget,
+  Stopping,
+};
+
+GlobalQuickJsLaneInitStatus initializeGlobalQuickJsLane(
+    QuickJsLaneBudget budget) noexcept;
+QuickJsLane *globalQuickJsLane() noexcept;
+QuickJsLaneSnapshot globalQuickJsLaneSnapshot() noexcept;
+void requestGlobalQuickJsLaneShutdown() noexcept;
+bool joinGlobalQuickJsLane() noexcept;
 
 #endif // QUICKJS_LANE_H_INCLUDED

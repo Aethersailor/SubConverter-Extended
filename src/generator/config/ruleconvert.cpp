@@ -136,12 +136,18 @@ std::string convertRuleset(const std::string &content, int type)
 
 size_t rulesetConversionCacheMaxEntries()
 {
-    return kRulesetConversionCacheEntries;
+    return ruleset_conversion_cache.maxEntries();
 }
 
 size_t rulesetConversionCacheMaxBytes()
 {
-    return kRulesetConversionCacheBytes;
+    return ruleset_conversion_cache.maxBytes();
+}
+
+void configureRulesetConversionCache(size_t max_entries,
+                                     size_t max_bytes)
+{
+    ruleset_conversion_cache.setLimits(max_entries, max_bytes);
 }
 
 static bool isClashCommaPayloadRule(const std::string &rule_type)

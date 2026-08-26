@@ -13,6 +13,7 @@
 
 #include "utils/bounded_executor.h"
 #include "runtime/compute_executor.h"
+#include "runtime/blocking_io_executor.h"
 #include "runtime/owner_admission.h"
 #include "utils/concurrent_lru_cache.h"
 #include "utils/cooperative_cpu.h"
@@ -785,6 +786,9 @@ static void testConcurrentLruCache() {
   assert(compute("same-content:type-b", "type-miss") == "type-miss");
   assert(computations.load() == after_hit + 2);
   assert(cache.size() == 2);
+  cache.setLimits(1, 16);
+  assert(cache.maxEntries() == 1 && cache.maxBytes() == 16 &&
+         cache.size() <= 1 && cache.bytes() <= 16);
 
   int before_evicted = computations.load();
   assert(compute("same-content:type-a", "recomputed") == "recomputed");
@@ -1037,11 +1041,15 @@ static void testResourceControlPrimitives() {
   assert(deterministic_first.quickjs_workers == 3);
   assert(deterministic_first.quickjs_heap_bytes_per_worker > 0);
   assert(deterministic_first.quickjs_stack_bytes_per_worker > 0);
+  assert(deterministic_first.blocking_io_queue_entries > 0);
+  assert(deterministic_first.blocking_io_queue_bytes > 0);
   assert(deterministic_first.quickjs_queue_bytes +
              deterministic_first.quickjs_workers *
                  (deterministic_first.quickjs_heap_bytes_per_worker +
                   deterministic_first.quickjs_stack_bytes_per_worker) <=
          deterministic_first.working_memory_bytes);
+  assert(deterministic_first.transport_active_bytes > 0);
+  assert(deterministic_first.owner_active_bytes > 0);
 
   ResourceEnvelope fractional_envelope = hostbrr_like;
   fractional_envelope.schedulable_cpu_millis = 500;
@@ -1371,6 +1379,47 @@ static void testOwnerAdmission() {
          global_snapshot.joined);
 }
 
+static void testBlockingIoExecutor() {
+  const BlockingIoExecutorInitStatus invalid =
+      initializeBlockingIoExecutor({0, 1, 1});
+  const BlockingIoExecutorInitStatus initialized =
+      initializeBlockingIoExecutor({2, 4, 1024});
+  const BlockingIoExecutorInitStatus same =
+      initializeBlockingIoExecutor({2, 4, 1024});
+  const BlockingIoExecutorInitStatus mismatch =
+      initializeBlockingIoExecutor({3, 4, 1024});
+  assert(invalid == BlockingIoExecutorInitStatus::InvalidBudget);
+  assert(initialized == BlockingIoExecutorInitStatus::Initialized);
+  assert(same == BlockingIoExecutorInitStatus::AlreadyInitialized);
+  assert(mismatch == BlockingIoExecutorInitStatus::BudgetMismatch);
+
+  std::promise<SchedulerSubmitStatus> completed;
+  auto completed_future = completed.get_future();
+  std::atomic<bool> ran{false};
+  ComputeTaskOptions options;
+  options.cost = RequestCostClass::Low;
+  options.bytes = 5;
+  const SchedulerSubmitStatus submitted = submitBlockingIo(
+      std::move(options),
+      [&] { ran.store(true, std::memory_order_release); },
+      [&](SchedulerSubmitStatus status, std::exception_ptr error) {
+        completed.set_value(error ? SchedulerSubmitStatus::Stopping
+                                  : status);
+      });
+  assert(submitted == SchedulerSubmitStatus::Accepted);
+  const SchedulerSubmitStatus completion_status = completed_future.get();
+  assert(completion_status == SchedulerSubmitStatus::Accepted);
+  assert(ran.load(std::memory_order_acquire));
+  const ComputeExecutorSnapshot active = blockingIoExecutorSnapshot();
+  assert(active.initialized && active.ready && active.workers == 2);
+
+  requestBlockingIoExecutorShutdown();
+  const bool joined = joinBlockingIoExecutor();
+  const ComputeExecutorSnapshot stopped = blockingIoExecutorSnapshot();
+  assert(joined && stopped.stopping && stopped.queued_entries == 0 &&
+         stopped.queued_bytes == 0 && stopped.active_workers == 0);
+}
+
 int main() {
   testBoundedExecutor();
   testBoundedExecutorDeadlineAndCancellation();
@@ -1383,6 +1432,7 @@ int main() {
   testActiveRequestShutdownCancellation();
   testCancellationTokenCallbacks();
   testOwnerAdmission();
+  testBlockingIoExecutor();
   testConcurrentLruCache();
   testExternalConfigCacheSemantics();
   testResourceControlPrimitives();

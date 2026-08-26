@@ -283,6 +283,7 @@ ownedWebGetContinuationRuntimeSnapshot();
 void requestOwnedWebGetContinuationShutdown() noexcept;
 bool joinOwnedWebGetContinuationRuntime() noexcept;
 bool asyncFetchEngineAvailable() noexcept;
+bool initializeAsyncFetchEngine() noexcept;
 AsyncFetchEngineSnapshot asyncFetchEngineSnapshot() noexcept;
 
 int webGet(const FetchArgument& argument, FetchResult &result);

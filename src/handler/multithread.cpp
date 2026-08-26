@@ -33,8 +33,12 @@ static size_t configuredWorkerCount()
     if(!configured.empty())
         return static_cast<size_t>(std::clamp(to_int(configured, 2), 1, 8));
     if(forceMaxResourceBudgetApplied())
-        return static_cast<size_t>(
-            std::max(1, effectiveSettings().maxConcurThreads));
+    {
+        const ForceMaxBudget &budget =
+            resourceControlSnapshot().calculated_force_max_budget;
+        return static_cast<size_t>(std::min<uint64_t>(
+            std::max<uint64_t>(1, budget.io_runners), SIZE_MAX));
+    }
     return static_cast<size_t>(
         std::clamp(effectiveSettings().maxConcurThreads / 2, 2, 8));
 }
@@ -47,8 +51,13 @@ static size_t configuredQueueCapacity()
         return static_cast<size_t>(
             std::clamp(to_int(configured, 64), 1, 1024));
     if(forceMaxResourceBudgetApplied())
-        return static_cast<size_t>(
-            std::max(1, effectiveSettings().maxPendingConns));
+    {
+        const ForceMaxBudget &budget =
+            resourceControlSnapshot().calculated_force_max_budget;
+        return static_cast<size_t>(std::min<uint64_t>(
+            std::max<uint64_t>(1, budget.blocking_io_queue_entries),
+            SIZE_MAX));
+    }
     return std::max<size_t>(64, configuredWorkerCount() * 16);
 }
 

@@ -102,6 +102,7 @@ WorkloadSchedulerSnapshot legacyRequestFlowSnapshot();
 CpuPermitSnapshot conversionCpuPermitSnapshot();
 void setConversionCpuPermitLimit(uint64_t limit) noexcept;
 ResponseMicroCacheSnapshot responseMicroCacheSnapshot();
+void configureResponseMicroCacheLimit(uint64_t max_bytes) noexcept;
 SubscriptionSingleflightSnapshot subscriptionSingleflightSnapshot() noexcept;
 SubscriptionOwnerAdmissionSnapshot subscriptionOwnerAdmissionSnapshot();
 void requestConversionSchedulerShutdown() noexcept;

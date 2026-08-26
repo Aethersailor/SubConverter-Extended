@@ -1226,6 +1226,7 @@ static std::mutex g_sub_response_cache_mutex;
 static std::map<std::string, CachedSubResponse> g_sub_response_cache;
 static uint64_t g_sub_response_cache_bytes = 0;
 static uint64_t g_sub_response_cache_sequence = 0;
+static std::atomic<uint64_t> g_sub_response_cache_limit{0};
 
 static void eraseInflightSubRequest(
     const std::string &key,
@@ -1248,6 +1249,10 @@ eraseSubResponseCacheEntry(
 }
 
 static uint64_t subResponseCacheMaxBytes() {
+  const uint64_t applied =
+      g_sub_response_cache_limit.load(std::memory_order_acquire);
+  if (applied != 0)
+    return applied;
   static const uint64_t limit = [] {
     const std::string configured =
         getEnv("SUBCONVERTER_RESPONSE_CACHE_MAX_BYTES");
@@ -2285,45 +2290,27 @@ std::size_t legacyRequestFlowWorkerCount(const Settings &settings) {
   if (resources.effective_mode != "force_max" ||
       !resources.startup_budget_applied)
     return cpu_workers;
-
-  uint64_t flow_workers = std::max<uint64_t>(
-      cpu_workers, resources.suggested_active_flows);
-  const uint64_t cooperative_thread_cap =
-      cooperativeFlowWorkerCap(cpu_workers);
-  flow_workers = std::min(flow_workers, cooperative_thread_cap);
-  flow_workers = std::min<uint64_t>(
-      flow_workers, static_cast<uint64_t>(std::max(1, settings.maxPendingConns)));
-  uint64_t memory_boundary = 0;
-  const auto include_memory_boundary = [&memory_boundary](uint64_t value) {
-    if (value != 0)
-      memory_boundary = memory_boundary == 0
-                            ? value
-                            : std::min(memory_boundary, value);
-  };
-  include_memory_boundary(resources.memory_high_bytes);
-  include_memory_boundary(resources.memory_max_bytes);
-  include_memory_boundary(resources.host_total_memory_bytes);
-  if (memory_boundary != 0)
-    flow_workers = std::min<uint64_t>(
-        flow_workers,
-        std::max<uint64_t>(1, memory_boundary / (UINT64_C(4) * 1024 * 1024)));
-  if (resources.pids_max != 0) {
-    const uint64_t remaining = resources.pids_max > resources.pids_current
-                                   ? resources.pids_max - resources.pids_current
-                                   : 0;
-    const uint64_t pids_headroom = remaining > 16 ? remaining - 16 : 1;
-    flow_workers = std::min<uint64_t>(flow_workers, pids_headroom);
-  }
+  const uint64_t flow_workers =
+      std::max<uint64_t>(
+          1, resources.calculated_force_max_budget.handler_permits);
   return static_cast<std::size_t>(std::max<uint64_t>(1, flow_workers));
 }
 
 WorkloadScheduler &legacyRequestFlowScheduler() {
   const Settings &settings = effectiveSettings();
-  const std::size_t entries = static_cast<std::size_t>(
-      std::max(settings.maxPendingConns, 1));
+  const ResourceControlSnapshot resources = resourceControlSnapshot();
+  const bool force_max = resources.effective_mode == "force_max" &&
+                         resources.calculated_force_max_budget.valid;
+  const std::size_t entries = static_cast<std::size_t>(force_max
+      ? std::min<uint64_t>(
+            resources.calculated_force_max_budget.flow_queue_entries,
+            SIZE_MAX)
+      : static_cast<uint64_t>(std::max(settings.maxPendingConns, 1)));
+  const uint64_t bytes = force_max
+      ? resources.calculated_force_max_budget.flow_queue_bytes
+      : requestAdmissionSnapshot().max_bytes;
   static WorkloadScheduler scheduler(legacyRequestFlowWorkerCount(settings),
-                                     entries,
-                                     requestAdmissionSnapshot().max_bytes);
+                                     entries, bytes);
   legacy_request_flow_instance.store(&scheduler, std::memory_order_release);
   if (conversion_shutdown_requested.load(std::memory_order_acquire))
     scheduler.requestShutdown(true);
@@ -2340,8 +2327,19 @@ WorkloadScheduler &conversionScheduler() {
                  1, INT_MAX));
   const std::size_t entries = static_cast<std::size_t>(
       std::max(settings.maxPendingConns, 1));
-  static WorkloadScheduler scheduler(workers, entries,
-                                     requestAdmissionSnapshot().max_bytes);
+  const ResourceControlSnapshot resources = resourceControlSnapshot();
+  const bool force_max = resources.effective_mode == "force_max" &&
+                         resources.calculated_force_max_budget.valid;
+  const std::size_t queue_entries = force_max
+      ? static_cast<std::size_t>(std::min<uint64_t>(
+            resources.calculated_force_max_budget.flow_queue_entries,
+            SIZE_MAX))
+      : entries;
+  const uint64_t queue_bytes = force_max
+      ? resources.calculated_force_max_budget.flow_queue_bytes
+      : requestAdmissionSnapshot().max_bytes;
+  static WorkloadScheduler scheduler(workers, queue_entries,
+                                     queue_bytes);
   conversion_scheduler_instance.store(&scheduler, std::memory_order_release);
   if (conversion_shutdown_requested.load(std::memory_order_acquire))
     scheduler.requestShutdown(true);
@@ -6846,6 +6844,23 @@ static std::string subconverter_impl(Request &request, Response &response,
                                    generation_state);
       },
   });
+}
+
+void configureResponseMicroCacheLimit(uint64_t max_bytes) noexcept {
+  g_sub_response_cache_limit.store(std::max<uint64_t>(1, max_bytes),
+                                   std::memory_order_release);
+  std::lock_guard<std::mutex> lock(g_sub_response_cache_mutex);
+  while (!g_sub_response_cache.empty() &&
+         g_sub_response_cache_bytes > max_bytes) {
+    auto oldest = std::min_element(
+        g_sub_response_cache.begin(), g_sub_response_cache.end(),
+        [](const auto &left, const auto &right) {
+          return left.second.sequence < right.second.sequence;
+        });
+    if (oldest == g_sub_response_cache.end())
+      break;
+    eraseSubResponseCacheEntry(oldest);
+  }
 }
 
 namespace {

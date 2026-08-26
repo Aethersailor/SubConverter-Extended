@@ -83,6 +83,7 @@ struct listener_args
     std::string listen_address;
     int port;
     int max_conn;
+    int listen_backlog;
     int max_workers;
     void (*looper_callback)() = nullptr;
     uint32_t looper_interval = 200;

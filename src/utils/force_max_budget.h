@@ -7,7 +7,7 @@
 #include "utils/resource_probe.h"
 
 inline constexpr const char *kProvisionalForceMaxFormulaRevision =
-    "force-max-provisional-v1";
+    "force-max-provisional-v2";
 
 struct ForceMaxBudget {
   std::string formula_revision = kProvisionalForceMaxFormulaRevision;
@@ -33,12 +33,16 @@ struct ForceMaxBudget {
   uint64_t owner_queue_bytes = 0;
   uint64_t flow_queue_entries = 0;
   uint64_t flow_queue_bytes = 0;
+  uint64_t blocking_io_queue_entries = 0;
+  uint64_t blocking_io_queue_bytes = 0;
 
   uint64_t retained_response_bytes = 0;
   uint64_t fetch_bytes = 0;
   uint64_t cache_bytes = 0;
   uint64_t working_memory_bytes = 0;
   uint64_t memory_budget_total = 0;
+  uint64_t transport_active_bytes = 0;
+  uint64_t owner_active_bytes = 0;
 
   uint64_t quickjs_workers = 0;
   uint64_t quickjs_queue_entries = 0;

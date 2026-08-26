@@ -1021,8 +1021,10 @@ int WebServer::start_web_server_multi(listener_args *args) {
                                    static_cast<size_t>(
                                        global.resourceControlEffective ==
                                                "compat"
-                                           ? std::max(10240, args->max_conn)
-                                           : std::max(1, args->max_conn)));
+                                           ? std::max(10240,
+                                                      args->listen_backlog)
+                                           : std::max(1,
+                                                      args->listen_backlog)));
   };
   if (!server.bind_to_port(args->listen_address, args->port, 0)) {
     writeLog(LOG_LEVEL_FATAL,

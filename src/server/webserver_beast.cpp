@@ -226,8 +226,8 @@ public:
     if (error)
       return false;
     acceptor.listen(global.resourceControlEffective == "compat"
-                        ? std::max(10240, args->max_conn)
-                        : std::max(1, args->max_conn),
+                        ? std::max(10240, args->listen_backlog)
+                        : std::max(1, args->listen_backlog),
                     error);
     return !error;
   }

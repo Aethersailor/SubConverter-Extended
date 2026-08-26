@@ -806,8 +806,13 @@ void controllerLoop() noexcept {
       next.pressure_fallback = decision.pressure_fallback;
       setConversionCpuPermitLimit(decision.permits);
       next.envelope = resourceEnvelopeFromSnapshot(next);
-      next.calculated_force_max_budget =
-          calculateProvisionalForceMaxBudget(next.envelope);
+      // force_max is a deterministic startup contract. Runtime telemetry may
+      // refresh the observable envelope, but it must not silently resize the
+      // budget that was already applied to the pre-listen runtimes.
+      if (!force_max) {
+        next.calculated_force_max_budget =
+            calculateProvisionalForceMaxBudget(next.envelope);
+      }
       ++next.sample_count;
     } catch (...) {
       const ResourceGovernorDecision decision = governorStep(
@@ -858,27 +863,25 @@ void configureResourceControl(Settings &settings) {
   const bool apply_force_max =
       *parsed == ResourceControlMode::ForceMax && snapshot.hardware_detected &&
       snapshot.hardware_pin_matched;
-  uint64_t memory_boundary =
-      snapshot.memory_max_bytes != 0 ? snapshot.memory_max_bytes
-                                     : snapshot.host_total_memory_bytes;
-  if (snapshot.memory_high_bytes != 0 &&
-      (memory_boundary == 0 || snapshot.memory_high_bytes < memory_boundary))
-    memory_boundary = snapshot.memory_high_bytes;
   uint64_t admission_entries = UINT64_C(2048);
   uint64_t admission_bytes = UINT64_C(64) * 1024 * 1024;
   uint64_t retained_bytes = 0;
   if (apply_force_max) {
+    const ForceMaxBudget &force_max =
+        snapshot.calculated_force_max_budget;
     settings.maxConcurThreads = static_cast<int>(
-        std::min<uint64_t>(snapshot.suggested_cpu_permits, INT_MAX));
-    settings.maxServerThreads =
-        std::max(settings.maxServerThreads, settings.maxConcurThreads);
-    admission_entries = computeForceMaxAdmissionEntries(
-        memory_boundary, snapshot.nofile_soft,
-        snapshot.suggested_outbound_connections);
-    admission_bytes = computeForceMaxRequestByteLimit(memory_boundary);
-    retained_bytes = computeForceMaxRetainedByteLimit(memory_boundary);
+        std::min<uint64_t>(force_max.compute_workers, INT_MAX));
+    settings.maxServerThreads = static_cast<int>(
+        std::min<uint64_t>(force_max.handler_permits, INT_MAX));
+    admission_entries = force_max.active_flows;
+    admission_bytes = force_max.transport_active_bytes;
+    retained_bytes = force_max.retained_response_bytes;
     settings.maxPendingConns = static_cast<int>(
-        std::min<uint64_t>(admission_entries, INT_MAX));
+        std::min<uint64_t>(force_max.active_flows, INT_MAX));
+    snapshot.suggested_cpu_permits = force_max.compute_permits;
+    snapshot.max_cpu_permits = force_max.compute_permits;
+    snapshot.suggested_active_flows = force_max.active_flows;
+    snapshot.suggested_outbound_connections = force_max.outbound_active;
     snapshot.startup_budget_applied = true;
     snapshot.permits_applied = true;
     snapshot.effective_mode = "force_max";

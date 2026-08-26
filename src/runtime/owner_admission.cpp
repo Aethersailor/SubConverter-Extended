@@ -503,24 +503,7 @@ struct OwnerAdmission::Core
 
 OwnerAdmissionBudget ownerAdmissionBudgetFromForceMax(
     const ForceMaxBudget &budget) noexcept {
-  uint64_t quickjs_bytes = budget.quickjs_queue_bytes;
-  uint64_t per_worker = 0;
-  if (budget.quickjs_heap_bytes_per_worker <=
-      UINT64_MAX - budget.quickjs_stack_bytes_per_worker)
-    per_worker = budget.quickjs_heap_bytes_per_worker +
-                 budget.quickjs_stack_bytes_per_worker;
-  if (per_worker != 0 && budget.quickjs_workers != 0 &&
-      per_worker <= UINT64_MAX / budget.quickjs_workers &&
-      quickjs_bytes <= UINT64_MAX -
-                           per_worker * budget.quickjs_workers)
-    quickjs_bytes += per_worker * budget.quickjs_workers;
-  else
-    quickjs_bytes = budget.working_memory_bytes;
-  const uint64_t active_bytes =
-      budget.working_memory_bytes > quickjs_bytes
-          ? budget.working_memory_bytes - quickjs_bytes
-          : 1;
-  return {budget.active_owners, active_bytes,
+  return {budget.active_owners, budget.owner_active_bytes,
           budget.owner_queue_entries, budget.owner_queue_bytes};
 }
 

@@ -1840,6 +1840,7 @@ def owned_webget_boundary_baseline(helper: Path, fixture_base: str) -> None:
             or hit["async_template_ok"] is not True
             or hit["async_upload_ok"] is not True
             or hit["quickjs_lane_ok"] is not True
+            or hit["quickjs_global_ok"] is not True
             or hit["continuation_runtime_ok"] is not True
         ):
             raise AssertionError(
@@ -11764,10 +11765,17 @@ def force_max_controller_runtime_baseline(binary: Path) -> None:
             )
         dashboard = json.loads(body)
         resources = dashboard["resource_control"]
+        budget = resources["calculated_force_max_budget"]
         permits = dashboard["cpu_permits"]
         conversion = dashboard["conversion_scheduler"]
         flow = dashboard["legacy_request_flow"]
         conversion_flows = dashboard["conversion_flows"]
+        compute = dashboard["compute_executor"]
+        blocking_io = dashboard["blocking_io_executor"]
+        quickjs = dashboard["quickjs_lane"]
+        transport = dashboard["request_admission"]
+        owner_admission = dashboard["owner_admission"]
+        outbound = dashboard["outbound_fetch"]
         singleflight = dashboard["subscription_singleflight"]
         backend = os.environ.get("SUBCONVERTER_HTTP_BACKEND", "beast").lower()
         execution_path_ok = (
@@ -11786,7 +11794,30 @@ def force_max_controller_runtime_baseline(binary: Path) -> None:
             or resources["sample_count"] < 1
             or resources["suggested_cpu_permits"]
             != resources["max_cpu_permits"]
+            or budget["applied"] is not True
             or permits["limit"] != resources["max_cpu_permits"]
+            or int(compute["workers"]) != int(budget["compute_workers"])
+            or int(compute["max_queue_entries"])
+            != int(budget["flow_queue_entries"])
+            or int(compute["max_queue_bytes"])
+            != int(budget["flow_queue_bytes"])
+            or int(blocking_io["workers"]) != int(budget["io_runners"])
+            or int(blocking_io["max_queue_entries"])
+            != int(budget["blocking_io_queue_entries"])
+            or int(quickjs["workers"]) != int(budget["quickjs_workers"])
+            or int(transport["max_entries"]) != int(budget["active_flows"])
+            or int(transport["max_bytes"])
+            != int(budget["transport_active_bytes"])
+            or int(owner_admission["max_active_entries"])
+            != int(budget["active_owners"])
+            or int(owner_admission["max_active_bytes"])
+            != int(budget["owner_active_bytes"])
+            or int(outbound["active_connection_limit"])
+            != int(budget["outbound_active"])
+            or int(outbound["open_connection_limit"])
+            != int(budget["outbound_open"])
+            or int(outbound["connection_cache_limit"])
+            != int(budget["outbound_idle_cache"])
             or not execution_path_ok
             or singleflight["active_owners"] != 0
             or singleflight["waiting_followers"] != 0

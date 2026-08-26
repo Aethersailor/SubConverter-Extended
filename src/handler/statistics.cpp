@@ -24,8 +24,11 @@
 #include "handler/statistics_v2.h"
 #include "handler/conversion_service.h"
 #include "handler/webget.h"
+#include "generator/config/ruleconvert.h"
 #include "runtime/compute_executor.h"
 #include "runtime/conversion_flow.h"
+#include "runtime/blocking_io_executor.h"
+#include "runtime/quickjs_lane.h"
 #include "server/request_context.h"
 #include "utils/logger.h"
 #include "utils/redact.h"
@@ -752,6 +755,57 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   }
   writer.EndArray();
   writer.EndObject();
+  const ComputeExecutorSnapshot blocking_io =
+      blockingIoExecutorSnapshot();
+  writer.Key("blocking_io_executor");
+  writer.StartObject();
+  writer.Key("initialized");
+  writer.Bool(blocking_io.initialized);
+  writer.Key("ready");
+  writer.Bool(blocking_io.ready);
+  writer.Key("stopping");
+  writer.Bool(blocking_io.stopping);
+  writer.Key("workers");
+  writer.Uint64(blocking_io.workers);
+  writer.Key("active_workers");
+  writer.Uint64(blocking_io.active_workers);
+  writer.Key("queued_entries");
+  writer.Uint64(blocking_io.queued_entries);
+  writer.Key("queued_bytes");
+  writer.Uint64(blocking_io.queued_bytes);
+  writer.Key("max_queue_entries");
+  writer.Uint64(blocking_io.max_queue_entries);
+  writer.Key("max_queue_bytes");
+  writer.Uint64(blocking_io.max_queue_bytes);
+  writer.EndObject();
+  const QuickJsLaneSnapshot quickjs = globalQuickJsLaneSnapshot();
+  writer.Key("quickjs_lane");
+  writer.StartObject();
+  writer.Key("ready");
+  writer.Bool(quickjs.ready);
+  writer.Key("stopping");
+  writer.Bool(quickjs.stopping);
+  writer.Key("workers");
+  writer.Uint64(quickjs.workers);
+  writer.Key("max_queue_entries");
+  writer.Uint64(quickjs.max_queue_entries);
+  writer.Key("max_queue_bytes");
+  writer.Uint64(quickjs.max_queue_bytes);
+  writer.Key("heap_bytes_per_worker");
+  writer.Uint64(quickjs.heap_bytes_per_worker);
+  writer.Key("stack_bytes_per_worker");
+  writer.Uint64(quickjs.stack_bytes_per_worker);
+  writer.Key("active");
+  writer.Uint64(quickjs.active);
+  writer.Key("queued_entries");
+  writer.Uint64(quickjs.queued_entries);
+  writer.Key("queued_bytes");
+  writer.Uint64(quickjs.queued_bytes);
+  writer.Key("accepted_total");
+  writer.Uint64(quickjs.accepted_total);
+  writer.Key("rejected_total");
+  writer.Uint64(quickjs.rejected_total);
+  writer.EndObject();
   const ConversionFlowRegistrySnapshot flows =
       conversionFlowRegistrySnapshot();
   writer.Key("conversion_flows");
@@ -955,7 +1009,58 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Key("valid");
   writer.Bool(calculated.valid);
   writer.Key("applied");
-  writer.Bool(false);
+  const uint64_t expected_response_cache = calculated.cache_bytes / 2;
+  const uint64_t expected_ruleset_cache = calculated.cache_bytes / 4;
+  const uint64_t expected_external_cache =
+      calculated.cache_bytes - expected_response_cache -
+      expected_ruleset_cache;
+  const bool force_max_applied =
+      resources.effective_mode == "force_max" && calculated.valid &&
+      resources.startup_budget_applied && compute.ready &&
+      compute.workers == calculated.compute_workers &&
+      compute.max_queue_entries == calculated.flow_queue_entries &&
+      compute.max_queue_bytes == calculated.flow_queue_bytes &&
+      blocking_io.ready &&
+      blocking_io.workers == calculated.io_runners &&
+      blocking_io.max_queue_entries ==
+          calculated.blocking_io_queue_entries &&
+      blocking_io.max_queue_bytes ==
+          calculated.blocking_io_queue_bytes &&
+      quickjs.ready && quickjs.workers == calculated.quickjs_workers &&
+      quickjs.max_queue_entries == calculated.quickjs_queue_entries &&
+      quickjs.max_queue_bytes == calculated.quickjs_queue_bytes &&
+      quickjs.heap_bytes_per_worker ==
+          calculated.quickjs_heap_bytes_per_worker &&
+      quickjs.stack_bytes_per_worker ==
+          calculated.quickjs_stack_bytes_per_worker &&
+      owner_admission.source == "force_max_waitable" &&
+      owner_admission.max_active_entries == calculated.active_owners &&
+      owner_admission.max_active_bytes == calculated.owner_active_bytes &&
+      owner_admission.max_wait_entries ==
+          calculated.owner_queue_entries &&
+      owner_admission.max_wait_bytes == calculated.owner_queue_bytes &&
+      admission.source == "force_max_waitable" &&
+      admission.max_entries == calculated.active_flows &&
+      admission.max_bytes == calculated.transport_active_bytes &&
+      admission.max_wait_entries ==
+          calculated.transport_queue_entries &&
+      admission.max_wait_bytes == calculated.transport_queue_bytes &&
+      fetch.available &&
+      fetch.active_connection_limit == calculated.outbound_active &&
+      fetch.open_connection_limit == calculated.outbound_open &&
+      fetch.connection_cache_limit == calculated.outbound_idle_cache &&
+      retained.limit == calculated.retained_response_bytes &&
+      response_cache.max_bytes == expected_response_cache &&
+      rulesetConversionCacheMaxBytes() == expected_ruleset_cache &&
+      externalConfigCacheMaxBytes() == expected_external_cache &&
+      cpu_permits.limit == calculated.compute_permits &&
+      static_cast<uint64_t>(std::max(1, global.maxConcurThreads)) ==
+          calculated.compute_workers &&
+      static_cast<uint64_t>(std::max(1, global.maxServerThreads)) ==
+          calculated.handler_permits &&
+      static_cast<uint64_t>(std::max(1, global.maxPendingConns)) ==
+          calculated.active_flows;
+  writer.Bool(force_max_applied);
   writer.Key("validation_error");
   writer.String(calculated.validation_error.c_str());
   writer.Key("compute_workers");
@@ -990,6 +1095,10 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(calculated.flow_queue_entries);
   writer.Key("flow_queue_bytes");
   writer.Uint64(calculated.flow_queue_bytes);
+  writer.Key("blocking_io_queue_entries");
+  writer.Uint64(calculated.blocking_io_queue_entries);
+  writer.Key("blocking_io_queue_bytes");
+  writer.Uint64(calculated.blocking_io_queue_bytes);
   writer.Key("retained_response_bytes");
   writer.Uint64(calculated.retained_response_bytes);
   writer.Key("fetch_bytes");
@@ -998,6 +1107,10 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(calculated.cache_bytes);
   writer.Key("working_memory_bytes");
   writer.Uint64(calculated.working_memory_bytes);
+  writer.Key("transport_active_bytes");
+  writer.Uint64(calculated.transport_active_bytes);
+  writer.Key("owner_active_bytes");
+  writer.Uint64(calculated.owner_active_bytes);
   writer.Key("memory_budget_total");
   writer.Uint64(calculated.memory_budget_total);
   writer.Key("quickjs_workers");
