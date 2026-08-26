@@ -12145,6 +12145,9 @@ def force_max_arrival_singleflight_baseline(
             raise AssertionError("arrival singleflight setup dashboard failed")
         before = json.loads(body)
         before_flow = int(before["legacy_request_flow"]["accepted"])
+        before_owner_admission = int(
+            before["owner_admission"]["accepted_total"]
+        )
         before_owners = int(
             before["subscription_singleflight"]["owners_created_total"]
         )
@@ -12221,8 +12224,10 @@ def force_max_arrival_singleflight_baseline(
             or int(singleflight["owners_created_total"]) - before_owners != 1
             or int(singleflight["followers_attached_total"]) - before_followers
             != 15
-            or owner_admission["source"] != "legacy_request_flow"
-            or int(owner_admission["accepted_total"]) - before_flow != 1
+            or owner_admission["source"] != "force_max_waitable"
+            or int(owner_admission["accepted_total"])
+            - before_owner_admission
+            != 1
             or int(owner_admission["active"]) != 1
         ):
             FixtureHandler.slow_subscription_release.set()

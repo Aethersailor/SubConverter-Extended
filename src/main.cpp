@@ -26,6 +26,7 @@
 #include "handler/version_page.h"
 #include "handler/webget.h"
 #include "runtime/conversion_flow.h"
+#include "runtime/owner_admission.h"
 #include "script/cron.h"
 #include "server/socket.h"
 #include "server/webserver.h"
@@ -191,6 +192,8 @@ void cron_tick_caller() {
 }
 
 void shutdown_runtime() {
+  requestGlobalOwnerAdmissionShutdown();
+  (void)joinGlobalOwnerAdmission();
   shutdownResourceControlRuntime();
   shutdownConversionScheduler();
   requestAllConversionFlowsShutdown();
@@ -202,6 +205,7 @@ void shutdown_runtime() {
 }
 
 void begin_runtime_shutdown() {
+  requestGlobalOwnerAdmissionShutdown();
   cancelAllActiveRequests(RequestCancellationReason::Shutdown);
   shutdownResourceControlRuntime();
   requestConversionSchedulerShutdown();
@@ -211,6 +215,7 @@ void begin_runtime_shutdown() {
 }
 
 void drain_runtime_shutdown() {
+  (void)joinGlobalOwnerAdmission();
   (void)joinOwnedWebGetContinuationRuntime();
   shutdownRulesetExecutor();
   shutdownConversionScheduler();
@@ -247,6 +252,40 @@ bool initializeForceMaxContinuationRuntime() {
                std::to_string(budget.workers) + " queue_entries=" +
                std::to_string(budget.max_entries) + " queue_bytes=" +
                std::to_string(budget.max_bytes));
+  return true;
+}
+
+bool initializeForceMaxOwnerAdmissionRuntime() {
+  const ResourceControlSnapshot resources = resourceControlSnapshot();
+  if (resources.effective_mode != "force_max")
+    return true;
+  const ForceMaxBudget &force_max =
+      resources.calculated_force_max_budget;
+  if (!force_max.valid) {
+    writeLog(LOG_LEVEL_ERROR,
+             "FORCE_MAX_OWNER_ADMISSION_INIT_FAILED reason=invalid_budget");
+    return false;
+  }
+  const OwnerAdmissionBudget budget =
+      ownerAdmissionBudgetFromForceMax(force_max);
+  const GlobalOwnerAdmissionInitStatus status =
+      initializeGlobalOwnerAdmission(budget);
+  if (status != GlobalOwnerAdmissionInitStatus::Initialized &&
+      status != GlobalOwnerAdmissionInitStatus::AlreadyInitialized) {
+    writeLog(LOG_LEVEL_ERROR,
+             "FORCE_MAX_OWNER_ADMISSION_INIT_FAILED status=" +
+                 std::to_string(static_cast<int>(status)));
+    return false;
+  }
+  writeLog(LOG_LEVEL_INFO,
+           "FORCE_MAX_OWNER_ADMISSION_READY active_entries=" +
+               std::to_string(budget.max_active_entries) +
+               " active_bytes=" +
+               std::to_string(budget.max_active_bytes) +
+               " wait_entries=" +
+               std::to_string(budget.max_wait_entries) +
+               " wait_bytes=" +
+               std::to_string(budget.max_wait_bytes));
   return true;
 }
 
@@ -399,6 +438,8 @@ int main(int argc, char *argv[]) {
     return simpleGenerator();
 
   if (!initializeForceMaxContinuationRuntime())
+    return 1;
+  if (!initializeForceMaxOwnerAdmissionRuntime())
     return 1;
 
   webServer.append_response("GET", "/version/favicon-dark.svg",

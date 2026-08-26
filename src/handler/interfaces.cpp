@@ -44,6 +44,7 @@
 #include "parser/subparser.h"
 #include "script/cron.h"
 #include "script/script_quickjs.h"
+#include "runtime/owner_admission.h"
 #include "server/request_context.h"
 #include "server/webserver.h"
 #include "settings.h"
@@ -1993,6 +1994,7 @@ struct AsyncInflightSubRequest {
       consumers;
   uint64_t next_consumer_id = 1;
   SharedCoalescedResponse result;
+  OwnerAdmissionLease owner_admission;
   std::atomic<bool> active_released{false};
 };
 
@@ -2405,6 +2407,25 @@ ConversionResult schedulerFailureResult(Request &request,
                           std::move(headers), std::move(body));
 }
 
+SchedulerSubmitStatus ownerAdmissionSchedulerStatus(
+    OwnerAdmissionStatus status) noexcept {
+  switch (status) {
+  case OwnerAdmissionStatus::Granted:
+    return SchedulerSubmitStatus::Accepted;
+  case OwnerAdmissionStatus::EntryLimit:
+    return SchedulerSubmitStatus::EntryLimit;
+  case OwnerAdmissionStatus::ByteLimit:
+    return SchedulerSubmitStatus::ByteLimit;
+  case OwnerAdmissionStatus::Cancelled:
+    return SchedulerSubmitStatus::Cancelled;
+  case OwnerAdmissionStatus::Deadline:
+    return SchedulerSubmitStatus::Deadline;
+  case OwnerAdmissionStatus::Shutdown:
+    return SchedulerSubmitStatus::Stopping;
+  }
+  return SchedulerSubmitStatus::Stopping;
+}
+
 ConversionResult executorFailureResult(Request &request,
                                        ExecutorSubmitStatus status) {
   int http_status = 503;
@@ -2605,10 +2626,17 @@ void eraseAsyncInflightSubRequest(
 
 void releaseAsyncInflightOwner(
     const std::shared_ptr<AsyncInflightSubRequest> &call) noexcept {
-  if (call &&
-      !call->active_released.exchange(true, std::memory_order_acq_rel))
-    g_async_singleflight_active_owners.fetch_sub(1,
-                                                  std::memory_order_relaxed);
+  if (!call ||
+      call->active_released.exchange(true, std::memory_order_acq_rel))
+    return;
+  OwnerAdmissionLease admission;
+  {
+    std::lock_guard<std::mutex> lock(call->mutex);
+    admission = std::move(call->owner_admission);
+  }
+  admission.reset();
+  g_async_singleflight_active_owners.fetch_sub(1,
+                                                std::memory_order_relaxed);
 }
 
 void detachAsyncSubRequestConsumer(
@@ -3095,48 +3123,99 @@ void ConversionService::convertSubscriptionAsync(Request request,
             std::make_shared<const PreparedSubRequest>(std::move(prepared));
         Request work_request = std::move(request);
         work_request.context = call->work_context;
-        const auto work_deadline = call->work_context->deadline();
-        const RequestCancellationToken work_cancellation =
-            call->work_context->cancellationToken();
-        const auto queued_at = RequestContext::Clock::now();
-        const SchedulerSubmitStatus owner_submit_status =
-            legacyRequestFlowScheduler().submitAsync(
-            cost, bytes, work_deadline, work_cancellation,
-            [work_request = std::move(work_request), prepared_owner, call,
-             track_statistics, work_deadline, work_cancellation,
-             queued_at]() mutable {
-              ScopedRequestContext request_scope(call->work_context);
-              ScopedLogRequestContext log_scope(call->owner_request_id);
-              if (call->work_context) {
-                call->work_context->addStageDuration(
-                    RequestStage::Queue,
-                    RequestContext::Clock::now() - queued_at);
-                call->work_context->setCurrentStage(RequestStage::Parse);
+        auto start_owner =
+            [cost, bytes, context, call, prepared_owner,
+             work_request = std::move(work_request), track_statistics](
+                OwnerAdmissionLease admission,
+                bool governed) mutable {
+              if (governed) {
+                bool attached = false;
+                {
+                  std::lock_guard<std::mutex> lock(call->mutex);
+                  if (!call->active_released.load(
+                          std::memory_order_acquire) &&
+                      call->phase == AsyncInflightPhase::Accepting) {
+                    call->owner_admission = std::move(admission);
+                    attached = true;
+                  }
+                }
+                if (!attached)
+                  return;
+                if (context)
+                  context->markWorkAdmitted();
               }
-              CpuPermitLease permit(conversionCpuGate(), work_deadline,
-                                    work_cancellation);
-              const SchedulerSubmitStatus permit_status = permit.acquire();
-              if (permit_status != SchedulerSubmitStatus::Accepted)
-                throw SchedulerSubmitError(permit_status);
-              ScopedCpuPermit permit_scope(permit);
-              RuleConversionStats stats;
-              return executePreparedSubRequestOwner(
-                  work_request, *prepared_owner,
-                  track_statistics ? &stats : nullptr);
-            },
-            [call, prepared_owner](
-                SchedulerAsyncResult<SharedCoalescedResponse> result) mutable {
-              if (result.status == SchedulerSubmitStatus::Accepted &&
-                  !result.error && result.value && *result.value) {
-                publishAsyncSubRequestSuccess(
-                    call, prepared_owner, std::move(*result.value));
-                return;
-              }
-              publishAsyncSubRequestFailure(call, result.status,
-                                            std::move(result.error));
-            });
-        if (owner_submit_status == SchedulerSubmitStatus::Accepted && context)
-          context->markWorkAdmitted();
+              const auto work_deadline = call->work_context->deadline();
+              const RequestCancellationToken work_cancellation =
+                  call->work_context->cancellationToken();
+              const auto queued_at = RequestContext::Clock::now();
+              const SchedulerSubmitStatus owner_submit_status =
+                  legacyRequestFlowScheduler().submitAsync(
+                  cost, bytes, work_deadline, work_cancellation,
+                  [work_request = std::move(work_request), prepared_owner,
+                   call, track_statistics, work_deadline,
+                   work_cancellation, queued_at]() mutable {
+                    ScopedRequestContext request_scope(call->work_context);
+                    ScopedLogRequestContext log_scope(
+                        call->owner_request_id);
+                    if (call->work_context) {
+                      call->work_context->addStageDuration(
+                          RequestStage::Queue,
+                          RequestContext::Clock::now() - queued_at);
+                      call->work_context->setCurrentStage(
+                          RequestStage::Parse);
+                    }
+                    CpuPermitLease permit(conversionCpuGate(),
+                                          work_deadline,
+                                          work_cancellation);
+                    const SchedulerSubmitStatus permit_status =
+                        permit.acquire();
+                    if (permit_status != SchedulerSubmitStatus::Accepted)
+                      throw SchedulerSubmitError(permit_status);
+                    ScopedCpuPermit permit_scope(permit);
+                    RuleConversionStats stats;
+                    return executePreparedSubRequestOwner(
+                        work_request, *prepared_owner,
+                        track_statistics ? &stats : nullptr);
+                  },
+                  [call, prepared_owner](
+                      SchedulerAsyncResult<SharedCoalescedResponse>
+                          result) mutable {
+                    if (result.status ==
+                            SchedulerSubmitStatus::Accepted &&
+                        !result.error && result.value && *result.value) {
+                      publishAsyncSubRequestSuccess(
+                          call, prepared_owner,
+                          std::move(*result.value));
+                      return;
+                    }
+                    publishAsyncSubRequestFailure(
+                        call, result.status, std::move(result.error));
+                  });
+              if (!governed &&
+                  owner_submit_status ==
+                      SchedulerSubmitStatus::Accepted &&
+                  context)
+                context->markWorkAdmitted();
+            };
+        if (OwnerAdmission *admission = globalOwnerAdmission()) {
+          (void)admission->admit(
+              {.cost = cost,
+               .bytes = bytes,
+               .request_context = call->work_context},
+              [call, start_owner = std::move(start_owner)](
+                  OwnerAdmissionResult result) mutable {
+                if (result.status != OwnerAdmissionStatus::Granted) {
+                  publishAsyncSubRequestFailure(
+                      call,
+                      ownerAdmissionSchedulerStatus(result.status),
+                      {});
+                  return;
+                }
+                start_owner(std::move(result.lease), true);
+              });
+        } else {
+          start_owner({}, false);
+        }
       } catch (...) {
         g_async_singleflight_owner_flow_rejections.fetch_add(
             1, std::memory_order_relaxed);
@@ -3154,63 +3233,106 @@ void ConversionService::convertSubscriptionAsync(Request request,
       context ? context->cancellationToken() : RequestCancellationToken();
   auto prepared_standalone =
       std::make_shared<const PreparedSubRequest>(std::move(prepared));
-  const auto queued_at = RequestContext::Clock::now();
-  const SchedulerSubmitStatus standalone_submit_status =
-      legacyRequestFlowScheduler().submitAsync(
-      cost, bytes, deadline, cancellation,
-      [request = std::move(request), prepared_standalone, track_statistics,
-       deadline, cancellation, queued_at]() mutable {
-        ScopedRequestContext request_scope(request.context);
-        ScopedLogRequestContext log_scope(
-            request.context ? request.context->requestId() : std::string());
-        if (request.context) {
-          request.context->addStageDuration(
-              RequestStage::Queue, RequestContext::Clock::now() - queued_at);
-          request.context->setCurrentStage(RequestStage::Parse);
-        }
-        CpuPermitLease permit(conversionCpuGate(), deadline, cancellation);
-        const SchedulerSubmitStatus permit_status = permit.acquire();
-        if (permit_status != SchedulerSubmitStatus::Accepted)
-          throw SchedulerSubmitError(permit_status);
-        ScopedCpuPermit permit_scope(permit);
-        return executePreparedStandalone(
-            request, *prepared_standalone, track_statistics);
-      },
-      [context, completion = std::move(completion)](
-          SchedulerAsyncResult<ConversionResult> result) mutable {
-        if (result.status == SchedulerSubmitStatus::Accepted &&
-            !result.error && result.value) {
-          completion(std::move(*result.value));
+  auto start_standalone =
+      [cost, bytes, context, request = std::move(request),
+       prepared_standalone, track_statistics, deadline, cancellation,
+       completion = std::move(completion)](
+          OwnerAdmissionResult admission_result,
+          bool governed) mutable {
+        if (governed &&
+            admission_result.status != OwnerAdmissionStatus::Granted) {
+          Request failure_request;
+          failure_request.context = context;
+          completion(schedulerFailureResult(
+              failure_request,
+              ownerAdmissionSchedulerStatus(admission_result.status)));
           return;
         }
-        Request failure_request;
-        failure_request.context = context;
-        if (result.status != SchedulerSubmitStatus::Accepted) {
-          completion(schedulerFailureResult(failure_request, result.status));
-          return;
-        }
-        if (result.error) {
-          try {
-            std::rethrow_exception(result.error);
-          } catch (const SchedulerSubmitError &error) {
-            completion(schedulerFailureResult(failure_request,
-                                              error.status()));
-            return;
-          } catch (...) {
-          }
-        }
-        if (context)
-          context->suggestFailure(RequestFailureAttribution::Server);
-        writeLog(LOG_LEVEL_ERROR,
-                 "ASYNC_REQUEST_FLOW_FAILED reason=unexpected_exception");
-        completion(ConversionResult(
-            500, "text/plain; charset=utf-8",
-            {{"Cache-Control", "private, no-store"}},
-            "Internal server error while processing request.\n"
-            "处理请求时发生内部服务器错误。\n"));
-      });
-  if (standalone_submit_status == SchedulerSubmitStatus::Accepted && context)
-    context->markWorkAdmitted();
+        if (governed && context)
+          context->markWorkAdmitted();
+        const auto queued_at = RequestContext::Clock::now();
+        const SchedulerSubmitStatus standalone_submit_status =
+            legacyRequestFlowScheduler().submitAsync(
+            cost, bytes, deadline, cancellation,
+            [request = std::move(request), prepared_standalone,
+             track_statistics, deadline, cancellation,
+             queued_at]() mutable {
+              ScopedRequestContext request_scope(request.context);
+              ScopedLogRequestContext log_scope(
+                  request.context ? request.context->requestId()
+                                  : std::string());
+              if (request.context) {
+                request.context->addStageDuration(
+                    RequestStage::Queue,
+                    RequestContext::Clock::now() - queued_at);
+                request.context->setCurrentStage(RequestStage::Parse);
+              }
+              CpuPermitLease permit(conversionCpuGate(), deadline,
+                                    cancellation);
+              const SchedulerSubmitStatus permit_status = permit.acquire();
+              if (permit_status != SchedulerSubmitStatus::Accepted)
+                throw SchedulerSubmitError(permit_status);
+              ScopedCpuPermit permit_scope(permit);
+              return executePreparedStandalone(
+                  request, *prepared_standalone, track_statistics);
+            },
+            [context, completion = std::move(completion),
+             admission = std::move(admission_result.lease)](
+                SchedulerAsyncResult<ConversionResult> result) mutable {
+              (void)admission;
+              if (result.status == SchedulerSubmitStatus::Accepted &&
+                  !result.error && result.value) {
+                completion(std::move(*result.value));
+                return;
+              }
+              Request failure_request;
+              failure_request.context = context;
+              if (result.status != SchedulerSubmitStatus::Accepted) {
+                completion(
+                    schedulerFailureResult(failure_request, result.status));
+                return;
+              }
+              if (result.error) {
+                try {
+                  std::rethrow_exception(result.error);
+                } catch (const SchedulerSubmitError &error) {
+                  completion(schedulerFailureResult(failure_request,
+                                                    error.status()));
+                  return;
+                } catch (...) {
+                }
+              }
+              if (context)
+                context->suggestFailure(RequestFailureAttribution::Server);
+              writeLog(LOG_LEVEL_ERROR,
+                       "ASYNC_REQUEST_FLOW_FAILED "
+                       "reason=unexpected_exception");
+              completion(ConversionResult(
+                  500, "text/plain; charset=utf-8",
+                  {{"Cache-Control", "private, no-store"}},
+                  "Internal server error while processing request.\n"
+                  "处理请求时发生内部服务器错误。\n"));
+            });
+        if (!governed &&
+            standalone_submit_status == SchedulerSubmitStatus::Accepted &&
+            context)
+          context->markWorkAdmitted();
+      };
+  if (OwnerAdmission *admission = globalOwnerAdmission()) {
+    (void)admission->admit(
+        {.cost = cost,
+         .bytes = bytes,
+         .deadline = deadline,
+         .request_context = context},
+        [start_standalone = std::move(start_standalone)](
+            OwnerAdmissionResult result) mutable {
+          start_standalone(std::move(result), true);
+        });
+  } else {
+    OwnerAdmissionResult result;
+    result.status = OwnerAdmissionStatus::Granted;
+    start_standalone(std::move(result), false);
+  }
 }
 
 WorkloadSchedulerSnapshot conversionSchedulerSnapshot() {
@@ -3228,6 +3350,27 @@ WorkloadSchedulerSnapshot legacyRequestFlowSnapshot() {
 }
 
 SubscriptionOwnerAdmissionSnapshot subscriptionOwnerAdmissionSnapshot() {
+  const OwnerAdmissionSnapshot owner =
+      globalOwnerAdmissionSnapshot();
+  if (owner.ready) {
+    SubscriptionOwnerAdmissionSnapshot result;
+    result.source = "force_max_waitable";
+    result.waiting_entries = owner.waiting_entries;
+    result.waiting_bytes = owner.waiting_bytes;
+    result.active = owner.active_entries;
+    result.active_bytes = owner.active_bytes;
+    result.accepted_total = owner.accepted_total;
+    result.rejected_total = owner.rejected_total;
+    result.cancelled_total = owner.cancelled_total;
+    result.deadline_total = owner.deadline_total;
+    result.shutdown_total = owner.shutdown_total;
+    result.max_active_entries = owner.max_active_entries;
+    result.max_active_bytes = owner.max_active_bytes;
+    result.max_wait_entries = owner.max_wait_entries;
+    result.max_wait_bytes = owner.max_wait_bytes;
+    result.oldest_wait_ms = owner.oldest_wait_ms;
+    return result;
+  }
   auto make_snapshot = [](const char *source, WorkloadScheduler *scheduler) {
     SubscriptionOwnerAdmissionSnapshot result;
     result.source = source;

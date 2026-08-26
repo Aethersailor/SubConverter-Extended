@@ -13,6 +13,7 @@
 
 #include "utils/bounded_executor.h"
 #include "runtime/compute_executor.h"
+#include "runtime/owner_admission.h"
 #include "utils/concurrent_lru_cache.h"
 #include "utils/cooperative_cpu.h"
 #include "utils/resource_control.h"
@@ -1160,6 +1161,216 @@ static void testCancellationTokenCallbacks() {
   }
 }
 
+static void testOwnerAdmission() {
+  OwnerAdmission admission({1, 10, 3, 20});
+  const auto settings_deadline =
+      RequestContext::Clock::now() + 10s;
+  auto first_context = std::make_shared<RequestContext>(
+      "owner-first", RequestContext::Clock::now(), settings_deadline);
+  std::promise<OwnerAdmissionResult> first_completion;
+  auto first_future = first_completion.get_future();
+  const OwnerAdmissionStatus first_submit = admission.admit(
+      {.cost = RequestCostClass::Medium,
+       .bytes = 6,
+       .request_context = first_context},
+      [&](OwnerAdmissionResult result) {
+        first_completion.set_value(std::move(result));
+      });
+  OwnerAdmissionResult first = first_future.get();
+  assert(first_submit == OwnerAdmissionStatus::Granted);
+  assert(first.status == OwnerAdmissionStatus::Granted && first.lease);
+
+  auto cancelled_context = std::make_shared<RequestContext>(
+      "owner-cancelled", RequestContext::Clock::now(), settings_deadline);
+  std::promise<OwnerAdmissionResult> cancelled_completion;
+  auto cancelled_future = cancelled_completion.get_future();
+  const OwnerAdmissionStatus cancelled_submit = admission.admit(
+      {.cost = RequestCostClass::Low,
+       .bytes = 5,
+       .request_context = cancelled_context},
+      [&](OwnerAdmissionResult result) {
+        cancelled_completion.set_value(std::move(result));
+      });
+  assert(cancelled_submit == OwnerAdmissionStatus::Granted);
+  const bool cancellation_requested =
+      cancelled_context->requestCancellation(
+          RequestCancellationReason::ClientDisconnected);
+  OwnerAdmissionResult cancelled = cancelled_future.get();
+  assert(cancellation_requested);
+  assert(cancelled.status == OwnerAdmissionStatus::Cancelled);
+
+  auto next_context = std::make_shared<RequestContext>(
+      "owner-next", RequestContext::Clock::now(), settings_deadline);
+  std::promise<OwnerAdmissionResult> next_completion;
+  auto next_future = next_completion.get_future();
+  const OwnerAdmissionStatus next_submit = admission.admit(
+      {.cost = RequestCostClass::High,
+       .bytes = 4,
+       .request_context = next_context},
+      [&](OwnerAdmissionResult result) {
+        next_completion.set_value(std::move(result));
+      });
+  assert(next_submit == OwnerAdmissionStatus::Granted);
+  assert(next_future.wait_for(0ms) != std::future_status::ready);
+  first.lease.reset();
+  OwnerAdmissionResult next = next_future.get();
+  assert(next.status == OwnerAdmissionStatus::Granted && next.lease);
+
+  auto deadline_context = std::make_shared<RequestContext>(
+      "owner-deadline", RequestContext::Clock::now(),
+      RequestContext::Clock::now() + 50ms);
+  std::promise<OwnerAdmissionResult> deadline_completion;
+  auto deadline_future = deadline_completion.get_future();
+  const OwnerAdmissionStatus deadline_submit = admission.admit(
+      {.cost = RequestCostClass::Medium,
+       .bytes = 4,
+       .request_context = deadline_context},
+      [&](OwnerAdmissionResult result) {
+        deadline_completion.set_value(std::move(result));
+      });
+  assert(deadline_submit == OwnerAdmissionStatus::Granted);
+  OwnerAdmissionResult deadline = deadline_future.get();
+  assert(deadline.status == OwnerAdmissionStatus::Deadline);
+
+  std::promise<OwnerAdmissionResult> oversized_completion;
+  auto oversized_future = oversized_completion.get_future();
+  const OwnerAdmissionStatus oversized_submit = admission.admit(
+      {.cost = RequestCostClass::Medium,
+       .bytes = 11,
+       .request_context = std::make_shared<RequestContext>(
+           "owner-oversized", RequestContext::Clock::now(),
+           settings_deadline)},
+      [&](OwnerAdmissionResult result) {
+        oversized_completion.set_value(std::move(result));
+      });
+  OwnerAdmissionResult oversized = oversized_future.get();
+  assert(oversized_submit == OwnerAdmissionStatus::ByteLimit);
+  assert(oversized.status == OwnerAdmissionStatus::ByteLimit);
+
+  std::vector<std::shared_ptr<RequestContext>> pending_contexts;
+  std::vector<std::shared_ptr<std::promise<OwnerAdmissionResult>>>
+      pending_promises;
+  std::vector<std::future<OwnerAdmissionResult>> pending_futures;
+  for (int index = 0; index < 3; ++index) {
+    auto context = std::make_shared<RequestContext>(
+        "owner-pending-" + std::to_string(index),
+        RequestContext::Clock::now(), settings_deadline);
+    auto completion =
+        std::make_shared<std::promise<OwnerAdmissionResult>>();
+    pending_futures.emplace_back(completion->get_future());
+    const OwnerAdmissionStatus status = admission.admit(
+        {.cost = RequestCostClass::Medium,
+         .bytes = 1,
+         .request_context = context},
+        [completion](OwnerAdmissionResult result) {
+          completion->set_value(std::move(result));
+        });
+    assert(status == OwnerAdmissionStatus::Granted);
+    pending_contexts.emplace_back(std::move(context));
+    pending_promises.emplace_back(std::move(completion));
+  }
+  std::promise<OwnerAdmissionResult> full_completion;
+  auto full_future = full_completion.get_future();
+  const OwnerAdmissionStatus full_submit = admission.admit(
+      {.cost = RequestCostClass::Medium,
+       .bytes = 1,
+       .request_context = std::make_shared<RequestContext>(
+           "owner-full", RequestContext::Clock::now(),
+           settings_deadline)},
+      [&](OwnerAdmissionResult result) {
+        full_completion.set_value(std::move(result));
+      });
+  OwnerAdmissionResult full = full_future.get();
+  assert(full_submit == OwnerAdmissionStatus::EntryLimit);
+  assert(full.status == OwnerAdmissionStatus::EntryLimit);
+
+  admission.requestShutdown();
+  for (auto &future : pending_futures) {
+    OwnerAdmissionResult pending = future.get();
+    assert(pending.status == OwnerAdmissionStatus::Shutdown);
+  }
+  next.lease.reset();
+  const bool joined = admission.join();
+  const OwnerAdmissionSnapshot snapshot = admission.snapshot();
+  assert(joined && snapshot.ready && snapshot.stopping && snapshot.joined);
+  assert(snapshot.active_entries == 0 && snapshot.active_bytes == 0);
+  assert(snapshot.waiting_entries == 0 && snapshot.waiting_bytes == 0);
+  assert(snapshot.accepted_total == 2);
+  assert(snapshot.rejected_total == 2);
+  assert(snapshot.cancelled_total == 1);
+  assert(snapshot.deadline_total == 1);
+  assert(snapshot.shutdown_total == 3);
+
+  OwnerAdmission fair({1, 100, 8, 800});
+  auto submit_probe = [&](std::string id, RequestCostClass cost) {
+    auto promise =
+        std::make_shared<std::promise<OwnerAdmissionResult>>();
+    auto future = promise->get_future();
+    const OwnerAdmissionStatus status = fair.admit(
+        {.cost = cost,
+         .bytes = 1,
+         .request_context = std::make_shared<RequestContext>(
+             std::move(id), RequestContext::Clock::now(),
+             RequestContext::Clock::now() + 10s)},
+        [promise](OwnerAdmissionResult result) {
+          promise->set_value(std::move(result));
+        });
+    assert(status == OwnerAdmissionStatus::Granted);
+    return future;
+  };
+  auto held_future = submit_probe("fair-held", RequestCostClass::Medium);
+  OwnerAdmissionResult held = held_future.get();
+  auto high_future = submit_probe("fair-high", RequestCostClass::High);
+  auto low_future = submit_probe("fair-low", RequestCostClass::Low);
+  held.lease.reset();
+  OwnerAdmissionResult low = low_future.get();
+  assert(low.status == OwnerAdmissionStatus::Granted);
+  assert(high_future.wait_for(0ms) != std::future_status::ready);
+  low.lease.reset();
+  OwnerAdmissionResult high = high_future.get();
+
+  auto aged_high_future =
+      submit_probe("fair-aged-high", RequestCostClass::High);
+  std::this_thread::sleep_for(520ms);
+  auto new_low_future =
+      submit_probe("fair-new-low", RequestCostClass::Low);
+  high.lease.reset();
+  OwnerAdmissionResult aged_high = aged_high_future.get();
+  assert(aged_high.status == OwnerAdmissionStatus::Granted);
+  assert(new_low_future.wait_for(0ms) != std::future_status::ready);
+  aged_high.lease.reset();
+  OwnerAdmissionResult new_low = new_low_future.get();
+  assert(new_low.status == OwnerAdmissionStatus::Granted);
+  new_low.lease.reset();
+  fair.requestShutdown();
+  const bool fair_joined = fair.join();
+  assert(fair_joined);
+
+  const GlobalOwnerAdmissionInitStatus invalid_global =
+      initializeGlobalOwnerAdmission({0, 1, 1, 1});
+  const GlobalOwnerAdmissionInitStatus initialized_global =
+      initializeGlobalOwnerAdmission({2, 32, 4, 64});
+  const GlobalOwnerAdmissionInitStatus same_global =
+      initializeGlobalOwnerAdmission({2, 32, 4, 64});
+  const GlobalOwnerAdmissionInitStatus mismatch_global =
+      initializeGlobalOwnerAdmission({3, 32, 4, 64});
+  assert(invalid_global ==
+         GlobalOwnerAdmissionInitStatus::InvalidBudget);
+  assert(initialized_global ==
+         GlobalOwnerAdmissionInitStatus::Initialized);
+  assert(same_global ==
+         GlobalOwnerAdmissionInitStatus::AlreadyInitialized);
+  assert(mismatch_global ==
+         GlobalOwnerAdmissionInitStatus::BudgetMismatch);
+  assert(globalOwnerAdmission() != nullptr);
+  requestGlobalOwnerAdmissionShutdown();
+  const bool global_joined = joinGlobalOwnerAdmission();
+  const OwnerAdmissionSnapshot global_snapshot =
+      globalOwnerAdmissionSnapshot();
+  assert(global_joined && global_snapshot.stopping &&
+         global_snapshot.joined);
+}
+
 int main() {
   testBoundedExecutor();
   testBoundedExecutorDeadlineAndCancellation();
@@ -1171,6 +1382,7 @@ int main() {
   testWorkAdmissionLifecycle();
   testActiveRequestShutdownCancellation();
   testCancellationTokenCallbacks();
+  testOwnerAdmission();
   testConcurrentLruCache();
   testExternalConfigCacheSemantics();
   testResourceControlPrimitives();

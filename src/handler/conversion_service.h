@@ -83,9 +83,14 @@ struct SubscriptionOwnerAdmissionSnapshot {
   uint64_t waiting_entries = 0;
   uint64_t waiting_bytes = 0;
   uint64_t active = 0;
+  uint64_t active_bytes = 0;
   uint64_t accepted_total = 0;
   uint64_t rejected_total = 0;
   uint64_t cancelled_total = 0;
+  uint64_t deadline_total = 0;
+  uint64_t shutdown_total = 0;
+  uint64_t max_active_entries = 0;
+  uint64_t max_active_bytes = 0;
   uint64_t max_wait_entries = 0;
   uint64_t max_wait_bytes = 0;
   uint64_t oldest_wait_ms = 0;

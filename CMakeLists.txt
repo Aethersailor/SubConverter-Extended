@@ -112,6 +112,7 @@ ADD_CUSTOM_TARGET(dashboard_resource
 SET(SUBCONVERTER_RUNTIME_SOURCES
     src/runtime/compute_executor.cpp
     src/runtime/conversion_flow.cpp
+    src/runtime/owner_admission.cpp
     src/runtime/quickjs_lane.cpp
     src/config/preference_file.cpp
     src/config/ruleset.cpp
@@ -517,6 +518,7 @@ IF(BUILD_TESTS)
     ADD_EXECUTABLE(concurrency_primitives_test
         tests/concurrency_primitives_test.cpp
         src/runtime/compute_executor.cpp
+        src/runtime/owner_admission.cpp
         src/utils/force_max_budget.cpp
         src/utils/resource_probe.cpp)
     TARGET_INCLUDE_DIRECTORIES(concurrency_primitives_test PRIVATE src)
