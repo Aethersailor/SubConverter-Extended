@@ -1783,7 +1783,7 @@ def owned_webget_boundary_baseline(helper: Path, fixture_base: str) -> None:
                 - hit_before
             )
         if (
-            hit_requests != 3
+            hit_requests != 4
             or hit["first_status"] != 200
             or hit["second_status"] != 200
             or hit["first_body"] != hit["second_body"]
@@ -1803,6 +1803,8 @@ def owned_webget_boundary_baseline(helper: Path, fixture_base: str) -> None:
             or hit["operation_owner_kinds_isolated"] is not True
             or hit["async_consumer_probe_ok"] is not True
             or hit["async_data_ok"] is not True
+            or hit["async_no_cache_ok"] is not True
+            or hit["async_absolute_deadline_ok"] is not True
             or hit["async_cache_ok"] is not True
             or hit["async_cache_rejection_ok"] is not True
             or hit["async_cache_resources_ok"] is not True

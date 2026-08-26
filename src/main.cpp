@@ -1,6 +1,7 @@
 #include <cerrno>
 #include <csignal>
 #include <cstdio>
+#include <cstdint>
 #include <fcntl.h>
 #include <iostream>
 #include <rapidjson/stringbuffer.h>
@@ -23,6 +24,7 @@
 #include "handler/settings_view.h"
 #include "handler/statistics.h"
 #include "handler/version_page.h"
+#include "handler/webget.h"
 #include "script/cron.h"
 #include "server/socket.h"
 #include "server/webserver.h"
@@ -190,6 +192,8 @@ void cron_tick_caller() {
 void shutdown_runtime() {
   shutdownResourceControlRuntime();
   shutdownConversionScheduler();
+  requestOwnedWebGetContinuationShutdown();
+  (void)joinOwnedWebGetContinuationRuntime();
   shutdownRulesetExecutor();
   statistics::shutdown();
   shutdownGlobalCurlHandlePool();
@@ -199,12 +203,48 @@ void begin_runtime_shutdown() {
   cancelAllActiveRequests(RequestCancellationReason::Shutdown);
   shutdownResourceControlRuntime();
   requestConversionSchedulerShutdown();
+  requestOwnedWebGetContinuationShutdown();
   requestRulesetExecutorShutdown();
 }
 
 void drain_runtime_shutdown() {
+  (void)joinOwnedWebGetContinuationRuntime();
   shutdownRulesetExecutor();
   shutdownConversionScheduler();
+}
+
+bool initializeForceMaxContinuationRuntime() {
+  const ResourceControlSnapshot resources = resourceControlSnapshot();
+  if (resources.effective_mode != "force_max")
+    return true;
+  const ForceMaxBudget &force_max =
+      resources.calculated_force_max_budget;
+  if (!force_max.valid ||
+      force_max.compute_workers > SIZE_MAX ||
+      force_max.flow_queue_entries > SIZE_MAX) {
+    writeLog(LOG_LEVEL_ERROR,
+             "FORCE_MAX_CONTINUATION_INIT_FAILED reason=invalid_budget");
+    return false;
+  }
+  const OwnedWebGetContinuationBudget budget{
+      static_cast<size_t>(force_max.compute_workers),
+      static_cast<size_t>(force_max.flow_queue_entries),
+      force_max.working_memory_bytes};
+  const OwnedWebGetContinuationInitStatus status =
+      initializeOwnedWebGetContinuationRuntime(budget);
+  if (status != OwnedWebGetContinuationInitStatus::Initialized &&
+      status != OwnedWebGetContinuationInitStatus::AlreadyInitialized) {
+    writeLog(LOG_LEVEL_ERROR,
+             "FORCE_MAX_CONTINUATION_INIT_FAILED status=" +
+                 std::to_string(static_cast<int>(status)));
+    return false;
+  }
+  writeLog(LOG_LEVEL_INFO,
+           "FORCE_MAX_CONTINUATION_READY workers=" +
+               std::to_string(budget.workers) + " queue_entries=" +
+               std::to_string(budget.max_entries) + " queue_bytes=" +
+               std::to_string(budget.max_bytes));
+  return true;
 }
 
 std::string publishRuntimeState() {
@@ -354,6 +394,9 @@ int main(int argc, char *argv[]) {
 
   if (global.generatorMode)
     return simpleGenerator();
+
+  if (!initializeForceMaxContinuationRuntime())
+    return 1;
 
   webServer.append_response("GET", "/version/favicon-dark.svg",
                             "image/svg+xml; charset=utf-8",

@@ -187,6 +187,55 @@ int main(int argc, char *argv[]) {
         async_data_outcome.payload->content == "owned-async-data" &&
         async_data_outcome.payload->retained_bytes.bytes() >=
             async_data_outcome.payload->content.size();
+    std::promise<OwnedWebGetAsyncOutcome> async_no_cache_completion;
+    OwnedWebGetRequest async_no_cache_request;
+    async_no_cache_request.url =
+        std::string(argv[3]) + "?owned-async-no-cache=1";
+    async_no_cache_request.proxy = ProxyPolicy::direct();
+    async_no_cache_request.cache_ttl = 0;
+    async_no_cache_request.capture_response_headers = true;
+    async_no_cache_request.context = FetchContext::TrustedConfig;
+    webGetOwnedAsync(
+        std::move(async_no_cache_request),
+        std::make_shared<RequestContext>(
+            "owned-async-no-cache", RequestContext::Clock::now(),
+            RequestContext::Clock::now() + std::chrono::seconds(10)),
+        [&](OwnedWebGetAsyncOutcome outcome) {
+          async_no_cache_completion.set_value(std::move(outcome));
+        });
+    const OwnedWebGetAsyncOutcome async_no_cache_outcome =
+        async_no_cache_completion.get_future().get();
+    const bool async_no_cache_ok =
+        async_no_cache_outcome.payload &&
+        async_no_cache_outcome.failure == AsyncFetchFailure::None &&
+        async_no_cache_outcome.payload->status_code == 200 &&
+        async_no_cache_outcome.payload->content ==
+            "owned-webget:/webget-probe-hit" &&
+        async_no_cache_outcome.payload->response_headers_touched &&
+        async_no_cache_outcome.payload->retained_bytes.bytes() >=
+            async_no_cache_outcome.payload->content.size();
+    std::promise<OwnedWebGetAsyncOutcome> expired_completion;
+    OwnedWebGetRequest expired_request;
+    expired_request.url =
+        std::string(argv[3]) + "?owned-async-expired=1";
+    expired_request.proxy = ProxyPolicy::direct();
+    expired_request.cache_ttl = 0;
+    expired_request.context = FetchContext::TrustedConfig;
+    webGetOwnedAsync(
+        std::move(expired_request),
+        std::make_shared<RequestContext>(
+            "owned-async-expired", RequestContext::Clock::now(),
+            RequestContext::Clock::now() - std::chrono::milliseconds(1)),
+        [&](OwnedWebGetAsyncOutcome outcome) {
+          expired_completion.set_value(std::move(outcome));
+        });
+    const OwnedWebGetAsyncOutcome expired_outcome =
+        expired_completion.get_future().get();
+    const bool async_absolute_deadline_ok =
+        !expired_outcome.payload &&
+        expired_outcome.failure == AsyncFetchFailure::Deadline &&
+        expired_outcome.cancellation ==
+            RequestCancellationReason::Deadline;
     const bool continuation_was_uninitialized =
         !ownedWebGetContinuationRuntimeSnapshot().initialized;
     std::promise<SchedulerSubmitStatus> preinit_completion;
@@ -527,6 +576,10 @@ int main(int argc, char *argv[]) {
                 async_consumer_probe.payload_lease_released);
     writer.Key("async_data_ok");
     writer.Bool(async_data_ok);
+    writer.Key("async_no_cache_ok");
+    writer.Bool(async_no_cache_ok);
+    writer.Key("async_absolute_deadline_ok");
+    writer.Bool(async_absolute_deadline_ok);
     writer.Key("async_cache_ok");
     writer.Bool(async_cache_ok);
     writer.Key("async_cache_rejection_ok");

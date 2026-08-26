@@ -29,6 +29,7 @@
 #include "handler/curl_handle_pool.h"
 #include "handler/settings.h"
 #include "handler/settings_view.h"
+#include "runtime/compute_executor.h"
 #include "server/client_ip.h"
 #include "server/request_context.h"
 #include "server/webserver.h"
@@ -4019,6 +4020,7 @@ void registerOwnedWebGetAsyncCancellation(
 struct AsyncOwnedCacheFetch
 {
     OwnedWebGetRequest request;
+    SettingsSnapshot settings;
     std::string effective_url;
     ResolvedProxyPolicy proxy_snapshot;
     ResolvedProxyRoute initial_route;
@@ -4309,6 +4311,7 @@ void submitAsyncOwnedCacheFinalize(
         state->operation->workDeadline(),
         state->operation->workCancellationToken(),
         [state, result = std::move(result)]() mutable {
+            ScopedSettingsView settings_view(state->settings);
             auto payload = std::make_shared<CacheFetchPayload>();
             if(result)
             {
@@ -4448,6 +4451,7 @@ void startAsyncOwnedCacheOwner(
             state->operation->workDeadline(),
             state->operation->workCancellationToken(),
             [state] {
+                ScopedSettingsView settings_view(state->settings);
                 md("cache");
                 if(!loadFreshAsyncOwnedCache(state))
                     startAsyncOwnedCacheNetwork(state);
@@ -4463,6 +4467,138 @@ void startAsyncOwnedCacheOwner(
         publishAsyncOwnedCacheException(state, std::current_exception());
     }
 }
+
+struct AsyncOwnedDirectFetch
+{
+    OwnedWebGetRequest request;
+    SettingsSnapshot settings;
+    std::shared_ptr<OwnedWebGetAsyncConsumer> consumer;
+    std::string effective_url;
+    ResolvedProxyPolicy proxy_snapshot;
+    ResolvedProxyRoute initial_route;
+    bool allow_insecure_tls = false;
+    long max_download_size = 0;
+};
+
+AsyncFetchRequest makeAsyncOwnedDirectRequest(
+    const std::shared_ptr<AsyncOwnedDirectFetch> &state,
+    std::string url)
+{
+    AsyncFetchRequest request;
+    request.method = HTTP_GET;
+    request.url = std::move(url);
+    request.proxy = state->request.proxy;
+    if(state->request.has_request_headers)
+        request.request_headers = state->request.request_headers;
+    request.capture_content = true;
+    request.capture_response_headers =
+        state->request.capture_response_headers;
+    request.keep_resp_on_fail = false;
+    request.context = state->request.context;
+    request.deadline = state->consumer->context->deadline();
+    request.cancellation =
+        state->consumer->context->cancellationToken();
+    request.request_context = state->consumer->context;
+    request.retain_result_bytes = true;
+    request.public_fetch_restricted =
+        isPublicFetchRestricted(request.context);
+    return request;
+}
+
+void completeAsyncOwnedDirectFetch(
+    const std::shared_ptr<AsyncOwnedDirectFetch> &state,
+    SharedAsyncFetchResult result) noexcept
+{
+    try
+    {
+        auto payload = std::make_shared<OwnedWebGetAsyncPayload>();
+        if(result)
+        {
+            payload->status_code = result->status_code;
+            payload->failure = result->failure;
+            payload->content = std::move(result->content);
+            payload->response_headers =
+                std::move(result->response_headers);
+            payload->response_headers_touched =
+                state->request.capture_response_headers;
+            payload->retained_bytes =
+                std::move(result->retained_bytes);
+        }
+        else
+            payload->failure = AsyncFetchFailure::Transport;
+        completeOwnedWebGetAsyncConsumer(
+            state->consumer,
+            {std::static_pointer_cast<const OwnedWebGetAsyncPayload>(payload),
+             payload->failure, RequestCancellationReason::None});
+    }
+    catch(...)
+    {
+        completeOwnedWebGetAsyncConsumer(
+            state->consumer,
+            {{}, AsyncFetchFailure::Capacity,
+             RequestCancellationReason::None});
+    }
+}
+
+void startAsyncOwnedDirectFetch(
+    const std::shared_ptr<AsyncOwnedDirectFetch> &state)
+{
+    AsyncFetchRequest request = makeAsyncOwnedDirectRequest(
+        state, state->effective_url);
+    multiEngine().submit(
+        std::move(request), state->initial_route,
+        state->allow_insecure_tls, state->max_download_size,
+        [state](SharedAsyncFetchResult original) mutable noexcept {
+            try
+            {
+                const CURLcode original_code = original
+                    ? static_cast<CURLcode>(original->transport_code)
+                    : CURLE_FAILED_INIT;
+                const int original_status = original
+                    ? original->status_code : 0;
+                std::string fallback_url;
+                if(original && original_status != 200 &&
+                   !outbound_fetch_shutdown_requested.load(
+                       std::memory_order_relaxed) &&
+                   should_try_jsdelivr_fallback(original_code,
+                                                 original_status) &&
+                   build_jsdelivr_github_url(state->effective_url,
+                                             fallback_url))
+                {
+                    const ResolvedProxyRoute fallback_route =
+                        resolveProxyRoute(state->proxy_snapshot,
+                                          fallback_url,
+                                          state->request.context);
+                    AsyncFetchRequest fallback_request =
+                        makeAsyncOwnedDirectRequest(state, fallback_url);
+                    multiEngine().submit(
+                        std::move(fallback_request), fallback_route,
+                        state->allow_insecure_tls,
+                        state->max_download_size,
+                        [state, original = std::move(original)](
+                            SharedAsyncFetchResult fallback) mutable noexcept {
+                            if(fallback &&
+                               fallback->transport_code == CURLE_OK &&
+                               fallback->status_code == 200)
+                                completeAsyncOwnedDirectFetch(
+                                    state, std::move(fallback));
+                            else
+                                completeAsyncOwnedDirectFetch(
+                                    state, std::move(original));
+                        });
+                    return;
+                }
+                completeAsyncOwnedDirectFetch(state, std::move(original));
+            }
+            catch(...)
+            {
+                completeOwnedWebGetAsyncConsumer(
+                    state->consumer,
+                    {{}, AsyncFetchFailure::Transport,
+                     RequestCancellationReason::None});
+            }
+        });
+}
 } // namespace
 
 void webGetOwnedAsync(OwnedWebGetRequest request,
@@ -4470,6 +4606,7 @@ void webGetOwnedAsync(OwnedWebGetRequest request,
                       OwnedWebGetAsyncCompletion completion)
 {
     std::shared_ptr<OwnedWebGetAsyncConsumer> consumer;
+    SettingsSnapshot settings_snapshot;
     try
     {
         consumer = std::make_shared<OwnedWebGetAsyncConsumer>();
@@ -4498,6 +4635,14 @@ void webGetOwnedAsync(OwnedWebGetRequest request,
                        RequestCancellationReason::None});
         return;
     }
+    settings_snapshot = captureEffectiveSettingsSnapshot();
+    if(!settings_snapshot)
+    {
+        completeOwnedWebGetAsyncConsumer(
+            consumer, {{}, AsyncFetchFailure::Capacity,
+                       RequestCancellationReason::None});
+        return;
+    }
     try
     {
         registerOwnedWebGetAsyncCancellation(consumer);
@@ -4511,6 +4656,14 @@ void webGetOwnedAsync(OwnedWebGetRequest request,
     }
     if(consumer->completion_claimed.load(std::memory_order_acquire))
         return;
+    if(consumer->context->deadline() !=
+           RequestContext::Clock::time_point::max() &&
+       RequestContext::Clock::now() >= consumer->context->deadline())
+    {
+        consumer->context->requestCancellation(
+            RequestCancellationReason::Deadline);
+        return;
+    }
 
     try
     {
@@ -4538,14 +4691,34 @@ void webGetOwnedAsync(OwnedWebGetRequest request,
 
     const CocrSourceResolution source = resolveCocrSourceUrl(
         request.url,
-        effectiveSettings().customOpenClashRulesSourceSwitch);
+        settings_snapshot->customOpenClashRulesSourceSwitch);
     request.url = source.effective_url;
     request.retention = OwnedWebGetRequest::RetentionPolicy::Result;
     if(!startsWith(request.url, "data:") && request.cache_ttl == 0)
     {
-        completeOwnedWebGetAsyncConsumer(
-            consumer, {{}, AsyncFetchFailure::Transport,
-                       RequestCancellationReason::None});
+        try
+        {
+            auto state = std::make_shared<AsyncOwnedDirectFetch>();
+            state->request = std::move(request);
+            state->settings = settings_snapshot;
+            state->consumer = consumer;
+            state->effective_url = state->request.url;
+            state->proxy_snapshot = state->request.proxy.snapshot();
+            state->initial_route = resolveProxyRoute(
+                state->proxy_snapshot, state->effective_url,
+                state->request.context);
+            state->allow_insecure_tls =
+                settings_snapshot->allowInsecureTls;
+            state->max_download_size =
+                settings_snapshot->maxAllowedDownloadSize;
+            startAsyncOwnedDirectFetch(state);
+        }
+        catch(...)
+        {
+            completeOwnedWebGetAsyncConsumer(
+                consumer, {{}, AsyncFetchFailure::Transport,
+                           RequestCancellationReason::None});
+        }
         return;
     }
     if(!startsWith(request.url, "data:"))
@@ -4556,10 +4729,7 @@ void webGetOwnedAsync(OwnedWebGetRequest request,
         bool operation_attached = false;
         try
         {
-            const auto work_deadline =
-                std::chrono::steady_clock::now() +
-                std::chrono::milliseconds(std::max(
-                    1, effectiveSettings().requestDeadlineMs));
+            const auto work_deadline = consumer->context->deadline();
             const ResolvedProxyPolicy proxy_snapshot =
                 request.proxy.snapshot();
             const ResolvedProxyRoute initial_route = resolveProxyRoute(
@@ -4664,15 +4834,16 @@ void webGetOwnedAsync(OwnedWebGetRequest request,
             {
                 auto state = std::make_shared<AsyncOwnedCacheFetch>();
                 state->request = std::move(request);
+                state->settings = settings_snapshot;
                 state->effective_url = state->request.url;
                 state->proxy_snapshot = proxy_snapshot;
                 state->initial_route = initial_route;
                 state->allow_insecure_tls =
-                    effectiveSettings().allowInsecureTls;
+                    settings_snapshot->allowInsecureTls;
                 state->max_download_size =
-                    effectiveSettings().maxAllowedDownloadSize;
+                    settings_snapshot->maxAllowedDownloadSize;
                 state->serve_cache_on_fetch_fail =
-                    effectiveSettings().serveCacheOnFetchFail;
+                    settings_snapshot->serveCacheOnFetchFail;
                 state->path = "cache/" + cache_key;
                 state->header_path = state->path + "_header";
                 state->registry_key = registry_key;
@@ -4703,6 +4874,7 @@ void webGetOwnedAsync(OwnedWebGetRequest request,
 
     try
     {
+        ScopedSettingsView settings_view(settings_snapshot);
         ScopedRequestContext no_request_context(
             std::shared_ptr<RequestContext>{});
         OwnedWebGetResult result = webGetOwned(std::move(request));
@@ -4793,8 +4965,8 @@ struct OwnedWebGetContinuationRuntime
 {
     std::mutex mutex;
     std::condition_variable condition;
-    std::unique_ptr<WorkloadScheduler> scheduler;
     OwnedWebGetContinuationBudget budget;
+    bool initialized = false;
     bool stopping = false;
     bool joining = false;
     bool joined = false;
@@ -4858,24 +5030,32 @@ OwnedWebGetContinuationInitStatus initializeOwnedWebGetContinuationRuntime(
        owned_webget_continuations.joining ||
        owned_webget_continuations.joined)
         return OwnedWebGetContinuationInitStatus::Stopping;
-    if(owned_webget_continuations.scheduler)
+    if(owned_webget_continuations.initialized)
         return owned_webget_continuations.budget == budget
                    ? OwnedWebGetContinuationInitStatus::AlreadyInitialized
                    : OwnedWebGetContinuationInitStatus::BudgetMismatch;
-    try
+    const GlobalComputeExecutorInitStatus status =
+        initializeGlobalComputeExecutor(
+            {static_cast<uint64_t>(budget.workers),
+             static_cast<uint64_t>(budget.max_entries),
+             budget.max_bytes});
+    switch(status)
     {
-        auto scheduler = std::make_unique<WorkloadScheduler>(
-            budget.workers, budget.max_entries, budget.max_bytes);
-        if(scheduler->workerCount() != budget.workers)
-            return OwnedWebGetContinuationInitStatus::InitializationFailed;
+    case GlobalComputeExecutorInitStatus::Initialized:
+    case GlobalComputeExecutorInitStatus::AlreadyInitialized:
         owned_webget_continuations.budget = budget;
-        owned_webget_continuations.scheduler = std::move(scheduler);
-    }
-    catch(...)
-    {
+        owned_webget_continuations.initialized = true;
+        return OwnedWebGetContinuationInitStatus::Initialized;
+    case GlobalComputeExecutorInitStatus::InvalidBudget:
+        return OwnedWebGetContinuationInitStatus::InvalidBudget;
+    case GlobalComputeExecutorInitStatus::BudgetMismatch:
+        return OwnedWebGetContinuationInitStatus::BudgetMismatch;
+    case GlobalComputeExecutorInitStatus::Stopping:
+        return OwnedWebGetContinuationInitStatus::Stopping;
+    case GlobalComputeExecutorInitStatus::InitializationFailed:
         return OwnedWebGetContinuationInitStatus::InitializationFailed;
     }
-    return OwnedWebGetContinuationInitStatus::Initialized;
+    return OwnedWebGetContinuationInitStatus::InitializationFailed;
 }
 
 SchedulerSubmitStatus submitOwnedWebGetContinuation(
@@ -4909,16 +5089,15 @@ SchedulerSubmitStatus submitOwnedWebGetContinuation(
         }
         return SchedulerSubmitStatus::Stopping;
     }
-    WorkloadScheduler *scheduler = nullptr;
+    bool available = false;
     {
         std::lock_guard<std::mutex> lock(owned_webget_continuations.mutex);
-        if(!owned_webget_continuations.scheduler ||
-           owned_webget_continuations.stopping)
-            scheduler = nullptr;
-        else
-            scheduler = owned_webget_continuations.scheduler.get();
+        available = owned_webget_continuations.initialized &&
+                    !owned_webget_continuations.stopping;
     }
-    if(!scheduler)
+    ComputeExecutor *executor =
+        available ? globalComputeExecutor() : nullptr;
+    if(!executor)
     {
         completeOwnedWebGetContinuation(
             completion_state, SchedulerSubmitStatus::Stopping,
@@ -4931,16 +5110,17 @@ SchedulerSubmitStatus submitOwnedWebGetContinuation(
             : bytes + kOwnedWebGetContinuationMetadataBytes;
     try
     {
-        return scheduler->submitAsync(
-            cost, charged_bytes, deadline, std::move(cancellation),
-            [continuation = std::move(continuation)] {
-                if(continuation)
-                    continuation();
-                return true;
-            },
-            [completion_state](SchedulerAsyncResult<bool> result) mutable {
+        ComputeTaskOptions options;
+        options.cost = cost;
+        options.bytes = charged_bytes;
+        options.deadline = deadline;
+        options.cancellation = std::move(cancellation);
+        return executor->submitContinuation(
+            std::move(options), std::move(continuation),
+            [completion_state](SchedulerSubmitStatus status,
+                               std::exception_ptr error) mutable {
                 completeOwnedWebGetContinuation(
-                    completion_state, result.status, std::move(result.error));
+                    completion_state, status, std::move(error));
             });
     }
     catch(...)
@@ -4955,54 +5135,75 @@ SchedulerSubmitStatus submitOwnedWebGetContinuation(
 OwnedWebGetContinuationRuntimeSnapshot
 ownedWebGetContinuationRuntimeSnapshot()
 {
-    std::lock_guard<std::mutex> lock(owned_webget_continuations.mutex);
-    if(!owned_webget_continuations.scheduler)
+    OwnedWebGetContinuationBudget budget;
+    bool initialized = false;
+    bool stopping = false;
+    bool joining = false;
+    bool joined = false;
+    uint64_t completion_exception_total = 0;
+    {
+        std::lock_guard<std::mutex> lock(
+            owned_webget_continuations.mutex);
+        initialized = owned_webget_continuations.initialized;
+        stopping = owned_webget_continuations.stopping;
+        joining = owned_webget_continuations.joining;
+        joined = owned_webget_continuations.joined;
+        budget = owned_webget_continuations.budget;
+        completion_exception_total =
+            owned_webget_continuations.completion_exception_total.load(
+                std::memory_order_relaxed);
+    }
+    if(!initialized)
         return {false,
-                owned_webget_continuations.stopping,
-                owned_webget_continuations.joining,
-                owned_webget_continuations.joined,
+                stopping,
+                joining,
+                joined,
                 0,
                 0,
                 0,
-                owned_webget_continuations.completion_exception_total.load(
-                    std::memory_order_relaxed),
+                completion_exception_total,
                 {}};
+    const ComputeExecutorSnapshot compute =
+        globalComputeExecutorSnapshot();
+    WorkloadSchedulerSnapshot scheduler;
+    scheduler.queued_entries = compute.queued_entries;
+    scheduler.queued_bytes = compute.queued_bytes;
+    scheduler.active = compute.active_workers;
+    scheduler.accepted = compute.accepted_total;
+    scheduler.rejected = compute.rejected_total;
+    scheduler.cancelled = compute.cancelled_total;
+    scheduler.oldest_queued_age_ms = compute.oldest_queue_age_ms;
     return {
         true,
-        owned_webget_continuations.stopping,
-        owned_webget_continuations.joining,
-        owned_webget_continuations.joined,
-        owned_webget_continuations.budget.workers,
-        owned_webget_continuations.budget.max_entries,
-        owned_webget_continuations.budget.max_bytes,
-        owned_webget_continuations.completion_exception_total.load(
-            std::memory_order_relaxed),
-        owned_webget_continuations.scheduler->snapshot()};
+        stopping,
+        joining,
+        joined,
+        budget.workers,
+        budget.max_entries,
+        budget.max_bytes,
+        completion_exception_total,
+        scheduler};
 }
 
 void requestOwnedWebGetContinuationShutdown() noexcept
 {
-    WorkloadScheduler *scheduler = nullptr;
     {
         std::lock_guard<std::mutex> lock(owned_webget_continuations.mutex);
         owned_webget_continuations.stopping = true;
-        scheduler = owned_webget_continuations.scheduler.get();
     }
-    if(scheduler)
-        scheduler->requestShutdown(true);
+    requestGlobalComputeExecutorShutdown();
 }
 
 bool joinOwnedWebGetContinuationRuntime() noexcept
 {
-    WorkloadScheduler *scheduler = nullptr;
+    ComputeExecutor *executor = globalComputeExecutor();
     {
         std::unique_lock<std::mutex> lock(owned_webget_continuations.mutex);
-        scheduler = owned_webget_continuations.scheduler.get();
-        if(scheduler && scheduler->isCurrentWorkerThread())
+        if(executor && executor->isCurrentWorkerThread())
         {
             owned_webget_continuations.stopping = true;
             lock.unlock();
-            scheduler->requestShutdown(true);
+            requestGlobalComputeExecutorShutdown();
             return false;
         }
         while(owned_webget_continuations.joining &&
@@ -5011,7 +5212,7 @@ bool joinOwnedWebGetContinuationRuntime() noexcept
         if(owned_webget_continuations.joined)
             return true;
         owned_webget_continuations.stopping = true;
-        if(!scheduler)
+        if(!owned_webget_continuations.initialized || !executor)
         {
             owned_webget_continuations.joined = true;
             owned_webget_continuations.condition.notify_all();
@@ -5019,8 +5220,8 @@ bool joinOwnedWebGetContinuationRuntime() noexcept
         }
         owned_webget_continuations.joining = true;
     }
-    scheduler->requestShutdown(true);
-    const bool joined = scheduler->join();
+    requestGlobalComputeExecutorShutdown();
+    const bool joined = joinGlobalComputeExecutor();
     {
         std::lock_guard<std::mutex> lock(owned_webget_continuations.mutex);
         owned_webget_continuations.joining = false;
