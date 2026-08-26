@@ -126,6 +126,7 @@ SET(SUBCONVERTER_RUNTIME_SOURCES
     src/handler/cocr_source_url.cpp
     src/handler/cache_storage.cpp
     src/handler/conversion_pipeline.cpp
+    src/handler/conversion_resource_async.cpp
     src/handler/curl_handle_pool.cpp
     src/handler/external_config_async.cpp
     src/handler/inspect_page.cpp

@@ -91,3 +91,41 @@ bool resolveSubscriptionsOnFlow(
       });
   return true;
 }
+
+bool resolveConversionResourcesOnFlow(
+    ConversionFlow &flow,
+    std::vector<AsyncConversionResourceRequest> requests,
+    SettingsSnapshot settings,
+    std::shared_ptr<RequestContext> request_context,
+    ConversionFlowResourceCompletion completion) {
+  const ConversionFlowOperation operation = flow.beginOperation();
+  if (!operation.valid() || !completion)
+    return false;
+  resolveConversionResourcesAsync(
+      std::move(requests), std::move(settings),
+      std::move(request_context),
+      [operation, completion = std::move(completion)](
+          AsyncConversionResourceBatchResult result) mutable {
+        uint64_t bytes = 0;
+        for (const ResolvedConversionResource &resource : result.resources) {
+          if (!resource.payload)
+            continue;
+          const uint64_t resource_bytes =
+              static_cast<uint64_t>(resource.payload->content.size()) +
+              static_cast<uint64_t>(
+                  resource.payload->response_headers.size());
+          if (resource_bytes > UINT64_MAX - bytes) {
+            bytes = UINT64_MAX;
+            break;
+          }
+          bytes += resource_bytes;
+        }
+        (void)operation.post(
+            [completion = std::move(completion),
+             result = std::move(result)](ConversionFlow &resumed) mutable {
+              completion(resumed, std::move(result));
+            },
+            bytes);
+      });
+  return true;
+}

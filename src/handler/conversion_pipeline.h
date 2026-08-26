@@ -6,6 +6,7 @@
 #include <string>
 
 #include "handler/external_config_async.h"
+#include "handler/conversion_resource_async.h"
 #include "handler/subscription_async.h"
 #include "runtime/conversion_flow.h"
 
@@ -44,5 +45,16 @@ bool resolveSubscriptionsOnFlow(
     SettingsSnapshot settings,
     std::shared_ptr<RequestContext> request_context,
     ConversionFlowSubscriptionCompletion completion);
+
+using ConversionFlowResourceCompletion =
+    std::function<void(ConversionFlow &,
+                       AsyncConversionResourceBatchResult)>;
+
+bool resolveConversionResourcesOnFlow(
+    ConversionFlow &flow,
+    std::vector<AsyncConversionResourceRequest> requests,
+    SettingsSnapshot settings,
+    std::shared_ptr<RequestContext> request_context,
+    ConversionFlowResourceCompletion completion);
 
 #endif // CONVERSION_PIPELINE_H_INCLUDED

@@ -1100,6 +1100,9 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 'rule = ["[]DIRECT"]\n'
             ).encode()
             content_type = "text/plain; charset=utf-8"
+        elif request_path == "/async-base.yaml":
+            body = b"proxies: []\nproxy-groups: []\nrules: []\n"
+            content_type = "text/yaml; charset=utf-8"
         elif request_path == "/webget-probe-hit":
             with type(self).counter_lock:
                 count = type(self).webget_probe_counts.get(request_path, 0) + 1
@@ -1829,6 +1832,7 @@ def owned_webget_boundary_baseline(helper: Path, fixture_base: str) -> None:
             or hit["conversion_flow_ok"] is not True
             or hit["async_external_config_ok"] is not True
             or hit["async_subscription_ok"] is not True
+            or hit["async_conversion_resources_ok"] is not True
             or hit["continuation_runtime_ok"] is not True
         ):
             raise AssertionError(

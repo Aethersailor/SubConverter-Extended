@@ -382,6 +382,55 @@ int main(int argc, char *argv[]) {
     async_subscription_ok =
         async_subscription_ok && async_nodes.size() == 2 &&
         async_nodes[0].GroupId == 0 && async_nodes[1].GroupId == 1;
+    auto make_conversion_resource_requests = [&] {
+      std::vector<AsyncConversionResourceRequest> requests;
+      for (uint64_t index = 0; index < 2; ++index) {
+        AsyncConversionResourceRequest request;
+        request.kind = ConversionResourceKind::Ruleset;
+        request.source_index = index;
+        request.url = fixture_root + "/generation-rules.list?async=" +
+                      std::to_string(index);
+        request.proxy = ProxyPolicy::direct();
+        request.cache_ttl = 0;
+        requests.emplace_back(std::move(request));
+      }
+      AsyncConversionResourceRequest base;
+      base.kind = ConversionResourceKind::Base;
+      base.source_index = 2;
+      base.url = fixture_root + "/async-base.yaml";
+      base.proxy = ProxyPolicy::direct();
+      base.cache_ttl = 0;
+      requests.emplace_back(std::move(base));
+      return requests;
+    };
+    std::promise<AsyncConversionResourceBatchResult>
+        async_resource_completion;
+    auto async_resource_context = std::make_shared<RequestContext>(
+        "async-conversion-resources", RequestContext::Clock::now(),
+        RequestContext::Clock::now() + std::chrono::seconds(10));
+    resolveConversionResourcesAsync(
+        make_conversion_resource_requests(),
+        captureEffectiveSettingsSnapshot(), async_resource_context,
+        [&](AsyncConversionResourceBatchResult result) {
+          async_resource_completion.set_value(std::move(result));
+        });
+    AsyncConversionResourceBatchResult async_resource_result =
+        async_resource_completion.get_future().get();
+    bool async_conversion_resources_ok =
+        async_resource_result.resources.size() == 3;
+    for (size_t index = 0;
+         index < async_resource_result.resources.size(); ++index) {
+      const ResolvedConversionResource &resource =
+          async_resource_result.resources[index];
+      async_conversion_resources_ok =
+          async_conversion_resources_ok &&
+          resource.source_index == index && resource.payload &&
+          resource.failure == AsyncFetchFailure::None &&
+          resource.payload->status_code == 200 &&
+          !resource.payload->content.empty() &&
+          resource.kind == (index < 2 ? ConversionResourceKind::Ruleset
+                                      : ConversionResourceKind::Base);
+    }
     constexpr size_t async_cache_consumers = 16;
     const uint64_t retained_before_async_cache =
         retainedResponseByteSnapshot().used;
@@ -698,6 +747,53 @@ int main(int argc, char *argv[]) {
         subscription_flow_terminal =
             subscription_flow_completion.get_future().get();
 
+      auto resource_flow_context = std::make_shared<RequestContext>(
+          "conversion-flow-resources", RequestContext::Clock::now(),
+          RequestContext::Clock::now() + std::chrono::seconds(10));
+      std::promise<ConversionFlowTerminal> resource_flow_completion;
+      std::atomic<bool> resource_flow_result_ok{false};
+      std::atomic<bool> resource_flow_dependency_started{false};
+      std::shared_ptr<ConversionFlow> resource_flow =
+          ConversionFlow::create(
+              *compute_executor, {8, 1024 * 1024}, flow_settings,
+              resource_flow_context,
+              [&](ConversionFlowTerminal terminal) {
+                resource_flow_completion.set_value(std::move(terminal));
+              });
+      const bool resource_flow_started = resource_flow &&
+          resource_flow->start([&](ConversionFlow &current) {
+            if (!current.setPhase(ConversionFlowPhase::FetchingRulesets))
+              throw std::runtime_error("failed to enter ruleset phase");
+            const bool dependency_started =
+                resolveConversionResourcesOnFlow(
+                    current, make_conversion_resource_requests(),
+                    flow_settings, resource_flow_context,
+                    [&](ConversionFlow &resumed,
+                        AsyncConversionResourceBatchResult result) {
+                      bool valid = result.resources.size() == 3;
+                      for (size_t index = 0;
+                           index < result.resources.size(); ++index)
+                        valid = valid && result.resources[index].payload &&
+                                result.resources[index].source_index == index &&
+                                result.resources[index].failure ==
+                                    AsyncFetchFailure::None;
+                      resource_flow_result_ok.store(
+                          valid && resumed.setPhase(
+                                       ConversionFlowPhase::Parsing),
+                          std::memory_order_release);
+                      (void)resumed.complete();
+                    });
+            resource_flow_dependency_started.store(
+                dependency_started, std::memory_order_release);
+            if (!dependency_started)
+              throw std::runtime_error(
+                  "failed to start conversion resources");
+          });
+      ConversionFlowTerminal resource_flow_terminal;
+      if (resource_flow_started)
+        resource_flow_terminal =
+            resource_flow_completion.get_future().get();
+
       auto cancelled_context = std::make_shared<RequestContext>(
           "conversion-flow-cancel", RequestContext::Clock::now(),
           RequestContext::Clock::now() + std::chrono::seconds(10));
@@ -799,6 +895,12 @@ int main(int argc, char *argv[]) {
           subscription_flow_result_ok.load(std::memory_order_acquire) &&
           subscription_flow_terminal.state ==
               ConversionFlowTerminalState::Completed &&
+          resource_flow_started &&
+          resource_flow_dependency_started.load(
+              std::memory_order_acquire) &&
+          resource_flow_result_ok.load(std::memory_order_acquire) &&
+          resource_flow_terminal.state ==
+              ConversionFlowTerminalState::Completed &&
           cancelled_started &&
           cancel_phase_ok.load(std::memory_order_acquire) &&
           cancel_operation_valid.load(std::memory_order_acquire) &&
@@ -813,8 +915,8 @@ int main(int argc, char *argv[]) {
           shutdown_terminal.cancellation ==
               RequestCancellationReason::Shutdown &&
           !rejected_after_shutdown && flow_registry.active == 0 &&
-          flow_registry.created_total == 5 &&
-          flow_registry.completed_total == 5 &&
+          flow_registry.created_total == 6 &&
+          flow_registry.completed_total == 6 &&
           flow_registry.rejected_total >= 1 && flow_registry.stopping;
     }
 
@@ -968,6 +1070,8 @@ int main(int argc, char *argv[]) {
     writer.String(async_external_result.failure_stage.c_str());
     writer.Key("async_subscription_ok");
     writer.Bool(async_subscription_ok);
+    writer.Key("async_conversion_resources_ok");
+    writer.Bool(async_conversion_resources_ok);
     writer.Key("continuation_runtime_ok");
     writer.Bool(continuation_was_uninitialized &&
                 preinit_submit == SchedulerSubmitStatus::Stopping &&
