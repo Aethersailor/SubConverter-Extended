@@ -424,6 +424,7 @@ inline bool hardwarePinMatches(
 
 void configureResourceControl(Settings &settings);
 ResourceControlSnapshot resourceControlSnapshot();
+ResourceEnvelope probeCurrentResourceEnvelope() noexcept;
 void startResourceControlRuntime();
 void shutdownResourceControlRuntime() noexcept;
 

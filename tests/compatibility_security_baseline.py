@@ -12185,7 +12185,7 @@ def force_max_arrival_singleflight_baseline(
         if status != 200:
             raise AssertionError("arrival singleflight setup dashboard failed")
         before = json.loads(body)
-        before_flow = int(before["legacy_request_flow"]["accepted"])
+        before_flow = int(before["conversion_scheduler"]["accepted"])
         before_owner_admission = int(
             before["owner_admission"]["accepted_total"]
         )
@@ -12252,7 +12252,7 @@ def force_max_arrival_singleflight_baseline(
             for worker in workers:
                 worker.join(timeout=5)
             raise AssertionError("arrival followers did not attach before scheduling")
-        flow = observed["legacy_request_flow"]
+        flow = observed["conversion_scheduler"]
         singleflight = observed["subscription_singleflight"]
         admission = observed["request_admission"]
         owner_admission = observed["owner_admission"]
@@ -12339,7 +12339,7 @@ def force_max_arrival_singleflight_baseline(
                 f"{after['subscription_singleflight']!r}"
             )
 
-        distinct_before_flow = int(after["legacy_request_flow"]["accepted"])
+        distinct_before_flow = int(after["conversion_scheduler"]["accepted"])
         distinct_before_conversion_flows = int(
             after["conversion_flows"]["created_total"]
         )
@@ -12401,7 +12401,7 @@ def force_max_arrival_singleflight_baseline(
         )
         distinct_after = json.loads(body)
         if (
-            int(distinct_after["legacy_request_flow"]["accepted"])
+            int(distinct_after["conversion_scheduler"]["accepted"])
             - distinct_before_flow
             != 0
             or int(distinct_after["conversion_flows"]["created_total"])
@@ -12449,7 +12449,7 @@ def force_max_arrival_singleflight_baseline(
             )
 
 
-def force_max_simple_flow_abba_baseline(
+def force_max_flow_activation_baseline(
     binary: Path, fixture_base: str
 ) -> None:
     if os.environ.get("SUBCONVERTER_HTTP_BACKEND", "beast").lower() == "httplib":
@@ -12461,13 +12461,12 @@ def force_max_simple_flow_abba_baseline(
         ).decode()
     }
 
-    def run(mode: str) -> tuple[bytes, dict[str, object]]:
+    def run(resource_mode: str) -> tuple[bytes, dict[str, object]]:
         with running_service(
             binary,
             statistics=True,
             environment={
-                "SUBCONVERTER_RESOURCE_CONTROL": "force_max",
-                "SUBCONVERTER_FORCE_MAX_FLOW": mode,
+                "SUBCONVERTER_RESOURCE_CONTROL": resource_mode,
             },
         ) as base_url:
             status, body, _ = request(
@@ -12476,39 +12475,86 @@ def force_max_simple_flow_abba_baseline(
                 {
                     "target": "mixed",
                     "url": fixture_base
-                    + f"/subscription.txt?force-max-flow-abba={mode}",
+                    + "/subscription.txt?force-max-flow-activation=1",
                     "config": DISABLE_RULEGEN_CONFIG,
                     "list": "true",
                 },
             )
             if status != 200 or b"Smoke" not in body:
                 raise AssertionError(
-                    f"force_max {mode} flow probe failed: HTTP {status}"
+                    f"{resource_mode} flow probe failed: HTTP {status}"
                 )
             dashboard_status, dashboard_body, _ = request(
                 base_url, "/dashboard/data", headers=dashboard_headers
             )
             if dashboard_status != 200:
                 raise AssertionError(
-                    f"force_max {mode} flow dashboard failed"
+                    f"{resource_mode} flow dashboard failed"
                 )
+            if resource_mode == "force_max":
+                remote_status, remote_body, _ = request(
+                    base_url,
+                    "/sub",
+                    {
+                        "target": "mixed",
+                        "url": fixture_base
+                        + "/subscription.txt?force-max-remote-config=1",
+                        "config": fixture_base
+                        + "/async-external-config.toml",
+                        "list": "true",
+                    },
+                )
+                if remote_status != 200 or b"Smoke" not in remote_body:
+                    raise AssertionError(
+                        "force_max remote external config failed"
+                    )
+                deadline = time.monotonic() + 2.0
+                while True:
+                    dashboard_status, dashboard_body, _ = request(
+                        base_url,
+                        "/dashboard/data",
+                        headers=dashboard_headers,
+                    )
+                    if dashboard_status != 200:
+                        raise AssertionError(
+                            "force_max remote flow dashboard failed"
+                        )
+                    observed = json.loads(dashboard_body)
+                    if (
+                        int(observed["conversion_flows"]["created_total"])
+                        >= 2
+                        and int(
+                            observed["conversion_flows"]["completed_total"]
+                        )
+                        >= 2
+                        and int(observed["conversion_flows"]["active"]) == 0
+                    ):
+                        break
+                    if time.monotonic() >= deadline:
+                        raise AssertionError(
+                            "force_max remote external config did not "
+                            "settle through ConversionFlow"
+                        )
+                    time.sleep(0.02)
             return body, json.loads(dashboard_body)
 
-    legacy_body, legacy = run("legacy")
-    candidate_body, candidate = run("candidate")
-    if legacy_body != candidate_body:
-        raise AssertionError("force_max flow ABBA output bytes changed")
+    compat_body, compat = run("compat")
+    force_body, force = run("force_max")
+    if compat_body != force_body:
+        raise AssertionError("force_max flow activation output bytes changed")
     if (
-        int(legacy["legacy_request_flow"]["accepted"]) < 1
-        or int(legacy["conversion_flows"]["created_total"]) != 0
-        or int(candidate["legacy_request_flow"]["accepted"]) != 0
-        or int(candidate["conversion_flows"]["created_total"]) < 1
-        or int(candidate["conversion_flows"]["completed_total"]) < 1
-        or int(candidate["conversion_flows"]["active"]) != 0
+        int(compat["conversion_scheduler"]["accepted"]) < 1
+        or int(compat["conversion_flows"]["created_total"]) != 0
+        or int(force["legacy_request_flow"]["accepted"]) != 0
+        or int(force["conversion_flows"]["created_total"]) < 2
+        or int(force["conversion_flows"]["completed_total"]) < 2
+        or int(force["conversion_flows"]["active"]) != 0
+        or force["runtime_coordinator"]["ready"] is not True
+        or int(force["runtime_coordinator"]["generation"]) != 1
     ):
         raise AssertionError(
-            "force_max flow ABBA execution paths were not isolated: "
-            f"legacy={legacy!r}, candidate={candidate!r}"
+            "force_max flow activation paths were not isolated: "
+            f"compat={compat!r}, force={force!r}"
         )
 
 
@@ -13063,7 +13109,7 @@ def main() -> int:
         force_max_subscription_cache_admission_baseline(binary, fixture_base)
         recoverable_fetch_retry_baseline(binary, fixture_base)
         force_max_arrival_singleflight_baseline(binary, fixture_base)
-        force_max_simple_flow_abba_baseline(binary, fixture_base)
+        force_max_flow_activation_baseline(binary, fixture_base)
         beast_hard_connection_response_baseline(binary)
         ruleset_executor_capacity_baseline(binary, fixture_base)
         getruleset_generation_reload_baseline(binary, fixture_base)

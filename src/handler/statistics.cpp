@@ -29,6 +29,7 @@
 #include "runtime/conversion_flow.h"
 #include "runtime/blocking_io_executor.h"
 #include "runtime/quickjs_lane.h"
+#include "runtime/runtime_coordinator.h"
 #include "server/request_context.h"
 #include "utils/logger.h"
 #include "utils/redact.h"
@@ -805,6 +806,25 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(quickjs.accepted_total);
   writer.Key("rejected_total");
   writer.Uint64(quickjs.rejected_total);
+  writer.EndObject();
+  const RuntimeCoordinatorSnapshot coordinator =
+      runtimeCoordinatorSnapshot();
+  writer.Key("runtime_coordinator");
+  writer.StartObject();
+  writer.Key("force_max");
+  writer.Bool(coordinator.force_max);
+  writer.Key("prepared");
+  writer.Bool(coordinator.prepared);
+  writer.Key("ready");
+  writer.Bool(coordinator.ready);
+  writer.Key("stopping");
+  writer.Bool(coordinator.stopping);
+  writer.Key("joined");
+  writer.Bool(coordinator.joined);
+  writer.Key("generation");
+  writer.Uint64(coordinator.generation);
+  writer.Key("reason");
+  writer.String(coordinator.reason.c_str());
   writer.EndObject();
   const ConversionFlowRegistrySnapshot flows =
       conversionFlowRegistrySnapshot();

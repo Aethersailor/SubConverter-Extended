@@ -115,6 +115,7 @@ SET(SUBCONVERTER_RUNTIME_SOURCES
     src/runtime/conversion_flow.cpp
     src/runtime/owner_admission.cpp
     src/runtime/quickjs_lane.cpp
+    src/runtime/runtime_coordinator.cpp
     src/runtime/transport_admission.cpp
     src/config/preference_file.cpp
     src/config/ruleset.cpp

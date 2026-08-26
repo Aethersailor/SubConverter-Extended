@@ -962,7 +962,7 @@ void controllerLoop() noexcept {
     lock.unlock();
     try {
       const RequestAdmissionSnapshot admission = requestAdmissionSnapshot();
-      const WorkloadSchedulerSnapshot scheduler = legacyRequestFlowSnapshot();
+      const WorkloadSchedulerSnapshot scheduler = conversionSchedulerSnapshot();
       const RequestLifecycleMetricsSnapshot lifecycle =
           requestLifecycleMetricsSnapshot();
       const uint64_t arrivals = admission.accepted - previous_accepted;
@@ -1083,6 +1083,22 @@ void controllerLoop() noexcept {
 }
 
 } // namespace
+
+ResourceEnvelope probeCurrentResourceEnvelope() noexcept {
+  ResourceControlSnapshot snapshot;
+  const double affinity = detectAffinityCpus();
+  const double cpuset = detectCpuSetCpus();
+  const double quota = detectCpuQuota();
+  const double fallback = static_cast<double>(
+      std::max(1U, std::thread::hardware_concurrency()));
+  const double effective =
+      computeEffectiveCpu(affinity, cpuset, quota, fallback);
+  snapshot.effective_cpu_millis =
+      static_cast<uint64_t>(std::llround(effective * 1000.0));
+  detectMemory(snapshot);
+  detectFileLimits(snapshot);
+  return resourceEnvelopeFromSnapshot(snapshot);
+}
 
 void configureResourceControl(Settings &settings) {
   const std::string normalized =

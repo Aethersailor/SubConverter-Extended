@@ -45,6 +45,7 @@
 #include "script/cron.h"
 #include "script/script_quickjs.h"
 #include "runtime/owner_admission.h"
+#include "runtime/runtime_coordinator.h"
 #include "server/request_context.h"
 #include "server/webserver.h"
 #include "settings.h"
@@ -1976,9 +1977,9 @@ struct ForceMaxFlowOutput {
 using ForceMaxFlowCompletion =
     std::function<void(ForceMaxFlowOutput, ConversionFlowTerminal)>;
 
-static bool forceMaxSimpleFlowEligible(
+static bool forceMaxFlowEligible(
     const Request &request, const PreparedSubRequest &prepared);
-static bool startForceMaxSimpleFlow(
+static bool startForceMaxFlow(
     Request request, std::shared_ptr<const PreparedSubRequest> prepared,
     bool track_statistics, bool record_direct_statistics,
     ForceMaxFlowCompletion completion);
@@ -2252,7 +2253,6 @@ static std::string subconverterEntry(Request &request, Response &response,
 namespace {
 
 std::atomic<WorkloadScheduler *> conversion_scheduler_instance{nullptr};
-std::atomic<WorkloadScheduler *> legacy_request_flow_instance{nullptr};
 std::atomic<CpuPermitGate *> conversion_cpu_gate_instance{nullptr};
 std::atomic<bool> conversion_shutdown_requested{false};
 std::atomic<uint64_t> desired_cpu_permits{0};
@@ -2277,44 +2277,6 @@ CpuPermitGate &conversionCpuGate() {
   if (conversion_shutdown_requested.load(std::memory_order_acquire))
     gate.requestShutdown();
   return gate;
-}
-
-std::size_t legacyRequestFlowWorkerCount(const Settings &settings) {
-  const unsigned int hardware_threads =
-      std::max(1U, std::thread::hardware_concurrency());
-  const std::size_t cpu_workers = static_cast<std::size_t>(
-      std::clamp(std::min(settings.maxConcurThreads,
-                          static_cast<int>(hardware_threads)),
-                 1, INT_MAX));
-  const ResourceControlSnapshot resources = resourceControlSnapshot();
-  if (resources.effective_mode != "force_max" ||
-      !resources.startup_budget_applied)
-    return cpu_workers;
-  const uint64_t flow_workers =
-      std::max<uint64_t>(
-          1, resources.calculated_force_max_budget.handler_permits);
-  return static_cast<std::size_t>(std::max<uint64_t>(1, flow_workers));
-}
-
-WorkloadScheduler &legacyRequestFlowScheduler() {
-  const Settings &settings = effectiveSettings();
-  const ResourceControlSnapshot resources = resourceControlSnapshot();
-  const bool force_max = resources.effective_mode == "force_max" &&
-                         resources.calculated_force_max_budget.valid;
-  const std::size_t entries = static_cast<std::size_t>(force_max
-      ? std::min<uint64_t>(
-            resources.calculated_force_max_budget.flow_queue_entries,
-            SIZE_MAX)
-      : static_cast<uint64_t>(std::max(settings.maxPendingConns, 1)));
-  const uint64_t bytes = force_max
-      ? resources.calculated_force_max_budget.flow_queue_bytes
-      : requestAdmissionSnapshot().max_bytes;
-  static WorkloadScheduler scheduler(legacyRequestFlowWorkerCount(settings),
-                                     entries, bytes);
-  legacy_request_flow_instance.store(&scheduler, std::memory_order_release);
-  if (conversion_shutdown_requested.load(std::memory_order_acquire))
-    scheduler.requestShutdown(true);
-  return scheduler;
 }
 
 WorkloadScheduler &conversionScheduler() {
@@ -3177,9 +3139,9 @@ void ConversionService::convertSubscriptionAsync(Request request,
                 if (context)
                   context->markWorkAdmitted();
               }
-              if (forceMaxSimpleFlowEligible(work_request,
-                                             *prepared_owner)) {
-                const bool flow_started = startForceMaxSimpleFlow(
+              if (forceMaxFlowEligible(work_request,
+                                       *prepared_owner)) {
+                const bool flow_started = startForceMaxFlow(
                     std::move(work_request), prepared_owner,
                     track_statistics, false,
                     [call, prepared_owner](
@@ -3211,7 +3173,7 @@ void ConversionService::convertSubscriptionAsync(Request request,
                   call->work_context->cancellationToken();
               const auto queued_at = RequestContext::Clock::now();
               const SchedulerSubmitStatus owner_submit_status =
-                  legacyRequestFlowScheduler().submitAsync(
+                  conversionScheduler().submitAsync(
                   cost, bytes, work_deadline, work_cancellation,
                   [work_request = std::move(work_request), prepared_owner,
                    call, track_statistics, work_deadline,
@@ -3312,12 +3274,12 @@ void ConversionService::convertSubscriptionAsync(Request request,
         }
         if (governed && context)
           context->markWorkAdmitted();
-        if (forceMaxSimpleFlowEligible(request,
-                                       *prepared_standalone)) {
+        if (forceMaxFlowEligible(request,
+                                 *prepared_standalone)) {
           auto flow_admission =
               std::make_shared<OwnerAdmissionLease>(
                   std::move(admission_result.lease));
-          const bool flow_started = startForceMaxSimpleFlow(
+          const bool flow_started = startForceMaxFlow(
               std::move(request), prepared_standalone,
               track_statistics, true,
               [context, completion, flow_admission](
@@ -3347,7 +3309,7 @@ void ConversionService::convertSubscriptionAsync(Request request,
         }
         const auto queued_at = RequestContext::Clock::now();
         const SchedulerSubmitStatus standalone_submit_status =
-            legacyRequestFlowScheduler().submitAsync(
+            conversionScheduler().submitAsync(
             cost, bytes, deadline, cancellation,
             [request = std::move(request), prepared_standalone,
              track_statistics, deadline, cancellation,
@@ -3438,9 +3400,6 @@ WorkloadSchedulerSnapshot conversionSchedulerSnapshot() {
 }
 
 WorkloadSchedulerSnapshot legacyRequestFlowSnapshot() {
-  if (WorkloadScheduler *scheduler =
-          legacy_request_flow_instance.load(std::memory_order_acquire))
-    return scheduler->snapshot();
   return {};
 }
 
@@ -3482,9 +3441,6 @@ SubscriptionOwnerAdmissionSnapshot subscriptionOwnerAdmissionSnapshot() {
     return result;
   };
   if (WorkloadScheduler *scheduler =
-          legacy_request_flow_instance.load(std::memory_order_acquire))
-    return make_snapshot("legacy_request_flow", scheduler);
-  if (WorkloadScheduler *scheduler =
           conversion_scheduler_instance.load(std::memory_order_acquire))
     return make_snapshot("conversion_scheduler", scheduler);
   return {};
@@ -3520,16 +3476,10 @@ void shutdownConversionScheduler() noexcept {
   if (WorkloadScheduler *scheduler =
           conversion_scheduler_instance.load(std::memory_order_acquire))
     scheduler->shutdown(true);
-  if (WorkloadScheduler *scheduler =
-          legacy_request_flow_instance.load(std::memory_order_acquire))
-    scheduler->shutdown(true);
 }
 
 void requestConversionSchedulerShutdown() noexcept {
   conversion_shutdown_requested.store(true, std::memory_order_release);
-  if (WorkloadScheduler *scheduler =
-          legacy_request_flow_instance.load(std::memory_order_acquire))
-    scheduler->requestShutdown(true);
   if (WorkloadScheduler *scheduler =
           conversion_scheduler_instance.load(std::memory_order_acquire))
     scheduler->requestShutdown(true);
@@ -6865,25 +6815,11 @@ void configureResponseMicroCacheLimit(uint64_t max_bytes) noexcept {
 
 namespace {
 
-static bool forceMaxSimpleFlowEligible(
+static bool forceMaxFlowEligible(
     const Request &request, const PreparedSubRequest &prepared) {
   if (!prepared.settings ||
       prepared.settings->resourceControlEffective != "force_max")
     return false;
-  const std::string mode =
-      toLower(trimWhitespace(getEnv("SUBCONVERTER_FORCE_MAX_FLOW"),
-                             true, true));
-  if (mode == "legacy")
-    return false;
-  if (!mode.empty() && mode != "candidate") {
-    static std::atomic<bool> logged{false};
-    bool expected = false;
-    if (logged.compare_exchange_strong(expected, true))
-      writeLog(LOG_LEVEL_ERROR,
-               "FORCE_MAX_FLOW_MODE_INVALID value_length=" +
-                   std::to_string(mode.size()) + " fallback=legacy");
-    return false;
-  }
   const std::string target = getUrlArg(request.argument, "target");
   if (target.empty() || target == "auto")
     return false;
@@ -6902,24 +6838,27 @@ static bool forceMaxSimpleFlowEligible(
           std::string::npos)
     return false;
 
-  const std::string requested_config =
-      getUrlArg(request.argument, "config");
-  auto supported_config = [](const std::string &path) {
-    return path.empty() || startsWith(path, "data:");
-  };
-  if (!supported_config(requested_config))
-    return false;
-  if ((requested_config.empty() ||
-       prepared.settings->fallbackToDefaultExternalConfig) &&
-      !supported_config(prepared.settings->defaultExtConfig))
+  if (target == "sssub") {
+    const std::string requested_config =
+        getUrlArg(request.argument, "config");
+    auto inline_config = [](const std::string &path) {
+      return path.empty() || startsWith(path, "data:");
+    };
+    if (!inline_config(requested_config) ||
+        ((requested_config.empty() ||
+          prepared.settings->fallbackToDefaultExternalConfig) &&
+         !inline_config(prepared.settings->defaultExtConfig)))
+      return false;
+  }
+  if (!runtimeCoordinatorSnapshot().ready)
     return false;
   return true;
 }
 
-class ForceMaxSimpleFlowState
-    : public std::enable_shared_from_this<ForceMaxSimpleFlowState> {
+class ForceMaxFlowState
+    : public std::enable_shared_from_this<ForceMaxFlowState> {
 public:
-  ForceMaxSimpleFlowState(
+  ForceMaxFlowState(
       Request request, std::shared_ptr<const PreparedSubRequest> prepared,
       bool track_statistics, bool record_direct_statistics,
       ForceMaxFlowCompletion completion)
@@ -7351,14 +7290,14 @@ private:
   ForceMaxFlowOutput output_;
 };
 
-static bool startForceMaxSimpleFlow(
+static bool startForceMaxFlow(
     Request request, std::shared_ptr<const PreparedSubRequest> prepared,
     bool track_statistics, bool record_direct_statistics,
     ForceMaxFlowCompletion completion) {
   if (!prepared || !completion)
     return false;
   try {
-    auto state = std::make_shared<ForceMaxSimpleFlowState>(
+    auto state = std::make_shared<ForceMaxFlowState>(
         std::move(request), std::move(prepared), track_statistics,
         record_direct_statistics, std::move(completion));
     return state->start();
