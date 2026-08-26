@@ -15,6 +15,8 @@ GlobalTransportAdmissionInitStatus initializeGlobalTransportAdmission(
     OwnerAdmissionBudget budget) noexcept;
 OwnerAdmission *globalTransportAdmission() noexcept;
 OwnerAdmissionSnapshot globalTransportAdmissionSnapshot() noexcept;
+bool setGlobalTransportAdmissionActiveLimits(
+    uint64_t max_active_entries, uint64_t max_active_bytes) noexcept;
 void requestGlobalTransportAdmissionShutdown() noexcept;
 bool joinGlobalTransportAdmission() noexcept;
 

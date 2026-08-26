@@ -930,41 +930,44 @@ static void testResourceControlPrimitives() {
   assert(governorRecoverCpuPermits(1, 8) == 2);
   assert(governorRecoverCpuPermits(8, 8) == 8);
 
-  ResourceGovernorState force_governor{8, 0, 0};
-  ResourceGovernorDecision decision = governorStep(
-      force_governor, {8, true, true, false, false, false});
-  assert(decision.permits == 8 &&
-         std::string(decision.state) == "max_ready");
-  decision = governorStep(
-      force_governor, {8, true, true, true, false, true});
-  assert(decision.permits == 6 &&
-         std::string(decision.state) == "pressure_guarded");
-  decision = governorStep(
-      force_governor, {8, true, true, false, false, false});
-  assert(decision.permits == 6 &&
-         std::string(decision.state) == "recovering");
-  decision = governorStep(
-      force_governor, {8, true, true, false, false, false});
-  assert(decision.permits == 7);
-  (void)governorStep(
-      force_governor, {8, true, true, false, false, false});
-  decision = governorStep(
-      force_governor, {8, true, true, false, false, false});
-  assert(decision.permits == 8);
-
-  ResourceGovernorState invalid_governor{8, 0, 0};
-  decision = governorStep(
-      invalid_governor, {8, true, false, false, false, false});
-  assert(decision.permits == 6 && decision.pressure_fallback &&
-         std::string(decision.reason) == "telemetry_unavailable");
-  ResourceGovernorState event_governor{8, 0, 0};
-  decision = governorStep(
-      event_governor, {8, true, true, false, true, true});
-  assert(decision.permits == 6 &&
-         std::string(decision.reason) == "memory_event");
+  PressureGuardState pressure_guard;
+  PressureGuardDecision guard_decision = pressureGuardStep(
+      pressure_guard, {false, false, "telemetry_error"});
+  assert(!guard_decision.guarded && !guard_decision.limits_changed &&
+         std::string(guard_decision.state) == "max_ready" &&
+         std::string(guard_decision.reason) ==
+             "telemetry_unavailable_full");
+  guard_decision = pressureGuardStep(
+      pressure_guard, {true, true, "memory_high_event"});
+  assert(guard_decision.guarded && guard_decision.limits_changed &&
+         pressure_guard.activations == 1 &&
+         std::string(guard_decision.state) == "pressure_guarded");
+  guard_decision = pressureGuardStep(
+      pressure_guard, {true, true, "memory_high_event"});
+  assert(guard_decision.guarded && !guard_decision.limits_changed &&
+         pressure_guard.activations == 1);
+  guard_decision = pressureGuardStep(
+      pressure_guard, {false, true, "none"});
+  assert(guard_decision.guarded &&
+         std::string(guard_decision.state) == "recovery_confirm");
+  guard_decision = pressureGuardStep(
+      pressure_guard, {false, true, "none"});
+  assert(guard_decision.guarded);
+  guard_decision = pressureGuardStep(
+      pressure_guard, {false, true, "none"});
+  assert(!guard_decision.guarded && guard_decision.limits_changed &&
+         pressure_guard.recoveries == 1);
+  guard_decision = pressureGuardStep(
+      pressure_guard, {true, true, "nofile_headroom_exhausted"});
+  assert(guard_decision.guarded && pressure_guard.activations == 2 &&
+         pressure_guard.repeated_activations == 1);
+  guard_decision = pressureGuardStep(
+      pressure_guard, {false, false, "telemetry_error"});
+  assert(!guard_decision.guarded && guard_decision.limits_changed &&
+         pressure_guard.recoveries == 2);
 
   ResourceGovernorState adaptive_governor{4, 0, 0};
-  (void)governorStep(
+  ResourceGovernorDecision decision = governorStep(
       adaptive_governor, {8, false, true, false, false, true});
   decision = governorStep(
       adaptive_governor, {8, false, true, false, false, true});
@@ -1357,6 +1360,47 @@ static void testOwnerAdmission() {
   const bool fair_joined = fair.join();
   assert(fair_joined);
 
+  OwnerAdmission dynamic({2, 20, 4, 40});
+  auto dynamic_submit = [&](std::string id) {
+    auto promise =
+        std::make_shared<std::promise<OwnerAdmissionResult>>();
+    auto future = promise->get_future();
+    const OwnerAdmissionStatus status = dynamic.admit(
+        {.cost = RequestCostClass::Medium,
+         .bytes = 5,
+         .request_context = std::make_shared<RequestContext>(
+             std::move(id), RequestContext::Clock::now(),
+             RequestContext::Clock::now() + 10s)},
+        [promise](OwnerAdmissionResult result) {
+          promise->set_value(std::move(result));
+        });
+    assert(status == OwnerAdmissionStatus::Granted);
+    return future;
+  };
+  auto dynamic_first_future = dynamic_submit("dynamic-first");
+  auto dynamic_second_future = dynamic_submit("dynamic-second");
+  OwnerAdmissionResult dynamic_first = dynamic_first_future.get();
+  OwnerAdmissionResult dynamic_second = dynamic_second_future.get();
+  const bool limits_lowered = dynamic.setActiveLimits(1, 10);
+  const OwnerAdmissionSnapshot lowered = dynamic.snapshot();
+  assert(limits_lowered && lowered.max_active_entries == 1 &&
+         lowered.max_active_bytes == 10 && lowered.active_entries == 2);
+  auto dynamic_waiter_future = dynamic_submit("dynamic-waiter");
+  dynamic_first.lease.reset();
+  assert(dynamic_waiter_future.wait_for(0ms) != std::future_status::ready);
+  dynamic_second.lease.reset();
+  OwnerAdmissionResult dynamic_waiter = dynamic_waiter_future.get();
+  assert(dynamic_waiter.status == OwnerAdmissionStatus::Granted &&
+         dynamic_waiter.lease);
+  const bool limits_restored = dynamic.setActiveLimits(2, 20);
+  const OwnerAdmissionSnapshot restored = dynamic.snapshot();
+  assert(limits_restored && restored.max_active_entries == 2 &&
+         restored.max_active_bytes == 20);
+  dynamic_waiter.lease.reset();
+  dynamic.requestShutdown();
+  const bool dynamic_joined = dynamic.join();
+  assert(dynamic_joined);
+
   const GlobalOwnerAdmissionInitStatus invalid_global =
       initializeGlobalOwnerAdmission({0, 1, 1, 1});
   const GlobalOwnerAdmissionInitStatus initialized_global =
@@ -1374,6 +1418,12 @@ static void testOwnerAdmission() {
   assert(mismatch_global ==
          GlobalOwnerAdmissionInitStatus::BudgetMismatch);
   assert(globalOwnerAdmission() != nullptr);
+  const bool global_limits =
+      setGlobalOwnerAdmissionActiveLimits(1, 16);
+  const OwnerAdmissionSnapshot global_limited =
+      globalOwnerAdmissionSnapshot();
+  assert(global_limits && global_limited.max_active_entries == 1 &&
+         global_limited.max_active_bytes == 16);
   requestGlobalOwnerAdmissionShutdown();
   const bool global_joined = joinGlobalOwnerAdmission();
   const OwnerAdmissionSnapshot global_snapshot =

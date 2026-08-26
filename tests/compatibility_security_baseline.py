@@ -11792,6 +11792,8 @@ def force_max_controller_runtime_baseline(binary: Path) -> None:
         if (
             resources["controller_state"] != "max_ready"
             or resources["sample_count"] < 1
+            or resources["pressure_guarded"] is not False
+            or resources["pressure_guard_activations"] != 0
             or resources["suggested_cpu_permits"]
             != resources["max_cpu_permits"]
             or budget["applied"] is not True

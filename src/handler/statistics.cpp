@@ -1138,6 +1138,14 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Bool(resources.permits_applied);
   writer.Key("pressure_fallback");
   writer.Bool(resources.pressure_fallback);
+  writer.Key("pressure_guarded");
+  writer.Bool(resources.pressure_guarded);
+  writer.Key("pressure_guard_activations");
+  writer.Uint64(resources.pressure_guard_activations);
+  writer.Key("pressure_guard_recoveries");
+  writer.Uint64(resources.pressure_guard_recoveries);
+  writer.Key("pressure_guard_repeated_activations");
+  writer.Uint64(resources.pressure_guard_repeated_activations);
   writer.EndObject();
   writer.EndObject();
   return std::string(buffer.GetString(), buffer.GetSize());

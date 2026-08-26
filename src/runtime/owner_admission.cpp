@@ -81,7 +81,10 @@ struct OwnerAdmission::Core
     OwnerAdmissionStatus status = OwnerAdmissionStatus::Shutdown;
   };
 
-  explicit Core(OwnerAdmissionBudget budget) : budget(std::move(budget)) {}
+  explicit Core(OwnerAdmissionBudget budget)
+      : budget(std::move(budget)),
+        active_entry_limit(this->budget.max_active_entries),
+        active_byte_limit(this->budget.max_active_bytes) {}
 
   ~Core() {
     requestShutdown();
@@ -97,9 +100,9 @@ struct OwnerAdmission::Core
   }
 
   bool canGrant(uint64_t bytes) const noexcept {
-    return active_entries < budget.max_active_entries &&
-           bytes <= budget.max_active_bytes &&
-           active_bytes <= budget.max_active_bytes - bytes;
+    return active_entries < active_entry_limit &&
+           bytes <= active_byte_limit &&
+           active_bytes <= active_byte_limit - bytes;
   }
 
   bool hasWaiting() const noexcept { return waiting_entries != 0; }
@@ -194,7 +197,7 @@ struct OwnerAdmission::Core
 
   void collectGrantsLocked(std::vector<Action> &actions) {
     pruneExpiredLocked(actions);
-    while (active_entries < budget.max_active_entries) {
+    while (active_entries < active_entry_limit) {
       const std::size_t index = selectQueueLocked();
       if (index >= queues.size())
         break;
@@ -471,13 +474,33 @@ struct OwnerAdmission::Core
             deadline_total,
             shutdown_total,
             oldest_ms,
-            budget.max_active_entries,
-            budget.max_active_bytes,
+            active_entry_limit,
+            active_byte_limit,
             budget.max_wait_entries,
             budget.max_wait_bytes};
   }
 
+  bool setActiveLimits(uint64_t max_active_entries,
+                       uint64_t max_active_bytes) noexcept {
+    std::vector<Action> actions;
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (stopping)
+        return false;
+      active_entry_limit = std::clamp<uint64_t>(
+          max_active_entries, 1, budget.max_active_entries);
+      active_byte_limit = std::clamp<uint64_t>(
+          max_active_bytes, 1, budget.max_active_bytes);
+      collectGrantsLocked(actions);
+    }
+    timer_condition.notify_all();
+    finishActions(std::move(actions));
+    return true;
+  }
+
   const OwnerAdmissionBudget budget;
+  uint64_t active_entry_limit;
+  uint64_t active_byte_limit;
   mutable std::mutex mutex;
   std::condition_variable timer_condition;
   std::condition_variable ready_condition;
@@ -538,6 +561,12 @@ OwnerAdmissionStatus OwnerAdmission::admit(
   return core_->admit(std::move(options), std::move(completion));
 }
 
+bool OwnerAdmission::setActiveLimits(uint64_t max_active_entries,
+                                     uint64_t max_active_bytes) noexcept {
+  return core_ && core_->setActiveLimits(max_active_entries,
+                                         max_active_bytes);
+}
+
 void OwnerAdmission::requestShutdown() noexcept {
   if (core_)
     core_->requestShutdown();
@@ -588,6 +617,17 @@ OwnerAdmissionSnapshot globalOwnerAdmissionSnapshot() noexcept {
   return global_owner_admission.admission
              ? global_owner_admission.admission->snapshot()
              : OwnerAdmissionSnapshot{};
+}
+
+bool setGlobalOwnerAdmissionActiveLimits(
+    uint64_t max_active_entries, uint64_t max_active_bytes) noexcept {
+  OwnerAdmission *admission = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(global_owner_admission.mutex);
+    admission = global_owner_admission.admission.get();
+  }
+  return admission && admission->setActiveLimits(
+                          max_active_entries, max_active_bytes);
 }
 
 void requestGlobalOwnerAdmissionShutdown() noexcept {

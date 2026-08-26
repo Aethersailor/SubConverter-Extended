@@ -51,6 +51,17 @@ OwnerAdmissionSnapshot globalTransportAdmissionSnapshot() noexcept {
              : OwnerAdmissionSnapshot{};
 }
 
+bool setGlobalTransportAdmissionActiveLimits(
+    uint64_t max_active_entries, uint64_t max_active_bytes) noexcept {
+  OwnerAdmission *admission = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(global_transport_admission.mutex);
+    admission = global_transport_admission.admission.get();
+  }
+  return admission && admission->setActiveLimits(
+                          max_active_entries, max_active_bytes);
+}
+
 void requestGlobalTransportAdmissionShutdown() noexcept {
   OwnerAdmission *admission = nullptr;
   {

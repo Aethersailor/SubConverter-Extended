@@ -27,7 +27,11 @@
 #endif
 
 #include "handler/conversion_service.h"
+#include "generator/config/ruleconvert.h"
 #include "handler/settings.h"
+#include "runtime/owner_admission.h"
+#include "runtime/transport_admission.h"
+#include "server/request_context.h"
 #include "server/webserver.h"
 #include "utils/logger.h"
 #include "utils/string.h"
@@ -740,6 +744,181 @@ MemoryPressureSample memoryPressure(
   return sample;
 }
 
+struct ForceMaxGuardLimits {
+  uint64_t cpu_permits = 1;
+  uint64_t owner_entries = 1;
+  uint64_t owner_bytes = 1;
+  uint64_t transport_entries = 1;
+  uint64_t transport_bytes = 1;
+  uint64_t retained_bytes = 1;
+  uint64_t cache_bytes = 3;
+};
+
+uint64_t guardedHalf(uint64_t value) noexcept {
+  return std::max<uint64_t>(1, value / 2);
+}
+
+ForceMaxGuardLimits forceMaxGuardLimits(
+    const ForceMaxBudget &full, const ForceMaxBudget *observed,
+    bool guarded) noexcept {
+  ForceMaxGuardLimits limits{
+      full.compute_permits,
+      full.active_owners,
+      full.owner_active_bytes,
+      full.active_flows,
+      full.transport_active_bytes,
+      full.retained_response_bytes,
+      full.cache_bytes,
+  };
+  if (!guarded)
+    return limits;
+  limits.cpu_permits = guardedHalf(limits.cpu_permits);
+  limits.owner_entries = guardedHalf(limits.owner_entries);
+  limits.owner_bytes = guardedHalf(limits.owner_bytes);
+  limits.transport_entries = guardedHalf(limits.transport_entries);
+  limits.transport_bytes = guardedHalf(limits.transport_bytes);
+  limits.retained_bytes = guardedHalf(limits.retained_bytes);
+  limits.cache_bytes = std::max<uint64_t>(3, limits.cache_bytes / 2);
+  if (observed && observed->valid) {
+    limits.cpu_permits =
+        std::min(limits.cpu_permits, observed->compute_permits);
+    limits.owner_entries =
+        std::min(limits.owner_entries, observed->active_owners);
+    limits.owner_bytes =
+        std::min(limits.owner_bytes, observed->owner_active_bytes);
+    limits.transport_entries =
+        std::min(limits.transport_entries, observed->active_flows);
+    limits.transport_bytes =
+        std::min(limits.transport_bytes, observed->transport_active_bytes);
+    limits.retained_bytes = std::min(
+        limits.retained_bytes, observed->retained_response_bytes);
+    limits.cache_bytes =
+        std::min(limits.cache_bytes, observed->cache_bytes);
+  }
+  return limits;
+}
+
+void applyForceMaxGuardLimits(const ForceMaxGuardLimits &limits) noexcept {
+  setConversionCpuPermitLimit(limits.cpu_permits);
+  (void)setGlobalOwnerAdmissionActiveLimits(
+      limits.owner_entries, limits.owner_bytes);
+  (void)setGlobalTransportAdmissionActiveLimits(
+      limits.transport_entries, limits.transport_bytes);
+  configureRetainedResponseByteLimit(limits.retained_bytes);
+  const uint64_t response_bytes = limits.cache_bytes / 2;
+  const uint64_t ruleset_bytes = limits.cache_bytes / 4;
+  const uint64_t external_bytes =
+      limits.cache_bytes - response_bytes - ruleset_bytes;
+  configureResponseMicroCacheLimit(response_bytes);
+  configureRulesetConversionCache(
+      static_cast<size_t>(std::min<uint64_t>(
+          std::max<uint64_t>(1, ruleset_bytes / (UINT64_C(64) * 1024)),
+          SIZE_MAX)),
+      static_cast<size_t>(std::min<uint64_t>(ruleset_bytes, SIZE_MAX)));
+  configureExternalConfigCache(
+      static_cast<size_t>(std::min<uint64_t>(
+          std::max<uint64_t>(1, external_bytes / (UINT64_C(128) * 1024)),
+          SIZE_MAX)),
+      static_cast<size_t>(std::min<uint64_t>(external_bytes, SIZE_MAX)));
+}
+
+struct ForceMaxHardDanger {
+  bool danger = false;
+  bool telemetry_valid = true;
+  const char *reason = "none";
+  ForceMaxBudget observed_budget;
+};
+
+ForceMaxHardDanger detectForceMaxHardDanger(
+    ResourceControlSnapshot &snapshot,
+    const ResourceEnvelope &startup_envelope,
+    const ForceMaxBudget &full_budget,
+    uint64_t previous_memory_high, uint64_t previous_memory_max,
+    uint64_t previous_oom, uint64_t previous_oom_kill,
+    uint64_t previous_sock_throttled) noexcept {
+  detectMemory(snapshot);
+  detectFileLimits(snapshot);
+  const double affinity = detectAffinityCpus();
+  const double cpuset = detectCpuSetCpus();
+  const double quota = detectCpuQuota();
+  const double fallback = static_cast<double>(
+      std::max(1U, std::thread::hardware_concurrency()));
+  const double effective =
+      computeEffectiveCpu(affinity, cpuset, quota, fallback);
+  snapshot.affinity_cpus = static_cast<uint64_t>(affinity);
+  snapshot.cpuset_cpus = static_cast<uint64_t>(cpuset);
+  snapshot.cpu_quota_millis =
+      quota > 0.0 ? static_cast<uint64_t>(std::llround(quota * 1000.0)) : 0;
+  snapshot.effective_cpu_millis =
+      static_cast<uint64_t>(std::llround(effective * 1000.0));
+
+  const MemoryPressureSample memory = memoryPressure(snapshot);
+  snapshot.envelope = resourceEnvelopeFromSnapshot(snapshot);
+  ForceMaxHardDanger result;
+  result.telemetry_valid = memory.valid;
+  result.observed_budget = calculateForceMaxBudget(snapshot.envelope);
+  const auto setDanger = [&result](const char *reason) {
+    if (!result.danger) {
+      result.danger = true;
+      result.reason = reason;
+    }
+  };
+
+  if (snapshot.memory_events_oom_kill > previous_oom_kill)
+    setDanger("memory_oom_kill_event");
+  else if (snapshot.memory_events_oom > previous_oom)
+    setDanger("memory_oom_event");
+  else if (snapshot.memory_events_max > previous_memory_max)
+    setDanger("memory_max_event");
+  else if (snapshot.memory_events_high > previous_memory_high)
+    setDanger("memory_high_event");
+  else if (snapshot.memory_events_sock_throttled >
+           previous_sock_throttled)
+    setDanger("memory_sock_throttled_event");
+  if (memory.pressure)
+    setDanger("memory_near_hard_boundary");
+
+  const uint64_t current_memory_boundary =
+      resourceEnvelopeMemoryBoundary(snapshot.envelope);
+  const uint64_t startup_memory_boundary =
+      resourceEnvelopeMemoryBoundary(startup_envelope);
+  if (current_memory_boundary != 0 && startup_memory_boundary != 0 &&
+      current_memory_boundary < startup_memory_boundary)
+    setDanger("memory_limit_shrink");
+
+  if (snapshot.nofile_soft != 0) {
+    if (startup_envelope.nofile_soft != 0 &&
+        snapshot.nofile_soft < startup_envelope.nofile_soft)
+      setDanger("nofile_limit_shrink");
+    if (snapshot.open_fds_available &&
+        snapshot.open_fds >= snapshot.nofile_soft -
+            std::min(snapshot.nofile_soft, full_budget.reserved_fds))
+      setDanger("nofile_headroom_exhausted");
+  }
+
+  if (snapshot.pids_max != 0 && snapshot.pids_current != 0) {
+    if (startup_envelope.pids_max != 0 &&
+        snapshot.pids_max < startup_envelope.pids_max)
+      setDanger("pids_limit_shrink");
+    const uint64_t required_pids =
+        UINT64_C(8) + full_budget.compute_workers +
+        full_budget.io_runners + full_budget.quickjs_workers +
+        full_budget.handler_permits;
+    const uint64_t remaining = snapshot.pids_max > snapshot.pids_current
+                                   ? snapshot.pids_max - snapshot.pids_current
+                                   : 0;
+    if (remaining <= required_pids)
+      setDanger("pids_headroom_exhausted");
+  }
+
+  if (snapshot.effective_cpu_millis != 0 &&
+      startup_envelope.schedulable_cpu_millis != 0 &&
+      snapshot.effective_cpu_millis <
+          startup_envelope.schedulable_cpu_millis)
+    setDanger("cpu_limit_shrink");
+  return result;
+}
+
 void controllerLoop() noexcept {
   std::unique_lock<std::mutex> lock(runtime.mutex);
   uint64_t previous_accepted = requestAdmissionSnapshot().accepted;
@@ -749,23 +928,37 @@ void controllerLoop() noexcept {
   uint64_t previous_memory_max = runtime.snapshot.memory_events_max;
   uint64_t previous_oom = runtime.snapshot.memory_events_oom;
   uint64_t previous_oom_kill = runtime.snapshot.memory_events_oom_kill;
+  uint64_t previous_sock_throttled =
+      runtime.snapshot.memory_events_sock_throttled;
+  const ResourceEnvelope startup_envelope = runtime.snapshot.envelope;
+  const ForceMaxBudget full_force_max_budget =
+      runtime.snapshot.calculated_force_max_budget;
   ResourceGovernorState governor{
       std::max<uint64_t>(1, runtime.snapshot.suggested_cpu_permits), 0, 0};
+  PressureGuardState pressure_guard;
   while (!runtime.stopping) {
     if (runtime.condition.wait_for(lock, std::chrono::seconds(1),
                                    [] { return runtime.stopping; }))
       break;
     ResourceControlSnapshot next = runtime.snapshot;
-    const ResourcePermitBudget baseline = computeConservativeResourceBudget(
-        static_cast<double>(next.effective_cpu_millis) / 1000.0,
-        0);
-    next.max_cpu_permits = baseline.cpu_permits;
-    next.suggested_active_flows = baseline.active_flows;
-    next.suggested_outbound_connections = baseline.outbound_connections;
-    if (next.nofile_soft != 0)
-      next.suggested_outbound_connections = std::min<uint64_t>(
-          next.suggested_outbound_connections,
-          std::max<uint64_t>(1, next.nofile_soft / 4));
+    const bool force_max = next.effective_mode == "force_max";
+    if (force_max) {
+      next.max_cpu_permits = full_force_max_budget.compute_permits;
+      next.suggested_active_flows = full_force_max_budget.active_flows;
+      next.suggested_outbound_connections =
+          full_force_max_budget.outbound_active;
+    } else {
+      const ResourcePermitBudget baseline =
+          computeConservativeResourceBudget(
+              static_cast<double>(next.effective_cpu_millis) / 1000.0, 0);
+      next.max_cpu_permits = baseline.cpu_permits;
+      next.suggested_active_flows = baseline.active_flows;
+      next.suggested_outbound_connections = baseline.outbound_connections;
+      if (next.nofile_soft != 0)
+        next.suggested_outbound_connections = std::min<uint64_t>(
+            next.suggested_outbound_connections,
+            std::max<uint64_t>(1, next.nofile_soft / 4));
+    }
     lock.unlock();
     try {
       const RequestAdmissionSnapshot admission = requestAdmissionSnapshot();
@@ -777,53 +970,111 @@ void controllerLoop() noexcept {
       const uint64_t successful =
           lifecycle.successful_owners - previous_successful;
       previous_successful = lifecycle.successful_owners;
-      const MemoryPressureSample memory = memoryPressure(next);
-      const bool memory_event = memory.events_valid &&
-          (next.memory_events_high > previous_memory_high ||
-           next.memory_events_max > previous_memory_max ||
-           next.memory_events_oom > previous_oom ||
-           next.memory_events_oom_kill > previous_oom_kill);
-      if (memory.events_valid) {
+      MemoryPressureSample memory;
+      bool memory_event = false;
+      bool pressure = false;
+      if (!force_max) {
+        memory = memoryPressure(next);
+        memory_event = memory.events_valid &&
+            (next.memory_events_high > previous_memory_high ||
+             next.memory_events_max > previous_memory_max ||
+             next.memory_events_oom > previous_oom ||
+             next.memory_events_oom_kill > previous_oom_kill);
+        if (memory.events_valid) {
+          previous_memory_high = next.memory_events_high;
+          previous_memory_max = next.memory_events_max;
+          previous_oom = next.memory_events_oom;
+          previous_oom_kill = next.memory_events_oom_kill;
+        }
+        pressure = memory.pressure || memory_event;
+      }
+      const bool active = arrivals != 0 || successful != 0 ||
+                          scheduler.active != 0 ||
+                          scheduler.queued_entries != 0;
+      if (force_max) {
+        const ForceMaxHardDanger danger = detectForceMaxHardDanger(
+            next, startup_envelope, full_force_max_budget,
+            previous_memory_high, previous_memory_max, previous_oom,
+            previous_oom_kill, previous_sock_throttled);
         previous_memory_high = next.memory_events_high;
         previous_memory_max = next.memory_events_max;
         previous_oom = next.memory_events_oom;
         previous_oom_kill = next.memory_events_oom_kill;
-      }
-      const bool pressure = memory.pressure || memory_event;
-      const bool active = arrivals != 0 || successful != 0 ||
-                          scheduler.active != 0 ||
-                          scheduler.queued_entries != 0;
-      const bool force_max = next.effective_mode == "force_max";
-      const bool telemetry_valid = memory.valid &&
-          (!next.memory_events_supported || memory.events_valid);
-      const ResourceGovernorDecision decision = governorStep(
-          governor,
-          {next.max_cpu_permits, force_max, telemetry_valid,
-           pressure && !memory_event, memory_event, active});
-      next.suggested_cpu_permits = decision.permits;
-      next.controller_state = decision.state;
-      next.controller_reason = decision.reason;
-      next.pressure_fallback = decision.pressure_fallback;
-      setConversionCpuPermitLimit(decision.permits);
-      next.envelope = resourceEnvelopeFromSnapshot(next);
-      // force_max is a deterministic startup contract. Runtime telemetry may
-      // refresh the observable envelope, but it must not silently resize the
-      // budget that was already applied to the pre-listen runtimes.
-      if (!force_max) {
+        previous_sock_throttled = next.memory_events_sock_throttled;
+        const PressureGuardDecision decision = pressureGuardStep(
+            pressure_guard,
+            {danger.danger, danger.telemetry_valid, danger.reason});
+        const ForceMaxBudget *observed =
+            danger.observed_budget.valid ? &danger.observed_budget : nullptr;
+        const ForceMaxGuardLimits limits = forceMaxGuardLimits(
+            full_force_max_budget, observed, decision.guarded);
+        if (decision.guarded || decision.limits_changed)
+          applyForceMaxGuardLimits(limits);
+        else
+          setConversionCpuPermitLimit(limits.cpu_permits);
+        next.suggested_cpu_permits = limits.cpu_permits;
+        next.suggested_active_flows = limits.transport_entries;
+        next.suggested_outbound_connections = decision.guarded
+            ? std::min(full_force_max_budget.outbound_active,
+                       limits.owner_entries * 2)
+            : full_force_max_budget.outbound_active;
+        next.controller_state = decision.state;
+        next.controller_reason = decision.reason;
+        next.pressure_fallback = decision.guarded;
+        next.pressure_guarded = decision.guarded;
+        next.pressure_guard_activations = pressure_guard.activations;
+        next.pressure_guard_recoveries = pressure_guard.recoveries;
+        next.pressure_guard_repeated_activations =
+            pressure_guard.repeated_activations;
+      } else {
+        const bool telemetry_valid = memory.valid &&
+            (!next.memory_events_supported || memory.events_valid);
+        const ResourceGovernorDecision decision = governorStep(
+            governor,
+            {next.max_cpu_permits, false, telemetry_valid,
+             pressure && !memory_event, memory_event, active});
+        next.suggested_cpu_permits = decision.permits;
+        next.controller_state = decision.state;
+        next.controller_reason = decision.reason;
+        next.pressure_fallback = decision.pressure_fallback;
+        setConversionCpuPermitLimit(decision.permits);
+        next.envelope = resourceEnvelopeFromSnapshot(next);
         next.calculated_force_max_budget =
             calculateForceMaxBudget(next.envelope);
       }
       ++next.sample_count;
     } catch (...) {
-      const ResourceGovernorDecision decision = governorStep(
-          governor, {next.max_cpu_permits,
-                     next.effective_mode == "force_max", false, false,
-                     false, false});
-      next.suggested_cpu_permits = decision.permits;
-      next.controller_state = decision.state;
-      next.controller_reason = "telemetry_error";
-      next.pressure_fallback = true;
-      setConversionCpuPermitLimit(decision.permits);
+      if (force_max) {
+        const PressureGuardDecision decision = pressureGuardStep(
+            pressure_guard, {false, false, "telemetry_error_full"});
+        const ForceMaxGuardLimits limits = forceMaxGuardLimits(
+            full_force_max_budget, nullptr, false);
+        if (decision.limits_changed)
+          applyForceMaxGuardLimits(limits);
+        else
+          setConversionCpuPermitLimit(limits.cpu_permits);
+        next.suggested_cpu_permits = limits.cpu_permits;
+        next.suggested_active_flows = limits.transport_entries;
+        next.suggested_outbound_connections =
+            full_force_max_budget.outbound_active;
+        next.controller_state = decision.state;
+        next.controller_reason = "telemetry_error_full";
+        next.pressure_fallback = false;
+        next.pressure_guarded = false;
+        next.pressure_guard_activations = pressure_guard.activations;
+        next.pressure_guard_recoveries = pressure_guard.recoveries;
+        next.pressure_guard_repeated_activations =
+            pressure_guard.repeated_activations;
+      } else {
+        const ResourceGovernorDecision decision = governorStep(
+            governor, {next.max_cpu_permits, false, false, false,
+                       false, false});
+        next.suggested_cpu_permits = decision.permits;
+        next.controller_state = decision.state;
+        next.controller_reason = "telemetry_error";
+        next.pressure_fallback = true;
+        setConversionCpuPermitLimit(decision.permits);
+      }
     }
     lock.lock();
     runtime.snapshot = std::move(next);

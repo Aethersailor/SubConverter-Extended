@@ -257,6 +257,94 @@ inline ResourceGovernorDecision governorStep(
   return decision;
 }
 
+enum class PressureGuardPhase : uint8_t {
+  Full,
+  Guarded,
+  RecoveryConfirm,
+};
+
+struct PressureGuardState {
+  PressureGuardPhase phase = PressureGuardPhase::Full;
+  uint32_t clear_samples = 0;
+  uint64_t activations = 0;
+  uint64_t recoveries = 0;
+  uint64_t repeated_activations = 0;
+};
+
+struct PressureGuardInput {
+  bool hard_danger = false;
+  bool telemetry_valid = true;
+  const char *reason = "none";
+};
+
+struct PressureGuardDecision {
+  bool guarded = false;
+  bool limits_changed = false;
+  const char *state = "max_ready";
+  const char *reason = "hardware_limit";
+};
+
+inline PressureGuardDecision pressureGuardStep(
+    PressureGuardState &state,
+    const PressureGuardInput &input) noexcept {
+  constexpr uint32_t kRecoveryConfirmSamples = 3;
+  PressureGuardDecision decision;
+  if (input.hard_danger) {
+    if (state.phase != PressureGuardPhase::Guarded) {
+      if (state.activations != 0)
+        ++state.repeated_activations;
+      ++state.activations;
+      decision.limits_changed = true;
+    }
+    state.phase = PressureGuardPhase::Guarded;
+    state.clear_samples = 0;
+    decision.guarded = true;
+    decision.state = "pressure_guarded";
+    decision.reason = input.reason ? input.reason : "hard_resource_danger";
+    return decision;
+  }
+
+  if (!input.telemetry_valid) {
+    decision.limits_changed =
+        state.phase != PressureGuardPhase::Full;
+    if (decision.limits_changed)
+      ++state.recoveries;
+    state.phase = PressureGuardPhase::Full;
+    state.clear_samples = 0;
+    decision.reason = "telemetry_unavailable_full";
+    return decision;
+  }
+
+  if (state.phase == PressureGuardPhase::Guarded) {
+    state.phase = PressureGuardPhase::RecoveryConfirm;
+    state.clear_samples = 1;
+    decision.guarded = true;
+    decision.state = "recovery_confirm";
+    decision.reason = "hard_pressure_clear_confirm";
+    return decision;
+  }
+  if (state.phase == PressureGuardPhase::RecoveryConfirm) {
+    if (++state.clear_samples >= kRecoveryConfirmSamples) {
+      state.phase = PressureGuardPhase::Full;
+      state.clear_samples = 0;
+      ++state.recoveries;
+      decision.limits_changed = true;
+      decision.state = "max_ready";
+      decision.reason = "hard_pressure_recovered";
+      return decision;
+    }
+    decision.guarded = true;
+    decision.state = "recovery_confirm";
+    decision.reason = "hard_pressure_clear_confirm";
+    return decision;
+  }
+
+  decision.reason = input.telemetry_valid
+                        ? "hardware_limit"
+                        : "telemetry_unavailable_full";
+  return decision;
+}
+
 struct ResourceControlSnapshot {
   std::string mode = "compat";
   std::string effective_mode = "compat";
@@ -318,6 +406,10 @@ struct ResourceControlSnapshot {
   bool curve_valid = false;
   bool permits_applied = false;
   bool pressure_fallback = false;
+  bool pressure_guarded = false;
+  uint64_t pressure_guard_activations = 0;
+  uint64_t pressure_guard_recoveries = 0;
+  uint64_t pressure_guard_repeated_activations = 0;
   ResourceEnvelope envelope;
   ForceMaxBudget calculated_force_max_budget;
 };

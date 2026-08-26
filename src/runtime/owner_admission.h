@@ -110,6 +110,8 @@ public:
 
   OwnerAdmissionStatus admit(OwnerAdmissionOptions options,
                              OwnerAdmissionCompletion completion);
+  bool setActiveLimits(uint64_t max_active_entries,
+                       uint64_t max_active_bytes) noexcept;
   void requestShutdown() noexcept;
   bool join() noexcept;
   OwnerAdmissionSnapshot snapshot() const noexcept;
@@ -132,6 +134,8 @@ GlobalOwnerAdmissionInitStatus initializeGlobalOwnerAdmission(
     OwnerAdmissionBudget budget) noexcept;
 OwnerAdmission *globalOwnerAdmission() noexcept;
 OwnerAdmissionSnapshot globalOwnerAdmissionSnapshot() noexcept;
+bool setGlobalOwnerAdmissionActiveLimits(
+    uint64_t max_active_entries, uint64_t max_active_bytes) noexcept;
 void requestGlobalOwnerAdmissionShutdown() noexcept;
 bool joinGlobalOwnerAdmission() noexcept;
 
