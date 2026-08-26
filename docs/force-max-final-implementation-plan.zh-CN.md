@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：已授权实施；阶段 0～7 已完成，阶段 8 待开始。
+- 状态：已授权实施；阶段 0～8 已完成，阶段 9 待开始。
 - 目标分支：`dev`。
 - 阶段 0 规划基线：`6d5dcddd2810bbe95fb7e2bbf4f924c7a4cc536f`。
 - 范围：源码、测试、dev CI、dev OCI、HostBrr 测试实例和公开测试路径。
@@ -22,7 +22,7 @@
 | 5 ConversionFlow | 已完成 | `cbd0b2d5d1e9fb0e6a011b2732dd988ee34aa011` | Release 与 ASan/UBSan CTest 各 28/28；同步/重复 callback、取消、shutdown 矩阵 | 尚未切正式 force_max 入口 |
 | 6 external config/import | 已完成 | `2729408a36ba4be2b42256284f50ed72024fd01a` | Release 与 ASan/UBSan CTest 各 28/28；异步嵌套 import + flow 恢复 | 候选路径完成，正式入口尚未切换 |
 | 7 subscription/ruleset/base | 已完成 | `2414a6a6be39926fa49a29ceff723f11f635a19f`、`5eb577d3328d7a4d7db192f5b322fb0ed59034f1` | 两个子阶段 Release 与 ASan/UBSan CTest 各 28/28 | 候选路径完成，正式入口尚未切换 |
-| 8 inja/upload/QuickJS | 待开始 | — | — | — |
+| 8 inja/upload/QuickJS | 已完成 | `4cfff0240f1615d14ed2d5ff164cd5cef9211b74`、`722ba148ace373226610e887cc0316ddaf2d9918`、`28c3596af6be24f34f8746aa495104a8efc3d668` | 三个子阶段 Release 与 ASan/UBSan CTest 各 28/28 | 候选路径完成，正式入口尚未切换 |
 | 9 owner admission | 待开始 | — | — | — |
 | 10 transport admission | 待开始 | — | — | — |
 | 11 候选 flow/多线程 | 待开始 | — | — | — |
@@ -111,6 +111,16 @@
 - 扩展既有 fixture/helper：两个订阅并发下载与顺序解析、两个 ruleset + 一个 base 的混合 batch、两条 ConversionFlow 挂起/恢复路径、registry 归零；未新增测试文件。
 - subscription 子提交和 ruleset/base 子提交分别通过 Linux Release `28/28` 与完整 ASan/UBSan `28/28`；正式 force_max 请求仍未切候选 flow。
 - 本阶段未访问或修改 HostBrr，未部署远端容器，未触及 `master`、正式实例、tag、Release 或 `:latest`。
+
+## 阶段 8 验证证据
+
+- inja 子阶段增加 request-scoped resolver：未知动态 URL 只记录去重依赖并返回 `NeedsFetch`，Curl multi 获取完成后以同一冻结输入重新渲染；已解析 URL 不重复联网，依赖数、迭代次数、deadline、取消和驻留字节均有边界。
+- Gist 上传拆成 Compute 准备、Curl multi POST/PATCH 和独立 cleanup 持久化三段；取消发生在发网前时不产生远端副作用，远端成功后即使请求取消也完成本地原子状态提交。POST `201` 与 PATCH `200` 分别验证，原正文、managed prefix、JSON request body 和响应正文均计入对应父预算。
+- 新增独立 `QuickJsLane`：worker、queue entries/bytes、每 Runtime heap 与 VM stack 都由显式预算约束；每个任务在单一 lane worker 内独占 Runtime/Context，不跨线程共享，也不占普通 ComputeExecutor worker。
+- quickjspp 的进程级 class ID 在启动 worker 前串行预热；解释器 interrupt handler 读取父请求的单一绝对 deadline、取消令牌和 lane shutdown。原生 `sleep` 改为取消可唤醒的等待，脚本同步 `fetch` 继承父 deadline/取消，`fileWrite` 在副作用前重新检查取消与 deadline。
+- `runQuickJsOnFlow` 将 lane completion 仅作为 mailbox event 恢复；同步拒绝、正常完成、取消、deadline 和 shutdown 均走 exactly-once completion。候选测试证明脚本 sleep 期间普通 executor 仍可前进，queue count/bytes 可恢复，Runtime/Context 销毁后 lane 可逆序 join。
+- 扩展既有测试而未新增测试文件；inja、上传和 QuickJS 三个独立子提交分别通过 Linux Release `28/28` 与完整 ASan/UBSan `28/28`。QuickJS 最终 Release OCI image ID 为 `sha256:e3fa1d4f55b426821c1c15300f1cc2ee96961d10c192cb29a0a94a0de09e499c`，插桩 image ID 为 `sha256:9142a32e6da29a7afc7137b23b57827955b097e9dbae3aba00252b230d203235`。
+- 本阶段仍未把正式 force_max 请求切入 ConversionFlow 或 QuickJS lane；未访问或修改 HostBrr，未部署远端容器，未触及 `master`、正式实例、tag、Release 或 `:latest`。
 
 ## 一、固定范围与不可改变的决策
 
@@ -203,7 +213,7 @@
 - `outbound_active`、`outbound_per_host`、`outbound_open`、`outbound_idle_cache`；
 - transport/owner/flow queue entries 和 bytes；
 - retained response、fetch、cache 和工作内存父预算；
-- QuickJS compatibility lane worker/queue/bytes；
+- QuickJS compatibility lane worker/queue/bytes，以及每 worker heap/VM stack；
 - health/overload response 的 FD 和内存保留量。
 
 同一 `ResourceEnvelope + formula_revision` 必须得到逐字段完全相同的预算。预算必须单调、受硬边界约束、使用 checked arithmetic。`16 x CPU`、flow 256、Curl 1024、Beast I/O 1 等旧值不能继续作为项目 ceiling。
