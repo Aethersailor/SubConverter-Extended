@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：已授权实施；阶段 0～13 已完成，阶段 14 待开始。
+- 状态：已授权实施；阶段 0～14 已完成，阶段 15 待开始。
 - 目标分支：`dev`。
 - 阶段 0 规划基线：`6d5dcddd2810bbe95fb7e2bbf4f924c7a4cc536f`。
 - 范围：源码、测试、dev CI、dev OCI、HostBrr 测试实例和公开测试路径。
@@ -28,7 +28,7 @@
 | 11 候选 flow/多线程 | 已完成 | `33b003c394d5b9c6ca7ba0df4bb1457d0f499bc7` | Release 与 ASan/UBSan CTest 各 28/28；legacy/candidate ABBA；force_max OCI smoke | simple target 默认走 flow；复杂路径暂保留 legacy |
 | 12 全维度预算消费者 | 已完成 | `47196f0262218fa42eb9236b1d511088ceb07692` | 精确 SHA 的 Release 与 ASan/UBSan CTest 各 28/28；6C/12GiB OCI smoke | 全部容量在监听前一次性冻结并逐项核对 `applied=true` |
 | 13 离线公式标定 | 已完成 | `4a5dacf66263a4d89c018c920152681c9cff3d4c` | 精确 SHA 的 Release 与 ASan/UBSan CTest 各 28/28；WSL 多包络和 HostBrr 低权重 ABBA | 冻结 `force-max-v1`；新增独立 inbound connection 预算 |
-| 14 PressureGuard | 待开始 | — | — | — |
+| 14 PressureGuard | 已完成 | `2e5f1653716530b417754c3bfb8d8cf004c7ab77` | 精确 SHA 的 Release 与 ASan/UBSan CTest 各 28/28；真实 cgroup memory/CPU shrink 注入 | 仅硬危险收紧；固定确认后一次恢复 Full |
 | 15 原子启动/旧路径清理 | 待开始 | — | — | — |
 | 16 最终验证与 dev 交付 | 待开始 | — | — | — |
 
@@ -178,6 +178,16 @@
 - HostBrr 使用 `cpu-shares=64` 的短时低权重 A-C-C-A，未替换现有测试实例：每轮 192/192、141,068 字节、摘要一致。Stage 11 与 Stage 13 平均吞吐约为 34.8/36.8 response/s，候选提高约 5.9%；平均 p99 均约 3.65 秒。候选另通过 250 ms 慢上游、同 key 384 follower 洪峰，384/384 成功且无 503。
 - 精确产品提交的 Linux Release 与完整 ASan/UBSan CTest 均为 `28/28`。Release image ID 为 `sha256:a1d6d712025760aa89b825c8500ae87419d38272ccede0e387db1e3d6fc80b77`，插桩 image ID 为 `sha256:3fd0b81af19816a6142b05d3effb258fae8692993fd7b93454e98e77fb2add2b`，两者 OCI revision 均精确等于产品 SHA。
 - HostBrr 只加载临时 benchmark image 并运行临时低权重容器；未修改 Compose、现有容器或公网路由。临时远端文件、容器和 image tag 均已清理；正式与测试实例最终均为 healthy、`restart=0`、`OOM=false`。未触及 `master`、tag、Release 或 `:latest`。
+
+## 阶段 14 验证证据
+
+- force_max 不再进入通用逐级 governor；新增固定 `Full -> Guarded -> RecoveryConfirm -> Full` 状态机。硬危险持续时保持同一 Guarded 额度；连续 3 个清除样本后一次性恢复完整预算，不逐级增加 permit。遥测缺失或采样异常直接保持/恢复 Full，并报告 `telemetry_unavailable_full` 或 `telemetry_error_full`。
+- 触发源仅包括 memory high/max/OOM/OOM-kill/socket-throttled 事件、内存逼近硬边界、memory/nofile/pids/CPU 硬限额缩小，以及 FD/PID 最低前进余量耗尽。CPU 满载、CPU PSI、普通 backlog、队列增长、到达量和吞吐均不进入 force_max guard 判定。
+- Guarded 使用启动 full budget 的固定二分之一，并在外部硬限额缩小时与当前确定性 envelope 重新计算结果取更小值。动态收紧 CPU permit、owner/transport active count/bytes、retained response bytes 和三个 cache；已活动 lease 不取消，即使当前占用高于新上限也只阻止新 grant，待自然排空后再放行。
+- `OwnerAdmission::setActiveLimits` 在自身锁内只更新额度和收集可 grant waiter，在锁外执行 completion；恢复 Full 时立即按原公平/老化规则继续 grant。Dashboard 增加 guarded、activation、recovery 和 repeated activation 诊断，并通过实际 admission/CPU/cache/retained 值反映当前状态。
+- 真实 2 CPU/2 GiB OCI 注入中，两个 `yes` 进程满载 4 秒后仍为 Full、`applied=true`、activation 0。memory 2 GiB -> 1 GiB 后进入 `memory_limit_shrink`，CPU/owner/transport 从 `2/16/32` 收紧为 `1/8/16`；恢复 2 GiB 后一次回到 `2/16/32` 和 `applied=true`。随后 CPU quota 2 -> 1 触发第二次 Guarded，恢复后 activation/recovery/repeated 为 `2/2/1`。全过程 health 可用，优雅退出码 0，`restart=0`、`OOM=false`。
+- 精确产品提交的 Linux Release 完整 CTest 最终为 `28/28`；首次 exact build 曾有一次与本阶段路径隔离的 `webserver_error_httplib` 终态计数时序失败，审计测试路径后使用同一构建缓存复跑为 `28/28`，ASan/UBSan 完整 CTest 同样为 `28/28`。Release image ID 为 `sha256:ccba00389ccbac8ef6880d0f793d54510b507c988cd2716d45c4bf14355df990`，插桩 image ID 为 `sha256:24afd463af5f29b61f6fc182b5574dc8c4e63f78bf35737d3ba21c8ba82a53c7`，OCI revision 均精确等于产品 SHA。
+- 本阶段未访问或修改 HostBrr，未部署远端容器，未触及 `master`、正式实例、tag、Release 或 `:latest`。
 
 ## 一、固定范围与不可改变的决策
 
