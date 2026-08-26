@@ -25,6 +25,7 @@
 #include "handler/statistics.h"
 #include "handler/version_page.h"
 #include "handler/webget.h"
+#include "runtime/conversion_flow.h"
 #include "script/cron.h"
 #include "server/socket.h"
 #include "server/webserver.h"
@@ -192,6 +193,7 @@ void cron_tick_caller() {
 void shutdown_runtime() {
   shutdownResourceControlRuntime();
   shutdownConversionScheduler();
+  requestAllConversionFlowsShutdown();
   requestOwnedWebGetContinuationShutdown();
   (void)joinOwnedWebGetContinuationRuntime();
   shutdownRulesetExecutor();
@@ -203,6 +205,7 @@ void begin_runtime_shutdown() {
   cancelAllActiveRequests(RequestCancellationReason::Shutdown);
   shutdownResourceControlRuntime();
   requestConversionSchedulerShutdown();
+  requestAllConversionFlowsShutdown();
   requestOwnedWebGetContinuationShutdown();
   requestRulesetExecutorShutdown();
 }

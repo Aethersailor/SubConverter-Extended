@@ -121,6 +121,7 @@ void ComputeExecutor::prepareTask(TaskBase &task,
   task.enqueued_at = Clock::now();
   task.deadline = options.deadline;
   task.cancellation = std::move(options.cancellation);
+  task.control = options.control;
   if (options.preferred_worker &&
       *options.preferred_worker < workers_.size())
     task.preferred_worker = options.preferred_worker;
@@ -138,15 +139,29 @@ ComputeExecutor::enqueue(const std::shared_ptr<TaskBase> &task) {
     } else if (task->deadline != Clock::time_point::max() &&
                task->enqueued_at >= task->deadline) {
       status = SchedulerSubmitStatus::Deadline;
-    } else if (queued_entries_ >= budget_.max_queue_entries) {
+    } else if (task->control &&
+               control_queued_entries_ >=
+                   (budget_.max_control_entries != 0
+                        ? budget_.max_control_entries
+                        : budget_.max_queue_entries)) {
       status = SchedulerSubmitStatus::EntryLimit;
-    } else if (task->bytes > budget_.max_queue_bytes ||
-               queued_bytes_ > budget_.max_queue_bytes - task->bytes) {
+    } else if (!task->control &&
+               queued_entries_ - control_queued_entries_ >=
+                   budget_.max_queue_entries) {
+      status = SchedulerSubmitStatus::EntryLimit;
+    } else if (!task->control &&
+               (task->bytes > budget_.max_queue_bytes ||
+                queued_bytes_ > budget_.max_queue_bytes - task->bytes)) {
       status = SchedulerSubmitStatus::ByteLimit;
     } else {
-      queues_[queueIndex(task->cost)].emplace_back(task);
+      if (task->control) {
+        control_queue_.emplace_back(task);
+        ++control_queued_entries_;
+      } else {
+        queues_[queueIndex(task->cost)].emplace_back(task);
+        queued_bytes_ += task->bytes;
+      }
       ++queued_entries_;
-      queued_bytes_ += task->bytes;
       ++accepted_total_;
     }
     if (status != SchedulerSubmitStatus::Accepted)
@@ -185,9 +200,14 @@ void ComputeExecutor::requestShutdown(bool cancel_pending) noexcept {
           queue.pop_front();
         }
       }
+      while (!control_queue_.empty()) {
+        cancelled.emplace_back(std::move(control_queue_.front()));
+        control_queue_.pop_front();
+      }
       cancelled_total_ += queued_entries_;
       queued_entries_ = 0;
       queued_bytes_ = 0;
+      control_queued_entries_ = 0;
     }
   }
   for (const auto &task : cancelled)
@@ -241,6 +261,11 @@ ComputeExecutorSnapshot ComputeExecutor::snapshot() const {
   result.queued_bytes = queued_bytes_;
   result.max_queue_entries = budget_.max_queue_entries;
   result.max_queue_bytes = budget_.max_queue_bytes;
+  result.control_queued_entries = control_queued_entries_;
+  result.max_control_entries =
+      budget_.max_control_entries != 0
+          ? budget_.max_control_entries
+          : budget_.max_queue_entries;
   result.accepted_total = accepted_total_;
   result.rejected_total = rejected_total_;
   result.cancelled_total = cancelled_total_;
@@ -249,6 +274,8 @@ ComputeExecutorSnapshot ComputeExecutor::snapshot() const {
     if (!queue.empty())
       oldest = std::min(oldest, queue.front()->enqueued_at);
   }
+  if (!control_queue_.empty())
+    oldest = std::min(oldest, control_queue_.front()->enqueued_at);
   if (oldest != Clock::time_point::max())
     result.oldest_queue_age_ms = static_cast<uint64_t>(
         std::max<int64_t>(0, std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -315,9 +342,21 @@ ComputeExecutor::popLocked(std::size_t queue_index,
 }
 
 std::shared_ptr<ComputeExecutor::TaskBase>
+ComputeExecutor::popControlLocked() {
+  std::shared_ptr<TaskBase> task = std::move(control_queue_.front());
+  control_queue_.pop_front();
+  --control_queued_entries_;
+  --queued_entries_;
+  ++active_workers_;
+  return task;
+}
+
+std::shared_ptr<ComputeExecutor::TaskBase>
 ComputeExecutor::takeTaskLocked(std::size_t worker_index,
                                 bool &affinity_hit) {
   affinity_hit = false;
+  if (!control_queue_.empty())
+    return popControlLocked();
   const Clock::time_point now = Clock::now();
   std::size_t oldest_queue = queues_.size();
   Clock::time_point oldest = Clock::time_point::max();

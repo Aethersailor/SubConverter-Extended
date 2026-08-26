@@ -25,6 +25,7 @@
 #include "handler/conversion_service.h"
 #include "handler/webget.h"
 #include "runtime/compute_executor.h"
+#include "runtime/conversion_flow.h"
 #include "server/request_context.h"
 #include "utils/logger.h"
 #include "utils/redact.h"
@@ -713,6 +714,10 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(compute.max_queue_entries);
   writer.Key("max_queue_bytes");
   writer.Uint64(compute.max_queue_bytes);
+  writer.Key("control_queued_entries");
+  writer.Uint64(compute.control_queued_entries);
+  writer.Key("max_control_entries");
+  writer.Uint64(compute.max_control_entries);
   writer.Key("accepted_total");
   writer.Uint64(compute.accepted_total);
   writer.Key("rejected_total");
@@ -736,6 +741,21 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
     writer.EndObject();
   }
   writer.EndArray();
+  writer.EndObject();
+  const ConversionFlowRegistrySnapshot flows =
+      conversionFlowRegistrySnapshot();
+  writer.Key("conversion_flows");
+  writer.StartObject();
+  writer.Key("active");
+  writer.Uint64(flows.active);
+  writer.Key("created_total");
+  writer.Uint64(flows.created_total);
+  writer.Key("completed_total");
+  writer.Uint64(flows.completed_total);
+  writer.Key("rejected_total");
+  writer.Uint64(flows.rejected_total);
+  writer.Key("stopping");
+  writer.Bool(flows.stopping);
   writer.EndObject();
   const WorkloadSchedulerSnapshot legacy_flow = legacyRequestFlowSnapshot();
   writer.Key("legacy_request_flow");

@@ -27,6 +27,7 @@ struct ComputeExecutorBudget {
   uint64_t workers = 1;
   uint64_t max_queue_entries = 1;
   uint64_t max_queue_bytes = 1;
+  uint64_t max_control_entries = 0;
 
   bool operator==(const ComputeExecutorBudget &) const = default;
 };
@@ -38,6 +39,7 @@ struct ComputeTaskOptions {
       std::chrono::steady_clock::time_point::max();
   RequestCancellationToken cancellation;
   std::optional<std::size_t> preferred_worker;
+  bool control = false;
 };
 
 struct ComputeWorkerSnapshot {
@@ -59,6 +61,8 @@ struct ComputeExecutorSnapshot {
   uint64_t queued_bytes = 0;
   uint64_t max_queue_entries = 0;
   uint64_t max_queue_bytes = 0;
+  uint64_t control_queued_entries = 0;
+  uint64_t max_control_entries = 0;
   uint64_t accepted_total = 0;
   uint64_t rejected_total = 0;
   uint64_t cancelled_total = 0;
@@ -85,6 +89,7 @@ class ComputeExecutor {
     Clock::time_point deadline = Clock::time_point::max();
     RequestCancellationToken cancellation;
     std::optional<std::size_t> preferred_worker;
+    bool control = false;
   };
 
   template <class Function, class Result> struct FutureTask final : TaskBase {
@@ -189,6 +194,7 @@ private:
                                            bool &affinity_hit);
   std::shared_ptr<TaskBase> popLocked(std::size_t queue_index,
                                       std::size_t element_index);
+  std::shared_ptr<TaskBase> popControlLocked();
   void workerLoop(std::size_t worker_index) noexcept;
   static RequestCostClass normalizedCost(RequestCostClass cost) noexcept;
   static std::size_t queueIndex(RequestCostClass cost) noexcept;
@@ -204,6 +210,7 @@ private:
   std::condition_variable condition_;
   std::condition_variable ready_condition_;
   std::array<std::deque<std::shared_ptr<TaskBase>>, 3> queues_;
+  std::deque<std::shared_ptr<TaskBase>> control_queue_;
   std::vector<std::thread> workers_;
   std::vector<std::unique_ptr<WorkerMetrics>> worker_metrics_;
   std::array<uint8_t, 3> credits_ = kWeights;
@@ -211,6 +218,7 @@ private:
   uint64_t ready_workers_ = 0;
   uint64_t queued_entries_ = 0;
   uint64_t queued_bytes_ = 0;
+  uint64_t control_queued_entries_ = 0;
   uint64_t active_workers_ = 0;
   uint64_t accepted_total_ = 0;
   uint64_t rejected_total_ = 0;

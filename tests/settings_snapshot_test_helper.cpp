@@ -17,6 +17,7 @@
 #include "handler/settings_snapshot.h"
 #include "handler/webget.h"
 #include "parser/mihomo_bridge.h"
+#include "runtime/conversion_flow.h"
 #include "server/webserver.h"
 #include "utils/logger.h"
 
@@ -448,6 +449,181 @@ int main(int argc, char *argv[]) {
         retainedResponseByteSnapshot().used ==
             retained_before_async_cache;
 
+    bool conversion_flow_ok = false;
+    ComputeExecutor *compute_executor = globalComputeExecutor();
+    const SettingsSnapshot flow_settings =
+        captureEffectiveSettingsSnapshot();
+    if (compute_executor && flow_settings) {
+      auto flow_context = std::make_shared<RequestContext>(
+          "conversion-flow-complete", RequestContext::Clock::now(),
+          RequestContext::Clock::now() + std::chrono::seconds(10));
+      std::promise<ConversionFlowTerminal> flow_completion;
+      std::atomic<uint64_t> flow_completion_count{0};
+      std::atomic<bool> duplicate_rejected{false};
+      std::atomic<bool> initial_scope_ok{false};
+      std::atomic<bool> initial_phase_ok{false};
+      std::atomic<bool> operation_valid{false};
+      std::atomic<bool> operation_posted{false};
+      std::atomic<bool> resumed_scope_ok{false};
+      std::atomic<bool> resumed_phase_ok{false};
+      std::atomic<bool> completed_claimed{false};
+      std::shared_ptr<ConversionFlow> flow = ConversionFlow::create(
+          *compute_executor, {8, 1024 * 1024}, flow_settings,
+          flow_context,
+          [&](ConversionFlowTerminal terminal) {
+            flow_completion_count.fetch_add(1, std::memory_order_relaxed);
+            flow_completion.set_value(std::move(terminal));
+          });
+      const bool started = flow && flow->start(
+          [&](ConversionFlow &current) {
+            initial_scope_ok.store(
+                captureCurrentRequestContext() == flow_context &&
+                    captureEffectiveSettingsSnapshot() == flow_settings,
+                std::memory_order_release);
+            initial_phase_ok.store(
+                current.setPhase(
+                    ConversionFlowPhase::FetchingSubscriptions),
+                std::memory_order_release);
+            const ConversionFlowOperation operation =
+                current.beginOperation();
+            operation_valid.store(operation.valid(),
+                                  std::memory_order_release);
+            operation_posted.store(operation.post(
+                [&](ConversionFlow &resumed) {
+                  resumed_scope_ok.store(
+                      captureCurrentRequestContext() == flow_context &&
+                          captureEffectiveSettingsSnapshot() ==
+                              flow_settings,
+                      std::memory_order_release);
+                  resumed_phase_ok.store(
+                      resumed.setPhase(ConversionFlowPhase::Parsing),
+                      std::memory_order_release);
+                  completed_claimed.store(
+                      resumed.complete(), std::memory_order_release);
+                },
+                128),
+                std::memory_order_release);
+            duplicate_rejected.store(
+                !operation.post([](ConversionFlow &) {}, 128),
+                std::memory_order_release);
+          },
+          128);
+      ConversionFlowTerminal completed_terminal;
+      ConversionFlowSnapshot completed_snapshot;
+      if (started) {
+        completed_terminal = flow_completion.get_future().get();
+        completed_snapshot = flow->snapshot();
+      }
+
+      auto cancelled_context = std::make_shared<RequestContext>(
+          "conversion-flow-cancel", RequestContext::Clock::now(),
+          RequestContext::Clock::now() + std::chrono::seconds(10));
+      std::promise<void> cancel_started;
+      std::promise<ConversionFlowTerminal> cancel_completion;
+      std::atomic<bool> cancel_phase_ok{false};
+      std::atomic<bool> cancel_operation_valid{false};
+      std::shared_ptr<ConversionFlow> cancelled_flow =
+          ConversionFlow::create(
+              *compute_executor, {8, 1024 * 1024}, flow_settings,
+              cancelled_context,
+              [&](ConversionFlowTerminal terminal) {
+                cancel_completion.set_value(std::move(terminal));
+              });
+      const bool cancelled_started = cancelled_flow && cancelled_flow->start(
+          [&](ConversionFlow &current) {
+            cancel_phase_ok.store(
+                current.setPhase(
+                    ConversionFlowPhase::FetchingExternalConfig),
+                std::memory_order_release);
+            cancel_operation_valid.store(
+                current.beginOperation().valid(),
+                std::memory_order_release);
+            cancel_started.set_value();
+          });
+      ConversionFlowTerminal cancelled_terminal;
+      if (cancelled_started) {
+        cancel_started.get_future().wait();
+        cancelled_context->requestCancellation(
+            RequestCancellationReason::ClientDisconnected);
+        cancelled_terminal = cancel_completion.get_future().get();
+      }
+
+      auto shutdown_context = std::make_shared<RequestContext>(
+          "conversion-flow-shutdown", RequestContext::Clock::now(),
+          RequestContext::Clock::now() + std::chrono::seconds(10));
+      std::promise<void> shutdown_started;
+      std::promise<ConversionFlowTerminal> shutdown_completion;
+      std::atomic<bool> shutdown_operation_valid{false};
+      std::shared_ptr<ConversionFlow> shutdown_flow =
+          ConversionFlow::create(
+              *compute_executor, {8, 1024 * 1024}, flow_settings,
+              shutdown_context,
+              [&](ConversionFlowTerminal terminal) {
+                shutdown_completion.set_value(std::move(terminal));
+              });
+      const bool shutdown_flow_started = shutdown_flow &&
+          shutdown_flow->start(
+          [&](ConversionFlow &current) {
+            shutdown_operation_valid.store(
+                current.beginOperation().valid(),
+                std::memory_order_release);
+            shutdown_started.set_value();
+          });
+      ConversionFlowTerminal shutdown_terminal;
+      if (shutdown_flow_started) {
+        shutdown_started.get_future().wait();
+        requestAllConversionFlowsShutdown();
+        shutdown_terminal = shutdown_completion.get_future().get();
+      } else {
+        requestAllConversionFlowsShutdown();
+      }
+      const std::shared_ptr<ConversionFlow> rejected_after_shutdown =
+          ConversionFlow::create(
+              *compute_executor, {8, 1024 * 1024}, flow_settings,
+              std::make_shared<RequestContext>(
+                  "conversion-flow-rejected",
+                  RequestContext::Clock::now()),
+              [](ConversionFlowTerminal) {});
+      const ConversionFlowRegistrySnapshot flow_registry =
+          conversionFlowRegistrySnapshot();
+      conversion_flow_ok =
+          started &&
+          initial_scope_ok.load(std::memory_order_acquire) &&
+          initial_phase_ok.load(std::memory_order_acquire) &&
+          operation_valid.load(std::memory_order_acquire) &&
+          operation_posted.load(std::memory_order_acquire) &&
+          resumed_scope_ok.load(std::memory_order_acquire) &&
+          resumed_phase_ok.load(std::memory_order_acquire) &&
+          completed_claimed.load(std::memory_order_acquire) &&
+          completed_terminal.state ==
+              ConversionFlowTerminalState::Completed &&
+          flow_completion_count.load(std::memory_order_relaxed) == 1 &&
+          duplicate_rejected.load(std::memory_order_acquire) &&
+          completed_snapshot.terminal &&
+          completed_snapshot.phase == ConversionFlowPhase::Completed &&
+          completed_snapshot.mailbox_entries == 0 &&
+          completed_snapshot.mailbox_bytes == 0 &&
+          completed_snapshot.outstanding_operations == 0 &&
+          completed_snapshot.duplicate_callbacks == 1 &&
+          cancelled_started &&
+          cancel_phase_ok.load(std::memory_order_acquire) &&
+          cancel_operation_valid.load(std::memory_order_acquire) &&
+          cancelled_terminal.state ==
+              ConversionFlowTerminalState::Cancelled &&
+          cancelled_terminal.cancellation ==
+              RequestCancellationReason::ClientDisconnected &&
+          shutdown_flow_started &&
+          shutdown_operation_valid.load(std::memory_order_acquire) &&
+          shutdown_terminal.state ==
+              ConversionFlowTerminalState::Shutdown &&
+          shutdown_terminal.cancellation ==
+              RequestCancellationReason::Shutdown &&
+          !rejected_after_shutdown && flow_registry.active == 0 &&
+          flow_registry.created_total == 3 &&
+          flow_registry.completed_total == 3 &&
+          flow_registry.rejected_total >= 1 && flow_registry.stopping;
+    }
+
     std::promise<void> throwing_completion_called;
     (void)submitOwnedWebGetContinuation(
         RequestCostClass::Low, 0,
@@ -586,6 +762,8 @@ int main(int argc, char *argv[]) {
     writer.Bool(async_cache_rejection_ok);
     writer.Key("async_cache_resources_ok");
     writer.Bool(async_cache_resources_ok);
+    writer.Key("conversion_flow_ok");
+    writer.Bool(conversion_flow_ok);
     writer.Key("continuation_runtime_ok");
     writer.Bool(continuation_was_uninitialized &&
                 preinit_submit == SchedulerSubmitStatus::Stopping &&
