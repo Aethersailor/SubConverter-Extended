@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "utils/bounded_executor.h"
+#include "runtime/compute_executor.h"
 #include "utils/concurrent_lru_cache.h"
 #include "utils/cooperative_cpu.h"
 #include "utils/resource_control.h"
@@ -262,6 +263,118 @@ static void testWorkloadScheduler() {
   assert(self_join.status == SchedulerSubmitStatus::Accepted);
   assert(!self_join.future.get());
   scheduler.shutdown(true);
+}
+
+static void testComputeExecutor() {
+  ComputeExecutor executor({1, 2, 10});
+  assert(executor.ready());
+  assert(executor.snapshot().workers == 1);
+
+  std::promise<void> release;
+  std::shared_future<void> released = release.get_future().share();
+  std::promise<void> started;
+  auto blocker = executor.submit({}, [&] {
+    started.set_value();
+    released.wait();
+    return 1;
+  });
+  assert(blocker.status == SchedulerSubmitStatus::Accepted);
+  started.get_future().wait();
+
+  auto byte_rejected = executor.submit(
+      {.bytes = 11}, [] { return 2; });
+  assert(byte_rejected.status == SchedulerSubmitStatus::ByteLimit);
+  bool byte_error = false;
+  try {
+    (void)byte_rejected.future.get();
+  } catch (const SchedulerSubmitError &error) {
+    byte_error = error.status() == SchedulerSubmitStatus::ByteLimit;
+  }
+  assert(byte_error);
+
+  RequestCancellationSource cancelled_source;
+  cancelled_source.cancel(RequestCancellationReason::NoConsumers);
+  auto cancelled = executor.submit(
+      {.cancellation = cancelled_source.token()}, [] { return 3; });
+  assert(cancelled.status == SchedulerSubmitStatus::Cancelled);
+  bool cancellation_error = false;
+  try {
+    (void)cancelled.future.get();
+  } catch (const SchedulerSubmitError &error) {
+    cancellation_error =
+        error.status() == SchedulerSubmitStatus::Cancelled;
+  }
+  assert(cancellation_error);
+
+  auto deadline = executor.submit(
+      {.deadline = std::chrono::steady_clock::now() - 1ms},
+      [] { return 4; });
+  assert(deadline.status == SchedulerSubmitStatus::Deadline);
+  bool deadline_error = false;
+  try {
+    (void)deadline.future.get();
+  } catch (const SchedulerSubmitError &error) {
+    deadline_error = error.status() == SchedulerSubmitStatus::Deadline;
+  }
+  assert(deadline_error);
+
+  auto queued = executor.submit({.bytes = 5}, [] { return 5; });
+  auto self_join = executor.submit(
+      {.bytes = 5, .preferred_worker = 0},
+      [&executor] { return executor.join(); });
+  auto entry_rejected = executor.submit({}, [] { return 6; });
+  assert(queued.status == SchedulerSubmitStatus::Accepted);
+  assert(self_join.status == SchedulerSubmitStatus::Accepted);
+  assert(entry_rejected.status == SchedulerSubmitStatus::EntryLimit);
+  bool entry_error = false;
+  try {
+    (void)entry_rejected.future.get();
+  } catch (const SchedulerSubmitError &error) {
+    entry_error = error.status() == SchedulerSubmitStatus::EntryLimit;
+  }
+  assert(entry_error);
+
+  release.set_value();
+  assert(blocker.future.get() == 1);
+  assert(queued.future.get() == 5);
+  assert(!self_join.future.get());
+  ComputeExecutorSnapshot snapshot = executor.snapshot();
+  assert(snapshot.queued_entries == 0);
+  assert(snapshot.queued_bytes == 0);
+  assert(snapshot.accepted_total == 3);
+  assert(snapshot.rejected_total == 4);
+  assert(snapshot.worker_metrics.size() == 1);
+  assert(snapshot.worker_metrics[0].executed == 3);
+  assert(snapshot.worker_metrics[0].affinity_hits >= 1);
+  executor.shutdown(true);
+  assert(!executor.ready());
+
+  ComputeExecutor completion_executor({1, 1, 1024});
+  std::promise<void> completion_release;
+  std::shared_future<void> completion_released =
+      completion_release.get_future().share();
+  std::promise<void> completion_started;
+  auto completion_blocker = completion_executor.submit({}, [&] {
+    completion_started.set_value();
+    completion_released.wait();
+  });
+  completion_started.get_future().wait();
+  std::atomic<uint64_t> completion_count{0};
+  std::promise<SchedulerSubmitStatus> completion_status;
+  assert(completion_executor.submitContinuation(
+             {}, [] {},
+             [&](SchedulerSubmitStatus status, std::exception_ptr error) {
+               assert(error);
+               completion_count.fetch_add(1, std::memory_order_relaxed);
+               completion_status.set_value(status);
+             }) == SchedulerSubmitStatus::Accepted);
+  completion_executor.requestShutdown(true);
+  assert(completion_status.get_future().get() ==
+         SchedulerSubmitStatus::Stopping);
+  completion_release.set_value();
+  completion_blocker.future.get();
+  assert(completion_executor.join());
+  assert(completion_count.load(std::memory_order_relaxed) == 1);
 }
 
 static void testCooperativeCpuPermit() {
@@ -1040,6 +1153,7 @@ static void testCancellationTokenCallbacks() {
 int main() {
   testBoundedExecutor();
   testBoundedExecutorDeadlineAndCancellation();
+  testComputeExecutor();
   testWorkloadScheduler();
   testCooperativeCpuPermit();
   testWorkloadSchedulerActiveQueueWeights();

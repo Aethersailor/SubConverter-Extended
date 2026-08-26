@@ -24,6 +24,7 @@
 #include "handler/statistics_v2.h"
 #include "handler/conversion_service.h"
 #include "handler/webget.h"
+#include "runtime/compute_executor.h"
 #include "server/request_context.h"
 #include "utils/logger.h"
 #include "utils/redact.h"
@@ -686,6 +687,55 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(scheduler.cancelled);
   writer.Key("oldest_queued_age_ms");
   writer.Uint64(scheduler.oldest_queued_age_ms);
+  writer.EndObject();
+  const ComputeExecutorSnapshot compute = globalComputeExecutorSnapshot();
+  writer.Key("compute_executor");
+  writer.StartObject();
+  writer.Key("initialized");
+  writer.Bool(compute.initialized);
+  writer.Key("ready");
+  writer.Bool(compute.ready);
+  writer.Key("stopping");
+  writer.Bool(compute.stopping);
+  writer.Key("workers");
+  writer.Uint64(compute.workers);
+  writer.Key("ready_workers");
+  writer.Uint64(compute.ready_workers);
+  writer.Key("active_workers");
+  writer.Uint64(compute.active_workers);
+  writer.Key("idle_workers");
+  writer.Uint64(compute.idle_workers);
+  writer.Key("queued_entries");
+  writer.Uint64(compute.queued_entries);
+  writer.Key("queued_bytes");
+  writer.Uint64(compute.queued_bytes);
+  writer.Key("max_queue_entries");
+  writer.Uint64(compute.max_queue_entries);
+  writer.Key("max_queue_bytes");
+  writer.Uint64(compute.max_queue_bytes);
+  writer.Key("accepted_total");
+  writer.Uint64(compute.accepted_total);
+  writer.Key("rejected_total");
+  writer.Uint64(compute.rejected_total);
+  writer.Key("cancelled_total");
+  writer.Uint64(compute.cancelled_total);
+  writer.Key("oldest_queue_age_ms");
+  writer.Uint64(compute.oldest_queue_age_ms);
+  writer.Key("worker_metrics");
+  writer.StartArray();
+  for (const ComputeWorkerSnapshot &worker : compute.worker_metrics) {
+    writer.StartObject();
+    writer.Key("executed");
+    writer.Uint64(worker.executed);
+    writer.Key("cancelled");
+    writer.Uint64(worker.cancelled);
+    writer.Key("busy_nanoseconds");
+    writer.Uint64(worker.busy_nanoseconds);
+    writer.Key("affinity_hits");
+    writer.Uint64(worker.affinity_hits);
+    writer.EndObject();
+  }
+  writer.EndArray();
   writer.EndObject();
   const WorkloadSchedulerSnapshot legacy_flow = legacyRequestFlowSnapshot();
   writer.Key("legacy_request_flow");
