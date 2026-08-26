@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：已授权实施；阶段 0 已完成，阶段 1 待开始。
+- 状态：已授权实施；阶段 0～1 已完成，阶段 2 待开始。
 - 目标分支：`dev`。
 - 阶段 0 规划基线：`6d5dcddd2810bbe95fb7e2bbf4f924c7a4cc536f`。
 - 范围：源码、测试、dev CI、dev OCI、HostBrr 测试实例和公开测试路径。
@@ -14,8 +14,8 @@
 
 | 阶段 | 状态 | 产品源码 SHA | 验证/交付 | 备注 |
 |---|---|---|---|---|
-| 0 基线与账本 | 已完成 | `6d5dcddd2810bbe95fb7e2bbf4f924c7a4cc536f` | Linux CTest 28/28；Python 36/36；Go/Shell/Actionlint；本地 OCI smoke | 等待提交 |
-| 1 pipeline 拆分 | 待开始 | — | — | — |
+| 0 基线与账本 | 已完成 | `6d5dcddd2810bbe95fb7e2bbf4f924c7a4cc536f` | Linux CTest 28/28；Python 36/36；Go/Shell/Actionlint；本地 OCI smoke | 账本提交 `cb834f69` |
+| 1 pipeline 拆分 | 已完成 | `f6c66b70271f7f816a3b5b85e94a40753116774a` | Linux CTest 28/28；本地 force_max OCI smoke；既有输出哈希断言 | 纯机械拆分；无线程和行为变化 |
 | 2 预算数据合同 | 待开始 | — | — | — |
 | 3 ComputeExecutor | 待开始 | — | — | — |
 | 4 async fetch 合同 | 待开始 | — | — | — |
@@ -43,6 +43,13 @@
 - 本地真实 `force_max` 容器使用 `SUBCONVERTER_RESOURCE_CONTROL=force_max` 启动，完整 smoke 通过；运行期间 `restart=0`、`OOM=false`。启动日志确认异步 DNS、Curl multi 和 Beast 生效。
 - 基线容器已删除；基线镜像 `codex-subconverter-force-max-baseline:6d5dcddd` 暂时保留供后续 ABBA。约 `4.95GB` BuildKit 缓存暂时保留供逐阶段复用；不得执行全局 prune。
 - 阶段 0 未访问或修改 HostBrr，未部署远端容器，未触及 `master`、正式实例、tag、Release 或 `:latest`。
+
+## 阶段 1 验证证据
+
+- `conversion_pipeline.h/.cpp` 只承载参数与策略、依赖计划、订阅处理、目标生成、响应组装和阶段间取消检查的既有顺序；同步入口、线程模型、计时范围和错误正文不变。
+- Linux Release 构建完成 196 个 C++/测试目标；完整 CTest `28/28` 通过。
+- 本地真实 `force_max` 容器完整运行既有 smoke；其中固定历史输出 SHA-256 断言通过，容器 `restart=0`、`OOM=false`、退出码为 0。
+- 本阶段未新增测试文件，未访问或修改 HostBrr，未部署远端容器，未触及 `master`、正式实例、tag、Release 或 `:latest`。
 
 ## 一、固定范围与不可改变的决策
 
