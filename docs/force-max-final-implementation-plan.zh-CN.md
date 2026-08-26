@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：已授权实施；阶段 0～12 已完成，阶段 13 待开始。
+- 状态：已授权实施；阶段 0～13 已完成，阶段 14 待开始。
 - 目标分支：`dev`。
 - 阶段 0 规划基线：`6d5dcddd2810bbe95fb7e2bbf4f924c7a4cc536f`。
 - 范围：源码、测试、dev CI、dev OCI、HostBrr 测试实例和公开测试路径。
@@ -27,7 +27,7 @@
 | 10 transport admission | 已完成 | `d5a8b6beaa63a70038841f46dcd787e09b27d75f` | Release 与 ASan/UBSan CTest 各 28/28；Beast hard-capacity/health；force_max OCI smoke | 软容量等待；硬包络返回完整响应 |
 | 11 候选 flow/多线程 | 已完成 | `33b003c394d5b9c6ca7ba0df4bb1457d0f499bc7` | Release 与 ASan/UBSan CTest 各 28/28；legacy/candidate ABBA；force_max OCI smoke | simple target 默认走 flow；复杂路径暂保留 legacy |
 | 12 全维度预算消费者 | 已完成 | `47196f0262218fa42eb9236b1d511088ceb07692` | 精确 SHA 的 Release 与 ASan/UBSan CTest 各 28/28；6C/12GiB OCI smoke | 全部容量在监听前一次性冻结并逐项核对 `applied=true` |
-| 13 离线公式标定 | 待开始 | — | — | — |
+| 13 离线公式标定 | 已完成 | `4a5dacf66263a4d89c018c920152681c9cff3d4c` | 精确 SHA 的 Release 与 ASan/UBSan CTest 各 28/28；WSL 多包络和 HostBrr 低权重 ABBA | 冻结 `force-max-v1`；新增独立 inbound connection 预算 |
 | 14 PressureGuard | 待开始 | — | — | — |
 | 15 原子启动/旧路径清理 | 待开始 | — | — | — |
 | 16 最终验证与 dev 交付 | 待开始 | — | — | — |
@@ -167,6 +167,17 @@
 - 精确产品提交的 Linux Release 与完整 ASan/UBSan CTest 均为 `28/28`。Release image ID 为 `sha256:b04999bca988cd65dc335d60bb521c00b4312cfa78ee27e9eca72045abbc4cb4`，插桩 image ID 为 `sha256:ad493c098935c8eb6cf4824009bb56c35884d00c3c82fdae4d76dc969cf2e92f`，两者 OCI revision 均精确等于产品 SHA。
 - 使用 6 CPU、12 GiB、`pids=4096`、`nofile=524288` 的临时 OCI 包络验证当前 HostBrr 规格：预算自动得到 compute/I/O/QuickJS worker `6/2/3`、active flow `96`、active owner `48`、outbound active `96`，Dashboard 为 `applied=true`，完整 smoke 通过；优雅退出码为 0，`restart=0`、`OOM=false`。这些数值是当前包络的计算结果，不是项目硬编码上限，迁移到更强服务器会随探测结果重新计算。
 - 本阶段未访问或修改 HostBrr，未部署远端容器，未触及 `master`、正式实例、tag、Release 或 `:latest`。
+
+## 阶段 13 验证证据
+
+- 离线标定使用临时仓库外 Python 驱动和不可变 Stage 11/Stage 13 OCI。驱动强制服务端展开 1,200 个节点，并逐响应验证节点正文、字节数和有序响应摘要；早期 provider-native 结果未实际展开节点，已明确作废且未用于结论。
+- 首轮 HostBrr 边界测试发现 Stage 12 把 `active_flows=96` 同时用作 Beast 全部业务连接硬上限；冷请求或短暂 keep-alive 未释放时，96 个新请求中有 2 个进入 overload lane，返回完整 503。该结果违反包络内不拒绝门，测试立即停止并修正公式。
+- 最终 `force-max-v1` 增加独立 `inbound_connections`：按可调度 CPU 派生，再与通用 FD 包络交叉收敛；出站与入站各使用最多一半可用 FD，active flow 同时受 inbound 二分之一约束。HostBrr 类 6C/高 FD 包络得到 384 inbound connection，而 compute/owner/flow/outbound 仍为 `6/48/96/96`。该比例不读取 CPU 型号、厂商、L3 或部署者名称，也不保存每机曲线。
+- WSL 的有效负载 A-C-C-A 中，每轮均为 192/192 成功，单响应 141,068 字节且摘要相同。Stage 11 与 Stage 13 的平均吞吐约为 78.5/79.2 response/s，约 0.9% 差异；平均 p99 约为 1.50/1.53 秒，判定为噪声，因此未继续放大 compute、owner 或 outbound 比例。
+- 同一候选在 1C/1GiB、2C/2GiB、4C/4GiB、8C/12GiB holdout 包络均为 100% 成功，`applied=true`，无 capacity 失败、OOM 或 restart。6C/12GiB 下 192 并发 384/384、384 并发 768/768 成功；超过 96 个 active flow 时由 admission 等待，不由连接硬上限提前拒绝。
+- HostBrr 使用 `cpu-shares=64` 的短时低权重 A-C-C-A，未替换现有测试实例：每轮 192/192、141,068 字节、摘要一致。Stage 11 与 Stage 13 平均吞吐约为 34.8/36.8 response/s，候选提高约 5.9%；平均 p99 均约 3.65 秒。候选另通过 250 ms 慢上游、同 key 384 follower 洪峰，384/384 成功且无 503。
+- 精确产品提交的 Linux Release 与完整 ASan/UBSan CTest 均为 `28/28`。Release image ID 为 `sha256:a1d6d712025760aa89b825c8500ae87419d38272ccede0e387db1e3d6fc80b77`，插桩 image ID 为 `sha256:3fd0b81af19816a6142b05d3effb258fae8692993fd7b93454e98e77fb2add2b`，两者 OCI revision 均精确等于产品 SHA。
+- HostBrr 只加载临时 benchmark image 并运行临时低权重容器；未修改 Compose、现有容器或公网路由。临时远端文件、容器和 image tag 均已清理；正式与测试实例最终均为 healthy、`restart=0`、`OOM=false`。未触及 `master`、tag、Release 或 `:latest`。
 
 ## 一、固定范围与不可改变的决策
 
