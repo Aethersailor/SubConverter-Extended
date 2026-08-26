@@ -1,5 +1,6 @@
 #include "handler/conversion_pipeline.h"
 
+#include <cstdint>
 #include <utility>
 
 namespace {
@@ -50,6 +51,43 @@ bool resolveExternalConfigOnFlow(
              result = std::move(result)](ConversionFlow &resumed) mutable {
               completion(resumed, std::move(result));
             });
+      });
+  return true;
+}
+
+bool resolveSubscriptionsOnFlow(
+    ConversionFlow &flow,
+    std::vector<AsyncSubscriptionRequest> requests,
+    SettingsSnapshot settings,
+    std::shared_ptr<RequestContext> request_context,
+    ConversionFlowSubscriptionCompletion completion) {
+  const ConversionFlowOperation operation = flow.beginOperation();
+  if (!operation.valid() || !completion)
+    return false;
+  resolveSubscriptionSourcesAsync(
+      std::move(requests), std::move(settings),
+      std::move(request_context),
+      [operation, completion = std::move(completion)](
+          AsyncSubscriptionBatchResult result) mutable {
+        uint64_t bytes = 0;
+        for (const AsyncSubscriptionSlot &slot : result.slots) {
+          if (!slot.payload)
+            continue;
+          const uint64_t slot_bytes =
+              static_cast<uint64_t>(slot.payload->content.size()) +
+              static_cast<uint64_t>(slot.payload->response_headers.size());
+          if (slot_bytes > UINT64_MAX - bytes) {
+            bytes = UINT64_MAX;
+            break;
+          }
+          bytes += slot_bytes;
+        }
+        (void)operation.post(
+            [completion = std::move(completion),
+             result = std::move(result)](ConversionFlow &resumed) mutable {
+              completion(resumed, std::move(result));
+            },
+            bytes);
       });
   return true;
 }

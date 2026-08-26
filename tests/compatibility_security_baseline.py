@@ -1828,6 +1828,7 @@ def owned_webget_boundary_baseline(helper: Path, fixture_base: str) -> None:
             or hit["async_cache_resources_ok"] is not True
             or hit["conversion_flow_ok"] is not True
             or hit["async_external_config_ok"] is not True
+            or hit["async_subscription_ok"] is not True
             or hit["continuation_runtime_ok"] is not True
         ):
             raise AssertionError(

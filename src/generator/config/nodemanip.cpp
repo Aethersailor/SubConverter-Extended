@@ -401,8 +401,22 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
         }
       }
 
-      strSub = webGet(link, proxy, effectiveSettings().cacheSubscription,
-                      &extra_headers, request_headers, parse_set.fetch_context);
+      if(parse_set.resolved_subscription_content)
+      {
+        strSub = *parse_set.resolved_subscription_content;
+        if(parse_set.resolved_subscription_headers)
+          extra_headers = *parse_set.resolved_subscription_headers;
+      }
+      else if(parse_set.require_resolved_subscription)
+      {
+        writeLog(LOG_LEVEL_ERROR,
+                 "NODE_SOURCE_FAILED branch=sub reason=unresolved_async_source");
+        return -1;
+      }
+      else
+        strSub = webGet(link, proxy, effectiveSettings().cacheSubscription,
+                        &extra_headers, request_headers,
+                        parse_set.fetch_context);
     } else if (isNodeLink) {
       // 节点链接不需要下载，直接交给当前目标的解析器。
       writeLog(LOG_LEVEL_VERBOSE, "检测到节点链接，正在直接解析...");
@@ -423,8 +437,22 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
         }
       }
 
-      strSub = webGet(link, proxy, effectiveSettings().cacheSubscription,
-                      &extra_headers, request_headers, parse_set.fetch_context);
+      if(parse_set.resolved_subscription_content)
+      {
+        strSub = *parse_set.resolved_subscription_content;
+        if(parse_set.resolved_subscription_headers)
+          extra_headers = *parse_set.resolved_subscription_headers;
+      }
+      else if(parse_set.require_resolved_subscription)
+      {
+        writeLog(LOG_LEVEL_ERROR,
+                 "NODE_SOURCE_FAILED branch=sub reason=unresolved_async_source");
+        return -1;
+      }
+      else
+        strSub = webGet(link, proxy, effectiveSettings().cacheSubscription,
+                        &extra_headers, request_headers,
+                        parse_set.fetch_context);
     }
     /*
     if(strSub.size() == 0)

@@ -41,6 +41,9 @@ struct parse_settings
     NodeParserStats *parser_stats = nullptr;
     FetchContext fetch_context = FetchContext::TrustedConfig;
     string_icase_map *request_header = nullptr;
+    const std::string *resolved_subscription_content = nullptr;
+    const std::string *resolved_subscription_headers = nullptr;
+    bool require_resolved_subscription = false;
 #ifndef NO_JS_RUNTIME
     qjs::Runtime *js_runtime = nullptr;
     qjs::Context *js_context = nullptr;

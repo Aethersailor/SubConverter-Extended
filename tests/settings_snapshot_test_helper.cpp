@@ -18,6 +18,7 @@
 #include "handler/settings.h"
 #include "handler/settings_snapshot.h"
 #include "handler/webget.h"
+#include "generator/config/nodemanip.h"
 #include "parser/mihomo_bridge.h"
 #include "runtime/conversion_flow.h"
 #include "server/webserver.h"
@@ -318,6 +319,69 @@ int main(int argc, char *argv[]) {
         async_external_result.config.custom_proxy_group.size() == 1 &&
         async_external_result.config.custom_proxy_group.front().Name ==
             "AsyncImported";
+    auto make_subscription_requests = [&] {
+      std::vector<AsyncSubscriptionRequest> requests;
+      for (uint64_t index = 0; index < 2; ++index) {
+        AsyncSubscriptionRequest request;
+        request.source_index = index;
+        request.url = fixture_root + "/subscription.txt?async-batch=" +
+                      std::to_string(index);
+        request.proxy = ProxyPolicy::direct();
+        request.cache_ttl = 0;
+        request.context = FetchContext::TrustedConfig;
+        requests.emplace_back(std::move(request));
+      }
+      return requests;
+    };
+    std::promise<AsyncSubscriptionBatchResult> async_subscription_completion;
+    auto async_subscription_context = std::make_shared<RequestContext>(
+        "async-subscription-batch", RequestContext::Clock::now(),
+        RequestContext::Clock::now() + std::chrono::seconds(10));
+    resolveSubscriptionSourcesAsync(
+        make_subscription_requests(), captureEffectiveSettingsSnapshot(),
+        async_subscription_context,
+        [&](AsyncSubscriptionBatchResult result) {
+          async_subscription_completion.set_value(std::move(result));
+        });
+    AsyncSubscriptionBatchResult async_subscription_result =
+        async_subscription_completion.get_future().get();
+    ProxyPolicy async_subscription_proxy = ProxyPolicy::direct();
+    string_array async_exclude, async_include;
+    RegexMatchConfigs async_stream, async_time;
+    std::string async_sub_info;
+    std::vector<Proxy> async_nodes;
+    bool async_subscription_ok =
+        async_subscription_result.slots.size() == 2;
+    for (size_t index = 0;
+         index < async_subscription_result.slots.size(); ++index) {
+      const AsyncSubscriptionSlot &slot =
+          async_subscription_result.slots[index];
+      async_subscription_ok =
+          async_subscription_ok && slot.source_index == index &&
+          slot.failure == AsyncFetchFailure::None && slot.payload &&
+          slot.payload->status_code == 200;
+      if (!slot.payload)
+        continue;
+      parse_settings parse;
+      parse.proxy = &async_subscription_proxy;
+      parse.exclude_remarks = &async_exclude;
+      parse.include_remarks = &async_include;
+      parse.stream_rules = &async_stream;
+      parse.time_rules = &async_time;
+      parse.sub_info = &async_sub_info;
+      parse.parser_mode = NodeParserMode::LegacyOnly;
+      parse.fetch_context = FetchContext::TrustedConfig;
+      parse.resolved_subscription_content = &slot.payload->content;
+      parse.resolved_subscription_headers =
+          &slot.payload->response_headers;
+      parse.require_resolved_subscription = true;
+      async_subscription_ok =
+          async_subscription_ok &&
+          addNodes(slot.url, async_nodes, static_cast<int>(index), parse) == 0;
+    }
+    async_subscription_ok =
+        async_subscription_ok && async_nodes.size() == 2 &&
+        async_nodes[0].GroupId == 0 && async_nodes[1].GroupId == 1;
     constexpr size_t async_cache_consumers = 16;
     const uint64_t retained_before_async_cache =
         retainedResponseByteSnapshot().used;
@@ -586,6 +650,54 @@ int main(int argc, char *argv[]) {
       if (async_flow_started)
         async_flow_terminal = async_flow_completion.get_future().get();
 
+      auto subscription_flow_context = std::make_shared<RequestContext>(
+          "conversion-flow-subscriptions", RequestContext::Clock::now(),
+          RequestContext::Clock::now() + std::chrono::seconds(10));
+      std::promise<ConversionFlowTerminal> subscription_flow_completion;
+      std::atomic<bool> subscription_flow_result_ok{false};
+      std::atomic<bool> subscription_flow_dependency_started{false};
+      std::shared_ptr<ConversionFlow> subscription_flow =
+          ConversionFlow::create(
+              *compute_executor, {8, 1024 * 1024}, flow_settings,
+              subscription_flow_context,
+              [&](ConversionFlowTerminal terminal) {
+                subscription_flow_completion.set_value(
+                    std::move(terminal));
+              });
+      const bool subscription_flow_started = subscription_flow &&
+          subscription_flow->start([&](ConversionFlow &current) {
+            if (!current.setPhase(
+                    ConversionFlowPhase::FetchingSubscriptions))
+              throw std::runtime_error(
+                  "failed to enter subscription phase");
+            const bool dependency_started = resolveSubscriptionsOnFlow(
+                current, make_subscription_requests(), flow_settings,
+                subscription_flow_context,
+                [&](ConversionFlow &resumed,
+                    AsyncSubscriptionBatchResult result) {
+                  bool valid = result.slots.size() == 2;
+                  for (size_t index = 0; index < result.slots.size(); ++index)
+                    valid = valid && result.slots[index].source_index == index &&
+                            result.slots[index].payload &&
+                            result.slots[index].failure ==
+                                AsyncFetchFailure::None;
+                  subscription_flow_result_ok.store(
+                      valid && resumed.setPhase(
+                                   ConversionFlowPhase::Parsing),
+                      std::memory_order_release);
+                  (void)resumed.complete();
+                });
+            subscription_flow_dependency_started.store(
+                dependency_started, std::memory_order_release);
+            if (!dependency_started)
+              throw std::runtime_error(
+                  "failed to start subscription batch");
+          });
+      ConversionFlowTerminal subscription_flow_terminal;
+      if (subscription_flow_started)
+        subscription_flow_terminal =
+            subscription_flow_completion.get_future().get();
+
       auto cancelled_context = std::make_shared<RequestContext>(
           "conversion-flow-cancel", RequestContext::Clock::now(),
           RequestContext::Clock::now() + std::chrono::seconds(10));
@@ -681,6 +793,12 @@ int main(int argc, char *argv[]) {
           async_flow_result_ok.load(std::memory_order_acquire) &&
           async_flow_terminal.state ==
               ConversionFlowTerminalState::Completed &&
+          subscription_flow_started &&
+          subscription_flow_dependency_started.load(
+              std::memory_order_acquire) &&
+          subscription_flow_result_ok.load(std::memory_order_acquire) &&
+          subscription_flow_terminal.state ==
+              ConversionFlowTerminalState::Completed &&
           cancelled_started &&
           cancel_phase_ok.load(std::memory_order_acquire) &&
           cancel_operation_valid.load(std::memory_order_acquire) &&
@@ -695,8 +813,8 @@ int main(int argc, char *argv[]) {
           shutdown_terminal.cancellation ==
               RequestCancellationReason::Shutdown &&
           !rejected_after_shutdown && flow_registry.active == 0 &&
-          flow_registry.created_total == 4 &&
-          flow_registry.completed_total == 4 &&
+          flow_registry.created_total == 5 &&
+          flow_registry.completed_total == 5 &&
           flow_registry.rejected_total >= 1 && flow_registry.stopping;
     }
 
@@ -848,6 +966,8 @@ int main(int argc, char *argv[]) {
     writer.Uint64(async_external_result.config.custom_proxy_group.size());
     writer.Key("async_external_config_failure_stage");
     writer.String(async_external_result.failure_stage.c_str());
+    writer.Key("async_subscription_ok");
+    writer.Bool(async_subscription_ok);
     writer.Key("continuation_runtime_ok");
     writer.Bool(continuation_was_uninitialized &&
                 preinit_submit == SchedulerSubmitStatus::Stopping &&
