@@ -129,3 +129,29 @@ bool resolveConversionResourcesOnFlow(
       });
   return true;
 }
+
+bool renderTemplateOnFlow(
+    ConversionFlow &flow, std::string content,
+    template_args arguments, std::string include_scope,
+    FetchContext context, SettingsSnapshot settings,
+    std::shared_ptr<RequestContext> request_context,
+    ConversionFlowTemplateCompletion completion) {
+  const ConversionFlowOperation operation = flow.beginOperation();
+  if (!operation.valid() || !completion)
+    return false;
+  renderTemplateAsync(
+      std::move(content), std::move(arguments),
+      std::move(include_scope), context, std::move(settings),
+      std::move(request_context),
+      [operation, completion = std::move(completion)](
+          AsyncTemplateResult result) mutable {
+        const uint64_t bytes = result.output.size();
+        (void)operation.post(
+            [completion = std::move(completion),
+             result = std::move(result)](ConversionFlow &resumed) mutable {
+              completion(resumed, std::move(result));
+            },
+            bytes);
+      });
+  return true;
+}

@@ -7,6 +7,7 @@
 
 #include "handler/external_config_async.h"
 #include "handler/conversion_resource_async.h"
+#include "generator/template/template_async.h"
 #include "handler/subscription_async.h"
 #include "runtime/conversion_flow.h"
 
@@ -56,5 +57,15 @@ bool resolveConversionResourcesOnFlow(
     SettingsSnapshot settings,
     std::shared_ptr<RequestContext> request_context,
     ConversionFlowResourceCompletion completion);
+
+using ConversionFlowTemplateCompletion =
+    std::function<void(ConversionFlow &, AsyncTemplateResult)>;
+
+bool renderTemplateOnFlow(
+    ConversionFlow &flow, std::string content,
+    template_args arguments, std::string include_scope,
+    FetchContext context, SettingsSnapshot settings,
+    std::shared_ptr<RequestContext> request_context,
+    ConversionFlowTemplateCompletion completion);
 
 #endif // CONVERSION_PIPELINE_H_INCLUDED

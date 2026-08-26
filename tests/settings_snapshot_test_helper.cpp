@@ -431,6 +431,25 @@ int main(int argc, char *argv[]) {
           resource.kind == (index < 2 ? ConversionResourceKind::Ruleset
                                       : ConversionResourceKind::Base);
     }
+    const std::string async_template_content =
+        "marker={{ fetch(\"" + fixture_root +
+        "/template-marker\") }}";
+    std::promise<AsyncTemplateResult> async_template_completion;
+    auto async_template_context = std::make_shared<RequestContext>(
+        "async-template", RequestContext::Clock::now(),
+        RequestContext::Clock::now() + std::chrono::seconds(10));
+    renderTemplateAsync(
+        async_template_content, {}, "", FetchContext::TrustedConfig,
+        captureEffectiveSettingsSnapshot(), async_template_context,
+        [&](AsyncTemplateResult result) {
+          async_template_completion.set_value(std::move(result));
+        });
+    const AsyncTemplateResult async_template_result =
+        async_template_completion.get_future().get();
+    const bool async_template_ok =
+        async_template_result.status == AsyncTemplateStatus::Success &&
+        async_template_result.output == "marker=template-ok" &&
+        async_template_result.dependency_count == 1;
     constexpr size_t async_cache_consumers = 16;
     const uint64_t retained_before_async_cache =
         retainedResponseByteSnapshot().used;
@@ -794,6 +813,47 @@ int main(int argc, char *argv[]) {
         resource_flow_terminal =
             resource_flow_completion.get_future().get();
 
+      auto template_flow_context = std::make_shared<RequestContext>(
+          "conversion-flow-template", RequestContext::Clock::now(),
+          RequestContext::Clock::now() + std::chrono::seconds(10));
+      std::promise<ConversionFlowTerminal> template_flow_completion;
+      std::atomic<bool> template_flow_result_ok{false};
+      std::atomic<bool> template_flow_dependency_started{false};
+      std::shared_ptr<ConversionFlow> template_flow =
+          ConversionFlow::create(
+              *compute_executor, {8, 1024 * 1024}, flow_settings,
+              template_flow_context,
+              [&](ConversionFlowTerminal terminal) {
+                template_flow_completion.set_value(std::move(terminal));
+              });
+      const bool template_flow_started = template_flow &&
+          template_flow->start([&](ConversionFlow &current) {
+            if (!current.setPhase(ConversionFlowPhase::Generating))
+              throw std::runtime_error("failed to enter template phase");
+            const bool dependency_started = renderTemplateOnFlow(
+                current, async_template_content, {}, "",
+                FetchContext::TrustedConfig, flow_settings,
+                template_flow_context,
+                [&](ConversionFlow &resumed, AsyncTemplateResult result) {
+                  template_flow_result_ok.store(
+                      result.status == AsyncTemplateStatus::Success &&
+                          result.output == "marker=template-ok" &&
+                          result.dependency_count == 1 &&
+                          resumed.setPhase(
+                              ConversionFlowPhase::Publishing),
+                      std::memory_order_release);
+                  (void)resumed.complete();
+                });
+            template_flow_dependency_started.store(
+                dependency_started, std::memory_order_release);
+            if (!dependency_started)
+              throw std::runtime_error("failed to start template render");
+          });
+      ConversionFlowTerminal template_flow_terminal;
+      if (template_flow_started)
+        template_flow_terminal =
+            template_flow_completion.get_future().get();
+
       auto cancelled_context = std::make_shared<RequestContext>(
           "conversion-flow-cancel", RequestContext::Clock::now(),
           RequestContext::Clock::now() + std::chrono::seconds(10));
@@ -901,6 +961,12 @@ int main(int argc, char *argv[]) {
           resource_flow_result_ok.load(std::memory_order_acquire) &&
           resource_flow_terminal.state ==
               ConversionFlowTerminalState::Completed &&
+          template_flow_started &&
+          template_flow_dependency_started.load(
+              std::memory_order_acquire) &&
+          template_flow_result_ok.load(std::memory_order_acquire) &&
+          template_flow_terminal.state ==
+              ConversionFlowTerminalState::Completed &&
           cancelled_started &&
           cancel_phase_ok.load(std::memory_order_acquire) &&
           cancel_operation_valid.load(std::memory_order_acquire) &&
@@ -915,8 +981,8 @@ int main(int argc, char *argv[]) {
           shutdown_terminal.cancellation ==
               RequestCancellationReason::Shutdown &&
           !rejected_after_shutdown && flow_registry.active == 0 &&
-          flow_registry.created_total == 6 &&
-          flow_registry.completed_total == 6 &&
+          flow_registry.created_total == 7 &&
+          flow_registry.completed_total == 7 &&
           flow_registry.rejected_total >= 1 && flow_registry.stopping;
     }
 
@@ -1072,6 +1138,8 @@ int main(int argc, char *argv[]) {
     writer.Bool(async_subscription_ok);
     writer.Key("async_conversion_resources_ok");
     writer.Bool(async_conversion_resources_ok);
+    writer.Key("async_template_ok");
+    writer.Bool(async_template_ok);
     writer.Key("continuation_runtime_ok");
     writer.Bool(continuation_was_uninitialized &&
                 preinit_submit == SchedulerSubmitStatus::Stopping &&

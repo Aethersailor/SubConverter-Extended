@@ -120,6 +120,7 @@ SET(SUBCONVERTER_RUNTIME_SOURCES
     src/generator/config/ruleconvert.cpp
     src/generator/config/subexport.cpp
     src/generator/template/templates.cpp
+    src/generator/template/template_async.cpp
     src/handler/dashboard_auth.cpp
     src/handler/dashboard_auth_limiter.cpp
     src/handler/dashboard_page.cpp
