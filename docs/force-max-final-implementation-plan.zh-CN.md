@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：已授权实施；阶段 0～15 已完成，阶段 16 待开始。
+- 状态：实施完成；阶段 0～16 已完成。
 - 目标分支：`dev`。
 - 阶段 0 规划基线：`6d5dcddd2810bbe95fb7e2bbf4f924c7a4cc536f`。
 - 范围：源码、测试、dev CI、dev OCI、HostBrr 测试实例和公开测试路径。
@@ -30,7 +30,7 @@
 | 13 离线公式标定 | 已完成 | `4a5dacf66263a4d89c018c920152681c9cff3d4c` | 精确 SHA 的 Release 与 ASan/UBSan CTest 各 28/28；WSL 多包络和 HostBrr 低权重 ABBA | 冻结 `force-max-v1`；新增独立 inbound connection 预算 |
 | 14 PressureGuard | 已完成 | `2e5f1653716530b417754c3bfb8d8cf004c7ab77` | 精确 SHA 的 Release 与 ASan/UBSan CTest 各 28/28；真实 cgroup memory/CPU shrink 注入 | 仅硬危险收紧；固定确认后一次恢复 Full |
 | 15 原子启动/旧路径清理 | 已完成 | `7cce0f0c46afe56f715ad299604112c8172aaef6` | 精确 SHA 的 Release 与 ASan/UBSan CTest 各 28/28；2C/2GiB OCI 路径与关闭 smoke | 两阶段 coordinator 在监听前发布 ready；force 专用旧 scheduler 和 ABBA override 已删除 |
-| 16 最终验证与 dev 交付 | 待开始 | — | — | — |
+| 16 最终验证与 dev 交付 | 已完成 | `6c67a0f0ab16a007fb46da6f8e5bc0134f8d3b03` | CI、CodeQL、双 registry OCI、HostBrr dev 回滚链、公网 smoke 和低权重 soak | 部署 digest `sha256:ee78c1579f7a8ddb48b163b528ced577149c226681c86ef0238533e4a6f323f0` |
 
 ## 阶段 0 基线证据
 
@@ -201,6 +201,20 @@
 - 真实 2 CPU/2 GiB OCI smoke 中，启动即得到 Compute/I/O/QuickJS `2/1/1`、flow/owner/outbound active `32/16/32`，Dashboard 为 `max_ready`、`applied=true`。simple 请求增加 `ConversionFlow`，带 script 的复杂请求只增加共享 `conversionScheduler`，旧 scheduler 始终为 0；两者均返回 200 和相同 56 字节正文。优雅关闭退出码为 0，运行期间 `restart=0`、`OOM=false`。
 - 为单独验证远程 external config，使用临时隔离 Docker network 和仓库外用途的只读 HTTP fixture 容器逐请求观察 flow 计数；请求成功后 `created/completed` 最终各增加 1。临时配置文件、fixture 容器、network 和专用 Python fixture image 已清理；精确 Stage 15 镜像与 BuildKit cache 暂留供阶段 16 复用，不执行全局 prune。
 - 本阶段未访问或修改 HostBrr，未部署远端容器，未触及 `master`、正式实例、tag、Release 或 `:latest`。
+
+## 阶段 16 验证与交付证据
+
+- 最终验证源码为 `6c67a0f0ab16a007fb46da6f8e5bc0134f8d3b03`，其中产品实现保持阶段 15 的 `7cce0f0c46afe56f715ad299604112c8172aaef6`，后续提交只增加阶段 15 证据。GitHub build run `32997631499` 全部成功：源码 head/metadata、Python、Go、Actionlint、Shell/交付合同、amd64 完整构建与 OCI smoke、arm64/armv7 非发布交叉构建、manifest 发布和临时 registry 数据清理均通过。Windows、手动 sanitizer 和正式发布 job 按 dev 合同跳过；精确产品 SHA 的本地 ASan/UBSan 28/28 已在阶段 15 完成。
+- CodeQL run `32997631545` 全部成功，覆盖 C/C++、Go、Python 和 Actions。C/C++ cache restore 曾产生非阻断 annotation，但手工构建、分析与上传均成功，不影响结论。
+- CI 测试后的 `:dev` 在 Docker Hub 与 GHCR 得到相同 manifest digest `sha256:ee78c1579f7a8ddb48b163b528ced577149c226681c86ef0238533e4a6f323f0`，只含 `linux/amd64`。独立拉取检查得到 revision `6c67a0f0ab16a007fb46da6f8e5bc0134f8d3b03`、version `dev`；HostBrr 最终镜像大小为 23,064,155 字节。
+- 部署前 HostBrr 测试实例为 revision `b727a6f343b291841fc7979b6a980eefd99c9320`、digest `sha256:3c706d58f5e662185a3001d4dc90989030efea5330b584e5d38b495890fdaac3`。正式实例为 revision `7065ec839fe246f9e9fb670f272a8f4c9250c6df`、digest `sha256:5986d0db938d85482185e51b55be3a0326e56c1ba3e3f8326895e89f31804475`。两者均 healthy、`restart=0`、`OOM=false`；测试 Compose/pref 和完整持久状态边界在变更前完成盘点。
+- 部署只停止和重建 `/opt/subconverter-extended-dev` 的测试服务。停机后创建包含 Compose、pref 与 statistics 状态的临时一致性快照，再执行旧 `b727a6f` -> 候选 `6c67a0f` -> 旧 `b727a6f` -> 候选 `6c67a0f`。三次容器分别为 `670156b6…`、`67ba165e…`、`87599b51…`，每次均等待 local health 与 image/revision 一致；回滚链完成后删除临时快照。Compose SHA-256 `e77ff3e4553dd9adb8e5f76f9ea86bae4352d38f9e4f45992a9682ed8ba61457` 和 pref 校验和保持不变。
+- 最终容器启动日志顺序为 resource control -> `FORCE_MAX_RUNTIME_PREPARED` -> `FORCE_MAX_RUNTIME_READY generation=1` -> HTTP listen -> Beast active。公网 `https://test-api.asailor.org` 的 health 为 200/`ok`，版本页与 CORS probe 均返回 `dev-6c67a0f`，不再出现旧 revision；完整 smoke 在部署后和最终资源状态恢复后各通过一次，覆盖 Clash、sing-box、Surge 与 legacy parser。
+- HostBrr Dashboard 最终为 coordinator `ready=true/generation=1`、`force_max/max_ready`、`applied=true`、formula `force-max-v1`。当前硬件包络自动得到 Compute/I/O/QuickJS `6/2/3`、active flow/owner/outbound `96/48/96`、inbound `384`；PressureGuard activation 0，旧 `legacy_request_flow` 全部计数为 0。这些值只来自当前探测结果，不是项目硬限制。
+- 最终低权重负载使用 64 节点、3,904 字节响应和固定 SHA-256 校验：384 distinct small、384 same-key heavier、96 distinct heavier 均 100% HTTP 200；120 秒 32 并发混合 soak 完成 151,997/151,997，吞吐 1,266.4 response/s，p50/p95/p99 为 23/44/58 ms。容器峰值约 196.39% CPU、40.35 MiB RSS、38 PIDs，结束后 health 正常、`restart=0`、`OOM=false`、无 capacity rejection 或正文漂移。
+- soak 前把测试容器 CPU shares 临时降为 64。Docker update 接口不能以 0 恢复 Compose 的未设置状态，首个收尾命令因此返回非零；该问题仅属于临时验证配置，不是产品失败。随后使用未修改的 Compose 精确重建同一候选镜像，将 `CpuShares` 恢复为原始 0，并再次通过完整公网 smoke。临时 driver、结果、监控文件均已删除。
+- 本地 Stage 15 worktree/exact/ASan 镜像 tag 和为 registry 复核拉取的临时镜像已按精确 ID 删除；WSL 与 HostBrr 均无本轮临时容器、network、脚本或状态快照。可复用 BuildKit cache 保留，未执行全局 Docker prune。
+- 正式实例在部署、回滚和负载前后始终保持同一 container ID `2cdefe00…`、image、启动时间、`restart=0`、`OOM=false`，未重启、未重建、未修改。阶段 16 未触及 `master`、tag、Release 或 `:latest`。
 
 ## 一、固定范围与不可改变的决策
 
