@@ -6,11 +6,10 @@
 
 #include "utils/resource_probe.h"
 
-inline constexpr const char *kProvisionalForceMaxFormulaRevision =
-    "force-max-provisional-v2";
+inline constexpr const char *kForceMaxFormulaRevision = "force-max-v1";
 
 struct ForceMaxBudget {
-  std::string formula_revision = kProvisionalForceMaxFormulaRevision;
+  std::string formula_revision = kForceMaxFormulaRevision;
   bool valid = false;
   bool envelope_complete = false;
   std::string validation_error;
@@ -21,6 +20,7 @@ struct ForceMaxBudget {
   uint64_t handler_permits = 0;
   uint64_t active_owners = 0;
   uint64_t active_flows = 0;
+  uint64_t inbound_connections = 0;
 
   uint64_t outbound_active = 0;
   uint64_t outbound_per_host = 0;
@@ -56,7 +56,7 @@ struct ForceMaxBudget {
   bool operator==(const ForceMaxBudget &) const = default;
 };
 
-ForceMaxBudget calculateProvisionalForceMaxBudget(
+ForceMaxBudget calculateForceMaxBudget(
     const ResourceEnvelope &envelope) noexcept;
 bool validateForceMaxBudget(const ForceMaxBudget &budget,
                             std::string *error = nullptr) noexcept;

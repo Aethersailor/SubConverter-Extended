@@ -1059,7 +1059,7 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
       static_cast<uint64_t>(std::max(1, global.maxServerThreads)) ==
           calculated.handler_permits &&
       static_cast<uint64_t>(std::max(1, global.maxPendingConns)) ==
-          calculated.active_flows;
+          calculated.inbound_connections;
   writer.Bool(force_max_applied);
   writer.Key("validation_error");
   writer.String(calculated.validation_error.c_str());
@@ -1075,6 +1075,8 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(calculated.active_owners);
   writer.Key("active_flows");
   writer.Uint64(calculated.active_flows);
+  writer.Key("inbound_connections");
+  writer.Uint64(calculated.inbound_connections);
   writer.Key("outbound_active");
   writer.Uint64(calculated.outbound_active);
   writer.Key("outbound_per_host");

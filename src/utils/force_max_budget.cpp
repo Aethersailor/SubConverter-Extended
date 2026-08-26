@@ -61,6 +61,11 @@ bool validateForceMaxBudget(const ForceMaxBudget &budget,
     return invalid("zero_runtime_capacity");
   if (budget.active_owners > budget.active_flows)
     return invalid("owners_exceed_flows");
+  uint64_t minimum_inbound_connections = 0;
+  if (!checkedMultiply(budget.active_flows, 2,
+                       minimum_inbound_connections) ||
+      budget.inbound_connections < minimum_inbound_connections)
+    return invalid("insufficient_inbound_connection_headroom");
   if (budget.outbound_active == 0 ||
       budget.outbound_per_host > budget.outbound_active ||
       budget.outbound_active > budget.outbound_open ||
@@ -121,7 +126,7 @@ bool validateForceMaxBudget(const ForceMaxBudget &budget,
   return true;
 }
 
-ForceMaxBudget calculateProvisionalForceMaxBudget(
+ForceMaxBudget calculateForceMaxBudget(
     const ResourceEnvelope &envelope) noexcept {
   ForceMaxBudget budget;
   budget.envelope_complete = envelope.complete;
@@ -174,10 +179,19 @@ ForceMaxBudget calculateProvisionalForceMaxBudget(
   }
   uint64_t desired_outbound = 0;
   uint64_t desired_open = 0;
+  uint64_t desired_inbound = 0;
   if (!assignScaled(cpu_units, 16, desired_outbound, budget) ||
-      !assignScaled(desired_outbound, 4, desired_open, budget))
+      !assignScaled(desired_outbound, 4, desired_open, budget) ||
+      !assignScaled(cpu_units, 64, desired_inbound, budget))
     return budget;
-  budget.outbound_open = std::min(desired_open, usable_fds);
+  const uint64_t outbound_fd_budget = usable_fds / 2;
+  budget.outbound_open = std::min(desired_open, outbound_fd_budget);
+  budget.inbound_connections =
+      std::min(desired_inbound, usable_fds - budget.outbound_open);
+  if (budget.outbound_open < 2 || budget.inbound_connections < 2) {
+    fail(budget, "insufficient_connection_fds");
+    return budget;
+  }
   budget.outbound_active =
       std::min(desired_outbound,
                std::max<uint64_t>(1, budget.outbound_open / 2));
@@ -230,7 +244,12 @@ ForceMaxBudget calculateProvisionalForceMaxBudget(
       budget.active_owners,
       std::min(budget.active_flows,
                std::max<uint64_t>(1, budget.working_memory_bytes /
-                                         (UINT64_C(512) * 1024))));
+                                          (UINT64_C(512) * 1024))));
+  budget.active_flows = std::min(
+      budget.active_flows,
+      std::max<uint64_t>(1, budget.inbound_connections / 2));
+  budget.active_owners =
+      std::min(budget.active_owners, budget.active_flows);
   budget.quickjs_workers =
       std::max<uint64_t>(1, budget.compute_workers / 2);
   budget.quickjs_queue_bytes =

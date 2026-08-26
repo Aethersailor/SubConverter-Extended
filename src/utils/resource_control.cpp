@@ -599,7 +599,7 @@ ResourceControlSnapshot discover(const Settings &settings,
       hardwarePinMatches(snapshot, settings.forceMaxCurveFingerprint);
   snapshot.envelope = resourceEnvelopeFromSnapshot(snapshot);
   snapshot.calculated_force_max_budget =
-      calculateProvisionalForceMaxBudget(snapshot.envelope);
+      calculateForceMaxBudget(snapshot.envelope);
   snapshot.controller_state = mode == ResourceControlMode::Compat
                                   ? "compat"
                                   : mode == ResourceControlMode::Adaptive
@@ -811,7 +811,7 @@ void controllerLoop() noexcept {
       // budget that was already applied to the pre-listen runtimes.
       if (!force_max) {
         next.calculated_force_max_budget =
-            calculateProvisionalForceMaxBudget(next.envelope);
+            calculateForceMaxBudget(next.envelope);
       }
       ++next.sample_count;
     } catch (...) {
@@ -877,7 +877,7 @@ void configureResourceControl(Settings &settings) {
     admission_bytes = force_max.transport_active_bytes;
     retained_bytes = force_max.retained_response_bytes;
     settings.maxPendingConns = static_cast<int>(
-        std::min<uint64_t>(force_max.active_flows, INT_MAX));
+        std::min<uint64_t>(force_max.inbound_connections, INT_MAX));
     snapshot.suggested_cpu_permits = force_max.compute_permits;
     snapshot.max_cpu_permits = force_max.compute_permits;
     snapshot.suggested_active_flows = force_max.active_flows;

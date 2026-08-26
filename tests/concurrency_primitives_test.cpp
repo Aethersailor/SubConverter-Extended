@@ -1025,13 +1025,14 @@ static void testResourceControlPrimitives() {
   hostbrr_like.pids_max = 4096;
   hostbrr_like.complete = true;
   const ForceMaxBudget deterministic_first =
-      calculateProvisionalForceMaxBudget(hostbrr_like);
+      calculateForceMaxBudget(hostbrr_like);
   const ForceMaxBudget deterministic_second =
-      calculateProvisionalForceMaxBudget(hostbrr_like);
+      calculateForceMaxBudget(hostbrr_like);
   assert(deterministic_first == deterministic_second);
   assert(deterministic_first.valid);
   assert(deterministic_first.envelope_complete);
   assert(deterministic_first.compute_workers == 6);
+  assert(deterministic_first.inbound_connections == 384);
   assert(deterministic_first.active_owners <=
          deterministic_first.active_flows);
   assert(deterministic_first.outbound_per_host <=
@@ -1054,26 +1055,28 @@ static void testResourceControlPrimitives() {
   ResourceEnvelope fractional_envelope = hostbrr_like;
   fractional_envelope.schedulable_cpu_millis = 500;
   const ForceMaxBudget fractional_budget =
-      calculateProvisionalForceMaxBudget(fractional_envelope);
+      calculateForceMaxBudget(fractional_envelope);
   assert(fractional_budget.valid);
   assert(fractional_budget.compute_workers == 1);
 
   ResourceEnvelope two_cpu_envelope = hostbrr_like;
   two_cpu_envelope.schedulable_cpu_millis = 2000;
   const ForceMaxBudget two_cpu =
-      calculateProvisionalForceMaxBudget(two_cpu_envelope);
+      calculateForceMaxBudget(two_cpu_envelope);
   assert(two_cpu.valid);
   assert(deterministic_first.compute_workers >= two_cpu.compute_workers);
   assert(deterministic_first.compute_permits >= two_cpu.compute_permits);
   assert(deterministic_first.active_owners >= two_cpu.active_owners);
   assert(deterministic_first.active_flows >= two_cpu.active_flows);
+  assert(deterministic_first.inbound_connections >=
+         two_cpu.inbound_connections);
   assert(deterministic_first.outbound_active >= two_cpu.outbound_active);
 
   ResourceEnvelope small_memory_envelope = hostbrr_like;
   small_memory_envelope.memory_max_bytes =
       UINT64_C(1) * 1024 * 1024 * 1024;
   const ForceMaxBudget small_memory =
-      calculateProvisionalForceMaxBudget(small_memory_envelope);
+      calculateForceMaxBudget(small_memory_envelope);
   assert(small_memory.valid);
   assert(deterministic_first.memory_budget_total >=
          small_memory.memory_budget_total);
@@ -1091,7 +1094,7 @@ static void testResourceControlPrimitives() {
   portable_envelope.host_total_memory_bytes =
       UINT64_C(512) * 1024 * 1024;
   const ForceMaxBudget portable =
-      calculateProvisionalForceMaxBudget(portable_envelope);
+      calculateForceMaxBudget(portable_envelope);
   assert(portable.valid);
   assert(!portable.envelope_complete);
 
@@ -1099,7 +1102,7 @@ static void testResourceControlPrimitives() {
   low_nofile_envelope.nofile_soft = 32;
   low_nofile_envelope.open_fds = 8;
   const ForceMaxBudget low_nofile =
-      calculateProvisionalForceMaxBudget(low_nofile_envelope);
+      calculateForceMaxBudget(low_nofile_envelope);
   assert(low_nofile.valid);
   assert(low_nofile.outbound_open <= 8);
 
@@ -1107,7 +1110,7 @@ static void testResourceControlPrimitives() {
   exhausted_nofile_envelope.nofile_soft = 8;
   exhausted_nofile_envelope.open_fds = 8;
   const ForceMaxBudget exhausted_nofile =
-      calculateProvisionalForceMaxBudget(exhausted_nofile_envelope);
+      calculateForceMaxBudget(exhausted_nofile_envelope);
   assert(!exhausted_nofile.valid);
   assert(exhausted_nofile.validation_error == "nofile_exhausted");
 
