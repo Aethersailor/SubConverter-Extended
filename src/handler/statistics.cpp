@@ -980,6 +980,10 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(calculated.quickjs_queue_entries);
   writer.Key("quickjs_queue_bytes");
   writer.Uint64(calculated.quickjs_queue_bytes);
+  writer.Key("quickjs_heap_bytes_per_worker");
+  writer.Uint64(calculated.quickjs_heap_bytes_per_worker);
+  writer.Key("quickjs_stack_bytes_per_worker");
+  writer.Uint64(calculated.quickjs_stack_bytes_per_worker);
   writer.Key("reserved_fds");
   writer.Uint64(calculated.reserved_fds);
   writer.Key("reserved_memory_bytes");

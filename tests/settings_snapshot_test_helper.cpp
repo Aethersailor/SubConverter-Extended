@@ -22,6 +22,8 @@
 #include "generator/config/nodemanip.h"
 #include "parser/mihomo_bridge.h"
 #include "runtime/conversion_flow.h"
+#include "runtime/quickjs_lane.h"
+#include "script/script_quickjs.h"
 #include "server/webserver.h"
 #include "utils/logger.h"
 
@@ -487,6 +489,190 @@ int main(int argc, char *argv[]) {
         async_upload_result.remote_status == 201 &&
         cancelled_upload_result.status == AsyncUploadStatus::Cancelled &&
         cancelled_upload_result.remote_status == 0;
+    bool quickjs_lane_ok = true;
+#ifndef NO_JS_RUNTIME
+    {
+      QuickJsLane lane({1, 1, 1024 * 1024,
+                        64 * 1024 * 1024, 1024 * 1024});
+      const SettingsSnapshot lane_settings =
+          captureEffectiveSettingsSnapshot();
+      auto first_context = std::make_shared<RequestContext>(
+          "quickjs-lane-first", RequestContext::Clock::now(),
+          RequestContext::Clock::now() + std::chrono::seconds(10));
+      std::promise<void> first_started;
+      std::promise<QuickJsTaskResult> first_completion;
+      std::future<QuickJsTaskResult> first_future =
+          first_completion.get_future();
+      std::atomic<uint64_t> side_effects{0};
+      std::atomic<uint64_t> completion_count{0};
+      std::atomic<bool> scope_ok{false};
+      const QuickJsSubmitStatus first_submit = lane.submit(
+          {.bytes = 128,
+           .settings = lane_settings,
+           .request_context = first_context},
+          [&](qjs::Context &context) {
+            scope_ok.store(
+                captureCurrentRequestContext() == first_context &&
+                    &effectiveSettings() == lane_settings.get(),
+                std::memory_order_release);
+            first_started.set_value();
+            context.eval("sleep(500)");
+            side_effects.fetch_add(1, std::memory_order_relaxed);
+          },
+          [&](QuickJsTaskResult result) {
+            completion_count.fetch_add(1, std::memory_order_relaxed);
+            first_completion.set_value(result);
+          });
+      first_started.get_future().wait();
+
+      std::promise<SchedulerSubmitStatus> ordinary_completion;
+      std::future<SchedulerSubmitStatus> ordinary_future =
+          ordinary_completion.get_future();
+      const SchedulerSubmitStatus ordinary_submit =
+          submitOwnedWebGetContinuation(
+              RequestCostClass::Low, 1,
+              RequestContext::Clock::time_point::max(), {}, [] {},
+              [&](SchedulerSubmitStatus status,
+                  std::exception_ptr error) {
+                ordinary_completion.set_value(
+                    error ? SchedulerSubmitStatus::Stopping : status);
+              });
+      const bool ordinary_completed_while_quickjs_busy =
+          ordinary_future.wait_for(std::chrono::seconds(2)) ==
+              std::future_status::ready &&
+          ordinary_future.get() == SchedulerSubmitStatus::Accepted &&
+          first_future.wait_for(std::chrono::milliseconds(0)) !=
+              std::future_status::ready;
+
+      std::promise<QuickJsTaskResult> queued_completion;
+      std::future<QuickJsTaskResult> queued_future =
+          queued_completion.get_future();
+      const QuickJsSubmitStatus queued_submit = lane.submit(
+          {.bytes = 256,
+           .settings = lane_settings,
+           .request_context = std::make_shared<RequestContext>(
+               "quickjs-lane-queued", RequestContext::Clock::now(),
+               RequestContext::Clock::now() +
+                   std::chrono::seconds(10))},
+          [&](qjs::Context &context) {
+            context.eval("1 + 1");
+            side_effects.fetch_add(1, std::memory_order_relaxed);
+          },
+          [&](QuickJsTaskResult result) {
+            completion_count.fetch_add(1, std::memory_order_relaxed);
+            queued_completion.set_value(result);
+          });
+      std::promise<QuickJsTaskResult> capacity_completion;
+      std::future<QuickJsTaskResult> capacity_future =
+          capacity_completion.get_future();
+      const QuickJsSubmitStatus capacity_submit = lane.submit(
+          {.bytes = 256,
+           .settings = lane_settings,
+           .request_context = std::make_shared<RequestContext>(
+               "quickjs-lane-capacity", RequestContext::Clock::now(),
+               RequestContext::Clock::now() +
+                   std::chrono::seconds(10))},
+          [](qjs::Context &context) { context.eval("2 + 2"); },
+          [&](QuickJsTaskResult result) {
+            completion_count.fetch_add(1, std::memory_order_relaxed);
+            capacity_completion.set_value(result);
+          });
+      const QuickJsTaskResult capacity_result = capacity_future.get();
+      const QuickJsTaskResult first_result = first_future.get();
+      const QuickJsTaskResult queued_result = queued_future.get();
+
+      auto cancelled_context = std::make_shared<RequestContext>(
+          "quickjs-lane-cancelled", RequestContext::Clock::now(),
+          RequestContext::Clock::now() + std::chrono::seconds(10));
+      std::promise<void> sleep_started;
+      std::promise<QuickJsTaskResult> cancelled_completion;
+      std::future<QuickJsTaskResult> cancelled_future =
+          cancelled_completion.get_future();
+      const QuickJsSubmitStatus cancelled_submit = lane.submit(
+          {.bytes = 64,
+           .settings = lane_settings,
+           .request_context = cancelled_context},
+          [&](qjs::Context &context) {
+            sleep_started.set_value();
+            context.eval("sleep(5000)");
+          },
+          [&](QuickJsTaskResult result) {
+            completion_count.fetch_add(1, std::memory_order_relaxed);
+            cancelled_completion.set_value(result);
+          });
+      sleep_started.get_future().wait();
+      const auto cancellation_started = RequestContext::Clock::now();
+      (void)cancelled_context->requestCancellation(
+          RequestCancellationReason::ClientDisconnected);
+      const QuickJsTaskResult cancelled_result = cancelled_future.get();
+      const auto cancellation_elapsed =
+          RequestContext::Clock::now() - cancellation_started;
+
+      auto deadline_context = std::make_shared<RequestContext>(
+          "quickjs-lane-deadline", RequestContext::Clock::now(),
+          RequestContext::Clock::now() +
+              std::chrono::milliseconds(100));
+      std::promise<QuickJsTaskResult> deadline_completion;
+      std::future<QuickJsTaskResult> deadline_future =
+          deadline_completion.get_future();
+      const QuickJsSubmitStatus deadline_submit = lane.submit(
+          {.bytes = 64,
+           .settings = lane_settings,
+           .request_context = deadline_context},
+          [](qjs::Context &context) { context.eval("for (;;) {}"); },
+          [&](QuickJsTaskResult result) {
+            completion_count.fetch_add(1, std::memory_order_relaxed);
+            deadline_completion.set_value(result);
+          });
+      const QuickJsTaskResult deadline_result = deadline_future.get();
+
+      lane.requestShutdown(false);
+      const bool lane_joined = lane.join();
+      std::promise<QuickJsTaskResult> stopped_completion;
+      std::future<QuickJsTaskResult> stopped_future =
+          stopped_completion.get_future();
+      const QuickJsSubmitStatus stopped_submit = lane.submit(
+          {.bytes = 1,
+           .settings = lane_settings,
+           .request_context = std::make_shared<RequestContext>(
+               "quickjs-lane-stopped", RequestContext::Clock::now())},
+          [](qjs::Context &context) { context.eval("3 + 3"); },
+          [&](QuickJsTaskResult result) {
+            completion_count.fetch_add(1, std::memory_order_relaxed);
+            stopped_completion.set_value(result);
+          });
+      const QuickJsTaskResult stopped_result = stopped_future.get();
+      const QuickJsLaneSnapshot lane_snapshot = lane.snapshot();
+      quickjs_lane_ok =
+          first_submit == QuickJsSubmitStatus::Accepted &&
+          ordinary_submit == SchedulerSubmitStatus::Accepted &&
+          ordinary_completed_while_quickjs_busy &&
+          queued_submit == QuickJsSubmitStatus::Accepted &&
+          capacity_submit == QuickJsSubmitStatus::EntryLimit &&
+          capacity_result.status == QuickJsTaskStatus::Capacity &&
+          first_result.status == QuickJsTaskStatus::Success &&
+          queued_result.status == QuickJsTaskStatus::Success &&
+          cancelled_submit == QuickJsSubmitStatus::Accepted &&
+          cancelled_result.status == QuickJsTaskStatus::Cancelled &&
+          cancellation_elapsed < std::chrono::seconds(1) &&
+          deadline_submit == QuickJsSubmitStatus::Accepted &&
+          deadline_result.status == QuickJsTaskStatus::Deadline &&
+          lane_joined && stopped_submit == QuickJsSubmitStatus::Stopping &&
+          stopped_result.status == QuickJsTaskStatus::Shutdown &&
+          scope_ok.load(std::memory_order_acquire) &&
+          side_effects.load(std::memory_order_relaxed) == 2 &&
+          completion_count.load(std::memory_order_relaxed) == 6 &&
+          lane_snapshot.ready && lane_snapshot.stopping &&
+          lane_snapshot.joined && lane_snapshot.queued_entries == 0 &&
+          lane_snapshot.queued_bytes == 0 && lane_snapshot.active == 0 &&
+          lane_snapshot.accepted_total == 4 &&
+          lane_snapshot.rejected_total == 2 &&
+          lane_snapshot.completed_total == 6 &&
+          lane_snapshot.cancelled_total == 1 &&
+          lane_snapshot.deadline_total == 1 &&
+          lane_snapshot.script_error_total == 0;
+    }
+#endif
     constexpr size_t async_cache_consumers = 16;
     const uint64_t retained_before_async_cache =
         retainedResponseByteSnapshot().used;
@@ -931,6 +1117,57 @@ int main(int argc, char *argv[]) {
         upload_flow_terminal =
             upload_flow_completion.get_future().get();
 
+      bool quickjs_flow_started = true;
+      bool quickjs_flow_joined = true;
+      std::atomic<bool> quickjs_flow_dependency_started{true};
+      std::atomic<bool> quickjs_flow_result_ok{true};
+      ConversionFlowTerminal quickjs_flow_terminal;
+      quickjs_flow_terminal.state =
+          ConversionFlowTerminalState::Completed;
+#ifndef NO_JS_RUNTIME
+      QuickJsLane quickjs_flow_lane(
+          {1, 2, 1024 * 1024, 64 * 1024 * 1024, 1024 * 1024});
+      auto quickjs_flow_context = std::make_shared<RequestContext>(
+          "conversion-flow-quickjs", RequestContext::Clock::now(),
+          RequestContext::Clock::now() + std::chrono::seconds(10));
+      std::promise<ConversionFlowTerminal> quickjs_flow_completion;
+      std::shared_ptr<ConversionFlow> quickjs_flow =
+          ConversionFlow::create(
+              *compute_executor, {8, 1024 * 1024}, flow_settings,
+              quickjs_flow_context,
+              [&](ConversionFlowTerminal terminal) {
+                quickjs_flow_completion.set_value(std::move(terminal));
+              });
+      quickjs_flow_started = quickjs_flow &&
+          quickjs_flow->start([&](ConversionFlow &current) {
+            if (!current.setPhase(ConversionFlowPhase::Parsing))
+              throw std::runtime_error("failed to enter QuickJS phase");
+            const bool dependency_started = runQuickJsOnFlow(
+                current, quickjs_flow_lane,
+                {.bytes = 64,
+                 .settings = flow_settings,
+                 .request_context = quickjs_flow_context},
+                [](qjs::Context &context) { context.eval("21 * 2"); },
+                [&](ConversionFlow &resumed, QuickJsTaskResult result) {
+                  quickjs_flow_result_ok.store(
+                      result.status == QuickJsTaskStatus::Success &&
+                          resumed.setPhase(
+                              ConversionFlowPhase::Generating),
+                      std::memory_order_release);
+                  (void)resumed.complete();
+                });
+            quickjs_flow_dependency_started.store(
+                dependency_started, std::memory_order_release);
+            if (!dependency_started)
+              throw std::runtime_error("failed to start QuickJS task");
+          });
+      if (quickjs_flow_started)
+        quickjs_flow_terminal =
+            quickjs_flow_completion.get_future().get();
+      quickjs_flow_lane.requestShutdown(false);
+      quickjs_flow_joined = quickjs_flow_lane.join();
+#endif
+
       auto cancelled_context = std::make_shared<RequestContext>(
           "conversion-flow-cancel", RequestContext::Clock::now(),
           RequestContext::Clock::now() + std::chrono::seconds(10));
@@ -1002,6 +1239,11 @@ int main(int argc, char *argv[]) {
               [](ConversionFlowTerminal) {});
       const ConversionFlowRegistrySnapshot flow_registry =
           conversionFlowRegistrySnapshot();
+#ifdef NO_JS_RUNTIME
+      constexpr uint64_t expected_flow_total = 8;
+#else
+      constexpr uint64_t expected_flow_total = 9;
+#endif
       conversion_flow_ok =
           started &&
           initial_scope_ok.load(std::memory_order_acquire) &&
@@ -1050,6 +1292,13 @@ int main(int argc, char *argv[]) {
           upload_flow_result_ok.load(std::memory_order_acquire) &&
           upload_flow_terminal.state ==
               ConversionFlowTerminalState::Completed &&
+          quickjs_flow_started &&
+          quickjs_flow_dependency_started.load(
+              std::memory_order_acquire) &&
+          quickjs_flow_result_ok.load(std::memory_order_acquire) &&
+          quickjs_flow_terminal.state ==
+              ConversionFlowTerminalState::Completed &&
+          quickjs_flow_joined &&
           cancelled_started &&
           cancel_phase_ok.load(std::memory_order_acquire) &&
           cancel_operation_valid.load(std::memory_order_acquire) &&
@@ -1064,8 +1313,8 @@ int main(int argc, char *argv[]) {
           shutdown_terminal.cancellation ==
               RequestCancellationReason::Shutdown &&
           !rejected_after_shutdown && flow_registry.active == 0 &&
-          flow_registry.created_total == 8 &&
-          flow_registry.completed_total == 8 &&
+          flow_registry.created_total == expected_flow_total &&
+          flow_registry.completed_total == expected_flow_total &&
           flow_registry.rejected_total >= 1 && flow_registry.stopping;
     }
 
@@ -1231,6 +1480,8 @@ int main(int argc, char *argv[]) {
     writer.Int(async_upload_result.remote_status);
     writer.Key("async_cancelled_upload_status");
     writer.Int(static_cast<int>(cancelled_upload_result.status));
+    writer.Key("quickjs_lane_ok");
+    writer.Bool(quickjs_lane_ok);
     writer.Key("continuation_runtime_ok");
     writer.Bool(continuation_was_uninitialized &&
                 preinit_submit == SchedulerSubmitStatus::Stopping &&

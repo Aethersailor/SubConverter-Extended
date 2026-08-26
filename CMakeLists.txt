@@ -112,6 +112,7 @@ ADD_CUSTOM_TARGET(dashboard_resource
 SET(SUBCONVERTER_RUNTIME_SOURCES
     src/runtime/compute_executor.cpp
     src/runtime/conversion_flow.cpp
+    src/runtime/quickjs_lane.cpp
     src/config/preference_file.cpp
     src/config/ruleset.cpp
     src/generator/config/clash_proxy.cpp

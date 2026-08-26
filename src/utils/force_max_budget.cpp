@@ -89,8 +89,20 @@ bool validateForceMaxBudget(const ForceMaxBudget &budget,
     return invalid("memory_budget_partition_mismatch");
   if (budget.quickjs_workers == 0 || budget.quickjs_queue_entries == 0 ||
       budget.quickjs_queue_bytes == 0 ||
-      budget.quickjs_queue_bytes > budget.working_memory_bytes)
+      budget.quickjs_heap_bytes_per_worker == 0 ||
+      budget.quickjs_stack_bytes_per_worker == 0)
     return invalid("invalid_quickjs_budget");
+  uint64_t quickjs_worker_bytes = 0;
+  uint64_t quickjs_total_bytes = 0;
+  if (!checkedAdd(budget.quickjs_heap_bytes_per_worker,
+                  budget.quickjs_stack_bytes_per_worker,
+                  quickjs_worker_bytes) ||
+      !checkedMultiply(quickjs_worker_bytes, budget.quickjs_workers,
+                       quickjs_total_bytes) ||
+      !checkedAdd(quickjs_total_bytes, budget.quickjs_queue_bytes,
+                  quickjs_total_bytes) ||
+      quickjs_total_bytes > budget.working_memory_bytes)
+    return invalid("quickjs_budget_exceeds_working_memory");
   if (error)
     error->clear();
   return true;
@@ -202,11 +214,26 @@ ForceMaxBudget calculateProvisionalForceMaxBudget(
       std::min(budget.active_flows,
                std::max<uint64_t>(1, budget.working_memory_bytes /
                                          (UINT64_C(512) * 1024))));
-  budget.quickjs_workers = std::max<uint64_t>(1, cpu_units / 2);
+  budget.quickjs_workers =
+      std::max<uint64_t>(1, budget.compute_workers / 2);
   budget.quickjs_queue_bytes =
       std::max<uint64_t>(1, budget.working_memory_bytes / 8);
   budget.quickjs_queue_entries = std::max<uint64_t>(
       1, budget.quickjs_queue_bytes / (UINT64_C(256) * 1024));
+  const uint64_t quickjs_worker_pool =
+      std::max<uint64_t>(1, budget.working_memory_bytes / 8);
+  const uint64_t quickjs_worker_bytes =
+      std::max<uint64_t>(2,
+          quickjs_worker_pool / budget.quickjs_workers);
+  budget.quickjs_stack_bytes_per_worker = std::min<uint64_t>(
+      UINT64_C(1) * 1024 * 1024,
+      std::max<uint64_t>(UINT64_C(64) * 1024,
+                         quickjs_worker_bytes / 16));
+  if (budget.quickjs_stack_bytes_per_worker >= quickjs_worker_bytes)
+    budget.quickjs_stack_bytes_per_worker =
+        std::max<uint64_t>(1, quickjs_worker_bytes / 4);
+  budget.quickjs_heap_bytes_per_worker =
+      quickjs_worker_bytes - budget.quickjs_stack_bytes_per_worker;
 
   std::string error;
   budget.valid = validateForceMaxBudget(budget, &error);

@@ -179,3 +179,23 @@ bool uploadGistOnFlow(
       });
   return true;
 }
+
+bool runQuickJsOnFlow(
+    ConversionFlow &flow, QuickJsLane &lane,
+    QuickJsTaskOptions options, QuickJsWork work,
+    ConversionFlowQuickJsCompletion completion) {
+  const ConversionFlowOperation operation = flow.beginOperation();
+  if (!operation.valid() || !work || !completion)
+    return false;
+  (void)lane.submit(
+      std::move(options), std::move(work),
+      [operation, completion = std::move(completion)](
+          QuickJsTaskResult result) mutable {
+        (void)operation.post(
+            [completion = std::move(completion), result](
+                ConversionFlow &resumed) mutable {
+              completion(resumed, result);
+            });
+      });
+  return true;
+}

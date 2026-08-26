@@ -43,6 +43,8 @@ struct ForceMaxBudget {
   uint64_t quickjs_workers = 0;
   uint64_t quickjs_queue_entries = 0;
   uint64_t quickjs_queue_bytes = 0;
+  uint64_t quickjs_heap_bytes_per_worker = 0;
+  uint64_t quickjs_stack_bytes_per_worker = 0;
 
   uint64_t reserved_fds = 0;
   uint64_t reserved_memory_bytes = 0;

@@ -11,6 +11,7 @@
 #include "handler/upload_async.h"
 #include "handler/subscription_async.h"
 #include "runtime/conversion_flow.h"
+#include "runtime/quickjs_lane.h"
 
 struct ConversionPipelineStepResult {
   bool complete = false;
@@ -78,5 +79,13 @@ bool uploadGistOnFlow(
     SettingsSnapshot settings,
     std::shared_ptr<RequestContext> request_context,
     ConversionFlowUploadCompletion completion);
+
+using ConversionFlowQuickJsCompletion =
+    std::function<void(ConversionFlow &, QuickJsTaskResult)>;
+
+bool runQuickJsOnFlow(
+    ConversionFlow &flow, QuickJsLane &lane,
+    QuickJsTaskOptions options, QuickJsWork work,
+    ConversionFlowQuickJsCompletion completion);
 
 #endif // CONVERSION_PIPELINE_H_INCLUDED

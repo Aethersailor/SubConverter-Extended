@@ -1839,6 +1839,7 @@ def owned_webget_boundary_baseline(helper: Path, fixture_base: str) -> None:
             or hit["async_conversion_resources_ok"] is not True
             or hit["async_template_ok"] is not True
             or hit["async_upload_ok"] is not True
+            or hit["quickjs_lane_ok"] is not True
             or hit["continuation_runtime_ok"] is not True
         ):
             raise AssertionError(

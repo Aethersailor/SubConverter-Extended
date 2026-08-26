@@ -1033,6 +1033,14 @@ static void testResourceControlPrimitives() {
          deterministic_first.outbound_active);
   assert(deterministic_first.outbound_active <=
          deterministic_first.outbound_open);
+  assert(deterministic_first.quickjs_workers == 3);
+  assert(deterministic_first.quickjs_heap_bytes_per_worker > 0);
+  assert(deterministic_first.quickjs_stack_bytes_per_worker > 0);
+  assert(deterministic_first.quickjs_queue_bytes +
+             deterministic_first.quickjs_workers *
+                 (deterministic_first.quickjs_heap_bytes_per_worker +
+                  deterministic_first.quickjs_stack_bytes_per_worker) <=
+         deterministic_first.working_memory_bytes);
 
   ResourceEnvelope fractional_envelope = hostbrr_like;
   fractional_envelope.schedulable_cpu_millis = 500;
@@ -1066,6 +1074,8 @@ static void testResourceControlPrimitives() {
   assert(deterministic_first.cache_bytes >= small_memory.cache_bytes);
   assert(deterministic_first.working_memory_bytes >=
          small_memory.working_memory_bytes);
+  assert(deterministic_first.quickjs_heap_bytes_per_worker >=
+         small_memory.quickjs_heap_bytes_per_worker);
 
   ResourceEnvelope portable_envelope;
   portable_envelope.schedulable_cpu_millis = 1500;
