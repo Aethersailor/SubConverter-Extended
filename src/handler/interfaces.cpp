@@ -35,6 +35,7 @@
 #include "generator/config/subexport.h"
 #include "generator/template/templates.h"
 #include "conversion_service.h"
+#include "conversion_pipeline.h"
 #include "interfaces.h"
 #include "multithread.h"
 #include "ruleset_output.h"
@@ -4011,10 +4012,7 @@ struct SubscriptionNodeState {
   std::string subscription_info;
 };
 
-struct SubStageResponse {
-  bool complete = false;
-  std::string body;
-};
+using SubStageResponse = ConversionPipelineStepResult;
 
 static bool parseSourceGroupRule(const std::string &rule,
                                  std::string &source_pattern,
@@ -6512,72 +6510,68 @@ static std::string subconverter_impl(Request &request, Response &response,
     response.headers = std::move(cancellation_response.headers);
     return std::move(cancellation_response.body);
   };
-  if (auto body = cancelled())
-    return std::move(*body);
   ParsedSubRequest parsed_request;
   EffectiveSubPolicy effective_policy;
-  {
-    RequestStageTimer parse_timer(request.context, RequestStage::Parse);
-    std::string parse_error =
-        parseSubRequestArguments(request, response, settings, parsed_request);
-    if (!parse_error.empty())
-      return parse_error;
-
-    std::string policy_error = buildEffectiveSubPolicy(
-        request, response, settings, rule_stats, parsed_request,
-        effective_policy);
-    if (!policy_error.empty())
-      return policy_error;
-  }
-  if (auto body = cancelled())
-    return std::move(*body);
-
   ExternalConfigFetchPlan fetch_plan;
-  {
-    RequestStageTimer rules_timer(request.context, RequestStage::Rules);
-    std::string fetch_plan_error = buildExternalConfigFetchPlan(
-        response, settings, parsed_request, effective_policy, fetch_plan);
-    if (!fetch_plan_error.empty())
-      return fetch_plan_error;
-  }
-  if (auto body = cancelled())
-    return std::move(*body);
-
   SubscriptionNodeState subscription_state;
-  {
-    RequestStageTimer parse_timer(request.context, RequestStage::Parse);
-    SubStageResponse subscription_response = processSubscriptionNodes(
-        request, response, settings, parsed_request, effective_policy,
-        subscription_state);
-    if (request.context) {
-      const bool high_cost =
-          parsed_request.explain.subscription_url_count > 1 ||
-          effective_policy.custom_rulesets.size() > 1 ||
-          parsed_request.generate_clash_script.get(false) ||
-          !parsed_request.external_config.empty();
-      request.context->setCostClass(
-          parsed_request.explain.proxy_provider_mode
-              ? RequestCostClass::Low
-              : (high_cost ? RequestCostClass::High
-                           : RequestCostClass::Medium));
-    }
-    if (subscription_response.complete)
-      return subscription_response.body;
-  }
-  if (auto body = cancelled())
-    return std::move(*body);
-
-  RequestStageTimer serialize_timer(request.context, RequestStage::Serialize);
   TargetGenerationState generation_state;
-  SubStageResponse generation_response = dispatchTargetGenerator(
-      request, response, settings, parsed_request, effective_policy,
-      fetch_plan, subscription_state, generation_state);
-  if (generation_response.complete)
-    return generation_response.body;
-  if (auto body = cancelled())
-    return std::move(*body);
-  return assembleSubResponse(request, response, settings, parsed_request,
-                             effective_policy, fetch_plan, generation_state);
+  std::optional<RequestStageTimer> serialize_timer;
+
+  return runConversionPipeline({
+      .cancellation = cancelled,
+      .parse_and_policy = [&]() -> ConversionPipelineStepResult {
+        RequestStageTimer parse_timer(request.context, RequestStage::Parse);
+        std::string parse_error = parseSubRequestArguments(
+            request, response, settings, parsed_request);
+        if (!parse_error.empty())
+          return {true, std::move(parse_error)};
+
+        std::string policy_error = buildEffectiveSubPolicy(
+            request, response, settings, rule_stats, parsed_request,
+            effective_policy);
+        if (!policy_error.empty())
+          return {true, std::move(policy_error)};
+        return {};
+      },
+      .dependency_plan = [&]() -> ConversionPipelineStepResult {
+        RequestStageTimer rules_timer(request.context, RequestStage::Rules);
+        std::string fetch_plan_error = buildExternalConfigFetchPlan(
+            response, settings, parsed_request, effective_policy, fetch_plan);
+        if (!fetch_plan_error.empty())
+          return {true, std::move(fetch_plan_error)};
+        return {};
+      },
+      .subscription = [&]() -> ConversionPipelineStepResult {
+        RequestStageTimer parse_timer(request.context, RequestStage::Parse);
+        SubStageResponse result = processSubscriptionNodes(
+            request, response, settings, parsed_request, effective_policy,
+            subscription_state);
+        if (request.context) {
+          const bool high_cost =
+              parsed_request.explain.subscription_url_count > 1 ||
+              effective_policy.custom_rulesets.size() > 1 ||
+              parsed_request.generate_clash_script.get(false) ||
+              !parsed_request.external_config.empty();
+          request.context->setCostClass(
+              parsed_request.explain.proxy_provider_mode
+                  ? RequestCostClass::Low
+                  : (high_cost ? RequestCostClass::High
+                               : RequestCostClass::Medium));
+        }
+        return result;
+      },
+      .generation = [&]() -> ConversionPipelineStepResult {
+        serialize_timer.emplace(request.context, RequestStage::Serialize);
+        return dispatchTargetGenerator(
+            request, response, settings, parsed_request, effective_policy,
+            fetch_plan, subscription_state, generation_state);
+      },
+      .assembly = [&] {
+        return assembleSubResponse(request, response, settings, parsed_request,
+                                   effective_policy, fetch_plan,
+                                   generation_state);
+      },
+  });
 }
 
 std::string simpleToClashR(RESPONSE_CALLBACK_ARGS) {
