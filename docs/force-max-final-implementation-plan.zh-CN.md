@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：已授权实施；阶段 0～6 已完成，阶段 7 待开始。
+- 状态：已授权实施；阶段 0～7 已完成，阶段 8 待开始。
 - 目标分支：`dev`。
 - 阶段 0 规划基线：`6d5dcddd2810bbe95fb7e2bbf4f924c7a4cc536f`。
 - 范围：源码、测试、dev CI、dev OCI、HostBrr 测试实例和公开测试路径。
@@ -21,7 +21,7 @@
 | 4 async fetch 合同 | 已完成 | `ac810e50ea38b8cd37b56ed17e8430bb20634995` | Release 与 ASan/UBSan CTest 各 28/28；force_max OCI smoke | 无缓存 GET、绝对 deadline、冻结设置和启动/关闭已接通 |
 | 5 ConversionFlow | 已完成 | `cbd0b2d5d1e9fb0e6a011b2732dd988ee34aa011` | Release 与 ASan/UBSan CTest 各 28/28；同步/重复 callback、取消、shutdown 矩阵 | 尚未切正式 force_max 入口 |
 | 6 external config/import | 已完成 | `2729408a36ba4be2b42256284f50ed72024fd01a` | Release 与 ASan/UBSan CTest 各 28/28；异步嵌套 import + flow 恢复 | 候选路径完成，正式入口尚未切换 |
-| 7 subscription/ruleset/base | 待开始 | — | — | — |
+| 7 subscription/ruleset/base | 已完成 | `2414a6a6be39926fa49a29ceff723f11f635a19f`、`5eb577d3328d7a4d7db192f5b322fb0ed59034f1` | 两个子阶段 Release 与 ASan/UBSan CTest 各 28/28 | 候选路径完成，正式入口尚未切换 |
 | 8 inja/upload/QuickJS | 待开始 | — | — | — |
 | 9 owner admission | 待开始 | — | — | — |
 | 10 transport admission | 待开始 | — | — | — |
@@ -100,6 +100,17 @@
 - 最小异步测试暴露并修复了既有 `render_template` 在空 `request_params` 时对空 `_args` 执行 `erase(npos)` 的缺陷；非空参数输出不变，空参数现在生成空 `_args`。
 - 扩展既有 fixture/helper，验证顶层 TOML、远程嵌套 custom-group import、解析结果、独立异步 API和 ConversionFlow 挂起/恢复；未新增测试文件。Linux Release 与完整 ASan/UBSan CTest 均为 `28/28`。
 - 本阶段仍未切正式 force_max 请求入口；未访问或修改 HostBrr，未部署远端容器，未触及 `master`、正式实例、tag、Release 或 `:latest`。
+
+## 阶段 7 验证证据
+
+- subscription 子阶段新增 Curl multi fan-out batch；每个 slot 固定携带原始 `source_index`、URL、不可变 payload、header、failure 和 cancellation，完成顺序不影响结果顺序。
+- `parse_settings` 增加显式 resolved subscription 正文/header；候选 CPU 解析设置 `require_resolved_subscription=true`，缺失正文时确定失败，禁止 ComputeExecutor worker 隐式同步回网。测试以两个 URL 验证输出 slot 和最终节点 group ID 均保持 0、1 顺序。
+- ruleset/base 子阶段新增统一 immutable resolved resource batch，以 `ConversionResourceKind + source_index + payload` 表示规则集和 base；候选 generator 不接收 `shared_future`，callback 完成后按原始 index 消费。
+- `resolveSubscriptionsOnFlow` 与 `resolveConversionResourcesOnFlow` 均先登记 flow operation，异步 callback 只 post mailbox；mailbox bytes 计入正文和 header，恢复后进入 Parsing phase。
+- 两个 batch 均继承同一不可变 settings、RequestContext、绝对 deadline、取消与 retained lease；回调使用 exactly-once batch completion，空批次也同步确定完成。
+- 扩展既有 fixture/helper：两个订阅并发下载与顺序解析、两个 ruleset + 一个 base 的混合 batch、两条 ConversionFlow 挂起/恢复路径、registry 归零；未新增测试文件。
+- subscription 子提交和 ruleset/base 子提交分别通过 Linux Release `28/28` 与完整 ASan/UBSan `28/28`；正式 force_max 请求仍未切候选 flow。
+- 本阶段未访问或修改 HostBrr，未部署远端容器，未触及 `master`、正式实例、tag、Release 或 `:latest`。
 
 ## 一、固定范围与不可改变的决策
 
