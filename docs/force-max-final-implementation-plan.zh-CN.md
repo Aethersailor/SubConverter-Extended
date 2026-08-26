@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：已授权实施；阶段 0～5 已完成，阶段 6 待开始。
+- 状态：已授权实施；阶段 0～6 已完成，阶段 7 待开始。
 - 目标分支：`dev`。
 - 阶段 0 规划基线：`6d5dcddd2810bbe95fb7e2bbf4f924c7a4cc536f`。
 - 范围：源码、测试、dev CI、dev OCI、HostBrr 测试实例和公开测试路径。
@@ -20,7 +20,7 @@
 | 3 ComputeExecutor | 已完成 | `d252740ffc7edb9ee533a21497868078b9e507e8` | Release 与 ASan/UBSan CTest 各 28/28；生命周期/边界/取消/自 join 测试 | 尚未承载正式 flow |
 | 4 async fetch 合同 | 已完成 | `ac810e50ea38b8cd37b56ed17e8430bb20634995` | Release 与 ASan/UBSan CTest 各 28/28；force_max OCI smoke | 无缓存 GET、绝对 deadline、冻结设置和启动/关闭已接通 |
 | 5 ConversionFlow | 已完成 | `cbd0b2d5d1e9fb0e6a011b2732dd988ee34aa011` | Release 与 ASan/UBSan CTest 各 28/28；同步/重复 callback、取消、shutdown 矩阵 | 尚未切正式 force_max 入口 |
-| 6 external config/import | 待开始 | — | — | — |
+| 6 external config/import | 已完成 | `2729408a36ba4be2b42256284f50ed72024fd01a` | Release 与 ASan/UBSan CTest 各 28/28；异步嵌套 import + flow 恢复 | 候选路径完成，正式入口尚未切换 |
 | 7 subscription/ruleset/base | 待开始 | — | — | — |
 | 8 inja/upload/QuickJS | 待开始 | — | — | — |
 | 9 owner admission | 待开始 | — | — | — |
@@ -89,6 +89,17 @@
 - 扩展既有 settings snapshot/兼容基线，覆盖 thread-local 恢复、phase generation、同步 callback、重复 callback、mailbox bytes 归零、client cancellation、shutdown、创建停止和 registry 归零；未新增测试文件。
 - 首轮测试曾因 Release helper 中把有副作用的操作写进 `assert(expr)` 而超时；已改为显式执行并单独记录结果。修正后 Linux Release 与完整 ASan/UBSan CTest 均为 `28/28`，两种 HTTP 后端结果一致。
 - 本阶段仍未把正式 force_max 请求切入 ConversionFlow；未访问或修改 HostBrr，未部署远端容器，未触及 `master`、正式实例、tag、Release 或 `:latest`。
+
+## 阶段 6 验证证据
+
+- 将外部配置加载拆成正文获取与 `loadExternalConfigFromContent` 解析/缓存边界；同步入口仍按原顺序调用该边界，既有行为不变。
+- import 解析增加 request-scoped resolved view：CPU 解析只读取本地文件或已解析正文；遇到缺失远程 import 时收集去重依赖，不在 ComputeExecutor worker 内等待 future 或执行同步网络。
+- 新增 `loadExternalConfigAsync`：顶层配置和多轮嵌套 import 使用 `webGetOwnedAsync`，全部继承同一 settings snapshot、RequestContext、绝对 deadline、取消和 retained byte lease；每轮依赖就绪后在单一 ComputeExecutor 重跑纯解析。
+- 新增 `resolveExternalConfigOnFlow` 候选接线：flow 在 FetchingExternalConfig phase 登记 operation，网络 callback 只 post mailbox event，再在恢复事件中应用结果；同步 callback 同样不重入。
+- import 数量使用现有 `maxAllowedRulesets` 硬边界；状态和 failure stage 为低基数诊断，不暴露原始 URL 或正文。异步状态和 source completion 均用原子 exactly-once，分配/回调异常确定终结。
+- 最小异步测试暴露并修复了既有 `render_template` 在空 `request_params` 时对空 `_args` 执行 `erase(npos)` 的缺陷；非空参数输出不变，空参数现在生成空 `_args`。
+- 扩展既有 fixture/helper，验证顶层 TOML、远程嵌套 custom-group import、解析结果、独立异步 API和 ConversionFlow 挂起/恢复；未新增测试文件。Linux Release 与完整 ASan/UBSan CTest 均为 `28/28`。
+- 本阶段仍未切正式 force_max 请求入口；未访问或修改 HostBrr，未部署远端容器，未触及 `master`、正式实例、tag、Release 或 `:latest`。
 
 ## 一、固定范围与不可改变的决策
 
