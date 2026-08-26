@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：已授权实施；阶段 0～14 已完成，阶段 15 待开始。
+- 状态：已授权实施；阶段 0～15 已完成，阶段 16 待开始。
 - 目标分支：`dev`。
 - 阶段 0 规划基线：`6d5dcddd2810bbe95fb7e2bbf4f924c7a4cc536f`。
 - 范围：源码、测试、dev CI、dev OCI、HostBrr 测试实例和公开测试路径。
@@ -29,7 +29,7 @@
 | 12 全维度预算消费者 | 已完成 | `47196f0262218fa42eb9236b1d511088ceb07692` | 精确 SHA 的 Release 与 ASan/UBSan CTest 各 28/28；6C/12GiB OCI smoke | 全部容量在监听前一次性冻结并逐项核对 `applied=true` |
 | 13 离线公式标定 | 已完成 | `4a5dacf66263a4d89c018c920152681c9cff3d4c` | 精确 SHA 的 Release 与 ASan/UBSan CTest 各 28/28；WSL 多包络和 HostBrr 低权重 ABBA | 冻结 `force-max-v1`；新增独立 inbound connection 预算 |
 | 14 PressureGuard | 已完成 | `2e5f1653716530b417754c3bfb8d8cf004c7ab77` | 精确 SHA 的 Release 与 ASan/UBSan CTest 各 28/28；真实 cgroup memory/CPU shrink 注入 | 仅硬危险收紧；固定确认后一次恢复 Full |
-| 15 原子启动/旧路径清理 | 待开始 | — | — | — |
+| 15 原子启动/旧路径清理 | 已完成 | `7cce0f0c46afe56f715ad299604112c8172aaef6` | 精确 SHA 的 Release 与 ASan/UBSan CTest 各 28/28；2C/2GiB OCI 路径与关闭 smoke | 两阶段 coordinator 在监听前发布 ready；force 专用旧 scheduler 和 ABBA override 已删除 |
 | 16 最终验证与 dev 交付 | 待开始 | — | — | — |
 
 ## 阶段 0 基线证据
@@ -187,6 +187,19 @@
 - `OwnerAdmission::setActiveLimits` 在自身锁内只更新额度和收集可 grant waiter，在锁外执行 completion；恢复 Full 时立即按原公平/老化规则继续 grant。Dashboard 增加 guarded、activation、recovery 和 repeated activation 诊断，并通过实际 admission/CPU/cache/retained 值反映当前状态。
 - 真实 2 CPU/2 GiB OCI 注入中，两个 `yes` 进程满载 4 秒后仍为 Full、`applied=true`、activation 0。memory 2 GiB -> 1 GiB 后进入 `memory_limit_shrink`，CPU/owner/transport 从 `2/16/32` 收紧为 `1/8/16`；恢复 2 GiB 后一次回到 `2/16/32` 和 `applied=true`。随后 CPU quota 2 -> 1 触发第二次 Guarded，恢复后 activation/recovery/repeated 为 `2/2/1`。全过程 health 可用，优雅退出码 0，`restart=0`、`OOM=false`。
 - 精确产品提交的 Linux Release 完整 CTest 最终为 `28/28`；首次 exact build 曾有一次与本阶段路径隔离的 `webserver_error_httplib` 终态计数时序失败，审计测试路径后使用同一构建缓存复跑为 `28/28`，ASan/UBSan 完整 CTest 同样为 `28/28`。Release image ID 为 `sha256:ccba00389ccbac8ef6880d0f793d54510b507c988cd2716d45c4bf14355df990`，插桩 image ID 为 `sha256:24afd463af5f29b61f6fc182b5574dc8c4e63f78bf35737d3ba21c8ba82a53c7`，OCI revision 均精确等于产品 SHA。
+- 本阶段未访问或修改 HostBrr，未部署远端容器，未触及 `master`、正式实例、tag、Release 或 `:latest`。
+
+## 阶段 15 验证证据
+
+- 新增单一 `RuntimeCoordinator`，将启动拆为 prepare 与 commit 两个阶段。prepare 按同一份 `ForceMaxBudget` 配置 cache、retained bytes、Compute、blocking I/O、QuickJS、Curl multi、owner admission 和 transport admission；启动规则刷新完成后，commit 重新探测 CPU、内存、nofile 和 pids 硬包络并逐项核对实际 runtime，只有全部一致才原子发布 `ready=true`、`generation=1`。
+- `FORCE_MAX_RUNTIME_PREPARED` 与 `FORCE_MAX_RUNTIME_READY` 均出现在 HTTP listen 日志之前；资源包络在初始化期间发生硬变化、任一组件初始化失败或 applied dimension 不一致时，在监听前请求关闭并逆序 join 已建立组件，由容器进程重启后重新计算完整预算，不在同一进程保留半新半旧 fallback。
+- main 的分散初始化和关闭逻辑已收拢到 coordinator；Dashboard 新增 `runtime_coordinator` 的 mode、prepared、ready、stopping、joined、generation 和低基数 reason。PressureGuard 仍只在 ready 后处理硬危险，不参与启动学习、warm-up 或逐级升档。
+- 删除 `SUBCONVERTER_FORCE_MAX_FLOW` 内部 ABBA override、force 专用 `legacy_request_flow` 实例、独立 worker 推导和关闭分支。该兼容 Dashboard 字段暂保留为恒零诊断，便于证明旧 force 路径没有重新激活。
+- Beast 下所有满足既有 simple-target 安全边界的 force_max 请求直接进入 `ConversionFlow`；远程和本地 external config 也使用 actor 的异步配置路径。`sssub` 仍只允许 inline config 进入 flow。upload、QuickJS/filter/sort script、`!!import` 和非 simple target 因副作用、模板或兼容语义继续进入共享的有界 `conversionScheduler`，不再进入 force 专用旧线程池。本阶段没有虚报这些复杂路径已经完全 actor 化，也没有为追求形式统一而扩大正确性风险。
+- 既有 flow 激活测试由 legacy/candidate ABBA 改为 compat/force_max 输出字节对照；新增 coordinator ready/generation、legacy 恒零和远程 external config 必须最终形成第二个 completed flow 的断言。终态计数使用 2 秒有界等待，避免把响应发送与 registry terminal 落账之间的正常极短竞态误判为路径回退；未新增仓库测试文件。
+- 精确产品提交的 Linux Release 与完整 ASan/UBSan CTest 均为 `28/28`。Release image ID 为 `sha256:a3f2dcbfc19db4c81b0f8e373ccd233ddd3e2f6c1ede0fc72c182a8b87799e8a`，插桩 image ID 为 `sha256:de4bbd4c5b9633a9ef55513d39bad59829cc8d657166fdbdf967439b1d42458a`，OCI revision 均精确等于产品 SHA。
+- 真实 2 CPU/2 GiB OCI smoke 中，启动即得到 Compute/I/O/QuickJS `2/1/1`、flow/owner/outbound active `32/16/32`，Dashboard 为 `max_ready`、`applied=true`。simple 请求增加 `ConversionFlow`，带 script 的复杂请求只增加共享 `conversionScheduler`，旧 scheduler 始终为 0；两者均返回 200 和相同 56 字节正文。优雅关闭退出码为 0，运行期间 `restart=0`、`OOM=false`。
+- 为单独验证远程 external config，使用临时隔离 Docker network 和仓库外用途的只读 HTTP fixture 容器逐请求观察 flow 计数；请求成功后 `created/completed` 最终各增加 1。临时配置文件、fixture 容器、network 和专用 Python fixture image 已清理；精确 Stage 15 镜像与 BuildKit cache 暂留供阶段 16 复用，不执行全局 prune。
 - 本阶段未访问或修改 HostBrr，未部署远端容器，未触及 `master`、正式实例、tag、Release 或 `:latest`。
 
 ## 一、固定范围与不可改变的决策
