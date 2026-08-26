@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：已授权实施；阶段 0～9 已完成，阶段 10 待开始。
+- 状态：已授权实施；阶段 0～10 已完成，阶段 11 待开始。
 - 目标分支：`dev`。
 - 阶段 0 规划基线：`6d5dcddd2810bbe95fb7e2bbf4f924c7a4cc536f`。
 - 范围：源码、测试、dev CI、dev OCI、HostBrr 测试实例和公开测试路径。
@@ -24,7 +24,7 @@
 | 7 subscription/ruleset/base | 已完成 | `2414a6a6be39926fa49a29ceff723f11f635a19f`、`5eb577d3328d7a4d7db192f5b322fb0ed59034f1` | 两个子阶段 Release 与 ASan/UBSan CTest 各 28/28 | 候选路径完成，正式入口尚未切换 |
 | 8 inja/upload/QuickJS | 已完成 | `4cfff0240f1615d14ed2d5ff164cd5cef9211b74`、`722ba148ace373226610e887cc0316ddaf2d9918`、`28c3596af6be24f34f8746aa495104a8efc3d668` | 三个子阶段 Release 与 ASan/UBSan CTest 各 28/28 | 候选路径完成，正式入口尚未切换 |
 | 9 owner admission | 已完成 | `e11de11f39d993707596f57269e59ddef5e2adbd` | Release 与 ASan/UBSan CTest 各 28/28；force_max OCI smoke | cache/singleflight/owner 顺序已接通，follower 豁免 |
-| 10 transport admission | 待开始 | — | — | — |
+| 10 transport admission | 已完成 | `d5a8b6beaa63a70038841f46dcd787e09b27d75f` | Release 与 ASan/UBSan CTest 各 28/28；Beast hard-capacity/health；force_max OCI smoke | 软容量等待；硬包络返回完整响应 |
 | 11 候选 flow/多线程 | 待开始 | — | — | — |
 | 12 全维度预算消费者 | 待开始 | — | — | — |
 | 13 离线公式标定 | 待开始 | — | — | — |
@@ -133,6 +133,18 @@
 - 扩展既有并发测试，覆盖立即 grant、等待后 grant、O(1) 取消、timer deadline、硬 count/bytes 边界、加权公平、500ms 老化、shutdown、lease 归零、全局重复初始化与预算不匹配；未新增测试文件。
 - Linux Release 与完整 ASan/UBSan CTest 均为 `28/28`。真实 force_max OCI smoke 通过，Release image ID 为 `sha256:b8e42cd4c0f79c611621fc132fc9f1a82303ed0dddfada4ed748b767b26d72a5`，插桩 image ID 为 `sha256:5a04a738bb825cc647f031c5e80437e8ed17876a8fa8aafa11ecb496bd6a0094`；容器 `restart=0`、`OOM=false`。
 - 本阶段仍使用 legacy request-flow worker 执行转换，正式 `ConversionFlow` 切换留在阶段 11；未访问或修改 HostBrr，未部署远端容器，未触及 `master`、正式实例、tag、Release 或 `:latest`。
+
+## 阶段 10 验证证据
+
+- 新增独立全局 transport admission，复用阶段 9 的 waitable count/bytes/lease 合同；force_max 在 bind/listen 前从当前 `ForceMaxBudget` 和已探测请求字节边界初始化 active 与 wait 预算，初始化失败不监听。
+- Beast 完整解析请求后异步等待 transport permit；等待期间只保留有界 session/request bytes，不占 handler worker。grant callback 回到 socket executor 后再投递业务 handler；deadline、客户端断开和 shutdown 均先取消 waiter，再返回确定响应。
+- transport lease 持有到响应发送完成或 keep-alive 请求结束；下一请求前释放 count/bytes。Dashboard 的 `request_admission.source=force_max_waitable` 同时公开 active/wait count/bytes、取消、deadline、shutdown 和硬边界。
+- Beast 连接硬边界不再对已 accept socket 直接 shutdown/reset。业务槽满时使用按 server worker 数派生的 reserved parse slots：`/healthz` 仍可完成，其他合法请求返回完整 `503 + Retry-After + X-Request-ID`；reserved keep-alive 被关闭且读等待限制为 1 秒，避免保留槽长期被占。
+- reserved slots 全满时最多额外保留一个已 accept spill socket并暂停继续 accept，由内核 backlog 承接后续连接；任一业务或 reserved slot 释放后恢复，未引入固定 CPU/内存/连接 ceiling。
+- httplib 兼容后端在 pre-routing 同样等待 transport permit；普通 handler 满时使用可取消、deadline-aware 的条件等待，并永久保留一个 health handler。该同步兼容路径会占用 httplib 自身请求线程，正式 force_max 高性能默认路径仍为 Beast。
+- 扩展既有兼容基线：业务连接上限为 1 时，第二个已 accept 请求必须收到完整硬包络 503；第一个连接仍占满业务槽时 health 必须返回 200；释放后 health 持续可用。未新增测试文件。
+- 最终 Linux Release 与完整 ASan/UBSan CTest 均为 `28/28`。真实 force_max OCI smoke 通过，Release image ID 为 `sha256:3dd126f10d74d457a6a65c716fe57e6e229fa856167eec4b386311c4076e070c`，插桩 image ID 为 `sha256:4808b52f2bee067858c5e3d9a1fe2c5444bfbcd7a56e5ecb481d9905eb040eb3`；容器 `restart=0`、`OOM=false`。
+- 本阶段仍未切正式 `ConversionFlow`；未访问或修改 HostBrr，未部署远端容器，未触及 `master`、正式实例、tag、Release 或 `:latest`。
 
 ## 一、固定范围与不可改变的决策
 
