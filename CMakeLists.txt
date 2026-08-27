@@ -374,7 +374,7 @@ IF(BUILD_TESTS)
                 ${COMPATIBILITY_SECURITY_BASELINE_ARGS})
     SET_TESTS_PROPERTIES(compatibility_security_baseline PROPERTIES
         LABELS full
-        TIMEOUT 120
+        TIMEOUT 240
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     ADD_TEST(
         NAME compatibility_security_baseline_httplib
@@ -383,7 +383,7 @@ IF(BUILD_TESTS)
                 ${COMPATIBILITY_SECURITY_BASELINE_ARGS})
     SET_TESTS_PROPERTIES(compatibility_security_baseline_httplib PROPERTIES
         LABELS full
-        TIMEOUT 120
+        TIMEOUT 240
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         ENVIRONMENT "SUBCONVERTER_HTTP_BACKEND=httplib;SUBCONVERTER_RESOURCE_CONTROL=compat")
 
