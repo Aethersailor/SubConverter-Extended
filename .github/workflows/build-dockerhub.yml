@@ -276,10 +276,80 @@ jobs:
           bash -n scripts/ci/*.sh
           bash tests/ci_delivery_scripts_test.sh
 
+  sanitizer-bootstrap:
+    name: "🧱 ASan/UBSan bootstrap (manual, dev, non-publishing)"
+    runs-on: ubuntu-latest
+    needs: prepare
+    if: needs.prepare.outputs.mode == 'dev' && github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
+
+      - name: Download dependency snapshot
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: dependency-snapshot
+          path: dependency-snapshot
+
+      - name: Activate dependency snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp dependency-snapshot/dependencies.lock.json scripts/ci/dependencies.lock.json
+          python3 scripts/ci/dependency_snapshot.py check
+          python3 scripts/ci/dependency_snapshot.py emit --github-env "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+
+      - name: Prepare sanitizer bootstrap arguments
+        id: sanitizer_args
+        shell: bash
+        env:
+          THREADS: "16"
+          SHA: ${{ needs.prepare.outputs.sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
+          REFRESH_GO_DEPS: "false"
+          REFRESH_HEADERS: "false"
+          BUILD_TESTS: "true"
+        run: |
+          {
+            echo 'args<<EOF'
+            bash scripts/ci/docker-build-args.sh
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build sanitizer production graph and export cache
+        shell: bash
+        env:
+          BUILD_ARGS: ${{ steps.sanitizer_args.outputs.args }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r arg; do
+            [ -n "$arg" ] && args+=(--build-arg "$arg")
+          done <<< "$BUILD_ARGS"
+          docker buildx build \
+            --file ./Dockerfile \
+            --platform linux/amd64 \
+            --ulimit nofile=524288:524288 \
+            --target sanitizer-bootstrap \
+            --output type=cacheonly \
+            --cache-from type=gha,scope=subconverter-sanitizer-bootstrap,timeout=30m \
+            --cache-to type=gha,mode=max,scope=subconverter-sanitizer-bootstrap,timeout=30m \
+            "${args[@]}" \
+            --build-arg ENABLE_SANITIZERS=true \
+            .
+
   sanitizer:
     name: "🧪 ASan/UBSan (manual, dev, non-publishing)"
     runs-on: ubuntu-latest
-    needs: prepare
+    needs: [prepare, sanitizer-bootstrap]
     if: needs.prepare.outputs.mode == 'dev' && github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
@@ -337,10 +407,12 @@ jobs:
           docker buildx build \
             --file ./Dockerfile \
             --platform linux/amd64 \
+            --ulimit nofile=524288:524288 \
             --target builder \
             --output type=cacheonly \
-            --cache-from type=gha,scope=subconverter-sanitizer \
-            --cache-to type=gha,mode=max,scope=subconverter-sanitizer \
+            --cache-from type=gha,scope=subconverter-sanitizer-bootstrap,timeout=30m \
+            --cache-from type=gha,scope=subconverter-sanitizer,timeout=30m \
+            --cache-to type=gha,mode=max,scope=subconverter-sanitizer,timeout=30m \
             "${args[@]}" \
             --build-arg ENABLE_SANITIZERS=true \
             .
@@ -875,7 +947,7 @@ jobs:
     name: "🔒 Strict force_max validation gate"
     if: always() && github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'final-force-max'
     runs-on: ubuntu-latest
-    needs: [prepare, validate-source, sanitizer, cross-build, build-linux, build-windows-amd64]
+    needs: [prepare, validate-source, sanitizer-bootstrap, sanitizer, cross-build, build-linux, build-windows-amd64]
     permissions: {}
     steps:
       - name: Require every strict validation job
@@ -883,6 +955,7 @@ jobs:
         env:
           PREPARE_RESULT: ${{ needs.prepare.result }}
           SOURCE_RESULT: ${{ needs.validate-source.result }}
+          SANITIZER_BOOTSTRAP_RESULT: ${{ needs.sanitizer-bootstrap.result }}
           SANITIZER_RESULT: ${{ needs.sanitizer.result }}
           CROSS_RESULT: ${{ needs.cross-build.result }}
           LINUX_RESULT: ${{ needs.build-linux.result }}
@@ -899,6 +972,7 @@ jobs:
           for requirement in \
             "prepare=$PREPARE_RESULT" \
             "source=$SOURCE_RESULT" \
+            "sanitizer-bootstrap=$SANITIZER_BOOTSTRAP_RESULT" \
             "sanitizer=$SANITIZER_RESULT" \
             "cross=$CROSS_RESULT" \
             "linux=$LINUX_RESULT" \
@@ -918,7 +992,7 @@ jobs:
   merge-manifest:
     name: "🔗 Publish Version Docker Images"
     runs-on: ubuntu-latest
-    needs: [prepare, validate-source, sanitizer, cross-build, build-linux, build-windows-amd64, strict-force-max-gate]
+    needs: [prepare, validate-source, sanitizer-bootstrap, sanitizer, cross-build, build-linux, build-windows-amd64, strict-force-max-gate]
     if: >-
       always() &&
       github.event_name != 'pull_request' &&
@@ -926,7 +1000,12 @@ jobs:
       needs.prepare.result == 'success' &&
       needs.build-linux.result == 'success' &&
       (needs.build-windows-amd64.result == 'success' || needs.prepare.outputs.mode == 'dev') &&
-      (needs.sanitizer.result == 'success' || needs.sanitizer.result == 'skipped' || needs.prepare.outputs.mode == 'release') &&
+      (needs.sanitizer-bootstrap.result == 'success' ||
+       (needs.sanitizer-bootstrap.result == 'skipped' && github.event_name != 'workflow_dispatch') ||
+       needs.prepare.outputs.mode == 'release') &&
+      (needs.sanitizer.result == 'success' ||
+       (needs.sanitizer.result == 'skipped' && github.event_name != 'workflow_dispatch') ||
+       needs.prepare.outputs.mode == 'release') &&
       (needs.cross-build.result == 'success' || needs.prepare.outputs.mode == 'release') &&
       (needs.validate-source.result == 'success' || needs.prepare.outputs.mode == 'release') &&
       (github.event_name != 'workflow_dispatch' ||

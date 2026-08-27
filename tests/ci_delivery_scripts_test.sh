@@ -174,11 +174,23 @@ grep -Fq 'ctest --test-dir "${BUILD_DIR}" --output-on-failure --timeout 120' "$W
 grep -Fq '$expectedUpdaterVersion = "unknown"' \
   "$REPOSITORY/.github/actions/smoke-windows-artifact/action.yml"
 
+sanitizer_bootstrap_block="$(sed -n '/^  sanitizer-bootstrap:/,/^  sanitizer:/p' "$BUILD_WORKFLOW")"
+grep -Fq "if: needs.prepare.outputs.mode == 'dev' && github.event_name == 'workflow_dispatch'" <<<"$sanitizer_bootstrap_block"
+grep -Fq -- '--target sanitizer-bootstrap' <<<"$sanitizer_bootstrap_block"
+grep -Fq -- '--ulimit nofile=524288:524288' <<<"$sanitizer_bootstrap_block"
+grep -Fq -- '--cache-to type=gha,mode=max,scope=subconverter-sanitizer-bootstrap,timeout=30m' <<<"$sanitizer_bootstrap_block"
+
+sanitizer_block="$(sed -n '/^  sanitizer:/,/^  cross-build:/p' "$BUILD_WORKFLOW")"
+grep -Fq 'needs: [prepare, sanitizer-bootstrap]' <<<"$sanitizer_block"
+grep -Fq -- '--target builder' <<<"$sanitizer_block"
+grep -Fq -- '--ulimit nofile=524288:524288' <<<"$sanitizer_block"
+grep -Fq -- '--cache-from type=gha,scope=subconverter-sanitizer-bootstrap,timeout=30m' <<<"$sanitizer_block"
+
 strict_gate_block="$(sed -n '/^  strict-force-max-gate:/,/^  merge-manifest:/p' "$BUILD_WORKFLOW")"
 grep -Fq "if: always() && github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'final-force-max'" <<<"$strict_gate_block"
-grep -Fq 'needs: [prepare, validate-source, sanitizer, cross-build, build-linux, build-windows-amd64]' <<<"$strict_gate_block"
+grep -Fq 'needs: [prepare, validate-source, sanitizer-bootstrap, sanitizer, cross-build, build-linux, build-windows-amd64]' <<<"$strict_gate_block"
 grep -Fq 'if [ "$result" != success ]; then' <<<"$strict_gate_block"
-for result_name in PREPARE_RESULT SOURCE_RESULT SANITIZER_RESULT CROSS_RESULT LINUX_RESULT WINDOWS_RESULT; do
+for result_name in PREPARE_RESULT SOURCE_RESULT SANITIZER_BOOTSTRAP_RESULT SANITIZER_RESULT CROSS_RESULT LINUX_RESULT WINDOWS_RESULT; do
   grep -Fq "$result_name:" <<<"$strict_gate_block"
 done
 
@@ -193,8 +205,11 @@ grep -Fq 'runtime_pref=/tmp/subconverter-force-max-pref.toml' "$OPENWRT_SMOKE_AC
 grep -Fq 'max_allowed_download_size = 1048576' "$OPENWRT_SMOKE_ACTION"
 
 publish_block="$(sed -n '/^  merge-manifest:/,/^  create-release:/p' "$BUILD_WORKFLOW")"
-grep -Fq 'needs: [prepare, validate-source, sanitizer, cross-build, build-linux, build-windows-amd64, strict-force-max-gate]' <<<"$publish_block"
+grep -Fq 'needs: [prepare, validate-source, sanitizer-bootstrap, sanitizer, cross-build, build-linux, build-windows-amd64, strict-force-max-gate]' <<<"$publish_block"
 grep -Fq "needs.build-windows-amd64.result == 'success'" <<<"$publish_block"
+grep -Fq "needs.sanitizer-bootstrap.result == 'success'" <<<"$publish_block"
+grep -Fq "needs.sanitizer-bootstrap.result == 'skipped' && github.event_name != 'workflow_dispatch'" <<<"$publish_block"
+grep -Fq "needs.sanitizer.result == 'skipped' && github.event_name != 'workflow_dispatch'" <<<"$publish_block"
 grep -Fq "needs.strict-force-max-gate.result == 'success'" <<<"$publish_block"
 grep -Fq 'pattern: docker-image-*' <<<"$publish_block"
 grep -Fq 'gzip -dc "images/$archive" | docker load' <<<"$publish_block"

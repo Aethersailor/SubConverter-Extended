@@ -115,7 +115,7 @@ RUN set -eux; \
 
 # ========== C++ BUILD STAGE ==========
 # 使用 Debian (glibc) 编译，运行时再搬运依赖到 Alpine
-FROM ${DEBIAN_IMAGE} AS builder
+FROM ${DEBIAN_IMAGE} AS builder-base
 ARG THREADS="4"
 ARG SHA=""
 ARG VERSION="dev"
@@ -294,7 +294,25 @@ RUN set -xe && \
     -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
     -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
     -DCMAKE_POSITION_INDEPENDENT_CODE=OFF \
-    . && \
+    .
+
+# Keep sanitizer compilation resumable on hosted runners that can be recycled
+# during one long build step. The first target materializes the production
+# object graph and ccache; the final builder continues with every test target.
+FROM builder-base AS sanitizer-bootstrap
+ARG THREADS="4"
+RUN export PATH="/usr/lib/ccache:$PATH" && \
+    export CCACHE_DIR=/tmp/ccache && \
+    export CCACHE_COMPILERCHECK=content && \
+    ninja -j ${THREADS} subconverter
+
+FROM sanitizer-bootstrap AS builder
+ARG THREADS="4"
+ARG BUILD_TESTS=false
+ARG ENABLE_SANITIZERS=false
+RUN export PATH="/usr/lib/ccache:$PATH" && \
+    export CCACHE_DIR=/tmp/ccache && \
+    export CCACHE_COMPILERCHECK=content && \
     ninja -j ${THREADS}
 
 RUN if [ "${BUILD_TESTS}" = "true" ]; then \
