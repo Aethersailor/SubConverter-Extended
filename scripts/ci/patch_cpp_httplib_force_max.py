@@ -31,6 +31,25 @@ def replace_once(content: str, old: str, new: str, label: str) -> str:
     return content.replace(old, new, 1)
 
 
+def patch_response_completion_storage(content: str) -> str:
+    anchors = (
+        "  std::string file_content_content_type_;\n};",
+        "  detail::EncodingType file_content_encoding_ = detail::EncodingType::None;\n};",
+    )
+    counts = tuple(content.count(anchor) for anchor in anchors)
+    if sum(counts) != 1:
+        raise RuntimeError(
+            "cpp-httplib patch anchor 'response completion storage' "
+            f"matched {sum(counts)} times"
+        )
+    anchor = anchors[counts.index(1)]
+    replacement = (
+        anchor[:-3]
+        + "\n  std::function<void(bool)> write_completion_handler_;\n};"
+    )
+    return content.replace(anchor, replacement, 1)
+
+
 def apply_patch(content: str) -> str:
     present = tuple(marker in content for marker in PATCH_MARKERS)
     if all(present):
@@ -38,6 +57,7 @@ def apply_patch(content: str) -> str:
     if any(present):
         raise RuntimeError("cpp-httplib force_max patch is only partially present")
 
+    content = patch_response_completion_storage(content)
     replacements = (
         (
             "response public hooks",
@@ -56,12 +76,6 @@ def apply_patch(content: str) -> str:
             "    if (handler) { handler(success); }\n"
             "  }\n\n"
             "  Response() = default;",
-        ),
-        (
-            "response completion storage",
-            "  std::string file_content_content_type_;\n};",
-            "  std::string file_content_content_type_;\n"
-            "  std::function<void(bool)> write_completion_handler_;\n};",
         ),
         (
             "thread pool declaration",

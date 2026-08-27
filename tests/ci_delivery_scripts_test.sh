@@ -67,6 +67,40 @@ grep -Eq '^[[:space:]]+cmake .*python3' \
   "$REPOSITORY/docker/Dockerfile.armv7-cross"
 PYTHONPYCACHEPREFIX="$TEST_ROOT/pycache" python3 -m py_compile \
   "$REPOSITORY/scripts/ci/patch_cpp_httplib_force_max.py"
+PYTHONPYCACHEPREFIX="$TEST_ROOT/pycache" python3 - \
+  "$REPOSITORY/scripts/ci/patch_cpp_httplib_force_max.py" <<'PY'
+import importlib.util
+from pathlib import Path
+import sys
+
+script = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("patch_cpp_httplib_force_max", script)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+old_storage = "  std::string file_content_content_type_;\n};"
+new_storage = (
+    "  std::string file_content_content_type_;\n"
+    "  detail::EncodingType file_content_encoding_ = detail::EncodingType::None;\n};"
+)
+for storage in (old_storage, new_storage):
+    patched = module.patch_response_completion_storage(storage)
+    assert patched.count("write_completion_handler_") == 1
+    assert storage[:-3] in patched
+
+for invalid in ("class Response {};", old_storage + "\n" + new_storage):
+    try:
+        module.patch_response_completion_storage(invalid)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("response storage anchor ambiguity was not rejected")
+PY
+cp "$REPOSITORY/include/httplib.h" "$TEST_ROOT/httplib.h"
+python3 "$REPOSITORY/scripts/ci/patch_cpp_httplib_force_max.py" \
+  "$TEST_ROOT/httplib.h"
+cmp "$REPOSITORY/include/httplib.h" "$TEST_ROOT/httplib.h"
 
 assert_trace() {
   grep -F -- "$1" "$TRACE" >/dev/null || {
