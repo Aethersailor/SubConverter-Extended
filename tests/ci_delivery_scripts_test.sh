@@ -171,6 +171,8 @@ grep -Fq "if: needs.prepare.outputs.is_release == 'true'" <<<"$windows_block"
 grep -Fq 'BUILD_TESTS="${BUILD_TESTS:-false}"' "$WINDOWS_BUILD_SCRIPT"
 grep -Fq -- '-DBUILD_TESTS="${BUILD_TESTS}"' "$WINDOWS_BUILD_SCRIPT"
 grep -Fq 'ctest --test-dir "${BUILD_DIR}" --output-on-failure --timeout 120' "$WINDOWS_BUILD_SCRIPT"
+grep -Fq '$expectedUpdaterVersion = "unknown"' \
+  "$REPOSITORY/.github/actions/smoke-windows-artifact/action.yml"
 
 strict_gate_block="$(sed -n '/^  strict-force-max-gate:/,/^  merge-manifest:/p' "$BUILD_WORKFLOW")"
 grep -Fq "if: always() && github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'final-force-max'" <<<"$strict_gate_block"

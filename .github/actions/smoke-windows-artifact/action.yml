@@ -75,8 +75,15 @@ runs:
             throw "Windows updater status command failed."
           }
           $updateStatus = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json
+          $expectedUpdaterVersion = "${{ inputs.expected-version }}"
+          if ($expectedUpdaterVersion -ceq "dev") {
+            # The updater intentionally recognizes only formal vX.Y.Z releases.
+            # A non-publishing dev artifact still has exact BUILD-INFO/runtime
+            # identity above, but must remain outside the stable update channel.
+            $expectedUpdaterVersion = "unknown"
+          }
           if ($updateStatus.state -cne "idle" -or
-              $updateStatus.current_version -cne "${{ inputs.expected-version }}" -or
+              $updateStatus.current_version -cne $expectedUpdaterVersion -or
               $updateStatus.rollback_available -or
               $updateStatus.available) {
             throw "Unexpected Windows updater status: $($updateStatus | ConvertTo-Json -Compress)"
