@@ -1765,13 +1765,6 @@ int main(int argc, char *argv[]) {
         cancelled_terminal = cancel_completion.get_future().get();
       }
 
-      const ComputeExecutorSnapshot affinity_snapshot =
-          globalComputeExecutorSnapshot();
-      uint64_t flow_affinity_hits = 0;
-      for (const ComputeWorkerSnapshot &worker :
-           affinity_snapshot.worker_metrics)
-        flow_affinity_hits += worker.affinity_hits;
-
       auto shutdown_context = std::make_shared<RequestContext>(
           "conversion-flow-shutdown", RequestContext::Clock::now(),
           RequestContext::Clock::now() + std::chrono::seconds(10));
@@ -1815,6 +1808,10 @@ int main(int argc, char *argv[]) {
 #else
       constexpr uint64_t expected_flow_total = 9;
 #endif
+      // Flow affinity is intentionally soft and may miss when another worker
+      // wins the queued continuation. Its deterministic executor contract is
+      // covered by concurrency_primitives; this integration probe verifies
+      // lifecycle and context restoration without depending on OS scheduling.
       conversion_flow_ok =
           started &&
           initial_scope_ok.load(std::memory_order_acquire) &&
@@ -1873,7 +1870,6 @@ int main(int argc, char *argv[]) {
           cancelled_started &&
           cancel_phase_ok.load(std::memory_order_acquire) &&
           cancel_operation_valid.load(std::memory_order_acquire) &&
-          flow_affinity_hits > 0 &&
           cancelled_terminal.state ==
               ConversionFlowTerminalState::Cancelled &&
           cancelled_terminal.cancellation ==
