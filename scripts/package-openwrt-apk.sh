@@ -38,8 +38,9 @@ case "${APK_RELEASE}" in
     ;;
 esac
 
-if [[ ! "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "Invalid version '${VERSION}'; expected vMAJOR.MINOR.PATCH." >&2
+if [[ ! "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] && \
+   [ "${VERSION}" != "dev" ]; then
+  echo "Invalid version '${VERSION}'; expected dev or vMAJOR.MINOR.PATCH." >&2
   exit 1
 fi
 

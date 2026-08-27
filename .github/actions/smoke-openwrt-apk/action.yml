@@ -6,7 +6,7 @@ inputs:
     description: Shell glob matching APK artifacts from one CPU family.
     required: true
   expected-version:
-    description: Exact formal vX.Y.Z identity.
+    description: Exact dev or formal vX.Y.Z identity.
     required: true
   expected-revision:
     description: Exact full tag commit SHA.
@@ -14,6 +14,10 @@ inputs:
   expected-build-date:
     description: Exact canonical UTC build timestamp.
     required: true
+  resource-control:
+    description: Resource-control mode used by the representative runtime smoke.
+    required: false
+    default: compat
 
 runs:
   using: composite
@@ -25,10 +29,12 @@ runs:
         EXPECTED_VERSION: ${{ inputs.expected-version }}
         EXPECTED_REVISION: ${{ inputs.expected-revision }}
         EXPECTED_BUILD_DATE: ${{ inputs.expected-build-date }}
+        RESOURCE_CONTROL: ${{ inputs.resource-control }}
       run: |
         set -euo pipefail
 
-        if [[ ! "$EXPECTED_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        if [[ ! "$EXPECTED_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] && \
+           [ "$EXPECTED_VERSION" != dev ]; then
           echo "Invalid expected version: $EXPECTED_VERSION" >&2
           exit 1
         fi
@@ -40,6 +46,13 @@ runs:
           echo "Invalid expected build date: $EXPECTED_BUILD_DATE" >&2
           exit 1
         fi
+        case "$RESOURCE_CONTROL" in
+          compat|force_max) ;;
+          *)
+            echo "Invalid resource-control mode: $RESOURCE_CONTROL" >&2
+            exit 1
+            ;;
+        esac
 
         mapfile -t artifacts < <(compgen -G "$ARTIFACT_PATTERN" | sort)
         if [ "${#artifacts[@]}" -eq 0 ]; then
@@ -197,13 +210,23 @@ runs:
         docker commit "$prep_container" "$prepared_image" >/dev/null
         docker rm "$prep_container" >/dev/null
 
+        declare -a runtime_container_args=()
+        if [ "$RESOURCE_CONTROL" = force_max ]; then
+          runtime_container_args+=(
+            --memory 768m
+            --pids-limit 256
+            --ulimit nofile=512:512
+          )
+        fi
+
         for index in "${!artifact_paths[@]}"; do
           artifact_path="${artifact_paths[$index]}"
           arch="${artifact_arches[$index]}"
           run_runtime=0
           [ "$arch" = "$runtime_arch" ] && run_runtime=1
 
-          docker run --rm --platform "$platform" -i \
+          docker run --rm --platform "$platform" \
+            "${runtime_container_args[@]}" -i \
             -v "$workspace_root:/work:ro" \
             -v "$results_dir:/results" \
             -e "APK_ARTIFACT=$artifact_path" \
@@ -212,6 +235,7 @@ runs:
             -e "EXPECTED_VERSION=$EXPECTED_VERSION" \
             -e "EXPECTED_REVISION=$EXPECTED_REVISION" \
             -e "EXPECTED_BUILD_DATE=$EXPECTED_BUILD_DATE" \
+            -e "RESOURCE_CONTROL=$RESOURCE_CONTROL" \
             -e "RUN_RUNTIME=$run_runtime" \
             "$prepared_image" /bin/sh -s <<'OPENWRT_SMOKE'
           set -eu
@@ -444,6 +468,7 @@ runs:
             SUBCONVERTER_LISTEN_ADDRESS=127.0.0.1 \
             SUBCONVERTER_LISTEN_PORT=25500 \
             SUBCONVERTER_RUNTIME_STATE_FILE=/tmp/subconverter-runtime.json \
+            SUBCONVERTER_RESOURCE_CONTROL="$RESOURCE_CONTROL" \
               /usr/bin/subconverter-extended >/tmp/subconverter.stdout 2>/tmp/subconverter.stderr &
             runtime_pid=$!
 
@@ -475,6 +500,12 @@ runs:
             test "$(jsonfilter -i /tmp/subconverter-runtime.json -e '@.listen_address')" = '127.0.0.1'
             test "$(jsonfilter -i /tmp/subconverter-runtime.json -e '@.listen_port')" = '25500'
             test "$(jsonfilter -i /tmp/subconverter-runtime.json -e '@.version')" = "$EXPECTED_VERSION"
+            if [ "$RESOURCE_CONTROL" = force_max ]; then
+              grep -Fq 'FORCE_MAX_RUNTIME_PREPARED' \
+                /tmp/subconverter.stdout /tmp/subconverter.stderr
+              grep -Fq 'FORCE_MAX_RUNTIME_READY generation=1' \
+                /tmp/subconverter.stdout /tmp/subconverter.stderr
+            fi
 
             kill -TERM "$runtime_pid"
             stopped=0

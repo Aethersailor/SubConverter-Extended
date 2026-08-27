@@ -9,6 +9,15 @@ on:
       - 'README-*.md'
       - 'docker-compose.yml'
   workflow_dispatch:
+    inputs:
+      validation_profile:
+        description: Validation depth for a manual dev build.
+        required: true
+        default: standard
+        type: choice
+        options:
+          - standard
+          - final-force-max
   workflow_call:
 permissions:
   contents: read
@@ -351,11 +360,21 @@ jobs:
             runner: ubuntu-24.04-arm
             dockerfile: ./Dockerfile
             platform: linux/arm64
+            builder_platform: linux/arm64
+            builder_tag: subconverter-temp:arm64-builder
+            extract_mode: shared
+            openwrt_arches: aarch64_generic,aarch64_cortex-a53,aarch64_cortex-a72
+            qemu_platforms: ""
             threads: "4"
           - arch: armv7
             runner: ubuntu-latest
             dockerfile: ./docker/Dockerfile.armv7-cross
             platform: linux/arm/v7
+            builder_platform: linux/amd64
+            builder_tag: subconverter-temp:armv7-builder
+            extract_mode: root
+            openwrt_arches: arm_cortex-a5_vfpv4,arm_cortex-a7,arm_cortex-a7_vfpv4,arm_cortex-a7_neon-vfpv4,arm_cortex-a8_vfpv3,arm_cortex-a9,arm_cortex-a9_neon,arm_cortex-a9_vfpv3-d16,arm_cortex-a15_neon-vfpv4
+            qemu_platforms: arm
             threads: "2"
     steps:
       - name: Checkout
@@ -417,6 +436,84 @@ jobs:
             --cache-to type=gha,mode=max,scope="subconverter-cross-${{ matrix.arch }}" \
             "${args[@]}" \
             .
+
+      - name: Set up QEMU for strict runtime smoke
+        if: github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'final-force-max' && matrix.qemu_platforms != ''
+        shell: bash
+        run: docker run --privileged --rm tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install "${{ matrix.qemu_platforms }}"
+
+      - name: Build strict non-publishing candidate image
+        if: github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'final-force-max'
+        id: strict_candidate
+        shell: bash
+        env:
+          BUILD_ARGS: ${{ steps.cross_args.outputs.args }}
+        run: |
+          bash scripts/ci/build-candidate-image.sh \
+            "${{ matrix.arch }}" \
+            "${{ matrix.dockerfile }}" \
+            "${{ matrix.platform }}"
+
+      - name: Export strict builder output
+        if: github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'final-force-max'
+        shell: bash
+        env:
+          BUILD_ARGS: ${{ steps.cross_args.outputs.args }}
+        run: |
+          bash scripts/ci/export-ci-image.sh \
+            "${{ matrix.dockerfile }}" \
+            "${{ matrix.builder_tag }}" \
+            "${{ matrix.builder_platform }}"
+
+      - name: Extract strict builder output
+        if: github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'final-force-max'
+        shell: bash
+        env:
+          EXTRACT_GENERATED: "false"
+        run: bash scripts/ci/extract-builder-output.sh "${{ matrix.builder_tag }}" "${{ matrix.extract_mode }}"
+
+      - name: Package strict dev OpenWrt APKs without publishing
+        if: github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'final-force-max'
+        shell: bash
+        env:
+          SHA: ${{ needs.prepare.outputs.sha }}
+          BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
+          BUILD_TIME: "0"
+        run: |
+          set -euo pipefail
+          bash scripts/ci/build-linux-release.sh \
+            "${{ needs.prepare.outputs.version }}" \
+            "${{ matrix.arch }}" \
+            "${{ matrix.openwrt_arches }}"
+          python3 scripts/ci/check_file_size.py --budget release-openwrt \
+            "SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-*.apk"
+
+      - name: Smoke test strict candidate image (${{ matrix.arch }})
+        if: github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'final-force-max'
+        timeout-minutes: 5
+        uses: ./.github/actions/smoke-docker-image
+        with:
+          image: subconverter-extended:${{ matrix.arch }}-ci
+          platform: ${{ matrix.platform }}
+          expected-version: ${{ needs.prepare.outputs.version }}
+          expected-revision: ${{ needs.prepare.outputs.sha }}
+          expected-build-date: ${{ needs.prepare.outputs.build_date }}
+
+      - name: Smoke test strict OpenWrt APKs (${{ matrix.arch }})
+        if: github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'final-force-max'
+        timeout-minutes: 15
+        uses: ./.github/actions/smoke-openwrt-apk
+        with:
+          artifacts: SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-*.apk
+          expected-version: ${{ needs.prepare.outputs.version }}
+          expected-revision: ${{ needs.prepare.outputs.sha }}
+          expected-build-date: ${{ needs.prepare.outputs.build_date }}
+          resource-control: force_max
+
+      - name: Clean strict cross-platform packaging files
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'final-force-max'
+        shell: bash
+        run: rm -rf SubConverter-Extended SubConverter-Extended-*.tar.gz SubConverter-Extended-*.apk subconverter subconverter-update runtime-libs runtime-root libmihomo.so build/openwrt-apk
 
   build-linux:
     name: "🐳 Docker Build (${{ matrix.arch }})"
@@ -501,7 +598,7 @@ jobs:
         run: bash scripts/ci/extract-builder-output.sh "${{ matrix.builder_tag }}" "${{ matrix.extract_mode }}"
 
       - name: Package dev-only OpenWrt amd64 without publishing
-        if: needs.prepare.outputs.mode == 'dev' && matrix.arch == 'amd64'
+        if: needs.prepare.outputs.mode == 'dev' && matrix.arch == 'amd64' && (github.event_name != 'workflow_dispatch' || inputs.validation_profile != 'final-force-max')
         shell: bash
         env:
           SHA: ${{ needs.prepare.outputs.sha }}
@@ -517,6 +614,36 @@ jobs:
             SubConverter-Extended-v0.0.0-linux-amd64.tar.gz \
             SubConverter-Extended-v0.0.0-openwrt-x86_64.apk \
             build/openwrt-apk/amd64
+
+      - name: Package strict dev OpenWrt amd64 without publishing
+        if: needs.prepare.outputs.mode == 'dev' && matrix.arch == 'amd64' && github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'final-force-max'
+        shell: bash
+        env:
+          SHA: ${{ needs.prepare.outputs.sha }}
+          BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
+          BUILD_TIME: "0"
+        run: |
+          set -euo pipefail
+          bash scripts/ci/build-linux-release.sh \
+            "${{ needs.prepare.outputs.version }}" amd64 x86_64
+          python3 scripts/ci/check_file_size.py --budget release-openwrt \
+            "SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-x86_64.apk"
+
+      - name: Smoke test strict OpenWrt APKs (amd64)
+        if: needs.prepare.outputs.mode == 'dev' && matrix.arch == 'amd64' && github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'final-force-max'
+        timeout-minutes: 15
+        uses: ./.github/actions/smoke-openwrt-apk
+        with:
+          artifacts: SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-x86_64.apk
+          expected-version: ${{ needs.prepare.outputs.version }}
+          expected-revision: ${{ needs.prepare.outputs.sha }}
+          expected-build-date: ${{ needs.prepare.outputs.build_date }}
+          resource-control: force_max
+
+      - name: Clean strict OpenWrt amd64 packaging files
+        if: always() && needs.prepare.outputs.mode == 'dev' && matrix.arch == 'amd64' && github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'final-force-max'
+        shell: bash
+        run: rm -rf SubConverter-Extended SubConverter-Extended-*.tar.gz SubConverter-Extended-*.apk build/openwrt-apk/amd64
 
       - name: Check bridge size budget (${{ matrix.arch }})
         shell: bash
@@ -661,7 +788,11 @@ jobs:
     name: "🪟 Windows Build (amd64)"
     runs-on: windows-latest
     needs: prepare
-    if: needs.prepare.outputs.is_release == 'true'
+    if: >-
+      needs.prepare.outputs.is_release == 'true' ||
+      (needs.prepare.outputs.mode == 'dev' &&
+       github.event_name == 'workflow_dispatch' &&
+       inputs.validation_profile == 'final-force-max')
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -708,8 +839,10 @@ jobs:
 
       - name: Build Windows amd64
         shell: msys2 {0}
+        env:
+          BUILD_TESTS: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'final-force-max' }}
         run: |
-          THREADS=4 bash scripts/build-windows-amd64.sh \
+          THREADS=4 BUILD_TESTS="$BUILD_TESTS" bash scripts/build-windows-amd64.sh \
             "${{ needs.prepare.outputs.version }}" \
             "${{ needs.prepare.outputs.sha }}" \
             "${{ needs.prepare.outputs.build_date }}"
@@ -732,15 +865,60 @@ jobs:
           expected-build-date: ${{ needs.prepare.outputs.build_date }}
 
       - name: Upload Artifact (Windows amd64)
+        if: needs.prepare.outputs.is_release == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: windows-amd64
           path: SubConverter-Extended-*.zip
 
+  strict-force-max-gate:
+    name: "🔒 Strict force_max validation gate"
+    if: always() && github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'final-force-max'
+    runs-on: ubuntu-latest
+    needs: [prepare, validate-source, sanitizer, cross-build, build-linux, build-windows-amd64]
+    permissions: {}
+    steps:
+      - name: Require every strict validation job
+        shell: bash
+        env:
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          SOURCE_RESULT: ${{ needs.validate-source.result }}
+          SANITIZER_RESULT: ${{ needs.sanitizer.result }}
+          CROSS_RESULT: ${{ needs.cross-build.result }}
+          LINUX_RESULT: ${{ needs.build-linux.result }}
+          WINDOWS_RESULT: ${{ needs.build-windows-amd64.result }}
+          CANDIDATE_MODE: ${{ needs.prepare.outputs.mode }}
+          CANDIDATE_SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = 'refs/heads/dev'
+          test "$CANDIDATE_MODE" = 'dev'
+          test "$CANDIDATE_SHA" = "$GITHUB_SHA"
+
+          failed=false
+          for requirement in \
+            "prepare=$PREPARE_RESULT" \
+            "source=$SOURCE_RESULT" \
+            "sanitizer=$SANITIZER_RESULT" \
+            "cross=$CROSS_RESULT" \
+            "linux=$LINUX_RESULT" \
+            "windows=$WINDOWS_RESULT"; do
+            name="${requirement%%=*}"
+            result="${requirement#*=}"
+            if [ "$result" != success ]; then
+              echo "::error::Strict force_max requirement $name concluded $result; success is required."
+              failed=true
+            fi
+          done
+          if [ "$failed" = true ]; then
+            exit 1
+          fi
+          echo "Strict force_max validation succeeded for $CANDIDATE_SHA."
+
   merge-manifest:
     name: "🔗 Publish Version Docker Images"
     runs-on: ubuntu-latest
-    needs: [prepare, validate-source, sanitizer, cross-build, build-linux, build-windows-amd64]
+    needs: [prepare, validate-source, sanitizer, cross-build, build-linux, build-windows-amd64, strict-force-max-gate]
     if: >-
       always() &&
       github.event_name != 'pull_request' &&
@@ -750,7 +928,10 @@ jobs:
       (needs.build-windows-amd64.result == 'success' || needs.prepare.outputs.mode == 'dev') &&
       (needs.sanitizer.result == 'success' || needs.sanitizer.result == 'skipped' || needs.prepare.outputs.mode == 'release') &&
       (needs.cross-build.result == 'success' || needs.prepare.outputs.mode == 'release') &&
-      (needs.validate-source.result == 'success' || needs.prepare.outputs.mode == 'release')
+      (needs.validate-source.result == 'success' || needs.prepare.outputs.mode == 'release') &&
+      (github.event_name != 'workflow_dispatch' ||
+       inputs.validation_profile != 'final-force-max' ||
+       needs.strict-force-max-gate.result == 'success')
     outputs:
       dockerhub_digest: ${{ steps.published.outputs.dockerhub_digest }}
       ghcr_digest: ${{ steps.published.outputs.ghcr_digest }}

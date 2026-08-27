@@ -117,12 +117,25 @@ assert_trace "--load"
 echo "CI delivery script contract passed"
 
 BUILD_WORKFLOW="$REPOSITORY/.github/workflows/build-dockerhub.yml"
+WINDOWS_BUILD_SCRIPT="$REPOSITORY/scripts/build-windows-amd64.sh"
+OPENWRT_PACKAGE_SCRIPT="$REPOSITORY/scripts/package-openwrt-apk.sh"
+OPENWRT_SMOKE_ACTION="$REPOSITORY/.github/actions/smoke-openwrt-apk/action.yml"
 CLEANUP_WORKFLOW="$REPOSITORY/.github/workflows/cleanup-container-registry.yml"
 SYNC_WORKFLOW="$REPOSITORY/.github/workflows/sync-dev-to-master.yml"
 
 grep -Fq 'group: build-core-${{ github.ref }}' "$BUILD_WORKFLOW"
 grep -Fq 'group: container-registry-cleanup' "$BUILD_WORKFLOW"
 grep -Fq 'group: container-registry-cleanup' "$CLEANUP_WORKFLOW"
+grep -Fq 'validation_profile:' "$BUILD_WORKFLOW"
+grep -Fq -- '- final-force-max' "$BUILD_WORKFLOW"
+
+cross_build_block="$(sed -n '/^  cross-build:/,/^  build-linux:/p' "$BUILD_WORKFLOW")"
+grep -Fq 'Build strict non-publishing candidate image' <<<"$cross_build_block"
+grep -Fq 'Smoke test strict candidate image (${{ matrix.arch }})' <<<"$cross_build_block"
+grep -Fq 'Smoke test strict OpenWrt APKs (${{ matrix.arch }})' <<<"$cross_build_block"
+grep -Fq 'resource-control: force_max' <<<"$cross_build_block"
+grep -Fq 'builder_platform: linux/arm64' <<<"$cross_build_block"
+grep -Fq 'builder_platform: linux/amd64' <<<"$cross_build_block"
 
 build_linux_block="$(sed -n '/^  build-linux:/,/^  build-windows-amd64:/p' "$BUILD_WORKFLOW")"
 deny_build_linux_registry_write=false
@@ -136,10 +149,36 @@ fi
 grep -Fq 'image: subconverter-extended:${{ matrix.arch }}-ci' <<<"$build_linux_block"
 grep -Fq 'docker save "subconverter-extended:${{ matrix.arch }}-ci"' <<<"$build_linux_block"
 grep -Fq 'name: docker-image-${{ matrix.arch }}' <<<"$build_linux_block"
+grep -Fq 'bash scripts/ci/build-linux-release.sh v0.0.0 amd64 x86_64' <<<"$build_linux_block"
+grep -Fq 'Smoke test strict OpenWrt APKs (amd64)' <<<"$build_linux_block"
+grep -Fq 'resource-control: force_max' <<<"$build_linux_block"
+
+windows_block="$(sed -n '/^  build-windows-amd64:/,/^  strict-force-max-gate:/p' "$BUILD_WORKFLOW")"
+grep -Fq "inputs.validation_profile == 'final-force-max'" <<<"$windows_block"
+grep -Fq 'BUILD_TESTS="$BUILD_TESTS" bash scripts/build-windows-amd64.sh' <<<"$windows_block"
+grep -Fq "if: needs.prepare.outputs.is_release == 'true'" <<<"$windows_block"
+grep -Fq 'BUILD_TESTS="${BUILD_TESTS:-false}"' "$WINDOWS_BUILD_SCRIPT"
+grep -Fq -- '-DBUILD_TESTS="${BUILD_TESTS}"' "$WINDOWS_BUILD_SCRIPT"
+grep -Fq 'ctest --test-dir "${BUILD_DIR}" --output-on-failure --timeout 120' "$WINDOWS_BUILD_SCRIPT"
+
+strict_gate_block="$(sed -n '/^  strict-force-max-gate:/,/^  merge-manifest:/p' "$BUILD_WORKFLOW")"
+grep -Fq "if: always() && github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'final-force-max'" <<<"$strict_gate_block"
+grep -Fq 'needs: [prepare, validate-source, sanitizer, cross-build, build-linux, build-windows-amd64]' <<<"$strict_gate_block"
+grep -Fq 'if [ "$result" != success ]; then' <<<"$strict_gate_block"
+for result_name in PREPARE_RESULT SOURCE_RESULT SANITIZER_RESULT CROSS_RESULT LINUX_RESULT WINDOWS_RESULT; do
+  grep -Fq "$result_name:" <<<"$strict_gate_block"
+done
+
+grep -Fq '[ "${VERSION}" != "dev" ]' "$OPENWRT_PACKAGE_SCRIPT"
+grep -Fq '[ "$EXPECTED_VERSION" != dev ]' "$OPENWRT_SMOKE_ACTION"
+grep -Fq 'default: compat' "$OPENWRT_SMOKE_ACTION"
+grep -Fq 'SUBCONVERTER_RESOURCE_CONTROL="$RESOURCE_CONTROL"' "$OPENWRT_SMOKE_ACTION"
+grep -Fq -- '--ulimit nofile=512:512' "$OPENWRT_SMOKE_ACTION"
 
 publish_block="$(sed -n '/^  merge-manifest:/,/^  create-release:/p' "$BUILD_WORKFLOW")"
-grep -Fq 'needs: [prepare, validate-source, sanitizer, cross-build, build-linux, build-windows-amd64]' <<<"$publish_block"
+grep -Fq 'needs: [prepare, validate-source, sanitizer, cross-build, build-linux, build-windows-amd64, strict-force-max-gate]' <<<"$publish_block"
 grep -Fq "needs.build-windows-amd64.result == 'success'" <<<"$publish_block"
+grep -Fq "needs.strict-force-max-gate.result == 'success'" <<<"$publish_block"
 grep -Fq 'pattern: docker-image-*' <<<"$publish_block"
 grep -Fq 'gzip -dc "images/$archive" | docker load' <<<"$publish_block"
 grep -Fq 'actual_platform="$(docker image inspect' <<<"$publish_block"
