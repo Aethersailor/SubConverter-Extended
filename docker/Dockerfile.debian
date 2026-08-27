@@ -28,20 +28,32 @@ COPY bridge/preprocess.go ./
 COPY bridge/mieru.go ./
 
 RUN set -xe && \
+    retry_go_dependency() { \
+      attempt=1; \
+      while ! "$@"; do \
+        if [ "${attempt}" = 3 ]; then \
+          echo "Go dependency command failed after ${attempt} attempts" >&2; \
+          return 1; \
+        fi; \
+        echo "Go dependency command attempt ${attempt} failed; retrying" >&2; \
+        sleep "$((attempt * 5))"; \
+        attempt="$((attempt + 1))"; \
+      done; \
+    } && \
     if [ "${REFRESH_GO_DEPS}" = "true" ]; then \
       echo "MIHOMO_CACHE_BUST=$MIHOMO_CACHE_BUST" && \
-      go get github.com/metacubex/mihomo@${MIHOMO_REF} && \
-      go get -u all && \
+      retry_go_dependency go get github.com/metacubex/mihomo@${MIHOMO_REF} && \
+      retry_go_dependency go get -u all && \
       go mod tidy; \
     else \
-      go mod download; \
+      retry_go_dependency go mod download; \
     fi
 
 # Copy scripts for scheme generation
 COPY scripts/ ../scripts/
-RUN go run ../scripts/generate_proxy_validation.go -o proxy_validation_generated.go
-RUN go run ../scripts/generate_schemes.go mihomo_schemes.h
-RUN go run ../scripts/generate_param_compat.go -o param_compat.h
+RUN go run ../scripts/generate_proxy_validation.go -o proxy_validation_generated.go -manifest mihomo_capabilities.json
+RUN go run ../scripts/generate_schemes.go -manifest mihomo_capabilities.json -o mihomo_schemes.h
+RUN go run ../scripts/generate_param_compat.go -manifest mihomo_capabilities.json -o param_compat.h
 
 # Build static library (enable CGO for glibc)
 # 根据目标架构自动配置交叉编译环境

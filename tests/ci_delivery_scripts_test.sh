@@ -40,7 +40,23 @@ for dockerfile in Dockerfile docker/Dockerfile.armv7-cross \
   grep -Fq \
     'python3 scripts/ci/patch_cpp_httplib_force_max.py include/httplib.h' \
     "$REPOSITORY/$dockerfile"
+  grep -Fq 'retry_go_dependency() {' "$REPOSITORY/$dockerfile"
+  grep -Fq 'retry_go_dependency go mod download' "$REPOSITORY/$dockerfile"
+  grep -Fq 'retry_go_dependency go get github.com/metacubex/mihomo@${MIHOMO_REF}' \
+    "$REPOSITORY/$dockerfile"
+  grep -Fq 'retry_go_dependency go get -u all' "$REPOSITORY/$dockerfile"
+  grep -Fq 'Go dependency command failed after ${attempt} attempts' \
+    "$REPOSITORY/$dockerfile"
+  grep -Fq 'return 1;' "$REPOSITORY/$dockerfile"
+  grep -Fq 'sleep "$((attempt * 5))"' "$REPOSITORY/$dockerfile"
+  grep -Fq 'generate_proxy_validation.go -o proxy_validation_generated.go -manifest mihomo_capabilities.json' \
+    "$REPOSITORY/$dockerfile"
+  grep -Fq 'generate_schemes.go -manifest mihomo_capabilities.json -o mihomo_schemes.h' \
+    "$REPOSITORY/$dockerfile"
+  grep -Fq 'generate_param_compat.go -manifest mihomo_capabilities.json -o param_compat.h' \
+    "$REPOSITORY/$dockerfile"
 done
+grep -Fq 'retry_go_dependency go get \' "$REPOSITORY/Dockerfile"
 grep -Fq 'for attempt in 1 2 3; do' "$REPOSITORY/Dockerfile"
 grep -Fq 'if [ "${attempt}" = 3 ]; then' "$REPOSITORY/Dockerfile"
 grep -Fq 'Mihomo config validator build failed after ${attempt} attempts' \

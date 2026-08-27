@@ -31,15 +31,27 @@ COPY bridge/mieru.go ./
 COPY bridge/cmd/portable-updater/ ./cmd/portable-updater/
 
 RUN set -xe && \
+    retry_go_dependency() { \
+      attempt=1; \
+      while ! "$@"; do \
+        if [ "${attempt}" = 3 ]; then \
+          echo "Go dependency command failed after ${attempt} attempts" >&2; \
+          return 1; \
+        fi; \
+        echo "Go dependency command attempt ${attempt} failed; retrying" >&2; \
+        sleep "$((attempt * 5))"; \
+        attempt="$((attempt + 1))"; \
+      done; \
+    } && \
     if [ "${REFRESH_GO_DEPS}" = "true" ]; then \
       echo "MIHOMO_CACHE_BUST=$MIHOMO_CACHE_BUST" && \
-      go get github.com/metacubex/mihomo@${MIHOMO_REF} && \
+      retry_go_dependency go get github.com/metacubex/mihomo@${MIHOMO_REF} && \
       mihomo_version="$(go list -m -f '{{.Version}}' github.com/metacubex/mihomo)" && \
       mieru_version="$(go list -m -f '{{.Version}}' github.com/enfein/mieru/v3)" && \
       protobuf_version="$(go list -m -f '{{.Version}}' google.golang.org/protobuf)" && \
       test -n "${mihomo_version}" && test -n "${mieru_version}" && test -n "${protobuf_version}" && \
-      go get -u all && \
-      go get \
+      retry_go_dependency go get -u all && \
+      retry_go_dependency go get \
         "github.com/enfein/mieru/v3@${mieru_version}" \
         "google.golang.org/protobuf@${protobuf_version}" && \
       go mod tidy && \
@@ -47,7 +59,7 @@ RUN set -xe && \
       test "$(go list -m -f '{{.Version}}' github.com/enfein/mieru/v3)" = "${mieru_version}" && \
       test "$(go list -m -f '{{.Version}}' google.golang.org/protobuf)" = "${protobuf_version}"; \
     else \
-      go mod download; \
+      retry_go_dependency go mod download; \
     fi
 
 # Copy scripts for scheme generation

@@ -28,13 +28,25 @@ COPY bridge/mieru.go ./
 COPY bridge/cmd/portable-updater/ ./cmd/portable-updater/
 
 RUN set -xe && \
+    retry_go_dependency() { \
+      attempt=1; \
+      while ! "$@"; do \
+        if [ "${attempt}" = 3 ]; then \
+          echo "Go dependency command failed after ${attempt} attempts" >&2; \
+          return 1; \
+        fi; \
+        echo "Go dependency command attempt ${attempt} failed; retrying" >&2; \
+        sleep "$((attempt * 5))"; \
+        attempt="$((attempt + 1))"; \
+      done; \
+    } && \
     if [ "${REFRESH_GO_DEPS}" = "true" ]; then \
       echo "MIHOMO_CACHE_BUST=$MIHOMO_CACHE_BUST" && \
-      go get github.com/metacubex/mihomo@${MIHOMO_REF} && \
-      go get -u all && \
+      retry_go_dependency go get github.com/metacubex/mihomo@${MIHOMO_REF} && \
+      retry_go_dependency go get -u all && \
       go mod tidy; \
     else \
-      go mod download; \
+      retry_go_dependency go mod download; \
     fi
 
 COPY scripts/ ../scripts/
