@@ -102,6 +102,53 @@ inline double computeEffectiveCpu(double affinity, double cpuset,
   return std::max(1.0, result);
 }
 
+inline uint64_t computeWindowsSchedulableCpuCount(
+    uint64_t primary_affinity, uint64_t primary_group_active,
+    uint64_t system_active, bool default_spans_groups,
+    bool process_group_probe_complete, bool process_spans_multiple_groups,
+    bool cpu_set_probe_complete, uint64_t cpu_set_limit,
+    bool job_group_probe_complete, uint64_t job_group_limit) noexcept {
+  if (system_active == 0)
+    system_active = std::max(primary_group_active, primary_affinity);
+  if (primary_affinity == 0)
+    return 0;
+  // A restrictive process affinity is a hard boundary and takes precedence
+  // over a conflicting CPU Set selection.
+  const bool restrictive_primary =
+      primary_group_active != 0 && primary_affinity < primary_group_active;
+  uint64_t result = primary_affinity;
+  if (!restrictive_primary && system_active > primary_group_active &&
+      default_spans_groups && process_group_probe_complete &&
+      process_spans_multiple_groups)
+    result = system_active;
+  // Unknown Job or CPU Set state must never be interpreted as unlimited.
+  if (!process_group_probe_complete || !job_group_probe_complete ||
+      !cpu_set_probe_complete)
+    return std::min(result, primary_affinity);
+  if (job_group_limit != 0)
+    result = std::min(result, job_group_limit);
+  if (cpu_set_limit != 0)
+    result = std::min(result, cpu_set_limit);
+  return result;
+}
+
+inline bool forceMaxStartupBudgetReady(bool hardware_complete,
+                                       bool budget_valid) noexcept {
+  return hardware_complete && budget_valid;
+}
+
+inline uint64_t computeWindowsCpuRateMillis(uint64_t system_active,
+                                            uint32_t rate) noexcept {
+  if (system_active == 0 || rate == 0 || rate > 10000)
+    return 0;
+  const long double value = static_cast<long double>(system_active) *
+                            static_cast<long double>(rate) * 1000.0L /
+                            10000.0L;
+  if (value >= static_cast<long double>(UINT64_MAX))
+    return UINT64_MAX;
+  return static_cast<uint64_t>(std::llround(value));
+}
+
 struct ResourcePermitBudget {
   uint32_t cpu_permits = 1;
   uint32_t active_flows = 16;

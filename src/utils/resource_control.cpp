@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -329,26 +330,313 @@ uint64_t countOpenFileDescriptors() noexcept {
 }
 #endif
 
-double detectAffinityCpus() noexcept {
+struct CpuCapacityProbe {
+  double cpus = 0.0;
+  bool complete = true;
+};
+
 #ifdef _WIN32
+struct WindowsLimitProbe {
+  uint64_t limit = 0;
+  bool complete = false;
+};
+
+struct WindowsVersionProbe {
+  bool complete = false;
+  bool default_spans_groups = false;
+};
+
+struct WindowsGroupCoverageProbe {
+  bool complete = false;
+  bool spans_multiple_groups = false;
+};
+
+uint64_t popcountAffinity(KAFFINITY mask) noexcept {
+  uint64_t count = 0;
+  while (mask != 0) {
+    count += static_cast<uint64_t>(mask & 1);
+    mask >>= 1;
+  }
+  return count;
+}
+
+WindowsVersionProbe detectWindowsVersion() noexcept {
+  const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+  if (!ntdll)
+    return {};
+  using RtlGetVersionFunction = LONG(WINAPI *)(OSVERSIONINFOW *);
+  const auto rtl_get_version = reinterpret_cast<RtlGetVersionFunction>(
+      GetProcAddress(ntdll, "RtlGetVersion"));
+  if (!rtl_get_version)
+    return {};
+  OSVERSIONINFOEXW version{};
+  version.dwOSVersionInfoSize = sizeof(version);
+  if (rtl_get_version(reinterpret_cast<OSVERSIONINFOW *>(&version)) != 0)
+    return {};
+  const bool server = version.wProductType != VER_NT_WORKSTATION;
+  return {
+      true,
+      server ? version.dwBuildNumber >= 20348
+             : version.dwBuildNumber >= 22000,
+  };
+}
+
+uint64_t countGroupAffinities(const GROUP_AFFINITY *groups,
+                              std::size_t count) noexcept {
+  uint64_t result = 0;
+  for (std::size_t index = 0; index < count; ++index)
+    result += popcountAffinity(groups[index].Mask);
+  return result;
+}
+
+WindowsLimitProbe detectWindowsDefaultCpuSetLimit() noexcept {
+  const HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+  if (!kernel)
+    return {};
+  using GetProcessDefaultCpuSetMasksFunction =
+      BOOL(WINAPI *)(HANDLE, PGROUP_AFFINITY, USHORT, PUSHORT);
+  const auto get_process_default_cpu_set_masks =
+      reinterpret_cast<GetProcessDefaultCpuSetMasksFunction>(
+          GetProcAddress(kernel, "GetProcessDefaultCpuSetMasks"));
+  if (get_process_default_cpu_set_masks) {
+    USHORT required = 0;
+    const BOOL empty = get_process_default_cpu_set_masks(
+        GetCurrentProcess(), nullptr, 0, &required);
+    if (empty && required == 0)
+      return {0, true};
+    if (!empty && GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+      return {};
+    if (required == 0)
+      return {0, true};
+    try {
+      std::vector<GROUP_AFFINITY> masks(required);
+      USHORT received = required;
+      if (!get_process_default_cpu_set_masks(
+              GetCurrentProcess(), masks.data(),
+              static_cast<USHORT>(masks.size()), &received) ||
+          received == 0 || received > masks.size())
+        return {};
+      return {countGroupAffinities(masks.data(), received), true};
+    } catch (...) {
+      return {};
+    }
+  }
+
+  // Windows 10/Server 2016 expose only CPU Set IDs. They normally map to one
+  // home logical processor each; the primary affinity remains the hard upper
+  // bound on these pre-cross-group-default systems.
+  using GetProcessDefaultCpuSetsFunction =
+      BOOL(WINAPI *)(HANDLE, PULONG, ULONG, PULONG);
+  const auto get_process_default_cpu_sets =
+      reinterpret_cast<GetProcessDefaultCpuSetsFunction>(
+          GetProcAddress(kernel, "GetProcessDefaultCpuSets"));
+  if (!get_process_default_cpu_sets)
+    return {0, true};
+  ULONG required = 0;
+  const BOOL empty = get_process_default_cpu_sets(
+      GetCurrentProcess(), nullptr, 0, &required);
+  if (empty && required == 0)
+    return {0, true};
+  if (!empty && GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+    return {};
+  if (required == 0)
+    return {0, true};
+  try {
+    std::vector<ULONG> ids(required);
+    ULONG received = required;
+    if (!get_process_default_cpu_sets(GetCurrentProcess(), ids.data(),
+                                      static_cast<ULONG>(ids.size()),
+                                      &received) ||
+        received == 0 || received > ids.size())
+      return {};
+    using GetSystemCpuSetInformationFunction =
+        BOOL(WINAPI *)(PSYSTEM_CPU_SET_INFORMATION, ULONG, PULONG, HANDLE,
+                       ULONG);
+    const auto get_system_cpu_set_information =
+        reinterpret_cast<GetSystemCpuSetInformationFunction>(
+            GetProcAddress(kernel, "GetSystemCpuSetInformation"));
+    if (!get_system_cpu_set_information)
+      return {};
+    ULONG bytes = 0;
+    if (get_system_cpu_set_information(nullptr, 0, &bytes,
+                                       GetCurrentProcess(), 0) ||
+        GetLastError() != ERROR_INSUFFICIENT_BUFFER || bytes == 0)
+      return {};
+    std::vector<std::max_align_t> storage(
+        (bytes + sizeof(std::max_align_t) - 1) /
+        sizeof(std::max_align_t));
+    ULONG received_bytes = bytes;
+    if (!get_system_cpu_set_information(
+            reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(storage.data()),
+            static_cast<ULONG>(storage.size() * sizeof(std::max_align_t)),
+            &received_bytes, GetCurrentProcess(), 0) ||
+        received_bytes == 0 || received_bytes > bytes)
+      return {};
+    std::vector<uint32_t> processors;
+    std::size_t offset = 0;
+    while (offset < received_bytes) {
+      const auto *information =
+          reinterpret_cast<const SYSTEM_CPU_SET_INFORMATION *>(
+              reinterpret_cast<const unsigned char *>(storage.data()) +
+              offset);
+      if (information->Size < sizeof(SYSTEM_CPU_SET_INFORMATION) ||
+          information->Size > received_bytes - offset)
+        return {};
+      if (information->Type == CpuSetInformation &&
+          std::find(ids.begin(), ids.begin() + received,
+                    information->CpuSet.Id) != ids.begin() + received) {
+        const uint32_t processor =
+            (static_cast<uint32_t>(information->CpuSet.Group) << 8) |
+            information->CpuSet.LogicalProcessorIndex;
+        if (std::find(processors.begin(), processors.end(), processor) ==
+            processors.end())
+          processors.push_back(processor);
+      }
+      offset += information->Size;
+    }
+    std::size_t unique_ids = 0;
+    for (ULONG index = 0; index < received; ++index) {
+      if (std::find(ids.begin(), ids.begin() + index, ids[index]) ==
+          ids.begin() + index)
+        ++unique_ids;
+    }
+    if (processors.size() != unique_ids)
+      return {};
+    return {processors.size(), true};
+  } catch (...) {
+    return {};
+  }
+}
+
+WindowsLimitProbe detectWindowsJobGroupLimit(WORD active_groups) noexcept {
+  BOOL in_job = FALSE;
+  if (!IsProcessInJob(GetCurrentProcess(), nullptr, &in_job))
+    return {};
+  if (!in_job)
+    return {0, true};
+  try {
+    std::vector<GROUP_AFFINITY> groups(
+        std::max<WORD>(active_groups, 1));
+    DWORD returned = 0;
+    const auto information_class =
+        static_cast<JOBOBJECTINFOCLASS>(14); // JobObjectGroupInformationEx
+    if (!QueryInformationJobObject(
+            nullptr, information_class, groups.data(),
+            static_cast<DWORD>(groups.size() * sizeof(GROUP_AFFINITY)),
+            &returned)) {
+      if (returned == 0 || returned % sizeof(GROUP_AFFINITY) != 0)
+        return {};
+      groups.resize(returned / sizeof(GROUP_AFFINITY));
+      if (!QueryInformationJobObject(
+              nullptr, information_class, groups.data(),
+              static_cast<DWORD>(groups.size() * sizeof(GROUP_AFFINITY)),
+              &returned))
+        return {};
+    }
+    if (returned == 0 || returned % sizeof(GROUP_AFFINITY) != 0)
+      return {};
+    const std::size_t count = std::min<std::size_t>(
+        groups.size(), returned / sizeof(GROUP_AFFINITY));
+    return {countGroupAffinities(groups.data(), count), true};
+  } catch (...) {
+    return {};
+  }
+}
+
+WindowsGroupCoverageProbe detectWindowsProcessGroupCoverage() noexcept {
+  const HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+  if (!kernel)
+    return {};
+  using GetProcessGroupAffinityFunction =
+      BOOL(WINAPI *)(HANDLE, PUSHORT, PUSHORT);
+  const auto get_process_group_affinity =
+      reinterpret_cast<GetProcessGroupAffinityFunction>(
+          GetProcAddress(kernel, "GetProcessGroupAffinity"));
+  if (!get_process_group_affinity)
+    return {};
+  USHORT required = 0;
+  if (get_process_group_affinity(GetCurrentProcess(), &required, nullptr) ||
+      GetLastError() != ERROR_INSUFFICIENT_BUFFER || required == 0)
+    return {};
+  try {
+    std::vector<USHORT> groups(required);
+    USHORT received = required;
+    if (!get_process_group_affinity(GetCurrentProcess(), &received,
+                                    groups.data()) ||
+        received == 0 || received > groups.size())
+      return {};
+    std::size_t unique = 0;
+    for (USHORT index = 0; index < received; ++index) {
+      if (std::find(groups.begin(), groups.begin() + index, groups[index]) ==
+          groups.begin() + index)
+        ++unique;
+    }
+    return {true, unique > 1};
+  } catch (...) {
+    return {};
+  }
+}
+
+CpuCapacityProbe detectWindowsAffinityCpus() noexcept {
   DWORD_PTR process_mask = 0;
   DWORD_PTR system_mask = 0;
-  if (!GetProcessAffinityMask(GetCurrentProcess(), &process_mask, &system_mask))
-    return 0.0;
-  uint64_t count = 0;
-  while (process_mask != 0) {
-    count += process_mask & 1;
-    process_mask >>= 1;
-  }
-  return static_cast<double>(count);
+  const bool have_primary =
+      GetProcessAffinityMask(GetCurrentProcess(), &process_mask,
+                             &system_mask) != FALSE;
+  const uint64_t primary_affinity =
+      have_primary ? popcountAffinity(process_mask) : 0;
+  const uint64_t primary_active =
+      have_primary ? popcountAffinity(system_mask) : 0;
+  if (!have_primary || primary_affinity == 0)
+    return {0.0, false};
+
+  const HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+  using GetActiveProcessorGroupCountFunction = WORD(WINAPI *)();
+  using GetActiveProcessorCountFunction = DWORD(WINAPI *)(WORD);
+  const auto get_active_processor_group_count = kernel
+      ? reinterpret_cast<GetActiveProcessorGroupCountFunction>(
+            GetProcAddress(kernel, "GetActiveProcessorGroupCount"))
+      : nullptr;
+  const auto get_active_processor_count = kernel
+      ? reinterpret_cast<GetActiveProcessorCountFunction>(
+            GetProcAddress(kernel, "GetActiveProcessorCount"))
+      : nullptr;
+  if (!get_active_processor_group_count || !get_active_processor_count)
+    return {static_cast<double>(primary_affinity), false};
+
+  const WORD active_groups = get_active_processor_group_count();
+  constexpr WORD all_processor_groups = 0xffff;
+  const uint64_t system_active =
+      get_active_processor_count(all_processor_groups);
+  const WindowsVersionProbe version = detectWindowsVersion();
+  const WindowsGroupCoverageProbe process_groups =
+      detectWindowsProcessGroupCoverage();
+  const WindowsLimitProbe cpu_set = detectWindowsDefaultCpuSetLimit();
+  const WindowsLimitProbe job_group = detectWindowsJobGroupLimit(active_groups);
+  const uint64_t capacity = computeWindowsSchedulableCpuCount(
+      primary_affinity, primary_active, system_active,
+      version.default_spans_groups, process_groups.complete,
+      process_groups.spans_multiple_groups, cpu_set.complete, cpu_set.limit,
+      job_group.complete, job_group.limit);
+  return {
+      static_cast<double>(capacity),
+      version.complete && process_groups.complete && cpu_set.complete &&
+          job_group.complete && system_active != 0,
+  };
+}
+#endif
+
+CpuCapacityProbe detectAffinityCpus() noexcept {
+#ifdef _WIN32
+  return detectWindowsAffinityCpus();
 #elif defined(__linux__)
   cpu_set_t set;
   CPU_ZERO(&set);
   if (sched_getaffinity(0, sizeof(set), &set) != 0)
-    return 0.0;
-  return static_cast<double>(CPU_COUNT(&set));
+    return {0.0, false};
+  return {static_cast<double>(CPU_COUNT(&set)), true};
 #else
-  return 0.0;
+  return {0.0, false};
 #endif
 }
 
@@ -365,21 +653,51 @@ double detectCpuSetCpus() noexcept {
 #endif
 }
 
-double detectCpuQuota() noexcept {
+CpuCapacityProbe detectCpuQuota() noexcept {
 #ifdef _WIN32
   BOOL in_job = FALSE;
   JOBOBJECT_CPU_RATE_CONTROL_INFORMATION control{};
-  if (!IsProcessInJob(GetCurrentProcess(), nullptr, &in_job) || !in_job ||
-      !QueryInformationJobObject(nullptr, JobObjectCpuRateControlInformation,
-                                &control, sizeof(control), nullptr) ||
-      (control.ControlFlags & JOB_OBJECT_CPU_RATE_CONTROL_ENABLE) == 0 ||
-      (control.ControlFlags & JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP) == 0 ||
-      control.CpuRate == 0)
-    return 0.0;
-  const double affinity = detectAffinityCpus();
-  return affinity > 0.0
-             ? affinity * static_cast<double>(control.CpuRate) / 10000.0
-             : 0.0;
+  if (!IsProcessInJob(GetCurrentProcess(), nullptr, &in_job))
+    return {0.0, false};
+  if (!in_job)
+    return {0.0, true};
+  if (!QueryInformationJobObject(nullptr, JobObjectCpuRateControlInformation,
+                                 &control, sizeof(control), nullptr))
+    return {0.0, false};
+  if ((control.ControlFlags & JOB_OBJECT_CPU_RATE_CONTROL_ENABLE) == 0 ||
+      (control.ControlFlags & JOB_OBJECT_CPU_RATE_CONTROL_WEIGHT_BASED) != 0)
+    return {0.0, true};
+  uint64_t rate = 0;
+  if ((control.ControlFlags & JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP) != 0)
+    rate = control.CpuRate;
+  else if ((control.ControlFlags &
+            JOB_OBJECT_CPU_RATE_CONTROL_MIN_MAX_RATE) != 0)
+    // MinRate and MaxRate share the CpuRate union storage. Older MinGW
+    // headers omit the named WORD members, so read the documented upper WORD.
+    rate = static_cast<WORD>(control.CpuRate >> 16);
+  if (rate == 0 || rate > 10000)
+    return {0.0, false};
+  const HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+  using GetActiveProcessorCountFunction = DWORD(WINAPI *)(WORD);
+  const auto get_active_processor_count = kernel
+      ? reinterpret_cast<GetActiveProcessorCountFunction>(
+            GetProcAddress(kernel, "GetActiveProcessorCount"))
+      : nullptr;
+  if (!get_active_processor_count)
+    return {0.0, false};
+  constexpr WORD all_processor_groups = 0xffff;
+  const uint64_t system_active =
+      get_active_processor_count(all_processor_groups);
+  if (system_active == 0)
+    return {0.0, false};
+  // The immediate rate is relative to its parent Job. Windows does not expose
+  // the full parent chain from a process handle, so retain the conservative
+  // value for compat diagnostics but mark the force_max envelope incomplete.
+  return {static_cast<double>(
+              computeWindowsCpuRateMillis(system_active,
+                                           static_cast<uint32_t>(rate))) /
+              1000.0,
+          false};
 #elif defined(__linux__)
   const std::string value = readFirstLine(cgroupV2File("cpu.max"));
   if (!value.empty()) {
@@ -388,12 +706,12 @@ double detectCpuQuota() noexcept {
     uint64_t period = 0;
     stream >> quota_text >> period;
     if (!stream || quota_text == "max" || period == 0)
-      return 0.0;
+      return {0.0, true};
     try {
       const double quota = static_cast<double>(std::stoull(quota_text));
-      return quota > 0.0 ? quota / static_cast<double>(period) : 0.0;
+      return {quota > 0.0 ? quota / static_cast<double>(period) : 0.0, true};
     } catch (...) {
-      return 0.0;
+      return {0.0, false};
     }
   }
   const std::string quota_text =
@@ -403,14 +721,15 @@ double detectCpuQuota() noexcept {
   try {
     const int64_t quota = std::stoll(quota_text);
     const uint64_t period = std::stoull(period_text);
-    return quota > 0 && period != 0
-               ? static_cast<double>(quota) / static_cast<double>(period)
-               : 0.0;
+    return {quota > 0 && period != 0
+                ? static_cast<double>(quota) / static_cast<double>(period)
+                : 0.0,
+            true};
   } catch (...) {
-    return 0.0;
+    return {0.0, quota_text.empty() && period_text.empty()};
   }
 #else
-  return 0.0;
+  return {0.0, false};
 #endif
 }
 
@@ -684,9 +1003,11 @@ ResourceControlSnapshot discover(const Settings &settings,
   ResourceControlSnapshot snapshot;
   snapshot.mode = resourceControlModeName(mode);
   snapshot.source = settings.resourceControlSource;
-  const double affinity = detectAffinityCpus();
+  const CpuCapacityProbe affinity_probe = detectAffinityCpus();
   const double cpuset = detectCpuSetCpus();
-  const double quota = detectCpuQuota();
+  const CpuCapacityProbe quota_probe = detectCpuQuota();
+  const double affinity = affinity_probe.cpus;
+  const double quota = quota_probe.cpus;
   const double fallback =
       static_cast<double>(std::max(1U, std::thread::hardware_concurrency()));
   const double effective =
@@ -735,7 +1056,9 @@ ResourceControlSnapshot discover(const Settings &settings,
     snapshot.suggested_outbound_connections = std::min<uint64_t>(
         snapshot.suggested_outbound_connections,
         std::max<uint64_t>(1, snapshot.nofile_soft / 4));
-  snapshot.hardware_detected = snapshot.cgroup_scope_known && affinity > 0.0 &&
+  snapshot.hardware_detected = snapshot.cgroup_scope_known &&
+                               affinity_probe.complete &&
+                               quota_probe.complete && affinity > 0.0 &&
                                (snapshot.memory_max_bytes > 0 ||
                                 snapshot.host_total_memory_bytes > 0);
   snapshot.hardware_complete = snapshot.hardware_detected;
@@ -1012,9 +1335,11 @@ ForceMaxHardDanger detectForceMaxHardDanger(
     uint64_t previous_sock_throttled) noexcept {
   detectMemory(snapshot);
   detectFileLimits(snapshot);
-  const double affinity = detectAffinityCpus();
+  const CpuCapacityProbe affinity_probe = detectAffinityCpus();
   const double cpuset = detectCpuSetCpus();
-  const double quota = detectCpuQuota();
+  const CpuCapacityProbe quota_probe = detectCpuQuota();
+  const double affinity = affinity_probe.cpus;
+  const double quota = quota_probe.cpus;
   const double fallback = static_cast<double>(
       std::max(1U, std::thread::hardware_concurrency()));
   const double effective =
@@ -1029,7 +1354,8 @@ ForceMaxHardDanger detectForceMaxHardDanger(
   const MemoryPressureSample memory = memoryPressure(snapshot);
   snapshot.envelope = resourceEnvelopeFromSnapshot(snapshot);
   ForceMaxHardDanger result;
-  result.telemetry_valid = memory.valid;
+  result.telemetry_valid = memory.valid && affinity_probe.complete &&
+                           quota_probe.complete;
   result.observed_budget = calculateForceMaxBudget(snapshot.envelope);
   const auto setDanger = [&result](const char *reason) {
     if (!result.danger) {
@@ -1280,9 +1606,11 @@ forceMaxCacheGuardPolicySnapshot() noexcept {
 
 ResourceEnvelope probeCurrentResourceEnvelope() noexcept {
   ResourceControlSnapshot snapshot;
-  const double affinity = detectAffinityCpus();
+  const CpuCapacityProbe affinity_probe = detectAffinityCpus();
   const double cpuset = detectCpuSetCpus();
-  const double quota = detectCpuQuota();
+  const CpuCapacityProbe quota_probe = detectCpuQuota();
+  const double affinity = affinity_probe.cpus;
+  const double quota = quota_probe.cpus;
   const double fallback = static_cast<double>(
       std::max(1U, std::thread::hardware_concurrency()));
   const double effective =
@@ -1331,10 +1659,18 @@ void configureResourceControl(Settings &settings) {
           "advanced resource-capacity changes require a process restart");
   }
   const bool apply_force_max = *parsed == ResourceControlMode::ForceMax;
-  if (apply_force_max && !snapshot.calculated_force_max_budget.valid)
+  if (apply_force_max &&
+      !forceMaxStartupBudgetReady(
+          snapshot.hardware_complete,
+          snapshot.calculated_force_max_budget.valid)) {
+    if (!snapshot.hardware_complete)
+      throw std::invalid_argument(
+          "force_max resource envelope is incomplete; restart under a "
+          "fully observable CPU, memory, PID, and file-limit scope");
     throw std::invalid_argument(
         "force_max budget is invalid: " +
         snapshot.calculated_force_max_budget.validation_error);
+  }
   uint64_t admission_entries = UINT64_C(2048);
   uint64_t admission_bytes = UINT64_C(64) * 1024 * 1024;
   uint64_t retained_bytes = 0;

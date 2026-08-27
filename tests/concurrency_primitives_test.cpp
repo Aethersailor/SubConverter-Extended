@@ -1178,6 +1178,41 @@ static void testResourceControlPrimitives() {
   assert(decision.permits == 4 &&
          std::string(decision.state) == "idle_reduced");
 
+  assert(computeWindowsSchedulableCpuCount(
+             16, 32, 32, false, true, false, true, 0, true, 0) == 16);
+  assert(computeWindowsSchedulableCpuCount(
+             16, 16, 16, false, true, false, true, 4, true, 0) == 4);
+  assert(computeWindowsSchedulableCpuCount(
+             16, 16, 16, false, true, false, true, 0, true, 8) == 8);
+  assert(computeWindowsSchedulableCpuCount(
+             64, 64, 128, false, true, false, true, 0, true, 0) == 64);
+  assert(computeWindowsSchedulableCpuCount(
+             64, 64, 128, true, true, true, true, 0, true, 0) == 128);
+  assert(computeWindowsSchedulableCpuCount(
+             64, 64, 128, true, true, false, true, 0, true, 0) == 64);
+  assert(computeWindowsSchedulableCpuCount(
+             32, 64, 128, true, true, true, true, 128, true, 128) == 32);
+  assert(computeWindowsSchedulableCpuCount(
+             64, 64, 128, true, true, true, true, 48, true, 96) == 48);
+  assert(computeWindowsSchedulableCpuCount(
+             64, 64, 128, true, true, true, true, 96, true, 48) == 48);
+  assert(computeWindowsSchedulableCpuCount(
+             64, 64, 128, true, true, true, false, 0, true, 128) == 64);
+  assert(computeWindowsSchedulableCpuCount(
+             64, 64, 128, true, true, true, true, 128, false, 0) == 64);
+  assert(computeWindowsSchedulableCpuCount(
+             64, 64, 128, true, false, false, true, 0, true, 0) == 64);
+  assert(computeWindowsSchedulableCpuCount(
+             0, 0, 128, true, true, true, true, 0, true, 0) == 0);
+  assert(computeWindowsCpuRateMillis(128, 5000) == 64000);
+  assert(computeWindowsCpuRateMillis(128, 2500) == 32000);
+  assert(computeWindowsCpuRateMillis(UINT64_MAX, 10000) == UINT64_MAX);
+  assert(computeWindowsCpuRateMillis(128, 0) == 0);
+  assert(computeWindowsCpuRateMillis(128, 10001) == 0);
+  assert(forceMaxStartupBudgetReady(true, true));
+  assert(!forceMaxStartupBudgetReady(false, true));
+  assert(!forceMaxStartupBudgetReady(true, false));
+
   assert(computeForceMaxAdmissionEntries(UINT64_C(1) * 1024 * 1024 * 1024,
                                          0, 16) == 2048);
   assert(computeForceMaxAdmissionEntries(UINT64_C(1) * 1024 * 1024 * 1024,
