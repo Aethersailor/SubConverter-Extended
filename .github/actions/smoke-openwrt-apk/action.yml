@@ -259,8 +259,12 @@ runs:
           test "$(awk '$1 == "arch:" { print $2; exit }' "$metadata")" = "$OPENWRT_ARCH"
           test "$(awk '$1 == "repo-commit:" { print $2; exit }' "$metadata")" = "$EXPECTED_REVISION"
           apk_version="$(awk '$1 == "version:" { print $2; exit }' "$metadata")"
+          expected_apk_version="${EXPECTED_VERSION#v}"
+          if [ "$EXPECTED_VERSION" = dev ]; then
+            expected_apk_version='0.0.0'
+          fi
           case "$apk_version" in
-            "${EXPECTED_VERSION#v}"-r*) ;;
+            "${expected_apk_version}"-r*) ;;
             *) echo "Unexpected APK version: $apk_version" >&2; exit 1 ;;
           esac
           apk_release="${apk_version##*-r}"

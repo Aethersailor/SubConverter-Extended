@@ -11,7 +11,14 @@ DISPLAY_NAME="SubConverter-Extended"
 ROOT_DIR="/opt/${PACKAGE_NAME}"
 WORK_DIR="build/openwrt-apk/${LINUX_ARCH}"
 APK_RELEASE="${APK_RELEASE:-0}"
-APK_VERSION="${VERSION#v}-r${APK_RELEASE}"
+if [ "${VERSION}" = "dev" ]; then
+  # apk-tools requires an ordered numeric package version. Keep the artifact,
+  # embedded build identity and runtime version as dev, while using the
+  # conventional non-release package-manager sentinel for dependency solving.
+  APK_VERSION="0.0.0-r${APK_RELEASE}"
+else
+  APK_VERSION="${VERSION#v}-r${APK_RELEASE}"
+fi
 BUILD_TIME="${BUILD_TIME:-$(date +%s)}"
 REPO_COMMIT="${GITHUB_SHA:-${SHA:-unknown}}"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
