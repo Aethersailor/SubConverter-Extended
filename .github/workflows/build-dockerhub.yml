@@ -328,6 +328,7 @@ jobs:
         shell: bash
         env:
           BUILD_ARGS: ${{ steps.sanitizer_args.outputs.args }}
+          SANITIZER_BOOTSTRAP_CACHE: ${{ runner.temp }}/subconverter-sanitizer-bootstrap-cache
         run: |
           set -euo pipefail
           args=()
@@ -340,11 +341,22 @@ jobs:
             --ulimit nofile=524288:524288 \
             --target sanitizer-bootstrap \
             --output type=cacheonly \
-            --cache-from type=gha,scope=subconverter-sanitizer-bootstrap,timeout=30m \
-            --cache-to type=gha,mode=max,scope=subconverter-sanitizer-bootstrap,timeout=30m \
+            --cache-to "type=local,dest=${SANITIZER_BOOTSTRAP_CACHE},mode=max" \
             "${args[@]}" \
             --build-arg ENABLE_SANITIZERS=true \
             .
+          test -s "${SANITIZER_BOOTSTRAP_CACHE}/index.json"
+          du -sh "${SANITIZER_BOOTSTRAP_CACHE}"
+
+      - name: Upload exact sanitizer bootstrap cache
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: sanitizer-bootstrap-cache-${{ needs.prepare.outputs.sha }}
+          path: ${{ runner.temp }}/subconverter-sanitizer-bootstrap-cache
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: true
 
   sanitizer:
     name: "🧪 ASan/UBSan (manual, dev, non-publishing)"
@@ -373,6 +385,21 @@ jobs:
           python3 scripts/ci/dependency_snapshot.py check
           python3 scripts/ci/dependency_snapshot.py emit --github-env "$GITHUB_ENV"
 
+      - name: Download exact sanitizer bootstrap cache
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: sanitizer-bootstrap-cache-${{ needs.prepare.outputs.sha }}
+          path: ${{ runner.temp }}/subconverter-sanitizer-bootstrap-cache
+
+      - name: Verify exact sanitizer bootstrap cache
+        shell: bash
+        env:
+          SANITIZER_BOOTSTRAP_CACHE: ${{ runner.temp }}/subconverter-sanitizer-bootstrap-cache
+        run: |
+          set -euo pipefail
+          test -s "${SANITIZER_BOOTSTRAP_CACHE}/index.json"
+          du -sh "${SANITIZER_BOOTSTRAP_CACHE}"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
 
@@ -398,6 +425,7 @@ jobs:
         shell: bash
         env:
           BUILD_ARGS: ${{ steps.sanitizer_args.outputs.args }}
+          SANITIZER_BOOTSTRAP_CACHE: ${{ runner.temp }}/subconverter-sanitizer-bootstrap-cache
         run: |
           set -euo pipefail
           args=()
@@ -410,9 +438,7 @@ jobs:
             --ulimit nofile=524288:524288 \
             --target builder \
             --output type=cacheonly \
-            --cache-from type=gha,scope=subconverter-sanitizer-bootstrap,timeout=30m \
-            --cache-from type=gha,scope=subconverter-sanitizer,timeout=30m \
-            --cache-to type=gha,mode=max,scope=subconverter-sanitizer,timeout=30m \
+            --cache-from "type=local,src=${SANITIZER_BOOTSTRAP_CACHE}" \
             "${args[@]}" \
             --build-arg ENABLE_SANITIZERS=true \
             .

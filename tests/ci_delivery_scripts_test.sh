@@ -200,13 +200,27 @@ sanitizer_bootstrap_block="$(sed -n '/^  sanitizer-bootstrap:/,/^  sanitizer:/p'
 grep -Fq "if: needs.prepare.outputs.mode == 'dev' && github.event_name == 'workflow_dispatch'" <<<"$sanitizer_bootstrap_block"
 grep -Fq -- '--target sanitizer-bootstrap' <<<"$sanitizer_bootstrap_block"
 grep -Fq -- '--ulimit nofile=524288:524288' <<<"$sanitizer_bootstrap_block"
-grep -Fq -- '--cache-to type=gha,mode=max,scope=subconverter-sanitizer-bootstrap,timeout=30m' <<<"$sanitizer_bootstrap_block"
+grep -Fq -- '--cache-to "type=local,dest=${SANITIZER_BOOTSTRAP_CACHE},mode=max"' <<<"$sanitizer_bootstrap_block"
+grep -Fq 'name: Upload exact sanitizer bootstrap cache' <<<"$sanitizer_bootstrap_block"
+grep -Fq 'name: sanitizer-bootstrap-cache-${{ needs.prepare.outputs.sha }}' <<<"$sanitizer_bootstrap_block"
+grep -Fq 'path: ${{ runner.temp }}/subconverter-sanitizer-bootstrap-cache' <<<"$sanitizer_bootstrap_block"
+grep -Fq 'if-no-files-found: error' <<<"$sanitizer_bootstrap_block"
+grep -Fq 'retention-days: 1' <<<"$sanitizer_bootstrap_block"
+grep -Fq 'compression-level: 0' <<<"$sanitizer_bootstrap_block"
+grep -Fq 'overwrite: true' <<<"$sanitizer_bootstrap_block"
 
 sanitizer_block="$(sed -n '/^  sanitizer:/,/^  cross-build:/p' "$BUILD_WORKFLOW")"
 grep -Fq 'needs: [prepare, sanitizer-bootstrap]' <<<"$sanitizer_block"
+grep -Fq 'name: Download exact sanitizer bootstrap cache' <<<"$sanitizer_block"
+grep -Fq 'name: sanitizer-bootstrap-cache-${{ needs.prepare.outputs.sha }}' <<<"$sanitizer_block"
+grep -Fq 'test -s "${SANITIZER_BOOTSTRAP_CACHE}/index.json"' <<<"$sanitizer_block"
 grep -Fq -- '--target builder' <<<"$sanitizer_block"
 grep -Fq -- '--ulimit nofile=524288:524288' <<<"$sanitizer_block"
-grep -Fq -- '--cache-from type=gha,scope=subconverter-sanitizer-bootstrap,timeout=30m' <<<"$sanitizer_block"
+grep -Fq -- '--cache-from "type=local,src=${SANITIZER_BOOTSTRAP_CACHE}"' <<<"$sanitizer_block"
+if grep -Fq 'scope=subconverter-sanitizer' <<<"$sanitizer_bootstrap_block$sanitizer_block"; then
+  echo "sanitizer handoff still depends on the flaky GHA BuildKit backend" >&2
+  exit 1
+fi
 
 strict_gate_block="$(sed -n '/^  strict-force-max-gate:/,/^  merge-manifest:/p' "$BUILD_WORKFLOW")"
 grep -Fq "if: always() && github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'final-force-max'" <<<"$strict_gate_block"
