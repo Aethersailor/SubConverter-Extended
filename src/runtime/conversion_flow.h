@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 
 #include "handler/settings_view.h"
@@ -162,6 +163,7 @@ private:
   uint64_t mailbox_bytes_ = 0;
   uint64_t events_processed_ = 0;
   uint64_t duplicate_callbacks_ = 0;
+  std::optional<std::size_t> preferred_worker_;
   bool drain_scheduled_ = false;
   bool termination_queued_ = false;
   std::atomic<bool> terminal_claimed_{false};

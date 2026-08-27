@@ -5,9 +5,11 @@
 #include <future>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <rapidjson/stringbuffer.h>
@@ -15,22 +17,41 @@
 
 #include "handler/interfaces.h"
 #include "handler/external_config_async.h"
+#include "handler/conversion_service.h"
 #include "handler/conversion_pipeline.h"
 #include "handler/settings.h"
 #include "handler/settings_snapshot.h"
 #include "handler/webget.h"
 #include "generator/config/nodemanip.h"
+#include "generator/config/subexport.h"
 #include "parser/mihomo_bridge.h"
 #include "runtime/conversion_flow.h"
 #include "runtime/blocking_io_executor.h"
 #include "runtime/memory_budget.h"
+#include "runtime/owner_admission.h"
 #include "runtime/quickjs_lane.h"
+#include "runtime/runtime_coordinator.h"
+#include "runtime/transport_admission.h"
 #include "script/script_quickjs.h"
 #include "server/webserver.h"
 #include "utils/logger.h"
+#include "utils/ini_reader/ini_reader.h"
 #include "utils/resource_control.h"
 
 WebServer webServer;
+
+namespace {
+void setProcessEnvironment(const char *name, const char *value) {
+#ifdef _WIN32
+  if (_putenv_s(name, value ? value : "") != 0)
+    throw std::runtime_error("failed to update process environment");
+#else
+  const int result = value ? setenv(name, value, 1) : unsetenv(name);
+  if (result != 0)
+    throw std::runtime_error("failed to update process environment");
+#endif
+}
+} // namespace
 
 namespace mihomo {
 
@@ -54,27 +75,56 @@ std::string encryptAgeArmored(const std::string &, const std::string &) {
 } // namespace mihomo
 
 int main(int argc, char *argv[]) {
+  {
+    INIReader bounded_ini;
+    bounded_ini.store_any_line = true;
+    if (bounded_ini.parse("[Proxy]\nA=one\nB=two\n") != 0)
+      throw std::runtime_error("bounded INI fixture did not parse");
+    bounded_ini.set_current_section("Proxy Group");
+    for (int group = 0; group < 3; ++group)
+      for (int node = 0; node < 4; ++node)
+        bounded_ini.set("{NONAME}", "group-" + std::to_string(group) +
+                                         "=select,node-" +
+                                         std::to_string(node));
+    const std::string serialized = bounded_ini.to_string();
+    if (bounded_ini.to_string(serialized.size()) != serialized)
+      throw std::runtime_error("bounded INI exact limit changed output");
+    bool limit_rejected = false;
+    try {
+      (void)bounded_ini.to_string(serialized.size() - 1);
+    } catch (const BoundedOutputExceeded &) {
+      limit_rejected = true;
+    }
+    if (!limit_rejected)
+      throw std::runtime_error("bounded INI accepted limit+1 output");
+  }
   const bool webget_probe =
       argc == 6 && std::string(argv[1]) == "--webget-probe";
   const bool fetch_shutdown_race =
       argc == 3 && std::string(argv[1]) == "--fetch-shutdown-race";
+  const bool runtime_transaction =
+      argc == 3 && std::string(argv[1]) == "--runtime-transaction";
   const bool expect_reload_failure =
       argc == 4 && std::string(argv[3]) == "--expect-reload-failure";
-  if ((!webget_probe && !fetch_shutdown_race && argc != 2 && argc != 3 &&
-       argc != 4) ||
+  if ((!webget_probe && !fetch_shutdown_race && !runtime_transaction &&
+       argc != 2 && argc != 3 && argc != 4) ||
       (argc == 4 && !expect_reload_failure)) {
     std::cerr << "usage: settings_snapshot_test_helper <config> "
                  "[reload-config [--expect-reload-failure]]\n"
                  "       settings_snapshot_test_helper --webget-probe "
                  "<config> <url> <cache-ttl> <delay-ms>\n"
                  "       settings_snapshot_test_helper "
-                 "--fetch-shutdown-race <config>\n";
+                 "--fetch-shutdown-race <config>\n"
+                 "       settings_snapshot_test_helper "
+                 "--runtime-transaction <config>\n";
     return 2;
   }
 
   const std::filesystem::path config =
       std::filesystem::absolute(
-          argv[webget_probe || fetch_shutdown_race ? 2 : 1])
+          argv[webget_probe || fetch_shutdown_race || runtime_transaction
+                   ? 2
+                   : 1])
           .lexically_normal();
   if (!config.has_filename()) {
     std::cerr << "configuration path has no filename\n";
@@ -83,8 +133,253 @@ int main(int argc, char *argv[]) {
 
   std::filesystem::current_path(config.parent_path());
   global.prefPath = config.filename().string();
+  if (runtime_transaction)
+    setProcessEnvironment("SUBCONVERTER_RESOURCE_CONTROL", "force_max");
   if (!readConf())
     return 1;
+
+#ifndef NO_JS_RUNTIME
+  {
+    const std::string script_name =
+        "force-max-group-script-" +
+        std::to_string(std::chrono::steady_clock::now()
+                           .time_since_epoch()
+                           .count()) +
+        ".js";
+    auto generate_with_script = [&](const std::string &script,
+                                    size_t native_limit,
+                                    size_t group_count = 1) {
+      {
+        std::ofstream file(script_name, std::ios::trunc);
+        file << script;
+      }
+      Proxy node;
+      node.Type = ProxyType::Shadowsocks;
+      node.Remark = "script-node";
+      node.Hostname = "127.0.0.1";
+      node.Port = 8388;
+      node.Password = "fixture-password";
+      node.EncryptMethod = "aes-128-gcm";
+      std::vector<Proxy> nodes{node};
+      ProxyGroupConfigs groups;
+      for (size_t index = 0; index < group_count; ++index) {
+        ProxyGroupConfig group;
+        group.Name = "ScriptGroup" + std::to_string(index);
+        group.Type = ProxyGroupType::Select;
+        group.Proxies = {"script:" + script_name};
+        groups.emplace_back(std::move(group));
+      }
+      std::vector<RulesetContent> rulesets;
+      extra_settings settings;
+      settings.authorized = true;
+      settings.force_max_group_script_limited = true;
+      settings.force_max_group_script_remaining_bytes = native_limit;
+      settings.js_runtime = new qjs::Runtime();
+      script_runtime_init(*settings.js_runtime);
+      settings.js_context = new qjs::Context(*settings.js_runtime);
+      script_context_init(*settings.js_context);
+      return proxyToSurge(nodes, "[General]\n", rulesets, groups, 3,
+                          settings, 8192);
+    };
+    try {
+      const std::string output = generate_with_script(
+          "function filter(nodes) { return nodes[0].Remark; }\n", 4096);
+      if (output.find("ScriptGroup") == std::string::npos ||
+          output.find("script-node") == std::string::npos)
+        throw std::runtime_error(
+            "bounded group script changed selected node output");
+      bool rejected = false;
+      try {
+        (void)generate_with_script(
+            "function filter(nodes) { return 'x'.repeat(4096); }\n", 256);
+      } catch (const BoundedOutputExceeded &) {
+        rejected = true;
+      }
+      if (!rejected)
+        throw std::runtime_error(
+            "bounded group script accepted oversized native result");
+      rejected = false;
+      try {
+        const size_t exact_one_group =
+            std::string("script-node").size() +
+            sizeof(std::string) * 2 + 32;
+        (void)generate_with_script(
+            "function filter(nodes) { return nodes[0].Remark; }\n",
+            exact_one_group, 2);
+      } catch (const BoundedOutputExceeded &) {
+        rejected = true;
+      }
+      if (!rejected)
+        throw std::runtime_error(
+            "bounded group script reused an exhausted shared budget");
+    } catch (...) {
+      std::filesystem::remove(script_name);
+      throw;
+    }
+    std::filesystem::remove(script_name);
+  }
+#endif
+
+  {
+    enum class NodelistTarget { Surge, QuanX, Loon };
+    auto generate_nodelist = [](NodelistTarget target, size_t limit) {
+      Proxy node;
+      node.Type = ProxyType::Shadowsocks;
+      node.Remark = "bounded-node";
+      node.Hostname = "127.0.0.1";
+      node.Port = 8388;
+      node.Password = "fixture-password";
+      node.EncryptMethod = "aes-128-gcm";
+      std::vector<Proxy> nodes{node};
+      std::vector<RulesetContent> rulesets;
+      ProxyGroupConfigs groups;
+      extra_settings settings;
+      settings.nodelist = true;
+      switch (target) {
+      case NodelistTarget::Surge:
+        return proxyToSurge(nodes, "", rulesets, groups, 3, settings,
+                            limit);
+      case NodelistTarget::QuanX:
+        return proxyToQuanX(nodes, "", rulesets, groups, settings, limit);
+      case NodelistTarget::Loon:
+        return proxyToLoon(nodes, "", rulesets, groups, settings, limit);
+      }
+      throw std::runtime_error("unknown bounded nodelist target");
+    };
+    for (NodelistTarget target :
+         {NodelistTarget::Surge, NodelistTarget::QuanX,
+          NodelistTarget::Loon}) {
+      const std::string expected = generate_nodelist(
+          target, std::numeric_limits<size_t>::max());
+      if (expected.empty() ||
+          generate_nodelist(target, expected.size()) != expected)
+        throw std::runtime_error(
+            "bounded nodelist exact limit changed output");
+      bool rejected = false;
+      try {
+        (void)generate_nodelist(target, expected.size() - 1);
+      } catch (const BoundedOutputExceeded &) {
+        rejected = true;
+      }
+      if (!rejected)
+        throw std::runtime_error(
+            "bounded nodelist accepted limit+1 output");
+    }
+  }
+
+  if (runtime_transaction) {
+    const uint64_t initial_response_cache =
+        responseMicroCacheSnapshot().max_bytes;
+    const size_t initial_ruleset_entries =
+        rulesetConversionCacheMaxEntries();
+    const size_t initial_ruleset_bytes =
+        rulesetConversionCacheMaxBytes();
+    const size_t initial_external_entries =
+        externalConfigCacheMaxEntries();
+    const size_t initial_external_bytes =
+        externalConfigCacheMaxBytes();
+    const uint64_t initial_retained_limit =
+        retainedResponseByteSnapshot().limit;
+    const std::vector<std::pair<std::string, std::string>> failure_stages{
+        {"compute", "compute"},
+        {"blocking_io", "blocking_io"},
+        {"quickjs", "quickjs"},
+        {"outbound_fetch", "outbound_fetch"},
+        {"owner_admission", "owner_admission"},
+        {"transport_admission", "transport_admission"},
+        {"precommit", "precommit"},
+        {"publish_compute", "publish"},
+        {"publish", "publish"},
+        {"validation", "validation"}};
+    uint64_t expected_rollbacks = 0;
+    for (const auto &[stage, failed_stage] : failure_stages) {
+      setProcessEnvironment("SUBCONVERTER_FORCE_MAX_FAIL_STAGE",
+                            stage.c_str());
+      const bool prepared = prepareRuntimeCoordinator();
+      bool failed = !prepared;
+      if (stage == "precommit" || stage == "publish_compute" ||
+          stage == "publish" || stage == "validation")
+        failed = prepared && !commitRuntimeCoordinator();
+      const RuntimeCoordinatorSnapshot snapshot =
+          runtimeCoordinatorSnapshot();
+      ++expected_rollbacks;
+      if (!failed || snapshot.ready || snapshot.prepared ||
+          snapshot.generation != 0 ||
+          snapshot.rollback_total != expected_rollbacks ||
+          snapshot.last_failed_stage != failed_stage ||
+          globalComputeExecutorSnapshot().initialized ||
+          blockingIoExecutorSnapshot().initialized ||
+          globalQuickJsLaneSnapshot().ready ||
+          globalOwnerAdmissionSnapshot().ready ||
+          globalTransportAdmissionSnapshot().ready ||
+          asyncFetchEngineSnapshot().available ||
+          globalFetchMemoryBudgetSnapshot().enabled ||
+          conversionFlowRegistrySnapshot().stopping ||
+          responseMicroCacheSnapshot().max_bytes !=
+              initial_response_cache ||
+          rulesetConversionCacheMaxEntries() != initial_ruleset_entries ||
+          rulesetConversionCacheMaxBytes() != initial_ruleset_bytes ||
+          externalConfigCacheMaxEntries() != initial_external_entries ||
+          externalConfigCacheMaxBytes() != initial_external_bytes ||
+          retainedResponseByteSnapshot().limit != initial_retained_limit) {
+        std::cerr << "runtime transaction rollback failed at stage "
+                  << stage << '\n';
+        return 1;
+      }
+    }
+    setProcessEnvironment("SUBCONVERTER_FORCE_MAX_FAIL_STAGE", nullptr);
+    if (!prepareRuntimeCoordinator() || !commitRuntimeCoordinator()) {
+      std::cerr << "runtime transaction could not rebuild after rollback\n";
+      return 1;
+    }
+    RuntimeCoordinatorSnapshot ready = runtimeCoordinatorSnapshot();
+    if (!ready.prepared || !ready.ready || ready.generation != 1 ||
+        !globalComputeExecutorSnapshot().ready ||
+        !blockingIoExecutorSnapshot().ready ||
+        !globalQuickJsLaneSnapshot().ready ||
+        !globalOwnerAdmissionSnapshot().ready ||
+        !globalTransportAdmissionSnapshot().ready ||
+        !asyncFetchEngineSnapshot().available ||
+        !globalFetchMemoryBudgetSnapshot().enabled ||
+        conversionFlowRegistrySnapshot().stopping) {
+      std::cerr << "rebuilt runtime was not atomically published\n";
+      return 1;
+    }
+    const uint64_t controller_samples_before =
+        resourceControlSnapshot().sample_count;
+    startResourceControlRuntime();
+    const auto controller_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    ResourceControlSnapshot controller = resourceControlSnapshot();
+    while (controller.sample_count == controller_samples_before &&
+           std::chrono::steady_clock::now() < controller_deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      controller = resourceControlSnapshot();
+    }
+    if (controller.controller_state == "starting" ||
+        controller.controller_state == "compat" ||
+        controller.controller_reason == "compat") {
+      std::cerr << "resource controller did not start after rollback/rebuild\n";
+      return 1;
+    }
+    requestRuntimeCoordinatorShutdown();
+    const bool joined = joinRuntimeCoordinator();
+    const RuntimeCoordinatorSnapshot stopped =
+        runtimeCoordinatorSnapshot();
+    if (!joined || !stopped.joined || stopped.shutdown_stage != "joined" ||
+        stopped.shutdown_deadline_exceeded ||
+        !globalComputeExecutorSnapshot().stopping ||
+        !blockingIoExecutorSnapshot().stopping ||
+        !globalQuickJsLaneSnapshot().stopping ||
+        !globalOwnerAdmissionSnapshot().stopping ||
+        !globalTransportAdmissionSnapshot().stopping ||
+        asyncFetchEngineSnapshot().available) {
+      std::cerr << "rebuilt runtime left live threads during shutdown\n";
+      return 1;
+    }
+    std::cout << "runtime transaction rollback/rebuild/shutdown passed\n";
+    return 0;
+  }
 
   if (fetch_shutdown_race) {
     std::atomic<int> ready{0};
@@ -108,6 +403,7 @@ int main(int argc, char *argv[]) {
     initialize.join();
     shutdown.join();
     requestOutboundFetchShutdown();
+    (void)joinOutboundFetchShutdown();
     const AsyncFetchEngineSnapshot snapshot = asyncFetchEngineSnapshot();
     rapidjson::StringBuffer buffer;
     rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
@@ -504,6 +800,37 @@ int main(int argc, char *argv[]) {
         async_template_result.status == AsyncTemplateStatus::Success &&
         async_template_result.output == "marker=template-ok" &&
         async_template_result.dependency_count == 1;
+    const std::string async_template_branch_content =
+        "{% if fetch(\"" + fixture_root +
+        "/template-branch-a\") == \"\" %}{{ fetch(\"" + fixture_root +
+        "/template-branch-b\") }}{% else %}kept{% endif %}";
+    std::promise<AsyncTemplateResult> async_template_branch_completion;
+    renderTemplateAsync(
+        async_template_branch_content, {}, "", FetchContext::TrustedConfig,
+        captureEffectiveSettingsSnapshot(), async_template_context,
+        [&](AsyncTemplateResult result) {
+          async_template_branch_completion.set_value(std::move(result));
+        });
+    const AsyncTemplateResult async_template_branch_result =
+        async_template_branch_completion.get_future().get();
+    const bool async_template_branch_ok =
+        async_template_branch_result.status == AsyncTemplateStatus::Success &&
+        async_template_branch_result.output == "kept" &&
+        async_template_branch_result.dependency_count == 1;
+    std::promise<AsyncTemplateResult> limited_template_completion;
+    renderTemplateAsync(
+        "0123456789", {}, "", FetchContext::TrustedConfig,
+        captureEffectiveSettingsSnapshot(), async_template_context,
+        [&](AsyncTemplateResult result) {
+          limited_template_completion.set_value(std::move(result));
+        },
+        8);
+    const AsyncTemplateResult limited_template_result =
+        limited_template_completion.get_future().get();
+    const bool async_template_limit_ok =
+        limited_template_result.status ==
+            AsyncTemplateStatus::ResourceLimitExceeded &&
+        limited_template_result.output.empty();
     {
       std::ofstream gist_config("gistconf.ini", std::ios::trunc);
       gist_config << "[common]\n"
@@ -723,6 +1050,54 @@ int main(int argc, char *argv[]) {
           lane_snapshot.cancelled_total == 1 &&
           lane_snapshot.deadline_total == 1 &&
           lane_snapshot.script_error_total == 0;
+    }
+    {
+      constexpr uint64_t clean_heap = 64 * 1024 * 1024 + 1;
+      constexpr uint64_t clean_stack = 1024 * 1024 + 1;
+      QuickJsLane clean_lane(
+          {1, 1, 1024 * 1024, clean_heap, clean_stack});
+      auto mutable_clean_settings =
+          std::make_shared<Settings>(*captureEffectiveSettingsSnapshot());
+      mutable_clean_settings->scriptCleanContext = true;
+      SettingsSnapshot clean_settings = mutable_clean_settings;
+      std::promise<QuickJsTaskResult> clean_completion;
+      std::atomic<bool> clean_isolated{false};
+      const auto clean_deadline =
+          RequestContext::Clock::now() + std::chrono::milliseconds(100);
+      const QuickJsSubmitStatus clean_submit = clean_lane.submit(
+          {.bytes = 64,
+           .deadline = clean_deadline,
+           .settings = clean_settings,
+           .request_context = std::make_shared<RequestContext>(
+               "quickjs-clean-context", RequestContext::Clock::now(),
+               clean_deadline)},
+          [&](qjs::Context &primary) {
+            const ScriptNestedRuntimeBudget nested =
+                currentScriptNestedRuntimeBudget();
+            script_safe_runner(
+                nullptr, &primary,
+                [&](qjs::Context &isolated) {
+                  clean_isolated.store(
+                      &isolated != &primary && nested.active &&
+                          nested.heap_bytes == clean_heap / 2 &&
+                          nested.stack_bytes == clean_stack / 2 &&
+                          nested.interrupt_handler != nullptr &&
+                          nested.interrupt_opaque != nullptr,
+                      std::memory_order_release);
+                  isolated.eval("for (;;) {}");
+                },
+                true);
+          },
+          [&](QuickJsTaskResult result) {
+            clean_completion.set_value(result);
+          });
+      const QuickJsTaskResult clean_result =
+          clean_completion.get_future().get();
+      clean_lane.shutdown(false);
+      quickjs_lane_ok = quickjs_lane_ok &&
+          clean_submit == QuickJsSubmitStatus::Accepted &&
+          clean_result.status == QuickJsTaskStatus::Deadline &&
+          clean_isolated.load(std::memory_order_acquire);
     }
     {
       const GlobalQuickJsLaneInitStatus invalid =
@@ -1383,6 +1758,13 @@ int main(int argc, char *argv[]) {
         cancelled_terminal = cancel_completion.get_future().get();
       }
 
+      const ComputeExecutorSnapshot affinity_snapshot =
+          globalComputeExecutorSnapshot();
+      uint64_t flow_affinity_hits = 0;
+      for (const ComputeWorkerSnapshot &worker :
+           affinity_snapshot.worker_metrics)
+        flow_affinity_hits += worker.affinity_hits;
+
       auto shutdown_context = std::make_shared<RequestContext>(
           "conversion-flow-shutdown", RequestContext::Clock::now(),
           RequestContext::Clock::now() + std::chrono::seconds(10));
@@ -1484,6 +1866,7 @@ int main(int argc, char *argv[]) {
           cancelled_started &&
           cancel_phase_ok.load(std::memory_order_acquire) &&
           cancel_operation_valid.load(std::memory_order_acquire) &&
+          flow_affinity_hits > 0 &&
           cancelled_terminal.state ==
               ConversionFlowTerminalState::Cancelled &&
           cancelled_terminal.cancellation ==
@@ -1679,6 +2062,16 @@ int main(int argc, char *argv[]) {
     writer.EndArray();
     writer.Key("async_template_ok");
     writer.Bool(async_template_ok);
+    writer.Key("async_template_status");
+    writer.Int(static_cast<int>(async_template_result.status));
+    writer.Key("async_template_output");
+    writer.String(async_template_result.output.c_str());
+    writer.Key("async_template_dependencies");
+    writer.Uint64(async_template_result.dependency_count);
+    writer.Key("async_template_branch_ok");
+    writer.Bool(async_template_branch_ok);
+    writer.Key("async_template_limit_ok");
+    writer.Bool(async_template_limit_ok);
     writer.Key("async_upload_ok");
     writer.Bool(async_upload_ok);
     writer.Key("async_upload_status");

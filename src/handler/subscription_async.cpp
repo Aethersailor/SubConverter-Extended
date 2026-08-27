@@ -115,6 +115,8 @@ void resolveSubscriptionSourcesAsync(
         std::move(requests), settings, request_context, completion);
     state->start();
   } catch (...) {
-    completion({});
+    AsyncSubscriptionBatchResult failure;
+    failure.terminal_failure = AsyncFetchFailure::Capacity;
+    completion(std::move(failure));
   }
 }

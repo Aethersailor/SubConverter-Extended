@@ -1,4 +1,6 @@
 #include <string>
+#include <cstdint>
+#include <stdexcept>
 
 #include <jinja2cpp/user_callable.h>
 #include <jinja2cpp/binding/nlohmann_json.h>
@@ -17,8 +19,10 @@ static inline void parse_json_pointer(nlohmann::json &json, const std::string &p
 
 int render_template(const std::string &content, const template_args &vars,
                     std::string &output, const std::string &include_scope,
-                    FetchContext context)
+                    FetchContext context, bool *fetch_failed,
+                    uint64_t max_output_bytes)
 {
+    (void)fetch_failed;
     jinja2::Template tpl;
     nlohmann::json data;
     for(auto &x : vars.global_vars)
@@ -37,7 +41,15 @@ int render_template(const std::string &content, const template_args &vars,
     try
     {
         output = tpl.RenderAsString(valmap).value();
+        if(max_output_bytes != 0 && output.size() > max_output_bytes)
+            throw std::length_error(
+                "template output exceeds working-memory limit");
         return 0;
+    }
+    catch (const std::length_error &)
+    {
+        output.clear();
+        return -3;
     }
     catch (std::exception &e)
     {

@@ -342,9 +342,11 @@ ComputeExecutor::popLocked(std::size_t queue_index,
 }
 
 std::shared_ptr<ComputeExecutor::TaskBase>
-ComputeExecutor::popControlLocked() {
-  std::shared_ptr<TaskBase> task = std::move(control_queue_.front());
-  control_queue_.pop_front();
+ComputeExecutor::popControlLocked(std::size_t element_index) {
+  auto iterator = control_queue_.begin() +
+      static_cast<std::ptrdiff_t>(element_index);
+  std::shared_ptr<TaskBase> task = std::move(*iterator);
+  control_queue_.erase(iterator);
   --control_queued_entries_;
   --queued_entries_;
   ++active_workers_;
@@ -355,8 +357,17 @@ std::shared_ptr<ComputeExecutor::TaskBase>
 ComputeExecutor::takeTaskLocked(std::size_t worker_index,
                                 bool &affinity_hit) {
   affinity_hit = false;
-  if (!control_queue_.empty())
+  if (!control_queue_.empty()) {
+    const std::size_t scan =
+        std::min<std::size_t>(8, control_queue_.size());
+    for (std::size_t element = 0; element < scan; ++element) {
+      if (control_queue_[element]->preferred_worker == worker_index) {
+        affinity_hit = true;
+        return popControlLocked(element);
+      }
+    }
     return popControlLocked();
+  }
   const Clock::time_point now = Clock::now();
   std::size_t oldest_queue = queues_.size();
   Clock::time_point oldest = Clock::time_point::max();
@@ -428,37 +439,7 @@ void ComputeExecutor::workerLoop(std::size_t worker_index) noexcept {
     if (!task)
       continue;
 
-    const Clock::time_point started = Clock::now();
-    SchedulerSubmitStatus status = SchedulerSubmitStatus::Accepted;
-    if (task->cancellation.isCancellationRequested())
-      status = SchedulerSubmitStatus::Cancelled;
-    else if (task->deadline != Clock::time_point::max() &&
-             started >= task->deadline)
-      status = SchedulerSubmitStatus::Deadline;
-    if (status == SchedulerSubmitStatus::Accepted) {
-      task->run();
-      worker_metrics_[worker_index]->executed.fetch_add(
-          1, std::memory_order_relaxed);
-    } else {
-      task->cancel(status);
-      worker_metrics_[worker_index]->cancelled.fetch_add(
-          1, std::memory_order_relaxed);
-      std::lock_guard<std::mutex> lock(mutex_);
-      ++cancelled_total_;
-    }
-    if (affinity_hit)
-      worker_metrics_[worker_index]->affinity_hits.fetch_add(
-          1, std::memory_order_relaxed);
-    worker_metrics_[worker_index]->busy_nanoseconds.fetch_add(
-        static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                Clock::now() - started)
-                .count()),
-        std::memory_order_relaxed);
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      --active_workers_;
-    }
+    executeTask(task, worker_index, affinity_hit, false);
   }
 
   current_worker_index_ = previous_index;
@@ -486,6 +467,99 @@ GlobalComputeExecutorInitStatus initializeGlobalComputeExecutor(
   }
 }
 
+void ComputeExecutor::executeTask(const std::shared_ptr<TaskBase> &task,
+                                  std::size_t worker_index,
+                                  bool affinity_hit,
+                                  bool cooperative_child) noexcept {
+  if (!task)
+    return;
+  const Clock::time_point started = Clock::now();
+  const uint64_t children_before = cooperative_child_nanoseconds_;
+  SchedulerSubmitStatus status = SchedulerSubmitStatus::Accepted;
+  if (task->cancellation.isCancellationRequested())
+    status = SchedulerSubmitStatus::Cancelled;
+  else if (task->deadline != Clock::time_point::max() &&
+           started >= task->deadline)
+    status = SchedulerSubmitStatus::Deadline;
+  if (status == SchedulerSubmitStatus::Accepted) {
+    task->run();
+    worker_metrics_[worker_index]->executed.fetch_add(
+        1, std::memory_order_relaxed);
+  } else {
+    task->cancel(status);
+    worker_metrics_[worker_index]->cancelled.fetch_add(
+        1, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++cancelled_total_;
+  }
+  if (affinity_hit)
+    worker_metrics_[worker_index]->affinity_hits.fetch_add(
+        1, std::memory_order_relaxed);
+  const uint64_t elapsed = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          Clock::now() - started)
+          .count());
+  const uint64_t child_time = cooperative_child_nanoseconds_ - children_before;
+  worker_metrics_[worker_index]->busy_nanoseconds.fetch_add(
+      elapsed >= child_time ? elapsed - child_time : 0,
+      std::memory_order_relaxed);
+  if (cooperative_child)
+    cooperative_child_nanoseconds_ += elapsed;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    --active_workers_;
+  }
+}
+
+bool ComputeExecutor::runOnePendingCooperatively() noexcept {
+  if (current_executor_ != this || cooperative_dispatch_active_ ||
+      current_worker_index_ >= workers_.size())
+    return false;
+  std::shared_ptr<TaskBase> task;
+  bool affinity_hit = false;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (queued_entries_ == 0)
+      return false;
+    task = takeTaskLocked(current_worker_index_, affinity_hit);
+  }
+  if (!task)
+    return false;
+  cooperative_dispatch_active_ = true;
+  executeTask(task, current_worker_index_, affinity_hit, true);
+  cooperative_dispatch_active_ = false;
+  return true;
+}
+
+bool publishGlobalComputeExecutor(
+    std::unique_ptr<ComputeExecutor> executor,
+    ComputeExecutorBudget budget) noexcept {
+  if (!executor || !executor->ready())
+    return false;
+  std::lock_guard<std::mutex> lock(global_compute.mutex);
+  if (global_compute.stopping || global_compute.executor)
+    return false;
+  global_compute.budget = budget;
+  global_compute.executor = std::move(executor);
+  return true;
+}
+
+bool resetGlobalComputeExecutor() noexcept {
+  std::unique_ptr<ComputeExecutor> retired;
+  {
+    std::lock_guard<std::mutex> lock(global_compute.mutex);
+    if (global_compute.executor &&
+        !global_compute.executor->snapshot().stopping)
+      return false;
+    retired = std::move(global_compute.executor);
+    global_compute.budget = {};
+    global_compute.stopping = false;
+  }
+  if (retired && !retired->join())
+    return false;
+  return true;
+}
+
 ComputeExecutor *globalComputeExecutor() noexcept {
   std::lock_guard<std::mutex> lock(global_compute.mutex);
   return global_compute.executor.get();
@@ -497,7 +571,7 @@ ComputeExecutorSnapshot globalComputeExecutorSnapshot() {
                                  : ComputeExecutorSnapshot{};
 }
 
-void requestGlobalComputeExecutorShutdown() noexcept {
+void requestGlobalComputeExecutorShutdown(bool cancel_pending) noexcept {
   ComputeExecutor *executor = nullptr;
   {
     std::lock_guard<std::mutex> lock(global_compute.mutex);
@@ -505,7 +579,7 @@ void requestGlobalComputeExecutorShutdown() noexcept {
     executor = global_compute.executor.get();
   }
   if (executor)
-    executor->requestShutdown(true);
+    executor->requestShutdown(cancel_pending);
 }
 
 bool joinGlobalComputeExecutor() noexcept {
@@ -515,4 +589,9 @@ bool joinGlobalComputeExecutor() noexcept {
     executor = global_compute.executor.get();
   }
   return !executor || executor->join();
+}
+
+bool runOneGlobalComputeTaskCooperatively() noexcept {
+  ComputeExecutor *executor = globalComputeExecutor();
+  return executor && executor->runOnePendingCooperatively();
 }

@@ -1776,6 +1776,18 @@ struct Response {
                         const std::string &content_type);
   void set_file_content(const std::string &path);
 
+  // Called exactly once after the server has attempted to write the complete
+  // response. This lets embedding applications attribute request completion
+  // from the actual write result instead of racing a later socket-liveness
+  // probe against a client that normally closes the connection.
+  void set_write_completion_handler(std::function<void(bool)> handler) {
+    write_completion_handler_ = std::move(handler);
+  }
+  void notify_write_completion(bool success) {
+    auto handler = std::move(write_completion_handler_);
+    if (handler) { handler(success); }
+  }
+
   Response() = default;
   Response(const Response &) = default;
   Response &operator=(const Response &) = default;
@@ -1795,6 +1807,7 @@ struct Response {
   bool content_provider_success_ = false;
   std::string file_content_path_;
   std::string file_content_content_type_;
+  std::function<void(bool)> write_completion_handler_;
 };
 
 enum class Error {
@@ -1902,7 +1915,8 @@ class ThreadPool final : public TaskQueue {
 public:
   explicit ThreadPool(
       size_t n, size_t max_n = 0, size_t mqr = 0,
-      time_t idle_timeout_sec = CPPHTTPLIB_THREAD_POOL_IDLE_TIMEOUT);
+      time_t idle_timeout_sec = CPPHTTPLIB_THREAD_POOL_IDLE_TIMEOUT,
+      bool wait_when_full = false);
   ThreadPool(const ThreadPool &) = delete;
   ~ThreadPool() override = default;
 
@@ -1919,6 +1933,7 @@ private:
   size_t max_queued_requests_;
   time_t idle_timeout_sec_;
   size_t idle_thread_count_;
+  bool wait_when_full_;
 
   bool shutdown_;
 
@@ -11507,10 +11522,11 @@ inline ssize_t detail::BodyReader::read(char *buf, size_t len) {
 
 // ThreadPool implementation
 inline ThreadPool::ThreadPool(size_t n, size_t max_n, size_t mqr,
-                              time_t idle_timeout_sec)
+                              time_t idle_timeout_sec,
+                              bool wait_when_full)
     : base_thread_count_(n), max_queued_requests_(mqr),
       idle_timeout_sec_(idle_timeout_sec), idle_thread_count_(0),
-      shutdown_(false) {
+      wait_when_full_(wait_when_full), shutdown_(false) {
 #ifndef CPPHTTPLIB_NO_EXCEPTIONS
   if (max_n != 0 && max_n < n) {
     std::string msg = "max_threads must be >= base_threads";
@@ -11547,6 +11563,11 @@ inline ThreadPool::ThreadPool(size_t n, size_t max_n, size_t mqr,
 inline bool ThreadPool::enqueue(std::function<void()> fn) {
   {
     std::unique_lock<std::mutex> lock(mutex_);
+    if (wait_when_full_ && max_queued_requests_ > 0) {
+      cond_.wait(lock, [&] {
+        return shutdown_ || jobs_.size() < max_queued_requests_;
+      });
+    }
     if (shutdown_) { return false; }
     if (max_queued_requests_ > 0 && jobs_.size() >= max_queued_requests_) {
       return false;
@@ -11561,7 +11582,11 @@ inline bool ThreadPool::enqueue(std::function<void()> fn) {
     }
   }
 
-  cond_.notify_one();
+  if (wait_when_full_) {
+    cond_.notify_all();
+  } else {
+    cond_.notify_one();
+  }
   return true;
 }
 
@@ -11639,6 +11664,7 @@ inline void ThreadPool::worker(bool is_dynamic) {
       fn = std::move(jobs_.front());
       jobs_.pop_front();
     }
+    if (wait_when_full_) { cond_.notify_all(); }
 
     assert(true == static_cast<bool>(fn));
     fn();
@@ -12971,6 +12997,10 @@ inline bool Server::write_response_core(Stream &strm, bool close_connection,
                                         const Request &req, Response &res,
                                         bool need_apply_ranges) {
   assert(res.status != -1);
+  auto complete_write = [&res](bool success) {
+    res.notify_write_completion(success);
+    return success;
+  };
 
   if (400 <= res.status && error_handler_ &&
       error_handler_(req, res) == HandlerResponse::Handled) {
@@ -13012,8 +13042,12 @@ inline bool Server::write_response_core(Stream &strm, bool close_connection,
 
   // Response line and headers
   detail::BufferStream bstrm;
-  if (!detail::write_response_line(bstrm, res.status)) { return false; }
-  if (header_writer_(bstrm, res.headers) <= 0) { return false; }
+  if (!detail::write_response_line(bstrm, res.status)) {
+    return complete_write(false);
+  }
+  if (header_writer_(bstrm, res.headers) <= 0) {
+    return complete_write(false);
+  }
 
   // Combine small body with headers to reduce write syscalls
   if (req.method != "HEAD" && !res.body.empty() && !res.content_provider_) {
@@ -13026,7 +13060,9 @@ inline bool Server::write_response_core(Stream &strm, bool close_connection,
 
   // Flush buffer
   auto &data = bstrm.get_buffer();
-  if (!detail::write_data(strm, data.data(), data.size())) { return false; }
+  if (!detail::write_data(strm, data.data(), data.size())) {
+    return complete_write(false);
+  }
 
   // Streaming body
   auto ret = true;
@@ -13038,7 +13074,7 @@ inline bool Server::write_response_core(Stream &strm, bool close_connection,
     }
   }
 
-  return ret;
+  return complete_write(ret);
 }
 
 inline bool

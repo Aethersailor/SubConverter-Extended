@@ -277,6 +277,26 @@ struct PressureGuardInput {
   const char *reason = "none";
 };
 
+inline bool forceMaxPidsHeadroomExhausted(uint64_t maximum,
+                                          uint64_t current,
+                                          uint64_t reserved) noexcept {
+  if (maximum == 0 || current == 0 || reserved == 0)
+    return false;
+  const uint64_t remaining = maximum > current ? maximum - current : 0;
+  return remaining < reserved;
+}
+
+inline uint64_t forceMaxRequiredPidHeadroom(
+    uint64_t transient_reserve, uint64_t resolver_budget,
+    uint64_t active_resolver_transfers) noexcept {
+  const uint64_t materialized =
+      std::min(resolver_budget, active_resolver_transfers);
+  const uint64_t unmaterialized = resolver_budget - materialized;
+  return transient_reserve > UINT64_MAX - unmaterialized
+             ? UINT64_MAX
+             : transient_reserve + unmaterialized;
+}
+
 struct PressureGuardDecision {
   bool guarded = false;
   bool limits_changed = false;
@@ -368,6 +388,9 @@ struct ResourceControlSnapshot {
   uint64_t nofile_hard = 0;
   uint64_t pids_current = 0;
   uint64_t pids_max = 0;
+  uint64_t self_threads = 0;
+  bool resolver_may_use_threads = true;
+  uint64_t http_handler_threads_per_compute = 4;
   uint64_t open_fds = 0;
   uint64_t memory_peak_bytes = 0;
   uint64_t memory_events_high = 0;
@@ -437,6 +460,7 @@ void configureResourceControl(Settings &settings);
 ResourceControlSnapshot resourceControlSnapshot();
 ResourceEnvelope probeCurrentResourceEnvelope() noexcept;
 void startResourceControlRuntime();
+void refreshResourceControlThreadBaseline() noexcept;
 void shutdownResourceControlRuntime() noexcept;
 
 #endif // RESOURCE_CONTROL_H_INCLUDED

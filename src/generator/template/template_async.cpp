@@ -11,6 +11,46 @@
 
 namespace {
 
+AsyncTemplateStatus templateStatusForScheduler(
+    SchedulerSubmitStatus status) noexcept {
+  switch (status) {
+  case SchedulerSubmitStatus::EntryLimit:
+  case SchedulerSubmitStatus::ByteLimit:
+    return AsyncTemplateStatus::ResourceLimitExceeded;
+  case SchedulerSubmitStatus::Deadline:
+    return AsyncTemplateStatus::Deadline;
+  case SchedulerSubmitStatus::Cancelled:
+    return AsyncTemplateStatus::Cancelled;
+  case SchedulerSubmitStatus::Stopping:
+    return AsyncTemplateStatus::Shutdown;
+  case SchedulerSubmitStatus::Accepted:
+    return AsyncTemplateStatus::RenderFailed;
+  }
+  return AsyncTemplateStatus::RenderFailed;
+}
+
+AsyncTemplateStatus templateStatusForFetch(
+    AsyncFetchFailure failure) noexcept {
+  switch (failure) {
+  case AsyncFetchFailure::Capacity:
+    return AsyncTemplateStatus::ResourceLimitExceeded;
+  case AsyncFetchFailure::Deadline:
+    return AsyncTemplateStatus::Deadline;
+  case AsyncFetchFailure::Cancelled:
+    return AsyncTemplateStatus::Cancelled;
+  case AsyncFetchFailure::Shutdown:
+    return AsyncTemplateStatus::Shutdown;
+  case AsyncFetchFailure::None:
+  case AsyncFetchFailure::SizeLimit:
+  case AsyncFetchFailure::Dns:
+  case AsyncFetchFailure::Tls:
+  case AsyncFetchFailure::Proxy:
+  case AsyncFetchFailure::Transport:
+    return AsyncTemplateStatus::FetchFailed;
+  }
+  return AsyncTemplateStatus::FetchFailed;
+}
+
 class AsyncTemplateState
     : public std::enable_shared_from_this<AsyncTemplateState> {
 public:
@@ -19,12 +59,14 @@ public:
       std::string include_scope, FetchContext context,
       SettingsSnapshot settings,
       std::shared_ptr<RequestContext> request_context,
-      AsyncTemplateCompletion completion)
+      AsyncTemplateCompletion completion,
+      uint64_t max_output_bytes)
       : content_(std::move(content)), arguments_(std::move(arguments)),
         include_scope_(std::move(include_scope)), context_(context),
         settings_(std::move(settings)),
         request_context_(std::move(request_context)),
-        completion_(std::move(completion)) {}
+        completion_(std::move(completion)),
+        max_output_bytes_(max_output_bytes) {}
 
   void start() {
     if (!retain(content_.size())) {
@@ -50,7 +92,9 @@ private:
         [self] { self->renderAttempt(); },
         [self](SchedulerSubmitStatus completion_status,
                std::exception_ptr error) {
-          if (completion_status != SchedulerSubmitStatus::Accepted || error)
+          if (completion_status != SchedulerSubmitStatus::Accepted)
+            self->finish(templateStatusForScheduler(completion_status));
+          else if (error)
             self->finish(AsyncTemplateStatus::RenderFailed);
         });
     if (status != SchedulerSubmitStatus::Accepted)
@@ -67,7 +111,7 @@ private:
     bool fetch_failed = false;
     const int status = render_template_resolved(
         content_, arguments_, output, include_scope_, context_,
-        resolved_fetches_, missing, &fetch_failed);
+        resolved_fetches_, missing, &fetch_failed, max_output_bytes_);
     if (!missing.empty()) {
       const uint64_t total = static_cast<uint64_t>(resolved_fetches_.size()) +
                              static_cast<uint64_t>(missing.size());
@@ -77,6 +121,10 @@ private:
         return;
       }
       fetchMissing(std::move(missing));
+      return;
+    }
+    if (status == -3) {
+      finish(AsyncTemplateStatus::ResourceLimitExceeded);
       return;
     }
     if (status != 0 || fetch_failed) {
@@ -118,14 +166,26 @@ private:
                      OwnedWebGetAsyncOutcome outcome) noexcept {
     if (completed_.load(std::memory_order_acquire))
       return;
+    if (outcome.failure == AsyncFetchFailure::Capacity ||
+        outcome.failure == AsyncFetchFailure::Deadline ||
+        outcome.failure == AsyncFetchFailure::Cancelled ||
+        outcome.failure == AsyncFetchFailure::Shutdown) {
+      finish(templateStatusForFetch(outcome.failure));
+      return;
+    }
+    if (outcome.payload && outcome.failure == AsyncFetchFailure::None &&
+        outcome.payload->status_code == 200 &&
+        !retain(outcome.payload->content.size())) {
+      finish(AsyncTemplateStatus::ResourceLimitExceeded);
+      return;
+    }
     bool ready = false;
     bool failed = false;
     try {
       std::lock_guard<std::mutex> lock(mutex_);
       if (!outcome.payload ||
           outcome.failure != AsyncFetchFailure::None ||
-          outcome.payload->status_code != 200 ||
-          !retain(outcome.payload->content.size())) {
+          outcome.payload->status_code != 200) {
         fetch_failed_ = true;
       } else {
         resolved_fetches_[key] = outcome.payload->content;
@@ -179,6 +239,7 @@ private:
   const SettingsSnapshot settings_;
   const std::shared_ptr<RequestContext> request_context_;
   AsyncTemplateCompletion completion_;
+  const uint64_t max_output_bytes_ = 0;
   string_map resolved_fetches_;
   RetainedResponseByteLease retained_;
   std::mutex mutex_;
@@ -194,7 +255,8 @@ void renderTemplateAsync(
     std::string include_scope, FetchContext context,
     SettingsSnapshot settings,
     std::shared_ptr<RequestContext> request_context,
-    AsyncTemplateCompletion completion) {
+    AsyncTemplateCompletion completion,
+    uint64_t max_output_bytes) {
   if (!settings || !request_context || !completion) {
     if (completion)
       completion({AsyncTemplateStatus::RenderFailed, {}, 0});
@@ -204,7 +266,7 @@ void renderTemplateAsync(
     auto state = std::make_shared<AsyncTemplateState>(
         std::move(content), std::move(arguments),
         std::move(include_scope), context, settings,
-        request_context, completion);
+        request_context, completion, max_output_bytes);
     state->start();
   } catch (...) {
     completion({AsyncTemplateStatus::ResourceLimitExceeded, {}, 0});

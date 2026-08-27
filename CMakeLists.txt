@@ -319,6 +319,16 @@ IF(BUILD_TESTS)
     TARGET_COMPILE_DEFINITIONS(settings_snapshot_test_helper PRIVATE
         $<TARGET_PROPERTY:${BUILD_TARGET_NAME},COMPILE_DEFINITIONS>)
 
+    ADD_TEST(
+        NAME force_max_runtime_transaction
+        COMMAND $<TARGET_FILE:settings_snapshot_test_helper>
+                --runtime-transaction
+                ${CMAKE_SOURCE_DIR}/tests/fixtures/compat/legacy-pref.toml)
+    SET_TESTS_PROPERTIES(force_max_runtime_transaction PROPERTIES
+        LABELS full
+        TIMEOUT 60
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
     SET(COMPATIBILITY_SECURITY_BASELINE_ARGS
         --binary $<TARGET_FILE:${BUILD_TARGET_NAME}>
         --settings-snapshot-helper
@@ -399,6 +409,32 @@ IF(BUILD_TESTS)
             TIMEOUT 120
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
             ENVIRONMENT "SUBCONVERTER_HTTP_BACKEND=httplib;SUBCONVERTER_RESOURCE_CONTROL=compat")
+        ADD_TEST(
+            NAME shutdown_process_force_max
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/shutdown_process_test.py
+                    --binary $<TARGET_FILE:${BUILD_TARGET_NAME}>
+                    --scenario completed-request
+                    --scenario inflight-request)
+        SET_TESTS_PROPERTIES(shutdown_process_force_max PROPERTIES
+            LABELS full
+            RUN_SERIAL TRUE
+            TIMEOUT 60
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            ENVIRONMENT "SUBCONVERTER_RESOURCE_CONTROL=force_max")
+        ADD_TEST(
+            NAME shutdown_process_force_max_httplib
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/shutdown_process_test.py
+                    --binary $<TARGET_FILE:${BUILD_TARGET_NAME}>
+                    --scenario completed-request
+                    --scenario inflight-request)
+        SET_TESTS_PROPERTIES(shutdown_process_force_max_httplib PROPERTIES
+            LABELS full
+            RUN_SERIAL TRUE
+            TIMEOUT 60
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            ENVIRONMENT "SUBCONVERTER_HTTP_BACKEND=httplib;SUBCONVERTER_RESOURCE_CONTROL=force_max")
     ENDIF()
 
     ADD_EXECUTABLE(proxy_policy_test

@@ -22,6 +22,9 @@ struct ResourceEnvelope {
   uint64_t open_fds = 0;
   uint64_t pids_current = 0;
   uint64_t pids_max = 0;
+  uint64_t self_threads = 0;
+  uint64_t resolver_threads_per_transfer = 1;
+  uint64_t http_handler_threads_per_compute = 4;
 
   bool affinity_available = false;
   bool cpuset_available = false;
@@ -37,7 +40,18 @@ struct ResourceEnvelope {
   bool operator==(const ResourceEnvelope &) const = default;
 };
 
+struct ResourceMemoryLedger {
+  bool valid = false;
+  uint64_t capacity_bytes = 0;
+  uint64_t startup_bytes = 0;
+  uint64_t headroom_bytes = 0;
+
+  bool operator==(const ResourceMemoryLedger &) const = default;
+};
+
 uint64_t resourceEnvelopeMemoryBoundary(
+    const ResourceEnvelope &envelope) noexcept;
+ResourceMemoryLedger resourceEnvelopeMemoryLedger(
     const ResourceEnvelope &envelope) noexcept;
 ResourceEnvelope resourceEnvelopeFromSnapshot(
     const ResourceControlSnapshot &snapshot) noexcept;

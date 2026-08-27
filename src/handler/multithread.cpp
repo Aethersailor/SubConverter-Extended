@@ -28,10 +28,6 @@ static bool forceMaxResourceBudgetApplied()
 
 static size_t configuredWorkerCount()
 {
-    const std::string configured =
-        getEnv("SUBCONVERTER_RULESET_EXECUTOR_WORKERS");
-    if(!configured.empty())
-        return static_cast<size_t>(std::clamp(to_int(configured, 2), 1, 8));
     if(forceMaxResourceBudgetApplied())
     {
         const ForceMaxBudget &budget =
@@ -39,17 +35,16 @@ static size_t configuredWorkerCount()
         return static_cast<size_t>(std::min<uint64_t>(
             std::max<uint64_t>(1, budget.io_runners), SIZE_MAX));
     }
+    const std::string configured =
+        getEnv("SUBCONVERTER_RULESET_EXECUTOR_WORKERS");
+    if(!configured.empty())
+        return static_cast<size_t>(std::clamp(to_int(configured, 2), 1, 8));
     return static_cast<size_t>(
         std::clamp(effectiveSettings().maxConcurThreads / 2, 2, 8));
 }
 
 static size_t configuredQueueCapacity()
 {
-    const std::string configured =
-        getEnv("SUBCONVERTER_RULESET_EXECUTOR_QUEUE_CAPACITY");
-    if(!configured.empty())
-        return static_cast<size_t>(
-            std::clamp(to_int(configured, 64), 1, 1024));
     if(forceMaxResourceBudgetApplied())
     {
         const ForceMaxBudget &budget =
@@ -58,6 +53,11 @@ static size_t configuredQueueCapacity()
             std::max<uint64_t>(1, budget.blocking_io_queue_entries),
             SIZE_MAX));
     }
+    const std::string configured =
+        getEnv("SUBCONVERTER_RULESET_EXECUTOR_QUEUE_CAPACITY");
+    if(!configured.empty())
+        return static_cast<size_t>(
+            std::clamp(to_int(configured, 64), 1, 1024));
     return std::max<size_t>(64, configuredWorkerCount() * 16);
 }
 

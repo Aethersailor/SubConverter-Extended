@@ -182,6 +182,9 @@ enum class ExternalConfigLoadStatus {
   ParseFailed,
   ImportFailed,
   ResourceLimitExceeded,
+  Cancelled,
+  Deadline,
+  Shutdown,
 };
 
 struct ExternalConfigLoadResult {
@@ -199,6 +202,38 @@ bool isPublicUploadAllowed();
 void logSecurityPosture();
 int importItems(string_array &target, bool scope_limit = true,
                 FetchContext context = FetchContext::TrustedConfig);
+
+struct UnresolvedImportSource {
+  std::string path;
+  FetchContext context = FetchContext::TrustedConfig;
+};
+
+// Bind pre-resolved import content to the current worker while request-scoped
+// parsing runs. When a flow-missing sink is supplied, importItems never falls
+// back to synchronous I/O: missing sources are reported to the flow so it can
+// suspend and resolve them on the async/blocking-I/O lanes.
+class ScopedResolvedImportView {
+public:
+  ScopedResolvedImportView(const string_map *resolved,
+                           string_array *missing) noexcept;
+  ScopedResolvedImportView(
+      const string_map *resolved,
+      std::vector<UnresolvedImportSource> *missing) noexcept;
+  ~ScopedResolvedImportView();
+
+  ScopedResolvedImportView(const ScopedResolvedImportView &) = delete;
+  ScopedResolvedImportView &operator=(const ScopedResolvedImportView &) =
+      delete;
+
+private:
+  const string_map *previous_resolved_ = nullptr;
+  string_array *previous_missing_ = nullptr;
+  std::vector<UnresolvedImportSource> *previous_flow_missing_ = nullptr;
+  bool previous_active_ = false;
+};
+
+std::string resolvedImportKey(const std::string &path,
+                              FetchContext context);
 ExternalConfigLoadResult
 loadExternalConfig(const std::string &path, ExternalConfig &ext,
                    FetchContext context = FetchContext::TrustedConfig);
@@ -219,6 +254,7 @@ bool isExternalConfigCacheableContent(const std::string &content);
 size_t externalConfigCacheMaxEntries();
 size_t externalConfigCacheMaxBytes();
 void configureExternalConfigCache(size_t max_entries, size_t max_bytes);
+void setExternalConfigCacheGrowthFrozen(bool frozen) noexcept;
 // template <class T, class... U>
 // void find_if_exist(const toml::value &v, const toml::key &k, T& target,
 // U&&... args)

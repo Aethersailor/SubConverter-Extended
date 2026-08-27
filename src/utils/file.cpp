@@ -29,6 +29,7 @@
 #endif
 
 #include "utils/file.h"
+#include "utils/bounded_output.h"
 
 namespace {
 
@@ -771,6 +772,53 @@ std::string fileGet(const std::string &path, bool scope_limit)
     }
     if(std::ferror(fp) || closeFile(fp) != 0)
         content.clear();
+    return content;
+}
+
+std::string fileGetBounded(const std::string &path, std::size_t max_bytes,
+                           bool scope_limit)
+{
+    if(scope_limit && !isInScope(path))
+        return "";
+    std::FILE *fp = openFile(path.c_str(), "rb");
+    if(!fp)
+        return "";
+    if(std::fseek(fp, 0, SEEK_END) != 0)
+    {
+        closeFile(fp);
+        return "";
+    }
+    const long measured = std::ftell(fp);
+    if(measured < 0 || static_cast<uint64_t>(measured) > max_bytes ||
+       std::fseek(fp, 0, SEEK_SET) != 0)
+    {
+        closeFile(fp);
+        if(measured >= 0 && static_cast<uint64_t>(measured) > max_bytes)
+            throw BoundedOutputExceeded();
+        return "";
+    }
+    std::string content(static_cast<std::size_t>(measured), '\0');
+    if(content.capacity() > max_bytes)
+    {
+        closeFile(fp);
+        throw BoundedOutputExceeded();
+    }
+    std::size_t offset = 0;
+    while(offset < content.size())
+    {
+        const std::size_t count =
+            std::fread(&content[offset], 1, content.size() - offset, fp);
+        if(count == 0)
+            break;
+        offset += count;
+    }
+    const int extra = offset == content.size() ? std::fgetc(fp) : EOF;
+    const bool read_failed = offset != content.size() || std::ferror(fp);
+    const int close_result = closeFile(fp);
+    if(extra != EOF)
+        throw BoundedOutputExceeded();
+    if(read_failed || close_result != 0)
+        return "";
     return content;
 }
 

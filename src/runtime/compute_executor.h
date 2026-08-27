@@ -182,6 +182,7 @@ public:
   bool join() noexcept;
   void shutdown(bool cancel_pending) noexcept;
   bool isCurrentWorkerThread() const noexcept;
+  bool runOnePendingCooperatively() noexcept;
   bool ready() const noexcept;
   ComputeExecutorSnapshot snapshot() const;
 
@@ -194,7 +195,10 @@ private:
                                            bool &affinity_hit);
   std::shared_ptr<TaskBase> popLocked(std::size_t queue_index,
                                       std::size_t element_index);
-  std::shared_ptr<TaskBase> popControlLocked();
+  std::shared_ptr<TaskBase> popControlLocked(std::size_t element_index = 0);
+  void executeTask(const std::shared_ptr<TaskBase> &task,
+                   std::size_t worker_index, bool affinity_hit,
+                   bool cooperative_child) noexcept;
   void workerLoop(std::size_t worker_index) noexcept;
   static RequestCostClass normalizedCost(RequestCostClass cost) noexcept;
   static std::size_t queueIndex(RequestCostClass cost) noexcept;
@@ -204,6 +208,8 @@ private:
       nullptr;
   inline static thread_local std::size_t current_worker_index_ =
       std::numeric_limits<std::size_t>::max();
+  inline static thread_local bool cooperative_dispatch_active_ = false;
+  inline static thread_local uint64_t cooperative_child_nanoseconds_ = 0;
 
   const ComputeExecutorBudget budget_;
   mutable std::mutex mutex_;
@@ -237,9 +243,15 @@ enum class GlobalComputeExecutorInitStatus {
 
 GlobalComputeExecutorInitStatus initializeGlobalComputeExecutor(
     ComputeExecutorBudget budget) noexcept;
+bool publishGlobalComputeExecutor(
+    std::unique_ptr<ComputeExecutor> executor,
+    ComputeExecutorBudget budget) noexcept;
+bool resetGlobalComputeExecutor() noexcept;
 ComputeExecutor *globalComputeExecutor() noexcept;
 ComputeExecutorSnapshot globalComputeExecutorSnapshot();
-void requestGlobalComputeExecutorShutdown() noexcept;
+void requestGlobalComputeExecutorShutdown(
+    bool cancel_pending = true) noexcept;
 bool joinGlobalComputeExecutor() noexcept;
+bool runOneGlobalComputeTaskCooperatively() noexcept;
 
 #endif // COMPUTE_EXECUTOR_H_INCLUDED

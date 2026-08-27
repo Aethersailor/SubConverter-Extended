@@ -1,6 +1,7 @@
 #ifndef WEBSERVER_H_INCLUDED
 #define WEBSERVER_H_INCLUDED
 
+#include <cstddef>
 #include <string>
 #include <utility>
 #include <vector>
@@ -90,6 +91,8 @@ struct listener_args
     uint32_t request_deadline_ms = 15000;
     void (*shutdown_callback)() = nullptr;
     void (*drain_callback)() = nullptr;
+    std::size_t request_body_limit = 100 * 1024 * 1024;
+    void (*runtime_ready_callback)() = nullptr;
 };
 
 struct RequestCancellationResponse
@@ -111,6 +114,20 @@ struct responseRoute
     response_callback rc {};
     async_response_callback async_rc;
 };
+
+struct HttplibExecutionBudget
+{
+    std::size_t base_threads = 1;
+    std::size_t max_threads = 1;
+    std::size_t max_queued_requests = 1;
+};
+
+HttplibExecutionBudget forceMaxHttplibExecutionBudget(
+    uint64_t base_threads, uint64_t max_threads,
+    uint64_t inbound_connections) noexcept;
+std::size_t forceMaxRequestBodyLimit(uint64_t transport_active_bytes,
+                                     uint64_t concurrent_readers,
+                                     std::size_t compatibility_limit) noexcept;
 
 const responseRoute *findResponseRoute(
     const std::vector<responseRoute> &routes, const std::string &method,

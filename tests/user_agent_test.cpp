@@ -133,5 +133,20 @@ int main() {
     std::cerr << "invalid compiled regex did not fail closed\n";
     return 1;
   }
+
+  CompiledRegex replacement("^(US|HK)-([0-9]+)$",
+                            CompiledRegexMode::Replace);
+  if (!replacement.valid() ||
+      replacement.replace("US-12", "$1 Node $2") != "US Node 12" ||
+      replacement.replace("JP-1", "$1 Node $2") != "JP-1") {
+    std::cerr << "compiled replacement changed regReplace semantics\n";
+    return 1;
+  }
+  CompiledRegex invalid_replacement("[", CompiledRegexMode::Replace);
+  if (invalid_replacement.valid() ||
+      invalid_replacement.replace("unchanged", "x") != "unchanged") {
+    std::cerr << "invalid compiled replacement did not fail soft\n";
+    return 1;
+  }
   return 0;
 }

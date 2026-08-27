@@ -1,6 +1,7 @@
 #include "utils/resource_probe.h"
 
 #include <algorithm>
+#include <limits>
 
 #include "utils/resource_control.h"
 
@@ -14,6 +15,38 @@ uint64_t resourceEnvelopeMemoryBoundary(
   if (boundary == 0)
     boundary = envelope.host_total_memory_bytes;
   return boundary;
+}
+
+ResourceMemoryLedger resourceEnvelopeMemoryLedger(
+    const ResourceEnvelope &envelope) noexcept {
+  ResourceMemoryLedger ledger;
+  ledger.startup_bytes = envelope.memory_current_bytes;
+  if (ledger.startup_bytes == 0)
+    return ledger;
+
+  const uint64_t configured_boundary =
+      resourceEnvelopeMemoryBoundary(envelope);
+  uint64_t headroom = 0;
+  if (configured_boundary != 0) {
+    if (ledger.startup_bytes >= configured_boundary)
+      return ledger;
+    headroom = configured_boundary - ledger.startup_bytes;
+  } else {
+    headroom = envelope.host_available_memory_bytes;
+  }
+
+  if (envelope.host_available_memory_bytes != 0)
+    headroom = std::min(headroom, envelope.host_available_memory_bytes);
+  headroom = std::min(
+      headroom,
+      std::numeric_limits<uint64_t>::max() - ledger.startup_bytes);
+  if (headroom == 0)
+    return ledger;
+
+  ledger.headroom_bytes = headroom;
+  ledger.capacity_bytes = ledger.startup_bytes + ledger.headroom_bytes;
+  ledger.valid = true;
+  return ledger;
 }
 
 ResourceEnvelope resourceEnvelopeFromSnapshot(
@@ -35,6 +68,12 @@ ResourceEnvelope resourceEnvelopeFromSnapshot(
   envelope.open_fds = snapshot.open_fds;
   envelope.pids_current = snapshot.pids_current;
   envelope.pids_max = snapshot.pids_max;
+  envelope.self_threads = snapshot.self_threads;
+  envelope.resolver_threads_per_transfer =
+      snapshot.resolver_may_use_threads ? 1 : 0;
+  envelope.http_handler_threads_per_compute =
+      std::max<uint64_t>(1,
+                         snapshot.http_handler_threads_per_compute);
   envelope.affinity_available = snapshot.affinity_cpus != 0;
   envelope.cpuset_available = snapshot.cpuset_cpus != 0;
   envelope.quota_available = snapshot.cpu_quota_millis != 0;

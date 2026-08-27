@@ -39,6 +39,36 @@ GlobalTransportAdmissionInitStatus initializeGlobalTransportAdmission(
   }
 }
 
+bool publishGlobalTransportAdmission(
+    std::unique_ptr<OwnerAdmission> admission,
+    OwnerAdmissionBudget budget) noexcept {
+  if (!admission || !admission->snapshot().ready)
+    return false;
+  std::lock_guard<std::mutex> lock(global_transport_admission.mutex);
+  if (global_transport_admission.stopping ||
+      global_transport_admission.admission)
+    return false;
+  global_transport_admission.budget = budget;
+  global_transport_admission.admission = std::move(admission);
+  return true;
+}
+
+bool resetGlobalTransportAdmission() noexcept {
+  std::unique_ptr<OwnerAdmission> retired;
+  {
+    std::lock_guard<std::mutex> lock(global_transport_admission.mutex);
+    if (global_transport_admission.admission &&
+        !global_transport_admission.admission->snapshot().stopping)
+      return false;
+    retired = std::move(global_transport_admission.admission);
+    global_transport_admission.budget = {};
+    global_transport_admission.stopping = false;
+  }
+  if (retired && !retired->join())
+    return false;
+  return true;
+}
+
 OwnerAdmission *globalTransportAdmission() noexcept {
   std::lock_guard<std::mutex> lock(global_transport_admission.mutex);
   return global_transport_admission.admission.get();

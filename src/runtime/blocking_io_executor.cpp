@@ -42,6 +42,35 @@ BlockingIoExecutorInitStatus initializeBlockingIoExecutor(
   }
 }
 
+bool publishBlockingIoExecutor(
+    std::unique_ptr<ComputeExecutor> executor,
+    BlockingIoExecutorBudget budget) noexcept {
+  if (!executor || !executor->ready())
+    return false;
+  std::lock_guard<std::mutex> lock(blocking_io.mutex);
+  if (blocking_io.stopping || blocking_io.executor)
+    return false;
+  blocking_io.budget = budget;
+  blocking_io.executor = std::move(executor);
+  return true;
+}
+
+bool resetBlockingIoExecutor() noexcept {
+  std::unique_ptr<ComputeExecutor> retired;
+  {
+    std::lock_guard<std::mutex> lock(blocking_io.mutex);
+    if (blocking_io.executor &&
+        !blocking_io.executor->snapshot().stopping)
+      return false;
+    retired = std::move(blocking_io.executor);
+    blocking_io.budget = {};
+    blocking_io.stopping = false;
+  }
+  if (retired && !retired->join())
+    return false;
+  return true;
+}
+
 SchedulerSubmitStatus submitBlockingIo(
     ComputeTaskOptions options, std::function<void()> work,
     std::function<void(SchedulerSubmitStatus, std::exception_ptr)>

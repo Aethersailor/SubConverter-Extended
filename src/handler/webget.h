@@ -286,6 +286,9 @@ using OwnedWebGetContinuationCompletion =
     std::function<void(SchedulerSubmitStatus, std::exception_ptr)>;
 OwnedWebGetContinuationInitStatus initializeOwnedWebGetContinuationRuntime(
     OwnedWebGetContinuationBudget budget);
+bool publishOwnedWebGetContinuationRuntime(
+    OwnedWebGetContinuationBudget budget) noexcept;
+bool resetOwnedWebGetContinuationRuntime() noexcept;
 SchedulerSubmitStatus submitOwnedWebGetContinuation(
     RequestCostClass cost, uint64_t bytes,
     std::chrono::steady_clock::time_point deadline,
@@ -295,9 +298,15 @@ SchedulerSubmitStatus submitOwnedWebGetContinuation(
 OwnedWebGetContinuationRuntimeSnapshot
 ownedWebGetContinuationRuntimeSnapshot();
 void requestOwnedWebGetContinuationShutdown() noexcept;
-bool joinOwnedWebGetContinuationRuntime() noexcept;
+bool joinOwnedWebGetContinuationRuntime(
+    bool shutdown_compute = true) noexcept;
 bool asyncFetchEngineAvailable() noexcept;
+bool outboundResolverMayUseThreads() noexcept;
 bool initializeAsyncFetchEngine() noexcept;
+bool prepareAsyncFetchEngineCandidate() noexcept;
+bool commitAsyncFetchEngineCandidate() noexcept;
+void rollbackAsyncFetchEngineCandidate() noexcept;
+bool resetAsyncFetchEngine() noexcept;
 AsyncFetchEngineSnapshot asyncFetchEngineSnapshot() noexcept;
 bool requestAsyncFetchRuntimeLimits(
     AsyncFetchRuntimeLimits limits) noexcept;
@@ -310,6 +319,7 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy,
                    FetchContext context = FetchContext::TrustedConfig);
 bool isFetchUrlAllowed(const std::string &url, FetchContext context);
 void requestOutboundFetchShutdown() noexcept;
+bool joinOutboundFetchShutdown() noexcept;
 void flushCache();
 int webPost(const std::string &url, const std::string &data,
             const ProxyPolicy &proxy, const string_icase_map &request_headers,

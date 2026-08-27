@@ -303,6 +303,10 @@ bool ConversionFlow::scheduleDrain() {
   ComputeTaskOptions options;
   options.cost = context_->costClass();
   options.control = true;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    options.preferred_worker = preferred_worker_;
+  }
   const std::shared_ptr<ConversionFlow> self = shared_from_this();
   SchedulerSubmitStatus status = SchedulerSubmitStatus::Stopping;
   try {
@@ -328,6 +332,11 @@ bool ConversionFlow::scheduleDrain() {
 void ConversionFlow::drain() noexcept {
   ConversionFlow *previous = current_drain_;
   current_drain_ = this;
+  if (const std::optional<std::size_t> worker =
+          ComputeExecutor::currentWorkerIndex()) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    preferred_worker_ = *worker;
+  }
   for (;;) {
     MailboxEvent next;
     {

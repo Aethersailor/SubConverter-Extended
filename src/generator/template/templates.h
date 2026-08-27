@@ -20,12 +20,14 @@ int render_template(const std::string &content, const template_args &vars,
                     std::string &output,
                     const std::string &include_scope = "templates",
                     FetchContext context = FetchContext::TrustedConfig,
-                    bool *fetch_failed = nullptr);
+                    bool *fetch_failed = nullptr,
+                    uint64_t max_output_bytes = 0);
 int render_template_resolved(
     const std::string &content, const template_args &vars,
     std::string &output, const std::string &include_scope,
     FetchContext context, const string_map &resolved_fetches,
-    string_array &missing_fetches, bool *fetch_failed = nullptr);
+    string_array &missing_fetches, bool *fetch_failed = nullptr,
+    uint64_t max_output_bytes = 0);
 int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_content_array, const std::string &remote_path_prefix, bool script, bool overwrite_original_rules, bool clash_classic_ruleset, RuleConversionStats *stats = nullptr);
 
 #endif // TEMPLATES_H_INCLUDED

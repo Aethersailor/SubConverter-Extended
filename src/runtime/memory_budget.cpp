@@ -37,6 +37,20 @@ void configureGlobalFetchMemoryBudget(uint64_t limit) noexcept {
   fetch_memory.capacity_generation.fetch_add(1, std::memory_order_acq_rel);
 }
 
+bool resetGlobalFetchMemoryBudget() noexcept {
+  if (fetch_memory.used.load(std::memory_order_acquire) != 0 ||
+      fetch_memory.waiters.load(std::memory_order_acquire) != 0)
+    return false;
+  fetch_memory.enabled.store(false, std::memory_order_release);
+  fetch_memory.limit.store(0, std::memory_order_release);
+  fetch_memory.peak.store(0, std::memory_order_relaxed);
+  fetch_memory.wait_total.store(0, std::memory_order_relaxed);
+  fetch_memory.resumed_total.store(0, std::memory_order_relaxed);
+  fetch_memory.capacity_generation.fetch_add(1,
+                                              std::memory_order_acq_rel);
+  return true;
+}
+
 FetchMemoryBudgetSnapshot globalFetchMemoryBudgetSnapshot() noexcept {
   return {
       fetch_memory.enabled.load(std::memory_order_acquire),

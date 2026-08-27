@@ -75,6 +75,7 @@ struct OwnerAdmissionOptions {
   std::chrono::steady_clock::time_point deadline =
       std::chrono::steady_clock::time_point::max();
   std::shared_ptr<RequestContext> request_context;
+  bool wait = true;
 };
 
 using OwnerAdmissionCompletion =
@@ -132,6 +133,9 @@ enum class GlobalOwnerAdmissionInitStatus : uint8_t {
 
 GlobalOwnerAdmissionInitStatus initializeGlobalOwnerAdmission(
     OwnerAdmissionBudget budget) noexcept;
+bool publishGlobalOwnerAdmission(std::unique_ptr<OwnerAdmission> admission,
+                                 OwnerAdmissionBudget budget) noexcept;
+bool resetGlobalOwnerAdmission() noexcept;
 OwnerAdmission *globalOwnerAdmission() noexcept;
 OwnerAdmissionSnapshot globalOwnerAdmissionSnapshot() noexcept;
 bool setGlobalOwnerAdmissionActiveLimits(

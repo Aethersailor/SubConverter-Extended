@@ -307,6 +307,11 @@ struct OwnerAdmission::Core
         active_bytes += waiter->options.bytes;
         ++accepted_total;
         actions.push_back({waiter, OwnerAdmissionStatus::Granted});
+      } else if (!waiter->options.wait) {
+        waiter->claimed = true;
+        ++rejected_total;
+        actions.push_back({waiter, OwnerAdmissionStatus::EntryLimit});
+        result = OwnerAdmissionStatus::EntryLimit;
       } else if (waiter->options.bytes > budget.max_wait_bytes) {
         waiter->claimed = true;
         ++rejected_total;
@@ -605,6 +610,34 @@ GlobalOwnerAdmissionInitStatus initializeGlobalOwnerAdmission(
     global_owner_admission.admission.reset();
     return GlobalOwnerAdmissionInitStatus::InvalidBudget;
   }
+}
+
+bool publishGlobalOwnerAdmission(std::unique_ptr<OwnerAdmission> admission,
+                                 OwnerAdmissionBudget budget) noexcept {
+  if (!admission || !admission->snapshot().ready)
+    return false;
+  std::lock_guard<std::mutex> lock(global_owner_admission.mutex);
+  if (global_owner_admission.stopping || global_owner_admission.admission)
+    return false;
+  global_owner_admission.budget = budget;
+  global_owner_admission.admission = std::move(admission);
+  return true;
+}
+
+bool resetGlobalOwnerAdmission() noexcept {
+  std::unique_ptr<OwnerAdmission> retired;
+  {
+    std::lock_guard<std::mutex> lock(global_owner_admission.mutex);
+    if (global_owner_admission.admission &&
+        !global_owner_admission.admission->snapshot().stopping)
+      return false;
+    retired = std::move(global_owner_admission.admission);
+    global_owner_admission.budget = {};
+    global_owner_admission.stopping = false;
+  }
+  if (retired && !retired->join())
+    return false;
+  return true;
 }
 
 OwnerAdmission *globalOwnerAdmission() noexcept {

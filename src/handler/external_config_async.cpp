@@ -17,6 +17,63 @@
 
 namespace {
 
+ExternalConfigLoadStatus externalStatusForScheduler(
+    SchedulerSubmitStatus status) noexcept {
+  switch (status) {
+  case SchedulerSubmitStatus::EntryLimit:
+  case SchedulerSubmitStatus::ByteLimit:
+    return ExternalConfigLoadStatus::ResourceLimitExceeded;
+  case SchedulerSubmitStatus::Deadline:
+    return ExternalConfigLoadStatus::Deadline;
+  case SchedulerSubmitStatus::Cancelled:
+    return ExternalConfigLoadStatus::Cancelled;
+  case SchedulerSubmitStatus::Stopping:
+    return ExternalConfigLoadStatus::Shutdown;
+  case SchedulerSubmitStatus::Accepted:
+    return ExternalConfigLoadStatus::FetchFailed;
+  }
+  return ExternalConfigLoadStatus::FetchFailed;
+}
+
+ExternalConfigLoadStatus externalStatusForFetch(
+    AsyncFetchFailure failure) noexcept {
+  switch (failure) {
+  case AsyncFetchFailure::Capacity:
+    return ExternalConfigLoadStatus::ResourceLimitExceeded;
+  case AsyncFetchFailure::Deadline:
+    return ExternalConfigLoadStatus::Deadline;
+  case AsyncFetchFailure::Cancelled:
+    return ExternalConfigLoadStatus::Cancelled;
+  case AsyncFetchFailure::Shutdown:
+    return ExternalConfigLoadStatus::Shutdown;
+  case AsyncFetchFailure::None:
+  case AsyncFetchFailure::SizeLimit:
+  case AsyncFetchFailure::Dns:
+  case AsyncFetchFailure::Tls:
+  case AsyncFetchFailure::Proxy:
+  case AsyncFetchFailure::Transport:
+    return ExternalConfigLoadStatus::FetchFailed;
+  }
+  return ExternalConfigLoadStatus::FetchFailed;
+}
+
+ExternalConfigLoadStatus externalStatusForCancellation(
+    const std::shared_ptr<RequestContext> &context) noexcept {
+  if (!context)
+    return ExternalConfigLoadStatus::Cancelled;
+  switch (context->cancellationToken().reason()) {
+  case RequestCancellationReason::Deadline:
+    return ExternalConfigLoadStatus::Deadline;
+  case RequestCancellationReason::Shutdown:
+    return ExternalConfigLoadStatus::Shutdown;
+  case RequestCancellationReason::None:
+  case RequestCancellationReason::ClientDisconnected:
+  case RequestCancellationReason::NoConsumers:
+    return ExternalConfigLoadStatus::Cancelled;
+  }
+  return ExternalConfigLoadStatus::Cancelled;
+}
+
 struct SourceCompletionState {
   explicit SourceCompletionState(
       std::function<void(ExternalConfigLoadStatus, std::string)> callback)
@@ -43,12 +100,14 @@ public:
       std::string path, FetchContext context, SettingsSnapshot settings,
       std::shared_ptr<RequestContext> request_context,
       template_args template_arguments,
-      AsyncExternalConfigCompletion completion)
+      AsyncExternalConfigCompletion completion,
+      uint64_t max_output_bytes)
       : path_(std::move(path)), context_(context),
         settings_(std::move(settings)),
         request_context_(std::move(request_context)),
         template_arguments_(std::move(template_arguments)),
-        completion_(std::move(completion)) {}
+        completion_(std::move(completion)),
+        max_output_bytes_(max_output_bytes) {}
 
   void start() {
     fetchSource(path_, context_,
@@ -66,6 +125,7 @@ public:
                           "base_retention");
                       return;
                     }
+                    self->working_source_bytes_ += content.size();
                     self->base_content_ = std::move(content);
                     self->renderBase();
                   } catch (...) {
@@ -91,13 +151,27 @@ public:
             else if (result.status ==
                      AsyncTemplateStatus::ResourceLimitExceeded)
               failure_stage = "base_render_capacity";
-            self->finish(
-                result.status == AsyncTemplateStatus::ResourceLimitExceeded
-                    ? ExternalConfigLoadStatus::ResourceLimitExceeded
-                    : ExternalConfigLoadStatus::RenderFailed,
-                failure_stage);
+            ExternalConfigLoadStatus status =
+                ExternalConfigLoadStatus::RenderFailed;
+            if (result.status == AsyncTemplateStatus::ResourceLimitExceeded)
+              status = ExternalConfigLoadStatus::ResourceLimitExceeded;
+            else if (result.status == AsyncTemplateStatus::Deadline)
+              status = ExternalConfigLoadStatus::Deadline;
+            else if (result.status == AsyncTemplateStatus::Cancelled)
+              status = ExternalConfigLoadStatus::Cancelled;
+            else if (result.status == AsyncTemplateStatus::Shutdown)
+              status = ExternalConfigLoadStatus::Shutdown;
+            self->finish(status, failure_stage);
             return;
           }
+          if (result.output.size() >
+              UINT64_MAX - self->working_source_bytes_) {
+            self->finish(
+                ExternalConfigLoadStatus::ResourceLimitExceeded,
+                "rendered_working_overflow");
+            return;
+          }
+          self->working_source_bytes_ += result.output.size();
           if (!self->retain(result.output.size())) {
             self->finish(
                 ExternalConfigLoadStatus::ResourceLimitExceeded,
@@ -106,7 +180,7 @@ public:
           }
           self->rendered_content_ = std::move(result.output);
           self->scheduleParse();
-        });
+        }, max_output_bytes_);
   }
 
 private:
@@ -122,7 +196,7 @@ private:
   void fetchSource(std::string source, FetchContext context,
                    SourceCompletion completion) {
     if (request_context_->cancellationToken().isCancellationRequested()) {
-      completion(ExternalConfigLoadStatus::FetchFailed, {});
+      completion(externalStatusForCancellation(request_context_), {});
       return;
     }
     if (isLink(source) || startsWith(source, "data:")) {
@@ -144,7 +218,7 @@ private:
                 outcome.failure != AsyncFetchFailure::None ||
                 outcome.payload->status_code != 200 ||
                 outcome.payload->content.empty()) {
-              completion(ExternalConfigLoadStatus::FetchFailed, {});
+              completion(externalStatusForFetch(outcome.failure), {});
               return;
             }
             completion(ExternalConfigLoadStatus::Success,
@@ -179,7 +253,10 @@ private:
         },
         [completion_state](SchedulerSubmitStatus completion_status,
                            std::exception_ptr error) mutable {
-          if (completion_status != SchedulerSubmitStatus::Accepted || error)
+          if (completion_status != SchedulerSubmitStatus::Accepted)
+            completion_state->complete(
+                externalStatusForScheduler(completion_status));
+          else if (error)
             completion_state->complete(
                 ExternalConfigLoadStatus::FetchFailed);
         });
@@ -197,6 +274,11 @@ private:
         [self](SchedulerSubmitStatus completion_status,
                std::exception_ptr error) {
           if (completion_status != SchedulerSubmitStatus::Accepted || error) {
+            if (completion_status != SchedulerSubmitStatus::Accepted) {
+              self->finish(externalStatusForScheduler(completion_status),
+                           "parse_continuation");
+              return;
+            }
             if (error) {
               try {
                 std::rethrow_exception(error);
@@ -274,16 +356,33 @@ private:
               std::string content) mutable {
             if (self->completed_.load(std::memory_order_acquire))
               return;
+            if (status ==
+                    ExternalConfigLoadStatus::ResourceLimitExceeded ||
+                status == ExternalConfigLoadStatus::Cancelled ||
+                status == ExternalConfigLoadStatus::Deadline ||
+                status == ExternalConfigLoadStatus::Shutdown) {
+              self->finish(status, "import_fetch");
+              return;
+            }
             bool ready = false;
             bool failed = false;
+            bool retention_failed = false;
             try {
               {
                 std::lock_guard<std::mutex> lock(self->mutex_);
                 if (status != ExternalConfigLoadStatus::Success ||
-                    content.empty() || !self->retain(content.size())) {
+                    content.empty()) {
                   self->fetch_failed_ = true;
+                } else if (!self->retain(content.size())) {
+                  retention_failed = true;
                 } else {
+                  if (content.size() >
+                      UINT64_MAX - self->working_source_bytes_) {
+                    self->fetch_failed_ = true;
+                  } else {
+                    self->working_source_bytes_ += content.size();
                   self->resolved_imports_[key] = std::move(content);
+                  }
                 }
                 if (self->pending_ != 0)
                   --self->pending_;
@@ -294,6 +393,12 @@ private:
               self->finish(
                   ExternalConfigLoadStatus::ResourceLimitExceeded,
                   "import_completion");
+              return;
+            }
+            if (retention_failed) {
+              self->finish(
+                  ExternalConfigLoadStatus::ResourceLimitExceeded,
+                  "import_retention");
               return;
             }
             if (!ready)
@@ -316,7 +421,8 @@ private:
       return;
     try {
       completion({ExternalConfigLoadStatus::Success, {},
-                  std::move(config), std::move(arguments)});
+                   std::move(config), std::move(arguments),
+                   working_source_bytes_});
     } catch (...) {
     }
   }
@@ -330,7 +436,7 @@ private:
       return;
     try {
       completion({status, std::move(failure_stage), {},
-                  std::move(template_arguments_)});
+                   std::move(template_arguments_), 0});
     } catch (...) {
     }
   }
@@ -341,6 +447,8 @@ private:
   const std::shared_ptr<RequestContext> request_context_;
   template_args template_arguments_;
   AsyncExternalConfigCompletion completion_;
+  const uint64_t max_output_bytes_ = 0;
+  uint64_t working_source_bytes_ = 0;
   std::string base_content_;
   std::string rendered_content_;
   string_map resolved_imports_;
@@ -357,21 +465,23 @@ void loadExternalConfigAsync(
     std::string path, FetchContext context, SettingsSnapshot settings,
     std::shared_ptr<RequestContext> request_context,
     template_args template_arguments,
-    AsyncExternalConfigCompletion completion) {
+    AsyncExternalConfigCompletion completion,
+    uint64_t max_output_bytes) {
   if (!settings || !request_context || !completion) {
     if (completion)
       completion({ExternalConfigLoadStatus::FetchFailed, {}, {},
-                  std::move(template_arguments)});
+                   std::move(template_arguments), 0});
     return;
   }
   try {
     auto state = std::make_shared<AsyncExternalConfigState>(
         std::move(path), context, settings,
-        request_context, template_arguments, completion);
+        request_context, template_arguments, completion,
+        max_output_bytes);
     state->start();
   } catch (...) {
     completion({ExternalConfigLoadStatus::ResourceLimitExceeded,
                 "state_allocation", {},
-                std::move(template_arguments)});
+                std::move(template_arguments), 0});
   }
 }

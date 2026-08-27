@@ -16,6 +16,7 @@ enum class ConversionResourceKind {
   Base,
   RulePrepend,
   RuleAppend,
+  SubscriptionImport,
 };
 
 struct AsyncConversionResourceRequest {
@@ -41,6 +42,7 @@ struct ResolvedConversionResource {
 
 struct AsyncConversionResourceBatchResult {
   std::vector<ResolvedConversionResource> resources;
+  AsyncFetchFailure terminal_failure = AsyncFetchFailure::None;
 };
 
 using AsyncConversionResourceCompletion =

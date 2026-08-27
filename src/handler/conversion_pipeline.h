@@ -37,7 +37,8 @@ bool resolveExternalConfigOnFlow(
     SettingsSnapshot settings,
     std::shared_ptr<RequestContext> request_context,
     template_args template_arguments,
-    ConversionFlowExternalConfigCompletion completion);
+    ConversionFlowExternalConfigCompletion completion,
+    uint64_t max_output_bytes = 0);
 
 using ConversionFlowSubscriptionCompletion =
     std::function<void(ConversionFlow &, AsyncSubscriptionBatchResult)>;
@@ -68,7 +69,8 @@ bool renderTemplateOnFlow(
     template_args arguments, std::string include_scope,
     FetchContext context, SettingsSnapshot settings,
     std::shared_ptr<RequestContext> request_context,
-    ConversionFlowTemplateCompletion completion);
+    ConversionFlowTemplateCompletion completion,
+    uint64_t max_output_bytes = 0);
 
 using ConversionFlowUploadCompletion =
     std::function<void(ConversionFlow &, AsyncUploadResult)>;

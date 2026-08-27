@@ -11,7 +11,10 @@
 #include <thread>
 #include <vector>
 
+#include <rapidjson/writer.h>
+
 #include "utils/bounded_executor.h"
+#include "utils/bounded_output.h"
 #include "runtime/compute_executor.h"
 #include "runtime/blocking_io_executor.h"
 #include "runtime/owner_admission.h"
@@ -22,6 +25,101 @@
 #include "utils/workload_scheduler.h"
 
 using namespace std::chrono_literals;
+
+static void testBoundedOutput() {
+  BoundedOutputSink exact(4);
+  exact.append("ab");
+  exact.append("cd");
+  bool rejected = false;
+  try {
+    exact.append("e");
+  } catch (const BoundedOutputExceeded &) {
+    rejected = true;
+  }
+  assert(rejected && exact.release() == "abcd");
+
+  constexpr size_t double_buffer_budget = 128;
+  BoundedOutputSink double_buffer(double_buffer_budget / 2);
+  double_buffer.append(std::string(40, 'x'));
+  const size_t staging_capacity = double_buffer.allocatedCapacity();
+  const std::string abi_output = double_buffer.release();
+  assert(staging_capacity + abi_output.capacity() <= double_buffer_budget);
+
+  Base64OutputSink base64_exact(4);
+  base64_exact.append("M");
+  base64_exact.append("an");
+  assert(base64_exact.release() == "TWFu");
+  rejected = false;
+  try {
+    Base64OutputSink base64_short(3);
+    base64_short.append("Man");
+  } catch (const BoundedOutputExceeded &) {
+    rejected = true;
+  }
+  assert(rejected);
+
+  std::string managed_prefix = "#!MANAGED-CONFIG fixture\n\n";
+  std::string generated = "payload";
+  const size_t concat_limit = 1024;
+  assert(boundedConcatWithRetained(managed_prefix, generated, concat_limit) ==
+         managed_prefix + generated);
+  rejected = false;
+  try {
+    (void)boundedConcatWithRetained(managed_prefix, generated, 1);
+  } catch (const BoundedOutputExceeded &) {
+    rejected = true;
+  }
+  assert(rejected);
+
+  BoundedOutputSink json_probe(1024);
+  rapidjson::Writer<BoundedOutputSink> probe_writer(json_probe);
+  probe_writer.StartObject();
+  probe_writer.Key("nodes");
+  probe_writer.Uint(12);
+  probe_writer.EndObject();
+  const std::string expected_json = json_probe.release();
+  BoundedOutputSink json_exact(expected_json.size());
+  rapidjson::Writer<BoundedOutputSink> exact_writer(json_exact);
+  exact_writer.StartObject();
+  exact_writer.Key("nodes");
+  exact_writer.Uint(12);
+  exact_writer.EndObject();
+  assert(json_exact.release() == expected_json);
+  rejected = false;
+  try {
+    BoundedOutputSink json_short(expected_json.size() - 1);
+    rapidjson::Writer<BoundedOutputSink> short_writer(json_short);
+    short_writer.StartObject();
+    short_writer.Key("nodes");
+    short_writer.Uint(12);
+    short_writer.EndObject();
+  } catch (const BoundedOutputExceeded &) {
+    rejected = true;
+  }
+  assert(rejected);
+
+  // Model the target serializer's group x node fan-out at its append point.
+  BoundedOutputSink fanout_probe(4096);
+  for (int group = 0; group < 3; ++group)
+    for (int node = 0; node < 4; ++node)
+      fanout_probe.append("group-node\n");
+  const std::string fanout = fanout_probe.release();
+  BoundedOutputSink fanout_exact(fanout.size());
+  for (int group = 0; group < 3; ++group)
+    for (int node = 0; node < 4; ++node)
+      fanout_exact.append("group-node\n");
+  assert(fanout_exact.release() == fanout);
+  rejected = false;
+  try {
+    BoundedOutputSink fanout_short(fanout.size() - 1);
+    for (int group = 0; group < 3; ++group)
+      for (int node = 0; node < 4; ++node)
+        fanout_short.append("group-node\n");
+  } catch (const BoundedOutputExceeded &) {
+    rejected = true;
+  }
+  assert(rejected);
+}
 
 static void testBoundedExecutor() {
   BoundedExecutor executor(2, 1);
@@ -351,6 +449,81 @@ static void testComputeExecutor() {
   assert(snapshot.worker_metrics[0].affinity_hits >= 1);
   executor.shutdown(true);
   assert(!executor.ready());
+
+  ComputeExecutor control_affinity({2, 2, 1024, 64});
+  std::promise<void> affinity_release;
+  std::shared_future<void> affinity_released =
+      affinity_release.get_future().share();
+  std::atomic<uint64_t> affinity_blockers_started{0};
+  std::promise<void> affinity_blockers_ready;
+  for (std::size_t index = 0; index < 2; ++index) {
+    assert(control_affinity.submit(
+               {.preferred_worker = index},
+               [&, index] {
+                 (void)index;
+                 if (affinity_blockers_started.fetch_add(
+                         1, std::memory_order_acq_rel) == 1)
+                   affinity_blockers_ready.set_value();
+                 affinity_released.wait();
+               }).status == SchedulerSubmitStatus::Accepted);
+  }
+  affinity_blockers_ready.get_future().wait();
+  std::atomic<uint64_t> affinity_control_completed{0};
+  std::promise<void> affinity_control_done;
+  for (std::size_t index = 0; index < 32; ++index) {
+    ComputeTaskOptions options;
+    options.control = true;
+    options.preferred_worker = index % 2;
+    assert(control_affinity.submitContinuation(
+               std::move(options), [] {},
+               [&](SchedulerSubmitStatus status, std::exception_ptr error) {
+                 assert(status == SchedulerSubmitStatus::Accepted);
+                 assert(!error);
+                 if (affinity_control_completed.fetch_add(
+                         1, std::memory_order_acq_rel) == 31)
+                   affinity_control_done.set_value();
+               }) == SchedulerSubmitStatus::Accepted);
+  }
+  affinity_release.set_value();
+  affinity_control_done.get_future().wait();
+  const ComputeExecutorSnapshot control_affinity_snapshot =
+      control_affinity.snapshot();
+  assert(control_affinity_snapshot.control_queued_entries == 0);
+  uint64_t control_affinity_hits = 0;
+  for (const ComputeWorkerSnapshot &worker :
+       control_affinity_snapshot.worker_metrics)
+    control_affinity_hits += worker.affinity_hits;
+  assert(control_affinity_hits > 0);
+  control_affinity.shutdown(false);
+
+  ComputeExecutor cooperative({1, 2, 1024, 2});
+  std::promise<void> outer_ready;
+  std::promise<void> dispatch_now;
+  std::shared_future<void> dispatch_signal =
+      dispatch_now.get_future().share();
+  std::atomic<bool> inner_ran{false};
+  auto outer = cooperative.submit({}, [&] {
+    outer_ready.set_value();
+    dispatch_signal.wait();
+    assert(cooperative.runOnePendingCooperatively());
+    assert(inner_ran.load(std::memory_order_acquire));
+  });
+  outer_ready.get_future().wait();
+  auto inner = cooperative.submit(
+      {}, [&] { inner_ran.store(true, std::memory_order_release); });
+  assert(inner.status == SchedulerSubmitStatus::Accepted);
+  dispatch_now.set_value();
+  outer.future.get();
+  inner.future.get();
+  cooperative.requestShutdown(false);
+  assert(cooperative.join());
+  const ComputeExecutorSnapshot cooperative_snapshot =
+      cooperative.snapshot();
+  uint64_t cooperative_executed = 0;
+  for (const ComputeWorkerSnapshot &worker :
+       cooperative_snapshot.worker_metrics)
+    cooperative_executed += worker.executed;
+  assert(cooperative_executed == 2);
 
   ComputeExecutor completion_executor({1, 1, 1024});
   std::promise<void> completion_release;
@@ -698,6 +871,18 @@ static void testWorkAdmissionLifecycle() {
   assert(metrics.work_admitted == 2);
   assert(metrics.server_capacity_failure_after_admission == 2);
 
+  auto final_capacity = std::make_shared<RequestContext>(
+      "final-capacity", RequestContext::Clock::now());
+  final_capacity->suggestFailure(RequestFailureAttribution::Upstream);
+  assert(final_capacity->markWorkAdmitted());
+  final_capacity->setFinalFailureAttribution(
+      RequestFailureAttribution::Capacity);
+  assert(final_capacity->suggestedFailure() ==
+         RequestFailureAttribution::Capacity);
+  metrics = requestLifecycleMetricsSnapshot();
+  assert(metrics.work_admitted == 3);
+  assert(metrics.server_capacity_failure_after_admission == 3);
+
   auto internal = std::make_shared<RequestContext>(
       "internal-work", RequestContext::Clock::now(),
       RequestContext::Clock::time_point::max(),
@@ -705,8 +890,8 @@ static void testWorkAdmissionLifecycle() {
   assert(!internal->markWorkAdmitted());
   internal->suggestFailure(RequestFailureAttribution::Capacity);
   metrics = requestLifecycleMetricsSnapshot();
-  assert(metrics.work_admitted == 2);
-  assert(metrics.server_capacity_failure_after_admission == 2);
+  assert(metrics.work_admitted == 3);
+  assert(metrics.server_capacity_failure_after_admission == 3);
 }
 
 static void testActiveRequestShutdownCancellation() {
@@ -787,6 +972,19 @@ static void testConcurrentLruCache() {
   assert(compute("same-content:type-b", "type-miss") == "type-miss");
   assert(computations.load() == after_hit + 2);
   assert(cache.size() == 2);
+  cache.setGrowthFrozen(true);
+  assert(cache.growthFrozen());
+  const size_t frozen_size = cache.size();
+  const size_t frozen_bytes = cache.bytes();
+  const int before_frozen_miss = computations.load();
+  assert(compute("frozen-miss", "not-retained") == "not-retained");
+  assert(computations.load() == before_frozen_miss + 1);
+  assert(cache.size() == frozen_size && cache.bytes() == frozen_bytes);
+  assert(compute("same-content:type-b", "wrong") == "type-miss");
+  assert(cache.size() == frozen_size && cache.bytes() == frozen_bytes);
+  cache.setGrowthFrozen(false);
+  assert(!cache.growthFrozen());
+  assert(compute("growth-restored", "retained") == "retained");
   cache.setLimits(1, 16);
   assert(cache.maxEntries() == 1 && cache.maxBytes() == 16 &&
          cache.size() <= 1 && cache.bytes() <= 16);
@@ -1019,19 +1217,24 @@ static void testResourceControlPrimitives() {
   assert(hardwarePinMatches(uncalibrated, ""));
   assert(!hardwarePinMatches(uncalibrated, "hardware-a"));
 
-  ResourceEnvelope hostbrr_like;
-  hostbrr_like.schedulable_cpu_millis = 6000;
-  hostbrr_like.memory_max_bytes = UINT64_C(12) * 1024 * 1024 * 1024;
-  hostbrr_like.nofile_soft = 524288;
-  hostbrr_like.nofile_hard = 524288;
-  hostbrr_like.open_fds = 32;
-  hostbrr_like.pids_current = 24;
-  hostbrr_like.pids_max = 4096;
-  hostbrr_like.complete = true;
+  ResourceEnvelope bounded_envelope;
+  bounded_envelope.schedulable_cpu_millis = 6000;
+  bounded_envelope.memory_current_bytes =
+      UINT64_C(512) * 1024 * 1024;
+  bounded_envelope.memory_max_bytes =
+      UINT64_C(12) * 1024 * 1024 * 1024;
+  bounded_envelope.host_available_memory_bytes =
+      UINT64_C(10) * 1024 * 1024 * 1024;
+  bounded_envelope.nofile_soft = 524288;
+  bounded_envelope.nofile_hard = 524288;
+  bounded_envelope.open_fds = 32;
+  bounded_envelope.pids_current = 24;
+  bounded_envelope.pids_max = 4096;
+  bounded_envelope.complete = true;
   const ForceMaxBudget deterministic_first =
-      calculateForceMaxBudget(hostbrr_like);
+      calculateForceMaxBudget(bounded_envelope);
   const ForceMaxBudget deterministic_second =
-      calculateForceMaxBudget(hostbrr_like);
+      calculateForceMaxBudget(bounded_envelope);
   assert(deterministic_first == deterministic_second);
   assert(deterministic_first.valid);
   assert(deterministic_first.envelope_complete);
@@ -1044,6 +1247,16 @@ static void testResourceControlPrimitives() {
   assert(deterministic_first.outbound_active <=
          deterministic_first.outbound_open);
   assert(deterministic_first.quickjs_workers == 3);
+  assert(deterministic_first.formula_revision == "force-max-v3");
+  assert(deterministic_first.startup_memory_bytes ==
+         bounded_envelope.memory_current_bytes);
+  assert(deterministic_first.memory_headroom_bytes ==
+         bounded_envelope.host_available_memory_bytes);
+  assert(deterministic_first.memory_capacity_bytes ==
+         bounded_envelope.memory_current_bytes +
+             bounded_envelope.host_available_memory_bytes);
+  assert(deterministic_first.memory_budget_total ==
+         deterministic_first.memory_headroom_bytes);
   assert(deterministic_first.quickjs_heap_bytes_per_worker > 0);
   assert(deterministic_first.quickjs_stack_bytes_per_worker > 0);
   assert(deterministic_first.blocking_io_queue_entries > 0);
@@ -1055,15 +1268,50 @@ static void testResourceControlPrimitives() {
          deterministic_first.working_memory_bytes);
   assert(deterministic_first.transport_active_bytes > 0);
   assert(deterministic_first.owner_active_bytes > 0);
+  const uint64_t owner_reservation = forceMaxOwnerWorkingReservation(
+      deterministic_first, 4096, UINT64_C(1) * 1024 * 1024);
+  assert(owner_reservation >= UINT64_C(4) * 1024 * 1024);
+  assert(owner_reservation >=
+         deterministic_first.owner_active_bytes /
+             deterministic_first.active_owners);
+  assert(owner_reservation <= deterministic_first.owner_active_bytes);
+  assert(forceMaxOwnerWorkingReservation(
+             deterministic_first,
+             deterministic_first.owner_active_bytes + 1,
+             UINT64_C(1) * 1024 * 1024) ==
+         deterministic_first.owner_active_bytes);
+  assert(deterministic_first.reserved_pids == 6);
+  assert(deterministic_first.fixed_threads == 7);
+  assert(deterministic_first.resolver_thread_budget == 96);
+  assert(deterministic_first.thread_budget_total ==
+         deterministic_first.reserved_pids +
+             deterministic_first.fixed_threads +
+             deterministic_first.resolver_thread_budget +
+             deterministic_first.compute_workers +
+             deterministic_first.io_runners +
+             deterministic_first.handler_permits +
+             deterministic_first.quickjs_workers +
+             deterministic_first.io_runners);
+  ResourceEnvelope cares_envelope = bounded_envelope;
+  cares_envelope.resolver_threads_per_transfer = 0;
+  const ForceMaxBudget cares_budget =
+      calculateForceMaxBudget(cares_envelope);
+  assert(cares_budget.valid);
+  assert(cares_budget.compute_workers ==
+         deterministic_first.compute_workers);
+  assert(cares_budget.resolver_thread_budget == 0);
+  assert(cares_budget.thread_budget_total +
+             deterministic_first.resolver_thread_budget ==
+         deterministic_first.thread_budget_total);
 
-  ResourceEnvelope fractional_envelope = hostbrr_like;
+  ResourceEnvelope fractional_envelope = bounded_envelope;
   fractional_envelope.schedulable_cpu_millis = 500;
   const ForceMaxBudget fractional_budget =
       calculateForceMaxBudget(fractional_envelope);
   assert(fractional_budget.valid);
   assert(fractional_budget.compute_workers == 1);
 
-  ResourceEnvelope two_cpu_envelope = hostbrr_like;
+  ResourceEnvelope two_cpu_envelope = bounded_envelope;
   two_cpu_envelope.schedulable_cpu_millis = 2000;
   const ForceMaxBudget two_cpu =
       calculateForceMaxBudget(two_cpu_envelope);
@@ -1076,7 +1324,7 @@ static void testResourceControlPrimitives() {
          two_cpu.inbound_connections);
   assert(deterministic_first.outbound_active >= two_cpu.outbound_active);
 
-  ResourceEnvelope small_memory_envelope = hostbrr_like;
+  ResourceEnvelope small_memory_envelope = bounded_envelope;
   small_memory_envelope.memory_max_bytes =
       UINT64_C(1) * 1024 * 1024 * 1024;
   const ForceMaxBudget small_memory =
@@ -1093,14 +1341,92 @@ static void testResourceControlPrimitives() {
   assert(deterministic_first.quickjs_heap_bytes_per_worker >=
          small_memory.quickjs_heap_bytes_per_worker);
 
+  ResourceEnvelope occupied_envelope = bounded_envelope;
+  occupied_envelope.memory_current_bytes =
+      UINT64_C(4) * 1024 * 1024 * 1024;
+  const ForceMaxBudget occupied =
+      calculateForceMaxBudget(occupied_envelope);
+  assert(occupied.valid);
+  assert(occupied.memory_capacity_bytes ==
+         bounded_envelope.memory_max_bytes);
+  assert(occupied.memory_headroom_bytes ==
+         UINT64_C(8) * 1024 * 1024 * 1024);
+  assert(occupied.memory_budget_total <
+         deterministic_first.memory_budget_total);
+
   ResourceEnvelope portable_envelope;
   portable_envelope.schedulable_cpu_millis = 1500;
+  portable_envelope.memory_current_bytes =
+      UINT64_C(128) * 1024 * 1024;
   portable_envelope.host_total_memory_bytes =
       UINT64_C(512) * 1024 * 1024;
+  portable_envelope.host_available_memory_bytes =
+      UINT64_C(256) * 1024 * 1024;
   const ForceMaxBudget portable =
       calculateForceMaxBudget(portable_envelope);
   assert(portable.valid);
   assert(!portable.envelope_complete);
+  assert(portable.startup_memory_bytes ==
+         portable_envelope.memory_current_bytes);
+  assert(portable.memory_headroom_bytes ==
+         portable_envelope.host_available_memory_bytes);
+  assert(portable.memory_capacity_bytes ==
+         UINT64_C(384) * 1024 * 1024);
+
+  ResourceEnvelope unknown_cgroup_envelope = portable_envelope;
+  unknown_cgroup_envelope.cgroup_scope_known = false;
+  const ForceMaxBudget unknown_cgroup =
+      calculateForceMaxBudget(unknown_cgroup_envelope);
+  assert(!unknown_cgroup.valid);
+  assert(unknown_cgroup.validation_error == "unknown_cgroup_scope");
+
+  ResourceEnvelope missing_current_envelope = portable_envelope;
+  missing_current_envelope.memory_current_bytes = 0;
+  const ForceMaxBudget missing_current =
+      calculateForceMaxBudget(missing_current_envelope);
+  assert(!missing_current.valid);
+  assert(missing_current.validation_error ==
+         "memory_current_unavailable");
+
+  std::string validation_error;
+  ResourceEnvelope low_headroom_envelope = bounded_envelope;
+  low_headroom_envelope.memory_current_bytes =
+      UINT64_C(64) * 1024 * 1024;
+  low_headroom_envelope.memory_max_bytes =
+      UINT64_C(72) * 1024 * 1024;
+  low_headroom_envelope.host_available_memory_bytes =
+      UINT64_C(128) * 1024 * 1024;
+  const ForceMaxBudget low_headroom =
+      calculateForceMaxBudget(low_headroom_envelope);
+  assert(low_headroom.valid);
+  assert(!validateForceMaxFetchContract(
+      low_headroom, UINT64_C(2) * 1024 * 1024,
+      &validation_error));
+  assert(validation_error ==
+         "fetch_budget_below_download_contract");
+  assert(validateForceMaxFetchContract(
+      low_headroom, UINT64_C(256) * 1024,
+      &validation_error));
+  assert(validation_error.empty());
+
+  ResourceEnvelope exhausted_memory_envelope = bounded_envelope;
+  exhausted_memory_envelope.memory_current_bytes =
+      exhausted_memory_envelope.memory_max_bytes;
+  const ForceMaxBudget exhausted_memory =
+      calculateForceMaxBudget(exhausted_memory_envelope);
+  assert(!exhausted_memory.valid);
+  assert(exhausted_memory.validation_error ==
+         "memory_headroom_exhausted");
+
+  ResourceEnvelope overflowing_memory_envelope;
+  overflowing_memory_envelope.memory_current_bytes = UINT64_MAX - 3;
+  overflowing_memory_envelope.host_available_memory_bytes = 16;
+  const ResourceMemoryLedger overflowing_memory =
+      resourceEnvelopeMemoryLedger(overflowing_memory_envelope);
+  assert(overflowing_memory.valid);
+  assert(overflowing_memory.startup_bytes == UINT64_MAX - 3);
+  assert(overflowing_memory.headroom_bytes == 3);
+  assert(overflowing_memory.capacity_bytes == UINT64_MAX);
 
   ResourceEnvelope low_nofile_envelope = portable_envelope;
   low_nofile_envelope.nofile_soft = 32;
@@ -1121,9 +1447,52 @@ static void testResourceControlPrimitives() {
   ForceMaxBudget overflow = deterministic_first;
   overflow.transport_queue_bytes = UINT64_MAX;
   overflow.owner_queue_bytes = 1;
-  std::string validation_error;
   assert(!validateForceMaxBudget(overflow, &validation_error));
   assert(validation_error == "queue_budget_overflow");
+
+  ResourceEnvelope tight_pids_envelope = bounded_envelope;
+  tight_pids_envelope.pids_current = 24;
+  tight_pids_envelope.pids_max = 59;
+  const ForceMaxBudget tight_pids =
+      calculateForceMaxBudget(tight_pids_envelope);
+  assert(tight_pids.valid);
+  assert(tight_pids.compute_workers == 1);
+  assert(tight_pids.handler_permits == 4);
+  assert(tight_pids.thread_budget_total == 35);
+  assert(tight_pids.fixed_threads == 7);
+  assert(tight_pids.resolver_thread_budget == 16);
+  assert(tight_pids.resolver_thread_budget == tight_pids.outbound_active);
+  assert(tight_pids.reserved_pids == 4);
+
+  ResourceEnvelope tight_pids_beast_envelope = tight_pids_envelope;
+  tight_pids_beast_envelope.http_handler_threads_per_compute = 1;
+  tight_pids_beast_envelope.pids_max = 74;
+  ResourceEnvelope tight_pids_httplib_peer = tight_pids_beast_envelope;
+  tight_pids_httplib_peer.http_handler_threads_per_compute = 4;
+  const ForceMaxBudget tight_pids_beast =
+      calculateForceMaxBudget(tight_pids_beast_envelope);
+  const ForceMaxBudget tight_pids_httplib_peer_budget =
+      calculateForceMaxBudget(tight_pids_httplib_peer);
+  assert(tight_pids_beast.valid);
+  assert(tight_pids_httplib_peer_budget.valid);
+  assert(tight_pids_beast.compute_workers >
+         tight_pids_httplib_peer_budget.compute_workers);
+  assert(tight_pids_beast.handler_permits ==
+         tight_pids_beast.compute_workers);
+  assert(tight_pids_beast.thread_budget_total <=
+         tight_pids_beast_envelope.pids_max -
+             tight_pids_beast_envelope.pids_current);
+  assert(!forceMaxPidsHeadroomExhausted(59, 55, 4));
+  assert(forceMaxPidsHeadroomExhausted(59, 56, 4));
+  assert(forceMaxRequiredPidHeadroom(4, 16, 0) == 20);
+  assert(forceMaxRequiredPidHeadroom(4, 16, 5) == 15);
+  assert(forceMaxRequiredPidHeadroom(4, 16, 16) == 4);
+  ResourceEnvelope exhausted_pids_envelope = tight_pids_envelope;
+  exhausted_pids_envelope.pids_max = 58;
+  const ForceMaxBudget exhausted_pids =
+      calculateForceMaxBudget(exhausted_pids_envelope);
+  assert(!exhausted_pids.valid);
+  assert(exhausted_pids.validation_error == "pids_exhausted");
 }
 
 static void testCancellationTokenCallbacks() {
@@ -1508,6 +1877,7 @@ static void testFetchMemoryBudget() {
 }
 
 int main() {
+  testBoundedOutput();
   testBoundedExecutor();
   testBoundedExecutorDeadlineAndCancellation();
   testComputeExecutor();

@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <limits>
 #include <string>
 
 #ifndef NO_JS_RUNTIME
@@ -162,6 +163,11 @@ struct extra_settings {
   TargetGenerationStats surfboard_generation_stats;
   TargetGenerationStats loon_generation_stats;
   bool authorized = false;
+  // Non-zero only for a force_max owner that has prepaid native bytes for an
+  // authorized proxy-group script result. The QuickJS heap remains governed
+  // separately; this bounds the C++ file/result copies before allocation.
+  bool force_max_group_script_limited = false;
+  std::size_t force_max_group_script_remaining_bytes = 0;
   RuleConversionStats *rule_stats = nullptr;
 
   extra_settings() = default;
@@ -185,7 +191,9 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
                          const std::string &base_conf,
                          std::vector<RulesetContent> &ruleset_content_array,
                          const ProxyGroupConfigs &extra_proxy_group,
-                         bool clashR, extra_settings &ext);
+                         bool clashR, extra_settings &ext,
+                         std::size_t max_output_bytes =
+                             std::numeric_limits<std::size_t>::max());
 void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
                   const ProxyGroupConfigs &extra_proxy_group, bool clashR,
                   extra_settings &ext);
@@ -193,12 +201,16 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
                          const std::string &base_conf,
                          std::vector<RulesetContent> &ruleset_content_array,
                          const ProxyGroupConfigs &extra_proxy_group,
-                         int surge_ver, extra_settings &ext);
+                         int surge_ver, extra_settings &ext,
+                         std::size_t max_output_bytes =
+                             std::numeric_limits<std::size_t>::max());
 std::string proxyToMellow(std::vector<Proxy> &nodes,
                           const std::string &base_conf,
                           std::vector<RulesetContent> &ruleset_content_array,
                           const ProxyGroupConfigs &extra_proxy_group,
-                          extra_settings &ext);
+                          extra_settings &ext,
+                          std::size_t max_output_bytes =
+                              std::numeric_limits<std::size_t>::max());
 void proxyToMellow(std::vector<Proxy> &nodes, INIReader &ini,
                    std::vector<RulesetContent> &ruleset_content_array,
                    const ProxyGroupConfigs &extra_proxy_group,
@@ -206,27 +218,41 @@ void proxyToMellow(std::vector<Proxy> &nodes, INIReader &ini,
 std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
                         std::vector<RulesetContent> &ruleset_content_array,
                         const ProxyGroupConfigs &extra_proxy_group,
-                        extra_settings &ext);
+                        extra_settings &ext,
+                        std::size_t max_output_bytes =
+                            std::numeric_limits<std::size_t>::max());
 std::string proxyToStash(std::vector<Proxy> &nodes,
                          const std::string &base_conf,
                          std::vector<RulesetContent> &ruleset_content_array,
                          const ProxyGroupConfigs &extra_proxy_group,
-                         extra_settings &ext);
+                         extra_settings &ext,
+                         std::size_t max_output_bytes =
+                             std::numeric_limits<std::size_t>::max());
 std::string proxyToSSSub(std::string base_conf, std::vector<Proxy> &nodes,
-                         extra_settings &ext);
+                         extra_settings &ext,
+                         std::size_t max_output_bytes =
+                             std::numeric_limits<std::size_t>::max());
 std::string proxyToSingle(const std::vector<Proxy> &nodes,
                           SingleLinkTypes types,
-                           extra_settings &ext);
+                           extra_settings &ext,
+                          std::size_t max_output_bytes =
+                              std::numeric_limits<std::size_t>::max());
 std::string proxyToShadowrocket(const std::vector<Proxy> &nodes,
-                                extra_settings &ext);
+                                extra_settings &ext,
+                                std::size_t max_output_bytes =
+                                    std::numeric_limits<std::size_t>::max());
 std::string proxyToV2RayClient(std::vector<Proxy> &nodes,
                                V2RayClientTarget target,
-                               extra_settings &ext);
+                               extra_settings &ext,
+                               std::size_t max_output_bytes =
+                                   std::numeric_limits<std::size_t>::max());
 std::string proxyToQuanX(std::vector<Proxy> &nodes,
                          const std::string &base_conf,
                          std::vector<RulesetContent> &ruleset_content_array,
                          const ProxyGroupConfigs &extra_proxy_group,
-                         extra_settings &ext);
+                         extra_settings &ext,
+                         std::size_t max_output_bytes =
+                             std::numeric_limits<std::size_t>::max());
 void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini,
                   std::vector<RulesetContent> &ruleset_content_array,
                   const ProxyGroupConfigs &extra_proxy_group,
@@ -234,18 +260,24 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini,
 std::string proxyToQuan(std::vector<Proxy> &nodes, const std::string &base_conf,
                         std::vector<RulesetContent> &ruleset_content_array,
                         const ProxyGroupConfigs &extra_proxy_group,
-                        extra_settings &ext);
+                        extra_settings &ext,
+                        std::size_t max_output_bytes =
+                            std::numeric_limits<std::size_t>::max());
 void proxyToQuan(std::vector<Proxy> &nodes, INIReader &ini,
                  std::vector<RulesetContent> &ruleset_content_array,
                  const ProxyGroupConfigs &extra_proxy_group,
                  extra_settings &ext);
 std::string proxyToSSD(std::vector<Proxy> &nodes, std::string &group,
-                       std::string &userinfo, extra_settings &ext);
+                       std::string &userinfo, extra_settings &ext,
+                       std::size_t max_output_bytes =
+                           std::numeric_limits<std::size_t>::max());
 std::string proxyToSingBox(std::vector<Proxy> &nodes,
                            const std::string &base_conf,
                            std::vector<RulesetContent> &ruleset_content_array,
                            const ProxyGroupConfigs &extra_proxy_group,
-                           extra_settings &ext);
+                           extra_settings &ext,
+                           std::size_t max_output_bytes =
+                               std::numeric_limits<std::size_t>::max());
 void replaceAll(std::string &input, const std::string &search,
                 const std::string &replace);
 #endif // SUBEXPORT_H_INCLUDED

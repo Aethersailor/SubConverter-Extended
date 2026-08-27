@@ -199,6 +199,7 @@ void shutdown_runtime() {
   drain_runtime_shutdown();
   statistics::shutdown();
   shutdownGlobalCurlHandlePool();
+  completeRuntimeCoordinatorShutdown();
 }
 
 void begin_runtime_shutdown() {
@@ -326,13 +327,13 @@ int main(int argc, char *argv[]) {
   defer(shutdown_runtime();)
   if (!prepareRuntimeCoordinator())
     return 1;
-  startResourceControlRuntime();
+  if (!commitRuntimeCoordinator())
+    return 1;
   statistics::initialize();
   // vfs::vfs_read("vfs.ini");
   if (!global.updateRulesetOnRequest)
     refreshRulesets(global.customRulesets, global.rulesetsContent);
-  if (!commitRuntimeCoordinator())
-    return 1;
+  startResourceControlRuntime();
 
   auto normalize_managed_prefix = [](const std::string &raw_value) {
     std::string value = trimWhitespace(raw_value, true, true);
@@ -436,14 +437,22 @@ int main(int argc, char *argv[]) {
   }
   logSecurityPosture();
   int listen_backlog = global.maxPendingConns;
+  std::size_t request_body_limit = 100 * 1024 * 1024;
   const ResourceControlSnapshot listener_resources =
       resourceControlSnapshot();
   if (listener_resources.effective_mode == "force_max" &&
-      listener_resources.calculated_force_max_budget.valid)
+      listener_resources.calculated_force_max_budget.valid) {
     listen_backlog = static_cast<int>(std::min<uint64_t>(
         listener_resources.calculated_force_max_budget
             .transport_queue_entries,
         INT_MAX));
+    const ForceMaxBudget &budget =
+        listener_resources.calculated_force_max_budget;
+    request_body_limit = forceMaxRequestBodyLimit(
+        budget.transport_active_bytes,
+        1,
+        request_body_limit);
+  }
   listener_args args = {
       global.listenAddress,
       global.listenPort,
@@ -454,7 +463,9 @@ int main(int argc, char *argv[]) {
       200,
       static_cast<uint32_t>(global.requestDeadlineMs),
       begin_runtime_shutdown,
-      drain_runtime_shutdown};
+      drain_runtime_shutdown,
+      request_body_limit,
+      refreshResourceControlThreadBaseline};
   // std::cout<<"Serving HTTP @
   // http://"<<listen_address<<":"<<listen_port<<std::endl;
   writeLog(LOG_LEVEL_INFO,

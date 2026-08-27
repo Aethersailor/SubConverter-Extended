@@ -13,6 +13,10 @@ enum class GlobalTransportAdmissionInitStatus : uint8_t {
 
 GlobalTransportAdmissionInitStatus initializeGlobalTransportAdmission(
     OwnerAdmissionBudget budget) noexcept;
+bool publishGlobalTransportAdmission(
+    std::unique_ptr<OwnerAdmission> admission,
+    OwnerAdmissionBudget budget) noexcept;
+bool resetGlobalTransportAdmission() noexcept;
 OwnerAdmission *globalTransportAdmission() noexcept;
 OwnerAdmissionSnapshot globalTransportAdmissionSnapshot() noexcept;
 bool setGlobalTransportAdmissionActiveLimits(

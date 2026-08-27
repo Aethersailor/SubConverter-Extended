@@ -240,6 +240,8 @@ void resolveConversionResourcesAsync(
         std::move(requests), settings, request_context, completion);
     state->start();
   } catch (...) {
-    completion({});
+    AsyncConversionResourceBatchResult failure;
+    failure.terminal_failure = AsyncFetchFailure::Capacity;
+    completion(std::move(failure));
   }
 }

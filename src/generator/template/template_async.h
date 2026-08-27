@@ -14,6 +14,9 @@ enum class AsyncTemplateStatus {
   FetchFailed,
   RenderFailed,
   ResourceLimitExceeded,
+  Cancelled,
+  Deadline,
+  Shutdown,
 };
 
 struct AsyncTemplateResult {
@@ -30,6 +33,7 @@ void renderTemplateAsync(
     std::string include_scope, FetchContext context,
     SettingsSnapshot settings,
     std::shared_ptr<RequestContext> request_context,
-    AsyncTemplateCompletion completion);
+    AsyncTemplateCompletion completion,
+    uint64_t max_output_bytes = 0);
 
 #endif // TEMPLATE_ASYNC_H_INCLUDED

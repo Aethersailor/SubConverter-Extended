@@ -23,6 +23,7 @@
 #include "handler/settings_view.h"
 #include "handler/statistics_v2.h"
 #include "handler/conversion_service.h"
+#include "handler/multithread.h"
 #include "handler/webget.h"
 #include "generator/config/ruleconvert.h"
 #include "runtime/compute_executor.h"
@@ -854,6 +855,18 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
     writer.Bool(coordinator.joined);
     writer.Key("generation");
     writer.Uint64(coordinator.generation);
+    writer.Key("rollback_total");
+    writer.Uint64(coordinator.rollback_total);
+    writer.Key("last_failed_stage");
+    writer.String(coordinator.last_failed_stage.c_str());
+    writer.Key("shutdown_stage");
+    writer.String(coordinator.shutdown_stage.c_str());
+    writer.Key("shutdown_deadline_ms");
+    writer.Uint64(coordinator.shutdown_deadline_ms);
+    writer.Key("shutdown_elapsed_ms");
+    writer.Uint64(coordinator.shutdown_elapsed_ms);
+    writer.Key("shutdown_deadline_exceeded");
+    writer.Bool(coordinator.shutdown_deadline_exceeded);
     writer.Key("reason");
     writer.String(coordinator.reason.c_str());
     writer.EndObject();
@@ -1049,6 +1062,9 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(resources.envelope.pids_current);
   writer.Key("pids_max");
   writer.Uint64(resources.envelope.pids_max);
+  writer.Key("http_handler_threads_per_compute");
+  writer.Uint64(
+      resources.envelope.http_handler_threads_per_compute);
   writer.Key("complete");
   writer.Bool(resources.envelope.complete);
   writer.EndObject();
@@ -1066,8 +1082,21 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   const uint64_t expected_external_cache =
       calculated.cache_bytes - expected_response_cache -
       expected_ruleset_cache;
+  const bool fetch_contract_applied =
+      global.maxAllowedDownloadSize > 0 &&
+      validateForceMaxFetchContract(
+          calculated,
+          static_cast<uint64_t>(global.maxAllowedDownloadSize));
   const bool force_max_applied =
       resources.effective_mode == "force_max" && calculated.valid &&
+      fetch_contract_applied &&
+      calculated.memory_capacity_bytes >=
+          calculated.startup_memory_bytes &&
+      calculated.memory_headroom_bytes ==
+          calculated.memory_capacity_bytes -
+              calculated.startup_memory_bytes &&
+      calculated.memory_budget_total <=
+          calculated.memory_headroom_bytes &&
       resources.startup_budget_applied && compute.ready &&
       compute.workers == calculated.compute_workers &&
       compute.max_queue_entries == calculated.flow_queue_entries &&
@@ -1078,6 +1107,9 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
           calculated.blocking_io_queue_entries &&
       blocking_io.max_queue_bytes ==
           calculated.blocking_io_queue_bytes &&
+      rulesetExecutorWorkerCount() == calculated.io_runners &&
+      rulesetExecutorQueueCapacity() ==
+          calculated.blocking_io_queue_entries &&
       quickjs.ready && quickjs.workers == calculated.quickjs_workers &&
       quickjs.max_queue_entries == calculated.quickjs_queue_entries &&
       quickjs.max_queue_bytes == calculated.quickjs_queue_bytes &&
@@ -1164,6 +1196,12 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(calculated.cache_bytes);
   writer.Key("working_memory_bytes");
   writer.Uint64(calculated.working_memory_bytes);
+  writer.Key("memory_capacity_bytes");
+  writer.Uint64(calculated.memory_capacity_bytes);
+  writer.Key("startup_memory_bytes");
+  writer.Uint64(calculated.startup_memory_bytes);
+  writer.Key("memory_headroom_bytes");
+  writer.Uint64(calculated.memory_headroom_bytes);
   writer.Key("transport_active_bytes");
   writer.Uint64(calculated.transport_active_bytes);
   writer.Key("owner_active_bytes");
@@ -1182,6 +1220,14 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(calculated.quickjs_stack_bytes_per_worker);
   writer.Key("reserved_fds");
   writer.Uint64(calculated.reserved_fds);
+  writer.Key("reserved_pids");
+  writer.Uint64(calculated.reserved_pids);
+  writer.Key("fixed_threads");
+  writer.Uint64(calculated.fixed_threads);
+  writer.Key("resolver_thread_budget");
+  writer.Uint64(calculated.resolver_thread_budget);
+  writer.Key("thread_budget_total");
+  writer.Uint64(calculated.thread_budget_total);
   writer.Key("reserved_memory_bytes");
   writer.Uint64(calculated.reserved_memory_bytes);
   writer.EndObject();

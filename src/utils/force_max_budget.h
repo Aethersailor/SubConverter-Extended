@@ -6,7 +6,7 @@
 
 #include "utils/resource_probe.h"
 
-inline constexpr const char *kForceMaxFormulaRevision = "force-max-v1";
+inline constexpr const char *kForceMaxFormulaRevision = "force-max-v3";
 
 struct ForceMaxBudget {
   std::string formula_revision = kForceMaxFormulaRevision;
@@ -40,6 +40,9 @@ struct ForceMaxBudget {
   uint64_t fetch_bytes = 0;
   uint64_t cache_bytes = 0;
   uint64_t working_memory_bytes = 0;
+  uint64_t memory_capacity_bytes = 0;
+  uint64_t startup_memory_bytes = 0;
+  uint64_t memory_headroom_bytes = 0;
   uint64_t memory_budget_total = 0;
   uint64_t transport_active_bytes = 0;
   uint64_t owner_active_bytes = 0;
@@ -51,6 +54,10 @@ struct ForceMaxBudget {
   uint64_t quickjs_stack_bytes_per_worker = 0;
 
   uint64_t reserved_fds = 0;
+  uint64_t reserved_pids = 0;
+  uint64_t fixed_threads = 0;
+  uint64_t resolver_thread_budget = 0;
+  uint64_t thread_budget_total = 0;
   uint64_t reserved_memory_bytes = 0;
 
   bool operator==(const ForceMaxBudget &) const = default;
@@ -60,5 +67,11 @@ ForceMaxBudget calculateForceMaxBudget(
     const ResourceEnvelope &envelope) noexcept;
 bool validateForceMaxBudget(const ForceMaxBudget &budget,
                             std::string *error = nullptr) noexcept;
+bool validateForceMaxFetchContract(const ForceMaxBudget &budget,
+                                   uint64_t maximum_download_bytes,
+                                   std::string *error = nullptr) noexcept;
+uint64_t forceMaxOwnerWorkingReservation(
+    const ForceMaxBudget &budget, uint64_t request_bytes,
+    uint64_t maximum_download_bytes) noexcept;
 
 #endif // FORCE_MAX_BUDGET_H_INCLUDED

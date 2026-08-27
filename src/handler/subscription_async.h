@@ -30,6 +30,7 @@ struct AsyncSubscriptionSlot {
 
 struct AsyncSubscriptionBatchResult {
   std::vector<AsyncSubscriptionSlot> slots;
+  AsyncFetchFailure terminal_failure = AsyncFetchFailure::None;
 };
 
 using AsyncSubscriptionBatchCompletion =

@@ -6,6 +6,9 @@
 #include <string>
 #include <utility>
 
+#include "handler/settings.h"
+#include "utils/workload_scheduler.h"
+
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -297,14 +300,30 @@ QuickJsLane::runTask(const std::shared_ptr<Task> &task) noexcept {
   try {
     ScopedSettingsView settings_scope(task->options.settings);
     ScopedRequestContext request_scope(task->options.request_context);
-    qjs::Runtime runtime;
-    JS_SetMemoryLimit(runtime.rt,
-                      static_cast<size_t>(budget_.heap_bytes_per_worker));
-    JS_SetMaxStackSize(runtime.rt,
-                       static_cast<size_t>(budget_.stack_bytes_per_worker));
+    const bool clean_context = task->options.settings &&
+        task->options.settings->scriptCleanContext;
+    const uint64_t nested_heap =
+        clean_context ? budget_.heap_bytes_per_worker / 2 : 0;
+    const uint64_t nested_stack =
+        clean_context ? budget_.stack_bytes_per_worker / 2 : 0;
+    if (clean_context && (nested_heap == 0 || nested_stack == 0))
+      return QuickJsTaskStatus::RuntimeError;
+    const uint64_t primary_heap =
+        budget_.heap_bytes_per_worker - nested_heap;
+    const uint64_t primary_stack =
+        budget_.stack_bytes_per_worker - nested_stack;
     QuickJsInterruptState interrupt{
         task->options.deadline, task->cancellation,
         &interrupt_shutdown_};
+    ScopedScriptNestedRuntimeBudget nested_budget(
+        static_cast<size_t>(nested_heap),
+        static_cast<size_t>(nested_stack), quickJsInterrupt,
+        &interrupt);
+    qjs::Runtime runtime;
+    JS_SetMemoryLimit(runtime.rt,
+                      static_cast<size_t>(primary_heap));
+    JS_SetMaxStackSize(runtime.rt,
+                       static_cast<size_t>(primary_stack));
     JS_SetInterruptHandler(runtime.rt, quickJsInterrupt, &interrupt);
     script_runtime_init(runtime);
     qjs::Context context(runtime);
@@ -318,6 +337,22 @@ QuickJsLane::runTask(const std::shared_ptr<Task> &task) noexcept {
       task->work(context);
       (void)script_cleanup(context);
       context_initialized = false;
+    } catch (const SchedulerSubmitError &error) {
+      if (context_initialized)
+        (void)script_cleanup(context);
+      switch (error.status()) {
+      case SchedulerSubmitStatus::Cancelled:
+        return QuickJsTaskStatus::Cancelled;
+      case SchedulerSubmitStatus::Deadline:
+        return QuickJsTaskStatus::Deadline;
+      case SchedulerSubmitStatus::Stopping:
+        return QuickJsTaskStatus::Shutdown;
+      case SchedulerSubmitStatus::Accepted:
+      case SchedulerSubmitStatus::EntryLimit:
+      case SchedulerSubmitStatus::ByteLimit:
+        return QuickJsTaskStatus::RuntimeError;
+      }
+      return QuickJsTaskStatus::RuntimeError;
     } catch (qjs::exception &) {
       if (context_initialized)
         (void)script_cleanup(context);
@@ -469,6 +504,34 @@ GlobalQuickJsLaneInitStatus initializeGlobalQuickJsLane(
     global_quickjs_lane.lane.reset();
     return GlobalQuickJsLaneInitStatus::InvalidBudget;
   }
+}
+
+bool publishGlobalQuickJsLane(std::unique_ptr<QuickJsLane> lane,
+                              QuickJsLaneBudget budget) noexcept {
+  if (!lane || !lane->snapshot().ready)
+    return false;
+  std::lock_guard<std::mutex> lock(global_quickjs_lane.mutex);
+  if (global_quickjs_lane.stopping || global_quickjs_lane.lane)
+    return false;
+  global_quickjs_lane.budget = budget;
+  global_quickjs_lane.lane = std::move(lane);
+  return true;
+}
+
+bool resetGlobalQuickJsLane() noexcept {
+  std::unique_ptr<QuickJsLane> retired;
+  {
+    std::lock_guard<std::mutex> lock(global_quickjs_lane.mutex);
+    if (global_quickjs_lane.lane &&
+        !global_quickjs_lane.lane->snapshot().stopping)
+      return false;
+    retired = std::move(global_quickjs_lane.lane);
+    global_quickjs_lane.budget = {};
+    global_quickjs_lane.stopping = false;
+  }
+  if (retired && !retired->join())
+    return false;
+  return true;
 }
 
 QuickJsLane *globalQuickJsLane() noexcept {

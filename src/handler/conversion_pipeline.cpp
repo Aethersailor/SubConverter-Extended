@@ -37,7 +37,8 @@ bool resolveExternalConfigOnFlow(
     SettingsSnapshot settings,
     std::shared_ptr<RequestContext> request_context,
     template_args template_arguments,
-    ConversionFlowExternalConfigCompletion completion) {
+    ConversionFlowExternalConfigCompletion completion,
+    uint64_t max_output_bytes) {
   const ConversionFlowOperation operation = flow.beginOperation();
   if (!operation.valid() || !completion)
     return false;
@@ -46,12 +47,14 @@ bool resolveExternalConfigOnFlow(
       std::move(request_context), std::move(template_arguments),
       [operation, completion = std::move(completion)](
           AsyncExternalConfigResult result) mutable {
+        const uint64_t bytes = result.working_source_bytes;
         (void)operation.post(
             [completion = std::move(completion),
              result = std::move(result)](ConversionFlow &resumed) mutable {
               completion(resumed, std::move(result));
-            });
-      });
+            },
+            bytes);
+      }, max_output_bytes);
   return true;
 }
 
@@ -135,7 +138,8 @@ bool renderTemplateOnFlow(
     template_args arguments, std::string include_scope,
     FetchContext context, SettingsSnapshot settings,
     std::shared_ptr<RequestContext> request_context,
-    ConversionFlowTemplateCompletion completion) {
+    ConversionFlowTemplateCompletion completion,
+    uint64_t max_output_bytes) {
   const ConversionFlowOperation operation = flow.beginOperation();
   if (!operation.valid() || !completion)
     return false;
@@ -152,7 +156,7 @@ bool renderTemplateOnFlow(
               completion(resumed, std::move(result));
             },
             bytes);
-      });
+      }, max_output_bytes);
   return true;
 }
 

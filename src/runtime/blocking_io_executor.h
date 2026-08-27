@@ -2,6 +2,7 @@
 #define BLOCKING_IO_EXECUTOR_H_INCLUDED
 
 #include <functional>
+#include <memory>
 
 #include "runtime/compute_executor.h"
 
@@ -23,6 +24,10 @@ enum class BlockingIoExecutorInitStatus : uint8_t {
 
 BlockingIoExecutorInitStatus initializeBlockingIoExecutor(
     BlockingIoExecutorBudget budget) noexcept;
+bool publishBlockingIoExecutor(
+    std::unique_ptr<ComputeExecutor> executor,
+    BlockingIoExecutorBudget budget) noexcept;
+bool resetBlockingIoExecutor() noexcept;
 SchedulerSubmitStatus submitBlockingIo(
     ComputeTaskOptions options, std::function<void()> work,
     std::function<void(SchedulerSubmitStatus, std::exception_ptr)>

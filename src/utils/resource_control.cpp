@@ -23,6 +23,7 @@
 #ifdef __linux__
 #include <sched.h>
 #include <sys/sysinfo.h>
+#include <unistd.h>
 #endif
 #endif
 
@@ -36,6 +37,7 @@
 #include "server/webserver.h"
 #include "utils/logger.h"
 #include "utils/string.h"
+#include "utils/system.h"
 
 namespace {
 
@@ -50,6 +52,7 @@ struct ResourceControllerRuntime {
   bool configuration_frozen = false;
   bool running = false;
   bool stopping = false;
+  uint64_t committed_self_threads = 0;
 };
 
 ResourceControllerRuntime runtime;
@@ -81,6 +84,38 @@ uint64_t linuxAvailableMemoryBytes() noexcept {
   } catch (...) {
   }
   return 0;
+}
+
+uint64_t linuxProcessResidentBytes() noexcept {
+  try {
+    std::ifstream file("/proc/self/statm");
+    uint64_t virtual_pages = 0;
+    uint64_t resident_pages = 0;
+    if (!(file >> virtual_pages >> resident_pages) || resident_pages == 0)
+      return 0;
+    (void)virtual_pages;
+    const long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0 ||
+        resident_pages > UINT64_MAX / static_cast<uint64_t>(page_size))
+      return 0;
+    return resident_pages * static_cast<uint64_t>(page_size);
+  } catch (...) {
+    return 0;
+  }
+}
+
+uint64_t linuxProcessThreadCount() noexcept {
+  try {
+    uint64_t count = 0;
+    std::error_code error;
+    for (std::filesystem::directory_iterator iterator("/proc/self/task", error);
+         !error && iterator != std::filesystem::directory_iterator();
+         iterator.increment(error))
+      ++count;
+    return error ? 0 : count;
+  } catch (...) {
+    return 0;
+  }
 }
 
 std::string selfCgroupRelativePath(const char *controller) noexcept {
@@ -364,6 +399,8 @@ bool sampleWindowsMemory(ResourceControlSnapshot &snapshot) noexcept {
                                 &job, sizeof(job), nullptr) != FALSE;
 
   uint64_t memory_limit = 0;
+  uint64_t process_memory_limit = 0;
+  uint64_t job_memory_limit = 0;
   const auto include_limit = [&memory_limit](uint64_t value) {
     if (value != 0)
       memory_limit = memory_limit == 0 ? value
@@ -371,10 +408,14 @@ bool sampleWindowsMemory(ResourceControlSnapshot &snapshot) noexcept {
   };
   if (job_membership_valid && in_job && job_valid) {
     if (job.BasicLimitInformation.LimitFlags &
-        JOB_OBJECT_LIMIT_PROCESS_MEMORY)
-      include_limit(job.ProcessMemoryLimit);
-    if (job.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_JOB_MEMORY)
-      include_limit(job.JobMemoryLimit);
+        JOB_OBJECT_LIMIT_PROCESS_MEMORY) {
+      process_memory_limit = job.ProcessMemoryLimit;
+      include_limit(process_memory_limit);
+    }
+    if (job.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_JOB_MEMORY) {
+      job_memory_limit = job.JobMemoryLimit;
+      include_limit(job_memory_limit);
+    }
   }
 
   PROCESS_MEMORY_COUNTERS_EX process{};
@@ -384,6 +425,13 @@ bool sampleWindowsMemory(ResourceControlSnapshot &snapshot) noexcept {
           GetCurrentProcess(),
           reinterpret_cast<PROCESS_MEMORY_COUNTERS *>(&process),
           sizeof(process)) != FALSE;
+  JOBOBJECT_LIMIT_VIOLATION_INFORMATION job_usage{};
+  const bool job_usage_valid =
+      job_memory_limit == 0 ||
+      QueryInformationJobObject(nullptr,
+                                JobObjectLimitViolationInformation,
+                                &job_usage, sizeof(job_usage),
+                                nullptr) != FALSE;
 
   snapshot.host_total_memory_bytes =
       host_valid ? status.ullTotalPhys : 0;
@@ -394,11 +442,27 @@ bool sampleWindowsMemory(ResourceControlSnapshot &snapshot) noexcept {
   if (!job_membership_valid || !job_valid)
     return false;
   if (memory_limit != 0) {
-    snapshot.memory_peak_bytes =
-        static_cast<uint64_t>(job.PeakJobMemoryUsed);
-    if (!process_valid)
+    if ((process_memory_limit != 0 && !process_valid) ||
+        (job_memory_limit != 0 && !job_usage_valid))
       return false;
-    snapshot.memory_current_bytes = process.PrivateUsage;
+    uint64_t remaining = memory_limit;
+    if (process_memory_limit != 0) {
+      const uint64_t used = static_cast<uint64_t>(process.PrivateUsage);
+      remaining = std::min(
+          remaining,
+          process_memory_limit > used ? process_memory_limit - used : 0);
+    }
+    if (job_memory_limit != 0) {
+      const uint64_t used = static_cast<uint64_t>(job_usage.JobMemory);
+      remaining = std::min(
+          remaining, job_memory_limit > used ? job_memory_limit - used : 0);
+    }
+    snapshot.memory_peak_bytes = std::max<uint64_t>(
+        static_cast<uint64_t>(process.PeakPagefileUsage),
+        static_cast<uint64_t>(job.PeakJobMemoryUsed));
+    // Represent both nested constraints as one synthetic boundary/current
+    // pair whose difference is the smaller real headroom.
+    snapshot.memory_current_bytes = memory_limit - remaining;
     return snapshot.memory_current_bytes != 0;
   }
   if (!host_valid || status.ullAvailPhys > status.ullTotalPhys)
@@ -417,10 +481,39 @@ void detectMemory(ResourceControlSnapshot &snapshot) noexcept {
       !selfCgroupRelativePath(nullptr).empty();
   const bool cgroup_v1_memory_member =
       !selfCgroupRelativePath("memory").empty();
-  snapshot.cgroup_scope_known =
-      cgroup_v2_member ? !cgroupV2Base().empty()
-                       : !cgroup_v1_memory_member ||
-                             !cgroupV1Base("memory").empty();
+  const bool cgroup_v1_cpu_member =
+      !selfCgroupRelativePath("cpu").empty();
+  const bool cgroup_v1_cpuset_member =
+      !selfCgroupRelativePath("cpuset").empty();
+  const bool cgroup_v1_pids_member =
+      !selfCgroupRelativePath("pids").empty();
+  if (cgroup_v2_member) {
+    snapshot.cgroup_scope_known =
+        !cgroupV2Base().empty() &&
+        readableFile(cgroupV2File("cpu.max")) &&
+        readableFile(cgroupV2File("cpuset.cpus.effective")) &&
+        readableFile(cgroupV2File("memory.current")) &&
+        readableFile(cgroupV2File("memory.max")) &&
+        readableFile(cgroupV2File("pids.current")) &&
+        readableFile(cgroupV2File("pids.max"));
+  } else {
+    snapshot.cgroup_scope_known =
+        (!cgroup_v1_memory_member ||
+         (!cgroupV1Base("memory").empty() &&
+          readableFile(cgroupV1File("memory", "memory.usage_in_bytes")) &&
+          readableFile(cgroupV1File("memory", "memory.limit_in_bytes")))) &&
+        (!cgroup_v1_cpu_member ||
+         (!cgroupV1Base("cpu").empty() &&
+          readableFile(cgroupV1File("cpu", "cpu.cfs_quota_us")) &&
+          readableFile(cgroupV1File("cpu", "cpu.cfs_period_us")))) &&
+        (!cgroup_v1_cpuset_member ||
+         (!cgroupV1Base("cpuset").empty() &&
+          readableFile(cgroupV1File("cpuset", "cpuset.cpus")))) &&
+        (!cgroup_v1_pids_member ||
+         (!cgroupV1Base("pids").empty() &&
+          readableFile(cgroupV1File("pids", "pids.current")) &&
+          readableFile(cgroupV1File("pids", "pids.max"))));
+  }
   snapshot.memory_events_supported = cgroup_v2_member;
   snapshot.memory_events_available =
       readableFile(cgroupV2File("memory.events"));
@@ -440,6 +533,8 @@ void detectMemory(ResourceControlSnapshot &snapshot) noexcept {
   if (snapshot.memory_current_bytes == 0)
     snapshot.memory_current_bytes = parseFiniteBytes(
         readFirstLine(cgroupV1File("memory", "memory.usage_in_bytes")));
+  if (snapshot.memory_current_bytes == 0)
+    snapshot.memory_current_bytes = linuxProcessResidentBytes();
   snapshot.memory_high_bytes =
       parseFiniteBytes(readFirstLine(cgroupV2File("memory.high")));
   snapshot.memory_max_bytes =
@@ -458,6 +553,7 @@ void detectMemory(ResourceControlSnapshot &snapshot) noexcept {
       parseFiniteBytes(readFirstLine(cgroupV2File("pids.current")));
   snapshot.pids_max =
       parseFiniteBytes(readFirstLine(cgroupV2File("pids.max")));
+  snapshot.self_threads = linuxProcessThreadCount();
   snapshot.memory_peak_bytes =
       parseFiniteBytes(readFirstLine(cgroupV2File("memory.peak")));
   snapshot.memory_events_high =
@@ -571,6 +667,12 @@ ResourceControlSnapshot discover(const Settings &settings,
       quota > 0.0 ? static_cast<uint64_t>(std::llround(quota * 1000.0)) : 0;
   snapshot.effective_cpu_millis =
       static_cast<uint64_t>(std::llround(effective * 1000.0));
+  snapshot.resolver_may_use_threads = outboundResolverMayUseThreads();
+  const std::string http_backend =
+      toLower(trimWhitespace(getEnv("SUBCONVERTER_HTTP_BACKEND"),
+                             true, true));
+  snapshot.http_handler_threads_per_compute =
+      http_backend == "httplib" ? 4 : 1;
   detectMemory(snapshot);
   detectFileLimits(snapshot);
   const ResourcePermitBudget budget = computeConservativeResourceBudget(
@@ -763,6 +865,9 @@ std::atomic<uint64_t> force_max_outbound_limit_generation{1};
 void applyForceMaxCacheGuardPolicy(bool freeze) noexcept {
   const bool previous = force_max_cache_growth_frozen.exchange(
       freeze, std::memory_order_acq_rel);
+  setResponseMicroCacheGrowthFrozen(freeze);
+  setRulesetConversionCacheGrowthFrozen(freeze);
+  setExternalConfigCacheGrowthFrozen(freeze);
   if (previous != freeze)
     force_max_cache_guard_generation.fetch_add(1,
                                                 std::memory_order_acq_rel);
@@ -863,6 +968,7 @@ ForceMaxHardDanger detectForceMaxHardDanger(
     ResourceControlSnapshot &snapshot,
     const ResourceEnvelope &startup_envelope,
     const ForceMaxBudget &full_budget,
+    uint64_t committed_self_threads,
     uint64_t previous_memory_high, uint64_t previous_memory_max,
     uint64_t previous_oom, uint64_t previous_oom_kill,
     uint64_t previous_sock_throttled) noexcept {
@@ -930,14 +1036,21 @@ ForceMaxHardDanger detectForceMaxHardDanger(
     if (startup_envelope.pids_max != 0 &&
         snapshot.pids_max < startup_envelope.pids_max)
       setDanger("pids_limit_shrink");
-    const uint64_t required_pids =
-        UINT64_C(8) + full_budget.compute_workers +
-        full_budget.io_runners + full_budget.quickjs_workers +
-        full_budget.handler_permits;
-    const uint64_t remaining = snapshot.pids_max > snapshot.pids_current
-                                   ? snapshot.pids_max - snapshot.pids_current
-                                   : 0;
-    if (remaining <= required_pids)
+    // The runtime threads are already included in pids.current. Preserve only
+    // the explicit transient/fixed reserve here; charging the full startup
+    // thread budget again would immediately guard every tight but valid
+    // deployment after it created those threads.
+    const uint64_t materialized_resolvers =
+        snapshot.self_threads > committed_self_threads
+            ? snapshot.self_threads - committed_self_threads
+            : 0;
+    const uint64_t required_headroom = forceMaxRequiredPidHeadroom(
+        full_budget.reserved_pids,
+        full_budget.resolver_thread_budget,
+        snapshot.resolver_may_use_threads ? materialized_resolvers : 0);
+    if (forceMaxPidsHeadroomExhausted(
+            snapshot.pids_max, snapshot.pids_current,
+            required_headroom))
       setDanger("pids_headroom_exhausted");
   }
 
@@ -963,6 +1076,8 @@ void controllerLoop() noexcept {
   const ResourceEnvelope startup_envelope = runtime.snapshot.envelope;
   const ForceMaxBudget full_force_max_budget =
       runtime.snapshot.calculated_force_max_budget;
+  runtime.committed_self_threads =
+      probeCurrentResourceEnvelope().self_threads;
   ResourceGovernorState governor{
       std::max<uint64_t>(1, runtime.snapshot.suggested_cpu_permits), 0, 0};
   PressureGuardState pressure_guard;
@@ -1026,6 +1141,7 @@ void controllerLoop() noexcept {
       if (force_max) {
         const ForceMaxHardDanger danger = detectForceMaxHardDanger(
             next, startup_envelope, full_force_max_budget,
+            runtime.committed_self_threads,
             previous_memory_high, previous_memory_max, previous_oom,
             previous_oom_kill, previous_sock_throttled);
         previous_memory_high = next.memory_events_high;
@@ -1135,6 +1251,7 @@ ResourceEnvelope probeCurrentResourceEnvelope() noexcept {
       computeEffectiveCpu(affinity, cpuset, quota, fallback);
   snapshot.effective_cpu_millis =
       static_cast<uint64_t>(std::llround(effective * 1000.0));
+  snapshot.resolver_may_use_threads = outboundResolverMayUseThreads();
   detectMemory(snapshot);
   detectFileLimits(snapshot);
   return resourceEnvelopeFromSnapshot(snapshot);
@@ -1162,6 +1279,8 @@ void configureResourceControl(Settings &settings) {
              snapshot.configured_server_threads ||
          runtime.snapshot.configured_deadline_ms !=
              snapshot.configured_deadline_ms ||
+         runtime.snapshot.http_handler_threads_per_compute !=
+             snapshot.http_handler_threads_per_compute ||
          runtime.snapshot.hardware_fingerprint !=
              snapshot.hardware_fingerprint))
       throw std::invalid_argument(
@@ -1271,6 +1390,14 @@ void startResourceControlRuntime() {
   runtime.stopping = false;
   runtime.thread = std::thread(controllerLoop);
   runtime.running = true;
+}
+
+void refreshResourceControlThreadBaseline() noexcept {
+  const uint64_t current = probeCurrentResourceEnvelope().self_threads;
+  if (current == 0)
+    return;
+  std::lock_guard<std::mutex> lock(runtime.mutex);
+  runtime.committed_self_threads = current;
 }
 
 void shutdownResourceControlRuntime() noexcept {

@@ -18,6 +18,7 @@ struct FetchMemoryBudgetSnapshot {
 // This budget is enabled only by the force_max Curl runtime. In other modes
 // leases remain inert so compat/adaptive retain their historical behavior.
 void configureGlobalFetchMemoryBudget(uint64_t limit) noexcept;
+bool resetGlobalFetchMemoryBudget() noexcept;
 FetchMemoryBudgetSnapshot globalFetchMemoryBudgetSnapshot() noexcept;
 uint64_t globalFetchMemoryCapacityGeneration() noexcept;
 void noteGlobalFetchMemoryWaiterAdded() noexcept;

@@ -673,6 +673,12 @@ GIST_REMOTE_FAILURE_BODY = (
 ).encode()
 
 
+def fixture_data_url(content: str) -> str:
+    return "data:text/plain;base64," + base64.b64encode(
+        content.encode()
+    ).decode()
+
+
 class FixtureHandler(BaseHTTPRequestHandler):
     gist_request_count = 0
     gist_uploaded_paths: list[str] = []
@@ -685,7 +691,11 @@ class FixtureHandler(BaseHTTPRequestHandler):
     subscription_request_count = 0
     recoverable_retry_request_count = 0
     recoverable_retry_failures = 0
+    quickjs_side_effect_count = 0
+    force_flow_retry_config_count = 0
     slow_subscription_request_count = 0
+    template_branch_a_count = 0
+    template_branch_b_count = 0
     webget_probe_counts: dict[str, int] = {}
     counter_lock = threading.Lock()
     slow_subscription_started = threading.Event()
@@ -716,6 +726,25 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 self.connection.close()
                 return
             body = ENCODED_SUBSCRIPTION.encode()
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/quickjs-side-effect":
+            with type(self).counter_lock:
+                type(self).quickjs_side_effect_count += 1
+            body = b"ok"
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/force-flow-retry.ini":
+            with type(self).counter_lock:
+                type(self).force_flow_retry_config_count += 1
+                attempt = type(self).force_flow_retry_config_count
+            if attempt == 1:
+                body = b"retryable upstream failure"
+                self.send_response(500)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            body = b"enable_rule_generator=false\n"
             content_type = "text/plain; charset=utf-8"
         elif request_path == "/select-health.toml":
             body = SELECT_HEALTH_TOML_CONFIG.encode()
@@ -1099,6 +1128,16 @@ class FixtureHandler(BaseHTTPRequestHandler):
         elif request_path == "/template-marker":
             body = b"template-ok"
             content_type = "text/plain; charset=utf-8"
+        elif request_path == "/template-branch-a":
+            with type(self).counter_lock:
+                type(self).template_branch_a_count += 1
+            body = b"actual-nonempty"
+            content_type = "text/plain; charset=utf-8"
+        elif request_path == "/template-branch-b":
+            with type(self).counter_lock:
+                type(self).template_branch_b_count += 1
+            body = b"must-not-fetch"
+            content_type = "text/plain; charset=utf-8"
         elif request_path == "/async-external-config.toml":
             host = self.headers.get("Host", "127.0.0.1")
             body = (
@@ -1288,6 +1327,8 @@ def fixture_server():
     FixtureHandler.subscription_request_count = 0
     FixtureHandler.recoverable_retry_request_count = 0
     FixtureHandler.recoverable_retry_failures = 0
+    FixtureHandler.quickjs_side_effect_count = 0
+    FixtureHandler.force_flow_retry_config_count = 0
     FixtureHandler.slow_subscription_request_count = 0
     FixtureHandler.webget_probe_counts = {}
     FixtureHandler.stash_invalid_bases = {}
@@ -1819,6 +1860,8 @@ def owned_webget_boundary_baseline(helper: Path, fixture_base: str) -> None:
                 "/webget-probe-hit", 0
             )
             gist_before = FixtureHandler.gist_request_count
+            template_branch_a_before = FixtureHandler.template_branch_a_count
+            template_branch_b_before = FixtureHandler.template_branch_b_count
         hit = run_probe("/webget-probe-hit", 60, 0)
         with FixtureHandler.counter_lock:
             hit_requests = (
@@ -1826,9 +1869,17 @@ def owned_webget_boundary_baseline(helper: Path, fixture_base: str) -> None:
                 - hit_before
             )
             gist_requests = FixtureHandler.gist_request_count - gist_before
+            template_branch_a_requests = (
+                FixtureHandler.template_branch_a_count - template_branch_a_before
+            )
+            template_branch_b_requests = (
+                FixtureHandler.template_branch_b_count - template_branch_b_before
+            )
         if (
             hit_requests != 4
             or gist_requests != 2
+            or template_branch_a_requests != 1
+            or template_branch_b_requests != 0
             or hit["first_status"] != 200
             or hit["second_status"] != 200
             or hit["first_body"] != hit["second_body"]
@@ -1858,6 +1909,8 @@ def owned_webget_boundary_baseline(helper: Path, fixture_base: str) -> None:
             or hit["async_subscription_ok"] is not True
             or hit["async_conversion_resources_ok"] is not True
             or hit["async_template_ok"] is not True
+            or hit["async_template_branch_ok"] is not True
+            or hit["async_template_limit_ok"] is not True
             or hit["async_upload_ok"] is not True
             or hit["quickjs_lane_ok"] is not True
             or hit["quickjs_global_ok"] is not True
@@ -11846,15 +11899,11 @@ def force_max_controller_runtime_baseline(binary: Path) -> None:
         singleflight = dashboard["subscription_singleflight"]
         backend = os.environ.get("SUBCONVERTER_HTTP_BACKEND", "beast").lower()
         execution_path_ok = (
-            conversion["accepted"] >= 1 and flow["accepted"] == 0
-            if backend == "httplib"
-            else (
-                conversion["accepted"] == 0
-                and flow["accepted"] == 0
-                and conversion_flows["created_total"] >= 1
-                and conversion_flows["completed_total"] >= 1
-                and conversion_flows["active"] == 0
-            )
+            conversion["accepted"] == 0
+            and flow["accepted"] == 0
+            and conversion_flows["created_total"] >= 1
+            and conversion_flows["completed_total"] >= 1
+            and conversion_flows["active"] == 0
         )
         if (
             resources["controller_state"] != "max_ready"
@@ -11890,8 +11939,7 @@ def force_max_controller_runtime_baseline(binary: Path) -> None:
             or not execution_path_ok
             or singleflight["active_owners"] != 0
             or singleflight["waiting_followers"] != 0
-            or (backend != "httplib" and
-                singleflight["owners_created_total"] < 1)
+            or singleflight["owners_created_total"] < 1
         ):
             raise AssertionError(
                 "idle force_max did not hold the hardware CPU limit: "
@@ -11899,6 +11947,294 @@ def force_max_controller_runtime_baseline(binary: Path) -> None:
                 f"conversion={conversion!r} flow={flow!r} "
                 f"conversion_flows={conversion_flows!r} backend={backend}"
             )
+
+
+def force_max_flow_feature_baseline(binary: Path, fixture_base: str) -> None:
+    dashboard_headers = {
+        "Authorization": "Basic "
+        + base64.b64encode(
+            b"fixture-admin:fixture-dashboard-secret"
+        ).decode()
+    }
+    environment = {
+        "SUBCONVERTER_RESOURCE_CONTROL": "force_max",
+        "SUBCONVERTER_RESPONSE_CACHE_TTL": "0",
+    }
+    with FixtureHandler.counter_lock:
+        upload_before = FixtureHandler.gist_request_count
+    with running_service(
+        binary,
+        statistics=True,
+        allow_public_upload=True,
+        gist_api_base=fixture_base,
+        environment=environment,
+    ) as base_url:
+        before_status, before_body, _ = request(
+            base_url, "/dashboard/data", headers=dashboard_headers
+        )
+        if before_status != 200:
+            raise AssertionError("force_max feature dashboard setup failed")
+        before = json.loads(before_body)
+        legacy_before = int(before["conversion_scheduler"]["accepted"])
+        flows_before = int(before["conversion_flows"]["created_total"])
+
+        auto_status, auto_body, auto_headers = request(
+            base_url,
+            "/sub",
+            {
+                "target": "auto",
+                "url": SUBSCRIPTION.strip(),
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+            headers={"User-Agent": "clash.meta/1.19.29"},
+        )
+        if auto_status != 200 or not auto_body:
+            raise AssertionError(
+                f"force_max auto target left the flow: HTTP {auto_status}"
+            )
+        assert_vary_header(auto_headers, "User-Agent", "force_max auto target")
+
+        inner_import = fixture_data_url(SUBSCRIPTION.strip())
+        outer_import = fixture_data_url("!!import:" + inner_import)
+        import_status, import_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "mixed",
+                "url": "!!import:" + outer_import,
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+        )
+        if import_status != 200 or b"Smoke" not in import_body:
+            raise AssertionError(
+                "force_max recursive request import did not complete on the "
+                f"flow: HTTP {import_status}: {import_body!r}"
+            )
+
+        upload_params = {
+            "target": "mixed",
+            "url": SUBSCRIPTION.strip(),
+            "config": DISABLE_RULEGEN_CONFIG,
+            "list": "true",
+            "upload_path": "force-max-exactly-once",
+        }
+        plain_status, plain_body, _ = request(
+            base_url, "/sub", upload_params
+        )
+        upload_status, upload_body, _ = request(
+            base_url,
+            "/sub",
+            {**upload_params, "upload": "true"},
+        )
+        if (
+            plain_status != 200
+            or upload_status != plain_status
+            or upload_body != plain_body
+        ):
+            raise AssertionError(
+                "force_max async upload changed the conversion response: "
+                f"plain HTTP {plain_status}, upload HTTP {upload_status}, "
+                f"body_equal={upload_body == plain_body}"
+            )
+
+        after = before
+        dashboard_deadline = time.monotonic() + 3.0
+        while time.monotonic() < dashboard_deadline:
+            _, after_body, _ = request(
+                base_url, "/dashboard/data", headers=dashboard_headers
+            )
+            after = json.loads(after_body)
+            if (
+                int(after["conversion_flows"]["created_total"])
+                - flows_before
+                >= 3
+            ):
+                break
+            time.sleep(0.05)
+        if (
+            int(after["conversion_scheduler"]["accepted"])
+            != legacy_before
+            or int(after["conversion_flows"]["created_total"])
+            - flows_before
+            < 3
+        ):
+            raise AssertionError(
+                "auto/import/upload request escaped the force_max flow: "
+                f"conversion={after['conversion_scheduler']!r} "
+                f"flows={after['conversion_flows']!r}"
+            )
+    with FixtureHandler.counter_lock:
+        upload_delta = FixtureHandler.gist_request_count - upload_before
+    if upload_delta != 1:
+        raise AssertionError(
+            f"force_max upload side effect executed {upload_delta} times"
+        )
+
+    with FixtureHandler.counter_lock:
+        failed_upload_before = FixtureHandler.gist_request_count
+    with running_service(
+        binary,
+        allow_public_upload=True,
+        gist_api_base=fixture_base + "/failure",
+        environment=environment,
+    ) as base_url:
+        failure_params = {
+            "target": "mixed",
+            "url": SUBSCRIPTION.strip(),
+            "config": DISABLE_RULEGEN_CONFIG,
+            "list": "true",
+            "upload_path": "force-max-failure",
+        }
+        baseline_status, baseline_body, _ = request(
+            base_url, "/sub", failure_params
+        )
+        failure_status, failure_body, _ = request(
+            base_url,
+            "/sub",
+            {**failure_params, "upload": "true"},
+        )
+    with FixtureHandler.counter_lock:
+        failed_upload_delta = (
+            FixtureHandler.gist_request_count - failed_upload_before
+        )
+    if (
+        baseline_status != 200
+        or failure_status != baseline_status
+        or failure_body != baseline_body
+        or failed_upload_delta != 1
+    ):
+        raise AssertionError(
+            "force_max failed upload drifted from the current optional-upload "
+            "compatibility contract: "
+            f"baseline HTTP {baseline_status}, failure HTTP {failure_status}, "
+            f"body_equal={failure_body == baseline_body}, "
+            f"gist_requests={failed_upload_delta}"
+        )
+
+    with FixtureHandler.counter_lock:
+        FixtureHandler.force_flow_retry_config_count = 0
+    retry_logs: list[str] = []
+    with running_service(
+        binary,
+        statistics=True,
+        default_external_config=fixture_base + "/force-flow-retry.ini",
+        environment=environment,
+        log_capture=retry_logs,
+        log_level="debug",
+    ) as base_url:
+        _, before_body, _ = request(
+            base_url, "/dashboard/data", headers=dashboard_headers
+        )
+        before = json.loads(before_body)
+        retry_status, retry_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "mixed",
+                "url": SUBSCRIPTION.strip(),
+                "list": "true",
+            },
+        )
+        after = before
+        retry_dashboard_deadline = time.monotonic() + 3.0
+        while time.monotonic() < retry_dashboard_deadline:
+            _, after_body, _ = request(
+                base_url, "/dashboard/data", headers=dashboard_headers
+            )
+            after = json.loads(after_body)
+            if (
+                int(after["conversion_flows"]["created_total"])
+                - int(before["conversion_flows"]["created_total"])
+                >= 2
+            ):
+                break
+            time.sleep(0.05)
+    with FixtureHandler.counter_lock:
+        retry_config_attempts = FixtureHandler.force_flow_retry_config_count
+    if (
+        retry_status != 200
+        or b"Smoke" not in retry_body
+        or retry_config_attempts != 2
+        or int(after["conversion_flows"]["created_total"])
+        - int(before["conversion_flows"]["created_total"])
+        != 2
+        or int(after["subscription_singleflight"]["owners_created_total"])
+        - int(before["subscription_singleflight"]["owners_created_total"])
+        != 1
+        or int(after["conversion_scheduler"]["accepted"])
+        != int(before["conversion_scheduler"]["accepted"])
+    ):
+        raise AssertionError(
+            "force_max 5xx retry did not reuse one singleflight owner and "
+            "the original flow deadline: "
+            f"HTTP={retry_status}, config_attempts={retry_config_attempts}, "
+            "flow_delta="
+            f"{int(after['conversion_flows']['created_total']) - int(before['conversion_flows']['created_total'])}, "
+            "owner_delta="
+            f"{int(after['subscription_singleflight']['owners_created_total']) - int(before['subscription_singleflight']['owners_created_total'])}, "
+            "legacy_delta="
+            f"{int(after['conversion_scheduler']['accepted']) - int(before['conversion_scheduler']['accepted'])}, "
+            "retry_logs="
+            f"{[line for line in retry_logs if 'FORCE_MAX_RETRY' in line or '内部 flow 重试' in line]!r}"
+        )
+
+    script = (
+        "const sideEffectRequest = new Request(); "
+        f'sideEffectRequest.url = "{fixture_base}/quickjs-side-effect"; '
+        "fetch(sideEffectRequest); "
+        "function filter(node) { return false; }"
+    )
+    with FixtureHandler.counter_lock:
+        script_before = FixtureHandler.quickjs_side_effect_count
+    with running_service(
+        binary,
+        statistics=True,
+        environment=environment,
+        config_replacements=((
+            "enable_filter = false",
+            "enable_filter = true\nfilter_script = " + json.dumps(script),
+        ),),
+    ) as base_url:
+        scripted_inner = fixture_data_url(SUBSCRIPTION.strip())
+        scripted_outer = fixture_data_url("!!import:" + scripted_inner)
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "mixed",
+                "url": "!!import:" + scripted_outer,
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+        )
+        if status != 200 or b"Smoke" not in body:
+            raise AssertionError(
+                f"force_max QuickJS lane request failed: HTTP {status}: {body!r}"
+            )
+        _, dashboard_body, _ = request(
+            base_url, "/dashboard/data", headers=dashboard_headers
+        )
+        dashboard = json.loads(dashboard_body)
+        if (
+            int(dashboard["quickjs_lane"]["accepted_total"]) < 1
+            or int(dashboard["conversion_scheduler"]["accepted"]) != 0
+            or int(dashboard["conversion_flows"]["completed_total"]) < 1
+        ):
+            raise AssertionError(
+                "script request did not stay on the QuickJS/flow lanes: "
+                f"quickjs={dashboard['quickjs_lane']!r} "
+                f"conversion={dashboard['conversion_scheduler']!r}"
+            )
+    with FixtureHandler.counter_lock:
+        script_delta = (
+            FixtureHandler.quickjs_side_effect_count - script_before
+        )
+    if script_delta != 1:
+        raise AssertionError(
+            f"QuickJS side effect executed {script_delta} times"
+        )
 
 
 def force_max_subscription_cache_admission_baseline(
@@ -12230,8 +12566,6 @@ def recoverable_fetch_retry_baseline(binary: Path, fixture_base: str) -> None:
 def force_max_arrival_singleflight_baseline(
     binary: Path, fixture_base: str
 ) -> None:
-    if os.environ.get("SUBCONVERTER_HTTP_BACKEND", "beast").lower() == "httplib":
-        return
     dashboard_headers = {
         "Authorization": "Basic "
         + base64.b64encode(
@@ -12525,8 +12859,6 @@ def force_max_arrival_singleflight_baseline(
 def force_max_flow_activation_baseline(
     binary: Path, fixture_base: str
 ) -> None:
-    if os.environ.get("SUBCONVERTER_HTTP_BACKEND", "beast").lower() == "httplib":
-        return
     dashboard_headers = {
         "Authorization": "Basic "
         + base64.b64encode(
@@ -13238,6 +13570,7 @@ def main() -> int:
         conversion_cost_classification_baseline(binary, fixture_base)
         resource_control_execution_path_baseline(binary)
         force_max_controller_runtime_baseline(binary)
+        force_max_flow_feature_baseline(binary, fixture_base)
         force_max_subscription_cache_admission_baseline(binary, fixture_base)
         recoverable_fetch_retry_baseline(binary, fixture_base)
         force_max_arrival_singleflight_baseline(binary, fixture_base)

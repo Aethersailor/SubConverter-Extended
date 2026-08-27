@@ -64,6 +64,18 @@ RWLock cache_rw_lock;
 //std::string user_agent_str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/74.0.3729.169 Safari/537.36";
 static auto user_agent_str = "clash.meta";
 
+bool outboundResolverMayUseThreads() noexcept
+{
+    const curl_version_info_data *version =
+        curl_version_info(CURLVERSION_NOW);
+    if(version == nullptr)
+        return true;
+    // c-ares reports its version through this field. ASYNCHDNS without c-ares
+    // is commonly libcurl's threaded resolver and may create one helper per
+    // active transfer; native backends are conservatively budgeted the same.
+    return version->ares == nullptr;
+}
+
 struct curl_progress_data
 {
     long size_limit = 0L;
@@ -345,6 +357,7 @@ struct HttpUrlTarget
 static CURLcode curl_init();
 static std::string dataGet(const std::string &url);
 static void shutdownAsyncFetchEngine() noexcept;
+static bool joinAsyncFetchEngine() noexcept;
 
 static bool has_control_character(const std::string &value)
 {
@@ -745,6 +758,11 @@ void requestOutboundFetchShutdown() noexcept
     outbound_fetch_shutdown_requested.store(true,
                                              std::memory_order_seq_cst);
     shutdownAsyncFetchEngine();
+}
+
+bool joinOutboundFetchShutdown() noexcept
+{
+    return joinAsyncFetchEngine();
 }
 
 class CacheFetchOwnerCleanup
@@ -1648,8 +1666,6 @@ public:
         const bool deterministic_force_max =
             resources.effective_mode == "force_max" && force_max.valid;
         deterministic_force_max_ = deterministic_force_max;
-        if(deterministic_force_max)
-            configureGlobalFetchMemoryBudget(force_max.fetch_bytes);
         const long total_connections = deterministic_force_max
             ? static_cast<long>(std::min<uint64_t>(
                   force_max.outbound_active, LONG_MAX))
@@ -1743,7 +1759,6 @@ public:
 #endif
         available_.store(true, std::memory_order_release);
         worker_ = std::thread([this]() { run(); });
-        multi_engine_instance.store(this, std::memory_order_seq_cst);
         if(outbound_fetch_shutdown_requested.load(std::memory_order_seq_cst))
         {
             shutdown();
@@ -1771,7 +1786,6 @@ public:
         shutdown();
         if(multi_)
             curl_multi_cleanup(multi_);
-        multi_engine_instance.store(nullptr, std::memory_order_release);
     }
 
     CurlMultiEngine(const CurlMultiEngine &) = delete;
@@ -1858,25 +1872,34 @@ public:
         return future;
     }
 
-    void shutdown() noexcept
+    void requestShutdown() noexcept
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopping_ = true;
+        }
+        wakeWorker();
+    }
+
+    bool join() noexcept
     {
         bool join_worker = false;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             if(joined_)
-                return;
+                return true;
             stopping_ = true;
             if(worker_.joinable() &&
                worker_.get_id() == std::this_thread::get_id())
             {
                 lock.unlock();
                 wakeWorker();
-                return;
+                return false;
             }
             if(joining_)
             {
                 condition_.wait(lock, [this] { return joined_; });
-                return;
+                return true;
             }
             joining_ = true;
             join_worker = worker_.joinable();
@@ -1892,6 +1915,25 @@ public:
             joining_ = false;
         }
         condition_.notify_all();
+        return true;
+    }
+
+    void shutdown() noexcept
+    {
+        requestShutdown();
+        (void)join();
+    }
+
+    void publish() noexcept
+    {
+        if(deterministic_force_max_)
+        {
+            const ResourceControlSnapshot resources =
+                resourceControlSnapshot();
+            if(resources.calculated_force_max_budget.valid)
+                configureGlobalFetchMemoryBudget(
+                    resources.calculated_force_max_budget.fetch_bytes);
+        }
     }
 
     AsyncFetchEngineSnapshot snapshot() const noexcept
@@ -2851,10 +2893,31 @@ private:
     int running_handles_ = 0;
 };
 
+struct AsyncFetchEngineRuntime
+{
+    std::mutex mutex;
+    std::unique_ptr<CurlMultiEngine> published;
+    std::unique_ptr<CurlMultiEngine> candidate;
+};
+
+AsyncFetchEngineRuntime &asyncFetchEngineRuntime()
+{
+    static AsyncFetchEngineRuntime runtime;
+    return runtime;
+}
+
 CurlMultiEngine &multiEngine()
 {
-    static CurlMultiEngine engine;
-    return engine;
+    AsyncFetchEngineRuntime &runtime = asyncFetchEngineRuntime();
+    std::lock_guard<std::mutex> lock(runtime.mutex);
+    if(!runtime.published)
+    {
+        runtime.published = std::make_unique<CurlMultiEngine>();
+        runtime.published->publish();
+        multi_engine_instance.store(runtime.published.get(),
+                                    std::memory_order_release);
+    }
+    return *runtime.published;
 }
 
 } // namespace
@@ -2874,6 +2937,71 @@ bool initializeAsyncFetchEngine() noexcept
     {
         return false;
     }
+}
+
+bool prepareAsyncFetchEngineCandidate() noexcept
+{
+    try
+    {
+        AsyncFetchEngineRuntime &runtime = asyncFetchEngineRuntime();
+        std::lock_guard<std::mutex> lock(runtime.mutex);
+        if(runtime.published)
+            return runtime.published->available();
+        if(!runtime.candidate)
+            runtime.candidate = std::make_unique<CurlMultiEngine>();
+        return runtime.candidate->available();
+    }
+    catch(...)
+    {
+        return false;
+    }
+}
+
+bool commitAsyncFetchEngineCandidate() noexcept
+{
+    AsyncFetchEngineRuntime &runtime = asyncFetchEngineRuntime();
+    std::lock_guard<std::mutex> lock(runtime.mutex);
+    if(runtime.published)
+        return runtime.published->available();
+    if(!runtime.candidate || !runtime.candidate->available())
+        return false;
+    runtime.published = std::move(runtime.candidate);
+    runtime.published->publish();
+    multi_engine_instance.store(runtime.published.get(),
+                                std::memory_order_release);
+    return true;
+}
+
+void rollbackAsyncFetchEngineCandidate() noexcept
+{
+    std::unique_ptr<CurlMultiEngine> candidate;
+    AsyncFetchEngineRuntime &runtime = asyncFetchEngineRuntime();
+    {
+        std::lock_guard<std::mutex> lock(runtime.mutex);
+        candidate = std::move(runtime.candidate);
+    }
+}
+
+bool resetAsyncFetchEngine() noexcept
+{
+    std::unique_ptr<CurlMultiEngine> retired;
+    AsyncFetchEngineRuntime &runtime = asyncFetchEngineRuntime();
+    {
+        std::lock_guard<std::mutex> lock(runtime.mutex);
+        if(runtime.candidate)
+            return false;
+        multi_engine_instance.store(nullptr, std::memory_order_release);
+        retired = std::move(runtime.published);
+    }
+    if(retired)
+    {
+        retired->requestShutdown();
+        if(!retired->join())
+            return false;
+    }
+    outbound_fetch_shutdown_requested.store(false,
+                                             std::memory_order_release);
+    return resetGlobalFetchMemoryBudget();
 }
 
 AsyncFetchEngineSnapshot asyncFetchEngineSnapshot() noexcept
@@ -2981,7 +3109,15 @@ static void shutdownAsyncFetchEngine() noexcept
 {
     if(CurlMultiEngine *engine =
            multi_engine_instance.load(std::memory_order_seq_cst))
-        engine->shutdown();
+        engine->requestShutdown();
+}
+
+static bool joinAsyncFetchEngine() noexcept
+{
+    if(CurlMultiEngine *engine =
+           multi_engine_instance.load(std::memory_order_acquire))
+        return engine->join();
+    return true;
 }
 
 //static std::string curlGet(const std::string &url, const std::string &proxy, std::string &response_headers, CURLcode &return_code, const string_map &request_headers)
@@ -5307,6 +5443,40 @@ OwnedWebGetContinuationInitStatus initializeOwnedWebGetContinuationRuntime(
     return OwnedWebGetContinuationInitStatus::InitializationFailed;
 }
 
+bool publishOwnedWebGetContinuationRuntime(
+    OwnedWebGetContinuationBudget budget) noexcept
+{
+    if(budget.workers == 0 || budget.max_entries == 0 ||
+       budget.max_bytes < kOwnedWebGetContinuationMetadataBytes ||
+       !globalComputeExecutor())
+        return false;
+    std::lock_guard<std::mutex> lock(owned_webget_continuations.mutex);
+    if(owned_webget_continuations.initialized ||
+       owned_webget_continuations.stopping ||
+       owned_webget_continuations.joining ||
+       owned_webget_continuations.joined)
+        return false;
+    owned_webget_continuations.budget = budget;
+    owned_webget_continuations.initialized = true;
+    return true;
+}
+
+bool resetOwnedWebGetContinuationRuntime() noexcept
+{
+    std::lock_guard<std::mutex> lock(owned_webget_continuations.mutex);
+    if(owned_webget_continuations.initialized &&
+       !owned_webget_continuations.joined)
+        return false;
+    owned_webget_continuations.budget = {};
+    owned_webget_continuations.initialized = false;
+    owned_webget_continuations.stopping = false;
+    owned_webget_continuations.joining = false;
+    owned_webget_continuations.joined = false;
+    owned_webget_continuations.completion_exception_total.store(
+        0, std::memory_order_relaxed);
+    return true;
+}
+
 SchedulerSubmitStatus submitOwnedWebGetContinuation(
     RequestCostClass cost, uint64_t bytes,
     std::chrono::steady_clock::time_point deadline,
@@ -5440,10 +5610,9 @@ void requestOwnedWebGetContinuationShutdown() noexcept
         std::lock_guard<std::mutex> lock(owned_webget_continuations.mutex);
         owned_webget_continuations.stopping = true;
     }
-    requestGlobalComputeExecutorShutdown();
 }
 
-bool joinOwnedWebGetContinuationRuntime() noexcept
+bool joinOwnedWebGetContinuationRuntime(bool shutdown_compute) noexcept
 {
     ComputeExecutor *executor = globalComputeExecutor();
     {
@@ -5452,7 +5621,8 @@ bool joinOwnedWebGetContinuationRuntime() noexcept
         {
             owned_webget_continuations.stopping = true;
             lock.unlock();
-            requestGlobalComputeExecutorShutdown();
+            if(shutdown_compute)
+                requestGlobalComputeExecutorShutdown(true);
             return false;
         }
         while(owned_webget_continuations.joining &&
@@ -5469,8 +5639,12 @@ bool joinOwnedWebGetContinuationRuntime() noexcept
         }
         owned_webget_continuations.joining = true;
     }
-    requestGlobalComputeExecutorShutdown();
-    const bool joined = joinGlobalComputeExecutor();
+    bool joined = true;
+    if(shutdown_compute)
+    {
+        requestGlobalComputeExecutorShutdown(true);
+        joined = joinGlobalComputeExecutor();
+    }
     {
         std::lock_guard<std::mutex> lock(owned_webget_continuations.mutex);
         owned_webget_continuations.joining = false;

@@ -156,6 +156,9 @@ enum class GlobalQuickJsLaneInitStatus : uint8_t {
 
 GlobalQuickJsLaneInitStatus initializeGlobalQuickJsLane(
     QuickJsLaneBudget budget) noexcept;
+bool publishGlobalQuickJsLane(std::unique_ptr<QuickJsLane> lane,
+                              QuickJsLaneBudget budget) noexcept;
+bool resetGlobalQuickJsLane() noexcept;
 QuickJsLane *globalQuickJsLane() noexcept;
 QuickJsLaneSnapshot globalQuickJsLaneSnapshot() noexcept;
 void requestGlobalQuickJsLaneShutdown() noexcept;
