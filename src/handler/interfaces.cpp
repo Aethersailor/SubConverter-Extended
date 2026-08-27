@@ -4070,6 +4070,14 @@ static const ResolvedConversionResource *findResolvedDependency(
   return nullptr;
 }
 
+static void prepareTargetTemplateArguments(
+    const ParsedSubRequest &parsed, EffectiveSubPolicy &policy) {
+  if (parsed.target == "clash" || parsed.target == "clashr") {
+    policy.template_arguments.local_vars["clash.new_field_name"] =
+        policy.generator.clash_new_field_name ? "true" : "false";
+  }
+}
+
 static const ResolvedConversionResource *resolveOrPlanDependency(
     ConversionDependencyResolution *resolution,
     AsyncConversionResourceRequest request) {
@@ -6419,12 +6427,11 @@ static SubStageResponse dispatchTargetGenerator(
   };
 
   proxy = parseProxy(settings.proxyConfig, settings.proxyBypass);
+  prepareTargetTemplateArguments(parsed, policy);
   switch (hash_(target)) {
   case "clash"_hash:
   case "clashr"_hash:
     writeLog(LOG_LEVEL_INFO, target == "clashr" ? "生成目标：ClashR" : "生成目标：Clash");
-    template_arguments.local_vars["clash.new_field_name"] =
-        ext.clash_new_field_name ? "true" : "false";
     response.headers["profile-update-interval"] =
         std::to_string(policy.update_interval / 3600);
     if (ext.nodelist) {
@@ -8348,6 +8355,7 @@ private:
         return;
       }
       rebuildPolicy();
+      prepareTargetTemplateArguments(*parsed_, *policy_);
       if (!fetch_plan_->base_path.empty()) {
         auto self = shared_from_this();
         if (!renderTemplateOnFlow(

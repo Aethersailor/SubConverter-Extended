@@ -3556,7 +3556,10 @@ def provider_no_fetch_vary_and_route_log_baseline(
         ("clash", {}, "https://127.0.0.1:1/provider-must-not-connect"),
     )
     with running_service(
-        binary, log_capture=logs, log_level="verbose"
+        binary,
+        log_capture=logs,
+        log_level="verbose",
+        environment={"SUBCONVERTER_RESOURCE_CONTROL": "force_max"},
     ) as base_url:
         for target, headers, source in cases:
             status, body, response_headers = request(
@@ -3656,7 +3659,6 @@ def provider_no_fetch_vary_and_route_log_baseline(
         diagnostics, "AUTO_TARGET_UNRESOLVED ua_family=unknown"
     ):
         raise AssertionError("unrecognized auto-target event is missing")
-
 
 def local_group_matcher_baseline(base_url: str) -> None:
     status, body, _ = request(
