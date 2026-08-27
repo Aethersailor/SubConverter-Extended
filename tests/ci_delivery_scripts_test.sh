@@ -187,6 +187,8 @@ grep -Fq "expected_apk_version='0.0.0'" "$OPENWRT_SMOKE_ACTION"
 grep -Fq 'default: compat' "$OPENWRT_SMOKE_ACTION"
 grep -Fq 'SUBCONVERTER_RESOURCE_CONTROL="$RESOURCE_CONTROL"' "$OPENWRT_SMOKE_ACTION"
 grep -Fq -- '--ulimit nofile=512:512' "$OPENWRT_SMOKE_ACTION"
+grep -Fq 'runtime_pref=/tmp/subconverter-force-max-pref.toml' "$OPENWRT_SMOKE_ACTION"
+grep -Fq 'max_allowed_download_size = 1048576' "$OPENWRT_SMOKE_ACTION"
 
 publish_block="$(sed -n '/^  merge-manifest:/,/^  create-release:/p' "$BUILD_WORKFLOW")"
 grep -Fq 'needs: [prepare, validate-source, sanitizer, cross-build, build-linux, build-windows-amd64, strict-force-max-gate]' <<<"$publish_block"

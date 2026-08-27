@@ -468,7 +468,18 @@ runs:
             }
             trap runtime_cleanup EXIT
             trap 'runtime_cleanup; exit 1' HUP INT TERM
-            PREF_PATH=/etc/subconverter/pref.toml \
+            runtime_pref=/etc/subconverter/pref.toml
+            if [ "$RESOURCE_CONTROL" = force_max ]; then
+              runtime_pref=/tmp/subconverter-force-max-pref.toml
+              cp /opt/subconverter-extended/base/pref.example.toml \
+                "$runtime_pref"
+              sed -i \
+                's/^max_allowed_download_size = 0$/max_allowed_download_size = 1048576/' \
+                "$runtime_pref"
+              grep -Fxq 'max_allowed_download_size = 1048576' \
+                "$runtime_pref"
+            fi
+            PREF_PATH="$runtime_pref" \
             SUBCONVERTER_LISTEN_ADDRESS=127.0.0.1 \
             SUBCONVERTER_LISTEN_PORT=25500 \
             SUBCONVERTER_RUNTIME_STATE_FILE=/tmp/subconverter-runtime.json \
