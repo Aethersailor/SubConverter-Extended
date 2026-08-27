@@ -41,6 +41,8 @@ for dockerfile in Dockerfile docker/Dockerfile.armv7-cross \
     'python3 scripts/ci/patch_cpp_httplib_force_max.py include/httplib.h' \
     "$REPOSITORY/$dockerfile"
 done
+grep -Eq '^[[:space:]]+cmake .*python3' \
+  "$REPOSITORY/docker/Dockerfile.armv7-cross"
 PYTHONPYCACHEPREFIX="$TEST_ROOT/pycache" python3 -m py_compile \
   "$REPOSITORY/scripts/ci/patch_cpp_httplib_force_max.py"
 
