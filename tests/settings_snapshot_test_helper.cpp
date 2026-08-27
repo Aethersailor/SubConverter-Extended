@@ -178,8 +178,15 @@ int main(int argc, char *argv[]) {
       script_runtime_init(*settings.js_runtime);
       settings.js_context = new qjs::Context(*settings.js_runtime);
       script_context_init(*settings.js_context);
-      return proxyToSurge(nodes, "[General]\n", rulesets, groups, 3,
-                          settings, 8192);
+      try {
+        std::string output = proxyToSurge(
+            nodes, "[General]\n", rulesets, groups, 3, settings, 8192);
+        (void)script_cleanup(*settings.js_context);
+        return output;
+      } catch (...) {
+        (void)script_cleanup(*settings.js_context);
+        throw;
+      }
     };
     try {
       const std::string output = generate_with_script(
