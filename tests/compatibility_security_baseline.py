@@ -11721,9 +11721,56 @@ def resource_control_execution_path_baseline(binary: Path) -> None:
             or conversion["accepted"] < 1
             or flow["accepted"] != 0
             or cache_admission["enabled"] is not False
+            or "runtime_coordinator" in dashboard
         ):
             raise AssertionError(
                 "compat request did not stay on the bounded synchronous path: "
+                f"resources={resources!r} conversion={conversion!r} flow={flow!r}"
+            )
+
+    with running_service(
+        binary,
+        statistics=True,
+        environment={"SUBCONVERTER_RESOURCE_CONTROL": "adaptive"},
+    ) as base_url:
+        status, body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "mixed",
+                "url": SUBSCRIPTION.strip(),
+                "config": DISABLE_RULEGEN_CONFIG,
+                "list": "true",
+            },
+        )
+        if status != 200 or not body:
+            raise AssertionError(
+                f"adaptive execution probe failed: HTTP {status}: {body!r}"
+            )
+        status, body, _ = request(
+            base_url, "/dashboard/data", headers=dashboard_headers
+        )
+        if status != 200:
+            raise AssertionError(
+                f"adaptive execution dashboard returned HTTP {status}"
+            )
+        dashboard = json.loads(body)
+        resources = dashboard["resource_control"]
+        conversion = dashboard["conversion_scheduler"]
+        flow = dashboard["legacy_request_flow"]
+        backend = os.environ.get("SUBCONVERTER_HTTP_BACKEND", "beast").lower()
+        scheduler_path_ok = (
+            conversion["accepted"] >= 1 and flow["accepted"] == 0
+            if backend == "httplib"
+            else conversion["accepted"] == 0 and flow["accepted"] >= 1
+        )
+        if (
+            resources["effective_mode"] != "adaptive"
+            or not scheduler_path_ok
+            or "runtime_coordinator" in dashboard
+        ):
+            raise AssertionError(
+                "adaptive request changed its compatibility scheduler path: "
                 f"resources={resources!r} conversion={conversion!r} flow={flow!r}"
             )
 
@@ -12544,6 +12591,7 @@ def force_max_flow_activation_baseline(
         raise AssertionError("force_max flow activation output bytes changed")
     if (
         int(compat["conversion_scheduler"]["accepted"]) < 1
+        or int(compat["legacy_request_flow"]["accepted"]) != 0
         or int(compat["conversion_flows"]["created_total"]) != 0
         or int(force["legacy_request_flow"]["accepted"]) != 0
         or int(force["conversion_flows"]["created_total"]) < 2
@@ -12899,20 +12947,20 @@ def main() -> int:
         mismatch_env,
     )
     if (
-        mismatch_snapshot["server"] != snapshots[0]["server"]
+        mismatch_snapshot["server"] != force_snapshot["server"]
         or mismatch_snapshot["advanced"]["resource_control_effective"]
-        != "compat"
+        != "force_max"
         or any(
             expected not in mismatch_logs
             for expected in (
-                "effective_mode=compat",
-                "state=safe_fallback",
+                "effective_mode=force_max",
+                "state=max_ready_static",
                 "hardware_pin_matched=false",
-                "startup_budget_applied=false",
+                "startup_budget_applied=true",
             )
         )
     ):
-        raise AssertionError("hardware pin mismatch did not use compat limits")
+        raise AssertionError("hardware pin mismatch changed force_max capacity")
     calibrated_env = force_env.copy()
     calibrated_env["SUBCONVERTER_FORCE_MAX_CURVE_FINGERPRINT"] = hardware.group(1)
     calibrated_snapshot, calibrated_logs = run_settings_snapshot(

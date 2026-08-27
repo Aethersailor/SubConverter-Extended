@@ -608,25 +608,21 @@ ResourceControlSnapshot discover(const Settings &settings,
                                   ? "compat"
                                   : mode == ResourceControlMode::Adaptive
                                         ? "observe_only"
-                                        : snapshot.hardware_detected &&
-                                                  snapshot.hardware_pin_matched
+                                        : snapshot.calculated_force_max_budget.valid
                                               ? "max_ready_static"
-                                              : "safe_fallback";
+                                              : "invalid_budget";
   snapshot.controller_reason = mode == ResourceControlMode::Compat
                                    ? "compat"
-                                   : !snapshot.hardware_detected
-                                         ? "telemetry_incomplete"
-                                         : !snapshot.hardware_pin_matched
-                                               ? "hardware_pin_mismatch"
-                                               : mode ==
-                                                         ResourceControlMode::Adaptive
-                                                     ? "shadow_controller"
-                                                     : "hardware_limits";
-  snapshot.effective_mode =
-      mode == ResourceControlMode::ForceMax &&
-              (!snapshot.hardware_detected || !snapshot.hardware_pin_matched)
-          ? "compat"
-          : snapshot.mode;
+                                   : mode == ResourceControlMode::Adaptive
+                                         ? "shadow_controller"
+                                         : !snapshot.calculated_force_max_budget.valid
+                                               ? "invalid_force_max_budget"
+                                               : !snapshot.hardware_detected
+                                                     ? "hardware_fallback_limits"
+                                                     : !snapshot.hardware_pin_matched
+                                                           ? "hardware_pin_ignored"
+                                                           : "hardware_limits";
+  snapshot.effective_mode = snapshot.mode;
   // Retained as a compatibility diagnostic field. The new controller does not
   // learn or load a persisted capacity curve.
   snapshot.curve_valid = false;
@@ -962,7 +958,9 @@ void controllerLoop() noexcept {
     lock.unlock();
     try {
       const RequestAdmissionSnapshot admission = requestAdmissionSnapshot();
-      const WorkloadSchedulerSnapshot scheduler = conversionSchedulerSnapshot();
+      const WorkloadSchedulerSnapshot scheduler =
+          force_max ? conversionSchedulerSnapshot()
+                    : legacyRequestFlowSnapshot();
       const RequestLifecycleMetricsSnapshot lifecycle =
           requestLifecycleMetricsSnapshot();
       const uint64_t arrivals = admission.accepted - previous_accepted;
@@ -1127,9 +1125,11 @@ void configureResourceControl(Settings &settings) {
       throw std::invalid_argument(
           "advanced resource-capacity changes require a process restart");
   }
-  const bool apply_force_max =
-      *parsed == ResourceControlMode::ForceMax && snapshot.hardware_detected &&
-      snapshot.hardware_pin_matched;
+  const bool apply_force_max = *parsed == ResourceControlMode::ForceMax;
+  if (apply_force_max && !snapshot.calculated_force_max_budget.valid)
+    throw std::invalid_argument(
+        "force_max budget is invalid: " +
+        snapshot.calculated_force_max_budget.validation_error);
   uint64_t admission_entries = UINT64_C(2048);
   uint64_t admission_bytes = UINT64_C(64) * 1024 * 1024;
   uint64_t retained_bytes = 0;
@@ -1171,7 +1171,7 @@ void configureResourceControl(Settings &settings) {
   }
   if (!settings.forceMaxCurveFingerprint.empty())
     writeLog(LOG_LEVEL_WARNING,
-             "force_max_curve_fingerprint 现仅作为可选硬件 pin；不代表已验证容量曲线。");
+             "force_max_curve_fingerprint 已弃用且仅用于诊断；匹配结果不会改变 force_max 容量。");
   writeLog(LOG_LEVEL_INFO,
            "RESOURCE_CONTROL_EFFECTIVE mode=" + snapshot.mode +
                " effective_mode=" + snapshot.effective_mode +

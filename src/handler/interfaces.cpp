@@ -2253,6 +2253,7 @@ static std::string subconverterEntry(Request &request, Response &response,
 namespace {
 
 std::atomic<WorkloadScheduler *> conversion_scheduler_instance{nullptr};
+std::atomic<WorkloadScheduler *> compatibility_request_flow_instance{nullptr};
 std::atomic<CpuPermitGate *> conversion_cpu_gate_instance{nullptr};
 std::atomic<bool> conversion_shutdown_requested{false};
 std::atomic<uint64_t> desired_cpu_permits{0};
@@ -2277,6 +2278,35 @@ CpuPermitGate &conversionCpuGate() {
   if (conversion_shutdown_requested.load(std::memory_order_acquire))
     gate.requestShutdown();
   return gate;
+}
+
+WorkloadScheduler &conversionScheduler();
+
+WorkloadScheduler &compatibilityRequestFlowScheduler() {
+  const Settings &settings = effectiveSettings();
+  const unsigned int hardware_threads =
+      std::max(1U, std::thread::hardware_concurrency());
+  const std::size_t workers = static_cast<std::size_t>(
+      std::clamp(std::min(settings.maxConcurThreads,
+                          static_cast<int>(hardware_threads)),
+                 1, INT_MAX));
+  const std::size_t entries = static_cast<std::size_t>(
+      std::max(settings.maxPendingConns, 1));
+  static WorkloadScheduler scheduler(
+      workers, entries, requestAdmissionSnapshot().max_bytes);
+  compatibility_request_flow_instance.store(&scheduler,
+                                             std::memory_order_release);
+  if (conversion_shutdown_requested.load(std::memory_order_acquire))
+    scheduler.requestShutdown(true);
+  return scheduler;
+}
+
+WorkloadScheduler &requestFlowFallbackScheduler(
+    const PreparedSubRequest &prepared) {
+  return prepared.settings &&
+                 prepared.settings->resourceControlEffective == "force_max"
+             ? conversionScheduler()
+             : compatibilityRequestFlowScheduler();
 }
 
 WorkloadScheduler &conversionScheduler() {
@@ -3173,7 +3203,7 @@ void ConversionService::convertSubscriptionAsync(Request request,
                   call->work_context->cancellationToken();
               const auto queued_at = RequestContext::Clock::now();
               const SchedulerSubmitStatus owner_submit_status =
-                  conversionScheduler().submitAsync(
+                  requestFlowFallbackScheduler(*prepared_owner).submitAsync(
                   cost, bytes, work_deadline, work_cancellation,
                   [work_request = std::move(work_request), prepared_owner,
                    call, track_statistics, work_deadline,
@@ -3309,7 +3339,7 @@ void ConversionService::convertSubscriptionAsync(Request request,
         }
         const auto queued_at = RequestContext::Clock::now();
         const SchedulerSubmitStatus standalone_submit_status =
-            conversionScheduler().submitAsync(
+            requestFlowFallbackScheduler(*prepared_standalone).submitAsync(
             cost, bytes, deadline, cancellation,
             [request = std::move(request), prepared_standalone,
              track_statistics, deadline, cancellation,
@@ -3400,6 +3430,9 @@ WorkloadSchedulerSnapshot conversionSchedulerSnapshot() {
 }
 
 WorkloadSchedulerSnapshot legacyRequestFlowSnapshot() {
+  if (WorkloadScheduler *scheduler =
+          compatibility_request_flow_instance.load(std::memory_order_acquire))
+    return scheduler->snapshot();
   return {};
 }
 
@@ -3441,6 +3474,9 @@ SubscriptionOwnerAdmissionSnapshot subscriptionOwnerAdmissionSnapshot() {
     return result;
   };
   if (WorkloadScheduler *scheduler =
+          compatibility_request_flow_instance.load(std::memory_order_acquire))
+    return make_snapshot("legacy_request_flow", scheduler);
+  if (WorkloadScheduler *scheduler =
           conversion_scheduler_instance.load(std::memory_order_acquire))
     return make_snapshot("conversion_scheduler", scheduler);
   return {};
@@ -3476,12 +3512,18 @@ void shutdownConversionScheduler() noexcept {
   if (WorkloadScheduler *scheduler =
           conversion_scheduler_instance.load(std::memory_order_acquire))
     scheduler->shutdown(true);
+  if (WorkloadScheduler *scheduler =
+          compatibility_request_flow_instance.load(std::memory_order_acquire))
+    scheduler->shutdown(true);
 }
 
 void requestConversionSchedulerShutdown() noexcept {
   conversion_shutdown_requested.store(true, std::memory_order_release);
   if (WorkloadScheduler *scheduler =
           conversion_scheduler_instance.load(std::memory_order_acquire))
+    scheduler->requestShutdown(true);
+  if (WorkloadScheduler *scheduler =
+          compatibility_request_flow_instance.load(std::memory_order_acquire))
     scheduler->requestShutdown(true);
   if (CpuPermitGate *gate =
           conversion_cpu_gate_instance.load(std::memory_order_acquire))

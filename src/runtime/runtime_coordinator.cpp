@@ -173,13 +173,10 @@ bool prepareRuntimeCoordinator() noexcept {
   const ResourceControlSnapshot resources = resourceControlSnapshot();
   coordinator.snapshot.force_max =
       resources.effective_mode == "force_max";
+  if (!coordinator.snapshot.force_max)
+    return true;
   coordinator.startup_envelope = resources.envelope;
   coordinator.budget = resources.calculated_force_max_budget;
-  if (!coordinator.snapshot.force_max) {
-    coordinator.snapshot.prepared = true;
-    coordinator.snapshot.reason = "non_force_max";
-    return true;
-  }
   try {
     if (!prepareForceMax(resources)) {
       coordinator.snapshot.reason = "force_max_prepare_failed";
@@ -203,6 +200,9 @@ bool prepareRuntimeCoordinator() noexcept {
 
 bool commitRuntimeCoordinator() noexcept {
   std::lock_guard<std::mutex> lock(coordinator.mutex);
+  const ResourceControlSnapshot resources = resourceControlSnapshot();
+  if (resources.effective_mode != "force_max")
+    return true;
   if (!coordinator.snapshot.prepared || coordinator.snapshot.stopping)
     return false;
   if (coordinator.snapshot.ready)
@@ -221,10 +221,8 @@ bool commitRuntimeCoordinator() noexcept {
   ++coordinator.snapshot.generation;
   coordinator.snapshot.reason = "ready";
   writeLog(LOG_LEVEL_INFO,
-           coordinator.snapshot.force_max
-               ? "FORCE_MAX_RUNTIME_READY generation=" +
-                     std::to_string(coordinator.snapshot.generation)
-               : "RUNTIME_COORDINATOR_READY mode=compatibility");
+           "FORCE_MAX_RUNTIME_READY generation=" +
+               std::to_string(coordinator.snapshot.generation));
   return true;
 }
 
