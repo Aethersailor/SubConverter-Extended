@@ -467,6 +467,8 @@ IF(BUILD_TESTS)
         src/utils/system.cpp
         src/utils/urlencode.cpp)
     TARGET_INCLUDE_DIRECTORIES(webserver_error_test PRIVATE src)
+    TARGET_INCLUDE_DIRECTORIES(webserver_error_test SYSTEM PRIVATE
+        ${QUICKJS_INCLUDE_DIRS})
     TARGET_COMPILE_DEFINITIONS(webserver_error_test PRIVATE
         $<TARGET_PROPERTY:${BUILD_TARGET_NAME},COMPILE_DEFINITIONS>)
     TARGET_LINK_LIBRARIES(webserver_error_test ${CMAKE_THREAD_LIBS_INIT})
@@ -575,6 +577,8 @@ IF(BUILD_TESTS)
         tests/settings_view_test.cpp
         src/handler/settings_view.cpp)
     TARGET_INCLUDE_DIRECTORIES(settings_view_test PRIVATE src)
+    TARGET_INCLUDE_DIRECTORIES(settings_view_test SYSTEM PRIVATE
+        ${QUICKJS_INCLUDE_DIRS})
     TARGET_COMPILE_DEFINITIONS(settings_view_test PRIVATE
         $<TARGET_PROPERTY:${BUILD_TARGET_NAME},COMPILE_DEFINITIONS>)
     TARGET_LINK_LIBRARIES(settings_view_test ${CMAKE_THREAD_LIBS_INIT})
@@ -683,6 +687,8 @@ IF(BUILD_TESTS)
         src/utils/redact.cpp
         src/utils/string.cpp)
     TARGET_INCLUDE_DIRECTORIES(upload_persistence_test PRIVATE src)
+    TARGET_INCLUDE_DIRECTORIES(upload_persistence_test SYSTEM PRIVATE
+        ${QUICKJS_INCLUDE_DIRS})
     TARGET_COMPILE_DEFINITIONS(upload_persistence_test PRIVATE
         FILE_IO_TESTING
         JS_SetHostUnhandledPromiseRejectionTracker=JS_SetHostPromiseRejectionTracker)

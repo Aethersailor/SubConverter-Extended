@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write and verify the identity embedded in every formal release package."""
+"""Write and verify package identity, with explicit dev-only opt-in."""
 
 from __future__ import annotations
 
@@ -14,9 +14,17 @@ VERSION_RE = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
-def build_info(*, version: str, revision: str, build_date: str) -> dict[str, str]:
-    if not VERSION_RE.fullmatch(version):
-        raise ValueError("version must be an exact vX.Y.Z tag")
+def build_info(
+    *,
+    version: str,
+    revision: str,
+    build_date: str,
+    allow_dev: bool = False,
+) -> dict[str, str]:
+    if not VERSION_RE.fullmatch(version) and not (allow_dev and version == "dev"):
+        raise ValueError(
+            "version must be an exact vX.Y.Z tag, or explicitly allowed dev"
+        )
     if not SHA_RE.fullmatch(revision):
         raise ValueError("revision must be a full 40-character Git SHA")
     parsed = datetime.fromisoformat(build_date.replace("Z", "+00:00"))
@@ -53,12 +61,18 @@ def main() -> int:
     parser.add_argument("--version", required=True)
     parser.add_argument("--revision", required=True)
     parser.add_argument("--build-date", required=True)
+    parser.add_argument(
+        "--allow-dev",
+        action="store_true",
+        help="allow the non-publishing dev identity",
+    )
     args = parser.parse_args()
 
     identity = build_info(
         version=args.version,
         revision=args.revision,
         build_date=args.build_date,
+        allow_dev=args.allow_dev,
     )
     if args.mode == "write":
         write(args.path, identity)

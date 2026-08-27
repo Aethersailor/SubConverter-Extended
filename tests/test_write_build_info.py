@@ -46,6 +46,12 @@ class BuildInfoTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "vX.Y.Z"):
             self.identity(version="dev")
 
+    def test_allows_dev_only_when_explicitly_enabled(self):
+        self.assertEqual(
+            self.identity(version="dev", allow_dev=True)["version"],
+            "dev",
+        )
+
     def test_rejects_noncanonical_date(self):
         with self.assertRaisesRegex(ValueError, "UTC timestamp"):
             self.identity(build_date="2026-08-06T12:37:18+08:00")

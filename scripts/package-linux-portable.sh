@@ -36,11 +36,16 @@ rm -rf "${PACKAGE_DIR}/base/Custom_OpenClash_Rules"
 copy_dir_contents runtime-libs
 copy_dir_contents runtime-root
 
+identity_args=()
+if [ "${VERSION}" = "dev" ]; then
+  identity_args+=(--allow-dev)
+fi
 python3 scripts/ci/write_build_info.py write \
   --path "${PACKAGE_DIR}/BUILD-INFO.json" \
   --version "${VERSION}" \
   --revision "${REVISION}" \
-  --build-date "${RELEASE_BUILD_DATE}"
+  --build-date "${RELEASE_BUILD_DATE}" \
+  "${identity_args[@]}"
 
 bash "${RENDER_LAUNCHER}" "${PACKAGE_DIR}/start.sh" portable "__PORTABLE_ROOT__" "__ROOT_BASE__"
 install -m755 "${UPDATE_LAUNCHER}" "${PACKAGE_DIR}/update.sh"

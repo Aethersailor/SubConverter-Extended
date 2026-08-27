@@ -47,11 +47,16 @@ runs:
         test -x subconverter-update
         test -x update.sh
         test -s UPDATE-README.txt
+        identity_args=()
+        if [ "${{ inputs.expected-version }}" = dev ]; then
+          identity_args+=(--allow-dev)
+        fi
         python3 "$GITHUB_WORKSPACE/scripts/ci/write_build_info.py" verify \
           --path BUILD-INFO.json \
           --version "${{ inputs.expected-version }}" \
           --revision "${{ inputs.expected-revision }}" \
-          --build-date "${{ inputs.expected-build-date }}"
+          --build-date "${{ inputs.expected-build-date }}" \
+          "${identity_args[@]}"
         ./update.sh status >"$WORKDIR/update-status.json"
         python3 - "$WORKDIR/update-status.json" "${{ inputs.expected-version }}" <<'PY'
         import json
