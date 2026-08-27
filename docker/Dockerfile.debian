@@ -159,6 +159,8 @@ RUN set -xe && \
       echo "Using committed header-only libraries"; \
     fi
 
+RUN python3 scripts/ci/patch_cpp_httplib_force_max.py include/httplib.h
+
 RUN set -xe && \
     BUILD_ID="$(printf '%.7s' "${SHA}")" && \
     [ -n "${BUILD_ID}" ] && sed -i "s/#define BUILD_ID \"\"/#define BUILD_ID \"${BUILD_ID}\"/ " src/version.h || true && \

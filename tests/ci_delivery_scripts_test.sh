@@ -35,6 +35,15 @@ export GITHUB_RUN_ID=42
 export GITHUB_RUN_ATTEMPT=3
 export BUILD_ARGS=$'THREADS=16\nSHA=0123456789abcdef0123456789abcdef01234567'
 
+for dockerfile in Dockerfile docker/Dockerfile.armv7-cross \
+                  docker/Dockerfile.debian; do
+  grep -Fq \
+    'python3 scripts/ci/patch_cpp_httplib_force_max.py include/httplib.h' \
+    "$REPOSITORY/$dockerfile"
+done
+PYTHONPYCACHEPREFIX="$TEST_ROOT/pycache" python3 -m py_compile \
+  "$REPOSITORY/scripts/ci/patch_cpp_httplib_force_max.py"
+
 assert_trace() {
   grep -F -- "$1" "$TRACE" >/dev/null || {
     echo "missing trace token: $1" >&2
