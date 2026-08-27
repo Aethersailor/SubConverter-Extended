@@ -30,6 +30,7 @@
 #include "handler/settings.h"
 #include "handler/settings_view.h"
 #include "runtime/compute_executor.h"
+#include "runtime/memory_budget.h"
 #include "server/client_ip.h"
 #include "server/request_context.h"
 #include "server/webserver.h"
@@ -1619,6 +1620,8 @@ class CurlMultiEngine
         uint64_t retry_jitter_seed = 0;
         std::chrono::steady_clock::time_point retry_at =
             std::chrono::steady_clock::time_point::max();
+        uint64_t fetch_reservation_bytes = 0;
+        bool fetch_memory_waiting = false;
     };
 
 public:
@@ -1644,6 +1647,9 @@ public:
             resources.calculated_force_max_budget;
         const bool deterministic_force_max =
             resources.effective_mode == "force_max" && force_max.valid;
+        deterministic_force_max_ = deterministic_force_max;
+        if(deterministic_force_max)
+            configureGlobalFetchMemoryBudget(force_max.fetch_bytes);
         const long total_connections = deterministic_force_max
             ? static_cast<long>(std::min<uint64_t>(
                   force_max.outbound_active, LONG_MAX))
@@ -1716,10 +1722,15 @@ public:
                                          cached_connections),
                 static_cast<uint64_t>(LONG_MAX)));
         active_connection_limit_ = active_limit;
+        per_host_connection_limit_ =
+            static_cast<uint64_t>(std::max(1L, host_connections));
         open_connection_limit_ = static_cast<uint64_t>(max_open_connections);
         connection_cache_limit_ =
             static_cast<uint64_t>(max_cached_connections);
         max_retries_ = performance_mode_ ? 3 : 1;
+        runtime_limit_generation_ = 1;
+        last_fetch_capacity_generation_ =
+            globalFetchMemoryCapacityGeneration();
         curl_multi_setopt(multi_, CURLMOPT_MAX_TOTAL_CONNECTIONS,
                           max_open_connections);
         curl_multi_setopt(multi_, CURLMOPT_MAX_HOST_CONNECTIONS,
@@ -1781,6 +1792,15 @@ public:
         transfer->route = std::move(route);
         transfer->allow_insecure_tls = allow_insecure_tls;
         transfer->size_limit = size_limit;
+        if(transfer->request.capture_content)
+        {
+            const FetchMemoryBudgetSnapshot fetch_budget =
+                globalFetchMemoryBudgetSnapshot();
+            transfer->fetch_reservation_bytes =
+                size_limit > 0
+                    ? static_cast<uint64_t>(size_limit)
+                    : (fetch_budget.enabled ? fetch_budget.limit : 0);
+        }
         transfer->completion = std::move(completion);
         transfer->retry_jitter_seed =
             next_retry_jitter_seed_.fetch_add(1, std::memory_order_relaxed);
@@ -1886,7 +1906,30 @@ public:
             static_cast<uint64_t>(handle_window_),
             active_connection_limit_, open_connection_limit_,
             connection_cache_limit_, max_retries_,
-            retained.used};
+            retained.used, per_host_connection_limit_,
+            runtime_limit_generation_, runtime_limit_updates_};
+    }
+
+    bool requestRuntimeLimits(AsyncFetchRuntimeLimits limits) noexcept
+    {
+        if(!deterministic_force_max_ || limits.active == 0 ||
+           limits.per_host == 0 || limits.open < limits.active ||
+           limits.per_host > limits.active ||
+           limits.idle_cache > limits.open)
+            return false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if(stopping_)
+                return false;
+            if(limits.generation == 0)
+                limits.generation =
+                    runtime_limit_generation_.load(
+                        std::memory_order_acquire) + 1;
+            requested_limits_ = limits;
+            requested_limits_available_ = true;
+        }
+        wakeWorker();
+        return true;
     }
 
 private:
@@ -2070,9 +2113,20 @@ private:
         return CURLE_OK;
     }
 
+    static void clearFetchMemoryWaiter(
+        const std::shared_ptr<Transfer> &transfer, bool resumed) noexcept
+    {
+        if(transfer && transfer->fetch_memory_waiting)
+        {
+            transfer->fetch_memory_waiting = false;
+            noteGlobalFetchMemoryWaiterRemoved(resumed);
+        }
+    }
+
     void finish(std::shared_ptr<Transfer> transfer, CURLcode code,
                 bool added)
     {
+        clearFetchMemoryWaiter(transfer, false);
         transfer->cancellation_registration.reset();
         if(added)
             active_count_.fetch_sub(1, std::memory_order_relaxed);
@@ -2172,6 +2226,8 @@ private:
             if(!transfer->result->cookies.empty())
                 transfer->request.cookies = transfer->result->cookies;
             resetAttemptRetention(transfer->progress);
+            next_result->fetch_memory =
+                std::move(transfer->result->fetch_memory);
             transfer->result = std::move(next_result);
             transfer->progress = {};
             transfer->prereq_context = {};
@@ -2299,6 +2355,10 @@ private:
             return true;
         if(handle_window_ != 0 && active_.size() >= handle_window_)
             return false;
+        if(fetch_admission_blocked_ &&
+           globalFetchMemoryCapacityGeneration() ==
+               last_fetch_capacity_generation_)
+            return false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if(!pending_.empty())
@@ -2317,15 +2377,47 @@ private:
         for(;;)
         {
             std::shared_ptr<Transfer> transfer;
+            bool oversized = false;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if(pending_.empty() ||
                    (handle_window_ != 0 &&
                     active_.size() >= handle_window_))
                     return;
-                transfer = std::move(pending_.front());
+                transfer = pending_.front();
+                const FetchMemoryBudgetSnapshot fetch_budget =
+                    globalFetchMemoryBudgetSnapshot();
+                if(fetch_budget.enabled &&
+                   transfer->fetch_reservation_bytes > fetch_budget.limit)
+                {
+                    oversized = true;
+                }
+                else if(fetch_budget.enabled &&
+                        transfer->fetch_reservation_bytes != 0 &&
+                        !transfer->result->fetch_memory.acquire(
+                            transfer->fetch_reservation_bytes))
+                {
+                    if(!transfer->fetch_memory_waiting)
+                    {
+                        transfer->fetch_memory_waiting = true;
+                        noteGlobalFetchMemoryWaiterAdded();
+                    }
+                    fetch_admission_blocked_ = true;
+                    last_fetch_capacity_generation_ =
+                        globalFetchMemoryCapacityGeneration();
+                    return;
+                }
                 pending_.pop_front();
                 pending_count_.fetch_sub(1, std::memory_order_relaxed);
+            }
+            clearFetchMemoryWaiter(transfer, !oversized);
+            fetch_admission_blocked_ = false;
+            if(oversized)
+            {
+                transfer->progress.abort_reason =
+                    AsyncFetchFailure::SizeLimit;
+                finish(transfer, CURLE_FILESIZE_EXCEEDED, false);
+                continue;
             }
             startTransfer(std::move(transfer));
         }
@@ -2441,6 +2533,50 @@ private:
         drainMessages();
     }
 
+    void applyRequestedLimits()
+    {
+        AsyncFetchRuntimeLimits limits;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if(!requested_limits_available_)
+                return;
+            limits = requested_limits_;
+            requested_limits_available_ = false;
+        }
+        const long open = static_cast<long>(std::min<uint64_t>(
+            limits.open, static_cast<uint64_t>(LONG_MAX)));
+        const long per_host = static_cast<long>(std::min<uint64_t>(
+            limits.per_host, static_cast<uint64_t>(LONG_MAX)));
+        const long cache = static_cast<long>(std::min<uint64_t>(
+            limits.idle_cache, static_cast<uint64_t>(LONG_MAX)));
+        if(curl_multi_setopt(multi_, CURLMOPT_MAX_TOTAL_CONNECTIONS,
+                             open) != CURLM_OK ||
+           curl_multi_setopt(multi_, CURLMOPT_MAX_HOST_CONNECTIONS,
+                             per_host) != CURLM_OK ||
+           curl_multi_setopt(multi_, CURLMOPT_MAXCONNECTS,
+                             cache) != CURLM_OK)
+        {
+            writeLog(LOG_LEVEL_ERROR,
+                     "OUTBOUND_RUNTIME_LIMIT_UPDATE_FAILED generation=" +
+                         std::to_string(limits.generation));
+            return;
+        }
+        handle_window_.store(static_cast<size_t>(std::min<uint64_t>(
+                                 limits.active, SIZE_MAX)),
+                             std::memory_order_release);
+        active_connection_limit_.store(limits.active,
+                                       std::memory_order_release);
+        per_host_connection_limit_.store(limits.per_host,
+                                         std::memory_order_release);
+        open_connection_limit_.store(limits.open,
+                                     std::memory_order_release);
+        connection_cache_limit_.store(limits.idle_cache,
+                                      std::memory_order_release);
+        runtime_limit_generation_.store(limits.generation,
+                                        std::memory_order_release);
+        runtime_limit_updates_.fetch_add(1, std::memory_order_relaxed);
+    }
+
     void drainMessages()
     {
         int remaining = 0;
@@ -2461,7 +2597,10 @@ private:
             std::unique_lock<std::mutex> lock(mutex_);
             const uint64_t generation =
                 wake_generation_.load(std::memory_order_acquire);
-            if(stopping_ || !pending_.empty())
+            const uint64_t fetch_generation =
+                globalFetchMemoryCapacityGeneration();
+            if(stopping_ ||
+               (!pending_.empty() && !fetch_admission_blocked_))
                 return;
             for(const auto &transfer : delayed_)
             {
@@ -2472,13 +2611,19 @@ private:
                         transfer->request.deadline))
                     return;
             }
-            const auto awakened = [this, generation]() {
-                return stopping_ || !pending_.empty() ||
+            const auto awakened = [this, generation, fetch_generation]() {
+                return stopping_ ||
+                       (!pending_.empty() && !fetch_admission_blocked_) ||
                        wake_generation_.load(std::memory_order_acquire) !=
-                           generation;
+                           generation ||
+                       globalFetchMemoryCapacityGeneration() !=
+                           fetch_generation;
             };
-            if(delayed_.empty())
+            if(delayed_.empty() && !fetch_admission_blocked_)
                 condition_.wait(lock, awakened);
+            else if(delayed_.empty())
+                condition_.wait_for(lock, std::chrono::milliseconds(25),
+                                    awakened);
             else
             {
                 const auto next = std::min_element(
@@ -2505,6 +2650,8 @@ private:
            curl_timeout_ms >= 0)
             timeout_ms = static_cast<int>(
                 std::clamp<long>(curl_timeout_ms, 0, timeout_ms));
+        if(fetch_admission_blocked_)
+            timeout_ms = std::min(timeout_ms, 25);
         const auto now = std::chrono::steady_clock::now();
         for(const auto &[easy, transfer] : active_)
         {
@@ -2618,6 +2765,14 @@ private:
     {
         for(;;)
         {
+            applyRequestedLimits();
+            const uint64_t fetch_generation =
+                globalFetchMemoryCapacityGeneration();
+            if(fetch_generation != last_fetch_capacity_generation_)
+            {
+                last_fetch_capacity_generation_ = fetch_generation;
+                fetch_admission_blocked_ = false;
+            }
             prunePending();
             processDelayed();
             processPending();
@@ -2678,13 +2833,21 @@ private:
     std::atomic<int64_t> next_pending_deadline_ns_{INT64_MAX};
     std::atomic<uint64_t> next_retry_jitter_seed_{1};
     bool performance_mode_ = false;
+    bool deterministic_force_max_ = false;
     bool joining_ = false;
     bool joined_ = false;
     uint8_t max_retries_ = 1;
-    size_t handle_window_ = 0;
-    uint64_t active_connection_limit_ = 0;
-    uint64_t open_connection_limit_ = 0;
-    uint64_t connection_cache_limit_ = 0;
+    std::atomic<size_t> handle_window_{0};
+    std::atomic<uint64_t> active_connection_limit_{0};
+    std::atomic<uint64_t> per_host_connection_limit_{0};
+    std::atomic<uint64_t> open_connection_limit_{0};
+    std::atomic<uint64_t> connection_cache_limit_{0};
+    AsyncFetchRuntimeLimits requested_limits_;
+    bool requested_limits_available_ = false;
+    std::atomic<uint64_t> runtime_limit_generation_{0};
+    std::atomic<uint64_t> runtime_limit_updates_{0};
+    uint64_t last_fetch_capacity_generation_ = 0;
+    bool fetch_admission_blocked_ = false;
     int running_handles_ = 0;
 };
 
@@ -2720,7 +2883,17 @@ AsyncFetchEngineSnapshot asyncFetchEngineSnapshot() noexcept
         return engine->snapshot();
     const RetainedResponseByteSnapshot retained =
         retainedResponseByteSnapshot();
-    return {false, false, 0, 0, 0, 0, 0, 0, 0, 0, retained.used};
+    return {false, false, 0, 0, 0, 0, 0, 0, 0, 0, retained.used,
+            0, 0, 0};
+}
+
+bool requestAsyncFetchRuntimeLimits(
+    AsyncFetchRuntimeLimits limits) noexcept
+{
+    if(CurlMultiEngine *engine =
+           multi_engine_instance.load(std::memory_order_acquire))
+        return engine->requestRuntimeLimits(limits);
+    return false;
 }
 
 void webGetAsync(AsyncFetchRequest request, AsyncFetchCompletion completion)
@@ -4457,6 +4630,12 @@ void startAsyncOwnedCacheNetwork(
                                           state->request.context);
                     AsyncFetchRequest fallback_request =
                         makeAsyncOwnedCacheRequest(state, fallback_url);
+                    // The original body remains charged to retained_bytes (or
+                    // its request context) while the fallback is in flight.
+                    // Release the fetch reservation first so one sequential
+                    // fallback cannot deadlock against its own full-size
+                    // reservation.
+                    original->fetch_memory.reset();
                     multiEngine().submit(
                         std::move(fallback_request), fallback_route,
                         state->allow_insecure_tls,
@@ -4622,6 +4801,7 @@ void startAsyncOwnedDirectFetch(
                                           state->request.context);
                     AsyncFetchRequest fallback_request =
                         makeAsyncOwnedDirectRequest(state, fallback_url);
+                    original->fetch_memory.reset();
                     multiEngine().submit(
                         std::move(fallback_request), fallback_route,
                         state->allow_insecure_tls,

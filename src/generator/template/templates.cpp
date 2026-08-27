@@ -640,9 +640,7 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
         rule_path_typed = x.rule_path_typed;
         if(rule_path.empty())
         {
-            strLine = waitWithoutCpuPermit(
-                          [&] { return x.rule_content.get(); })
-                          .substr(2);
+            strLine = materializeRulesetContent(x).substr(2);
             if(script)
             {
                 if(startsWith(strLine, "MATCH") || startsWith(strLine, "FINAL"))
@@ -735,8 +733,7 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                     continue;
             }
 
-            retrieved_rules =
-                waitWithoutCpuPermit([&] { return x.rule_content.get(); });
+            retrieved_rules = materializeRulesetContent(x);
             if(retrieved_rules.empty())
             {
                 writeLog(LOG_LEVEL_WARNING, "获取规则集失败或规则集为空：" +

@@ -29,6 +29,7 @@
 #include "handler/conversion_service.h"
 #include "generator/config/ruleconvert.h"
 #include "handler/settings.h"
+#include "handler/webget.h"
 #include "runtime/owner_admission.h"
 #include "runtime/transport_admission.h"
 #include "server/request_context.h"
@@ -748,7 +749,24 @@ struct ForceMaxGuardLimits {
   uint64_t transport_bytes = 1;
   uint64_t retained_bytes = 1;
   uint64_t cache_bytes = 3;
+  uint64_t outbound_active = 1;
+  uint64_t outbound_per_host = 1;
+  uint64_t outbound_open = 1;
+  uint64_t outbound_idle_cache = 0;
+  bool freeze_cache_growth = false;
 };
+
+std::atomic<bool> force_max_cache_growth_frozen{false};
+std::atomic<uint64_t> force_max_cache_guard_generation{0};
+std::atomic<uint64_t> force_max_outbound_limit_generation{1};
+
+void applyForceMaxCacheGuardPolicy(bool freeze) noexcept {
+  const bool previous = force_max_cache_growth_frozen.exchange(
+      freeze, std::memory_order_acq_rel);
+  if (previous != freeze)
+    force_max_cache_guard_generation.fetch_add(1,
+                                                std::memory_order_acq_rel);
+}
 
 uint64_t guardedHalf(uint64_t value) noexcept {
   return std::max<uint64_t>(1, value / 2);
@@ -765,6 +783,11 @@ ForceMaxGuardLimits forceMaxGuardLimits(
       full.transport_active_bytes,
       full.retained_response_bytes,
       full.cache_bytes,
+      full.outbound_active,
+      full.outbound_per_host,
+      full.outbound_open,
+      full.outbound_idle_cache,
+      false,
   };
   if (!guarded)
     return limits;
@@ -774,7 +797,12 @@ ForceMaxGuardLimits forceMaxGuardLimits(
   limits.transport_entries = guardedHalf(limits.transport_entries);
   limits.transport_bytes = guardedHalf(limits.transport_bytes);
   limits.retained_bytes = guardedHalf(limits.retained_bytes);
-  limits.cache_bytes = std::max<uint64_t>(3, limits.cache_bytes / 2);
+  // Preserve resident cache entries. Cache write sites observe this policy and
+  // reject only net growth while Guarded; startup storage limits remain full.
+  limits.freeze_cache_growth = true;
+  limits.outbound_active = guardedHalf(limits.outbound_active);
+  limits.outbound_per_host = guardedHalf(limits.outbound_per_host);
+  limits.outbound_open = guardedHalf(limits.outbound_open);
   if (observed && observed->valid) {
     limits.cpu_permits =
         std::min(limits.cpu_permits, observed->compute_permits);
@@ -790,7 +818,21 @@ ForceMaxGuardLimits forceMaxGuardLimits(
         limits.retained_bytes, observed->retained_response_bytes);
     limits.cache_bytes =
         std::min(limits.cache_bytes, observed->cache_bytes);
+    limits.outbound_active =
+        std::min(limits.outbound_active, observed->outbound_active);
+    limits.outbound_per_host =
+        std::min(limits.outbound_per_host, observed->outbound_per_host);
+    limits.outbound_open =
+        std::min(limits.outbound_open, observed->outbound_open);
   }
+  limits.outbound_open =
+      std::max(limits.outbound_open, limits.outbound_active);
+  limits.outbound_active =
+      std::min(limits.outbound_active, limits.outbound_open);
+  limits.outbound_per_host =
+      std::min(limits.outbound_per_host, limits.outbound_active);
+  limits.outbound_idle_cache =
+      limits.outbound_open - limits.outbound_active;
   return limits;
 }
 
@@ -801,21 +843,13 @@ void applyForceMaxGuardLimits(const ForceMaxGuardLimits &limits) noexcept {
   (void)setGlobalTransportAdmissionActiveLimits(
       limits.transport_entries, limits.transport_bytes);
   configureRetainedResponseByteLimit(limits.retained_bytes);
-  const uint64_t response_bytes = limits.cache_bytes / 2;
-  const uint64_t ruleset_bytes = limits.cache_bytes / 4;
-  const uint64_t external_bytes =
-      limits.cache_bytes - response_bytes - ruleset_bytes;
-  configureResponseMicroCacheLimit(response_bytes);
-  configureRulesetConversionCache(
-      static_cast<size_t>(std::min<uint64_t>(
-          std::max<uint64_t>(1, ruleset_bytes / (UINT64_C(64) * 1024)),
-          SIZE_MAX)),
-      static_cast<size_t>(std::min<uint64_t>(ruleset_bytes, SIZE_MAX)));
-  configureExternalConfigCache(
-      static_cast<size_t>(std::min<uint64_t>(
-          std::max<uint64_t>(1, external_bytes / (UINT64_C(128) * 1024)),
-          SIZE_MAX)),
-      static_cast<size_t>(std::min<uint64_t>(external_bytes, SIZE_MAX)));
+  applyForceMaxCacheGuardPolicy(limits.freeze_cache_growth);
+  const uint64_t generation =
+      force_max_outbound_limit_generation.fetch_add(
+          1, std::memory_order_acq_rel) + 1;
+  (void)requestAsyncFetchRuntimeLimits(
+      {limits.outbound_active, limits.outbound_per_host,
+       limits.outbound_open, limits.outbound_idle_cache, generation});
 }
 
 struct ForceMaxHardDanger {
@@ -1081,6 +1115,14 @@ void controllerLoop() noexcept {
 }
 
 } // namespace
+
+ForceMaxCacheGuardPolicySnapshot
+forceMaxCacheGuardPolicySnapshot() noexcept {
+  return {
+      force_max_cache_growth_frozen.load(std::memory_order_acquire),
+      force_max_cache_guard_generation.load(std::memory_order_acquire),
+  };
+}
 
 ResourceEnvelope probeCurrentResourceEnvelope() noexcept {
   ResourceControlSnapshot snapshot;

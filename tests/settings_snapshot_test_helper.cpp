@@ -22,10 +22,13 @@
 #include "generator/config/nodemanip.h"
 #include "parser/mihomo_bridge.h"
 #include "runtime/conversion_flow.h"
+#include "runtime/blocking_io_executor.h"
+#include "runtime/memory_budget.h"
 #include "runtime/quickjs_lane.h"
 #include "script/script_quickjs.h"
 #include "server/webserver.h"
 #include "utils/logger.h"
+#include "utils/resource_control.h"
 
 WebServer webServer;
 
@@ -219,8 +222,44 @@ int main(int argc, char *argv[]) {
         async_no_cache_outcome.payload->content ==
             "owned-webget:/webget-probe-hit" &&
         async_no_cache_outcome.payload->response_headers_touched &&
-        async_no_cache_outcome.payload->retained_bytes.bytes() >=
-            async_no_cache_outcome.payload->content.size();
+            async_no_cache_outcome.payload->retained_bytes.bytes() >=
+                async_no_cache_outcome.payload->content.size();
+    bool async_fetch_memory_lifetime_ok = true;
+    if (globalFetchMemoryBudgetSnapshot().enabled) {
+      std::promise<SharedAsyncFetchResult> held_fetch_completion;
+      AsyncFetchRequest held_fetch_request;
+      held_fetch_request.url =
+          std::string(argv[3]) + "?fetch-memory-lifetime=1";
+      held_fetch_request.proxy = ProxyPolicy::direct();
+      held_fetch_request.capture_content = true;
+      held_fetch_request.retain_result_bytes = true;
+      held_fetch_request.context = FetchContext::TrustedConfig;
+      held_fetch_request.deadline =
+          std::chrono::steady_clock::now() + std::chrono::seconds(10);
+      webGetAsync(
+          std::move(held_fetch_request),
+          [&](SharedAsyncFetchResult result) {
+            held_fetch_completion.set_value(std::move(result));
+          });
+      SharedAsyncFetchResult held_fetch =
+          held_fetch_completion.get_future().get();
+      const FetchMemoryBudgetSnapshot held_fetch_snapshot =
+          globalFetchMemoryBudgetSnapshot();
+      async_fetch_memory_lifetime_ok =
+          held_fetch && held_fetch->failure == AsyncFetchFailure::None &&
+          !held_fetch->content.empty() &&
+          held_fetch->fetch_memory.bytes() != 0 &&
+          held_fetch_snapshot.used >= held_fetch->fetch_memory.bytes();
+      held_fetch.reset();
+      const auto fetch_release_deadline =
+          std::chrono::steady_clock::now() + std::chrono::seconds(2);
+      while (globalFetchMemoryBudgetSnapshot().used != 0 &&
+             std::chrono::steady_clock::now() < fetch_release_deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      async_fetch_memory_lifetime_ok =
+          async_fetch_memory_lifetime_ok &&
+          globalFetchMemoryBudgetSnapshot().used == 0;
+    }
     std::promise<OwnedWebGetAsyncOutcome> expired_completion;
     OwnedWebGetRequest expired_request;
     expired_request.url =
@@ -300,6 +339,8 @@ int main(int argc, char *argv[]) {
         initializeOwnedWebGetContinuationRuntime(continuation_budget);
     const OwnedWebGetContinuationInitStatus different_budget_init =
         initializeOwnedWebGetContinuationRuntime({2, 9, 1024 * 1024});
+    const BlockingIoExecutorInitStatus blocking_io_init =
+        initializeBlockingIoExecutor({2, 8, 1024 * 1024});
     const std::string fixture_root =
         std::string(argv[3]).substr(0, std::string(argv[3]).rfind('/'));
     std::promise<AsyncExternalConfigResult> async_external_completion;
@@ -321,7 +362,9 @@ int main(int argc, char *argv[]) {
             ExternalConfigLoadStatus::Success &&
         async_external_result.config.custom_proxy_group.size() == 1 &&
         async_external_result.config.custom_proxy_group.front().Name ==
-            "AsyncImported";
+            "AsyncImported" &&
+        async_external_result.template_arguments.local_vars["marker"].find(
+            "template-ok") != std::string::npos;
     auto make_subscription_requests = [&] {
       std::vector<AsyncSubscriptionRequest> requests;
       for (uint64_t index = 0; index < 2; ++index) {
@@ -404,6 +447,14 @@ int main(int argc, char *argv[]) {
       base.proxy = ProxyPolicy::direct();
       base.cache_ttl = 0;
       requests.emplace_back(std::move(base));
+      AsyncConversionResourceRequest local_base;
+      local_base.kind = ConversionResourceKind::Base;
+      local_base.source_index = 3;
+      local_base.url = config.filename().string();
+      local_base.proxy = ProxyPolicy::direct();
+      local_base.cache_ttl = 0;
+      local_base.context = FetchContext::TrustedConfig;
+      requests.emplace_back(std::move(local_base));
       return requests;
     };
     std::promise<AsyncConversionResourceBatchResult>
@@ -420,7 +471,7 @@ int main(int argc, char *argv[]) {
     AsyncConversionResourceBatchResult async_resource_result =
         async_resource_completion.get_future().get();
     bool async_conversion_resources_ok =
-        async_resource_result.resources.size() == 3;
+        async_resource_result.resources.size() == 4;
     for (size_t index = 0;
          index < async_resource_result.resources.size(); ++index) {
       const ResolvedConversionResource &resource =
@@ -849,23 +900,28 @@ int main(int argc, char *argv[]) {
     CacheFetchPayloadSnapshot async_cache_payload_snapshot;
     AsyncFetchEngineSnapshot async_cache_engine_snapshot;
     OwnedWebGetContinuationRuntimeSnapshot async_cache_runtime_snapshot;
+    FetchMemoryBudgetSnapshot async_fetch_memory_snapshot;
     do {
       async_cache_payload_snapshot = cacheFetchPayloadSnapshot();
       async_cache_engine_snapshot = asyncFetchEngineSnapshot();
       async_cache_runtime_snapshot =
           ownedWebGetContinuationRuntimeSnapshot();
+      async_fetch_memory_snapshot =
+          globalFetchMemoryBudgetSnapshot();
       if (async_cache_payload_snapshot.retained_bytes == 0 &&
           async_cache_payload_snapshot.registry_entries == 0 &&
           async_cache_engine_snapshot.pending == 0 &&
           async_cache_engine_snapshot.active == 0 &&
           async_cache_runtime_snapshot.scheduler.queued_entries == 0 &&
           async_cache_runtime_snapshot.scheduler.queued_bytes == 0 &&
-          async_cache_runtime_snapshot.scheduler.active == 0)
+          async_cache_runtime_snapshot.scheduler.active == 0 &&
+          (!async_fetch_memory_snapshot.enabled ||
+           async_fetch_memory_snapshot.used == 0))
         break;
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     } while (std::chrono::steady_clock::now() <
              async_cache_cleanup_deadline);
-    const bool async_cache_resources_ok =
+    bool async_cache_resources_ok =
         async_cache_payload_snapshot.retained_bytes == 0 &&
         async_cache_payload_snapshot.registry_entries == 0 &&
         async_cache_engine_snapshot.pending == 0 &&
@@ -873,8 +929,86 @@ int main(int argc, char *argv[]) {
         async_cache_runtime_snapshot.scheduler.queued_entries == 0 &&
         async_cache_runtime_snapshot.scheduler.queued_bytes == 0 &&
         async_cache_runtime_snapshot.scheduler.active == 0 &&
+        (!async_fetch_memory_snapshot.enabled ||
+         (async_fetch_memory_snapshot.used == 0 &&
+          async_fetch_memory_snapshot.waiters == 0)) &&
         retainedResponseByteSnapshot().used ==
             retained_before_async_cache;
+
+    bool async_runtime_limits_ok = true;
+    const ResourceControlSnapshot runtime_resources =
+        resourceControlSnapshot();
+    if (runtime_resources.effective_mode == "force_max") {
+      const ForceMaxBudget &budget =
+          runtime_resources.calculated_force_max_budget;
+      const AsyncFetchEngineSnapshot before_limits =
+          asyncFetchEngineSnapshot();
+      const uint64_t guarded_active =
+          std::max<uint64_t>(1, budget.outbound_active / 2);
+      const uint64_t guarded_open =
+          std::max<uint64_t>(guarded_active, budget.outbound_open / 2);
+      const uint64_t guarded_host =
+          std::min<uint64_t>(guarded_active,
+                             std::max<uint64_t>(1,
+                                                budget.outbound_per_host / 2));
+      const uint64_t guarded_generation =
+          before_limits.runtime_limit_generation + 100;
+      async_runtime_limits_ok = requestAsyncFetchRuntimeLimits(
+          {guarded_active, guarded_host, guarded_open,
+           guarded_open - guarded_active, guarded_generation});
+      const auto guarded_deadline =
+          std::chrono::steady_clock::now() + std::chrono::seconds(2);
+      AsyncFetchEngineSnapshot guarded_snapshot;
+      do {
+        guarded_snapshot = asyncFetchEngineSnapshot();
+        if (guarded_snapshot.runtime_limit_generation ==
+            guarded_generation)
+          break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      } while (std::chrono::steady_clock::now() < guarded_deadline);
+      async_runtime_limits_ok =
+          async_runtime_limits_ok &&
+          guarded_snapshot.runtime_limit_generation ==
+              guarded_generation &&
+          guarded_snapshot.active_connection_limit == guarded_active &&
+          guarded_snapshot.per_host_connection_limit == guarded_host &&
+          guarded_snapshot.open_connection_limit == guarded_open &&
+          guarded_snapshot.connection_cache_limit ==
+              guarded_open - guarded_active;
+
+      const uint64_t restored_generation = guarded_generation + 1;
+      async_runtime_limits_ok =
+          requestAsyncFetchRuntimeLimits(
+              {budget.outbound_active, budget.outbound_per_host,
+               budget.outbound_open, budget.outbound_idle_cache,
+               restored_generation}) &&
+          async_runtime_limits_ok;
+      const auto restored_deadline =
+          std::chrono::steady_clock::now() + std::chrono::seconds(2);
+      AsyncFetchEngineSnapshot restored_snapshot;
+      do {
+        restored_snapshot = asyncFetchEngineSnapshot();
+        if (restored_snapshot.runtime_limit_generation ==
+            restored_generation)
+          break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      } while (std::chrono::steady_clock::now() < restored_deadline);
+      async_runtime_limits_ok =
+          async_runtime_limits_ok &&
+          restored_snapshot.runtime_limit_generation ==
+              restored_generation &&
+          restored_snapshot.active_connection_limit ==
+              budget.outbound_active &&
+          restored_snapshot.per_host_connection_limit ==
+              budget.outbound_per_host &&
+          restored_snapshot.open_connection_limit ==
+              budget.outbound_open &&
+          restored_snapshot.connection_cache_limit ==
+              budget.outbound_idle_cache;
+    }
+    async_cache_resources_ok =
+        async_cache_resources_ok && async_runtime_limits_ok &&
+        async_fetch_memory_lifetime_ok;
 
     bool conversion_flow_ok = false;
     ComputeExecutor *compute_executor = globalComputeExecutor();
@@ -1060,7 +1194,7 @@ int main(int argc, char *argv[]) {
                     flow_settings, resource_flow_context,
                     [&](ConversionFlow &resumed,
                         AsyncConversionResourceBatchResult result) {
-                      bool valid = result.resources.size() == 3;
+                      bool valid = result.resources.size() == 4;
                       for (size_t index = 0;
                            index < result.resources.size(); ++index)
                         valid = valid && result.resources[index].payload &&
@@ -1366,6 +1500,9 @@ int main(int argc, char *argv[]) {
           flow_registry.rejected_total >= 1 && flow_registry.stopping;
     }
 
+    requestBlockingIoExecutorShutdown();
+    const bool blocking_io_joined = joinBlockingIoExecutor();
+
     std::promise<void> throwing_completion_called;
     (void)submitOwnedWebGetContinuation(
         RequestCostClass::Low, 0,
@@ -1504,6 +1641,10 @@ int main(int argc, char *argv[]) {
     writer.Bool(async_cache_rejection_ok);
     writer.Key("async_cache_resources_ok");
     writer.Bool(async_cache_resources_ok);
+    writer.Key("async_runtime_limits_ok");
+    writer.Bool(async_runtime_limits_ok);
+    writer.Key("async_fetch_memory_lifetime_ok");
+    writer.Bool(async_fetch_memory_lifetime_ok);
     writer.Key("conversion_flow_ok");
     writer.Bool(conversion_flow_ok);
     writer.Key("async_external_config_ok");
@@ -1518,6 +1659,24 @@ int main(int argc, char *argv[]) {
     writer.Bool(async_subscription_ok);
     writer.Key("async_conversion_resources_ok");
     writer.Bool(async_conversion_resources_ok);
+    writer.Key("async_conversion_resource_summary");
+    writer.StartArray();
+    for (const ResolvedConversionResource &resource :
+         async_resource_result.resources) {
+      writer.StartObject();
+      writer.Key("source_index");
+      writer.Uint64(resource.source_index);
+      writer.Key("kind");
+      writer.Uint(static_cast<unsigned int>(resource.kind));
+      writer.Key("failure");
+      writer.Uint(static_cast<unsigned int>(resource.failure));
+      writer.Key("status");
+      writer.Int(resource.payload ? resource.payload->status_code : 0);
+      writer.Key("bytes");
+      writer.Uint64(resource.payload ? resource.payload->content.size() : 0);
+      writer.EndObject();
+    }
+    writer.EndArray();
     writer.Key("async_template_ok");
     writer.Bool(async_template_ok);
     writer.Key("async_upload_ok");
@@ -1544,6 +1703,9 @@ int main(int argc, char *argv[]) {
                     OwnedWebGetContinuationInitStatus::AlreadyInitialized &&
                 different_budget_init ==
                     OwnedWebGetContinuationInitStatus::BudgetMismatch &&
+                blocking_io_init ==
+                    BlockingIoExecutorInitStatus::Initialized &&
+                blocking_io_joined &&
                 active_status == SchedulerSubmitStatus::Accepted &&
                 active_status_second == SchedulerSubmitStatus::Accepted &&
                 pending_status == SchedulerSubmitStatus::Stopping &&

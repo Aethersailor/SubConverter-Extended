@@ -113,6 +113,7 @@ SET(SUBCONVERTER_RUNTIME_SOURCES
     src/runtime/blocking_io_executor.cpp
     src/runtime/compute_executor.cpp
     src/runtime/conversion_flow.cpp
+    src/runtime/memory_budget.cpp
     src/runtime/owner_admission.cpp
     src/runtime/quickjs_lane.cpp
     src/runtime/runtime_coordinator.cpp
@@ -524,6 +525,7 @@ IF(BUILD_TESTS)
         tests/concurrency_primitives_test.cpp
         src/runtime/blocking_io_executor.cpp
         src/runtime/compute_executor.cpp
+        src/runtime/memory_budget.cpp
         src/runtime/owner_admission.cpp
         src/utils/force_max_budget.cpp
         src/utils/resource_probe.cpp)

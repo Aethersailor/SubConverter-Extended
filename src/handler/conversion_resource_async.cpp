@@ -4,7 +4,29 @@
 #include <mutex>
 #include <utility>
 
+#include "runtime/blocking_io_executor.h"
+#include "handler/settings.h"
+#include "utils/file_extra.h"
+#include "utils/network.h"
+
 namespace {
+
+AsyncFetchFailure localFailure(SchedulerSubmitStatus status) noexcept {
+  switch (status) {
+  case SchedulerSubmitStatus::Cancelled:
+    return AsyncFetchFailure::Cancelled;
+  case SchedulerSubmitStatus::Deadline:
+    return AsyncFetchFailure::Deadline;
+  case SchedulerSubmitStatus::Stopping:
+    return AsyncFetchFailure::Shutdown;
+  case SchedulerSubmitStatus::EntryLimit:
+  case SchedulerSubmitStatus::ByteLimit:
+    return AsyncFetchFailure::Capacity;
+  case SchedulerSubmitStatus::Accepted:
+    break;
+  }
+  return AsyncFetchFailure::Transport;
+}
 
 class AsyncConversionResourceState
     : public std::enable_shared_from_this<AsyncConversionResourceState> {
@@ -32,24 +54,129 @@ public:
       slot.kind = source.kind;
       slot.source_index = source.source_index;
       slot.url = source.url;
-      OwnedWebGetRequest request;
-      request.url = source.url;
-      request.proxy = source.proxy;
-      request.cache_ttl = source.cache_ttl;
-      request.capture_response_headers = true;
-      request.context = source.context;
-      request.retention = OwnedWebGetRequest::RetentionPolicy::Result;
-      ScopedSettingsView settings_view(settings_);
-      webGetOwnedAsync(
-          std::move(request), request_context_,
-          [self = shared_from_this(), index](
-              OwnedWebGetAsyncOutcome outcome) mutable {
-            self->complete(index, std::move(outcome));
-          });
+      if (source.preloaded_content.valid()) {
+        startPreloaded(index, source.preloaded_content);
+        continue;
+      }
+      if (!isLink(source.url) && !startsWith(source.url, "data:")) {
+        startLocal(index, source);
+        continue;
+      }
+      startRemote(index, source);
     }
   }
 
 private:
+  void startRemote(size_t index,
+                   const AsyncConversionResourceRequest &source) {
+    OwnedWebGetRequest request;
+    request.url = source.url;
+    request.proxy = source.proxy;
+    request.has_request_headers = !source.request_headers.empty();
+    request.request_headers = source.request_headers;
+    request.cache_ttl = source.cache_ttl;
+    request.capture_response_headers = true;
+    request.context = source.context;
+    request.retention = OwnedWebGetRequest::RetentionPolicy::Result;
+    ScopedSettingsView settings_view(settings_);
+    webGetOwnedAsync(
+        std::move(request), request_context_,
+        [self = shared_from_this(), index](
+            OwnedWebGetAsyncOutcome outcome) mutable {
+          self->complete(index, std::move(outcome));
+        });
+  }
+
+  void startPreloaded(size_t index,
+                      std::shared_future<std::string> content) {
+    auto self = shared_from_this();
+    (void)submitBlockingIo(
+        {.cost = RequestCostClass::Low,
+         .bytes = 0,
+         .deadline = request_context_->deadline(),
+         .cancellation = request_context_->cancellationToken(),
+         .preferred_worker = std::nullopt},
+        [self, index, content = std::move(content)]() mutable {
+          OwnedWebGetAsyncOutcome outcome;
+          try {
+            auto payload = std::make_shared<OwnedWebGetAsyncPayload>();
+            payload->status_code = 200;
+            payload->content = content.get();
+            if (!payload->retained_bytes.retain(payload->content.size()))
+              outcome.failure = AsyncFetchFailure::Capacity;
+            else
+              outcome.payload = std::move(payload);
+          } catch (...) {
+            outcome.failure = AsyncFetchFailure::Transport;
+          }
+          self->complete(index, std::move(outcome));
+        },
+        [self, index](SchedulerSubmitStatus completion_status,
+                      std::exception_ptr error) mutable {
+          if (completion_status == SchedulerSubmitStatus::Accepted && !error)
+            return;
+          OwnedWebGetAsyncOutcome outcome;
+          outcome.failure = error ? AsyncFetchFailure::Transport
+                                  : localFailure(completion_status);
+          self->complete(index, std::move(outcome));
+        });
+  }
+
+  void startLocal(size_t index,
+                  const AsyncConversionResourceRequest &source) {
+    const AsyncConversionResourceRequest request = source;
+    const std::string path = request.url;
+    auto self = shared_from_this();
+    const SchedulerSubmitStatus status = submitBlockingIo(
+        {.cost = RequestCostClass::Low,
+         .bytes = static_cast<uint64_t>(path.size()),
+         .deadline = request_context_->deadline(),
+         .cancellation = request_context_->cancellationToken(),
+         .preferred_worker = std::nullopt},
+        [self, index, path, request]() mutable {
+          ScopedSettingsView settings_view(self->settings_);
+          ScopedRequestContext request_scope(self->request_context_);
+          OwnedWebGetAsyncOutcome outcome;
+          try {
+            const bool trusted = isTrustedLocalResourcePath(path);
+            const bool scope_limit = !trusted;
+            if (!fileExist(path, scope_limit) ||
+                (isPublicFetchRestricted(request.context) && !trusted)) {
+              self->startRemote(index, request);
+              return;
+            } else {
+              auto payload = std::make_shared<OwnedWebGetAsyncPayload>();
+              payload->status_code = 200;
+              payload->content = fileGet(path, scope_limit);
+              if (!payload->retained_bytes.retain(payload->content.size())) {
+                outcome.failure = AsyncFetchFailure::Capacity;
+              } else {
+                outcome.payload = std::move(payload);
+              }
+            }
+          } catch (...) {
+            outcome.failure = AsyncFetchFailure::Transport;
+          }
+          self->complete(index, std::move(outcome));
+        },
+        [self, index](SchedulerSubmitStatus completion_status,
+                      std::exception_ptr error) mutable {
+          if (completion_status == SchedulerSubmitStatus::Accepted && !error)
+            return;
+          OwnedWebGetAsyncOutcome outcome;
+          outcome.failure = error ? AsyncFetchFailure::Transport
+                                  : localFailure(completion_status);
+          if (completion_status == SchedulerSubmitStatus::Cancelled)
+            outcome.cancellation = RequestCancellationReason::ClientDisconnected;
+          else if (completion_status == SchedulerSubmitStatus::Deadline)
+            outcome.cancellation = RequestCancellationReason::Deadline;
+          else if (completion_status == SchedulerSubmitStatus::Stopping)
+            outcome.cancellation = RequestCancellationReason::Shutdown;
+          self->complete(index, std::move(outcome));
+        });
+    (void)status;
+  }
+
   void complete(size_t index,
                 OwnedWebGetAsyncOutcome outcome) noexcept {
     bool ready = false;

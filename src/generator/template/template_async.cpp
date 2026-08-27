@@ -81,7 +81,8 @@ private:
     }
     if (status != 0 || fetch_failed) {
       finish(fetch_failed ? AsyncTemplateStatus::FetchFailed
-                          : AsyncTemplateStatus::RenderFailed);
+                          : AsyncTemplateStatus::RenderFailed,
+             std::move(output));
       return;
     }
     finishSuccess(std::move(output));
@@ -158,14 +159,15 @@ private:
     }
   }
 
-  void finish(AsyncTemplateStatus status) noexcept {
+  void finish(AsyncTemplateStatus status,
+              std::string output = {}) noexcept {
     if (completed_.exchange(true, std::memory_order_acq_rel))
       return;
     AsyncTemplateCompletion completion = std::move(completion_);
     if (!completion)
       return;
     try {
-      completion({status, {}, resolved_fetches_.size()});
+      completion({status, std::move(output), resolved_fetches_.size()});
     } catch (...) {
     }
   }

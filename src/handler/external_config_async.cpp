@@ -8,6 +8,7 @@
 
 #include "handler/proxy_policy.h"
 #include "handler/webget.h"
+#include "generator/template/template_async.h"
 #include "runtime/blocking_io_executor.h"
 #include "utils/file_extra.h"
 #include "utils/logger.h"
@@ -66,13 +67,46 @@ public:
                       return;
                     }
                     self->base_content_ = std::move(content);
-                    self->scheduleParse();
+                    self->renderBase();
                   } catch (...) {
                     self->finish(
                         ExternalConfigLoadStatus::ResourceLimitExceeded,
                         "base_completion");
                   }
                 });
+  }
+
+  void renderBase() {
+    auto self = shared_from_this();
+    renderTemplateAsync(
+        base_content_, template_arguments_, settings_->templatePath,
+        context_, settings_, request_context_,
+        [self](AsyncTemplateResult result) mutable {
+          if (result.status != AsyncTemplateStatus::Success) {
+            const char *failure_stage = "base_render";
+            if (result.status == AsyncTemplateStatus::FetchFailed)
+              failure_stage = "base_render_fetch";
+            else if (result.status == AsyncTemplateStatus::RenderFailed)
+              failure_stage = "base_render_syntax";
+            else if (result.status ==
+                     AsyncTemplateStatus::ResourceLimitExceeded)
+              failure_stage = "base_render_capacity";
+            self->finish(
+                result.status == AsyncTemplateStatus::ResourceLimitExceeded
+                    ? ExternalConfigLoadStatus::ResourceLimitExceeded
+                    : ExternalConfigLoadStatus::RenderFailed,
+                failure_stage);
+            return;
+          }
+          if (!self->retain(result.output.size())) {
+            self->finish(
+                ExternalConfigLoadStatus::ResourceLimitExceeded,
+                "rendered_retention");
+            return;
+          }
+          self->rendered_content_ = std::move(result.output);
+          self->scheduleParse();
+        });
   }
 
 private:
@@ -200,9 +234,11 @@ private:
     ExternalConfig attempt;
     attempt.tpl_args = &attempt_arguments;
     string_array missing;
-    const ExternalConfigLoadResult loaded = loadExternalConfigFromContent(
-        path_, base_content_, attempt, context_, &resolved_imports_,
-        &missing);
+    const ExternalConfigLoadResult loaded =
+        loadExternalConfigFromRenderedContent(
+            path_, rendered_content_, attempt, context_,
+            &resolved_imports_, &missing,
+            isExternalConfigCacheableContent(base_content_));
     if (!missing.empty()) {
       const uint64_t total = static_cast<uint64_t>(resolved_imports_.size()) +
                              static_cast<uint64_t>(missing.size());
@@ -306,6 +342,7 @@ private:
   template_args template_arguments_;
   AsyncExternalConfigCompletion completion_;
   std::string base_content_;
+  std::string rendered_content_;
   string_map resolved_imports_;
   RetainedResponseByteLease retained_;
   std::mutex mutex_;

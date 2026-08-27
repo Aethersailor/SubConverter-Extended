@@ -17,8 +17,8 @@
 enum class ConversionFlowPhase {
   Preparing,
   FetchingExternalConfig,
-  FetchingSubscriptions,
   FetchingRulesets,
+  FetchingSubscriptions,
   Parsing,
   Generating,
   Uploading,

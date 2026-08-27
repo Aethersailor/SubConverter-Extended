@@ -191,6 +191,7 @@ struct ExternalConfigLoadResult {
 };
 
 extern Settings global;
+extern const std::map<std::string, ruleset_type> RulesetTypes;
 
 bool isPublicFetchRestricted(FetchContext context);
 bool isTrustedLocalResourcePath(const std::string &path);
@@ -207,6 +208,13 @@ ExternalConfigLoadResult loadExternalConfigFromContent(
     FetchContext context = FetchContext::TrustedConfig,
     const string_map *resolved_imports = nullptr,
     string_array *missing_imports = nullptr);
+ExternalConfigLoadResult loadExternalConfigFromRenderedContent(
+    const std::string &path, const std::string &rendered_content,
+    ExternalConfig &ext,
+    FetchContext context = FetchContext::TrustedConfig,
+    const string_map *resolved_imports = nullptr,
+    string_array *missing_imports = nullptr,
+    bool source_cacheable = true);
 bool isExternalConfigCacheableContent(const std::string &content);
 size_t externalConfigCacheMaxEntries();
 size_t externalConfigCacheMaxBytes();

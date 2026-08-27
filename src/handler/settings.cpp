@@ -864,7 +864,9 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
               RULESET_SURGE,
               makeReadyStringFuture(rule_url.substr(pos)),
               0,
-              x.Options};
+              x.Options,
+              RulesetDelivery::ServerFetched,
+              {}};
     } else {
       ruleset_type type = RULESET_SURGE;
       rule_url_typed = rule_url;
@@ -912,7 +914,8 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
               x.Interval,
               x.Options,
               native_stash_provider ? RulesetDelivery::NativeStashProvider
-                                    : RulesetDelivery::ServerFetched};
+                                    : RulesetDelivery::ServerFetched,
+              {}};
     }
     ruleset_content_array.emplace_back(std::move(rc));
     ++source_index;
@@ -2401,9 +2404,6 @@ ExternalConfigLoadResult loadExternalConfigFromContent(
   if (config.empty())
     return {ExternalConfigLoadStatus::FetchFailed};
 
-  ScopedResolvedImportView import_view(resolved_imports,
-                                       missing_imports);
-
   bool template_fetch_failed = false;
   if (render_template(config, *request_tpl_args, base_content,
                       settings.templatePath, context,
@@ -2411,8 +2411,29 @@ ExternalConfigLoadResult loadExternalConfigFromContent(
       template_fetch_failed)
     return {ExternalConfigLoadStatus::RenderFailed};
 
+  return loadExternalConfigFromRenderedContent(
+      path, base_content, ext, context, resolved_imports,
+      missing_imports, isExternalConfigCacheableContent(config));
+}
+
+ExternalConfigLoadResult loadExternalConfigFromRenderedContent(
+    const std::string &path, const std::string &base_content,
+    ExternalConfig &ext, FetchContext context,
+    const string_map *resolved_imports,
+    string_array *missing_imports,
+    bool source_cacheable) {
+  template_args empty_tpl_args;
+  template_args *request_tpl_args =
+      ext.tpl_args ? ext.tpl_args : &empty_tpl_args;
+  const Settings &settings = effectiveSettings();
+  if (base_content.empty())
+    return {ExternalConfigLoadStatus::FetchFailed};
+
+  ScopedResolvedImportView import_view(resolved_imports,
+                                       missing_imports);
+
   bool cache_enabled =
-      settings.cacheConfig > 0 && isExternalConfigCacheableContent(config) &&
+      settings.cacheConfig > 0 && source_cacheable &&
       isExternalConfigCacheableContent(base_content);
   const std::string key = buildExternalConfigCacheKey(
       base_content, context, settings.configGeneration);

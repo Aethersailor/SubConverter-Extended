@@ -414,6 +414,17 @@ struct ResourceControlSnapshot {
   ForceMaxBudget calculated_force_max_budget;
 };
 
+struct ForceMaxCacheGuardPolicySnapshot {
+  bool freeze_net_growth = false;
+  uint64_t generation = 0;
+};
+
+// Cache implementations use this force_max-only policy to reject net-new
+// resident bytes while Guarded. Existing entries remain available and are not
+// evicted merely because the guard changed state.
+ForceMaxCacheGuardPolicySnapshot
+forceMaxCacheGuardPolicySnapshot() noexcept;
+
 inline bool hardwarePinMatches(
     const ResourceControlSnapshot &snapshot,
     std::string_view configured_hardware_pin) noexcept {

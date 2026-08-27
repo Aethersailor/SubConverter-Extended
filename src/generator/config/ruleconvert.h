@@ -6,6 +6,7 @@
 #include <future>
 #include <cstdint>
 #include <cstddef>
+#include <memory>
 
 #include <yaml-cpp/yaml.h>
 #include <rapidjson/document.h>
@@ -35,6 +36,9 @@ struct RulesetContent
     int update_interval = 0;
     RulesetOptions options;
     RulesetDelivery delivery = RulesetDelivery::ServerFetched;
+    // force_max resolves every dependency before generation. Legacy callers
+    // keep rule_content so compat/adaptive retain their established path.
+    std::shared_ptr<const std::string> resolved_content;
 };
 
 struct RuleConversionStats
@@ -59,6 +63,7 @@ struct StashRuleConversionStats
 };
 
 std::string convertRuleset(const std::string &content, int type);
+std::string materializeRulesetContent(const RulesetContent &content);
 size_t rulesetConversionCacheMaxEntries();
 size_t rulesetConversionCacheMaxBytes();
 void configureRulesetConversionCache(size_t max_entries,

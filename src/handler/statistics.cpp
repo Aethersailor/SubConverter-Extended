@@ -29,6 +29,7 @@
 #include "runtime/conversion_flow.h"
 #include "runtime/blocking_io_executor.h"
 #include "runtime/quickjs_lane.h"
+#include "runtime/memory_budget.h"
 #include "runtime/runtime_coordinator.h"
 #include "server/request_context.h"
 #include "utils/logger.h"
@@ -591,11 +592,40 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(fetch.open_connection_limit);
   writer.Key("connection_cache_limit");
   writer.Uint64(fetch.connection_cache_limit);
+  if (global.resourceControlEffective == "force_max") {
+    writer.Key("per_host_connection_limit");
+    writer.Uint64(fetch.per_host_connection_limit);
+    writer.Key("runtime_limit_generation");
+    writer.Uint64(fetch.runtime_limit_generation);
+    writer.Key("runtime_limit_updates");
+    writer.Uint64(fetch.runtime_limit_updates);
+  }
   writer.Key("recoverable_retry_limit");
   writer.Uint64(fetch.recoverable_retry_limit);
   writer.Key("buffered_bytes");
   writer.Uint64(fetch.buffered_bytes);
   writer.EndObject();
+  const FetchMemoryBudgetSnapshot fetch_memory =
+      globalFetchMemoryBudgetSnapshot();
+  if (fetch_memory.enabled) {
+    writer.Key("fetch_memory_budget");
+    writer.StartObject();
+    writer.Key("limit");
+    writer.Uint64(fetch_memory.limit);
+    writer.Key("used");
+    writer.Uint64(fetch_memory.used);
+    writer.Key("peak");
+    writer.Uint64(fetch_memory.peak);
+    writer.Key("waiters");
+    writer.Uint64(fetch_memory.waiters);
+    writer.Key("wait_total");
+    writer.Uint64(fetch_memory.wait_total);
+    writer.Key("resumed_total");
+    writer.Uint64(fetch_memory.resumed_total);
+    writer.Key("capacity_generation");
+    writer.Uint64(fetch_memory.capacity_generation);
+    writer.EndObject();
+  }
   const RetainedResponseByteSnapshot retained =
       retainedResponseByteSnapshot();
   writer.Key("retained_response_bytes");
@@ -1071,6 +1101,9 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
       fetch.active_connection_limit == calculated.outbound_active &&
       fetch.open_connection_limit == calculated.outbound_open &&
       fetch.connection_cache_limit == calculated.outbound_idle_cache &&
+      fetch.per_host_connection_limit == calculated.outbound_per_host &&
+      fetch_memory.enabled &&
+      fetch_memory.limit == calculated.fetch_bytes &&
       retained.limit == calculated.retained_response_bytes &&
       response_cache.max_bytes == expected_response_cache &&
       rulesetConversionCacheMaxBytes() == expected_ruleset_cache &&
@@ -1168,6 +1201,14 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(resources.pressure_guard_recoveries);
   writer.Key("pressure_guard_repeated_activations");
   writer.Uint64(resources.pressure_guard_repeated_activations);
+  if (resources.effective_mode == "force_max") {
+    const ForceMaxCacheGuardPolicySnapshot cache_guard =
+        forceMaxCacheGuardPolicySnapshot();
+    writer.Key("cache_growth_frozen");
+    writer.Bool(cache_guard.freeze_net_growth);
+    writer.Key("cache_guard_generation");
+    writer.Uint64(cache_guard.generation);
+  }
   writer.EndObject();
   writer.EndObject();
   return std::string(buffer.GetString(), buffer.GetSize());

@@ -114,6 +114,8 @@ bool validateForceMaxBudget(const ForceMaxBudget &budget,
   if (budget.transport_active_bytes == 0 ||
       budget.owner_active_bytes == 0)
     return invalid("invalid_active_byte_budget");
+  if (budget.fetch_bytes < UINT64_C(64) * 1024)
+    return invalid("fetch_budget_too_small");
   uint64_t active_memory_total = 0;
   if (!checkedAdd(quickjs_total_bytes, budget.transport_active_bytes,
                   active_memory_total) ||

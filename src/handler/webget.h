@@ -13,6 +13,7 @@
 
 #include "handler/fetch_context.h"
 #include "handler/proxy_policy.h"
+#include "runtime/memory_budget.h"
 #include "server/request_context.h"
 #include "utils/map_extra.h"
 #include "utils/string.h"
@@ -116,6 +117,7 @@ struct AsyncFetchResult
     std::string cookies;
     bool used_proxy = false;
     long proxy_error = 0;
+    FetchMemoryLease fetch_memory;
     RetainedResponseByteLease retained_bytes;
 };
 
@@ -132,6 +134,18 @@ struct AsyncFetchEngineSnapshot
     uint64_t connection_cache_limit = 0;
     uint64_t recoverable_retry_limit = 0;
     uint64_t buffered_bytes = 0;
+    uint64_t per_host_connection_limit = 0;
+    uint64_t runtime_limit_generation = 0;
+    uint64_t runtime_limit_updates = 0;
+};
+
+struct AsyncFetchRuntimeLimits
+{
+    uint64_t active = 0;
+    uint64_t per_host = 0;
+    uint64_t open = 0;
+    uint64_t idle_cache = 0;
+    uint64_t generation = 0;
 };
 
 using SharedAsyncFetchResult = std::shared_ptr<AsyncFetchResult>;
@@ -285,6 +299,8 @@ bool joinOwnedWebGetContinuationRuntime() noexcept;
 bool asyncFetchEngineAvailable() noexcept;
 bool initializeAsyncFetchEngine() noexcept;
 AsyncFetchEngineSnapshot asyncFetchEngineSnapshot() noexcept;
+bool requestAsyncFetchRuntimeLimits(
+    AsyncFetchRuntimeLimits limits) noexcept;
 
 int webGet(const FetchArgument& argument, FetchResult &result);
 std::string webGet(const std::string &url, const ProxyPolicy &proxy,

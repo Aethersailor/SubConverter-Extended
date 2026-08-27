@@ -15,6 +15,7 @@
 #include "runtime/compute_executor.h"
 #include "runtime/blocking_io_executor.h"
 #include "runtime/owner_admission.h"
+#include "runtime/memory_budget.h"
 #include "utils/concurrent_lru_cache.h"
 #include "utils/cooperative_cpu.h"
 #include "utils/resource_control.h"
@@ -1473,6 +1474,39 @@ static void testBlockingIoExecutor() {
          stopped.queued_bytes == 0 && stopped.active_workers == 0);
 }
 
+static void testFetchMemoryBudget() {
+  configureGlobalFetchMemoryBudget(64);
+  const FetchMemoryBudgetSnapshot configured =
+      globalFetchMemoryBudgetSnapshot();
+  assert(configured.enabled && configured.limit == 64 &&
+         configured.used == 0);
+
+  FetchMemoryLease first;
+  FetchMemoryLease second;
+  FetchMemoryLease oversized;
+  assert(!oversized.acquire(65));
+  assert(first.acquire(40));
+  assert(!second.acquire(32));
+  noteGlobalFetchMemoryWaiterAdded();
+  FetchMemoryBudgetSnapshot waiting = globalFetchMemoryBudgetSnapshot();
+  assert(waiting.used == 40 && waiting.peak == 40 &&
+         waiting.waiters == 1 && waiting.wait_total == 1);
+
+  const uint64_t before_release = waiting.capacity_generation;
+  first.reset();
+  assert(globalFetchMemoryCapacityGeneration() > before_release);
+  assert(second.acquire(32));
+  noteGlobalFetchMemoryWaiterRemoved(true);
+  FetchMemoryLease moved = std::move(second);
+  assert(moved.bytes() == 32 && second.bytes() == 0);
+  moved.reset();
+
+  const FetchMemoryBudgetSnapshot released =
+      globalFetchMemoryBudgetSnapshot();
+  assert(released.used == 0 && released.waiters == 0 &&
+         released.resumed_total == 1);
+}
+
 int main() {
   testBoundedExecutor();
   testBoundedExecutorDeadlineAndCancellation();
@@ -1486,6 +1520,7 @@ int main() {
   testCancellationTokenCallbacks();
   testOwnerAdmission();
   testBlockingIoExecutor();
+  testFetchMemoryBudget();
   testConcurrentLruCache();
   testExternalConfigCacheSemantics();
   testResourceControlPrimitives();

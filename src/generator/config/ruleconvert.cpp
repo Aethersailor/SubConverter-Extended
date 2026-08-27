@@ -139,6 +139,13 @@ size_t rulesetConversionCacheMaxEntries()
     return ruleset_conversion_cache.maxEntries();
 }
 
+std::string materializeRulesetContent(const RulesetContent &content)
+{
+    if(content.resolved_content)
+        return *content.resolved_content;
+    return waitWithoutCpuPermit([&] { return content.rule_content.get(); });
+}
+
 size_t rulesetConversionCacheMaxBytes()
 {
     return ruleset_conversion_cache.maxBytes();
@@ -541,8 +548,7 @@ bool rulesetToStash(YAML::Node &base_rule,
             continue;
         }
 
-        std::string retrieved = waitWithoutCpuPermit(
-            [&] { return source.rule_content.get(); });
+        std::string retrieved = materializeRulesetContent(source);
         if(!stashRulesetGroupIsSafe(source.rule_group))
             return fail("a Stash ruleset policy name contains an unsafe value",
                         "Stash 规则集的策略名称包含不安全值");
@@ -618,8 +624,7 @@ void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_
         if(max_allowed_rules && total_rules > max_allowed_rules)
             break;
         rule_group = x.rule_group;
-        retrieved_rules =
-            waitWithoutCpuPermit([&] { return x.rule_content.get(); });
+        retrieved_rules = materializeRulesetContent(x);
         if(retrieved_rules.empty())
         {
             writeLog(LOG_LEVEL_WARNING, "获取规则集失败或规则集为空：'" + x.rule_path + "'。");
@@ -696,8 +701,7 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent>
         if(max_allowed_rules && total_rules > max_allowed_rules)
             break;
         rule_group = x.rule_group;
-        retrieved_rules =
-            waitWithoutCpuPermit([&] { return x.rule_content.get(); });
+        retrieved_rules = materializeRulesetContent(x);
         if(retrieved_rules.empty())
         {
             writeLog(LOG_LEVEL_WARNING, "获取规则集失败或规则集为空：'" + x.rule_path + "'。");
@@ -800,9 +804,7 @@ void rulesetToSurge(INIReader &base_rule, std::vector<RulesetContent> &ruleset_c
         rule_path_typed = x.rule_path_typed;
         if(rule_path.empty())
         {
-            strLine = waitWithoutCpuPermit(
-                          [&] { return x.rule_content.get(); })
-                          .substr(2);
+            strLine = materializeRulesetContent(x).substr(2);
             if(strLine == "MATCH")
                 strLine = "FINAL";
             if(surge_ver == -1 || surge_ver == -2)
@@ -895,8 +897,7 @@ void rulesetToSurge(INIReader &base_rule, std::vector<RulesetContent> &ruleset_c
             }
             else
                 continue;
-            retrieved_rules =
-                waitWithoutCpuPermit([&] { return x.rule_content.get(); });
+            retrieved_rules = materializeRulesetContent(x);
             if(retrieved_rules.empty())
             {
                 writeLog(LOG_LEVEL_WARNING, "获取规则集失败或规则集为空：'" + x.rule_path + "'。");
@@ -1248,8 +1249,7 @@ void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent
         if(settings.maxAllowedRules && total_rules > settings.maxAllowedRules)
             break;
         rule_group = x.rule_group;
-        retrieved_rules =
-            waitWithoutCpuPermit([&] { return x.rule_content.get(); });
+        retrieved_rules = materializeRulesetContent(x);
         if(retrieved_rules.empty())
         {
             writeLog(LOG_LEVEL_WARNING, "获取规则集失败或规则集为空：'" + x.rule_path + "'。");

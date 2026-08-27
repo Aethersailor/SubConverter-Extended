@@ -1054,6 +1054,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
         elif request_path in (
             "/external-generation.ini",
             "/external-generation-slow.ini",
+            "/external-generation-missing-base.ini",
+            "/external-generation-bad-template.ini",
         ):
             host = self.headers.get("Host", "127.0.0.1")
             rules_path = (
@@ -1061,10 +1063,16 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 if request_path.endswith("-slow.ini")
                 else "/generation-rules.list"
             )
+            if request_path.endswith("-missing-base.ini"):
+                base_path = "/missing-force-max-base.json"
+            elif request_path.endswith("-bad-template.ini"):
+                base_path = "/snapshot-singbox-bad-template.json"
+            else:
+                base_path = "/snapshot-singbox.json"
             body = (
                 "[custom]\n"
                 "enable_rule_generator=true\n"
-                f"singbox_rule_base=http://{host}/snapshot-singbox.json\n"
+                f"singbox_rule_base=http://{host}{base_path}\n"
                 f"ruleset=Proxy,http://{host}{rules_path}\n"
             ).encode()
             content_type = "text/plain; charset=utf-8"
@@ -1079,6 +1087,15 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 "}\n"
             ).encode()
             content_type = "application/json; charset=utf-8"
+        elif request_path == "/snapshot-singbox-bad-template.json":
+            host = self.headers.get("Host", "127.0.0.1")
+            body = (
+                "{\n"
+                f'  "template_fetch": "{{{{ fetch(\"http://{host}/template-marker\") }}}}",\n'
+                "  {% if broken %}\n"
+                "}\n"
+            ).encode()
+            content_type = "application/json; charset=utf-8"
         elif request_path == "/template-marker":
             body = b"template-ok"
             content_type = "text/plain; charset=utf-8"
@@ -1088,6 +1105,9 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 "version = 1\n"
                 "[custom]\n"
                 "enable_rule_generator = false\n"
+                "[[custom.template_args]]\n"
+                'key = "marker"\n'
+                f"value = '{{{{ fetch(\"http://{host}/template-marker\") }}}}'\n"
                 "[[custom_groups]]\n"
                 f'import = "http://{host}/async-external-groups.toml"\n'
             ).encode()
@@ -12232,7 +12252,10 @@ def force_max_arrival_singleflight_baseline(
         if status != 200:
             raise AssertionError("arrival singleflight setup dashboard failed")
         before = json.loads(body)
-        before_flow = int(before["conversion_scheduler"]["accepted"])
+        before_legacy_flow = int(
+            before["conversion_scheduler"]["accepted"]
+        )
+        before_flow = int(before["conversion_flows"]["created_total"])
         before_owner_admission = int(
             before["owner_admission"]["accepted_total"]
         )
@@ -12299,14 +12322,16 @@ def force_max_arrival_singleflight_baseline(
             for worker in workers:
                 worker.join(timeout=5)
             raise AssertionError("arrival followers did not attach before scheduling")
-        flow = observed["conversion_scheduler"]
+        flow = observed["conversion_flows"]
+        legacy_flow = observed["conversion_scheduler"]
         singleflight = observed["subscription_singleflight"]
         admission = observed["request_admission"]
         owner_admission = observed["owner_admission"]
         if (
-            int(flow["accepted"]) - before_flow != 1
+            int(flow["created_total"]) - before_flow != 1
             or int(flow["active"]) != 1
-            or int(flow["queued_entries"]) != 0
+            or int(legacy_flow["accepted"]) - before_legacy_flow != 0
+            or int(legacy_flow["active"]) != 0
             or admission["source"] != "force_max_waitable"
             or int(admission["waiting_entries"]) != 0
             or int(admission["active_entries"]) < 16
@@ -12325,7 +12350,8 @@ def force_max_arrival_singleflight_baseline(
                 worker.join(timeout=5)
             raise AssertionError(
                 "arrival followers consumed owner flow capacity: "
-                f"flow={flow!r} admission={admission!r} "
+                f"flow={flow!r} legacy_flow={legacy_flow!r} "
+                f"admission={admission!r} "
                 f"singleflight={singleflight!r} "
                 f"owner_admission={owner_admission!r}"
             )
@@ -12508,7 +12534,9 @@ def force_max_flow_activation_baseline(
         ).decode()
     }
 
-    def run(resource_mode: str) -> tuple[bytes, dict[str, object]]:
+    def run(
+        resource_mode: str,
+    ) -> tuple[tuple[bytes, bytes, bytes, bytes], dict[str, object]]:
         with running_service(
             binary,
             statistics=True,
@@ -12530,6 +12558,56 @@ def force_max_flow_activation_baseline(
             if status != 200 or b"Smoke" not in body:
                 raise AssertionError(
                     f"{resource_mode} flow probe failed: HTTP {status}"
+                )
+            complex_status, complex_body, _ = request(
+                base_url,
+                "/sub",
+                {
+                    "target": "singbox",
+                    "url": fixture_base
+                    + "/subscription.txt?force-max-resolved-dependencies="
+                    + resource_mode,
+                    "config": fixture_base + "/external-generation.ini",
+                },
+            )
+            if (
+                complex_status != 200
+                or b"template-ok" not in complex_body
+                or b"first.snapshot.test" not in complex_body
+            ):
+                raise AssertionError(
+                    f"{resource_mode} resolved dependency flow failed: "
+                    f"HTTP {complex_status} {complex_body!r}"
+                )
+            missing_status, missing_body, _ = request(
+                base_url,
+                "/sub",
+                {
+                    "target": "singbox",
+                    "url": SUBSCRIPTION.strip(),
+                    "config": fixture_base
+                    + "/external-generation-missing-base.ini",
+                },
+            )
+            if missing_status != 400:
+                raise AssertionError(
+                    f"{resource_mode} missing base semantics changed: "
+                    f"HTTP {missing_status} {missing_body!r}"
+                )
+            template_status, template_body, _ = request(
+                base_url,
+                "/sub",
+                {
+                    "target": "singbox",
+                    "url": SUBSCRIPTION.strip(),
+                    "config": fixture_base
+                    + "/external-generation-bad-template.ini",
+                },
+            )
+            if template_status != 400:
+                raise AssertionError(
+                    f"{resource_mode} base template failure changed: "
+                    f"HTTP {template_status} {template_body!r}"
                 )
             dashboard_status, dashboard_body, _ = request(
                 base_url, "/dashboard/data", headers=dashboard_headers
@@ -12583,7 +12661,12 @@ def force_max_flow_activation_baseline(
                             "settle through ConversionFlow"
                         )
                     time.sleep(0.02)
-            return body, json.loads(dashboard_body)
+            return (
+                body,
+                complex_body,
+                missing_body,
+                template_body,
+            ), json.loads(dashboard_body)
 
     compat_body, compat = run("compat")
     force_body, force = run("force_max")
@@ -12594,8 +12677,9 @@ def force_max_flow_activation_baseline(
         or int(compat["legacy_request_flow"]["accepted"]) != 0
         or int(compat["conversion_flows"]["created_total"]) != 0
         or int(force["legacy_request_flow"]["accepted"]) != 0
-        or int(force["conversion_flows"]["created_total"]) < 2
-        or int(force["conversion_flows"]["completed_total"]) < 2
+        or int(force["conversion_scheduler"]["accepted"]) != 0
+        or int(force["conversion_flows"]["created_total"]) < 4
+        or int(force["conversion_flows"]["completed_total"]) < 4
         or int(force["conversion_flows"]["active"]) != 0
         or force["runtime_coordinator"]["ready"] is not True
         or int(force["runtime_coordinator"]["generation"]) != 1

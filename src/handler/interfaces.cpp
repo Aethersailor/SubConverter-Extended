@@ -3948,6 +3948,13 @@ struct ExternalConfigFetchPlan {
   bool config_load_success = false;
   FetchContext base_fetch_context = FetchContext::TrustedConfig;
   std::vector<RulesetContent> ruleset_content;
+  std::string base_path;
+  std::string resolved_base_content;
+};
+
+struct ConversionDependencyResolution {
+  std::vector<AsyncConversionResourceRequest> *requests = nullptr;
+  const AsyncConversionResourceBatchResult *resolved = nullptr;
 };
 
 struct ResolvedExternalConfigSelection {
@@ -3957,10 +3964,69 @@ struct ResolvedExternalConfigSelection {
   bool fallback = false;
 };
 
+static const std::string *selectedTargetBase(
+    const ParsedSubRequest &parsed, const EffectiveSubPolicy &policy) {
+  if (parsed.target == "sssub")
+    return &policy.sssub_base;
+  if (policy.generator.nodelist)
+    return nullptr;
+  switch (hash_(parsed.target)) {
+  case "clash"_hash:
+  case "clashr"_hash:
+    return &policy.clash_base;
+  case "surge"_hash:
+    return &policy.surge_base;
+  case "surfboard"_hash:
+    return &policy.surfboard_base;
+  case "stash"_hash:
+    return &policy.stash_base;
+  case "mellow"_hash:
+    return &policy.mellow_base;
+  case "quan"_hash:
+    return &policy.quan_base;
+  case "quanx"_hash:
+    return &policy.quanx_base;
+  case "loon"_hash:
+    return &policy.loon_base;
+  case "singbox"_hash:
+    return &policy.singbox_base;
+  default:
+    return nullptr;
+  }
+}
+
+static const ResolvedConversionResource *findResolvedDependency(
+    const ConversionDependencyResolution *resolution,
+    ConversionResourceKind kind, uint64_t source_index,
+    const std::string &url) {
+  if (!resolution || !resolution->resolved)
+    return nullptr;
+  for (const ResolvedConversionResource &resource :
+       resolution->resolved->resources) {
+    if (resource.kind == kind && resource.source_index == source_index &&
+        resource.url == url)
+      return &resource;
+  }
+  return nullptr;
+}
+
+static const ResolvedConversionResource *resolveOrPlanDependency(
+    ConversionDependencyResolution *resolution,
+    AsyncConversionResourceRequest request) {
+  if (!resolution)
+    return nullptr;
+  const ResolvedConversionResource *resolved = findResolvedDependency(
+      resolution, request.kind, request.source_index, request.url);
+  if (!resolved && resolution->requests)
+    resolution->requests->emplace_back(std::move(request));
+  return resolved;
+}
+
 static std::string buildExternalConfigFetchPlan(
     Response &response, const Settings &settings, ParsedSubRequest &parsed,
     EffectiveSubPolicy &policy, ExternalConfigFetchPlan &plan,
-    const ResolvedExternalConfigSelection *resolved_config = nullptr) {
+    const ResolvedExternalConfigSelection *resolved_config = nullptr,
+    ConversionDependencyResolution *dependency_resolution = nullptr) {
   plan.user_provided_external_config = !parsed.external_config.empty();
   FetchContext rulesetFetchContext = FetchContext::TrustedConfig;
   bool configLoadSuccess = false;
@@ -4186,42 +4252,251 @@ static std::string buildExternalConfigFetchPlan(
              "无效请求：ruleprepend 与 ruleappend 不支持 script=true。";
     }
 
-    std::string external_rule_error;
-    if (!fetchExternalRuleSources(rulePrependSources, "ruleprepend",
-                                  externalRuleFetchContext,
-                                  policy.generator.rule_prepend,
-                                  external_rule_error) ||
-        !fetchExternalRuleSources(ruleAppendSources, "ruleappend",
-                                  externalRuleFetchContext,
-                                  policy.generator.rule_append,
-                                  external_rule_error)) {
-      response.status_code = 400;
-      return external_rule_error;
+    if (!dependency_resolution) {
+      std::string external_rule_error;
+      if (!fetchExternalRuleSources(rulePrependSources, "ruleprepend",
+                                    externalRuleFetchContext,
+                                    policy.generator.rule_prepend,
+                                    external_rule_error) ||
+          !fetchExternalRuleSources(ruleAppendSources, "ruleappend",
+                                    externalRuleFetchContext,
+                                    policy.generator.rule_append,
+                                    external_rule_error)) {
+        response.status_code = 400;
+        return external_rule_error;
+      }
+    } else {
+      const ProxyPolicy ruleset_proxy =
+          parseProxy(settings.proxyRuleset, settings.proxyBypass);
+      const string_icase_map no_cache_headers = {
+          {"Cache-Control", "no-cache, no-store, max-age=0"},
+          {"Pragma", "no-cache"}};
+      auto resolve_external_rules = [&](const string_array &sources,
+                                        ConversionResourceKind kind,
+                                        const std::string &field_name,
+                                        string_array &destination)
+          -> std::string {
+        for (size_t index = 0; index < sources.size(); ++index) {
+          const std::string source_identifier =
+              field_name + " source #" + std::to_string(index + 1);
+          const std::string lower_source = toLower(sources[index]);
+          if (!startsWith(lower_source, "http://") &&
+              !startsWith(lower_source, "https://")) {
+            return "Invalid external rule source " + source_identifier +
+                   ": only remote HTTP(S) URLs are supported; local paths "
+                   "and data URLs are not allowed.\n外部规则来源 " +
+                   source_identifier +
+                   " 无效：仅支持远程 HTTP(S) URL，不允许本地路径或 data "
+                   "URL。";
+          }
+          AsyncConversionResourceRequest request;
+          request.kind = kind;
+          request.source_index = index;
+          request.url = sources[index];
+          request.proxy = ruleset_proxy;
+          request.request_headers = no_cache_headers;
+          request.cache_ttl = 0;
+          request.context = externalRuleFetchContext;
+          const ResolvedConversionResource *resource =
+              resolveOrPlanDependency(dependency_resolution,
+                                      std::move(request));
+          if (!resource)
+            continue;
+          if (!resource->payload ||
+              resource->failure != AsyncFetchFailure::None ||
+              resource->payload->status_code < 200 ||
+              resource->payload->status_code >= 300 ||
+              resource->payload->content.empty()) {
+            writeLog(LOG_LEVEL_WARNING,
+                     "外部规则来源 " + source_identifier +
+                         " 拉取失败、HTTP 状态异常或内容为空，已跳过。");
+            continue;
+          }
+          ExternalRuleParseResult parsed_rules = parseExternalClashRules(
+              resource->payload->content, source_identifier,
+              ClashRuleTypes);
+          if (!parsed_rules.ok)
+            return std::move(parsed_rules.error);
+          if (parsed_rules.rules.empty())
+            return "Invalid external rule source " + source_identifier +
+                   ": no usable rules were found.\n外部规则来源 " +
+                   source_identifier + " 无效：未找到可用规则。";
+          destination.insert(
+              destination.end(),
+              std::make_move_iterator(parsed_rules.rules.begin()),
+              std::make_move_iterator(parsed_rules.rules.end()));
+        }
+        return {};
+      };
+      std::string external_rule_error = resolve_external_rules(
+          rulePrependSources, ConversionResourceKind::RulePrepend,
+          "ruleprepend", policy.generator.rule_prepend);
+      if (external_rule_error.empty())
+        external_rule_error = resolve_external_rules(
+            ruleAppendSources, ConversionResourceKind::RuleAppend,
+            "ruleappend", policy.generator.rule_append);
+      if (!external_rule_error.empty()) {
+        response.status_code = 400;
+        return external_rule_error;
+      }
     }
   }
 
   if (policy.generator.enable_rule_generator &&
       !policy.generator.nodelist && !parsed.simple_subscription) {
-    const bool stash_native_rulesets = parsed.target == "stash";
-    if (stash_native_rulesets) {
+    if (!dependency_resolution) {
+      const bool stash_native_rulesets = parsed.target == "stash";
+      if (stash_native_rulesets) {
+        const bool reuse_cached_rulesets =
+            policy.custom_rulesets == settings.customRulesets &&
+            !settings.updateRulesetOnRequest &&
+            settings.rulesetsContent.size() == policy.custom_rulesets.size();
+        refreshRulesets(policy.custom_rulesets, plan.ruleset_content,
+                        rulesetFetchContext,
+                        RulesetRefreshMode::PreferNativeStashProviders,
+                        reuse_cached_rulesets ? &settings.rulesetsContent
+                                              : nullptr);
+      } else if (policy.custom_rulesets != settings.customRulesets) {
+        refreshRulesets(policy.custom_rulesets, plan.ruleset_content,
+                        rulesetFetchContext);
+      } else if (settings.updateRulesetOnRequest) {
+        refreshRulesets(policy.custom_rulesets, plan.ruleset_content,
+                        rulesetFetchContext);
+      } else {
+        plan.ruleset_content = settings.rulesetsContent;
+      }
+    } else {
+      plan.ruleset_content.clear();
+      plan.ruleset_content.reserve(policy.custom_rulesets.size());
+      const ProxyPolicy ruleset_proxy =
+          parseProxy(settings.proxyRuleset, settings.proxyBypass);
       const bool reuse_cached_rulesets =
           policy.custom_rulesets == settings.customRulesets &&
           !settings.updateRulesetOnRequest &&
           settings.rulesetsContent.size() == policy.custom_rulesets.size();
-      refreshRulesets(policy.custom_rulesets, plan.ruleset_content,
-                      rulesetFetchContext,
-                      RulesetRefreshMode::PreferNativeStashProviders,
-                      reuse_cached_rulesets ? &settings.rulesetsContent
-                                            : nullptr);
-    } else if (policy.custom_rulesets != settings.customRulesets)
-      refreshRulesets(policy.custom_rulesets, plan.ruleset_content,
-                      rulesetFetchContext);
-    else {
-      if (settings.updateRulesetOnRequest)
-        refreshRulesets(policy.custom_rulesets, plan.ruleset_content,
-                        rulesetFetchContext);
-      else
-        plan.ruleset_content = settings.rulesetsContent;
+      for (size_t index = 0; index < policy.custom_rulesets.size(); ++index) {
+        if (reuse_cached_rulesets) {
+          RulesetContent content = settings.rulesetsContent[index];
+          if (content.delivery == RulesetDelivery::NativeStashProvider) {
+            content.resolved_content =
+                std::make_shared<const std::string>();
+          } else if (!content.resolved_content) {
+            AsyncConversionResourceRequest request;
+            request.kind = ConversionResourceKind::Ruleset;
+            request.source_index = index;
+            request.url = content.rule_path;
+            request.proxy = ruleset_proxy;
+            request.cache_ttl = static_cast<unsigned int>(
+                std::max(0, settings.cacheRuleset));
+            request.context = rulesetFetchContext;
+            request.preloaded_content = content.rule_content;
+            const ResolvedConversionResource *resource =
+                resolveOrPlanDependency(dependency_resolution,
+                                        std::move(request));
+            content.resolved_content = std::make_shared<const std::string>(
+                resource && resource->payload &&
+                        resource->failure == AsyncFetchFailure::None
+                    ? resource->payload->content
+                    : std::string());
+          }
+          plan.ruleset_content.emplace_back(std::move(content));
+          continue;
+        }
+        const RulesetConfig &configured = policy.custom_rulesets[index];
+        RulesetContent content;
+        content.rule_group = configured.Group;
+        content.rule_path_typed = configured.Url;
+        content.update_interval = configured.Interval;
+        content.options = configured.Options;
+
+        const size_t inline_position = configured.Url.find("[]");
+        if (inline_position != std::string::npos) {
+          content.rule_type = RULESET_SURGE;
+          content.resolved_content = std::make_shared<const std::string>(
+              configured.Url.substr(inline_position));
+          plan.ruleset_content.emplace_back(std::move(content));
+          continue;
+        }
+
+        content.rule_path = configured.Url;
+        auto type = std::find_if(
+            RulesetTypes.begin(), RulesetTypes.end(),
+            [&](const auto &entry) {
+              return startsWith(content.rule_path, entry.first);
+            });
+        if (type != RulesetTypes.end()) {
+          content.rule_path.erase(0, type->first.size());
+          content.rule_type = type->second;
+        } else {
+          content.rule_type = RULESET_SURGE;
+        }
+        if (content.options.no_resolve &&
+            content.rule_type != RULESET_CLASH_IPCIDR) {
+          writeLog(LOG_LEVEL_WARNING,
+                   "规则集选项 no-resolve 仅适用于 clash-ipcidr，已对策略组 '" +
+                       content.rule_group + "' 安全忽略。");
+        }
+        std::string native_path = toLower(content.rule_path);
+        const size_t query = native_path.find_first_of("?#");
+        if (query != std::string::npos)
+          native_path.erase(query);
+        const bool native_stash_provider =
+            parsed.target == "stash" &&
+            (startsWith(content.rule_path, "https://") ||
+             startsWith(content.rule_path, "http://")) &&
+            (content.rule_type == RULESET_CLASH_DOMAIN ||
+             content.rule_type == RULESET_CLASH_IPCIDR ||
+             content.rule_type == RULESET_CLASH_CLASSICAL) &&
+            (!content.options.stash_format.empty() ||
+             endsWith(native_path, ".mrs") ||
+             endsWith(native_path, ".yaml") ||
+             endsWith(native_path, ".yml"));
+        if (native_stash_provider) {
+          content.delivery = RulesetDelivery::NativeStashProvider;
+          content.resolved_content =
+              std::make_shared<const std::string>();
+        } else {
+          AsyncConversionResourceRequest request;
+          request.kind = ConversionResourceKind::Ruleset;
+          request.source_index = index;
+          request.url = content.rule_path;
+          request.proxy = ruleset_proxy;
+          request.cache_ttl = static_cast<unsigned int>(
+              std::max(0, settings.cacheRuleset));
+          request.context = rulesetFetchContext;
+          const ResolvedConversionResource *resource =
+              resolveOrPlanDependency(dependency_resolution,
+                                      std::move(request));
+          content.resolved_content = std::make_shared<const std::string>(
+              resource && resource->payload &&
+                      resource->failure == AsyncFetchFailure::None
+                  ? resource->payload->content
+                  : std::string());
+        }
+        plan.ruleset_content.emplace_back(std::move(content));
+      }
+    }
+  }
+
+  if (dependency_resolution) {
+    const std::string *base = selectedTargetBase(parsed, policy);
+    plan.base_path = base ? *base : std::string();
+    plan.resolved_base_content.clear();
+    if (base && !base->empty()) {
+      AsyncConversionResourceRequest request;
+      request.kind = ConversionResourceKind::Base;
+      request.source_index = 0;
+      request.url = *base;
+      request.proxy = parseProxy(settings.proxyConfig, settings.proxyBypass);
+      request.cache_ttl =
+          static_cast<unsigned int>(std::max(0, settings.cacheConfig));
+      request.context = plan.base_fetch_context;
+      const ResolvedConversionResource *resource =
+          resolveOrPlanDependency(dependency_resolution,
+                                  std::move(request));
+      if (resource && resource->payload &&
+          resource->failure == AsyncFetchFailure::None)
+        plan.resolved_base_content = resource->payload->content;
     }
   }
   parsed.explain.rule_generator_enabled =
@@ -5851,7 +6126,8 @@ static SubStageResponse dispatchTargetGenerator(
     Request &request, Response &response, const Settings &settings,
     ParsedSubRequest &parsed, EffectiveSubPolicy &policy,
     ExternalConfigFetchPlan &fetch_plan,
-    SubscriptionNodeState &subscription, TargetGenerationState &generation) {
+    SubscriptionNodeState &subscription, TargetGenerationState &generation,
+    const std::string *resolved_base_content = nullptr) {
   auto &argument = request.argument;
   int *status_code = &response.status_code;
   auto &target = parsed.target;
@@ -5870,6 +6146,16 @@ static SubStageResponse dispatchTargetGenerator(
   std::string &output = generation.output;
   ProxyGroupConfigs dummy_group;
   std::vector<RulesetContent> dummy_ruleset;
+  auto renderBase = [&](const std::string &path) {
+    if (resolved_base_content) {
+      base_content = *resolved_base_content;
+      return 0;
+    }
+    return render_template(
+        fetchFile(path, proxy, settings.cacheConfig, true, base_context),
+        template_arguments, base_content, settings.templatePath,
+        base_context);
+  };
 
   std::string &managed_url = generation.managed_url;
   managed_url = base64Decode(getUrlArg(argument, "profile_data"));
@@ -5905,10 +6191,7 @@ static SubStageResponse dispatchTargetGenerator(
       proxyToClash(nodes, yamlnode, dummy_group, target == "clashr", ext);
       output = dumpCanonicalClashYaml(yamlnode);
     } else {
-      if (render_template(fetchFile(policy.clash_base, proxy,
-                                    settings.cacheConfig, true, base_context),
-                          template_arguments, base_content,
-                          settings.templatePath, base_context) != 0) {
+      if (renderBase(policy.clash_base) != 0) {
         *status_code = 400;
         return {true, base_content};
       }
@@ -5930,10 +6213,7 @@ static SubStageResponse dispatchTargetGenerator(
       output = proxyToSurge(nodes, base_content, dummy_ruleset, dummy_group,
                             parsed.surge_version, ext);
     } else {
-      if (render_template(fetchFile(policy.surge_base, proxy,
-                                    settings.cacheConfig, true, base_context),
-                          template_arguments, base_content,
-                          settings.templatePath, base_context) != 0) {
+      if (renderBase(policy.surge_base) != 0) {
         *status_code = 400;
         return {true, base_content};
       }
@@ -5996,10 +6276,7 @@ static SubStageResponse dispatchTargetGenerator(
 
   case "surfboard"_hash:
     writeLog(LOG_LEVEL_INFO, "生成目标：Surfboard");
-    if (render_template(fetchFile(policy.surfboard_base, proxy,
-                                  settings.cacheConfig, true, base_context),
-                        template_arguments, base_content, settings.templatePath,
-                        base_context) != 0) {
+    if (renderBase(policy.surfboard_base) != 0) {
       *status_code = 400;
       return {true, base_content};
     }
@@ -6056,10 +6333,7 @@ static SubStageResponse dispatchTargetGenerator(
 
   case "stash"_hash:
     writeLog(LOG_LEVEL_INFO, "生成目标：Stash");
-    if (render_template(fetchFile(policy.stash_base, proxy,
-                                  settings.cacheConfig, true, base_context),
-                        template_arguments, base_content,
-                        settings.templatePath, base_context) != 0) {
+    if (renderBase(policy.stash_base) != 0) {
       *status_code = 400;
       return {true, base_content};
     }
@@ -6092,10 +6366,7 @@ static SubStageResponse dispatchTargetGenerator(
 
   case "mellow"_hash:
     writeLog(LOG_LEVEL_INFO, "生成目标：Mellow");
-    if (render_template(fetchFile(policy.mellow_base, proxy,
-                                  settings.cacheConfig, true, base_context),
-                        template_arguments, base_content, settings.templatePath,
-                        base_context) != 0) {
+    if (renderBase(policy.mellow_base) != 0) {
       *status_code = 400;
       return {true, base_content};
     }
@@ -6107,10 +6378,7 @@ static SubStageResponse dispatchTargetGenerator(
 
   case "sssub"_hash:
     writeLog(LOG_LEVEL_INFO, "生成目标：SS Subscription");
-    if (render_template(fetchFile(policy.sssub_base, proxy,
-                                  settings.cacheConfig, true, base_context),
-                        template_arguments, base_content, settings.templatePath,
-                        base_context) != 0) {
+    if (renderBase(policy.sssub_base) != 0) {
       *status_code = 400;
       return {true, base_content};
     }
@@ -6193,10 +6461,7 @@ static SubStageResponse dispatchTargetGenerator(
   case "quan"_hash:
     writeLog(LOG_LEVEL_INFO, "生成目标：Quantumult");
     if (!ext.nodelist) {
-      if (render_template(fetchFile(policy.quan_base, proxy,
-                                    settings.cacheConfig, true, base_context),
-                          template_arguments, base_content,
-                          settings.templatePath, base_context) != 0) {
+      if (renderBase(policy.quan_base) != 0) {
         *status_code = 400;
         return {true, base_content};
       }
@@ -6210,10 +6475,7 @@ static SubStageResponse dispatchTargetGenerator(
   case "quanx"_hash:
     writeLog(LOG_LEVEL_INFO, "生成目标：Quantumult X");
     if (!ext.nodelist) {
-      if (render_template(fetchFile(policy.quanx_base, proxy,
-                                    settings.cacheConfig, true, base_context),
-                          template_arguments, base_content,
-                          settings.templatePath, base_context) != 0) {
+      if (renderBase(policy.quanx_base) != 0) {
         *status_code = 400;
         return {true, base_content};
       }
@@ -6227,10 +6489,7 @@ static SubStageResponse dispatchTargetGenerator(
   case "loon"_hash:
     writeLog(LOG_LEVEL_INFO, "生成目标：Loon");
     if (!ext.nodelist) {
-      if (render_template(fetchFile(policy.loon_base, proxy,
-                                    settings.cacheConfig, true, base_context),
-                          template_arguments, base_content,
-                          settings.templatePath, base_context) != 0) {
+      if (renderBase(policy.loon_base) != 0) {
         *status_code = 400;
         return {true, base_content};
       }
@@ -6283,10 +6542,7 @@ static SubStageResponse dispatchTargetGenerator(
   case "singbox"_hash:
     writeLog(LOG_LEVEL_INFO, "生成目标：sing-box");
     if (!ext.nodelist) {
-      if (render_template(fetchFile(policy.singbox_base, proxy,
-                                    settings.cacheConfig, true, base_context),
-                          template_arguments, base_content,
-                          settings.templatePath, base_context) != 0) {
+      if (renderBase(policy.singbox_base) != 0) {
         *status_code = 400;
         return {true, base_content};
       }
@@ -6866,7 +7122,7 @@ static bool forceMaxFlowEligible(
   if (target.empty() || target == "auto")
     return false;
   const TargetDescriptor *descriptor = findTargetDescriptor(target);
-  if (!descriptor || !descriptor->simple_subscription)
+  if (!descriptor)
     return false;
   if (isTruthyRequestValue(getUrlArg(request.argument, "upload")) ||
       isTruthyRequestValue(getUrlArg(request.argument, "script")) ||
@@ -6880,18 +7136,6 @@ static bool forceMaxFlowEligible(
           std::string::npos)
     return false;
 
-  if (target == "sssub") {
-    const std::string requested_config =
-        getUrlArg(request.argument, "config");
-    auto inline_config = [](const std::string &path) {
-      return path.empty() || startsWith(path, "data:");
-    };
-    if (!inline_config(requested_config) ||
-        ((requested_config.empty() ||
-          prepared.settings->fallbackToDefaultExternalConfig) &&
-         !inline_config(prepared.settings->defaultExtConfig)))
-      return false;
-  }
   if (!runtimeCoordinatorSnapshot().ready)
     return false;
   return true;
@@ -7093,18 +7337,90 @@ private:
 
   void preparePlan(ConversionFlow &flow) {
     try {
+      dependency_requests_.clear();
+      ConversionDependencyResolution planning;
+      planning.requests = &dependency_requests_;
       {
         RequestStageTimer timer(request_.context, RequestStage::Rules);
         std::string error = buildExternalConfigFetchPlan(
             response_, *settings_, *parsed_, *policy_, *fetch_plan_,
-            &*selected_config_);
+            &*selected_config_, &planning);
         if (!error.empty()) {
           finishBody(flow, std::move(error));
           return;
         }
       }
-      if (!flow.setPhase(
-              ConversionFlowPhase::FetchingSubscriptions))
+      if (!flow.setPhase(ConversionFlowPhase::FetchingRulesets))
+        throw std::runtime_error("failed to enter dependency phase");
+      if (dependency_requests_.empty()) {
+        dependenciesReady(flow, {});
+        return;
+      }
+      auto self = shared_from_this();
+      if (!resolveConversionResourcesOnFlow(
+              flow, dependency_requests_, settings_, request_.context,
+              [self](ConversionFlow &resumed,
+                     AsyncConversionResourceBatchResult result) mutable {
+                self->dependenciesReady(resumed, std::move(result));
+              }))
+        throw std::runtime_error("failed to start conversion dependencies");
+    } catch (...) {
+      (void)flow.fail(std::current_exception());
+    }
+  }
+
+  void dependenciesReady(ConversionFlow &flow,
+                         AsyncConversionResourceBatchResult result) {
+    try {
+      resolved_dependencies_ = std::move(result);
+      rebuildPolicy();
+      if (!fetch_plan_->base_path.empty()) {
+        auto self = shared_from_this();
+        if (!renderTemplateOnFlow(
+                flow, fetch_plan_->resolved_base_content,
+                policy_->template_arguments, settings_->templatePath,
+                fetch_plan_->base_fetch_context, settings_,
+                request_.context,
+                [self](ConversionFlow &resumed,
+                       AsyncTemplateResult rendered) mutable {
+                  self->baseReady(resumed, std::move(rendered));
+                }))
+          throw std::runtime_error("failed to start base template render");
+        return;
+      }
+      beginSubscriptionPlanning(flow);
+    } catch (...) {
+      (void)flow.fail(std::current_exception());
+    }
+  }
+
+  void baseReady(ConversionFlow &flow, AsyncTemplateResult rendered) {
+    try {
+      if (rendered.status == AsyncTemplateStatus::RenderFailed ||
+          rendered.status == AsyncTemplateStatus::FetchFailed) {
+        response_.status_code = 400;
+        if (rendered.output.empty())
+          rendered.output =
+              "Invalid template: rendering failed.\n"
+              "无效模板：模板渲染失败。\n"
+              "Please check the template syntax and configured resources.\n"
+              "请检查模板语法和已配置资源。";
+        finishBody(flow, std::move(rendered.output));
+        return;
+      }
+      if (rendered.status == AsyncTemplateStatus::ResourceLimitExceeded) {
+        throw std::runtime_error("base template resource limit exceeded");
+      }
+      resolved_base_content_ = std::move(rendered.output);
+      beginSubscriptionPlanning(flow);
+    } catch (...) {
+      (void)flow.fail(std::current_exception());
+    }
+  }
+
+  void beginSubscriptionPlanning(ConversionFlow &flow) {
+    try {
+      if (!flow.setPhase(ConversionFlowPhase::FetchingSubscriptions))
         throw std::runtime_error("failed to enter subscription phase");
       missing_subscriptions_.clear();
       SubscriptionResolutionView planning;
@@ -7192,9 +7508,11 @@ private:
         *parsed_, *policy_);
     if (!error.empty())
       throw std::runtime_error("force max flow policy rebuild failed");
+    ConversionDependencyResolution resolved;
+    resolved.resolved = &resolved_dependencies_;
     error = buildExternalConfigFetchPlan(
         response_, *settings_, *parsed_, *policy_, *fetch_plan_,
-        &*selected_config_);
+        &*selected_config_, &resolved);
     if (!error.empty())
       throw std::runtime_error("force max flow config rebuild failed");
   }
@@ -7269,7 +7587,9 @@ private:
       RequestStageTimer timer(request_.context, RequestStage::Serialize);
       const SubStageResponse generated = dispatchTargetGenerator(
           request_, response_, *settings_, *parsed_, *policy_,
-          *fetch_plan_, *subscription_, *generation_);
+          *fetch_plan_, *subscription_, *generation_,
+          fetch_plan_->base_path.empty() ? nullptr
+                                         : &resolved_base_content_);
       if (generated.complete) {
         finishBody(flow, generated.body);
         return;
@@ -7298,6 +7618,19 @@ private:
   }
 
   void terminal(ConversionFlowTerminal terminal) noexcept {
+    if (terminal.state == ConversionFlowTerminalState::Failed &&
+        terminal.error) {
+      try {
+        std::rethrow_exception(terminal.error);
+      } catch (const std::exception &error) {
+        writeLog(LOG_LEVEL_ERROR,
+                 "FORCE_MAX_FLOW_FAILED detail=" +
+                     summarizeSensitiveTextForLog(error.what()));
+      } catch (...) {
+        writeLog(LOG_LEVEL_ERROR,
+                 "FORCE_MAX_FLOW_FAILED detail=unknown");
+      }
+    }
     ForceMaxFlowCompletion completion = std::move(completion_);
     flow_.reset();
     if (!completion)
@@ -7329,6 +7662,9 @@ private:
   std::vector<UnresolvedSubscriptionSource> missing_subscriptions_;
   std::vector<UnresolvedSubscriptionSource> resolved_keys_;
   AsyncSubscriptionBatchResult resolved_subscriptions_;
+  std::vector<AsyncConversionResourceRequest> dependency_requests_;
+  AsyncConversionResourceBatchResult resolved_dependencies_;
+  std::string resolved_base_content_;
   ForceMaxFlowOutput output_;
 };
 

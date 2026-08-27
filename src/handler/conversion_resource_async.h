@@ -2,6 +2,7 @@
 #define CONVERSION_RESOURCE_ASYNC_H_INCLUDED
 
 #include <functional>
+#include <future>
 #include <memory>
 #include <string>
 #include <vector>
@@ -13,6 +14,8 @@
 enum class ConversionResourceKind {
   Ruleset,
   Base,
+  RulePrepend,
+  RuleAppend,
 };
 
 struct AsyncConversionResourceRequest {
@@ -20,6 +23,8 @@ struct AsyncConversionResourceRequest {
   uint64_t source_index = 0;
   std::string url;
   ProxyPolicy proxy;
+  string_icase_map request_headers;
+  std::shared_future<std::string> preloaded_content;
   unsigned int cache_ttl = 0;
   FetchContext context = FetchContext::TrustedConfig;
 };
