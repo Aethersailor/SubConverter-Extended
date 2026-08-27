@@ -41,6 +41,12 @@ for dockerfile in Dockerfile docker/Dockerfile.armv7-cross \
     'python3 scripts/ci/patch_cpp_httplib_force_max.py include/httplib.h' \
     "$REPOSITORY/$dockerfile"
 done
+grep -Fq 'for attempt in 1 2 3; do' "$REPOSITORY/Dockerfile"
+grep -Fq 'if [ "${attempt}" = 3 ]; then' "$REPOSITORY/Dockerfile"
+grep -Fq 'Mihomo config validator build failed after ${attempt} attempts' \
+  "$REPOSITORY/Dockerfile"
+grep -Fq 'exit 1;' "$REPOSITORY/Dockerfile"
+grep -Fq 'sleep "$((attempt * 5))"' "$REPOSITORY/Dockerfile"
 grep -Eq '^[[:space:]]+cmake .*python3' \
   "$REPOSITORY/docker/Dockerfile.armv7-cross"
 PYTHONPYCACHEPREFIX="$TEST_ROOT/pycache" python3 -m py_compile \

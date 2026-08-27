@@ -103,13 +103,23 @@ RUN set -eux; \
       mihomo_dir="$(GOWORK=off go list -m -mod=readonly -f '{{.Dir}}' github.com/metacubex/mihomo)"; \
       mihomo_version="$(GOWORK=off go list -m -mod=readonly -f '{{.Version}}' github.com/metacubex/mihomo)"; \
       echo "Building Mihomo config validator ${mihomo_version}"; \
-      (cd "${mihomo_dir}" && \
-        GOWORK=off CGO_ENABLED=1 go build \
-          -mod=readonly \
-          -trimpath \
-          -ldflags='-s -w' \
-          -o /build/test-tools/mihomo \
-          .); \
+      for attempt in 1 2 3; do \
+        if (cd "${mihomo_dir}" && \
+          GOWORK=off CGO_ENABLED=1 go build \
+            -mod=readonly \
+            -trimpath \
+            -ldflags='-s -w' \
+            -o /build/test-tools/mihomo \
+            .); then \
+          break; \
+        fi; \
+        if [ "${attempt}" = 3 ]; then \
+          echo "Mihomo config validator build failed after ${attempt} attempts" >&2; \
+          exit 1; \
+        fi; \
+        echo "Mihomo config validator build attempt ${attempt} failed; retrying" >&2; \
+        sleep "$((attempt * 5))"; \
+      done; \
       test -x /build/test-tools/mihomo; \
     fi
 
