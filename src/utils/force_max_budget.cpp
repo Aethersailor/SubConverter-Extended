@@ -89,7 +89,8 @@ bool validateForceMaxBudget(const ForceMaxBudget &budget,
     return invalid("queue_budget_overflow");
   uint64_t memory_total = 0;
   for (uint64_t component :
-       {budget.reserved_memory_bytes, budget.retained_response_bytes,
+       {budget.reserved_memory_bytes, budget.handler_stack_bytes,
+        budget.retained_response_bytes,
         budget.fetch_bytes, budget.cache_bytes,
         budget.working_memory_bytes, queue_total}) {
     if (!checkedAdd(memory_total, component, memory_total))
@@ -211,99 +212,12 @@ ForceMaxBudget calculateForceMaxBudget(
   const uint64_t cpu_millis =
       std::max<uint64_t>(1, envelope.schedulable_cpu_millis);
   const uint64_t cpu_units = std::max<uint64_t>(1, ceilDivide(cpu_millis, 1000));
-  budget.compute_workers = cpu_units;
-  budget.compute_permits = cpu_units;
-  budget.io_runners = std::max<uint64_t>(1, ceilDivide(cpu_units, 4));
   const uint64_t handler_threads_per_compute =
       std::max<uint64_t>(1,
                          envelope.http_handler_threads_per_compute);
-  if (!assignScaled(cpu_units, handler_threads_per_compute,
-                    budget.handler_permits, budget) ||
-      !assignScaled(cpu_units, 8, budget.active_owners, budget) ||
-      !assignScaled(cpu_units, 16, budget.active_flows, budget))
-    return budget;
-
   budget.fixed_threads = 7;
-  auto threadRequirement = [&](uint64_t compute, uint64_t &io,
-                                uint64_t &handlers, uint64_t &quickjs,
-                                uint64_t &resolver_threads,
-                                uint64_t &transient_reserve,
-                                uint64_t &total) {
-    io = std::max<uint64_t>(1, ceilDivide(compute, 4));
-    if (!checkedMultiply(compute, handler_threads_per_compute,
-                         handlers))
-      return false;
-    handlers = std::max<uint64_t>(1, handlers);
-    quickjs = std::max<uint64_t>(1, compute / 2);
-    const uint64_t ruleset_workers = io;
-    transient_reserve = std::max<uint64_t>(4, compute);
-    uint64_t resolver_transfers = 0;
-    if (!checkedMultiply(compute, 16, resolver_transfers) ||
-        !checkedMultiply(resolver_transfers,
-                         envelope.resolver_threads_per_transfer,
-                         resolver_threads))
-      return false;
-    uint64_t variable = 0;
-    return checkedAdd(compute, handlers, variable) &&
-           checkedAdd(variable, io, variable) &&
-           checkedAdd(variable, quickjs, variable) &&
-           checkedAdd(variable, ruleset_workers, variable) &&
-           checkedAdd(variable, resolver_threads, variable) &&
-           checkedAdd(variable, budget.fixed_threads, variable) &&
-           checkedAdd(variable, transient_reserve, total);
-  };
-
-  uint64_t pids_io = 0;
-  uint64_t pids_handlers = 0;
-  uint64_t pids_quickjs = 0;
-  uint64_t pids_resolver = 0;
-  uint64_t pids_transient = 0;
-  uint64_t pids_total = 0;
-
-  if (envelope.pids_max != 0) {
-    const uint64_t remaining =
-        envelope.pids_max > envelope.pids_current
-            ? envelope.pids_max - envelope.pids_current
-            : 0;
-    uint64_t selected_compute = budget.compute_workers;
-    while (selected_compute != 0 &&
-            (!threadRequirement(selected_compute, pids_io,
-                                pids_handlers, pids_quickjs,
-                                pids_resolver, pids_transient,
-                                pids_total) ||
-            pids_total > remaining))
-      --selected_compute;
-    if (selected_compute == 0) {
-      fail(budget, "pids_exhausted");
-      return budget;
-    }
-    budget.compute_workers = selected_compute;
-    budget.compute_permits = selected_compute;
-    budget.io_runners = pids_io;
-    budget.handler_permits = pids_handlers;
-    budget.resolver_thread_budget = pids_resolver;
-    budget.reserved_pids = pids_transient;
-    budget.thread_budget_total = pids_total;
-  } else {
-    if (!threadRequirement(budget.compute_workers, pids_io,
-                            pids_handlers, pids_quickjs,
-                            pids_resolver, pids_transient,
-                            pids_total)) {
-      fail(budget, "integer_overflow");
-      return budget;
-    }
-    budget.resolver_thread_budget = pids_resolver;
-    budget.reserved_pids = pids_transient;
-    budget.thread_budget_total = pids_total;
-  }
-  if (!assignScaled(budget.compute_workers, 8, budget.active_owners,
-                    budget) ||
-      !assignScaled(budget.compute_workers, 16, budget.active_flows,
-                    budget))
-    return budget;
-
   uint64_t fallback_fds = 0;
-  if (!assignScaled(budget.compute_workers, 64, fallback_fds, budget))
+  if (!assignScaled(cpu_units, 64, fallback_fds, budget))
     return budget;
   fallback_fds = std::max<uint64_t>(1024, fallback_fds);
   const uint64_t fd_boundary =
@@ -321,30 +235,6 @@ ForceMaxBudget calculateForceMaxBudget(
     fail(budget, "nofile_exhausted");
     return budget;
   }
-  uint64_t desired_outbound = 0;
-  uint64_t desired_open = 0;
-  uint64_t desired_inbound = 0;
-  if (!assignScaled(budget.compute_workers, 16, desired_outbound, budget) ||
-      !assignScaled(desired_outbound, 4, desired_open, budget) ||
-      !assignScaled(budget.compute_workers, 64, desired_inbound, budget))
-    return budget;
-  const uint64_t outbound_fd_budget = usable_fds / 2;
-  budget.outbound_open = std::min(desired_open, outbound_fd_budget);
-  budget.inbound_connections =
-      std::min(desired_inbound, usable_fds - budget.outbound_open);
-  if (budget.outbound_open < 2 || budget.inbound_connections < 4) {
-    fail(budget, "insufficient_connection_fds");
-    return budget;
-  }
-  budget.outbound_active =
-      std::min(desired_outbound,
-               std::max<uint64_t>(1, budget.outbound_open / 2));
-  budget.outbound_per_host = std::min(
-      budget.outbound_active,
-      std::max<uint64_t>(1, ceilDivide(budget.outbound_active, 4)));
-  budget.outbound_idle_cache =
-      budget.outbound_open - budget.outbound_active;
-
   const ResourceMemoryLedger memory_ledger =
       resourceEnvelopeMemoryLedger(envelope);
   if (!memory_ledger.valid) {
@@ -361,16 +251,279 @@ ForceMaxBudget calculateForceMaxBudget(
   budget.startup_memory_bytes = memory_ledger.startup_bytes;
   budget.memory_headroom_bytes = memory_ledger.headroom_bytes;
   budget.memory_budget_total = memory_ledger.headroom_bytes;
+
+  const uint64_t base_memory_reserve =
+      fraction(memory_ledger.headroom_bytes, 1, 8);
+  const uint64_t minimum_runtime_memory = UINT64_C(8) * 1024 * 1024;
+  const uint64_t stack_memory_limit =
+      memory_ledger.headroom_bytes >
+              base_memory_reserve + minimum_runtime_memory
+          ? memory_ledger.headroom_bytes - base_memory_reserve -
+                minimum_runtime_memory
+          : 0;
+  const uint64_t pid_headroom =
+      envelope.pids_max != 0 && envelope.pids_max > envelope.pids_current
+          ? envelope.pids_max - envelope.pids_current
+          : (envelope.pids_max == 0 ? UINT64_MAX : 0);
+  const uint64_t outbound_fd_budget = usable_fds / 2;
+  const char *candidate_failure = "integer_overflow";
+  auto runtimeRequirement =
+      [&](uint64_t compute, uint64_t &io, uint64_t &handlers,
+          uint64_t &quickjs, uint64_t &resolver_threads,
+          uint64_t &transient_reserve, uint64_t &total,
+          uint64_t &outbound_open, uint64_t &inbound_connections,
+          uint64_t &outbound_active, uint64_t &handler_stack_bytes) {
+        candidate_failure = "integer_overflow";
+        resolver_threads = 0;
+        handler_stack_bytes = 0;
+        uint64_t desired_outbound = 0;
+        uint64_t desired_open = 0;
+        uint64_t desired_inbound = 0;
+        if (!checkedMultiply(compute, 16, desired_outbound) ||
+            !checkedMultiply(desired_outbound, 4, desired_open) ||
+            !checkedMultiply(compute, 64, desired_inbound))
+          return false;
+        outbound_open = std::min(desired_open, outbound_fd_budget);
+        inbound_connections =
+            std::min(desired_inbound, usable_fds - outbound_open);
+        if (outbound_open < 2 || inbound_connections < 4) {
+          candidate_failure = "insufficient_connection_fds";
+          return false;
+        }
+        outbound_active = std::min(
+            desired_outbound,
+            std::max<uint64_t>(1, outbound_open / 2));
+        io = std::max<uint64_t>(1, ceilDivide(compute, 4));
+        quickjs = std::max<uint64_t>(1, compute / 2);
+        transient_reserve = std::max<uint64_t>(4, compute);
+        uint64_t fixed_without_handlers_or_resolver = 0;
+        if (!checkedAdd(compute, io, fixed_without_handlers_or_resolver) ||
+            !checkedAdd(fixed_without_handlers_or_resolver, quickjs,
+                        fixed_without_handlers_or_resolver) ||
+            !checkedAdd(fixed_without_handlers_or_resolver, io,
+                        fixed_without_handlers_or_resolver) ||
+            !checkedAdd(fixed_without_handlers_or_resolver,
+                        budget.fixed_threads,
+                        fixed_without_handlers_or_resolver) ||
+            !checkedAdd(fixed_without_handlers_or_resolver,
+                        transient_reserve,
+                        fixed_without_handlers_or_resolver))
+          return false;
+        if (fixed_without_handlers_or_resolver > pid_headroom) {
+          candidate_failure = "pids_exhausted";
+          return false;
+        }
+        uint64_t variable_pid_budget =
+            pid_headroom - fixed_without_handlers_or_resolver;
+        if (envelope.http_handlers_own_inbound) {
+          if (envelope.http_handler_stack_bytes == 0) {
+            candidate_failure = "handler_stack_unknown";
+            return false;
+          }
+          const uint64_t memory_handler_limit =
+              stack_memory_limit / envelope.http_handler_stack_bytes;
+          uint64_t minimum_inbound_for_compute = 0;
+          if (!checkedMultiply(compute, 2,
+                               minimum_inbound_for_compute) ||
+              !checkedAdd(minimum_inbound_for_compute, 2,
+                          minimum_inbound_for_compute))
+            return false;
+          minimum_inbound_for_compute =
+              std::max<uint64_t>(4, minimum_inbound_for_compute);
+          uint64_t minimum_handlers = 0;
+          if (!checkedAdd(envelope.http_handler_control_reserve,
+                          minimum_inbound_for_compute,
+                          minimum_handlers))
+            return false;
+          const uint64_t minimum_resolver_threads =
+              envelope.resolver_threads_per_transfer;
+          uint64_t minimum_variable_threads = 0;
+          if (!checkedAdd(minimum_handlers, minimum_resolver_threads,
+                          minimum_variable_threads))
+            return false;
+          if (memory_handler_limit < minimum_handlers ||
+              variable_pid_budget < minimum_variable_threads) {
+            candidate_failure =
+                memory_handler_limit < minimum_handlers
+                    ? "handler_stack_memory_exhausted"
+                    : "pids_exhausted";
+            return false;
+          }
+          const uint64_t variable_extras =
+              variable_pid_budget - minimum_variable_threads;
+          const uint64_t handler_extra_share =
+              envelope.resolver_threads_per_transfer == 0
+                  ? variable_extras
+                  : fraction(variable_extras, 4, 5);
+          const uint64_t handler_pid_limit =
+              minimum_handlers + handler_extra_share;
+          const uint64_t resolver_pid_limit =
+              variable_pid_budget - handler_pid_limit;
+          uint64_t desired_handler_limit = 0;
+          if (!checkedAdd(desired_inbound,
+                          envelope.http_handler_control_reserve,
+                          desired_handler_limit))
+            return false;
+          const uint64_t handler_limit =
+              std::min(memory_handler_limit,
+                       std::min(handler_pid_limit,
+                                desired_handler_limit));
+          uint64_t desired_resolver_threads = 0;
+          if (!checkedMultiply(desired_outbound,
+                               envelope.resolver_threads_per_transfer,
+                               desired_resolver_threads))
+            return false;
+          const uint64_t resolver_thread_limit =
+              std::min(resolver_pid_limit, desired_resolver_threads);
+          if (envelope.resolver_threads_per_transfer != 0)
+            outbound_active = std::min(
+                outbound_active,
+                resolver_thread_limit /
+                    envelope.resolver_threads_per_transfer);
+          if (outbound_active == 0) {
+            candidate_failure = "pids_exhausted";
+            return false;
+          }
+          if (!checkedMultiply(outbound_active,
+                               envelope.resolver_threads_per_transfer,
+                               resolver_threads))
+            return false;
+          if (handler_limit < minimum_handlers) {
+            candidate_failure = "pids_exhausted";
+            return false;
+          }
+          inbound_connections = std::min(
+              inbound_connections,
+              handler_limit - envelope.http_handler_control_reserve);
+          if (inbound_connections < 4) {
+            candidate_failure = "insufficient_connection_fds";
+            return false;
+          }
+          if (!checkedAdd(inbound_connections,
+                          envelope.http_handler_control_reserve,
+                          handlers))
+            return false;
+        } else {
+          if (!checkedMultiply(compute, handler_threads_per_compute,
+                               handlers) ||
+              !checkedAdd(handlers,
+                          envelope.http_handler_control_reserve,
+                          handlers))
+            return false;
+          handlers = std::max<uint64_t>(1, handlers);
+          if (!checkedMultiply(handlers,
+                               envelope.http_handler_stack_bytes,
+                               handler_stack_bytes))
+            return false;
+          if (handler_stack_bytes > stack_memory_limit) {
+            candidate_failure = "handler_stack_memory_exhausted";
+            return false;
+          }
+          if (handlers > variable_pid_budget) {
+            candidate_failure = "pids_exhausted";
+            return false;
+          }
+          variable_pid_budget -= handlers;
+          if (envelope.resolver_threads_per_transfer != 0) {
+            outbound_active = std::min(
+                outbound_active,
+                variable_pid_budget /
+                    envelope.resolver_threads_per_transfer);
+          }
+          if (outbound_active == 0) {
+            candidate_failure = "pids_exhausted";
+            return false;
+          }
+          if (!checkedMultiply(outbound_active,
+                               envelope.resolver_threads_per_transfer,
+                               resolver_threads))
+            return false;
+        }
+        handlers = std::max<uint64_t>(1, handlers);
+        if (!checkedMultiply(handlers,
+                             envelope.http_handler_stack_bytes,
+                             handler_stack_bytes))
+          return false;
+        if (handler_stack_bytes > stack_memory_limit) {
+          candidate_failure = "handler_stack_memory_exhausted";
+          return false;
+        }
+        if (!checkedAdd(fixed_without_handlers_or_resolver, handlers,
+                        total) ||
+            !checkedAdd(total, resolver_threads, total))
+          return false;
+        if (total > pid_headroom) {
+          candidate_failure = "pids_exhausted";
+          return false;
+        }
+        return true;
+      };
+
+  uint64_t selected_compute = cpu_units;
+  uint64_t selected_io = 0;
+  uint64_t selected_handlers = 0;
+  uint64_t selected_quickjs = 0;
+  uint64_t selected_resolver = 0;
+  uint64_t selected_transient = 0;
+  uint64_t selected_total = 0;
+  uint64_t selected_outbound_open = 0;
+  uint64_t selected_inbound = 0;
+  uint64_t selected_outbound_active = 0;
+  uint64_t selected_handler_stack = 0;
+  while (selected_compute != 0 &&
+         !runtimeRequirement(
+             selected_compute, selected_io, selected_handlers,
+             selected_quickjs, selected_resolver, selected_transient,
+             selected_total, selected_outbound_open, selected_inbound,
+             selected_outbound_active, selected_handler_stack))
+    --selected_compute;
+  if (selected_compute == 0) {
+    fail(budget, candidate_failure);
+    return budget;
+  }
+  budget.compute_workers = selected_compute;
+  budget.compute_permits = selected_compute;
+  budget.io_runners = selected_io;
+  budget.handler_permits = selected_handlers;
+  budget.resolver_thread_budget = selected_resolver;
+  budget.reserved_pids = selected_transient;
+  budget.thread_budget_total = selected_total;
+  budget.handler_stack_bytes = selected_handler_stack;
+  budget.outbound_open = selected_outbound_open;
+  budget.inbound_connections = selected_inbound;
+  budget.outbound_active = selected_outbound_active;
+  budget.outbound_per_host = std::min(
+      budget.outbound_active,
+      std::max<uint64_t>(1, ceilDivide(budget.outbound_active, 4)));
+  budget.outbound_idle_cache =
+      budget.outbound_open - budget.outbound_active;
+  uint64_t desired_owners = 0;
+  uint64_t desired_flows = 0;
+  if (!assignScaled(budget.compute_workers, 8, desired_owners, budget) ||
+      !assignScaled(budget.compute_workers, 16, desired_flows, budget))
+    return budget;
+  const uint64_t inbound_flow_limit =
+      budget.inbound_connections > 2
+          ? (budget.inbound_connections - 2) / 2
+          : 0;
+  budget.active_flows = std::min(desired_flows, inbound_flow_limit);
+  budget.active_owners = std::min(desired_owners, budget.active_flows);
+  if (budget.active_flows == 0 || budget.active_owners == 0) {
+    fail(budget, "insufficient_connection_fds");
+    return budget;
+  }
   budget.reserved_memory_bytes =
-      fraction(budget.memory_headroom_bytes, 1, 8);
+      base_memory_reserve;
   const uint64_t allocatable =
-      budget.memory_headroom_bytes - budget.reserved_memory_bytes;
+      budget.memory_headroom_bytes - budget.reserved_memory_bytes -
+      budget.handler_stack_bytes;
   budget.retained_response_bytes = fraction(allocatable, 2, 10);
   budget.fetch_bytes = fraction(allocatable, 2, 10);
   budget.cache_bytes = fraction(allocatable, 2, 10);
   budget.working_memory_bytes = fraction(allocatable, 3, 10);
   const uint64_t queue_bytes =
       budget.memory_headroom_bytes - budget.reserved_memory_bytes -
+      budget.handler_stack_bytes -
       budget.retained_response_bytes - budget.fetch_bytes -
       budget.cache_bytes - budget.working_memory_bytes;
   budget.transport_queue_bytes = queue_bytes / 2;

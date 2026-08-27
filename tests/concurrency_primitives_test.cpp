@@ -1247,7 +1247,7 @@ static void testResourceControlPrimitives() {
   assert(deterministic_first.outbound_active <=
          deterministic_first.outbound_open);
   assert(deterministic_first.quickjs_workers == 3);
-  assert(deterministic_first.formula_revision == "force-max-v3");
+  assert(deterministic_first.formula_revision == "force-max-v4");
   assert(deterministic_first.startup_memory_bytes ==
          bounded_envelope.memory_current_bytes);
   assert(deterministic_first.memory_headroom_bytes ==
@@ -1303,6 +1303,92 @@ static void testResourceControlPrimitives() {
   assert(cares_budget.thread_budget_total +
              deterministic_first.resolver_thread_budget ==
          deterministic_first.thread_budget_total);
+
+  ResourceEnvelope httplib_envelope = bounded_envelope;
+  httplib_envelope.http_handler_control_reserve = 1;
+  const ForceMaxBudget httplib_budget =
+      calculateForceMaxBudget(httplib_envelope);
+  assert(httplib_budget.valid);
+  assert(httplib_budget.compute_workers ==
+         deterministic_first.compute_workers);
+  assert(httplib_budget.handler_permits ==
+         deterministic_first.handler_permits + 1);
+  assert(httplib_budget.thread_budget_total ==
+         deterministic_first.thread_budget_total + 1);
+  ResourceEnvelope live_httplib_envelope = bounded_envelope;
+  live_httplib_envelope.http_handler_threads_per_compute = 64;
+  live_httplib_envelope.http_handler_control_reserve = 2;
+  live_httplib_envelope.http_handler_stack_bytes =
+      UINT64_C(8) * 1024 * 1024;
+  live_httplib_envelope.http_handlers_own_inbound = true;
+  const ForceMaxBudget live_httplib_budget =
+      calculateForceMaxBudget(live_httplib_envelope);
+  assert(live_httplib_budget.valid);
+  assert(live_httplib_budget.compute_workers == 6);
+  assert(live_httplib_budget.inbound_connections == 384);
+  assert(live_httplib_budget.handler_permits == 386);
+  assert(live_httplib_budget.handler_stack_bytes ==
+         UINT64_C(386) * 8 * 1024 * 1024);
+  ResourceEnvelope fd_clamped_httplib = live_httplib_envelope;
+  fd_clamped_httplib.nofile_soft = 256;
+  fd_clamped_httplib.nofile_hard = 256;
+  fd_clamped_httplib.open_fds = 32;
+  fd_clamped_httplib.pids_current = 24;
+  fd_clamped_httplib.pids_max = 174;
+  const ForceMaxBudget fd_clamped_httplib_budget =
+      calculateForceMaxBudget(fd_clamped_httplib);
+  assert(fd_clamped_httplib_budget.valid);
+  assert(fd_clamped_httplib_budget.compute_workers == 6);
+  assert(fd_clamped_httplib_budget.inbound_connections == 80);
+  assert(fd_clamped_httplib_budget.handler_permits == 82);
+  assert(fd_clamped_httplib_budget.resolver_thread_budget == 23);
+  assert(fd_clamped_httplib_budget.thread_budget_total == 131);
+  assert(fd_clamped_httplib_budget.active_flows == 39);
+  assert(fd_clamped_httplib_budget.active_owners == 39);
+  ResourceEnvelope more_nofile_httplib = fd_clamped_httplib;
+  more_nofile_httplib.nofile_soft = 512;
+  more_nofile_httplib.nofile_hard = 512;
+  const ForceMaxBudget more_nofile_httplib_budget =
+      calculateForceMaxBudget(more_nofile_httplib);
+  assert(more_nofile_httplib_budget.valid);
+  assert(more_nofile_httplib_budget.compute_workers ==
+         fd_clamped_httplib_budget.compute_workers);
+  assert(more_nofile_httplib_budget.inbound_connections >=
+         fd_clamped_httplib_budget.inbound_connections);
+  assert(more_nofile_httplib_budget.active_flows >=
+         fd_clamped_httplib_budget.active_flows);
+  assert(more_nofile_httplib_budget.outbound_active >=
+         fd_clamped_httplib_budget.outbound_active);
+  ResourceEnvelope cares_httplib = more_nofile_httplib;
+  cares_httplib.resolver_threads_per_transfer = 0;
+  const ForceMaxBudget cares_httplib_budget =
+      calculateForceMaxBudget(cares_httplib);
+  assert(cares_httplib_budget.valid);
+  assert(cares_httplib_budget.compute_workers ==
+         more_nofile_httplib_budget.compute_workers);
+  assert(cares_httplib_budget.handler_permits >=
+         more_nofile_httplib_budget.handler_permits);
+  assert(cares_httplib_budget.inbound_connections >=
+         more_nofile_httplib_budget.inbound_connections);
+  assert(cares_httplib_budget.resolver_thread_budget == 0);
+
+  ResourceEnvelope memory_clamped_httplib = live_httplib_envelope;
+  memory_clamped_httplib.memory_max_bytes =
+      UINT64_C(2560) * 1024 * 1024;
+  const ForceMaxBudget memory_clamped_httplib_budget =
+      calculateForceMaxBudget(memory_clamped_httplib);
+  assert(memory_clamped_httplib_budget.valid);
+  assert(memory_clamped_httplib_budget.compute_workers == 6);
+  assert(memory_clamped_httplib_budget.handler_permits == 223);
+  assert(memory_clamped_httplib_budget.handler_stack_bytes ==
+         UINT64_C(223) * 8 * 1024 * 1024);
+  ResourceEnvelope overflowing_handler_envelope = bounded_envelope;
+  overflowing_handler_envelope.http_handler_control_reserve = UINT64_MAX;
+  const ForceMaxBudget overflowing_handler_budget =
+      calculateForceMaxBudget(overflowing_handler_envelope);
+  assert(!overflowing_handler_budget.valid);
+  assert(overflowing_handler_budget.validation_error ==
+         "integer_overflow");
 
   ResourceEnvelope fractional_envelope = bounded_envelope;
   fractional_envelope.schedulable_cpu_millis = 500;
@@ -1429,12 +1515,13 @@ static void testResourceControlPrimitives() {
   assert(overflowing_memory.capacity_bytes == UINT64_MAX);
 
   ResourceEnvelope low_nofile_envelope = portable_envelope;
-  low_nofile_envelope.nofile_soft = 32;
+  low_nofile_envelope.nofile_soft = 160;
   low_nofile_envelope.open_fds = 8;
   const ForceMaxBudget low_nofile =
       calculateForceMaxBudget(low_nofile_envelope);
   assert(low_nofile.valid);
-  assert(low_nofile.outbound_open <= 8);
+  assert(low_nofile.compute_workers == 2);
+  assert(low_nofile.outbound_open + low_nofile.inbound_connections <= 88);
 
   ResourceEnvelope exhausted_nofile_envelope = portable_envelope;
   exhausted_nofile_envelope.nofile_soft = 8;
@@ -1456,11 +1543,11 @@ static void testResourceControlPrimitives() {
   const ForceMaxBudget tight_pids =
       calculateForceMaxBudget(tight_pids_envelope);
   assert(tight_pids.valid);
-  assert(tight_pids.compute_workers == 1);
-  assert(tight_pids.handler_permits == 4);
+  assert(tight_pids.compute_workers == 3);
+  assert(tight_pids.handler_permits == 12);
   assert(tight_pids.thread_budget_total == 35);
   assert(tight_pids.fixed_threads == 7);
-  assert(tight_pids.resolver_thread_budget == 16);
+  assert(tight_pids.resolver_thread_budget == 6);
   assert(tight_pids.resolver_thread_budget == tight_pids.outbound_active);
   assert(tight_pids.reserved_pids == 4);
 
@@ -1488,7 +1575,7 @@ static void testResourceControlPrimitives() {
   assert(forceMaxRequiredPidHeadroom(4, 16, 5) == 15);
   assert(forceMaxRequiredPidHeadroom(4, 16, 16) == 4);
   ResourceEnvelope exhausted_pids_envelope = tight_pids_envelope;
-  exhausted_pids_envelope.pids_max = 58;
+  exhausted_pids_envelope.pids_max = 43;
   const ForceMaxBudget exhausted_pids =
       calculateForceMaxBudget(exhausted_pids_envelope);
   assert(!exhausted_pids.valid);

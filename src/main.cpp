@@ -376,12 +376,10 @@ int main(int argc, char *argv[]) {
   if (global.statisticsEnabled) {
     webServer.append_response(
         "GET", "/dashboard", "text/html; charset=utf-8",
-        global.dashboardAuthEnabled ? dashboard_auth::page
-                                    : dashboard_page::page);
+        dashboard_auth::page);
     webServer.append_response(
         "GET", "/dashboard/data", "application/json; charset=utf-8",
-        global.dashboardAuthEnabled ? dashboard_auth::data
-                                    : statistics::dashboardData);
+        dashboard_auth::data);
   }
 
   webServer.append_response(

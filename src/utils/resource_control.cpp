@@ -57,6 +57,36 @@ struct ResourceControllerRuntime {
 
 ResourceControllerRuntime runtime;
 
+uint64_t defaultNativeThreadStackBytes() noexcept {
+#ifdef _WIN32
+  const HMODULE module = GetModuleHandleW(nullptr);
+  if (!module)
+    return 0;
+  const auto *base = reinterpret_cast<const unsigned char *>(module);
+  const auto *dos = reinterpret_cast<const IMAGE_DOS_HEADER *>(base);
+  if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0)
+    return 0;
+#ifdef _WIN64
+  const auto *nt = reinterpret_cast<const IMAGE_NT_HEADERS64 *>(
+      base + static_cast<size_t>(dos->e_lfanew));
+#else
+  const auto *nt = reinterpret_cast<const IMAGE_NT_HEADERS32 *>(
+      base + static_cast<size_t>(dos->e_lfanew));
+#endif
+  if (nt->Signature != IMAGE_NT_SIGNATURE)
+    return 0;
+  return static_cast<uint64_t>(nt->OptionalHeader.SizeOfStackReserve);
+#else
+  pthread_attr_t attributes;
+  if (pthread_attr_init(&attributes) != 0)
+    return 0;
+  size_t stack_bytes = 0;
+  const int status = pthread_attr_getstacksize(&attributes, &stack_bytes);
+  pthread_attr_destroy(&attributes);
+  return status == 0 ? static_cast<uint64_t>(stack_bytes) : 0;
+#endif
+}
+
 #ifdef __linux__
 std::string readFirstLine(const std::filesystem::path &path) {
   std::ifstream file(path);
@@ -671,8 +701,16 @@ ResourceControlSnapshot discover(const Settings &settings,
   const std::string http_backend =
       toLower(trimWhitespace(getEnv("SUBCONVERTER_HTTP_BACKEND"),
                              true, true));
+  // httplib owns one blocking request thread for every admitted or waiting
+  // inbound socket. Prepay the full CPU-derived inbound envelope; Beast keeps
+  // its asynchronous one-handler-per-compute topology.
   snapshot.http_handler_threads_per_compute =
-      http_backend == "httplib" ? 4 : 1;
+      http_backend == "httplib" ? 64 : 1;
+  snapshot.http_handler_control_reserve =
+      http_backend == "httplib" ? 2 : 0;
+  snapshot.http_handler_stack_bytes =
+      http_backend == "httplib" ? defaultNativeThreadStackBytes() : 0;
+  snapshot.http_handlers_own_inbound = http_backend == "httplib";
   detectMemory(snapshot);
   detectFileLimits(snapshot);
   const ResourcePermitBudget budget = computeConservativeResourceBudget(
@@ -1281,6 +1319,12 @@ void configureResourceControl(Settings &settings) {
              snapshot.configured_deadline_ms ||
          runtime.snapshot.http_handler_threads_per_compute !=
              snapshot.http_handler_threads_per_compute ||
+         runtime.snapshot.http_handler_control_reserve !=
+             snapshot.http_handler_control_reserve ||
+         runtime.snapshot.http_handler_stack_bytes !=
+             snapshot.http_handler_stack_bytes ||
+         runtime.snapshot.http_handlers_own_inbound !=
+             snapshot.http_handlers_own_inbound ||
          runtime.snapshot.hardware_fingerprint !=
              snapshot.hardware_fingerprint))
       throw std::invalid_argument(

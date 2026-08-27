@@ -946,6 +946,25 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Key("max_wait_bytes");
   writer.Uint64(admission.max_wait_bytes);
   writer.EndObject();
+  const HttplibExecutionSnapshot httplib_execution =
+      httplibExecutionSnapshot();
+  writer.Key("httplib_execution");
+  writer.StartObject();
+  writer.Key("ready");
+  writer.Bool(httplib_execution.ready);
+  writer.Key("base_threads");
+  writer.Uint64(httplib_execution.base_threads);
+  writer.Key("max_threads");
+  writer.Uint64(httplib_execution.max_threads);
+  writer.Key("max_queued_requests");
+  writer.Uint64(httplib_execution.max_queued_requests);
+  writer.Key("normal_active_handlers");
+  writer.Uint64(httplib_execution.normal_active_handlers);
+  writer.Key("normal_wait_handlers");
+  writer.Uint64(httplib_execution.normal_wait_handlers);
+  writer.Key("control_handlers");
+  writer.Uint64(httplib_execution.control_handlers);
+  writer.EndObject();
   const ResourceControlSnapshot resources = resourceControlSnapshot();
   writer.Key("resource_control");
   writer.StartObject();
@@ -1065,6 +1084,12 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Key("http_handler_threads_per_compute");
   writer.Uint64(
       resources.envelope.http_handler_threads_per_compute);
+  writer.Key("http_handler_control_reserve");
+  writer.Uint64(resources.envelope.http_handler_control_reserve);
+  writer.Key("http_handler_stack_bytes");
+  writer.Uint64(resources.envelope.http_handler_stack_bytes);
+  writer.Key("http_handlers_own_inbound");
+  writer.Bool(resources.envelope.http_handlers_own_inbound);
   writer.Key("complete");
   writer.Bool(resources.envelope.complete);
   writer.EndObject();
@@ -1087,9 +1112,36 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
       validateForceMaxFetchContract(
           calculated,
           static_cast<uint64_t>(global.maxAllowedDownloadSize));
+  uint64_t normal_handler_total = 0;
+  uint64_t accounted_httplib_handlers = 0;
+  const bool normal_handler_sum_valid =
+      httplib_execution.normal_active_handlers <=
+      UINT64_MAX - httplib_execution.normal_wait_handlers;
+  if (normal_handler_sum_valid)
+    normal_handler_total = httplib_execution.normal_active_handlers +
+                           httplib_execution.normal_wait_handlers;
+  const bool httplib_handler_sum_valid =
+      normal_handler_sum_valid &&
+      normal_handler_total <=
+          UINT64_MAX - resources.envelope.http_handler_control_reserve;
+  if (httplib_handler_sum_valid)
+    accounted_httplib_handlers =
+        normal_handler_total +
+        resources.envelope.http_handler_control_reserve;
+  const bool handler_runtime_applied =
+      !resources.envelope.http_handlers_own_inbound ||
+      (httplib_execution.ready &&
+       httplib_execution.base_threads == calculated.handler_permits &&
+       httplib_execution.max_threads == calculated.handler_permits &&
+       httplib_execution.max_queued_requests == 1 &&
+       httplib_execution.normal_active_handlers == calculated.active_flows &&
+       normal_handler_total == calculated.inbound_connections &&
+       httplib_execution.control_handlers == 1 &&
+       httplib_handler_sum_valid &&
+       accounted_httplib_handlers == calculated.handler_permits);
   const bool force_max_applied =
       resources.effective_mode == "force_max" && calculated.valid &&
-      fetch_contract_applied &&
+      fetch_contract_applied && handler_runtime_applied &&
       calculated.memory_capacity_bytes >=
           calculated.startup_memory_bytes &&
       calculated.memory_headroom_bytes ==
@@ -1228,6 +1280,8 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(calculated.resolver_thread_budget);
   writer.Key("thread_budget_total");
   writer.Uint64(calculated.thread_budget_total);
+  writer.Key("handler_stack_bytes");
+  writer.Uint64(calculated.handler_stack_bytes);
   writer.Key("reserved_memory_bytes");
   writer.Uint64(calculated.reserved_memory_bytes);
   writer.EndObject();

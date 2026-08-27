@@ -74,6 +74,10 @@ ResourceEnvelope resourceEnvelopeFromSnapshot(
   envelope.http_handler_threads_per_compute =
       std::max<uint64_t>(1,
                          snapshot.http_handler_threads_per_compute);
+  envelope.http_handler_control_reserve =
+      snapshot.http_handler_control_reserve;
+  envelope.http_handler_stack_bytes = snapshot.http_handler_stack_bytes;
+  envelope.http_handlers_own_inbound = snapshot.http_handlers_own_inbound;
   envelope.affinity_available = snapshot.affinity_cpus != 0;
   envelope.cpuset_available = snapshot.cpuset_cpus != 0;
   envelope.quota_available = snapshot.cpu_quota_millis != 0;

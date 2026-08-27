@@ -11,6 +11,7 @@
 #include <thread>
 
 #include "handler/settings.h"
+#include "handler/dashboard_auth.h"
 #include "handler/settings_view.h"
 #include "httplib.h"
 #include "server/socket.h"
@@ -178,14 +179,14 @@ void testIndependentHealthChannel(bool force_max = false) {
   const int previous_max_threads = global.maxServerThreads;
   const std::string previous_resource_mode = global.resourceControlEffective;
   global.resourceControlEffective = force_max ? "force_max" : "compat";
-  global.maxServerThreads = force_max ? 2 : 1;
+  global.maxServerThreads = force_max ? 3 : 1;
   WebServer server;
   server.append_response("GET", "/healthz", "text/plain", healthHandler);
   server.append_response("GET", "/block", "text/plain", blockingHandler);
   listener_args args;
   args.listen_address = "127.0.0.1";
   args.port = unusedPort();
-  args.max_conn = 8;
+  args.max_conn = force_max ? 1 : 8;
   args.max_workers = force_max ? 2 : 1;
   args.looper_interval = 5;
   args.request_deadline_ms = 2000;
@@ -354,17 +355,46 @@ void testClientHalfCloseStillReceivesResponse() {
 
 int main() {
   const HttplibExecutionBudget tight_httplib =
-      forceMaxHttplibExecutionBudget(16, 64, 8);
-  require(tight_httplib.base_threads == 6 &&
-              tight_httplib.max_threads == 6 &&
+      forceMaxHttplibExecutionBudget(2, 10, 8);
+  require(tight_httplib.base_threads == 10 &&
+              tight_httplib.max_threads == 10 &&
               tight_httplib.max_queued_requests == 1,
-          "force_max httplib socket budget exceeded inbound capacity");
+          "force_max httplib control worker was not prepaid");
   const HttplibExecutionBudget scaled_httplib =
-      forceMaxHttplibExecutionBudget(6, 24, 384);
-  require(scaled_httplib.base_threads == 24 &&
-              scaled_httplib.max_threads == 24 &&
-              scaled_httplib.max_queued_requests == 359,
+      forceMaxHttplibExecutionBudget(6, 386, 384);
+  require(scaled_httplib.base_threads == 386 &&
+              scaled_httplib.max_threads == 386 &&
+              scaled_httplib.max_queued_requests == 1,
           "force_max httplib socket budget did not consume full capacity");
+  const std::string original_dashboard_username =
+      global.dashboardAuthUsername;
+  const std::string original_dashboard_password =
+      global.dashboardAuthPassword;
+  global.dashboardAuthUsername = "dashboard-old";
+  global.dashboardAuthPassword = "secret-old";
+  publishSettingsSnapshot(global);
+  const std::string old_dashboard_auth =
+      "Basic " + base64Encode("dashboard-old:secret-old");
+  require(dashboard_auth::validAuthorizationHeader(old_dashboard_auth),
+          "current dashboard credentials were rejected");
+  global.dashboardAuthUsername = "dashboard-new";
+  global.dashboardAuthPassword = "secret-new";
+  publishSettingsSnapshot(global);
+  const std::string new_dashboard_auth =
+      "Basic " + base64Encode("dashboard-new:secret-new");
+  require(!dashboard_auth::validAuthorizationHeader(old_dashboard_auth) &&
+              dashboard_auth::validAuthorizationHeader(new_dashboard_auth),
+          "dashboard credential rotation retained a stale token");
+  global.dashboardAuthUsername.clear();
+  global.dashboardAuthPassword.clear();
+  publishSettingsSnapshot(global);
+  require(!dashboard_auth::validAuthorizationHeader("Basic Og==") &&
+              !dashboard_auth::validAuthorizationHeader(
+                  std::string(1025, 'A')),
+          "invalid dashboard credentials entered the control lane");
+  global.dashboardAuthUsername = original_dashboard_username;
+  global.dashboardAuthPassword = original_dashboard_password;
+  publishSettingsSnapshot(global);
   require(forceMaxRequestBodyLimit(8 * 1024 * 1024, 8,
                                    100 * 1024 * 1024) ==
               1,

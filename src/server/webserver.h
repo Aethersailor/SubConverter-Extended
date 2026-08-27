@@ -122,9 +122,21 @@ struct HttplibExecutionBudget
     std::size_t max_queued_requests = 1;
 };
 
+struct HttplibExecutionSnapshot
+{
+    bool ready = false;
+    uint64_t base_threads = 0;
+    uint64_t max_threads = 0;
+    uint64_t max_queued_requests = 0;
+    uint64_t normal_active_handlers = 0;
+    uint64_t normal_wait_handlers = 0;
+    uint64_t control_handlers = 0;
+};
+
 HttplibExecutionBudget forceMaxHttplibExecutionBudget(
     uint64_t base_threads, uint64_t max_threads,
     uint64_t inbound_connections) noexcept;
+HttplibExecutionSnapshot httplibExecutionSnapshot() noexcept;
 std::size_t forceMaxRequestBodyLimit(uint64_t transport_active_bytes,
                                      uint64_t concurrent_readers,
                                      std::size_t compatibility_limit) noexcept;

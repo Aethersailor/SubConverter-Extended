@@ -33,6 +33,7 @@
 #include "utils/stl_extra.h"
 #include "utils/string_hash.h"
 #include "utils/urlencode.h"
+#include "handler/dashboard_auth.h"
 #include "handler/settings.h"
 #include "runtime/transport_admission.h"
 #include "webserver.h"
@@ -48,6 +49,13 @@ namespace {
 constexpr const char *kRequestTelemetryKey = "subconverter.request.telemetry";
 std::atomic<uint32_t> request_deadline_ms{15000};
 std::atomic<uint64_t> request_payload_limit{100 * 1024 * 1024};
+std::atomic<bool> httplib_execution_ready{false};
+std::atomic<uint64_t> httplib_base_threads{0};
+std::atomic<uint64_t> httplib_max_threads{0};
+std::atomic<uint64_t> httplib_max_queued_requests{0};
+std::atomic<uint64_t> httplib_normal_active_handlers{0};
+std::atomic<uint64_t> httplib_normal_wait_handlers{0};
+std::atomic<uint64_t> httplib_control_handler_limit{0};
 
 class RequestCancellationMonitor {
 public:
@@ -203,15 +211,18 @@ RequestAdmissionController request_admission;
 
 class NormalHandlerController {
 public:
-  void configure(uint64_t limit) noexcept {
+  void configure(uint64_t limit,
+                 uint64_t waiting_limit = UINT64_MAX) noexcept {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       limit_ = std::max<uint64_t>(1, limit);
+      waiting_limit_ = waiting_limit;
     }
     condition_.notify_all();
   }
 
   bool acquire(const std::shared_ptr<RequestContext> &context) noexcept {
+    bool waiting = false;
     try {
       RequestCancellationRegistration cancellation;
       if (context)
@@ -220,17 +231,30 @@ public:
       std::unique_lock<std::mutex> lock(mutex_);
       for (;;) {
         if (context &&
-            context->cancellationToken().isCancellationRequested())
+            context->cancellationToken().isCancellationRequested()) {
+          if (waiting)
+            --waiting_;
           return false;
+        }
         const auto now = RequestContext::Clock::now();
         if (context && context->deadlineExceeded(now)) {
+          if (waiting)
+            --waiting_;
           lock.unlock();
           context->requestCancellation(RequestCancellationReason::Deadline);
           return false;
         }
         if (active_ < limit_) {
+          if (waiting)
+            --waiting_;
           ++active_;
           return true;
+        }
+        if (!waiting) {
+          if (waiting_ >= waiting_limit_)
+            return false;
+          ++waiting_;
+          waiting = true;
         }
         if (context &&
             context->deadline() != RequestContext::Clock::time_point::max())
@@ -239,6 +263,11 @@ public:
           condition_.wait(lock);
       }
     } catch (...) {
+      if (waiting) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (waiting_ != 0)
+          --waiting_;
+      }
       return false;
     }
   }
@@ -265,9 +294,12 @@ private:
   std::condition_variable condition_;
   uint64_t limit_ = 1;
   uint64_t active_ = 0;
+  uint64_t waiting_limit_ = UINT64_MAX;
+  uint64_t waiting_ = 0;
 };
 
 NormalHandlerController normal_handlers;
+NormalHandlerController control_handlers;
 
 class NormalHandlerPermit {
 public:
@@ -318,10 +350,24 @@ bool isFastHealthRequest(const httplib::Request &request) {
          !request.has_header("Transfer-Encoding");
 }
 
+bool isForceMaxReservedControlRequest(const httplib::Request &request,
+                                      const Settings &settings) {
+  if (isFastHealthRequest(request))
+    return true;
+  if (!settings.dashboardAuthEnabled || request.path != "/dashboard/data" ||
+      (request.method != "GET" && request.method != "HEAD") ||
+      request.get_header_value_u64("Content-Length", 0) != 0 ||
+      request.has_header("Transfer-Encoding"))
+    return false;
+  return dashboard_auth::validAuthorizationHeader(
+      request.get_header_value("Authorization"), settings);
+}
+
 struct HttpRequestTelemetry {
   std::string request_id;
   std::chrono::steady_clock::time_point started_at;
   std::shared_ptr<RequestContext> context;
+  SettingsSnapshot settings;
 
   struct Completion {
     std::shared_ptr<RequestContext> context;
@@ -332,6 +378,7 @@ struct HttpRequestTelemetry {
     bool prepared = false;
     bool admission_acquired = false;
     bool normal_handler_acquired = false;
+    bool control_handler_acquired = false;
     uint64_t admission_bytes = 0;
     OwnerAdmissionLease waitable_admission;
     uint64_t cancellation_monitor_id = 0;
@@ -366,6 +413,8 @@ struct HttpRequestTelemetry {
         releaseRequestAdmission(admission_bytes);
       if (normal_handler_acquired)
         normal_handlers.release();
+      if (control_handler_acquired)
+        control_handlers.release();
     }
 
     void prepare(const httplib::Request &, int response_status) {
@@ -428,6 +477,7 @@ HttpRequestTelemetry &ensureRequestTelemetry(const httplib::Request &request,
       telemetry.started_at + std::chrono::milliseconds(
                                  request_deadline_ms.load(
                                      std::memory_order_acquire)));
+  telemetry.settings = captureSettingsSnapshot();
   telemetry.completion = std::make_shared<HttpRequestTelemetry::Completion>();
   telemetry.completion->context = telemetry.context;
   telemetry.completion->request_id = telemetry.request_id;
@@ -596,16 +646,27 @@ HttplibExecutionBudget forceMaxHttplibExecutionBudget(
     uint64_t base_threads, uint64_t max_threads,
     uint64_t inbound_connections) noexcept {
   const uint64_t connection_cap =
-      std::max<uint64_t>(4, inbound_connections);
+      std::max<uint64_t>(1, inbound_connections);
+  const uint64_t connection_thread_cap =
+      connection_cap > UINT64_MAX - 2 ? UINT64_MAX : connection_cap + 2;
   const uint64_t worker_cap = std::max<uint64_t>(
-      1, std::min(std::max<uint64_t>(1, max_threads), connection_cap - 2));
+      1, std::min(max_threads, connection_thread_cap));
   (void)base_threads;
-  const uint64_t base = worker_cap;
-  return {static_cast<std::size_t>(std::min<uint64_t>(base, SIZE_MAX)),
+  return {static_cast<std::size_t>(std::min<uint64_t>(worker_cap, SIZE_MAX)),
           static_cast<std::size_t>(
               std::min<uint64_t>(worker_cap, SIZE_MAX)),
-          static_cast<std::size_t>(std::min<uint64_t>(
-              connection_cap - worker_cap - 1, SIZE_MAX))};
+          static_cast<std::size_t>(
+              std::min<uint64_t>(1, connection_cap))};
+}
+
+HttplibExecutionSnapshot httplibExecutionSnapshot() noexcept {
+  return {httplib_execution_ready.load(std::memory_order_acquire),
+          httplib_base_threads.load(std::memory_order_relaxed),
+          httplib_max_threads.load(std::memory_order_relaxed),
+          httplib_max_queued_requests.load(std::memory_order_relaxed),
+          httplib_normal_active_handlers.load(std::memory_order_relaxed),
+          httplib_normal_wait_handlers.load(std::memory_order_relaxed),
+          httplib_control_handler_limit.load(std::memory_order_relaxed)};
 }
 
 std::size_t forceMaxRequestBodyLimit(uint64_t transport_active_bytes,
@@ -677,9 +738,12 @@ static httplib::Server::Handler makeHandler(const responseRoute &rr,
         ensureRequestTelemetry(request, response);
     ScopedLogRequestContext request_log_scope(telemetry.request_id);
     ScopedRequestContext request_context_scope(telemetry.context);
+    ScopedSettingsView settings_scope(telemetry.settings);
     const bool normal_route = !isFastHealthRequest(request);
     NormalHandlerPermit handler_permit(
-        normal_route && global.resourceControlEffective != "force_max",
+        normal_route &&
+            (!telemetry.settings ||
+             telemetry.settings->resourceControlEffective != "force_max"),
         telemetry.context);
     if (!handler_permit.acquired()) {
       RequestCancellationResponse cancellation;
@@ -747,7 +811,8 @@ static httplib::Server::Handler makeHandler(const responseRoute &rr,
       }
     }
     std::string result;
-    if (rr.async_rc && global.resourceControlEffective == "force_max") {
+    if (rr.async_rc && telemetry.settings &&
+        telemetry.settings->resourceControlEffective == "force_max") {
       struct WaitableResponse {
         std::mutex mutex;
         std::condition_variable condition;
@@ -913,9 +978,35 @@ int WebServer::start_web_server_multi(listener_args *args) {
   const uint64_t effective_httplib_thread_limit =
       force_max ? force_max_execution.max_threads
                 : configured_httplib_thread_limit;
-  normal_handlers.configure(effective_httplib_thread_limit > 1
-                                ? effective_httplib_thread_limit - 1
-                                : 1);
+  uint64_t normal_active_limit = 0;
+  uint64_t normal_wait_limit = 0;
+  uint64_t control_handler_limit = 0;
+  httplib_execution_ready.store(false, std::memory_order_release);
+  if (force_max) {
+    const uint64_t inbound_threads =
+        static_cast<uint64_t>(std::max(args->max_conn, 1));
+    const uint64_t control_reserve = std::min<uint64_t>(
+        effective_httplib_thread_limit > inbound_threads
+            ? effective_httplib_thread_limit - inbound_threads
+            : 0,
+        effective_httplib_thread_limit > 0
+            ? effective_httplib_thread_limit - 1
+            : 0);
+    const uint64_t business_threads =
+        effective_httplib_thread_limit - control_reserve;
+    const uint64_t active_handlers = std::max<uint64_t>(
+        1, std::min<uint64_t>(business_threads,
+                              requestAdmissionSnapshot().max_entries));
+    normal_active_limit = active_handlers;
+    normal_wait_limit = business_threads - active_handlers;
+    control_handler_limit = control_reserve > 0 ? 1 : 0;
+    normal_handlers.configure(normal_active_limit, normal_wait_limit);
+    control_handlers.configure(1, 0);
+  } else {
+    normal_handlers.configure(effective_httplib_thread_limit > 1
+                                  ? effective_httplib_thread_limit - 1
+                                  : 1);
+  }
   if (force_max)
     server.set_payload_max_length(
         std::max<std::size_t>(1, args->request_body_limit));
@@ -965,11 +1056,67 @@ int WebServer::start_web_server_multi(listener_args *args) {
     setRequestTelemetryHeaders(res, telemetry.request_id);
     ScopedLogRequestContext request_log_scope(telemetry.request_id);
     ScopedRequestContext request_context_scope(telemetry.context);
+    ScopedSettingsView settings_scope(telemetry.settings);
     const bool fast_health = isFastHealthRequest(req);
-    if (!fast_health &&
-        !telemetry.completion->admission_acquired) {
-      const uint64_t admission_bytes = requestAdmissionBytes(req);
+    const bool force_max = telemetry.settings &&
+        telemetry.settings->resourceControlEffective == "force_max";
+    const bool reserved_control =
+        force_max && telemetry.settings &&
+        isForceMaxReservedControlRequest(req, *telemetry.settings);
+    const uint64_t admission_bytes =
+        fast_health ? 0 : requestAdmissionBytes(req);
+    if (!fast_health)
       telemetry.context->setEstimatedBytes(admission_bytes);
+    if (reserved_control && !fast_health &&
+        !telemetry.completion->control_handler_acquired) {
+      if (!control_handlers.tryAcquire()) {
+        telemetry.context->suggestFailure(
+            RequestFailureAttribution::Capacity);
+        res.status = 503;
+        res.set_header("Cache-Control", "private, no-store");
+        res.set_header("Retry-After", "1");
+        res.set_content(
+            "Service temporarily unavailable: control handler capacity is "
+            "outside the hard resource envelope.\n"
+            "服务暂时不可用：控制面处理容量超出硬资源包络。\n",
+            "text/plain; charset=utf-8");
+        telemetry.context->recordAdmissionOnce(
+            std::chrono::steady_clock::now());
+        return httplib::Server::HandlerResponse::Handled;
+      }
+      telemetry.completion->control_handler_acquired = true;
+    }
+    if (force_max && !fast_health && !reserved_control &&
+        !telemetry.completion->normal_handler_acquired) {
+      if (!normal_handlers.acquire(telemetry.context)) {
+        RequestCancellationResponse cancellation;
+        if (requestCancellationResponse(telemetry.context,
+                                        cancellation)) {
+          res.status = cancellation.status_code;
+          for (const auto &[name, value] : cancellation.headers)
+            res.set_header(name, value);
+          res.set_content(std::move(cancellation.body),
+                          "text/plain; charset=utf-8");
+        } else {
+          telemetry.context->suggestFailure(
+              RequestFailureAttribution::Capacity);
+          res.status = 503;
+          res.set_header("Cache-Control", "private, no-store");
+          res.set_header("Retry-After", "1");
+          res.set_content(
+              "Service temporarily unavailable: HTTP handler capacity is "
+              "outside the hard resource envelope.\n"
+              "服务暂时不可用：HTTP 处理容量超出硬资源包络。\n",
+              "text/plain; charset=utf-8");
+        }
+        telemetry.context->recordAdmissionOnce(
+            std::chrono::steady_clock::now());
+        return httplib::Server::HandlerResponse::Handled;
+      }
+      telemetry.completion->normal_handler_acquired = true;
+    }
+    if (!fast_health && !reserved_control &&
+        !telemetry.completion->admission_acquired) {
       if (OwnerAdmission *admission = globalTransportAdmission()) {
         auto admitted =
             std::make_shared<std::promise<OwnerAdmissionResult>>();
@@ -978,8 +1125,7 @@ int WebServer::start_web_server_multi(listener_args *args) {
         (void)admission->admit(
             {.cost = RequestCostClass::Medium,
              .bytes = admission_bytes,
-             .request_context = telemetry.context,
-             .wait = global.resourceControlEffective != "force_max"},
+             .request_context = telemetry.context},
             [admitted](OwnerAdmissionResult result) {
               admitted->set_value(std::move(result));
             });
@@ -1033,25 +1179,6 @@ int WebServer::start_web_server_multi(listener_args *args) {
       }
       telemetry.completion->admission_acquired = true;
       telemetry.completion->admission_bytes = admission_bytes;
-    }
-    if (global.resourceControlEffective == "force_max" && !fast_health &&
-        !telemetry.completion->normal_handler_acquired) {
-      if (!normal_handlers.tryAcquire()) {
-        telemetry.context->suggestFailure(
-            RequestFailureAttribution::Capacity);
-        res.status = 503;
-        res.set_header("Cache-Control", "private, no-store");
-        res.set_header("Retry-After", "1");
-        res.set_content(
-            "Service temporarily unavailable: HTTP handler capacity is "
-            "outside the hard resource envelope.\n"
-            "服务暂时不可用：HTTP 处理容量超出硬资源包络。\n",
-            "text/plain; charset=utf-8");
-        telemetry.context->recordAdmissionOnce(
-            std::chrono::steady_clock::now());
-        return httplib::Server::HandlerResponse::Handled;
-      }
-      telemetry.completion->normal_handler_acquired = true;
     }
     telemetry.context->recordAdmissionOnce(
         std::chrono::steady_clock::now());
@@ -1186,13 +1313,29 @@ int WebServer::start_web_server_multi(listener_args *args) {
   if (serve_file) {
     server.set_mount_point("/", serve_file_root);
   }
-  server.new_task_queue = [args, force_max, force_max_execution] {
+  server.new_task_queue =
+      [args, force_max, force_max_execution, normal_active_limit,
+       normal_wait_limit, control_handler_limit] {
     if (force_max) {
       auto *pool = new httplib::ThreadPool(
           force_max_execution.base_threads,
           force_max_execution.max_threads,
           force_max_execution.max_queued_requests,
           CPPHTTPLIB_THREAD_POOL_IDLE_TIMEOUT, true);
+      httplib_base_threads.store(force_max_execution.base_threads,
+                                 std::memory_order_relaxed);
+      httplib_max_threads.store(force_max_execution.max_threads,
+                                std::memory_order_relaxed);
+      httplib_max_queued_requests.store(
+          force_max_execution.max_queued_requests,
+          std::memory_order_relaxed);
+      httplib_normal_active_handlers.store(normal_active_limit,
+                                           std::memory_order_relaxed);
+      httplib_normal_wait_handlers.store(normal_wait_limit,
+                                         std::memory_order_relaxed);
+      httplib_control_handler_limit.store(control_handler_limit,
+                                          std::memory_order_relaxed);
+      httplib_execution_ready.store(true, std::memory_order_release);
       if (args->runtime_ready_callback)
         args->runtime_ready_callback();
       return pool;
@@ -1249,6 +1392,7 @@ int WebServer::start_web_server_multi(listener_args *args) {
       args->drain_callback();
     thread.join();
   }
+  httplib_execution_ready.store(false, std::memory_order_release);
   return 0;
 }
 

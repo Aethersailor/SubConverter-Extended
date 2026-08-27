@@ -6,7 +6,7 @@
 
 #include "utils/resource_probe.h"
 
-inline constexpr const char *kForceMaxFormulaRevision = "force-max-v3";
+inline constexpr const char *kForceMaxFormulaRevision = "force-max-v4";
 
 struct ForceMaxBudget {
   std::string formula_revision = kForceMaxFormulaRevision;
@@ -58,6 +58,7 @@ struct ForceMaxBudget {
   uint64_t fixed_threads = 0;
   uint64_t resolver_thread_budget = 0;
   uint64_t thread_budget_total = 0;
+  uint64_t handler_stack_bytes = 0;
   uint64_t reserved_memory_bytes = 0;
 
   bool operator==(const ForceMaxBudget &) const = default;

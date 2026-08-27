@@ -25,6 +25,9 @@ struct ResourceEnvelope {
   uint64_t self_threads = 0;
   uint64_t resolver_threads_per_transfer = 1;
   uint64_t http_handler_threads_per_compute = 4;
+  uint64_t http_handler_control_reserve = 0;
+  uint64_t http_handler_stack_bytes = 0;
+  bool http_handlers_own_inbound = false;
 
   bool affinity_available = false;
   bool cpuset_available = false;
