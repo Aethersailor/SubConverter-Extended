@@ -45,10 +45,19 @@ public:
       finish(AsyncUploadStatus::Capacity, 0);
       return;
     }
-    // ConversionFlow invokes optional uploads from its already-admitted
-    // compute worker. Preparing the small request descriptor here avoids
-    // queueing back into the same executor before Curl multi can begin.
-    prepare();
+    auto self = shared_from_this();
+    (void)submitOwnedWebGetContinuation(
+        RequestCostClass::Low, content_.size(),
+        request_context_->deadline(),
+        request_context_->cancellationToken(),
+        [self] { self->prepare(); },
+        [self](SchedulerSubmitStatus status, std::exception_ptr error) {
+          if (status == SchedulerSubmitStatus::Cancelled ||
+              status == SchedulerSubmitStatus::Deadline)
+            self->finish(AsyncUploadStatus::Cancelled, 0);
+          else if (status != SchedulerSubmitStatus::Accepted || error)
+            self->finish(AsyncUploadStatus::Capacity, 0);
+        });
   }
 
 private:
