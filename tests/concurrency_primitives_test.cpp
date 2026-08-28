@@ -1533,7 +1533,7 @@ static void testResourceControlPrimitives() {
          UINT64_C(256) * 1024 * 1024);
   assert(deterministic_first.owner_active_bytes /
              worst_case_owner_reservation >=
-         deterministic_first.compute_workers * 2);
+         deterministic_first.compute_workers + 2);
   assert(forceMaxOwnerWorkingReservation(
              deterministic_first,
              deterministic_first.owner_active_bytes + 1,

@@ -615,8 +615,12 @@ ForceMaxBudget calculateForceMaxBudget(
     fail(budget, "working_memory_too_small");
     return budget;
   }
-  budget.owner_active_bytes =
-      budget.working_memory_bytes - committed_working_memory;
+  // Leave an explicit working-memory margin for actual parse and transform
+  // expansion beyond the admission estimate. This also prevents excessive
+  // owner overlap from trading median latency for marginal throughput.
+  budget.owner_active_bytes = std::min(
+      budget.working_memory_bytes - committed_working_memory,
+      fraction(budget.working_memory_bytes, 9, 16));
 
   std::string error;
   budget.valid = validateForceMaxBudget(budget, &error);
