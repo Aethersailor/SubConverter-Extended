@@ -1,6 +1,9 @@
 #include "handler/upload_async.h"
 
 #include <atomic>
+#include <filesystem>
+#include <mutex>
+#include <optional>
 #include <utility>
 
 #include <rapidjson/document.h>
@@ -14,6 +17,130 @@
 #include "utils/system.h"
 
 namespace {
+
+struct GistConfigSnapshot {
+  std::string token;
+  std::string id;
+  std::string username;
+  std::string path;
+};
+
+struct GistConfigFingerprint {
+  std::filesystem::file_time_type modified{};
+  uintmax_t size = 0;
+  bool valid = false;
+};
+
+bool sameFingerprint(const GistConfigFingerprint &left,
+                     const GistConfigFingerprint &right) noexcept {
+  return left.valid && right.valid && left.modified == right.modified &&
+         left.size == right.size;
+}
+
+GistConfigFingerprint gistConfigFingerprint() noexcept {
+  std::error_code error;
+  const std::filesystem::path path("gistconf.ini");
+  const auto modified = std::filesystem::last_write_time(path, error);
+  if (error)
+    return {};
+  const uintmax_t size = std::filesystem::file_size(path, error);
+  return error ? GistConfigFingerprint{}
+               : GistConfigFingerprint{modified, size, true};
+}
+
+class GistConfigCache {
+public:
+  std::optional<GistConfigSnapshot>
+  find(const std::string &name, const std::string &requested_path) {
+    const GistConfigFingerprint fingerprint = gistConfigFingerprint();
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!entry_ || entry_->name != name ||
+        entry_->requested_path != requested_path ||
+        !sameFingerprint(entry_->fingerprint, fingerprint))
+      return std::nullopt;
+    return entry_->snapshot;
+  }
+
+  std::optional<GistConfigSnapshot>
+  load(const std::string &name, const std::string &requested_path) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (int attempt = 0; attempt < 2; ++attempt) {
+      const GistConfigFingerprint before = gistConfigFingerprint();
+      if (!before.valid)
+        return std::nullopt;
+      if (entry_ && entry_->name == name &&
+          entry_->requested_path == requested_path &&
+          sameFingerprint(entry_->fingerprint, before))
+        return entry_->snapshot;
+
+      INIReader ini;
+      if (ini.parse_file("gistconf.ini") != 0 ||
+          ini.enter_section("common") != 0)
+        return std::nullopt;
+      const std::string token = ini.get("token");
+      if (token.empty())
+        return std::nullopt;
+      const std::string id = ini.get("id");
+      const std::string username = ini.get("username");
+      std::string path = requested_path;
+      if (path.empty())
+        path = ini.item_exist("path") ? ini.get(name, "path") : name;
+      const GistConfigFingerprint after = gistConfigFingerprint();
+      if (!sameFingerprint(before, after))
+        continue;
+
+      GistConfigSnapshot snapshot{token, id, username, std::move(path)};
+      entry_ = Entry{after, name, requested_path, snapshot};
+      return snapshot;
+    }
+    return std::nullopt;
+  }
+
+  bool persist(const std::string &name, const std::string &requested_path,
+               const std::string &path,
+               const std::string &token, const std::string &id,
+               const std::string &username, const std::string &url) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    INIReader ini;
+    if (fileExist("gistconf.ini"))
+      (void)ini.parse_file("gistconf.ini");
+    (void)ini.enter_section("common");
+    ini.erase_section();
+    ini.set("token", token);
+    ini.set("id", id);
+    ini.set("username", username);
+    ini.set_current_section(path);
+    ini.erase_section();
+    ini.set("type", name);
+    ini.set("url", url);
+    const FileCommitResult result =
+        static_cast<FileCommitResult>(ini.to_file("gistconf.ini"));
+    if (fileCommitFailed(result)) {
+      entry_.reset();
+      return false;
+    }
+    const GistConfigFingerprint fingerprint = gistConfigFingerprint();
+    if (fingerprint.valid)
+      entry_ = Entry{fingerprint, name, requested_path,
+                     GistConfigSnapshot{token, id, username, path}};
+    else
+      entry_.reset();
+    return true;
+  }
+
+private:
+  struct Entry {
+    GistConfigFingerprint fingerprint;
+    std::string name;
+    std::string requested_path;
+    GistConfigSnapshot snapshot;
+  };
+
+  std::mutex mutex_;
+  std::optional<Entry> entry_;
+};
+
+GistConfigCache gist_config_cache;
 
 std::string asyncGistApiUrl(const std::string &path) {
   std::string base =
@@ -33,7 +160,7 @@ public:
       bool write_manage_url, SettingsSnapshot settings,
       std::shared_ptr<RequestContext> request_context,
       AsyncUploadCompletion completion)
-      : name_(std::move(name)), path_(std::move(path)),
+      : name_(std::move(name)), requested_path_(path), path_(std::move(path)),
         content_(std::move(content)),
         write_manage_url_(write_manage_url),
         settings_(std::move(settings)),
@@ -43,6 +170,12 @@ public:
   void start() {
     if (!retained_.retain(content_.size())) {
       finish(AsyncUploadStatus::Capacity, 0);
+      return;
+    }
+    if (const auto cached =
+            gist_config_cache.find(name_, requested_path_)) {
+      applyConfig(*cached);
+      startNetwork();
       return;
     }
     auto self = shared_from_this();
@@ -68,25 +201,26 @@ private:
     }
     ScopedSettingsView settings_view(settings_);
     ScopedRequestContext request_scope(request_context_);
-    INIReader ini;
-    if (!fileExist("gistconf.ini") ||
-        ini.parse_file("gistconf.ini") != 0 ||
-        ini.enter_section("common") != 0) {
+    const auto config = gist_config_cache.load(name_, requested_path_);
+    if (!config) {
       finish(AsyncUploadStatus::ConfigFailed, 0);
       return;
     }
-    token_ = ini.get("token");
-    if (token_.empty()) {
-      finish(AsyncUploadStatus::ConfigFailed, 0);
+    applyConfig(*config);
+    startNetwork();
+  }
+
+  void applyConfig(const GistConfigSnapshot &config) {
+    token_ = config.token;
+    id_ = config.id;
+    username_ = config.username;
+    path_ = config.path;
+  }
+
+  void startNetwork() {
+    if (request_context_->cancellationToken().isCancellationRequested()) {
+      finish(AsyncUploadStatus::Cancelled, 0);
       return;
-    }
-    id_ = ini.get("id");
-    username_ = ini.get("username");
-    if (path_.empty()) {
-      if (ini.item_exist("path"))
-        path_ = ini.get(name_, "path");
-      else
-        path_ = name_;
     }
     http_method method = HTTP_POST;
     std::string url = asyncGistApiUrl("/gists");
@@ -179,21 +313,8 @@ private:
     const std::string url =
         "https://gist.githubusercontent.com/" + username_ + "/" + id_ +
         "/raw/" + path_;
-    INIReader ini;
-    if (fileExist("gistconf.ini"))
-      (void)ini.parse_file("gistconf.ini");
-    (void)ini.enter_section("common");
-    ini.erase_section();
-    ini.set("token", token_);
-    ini.set("id", id_);
-    ini.set("username", username_);
-    ini.set_current_section(path_);
-    ini.erase_section();
-    ini.set("type", name_);
-    ini.set("url", url);
-    const FileCommitResult persisted =
-        static_cast<FileCommitResult>(ini.to_file("gistconf.ini"));
-    finish(fileCommitFailed(persisted)
+    finish(!gist_config_cache.persist(name_, requested_path_, path_, token_, id_,
+                                      username_, url)
                ? AsyncUploadStatus::LocalStateFailed
                : AsyncUploadStatus::Success,
            result->status_code);
@@ -212,6 +333,7 @@ private:
   }
 
   const std::string name_;
+  const std::string requested_path_;
   std::string path_;
   std::string content_;
   const bool write_manage_url_;
