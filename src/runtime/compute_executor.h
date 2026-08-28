@@ -92,6 +92,7 @@ class ComputeExecutor {
     RequestCancellationToken cancellation;
     std::optional<std::size_t> preferred_worker;
     bool control = false;
+    bool cooperative = false;
   };
 
   template <class Function, class Result> struct FutureTask final : TaskBase {
@@ -136,7 +137,9 @@ class ComputeExecutor {
     ContinuationTask(std::function<void()> function,
                      std::function<void(SchedulerSubmitStatus,
                                         std::exception_ptr)> completion)
-        : function(std::move(function)), completion(std::move(completion)) {}
+        : function(std::move(function)), completion(std::move(completion)) {
+      cooperative = true;
+    }
 
     void run() noexcept override;
     void cancel(SchedulerSubmitStatus status) noexcept override;
@@ -195,6 +198,9 @@ private:
   SchedulerSubmitStatus enqueue(const std::shared_ptr<TaskBase> &task);
   std::shared_ptr<TaskBase> takeTaskLocked(std::size_t worker_index,
                                            bool &affinity_hit);
+  std::shared_ptr<TaskBase>
+  takeCooperativeTaskLocked(std::size_t worker_index,
+                            bool &affinity_hit);
   std::shared_ptr<TaskBase> popLocked(std::size_t queue_index,
                                       std::size_t element_index);
   std::shared_ptr<TaskBase> popControlLocked(std::size_t element_index = 0);

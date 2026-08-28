@@ -476,6 +476,51 @@ GlobalComputeExecutorInitStatus initializeGlobalComputeExecutor(
   }
 }
 
+std::shared_ptr<ComputeExecutor::TaskBase>
+ComputeExecutor::takeCooperativeTaskLocked(std::size_t worker_index,
+                                           bool &affinity_hit) {
+  affinity_hit = false;
+  const std::size_t control_scan =
+      std::min<std::size_t>(8, control_queue_.size());
+  std::optional<std::size_t> control_fallback;
+  for (std::size_t element = 0; element < control_scan; ++element) {
+    const auto &task = control_queue_[element];
+    if (!task->cooperative)
+      continue;
+    if (task->preferred_worker == worker_index) {
+      affinity_hit = true;
+      return popControlLocked(element);
+    }
+    if (!control_fallback)
+      control_fallback = element;
+  }
+  if (control_fallback)
+    return popControlLocked(*control_fallback);
+
+  std::optional<std::pair<std::size_t, std::size_t>> fallback;
+  Clock::time_point oldest = Clock::time_point::max();
+  for (std::size_t queue_index = 0; queue_index < queues_.size();
+       ++queue_index) {
+    const auto &queue = queues_[queue_index];
+    const std::size_t scan = std::min<std::size_t>(8, queue.size());
+    for (std::size_t element = 0; element < scan; ++element) {
+      const auto &task = queue[element];
+      if (!task->cooperative)
+        continue;
+      if (task->preferred_worker == worker_index) {
+        affinity_hit = true;
+        return popLocked(queue_index, element);
+      }
+      if (!fallback || task->enqueued_at < oldest) {
+        fallback = std::make_pair(queue_index, element);
+        oldest = task->enqueued_at;
+      }
+    }
+  }
+  return fallback ? popLocked(fallback->first, fallback->second)
+                  : nullptr;
+}
+
 void ComputeExecutor::executeTask(const std::shared_ptr<TaskBase> &task,
                                   std::size_t worker_index,
                                   bool affinity_hit,
@@ -537,7 +582,7 @@ bool ComputeExecutor::runOnePendingCooperatively() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     if (queued_entries_ == 0)
       return false;
-    task = takeTaskLocked(current_worker_index_, affinity_hit);
+    task = takeCooperativeTaskLocked(current_worker_index_, affinity_hit);
   }
   if (!task)
     return false;
