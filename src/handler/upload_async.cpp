@@ -1,8 +1,10 @@
 #include "handler/upload_async.h"
 
 #include <atomic>
+#include <deque>
 #include <mutex>
 #include <utility>
+#include <vector>
 
 #include <rapidjson/document.h>
 
@@ -17,7 +19,112 @@
 
 namespace {
 
-std::mutex gist_persistence_mutex;
+struct GistPersistenceJob {
+  std::function<AsyncUploadStatus(INIReader &)> apply;
+  std::function<void(AsyncUploadStatus)> completion;
+};
+
+class GistPersistenceCoordinator {
+public:
+  void enqueue(GistPersistenceJob job) noexcept {
+    bool schedule = false;
+    try {
+      std::lock_guard<std::mutex> lock(mutex_);
+      pending_.emplace_back(std::move(job));
+      if (!running_) {
+        running_ = true;
+        schedule = true;
+      }
+    } catch (...) {
+      completeJob(job, AsyncUploadStatus::LocalStateFailed);
+      return;
+    }
+    if (!schedule)
+      return;
+    (void)submitBlockingIo(
+        {.cost = RequestCostClass::Low,
+         .bytes = 0,
+         .deadline = RequestContext::Clock::time_point::max(),
+         .cancellation = {},
+         .preferred_worker = {}},
+        [this] { drain(); },
+        [this](SchedulerSubmitStatus status, std::exception_ptr error) {
+          if (status != SchedulerSubmitStatus::Accepted || error)
+            failPending();
+        });
+  }
+
+private:
+  static void completeJob(GistPersistenceJob &job,
+                          AsyncUploadStatus status) noexcept {
+    if (!job.completion)
+      return;
+    try {
+      job.completion(status);
+    } catch (...) {
+    }
+  }
+
+  void failPending() noexcept {
+    std::deque<GistPersistenceJob> failed;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      failed.swap(pending_);
+      running_ = false;
+    }
+    for (auto &job : failed)
+      completeJob(job, AsyncUploadStatus::LocalStateFailed);
+  }
+
+  void drain() noexcept {
+    for (;;) {
+      std::deque<GistPersistenceJob> batch;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (pending_.empty()) {
+          running_ = false;
+          return;
+        }
+        batch.swap(pending_);
+      }
+
+      std::vector<AsyncUploadStatus> statuses(
+          batch.size(), AsyncUploadStatus::LocalStateFailed);
+      bool commit = false;
+      bool committed = false;
+      try {
+        INIReader ini;
+        if (fileExist("gistconf.ini"))
+          (void)ini.parse_file("gistconf.ini");
+        for (size_t index = 0; index < batch.size(); ++index) {
+          if (!batch[index].apply)
+            continue;
+          statuses[index] = batch[index].apply(ini);
+          commit = commit || statuses[index] == AsyncUploadStatus::Success;
+        }
+        if (commit) {
+          const FileCommitResult persisted =
+              static_cast<FileCommitResult>(ini.to_file("gistconf.ini"));
+          committed = !fileCommitFailed(persisted);
+        }
+      } catch (...) {
+        committed = false;
+      }
+      for (size_t index = 0; index < batch.size(); ++index) {
+        AsyncUploadStatus status = statuses[index];
+        if (status == AsyncUploadStatus::Success && !committed)
+          status = AsyncUploadStatus::LocalStateFailed;
+        completeJob(batch[index], status);
+      }
+    }
+  }
+
+  std::mutex mutex_;
+  std::deque<GistPersistenceJob> pending_;
+  bool running_ = false;
+};
+
+GistPersistenceCoordinator gist_persistence;
 
 std::string asyncGistApiUrl(const std::string &path) {
   std::string base =
@@ -156,40 +263,29 @@ private:
       return;
     }
     auto self = shared_from_this();
-    const uint64_t bytes = result->content.size();
-    (void)submitBlockingIo(
-        {.cost = RequestCostClass::Low,
-         .bytes = bytes,
-         .deadline = RequestContext::Clock::time_point::max(),
-         .cancellation = {},
-         .preferred_worker = {}},
-        [self, result = std::move(result)]() mutable {
-          self->persist(std::move(result));
-        },
-        [self, expected](SchedulerSubmitStatus status,
-                         std::exception_ptr error) {
-          if (status != SchedulerSubmitStatus::Accepted || error)
-            self->finish(AsyncUploadStatus::LocalStateFailed, expected);
-        });
+    const int remote_status = result->status_code;
+    gist_persistence.enqueue(
+        {[self, result = std::move(result)](INIReader &ini) mutable {
+           return self->preparePersistence(ini, std::move(result));
+         },
+         [self, remote_status](AsyncUploadStatus status) {
+           self->finish(status, remote_status);
+         }});
   }
 
-  void persist(SharedAsyncFetchResult result) {
-    std::lock_guard<std::mutex> lock(gist_persistence_mutex);
+  AsyncUploadStatus preparePersistence(INIReader &ini,
+                                       SharedAsyncFetchResult result) {
     rapidjson::Document json;
     json.Parse(result->content.data());
     GetMember(json, "id", id_);
     if (json.HasMember("owner"))
       GetMember(json["owner"], "login", username_);
     if (id_.empty() || username_.empty()) {
-      finish(AsyncUploadStatus::RemoteFailed, result->status_code);
-      return;
+      return AsyncUploadStatus::RemoteFailed;
     }
     const std::string url =
         "https://gist.githubusercontent.com/" + username_ + "/" + id_ +
         "/raw/" + path_;
-    INIReader ini;
-    if (fileExist("gistconf.ini"))
-      (void)ini.parse_file("gistconf.ini");
     (void)ini.enter_section("common");
     ini.erase_section();
     ini.set("token", token_);
@@ -199,12 +295,7 @@ private:
     ini.erase_section();
     ini.set("type", name_);
     ini.set("url", url);
-    const FileCommitResult persisted =
-        static_cast<FileCommitResult>(ini.to_file("gistconf.ini"));
-    finish(fileCommitFailed(persisted)
-               ? AsyncUploadStatus::LocalStateFailed
-               : AsyncUploadStatus::Success,
-           result->status_code);
+    return AsyncUploadStatus::Success;
   }
 
   void finish(AsyncUploadStatus status, int remote_status) noexcept {
