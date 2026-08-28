@@ -304,7 +304,7 @@ ForceMaxBudget calculateForceMaxBudget(
         outbound_active = std::min(
             desired_outbound,
             std::max<uint64_t>(1, outbound_open / 2));
-        io = std::max<uint64_t>(1, ceilDivide(compute, 4));
+        io = compute;
         quickjs = std::max<uint64_t>(1, compute / 2);
         transient_reserve = std::max<uint64_t>(4, compute);
         uint64_t fixed_without_handlers_or_resolver = 0;

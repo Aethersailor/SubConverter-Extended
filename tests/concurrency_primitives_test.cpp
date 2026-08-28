@@ -1489,6 +1489,8 @@ static void testResourceControlPrimitives() {
   assert(deterministic_first.valid);
   assert(deterministic_first.envelope_complete);
   assert(deterministic_first.compute_workers == 6);
+  assert(deterministic_first.io_runners ==
+         deterministic_first.compute_workers);
   assert(deterministic_first.inbound_connections == 384);
   assert(deterministic_first.active_owners <=
          deterministic_first.active_flows);
@@ -1497,7 +1499,7 @@ static void testResourceControlPrimitives() {
   assert(deterministic_first.outbound_active <=
          deterministic_first.outbound_open);
   assert(deterministic_first.quickjs_workers == 3);
-  assert(deterministic_first.formula_revision == "force-max-v5");
+  assert(deterministic_first.formula_revision == "force-max-v6");
   assert(deterministic_first.startup_memory_bytes ==
          bounded_envelope.memory_current_bytes);
   assert(deterministic_first.memory_headroom_bytes ==
@@ -1601,8 +1603,8 @@ static void testResourceControlPrimitives() {
   assert(fd_clamped_httplib_budget.compute_workers == 6);
   assert(fd_clamped_httplib_budget.inbound_connections == 80);
   assert(fd_clamped_httplib_budget.handler_permits == 82);
-  assert(fd_clamped_httplib_budget.resolver_thread_budget == 23);
-  assert(fd_clamped_httplib_budget.thread_budget_total == 131);
+  assert(fd_clamped_httplib_budget.resolver_thread_budget == 21);
+  assert(fd_clamped_httplib_budget.thread_budget_total == 137);
   assert(fd_clamped_httplib_budget.active_flows == 39);
   assert(fd_clamped_httplib_budget.active_owners == 39);
   ResourceEnvelope more_nofile_httplib = fd_clamped_httplib;
@@ -1807,7 +1809,7 @@ static void testResourceControlPrimitives() {
   assert(tight_pids.handler_permits == 12);
   assert(tight_pids.thread_budget_total == 35);
   assert(tight_pids.fixed_threads == 7);
-  assert(tight_pids.resolver_thread_budget == 6);
+  assert(tight_pids.resolver_thread_budget == 2);
   assert(tight_pids.resolver_thread_budget == tight_pids.outbound_active);
   assert(tight_pids.reserved_pids == 4);
 
