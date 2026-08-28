@@ -10,12 +10,6 @@ inline constexpr const char *kForceMaxFormulaRevision = "force-max-v5";
 inline constexpr uint64_t kForceMaxOwnerWaitMetadataBytes =
     UINT64_C(64) * 1024;
 
-struct ForceMaxOwnerReservationBudget {
-  bool valid = false;
-  uint64_t active_owners = 0;
-  uint64_t owner_active_bytes = 0;
-};
-
 struct ForceMaxBudget {
   std::string formula_revision = kForceMaxFormulaRevision;
   bool valid = false;
@@ -81,9 +75,6 @@ bool validateForceMaxFetchContract(const ForceMaxBudget &budget,
                                    std::string *error = nullptr) noexcept;
 uint64_t forceMaxOwnerWorkingReservation(
     const ForceMaxBudget &budget, uint64_t request_bytes,
-    uint64_t maximum_download_bytes) noexcept;
-uint64_t forceMaxOwnerWorkingReservation(
-    const ForceMaxOwnerReservationBudget &budget, uint64_t request_bytes,
     uint64_t maximum_download_bytes) noexcept;
 uint64_t forceMaxOwnerWaitReservation(uint64_t request_bytes) noexcept;
 
