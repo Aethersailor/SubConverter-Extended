@@ -935,7 +935,7 @@ void requestLifecycleContextTest() {
          "cancellation reason is immutable");
   expect(token.reason() == RequestCancellationReason::ClientDisconnected,
          "cancellation token observes the source reason");
-  expect(cancelled->finalizeResponse(200, true) &&
+  expect(cancelled->finalizeResponse(499, true) &&
              cancelled->terminalState() == RequestTerminalState::Cancelled &&
              cancelled->failureAttribution() ==
                  RequestFailureAttribution::Client,

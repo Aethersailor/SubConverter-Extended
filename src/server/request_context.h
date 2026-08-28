@@ -870,7 +870,11 @@ public:
       terminal = RequestTerminalState::DeadlineExceeded;
       if (failure == RequestFailureAttribution::None)
         failure = RequestFailureAttribution::Client;
-    } else if (cancellation != RequestCancellationReason::None) {
+    } else if (cancellation == RequestCancellationReason::Shutdown ||
+               ((cancellation ==
+                     RequestCancellationReason::ClientDisconnected ||
+                 cancellation == RequestCancellationReason::NoConsumers) &&
+                status_code == 499)) {
       terminal = RequestTerminalState::Cancelled;
       if (failure == RequestFailureAttribution::None)
         failure = cancellation == RequestCancellationReason::Shutdown

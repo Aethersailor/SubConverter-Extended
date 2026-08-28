@@ -959,6 +959,105 @@ static void testRetainedResponseByteBudget() {
   configureRetainedResponseByteLimit(0);
 }
 
+static void testResponseFinalizationPrecedence() {
+  resetRequestLifecycleMetricsForTests();
+
+  auto sent_before_late_disconnect = std::make_shared<RequestContext>(
+      "sent-before-late-disconnect", RequestContext::Clock::now());
+  assert(sent_before_late_disconnect->requestCancellation(
+      RequestCancellationReason::ClientDisconnected));
+  assert(sent_before_late_disconnect->finalizeResponse(200, true));
+  assert(sent_before_late_disconnect->terminalState() ==
+         RequestTerminalState::Completed);
+  assert(sent_before_late_disconnect->failureAttribution() ==
+         RequestFailureAttribution::None);
+
+  auto client_closed_response = std::make_shared<RequestContext>(
+      "client-closed-response", RequestContext::Clock::now());
+  assert(client_closed_response->requestCancellation(
+      RequestCancellationReason::ClientDisconnected));
+  assert(client_closed_response->finalizeResponse(499, true));
+  assert(client_closed_response->terminalState() ==
+         RequestTerminalState::Cancelled);
+  assert(client_closed_response->failureAttribution() ==
+         RequestFailureAttribution::Client);
+
+  auto sent_before_no_consumers = std::make_shared<RequestContext>(
+      "sent-before-no-consumers", RequestContext::Clock::now());
+  assert(sent_before_no_consumers->requestCancellation(
+      RequestCancellationReason::NoConsumers));
+  assert(sent_before_no_consumers->finalizeResponse(200, true));
+  assert(sent_before_no_consumers->terminalState() ==
+         RequestTerminalState::Completed);
+  assert(sent_before_no_consumers->failureAttribution() ==
+         RequestFailureAttribution::None);
+
+  auto no_consumers_response = std::make_shared<RequestContext>(
+      "no-consumers-response", RequestContext::Clock::now());
+  assert(no_consumers_response->requestCancellation(
+      RequestCancellationReason::NoConsumers));
+  assert(no_consumers_response->finalizeResponse(499, true));
+  assert(no_consumers_response->terminalState() ==
+         RequestTerminalState::Cancelled);
+  assert(no_consumers_response->failureAttribution() ==
+         RequestFailureAttribution::Client);
+
+  auto deadline = std::make_shared<RequestContext>(
+      "deadline-response", RequestContext::Clock::now());
+  assert(deadline->requestCancellation(RequestCancellationReason::Deadline));
+  assert(deadline->finalizeResponse(200, true));
+  assert(deadline->terminalState() ==
+         RequestTerminalState::DeadlineExceeded);
+  assert(deadline->failureAttribution() ==
+         RequestFailureAttribution::Client);
+
+  auto shutdown = std::make_shared<RequestContext>(
+      "shutdown-response", RequestContext::Clock::now());
+  assert(shutdown->requestCancellation(RequestCancellationReason::Shutdown));
+  assert(shutdown->finalizeResponse(200, true));
+  assert(shutdown->terminalState() == RequestTerminalState::Cancelled);
+  assert(shutdown->failureAttribution() ==
+         RequestFailureAttribution::Server);
+
+  auto capacity = std::make_shared<RequestContext>(
+      "capacity-response", RequestContext::Clock::now());
+  capacity->suggestFailure(RequestFailureAttribution::Capacity);
+  assert(capacity->finalizeResponse(503, true));
+  assert(capacity->terminalState() == RequestTerminalState::Rejected);
+  assert(capacity->failureAttribution() ==
+         RequestFailureAttribution::Capacity);
+
+  auto explicit_client_failure = std::make_shared<RequestContext>(
+      "explicit-client-failure", RequestContext::Clock::now());
+  explicit_client_failure->suggestFailure(
+      RequestFailureAttribution::Client);
+  assert(explicit_client_failure->finalizeResponse(400, true));
+  assert(explicit_client_failure->terminalState() ==
+         RequestTerminalState::Cancelled);
+  assert(explicit_client_failure->failureAttribution() ==
+         RequestFailureAttribution::Client);
+
+  auto failed_send = std::make_shared<RequestContext>(
+      "failed-send", RequestContext::Clock::now());
+  assert(failed_send->finalizeResponse(200, false));
+  assert(failed_send->terminalState() ==
+         RequestTerminalState::Cancelled);
+  assert(failed_send->failureAttribution() ==
+         RequestFailureAttribution::Client);
+
+  const RequestLifecycleMetricsSnapshot metrics =
+      requestLifecycleMetricsSnapshot();
+  assert(metrics.terminal[static_cast<std::size_t>(
+             RequestTerminalState::Completed)] == 2);
+  assert(metrics.terminal[static_cast<std::size_t>(
+             RequestTerminalState::Cancelled)] == 5);
+  assert(metrics.terminal[static_cast<std::size_t>(
+             RequestTerminalState::DeadlineExceeded)] == 1);
+  assert(metrics.terminal[static_cast<std::size_t>(
+             RequestTerminalState::Rejected)] == 1);
+  assert(metrics.successful_responses == 2);
+}
+
 static void testWorkAdmissionLifecycle() {
   resetRequestLifecycleMetricsForTests();
 
@@ -2189,6 +2288,7 @@ int main() {
   testCooperativeCpuPermit();
   testWorkloadSchedulerActiveQueueWeights();
   testRetainedResponseByteBudget();
+  testResponseFinalizationPrecedence();
   testWorkAdmissionLifecycle();
   testActiveRequestShutdownCancellation();
   testCancellationTokenCallbacks();
