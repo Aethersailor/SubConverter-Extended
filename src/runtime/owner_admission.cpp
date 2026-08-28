@@ -105,6 +105,13 @@ struct OwnerAdmission::Core
            active_bytes <= active_byte_limit - bytes;
   }
 
+  static uint64_t waitBytes(
+      const OwnerAdmissionOptions &options) noexcept {
+    return options.wait_bytes == std::numeric_limits<uint64_t>::max()
+               ? options.bytes
+               : options.wait_bytes;
+  }
+
   bool hasWaiting() const noexcept { return waiting_entries != 0; }
 
   bool hasLegalWaiting() const noexcept {
@@ -160,7 +167,7 @@ struct OwnerAdmission::Core
     queues[waiter->queue_index].erase(waiter->position);
     waiter->queued = false;
     --waiting_entries;
-    waiting_bytes -= waiter->options.bytes;
+    waiting_bytes -= waitBytes(waiter->options);
   }
 
   void addActionLocked(std::vector<Action> &actions,
@@ -312,7 +319,7 @@ struct OwnerAdmission::Core
         ++rejected_total;
         actions.push_back({waiter, OwnerAdmissionStatus::EntryLimit});
         result = OwnerAdmissionStatus::EntryLimit;
-      } else if (waiter->options.bytes > budget.max_wait_bytes) {
+      } else if (waitBytes(waiter->options) > budget.max_wait_bytes) {
         waiter->claimed = true;
         ++rejected_total;
         actions.push_back({waiter, OwnerAdmissionStatus::ByteLimit});
@@ -323,7 +330,7 @@ struct OwnerAdmission::Core
         actions.push_back({waiter, OwnerAdmissionStatus::EntryLimit});
         result = OwnerAdmissionStatus::EntryLimit;
       } else if (waiting_bytes >
-                 budget.max_wait_bytes - waiter->options.bytes) {
+                 budget.max_wait_bytes - waitBytes(waiter->options)) {
         waiter->claimed = true;
         ++rejected_total;
         actions.push_back({waiter, OwnerAdmissionStatus::ByteLimit});
@@ -335,7 +342,7 @@ struct OwnerAdmission::Core
             queues[waiter->queue_index].end());
         waiter->queued = true;
         ++waiting_entries;
-        waiting_bytes += waiter->options.bytes;
+        waiting_bytes += waitBytes(waiter->options);
         collectGrantsLocked(actions);
       }
     }

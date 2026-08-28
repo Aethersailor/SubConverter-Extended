@@ -1282,7 +1282,7 @@ static void testResourceControlPrimitives() {
   assert(deterministic_first.outbound_active <=
          deterministic_first.outbound_open);
   assert(deterministic_first.quickjs_workers == 3);
-  assert(deterministic_first.formula_revision == "force-max-v4");
+  assert(deterministic_first.formula_revision == "force-max-v5");
   assert(deterministic_first.startup_memory_bytes ==
          bounded_envelope.memory_current_bytes);
   assert(deterministic_first.memory_headroom_bytes ==
@@ -1315,6 +1315,16 @@ static void testResourceControlPrimitives() {
              deterministic_first.owner_active_bytes + 1,
              UINT64_C(1) * 1024 * 1024) ==
          deterministic_first.owner_active_bytes);
+  assert(forceMaxOwnerWaitReservation(0) ==
+         kForceMaxOwnerWaitMetadataBytes);
+  assert(forceMaxOwnerWaitReservation(
+             kForceMaxOwnerWaitMetadataBytes + 1) ==
+         kForceMaxOwnerWaitMetadataBytes + 1);
+  assert(deterministic_first.owner_queue_entries >=
+         deterministic_first.active_owners);
+  assert(deterministic_first.owner_queue_bytes >=
+         deterministic_first.active_owners *
+             kForceMaxOwnerWaitMetadataBytes);
   assert(deterministic_first.reserved_pids == 6);
   assert(deterministic_first.fixed_threads == 7);
   assert(deterministic_first.resolver_thread_budget == 96);
@@ -1806,6 +1816,62 @@ static void testOwnerAdmission() {
   assert(snapshot.cancelled_total == 1);
   assert(snapshot.deadline_total == 1);
   assert(snapshot.shutdown_total == 3);
+
+  OwnerAdmission split_bytes({1, 10, 2, 2});
+  auto split_submit = [&](std::string id) {
+    auto promise =
+        std::make_shared<std::promise<OwnerAdmissionResult>>();
+    auto future = promise->get_future();
+    const OwnerAdmissionStatus status = split_bytes.admit(
+        {.cost = RequestCostClass::Medium,
+         .bytes = 10,
+         .wait_bytes = 1,
+         .request_context = std::make_shared<RequestContext>(
+             std::move(id), RequestContext::Clock::now(),
+             RequestContext::Clock::now() + 10s)},
+        [promise](OwnerAdmissionResult result) {
+          promise->set_value(std::move(result));
+        });
+    assert(status == OwnerAdmissionStatus::Granted);
+    return future;
+  };
+  auto split_active_future = split_submit("split-active");
+  OwnerAdmissionResult split_active = split_active_future.get();
+  auto split_first_waiter = split_submit("split-wait-1");
+  auto split_second_waiter = split_submit("split-wait-2");
+  const OwnerAdmissionSnapshot split_waiting = split_bytes.snapshot();
+  assert(split_waiting.active_entries == 1 &&
+         split_waiting.active_bytes == 10 &&
+         split_waiting.waiting_entries == 2 &&
+         split_waiting.waiting_bytes == 2);
+  std::promise<OwnerAdmissionResult> split_full_completion;
+  auto split_full_future = split_full_completion.get_future();
+  const OwnerAdmissionStatus split_full_submit = split_bytes.admit(
+      {.cost = RequestCostClass::Medium,
+       .bytes = 10,
+       .wait_bytes = 1,
+       .request_context = std::make_shared<RequestContext>(
+           "split-full", RequestContext::Clock::now(),
+           RequestContext::Clock::now() + 10s)},
+      [&](OwnerAdmissionResult result) {
+        split_full_completion.set_value(std::move(result));
+      });
+  OwnerAdmissionResult split_full = split_full_future.get();
+  assert(split_full_submit == OwnerAdmissionStatus::EntryLimit);
+  assert(split_full.status == OwnerAdmissionStatus::EntryLimit);
+  split_active.lease.reset();
+  OwnerAdmissionResult split_granted = split_first_waiter.get();
+  assert(split_granted.status == OwnerAdmissionStatus::Granted &&
+         split_granted.lease);
+  const OwnerAdmissionSnapshot split_promoted = split_bytes.snapshot();
+  assert(split_promoted.active_bytes == 10 &&
+         split_promoted.waiting_entries == 1 &&
+         split_promoted.waiting_bytes == 1);
+  split_bytes.requestShutdown();
+  OwnerAdmissionResult split_shutdown = split_second_waiter.get();
+  assert(split_shutdown.status == OwnerAdmissionStatus::Shutdown);
+  split_granted.lease.reset();
+  assert(split_bytes.join());
 
   OwnerAdmission fair({1, 100, 8, 800});
   auto submit_probe = [&](std::string id, RequestCostClass cost) {

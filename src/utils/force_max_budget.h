@@ -6,7 +6,9 @@
 
 #include "utils/resource_probe.h"
 
-inline constexpr const char *kForceMaxFormulaRevision = "force-max-v4";
+inline constexpr const char *kForceMaxFormulaRevision = "force-max-v5";
+inline constexpr uint64_t kForceMaxOwnerWaitMetadataBytes =
+    UINT64_C(64) * 1024;
 
 struct ForceMaxBudget {
   std::string formula_revision = kForceMaxFormulaRevision;
@@ -74,5 +76,6 @@ bool validateForceMaxFetchContract(const ForceMaxBudget &budget,
 uint64_t forceMaxOwnerWorkingReservation(
     const ForceMaxBudget &budget, uint64_t request_bytes,
     uint64_t maximum_download_bytes) noexcept;
+uint64_t forceMaxOwnerWaitReservation(uint64_t request_bytes) noexcept;
 
 #endif // FORCE_MAX_BUDGET_H_INCLUDED

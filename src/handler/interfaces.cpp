@@ -3031,6 +3031,7 @@ void ConversionService::convertSubscriptionAsync(Request request,
     return;
   }
   uint64_t owner_working_bytes = bytes;
+  const uint64_t owner_wait_bytes = forceMaxOwnerWaitReservation(bytes);
   if (prepared.settings &&
       prepared.settings->resourceControlEffective == "force_max") {
     const ResourceControlSnapshot resources = resourceControlSnapshot();
@@ -3312,6 +3313,7 @@ void ConversionService::convertSubscriptionAsync(Request request,
           (void)admission->admit(
               {.cost = cost,
                .bytes = owner_working_bytes,
+               .wait_bytes = owner_wait_bytes,
                .request_context = call->work_context},
               [call, start_owner = std::move(start_owner)](
                   OwnerAdmissionResult result) mutable {
@@ -3469,6 +3471,7 @@ void ConversionService::convertSubscriptionAsync(Request request,
     (void)admission->admit(
         {.cost = cost,
          .bytes = owner_working_bytes,
+         .wait_bytes = owner_wait_bytes,
          .deadline = deadline,
          .request_context = context},
         [start_standalone = std::move(start_standalone)](

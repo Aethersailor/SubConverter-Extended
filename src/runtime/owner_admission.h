@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 
 #include "server/request_context.h"
@@ -71,7 +72,10 @@ struct OwnerAdmissionResult {
 
 struct OwnerAdmissionOptions {
   RequestCostClass cost = RequestCostClass::Medium;
+  // Active bytes reserve the owner's possible conversion working set. Waiting
+  // bytes charge only the metadata retained while this request is queued.
   uint64_t bytes = 0;
+  uint64_t wait_bytes = std::numeric_limits<uint64_t>::max();
   std::chrono::steady_clock::time_point deadline =
       std::chrono::steady_clock::time_point::max();
   std::shared_ptr<RequestContext> request_context;

@@ -87,6 +87,13 @@ bool validateForceMaxBudget(const ForceMaxBudget &budget,
       !checkedAdd(queue_total, budget.blocking_io_queue_bytes,
                   queue_total))
     return invalid("queue_budget_overflow");
+  uint64_t minimum_owner_wait_bytes = 0;
+  if (!checkedMultiply(budget.active_owners,
+                       kForceMaxOwnerWaitMetadataBytes,
+                       minimum_owner_wait_bytes) ||
+      budget.owner_queue_entries < budget.active_owners ||
+      budget.owner_queue_bytes < minimum_owner_wait_bytes)
+    return invalid("insufficient_owner_wait_headroom");
   uint64_t memory_total = 0;
   for (uint64_t component :
        {budget.reserved_memory_bytes, budget.handler_stack_bytes,
@@ -198,6 +205,10 @@ uint64_t forceMaxOwnerWorkingReservation(
   // A single oversized owner is still allowed to make progress, but it owns
   // the entire working partition and therefore serializes against peers.
   return std::min(reservation, budget.owner_active_bytes);
+}
+
+uint64_t forceMaxOwnerWaitReservation(uint64_t request_bytes) noexcept {
+  return std::max(request_bytes, kForceMaxOwnerWaitMetadataBytes);
 }
 
 ForceMaxBudget calculateForceMaxBudget(
