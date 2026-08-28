@@ -489,6 +489,7 @@ struct QjsSleepWaitState
 {
     std::mutex mutex;
     std::condition_variable condition;
+    bool cancellation_requested = false;
 };
 
 void qjsSleep(int interval)
@@ -505,8 +506,13 @@ void qjsSleep(int interval)
 
     const auto wait_state = std::make_shared<QjsSleepWaitState>();
     RequestCancellationRegistration registration =
-        request_context->registerCancellationCallback(
-            [wait_state] { wait_state->condition.notify_all(); });
+        request_context->registerCancellationCallback([wait_state] {
+            {
+                std::lock_guard<std::mutex> lock(wait_state->mutex);
+                wait_state->cancellation_requested = true;
+            }
+            wait_state->condition.notify_all();
+        });
     const auto requested_end =
         std::chrono::steady_clock::now() +
         std::chrono::milliseconds(interval);
@@ -517,9 +523,10 @@ void qjsSleep(int interval)
             : std::min(requested_end, deadline);
     std::unique_lock<std::mutex> lock(wait_state->mutex);
     (void)wait_state->condition.wait_until(
-        lock, wait_until, [&request_context] {
-        return request_context->cancellationToken()
-            .isCancellationRequested();
+        lock, wait_until, [&request_context, &wait_state] {
+        return wait_state->cancellation_requested ||
+               request_context->cancellationToken()
+                   .isCancellationRequested();
         });
 }
 
