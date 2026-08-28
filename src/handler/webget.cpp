@@ -687,6 +687,9 @@ public:
                     .flow_queue_entries);
         capacity_ = static_cast<size_t>(
             std::clamp<uint64_t>(desired_capacity, 1024, 16384));
+        if((capacity_ & 1U) != 0 && capacity_ < 16384)
+            ++capacity_;
+        generation_capacity_ = capacity_ / 2;
     }
 
     bool admit(const std::string &cache_key,
@@ -699,20 +702,38 @@ public:
                                                std::clamp<unsigned int>(
                                                    cache_ttl, 60, 3600));
             std::lock_guard<std::mutex> lock(mutex_);
-            auto iter = entries_.find(cache_key);
-            if(iter != entries_.end())
+            auto current = current_entries_.find(cache_key);
+            if(current != current_entries_.end())
             {
-                if(iter->second > now)
+                if(current->second > now)
                 {
-                    iter->second = expires_at;
+                    current->second = expires_at;
                     ++reuse_admitted_total_;
                     return true;
                 }
-                entries_.erase(iter);
+                current_entries_.erase(current);
             }
-            if(entries_.size() >= capacity_)
-                entries_.erase(entries_.begin());
-            entries_.emplace(cache_key, expires_at);
+            auto previous = previous_entries_.find(cache_key);
+            if(previous != previous_entries_.end())
+            {
+                if(previous->second > now)
+                {
+                    previous->second = expires_at;
+                    ++reuse_admitted_total_;
+                    return true;
+                }
+                previous_entries_.erase(previous);
+            }
+            if(current_entries_.size() >= generation_capacity_)
+            {
+                // Keep exactly one completed generation. Swapping reuses the
+                // older generation's buckets and keeps total memory bounded;
+                // no timer, learning, or workload-dependent capacity change
+                // is involved.
+                previous_entries_.swap(current_entries_);
+                current_entries_.clear();
+            }
+            current_entries_.emplace(cache_key, expires_at);
             ++first_seen_bypassed_total_;
         }
         catch(...)
@@ -732,7 +753,8 @@ public:
             return {
                 enabled,
                 static_cast<uint64_t>(capacity_),
-                static_cast<uint64_t>(entries_.size()),
+                static_cast<uint64_t>(current_entries_.size() +
+                                      previous_entries_.size()),
                 first_seen_bypassed_total_,
                 reuse_admitted_total_,
             };
@@ -746,8 +768,13 @@ public:
 private:
     mutable std::mutex mutex_;
     std::unordered_map<std::string,
-                       std::chrono::steady_clock::time_point> entries_;
+                       std::chrono::steady_clock::time_point>
+        current_entries_;
+    std::unordered_map<std::string,
+                       std::chrono::steady_clock::time_point>
+        previous_entries_;
     size_t capacity_ = 1024;
+    size_t generation_capacity_ = 512;
     uint64_t first_seen_bypassed_total_ = 0;
     uint64_t reuse_admitted_total_ = 0;
 };
