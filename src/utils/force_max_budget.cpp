@@ -528,10 +528,15 @@ ForceMaxBudget calculateForceMaxBudget(
   const uint64_t allocatable =
       budget.memory_headroom_bytes - budget.reserved_memory_bytes -
       budget.handler_stack_bytes;
-  budget.retained_response_bytes = fraction(allocatable, 2, 10);
-  budget.fetch_bytes = fraction(allocatable, 2, 10);
-  budget.cache_bytes = fraction(allocatable, 2, 10);
-  budget.working_memory_bytes = fraction(allocatable, 3, 10);
+  // Keep the full ledger bounded while giving owner work enough room to
+  // overlap fetch and CPU phases. The previous split left only half of a 30%
+  // working partition for owners; with the four-times-download safety
+  // reservation this limited a 6-core/12-GiB envelope to six owners and left
+  // compute workers idle during mixed workloads.
+  budget.retained_response_bytes = fraction(allocatable, 3, 20);
+  budget.fetch_bytes = fraction(allocatable, 4, 20);
+  budget.cache_bytes = fraction(allocatable, 2, 20);
+  budget.working_memory_bytes = fraction(allocatable, 9, 20);
   const uint64_t queue_bytes =
       budget.memory_headroom_bytes - budget.reserved_memory_bytes -
       budget.handler_stack_bytes -
@@ -555,8 +560,9 @@ ForceMaxBudget calculateForceMaxBudget(
 
   budget.active_owners = std::min(
       budget.active_owners,
-      std::max<uint64_t>(1, budget.working_memory_bytes /
-                                (UINT64_C(1) * 1024 * 1024)));
+      std::min(budget.owner_queue_entries,
+               std::max<uint64_t>(1, budget.working_memory_bytes /
+                                         (UINT64_C(1) * 1024 * 1024))));
   budget.active_flows = std::max(
       budget.active_owners,
       std::min(budget.active_flows,
@@ -570,11 +576,11 @@ ForceMaxBudget calculateForceMaxBudget(
   budget.quickjs_workers =
       std::max<uint64_t>(1, budget.compute_workers / 2);
   budget.quickjs_queue_bytes =
-      std::max<uint64_t>(1, budget.working_memory_bytes / 8);
+      std::max<uint64_t>(1, budget.working_memory_bytes / 16);
   budget.quickjs_queue_entries = std::max<uint64_t>(
       1, budget.quickjs_queue_bytes / (UINT64_C(256) * 1024));
   const uint64_t quickjs_worker_pool =
-      std::max<uint64_t>(1, budget.working_memory_bytes / 8);
+      std::max<uint64_t>(1, budget.working_memory_bytes / 16);
   const uint64_t quickjs_worker_bytes =
       std::max<uint64_t>(2,
           quickjs_worker_pool / budget.quickjs_workers);
@@ -601,7 +607,7 @@ ForceMaxBudget calculateForceMaxBudget(
     return budget;
   }
   budget.transport_active_bytes =
-      std::max<uint64_t>(1, budget.working_memory_bytes / 4);
+      std::max<uint64_t>(1, budget.working_memory_bytes / 16);
   uint64_t committed_working_memory = 0;
   if (!checkedAdd(quickjs_total, budget.transport_active_bytes,
                   committed_working_memory) ||

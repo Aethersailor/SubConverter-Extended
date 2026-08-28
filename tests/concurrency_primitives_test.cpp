@@ -1497,7 +1497,7 @@ static void testResourceControlPrimitives() {
   assert(deterministic_first.outbound_active <=
          deterministic_first.outbound_open);
   assert(deterministic_first.quickjs_workers == 3);
-  assert(deterministic_first.formula_revision == "force-max-v5");
+  assert(deterministic_first.formula_revision == "force-max-v6");
   assert(deterministic_first.startup_memory_bytes ==
          bounded_envelope.memory_current_bytes);
   assert(deterministic_first.memory_headroom_bytes ==
@@ -1525,6 +1525,15 @@ static void testResourceControlPrimitives() {
          deterministic_first.owner_active_bytes /
              deterministic_first.active_owners);
   assert(owner_reservation <= deterministic_first.owner_active_bytes);
+  const uint64_t worst_case_owner_reservation =
+      forceMaxOwnerWorkingReservation(
+          deterministic_first, 4096,
+          UINT64_C(64) * 1024 * 1024);
+  assert(worst_case_owner_reservation ==
+         UINT64_C(256) * 1024 * 1024);
+  assert(deterministic_first.owner_active_bytes /
+             worst_case_owner_reservation >=
+         deterministic_first.compute_workers * 2);
   assert(forceMaxOwnerWorkingReservation(
              deterministic_first,
              deterministic_first.owner_active_bytes + 1,
