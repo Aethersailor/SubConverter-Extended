@@ -3030,20 +3030,19 @@ void ConversionService::convertSubscriptionAsync(Request request,
                                     std::move(early_body)));
     return;
   }
+  uint64_t owner_working_bytes = bytes;
   const uint64_t owner_wait_bytes = forceMaxOwnerWaitReservation(bytes);
-  const auto owner_working_reservation = [&prepared, bytes] {
-    if (!prepared.settings ||
-        prepared.settings->resourceControlEffective != "force_max")
-      return bytes;
+  if (prepared.settings &&
+      prepared.settings->resourceControlEffective == "force_max") {
     const ResourceControlSnapshot resources = resourceControlSnapshot();
     const uint64_t maximum_download =
         prepared.settings->maxAllowedDownloadSize > 0
             ? static_cast<uint64_t>(
                   prepared.settings->maxAllowedDownloadSize)
             : 0;
-    return forceMaxOwnerWorkingReservation(
+    owner_working_bytes = forceMaxOwnerWorkingReservation(
         resources.calculated_force_max_budget, bytes, maximum_download);
-  };
+  }
   statistics::SubscriptionConversionMetadata statistics_metadata;
   if (track_statistics) {
     ScopedSettingsView settings_scope(prepared.settings);
@@ -3201,7 +3200,6 @@ void ConversionService::convertSubscriptionAsync(Request request,
         context->setConsumerCount(1);
       }
       try {
-        const uint64_t owner_working_bytes = owner_working_reservation();
         registerAsyncSubRequestCancellation(owner_consumer);
         auto prepared_owner =
             std::make_shared<const PreparedSubRequest>(std::move(prepared));
@@ -3352,7 +3350,6 @@ void ConversionService::convertSubscriptionAsync(Request request,
                                 : RequestContext::Clock::time_point::max();
   const RequestCancellationToken cancellation =
       context ? context->cancellationToken() : RequestCancellationToken();
-  const uint64_t owner_working_bytes = owner_working_reservation();
   auto prepared_standalone =
       std::make_shared<const PreparedSubRequest>(std::move(prepared));
   auto start_standalone =
