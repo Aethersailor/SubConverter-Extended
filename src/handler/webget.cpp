@@ -739,9 +739,12 @@ private:
 
 static bool subscriptionCacheAdmissionEnabled() noexcept
 {
-    const std::string &mode =
-        effectiveSettings().resourceControlEffective;
-    return mode == "force_max" || mode == "adaptive";
+    static const bool enabled = [] {
+        const ResourceControlSnapshot resources = resourceControlSnapshot();
+        return resources.effective_mode == "force_max" ||
+               resources.effective_mode == "adaptive";
+    }();
+    return enabled;
 }
 
 static SubscriptionCacheDoorkeeper &subscriptionCacheDoorkeeper()
