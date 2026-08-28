@@ -1,6 +1,7 @@
 #include "handler/upload_async.h"
 
 #include <atomic>
+#include <mutex>
 #include <utility>
 
 #include <rapidjson/document.h>
@@ -9,11 +10,14 @@
 #include "handler/settings.h"
 #include "handler/upload.h"
 #include "handler/webget.h"
+#include "runtime/blocking_io_executor.h"
 #include "utils/ini_reader/ini_reader.h"
 #include "utils/rapidjson_extra.h"
 #include "utils/system.h"
 
 namespace {
+
+std::mutex gist_persistence_mutex;
 
 std::string asyncGistApiUrl(const std::string &path) {
   std::string base =
@@ -153,9 +157,12 @@ private:
     }
     auto self = shared_from_this();
     const uint64_t bytes = result->content.size();
-    (void)submitOwnedWebGetContinuation(
-        RequestCostClass::Low, bytes,
-        RequestContext::Clock::time_point::max(), {},
+    (void)submitBlockingIo(
+        {.cost = RequestCostClass::Low,
+         .bytes = bytes,
+         .deadline = RequestContext::Clock::time_point::max(),
+         .cancellation = {},
+         .preferred_worker = {}},
         [self, result = std::move(result)]() mutable {
           self->persist(std::move(result));
         },
@@ -167,6 +174,7 @@ private:
   }
 
   void persist(SharedAsyncFetchResult result) {
+    std::lock_guard<std::mutex> lock(gist_persistence_mutex);
     rapidjson::Document json;
     json.Parse(result->content.data());
     GetMember(json, "id", id_);
