@@ -2012,6 +2012,7 @@ static bool forceMaxFlowEligible(
     const Request &request, const PreparedSubRequest &prepared);
 static bool startForceMaxFlow(
     Request request, std::shared_ptr<const PreparedSubRequest> prepared,
+    ForceMaxRuntimeBudgetSlice runtime_budget,
     bool track_statistics, bool record_direct_statistics,
     ForceMaxFlowCompletion completion);
 
@@ -3031,18 +3032,21 @@ void ConversionService::convertSubscriptionAsync(Request request,
     return;
   }
   const uint64_t owner_wait_bytes = forceMaxOwnerWaitReservation(bytes);
-  const auto owner_working_reservation = [&prepared, bytes] {
-    if (!prepared.settings ||
-        prepared.settings->resourceControlEffective != "force_max")
-      return bytes;
-    const ResourceControlSnapshot resources = resourceControlSnapshot();
+  const auto runtime_budget_slice = [&prepared] {
+    return prepared.settings &&
+                   prepared.settings->resourceControlEffective == "force_max"
+               ? forceMaxRuntimeBudgetSlice()
+               : ForceMaxRuntimeBudgetSlice{};
+  };
+  const auto owner_working_reservation = [&prepared, bytes](
+                                             const auto &runtime_budget) {
     const uint64_t maximum_download =
-        prepared.settings->maxAllowedDownloadSize > 0
+        prepared.settings && prepared.settings->maxAllowedDownloadSize > 0
             ? static_cast<uint64_t>(
                   prepared.settings->maxAllowedDownloadSize)
             : 0;
     return forceMaxOwnerWorkingReservation(
-        resources.calculated_force_max_budget, bytes, maximum_download);
+        runtime_budget.owner, bytes, maximum_download);
   };
   statistics::SubscriptionConversionMetadata statistics_metadata;
   if (track_statistics) {
@@ -3201,14 +3205,17 @@ void ConversionService::convertSubscriptionAsync(Request request,
         context->setConsumerCount(1);
       }
       try {
-        const uint64_t owner_working_bytes = owner_working_reservation();
+        const ForceMaxRuntimeBudgetSlice runtime_budget =
+            runtime_budget_slice();
+        const uint64_t owner_working_bytes =
+            owner_working_reservation(runtime_budget);
         registerAsyncSubRequestCancellation(owner_consumer);
         auto prepared_owner =
             std::make_shared<const PreparedSubRequest>(std::move(prepared));
         Request work_request = std::move(request);
         work_request.context = call->work_context;
         auto start_owner =
-            [cost, bytes, context, call, prepared_owner,
+            [cost, bytes, context, call, prepared_owner, runtime_budget,
              work_request = std::move(work_request), track_statistics](
                 OwnerAdmissionLease admission,
                 bool governed) mutable {
@@ -3231,7 +3238,7 @@ void ConversionService::convertSubscriptionAsync(Request request,
               if (forceMaxFlowEligible(work_request,
                                        *prepared_owner)) {
                 const bool flow_started = startForceMaxFlow(
-                    std::move(work_request), prepared_owner,
+                    std::move(work_request), prepared_owner, runtime_budget,
                     track_statistics, false,
                     [call, prepared_owner](
                         ForceMaxFlowOutput output,
@@ -3352,11 +3359,13 @@ void ConversionService::convertSubscriptionAsync(Request request,
                                 : RequestContext::Clock::time_point::max();
   const RequestCancellationToken cancellation =
       context ? context->cancellationToken() : RequestCancellationToken();
-  const uint64_t owner_working_bytes = owner_working_reservation();
+  const ForceMaxRuntimeBudgetSlice runtime_budget = runtime_budget_slice();
+  const uint64_t owner_working_bytes =
+      owner_working_reservation(runtime_budget);
   auto prepared_standalone =
       std::make_shared<const PreparedSubRequest>(std::move(prepared));
   auto start_standalone =
-      [cost, bytes, context, request = std::move(request),
+      [cost, bytes, context, runtime_budget, request = std::move(request),
        prepared_standalone, track_statistics, deadline, cancellation,
        completion = std::move(completion)](
           OwnerAdmissionResult admission_result,
@@ -3378,7 +3387,7 @@ void ConversionService::convertSubscriptionAsync(Request request,
               std::make_shared<OwnerAdmissionLease>(
                   std::move(admission_result.lease));
           const bool flow_started = startForceMaxFlow(
-              std::move(request), prepared_standalone,
+              std::move(request), prepared_standalone, runtime_budget,
               track_statistics, true,
               [context, completion, flow_admission](
                   ForceMaxFlowOutput output,
@@ -7433,20 +7442,20 @@ class ForceMaxFlowState
 public:
   ForceMaxFlowState(
       Request request, std::shared_ptr<const PreparedSubRequest> prepared,
+      ForceMaxRuntimeBudgetSlice runtime_budget,
       bool track_statistics, bool record_direct_statistics,
       ForceMaxFlowCompletion completion)
       : request_(std::move(request)), prepared_(std::move(prepared)),
-        settings_(prepared_->settings),
+        settings_(prepared_->settings), runtime_budget_(runtime_budget),
         track_statistics_(track_statistics),
         record_direct_statistics_(record_direct_statistics),
         completion_(std::move(completion)) {
-    const ResourceControlSnapshot resources = resourceControlSnapshot();
     const uint64_t maximum_download =
         settings_ && settings_->maxAllowedDownloadSize > 0
             ? static_cast<uint64_t>(settings_->maxAllowedDownloadSize)
             : 0;
     working_reservation_bytes_ = forceMaxOwnerWorkingReservation(
-        resources.calculated_force_max_budget,
+        runtime_budget_.owner,
         request_.context ? request_.context->estimatedBytes() : 0,
         maximum_download);
   }
@@ -7475,21 +7484,17 @@ private:
     ComputeExecutor *executor = globalComputeExecutor();
     if (!executor || !settings_ || !request_.context)
       return false;
-    const ResourceControlSnapshot resources = resourceControlSnapshot();
-    const ForceMaxBudget &budget =
-        resources.calculated_force_max_budget;
-    const RuntimeCoordinatorSnapshot coordinator =
-        runtimeCoordinatorSnapshot();
-    if (resources.effective_mode != "force_max" || !budget.valid ||
-        !coordinator.force_max || !coordinator.prepared ||
-        !coordinator.ready || coordinator.stopping ||
-        coordinator.generation == 0)
+    const RuntimeCoordinatorLivenessSnapshot coordinator =
+        runtimeCoordinatorLivenessSnapshot();
+    if (!forceMaxRuntimeBudgetUsable(runtime_budget_, coordinator))
       return false;
-    const uint64_t flows = std::max<uint64_t>(1, budget.active_flows);
+    const uint64_t flows =
+        std::max<uint64_t>(1, runtime_budget_.active_flows);
     const ConversionFlowBudget flow_budget{
-        std::max<uint64_t>(8, budget.flow_queue_entries / flows),
+        std::max<uint64_t>(
+            8, runtime_budget_.flow_queue_entries / flows),
         std::max<uint64_t>(UINT64_C(64) * 1024,
-                           budget.flow_queue_bytes / flows)};
+                           runtime_budget_.flow_queue_bytes / flows)};
     try {
       auto self = shared_from_this();
       flow_ = ConversionFlow::create(
@@ -7911,10 +7916,8 @@ private:
       }
     }
     if (group_script && estimate < structural_partition) {
-      const ResourceControlSnapshot resources = resourceControlSnapshot();
       script_native_limit = std::min<uint64_t>(
-          resources.calculated_force_max_budget
-              .quickjs_heap_bytes_per_worker,
+          runtime_budget_.quickjs_heap_bytes_per_worker,
           structural_partition - estimate);
     }
     uint64_t total_estimate = estimate;
@@ -8869,6 +8872,7 @@ private:
   Request request_;
   const std::shared_ptr<const PreparedSubRequest> prepared_;
   const SettingsSnapshot settings_;
+  const ForceMaxRuntimeBudgetSlice runtime_budget_;
   const bool track_statistics_;
   const bool record_direct_statistics_;
   ForceMaxFlowCompletion completion_;
@@ -8917,14 +8921,16 @@ private:
 
 static bool startForceMaxFlow(
     Request request, std::shared_ptr<const PreparedSubRequest> prepared,
+    ForceMaxRuntimeBudgetSlice runtime_budget,
     bool track_statistics, bool record_direct_statistics,
     ForceMaxFlowCompletion completion) {
   if (!prepared || !completion)
     return false;
   try {
     auto state = std::make_shared<ForceMaxFlowState>(
-        std::move(request), std::move(prepared), track_statistics,
-        record_direct_statistics, std::move(completion));
+        std::move(request), std::move(prepared), runtime_budget,
+        track_statistics, record_direct_statistics,
+        std::move(completion));
     return state->start();
   } catch (const BoundedOutputExceeded &) {
     throw;

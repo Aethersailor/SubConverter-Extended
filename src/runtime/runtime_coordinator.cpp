@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <type_traits>
 
 #include "generator/config/ruleconvert.h"
 #include "handler/conversion_service.h"
@@ -52,6 +53,10 @@ struct RuntimeCoordinatorState {
 };
 
 RuntimeCoordinatorState coordinator;
+
+static_assert(
+    std::is_trivially_copyable_v<ForceMaxOwnerReservationBudget>);
+static_assert(std::is_trivially_copyable_v<ForceMaxRuntimeBudgetSlice>);
 
 bool hardEnvelopeMatches(const ResourceEnvelope &expected,
                          const ResourceEnvelope &current) noexcept {
@@ -491,6 +496,38 @@ bool commitRuntimeCoordinator() noexcept {
 RuntimeCoordinatorSnapshot runtimeCoordinatorSnapshot() noexcept {
   std::lock_guard<std::mutex> lock(coordinator.mutex);
   return coordinator.snapshot;
+}
+
+RuntimeCoordinatorLivenessSnapshot
+runtimeCoordinatorLivenessSnapshot() noexcept {
+  std::lock_guard<std::mutex> lock(coordinator.mutex);
+  return {coordinator.snapshot.force_max,
+          coordinator.snapshot.prepared,
+          coordinator.snapshot.ready,
+          coordinator.snapshot.stopping,
+          coordinator.snapshot.generation};
+}
+
+ForceMaxRuntimeBudgetSlice forceMaxRuntimeBudgetSlice() noexcept {
+  std::lock_guard<std::mutex> lock(coordinator.mutex);
+  const RuntimeCoordinatorSnapshot &state = coordinator.snapshot;
+  const ForceMaxBudget &budget = coordinator.budget;
+  const bool valid = state.force_max && state.prepared && state.ready &&
+                     !state.stopping && state.generation != 0 &&
+                     budget.valid && budget.active_owners != 0 &&
+                     budget.owner_active_bytes != 0 &&
+                     budget.active_flows != 0 &&
+                     budget.flow_queue_entries != 0 &&
+                     budget.flow_queue_bytes != 0 &&
+                     budget.quickjs_heap_bytes_per_worker != 0;
+  return {state.force_max,
+          valid,
+          state.generation,
+          {valid, budget.active_owners, budget.owner_active_bytes},
+          budget.active_flows,
+          budget.flow_queue_entries,
+          budget.flow_queue_bytes,
+          budget.quickjs_heap_bytes_per_worker};
 }
 
 void requestRuntimeCoordinatorShutdown() noexcept {

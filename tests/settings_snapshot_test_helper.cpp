@@ -309,9 +309,15 @@ int main(int argc, char *argv[]) {
         failed = prepared && !commitRuntimeCoordinator();
       const RuntimeCoordinatorSnapshot snapshot =
           runtimeCoordinatorSnapshot();
+      const RuntimeCoordinatorLivenessSnapshot liveness =
+          runtimeCoordinatorLivenessSnapshot();
+      const ForceMaxRuntimeBudgetSlice budget_slice =
+          forceMaxRuntimeBudgetSlice();
       ++expected_rollbacks;
       if (!failed || snapshot.ready || snapshot.prepared ||
           snapshot.generation != 0 ||
+          liveness.ready || liveness.generation != 0 ||
+          budget_slice.valid || budget_slice.generation != 0 ||
           snapshot.rollback_total != expected_rollbacks ||
           snapshot.last_failed_stage != failed_stage ||
           globalComputeExecutorSnapshot().initialized ||
@@ -340,7 +346,29 @@ int main(int argc, char *argv[]) {
       return 1;
     }
     RuntimeCoordinatorSnapshot ready = runtimeCoordinatorSnapshot();
+    const RuntimeCoordinatorLivenessSnapshot ready_liveness =
+        runtimeCoordinatorLivenessSnapshot();
+    const ForceMaxRuntimeBudgetSlice ready_budget =
+        forceMaxRuntimeBudgetSlice();
+    const ForceMaxBudget expected_budget =
+        resourceControlSnapshot().calculated_force_max_budget;
     if (!ready.prepared || !ready.ready || ready.generation != 1 ||
+        !ready_liveness.force_max || !ready_liveness.prepared ||
+        !ready_liveness.ready || ready_liveness.stopping ||
+        ready_liveness.generation != ready.generation ||
+        !ready_budget.force_max || !ready_budget.valid ||
+        ready_budget.generation != ready.generation ||
+        !ready_budget.owner.valid ||
+        ready_budget.owner.active_owners != expected_budget.active_owners ||
+        ready_budget.owner.owner_active_bytes !=
+            expected_budget.owner_active_bytes ||
+        ready_budget.active_flows != expected_budget.active_flows ||
+        ready_budget.flow_queue_entries !=
+            expected_budget.flow_queue_entries ||
+        ready_budget.flow_queue_bytes != expected_budget.flow_queue_bytes ||
+        ready_budget.quickjs_heap_bytes_per_worker !=
+            expected_budget.quickjs_heap_bytes_per_worker ||
+        !forceMaxRuntimeBudgetUsable(ready_budget, ready_liveness) ||
         !globalComputeExecutorSnapshot().ready ||
         !blockingIoExecutorSnapshot().ready ||
         !globalQuickJsLaneSnapshot().ready ||
@@ -350,6 +378,12 @@ int main(int argc, char *argv[]) {
         !globalFetchMemoryBudgetSnapshot().enabled ||
         conversionFlowRegistrySnapshot().stopping) {
       std::cerr << "rebuilt runtime was not atomically published\n";
+      return 1;
+    }
+    ForceMaxRuntimeBudgetSlice stale_budget = ready_budget;
+    ++stale_budget.generation;
+    if (forceMaxRuntimeBudgetUsable(stale_budget, ready_liveness)) {
+      std::cerr << "stale force max runtime budget remained usable\n";
       return 1;
     }
     const uint64_t controller_samples_before =
@@ -373,8 +407,17 @@ int main(int argc, char *argv[]) {
     const bool joined = joinRuntimeCoordinator();
     const RuntimeCoordinatorSnapshot stopped =
         runtimeCoordinatorSnapshot();
+    const RuntimeCoordinatorLivenessSnapshot stopped_liveness =
+        runtimeCoordinatorLivenessSnapshot();
+    const ForceMaxRuntimeBudgetSlice stopped_budget =
+        forceMaxRuntimeBudgetSlice();
     if (!joined || !stopped.joined || stopped.shutdown_stage != "joined" ||
         stopped.shutdown_deadline_exceeded ||
+        !stopped_liveness.force_max || !stopped_liveness.prepared ||
+        stopped_liveness.ready || !stopped_liveness.stopping ||
+        stopped_liveness.generation != ready.generation ||
+        stopped_budget.valid ||
+        forceMaxRuntimeBudgetUsable(ready_budget, stopped_liveness) ||
         !globalComputeExecutorSnapshot().stopping ||
         !blockingIoExecutorSnapshot().stopping ||
         !globalQuickJsLaneSnapshot().stopping ||

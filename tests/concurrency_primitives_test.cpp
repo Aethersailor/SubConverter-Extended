@@ -1520,6 +1520,12 @@ static void testResourceControlPrimitives() {
   assert(deterministic_first.owner_active_bytes > 0);
   const uint64_t owner_reservation = forceMaxOwnerWorkingReservation(
       deterministic_first, 4096, UINT64_C(1) * 1024 * 1024);
+  const ForceMaxOwnerReservationBudget compact_owner_budget{
+      deterministic_first.valid, deterministic_first.active_owners,
+      deterministic_first.owner_active_bytes};
+  assert(forceMaxOwnerWorkingReservation(
+             compact_owner_budget, 4096,
+             UINT64_C(1) * 1024 * 1024) == owner_reservation);
   assert(owner_reservation >= UINT64_C(4) * 1024 * 1024);
   assert(owner_reservation >=
          deterministic_first.owner_active_bytes /
@@ -1530,6 +1536,20 @@ static void testResourceControlPrimitives() {
              deterministic_first.owner_active_bytes + 1,
              UINT64_C(1) * 1024 * 1024) ==
          deterministic_first.owner_active_bytes);
+  assert(forceMaxOwnerWorkingReservation(
+             compact_owner_budget,
+             deterministic_first.owner_active_bytes + 1,
+             UINT64_C(1) * 1024 * 1024) ==
+         deterministic_first.owner_active_bytes);
+  assert(forceMaxOwnerWorkingReservation(
+             ForceMaxOwnerReservationBudget{}, 4096,
+             UINT64_C(1) * 1024 * 1024) == 4096);
+  assert(forceMaxOwnerWorkingReservation(
+             {true, 0, deterministic_first.owner_active_bytes}, 4096,
+             UINT64_C(1) * 1024 * 1024) == 4096);
+  assert(forceMaxOwnerWorkingReservation(
+             {true, deterministic_first.active_owners, 0}, 4096,
+             UINT64_C(1) * 1024 * 1024) == 4096);
   assert(forceMaxOwnerWaitReservation(0) ==
          kForceMaxOwnerWaitMetadataBytes);
   assert(forceMaxOwnerWaitReservation(

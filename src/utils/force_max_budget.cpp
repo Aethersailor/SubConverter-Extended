@@ -192,6 +192,14 @@ bool validateForceMaxFetchContract(const ForceMaxBudget &budget,
 uint64_t forceMaxOwnerWorkingReservation(
     const ForceMaxBudget &budget, uint64_t request_bytes,
     uint64_t maximum_download_bytes) noexcept {
+  return forceMaxOwnerWorkingReservation(
+      {budget.valid, budget.active_owners, budget.owner_active_bytes},
+      request_bytes, maximum_download_bytes);
+}
+
+uint64_t forceMaxOwnerWorkingReservation(
+    const ForceMaxOwnerReservationBudget &budget, uint64_t request_bytes,
+    uint64_t maximum_download_bytes) noexcept {
   if (!budget.valid || budget.active_owners == 0 ||
       budget.owner_active_bytes == 0)
     return request_bytes;
