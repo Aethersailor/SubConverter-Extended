@@ -205,7 +205,7 @@ private:
   static RequestCostClass normalizedCost(RequestCostClass cost) noexcept;
   static std::size_t queueIndex(RequestCostClass cost) noexcept;
 
-  inline static constexpr std::array<uint8_t, 3> kWeights{4, 2, 2};
+  inline static constexpr std::array<uint8_t, 3> kWeights{8, 4, 1};
   inline static thread_local const ComputeExecutor *current_executor_ =
       nullptr;
   inline static thread_local std::size_t current_worker_index_ =
