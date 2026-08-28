@@ -400,19 +400,16 @@ struct OwnerAdmission::Core
 
   void release(uint64_t bytes) noexcept {
     std::vector<Action> actions;
-    bool had_waiters = false;
     {
       std::lock_guard<std::mutex> lock(mutex);
       if (active_entries != 0)
         --active_entries;
       active_bytes -= std::min(active_bytes, bytes);
-      had_waiters = !stopping && waiting_entries != 0;
-      if (had_waiters)
+      if (!stopping)
         collectGrantsLocked(actions);
     }
     finishActions(std::move(actions));
-    if (had_waiters)
-      timer_condition.notify_all();
+    timer_condition.notify_all();
   }
 
   void timerLoop() noexcept {
