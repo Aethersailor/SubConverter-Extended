@@ -2115,9 +2115,11 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
   const bool bounded_output =
       max_output_bytes != std::numeric_limits<size_t>::max();
   YAML::Node proxy_providers_node;
+  bool has_proxy_providers_node = false;
   std::string proxy_providers_yaml;
   if (yamlnode["proxy-providers"].IsDefined()) {
     proxy_providers_node = yamlnode["proxy-providers"];
+    has_proxy_providers_node = true;
     if (!bounded_output)
       proxy_providers_yaml = YAML::Dump(proxy_providers_node);
     yamlnode.remove("proxy-providers"); // 从 yamlnode 中移除
@@ -2125,11 +2127,13 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
 
   // 提取 proxies 字段，用于手动控制输出顺序
   YAML::Node proxies_node;
+  bool has_proxies_node = false;
   std::string proxies_yaml;
   std::string proxies_field_name =
       ext.clash_new_field_name ? "proxies" : "Proxy";
   if (yamlnode[proxies_field_name].IsDefined()) {
     proxies_node = yamlnode[proxies_field_name];
+    has_proxies_node = true;
     if (!bounded_output)
       proxies_yaml = dumpCanonicalClashYaml(proxies_node);
     yamlnode.remove(proxies_field_name); // 从 yamlnode 中移除
@@ -2144,18 +2148,18 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
       for (const auto &entry : yamlnode) {
         const std::string key = entry.first.as<std::string>();
         if (!inserted && key == groups_field_name) {
-          if (proxy_providers_node.IsDefined())
+          if (has_proxy_providers_node)
             ordered["proxy-providers"] = proxy_providers_node;
-          if (proxies_node.IsDefined())
+          if (has_proxies_node)
             ordered[proxies_field_name] = proxies_node;
           inserted = true;
         }
         ordered[entry.first] = entry.second;
       }
       if (!inserted) {
-        if (proxy_providers_node.IsDefined())
+        if (has_proxy_providers_node)
           ordered["proxy-providers"] = proxy_providers_node;
-        if (proxies_node.IsDefined())
+        if (has_proxies_node)
           ordered[proxies_field_name] = proxies_node;
       }
       return dumpCanonicalClashYaml(ordered, max_output_bytes);

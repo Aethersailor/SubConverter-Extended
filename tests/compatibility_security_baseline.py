@@ -11999,6 +11999,30 @@ def force_max_flow_feature_baseline(binary: Path, fixture_base: str) -> None:
             )
         assert_vary_header(auto_headers, "User-Agent", "force_max auto target")
 
+        provider_status, provider_body, _ = request(
+            base_url,
+            "/sub",
+            {
+                "target": "clash",
+                "url": fixture_base + "/subscription.txt",
+                "config": DISABLE_RULEGEN_CONFIG,
+            },
+        )
+        provider_text = provider_body.decode("utf-8", errors="replace")
+        providers_position = provider_text.find("proxy-providers:")
+        groups_position = provider_text.find("proxy-groups:")
+        if (
+            provider_status != 200
+            or providers_position < 0
+            or groups_position < 0
+            or providers_position >= groups_position
+            or re.search(r"(?m)^proxies\s*:", provider_text) is not None
+        ):
+            raise AssertionError(
+                "force_max bounded Clash provider field presence or ordering "
+                f"changed: HTTP {provider_status}: {provider_text!r}"
+            )
+
         inner_import = fixture_data_url(SUBSCRIPTION.strip())
         outer_import = fixture_data_url("!!import:" + inner_import)
         import_status, import_body, _ = request(
