@@ -644,6 +644,8 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.StartObject();
   writer.Key("enabled");
   writer.Bool(cache_admission.enabled);
+  writer.Key("capacity");
+  writer.Uint64(cache_admission.capacity);
   writer.Key("entries");
   writer.Uint64(cache_admission.entries);
   writer.Key("first_seen_bypassed_total");

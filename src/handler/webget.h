@@ -215,6 +215,7 @@ struct CacheFetchPayloadSnapshot
 struct SubscriptionCacheAdmissionSnapshot
 {
     bool enabled = false;
+    uint64_t capacity = 0;
     uint64_t entries = 0;
     uint64_t first_seen_bypassed_total = 0;
     uint64_t reuse_admitted_total = 0;

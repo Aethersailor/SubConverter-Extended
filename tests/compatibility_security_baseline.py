@@ -12420,6 +12420,12 @@ def force_max_subscription_cache_admission_baseline(
         if (
             status != 200
             or admission["enabled"] is not True
+            or int(admission["capacity"])
+            < int(
+                after["resource_control"]["calculated_force_max_budget"][
+                    "flow_queue_entries"
+                ]
+            )
             or int(admission["first_seen_bypassed_total"])
             - int(admission_before["first_seen_bypassed_total"])
             != 10
@@ -12474,6 +12480,7 @@ def force_max_subscription_cache_admission_baseline(
             or any(status != 200 for status, _, _ in responses)
             or admission != {
                 "enabled": False,
+                "capacity": 0,
                 "entries": 0,
                 "first_seen_bypassed_total": 0,
                 "reuse_admitted_total": 0,
