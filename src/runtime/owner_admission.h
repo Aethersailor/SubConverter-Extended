@@ -17,10 +17,6 @@ struct OwnerAdmissionBudget {
   uint64_t max_active_bytes = 0;
   uint64_t max_wait_entries = 0;
   uint64_t max_wait_bytes = 0;
-  // Zero follows max_active_entries. force_max sets this to its compute
-  // worker count so high-cost CPU owners cannot queue behind each other while
-  // lower-cost and I/O-bound owners still overlap.
-  uint64_t max_active_high_cost_entries = 0;
 
   bool operator==(const OwnerAdmissionBudget &) const = default;
 };
@@ -108,8 +104,6 @@ struct OwnerAdmissionSnapshot {
   uint64_t max_active_bytes = 0;
   uint64_t max_wait_entries = 0;
   uint64_t max_wait_bytes = 0;
-  uint64_t active_high_cost_entries = 0;
-  uint64_t max_active_high_cost_entries = 0;
 };
 
 class OwnerAdmission {

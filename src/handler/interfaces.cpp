@@ -3530,9 +3530,6 @@ SubscriptionOwnerAdmissionSnapshot subscriptionOwnerAdmissionSnapshot() {
     result.max_wait_entries = owner.max_wait_entries;
     result.max_wait_bytes = owner.max_wait_bytes;
     result.oldest_wait_ms = owner.oldest_wait_ms;
-    result.active_high_cost = owner.active_high_cost_entries;
-    result.max_active_high_cost =
-        owner.max_active_high_cost_entries;
     return result;
   }
   auto make_snapshot = [](const char *source, WorkloadScheduler *scheduler) {

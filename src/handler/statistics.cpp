@@ -717,10 +717,6 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(owner_admission.max_wait_bytes);
   writer.Key("oldest_wait_ms");
   writer.Uint64(owner_admission.oldest_wait_ms);
-  writer.Key("active_high_cost");
-  writer.Uint64(owner_admission.active_high_cost);
-  writer.Key("max_active_high_cost");
-  writer.Uint64(owner_admission.max_active_high_cost);
   writer.EndObject();
   const WorkloadSchedulerSnapshot scheduler = conversionSchedulerSnapshot();
   writer.Key("conversion_scheduler");
@@ -1182,8 +1178,6 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
       owner_admission.source == "force_max_waitable" &&
       owner_admission.max_active_entries == calculated.active_owners &&
       owner_admission.max_active_bytes == calculated.owner_active_bytes &&
-      owner_admission.max_active_high_cost ==
-          calculated.compute_workers &&
       owner_admission.max_wait_entries ==
           calculated.owner_queue_entries &&
       owner_admission.max_wait_bytes == calculated.owner_queue_bytes &&

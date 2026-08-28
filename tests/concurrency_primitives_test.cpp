@@ -2013,63 +2013,6 @@ static void testOwnerAdmission() {
     assert(fast.join());
   }
 
-  {
-    OwnerAdmission cost_limited({4, 100, 8, 800, 1});
-    const auto deadline = RequestContext::Clock::now() + 10s;
-    auto first_high_context = std::make_shared<RequestContext>(
-        "owner-cost-high-first", RequestContext::Clock::now(), deadline);
-    auto first_high = cost_limited.tryAdmitImmediate(
-        {.cost = RequestCostClass::High,
-         .bytes = 10,
-         .request_context = first_high_context});
-    assert(first_high && first_high->lease);
-
-    auto second_high_context = std::make_shared<RequestContext>(
-        "owner-cost-high-second", RequestContext::Clock::now(), deadline);
-    std::promise<OwnerAdmissionResult> second_high_completion;
-    auto second_high_future = second_high_completion.get_future();
-    assert(cost_limited.admit(
-               {.cost = RequestCostClass::High,
-                .bytes = 10,
-                .request_context = second_high_context},
-               [&](OwnerAdmissionResult result) {
-                 second_high_completion.set_value(std::move(result));
-               }) == OwnerAdmissionStatus::Granted);
-    assert(second_high_future.wait_for(0ms) != std::future_status::ready);
-
-    auto low_context = std::make_shared<RequestContext>(
-        "owner-cost-low", RequestContext::Clock::now(), deadline);
-    std::promise<OwnerAdmissionResult> low_completion;
-    auto low_future = low_completion.get_future();
-    assert(cost_limited.admit(
-               {.cost = RequestCostClass::Low,
-                .bytes = 10,
-                .request_context = low_context},
-               [&](OwnerAdmissionResult result) {
-                 low_completion.set_value(std::move(result));
-               }) == OwnerAdmissionStatus::Granted);
-    OwnerAdmissionResult low = low_future.get();
-    assert(low.status == OwnerAdmissionStatus::Granted && low.lease);
-    OwnerAdmissionSnapshot snapshot = cost_limited.snapshot();
-    assert(snapshot.active_entries == 2 &&
-           snapshot.active_high_cost_entries == 1 &&
-           snapshot.max_active_high_cost_entries == 1 &&
-           snapshot.waiting_entries == 1);
-
-    first_high->lease.reset();
-    OwnerAdmissionResult second_high = second_high_future.get();
-    assert(second_high.status == OwnerAdmissionStatus::Granted &&
-           second_high.lease);
-    snapshot = cost_limited.snapshot();
-    assert(snapshot.active_entries == 2 &&
-           snapshot.active_high_cost_entries == 1 &&
-           snapshot.waiting_entries == 0);
-    low.lease.reset();
-    second_high.lease.reset();
-    cost_limited.requestShutdown();
-    assert(cost_limited.join());
-  }
-
   OwnerAdmission admission({1, 10, 3, 20});
   const auto settings_deadline =
       RequestContext::Clock::now() + 10s;

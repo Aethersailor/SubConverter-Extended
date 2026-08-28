@@ -84,8 +84,7 @@ struct OwnerAdmission::Core
   explicit Core(OwnerAdmissionBudget budget)
       : budget(std::move(budget)),
         active_entry_limit(this->budget.max_active_entries),
-        active_byte_limit(this->budget.max_active_bytes),
-        active_high_cost_entry_limit(configuredHighCostLimit()) {}
+        active_byte_limit(this->budget.max_active_bytes) {}
 
   ~Core() {
     requestShutdown();
@@ -100,28 +99,10 @@ struct OwnerAdmission::Core
       throw std::runtime_error("owner admission timer failed to become ready");
   }
 
-  uint64_t configuredHighCostLimit() const noexcept {
-    const uint64_t configured =
-        budget.max_active_high_cost_entries == 0
-            ? budget.max_active_entries
-            : budget.max_active_high_cost_entries;
-    return std::clamp<uint64_t>(configured, 1,
-                                budget.max_active_entries);
-  }
-
-  bool canGrant(uint64_t bytes, RequestCostClass cost) const noexcept {
+  bool canGrant(uint64_t bytes) const noexcept {
     return active_entries < active_entry_limit &&
            bytes <= active_byte_limit &&
-           active_bytes <= active_byte_limit - bytes &&
-           (normalizedCost(cost) != RequestCostClass::High ||
-            active_cost_entries[queueIndex(RequestCostClass::High)] <
-                active_high_cost_entry_limit);
-  }
-
-  void activateLocked(RequestCostClass cost, uint64_t bytes) noexcept {
-    ++active_entries;
-    active_bytes += bytes;
-    ++active_cost_entries[queueIndex(normalizedCost(cost))];
+           active_bytes <= active_byte_limit - bytes;
   }
 
   static uint64_t waitBytes(
@@ -135,9 +116,7 @@ struct OwnerAdmission::Core
 
   bool hasLegalWaiting() const noexcept {
     for (const auto &queue : queues)
-      if (!queue.empty() &&
-          canGrant(queue.front()->options.bytes,
-                   queue.front()->options.cost))
+      if (!queue.empty() && canGrant(queue.front()->options.bytes))
         return true;
     return false;
   }
@@ -148,8 +127,7 @@ struct OwnerAdmission::Core
     Clock::time_point oldest = Clock::time_point::max();
     for (std::size_t index = 0; index < queues.size(); ++index) {
       if (!queues[index].empty() &&
-          canGrant(queues[index].front()->options.bytes,
-                   queues[index].front()->options.cost) &&
+          canGrant(queues[index].front()->options.bytes) &&
           queues[index].front()->enqueued_at < oldest) {
         oldest = queues[index].front()->enqueued_at;
         oldest_index = index;
@@ -163,8 +141,7 @@ struct OwnerAdmission::Core
     auto has_credit = [this] {
       for (std::size_t index = 0; index < queues.size(); ++index)
         if (!queues[index].empty() && credits[index] != 0 &&
-            canGrant(queues[index].front()->options.bytes,
-                     queues[index].front()->options.cost))
+            canGrant(queues[index].front()->options.bytes))
           return true;
       return false;
     };
@@ -176,8 +153,7 @@ struct OwnerAdmission::Core
          ++attempts) {
       const std::size_t index = next_queue++ % queues.size();
       if (credits[index] == 0 || queues[index].empty() ||
-          !canGrant(queues[index].front()->options.bytes,
-                    queues[index].front()->options.cost))
+          !canGrant(queues[index].front()->options.bytes))
         continue;
       --credits[index];
       return index;
@@ -233,10 +209,11 @@ struct OwnerAdmission::Core
       if (index >= queues.size())
         break;
       const std::shared_ptr<Waiter> waiter = queues[index].front();
-      if (!canGrant(waiter->options.bytes, waiter->options.cost))
+      if (!canGrant(waiter->options.bytes))
         break;
       addActionLocked(actions, waiter, OwnerAdmissionStatus::Granted);
-      activateLocked(waiter->options.cost, waiter->options.bytes);
+      ++active_entries;
+      active_bytes += waiter->options.bytes;
       ++accepted_total;
     }
   }
@@ -263,10 +240,9 @@ struct OwnerAdmission::Core
       result.status = action.status;
       if (action.status == OwnerAdmissionStatus::Granted) {
         const uint64_t bytes = action.waiter->options.bytes;
-        const RequestCostClass cost = action.waiter->options.cost;
-        result.lease = OwnerAdmissionLease([weak, bytes, cost] {
+        result.lease = OwnerAdmissionLease([weak, bytes] {
           if (const std::shared_ptr<Core> core = weak.lock())
-            core->release(bytes, cost);
+            core->release(bytes);
         });
       }
       try {
@@ -283,11 +259,10 @@ struct OwnerAdmission::Core
     const Clock::time_point deadline =
         std::min(options.deadline, options.request_context->deadline());
     const uint64_t bytes = options.bytes;
-    const RequestCostClass cost = normalizedCost(options.cost);
     const std::weak_ptr<Core> weak = weak_from_this();
-    std::function<void()> release = [weak, bytes, cost] {
+    std::function<void()> release = [weak, bytes] {
       if (const std::shared_ptr<Core> core = weak.lock())
-        core->release(bytes, cost);
+        core->release(bytes);
     };
     {
       std::lock_guard<std::mutex> lock(mutex);
@@ -296,9 +271,10 @@ struct OwnerAdmission::Core
           options.request_context->cancellationToken()
               .isCancellationRequested() ||
           (deadline != Clock::time_point::max() && now >= deadline) ||
-          bytes > budget.max_active_bytes || !canGrant(bytes, cost))
+          bytes > budget.max_active_bytes || !canGrant(bytes))
         return std::nullopt;
-      activateLocked(cost, bytes);
+      ++active_entries;
+      active_bytes += bytes;
       ++accepted_total;
     }
 
@@ -363,12 +339,11 @@ struct OwnerAdmission::Core
         ++rejected_total;
         actions.push_back({waiter, OwnerAdmissionStatus::ByteLimit});
         result = OwnerAdmissionStatus::ByteLimit;
-      } else if (canGrant(waiter->options.bytes,
-                          waiter->options.cost) &&
+      } else if (canGrant(waiter->options.bytes) &&
                  !hasLegalWaiting()) {
         waiter->claimed = true;
-        activateLocked(waiter->options.cost,
-                       waiter->options.bytes);
+        ++active_entries;
+        active_bytes += waiter->options.bytes;
         ++accepted_total;
         actions.push_back({waiter, OwnerAdmissionStatus::Granted});
       } else if (!waiter->options.wait) {
@@ -423,17 +398,13 @@ struct OwnerAdmission::Core
     timer_condition.notify_all();
   }
 
-  void release(uint64_t bytes, RequestCostClass cost) noexcept {
+  void release(uint64_t bytes) noexcept {
     std::vector<Action> actions;
     {
       std::lock_guard<std::mutex> lock(mutex);
       if (active_entries != 0)
         --active_entries;
       active_bytes -= std::min(active_bytes, bytes);
-      uint64_t &cost_entries =
-          active_cost_entries[queueIndex(normalizedCost(cost))];
-      if (cost_entries != 0)
-        --cost_entries;
       if (!stopping)
         collectGrantsLocked(actions);
     }
@@ -550,9 +521,7 @@ struct OwnerAdmission::Core
             active_entry_limit,
             active_byte_limit,
             budget.max_wait_entries,
-            budget.max_wait_bytes,
-            active_cost_entries[queueIndex(RequestCostClass::High)],
-            active_high_cost_entry_limit};
+            budget.max_wait_bytes};
   }
 
   bool setActiveLimits(uint64_t max_active_entries,
@@ -566,8 +535,6 @@ struct OwnerAdmission::Core
           max_active_entries, 1, budget.max_active_entries);
       active_byte_limit = std::clamp<uint64_t>(
           max_active_bytes, 1, budget.max_active_bytes);
-      active_high_cost_entry_limit = std::min(
-          configuredHighCostLimit(), active_entry_limit);
       collectGrantsLocked(actions);
     }
     timer_condition.notify_all();
@@ -578,7 +545,6 @@ struct OwnerAdmission::Core
   const OwnerAdmissionBudget budget;
   uint64_t active_entry_limit;
   uint64_t active_byte_limit;
-  uint64_t active_high_cost_entry_limit;
   mutable std::mutex mutex;
   std::condition_variable timer_condition;
   std::condition_variable ready_condition;
@@ -589,7 +555,6 @@ struct OwnerAdmission::Core
   std::size_t next_queue = 0;
   uint64_t active_entries = 0;
   uint64_t active_bytes = 0;
-  std::array<uint64_t, 3> active_cost_entries{};
   uint64_t waiting_entries = 0;
   uint64_t waiting_bytes = 0;
   uint64_t accepted_total = 0;
@@ -606,8 +571,7 @@ struct OwnerAdmission::Core
 OwnerAdmissionBudget ownerAdmissionBudgetFromForceMax(
     const ForceMaxBudget &budget) noexcept {
   return {budget.active_owners, budget.owner_active_bytes,
-          budget.owner_queue_entries, budget.owner_queue_bytes,
-          budget.compute_workers};
+          budget.owner_queue_entries, budget.owner_queue_bytes};
 }
 
 void OwnerAdmissionLease::reset() noexcept {

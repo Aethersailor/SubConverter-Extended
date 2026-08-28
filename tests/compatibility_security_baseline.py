@@ -11934,9 +11934,6 @@ def force_max_controller_runtime_baseline(binary: Path) -> None:
             != int(budget["active_owners"])
             or int(owner_admission["max_active_bytes"])
             != int(budget["owner_active_bytes"])
-            or int(owner_admission["max_active_high_cost"])
-            != int(budget["compute_workers"])
-            or int(owner_admission["active_high_cost"]) != 0
             or int(outbound["active_connection_limit"])
             != int(budget["outbound_active"])
             or int(outbound["open_connection_limit"])
