@@ -6,6 +6,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <optional>
 
 #include "server/request_context.h"
 
@@ -113,6 +114,8 @@ public:
   OwnerAdmission(const OwnerAdmission &) = delete;
   OwnerAdmission &operator=(const OwnerAdmission &) = delete;
 
+  std::optional<OwnerAdmissionResult>
+  tryAdmitImmediate(const OwnerAdmissionOptions &options);
   OwnerAdmissionStatus admit(OwnerAdmissionOptions options,
                              OwnerAdmissionCompletion completion);
   bool setActiveLimits(uint64_t max_active_entries,

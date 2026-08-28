@@ -3310,22 +3310,28 @@ void ConversionService::convertSubscriptionAsync(Request request,
                 context->markWorkAdmitted();
             };
         if (OwnerAdmission *admission = globalOwnerAdmission()) {
-          (void)admission->admit(
-              {.cost = cost,
-               .bytes = owner_working_bytes,
-               .wait_bytes = owner_wait_bytes,
-               .request_context = call->work_context},
-              [call, start_owner = std::move(start_owner)](
-                  OwnerAdmissionResult result) mutable {
-                if (result.status != OwnerAdmissionStatus::Granted) {
-                  publishAsyncSubRequestFailure(
-                      call,
-                      ownerAdmissionSchedulerStatus(result.status),
-                      {});
-                  return;
-                }
-                start_owner(std::move(result.lease), true);
-              });
+          OwnerAdmissionOptions options{
+              .cost = cost,
+              .bytes = owner_working_bytes,
+              .wait_bytes = owner_wait_bytes,
+              .request_context = call->work_context};
+          if (auto immediate = admission->tryAdmitImmediate(options)) {
+            start_owner(std::move(immediate->lease), true);
+          } else {
+            (void)admission->admit(
+                std::move(options),
+                [call, start_owner = std::move(start_owner)](
+                    OwnerAdmissionResult result) mutable {
+                  if (result.status != OwnerAdmissionStatus::Granted) {
+                    publishAsyncSubRequestFailure(
+                        call,
+                        ownerAdmissionSchedulerStatus(result.status),
+                        {});
+                    return;
+                  }
+                  start_owner(std::move(result.lease), true);
+                });
+          }
         } else {
           start_owner({}, false);
         }
@@ -3468,16 +3474,21 @@ void ConversionService::convertSubscriptionAsync(Request request,
           context->markWorkAdmitted();
       };
   if (OwnerAdmission *admission = globalOwnerAdmission()) {
-    (void)admission->admit(
-        {.cost = cost,
-         .bytes = owner_working_bytes,
-         .wait_bytes = owner_wait_bytes,
-         .deadline = deadline,
-         .request_context = context},
-        [start_standalone = std::move(start_standalone)](
-            OwnerAdmissionResult result) mutable {
-          start_standalone(std::move(result), true);
-        });
+    OwnerAdmissionOptions options{.cost = cost,
+                                  .bytes = owner_working_bytes,
+                                  .wait_bytes = owner_wait_bytes,
+                                  .deadline = deadline,
+                                  .request_context = context};
+    if (auto immediate = admission->tryAdmitImmediate(options)) {
+      start_standalone(std::move(*immediate), true);
+    } else {
+      (void)admission->admit(
+          std::move(options),
+          [start_standalone = std::move(start_standalone)](
+              OwnerAdmissionResult result) mutable {
+            start_standalone(std::move(result), true);
+          });
+    }
   } else {
     OwnerAdmissionResult result;
     result.status = OwnerAdmissionStatus::Granted;

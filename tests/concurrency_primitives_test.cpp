@@ -1893,6 +1893,117 @@ static void testCancellationTokenCallbacks() {
 }
 
 static void testOwnerAdmission() {
+  {
+    OwnerAdmission fast({2, 10, 4, 20});
+    const auto deadline = RequestContext::Clock::now() + 10s;
+    auto active_context = std::make_shared<RequestContext>(
+        "owner-fast-active", RequestContext::Clock::now(), deadline);
+    auto active = fast.tryAdmitImmediate(
+        {.cost = RequestCostClass::Medium,
+         .bytes = 6,
+         .request_context = active_context});
+    assert(active && active->status == OwnerAdmissionStatus::Granted &&
+           active->lease);
+    OwnerAdmissionSnapshot snapshot = fast.snapshot();
+    assert(snapshot.active_entries == 1 && snapshot.active_bytes == 6 &&
+           snapshot.waiting_entries == 0 && snapshot.accepted_total == 1);
+
+    auto waiting_context = std::make_shared<RequestContext>(
+        "owner-fast-waiting", RequestContext::Clock::now(), deadline);
+    std::promise<OwnerAdmissionResult> waiting_completion;
+    auto waiting_future = waiting_completion.get_future();
+    assert(fast.admit({.cost = RequestCostClass::High,
+                       .bytes = 6,
+                       .request_context = waiting_context},
+                      [&](OwnerAdmissionResult result) {
+                        waiting_completion.set_value(std::move(result));
+                      }) == OwnerAdmissionStatus::Granted);
+    assert(waiting_future.wait_for(0ms) != std::future_status::ready);
+    snapshot = fast.snapshot();
+    assert(snapshot.active_entries == 1 && snapshot.waiting_entries == 1);
+
+    auto bypass_context = std::make_shared<RequestContext>(
+        "owner-fast-no-bypass", RequestContext::Clock::now(), deadline);
+    assert(!fast.tryAdmitImmediate(
+        {.cost = RequestCostClass::Low,
+         .bytes = 1,
+         .request_context = bypass_context}));
+
+    auto cancelled_context = std::make_shared<RequestContext>(
+        "owner-fast-cancelled", RequestContext::Clock::now(), deadline);
+    assert(cancelled_context->requestCancellation(
+        RequestCancellationReason::ClientDisconnected));
+    assert(!fast.tryAdmitImmediate(
+        {.cost = RequestCostClass::Low,
+         .bytes = 1,
+         .request_context = cancelled_context}));
+    std::promise<OwnerAdmissionResult> cancelled_completion;
+    auto cancelled_future = cancelled_completion.get_future();
+    (void)fast.admit(
+        {.cost = RequestCostClass::Low,
+         .bytes = 1,
+         .request_context = cancelled_context},
+        [&](OwnerAdmissionResult result) {
+          cancelled_completion.set_value(std::move(result));
+        });
+    assert(cancelled_future.get().status == OwnerAdmissionStatus::Cancelled);
+
+    auto expired_context = std::make_shared<RequestContext>(
+        "owner-fast-expired", RequestContext::Clock::now(),
+        RequestContext::Clock::now() - 1ms);
+    assert(!fast.tryAdmitImmediate(
+        {.cost = RequestCostClass::Low,
+         .bytes = 1,
+         .request_context = expired_context}));
+    std::promise<OwnerAdmissionResult> expired_completion;
+    auto expired_future = expired_completion.get_future();
+    (void)fast.admit(
+        {.cost = RequestCostClass::Low,
+         .bytes = 1,
+         .request_context = expired_context},
+        [&](OwnerAdmissionResult result) {
+          expired_completion.set_value(std::move(result));
+        });
+    assert(expired_future.get().status == OwnerAdmissionStatus::Deadline);
+
+    active->lease.reset();
+    OwnerAdmissionResult waiting = waiting_future.get();
+    assert(waiting.status == OwnerAdmissionStatus::Granted && waiting.lease);
+    snapshot = fast.snapshot();
+    assert(snapshot.active_entries == 1 && snapshot.active_bytes == 6 &&
+           snapshot.waiting_entries == 0 && snapshot.accepted_total == 2);
+
+    assert(fast.setActiveLimits(1, 5));
+    auto guarded_context = std::make_shared<RequestContext>(
+        "owner-fast-guarded", RequestContext::Clock::now(), deadline);
+    assert(!fast.tryAdmitImmediate(
+        {.cost = RequestCostClass::Low,
+         .bytes = 1,
+         .request_context = guarded_context}));
+    assert(fast.setActiveLimits(2, 10));
+    auto restored = fast.tryAdmitImmediate(
+        {.cost = RequestCostClass::Low,
+         .bytes = 1,
+         .request_context = guarded_context});
+    assert(restored && restored->lease);
+    restored->lease.reset();
+    waiting.lease.reset();
+    assert(fast.setActiveLimits(2, 5));
+    auto byte_limited_context = std::make_shared<RequestContext>(
+        "owner-fast-byte-limited", RequestContext::Clock::now(), deadline);
+    assert(!fast.tryAdmitImmediate(
+        {.cost = RequestCostClass::Low,
+         .bytes = 6,
+         .request_context = byte_limited_context}));
+    assert(fast.setActiveLimits(2, 10));
+    snapshot = fast.snapshot();
+    assert(snapshot.active_entries == 0 && snapshot.active_bytes == 0 &&
+           snapshot.accepted_total == 3 && snapshot.cancelled_total == 1 &&
+           snapshot.deadline_total == 1 && snapshot.rejected_total == 0);
+    fast.requestShutdown();
+    assert(fast.join());
+  }
+
   OwnerAdmission admission({1, 10, 3, 20});
   const auto settings_deadline =
       RequestContext::Clock::now() + 10s;

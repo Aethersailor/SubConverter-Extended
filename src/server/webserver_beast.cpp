@@ -535,13 +535,18 @@ void BeastSession::onHeader(beast::error_code error, std::size_t) {
     return;
   }
   processing_.store(true, std::memory_order_release);
-  if (expected_body == 0)
-    armAdmissionDisconnectObserver();
   if (OwnerAdmission *admission = globalTransportAdmission()) {
+    OwnerAdmissionOptions options{.cost = RequestCostClass::Medium,
+                                  .bytes = admission_bytes_,
+                                  .request_context = context_};
+    if (auto immediate = admission->tryAdmitImmediate(options)) {
+      onTransportAdmission(std::move(*immediate));
+      return;
+    }
+    if (expected_body == 0)
+      armAdmissionDisconnectObserver();
     (void)admission->admit(
-        {.cost = RequestCostClass::Medium,
-         .bytes = admission_bytes_,
-         .request_context = context_},
+        std::move(options),
         [self = shared_from_this()](OwnerAdmissionResult result) mutable {
           asio::post(self->stream_.get_executor(),
                      [self, result = std::move(result)]() mutable {

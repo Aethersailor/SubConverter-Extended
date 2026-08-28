@@ -1118,18 +1118,24 @@ int WebServer::start_web_server_multi(listener_args *args) {
     if (!fast_health && !reserved_control &&
         !telemetry.completion->admission_acquired) {
       if (OwnerAdmission *admission = globalTransportAdmission()) {
-        auto admitted =
-            std::make_shared<std::promise<OwnerAdmissionResult>>();
-        std::future<OwnerAdmissionResult> admitted_future =
-            admitted->get_future();
-        (void)admission->admit(
-            {.cost = RequestCostClass::Medium,
-             .bytes = admission_bytes,
-             .request_context = telemetry.context},
-            [admitted](OwnerAdmissionResult result) {
-              admitted->set_value(std::move(result));
-            });
-        OwnerAdmissionResult result = admitted_future.get();
+        OwnerAdmissionOptions options{.cost = RequestCostClass::Medium,
+                                      .bytes = admission_bytes,
+                                      .request_context = telemetry.context};
+        OwnerAdmissionResult result;
+        if (auto immediate = admission->tryAdmitImmediate(options)) {
+          result = std::move(*immediate);
+        } else {
+          auto admitted =
+              std::make_shared<std::promise<OwnerAdmissionResult>>();
+          std::future<OwnerAdmissionResult> admitted_future =
+              admitted->get_future();
+          (void)admission->admit(
+              std::move(options),
+              [admitted](OwnerAdmissionResult admitted_result) {
+                admitted->set_value(std::move(admitted_result));
+              });
+          result = admitted_future.get();
+        }
         if (result.status != OwnerAdmissionStatus::Granted) {
           if (result.status == OwnerAdmissionStatus::Deadline)
             telemetry.context->requestCancellation(

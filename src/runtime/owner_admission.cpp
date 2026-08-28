@@ -252,6 +252,38 @@ struct OwnerAdmission::Core
     }
   }
 
+  std::optional<OwnerAdmissionResult>
+  tryAdmitImmediate(const OwnerAdmissionOptions &options) {
+    if (!options.request_context)
+      return std::nullopt;
+    const Clock::time_point deadline =
+        std::min(options.deadline, options.request_context->deadline());
+    const uint64_t bytes = options.bytes;
+    const std::weak_ptr<Core> weak = weak_from_this();
+    std::function<void()> release = [weak, bytes] {
+      if (const std::shared_ptr<Core> core = weak.lock())
+        core->release(bytes);
+    };
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      const auto now = Clock::now();
+      if (stopping || waiting_entries != 0 ||
+          options.request_context->cancellationToken()
+              .isCancellationRequested() ||
+          (deadline != Clock::time_point::max() && now >= deadline) ||
+          bytes > budget.max_active_bytes || !canGrant(bytes))
+        return std::nullopt;
+      ++active_entries;
+      active_bytes += bytes;
+      ++accepted_total;
+    }
+
+    OwnerAdmissionResult result;
+    result.status = OwnerAdmissionStatus::Granted;
+    result.lease = OwnerAdmissionLease(std::move(release));
+    return result;
+  }
+
   OwnerAdmissionStatus admit(OwnerAdmissionOptions options,
                              OwnerAdmissionCompletion completion) {
     if (!completion || !options.request_context) {
@@ -566,6 +598,11 @@ OwnerAdmission::~OwnerAdmission() {
     return;
   core_->requestShutdown();
   (void)core_->join();
+}
+
+std::optional<OwnerAdmissionResult> OwnerAdmission::tryAdmitImmediate(
+    const OwnerAdmissionOptions &options) {
+  return core_->tryAdmitImmediate(options);
 }
 
 OwnerAdmissionStatus OwnerAdmission::admit(
