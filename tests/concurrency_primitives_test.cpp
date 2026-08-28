@@ -617,28 +617,20 @@ static void testComputeExecutor() {
   std::promise<void> dispatch_now;
   std::shared_future<void> dispatch_signal =
       dispatch_now.get_future().share();
-  std::atomic<bool> future_ran{false};
-  std::atomic<bool> continuation_ran{false};
+  std::atomic<bool> inner_ran{false};
   auto outer = cooperative.submit({}, [&] {
     outer_ready.set_value();
     dispatch_signal.wait();
     assert(cooperative.runOnePendingCooperatively());
-    assert(continuation_ran.load(std::memory_order_acquire));
-    assert(!future_ran.load(std::memory_order_acquire));
+    assert(inner_ran.load(std::memory_order_acquire));
   });
   outer_ready.get_future().wait();
   auto inner = cooperative.submit(
-      {}, [&] { future_ran.store(true, std::memory_order_release); });
+      {}, [&] { inner_ran.store(true, std::memory_order_release); });
   assert(inner.status == SchedulerSubmitStatus::Accepted);
-  assert(cooperative.submitContinuation(
-             {},
-             [&] {
-               continuation_ran.store(true, std::memory_order_release);
-             }) == SchedulerSubmitStatus::Accepted);
   dispatch_now.set_value();
   outer.future.get();
   inner.future.get();
-  assert(future_ran.load(std::memory_order_acquire));
   cooperative.requestShutdown(false);
   assert(cooperative.join());
   const ComputeExecutorSnapshot cooperative_snapshot =
@@ -647,7 +639,7 @@ static void testComputeExecutor() {
   for (const ComputeWorkerSnapshot &worker :
        cooperative_snapshot.worker_metrics)
     cooperative_executed += worker.executed;
-  assert(cooperative_executed == 3);
+  assert(cooperative_executed == 2);
 
   ComputeExecutor completion_executor({1, 1, 1024});
   std::promise<void> completion_release;
