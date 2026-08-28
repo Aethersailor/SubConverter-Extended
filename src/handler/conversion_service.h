@@ -94,6 +94,8 @@ struct SubscriptionOwnerAdmissionSnapshot {
   uint64_t max_wait_entries = 0;
   uint64_t max_wait_bytes = 0;
   uint64_t oldest_wait_ms = 0;
+  uint64_t active_high_cost = 0;
+  uint64_t max_active_high_cost = 0;
 };
 
 const ConversionService &defaultConversionService();
