@@ -164,8 +164,15 @@ ComputeExecutor::enqueue(const std::shared_ptr<TaskBase> &task) {
       ++queued_entries_;
       ++accepted_total_;
     }
-    if (status != SchedulerSubmitStatus::Accepted)
+    if (status == SchedulerSubmitStatus::EntryLimit ||
+        status == SchedulerSubmitStatus::ByteLimit)
       ++rejected_total_;
+    else if (status == SchedulerSubmitStatus::Cancelled)
+      ++cancelled_total_;
+    else if (status == SchedulerSubmitStatus::Deadline)
+      ++deadline_total_;
+    else if (status == SchedulerSubmitStatus::Stopping)
+      ++shutdown_total_;
   }
   if (status == SchedulerSubmitStatus::Accepted)
     condition_.notify_one();
@@ -204,7 +211,7 @@ void ComputeExecutor::requestShutdown(bool cancel_pending) noexcept {
         cancelled.emplace_back(std::move(control_queue_.front()));
         control_queue_.pop_front();
       }
-      cancelled_total_ += queued_entries_;
+      shutdown_total_ += queued_entries_;
       queued_entries_ = 0;
       queued_bytes_ = 0;
       control_queued_entries_ = 0;
@@ -269,6 +276,8 @@ ComputeExecutorSnapshot ComputeExecutor::snapshot() const {
   result.accepted_total = accepted_total_;
   result.rejected_total = rejected_total_;
   result.cancelled_total = cancelled_total_;
+  result.deadline_total = deadline_total_;
+  result.shutdown_total = shutdown_total_;
   Clock::time_point oldest = Clock::time_point::max();
   for (const auto &queue : queues_) {
     if (!queue.empty())
@@ -486,11 +495,18 @@ void ComputeExecutor::executeTask(const std::shared_ptr<TaskBase> &task,
     worker_metrics_[worker_index]->executed.fetch_add(
         1, std::memory_order_relaxed);
   } else {
-    task->cancel(status);
     worker_metrics_[worker_index]->cancelled.fetch_add(
         1, std::memory_order_relaxed);
-    std::lock_guard<std::mutex> lock(mutex_);
-    ++cancelled_total_;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (status == SchedulerSubmitStatus::Deadline)
+        ++deadline_total_;
+      else
+        ++cancelled_total_;
+    }
+    // Publish the cancelled future/completion only after its terminal
+    // telemetry is visible to an immediate snapshot by the observer.
+    task->cancel(status);
   }
   if (affinity_hit)
     worker_metrics_[worker_index]->affinity_hits.fetch_add(

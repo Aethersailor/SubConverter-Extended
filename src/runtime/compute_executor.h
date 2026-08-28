@@ -66,6 +66,8 @@ struct ComputeExecutorSnapshot {
   uint64_t accepted_total = 0;
   uint64_t rejected_total = 0;
   uint64_t cancelled_total = 0;
+  uint64_t deadline_total = 0;
+  uint64_t shutdown_total = 0;
   uint64_t oldest_queue_age_ms = 0;
   std::vector<ComputeWorkerSnapshot> worker_metrics;
 };
@@ -229,6 +231,8 @@ private:
   uint64_t accepted_total_ = 0;
   uint64_t rejected_total_ = 0;
   uint64_t cancelled_total_ = 0;
+  uint64_t deadline_total_ = 0;
+  uint64_t shutdown_total_ = 0;
   bool stopping_ = false;
 };
 

@@ -11921,6 +11921,8 @@ def force_max_controller_runtime_baseline(binary: Path) -> None:
             != int(budget["flow_queue_entries"])
             or int(compute["max_queue_bytes"])
             != int(budget["flow_queue_bytes"])
+            or int(compute["deadline_total"]) != 0
+            or int(compute["shutdown_total"]) != 0
             or int(blocking_io["workers"]) != int(budget["io_runners"])
             or int(blocking_io["max_queue_entries"])
             != int(budget["blocking_io_queue_entries"])

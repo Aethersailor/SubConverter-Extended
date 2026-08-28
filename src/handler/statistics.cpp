@@ -769,6 +769,10 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(compute.rejected_total);
   writer.Key("cancelled_total");
   writer.Uint64(compute.cancelled_total);
+  writer.Key("deadline_total");
+  writer.Uint64(compute.deadline_total);
+  writer.Key("shutdown_total");
+  writer.Uint64(compute.shutdown_total);
   writer.Key("oldest_queue_age_ms");
   writer.Uint64(compute.oldest_queue_age_ms);
   writer.Key("worker_metrics");

@@ -443,12 +443,128 @@ static void testComputeExecutor() {
   assert(snapshot.queued_entries == 0);
   assert(snapshot.queued_bytes == 0);
   assert(snapshot.accepted_total == 3);
-  assert(snapshot.rejected_total == 4);
+  assert(snapshot.rejected_total == 2);
+  assert(snapshot.cancelled_total == 1);
+  assert(snapshot.deadline_total == 1);
+  assert(snapshot.shutdown_total == 0);
   assert(snapshot.worker_metrics.size() == 1);
   assert(snapshot.worker_metrics[0].executed == 3);
   assert(snapshot.worker_metrics[0].affinity_hits >= 1);
   executor.shutdown(true);
   assert(!executor.ready());
+
+  ComputeExecutor terminal_counters({1, 2, 10});
+  std::promise<void> terminal_release;
+  std::shared_future<void> terminal_released =
+      terminal_release.get_future().share();
+  std::promise<void> terminal_started;
+  auto terminal_blocker = terminal_counters.submit({}, [&] {
+    terminal_started.set_value();
+    terminal_released.wait();
+    return 1;
+  });
+  terminal_started.get_future().wait();
+  RequestCancellationSource worker_cancelled_source;
+  auto worker_cancelled = terminal_counters.submit(
+      {.cancellation = worker_cancelled_source.token()}, [] { return 2; });
+  auto worker_deadline = terminal_counters.submit(
+      {.deadline = std::chrono::steady_clock::now() + 50ms},
+      [] { return 3; });
+  assert(worker_cancelled.status == SchedulerSubmitStatus::Accepted);
+  assert(worker_deadline.status == SchedulerSubmitStatus::Accepted);
+  worker_cancelled_source.cancel(RequestCancellationReason::NoConsumers);
+  std::this_thread::sleep_for(75ms);
+  terminal_release.set_value();
+  assert(terminal_blocker.future.get() == 1);
+  auto terminal_status = [](std::future<int> &future) {
+    try {
+      (void)future.get();
+    } catch (const SchedulerSubmitError &error) {
+      return error.status();
+    }
+    return SchedulerSubmitStatus::Accepted;
+  };
+  assert(terminal_status(worker_cancelled.future) ==
+         SchedulerSubmitStatus::Cancelled);
+  assert(terminal_status(worker_deadline.future) ==
+         SchedulerSubmitStatus::Deadline);
+  const ComputeExecutorSnapshot terminal_snapshot =
+      terminal_counters.snapshot();
+  assert(terminal_snapshot.rejected_total == 0);
+  assert(terminal_snapshot.cancelled_total == 1);
+  assert(terminal_snapshot.deadline_total == 1);
+  assert(terminal_snapshot.shutdown_total == 0);
+  terminal_counters.shutdown(true);
+
+  ComputeExecutor shutdown_counters({1, 2, 10, 1});
+  std::promise<void> shutdown_release;
+  std::shared_future<void> shutdown_released =
+      shutdown_release.get_future().share();
+  std::promise<void> shutdown_started;
+  auto shutdown_blocker = shutdown_counters.submit({}, [&] {
+    shutdown_started.set_value();
+    shutdown_released.wait();
+    return 1;
+  });
+  shutdown_started.get_future().wait();
+  auto shutdown_queued = shutdown_counters.submit({}, [] { return 2; });
+  std::promise<SchedulerSubmitStatus> shutdown_control_completion;
+  ComputeTaskOptions shutdown_control_options;
+  shutdown_control_options.control = true;
+  const SchedulerSubmitStatus shutdown_control_submit =
+      shutdown_counters.submitContinuation(
+          std::move(shutdown_control_options), [] {},
+          [&](SchedulerSubmitStatus status, std::exception_ptr) {
+            shutdown_control_completion.set_value(status);
+          });
+  assert(shutdown_blocker.status == SchedulerSubmitStatus::Accepted);
+  assert(shutdown_queued.status == SchedulerSubmitStatus::Accepted);
+  assert(shutdown_control_submit == SchedulerSubmitStatus::Accepted);
+  shutdown_counters.requestShutdown(true);
+  bool shutdown_error = false;
+  try {
+    (void)shutdown_queued.future.get();
+  } catch (const SchedulerSubmitError &error) {
+    shutdown_error = error.status() == SchedulerSubmitStatus::Stopping;
+  }
+  assert(shutdown_error);
+  assert(shutdown_control_completion.get_future().get() ==
+         SchedulerSubmitStatus::Stopping);
+  auto stopped_submit = shutdown_counters.submit({}, [] { return 3; });
+  assert(stopped_submit.status == SchedulerSubmitStatus::Stopping);
+  assert(terminal_status(stopped_submit.future) ==
+         SchedulerSubmitStatus::Stopping);
+  const ComputeExecutorSnapshot shutdown_snapshot =
+      shutdown_counters.snapshot();
+  assert(shutdown_snapshot.rejected_total == 0);
+  assert(shutdown_snapshot.cancelled_total == 0);
+  assert(shutdown_snapshot.deadline_total == 0);
+  assert(shutdown_snapshot.shutdown_total == 3);
+  shutdown_release.set_value();
+  assert(shutdown_blocker.future.get() == 1);
+  assert(shutdown_counters.join());
+
+  ComputeExecutor drain_counters({1, 1, 10});
+  std::promise<void> drain_release;
+  std::shared_future<void> drain_released =
+      drain_release.get_future().share();
+  std::promise<void> drain_started;
+  auto drain_blocker = drain_counters.submit({}, [&] {
+    drain_started.set_value();
+    drain_released.wait();
+    return 1;
+  });
+  drain_started.get_future().wait();
+  auto drain_queued = drain_counters.submit({}, [] { return 2; });
+  drain_counters.requestShutdown(false);
+  drain_release.set_value();
+  assert(drain_blocker.future.get() == 1);
+  assert(drain_queued.future.get() == 2);
+  assert(drain_counters.join());
+  const ComputeExecutorSnapshot drain_snapshot = drain_counters.snapshot();
+  assert(drain_snapshot.shutdown_total == 0);
+  assert(drain_snapshot.cancelled_total == 0);
+  assert(drain_snapshot.deadline_total == 0);
 
   ComputeExecutor control_affinity({2, 2, 1024, 64});
   std::promise<void> affinity_release;

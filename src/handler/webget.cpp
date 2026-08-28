@@ -5581,6 +5581,8 @@ ownedWebGetContinuationRuntimeSnapshot()
                 0,
                 0,
                 completion_exception_total,
+                0,
+                0,
                 {}};
     const ComputeExecutorSnapshot compute =
         globalComputeExecutorSnapshot();
@@ -5601,6 +5603,8 @@ ownedWebGetContinuationRuntimeSnapshot()
         budget.max_entries,
         budget.max_bytes,
         completion_exception_total,
+        compute.deadline_total,
+        compute.shutdown_total,
         scheduler};
 }
 

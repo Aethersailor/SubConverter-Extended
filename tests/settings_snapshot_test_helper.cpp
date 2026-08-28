@@ -876,6 +876,7 @@ int main(int argc, char *argv[]) {
         cancelled_upload_result.remote_status == 0;
     bool quickjs_lane_ok = true;
     bool quickjs_global_ok = true;
+    std::string quickjs_lane_diagnostic;
 #ifndef NO_JS_RUNTIME
     {
       QuickJsLane lane({1, 1, 1024 * 1024,
@@ -1057,6 +1058,56 @@ int main(int argc, char *argv[]) {
           lane_snapshot.cancelled_total == 1 &&
           lane_snapshot.deadline_total == 1 &&
           lane_snapshot.script_error_total == 0;
+      if (!quickjs_lane_ok) {
+        quickjs_lane_diagnostic =
+            "first_submit=" +
+            std::to_string(static_cast<int>(first_submit)) +
+            " ordinary_submit=" +
+            std::to_string(static_cast<int>(ordinary_submit)) +
+            " ordinary_while_busy=" +
+            std::to_string(ordinary_completed_while_quickjs_busy) +
+            " queued_submit=" +
+            std::to_string(static_cast<int>(queued_submit)) +
+            " capacity_submit=" +
+            std::to_string(static_cast<int>(capacity_submit)) +
+            " capacity_status=" +
+            std::to_string(static_cast<int>(capacity_result.status)) +
+            " first_status=" +
+            std::to_string(static_cast<int>(first_result.status)) +
+            " queued_status=" +
+            std::to_string(static_cast<int>(queued_result.status)) +
+            " cancelled_submit=" +
+            std::to_string(static_cast<int>(cancelled_submit)) +
+            " cancelled_status=" +
+            std::to_string(static_cast<int>(cancelled_result.status)) +
+            " cancellation_ms=" +
+            std::to_string(std::chrono::duration_cast<
+                           std::chrono::milliseconds>(cancellation_elapsed)
+                               .count()) +
+            " deadline_submit=" +
+            std::to_string(static_cast<int>(deadline_submit)) +
+            " deadline_status=" +
+            std::to_string(static_cast<int>(deadline_result.status)) +
+            " lane_joined=" + std::to_string(lane_joined) +
+            " scope_ok=" +
+            std::to_string(scope_ok.load(std::memory_order_acquire)) +
+            " side_effects=" +
+            std::to_string(side_effects.load(std::memory_order_relaxed)) +
+            " completion_count=" +
+            std::to_string(completion_count.load(std::memory_order_relaxed)) +
+            " accepted=" +
+            std::to_string(lane_snapshot.accepted_total) +
+            " rejected=" +
+            std::to_string(lane_snapshot.rejected_total) +
+            " completed=" +
+            std::to_string(lane_snapshot.completed_total) +
+            " cancelled=" +
+            std::to_string(lane_snapshot.cancelled_total) +
+            " deadline=" +
+            std::to_string(lane_snapshot.deadline_total) +
+            " script_error=" +
+            std::to_string(lane_snapshot.script_error_total);
+      }
     }
     {
       constexpr uint64_t clean_heap = 64 * 1024 * 1024 + 1;
@@ -2085,6 +2136,8 @@ int main(int argc, char *argv[]) {
     writer.Int(static_cast<int>(cancelled_upload_result.status));
     writer.Key("quickjs_lane_ok");
     writer.Bool(quickjs_lane_ok);
+    writer.Key("quickjs_lane_diagnostic");
+    writer.String(quickjs_lane_diagnostic.c_str());
     writer.Key("quickjs_global_ok");
     writer.Bool(quickjs_global_ok);
     writer.Key("continuation_runtime_ok");
@@ -2118,9 +2171,13 @@ int main(int argc, char *argv[]) {
                 continuation_snapshot.max_bytes ==
                     continuation_budget.max_bytes &&
                 continuation_snapshot.completion_exception_total >= 1 &&
-                // The pre-cancelled upload is deliberately rejected before
-                // any network work can start.
-                continuation_snapshot.scheduler.rejected == 1 &&
+                // The pre-cancelled upload is classified as cancellation;
+                // the queued continuation drained by runtime shutdown is
+                // classified independently from true capacity rejection.
+                continuation_snapshot.scheduler.rejected == 0 &&
+                continuation_snapshot.scheduler.cancelled == 1 &&
+                continuation_snapshot.deadline_total == 0 &&
+                continuation_snapshot.shutdown_total == 1 &&
                 continuation_snapshot.scheduler.queued_entries == 0 &&
                 continuation_snapshot.scheduler.queued_bytes == 0 &&
                 continuation_snapshot.scheduler.active == 0);

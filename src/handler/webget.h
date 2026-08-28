@@ -262,6 +262,8 @@ struct OwnedWebGetContinuationRuntimeSnapshot
     size_t max_entries = 0;
     uint64_t max_bytes = 0;
     uint64_t completion_exception_total = 0;
+    uint64_t deadline_total = 0;
+    uint64_t shutdown_total = 0;
     WorkloadSchedulerSnapshot scheduler;
 };
 struct OwnedWebGetContinuationBudget
