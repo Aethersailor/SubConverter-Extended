@@ -1497,7 +1497,7 @@ static void testResourceControlPrimitives() {
   assert(deterministic_first.outbound_active <=
          deterministic_first.outbound_open);
   assert(deterministic_first.quickjs_workers == 3);
-  assert(deterministic_first.formula_revision == "force-max-v7");
+  assert(deterministic_first.formula_revision == "force-max-v5");
   assert(deterministic_first.startup_memory_bytes ==
          bounded_envelope.memory_current_bytes);
   assert(deterministic_first.memory_headroom_bytes ==
