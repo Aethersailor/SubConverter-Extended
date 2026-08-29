@@ -44,6 +44,9 @@ $IdentityArgs = @(
   "--revision", $Revision,
   "--build-date", $BuildDate
 )
+if ($Version -eq "dev") {
+  $IdentityArgs += "--allow-dev"
+}
 & python @IdentityArgs
 if ($LASTEXITCODE -ne 0 -and (Get-Command py -ErrorAction SilentlyContinue)) {
   & py -3 @IdentityArgs

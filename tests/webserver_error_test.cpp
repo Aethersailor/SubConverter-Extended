@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <cctype>
+#include <cstdlib>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
@@ -10,10 +11,12 @@
 #include <thread>
 
 #include "handler/settings.h"
+#include "handler/dashboard_auth.h"
 #include "handler/settings_view.h"
 #include "httplib.h"
 #include "server/socket.h"
 #include "server/webserver.h"
+#include "server/webserver_beast.h"
 
 Settings global;
 
@@ -166,18 +169,96 @@ void waitReady(int port) {
   throw std::runtime_error("test server did not become ready");
 }
 
-void testIndependentHealthChannel() {
+void testBeastWaitsAtAcceptedConnectionLimit() {
+  const char *backend = std::getenv("SUBCONVERTER_HTTP_BACKEND");
+  if (backend && std::string(backend) == "httplib")
+    return;
+  const std::string previous_resource_mode = global.resourceControlEffective;
+  global.resourceControlEffective = "force_max";
+  WebServer server;
+  server.append_response("GET", "/healthz", "text/plain", healthHandler);
+  server.append_response("GET", "/ok", "text/plain", okHandler);
+  listener_args args;
+  args.listen_address = "127.0.0.1";
+  args.port = unusedPort();
+  args.max_conn = 1;
+  args.max_workers = 1;
+  args.looper_interval = 5;
+  args.request_deadline_ms = 2000;
+  args.accepted_conn = 1;
+  args.wait_on_connection_capacity = true;
+  std::thread server_thread([&] { server.start_web_server_multi(&args); });
+  waitReady(args.port);
+
+  SOCKET held = socket(AF_INET, SOCK_STREAM, 0);
+  require(held != INVALID_SOCKET, "accepted-wait hold socket failed");
+  sockaddr_in address {};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = htons(static_cast<unsigned short>(args.port));
+  require(connect(held, reinterpret_cast<sockaddr *>(&address),
+                  sizeof(address)) == 0,
+          "accepted-wait hold connect failed");
+  const auto held_deadline = std::chrono::steady_clock::now() +
+                             std::chrono::seconds(1);
+  while (beastConnectionSnapshot().business_sessions != 1 &&
+         std::chrono::steady_clock::now() < held_deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  require(beastConnectionSnapshot().business_sessions == 1,
+          "accepted-wait hold socket was not accepted");
+
+  auto waiting = std::async(std::launch::async, [&] {
+    httplib::Client client("127.0.0.1", args.port);
+    client.set_read_timeout(3, 0);
+    return client.Get("/ok");
+  });
+  const auto pause_deadline = std::chrono::steady_clock::now() +
+                              std::chrono::seconds(1);
+  while (!beastConnectionSnapshot().accept_paused &&
+         std::chrono::steady_clock::now() < pause_deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  require(beastConnectionSnapshot().accept_paused,
+          "force_max did not pause accept at the accepted socket envelope");
+  require(waiting.wait_for(std::chrono::milliseconds(100)) ==
+              std::future_status::timeout,
+          "force_max rejected instead of waiting for accepted capacity");
+  closesocket(held);
+  httplib::Result response = waiting.get();
+  const BeastConnectionSnapshot snapshot = beastConnectionSnapshot();
+  server.stop_web_server();
+  server_thread.join();
+  global.resourceControlEffective = previous_resource_mode;
+
+  require(response && response->status == 200 && response->body == "ok",
+          "force_max waiting request did not resume successfully");
+  require(snapshot.wait_on_connection_capacity &&
+              snapshot.accepted_limit == 1 &&
+              snapshot.capacity_503_total == 0 &&
+              snapshot.accept_pauses_total >= 1 &&
+              snapshot.accept_resumes_total >= 1,
+          "force_max accepted connection wait diagnostics changed");
+}
+
+void testIndependentHealthChannel(bool force_max = false) {
+  if (force_max) {
+    const char *backend = std::getenv("SUBCONVERTER_HTTP_BACKEND");
+    if (!backend || std::string(backend) != "httplib")
+      return;
+  }
   blocking_started.store(false);
   blocking_release.store(false);
-  global.maxServerThreads = 1;
+  const int previous_max_threads = global.maxServerThreads;
+  const std::string previous_resource_mode = global.resourceControlEffective;
+  global.resourceControlEffective = force_max ? "force_max" : "compat";
+  global.maxServerThreads = force_max ? 3 : 1;
   WebServer server;
   server.append_response("GET", "/healthz", "text/plain", healthHandler);
   server.append_response("GET", "/block", "text/plain", blockingHandler);
   listener_args args;
   args.listen_address = "127.0.0.1";
   args.port = unusedPort();
-  args.max_conn = 8;
-  args.max_workers = 1;
+  args.max_conn = force_max ? 1 : 8;
+  args.max_workers = force_max ? 2 : 1;
   args.looper_interval = 5;
   args.request_deadline_ms = 2000;
   std::thread server_thread([&] { server.start_web_server_multi(&args); });
@@ -190,6 +271,12 @@ void testIndependentHealthChannel() {
   });
   require(waitFlag(blocking_started, std::chrono::seconds(1)),
           "blocking route did not occupy the sole normal handler");
+  httplib::Result saturated;
+  if (force_max) {
+    httplib::Client saturated_client("127.0.0.1", args.port);
+    saturated_client.set_read_timeout(0, 500000);
+    saturated = saturated_client.Get("/block");
+  }
   httplib::Client health_client("127.0.0.1", args.port);
   health_client.set_read_timeout(0, 500000);
   const auto started = std::chrono::steady_clock::now();
@@ -199,12 +286,17 @@ void testIndependentHealthChannel() {
   httplib::Result blocked_response = blocked.get();
   server.stop_web_server();
   server_thread.join();
+  global.maxServerThreads = previous_max_threads;
+  global.resourceControlEffective = previous_resource_mode;
   require(health && health->status == 200 && health->body == "ok",
           "health channel was blocked by the normal handler pool");
   require(elapsed < std::chrono::milliseconds(500),
           "health channel exceeded its strict response deadline");
   require(blocked_response && blocked_response->status == 200,
           "blocking route did not finish after release");
+  if (force_max)
+    require(saturated && saturated->status == 503,
+            "force_max reserved health worker waited behind normal work");
 }
 
 void testAbsoluteDeadline() {
@@ -333,6 +425,55 @@ void testClientHalfCloseStillReceivesResponse() {
 } // namespace
 
 int main() {
+  const HttplibExecutionBudget tight_httplib =
+      forceMaxHttplibExecutionBudget(2, 10, 8);
+  require(tight_httplib.base_threads == 10 &&
+              tight_httplib.max_threads == 10 &&
+              tight_httplib.max_queued_requests == 1,
+          "force_max httplib control worker was not prepaid");
+  const HttplibExecutionBudget scaled_httplib =
+      forceMaxHttplibExecutionBudget(6, 386, 384);
+  require(scaled_httplib.base_threads == 386 &&
+              scaled_httplib.max_threads == 386 &&
+              scaled_httplib.max_queued_requests == 1,
+          "force_max httplib socket budget did not consume full capacity");
+  const std::string original_dashboard_username =
+      global.dashboardAuthUsername;
+  const std::string original_dashboard_password =
+      global.dashboardAuthPassword;
+  global.dashboardAuthUsername = "dashboard-old";
+  global.dashboardAuthPassword = "secret-old";
+  publishSettingsSnapshot(global);
+  const std::string old_dashboard_auth =
+      "Basic " + base64Encode("dashboard-old:secret-old");
+  require(dashboard_auth::validAuthorizationHeader(old_dashboard_auth),
+          "current dashboard credentials were rejected");
+  global.dashboardAuthUsername = "dashboard-new";
+  global.dashboardAuthPassword = "secret-new";
+  publishSettingsSnapshot(global);
+  const std::string new_dashboard_auth =
+      "Basic " + base64Encode("dashboard-new:secret-new");
+  require(!dashboard_auth::validAuthorizationHeader(old_dashboard_auth) &&
+              dashboard_auth::validAuthorizationHeader(new_dashboard_auth),
+          "dashboard credential rotation retained a stale token");
+  global.dashboardAuthUsername.clear();
+  global.dashboardAuthPassword.clear();
+  publishSettingsSnapshot(global);
+  require(!dashboard_auth::validAuthorizationHeader("Basic Og==") &&
+              !dashboard_auth::validAuthorizationHeader(
+                  std::string(1025, 'A')),
+          "invalid dashboard credentials entered the control lane");
+  global.dashboardAuthUsername = original_dashboard_username;
+  global.dashboardAuthPassword = original_dashboard_password;
+  publishSettingsSnapshot(global);
+  require(forceMaxRequestBodyLimit(8 * 1024 * 1024, 8,
+                                   100 * 1024 * 1024) ==
+              1,
+          "force_max request body cap did not partition transport bytes");
+  require(forceMaxRequestBodyLimit(8 * 1024 * 1024, 1,
+                                   100 * 1024 * 1024) ==
+              8 * 1024 * 1024 - (2 * 819200 + 1024),
+          "force_max body cap did not reserve request metadata bytes");
   resetRequestLifecycleMetricsForTests();
   global.logLevel = LOG_LEVEL_VERBOSE;
   publishSettingsSnapshot(global);
@@ -579,13 +720,18 @@ int main() {
     terminal_total += count;
   require(terminal_total == 10,
           "HTTP requests did not each reach exactly one terminal state");
-  require(lifecycle.terminal[static_cast<std::size_t>(
-              RequestTerminalState::Completed)] == 8 &&
-              lifecycle.terminal[static_cast<std::size_t>(
-                  RequestTerminalState::Failed)] == 2 &&
-              lifecycle.terminal[static_cast<std::size_t>(
-                  RequestTerminalState::Cancelled)] == 0,
-          "HTTP terminal attribution changed across normal and error paths");
+  const uint64_t completed = lifecycle.terminal[static_cast<std::size_t>(
+      RequestTerminalState::Completed)];
+  const uint64_t failed = lifecycle.terminal[static_cast<std::size_t>(
+      RequestTerminalState::Failed)];
+  const uint64_t cancelled = lifecycle.terminal[static_cast<std::size_t>(
+      RequestTerminalState::Cancelled)];
+  if (completed != 8 || failed != 2 || cancelled != 0)
+    throw std::runtime_error(
+        "HTTP terminal attribution changed across normal and error paths: "
+        "completed=" +
+        std::to_string(completed) + " failed=" + std::to_string(failed) +
+        " cancelled=" + std::to_string(cancelled));
   require(lifecycle.stage_samples[static_cast<std::size_t>(
               RequestStage::Admission)] == 10,
           "HTTP admission timing did not cover every response path");
@@ -604,6 +750,10 @@ int main() {
           "shared response byte lease leaked after server shutdown");
   resetRequestLifecycleMetricsForTests();
   testIndependentHealthChannel();
+  resetRequestLifecycleMetricsForTests();
+  testIndependentHealthChannel(true);
+  resetRequestLifecycleMetricsForTests();
+  testBeastWaitsAtAcceptedConnectionLimit();
   resetRequestLifecycleMetricsForTests();
   testAbsoluteDeadline();
   resetRequestLifecycleMetricsForTests();

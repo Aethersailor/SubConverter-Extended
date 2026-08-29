@@ -23,8 +23,17 @@
 #include "handler/settings_view.h"
 #include "handler/statistics_v2.h"
 #include "handler/conversion_service.h"
+#include "handler/multithread.h"
 #include "handler/webget.h"
+#include "generator/config/ruleconvert.h"
+#include "runtime/compute_executor.h"
+#include "runtime/conversion_flow.h"
+#include "runtime/blocking_io_executor.h"
+#include "runtime/quickjs_lane.h"
+#include "runtime/memory_budget.h"
+#include "runtime/runtime_coordinator.h"
 #include "server/request_context.h"
+#include "server/webserver_beast.h"
 #include "utils/logger.h"
 #include "utils/redact.h"
 #include "utils/resource_control.h"
@@ -585,11 +594,40 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(fetch.open_connection_limit);
   writer.Key("connection_cache_limit");
   writer.Uint64(fetch.connection_cache_limit);
+  if (global.resourceControlEffective == "force_max") {
+    writer.Key("per_host_connection_limit");
+    writer.Uint64(fetch.per_host_connection_limit);
+    writer.Key("runtime_limit_generation");
+    writer.Uint64(fetch.runtime_limit_generation);
+    writer.Key("runtime_limit_updates");
+    writer.Uint64(fetch.runtime_limit_updates);
+  }
   writer.Key("recoverable_retry_limit");
   writer.Uint64(fetch.recoverable_retry_limit);
   writer.Key("buffered_bytes");
   writer.Uint64(fetch.buffered_bytes);
   writer.EndObject();
+  const FetchMemoryBudgetSnapshot fetch_memory =
+      globalFetchMemoryBudgetSnapshot();
+  if (fetch_memory.enabled) {
+    writer.Key("fetch_memory_budget");
+    writer.StartObject();
+    writer.Key("limit");
+    writer.Uint64(fetch_memory.limit);
+    writer.Key("used");
+    writer.Uint64(fetch_memory.used);
+    writer.Key("peak");
+    writer.Uint64(fetch_memory.peak);
+    writer.Key("waiters");
+    writer.Uint64(fetch_memory.waiters);
+    writer.Key("wait_total");
+    writer.Uint64(fetch_memory.wait_total);
+    writer.Key("resumed_total");
+    writer.Uint64(fetch_memory.resumed_total);
+    writer.Key("capacity_generation");
+    writer.Uint64(fetch_memory.capacity_generation);
+    writer.EndObject();
+  }
   const RetainedResponseByteSnapshot retained =
       retainedResponseByteSnapshot();
   writer.Key("retained_response_bytes");
@@ -607,6 +645,8 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.StartObject();
   writer.Key("enabled");
   writer.Bool(cache_admission.enabled);
+  writer.Key("capacity");
+  writer.Uint64(cache_admission.capacity);
   writer.Key("entries");
   writer.Uint64(cache_admission.entries);
   writer.Key("first_seen_bypassed_total");
@@ -656,12 +696,22 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(owner_admission.waiting_bytes);
   writer.Key("active");
   writer.Uint64(owner_admission.active);
+  writer.Key("active_bytes");
+  writer.Uint64(owner_admission.active_bytes);
   writer.Key("accepted_total");
   writer.Uint64(owner_admission.accepted_total);
   writer.Key("rejected_total");
   writer.Uint64(owner_admission.rejected_total);
   writer.Key("cancelled_total");
   writer.Uint64(owner_admission.cancelled_total);
+  writer.Key("deadline_total");
+  writer.Uint64(owner_admission.deadline_total);
+  writer.Key("shutdown_total");
+  writer.Uint64(owner_admission.shutdown_total);
+  writer.Key("max_active_entries");
+  writer.Uint64(owner_admission.max_active_entries);
+  writer.Key("max_active_bytes");
+  writer.Uint64(owner_admission.max_active_bytes);
   writer.Key("max_wait_entries");
   writer.Uint64(owner_admission.max_wait_entries);
   writer.Key("max_wait_bytes");
@@ -686,6 +736,187 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(scheduler.cancelled);
   writer.Key("oldest_queued_age_ms");
   writer.Uint64(scheduler.oldest_queued_age_ms);
+  writer.EndObject();
+  const ComputeExecutorSnapshot compute = globalComputeExecutorSnapshot();
+  writer.Key("compute_executor");
+  writer.StartObject();
+  writer.Key("initialized");
+  writer.Bool(compute.initialized);
+  writer.Key("ready");
+  writer.Bool(compute.ready);
+  writer.Key("stopping");
+  writer.Bool(compute.stopping);
+  writer.Key("workers");
+  writer.Uint64(compute.workers);
+  writer.Key("ready_workers");
+  writer.Uint64(compute.ready_workers);
+  writer.Key("active_workers");
+  writer.Uint64(compute.active_workers);
+  writer.Key("idle_workers");
+  writer.Uint64(compute.idle_workers);
+  writer.Key("queued_entries");
+  writer.Uint64(compute.queued_entries);
+  writer.Key("queued_bytes");
+  writer.Uint64(compute.queued_bytes);
+  writer.Key("max_queue_entries");
+  writer.Uint64(compute.max_queue_entries);
+  writer.Key("max_queue_bytes");
+  writer.Uint64(compute.max_queue_bytes);
+  writer.Key("control_queued_entries");
+  writer.Uint64(compute.control_queued_entries);
+  writer.Key("max_control_entries");
+  writer.Uint64(compute.max_control_entries);
+  writer.Key("accepted_total");
+  writer.Uint64(compute.accepted_total);
+  writer.Key("rejected_total");
+  writer.Uint64(compute.rejected_total);
+  writer.Key("cancelled_total");
+  writer.Uint64(compute.cancelled_total);
+  writer.Key("deadline_total");
+  writer.Uint64(compute.deadline_total);
+  writer.Key("shutdown_total");
+  writer.Uint64(compute.shutdown_total);
+  writer.Key("oldest_queue_age_ms");
+  writer.Uint64(compute.oldest_queue_age_ms);
+  writer.Key("worker_metrics");
+  writer.StartArray();
+  for (const ComputeWorkerSnapshot &worker : compute.worker_metrics) {
+    writer.StartObject();
+    writer.Key("executed");
+    writer.Uint64(worker.executed);
+    writer.Key("cancelled");
+    writer.Uint64(worker.cancelled);
+    writer.Key("busy_nanoseconds");
+    writer.Uint64(worker.busy_nanoseconds);
+    writer.Key("affinity_hits");
+    writer.Uint64(worker.affinity_hits);
+    writer.EndObject();
+  }
+  writer.EndArray();
+  writer.EndObject();
+  const ComputeExecutorSnapshot blocking_io =
+      blockingIoExecutorSnapshot();
+  writer.Key("blocking_io_executor");
+  writer.StartObject();
+  writer.Key("initialized");
+  writer.Bool(blocking_io.initialized);
+  writer.Key("ready");
+  writer.Bool(blocking_io.ready);
+  writer.Key("stopping");
+  writer.Bool(blocking_io.stopping);
+  writer.Key("workers");
+  writer.Uint64(blocking_io.workers);
+  writer.Key("active_workers");
+  writer.Uint64(blocking_io.active_workers);
+  writer.Key("queued_entries");
+  writer.Uint64(blocking_io.queued_entries);
+  writer.Key("queued_bytes");
+  writer.Uint64(blocking_io.queued_bytes);
+  writer.Key("max_queue_entries");
+  writer.Uint64(blocking_io.max_queue_entries);
+  writer.Key("max_queue_bytes");
+  writer.Uint64(blocking_io.max_queue_bytes);
+  writer.EndObject();
+  const QuickJsLaneSnapshot quickjs = globalQuickJsLaneSnapshot();
+  writer.Key("quickjs_lane");
+  writer.StartObject();
+  writer.Key("ready");
+  writer.Bool(quickjs.ready);
+  writer.Key("stopping");
+  writer.Bool(quickjs.stopping);
+  writer.Key("workers");
+  writer.Uint64(quickjs.workers);
+  writer.Key("max_queue_entries");
+  writer.Uint64(quickjs.max_queue_entries);
+  writer.Key("max_queue_bytes");
+  writer.Uint64(quickjs.max_queue_bytes);
+  writer.Key("heap_bytes_per_worker");
+  writer.Uint64(quickjs.heap_bytes_per_worker);
+  writer.Key("stack_bytes_per_worker");
+  writer.Uint64(quickjs.stack_bytes_per_worker);
+  writer.Key("active");
+  writer.Uint64(quickjs.active);
+  writer.Key("queued_entries");
+  writer.Uint64(quickjs.queued_entries);
+  writer.Key("queued_bytes");
+  writer.Uint64(quickjs.queued_bytes);
+  writer.Key("accepted_total");
+  writer.Uint64(quickjs.accepted_total);
+  writer.Key("rejected_total");
+  writer.Uint64(quickjs.rejected_total);
+  writer.EndObject();
+  const BeastConnectionSnapshot beast_connections =
+      beastConnectionSnapshot();
+  writer.Key("beast_connections");
+  writer.StartObject();
+  writer.Key("running");
+  writer.Bool(beast_connections.running);
+  writer.Key("wait_on_connection_capacity");
+  writer.Bool(beast_connections.wait_on_connection_capacity);
+  writer.Key("accept_paused");
+  writer.Bool(beast_connections.accept_paused);
+  writer.Key("active_sessions");
+  writer.Uint64(beast_connections.active_sessions);
+  writer.Key("accepted_limit");
+  writer.Uint64(beast_connections.accepted_limit);
+  writer.Key("business_sessions");
+  writer.Uint64(beast_connections.business_sessions);
+  writer.Key("reserved_sessions");
+  writer.Uint64(beast_connections.reserved_sessions);
+  writer.Key("capacity_503_total");
+  writer.Uint64(beast_connections.capacity_503_total);
+  writer.Key("accept_pauses_total");
+  writer.Uint64(beast_connections.accept_pauses_total);
+  writer.Key("accept_resumes_total");
+  writer.Uint64(beast_connections.accept_resumes_total);
+  writer.EndObject();
+  const RuntimeCoordinatorSnapshot coordinator =
+      runtimeCoordinatorSnapshot();
+  if (coordinator.force_max) {
+    writer.Key("runtime_coordinator");
+    writer.StartObject();
+    writer.Key("force_max");
+    writer.Bool(coordinator.force_max);
+    writer.Key("prepared");
+    writer.Bool(coordinator.prepared);
+    writer.Key("ready");
+    writer.Bool(coordinator.ready);
+    writer.Key("stopping");
+    writer.Bool(coordinator.stopping);
+    writer.Key("joined");
+    writer.Bool(coordinator.joined);
+    writer.Key("generation");
+    writer.Uint64(coordinator.generation);
+    writer.Key("rollback_total");
+    writer.Uint64(coordinator.rollback_total);
+    writer.Key("last_failed_stage");
+    writer.String(coordinator.last_failed_stage.c_str());
+    writer.Key("shutdown_stage");
+    writer.String(coordinator.shutdown_stage.c_str());
+    writer.Key("shutdown_deadline_ms");
+    writer.Uint64(coordinator.shutdown_deadline_ms);
+    writer.Key("shutdown_elapsed_ms");
+    writer.Uint64(coordinator.shutdown_elapsed_ms);
+    writer.Key("shutdown_deadline_exceeded");
+    writer.Bool(coordinator.shutdown_deadline_exceeded);
+    writer.Key("reason");
+    writer.String(coordinator.reason.c_str());
+    writer.EndObject();
+  }
+  const ConversionFlowRegistrySnapshot flows =
+      conversionFlowRegistrySnapshot();
+  writer.Key("conversion_flows");
+  writer.StartObject();
+  writer.Key("active");
+  writer.Uint64(flows.active);
+  writer.Key("created_total");
+  writer.Uint64(flows.created_total);
+  writer.Key("completed_total");
+  writer.Uint64(flows.completed_total);
+  writer.Key("rejected_total");
+  writer.Uint64(flows.rejected_total);
+  writer.Key("stopping");
+  writer.Bool(flows.stopping);
   writer.EndObject();
   const WorkloadSchedulerSnapshot legacy_flow = legacyRequestFlowSnapshot();
   writer.Key("legacy_request_flow");
@@ -718,6 +949,8 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   const RequestAdmissionSnapshot admission = requestAdmissionSnapshot();
   writer.Key("request_admission");
   writer.StartObject();
+  writer.Key("source");
+  writer.String(admission.source.c_str());
   writer.Key("active_entries");
   writer.Uint64(admission.active_entries);
   writer.Key("active_bytes");
@@ -730,6 +963,39 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(admission.max_entries);
   writer.Key("max_bytes");
   writer.Uint64(admission.max_bytes);
+  writer.Key("waiting_entries");
+  writer.Uint64(admission.waiting_entries);
+  writer.Key("waiting_bytes");
+  writer.Uint64(admission.waiting_bytes);
+  writer.Key("cancelled");
+  writer.Uint64(admission.cancelled);
+  writer.Key("deadline");
+  writer.Uint64(admission.deadline);
+  writer.Key("shutdown");
+  writer.Uint64(admission.shutdown);
+  writer.Key("max_wait_entries");
+  writer.Uint64(admission.max_wait_entries);
+  writer.Key("max_wait_bytes");
+  writer.Uint64(admission.max_wait_bytes);
+  writer.EndObject();
+  const HttplibExecutionSnapshot httplib_execution =
+      httplibExecutionSnapshot();
+  writer.Key("httplib_execution");
+  writer.StartObject();
+  writer.Key("ready");
+  writer.Bool(httplib_execution.ready);
+  writer.Key("base_threads");
+  writer.Uint64(httplib_execution.base_threads);
+  writer.Key("max_threads");
+  writer.Uint64(httplib_execution.max_threads);
+  writer.Key("max_queued_requests");
+  writer.Uint64(httplib_execution.max_queued_requests);
+  writer.Key("normal_active_handlers");
+  writer.Uint64(httplib_execution.normal_active_handlers);
+  writer.Key("normal_wait_handlers");
+  writer.Uint64(httplib_execution.normal_wait_handlers);
+  writer.Key("control_handlers");
+  writer.Uint64(httplib_execution.control_handlers);
   writer.EndObject();
   const ResourceControlSnapshot resources = resourceControlSnapshot();
   writer.Key("resource_control");
@@ -833,6 +1099,234 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Bool(resources.hardware_pin_matched);
   writer.Key("startup_budget_applied");
   writer.Bool(resources.startup_budget_applied);
+  writer.Key("resource_envelope");
+  writer.StartObject();
+  writer.Key("schedulable_cpu_millis");
+  writer.Uint64(resources.envelope.schedulable_cpu_millis);
+  writer.Key("memory_boundary_bytes");
+  writer.Uint64(resourceEnvelopeMemoryBoundary(resources.envelope));
+  writer.Key("nofile_soft");
+  writer.Uint64(resources.envelope.nofile_soft);
+  writer.Key("open_fds");
+  writer.Uint64(resources.envelope.open_fds);
+  writer.Key("pids_current");
+  writer.Uint64(resources.envelope.pids_current);
+  writer.Key("pids_max");
+  writer.Uint64(resources.envelope.pids_max);
+  writer.Key("http_handler_threads_per_compute");
+  writer.Uint64(
+      resources.envelope.http_handler_threads_per_compute);
+  writer.Key("http_handler_control_reserve");
+  writer.Uint64(resources.envelope.http_handler_control_reserve);
+  writer.Key("http_handler_stack_bytes");
+  writer.Uint64(resources.envelope.http_handler_stack_bytes);
+  writer.Key("http_handlers_own_inbound");
+  writer.Bool(resources.envelope.http_handlers_own_inbound);
+  writer.Key("complete");
+  writer.Bool(resources.envelope.complete);
+  writer.EndObject();
+  const ForceMaxBudget &calculated =
+      resources.calculated_force_max_budget;
+  writer.Key("calculated_force_max_budget");
+  writer.StartObject();
+  writer.Key("formula_revision");
+  writer.String(calculated.formula_revision.c_str());
+  writer.Key("valid");
+  writer.Bool(calculated.valid);
+  writer.Key("applied");
+  const uint64_t expected_response_cache = calculated.cache_bytes / 2;
+  const uint64_t expected_ruleset_cache = calculated.cache_bytes / 4;
+  const uint64_t expected_external_cache =
+      calculated.cache_bytes - expected_response_cache -
+      expected_ruleset_cache;
+  const bool fetch_contract_applied =
+      global.maxAllowedDownloadSize > 0 &&
+      validateForceMaxFetchContract(
+          calculated,
+          static_cast<uint64_t>(global.maxAllowedDownloadSize));
+  uint64_t normal_handler_total = 0;
+  uint64_t accounted_httplib_handlers = 0;
+  const bool normal_handler_sum_valid =
+      httplib_execution.normal_active_handlers <=
+      UINT64_MAX - httplib_execution.normal_wait_handlers;
+  if (normal_handler_sum_valid)
+    normal_handler_total = httplib_execution.normal_active_handlers +
+                           httplib_execution.normal_wait_handlers;
+  const bool httplib_handler_sum_valid =
+      normal_handler_sum_valid &&
+      normal_handler_total <=
+          UINT64_MAX - resources.envelope.http_handler_control_reserve;
+  if (httplib_handler_sum_valid)
+    accounted_httplib_handlers =
+        normal_handler_total +
+        resources.envelope.http_handler_control_reserve;
+  const bool handler_runtime_applied =
+      !resources.envelope.http_handlers_own_inbound ||
+      (httplib_execution.ready &&
+       httplib_execution.base_threads == calculated.handler_permits &&
+       httplib_execution.max_threads == calculated.handler_permits &&
+       httplib_execution.max_queued_requests == 1 &&
+       httplib_execution.normal_active_handlers == calculated.active_flows &&
+       normal_handler_total == calculated.inbound_connections &&
+       httplib_execution.control_handlers == 1 &&
+       httplib_handler_sum_valid &&
+       accounted_httplib_handlers == calculated.handler_permits);
+  const bool force_max_applied =
+      resources.effective_mode == "force_max" && calculated.valid &&
+      fetch_contract_applied && handler_runtime_applied &&
+      (resources.envelope.http_handlers_own_inbound ||
+       (beast_connections.running &&
+        beast_connections.wait_on_connection_capacity &&
+        beast_connections.accepted_limit ==
+            calculated.accepted_connections &&
+        beast_connections.capacity_503_total == 0)) &&
+      calculated.memory_capacity_bytes >=
+          calculated.startup_memory_bytes &&
+      calculated.memory_headroom_bytes ==
+          calculated.memory_capacity_bytes -
+              calculated.startup_memory_bytes &&
+      calculated.memory_budget_total <=
+          calculated.memory_headroom_bytes &&
+      resources.startup_budget_applied && compute.ready &&
+      compute.workers == calculated.compute_workers &&
+      compute.max_queue_entries == calculated.flow_queue_entries &&
+      compute.max_queue_bytes == calculated.flow_queue_bytes &&
+      blocking_io.ready &&
+      blocking_io.workers == calculated.io_runners &&
+      blocking_io.max_queue_entries ==
+          calculated.blocking_io_queue_entries &&
+      blocking_io.max_queue_bytes ==
+          calculated.blocking_io_queue_bytes &&
+      rulesetExecutorWorkerCount() == calculated.io_runners &&
+      rulesetExecutorQueueCapacity() ==
+          calculated.blocking_io_queue_entries &&
+      quickjs.ready && quickjs.workers == calculated.quickjs_workers &&
+      quickjs.max_queue_entries == calculated.quickjs_queue_entries &&
+      quickjs.max_queue_bytes == calculated.quickjs_queue_bytes &&
+      quickjs.heap_bytes_per_worker ==
+          calculated.quickjs_heap_bytes_per_worker &&
+      quickjs.stack_bytes_per_worker ==
+          calculated.quickjs_stack_bytes_per_worker &&
+      owner_admission.source == "force_max_waitable" &&
+      owner_admission.max_active_entries == calculated.active_owners &&
+      owner_admission.max_active_bytes == calculated.owner_active_bytes &&
+      owner_admission.max_wait_entries ==
+          calculated.owner_queue_entries &&
+      owner_admission.max_wait_bytes == calculated.owner_queue_bytes &&
+      admission.source == "force_max_waitable" &&
+      admission.max_entries == calculated.active_flows &&
+      admission.max_bytes == calculated.transport_active_bytes &&
+      admission.max_wait_entries ==
+          calculated.transport_queue_entries &&
+      admission.max_wait_bytes == calculated.transport_queue_bytes &&
+      fetch.available &&
+      fetch.active_connection_limit == calculated.outbound_active &&
+      fetch.open_connection_limit == calculated.outbound_open &&
+      fetch.connection_cache_limit == calculated.outbound_idle_cache &&
+      fetch.per_host_connection_limit == calculated.outbound_per_host &&
+      fetch_memory.enabled &&
+      fetch_memory.limit == calculated.fetch_bytes &&
+      retained.limit == calculated.retained_response_bytes &&
+      response_cache.max_bytes == expected_response_cache &&
+      rulesetConversionCacheMaxBytes() == expected_ruleset_cache &&
+      externalConfigCacheMaxBytes() == expected_external_cache &&
+      cpu_permits.limit == calculated.compute_permits &&
+      static_cast<uint64_t>(std::max(1, global.maxConcurThreads)) ==
+          calculated.compute_workers &&
+      static_cast<uint64_t>(std::max(1, global.maxServerThreads)) ==
+          calculated.handler_permits &&
+      static_cast<uint64_t>(std::max(1, global.maxPendingConns)) ==
+          calculated.inbound_connections;
+  writer.Bool(force_max_applied);
+  writer.Key("validation_error");
+  writer.String(calculated.validation_error.c_str());
+  writer.Key("compute_workers");
+  writer.Uint64(calculated.compute_workers);
+  writer.Key("compute_permits");
+  writer.Uint64(calculated.compute_permits);
+  writer.Key("io_runners");
+  writer.Uint64(calculated.io_runners);
+  writer.Key("handler_permits");
+  writer.Uint64(calculated.handler_permits);
+  writer.Key("active_owners");
+  writer.Uint64(calculated.active_owners);
+  writer.Key("active_flows");
+  writer.Uint64(calculated.active_flows);
+  writer.Key("inbound_connections");
+  writer.Uint64(calculated.inbound_connections);
+  writer.Key("accepted_connections");
+  writer.Uint64(calculated.accepted_connections);
+  writer.Key("control_connections");
+  writer.Uint64(calculated.control_connections);
+  writer.Key("outbound_active");
+  writer.Uint64(calculated.outbound_active);
+  writer.Key("outbound_per_host");
+  writer.Uint64(calculated.outbound_per_host);
+  writer.Key("outbound_open");
+  writer.Uint64(calculated.outbound_open);
+  writer.Key("outbound_idle_cache");
+  writer.Uint64(calculated.outbound_idle_cache);
+  writer.Key("transport_queue_entries");
+  writer.Uint64(calculated.transport_queue_entries);
+  writer.Key("transport_queue_bytes");
+  writer.Uint64(calculated.transport_queue_bytes);
+  writer.Key("owner_queue_entries");
+  writer.Uint64(calculated.owner_queue_entries);
+  writer.Key("owner_queue_bytes");
+  writer.Uint64(calculated.owner_queue_bytes);
+  writer.Key("flow_queue_entries");
+  writer.Uint64(calculated.flow_queue_entries);
+  writer.Key("flow_queue_bytes");
+  writer.Uint64(calculated.flow_queue_bytes);
+  writer.Key("blocking_io_queue_entries");
+  writer.Uint64(calculated.blocking_io_queue_entries);
+  writer.Key("blocking_io_queue_bytes");
+  writer.Uint64(calculated.blocking_io_queue_bytes);
+  writer.Key("retained_response_bytes");
+  writer.Uint64(calculated.retained_response_bytes);
+  writer.Key("fetch_bytes");
+  writer.Uint64(calculated.fetch_bytes);
+  writer.Key("cache_bytes");
+  writer.Uint64(calculated.cache_bytes);
+  writer.Key("working_memory_bytes");
+  writer.Uint64(calculated.working_memory_bytes);
+  writer.Key("memory_capacity_bytes");
+  writer.Uint64(calculated.memory_capacity_bytes);
+  writer.Key("startup_memory_bytes");
+  writer.Uint64(calculated.startup_memory_bytes);
+  writer.Key("memory_headroom_bytes");
+  writer.Uint64(calculated.memory_headroom_bytes);
+  writer.Key("transport_active_bytes");
+  writer.Uint64(calculated.transport_active_bytes);
+  writer.Key("owner_active_bytes");
+  writer.Uint64(calculated.owner_active_bytes);
+  writer.Key("memory_budget_total");
+  writer.Uint64(calculated.memory_budget_total);
+  writer.Key("quickjs_workers");
+  writer.Uint64(calculated.quickjs_workers);
+  writer.Key("quickjs_queue_entries");
+  writer.Uint64(calculated.quickjs_queue_entries);
+  writer.Key("quickjs_queue_bytes");
+  writer.Uint64(calculated.quickjs_queue_bytes);
+  writer.Key("quickjs_heap_bytes_per_worker");
+  writer.Uint64(calculated.quickjs_heap_bytes_per_worker);
+  writer.Key("quickjs_stack_bytes_per_worker");
+  writer.Uint64(calculated.quickjs_stack_bytes_per_worker);
+  writer.Key("reserved_fds");
+  writer.Uint64(calculated.reserved_fds);
+  writer.Key("reserved_pids");
+  writer.Uint64(calculated.reserved_pids);
+  writer.Key("fixed_threads");
+  writer.Uint64(calculated.fixed_threads);
+  writer.Key("resolver_thread_budget");
+  writer.Uint64(calculated.resolver_thread_budget);
+  writer.Key("thread_budget_total");
+  writer.Uint64(calculated.thread_budget_total);
+  writer.Key("handler_stack_bytes");
+  writer.Uint64(calculated.handler_stack_bytes);
+  writer.Key("reserved_memory_bytes");
+  writer.Uint64(calculated.reserved_memory_bytes);
+  writer.EndObject();
   writer.Key("hardware_complete");
   writer.Bool(resources.hardware_complete);
   writer.Key("curve_valid");
@@ -841,6 +1335,22 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Bool(resources.permits_applied);
   writer.Key("pressure_fallback");
   writer.Bool(resources.pressure_fallback);
+  writer.Key("pressure_guarded");
+  writer.Bool(resources.pressure_guarded);
+  writer.Key("pressure_guard_activations");
+  writer.Uint64(resources.pressure_guard_activations);
+  writer.Key("pressure_guard_recoveries");
+  writer.Uint64(resources.pressure_guard_recoveries);
+  writer.Key("pressure_guard_repeated_activations");
+  writer.Uint64(resources.pressure_guard_repeated_activations);
+  if (resources.effective_mode == "force_max") {
+    const ForceMaxCacheGuardPolicySnapshot cache_guard =
+        forceMaxCacheGuardPolicySnapshot();
+    writer.Key("cache_growth_frozen");
+    writer.Bool(cache_guard.freeze_net_growth);
+    writer.Key("cache_guard_generation");
+    writer.Uint64(cache_guard.generation);
+  }
   writer.EndObject();
   writer.EndObject();
   return std::string(buffer.GetString(), buffer.GetSize());

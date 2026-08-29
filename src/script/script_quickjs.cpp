@@ -1,6 +1,11 @@
-#include <string>
+#include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <map>
+#include <memory>
+#include <mutex>
+#include <string>
 #include <quickjspp.hpp>
 #include <utility>
 #include <quickjs/quickjs-libc.h>
@@ -402,7 +407,18 @@ static qjs_fetch_Response qjs_fetch(qjs_fetch_Request request)
                             ? parseProxy(request.proxy, settings.proxyBypass)
                             : parseProxy(settings.proxyConfig,
                                          settings.proxyBypass);
-    FetchArgument argument {method, request.url, proxy, &request.postdata, &request.headers.headers, &request.cookies, 0};
+    const std::shared_ptr<RequestContext> request_context =
+        captureCurrentRequestContext();
+    const auto deadline = request_context
+        ? request_context->deadline()
+        : std::chrono::steady_clock::time_point::max();
+    const RequestCancellationToken cancellation = request_context
+        ? request_context->cancellationToken()
+        : RequestCancellationToken();
+    FetchArgument argument {
+        method, request.url, proxy, &request.postdata,
+        &request.headers.headers, &request.cookies, 0, false,
+        FetchContext::TrustedConfig, deadline, cancellation};
     FetchResult result {&response.status_code, &response.content, &response_headers, &response.cookies};
 
     webGet(argument, result);
@@ -467,6 +483,62 @@ struct Lambda {
 uint32_t currentTime()
 {
     return time(nullptr);
+}
+
+struct QjsSleepWaitState
+{
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool cancellation_requested = false;
+};
+
+void qjsSleep(int interval)
+{
+    if(interval <= 0)
+        return;
+    const std::shared_ptr<RequestContext> request_context =
+        captureCurrentRequestContext();
+    if(!request_context)
+    {
+        sleepMs(interval);
+        return;
+    }
+
+    const auto wait_state = std::make_shared<QjsSleepWaitState>();
+    RequestCancellationRegistration registration =
+        request_context->registerCancellationCallback([wait_state] {
+            {
+                std::lock_guard<std::mutex> lock(wait_state->mutex);
+                wait_state->cancellation_requested = true;
+            }
+            wait_state->condition.notify_all();
+        });
+    const auto requested_end =
+        std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(interval);
+    const auto deadline = request_context->deadline();
+    const auto wait_until =
+        deadline == std::chrono::steady_clock::time_point::max()
+            ? requested_end
+            : std::min(requested_end, deadline);
+    std::unique_lock<std::mutex> lock(wait_state->mutex);
+    (void)wait_state->condition.wait_until(
+        lock, wait_until, [&request_context, &wait_state] {
+        return wait_state->cancellation_requested ||
+               request_context->cancellationToken()
+                   .isCancellationRequested();
+        });
+}
+
+int qjsFileWrite(const std::string &path, const std::string &content,
+                 bool overwrite)
+{
+    if(const auto request_context = captureCurrentRequestContext();
+       request_context &&
+       (request_context->cancellationToken().isCancellationRequested() ||
+        request_context->deadlineExceeded()))
+        return -1;
+    return fileWrite(path, content, overwrite);
 }
 
 int script_context_init(qjs::Context &context)
@@ -571,11 +643,11 @@ int script_context_init(qjs::Context &context)
             .add<&base64Encode>("atob")
             .add<&base64Decode>("btoa")
             .add<&currentTime>("time")
-            .add<&sleepMs>("sleep")
+            .add<&qjsSleep>("sleep")
             .add<&ShowMsgbox>("msgbox")
             .add<&qjs_getUrlArg>("getUrlArg")
             .add<&fileGet>("fileGet")
-            .add<&fileWrite>("fileWrite");
+            .add<&qjsFileWrite>("fileWrite");
         context.eval(R"(
         import * as interUtils from 'interUtils'
         globalThis.Request = interUtils.Request

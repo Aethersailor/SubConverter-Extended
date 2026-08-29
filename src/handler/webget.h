@@ -13,6 +13,7 @@
 
 #include "handler/fetch_context.h"
 #include "handler/proxy_policy.h"
+#include "runtime/memory_budget.h"
 #include "server/request_context.h"
 #include "utils/map_extra.h"
 #include "utils/string.h"
@@ -116,6 +117,7 @@ struct AsyncFetchResult
     std::string cookies;
     bool used_proxy = false;
     long proxy_error = 0;
+    FetchMemoryLease fetch_memory;
     RetainedResponseByteLease retained_bytes;
 };
 
@@ -132,6 +134,18 @@ struct AsyncFetchEngineSnapshot
     uint64_t connection_cache_limit = 0;
     uint64_t recoverable_retry_limit = 0;
     uint64_t buffered_bytes = 0;
+    uint64_t per_host_connection_limit = 0;
+    uint64_t runtime_limit_generation = 0;
+    uint64_t runtime_limit_updates = 0;
+};
+
+struct AsyncFetchRuntimeLimits
+{
+    uint64_t active = 0;
+    uint64_t per_host = 0;
+    uint64_t open = 0;
+    uint64_t idle_cache = 0;
+    uint64_t generation = 0;
 };
 
 using SharedAsyncFetchResult = std::shared_ptr<AsyncFetchResult>;
@@ -201,6 +215,7 @@ struct CacheFetchPayloadSnapshot
 struct SubscriptionCacheAdmissionSnapshot
 {
     bool enabled = false;
+    uint64_t capacity = 0;
     uint64_t entries = 0;
     uint64_t first_seen_bypassed_total = 0;
     uint64_t reuse_admitted_total = 0;
@@ -248,6 +263,8 @@ struct OwnedWebGetContinuationRuntimeSnapshot
     size_t max_entries = 0;
     uint64_t max_bytes = 0;
     uint64_t completion_exception_total = 0;
+    uint64_t deadline_total = 0;
+    uint64_t shutdown_total = 0;
     WorkloadSchedulerSnapshot scheduler;
 };
 struct OwnedWebGetContinuationBudget
@@ -272,6 +289,9 @@ using OwnedWebGetContinuationCompletion =
     std::function<void(SchedulerSubmitStatus, std::exception_ptr)>;
 OwnedWebGetContinuationInitStatus initializeOwnedWebGetContinuationRuntime(
     OwnedWebGetContinuationBudget budget);
+bool publishOwnedWebGetContinuationRuntime(
+    OwnedWebGetContinuationBudget budget) noexcept;
+bool resetOwnedWebGetContinuationRuntime() noexcept;
 SchedulerSubmitStatus submitOwnedWebGetContinuation(
     RequestCostClass cost, uint64_t bytes,
     std::chrono::steady_clock::time_point deadline,
@@ -281,9 +301,18 @@ SchedulerSubmitStatus submitOwnedWebGetContinuation(
 OwnedWebGetContinuationRuntimeSnapshot
 ownedWebGetContinuationRuntimeSnapshot();
 void requestOwnedWebGetContinuationShutdown() noexcept;
-bool joinOwnedWebGetContinuationRuntime() noexcept;
+bool joinOwnedWebGetContinuationRuntime(
+    bool shutdown_compute = true) noexcept;
 bool asyncFetchEngineAvailable() noexcept;
+bool outboundResolverMayUseThreads() noexcept;
+bool initializeAsyncFetchEngine() noexcept;
+bool prepareAsyncFetchEngineCandidate() noexcept;
+bool commitAsyncFetchEngineCandidate() noexcept;
+void rollbackAsyncFetchEngineCandidate() noexcept;
+bool resetAsyncFetchEngine() noexcept;
 AsyncFetchEngineSnapshot asyncFetchEngineSnapshot() noexcept;
+bool requestAsyncFetchRuntimeLimits(
+    AsyncFetchRuntimeLimits limits) noexcept;
 
 int webGet(const FetchArgument& argument, FetchResult &result);
 std::string webGet(const std::string &url, const ProxyPolicy &proxy,
@@ -293,6 +322,7 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy,
                    FetchContext context = FetchContext::TrustedConfig);
 bool isFetchUrlAllowed(const std::string &url, FetchContext context);
 void requestOutboundFetchShutdown() noexcept;
+bool joinOutboundFetchShutdown() noexcept;
 void flushCache();
 int webPost(const std::string &url, const std::string &data,
             const ProxyPolicy &proxy, const string_icase_map &request_headers,

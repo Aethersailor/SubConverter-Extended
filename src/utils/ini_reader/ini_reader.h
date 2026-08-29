@@ -6,7 +6,9 @@
 #include <vector>
 #include <numeric>
 #include <algorithm>
+#include <limits>
 
+#include "utils/bounded_output.h"
 #include "utils/codepage.h"
 #include "utils/file_extra.h"
 #include "utils/string.h"
@@ -937,9 +939,45 @@ public:
     /**
     *  @brief Export the whole INI data structure into a string.
     */
-    std::string to_string()
+    std::string to_string(
+        std::size_t max_output_bytes = std::numeric_limits<std::size_t>::max())
     {
-        std::string content, itemVal;
+        if(max_output_bytes == std::numeric_limits<std::size_t>::max())
+        {
+            std::string content, itemVal;
+            if(!parsed)
+                return "";
+            for(auto &x : section_order)
+            {
+                string_size strsize = 0;
+                content += "[" + x + "]\n";
+                if(ini_content.find(x) != ini_content.end())
+                {
+                    auto section = ini_content.at(x);
+                    if(section.empty())
+                    {
+                        content += "\n";
+                        continue;
+                    }
+                    for(auto iter = section.begin(); iter != section.end(); iter++)
+                    {
+                        if(iter->first != "{NONAME}")
+                            content += iter->first + "=";
+                        itemVal = iter->second;
+                        processEscapeCharReverse(itemVal);
+                        content += itemVal + "\n";
+                        if(std::next(iter) == section.end())
+                            strsize = itemVal.size();
+                    }
+                }
+                if(strsize)
+                    content += "\n";
+            }
+            return content;
+        }
+
+        BoundedOutputSink content(max_output_bytes);
+        std::string itemVal;
 
         if(!parsed)
             return "";
@@ -947,30 +985,36 @@ public:
         for(auto &x : section_order)
         {
             string_size strsize = 0;
-            content += "[" + x + "]\n";
+            content.append("[");
+            content.append(x);
+            content.append("]\n");
             if(ini_content.find(x) != ini_content.end())
             {
                 auto section = ini_content.at(x);
                 if(section.empty())
                 {
-                    content += "\n";
+                    content.append("\n");
                     continue;
                 }
                 for(auto iter = section.begin(); iter != section.end(); iter++)
                 {
                     if(iter->first != "{NONAME}")
-                        content += iter->first + "=";
+                    {
+                        content.append(iter->first);
+                        content.append("=");
+                    }
                     itemVal = iter->second;
                     processEscapeCharReverse(itemVal);
-                    content += itemVal + "\n";
+                    content.append(itemVal);
+                    content.append("\n");
                     if(std::next(iter) == section.end())
                         strsize = itemVal.size();
                 }
             }
             if(strsize)
-                content += "\n";
+                content.append("\n");
         }
-        return content;
+        return content.release();
     }
 
     /**

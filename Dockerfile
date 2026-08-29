@@ -31,15 +31,27 @@ COPY bridge/mieru.go ./
 COPY bridge/cmd/portable-updater/ ./cmd/portable-updater/
 
 RUN set -xe && \
+    retry_go_dependency() { \
+      attempt=1; \
+      while ! "$@"; do \
+        if [ "${attempt}" = 3 ]; then \
+          echo "Go dependency command failed after ${attempt} attempts" >&2; \
+          return 1; \
+        fi; \
+        echo "Go dependency command attempt ${attempt} failed; retrying" >&2; \
+        sleep "$((attempt * 5))"; \
+        attempt="$((attempt + 1))"; \
+      done; \
+    } && \
     if [ "${REFRESH_GO_DEPS}" = "true" ]; then \
       echo "MIHOMO_CACHE_BUST=$MIHOMO_CACHE_BUST" && \
-      go get github.com/metacubex/mihomo@${MIHOMO_REF} && \
+      retry_go_dependency go get github.com/metacubex/mihomo@${MIHOMO_REF} && \
       mihomo_version="$(go list -m -f '{{.Version}}' github.com/metacubex/mihomo)" && \
       mieru_version="$(go list -m -f '{{.Version}}' github.com/enfein/mieru/v3)" && \
       protobuf_version="$(go list -m -f '{{.Version}}' google.golang.org/protobuf)" && \
       test -n "${mihomo_version}" && test -n "${mieru_version}" && test -n "${protobuf_version}" && \
-      go get -u all && \
-      go get \
+      retry_go_dependency go get -u all && \
+      retry_go_dependency go get \
         "github.com/enfein/mieru/v3@${mieru_version}" \
         "google.golang.org/protobuf@${protobuf_version}" && \
       go mod tidy && \
@@ -47,7 +59,7 @@ RUN set -xe && \
       test "$(go list -m -f '{{.Version}}' github.com/enfein/mieru/v3)" = "${mieru_version}" && \
       test "$(go list -m -f '{{.Version}}' google.golang.org/protobuf)" = "${protobuf_version}"; \
     else \
-      go mod download; \
+      retry_go_dependency go mod download; \
     fi
 
 # Copy scripts for scheme generation
@@ -103,19 +115,29 @@ RUN set -eux; \
       mihomo_dir="$(GOWORK=off go list -m -mod=readonly -f '{{.Dir}}' github.com/metacubex/mihomo)"; \
       mihomo_version="$(GOWORK=off go list -m -mod=readonly -f '{{.Version}}' github.com/metacubex/mihomo)"; \
       echo "Building Mihomo config validator ${mihomo_version}"; \
-      (cd "${mihomo_dir}" && \
-        GOWORK=off CGO_ENABLED=1 go build \
-          -mod=readonly \
-          -trimpath \
-          -ldflags='-s -w' \
-          -o /build/test-tools/mihomo \
-          .); \
+      for attempt in 1 2 3; do \
+        if (cd "${mihomo_dir}" && \
+          GOWORK=off CGO_ENABLED=1 go build \
+            -mod=readonly \
+            -trimpath \
+            -ldflags='-s -w' \
+            -o /build/test-tools/mihomo \
+            .); then \
+          break; \
+        fi; \
+        if [ "${attempt}" = 3 ]; then \
+          echo "Mihomo config validator build failed after ${attempt} attempts" >&2; \
+          exit 1; \
+        fi; \
+        echo "Mihomo config validator build attempt ${attempt} failed; retrying" >&2; \
+        sleep "$((attempt * 5))"; \
+      done; \
       test -x /build/test-tools/mihomo; \
     fi
 
 # ========== C++ BUILD STAGE ==========
 # 使用 Debian (glibc) 编译，运行时再搬运依赖到 Alpine
-FROM ${DEBIAN_IMAGE} AS builder
+FROM ${DEBIAN_IMAGE} AS builder-base
 ARG THREADS="4"
 ARG SHA=""
 ARG VERSION="dev"
@@ -259,6 +281,8 @@ RUN set -xe && \
       echo "Using committed header libraries"; \
     fi
 
+RUN python3 scripts/ci/patch_cpp_httplib_force_max.py include/httplib.h
+
 RUN set -xe && \
     BUILD_ID="$(printf '%.7s' "${SHA}")" && \
     [ -n "${BUILD_ID}" ] && sed -i "s/#define BUILD_ID \"\"/#define BUILD_ID \"${BUILD_ID}\"/ " src/version.h || true && \
@@ -292,7 +316,25 @@ RUN set -xe && \
     -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
     -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
     -DCMAKE_POSITION_INDEPENDENT_CODE=OFF \
-    . && \
+    .
+
+# Keep sanitizer compilation resumable on hosted runners that can be recycled
+# during one long build step. The first target materializes the production
+# object graph and ccache; the final builder continues with every test target.
+FROM builder-base AS sanitizer-bootstrap
+ARG THREADS="4"
+RUN export PATH="/usr/lib/ccache:$PATH" && \
+    export CCACHE_DIR=/tmp/ccache && \
+    export CCACHE_COMPILERCHECK=content && \
+    ninja -j ${THREADS} subconverter
+
+FROM sanitizer-bootstrap AS builder
+ARG THREADS="4"
+ARG BUILD_TESTS=false
+ARG ENABLE_SANITIZERS=false
+RUN export PATH="/usr/lib/ccache:$PATH" && \
+    export CCACHE_DIR=/tmp/ccache && \
+    export CCACHE_COMPILERCHECK=content && \
     ninja -j ${THREADS}
 
 RUN if [ "${BUILD_TESTS}" = "true" ]; then \

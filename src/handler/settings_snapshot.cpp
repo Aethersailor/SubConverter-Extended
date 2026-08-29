@@ -6,6 +6,7 @@
 
 #include "handler/proxy_policy.h"
 #include "handler/settings.h"
+#include "utils/resource_control.h"
 #include "utils/string.h"
 
 namespace {
@@ -27,6 +28,7 @@ std::string triState(const tribool &value) {
 } // namespace
 
 std::string sanitizedSettingsSnapshot(const Settings &settings) {
+  const ResourceControlSnapshot resources = resourceControlSnapshot();
   nlohmann::json snapshot = {
       {"schema", 1},
       {"common",
@@ -110,6 +112,11 @@ std::string sanitizedSettingsSnapshot(const Settings &settings) {
        {
            {"resource_control", settings.resourceControl},
            {"resource_control_effective", settings.resourceControlEffective},
+           {"force_max_formula_revision",
+            resources.calculated_force_max_budget.formula_revision},
+           {"force_max_budget_valid",
+            resources.calculated_force_max_budget.valid},
+           {"force_max_budget_applied", false},
            {"force_max_curve_fingerprint",
             settings.forceMaxCurveFingerprint},
            {"max_allowed_rulesets", settings.maxAllowedRulesets},

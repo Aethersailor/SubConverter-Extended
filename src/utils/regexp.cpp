@@ -146,6 +146,11 @@ CompiledRegex::CompiledRegex(const std::string &pattern, CompiledRegexMode mode)
         impl_->regex.setPattern(pattern).addModifier("m").addPcre2Option(
             PCRE2_ANCHORED | PCRE2_ENDANCHORED | PCRE2_UTF).compile();
     }
+    else if(mode == CompiledRegexMode::Replace)
+    {
+        impl_->regex.setPattern(pattern).addModifier("m").addPcre2Option(
+            PCRE2_UTF | PCRE2_MULTILINE | PCRE2_ALT_BSUX).compile();
+    }
     else
     {
         impl_->regex.setPattern(pattern).addModifier("m").addPcre2Option(
@@ -166,6 +171,15 @@ bool CompiledRegex::valid() const noexcept
 bool CompiledRegex::matches(const std::string &subject)
 {
     return valid() && impl_->regex.match(subject, "g");
+}
+
+std::string CompiledRegex::replace(const std::string &subject,
+                                   const std::string &replacement,
+                                   bool global)
+{
+    if(!valid())
+        return subject;
+    return impl_->regex.replace(subject, replacement, global ? "gEx" : "Ex");
 }
 
 bool regMatch(const std::string &src, const std::string &match)

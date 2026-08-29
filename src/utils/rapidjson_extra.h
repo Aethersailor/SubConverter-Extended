@@ -1,6 +1,9 @@
 #ifndef RAPIDJSON_EXTRA_H_INCLUDED
 #define RAPIDJSON_EXTRA_H_INCLUDED
 
+#include <cstddef>
+#include <limits>
+
 #include <stdexcept>
 
 template <typename T> void exception_thrower(T e, const std::string &cond, const std::string &file, int line)
@@ -16,6 +19,8 @@ template <typename T> void exception_thrower(T e, const std::string &cond, const
 #define RAPIDJSON_ASSERT(x) exception_thrower(x, VALUE(x), __FILE__, __LINE__)
 #include <rapidjson/document.h>
 #include <rapidjson/writer.h>
+
+#include "utils/bounded_output.h"
 #include <rapidjson/error/en.h>
 #include <string>
 
@@ -167,13 +172,27 @@ namespace rapidjson_ext {
     };
 
     struct SerializeObject : public ExtensionFunction<std::string> {
+        explicit SerializeObject(
+            std::size_t max_output_bytes =
+                std::numeric_limits<std::size_t>::max())
+            : max_output_bytes(max_output_bytes) {}
+
         inline std::string operator() (rapidjson::Value &root) const override
         {
-            rapidjson::StringBuffer buffer;
-            rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+            if (max_output_bytes == std::numeric_limits<std::size_t>::max())
+            {
+                rapidjson::StringBuffer buffer;
+                rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+                root.Accept(writer);
+                return buffer.GetString();
+            }
+            BoundedOutputSink buffer(max_output_bytes);
+            rapidjson::Writer<BoundedOutputSink> writer(buffer);
             root.Accept(writer);
-            return buffer.GetString();
+            return buffer.release();
         }
+
+        std::size_t max_output_bytes;
     };
 }
 

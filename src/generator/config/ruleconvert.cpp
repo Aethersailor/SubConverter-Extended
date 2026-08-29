@@ -14,6 +14,7 @@
 #include "utils/logger.h"
 #include "utils/concurrent_lru_cache.h"
 #include "utils/cooperative_cpu.h"
+#include "utils/force_max_cooperation.h"
 #include "utils/md5/md5_interface.h"
 #include "utils/network.h"
 #include "utils/regexp.h"
@@ -39,6 +40,8 @@ static std::string convertRulesetUncached(const std::string &content, int type)
     ///         Clash payload:\n  - 'ipcidr/domain/classic(Surge-like)'
 
     std::string output, strLine;
+    ForceMaxCooperativeBatch checkpoint(
+        effectiveSettings().resourceControlEffective == "force_max", 128);
 
     if(type == RULESET_SURGE)
         return content;
@@ -99,6 +102,7 @@ static std::string convertRulesetUncached(const std::string &content, int type)
             }
             output += strLine;
             output += '\n';
+            checkpoint.complete();
         }
         return output;
     }
@@ -136,12 +140,33 @@ std::string convertRuleset(const std::string &content, int type)
 
 size_t rulesetConversionCacheMaxEntries()
 {
-    return kRulesetConversionCacheEntries;
+    return ruleset_conversion_cache.maxEntries();
+}
+
+std::string materializeRulesetContent(const RulesetContent &content)
+{
+    if(content.resolved_content)
+        return *content.resolved_content;
+    return waitWithoutCpuPermit([&] { return content.rule_content.get(); });
 }
 
 size_t rulesetConversionCacheMaxBytes()
 {
-    return kRulesetConversionCacheBytes;
+    return ruleset_conversion_cache.maxBytes();
+}
+
+void configureRulesetConversionCache(size_t max_entries,
+                                     size_t max_bytes)
+{
+    ruleset_conversion_cache.setLimits(max_entries, max_bytes);
+}
+
+void setRulesetConversionCacheGrowthFrozen(bool frozen) noexcept
+{
+    try {
+        ruleset_conversion_cache.setGrowthFrozen(frozen);
+    } catch(...) {
+    }
 }
 
 static bool isClashCommaPayloadRule(const std::string &rule_type)
@@ -209,8 +234,11 @@ static void warnNoResolveIgnoredForTarget(
     const std::vector<RulesetContent> &ruleset_content_array,
     const std::string &target)
 {
+    ForceMaxCooperativeBatch checkpoint(
+        effectiveSettings().resourceControlEffective == "force_max", 128);
     for(const RulesetContent &ruleset : ruleset_content_array)
     {
+        checkpoint.complete();
         if(!ruleset.options.no_resolve)
             continue;
         writeLog(LOG_LEVEL_WARNING,
@@ -424,6 +452,8 @@ bool rulesetToStash(YAML::Node &base_rule,
     stash_stats.input_sources = ruleset_content_array.size();
     error.clear();
     const size_t max_allowed_rules = effectiveSettings().maxAllowedRules;
+    ForceMaxCooperativeBatch checkpoint(
+        effectiveSettings().resourceControlEffective == "force_max", 128);
 
     auto fail = [&](const std::string &english, const std::string &chinese) {
         stash_stats.unsupported_sources++;
@@ -438,6 +468,7 @@ bool rulesetToStash(YAML::Node &base_rule,
         bool terminal_seen = false;
         for(const YAML::Node &entry : base_rule["rules"])
         {
+            checkpoint.complete();
             if(!entry.IsScalar())
                 return fail("the selected Stash base contains a non-scalar rule",
                             "所选 Stash 基础模板包含非标量规则");
@@ -472,6 +503,7 @@ bool rulesetToStash(YAML::Node &base_rule,
                     "所选 Stash 基础模板的 rule-providers 字段无效");
     for(const auto &entry : providers)
     {
+        checkpoint.complete();
         if(!entry.first.IsScalar() || !entry.second.IsMap())
             return fail("the selected Stash base contains an invalid rule-provider",
                         "所选 Stash 基础模板包含无效的 rule-provider");
@@ -492,6 +524,7 @@ bool rulesetToStash(YAML::Node &base_rule,
     RuleConversionStats local_stats;
     for(const RulesetContent &source : ruleset_content_array)
     {
+        checkpoint.complete();
         if(max_allowed_rules &&
            rules.size() + terminal_rules.size() >= max_allowed_rules)
             return fail("the final Stash rule count exceeds max_allowed_rules",
@@ -535,8 +568,7 @@ bool rulesetToStash(YAML::Node &base_rule,
             continue;
         }
 
-        std::string retrieved = waitWithoutCpuPermit(
-            [&] { return source.rule_content.get(); });
+        std::string retrieved = materializeRulesetContent(source);
         if(!stashRulesetGroupIsSafe(source.rule_group))
             return fail("a Stash ruleset policy name contains an unsafe value",
                         "Stash 规则集的策略名称包含不安全值");
@@ -560,6 +592,7 @@ bool rulesetToStash(YAML::Node &base_rule,
         bool emitted_source_rule = false;
         while(getline(stream, line, delimiter))
         {
+            checkpoint.complete();
             line = trimWhitespace(line, true, true);
             if(line.empty() || line[0] == ';' || line[0] == '#' ||
                (line.size() >= 2 && line[0] == '/' && line[1] == '/'))
@@ -583,8 +616,10 @@ bool rulesetToStash(YAML::Node &base_rule,
                         "Stash 规则集不包含任何受支持的规则");
     }
 
-    for(const YAML::Node &entry : terminal_rules)
+    for(const YAML::Node &entry : terminal_rules) {
         rules.push_back(entry);
+        checkpoint.complete();
+    }
     stash_stats.final_provider_count = providers.size();
     base_rule["rules"] = rules;
     base_rule["rule-providers"] = providers;
@@ -595,6 +630,8 @@ bool rulesetToStash(YAML::Node &base_rule,
 
 void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_content_array, bool overwrite_original_rules, bool new_field_name, RuleConversionStats *stats)
 {
+    ForceMaxCooperativeBatch checkpoint(
+        effectiveSettings().resourceControlEffective == "force_max", 128);
     RuleConversionStats local_stats;
     string_array allRules;
     std::string rule_group, retrieved_rules, strLine;
@@ -609,11 +646,11 @@ void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_
 
     for(RulesetContent &x : ruleset_content_array)
     {
+        checkpoint.complete();
         if(max_allowed_rules && total_rules > max_allowed_rules)
             break;
         rule_group = x.rule_group;
-        retrieved_rules =
-            waitWithoutCpuPermit([&] { return x.rule_content.get(); });
+        retrieved_rules = materializeRulesetContent(x);
         if(retrieved_rules.empty())
         {
             writeLog(LOG_LEVEL_WARNING, "获取规则集失败或规则集为空：'" + x.rule_path + "'。");
@@ -636,6 +673,7 @@ void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_
         std::string::size_type lineSize;
         while(getline(strStrm, strLine, delimiter))
         {
+            checkpoint.complete();
             if(max_allowed_rules && total_rules > max_allowed_rules)
                 break;
             strLine = trimWhitespace(strLine, true, true); //remove whitespaces
@@ -661,6 +699,7 @@ void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_
     for(std::string &x : allRules)
     {
         rules.push_back(x);
+        checkpoint.complete();
     }
 
     base_rule[field_name] = rules;
@@ -670,6 +709,8 @@ void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_
 
 std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_content_array, bool overwrite_original_rules, bool new_field_name, RuleConversionStats *stats)
 {
+    ForceMaxCooperativeBatch checkpoint(
+        effectiveSettings().resourceControlEffective == "force_max", 128);
     RuleConversionStats local_stats;
     std::string rule_group, retrieved_rules, strLine;
     std::stringstream strStrm;
@@ -680,18 +721,20 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent>
 
     if(!overwrite_original_rules && base_rule[field_name].IsDefined())
     {
-        for(size_t i = 0; i < base_rule[field_name].size(); i++)
+        for(size_t i = 0; i < base_rule[field_name].size(); i++) {
             output_content += "  - " + safe_as<std::string>(base_rule[field_name][i]) + "\n";
+            checkpoint.complete();
+        }
     }
     base_rule.remove(field_name);
 
     for(RulesetContent &x : ruleset_content_array)
     {
+        checkpoint.complete();
         if(max_allowed_rules && total_rules > max_allowed_rules)
             break;
         rule_group = x.rule_group;
-        retrieved_rules =
-            waitWithoutCpuPermit([&] { return x.rule_content.get(); });
+        retrieved_rules = materializeRulesetContent(x);
         if(retrieved_rules.empty())
         {
             writeLog(LOG_LEVEL_WARNING, "获取规则集失败或规则集为空：'" + x.rule_path + "'。");
@@ -714,6 +757,7 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent>
         std::string::size_type lineSize;
         while(getline(strStrm, strLine, delimiter))
         {
+            checkpoint.complete();
             if(max_allowed_rules && total_rules > max_allowed_rules)
                 break;
             strLine = trimWhitespace(strLine, true, true); //remove whitespaces
@@ -743,6 +787,8 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent>
 
 void rulesetToSurge(INIReader &base_rule, std::vector<RulesetContent> &ruleset_content_array, int surge_ver, bool overwrite_original_rules, const std::string &remote_path_prefix, RuleConversionStats *stats)
 {
+    ForceMaxCooperativeBatch checkpoint(
+        effectiveSettings().resourceControlEffective == "force_max", 128);
     RuleConversionStats local_stats;
     warnNoResolveIgnoredForTarget(ruleset_content_array, "非 Clash");
     string_array allRules;
@@ -787,6 +833,7 @@ void rulesetToSurge(INIReader &base_rule, std::vector<RulesetContent> &ruleset_c
     string_view_array temp(4);
     for(RulesetContent &x : ruleset_content_array)
     {
+        checkpoint.complete();
         if(max_allowed_rules && total_rules > max_allowed_rules)
             break;
         rule_group = x.rule_group;
@@ -794,9 +841,7 @@ void rulesetToSurge(INIReader &base_rule, std::vector<RulesetContent> &ruleset_c
         rule_path_typed = x.rule_path_typed;
         if(rule_path.empty())
         {
-            strLine = waitWithoutCpuPermit(
-                          [&] { return x.rule_content.get(); })
-                          .substr(2);
+            strLine = materializeRulesetContent(x).substr(2);
             if(strLine == "MATCH")
                 strLine = "FINAL";
             if(surge_ver == -1 || surge_ver == -2)
@@ -889,8 +934,7 @@ void rulesetToSurge(INIReader &base_rule, std::vector<RulesetContent> &ruleset_c
             }
             else
                 continue;
-            retrieved_rules =
-                waitWithoutCpuPermit([&] { return x.rule_content.get(); });
+            retrieved_rules = materializeRulesetContent(x);
             if(retrieved_rules.empty())
             {
                 writeLog(LOG_LEVEL_WARNING, "获取规则集失败或规则集为空：'" + x.rule_path + "'。");
@@ -905,6 +949,7 @@ void rulesetToSurge(INIReader &base_rule, std::vector<RulesetContent> &ruleset_c
             std::string::size_type lineSize;
             while(getline(strStrm, strLine, delimiter))
             {
+                checkpoint.complete();
                 if(max_allowed_rules && total_rules > max_allowed_rules)
                     break;
                 strLine = trimWhitespace(strLine, true, true);
@@ -967,6 +1012,7 @@ void rulesetToSurge(INIReader &base_rule, std::vector<RulesetContent> &ruleset_c
     for(std::string &x : allRules)
     {
         base_rule.set("{NONAME}", x);
+        checkpoint.complete();
     }
     if(stats)
         stats->add(local_stats.rules);
@@ -1190,6 +1236,8 @@ bool preserveSingBoxBaseActionRule(const rapidjson::Value &rule) {
 
 void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent> &ruleset_content_array, bool overwrite_original_rules, RuleConversionStats *stats)
 {
+    ForceMaxCooperativeBatch checkpoint(
+        effectiveSettings().resourceControlEffective == "force_max", 128);
     RuleConversionStats local_stats;
     warnNoResolveIgnoredForTarget(ruleset_content_array, "sing-box");
     using namespace rapidjson_ext;
@@ -1213,6 +1261,7 @@ void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent
         } else {
             for (const rapidjson::Value &base_item :
                  base_rule["route"]["rules"].GetArray()) {
+                checkpoint.complete();
                 if (!preserveSingBoxBaseActionRule(base_item))
                     continue;
                 rapidjson::Value copy(rapidjson::kObjectType);
@@ -1239,11 +1288,11 @@ void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent
     std::set<std::string> geosite_codes, geoip_codes;
     for(RulesetContent &x : ruleset_content_array)
     {
+        checkpoint.complete();
         if(settings.maxAllowedRules && total_rules > settings.maxAllowedRules)
             break;
         rule_group = x.rule_group;
-        retrieved_rules =
-            waitWithoutCpuPermit([&] { return x.rule_content.get(); });
+        retrieved_rules = materializeRulesetContent(x);
         if(retrieved_rules.empty())
         {
             writeLog(LOG_LEVEL_WARNING, "获取规则集失败或规则集为空：'" + x.rule_path + "'。");
@@ -1272,6 +1321,7 @@ void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent
 
         while(getline(strStrm, strLine, delimiter))
         {
+            checkpoint.complete();
             if(settings.maxAllowedRules && total_rules > settings.maxAllowedRules)
                 break;
             strLine = trimWhitespace(strLine, true, true); //remove whitespaces
@@ -1299,17 +1349,22 @@ void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent
         base_rule["route"]["rule_set"].IsArray()) {
         rule_sets.Swap(base_rule["route"]["rule_set"]);
         for (const rapidjson::Value &rule_set : rule_sets.GetArray()) {
+            checkpoint.complete();
             if (rule_set.IsObject() && rule_set.HasMember("tag") &&
                 rule_set["tag"].IsString())
                 existing_tags.emplace(rule_set["tag"].GetString());
         }
     }
-    for (const std::string &code : geosite_codes)
+    for (const std::string &code : geosite_codes) {
         appendSingBoxRemoteRuleSet(rule_sets, existing_tags, "geosite", code,
                                    allocator);
-    for (const std::string &code : geoip_codes)
+        checkpoint.complete();
+    }
+    for (const std::string &code : geoip_codes) {
         appendSingBoxRemoteRuleSet(rule_sets, existing_tags, "geoip", code,
                                    allocator);
+        checkpoint.complete();
+    }
 
     auto finalValue = rapidjson::Value(final.c_str(), allocator);
     base_rule["route"]

@@ -8,6 +8,7 @@
 #include <yaml-cpp/yaml.h>
 
 #include "generator/config/clash_proxy.h"
+#include "utils/bounded_output.h"
 
 int main() {
   Proxy proxy;
@@ -98,6 +99,18 @@ int main() {
   assert(anchored_roundtrip["defaults"].is(anchored_roundtrip["copy"]));
   assert(anchored_dumped.find("short-id: \"00112233\"") !=
          std::string::npos);
+  const std::string bounded_anchored =
+      dumpCanonicalClashYaml(anchored, 64 * 1024);
+  YAML::Node bounded_anchored_roundtrip = YAML::Load(bounded_anchored);
+  assert(bounded_anchored_roundtrip["defaults"].is(
+      bounded_anchored_roundtrip["copy"]));
+  bool yaml_limit_rejected = false;
+  try {
+    (void)dumpCanonicalClashYaml(anchored, bounded_anchored.size() - 1);
+  } catch (const BoundedOutputExceeded &) {
+    yaml_limit_rejected = true;
+  }
+  assert(yaml_limit_rejected);
 
   Proxy marker_text = numeric_sid;
   marker_text.Remark =

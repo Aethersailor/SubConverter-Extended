@@ -14,11 +14,20 @@
 #include <yaml-cpp/parser.h>
 
 #include "parser/param_compat.h"
+#include "utils/bounded_output.h"
 
 namespace {
 
 constexpr const char *kQuotedCanonicalStringTag =
     "tag:aethersailor.github.io,2026:canonical-string";
+
+class StringViewStreambuf final : public std::streambuf {
+public:
+  explicit StringViewStreambuf(const std::string &value) {
+    char *begin = const_cast<char *>(value.data());
+    setg(begin, begin, begin + value.size());
+  }
+};
 
 bool isDigit(char value) { return value >= '0' && value <= '9'; }
 
@@ -356,14 +365,47 @@ YAML::Node buildCanonicalClashProxy(const Proxy &proxy,
 }
 
 std::string finalizeCanonicalClashYaml(const std::string &yaml) {
+  return finalizeCanonicalClashYaml(
+      std::string(yaml), std::numeric_limits<size_t>::max());
+}
+
+std::string finalizeCanonicalClashYaml(std::string yaml,
+                                       size_t max_output_bytes) {
+  if (yaml.size() > max_output_bytes)
+    throw BoundedOutputExceeded();
   const std::string marker =
       std::string("!<") + kQuotedCanonicalStringTag + ">";
   if (yaml.find(marker) == std::string::npos)
     return yaml;
 
-  std::istringstream input(yaml);
+  if (max_output_bytes == std::numeric_limits<size_t>::max()) {
+    StringViewStreambuf input_buffer(yaml);
+    std::istream input(&input_buffer);
+    YAML::Parser parser(input);
+    YAML::Emitter emitter;
+    CanonicalStringEventHandler handler(emitter);
+    if (!parser.HandleNextDocument(handler))
+      throw std::runtime_error("canonical Clash YAML document is empty");
+    if (parser)
+      throw std::runtime_error(
+          "canonical Clash YAML unexpectedly contains multiple documents");
+    if (!emitter.good())
+      throw std::runtime_error("canonical Clash YAML emission failed: " +
+                               emitter.GetLastError());
+    if (handler.convertedStrings() == 0)
+      return yaml;
+    return std::string(emitter.c_str(), emitter.size());
+  }
+
+  const size_t input_storage = yaml.capacity();
+  if (input_storage > max_output_bytes)
+    throw BoundedOutputExceeded();
+  StringViewStreambuf input_buffer(yaml);
+  std::istream input(&input_buffer);
   YAML::Parser parser(input);
-  YAML::Emitter emitter;
+  BoundedOutputSink sink((max_output_bytes - input_storage) / 2);
+  BoundedOutputStream stream(sink);
+  YAML::Emitter emitter(stream);
   CanonicalStringEventHandler handler(emitter);
   if (!parser.HandleNextDocument(handler))
     throw std::runtime_error("canonical Clash YAML document is empty");
@@ -376,9 +418,27 @@ std::string finalizeCanonicalClashYaml(const std::string &yaml) {
 
   if (handler.convertedStrings() == 0)
     return yaml;
-  return std::string(emitter.c_str(), emitter.size());
+  return sink.release();
 }
 
 std::string dumpCanonicalClashYaml(const YAML::Node &node) {
   return finalizeCanonicalClashYaml(YAML::Dump(node));
+}
+
+std::string dumpYamlBounded(const YAML::Node &node,
+                            size_t max_output_bytes) {
+  BoundedOutputSink sink(max_output_bytes);
+  BoundedOutputStream stream(sink);
+  YAML::Emitter emitter(stream);
+  emitter << node;
+  if (!emitter.good())
+    throw std::runtime_error("YAML emission failed: " +
+                             emitter.GetLastError());
+  return sink.release();
+}
+
+std::string dumpCanonicalClashYaml(const YAML::Node &node,
+                                   size_t max_output_bytes) {
+  return finalizeCanonicalClashYaml(
+      dumpYamlBounded(node, max_output_bytes), max_output_bytes);
 }

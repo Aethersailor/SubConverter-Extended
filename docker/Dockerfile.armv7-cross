@@ -28,13 +28,25 @@ COPY bridge/mieru.go ./
 COPY bridge/cmd/portable-updater/ ./cmd/portable-updater/
 
 RUN set -xe && \
+    retry_go_dependency() { \
+      attempt=1; \
+      while ! "$@"; do \
+        if [ "${attempt}" = 3 ]; then \
+          echo "Go dependency command failed after ${attempt} attempts" >&2; \
+          return 1; \
+        fi; \
+        echo "Go dependency command attempt ${attempt} failed; retrying" >&2; \
+        sleep "$((attempt * 5))"; \
+        attempt="$((attempt + 1))"; \
+      done; \
+    } && \
     if [ "${REFRESH_GO_DEPS}" = "true" ]; then \
       echo "MIHOMO_CACHE_BUST=$MIHOMO_CACHE_BUST" && \
-      go get github.com/metacubex/mihomo@${MIHOMO_REF} && \
-      go get -u all && \
+      retry_go_dependency go get github.com/metacubex/mihomo@${MIHOMO_REF} && \
+      retry_go_dependency go get -u all && \
       go mod tidy; \
     else \
-      go mod download; \
+      retry_go_dependency go mod download; \
     fi
 
 COPY scripts/ ../scripts/
@@ -94,7 +106,7 @@ RUN dpkg --add-architecture armhf && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
       git build-essential crossbuild-essential-armhf \
-      cmake ninja-build ccache pkg-config curl ca-certificates file \
+      cmake ninja-build ccache pkg-config curl ca-certificates file python3 \
       tzdata \
       libboost-dev \
       libcurl4-openssl-dev:armhf \
@@ -183,6 +195,8 @@ RUN set -xe && \
     else \
       echo "Using committed header libraries"; \
     fi
+
+RUN python3 scripts/ci/patch_cpp_httplib_force_max.py include/httplib.h
 
 RUN set -xe && \
     BUILD_ID="$(printf '%.7s' "${SHA}")" && \

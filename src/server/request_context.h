@@ -753,6 +753,21 @@ public:
     return suggested_failure_.load(std::memory_order_acquire);
   }
 
+  // A terminal response may establish a more authoritative attribution than
+  // an earlier recoverable stage hint. Use only when the final HTTP outcome
+  // is known; ordinary stages must keep using first-wins suggestFailure().
+  void setFinalFailureAttribution(
+      RequestFailureAttribution value) noexcept {
+    if (value == RequestFailureAttribution::None ||
+        value == RequestFailureAttribution::Count)
+      return;
+    suggested_failure_.store(value, std::memory_order_release);
+    if (value == RequestFailureAttribution::Capacity) {
+      capacity_failure_seen_.store(true, std::memory_order_release);
+      recordPostAdmissionCapacityFailureIfNeeded();
+    }
+  }
+
   void setCurrentStage(RequestStage stage) noexcept {
     if (stage != RequestStage::Count) {
       current_stage_.store(stage, std::memory_order_release);
@@ -855,7 +870,11 @@ public:
       terminal = RequestTerminalState::DeadlineExceeded;
       if (failure == RequestFailureAttribution::None)
         failure = RequestFailureAttribution::Client;
-    } else if (cancellation != RequestCancellationReason::None) {
+    } else if (cancellation == RequestCancellationReason::Shutdown ||
+               ((cancellation ==
+                     RequestCancellationReason::ClientDisconnected ||
+                 cancellation == RequestCancellationReason::NoConsumers) &&
+                status_code == 499)) {
       terminal = RequestTerminalState::Cancelled;
       if (failure == RequestFailureAttribution::None)
         failure = cancellation == RequestCancellationReason::Shutdown

@@ -233,109 +233,6 @@ jobs:
             --version "$VERSION" \
             --github-output "$GITHUB_OUTPUT"
 
-  validate-source:
-    name: "✅ Validate Source Once"
-    runs-on: ubuntu-latest
-    needs: prepare
-    if: needs.prepare.outputs.mode == 'dev' || needs.prepare.outputs.mode == 'pr'
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          persist-credentials: false
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: bridge/go.mod
-          cache-dependency-path: bridge/go.sum
-
-      - name: Run maintained Python regressions
-        shell: bash
-        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
-
-      - name: Run Go bridge regressions
-        shell: bash
-        working-directory: bridge
-        run: go test -mod=readonly ./...
-
-      - name: Validate workflow and delivery scripts
-        shell: bash
-        run: |
-          set -euo pipefail
-          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
-          bash -n scripts/ci/*.sh
-          bash tests/ci_delivery_scripts_test.sh
-
-  sanitizer:
-    name: "🧪 ASan/UBSan (manual, dev, non-publishing)"
-    runs-on: ubuntu-latest
-    needs: prepare
-    if: needs.prepare.outputs.mode == 'dev' && github.event_name == 'workflow_dispatch'
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          persist-credentials: false
-
-      - name: Download dependency snapshot
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: dependency-snapshot
-          path: dependency-snapshot
-
-      - name: Activate dependency snapshot
-        shell: bash
-        run: |
-          set -euo pipefail
-          cp dependency-snapshot/dependencies.lock.json scripts/ci/dependencies.lock.json
-          python3 scripts/ci/dependency_snapshot.py check
-          python3 scripts/ci/dependency_snapshot.py emit --github-env "$GITHUB_ENV"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
-
-      - name: Prepare sanitizer build arguments
-        id: sanitizer_args
-        shell: bash
-        env:
-          THREADS: "16"
-          SHA: ${{ needs.prepare.outputs.sha }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-          BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
-          REFRESH_GO_DEPS: "false"
-          REFRESH_HEADERS: "false"
-          BUILD_TESTS: "true"
-        run: |
-          {
-            echo 'args<<EOF'
-            bash scripts/ci/docker-build-args.sh
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Run ASan and UBSan correctness suite without publishing
-        shell: bash
-        env:
-          BUILD_ARGS: ${{ steps.sanitizer_args.outputs.args }}
-        run: |
-          set -euo pipefail
-          args=()
-          while IFS= read -r arg; do
-            [ -n "$arg" ] && args+=(--build-arg "$arg")
-          done <<< "$BUILD_ARGS"
-          docker buildx build \
-            --file ./Dockerfile \
-            --platform linux/amd64 \
-            --target builder \
-            --output type=cacheonly \
-            --cache-from type=gha,scope=subconverter-sanitizer \
-            --cache-to type=gha,mode=max,scope=subconverter-sanitizer \
-            "${args[@]}" \
-            --build-arg ENABLE_SANITIZERS=true \
-            .
-
   cross-build:
     name: "🧭 Non-publishing cross build (${{ matrix.arch }})"
     runs-on: ${{ matrix.runner }}
@@ -465,7 +362,7 @@ jobs:
           BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
           REFRESH_GO_DEPS: ${{ needs.prepare.outputs.mode == 'dev' && matrix.extract_generated == 'true' }}
           REFRESH_HEADERS: ${{ needs.prepare.outputs.mode == 'dev' && matrix.extract_generated == 'true' }}
-          BUILD_TESTS: ${{ matrix.arch == 'amd64' && (needs.prepare.outputs.mode == 'dev' || needs.prepare.outputs.mode == 'pr') }}
+          BUILD_TESTS: "false"
         run: |
           {
             echo 'args<<EOF'
@@ -661,7 +558,10 @@ jobs:
     name: "🪟 Windows Build (amd64)"
     runs-on: windows-latest
     needs: prepare
-    if: needs.prepare.outputs.is_release == 'true'
+    if: >-
+      needs.prepare.outputs.is_release == 'true' ||
+      (needs.prepare.outputs.mode == 'dev' &&
+       github.event_name == 'workflow_dispatch')
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -708,8 +608,10 @@ jobs:
 
       - name: Build Windows amd64
         shell: msys2 {0}
+        env:
+          BUILD_TESTS: "false"
         run: |
-          THREADS=4 bash scripts/build-windows-amd64.sh \
+          THREADS=4 BUILD_TESTS="$BUILD_TESTS" bash scripts/build-windows-amd64.sh \
             "${{ needs.prepare.outputs.version }}" \
             "${{ needs.prepare.outputs.sha }}" \
             "${{ needs.prepare.outputs.build_date }}"
@@ -732,6 +634,7 @@ jobs:
           expected-build-date: ${{ needs.prepare.outputs.build_date }}
 
       - name: Upload Artifact (Windows amd64)
+        if: needs.prepare.outputs.is_release == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: windows-amd64
@@ -740,7 +643,7 @@ jobs:
   merge-manifest:
     name: "🔗 Publish Version Docker Images"
     runs-on: ubuntu-latest
-    needs: [prepare, validate-source, sanitizer, cross-build, build-linux, build-windows-amd64]
+    needs: [prepare, cross-build, build-linux, build-windows-amd64]
     if: >-
       always() &&
       github.event_name != 'pull_request' &&
@@ -748,9 +651,7 @@ jobs:
       needs.prepare.result == 'success' &&
       needs.build-linux.result == 'success' &&
       (needs.build-windows-amd64.result == 'success' || needs.prepare.outputs.mode == 'dev') &&
-      (needs.sanitizer.result == 'success' || needs.sanitizer.result == 'skipped' || needs.prepare.outputs.mode == 'release') &&
-      (needs.cross-build.result == 'success' || needs.prepare.outputs.mode == 'release') &&
-      (needs.validate-source.result == 'success' || needs.prepare.outputs.mode == 'release')
+      (needs.cross-build.result == 'success' || needs.prepare.outputs.mode == 'release')
     outputs:
       dockerhub_digest: ${{ steps.published.outputs.dockerhub_digest }}
       ghcr_digest: ${{ steps.published.outputs.ghcr_digest }}

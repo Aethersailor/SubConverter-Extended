@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <map>
 #include <sstream>
+#include <streambuf>
+#include <stdexcept>
 #include <filesystem>
 #include <unordered_set>
 #include <inja.hpp>
@@ -29,6 +31,14 @@ extern string_array ClashRuleTypes;
 static thread_local FetchContext current_template_fetch_context =
     FetchContext::TrustedConfig;
 static thread_local bool *current_template_fetch_failed = nullptr;
+static thread_local const string_map *current_template_resolved_fetches =
+    nullptr;
+static thread_local string_array *current_template_missing_fetches = nullptr;
+
+struct TemplateFetchSuspended final
+{
+};
+
 static constexpr std::size_t rule_provider_file_name_max_length = 64;
 static constexpr std::size_t rule_provider_url_hash_hex_length = 16;
 
@@ -289,6 +299,22 @@ std::string parseHostname(inja::Arguments &args)
 std::string template_webGet(inja::Arguments &args)
 {
     std::string data = args.at(0)->get<std::string>();
+    if(current_template_resolved_fetches)
+    {
+        const auto found = current_template_resolved_fetches->find(data);
+        if(found != current_template_resolved_fetches->end())
+        {
+            if(found->second.empty() && current_template_fetch_failed)
+                *current_template_fetch_failed = true;
+            return found->second;
+        }
+        if(current_template_missing_fetches &&
+           std::find(current_template_missing_fetches->begin(),
+                     current_template_missing_fetches->end(), data) ==
+               current_template_missing_fetches->end())
+            current_template_missing_fetches->push_back(data);
+        throw TemplateFetchSuspended{};
+    }
     const Settings &settings = effectiveSettings();
     ProxyPolicy proxy = parseProxy(settings.proxyConfig, settings.proxyBypass);
     writeLog(LOG_LEVEL_INFO, "模板调用 fetch：" + summarizeUrlForLog(data) + "。");
@@ -301,9 +327,39 @@ std::string template_webGet(inja::Arguments &args)
 }
 #endif // NO_WEBGET
 
+int render_template_resolved(
+    const std::string &content, const template_args &vars,
+    std::string &output, const std::string &include_scope,
+    FetchContext context, const string_map &resolved_fetches,
+    string_array &missing_fetches, bool *fetch_failed,
+    uint64_t max_output_bytes)
+{
+    struct ResolvedFetchGuard
+    {
+        const string_map *previous_resolved;
+        string_array *previous_missing;
+        ResolvedFetchGuard(const string_map &resolved,
+                           string_array &missing)
+            : previous_resolved(current_template_resolved_fetches),
+              previous_missing(current_template_missing_fetches)
+        {
+            current_template_resolved_fetches = &resolved;
+            current_template_missing_fetches = &missing;
+        }
+        ~ResolvedFetchGuard()
+        {
+            current_template_resolved_fetches = previous_resolved;
+            current_template_missing_fetches = previous_missing;
+        }
+    } guard(resolved_fetches, missing_fetches);
+    return render_template(content, vars, output, include_scope, context,
+                           fetch_failed, max_output_bytes);
+}
+
 int render_template(const std::string &content, const template_args &vars,
-                    std::string &output, const std::string &include_scope,
-                    FetchContext context, bool *fetch_failed)
+                     std::string &output, const std::string &include_scope,
+                     FetchContext context, bool *fetch_failed,
+                     uint64_t max_output_bytes)
 {
     RequestStageTimer template_timer(RequestStage::Template);
     struct TemplateFetchContextGuard
@@ -353,7 +409,8 @@ int render_template(const std::string &content, const template_args &vars,
         }
         all_args += "&";
     }
-    all_args.erase(all_args.size() - 1);
+    if(!all_args.empty())
+        all_args.pop_back();
     parse_json_pointer(data["request"], "_args", all_args);
     for(auto &x : vars.local_vars)
         parse_json_pointer(data["local"], x.first, x.second);
@@ -497,10 +554,66 @@ int render_template(const std::string &content, const template_args &vars,
 
     try
     {
-        std::stringstream out;
+        class BoundedStringBuffer final : public std::streambuf
+        {
+        public:
+            explicit BoundedStringBuffer(uint64_t limit) : limit_(limit) {}
+            std::string release() { return std::move(output_); }
+            bool exceeded() const noexcept { return exceeded_; }
+
+        protected:
+            std::streamsize xsputn(const char *data,
+                                   std::streamsize count) override
+            {
+                if(count < 0)
+                    throw std::length_error("negative template output");
+                const uint64_t bytes = static_cast<uint64_t>(count);
+                if(limit_ != 0 &&
+                   (bytes > limit_ || output_.size() > limit_ - bytes))
+                {
+                    exceeded_ = true;
+                    return count;
+                }
+                output_.append(data, static_cast<size_t>(count));
+                return count;
+            }
+
+            int overflow(int value) override
+            {
+                if(value == traits_type::eof())
+                    return traits_type::not_eof(value);
+                const char byte = static_cast<char>(value);
+                xsputn(&byte, 1);
+                return value;
+            }
+
+        private:
+            uint64_t limit_ = 0;
+            std::string output_;
+            bool exceeded_ = false;
+        } buffer(max_output_bytes);
+        std::ostream out(&buffer);
         env.render_to(out, env.parse(content), data);
-        output = out.str();
+        if(buffer.exceeded())
+        {
+            output.clear();
+            return -3;
+        }
+        output = buffer.release();
         return 0;
+    }
+    catch (const TemplateFetchSuspended &)
+    {
+        output.clear();
+        return -4;
+    }
+    catch (const std::length_error &e)
+    {
+        output.clear();
+        writeLog(LOG_LEVEL_WARNING,
+                 "TEMPLATE_OUTPUT_LIMIT_EXCEEDED detail=" +
+                     summarizeSensitiveTextForLog(e.what()));
+        return -3;
     }
     catch (std::exception &e)
     {
@@ -590,9 +703,7 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
         rule_path_typed = x.rule_path_typed;
         if(rule_path.empty())
         {
-            strLine = waitWithoutCpuPermit(
-                          [&] { return x.rule_content.get(); })
-                          .substr(2);
+            strLine = materializeRulesetContent(x).substr(2);
             if(script)
             {
                 if(startsWith(strLine, "MATCH") || startsWith(strLine, "FINAL"))
@@ -685,8 +796,7 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                     continue;
             }
 
-            retrieved_rules =
-                waitWithoutCpuPermit([&] { return x.rule_content.get(); });
+            retrieved_rules = materializeRulesetContent(x);
             if(retrieved_rules.empty())
             {
                 writeLog(LOG_LEVEL_WARNING, "获取规则集失败或规则集为空：" +

@@ -1,6 +1,8 @@
 #include <cerrno>
+#include <climits>
 #include <csignal>
 #include <cstdio>
+#include <cstdint>
 #include <fcntl.h>
 #include <iostream>
 #include <rapidjson/stringbuffer.h>
@@ -23,6 +25,8 @@
 #include "handler/settings_view.h"
 #include "handler/statistics.h"
 #include "handler/version_page.h"
+#include "handler/webget.h"
+#include "runtime/runtime_coordinator.h"
 #include "script/cron.h"
 #include "server/socket.h"
 #include "server/webserver.h"
@@ -187,24 +191,23 @@ void cron_tick_caller() {
     statistics::tick();
 }
 
+void begin_runtime_shutdown();
+void drain_runtime_shutdown();
+
 void shutdown_runtime() {
-  shutdownResourceControlRuntime();
-  shutdownConversionScheduler();
-  shutdownRulesetExecutor();
+  begin_runtime_shutdown();
+  drain_runtime_shutdown();
   statistics::shutdown();
   shutdownGlobalCurlHandlePool();
+  completeRuntimeCoordinatorShutdown();
 }
 
 void begin_runtime_shutdown() {
-  cancelAllActiveRequests(RequestCancellationReason::Shutdown);
-  shutdownResourceControlRuntime();
-  requestConversionSchedulerShutdown();
-  requestRulesetExecutorShutdown();
+  requestRuntimeCoordinatorShutdown();
 }
 
 void drain_runtime_shutdown() {
-  shutdownRulesetExecutor();
-  shutdownConversionScheduler();
+  (void)joinRuntimeCoordinator();
 }
 
 std::string publishRuntimeState() {
@@ -322,11 +325,15 @@ int main(int argc, char *argv[]) {
   // drains accepted requests before returning, so only then may the executor
   // cancel unobserved work and release its curl leases before the pool stops.
   defer(shutdown_runtime();)
-  startResourceControlRuntime();
+  if (!prepareRuntimeCoordinator())
+    return 1;
+  if (!commitRuntimeCoordinator())
+    return 1;
   statistics::initialize();
   // vfs::vfs_read("vfs.ini");
   if (!global.updateRulesetOnRequest)
     refreshRulesets(global.customRulesets, global.rulesetsContent);
+  startResourceControlRuntime();
 
   auto normalize_managed_prefix = [](const std::string &raw_value) {
     std::string value = trimWhitespace(raw_value, true, true);
@@ -369,12 +376,10 @@ int main(int argc, char *argv[]) {
   if (global.statisticsEnabled) {
     webServer.append_response(
         "GET", "/dashboard", "text/html; charset=utf-8",
-        global.dashboardAuthEnabled ? dashboard_auth::page
-                                    : dashboard_page::page);
+        dashboard_auth::page);
     webServer.append_response(
         "GET", "/dashboard/data", "application/json; charset=utf-8",
-        global.dashboardAuthEnabled ? dashboard_auth::data
-                                    : statistics::dashboardData);
+        dashboard_auth::data);
   }
 
   webServer.append_response(
@@ -429,11 +434,43 @@ int main(int argc, char *argv[]) {
              "security.profile=public。");
   }
   logSecurityPosture();
-  listener_args args = {global.listenAddress,   global.listenPort,
-                        global.maxPendingConns, global.maxConcurThreads,
-                        cron_tick_caller,       200,
-                        static_cast<uint32_t>(global.requestDeadlineMs),
-                        begin_runtime_shutdown, drain_runtime_shutdown};
+  int listen_backlog = global.maxPendingConns;
+  std::size_t request_body_limit = 100 * 1024 * 1024;
+  const ResourceControlSnapshot listener_resources =
+      resourceControlSnapshot();
+  if (listener_resources.effective_mode == "force_max" &&
+      listener_resources.calculated_force_max_budget.valid) {
+    listen_backlog = static_cast<int>(std::min<uint64_t>(
+        listener_resources.calculated_force_max_budget
+            .transport_queue_entries,
+        INT_MAX));
+    const ForceMaxBudget &budget =
+        listener_resources.calculated_force_max_budget;
+    request_body_limit = forceMaxRequestBodyLimit(
+        budget.transport_active_bytes,
+        1,
+        request_body_limit);
+  }
+  listener_args args = {
+      global.listenAddress,
+      global.listenPort,
+      global.maxPendingConns,
+      listen_backlog,
+      global.maxConcurThreads,
+      cron_tick_caller,
+      200,
+      static_cast<uint32_t>(global.requestDeadlineMs),
+      begin_runtime_shutdown,
+      drain_runtime_shutdown,
+      request_body_limit,
+      refreshResourceControlThreadBaseline};
+  if (listener_resources.effective_mode == "force_max" &&
+      listener_resources.calculated_force_max_budget.valid) {
+    args.accepted_conn = static_cast<int>(std::min<uint64_t>(
+        listener_resources.calculated_force_max_budget.accepted_connections,
+        INT_MAX));
+    args.wait_on_connection_capacity = true;
+  }
   // std::cout<<"Serving HTTP @
   // http://"<<listen_address<<":"<<listen_port<<std::endl;
   writeLog(LOG_LEVEL_INFO,

@@ -6,6 +6,7 @@
 #include <future>
 #include <cstdint>
 #include <cstddef>
+#include <memory>
 
 #include <yaml-cpp/yaml.h>
 #include <rapidjson/document.h>
@@ -35,6 +36,9 @@ struct RulesetContent
     int update_interval = 0;
     RulesetOptions options;
     RulesetDelivery delivery = RulesetDelivery::ServerFetched;
+    // force_max resolves every dependency before generation. Legacy callers
+    // keep rule_content so compat/adaptive retain their established path.
+    std::shared_ptr<const std::string> resolved_content;
 };
 
 struct RuleConversionStats
@@ -59,8 +63,12 @@ struct StashRuleConversionStats
 };
 
 std::string convertRuleset(const std::string &content, int type);
+std::string materializeRulesetContent(const RulesetContent &content);
 size_t rulesetConversionCacheMaxEntries();
 size_t rulesetConversionCacheMaxBytes();
+void configureRulesetConversionCache(size_t max_entries,
+                                     size_t max_bytes);
+void setRulesetConversionCacheGrowthFrozen(bool frozen) noexcept;
 std::string appendClashRuleTarget(const std::string &rule, const std::string &target, bool no_resolve_only = false);
 void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_content_array, bool overwrite_original_rules, bool new_field_name, RuleConversionStats *stats = nullptr);
 std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_content_array, bool overwrite_original_rules, bool new_field_name, RuleConversionStats *stats = nullptr);

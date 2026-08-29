@@ -559,7 +559,92 @@ static bool readImportLocalPath(const std::string &path, bool scope_limit,
   return true;
 }
 
+namespace {
+
+struct ResolvedImportView {
+  const string_map *resolved = nullptr;
+  string_array *missing = nullptr;
+  std::vector<UnresolvedImportSource> *flow_missing = nullptr;
+  bool active = false;
+};
+
+thread_local ResolvedImportView resolved_import_view;
+
+bool readImportSource(const std::string &path, bool scope_limit,
+                      FetchContext context, const ProxyPolicy &proxy,
+                      unsigned int cache_ttl, std::string &content) {
+  if (!resolved_import_view.active) {
+    if (readImportLocalPath(path, scope_limit, context, content))
+      return true;
+    if (!isLink(path)) {
+      writeLog(LOG_LEVEL_ERROR, "文件不存在或不是有效 URL：" + path);
+      return false;
+    }
+    content = webGet(path, proxy, cache_ttl, nullptr, nullptr, context);
+    return !content.empty();
+  }
+
+  if (resolved_import_view.resolved) {
+    const std::string key = resolved_import_view.flow_missing
+                                ? resolvedImportKey(path, context)
+                                : path;
+    const auto found = resolved_import_view.resolved->find(key);
+    if (found != resolved_import_view.resolved->end()) {
+      content = found->second;
+      return !content.empty();
+    }
+  }
+  if (resolved_import_view.flow_missing) {
+    auto &missing = *resolved_import_view.flow_missing;
+    if (std::find_if(missing.begin(), missing.end(),
+                     [&](const UnresolvedImportSource &source) {
+                       return source.path == path &&
+                              source.context == context;
+                     }) == missing.end())
+      missing.push_back({path, context});
+    return false;
+  }
+  if (resolved_import_view.missing &&
+      std::find(resolved_import_view.missing->begin(),
+                resolved_import_view.missing->end(), path) ==
+          resolved_import_view.missing->end())
+    resolved_import_view.missing->push_back(path);
+  return false;
+}
+
+} // namespace
+
+ScopedResolvedImportView::ScopedResolvedImportView(
+    const string_map *resolved, string_array *missing) noexcept
+    : previous_resolved_(resolved_import_view.resolved),
+      previous_missing_(resolved_import_view.missing),
+      previous_flow_missing_(resolved_import_view.flow_missing),
+      previous_active_(resolved_import_view.active) {
+  resolved_import_view = {resolved, missing, nullptr, true};
+}
+
+ScopedResolvedImportView::ScopedResolvedImportView(
+    const string_map *resolved,
+    std::vector<UnresolvedImportSource> *missing) noexcept
+    : previous_resolved_(resolved_import_view.resolved),
+      previous_missing_(resolved_import_view.missing),
+      previous_flow_missing_(resolved_import_view.flow_missing),
+      previous_active_(resolved_import_view.active) {
+  resolved_import_view = {resolved, nullptr, missing, true};
+}
+
+ScopedResolvedImportView::~ScopedResolvedImportView() {
+  resolved_import_view = {previous_resolved_, previous_missing_,
+                          previous_flow_missing_, previous_active_};
+}
+
+std::string resolvedImportKey(const std::string &path,
+                              FetchContext context) {
+  return std::to_string(static_cast<unsigned>(context)) + ":" + path;
+}
+
 int importItems(string_array &target, bool scope_limit, FetchContext context) {
+  static thread_local unsigned int flow_import_depth = 0;
   string_array result;
   std::stringstream ss;
   std::string path, content, strLine;
@@ -576,13 +661,8 @@ int importItems(string_array &target, bool scope_limit, FetchContext context) {
     const Settings &settings = effectiveSettings();
     ProxyPolicy proxy = parseProxy(settings.proxyConfig, settings.proxyBypass);
 
-    if (readImportLocalPath(path, scope_limit, context, content)) {
-      // Local content was loaded through the effective scoped/trusted policy.
-    } else if (isLink(path))
-      content = webGet(path, proxy, settings.cacheConfig, nullptr, nullptr,
-                       context);
-    else
-      writeLog(LOG_LEVEL_ERROR, "文件不存在或不是有效 URL：" + path);
+    (void)readImportSource(path, scope_limit, context, proxy,
+                           settings.cacheConfig, content);
     if (content.empty())
       return -1;
 
@@ -603,6 +683,18 @@ int importItems(string_array &target, bool scope_limit, FetchContext context) {
     ss.clear();
   }
   target.swap(result);
+  if (resolved_import_view.flow_missing &&
+      std::any_of(target.begin(), target.end(), [](const std::string &item) {
+        return item.find("!!import:") != std::string::npos;
+      })) {
+    if (flow_import_depth >= 8)
+      return -1;
+    ++flow_import_depth;
+    const int nested = importItems(target, scope_limit, context);
+    --flow_import_depth;
+    if (nested != 0)
+      return nested;
+  }
   writeLog(LOG_LEVEL_VERBOSE,
            "已导入 " + std::to_string(itemCount) + " 个项目。");
   return 0;
@@ -632,13 +724,8 @@ int importItems(std::vector<toml::value> &root, const std::string &import_key,
       const std::string &path = toml::get<std::string>(table.at("import"));
       writeLog(LOG_LEVEL_VERBOSE, "正在导入项目：" + path);
       content.clear();
-      if (readImportLocalPath(path, scope_limit, context, content)) {
-        // Local content was loaded through the effective scoped/trusted policy.
-      } else if (isLink(path))
-        content = webGet(path, proxy, settings.cacheConfig, nullptr, nullptr,
-                         context);
-      else
-        writeLog(LOG_LEVEL_ERROR, "文件不存在或不是有效 URL：" + path);
+      (void)readImportSource(path, scope_limit, context, proxy,
+                             settings.cacheConfig, content);
       if (content.empty()) {
         failed = true;
       } else {
@@ -823,7 +910,9 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
               RULESET_SURGE,
               makeReadyStringFuture(rule_url.substr(pos)),
               0,
-              x.Options};
+              x.Options,
+              RulesetDelivery::ServerFetched,
+              {}};
     } else {
       ruleset_type type = RULESET_SURGE;
       rule_url_typed = rule_url;
@@ -871,7 +960,8 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
               x.Interval,
               x.Options,
               native_stash_provider ? RulesetDelivery::NativeStashProvider
-                                    : RulesetDelivery::ServerFetched};
+                                    : RulesetDelivery::ServerFetched,
+              {}};
     }
     ruleset_content_array.emplace_back(std::move(rc));
     ++source_index;
@@ -2336,22 +2426,34 @@ bool isExternalConfigCacheableContent(const std::string &content) {
 }
 
 size_t externalConfigCacheMaxEntries() {
-  return kExternalConfigCacheEntries;
+  return external_config_cache.maxEntries();
 }
 
-size_t externalConfigCacheMaxBytes() { return kExternalConfigCacheBytes; }
+size_t externalConfigCacheMaxBytes() {
+  return external_config_cache.maxBytes();
+}
 
-ExternalConfigLoadResult loadExternalConfig(const std::string &path,
-                                            ExternalConfig &ext,
-                                            FetchContext context) {
+void configureExternalConfigCache(size_t max_entries, size_t max_bytes) {
+  external_config_cache.setLimits(max_entries, max_bytes);
+}
+
+void setExternalConfigCacheGrowthFrozen(bool frozen) noexcept {
+  try {
+    external_config_cache.setGrowthFrozen(frozen);
+  } catch (...) {
+  }
+}
+
+ExternalConfigLoadResult loadExternalConfigFromContent(
+    const std::string &path, const std::string &config,
+    ExternalConfig &ext, FetchContext context,
+    const string_map *resolved_imports,
+    string_array *missing_imports) {
   template_args empty_tpl_args;
   template_args *request_tpl_args =
       ext.tpl_args ? ext.tpl_args : &empty_tpl_args;
   const Settings &settings = effectiveSettings();
   std::string base_content;
-  ProxyPolicy proxy = parseProxy(settings.proxyConfig, settings.proxyBypass);
-  std::string config =
-      fetchFile(path, proxy, settings.cacheConfig, true, context);
   if (config.empty())
     return {ExternalConfigLoadStatus::FetchFailed};
 
@@ -2362,8 +2464,29 @@ ExternalConfigLoadResult loadExternalConfig(const std::string &path,
       template_fetch_failed)
     return {ExternalConfigLoadStatus::RenderFailed};
 
+  return loadExternalConfigFromRenderedContent(
+      path, base_content, ext, context, resolved_imports,
+      missing_imports, isExternalConfigCacheableContent(config));
+}
+
+ExternalConfigLoadResult loadExternalConfigFromRenderedContent(
+    const std::string &path, const std::string &base_content,
+    ExternalConfig &ext, FetchContext context,
+    const string_map *resolved_imports,
+    string_array *missing_imports,
+    bool source_cacheable) {
+  template_args empty_tpl_args;
+  template_args *request_tpl_args =
+      ext.tpl_args ? ext.tpl_args : &empty_tpl_args;
+  const Settings &settings = effectiveSettings();
+  if (base_content.empty())
+    return {ExternalConfigLoadStatus::FetchFailed};
+
+  ScopedResolvedImportView import_view(resolved_imports,
+                                       missing_imports);
+
   bool cache_enabled =
-      settings.cacheConfig > 0 && isExternalConfigCacheableContent(config) &&
+      settings.cacheConfig > 0 && source_cacheable &&
       isExternalConfigCacheableContent(base_content);
   const std::string key = buildExternalConfigCacheKey(
       base_content, context, settings.configGeneration);
@@ -2404,4 +2527,14 @@ ExternalConfigLoadResult loadExternalConfig(const std::string &path,
       destination_tpl_args->local_vars[name] = value;
   }
   return {ExternalConfigLoadStatus::Success};
+}
+
+ExternalConfigLoadResult loadExternalConfig(const std::string &path,
+                                            ExternalConfig &ext,
+                                            FetchContext context) {
+  const Settings &settings = effectiveSettings();
+  ProxyPolicy proxy = parseProxy(settings.proxyConfig, settings.proxyBypass);
+  std::string config =
+      fetchFile(path, proxy, settings.cacheConfig, true, context);
+  return loadExternalConfigFromContent(path, config, ext, context);
 }

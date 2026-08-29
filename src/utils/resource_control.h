@@ -10,6 +10,9 @@
 #include <string>
 #include <string_view>
 
+#include "utils/force_max_budget.h"
+#include "utils/resource_probe.h"
+
 struct Settings;
 
 enum class ResourceControlMode {
@@ -97,6 +100,53 @@ inline double computeEffectiveCpu(double affinity, double cpuset,
   if (result <= 0.0 || !std::isfinite(result))
     result = fallback > 0.0 && std::isfinite(fallback) ? fallback : 1.0;
   return std::max(1.0, result);
+}
+
+inline uint64_t computeWindowsSchedulableCpuCount(
+    uint64_t primary_affinity, uint64_t primary_group_active,
+    uint64_t system_active, bool default_spans_groups,
+    bool process_group_probe_complete, bool process_spans_multiple_groups,
+    bool cpu_set_probe_complete, uint64_t cpu_set_limit,
+    bool job_group_probe_complete, uint64_t job_group_limit) noexcept {
+  if (system_active == 0)
+    system_active = std::max(primary_group_active, primary_affinity);
+  if (primary_affinity == 0)
+    return 0;
+  // A restrictive process affinity is a hard boundary and takes precedence
+  // over a conflicting CPU Set selection.
+  const bool restrictive_primary =
+      primary_group_active != 0 && primary_affinity < primary_group_active;
+  uint64_t result = primary_affinity;
+  if (!restrictive_primary && system_active > primary_group_active &&
+      default_spans_groups && process_group_probe_complete &&
+      process_spans_multiple_groups)
+    result = system_active;
+  // Unknown Job or CPU Set state must never be interpreted as unlimited.
+  if (!process_group_probe_complete || !job_group_probe_complete ||
+      !cpu_set_probe_complete)
+    return std::min(result, primary_affinity);
+  if (job_group_limit != 0)
+    result = std::min(result, job_group_limit);
+  if (cpu_set_limit != 0)
+    result = std::min(result, cpu_set_limit);
+  return result;
+}
+
+inline bool forceMaxStartupBudgetReady(bool hardware_complete,
+                                       bool budget_valid) noexcept {
+  return hardware_complete && budget_valid;
+}
+
+inline uint64_t computeWindowsCpuRateMillis(uint64_t system_active,
+                                            uint32_t rate) noexcept {
+  if (system_active == 0 || rate == 0 || rate > 10000)
+    return 0;
+  const long double value = static_cast<long double>(system_active) *
+                            static_cast<long double>(rate) * 1000.0L /
+                            10000.0L;
+  if (value >= static_cast<long double>(UINT64_MAX))
+    return UINT64_MAX;
+  return static_cast<uint64_t>(std::llround(value));
 }
 
 struct ResourcePermitBudget {
@@ -254,6 +304,114 @@ inline ResourceGovernorDecision governorStep(
   return decision;
 }
 
+enum class PressureGuardPhase : uint8_t {
+  Full,
+  Guarded,
+  RecoveryConfirm,
+};
+
+struct PressureGuardState {
+  PressureGuardPhase phase = PressureGuardPhase::Full;
+  uint32_t clear_samples = 0;
+  uint64_t activations = 0;
+  uint64_t recoveries = 0;
+  uint64_t repeated_activations = 0;
+};
+
+struct PressureGuardInput {
+  bool hard_danger = false;
+  bool telemetry_valid = true;
+  const char *reason = "none";
+};
+
+inline bool forceMaxPidsHeadroomExhausted(uint64_t maximum,
+                                          uint64_t current,
+                                          uint64_t reserved) noexcept {
+  if (maximum == 0 || current == 0 || reserved == 0)
+    return false;
+  const uint64_t remaining = maximum > current ? maximum - current : 0;
+  return remaining < reserved;
+}
+
+inline uint64_t forceMaxRequiredPidHeadroom(
+    uint64_t transient_reserve, uint64_t resolver_budget,
+    uint64_t active_resolver_transfers) noexcept {
+  const uint64_t materialized =
+      std::min(resolver_budget, active_resolver_transfers);
+  const uint64_t unmaterialized = resolver_budget - materialized;
+  return transient_reserve > UINT64_MAX - unmaterialized
+             ? UINT64_MAX
+             : transient_reserve + unmaterialized;
+}
+
+struct PressureGuardDecision {
+  bool guarded = false;
+  bool limits_changed = false;
+  const char *state = "max_ready";
+  const char *reason = "hardware_limit";
+};
+
+inline PressureGuardDecision pressureGuardStep(
+    PressureGuardState &state,
+    const PressureGuardInput &input) noexcept {
+  constexpr uint32_t kRecoveryConfirmSamples = 3;
+  PressureGuardDecision decision;
+  if (input.hard_danger) {
+    if (state.phase != PressureGuardPhase::Guarded) {
+      if (state.activations != 0)
+        ++state.repeated_activations;
+      ++state.activations;
+      decision.limits_changed = true;
+    }
+    state.phase = PressureGuardPhase::Guarded;
+    state.clear_samples = 0;
+    decision.guarded = true;
+    decision.state = "pressure_guarded";
+    decision.reason = input.reason ? input.reason : "hard_resource_danger";
+    return decision;
+  }
+
+  if (!input.telemetry_valid) {
+    decision.limits_changed =
+        state.phase != PressureGuardPhase::Full;
+    if (decision.limits_changed)
+      ++state.recoveries;
+    state.phase = PressureGuardPhase::Full;
+    state.clear_samples = 0;
+    decision.reason = "telemetry_unavailable_full";
+    return decision;
+  }
+
+  if (state.phase == PressureGuardPhase::Guarded) {
+    state.phase = PressureGuardPhase::RecoveryConfirm;
+    state.clear_samples = 1;
+    decision.guarded = true;
+    decision.state = "recovery_confirm";
+    decision.reason = "hard_pressure_clear_confirm";
+    return decision;
+  }
+  if (state.phase == PressureGuardPhase::RecoveryConfirm) {
+    if (++state.clear_samples >= kRecoveryConfirmSamples) {
+      state.phase = PressureGuardPhase::Full;
+      state.clear_samples = 0;
+      ++state.recoveries;
+      decision.limits_changed = true;
+      decision.state = "max_ready";
+      decision.reason = "hard_pressure_recovered";
+      return decision;
+    }
+    decision.guarded = true;
+    decision.state = "recovery_confirm";
+    decision.reason = "hard_pressure_clear_confirm";
+    return decision;
+  }
+
+  decision.reason = input.telemetry_valid
+                        ? "hardware_limit"
+                        : "telemetry_unavailable_full";
+  return decision;
+}
+
 struct ResourceControlSnapshot {
   std::string mode = "compat";
   std::string effective_mode = "compat";
@@ -277,6 +435,12 @@ struct ResourceControlSnapshot {
   uint64_t nofile_hard = 0;
   uint64_t pids_current = 0;
   uint64_t pids_max = 0;
+  uint64_t self_threads = 0;
+  bool resolver_may_use_threads = true;
+  uint64_t http_handler_threads_per_compute = 4;
+  uint64_t http_handler_control_reserve = 0;
+  uint64_t http_handler_stack_bytes = 0;
+  bool http_handlers_own_inbound = false;
   uint64_t open_fds = 0;
   uint64_t memory_peak_bytes = 0;
   uint64_t memory_events_high = 0;
@@ -315,7 +479,24 @@ struct ResourceControlSnapshot {
   bool curve_valid = false;
   bool permits_applied = false;
   bool pressure_fallback = false;
+  bool pressure_guarded = false;
+  uint64_t pressure_guard_activations = 0;
+  uint64_t pressure_guard_recoveries = 0;
+  uint64_t pressure_guard_repeated_activations = 0;
+  ResourceEnvelope envelope;
+  ForceMaxBudget calculated_force_max_budget;
 };
+
+struct ForceMaxCacheGuardPolicySnapshot {
+  bool freeze_net_growth = false;
+  uint64_t generation = 0;
+};
+
+// Cache implementations use this force_max-only policy to reject net-new
+// resident bytes while Guarded. Existing entries remain available and are not
+// evicted merely because the guard changed state.
+ForceMaxCacheGuardPolicySnapshot
+forceMaxCacheGuardPolicySnapshot() noexcept;
 
 inline bool hardwarePinMatches(
     const ResourceControlSnapshot &snapshot,
@@ -327,7 +508,9 @@ inline bool hardwarePinMatches(
 
 void configureResourceControl(Settings &settings);
 ResourceControlSnapshot resourceControlSnapshot();
+ResourceEnvelope probeCurrentResourceEnvelope() noexcept;
 void startResourceControlRuntime();
+void refreshResourceControlThreadBaseline() noexcept;
 void shutdownResourceControlRuntime() noexcept;
 
 #endif // RESOURCE_CONTROL_H_INCLUDED

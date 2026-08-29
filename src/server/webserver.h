@@ -1,6 +1,7 @@
 #ifndef WEBSERVER_H_INCLUDED
 #define WEBSERVER_H_INCLUDED
 
+#include <cstddef>
 #include <string>
 #include <utility>
 #include <vector>
@@ -54,6 +55,14 @@ struct RequestAdmissionSnapshot
     uint64_t rejected = 0;
     uint64_t max_entries = 0;
     uint64_t max_bytes = 0;
+    std::string source = "legacy_try";
+    uint64_t waiting_entries = 0;
+    uint64_t waiting_bytes = 0;
+    uint64_t cancelled = 0;
+    uint64_t deadline = 0;
+    uint64_t shutdown = 0;
+    uint64_t max_wait_entries = 0;
+    uint64_t max_wait_bytes = 0;
 };
 
 RequestAdmissionSnapshot requestAdmissionSnapshot() noexcept;
@@ -75,12 +84,17 @@ struct listener_args
     std::string listen_address;
     int port;
     int max_conn;
+    int listen_backlog;
     int max_workers;
     void (*looper_callback)() = nullptr;
     uint32_t looper_interval = 200;
     uint32_t request_deadline_ms = 15000;
     void (*shutdown_callback)() = nullptr;
     void (*drain_callback)() = nullptr;
+    std::size_t request_body_limit = 100 * 1024 * 1024;
+    void (*runtime_ready_callback)() = nullptr;
+    int accepted_conn = 0;
+    bool wait_on_connection_capacity = false;
 };
 
 struct RequestCancellationResponse
@@ -102,6 +116,32 @@ struct responseRoute
     response_callback rc {};
     async_response_callback async_rc;
 };
+
+struct HttplibExecutionBudget
+{
+    std::size_t base_threads = 1;
+    std::size_t max_threads = 1;
+    std::size_t max_queued_requests = 1;
+};
+
+struct HttplibExecutionSnapshot
+{
+    bool ready = false;
+    uint64_t base_threads = 0;
+    uint64_t max_threads = 0;
+    uint64_t max_queued_requests = 0;
+    uint64_t normal_active_handlers = 0;
+    uint64_t normal_wait_handlers = 0;
+    uint64_t control_handlers = 0;
+};
+
+HttplibExecutionBudget forceMaxHttplibExecutionBudget(
+    uint64_t base_threads, uint64_t max_threads,
+    uint64_t inbound_connections) noexcept;
+HttplibExecutionSnapshot httplibExecutionSnapshot() noexcept;
+std::size_t forceMaxRequestBodyLimit(uint64_t transport_active_bytes,
+                                     uint64_t concurrent_readers,
+                                     std::size_t compatibility_limit) noexcept;
 
 const responseRoute *findResponseRoute(
     const std::vector<responseRoute> &routes, const std::string &method,

@@ -2,6 +2,8 @@
 #define CLASH_PROXY_H_INCLUDED
 
 #include <string>
+#include <cstddef>
+#include <limits>
 
 #include <yaml-cpp/yaml.h>
 
@@ -24,9 +26,19 @@ YAML::Node buildCanonicalClashProxy(const Proxy &proxy,
 // canonical JSON. This is the only supported dump path for YAML that may
 // contain nodes returned by buildCanonicalClashProxy().
 std::string dumpCanonicalClashYaml(const YAML::Node &node);
+std::string dumpCanonicalClashYaml(
+    const YAML::Node &node, std::size_t max_output_bytes);
+
+// yaml-cpp's default YAML::Dump owns an unbounded internal std::string. This
+// variant emits directly into a caller-sized stream buffer.
+std::string dumpYamlBounded(
+    const YAML::Node &node,
+    std::size_t max_output_bytes = std::numeric_limits<std::size_t>::max());
 
 // Finalize an already serialized Clash document. This is used by output paths
 // that compose independently dumped top-level fields.
 std::string finalizeCanonicalClashYaml(const std::string &yaml);
+std::string finalizeCanonicalClashYaml(std::string yaml,
+                                       std::size_t max_output_bytes);
 
 #endif // CLASH_PROXY_H_INCLUDED

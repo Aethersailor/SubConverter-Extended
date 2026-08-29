@@ -24,28 +24,9 @@ std::string headerValue(const Request &request, const std::string &name) {
   return trimWhitespace(iter->second, true, true);
 }
 
-bool constantTimeEquals(const std::string &lhs, const std::string &rhs) {
-  unsigned char diff = static_cast<unsigned char>(lhs.size() ^ rhs.size());
-  size_t length = std::max(lhs.size(), rhs.size());
-  for (size_t i = 0; i < length; ++i) {
-    unsigned char left =
-        i < lhs.size() ? static_cast<unsigned char>(lhs[i]) : 0;
-    unsigned char right =
-        i < rhs.size() ? static_cast<unsigned char>(rhs[i]) : 0;
-    diff |= static_cast<unsigned char>(left ^ right);
-  }
-  return diff == 0;
-}
-
-bool validBasicAuth(const Request &request) {
-  std::string auth = headerValue(request, "Authorization");
-  if (auth.size() <= 6 || toLower(auth.substr(0, 6)) != "basic ")
-    return false;
-  std::string supplied = "Basic " + trimWhitespace(auth.substr(6), true, true);
-  static const std::string expected =
-      "Basic " + base64Encode(global.dashboardAuthUsername + ":" +
-                              global.dashboardAuthPassword);
-  return constantTimeEquals(supplied, expected);
+bool validBasicAuth(const Request &request, const Settings &settings) {
+  return dashboard_auth::validAuthorizationHeader(
+      headerValue(request, "Authorization"), settings);
 }
 
 void applyNoStoreHeaders(Response &response) {
@@ -98,20 +79,28 @@ std::string misconfigured(Response &response) {
 }
 
 bool authorize(Request &request, Response &response, std::string &body) {
-  if (!global.dashboardAuthEnabled)
+  const SettingsSnapshot settings_snapshot =
+      captureEffectiveSettingsSnapshot();
+  if (!settings_snapshot) {
+    body = misconfigured(response);
+    return false;
+  }
+  const Settings &settings = *settings_snapshot;
+  if (!settings.dashboardAuthEnabled)
     return true;
 
-  if (global.dashboardAuthUsername.empty() ||
-      global.dashboardAuthPassword.empty()) {
+  if (settings.dashboardAuthUsername.empty() ||
+      settings.dashboardAuthPassword.empty()) {
     body = misconfigured(response);
     return false;
   }
 
-  bool ok = validBasicAuth(request);
+  bool ok = validBasicAuth(request, settings);
   const dashboard_auth::FailureLimiter::Decision decision =
       g_failure_limiter.evaluate(
-          request.client_address, ok, global.dashboardAuthMaxFailures,
-          global.dashboardAuthWindowSeconds, global.dashboardAuthLockSeconds);
+          request.client_address, ok, settings.dashboardAuthMaxFailures,
+          settings.dashboardAuthWindowSeconds,
+          settings.dashboardAuthLockSeconds);
   if (decision.result == dashboard_auth::FailureLimiter::Result::Allowed)
     return true;
   if (decision.result == dashboard_auth::FailureLimiter::Result::Locked)

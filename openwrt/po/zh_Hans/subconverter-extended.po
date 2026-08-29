@@ -1,0 +1,524 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: SubConverter-Extended\n"
+"PO-Revision-Date: 2026-08-24 15:00+0800\n"
+"Last-Translator: Aethersailor\n"
+"Language-Team: Chinese (Simplified)\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+msgid "Adaptive"
+msgstr "自适应"
+
+msgid "All IPv4 interfaces (0.0.0.0)"
+msgstr "所有 IPv4 接口（0.0.0.0）"
+
+msgid "All IPv6 and supported dual-stack interfaces (::)"
+msgstr "所有 IPv6 及支持的双栈接口（::）"
+
+msgid "Application pages"
+msgstr "应用页面"
+
+msgid "Architecture"
+msgstr "架构"
+
+msgid "Automatic proxy pool"
+msgstr "自动反向代理池"
+
+msgid "Automatic update settings"
+msgstr "自动升级设置"
+
+msgid "Basic settings"
+msgstr "基本设置"
+
+msgid "Build date"
+msgstr "构建日期"
+
+msgid "Cancel"
+msgstr "取消"
+
+msgid "Check automatically"
+msgstr "自动检查"
+
+msgid "Check for updates"
+msgstr "检查更新"
+
+msgid "Check interval"
+msgstr "检查间隔"
+
+msgid "Checking"
+msgstr "正在检查"
+
+msgid "Compatibility"
+msgstr "兼容模式"
+
+msgid "Completed"
+msgstr "已完成"
+
+msgid "Configuration file"
+msgstr "配置文件"
+
+msgid "Current version"
+msgstr "当前版本"
+
+msgid "Daily"
+msgstr "每天"
+
+msgid "Dashboard"
+msgstr "仪表盘"
+
+msgid "Debug"
+msgstr "调试"
+
+msgid "Direct GitHub"
+msgstr "直连 GitHub"
+
+msgid "Disable start at boot"
+msgstr "禁用开机启动"
+
+msgid "Disabled"
+msgstr "已禁用"
+
+msgid "Download source"
+msgstr "下载来源"
+
+msgid "Downloading"
+msgstr "正在下载"
+
+msgid "Effective listen address"
+msgstr "实际监听地址"
+
+msgid "Effective listen port"
+msgstr "实际监听端口"
+
+msgid "Enable start at boot"
+msgstr "启用开机启动"
+
+msgid "Enable the update system"
+msgstr "启用升级系统"
+
+msgid "Enabled"
+msgstr "已启用"
+
+msgid "Enter a time in 24-hour HH:MM format."
+msgstr "请输入 24 小时制时间，格式为 HH:MM。"
+
+msgid "Error"
+msgstr "错误"
+
+msgid "Every 12 hours"
+msgstr "每 12 小时"
+
+msgid "Every 6 hours"
+msgstr "每 6 小时"
+
+msgid "Failed"
+msgstr "失败"
+
+msgid "Fatal"
+msgstr "严重错误"
+
+msgid "Hardware-aware maximum"
+msgstr "硬件感知最大性能"
+
+msgid "Idle"
+msgstr "空闲"
+
+msgid "Info"
+msgstr "信息"
+
+msgid "Inherit from pref.toml"
+msgstr "继承 pref.toml"
+
+msgid "Inherited from pref.toml"
+msgstr "已继承 pref.toml"
+
+msgid "Inspect"
+msgstr "诊断台"
+
+msgid "Install automatically"
+msgstr "自动安装"
+
+msgid "Install update"
+msgstr "安装更新"
+
+msgid "Installation window ends"
+msgstr "安装时间窗口结束"
+
+msgid "Installation window starts"
+msgstr "安装时间窗口开始"
+
+msgid "Installed; configuration reload failed"
+msgstr "已安装；配置重载失败"
+
+msgid "Installed; updater reload failed"
+msgstr "已安装；更新器重载失败"
+
+msgid "Installing"
+msgstr "正在安装"
+
+msgid "LAN compatibility"
+msgstr "局域网兼容"
+
+msgid "Last failed update"
+msgstr "上次升级失败时间"
+
+msgid "Last failed version"
+msgstr "上次升级失败版本"
+
+msgid "Last successful update"
+msgstr "上次升级成功时间"
+
+msgid "Last successful version"
+msgstr "上次升级成功版本"
+
+msgid "Latest version"
+msgstr "最新版本"
+
+msgid "Links use the router address currently open in your browser and the effective runtime port reported by the service."
+msgstr "链接使用浏览器当前打开的路由器地址，以及服务报告的实际运行端口。"
+
+msgid "Listen address override"
+msgstr "监听地址覆盖"
+
+msgid "Listen port override"
+msgstr "监听端口覆盖"
+
+msgid "Local build is newer"
+msgstr "本地版本较新"
+
+msgid "Log level override"
+msgstr "日志级别覆盖"
+
+msgid "Logs"
+msgstr "日志"
+
+msgid "Loopback only (127.0.0.1)"
+msgstr "仅本机回环（127.0.0.1）"
+
+msgid "Metadata source"
+msgstr "元数据来源"
+
+msgid "No"
+msgstr "否"
+
+msgid "No matching log entries."
+msgstr "没有匹配的日志记录。"
+
+msgid "Not checked"
+msgstr "尚未检查"
+
+msgid "Not recorded"
+msgstr "尚无记录"
+
+msgid "Not selected"
+msgstr "尚未选择"
+
+msgid "Only affects the public security profile. The strict profile always rejects public uploads."
+msgstr "仅影响 public 安全档位。strict 档位始终拒绝公网上传。"
+
+msgid "Only the fixed service log filter and sanitized status documents are exposed to LuCI."
+msgstr "LuCI 仅显示固定过滤后的服务日志和已脱敏的状态信息。"
+
+msgid "Operation failed"
+msgstr "操作失败"
+
+msgid "Overview"
+msgstr "概览"
+
+msgid "Preparing"
+msgstr "正在准备"
+
+msgid "Progress"
+msgstr "进度"
+
+msgid "Proxy mode"
+msgstr "连接模式"
+
+msgid "Public"
+msgstr "公网"
+
+msgid "Public upload override"
+msgstr "公网上传覆盖"
+
+msgid "Queued"
+msgstr "已进入队列"
+
+msgid "Recovered"
+msgstr "已恢复"
+
+msgid "Recovering"
+msgstr "正在恢复"
+
+msgid "Recovery failed"
+msgstr "恢复失败"
+
+msgid "Release metadata and packages may be fetched through trusted public reverse proxies. Repository identity, stable version selection and exact architecture matching remain fixed by the updater."
+msgstr "Release 元数据和软件包可以通过可信公共反向代理获取。更新器始终固定仓库身份、稳定版本选择和精确架构匹配。"
+
+msgid "Resource control override"
+msgstr "资源控制覆盖"
+
+msgid "Resource profile override"
+msgstr "资源档位覆盖"
+
+msgid "Restart"
+msgstr "重启"
+
+msgid "Restore the last retained package and validate the service again. Current persistent configuration is not deleted."
+msgstr "恢复上一个保留的软件包并重新验证服务。当前持久化配置不会被删除。"
+
+msgid "Revision"
+msgstr "修订"
+
+msgid "Roll back"
+msgstr "回滚"
+
+msgid "Rolled back"
+msgstr "已回滚"
+
+msgid "Rolling back"
+msgstr "正在回滚"
+
+msgid "Running"
+msgstr "运行中"
+
+msgid "Running; runtime endpoint configured"
+msgstr "运行中；运行端点已配置"
+
+msgid "Runtime state and start-at-boot are controlled independently."
+msgstr "运行状态与开机启动分别控制。"
+
+msgid "Runtime status"
+msgstr "运行状态"
+
+msgid "Schedule and source"
+msgstr "计划与来源"
+
+msgid "Security profile override"
+msgstr "安全档位覆盖"
+
+msgid "Select the persistent user configuration read by the service. Package defaults remain read-only under /opt/subconverter-extended."
+msgstr "选择服务读取的持久化用户配置。软件包默认文件在 /opt/subconverter-extended 下保持只读。"
+
+msgid "Service action completed."
+msgstr "服务操作已完成。"
+
+msgid "Service controls"
+msgstr "服务控制"
+
+msgid "Service log"
+msgstr "服务日志"
+
+msgid "Service status"
+msgstr "服务状态"
+
+msgid "Settings"
+msgstr "设置"
+
+msgid "Software update"
+msgstr "软件更新"
+
+msgid "Start"
+msgstr "启动"
+
+msgid "Start at boot"
+msgstr "开机启动"
+
+msgid "Starting"
+msgstr "正在启动"
+
+msgid "State"
+msgstr "状态"
+
+msgid "Statistics override"
+msgstr "统计功能覆盖"
+
+msgid "Status and update diagnostics"
+msgstr "状态与升级诊断"
+
+msgid "Status updated"
+msgstr "状态更新时间"
+
+msgid "Stop"
+msgstr "停止"
+
+msgid "Stopped"
+msgstr "已停止"
+
+msgid "Stopping service"
+msgstr "正在停止服务"
+
+msgid "Strict public"
+msgstr "严格公网"
+
+msgid "SubConverter-Extended - Logs"
+msgstr "SubConverter-Extended - 日志"
+
+msgid "SubConverter-Extended - Overview"
+msgstr "SubConverter-Extended - 概览"
+
+msgid "SubConverter-Extended - Settings"
+msgstr "SubConverter-Extended - 设置"
+
+msgid "SubConverter-Extended - Software update"
+msgstr "SubConverter-Extended - 软件更新"
+
+msgid "Technical details"
+msgstr "技术详情"
+
+msgid "The backend returned no usable result."
+msgstr "后端没有返回可用结果。"
+
+msgid "The service and LuCI integration will be replaced as one package. Persistent configuration is preserved, and failed validation triggers rollback."
+msgstr "核心服务和 LuCI 将作为一个软件包整体替换。持久化配置会被保留，验证失败时会自动回滚。"
+
+msgid "The trusted source is always this project's latest stable GitHub Release. Auto mode tries the built-in public proxy pool before direct GitHub access."
+msgstr "可信来源始终为本项目最新稳定 GitHub Release。自动模式会先尝试内置公共反向代理池，再尝试直连 GitHub。"
+
+msgid "These OpenWrt settings override the corresponding values in pref.toml. Options not shown here remain managed by pref.toml. Restart the service after changing runtime settings."
+msgstr "这些 OpenWrt 设置会覆盖 pref.toml 中的对应值。未在本页显示的选项仍由 pref.toml 管理。修改运行设置后请重启服务。"
+
+msgid "Unavailable"
+msgstr "不可用"
+
+msgid "Up to date"
+msgstr "已是最新版本"
+
+msgid "Update available"
+msgstr "有可用更新"
+
+msgid "Update error"
+msgstr "升级错误"
+
+msgid "Update status"
+msgstr "升级状态"
+
+msgid "Update task accepted. Progress will refresh automatically."
+msgstr "升级任务已接受，进度将自动刷新。"
+
+msgid "Update transaction is active."
+msgstr "升级事务正在进行。"
+
+msgid "Use public or strict when the service is reachable beyond a trusted LAN."
+msgstr "服务可从可信局域网外访问时，请使用 public 或 strict 安全档位。"
+
+msgid "Validating"
+msgstr "正在验证"
+
+msgid "Verbose"
+msgstr "详细"
+
+msgid "Verified"
+msgstr "已验证"
+
+msgid "Verifying"
+msgstr "正在校验"
+
+msgid "Version"
+msgstr "版本"
+
+msgid "Wait for it to finish before changing automatic update settings."
+msgstr "请等待升级事务完成后再修改自动升级设置。"
+
+msgid "Wait for it to finish before changing runtime settings."
+msgstr "请等待升级事务完成后再修改运行设置。"
+
+msgid "Warning"
+msgstr "警告"
+
+msgid "Weekly"
+msgstr "每周"
+
+msgid "When disabled, automatic checks only report that an update is available."
+msgstr "禁用后，自动检查只会报告有可用更新，不会自动安装。"
+
+msgid "Yes"
+msgstr "是"
+
+msgid "An update is available."
+msgstr "有可用更新。"
+
+msgid "Checking the latest stable GitHub Release."
+msgstr "正在检查最新稳定版 GitHub Release。"
+
+msgid "Downloading verified update packages into persistent cache."
+msgstr "正在将已验证的更新包下载到持久化缓存。"
+
+msgid "Installing the update package."
+msgstr "正在安装更新包。"
+
+msgid "Installing version %s."
+msgstr "正在安装版本 %s。"
+
+msgid "Installed version %s is newer than the latest stable Release."
+msgstr "已安装版本 %s 高于最新稳定版 Release。"
+
+msgid "Preparing the update transaction."
+msgstr "正在准备更新事务。"
+
+msgid "Recovering an interrupted update transaction."
+msgstr "正在恢复中断的更新事务。"
+
+msgid "Refreshing LuCI and validating the installed version."
+msgstr "正在刷新 LuCI 并验证已安装版本。"
+
+msgid "Release metadata and package integrity are verified."
+msgstr "Release 元数据和安装包完整性已验证。"
+
+msgid "Stopping the service gracefully."
+msgstr "正在安全停止服务。"
+
+msgid "The installed version is current."
+msgstr "当前已安装版本已是最新版本。"
+
+msgid "The installed version is newer than the latest stable Release."
+msgstr "已安装版本高于最新稳定版 Release。"
+
+msgid "The interrupted update transaction was recovered."
+msgstr "中断的更新事务已恢复。"
+
+msgid "The package is installed; retry the updater service reload."
+msgstr "安装包已完成安装；请重试重新加载自动更新服务。"
+
+msgid "The package is installed; review the saved runtime settings."
+msgstr "安装包已完成安装；请检查已保存的运行设置。"
+
+msgid "The previous package was restored and validated."
+msgstr "上一版本安装包已恢复并通过验证。"
+
+msgid "The update is installed, validated and rollback-ready."
+msgstr "更新已安装并通过验证，且已准备好回滚。"
+
+msgid "The update task is queued."
+msgstr "更新任务已进入队列。"
+
+msgid "The update transaction could not be recovered."
+msgstr "无法恢复更新事务。"
+
+msgid "The update transaction failed."
+msgstr "更新事务失败。"
+
+msgid "The updater is idle."
+msgstr "自动更新程序处于空闲状态。"
+
+msgid "Update status is unavailable."
+msgstr "无法获取更新状态。"
+
+msgid "Validation failed; restoring the previous package."
+msgstr "验证失败；正在恢复上一版本安装包。"
+
+msgid "Verifying Release metadata and package integrity."
+msgstr "正在验证 Release 元数据和安装包完整性。"
+
+msgid "Version %s is available."
+msgstr "版本 %s 可用。"
+
+msgid "Version %s is current."
+msgstr "版本 %s 已是最新版本。"
+
+msgid "Version %s is installed, validated and rollback-ready."
+msgstr "版本 %s 已安装并通过验证，且已准备好回滚。"

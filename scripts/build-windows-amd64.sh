@@ -5,9 +5,18 @@ VERSION="${1:?version is required}"
 REVISION="${2:-}"
 BUILD_DATE="${3:-}"
 THREADS="${THREADS:-4}"
+BUILD_TESTS="${BUILD_TESTS:-false}"
 : "${QUICKJSPP_REF:?QUICKJSPP_REF is required}"
 : "${LIBCRON_REF:?LIBCRON_REF is required}"
 : "${TOML11_REF:?TOML11_REF is required}"
+
+case "${BUILD_TESTS}" in
+  true|false) ;;
+  *)
+    echo "BUILD_TESTS must be true or false." >&2
+    exit 2
+    ;;
+esac
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK_DIR="${ROOT}/build/windows-amd64"
@@ -91,8 +100,13 @@ cmake -S "${ROOT}" -B "${BUILD_DIR}" -G Ninja \
   -DLIBCRON_INCLUDE_DIR="${DEPS_DIR}/include" \
   -DDATE_INCLUDE_DIR="${DEPS_DIR}/include" \
   -DLIBCRON_LIBRARY="${DEPS_DIR}/lib/liblibcron.a" \
-  -DTOML11_INCLUDE_DIR="${DEPS_DIR}/include"
+  -DTOML11_INCLUDE_DIR="${DEPS_DIR}/include" \
+  -DBUILD_TESTS="${BUILD_TESTS}"
 cmake --build "${BUILD_DIR}" -j "${THREADS}"
+
+if [ "${BUILD_TESTS}" = "true" ]; then
+  ctest --test-dir "${BUILD_DIR}" --output-on-failure --timeout 120
+fi
 
 RUNTIME_DLLS="${WORK_DIR}/runtime-dlls.txt"
 : > "${RUNTIME_DLLS}"

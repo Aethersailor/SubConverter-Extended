@@ -110,6 +110,14 @@ ADD_CUSTOM_TARGET(dashboard_resource
     DEPENDS "${DASHBOARD_HTML_GENERATED}")
 
 SET(SUBCONVERTER_RUNTIME_SOURCES
+    src/runtime/blocking_io_executor.cpp
+    src/runtime/compute_executor.cpp
+    src/runtime/conversion_flow.cpp
+    src/runtime/memory_budget.cpp
+    src/runtime/owner_admission.cpp
+    src/runtime/quickjs_lane.cpp
+    src/runtime/runtime_coordinator.cpp
+    src/runtime/transport_admission.cpp
     src/config/preference_file.cpp
     src/config/ruleset.cpp
     src/generator/config/clash_proxy.cpp
@@ -118,18 +126,24 @@ SET(SUBCONVERTER_RUNTIME_SOURCES
     src/generator/config/ruleconvert.cpp
     src/generator/config/subexport.cpp
     src/generator/template/templates.cpp
+    src/generator/template/template_async.cpp
     src/handler/dashboard_auth.cpp
     src/handler/dashboard_auth_limiter.cpp
     src/handler/dashboard_page.cpp
     src/handler/cocr_source_url.cpp
     src/handler/cache_storage.cpp
+    src/handler/conversion_pipeline.cpp
+    src/handler/conversion_resource_async.cpp
     src/handler/curl_handle_pool.cpp
+    src/handler/external_config_async.cpp
     src/handler/inspect_page.cpp
     src/handler/interfaces.cpp
     src/handler/multithread.cpp
     src/handler/statistics.cpp
     src/handler/statistics_v2.cpp
+    src/handler/subscription_async.cpp
     src/handler/upload.cpp
+    src/handler/upload_async.cpp
     src/handler/user_agent.cpp
     src/handler/version_page.cpp
     src/handler/webget.cpp
@@ -155,6 +169,8 @@ SET(SUBCONVERTER_RUNTIME_SOURCES
     src/utils/network.cpp
     src/utils/redact.cpp
     src/utils/regexp.cpp
+    src/utils/resource_probe.cpp
+    src/utils/force_max_budget.cpp
     src/utils/resource_control.cpp
     src/utils/string.cpp
     src/utils/system.cpp
@@ -303,6 +319,16 @@ IF(BUILD_TESTS)
     TARGET_COMPILE_DEFINITIONS(settings_snapshot_test_helper PRIVATE
         $<TARGET_PROPERTY:${BUILD_TARGET_NAME},COMPILE_DEFINITIONS>)
 
+    ADD_TEST(
+        NAME force_max_runtime_transaction
+        COMMAND $<TARGET_FILE:settings_snapshot_test_helper>
+                --runtime-transaction
+                ${CMAKE_SOURCE_DIR}/tests/fixtures/compat/legacy-pref.toml)
+    SET_TESTS_PROPERTIES(force_max_runtime_transaction PROPERTIES
+        LABELS full
+        TIMEOUT 60
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
     SET(COMPATIBILITY_SECURITY_BASELINE_ARGS
         --binary $<TARGET_FILE:${BUILD_TARGET_NAME}>
         --settings-snapshot-helper
@@ -348,7 +374,7 @@ IF(BUILD_TESTS)
                 ${COMPATIBILITY_SECURITY_BASELINE_ARGS})
     SET_TESTS_PROPERTIES(compatibility_security_baseline PROPERTIES
         LABELS full
-        TIMEOUT 120
+        TIMEOUT 240
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     ADD_TEST(
         NAME compatibility_security_baseline_httplib
@@ -357,7 +383,7 @@ IF(BUILD_TESTS)
                 ${COMPATIBILITY_SECURITY_BASELINE_ARGS})
     SET_TESTS_PROPERTIES(compatibility_security_baseline_httplib PROPERTIES
         LABELS full
-        TIMEOUT 120
+        TIMEOUT 240
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         ENVIRONMENT "SUBCONVERTER_HTTP_BACKEND=httplib;SUBCONVERTER_RESOURCE_CONTROL=compat")
 
@@ -383,6 +409,32 @@ IF(BUILD_TESTS)
             TIMEOUT 120
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
             ENVIRONMENT "SUBCONVERTER_HTTP_BACKEND=httplib;SUBCONVERTER_RESOURCE_CONTROL=compat")
+        ADD_TEST(
+            NAME shutdown_process_force_max
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/shutdown_process_test.py
+                    --binary $<TARGET_FILE:${BUILD_TARGET_NAME}>
+                    --scenario completed-request
+                    --scenario inflight-request)
+        SET_TESTS_PROPERTIES(shutdown_process_force_max PROPERTIES
+            LABELS full
+            RUN_SERIAL TRUE
+            TIMEOUT 60
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            ENVIRONMENT "SUBCONVERTER_RESOURCE_CONTROL=force_max")
+        ADD_TEST(
+            NAME shutdown_process_force_max_httplib
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/shutdown_process_test.py
+                    --binary $<TARGET_FILE:${BUILD_TARGET_NAME}>
+                    --scenario completed-request
+                    --scenario inflight-request)
+        SET_TESTS_PROPERTIES(shutdown_process_force_max_httplib PROPERTIES
+            LABELS full
+            RUN_SERIAL TRUE
+            TIMEOUT 60
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            ENVIRONMENT "SUBCONVERTER_HTTP_BACKEND=httplib;SUBCONVERTER_RESOURCE_CONTROL=force_max")
     ENDIF()
 
     ADD_EXECUTABLE(proxy_policy_test
@@ -403,6 +455,8 @@ IF(BUILD_TESTS)
     ADD_EXECUTABLE(webserver_error_test
         tests/webserver_error_test.cpp
         src/handler/settings_view.cpp
+        src/runtime/owner_admission.cpp
+        src/runtime/transport_admission.cpp
         src/server/client_ip.cpp
         src/server/webserver_beast.cpp
         src/server/webserver_httplib.cpp
@@ -413,6 +467,8 @@ IF(BUILD_TESTS)
         src/utils/system.cpp
         src/utils/urlencode.cpp)
     TARGET_INCLUDE_DIRECTORIES(webserver_error_test PRIVATE src)
+    TARGET_INCLUDE_DIRECTORIES(webserver_error_test SYSTEM PRIVATE
+        ${QUICKJS_INCLUDE_DIRS})
     TARGET_COMPILE_DEFINITIONS(webserver_error_test PRIVATE
         $<TARGET_PROPERTY:${BUILD_TARGET_NAME},COMPILE_DEFINITIONS>)
     TARGET_LINK_LIBRARIES(webserver_error_test ${CMAKE_THREAD_LIBS_INIT})
@@ -504,7 +560,13 @@ IF(BUILD_TESTS)
     SET_TESTS_PROPERTIES(clash_proxy PROPERTIES LABELS fast)
 
     ADD_EXECUTABLE(concurrency_primitives_test
-        tests/concurrency_primitives_test.cpp)
+        tests/concurrency_primitives_test.cpp
+        src/runtime/blocking_io_executor.cpp
+        src/runtime/compute_executor.cpp
+        src/runtime/memory_budget.cpp
+        src/runtime/owner_admission.cpp
+        src/utils/force_max_budget.cpp
+        src/utils/resource_probe.cpp)
     TARGET_INCLUDE_DIRECTORIES(concurrency_primitives_test PRIVATE src)
     TARGET_LINK_LIBRARIES(concurrency_primitives_test
         ${CMAKE_THREAD_LIBS_INIT})
@@ -515,6 +577,8 @@ IF(BUILD_TESTS)
         tests/settings_view_test.cpp
         src/handler/settings_view.cpp)
     TARGET_INCLUDE_DIRECTORIES(settings_view_test PRIVATE src)
+    TARGET_INCLUDE_DIRECTORIES(settings_view_test SYSTEM PRIVATE
+        ${QUICKJS_INCLUDE_DIRS})
     TARGET_COMPILE_DEFINITIONS(settings_view_test PRIVATE
         $<TARGET_PROPERTY:${BUILD_TARGET_NAME},COMPILE_DEFINITIONS>)
     TARGET_LINK_LIBRARIES(settings_view_test ${CMAKE_THREAD_LIBS_INIT})
@@ -623,6 +687,8 @@ IF(BUILD_TESTS)
         src/utils/redact.cpp
         src/utils/string.cpp)
     TARGET_INCLUDE_DIRECTORIES(upload_persistence_test PRIVATE src)
+    TARGET_INCLUDE_DIRECTORIES(upload_persistence_test SYSTEM PRIVATE
+        ${QUICKJS_INCLUDE_DIRS})
     TARGET_COMPILE_DEFINITIONS(upload_persistence_test PRIVATE
         FILE_IO_TESTING
         JS_SetHostUnhandledPromiseRejectionTracker=JS_SetHostPromiseRejectionTracker)

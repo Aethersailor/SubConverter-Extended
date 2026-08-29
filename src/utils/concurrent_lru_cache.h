@@ -62,9 +62,10 @@ public:
     try {
       Value value = compute();
       CacheSize bytes = size_of(value);
-      if (bytes && *bytes <= max_bytes_ && max_entries_ != 0) {
+      if (bytes) {
         std::lock_guard<std::mutex> lock(mutex_);
-        insert(key, value, *bytes);
+        if (!growth_frozen_ && *bytes <= max_bytes_ && max_entries_ != 0)
+          insert(key, value, *bytes);
       }
       promise->set_value(value);
     } catch (...) {
@@ -95,6 +96,33 @@ public:
     bytes_ = 0;
   }
 
+  void setLimits(size_t max_entries, size_t max_bytes) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    max_entries_ = max_entries;
+    max_bytes_ = max_bytes;
+    evictLocked();
+  }
+
+  void setGrowthFrozen(bool frozen) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    growth_frozen_ = frozen;
+  }
+
+  bool growthFrozen() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return growth_frozen_;
+  }
+
+  size_t maxEntries() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return max_entries_;
+  }
+
+  size_t maxBytes() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return max_bytes_;
+  }
+
 private:
   struct Entry {
     Value value;
@@ -120,6 +148,10 @@ private:
     lru_.push_front(key);
     entries_.emplace(key, Entry{value, bytes, lru_.begin()});
     bytes_ += bytes;
+    evictLocked();
+  }
+
+  void evictLocked() {
     while (!entries_.empty() &&
            (entries_.size() > max_entries_ || bytes_ > max_bytes_)) {
       const Key &evicted_key = lru_.back();
@@ -132,13 +164,14 @@ private:
     }
   }
 
-  const size_t max_entries_;
-  const size_t max_bytes_;
+  size_t max_entries_;
+  size_t max_bytes_;
   mutable std::mutex mutex_;
   std::list<Key> lru_;
   EntryMap entries_;
   std::unordered_map<Key, std::shared_future<Value>, Hash> inflight_;
   size_t bytes_ = 0;
+  bool growth_frozen_ = false;
 };
 
 #endif // CONCURRENT_LRU_CACHE_H_INCLUDED

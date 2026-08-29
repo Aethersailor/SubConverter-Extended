@@ -8,6 +8,7 @@
 enum class CompiledRegexMode {
     Search,
     FullMatch,
+    Replace,
 };
 
 class CompiledRegex
@@ -23,6 +24,9 @@ public:
 
     bool valid() const noexcept;
     bool matches(const std::string &subject);
+    std::string replace(const std::string &subject,
+                        const std::string &replacement,
+                        bool global = true);
 
 private:
     struct Impl;

@@ -6,7 +6,49 @@
 
 #ifndef NO_JS_RUNTIME
 
+#include <cstddef>
+#include <memory>
 #include <quickjspp.hpp>
+#include <stdexcept>
+
+struct ScriptNestedRuntimeBudget {
+    size_t heap_bytes = 0;
+    size_t stack_bytes = 0;
+    int (*interrupt_handler)(JSRuntime *, void *) = nullptr;
+    void *interrupt_opaque = nullptr;
+    bool active = false;
+};
+
+inline thread_local ScriptNestedRuntimeBudget script_nested_runtime_budget;
+
+class ScopedScriptNestedRuntimeBudget {
+public:
+    ScopedScriptNestedRuntimeBudget(size_t heap_bytes,
+                                    size_t stack_bytes,
+                                    int (*interrupt_handler)(
+                                        JSRuntime *, void *) = nullptr,
+                                    void *interrupt_opaque = nullptr) noexcept
+        : previous_(script_nested_runtime_budget) {
+        script_nested_runtime_budget =
+            {heap_bytes, stack_bytes, interrupt_handler,
+             interrupt_opaque, heap_bytes != 0 && stack_bytes != 0};
+    }
+    ~ScopedScriptNestedRuntimeBudget() {
+        script_nested_runtime_budget = previous_;
+    }
+
+    ScopedScriptNestedRuntimeBudget(
+        const ScopedScriptNestedRuntimeBudget &) = delete;
+    ScopedScriptNestedRuntimeBudget &operator=(
+        const ScopedScriptNestedRuntimeBudget &) = delete;
+
+private:
+    ScriptNestedRuntimeBudget previous_;
+};
+
+inline ScriptNestedRuntimeBudget currentScriptNestedRuntimeBudget() noexcept {
+    return script_nested_runtime_budget;
+}
 
 void script_runtime_init(qjs::Runtime &runtime);
 int script_context_init(qjs::Context &context);
@@ -258,15 +300,41 @@ void script_safe_runner(qjs::Runtime *runtime, qjs::Context *context, Fn runnabl
 {
     qjs::Runtime *internal_runtime = runtime;
     qjs::Context *internal_context = context;
-    defer(if(clean_context) {delete internal_context; delete internal_runtime;} )
+    std::unique_ptr<qjs::Runtime> owned_runtime;
+    std::unique_ptr<qjs::Context> owned_context;
+    bool clean_context_initialized = false;
+    defer(if(clean_context_initialized && internal_context)
+              (void)script_cleanup(*internal_context);)
     if(clean_context)
     {
-        internal_runtime = new qjs::Runtime();
+        owned_runtime = std::make_unique<qjs::Runtime>();
+        internal_runtime = owned_runtime.get();
+        const ScriptNestedRuntimeBudget nested =
+            currentScriptNestedRuntimeBudget();
+        if(nested.active)
+        {
+            JS_SetMemoryLimit(internal_runtime->rt, nested.heap_bytes);
+            JS_SetMaxStackSize(internal_runtime->rt, nested.stack_bytes);
+            if(nested.interrupt_handler)
+                JS_SetInterruptHandler(internal_runtime->rt,
+                                       nested.interrupt_handler,
+                                       nested.interrupt_opaque);
+        }
         script_runtime_init(*internal_runtime);
-        internal_context = new qjs::Context(*internal_runtime);
-        script_context_init(*internal_context);
+        owned_context = std::make_unique<qjs::Context>(*internal_runtime);
+        internal_context = owned_context.get();
+        if(script_context_init(*internal_context) != 0)
+        {
+            (void)script_cleanup(*internal_context);
+            throw std::runtime_error("QuickJS clean context initialization failed");
+        }
+        clean_context_initialized = true;
     }
-    if(internal_runtime && internal_context)
+    // A bounded QuickJS lane owns the runtime and lends only its initialized
+    // Context to conversion code. The runtime pointer remains null so the
+    // legacy extra_settings destructor cannot accidentally free lane-owned
+    // state; a valid context is sufficient to execute the callback.
+    if(internal_context)
         runnable(*internal_context);
 }
 

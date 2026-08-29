@@ -30,6 +30,7 @@ from pathlib import Path
 REPOSITORY = Path(__file__).resolve().parents[1]
 PREFERENCE_FIXTURE = REPOSITORY / "tests" / "fixtures" / "compat" / "legacy-pref.toml"
 SUBSCRIPTION = "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388#Shutdown\n"
+ENCODED_SUBSCRIPTION = base64.b64encode(SUBSCRIPTION.encode()).decode()
 RULESET = "DOMAIN-SUFFIX,shutdown.example,Proxy\n"
 SHUTDOWN_DEADLINE_SECONDS = 5.0
 LISTENER_CLOSE_DEADLINE_SECONDS = 2.0
@@ -76,7 +77,11 @@ def make_fixture_handler(state: FixtureState) -> type[BaseHTTPRequestHandler]:
         def do_GET(self) -> None:  # noqa: N802
             request_path = urllib.parse.urlsplit(self.path).path
             if request_path == "/subscription.txt":
-                self._send(SUBSCRIPTION.encode())
+                # The legacy parser accepts remote subscription payloads in
+                # their conventional base64 envelope. Direct node URI parsing
+                # is covered separately; this endpoint specifically exercises
+                # the force_max asynchronous subscription fetch path.
+                self._send(ENCODED_SUBSCRIPTION.encode())
                 return
             if request_path == "/rules.list":
                 self._send(RULESET.encode())
@@ -108,6 +113,13 @@ def make_fixture_handler(state: FixtureState) -> type[BaseHTTPRequestHandler]:
                     self.send_error(504, "in-flight fixture timed out")
                     return
                 self._send(RULESET.encode())
+                return
+            if request_path == "/inflight-subscription.txt":
+                state.inflight_started.set()
+                if not state.inflight_release.wait(timeout=10):
+                    self.send_error(504, "in-flight subscription fixture timed out")
+                    return
+                self._send(ENCODED_SUBSCRIPTION.encode())
                 return
             self.send_error(404)
 
@@ -332,6 +344,20 @@ def complete_ruleset_request(base_url: str, source_url: str) -> tuple[int, bytes
     )
 
 
+def complete_sub_request(base_url: str, source_url: str) -> tuple[int, bytes]:
+    return request(
+        base_url,
+        "/sub",
+        {
+            "target": "mixed",
+            "url": source_url,
+            "config": "data:,enable_rule_generator=false",
+            "list": "true",
+        },
+        timeout=10,
+    )
+
+
 def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no: int) -> None:
     label = f"{signal_value.name}/{scenario}/round-{round_no}"
     process: subprocess.Popen[bytes] | None = None
@@ -369,6 +395,7 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
             env["PORT"] = str(port)
             env["NO_PROXY"] = "127.0.0.1,localhost"
             env["no_proxy"] = "127.0.0.1,localhost"
+            force_mode = env.get("SUBCONVERTER_RESOURCE_CONTROL") == "force_max"
 
             stdout = stdout_path.open("wb")
             stderr = stderr_path.open("wb")
@@ -384,10 +411,17 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
                 wait_ready(port, process)
 
                 if scenario == "completed-request":
-                    status, body = complete_ruleset_request(
-                        base_url, fixture_base + "/rules.list"
-                    )
-                    if status != 200 or b"shutdown.example" not in body:
+                    if force_mode:
+                        status, body = complete_sub_request(
+                            base_url, fixture_base + "/subscription.txt"
+                        )
+                        expected = b"Shutdown"
+                    else:
+                        status, body = complete_ruleset_request(
+                            base_url, fixture_base + "/rules.list"
+                        )
+                        expected = b"shutdown.example"
+                    if status != 200 or expected not in body:
                         raise ShutdownFailure(
                             f"completed request returned HTTP {status}: {body[-1000:]!r}"
                         )
@@ -415,9 +449,18 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
 
                     def make_inflight_request() -> None:
                         try:
-                            client_result.append(
-                                complete_ruleset_request(base_url, source_url)
-                            )
+                            if force_mode:
+                                client_result.append(
+                                    complete_sub_request(
+                                        base_url,
+                                        fixture_base
+                                        + "/inflight-subscription.txt",
+                                    )
+                                )
+                            else:
+                                client_result.append(
+                                    complete_ruleset_request(base_url, source_url)
+                                )
                         except BaseException as error:  # surfaced on the owner thread
                             client_error.append(error)
 
@@ -476,8 +519,11 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
                     cancelled = (
                         status == 503 and b"shutting down" in body.lower()
                     )
+                    expected_inflight = (
+                        b"Shutdown" if force_mode else b"shutdown.example"
+                    )
                     drained_successfully = (
-                        status == 200 and b"shutdown.example" in body
+                        status == 200 and expected_inflight in body
                     )
                     if not cancelled and not drained_successfully:
                         raise ShutdownFailure(
@@ -503,6 +549,23 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
                     raise ShutdownFailure(
                         "normal graceful shutdown was mislabeled FATAL"
                     )
+                force_max = (
+                    os.environ.get("SUBCONVERTER_RESOURCE_CONTROL", "compat")
+                    == "force_max"
+                )
+                joined_marker = (
+                    "FORCE_MAX_SHUTDOWN_STAGE stage=joined "
+                    "status=complete"
+                )
+                if force_max:
+                    if joined_marker not in logs:
+                        raise ShutdownFailure(
+                            "runtime components did not reach the joined terminal stage"
+                        )
+                    if "FORCE_MAX_SHUTDOWN_DEADLINE_EXCEEDED" in logs:
+                        raise ShutdownFailure(
+                            "runtime shutdown exceeded its hard deadline"
+                        )
                 if (
                     scenario not in ("idle", "backlog-shutdown")
                     and "OUTBOUND_MULTI_ENGINE resolver=asynchronous" not in logs
@@ -518,6 +581,12 @@ def run_case(binary: Path, signal_value: signal.Signals, scenario: str, round_no
                     if "HTTP_RESPONSE_PREPARED" not in logs:
                         raise ShutdownFailure(
                             "completed request is missing lifecycle completion telemetry"
+                        )
+                    if force_max and logs.rfind(
+                        "HTTP_RESPONSE_PREPARED"
+                    ) > logs.find(joined_marker):
+                        raise ShutdownFailure(
+                            "runtime joined before the terminal HTTP response was prepared"
                         )
                     if scenario == "completed-request" and "HTTP_RESPONSE_SEND_FAILED" in logs:
                         raise ShutdownFailure(

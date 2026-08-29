@@ -35,6 +35,73 @@ export GITHUB_RUN_ID=42
 export GITHUB_RUN_ATTEMPT=3
 export BUILD_ARGS=$'THREADS=16\nSHA=0123456789abcdef0123456789abcdef01234567'
 
+for dockerfile in Dockerfile docker/Dockerfile.armv7-cross \
+                  docker/Dockerfile.debian; do
+  grep -Fq \
+    'python3 scripts/ci/patch_cpp_httplib_force_max.py include/httplib.h' \
+    "$REPOSITORY/$dockerfile"
+  grep -Fq 'retry_go_dependency() {' "$REPOSITORY/$dockerfile"
+  grep -Fq 'retry_go_dependency go mod download' "$REPOSITORY/$dockerfile"
+  grep -Fq 'retry_go_dependency go get github.com/metacubex/mihomo@${MIHOMO_REF}' \
+    "$REPOSITORY/$dockerfile"
+  grep -Fq 'retry_go_dependency go get -u all' "$REPOSITORY/$dockerfile"
+  grep -Fq 'Go dependency command failed after ${attempt} attempts' \
+    "$REPOSITORY/$dockerfile"
+  grep -Fq 'return 1;' "$REPOSITORY/$dockerfile"
+  grep -Fq 'sleep "$((attempt * 5))"' "$REPOSITORY/$dockerfile"
+  grep -Fq 'generate_proxy_validation.go -o proxy_validation_generated.go -manifest mihomo_capabilities.json' \
+    "$REPOSITORY/$dockerfile"
+  grep -Fq 'generate_schemes.go -manifest mihomo_capabilities.json -o mihomo_schemes.h' \
+    "$REPOSITORY/$dockerfile"
+  grep -Fq 'generate_param_compat.go -manifest mihomo_capabilities.json -o param_compat.h' \
+    "$REPOSITORY/$dockerfile"
+done
+grep -Fq 'retry_go_dependency go get \' "$REPOSITORY/Dockerfile"
+grep -Fq 'for attempt in 1 2 3; do' "$REPOSITORY/Dockerfile"
+grep -Fq 'if [ "${attempt}" = 3 ]; then' "$REPOSITORY/Dockerfile"
+grep -Fq 'Mihomo config validator build failed after ${attempt} attempts' \
+  "$REPOSITORY/Dockerfile"
+grep -Fq 'exit 1;' "$REPOSITORY/Dockerfile"
+grep -Fq 'sleep "$((attempt * 5))"' "$REPOSITORY/Dockerfile"
+grep -Eq '^[[:space:]]+cmake .*python3' \
+  "$REPOSITORY/docker/Dockerfile.armv7-cross"
+PYTHONPYCACHEPREFIX="$TEST_ROOT/pycache" python3 -m py_compile \
+  "$REPOSITORY/scripts/ci/patch_cpp_httplib_force_max.py"
+PYTHONPYCACHEPREFIX="$TEST_ROOT/pycache" python3 - \
+  "$REPOSITORY/scripts/ci/patch_cpp_httplib_force_max.py" <<'PY'
+import importlib.util
+from pathlib import Path
+import sys
+
+script = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("patch_cpp_httplib_force_max", script)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+old_storage = "  std::string file_content_content_type_;\n};"
+new_storage = (
+    "  std::string file_content_content_type_;\n"
+    "  detail::EncodingType file_content_encoding_ = detail::EncodingType::None;\n};"
+)
+for storage in (old_storage, new_storage):
+    patched = module.patch_response_completion_storage(storage)
+    assert patched.count("write_completion_handler_") == 1
+    assert storage[:-3] in patched
+
+for invalid in ("class Response {};", old_storage + "\n" + new_storage):
+    try:
+        module.patch_response_completion_storage(invalid)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("response storage anchor ambiguity was not rejected")
+PY
+cp "$REPOSITORY/include/httplib.h" "$TEST_ROOT/httplib.h"
+python3 "$REPOSITORY/scripts/ci/patch_cpp_httplib_force_max.py" \
+  "$TEST_ROOT/httplib.h"
+cmp "$REPOSITORY/include/httplib.h" "$TEST_ROOT/httplib.h"
+
 assert_trace() {
   grep -F -- "$1" "$TRACE" >/dev/null || {
     echo "missing trace token: $1" >&2
@@ -117,12 +184,36 @@ assert_trace "--load"
 echo "CI delivery script contract passed"
 
 BUILD_WORKFLOW="$REPOSITORY/.github/workflows/build-dockerhub.yml"
+WINDOWS_BUILD_SCRIPT="$REPOSITORY/scripts/build-windows-amd64.sh"
+OPENWRT_PACKAGE_SCRIPT="$REPOSITORY/scripts/package-openwrt-apk.sh"
+OPENWRT_SMOKE_ACTION="$REPOSITORY/.github/actions/smoke-openwrt-apk/action.yml"
 CLEANUP_WORKFLOW="$REPOSITORY/.github/workflows/cleanup-container-registry.yml"
 SYNC_WORKFLOW="$REPOSITORY/.github/workflows/sync-dev-to-master.yml"
 
 grep -Fq 'group: build-core-${{ github.ref }}' "$BUILD_WORKFLOW"
 grep -Fq 'group: container-registry-cleanup' "$BUILD_WORKFLOW"
 grep -Fq 'group: container-registry-cleanup' "$CLEANUP_WORKFLOW"
+for forbidden_cloud_test in \
+  'validation_profile:' \
+  'final-force-max' \
+  'Validate Source Once' \
+  'sanitizer-bootstrap:' \
+  'ASan/UBSan' \
+  'strict-force-max-gate:' \
+  'BUILD_TESTS: "true"'; do
+  if grep -Fq "$forbidden_cloud_test" "$BUILD_WORKFLOW"; then
+    echo "cloud build workflow still contains test-only path: $forbidden_cloud_test" >&2
+    exit 1
+  fi
+done
+
+cross_build_block="$(sed -n '/^  cross-build:/,/^  build-linux:/p' "$BUILD_WORKFLOW")"
+grep -Fq 'Compile without loading or publishing an image' <<<"$cross_build_block"
+grep -Fq 'BUILD_TESTS: "false"' <<<"$cross_build_block"
+if grep -Eq 'Smoke test|Package strict|Set up QEMU' <<<"$cross_build_block"; then
+  echo "cross-build must compile only" >&2
+  exit 1
+fi
 
 build_linux_block="$(sed -n '/^  build-linux:/,/^  build-windows-amd64:/p' "$BUILD_WORKFLOW")"
 deny_build_linux_registry_write=false
@@ -136,10 +227,41 @@ fi
 grep -Fq 'image: subconverter-extended:${{ matrix.arch }}-ci' <<<"$build_linux_block"
 grep -Fq 'docker save "subconverter-extended:${{ matrix.arch }}-ci"' <<<"$build_linux_block"
 grep -Fq 'name: docker-image-${{ matrix.arch }}' <<<"$build_linux_block"
+grep -Fq 'bash scripts/ci/build-linux-release.sh v0.0.0 amd64 x86_64' <<<"$build_linux_block"
+grep -Fq 'BUILD_TESTS: "false"' <<<"$build_linux_block"
+if grep -Eq 'Smoke test strict|Package strict|ASan|UBSan|ctest' <<<"$build_linux_block"; then
+  echo "dev Linux build still contains full or sanitizer tests" >&2
+  exit 1
+fi
+
+windows_block="$(sed -n '/^  build-windows-amd64:/,/^  merge-manifest:/p' "$BUILD_WORKFLOW")"
+grep -Fq "github.event_name == 'workflow_dispatch'" <<<"$windows_block"
+grep -Fq 'BUILD_TESTS: "false"' <<<"$windows_block"
+grep -Fq 'BUILD_TESTS="$BUILD_TESTS" bash scripts/build-windows-amd64.sh' <<<"$windows_block"
+grep -Fq "if: needs.prepare.outputs.is_release == 'true'" <<<"$windows_block"
+grep -Fq 'BUILD_TESTS="${BUILD_TESTS:-false}"' "$WINDOWS_BUILD_SCRIPT"
+grep -Fq -- '-DBUILD_TESTS="${BUILD_TESTS}"' "$WINDOWS_BUILD_SCRIPT"
+grep -Fq 'ctest --test-dir "${BUILD_DIR}" --output-on-failure --timeout 120' "$WINDOWS_BUILD_SCRIPT"
+grep -Fq '$expectedUpdaterVersion = "unknown"' \
+  "$REPOSITORY/.github/actions/smoke-windows-artifact/action.yml"
+
+grep -Fq '[ "${VERSION}" != "dev" ]' "$OPENWRT_PACKAGE_SCRIPT"
+grep -Fq 'APK_VERSION="0.0.0-r${APK_RELEASE}"' "$OPENWRT_PACKAGE_SCRIPT"
+grep -Fq '[ "$EXPECTED_VERSION" != dev ]' "$OPENWRT_SMOKE_ACTION"
+grep -Fq "expected_apk_version='0.0.0'" "$OPENWRT_SMOKE_ACTION"
+grep -Fq 'default: compat' "$OPENWRT_SMOKE_ACTION"
+grep -Fq 'SUBCONVERTER_RESOURCE_CONTROL="$RESOURCE_CONTROL"' "$OPENWRT_SMOKE_ACTION"
+grep -Fq -- '--ulimit nofile=512:512' "$OPENWRT_SMOKE_ACTION"
+grep -Fq 'runtime_pref=/tmp/subconverter-force-max-pref.toml' "$OPENWRT_SMOKE_ACTION"
+grep -Fq 'max_allowed_download_size = 1048576' "$OPENWRT_SMOKE_ACTION"
 
 publish_block="$(sed -n '/^  merge-manifest:/,/^  create-release:/p' "$BUILD_WORKFLOW")"
-grep -Fq 'needs: [prepare, validate-source, sanitizer, cross-build, build-linux, build-windows-amd64]' <<<"$publish_block"
+grep -Fq 'needs: [prepare, cross-build, build-linux, build-windows-amd64]' <<<"$publish_block"
 grep -Fq "needs.build-windows-amd64.result == 'success'" <<<"$publish_block"
+if grep -Eq 'sanitizer|validate-source|strict-force-max' <<<"$publish_block"; then
+  echo "publish path still depends on removed cloud tests" >&2
+  exit 1
+fi
 grep -Fq 'pattern: docker-image-*' <<<"$publish_block"
 grep -Fq 'gzip -dc "images/$archive" | docker load' <<<"$publish_block"
 grep -Fq 'actual_platform="$(docker image inspect' <<<"$publish_block"

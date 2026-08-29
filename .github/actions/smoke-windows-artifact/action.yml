@@ -53,11 +53,18 @@ runs:
             }
           }
 
-          python "$env:GITHUB_WORKSPACE\scripts\ci\write_build_info.py" verify `
-            --path (Join-Path $root "BUILD-INFO.json") `
-            --version "${{ inputs.expected-version }}" `
-            --revision "${{ inputs.expected-revision }}" `
-            --build-date "${{ inputs.expected-build-date }}"
+          $identityArgs = @(
+            "$env:GITHUB_WORKSPACE\scripts\ci\write_build_info.py",
+            "verify",
+            "--path", (Join-Path $root "BUILD-INFO.json"),
+            "--version", "${{ inputs.expected-version }}",
+            "--revision", "${{ inputs.expected-revision }}",
+            "--build-date", "${{ inputs.expected-build-date }}"
+          )
+          if ("${{ inputs.expected-version }}" -eq "dev") {
+            $identityArgs += "--allow-dev"
+          }
+          python @identityArgs
           if ($LASTEXITCODE -ne 0) {
             throw "Windows package identity verification failed."
           }
@@ -68,8 +75,15 @@ runs:
             throw "Windows updater status command failed."
           }
           $updateStatus = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json
+          $expectedUpdaterVersion = "${{ inputs.expected-version }}"
+          if ($expectedUpdaterVersion -ceq "dev") {
+            # The updater intentionally recognizes only formal vX.Y.Z releases.
+            # A non-publishing dev artifact still has exact BUILD-INFO/runtime
+            # identity above, but must remain outside the stable update channel.
+            $expectedUpdaterVersion = "unknown"
+          }
           if ($updateStatus.state -cne "idle" -or
-              $updateStatus.current_version -cne "${{ inputs.expected-version }}" -or
+              $updateStatus.current_version -cne $expectedUpdaterVersion -or
               $updateStatus.rollback_available -or
               $updateStatus.available) {
             throw "Unexpected Windows updater status: $($updateStatus | ConvertTo-Json -Compress)"
@@ -135,26 +149,35 @@ runs:
           python "$env:GITHUB_WORKSPACE\scripts\run-subconverter-smoke.py" --base-url "http://127.0.0.1:$port"
 
           # The portable archive deliberately contains no CA bundle. Fetch a
-          # pinned HTTPS external config to prove that the packaged OpenSSL
-          # libcurl can use the Windows native trust store. Do not import a
-          # test root certificate or weaken certificate verification here.
+          # ruleset from the exact source revision to prove that the packaged
+          # OpenSSL libcurl can use the Windows native trust store. Keep this
+          # probe independent of external-config imports and their additional
+          # remote dependencies. Do not import a test root certificate or
+          # weaken certificate verification here.
           $caBundle = Join-Path $workDir "etc\ssl\certs\ca-bundle.crt"
           if (Test-Path -LiteralPath $caBundle) {
             throw "Windows artifact smoke unexpectedly found a relocated CA bundle."
           }
-          $subscription = [uri]::EscapeDataString(
-            "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ@example.com:8388#NativeCA"
-          )
-          $externalConfig = [uri]::EscapeDataString(
-            "https://raw.githubusercontent.com/Aethersailor/SubConverter-Extended/3bc7f09aeeafe4c823b47723915d039d064c4b67/base/config/example_external_config.toml"
-          )
+          $rulesetUrl =
+            "https://raw.githubusercontent.com/Aethersailor/SubConverter-Extended/${{ inputs.expected-revision }}/base/base/mellow.conf"
+          $encodedRuleset = [Convert]::ToBase64String(
+            [Text.Encoding]::UTF8.GetBytes($rulesetUrl)
+          ).TrimEnd("=").Replace("+", "-").Replace("/", "_")
           $nativeCaResponse = Invoke-WebRequest `
             -UseBasicParsing `
             -SkipHttpErrorCheck `
-            -Uri "http://127.0.0.1:$port/sub?target=clash&url=$subscription&config=$externalConfig" `
+            -Uri "http://127.0.0.1:$port/getruleset?type=1&url=$encodedRuleset" `
             -TimeoutSec 30
           if ($nativeCaResponse.StatusCode -ne 200 -or
-              -not $nativeCaResponse.Content.Contains("NativeCA")) {
+              -not $nativeCaResponse.Content.Contains(
+                "DOMAIN-SUFFIX, google.com, Remote"
+              )) {
+            Write-Host "native CA response:"
+            Write-Host $nativeCaResponse.Content
+            Write-Host "stdout:"
+            if (Test-Path $stdout) { Get-Content $stdout -ErrorAction SilentlyContinue }
+            Write-Host "stderr:"
+            if (Test-Path $stderr) { Get-Content $stderr -ErrorAction SilentlyContinue }
             throw "Windows native CA smoke returned HTTP $($nativeCaResponse.StatusCode)."
           }
 

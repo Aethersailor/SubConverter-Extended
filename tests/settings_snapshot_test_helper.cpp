@@ -3,24 +3,55 @@
 #include <chrono>
 #include <filesystem>
 #include <future>
+#include <fstream>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 
 #include "handler/interfaces.h"
+#include "handler/external_config_async.h"
+#include "handler/conversion_service.h"
+#include "handler/conversion_pipeline.h"
 #include "handler/settings.h"
 #include "handler/settings_snapshot.h"
 #include "handler/webget.h"
+#include "generator/config/nodemanip.h"
+#include "generator/config/subexport.h"
 #include "parser/mihomo_bridge.h"
+#include "runtime/conversion_flow.h"
+#include "runtime/blocking_io_executor.h"
+#include "runtime/memory_budget.h"
+#include "runtime/owner_admission.h"
+#include "runtime/quickjs_lane.h"
+#include "runtime/runtime_coordinator.h"
+#include "runtime/transport_admission.h"
+#include "script/script_quickjs.h"
 #include "server/webserver.h"
 #include "utils/logger.h"
+#include "utils/ini_reader/ini_reader.h"
+#include "utils/resource_control.h"
 
 WebServer webServer;
+
+namespace {
+void setProcessEnvironment(const char *name, const char *value) {
+#ifdef _WIN32
+  if (_putenv_s(name, value ? value : "") != 0)
+    throw std::runtime_error("failed to update process environment");
+#else
+  const int result = value ? setenv(name, value, 1) : unsetenv(name);
+  if (result != 0)
+    throw std::runtime_error("failed to update process environment");
+#endif
+}
+} // namespace
 
 namespace mihomo {
 
@@ -44,27 +75,56 @@ std::string encryptAgeArmored(const std::string &, const std::string &) {
 } // namespace mihomo
 
 int main(int argc, char *argv[]) {
+  {
+    INIReader bounded_ini;
+    bounded_ini.store_any_line = true;
+    if (bounded_ini.parse("[Proxy]\nA=one\nB=two\n") != 0)
+      throw std::runtime_error("bounded INI fixture did not parse");
+    bounded_ini.set_current_section("Proxy Group");
+    for (int group = 0; group < 3; ++group)
+      for (int node = 0; node < 4; ++node)
+        bounded_ini.set("{NONAME}", "group-" + std::to_string(group) +
+                                         "=select,node-" +
+                                         std::to_string(node));
+    const std::string serialized = bounded_ini.to_string();
+    if (bounded_ini.to_string(serialized.size()) != serialized)
+      throw std::runtime_error("bounded INI exact limit changed output");
+    bool limit_rejected = false;
+    try {
+      (void)bounded_ini.to_string(serialized.size() - 1);
+    } catch (const BoundedOutputExceeded &) {
+      limit_rejected = true;
+    }
+    if (!limit_rejected)
+      throw std::runtime_error("bounded INI accepted limit+1 output");
+  }
   const bool webget_probe =
       argc == 6 && std::string(argv[1]) == "--webget-probe";
   const bool fetch_shutdown_race =
       argc == 3 && std::string(argv[1]) == "--fetch-shutdown-race";
+  const bool runtime_transaction =
+      argc == 3 && std::string(argv[1]) == "--runtime-transaction";
   const bool expect_reload_failure =
       argc == 4 && std::string(argv[3]) == "--expect-reload-failure";
-  if ((!webget_probe && !fetch_shutdown_race && argc != 2 && argc != 3 &&
-       argc != 4) ||
+  if ((!webget_probe && !fetch_shutdown_race && !runtime_transaction &&
+       argc != 2 && argc != 3 && argc != 4) ||
       (argc == 4 && !expect_reload_failure)) {
     std::cerr << "usage: settings_snapshot_test_helper <config> "
                  "[reload-config [--expect-reload-failure]]\n"
                  "       settings_snapshot_test_helper --webget-probe "
                  "<config> <url> <cache-ttl> <delay-ms>\n"
                  "       settings_snapshot_test_helper "
-                 "--fetch-shutdown-race <config>\n";
+                 "--fetch-shutdown-race <config>\n"
+                 "       settings_snapshot_test_helper "
+                 "--runtime-transaction <config>\n";
     return 2;
   }
 
   const std::filesystem::path config =
       std::filesystem::absolute(
-          argv[webget_probe || fetch_shutdown_race ? 2 : 1])
+          argv[webget_probe || fetch_shutdown_race || runtime_transaction
+                   ? 2
+                   : 1])
           .lexically_normal();
   if (!config.has_filename()) {
     std::cerr << "configuration path has no filename\n";
@@ -73,8 +133,260 @@ int main(int argc, char *argv[]) {
 
   std::filesystem::current_path(config.parent_path());
   global.prefPath = config.filename().string();
+  if (runtime_transaction)
+    setProcessEnvironment("SUBCONVERTER_RESOURCE_CONTROL", "force_max");
   if (!readConf())
     return 1;
+
+#ifndef NO_JS_RUNTIME
+  {
+    const std::string script_name =
+        "force-max-group-script-" +
+        std::to_string(std::chrono::steady_clock::now()
+                           .time_since_epoch()
+                           .count()) +
+        ".js";
+    auto generate_with_script = [&](const std::string &script,
+                                    size_t native_limit,
+                                    size_t group_count = 1) {
+      {
+        std::ofstream file(script_name, std::ios::trunc);
+        file << script;
+      }
+      Proxy node;
+      node.Type = ProxyType::Shadowsocks;
+      node.Remark = "script-node";
+      node.Hostname = "127.0.0.1";
+      node.Port = 8388;
+      node.Password = "fixture-password";
+      node.EncryptMethod = "aes-128-gcm";
+      std::vector<Proxy> nodes{node};
+      ProxyGroupConfigs groups;
+      for (size_t index = 0; index < group_count; ++index) {
+        ProxyGroupConfig group;
+        group.Name = "ScriptGroup" + std::to_string(index);
+        group.Type = ProxyGroupType::Select;
+        group.Proxies = {"script:" + script_name};
+        groups.emplace_back(std::move(group));
+      }
+      std::vector<RulesetContent> rulesets;
+      extra_settings settings;
+      settings.authorized = true;
+      settings.force_max_group_script_limited = true;
+      settings.force_max_group_script_remaining_bytes = native_limit;
+      settings.js_runtime = new qjs::Runtime();
+      script_runtime_init(*settings.js_runtime);
+      settings.js_context = new qjs::Context(*settings.js_runtime);
+      script_context_init(*settings.js_context);
+      try {
+        std::string output = proxyToSurge(
+            nodes, "[General]\n", rulesets, groups, 3, settings, 8192);
+        (void)script_cleanup(*settings.js_context);
+        return output;
+      } catch (...) {
+        (void)script_cleanup(*settings.js_context);
+        throw;
+      }
+    };
+    try {
+      const std::string output = generate_with_script(
+          "function filter(nodes) { return nodes[0].Remark; }\n", 4096);
+      if (output.find("ScriptGroup") == std::string::npos ||
+          output.find("script-node") == std::string::npos)
+        throw std::runtime_error(
+            "bounded group script changed selected node output");
+      bool rejected = false;
+      try {
+        (void)generate_with_script(
+            "function filter(nodes) { return 'x'.repeat(4096); }\n", 256);
+      } catch (const BoundedOutputExceeded &) {
+        rejected = true;
+      }
+      if (!rejected)
+        throw std::runtime_error(
+            "bounded group script accepted oversized native result");
+      rejected = false;
+      try {
+        const size_t exact_one_group =
+            std::string("script-node").size() +
+            sizeof(std::string) * 2 + 32;
+        (void)generate_with_script(
+            "function filter(nodes) { return nodes[0].Remark; }\n",
+            exact_one_group, 2);
+      } catch (const BoundedOutputExceeded &) {
+        rejected = true;
+      }
+      if (!rejected)
+        throw std::runtime_error(
+            "bounded group script reused an exhausted shared budget");
+    } catch (...) {
+      std::filesystem::remove(script_name);
+      throw;
+    }
+    std::filesystem::remove(script_name);
+  }
+#endif
+
+  {
+    enum class NodelistTarget { Surge, QuanX, Loon };
+    auto generate_nodelist = [](NodelistTarget target, size_t limit) {
+      Proxy node;
+      node.Type = ProxyType::Shadowsocks;
+      node.Remark = "bounded-node";
+      node.Hostname = "127.0.0.1";
+      node.Port = 8388;
+      node.Password = "fixture-password";
+      node.EncryptMethod = "aes-128-gcm";
+      std::vector<Proxy> nodes{node};
+      std::vector<RulesetContent> rulesets;
+      ProxyGroupConfigs groups;
+      extra_settings settings;
+      settings.nodelist = true;
+      switch (target) {
+      case NodelistTarget::Surge:
+        return proxyToSurge(nodes, "", rulesets, groups, 3, settings,
+                            limit);
+      case NodelistTarget::QuanX:
+        return proxyToQuanX(nodes, "", rulesets, groups, settings, limit);
+      case NodelistTarget::Loon:
+        return proxyToLoon(nodes, "", rulesets, groups, settings, limit);
+      }
+      throw std::runtime_error("unknown bounded nodelist target");
+    };
+    for (NodelistTarget target :
+         {NodelistTarget::Surge, NodelistTarget::QuanX,
+          NodelistTarget::Loon}) {
+      const std::string expected = generate_nodelist(
+          target, std::numeric_limits<size_t>::max());
+      if (expected.empty() ||
+          generate_nodelist(target, expected.size()) != expected)
+        throw std::runtime_error(
+            "bounded nodelist exact limit changed output");
+      bool rejected = false;
+      try {
+        (void)generate_nodelist(target, expected.size() - 1);
+      } catch (const BoundedOutputExceeded &) {
+        rejected = true;
+      }
+      if (!rejected)
+        throw std::runtime_error(
+            "bounded nodelist accepted limit+1 output");
+    }
+  }
+
+  if (runtime_transaction) {
+    const uint64_t initial_response_cache =
+        responseMicroCacheSnapshot().max_bytes;
+    const size_t initial_ruleset_entries =
+        rulesetConversionCacheMaxEntries();
+    const size_t initial_ruleset_bytes =
+        rulesetConversionCacheMaxBytes();
+    const size_t initial_external_entries =
+        externalConfigCacheMaxEntries();
+    const size_t initial_external_bytes =
+        externalConfigCacheMaxBytes();
+    const uint64_t initial_retained_limit =
+        retainedResponseByteSnapshot().limit;
+    const std::vector<std::pair<std::string, std::string>> failure_stages{
+        {"compute", "compute"},
+        {"blocking_io", "blocking_io"},
+        {"quickjs", "quickjs"},
+        {"outbound_fetch", "outbound_fetch"},
+        {"owner_admission", "owner_admission"},
+        {"transport_admission", "transport_admission"},
+        {"precommit", "precommit"},
+        {"publish_compute", "publish"},
+        {"publish", "publish"},
+        {"validation", "validation"}};
+    uint64_t expected_rollbacks = 0;
+    for (const auto &[stage, failed_stage] : failure_stages) {
+      setProcessEnvironment("SUBCONVERTER_FORCE_MAX_FAIL_STAGE",
+                            stage.c_str());
+      const bool prepared = prepareRuntimeCoordinator();
+      bool failed = !prepared;
+      if (stage == "precommit" || stage == "publish_compute" ||
+          stage == "publish" || stage == "validation")
+        failed = prepared && !commitRuntimeCoordinator();
+      const RuntimeCoordinatorSnapshot snapshot =
+          runtimeCoordinatorSnapshot();
+      ++expected_rollbacks;
+      if (!failed || snapshot.ready || snapshot.prepared ||
+          snapshot.generation != 0 ||
+          snapshot.rollback_total != expected_rollbacks ||
+          snapshot.last_failed_stage != failed_stage ||
+          globalComputeExecutorSnapshot().initialized ||
+          blockingIoExecutorSnapshot().initialized ||
+          globalQuickJsLaneSnapshot().ready ||
+          globalOwnerAdmissionSnapshot().ready ||
+          globalTransportAdmissionSnapshot().ready ||
+          asyncFetchEngineSnapshot().available ||
+          globalFetchMemoryBudgetSnapshot().enabled ||
+          conversionFlowRegistrySnapshot().stopping ||
+          responseMicroCacheSnapshot().max_bytes !=
+              initial_response_cache ||
+          rulesetConversionCacheMaxEntries() != initial_ruleset_entries ||
+          rulesetConversionCacheMaxBytes() != initial_ruleset_bytes ||
+          externalConfigCacheMaxEntries() != initial_external_entries ||
+          externalConfigCacheMaxBytes() != initial_external_bytes ||
+          retainedResponseByteSnapshot().limit != initial_retained_limit) {
+        std::cerr << "runtime transaction rollback failed at stage "
+                  << stage << '\n';
+        return 1;
+      }
+    }
+    setProcessEnvironment("SUBCONVERTER_FORCE_MAX_FAIL_STAGE", nullptr);
+    if (!prepareRuntimeCoordinator() || !commitRuntimeCoordinator()) {
+      std::cerr << "runtime transaction could not rebuild after rollback\n";
+      return 1;
+    }
+    RuntimeCoordinatorSnapshot ready = runtimeCoordinatorSnapshot();
+    if (!ready.prepared || !ready.ready || ready.generation != 1 ||
+        !globalComputeExecutorSnapshot().ready ||
+        !blockingIoExecutorSnapshot().ready ||
+        !globalQuickJsLaneSnapshot().ready ||
+        !globalOwnerAdmissionSnapshot().ready ||
+        !globalTransportAdmissionSnapshot().ready ||
+        !asyncFetchEngineSnapshot().available ||
+        !globalFetchMemoryBudgetSnapshot().enabled ||
+        conversionFlowRegistrySnapshot().stopping) {
+      std::cerr << "rebuilt runtime was not atomically published\n";
+      return 1;
+    }
+    const uint64_t controller_samples_before =
+        resourceControlSnapshot().sample_count;
+    startResourceControlRuntime();
+    const auto controller_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    ResourceControlSnapshot controller = resourceControlSnapshot();
+    while (controller.sample_count == controller_samples_before &&
+           std::chrono::steady_clock::now() < controller_deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      controller = resourceControlSnapshot();
+    }
+    if (controller.controller_state == "starting" ||
+        controller.controller_state == "compat" ||
+        controller.controller_reason == "compat") {
+      std::cerr << "resource controller did not start after rollback/rebuild\n";
+      return 1;
+    }
+    requestRuntimeCoordinatorShutdown();
+    const bool joined = joinRuntimeCoordinator();
+    const RuntimeCoordinatorSnapshot stopped =
+        runtimeCoordinatorSnapshot();
+    if (!joined || !stopped.joined || stopped.shutdown_stage != "joined" ||
+        stopped.shutdown_deadline_exceeded ||
+        !globalComputeExecutorSnapshot().stopping ||
+        !blockingIoExecutorSnapshot().stopping ||
+        !globalQuickJsLaneSnapshot().stopping ||
+        !globalOwnerAdmissionSnapshot().stopping ||
+        !globalTransportAdmissionSnapshot().stopping ||
+        asyncFetchEngineSnapshot().available) {
+      std::cerr << "rebuilt runtime left live threads during shutdown\n";
+      return 1;
+    }
+    std::cout << "runtime transaction rollback/rebuild/shutdown passed\n";
+    return 0;
+  }
 
   if (fetch_shutdown_race) {
     std::atomic<int> ready{0};
@@ -98,6 +410,7 @@ int main(int argc, char *argv[]) {
     initialize.join();
     shutdown.join();
     requestOutboundFetchShutdown();
+    (void)joinOutboundFetchShutdown();
     const AsyncFetchEngineSnapshot snapshot = asyncFetchEngineSnapshot();
     rapidjson::StringBuffer buffer;
     rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
@@ -187,6 +500,91 @@ int main(int argc, char *argv[]) {
         async_data_outcome.payload->content == "owned-async-data" &&
         async_data_outcome.payload->retained_bytes.bytes() >=
             async_data_outcome.payload->content.size();
+    std::promise<OwnedWebGetAsyncOutcome> async_no_cache_completion;
+    OwnedWebGetRequest async_no_cache_request;
+    async_no_cache_request.url =
+        std::string(argv[3]) + "?owned-async-no-cache=1";
+    async_no_cache_request.proxy = ProxyPolicy::direct();
+    async_no_cache_request.cache_ttl = 0;
+    async_no_cache_request.capture_response_headers = true;
+    async_no_cache_request.context = FetchContext::TrustedConfig;
+    webGetOwnedAsync(
+        std::move(async_no_cache_request),
+        std::make_shared<RequestContext>(
+            "owned-async-no-cache", RequestContext::Clock::now(),
+            RequestContext::Clock::now() + std::chrono::seconds(10)),
+        [&](OwnedWebGetAsyncOutcome outcome) {
+          async_no_cache_completion.set_value(std::move(outcome));
+        });
+    const OwnedWebGetAsyncOutcome async_no_cache_outcome =
+        async_no_cache_completion.get_future().get();
+    const bool async_no_cache_ok =
+        async_no_cache_outcome.payload &&
+        async_no_cache_outcome.failure == AsyncFetchFailure::None &&
+        async_no_cache_outcome.payload->status_code == 200 &&
+        async_no_cache_outcome.payload->content ==
+            "owned-webget:/webget-probe-hit" &&
+        async_no_cache_outcome.payload->response_headers_touched &&
+            async_no_cache_outcome.payload->retained_bytes.bytes() >=
+                async_no_cache_outcome.payload->content.size();
+    bool async_fetch_memory_lifetime_ok = true;
+    if (globalFetchMemoryBudgetSnapshot().enabled) {
+      std::promise<SharedAsyncFetchResult> held_fetch_completion;
+      AsyncFetchRequest held_fetch_request;
+      held_fetch_request.url =
+          std::string(argv[3]) + "?fetch-memory-lifetime=1";
+      held_fetch_request.proxy = ProxyPolicy::direct();
+      held_fetch_request.capture_content = true;
+      held_fetch_request.retain_result_bytes = true;
+      held_fetch_request.context = FetchContext::TrustedConfig;
+      held_fetch_request.deadline =
+          std::chrono::steady_clock::now() + std::chrono::seconds(10);
+      webGetAsync(
+          std::move(held_fetch_request),
+          [&](SharedAsyncFetchResult result) {
+            held_fetch_completion.set_value(std::move(result));
+          });
+      SharedAsyncFetchResult held_fetch =
+          held_fetch_completion.get_future().get();
+      const FetchMemoryBudgetSnapshot held_fetch_snapshot =
+          globalFetchMemoryBudgetSnapshot();
+      async_fetch_memory_lifetime_ok =
+          held_fetch && held_fetch->failure == AsyncFetchFailure::None &&
+          !held_fetch->content.empty() &&
+          held_fetch->fetch_memory.bytes() != 0 &&
+          held_fetch_snapshot.used >= held_fetch->fetch_memory.bytes();
+      held_fetch.reset();
+      const auto fetch_release_deadline =
+          std::chrono::steady_clock::now() + std::chrono::seconds(2);
+      while (globalFetchMemoryBudgetSnapshot().used != 0 &&
+             std::chrono::steady_clock::now() < fetch_release_deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      async_fetch_memory_lifetime_ok =
+          async_fetch_memory_lifetime_ok &&
+          globalFetchMemoryBudgetSnapshot().used == 0;
+    }
+    std::promise<OwnedWebGetAsyncOutcome> expired_completion;
+    OwnedWebGetRequest expired_request;
+    expired_request.url =
+        std::string(argv[3]) + "?owned-async-expired=1";
+    expired_request.proxy = ProxyPolicy::direct();
+    expired_request.cache_ttl = 0;
+    expired_request.context = FetchContext::TrustedConfig;
+    webGetOwnedAsync(
+        std::move(expired_request),
+        std::make_shared<RequestContext>(
+            "owned-async-expired", RequestContext::Clock::now(),
+            RequestContext::Clock::now() - std::chrono::milliseconds(1)),
+        [&](OwnedWebGetAsyncOutcome outcome) {
+          expired_completion.set_value(std::move(outcome));
+        });
+    const OwnedWebGetAsyncOutcome expired_outcome =
+        expired_completion.get_future().get();
+    const bool async_absolute_deadline_ok =
+        !expired_outcome.payload &&
+        expired_outcome.failure == AsyncFetchFailure::Deadline &&
+        expired_outcome.cancellation ==
+            RequestCancellationReason::Deadline;
     const bool continuation_was_uninitialized =
         !ownedWebGetContinuationRuntimeSnapshot().initialized;
     std::promise<SchedulerSubmitStatus> preinit_completion;
@@ -244,6 +642,569 @@ int main(int argc, char *argv[]) {
         initializeOwnedWebGetContinuationRuntime(continuation_budget);
     const OwnedWebGetContinuationInitStatus different_budget_init =
         initializeOwnedWebGetContinuationRuntime({2, 9, 1024 * 1024});
+    const BlockingIoExecutorInitStatus blocking_io_init =
+        initializeBlockingIoExecutor({2, 8, 1024 * 1024});
+    const std::string fixture_root =
+        std::string(argv[3]).substr(0, std::string(argv[3]).rfind('/'));
+    std::promise<AsyncExternalConfigResult> async_external_completion;
+    template_args async_external_arguments;
+    loadExternalConfigAsync(
+        fixture_root + "/async-external-config.toml",
+        FetchContext::TrustedConfig, captureEffectiveSettingsSnapshot(),
+        std::make_shared<RequestContext>(
+            "async-external-config", RequestContext::Clock::now(),
+            RequestContext::Clock::now() + std::chrono::seconds(10)),
+        std::move(async_external_arguments),
+        [&](AsyncExternalConfigResult result) {
+          async_external_completion.set_value(std::move(result));
+        });
+    AsyncExternalConfigResult async_external_result =
+        async_external_completion.get_future().get();
+    const bool async_external_config_ok =
+        async_external_result.status ==
+            ExternalConfigLoadStatus::Success &&
+        async_external_result.config.custom_proxy_group.size() == 1 &&
+        async_external_result.config.custom_proxy_group.front().Name ==
+            "AsyncImported" &&
+        async_external_result.template_arguments.local_vars["marker"].find(
+            "template-ok") != std::string::npos;
+    auto make_subscription_requests = [&] {
+      std::vector<AsyncSubscriptionRequest> requests;
+      for (uint64_t index = 0; index < 2; ++index) {
+        AsyncSubscriptionRequest request;
+        request.source_index = index;
+        request.url = fixture_root + "/subscription.txt?async-batch=" +
+                      std::to_string(index);
+        request.proxy = ProxyPolicy::direct();
+        request.cache_ttl = 0;
+        request.context = FetchContext::TrustedConfig;
+        requests.emplace_back(std::move(request));
+      }
+      return requests;
+    };
+    std::promise<AsyncSubscriptionBatchResult> async_subscription_completion;
+    auto async_subscription_context = std::make_shared<RequestContext>(
+        "async-subscription-batch", RequestContext::Clock::now(),
+        RequestContext::Clock::now() + std::chrono::seconds(10));
+    resolveSubscriptionSourcesAsync(
+        make_subscription_requests(), captureEffectiveSettingsSnapshot(),
+        async_subscription_context,
+        [&](AsyncSubscriptionBatchResult result) {
+          async_subscription_completion.set_value(std::move(result));
+        });
+    AsyncSubscriptionBatchResult async_subscription_result =
+        async_subscription_completion.get_future().get();
+    ProxyPolicy async_subscription_proxy = ProxyPolicy::direct();
+    string_array async_exclude, async_include;
+    RegexMatchConfigs async_stream, async_time;
+    std::string async_sub_info;
+    std::vector<Proxy> async_nodes;
+    bool async_subscription_ok =
+        async_subscription_result.slots.size() == 2;
+    for (size_t index = 0;
+         index < async_subscription_result.slots.size(); ++index) {
+      const AsyncSubscriptionSlot &slot =
+          async_subscription_result.slots[index];
+      async_subscription_ok =
+          async_subscription_ok && slot.source_index == index &&
+          slot.failure == AsyncFetchFailure::None && slot.payload &&
+          slot.payload->status_code == 200;
+      if (!slot.payload)
+        continue;
+      parse_settings parse;
+      parse.proxy = &async_subscription_proxy;
+      parse.exclude_remarks = &async_exclude;
+      parse.include_remarks = &async_include;
+      parse.stream_rules = &async_stream;
+      parse.time_rules = &async_time;
+      parse.sub_info = &async_sub_info;
+      parse.parser_mode = NodeParserMode::LegacyOnly;
+      parse.fetch_context = FetchContext::TrustedConfig;
+      parse.resolved_subscription_content = &slot.payload->content;
+      parse.resolved_subscription_headers =
+          &slot.payload->response_headers;
+      parse.require_resolved_subscription = true;
+      async_subscription_ok =
+          async_subscription_ok &&
+          addNodes(slot.url, async_nodes, static_cast<int>(index), parse) == 0;
+    }
+    async_subscription_ok =
+        async_subscription_ok && async_nodes.size() == 2 &&
+        async_nodes[0].GroupId == 0 && async_nodes[1].GroupId == 1;
+    auto make_conversion_resource_requests = [&] {
+      std::vector<AsyncConversionResourceRequest> requests;
+      for (uint64_t index = 0; index < 2; ++index) {
+        AsyncConversionResourceRequest request;
+        request.kind = ConversionResourceKind::Ruleset;
+        request.source_index = index;
+        request.url = fixture_root + "/generation-rules.list?async=" +
+                      std::to_string(index);
+        request.proxy = ProxyPolicy::direct();
+        request.cache_ttl = 0;
+        requests.emplace_back(std::move(request));
+      }
+      AsyncConversionResourceRequest base;
+      base.kind = ConversionResourceKind::Base;
+      base.source_index = 2;
+      base.url = fixture_root + "/async-base.yaml";
+      base.proxy = ProxyPolicy::direct();
+      base.cache_ttl = 0;
+      requests.emplace_back(std::move(base));
+      AsyncConversionResourceRequest local_base;
+      local_base.kind = ConversionResourceKind::Base;
+      local_base.source_index = 3;
+      local_base.url = config.filename().string();
+      local_base.proxy = ProxyPolicy::direct();
+      local_base.cache_ttl = 0;
+      local_base.context = FetchContext::TrustedConfig;
+      requests.emplace_back(std::move(local_base));
+      return requests;
+    };
+    std::promise<AsyncConversionResourceBatchResult>
+        async_resource_completion;
+    auto async_resource_context = std::make_shared<RequestContext>(
+        "async-conversion-resources", RequestContext::Clock::now(),
+        RequestContext::Clock::now() + std::chrono::seconds(10));
+    resolveConversionResourcesAsync(
+        make_conversion_resource_requests(),
+        captureEffectiveSettingsSnapshot(), async_resource_context,
+        [&](AsyncConversionResourceBatchResult result) {
+          async_resource_completion.set_value(std::move(result));
+        });
+    AsyncConversionResourceBatchResult async_resource_result =
+        async_resource_completion.get_future().get();
+    bool async_conversion_resources_ok =
+        async_resource_result.resources.size() == 4;
+    for (size_t index = 0;
+         index < async_resource_result.resources.size(); ++index) {
+      const ResolvedConversionResource &resource =
+          async_resource_result.resources[index];
+      async_conversion_resources_ok =
+          async_conversion_resources_ok &&
+          resource.source_index == index && resource.payload &&
+          resource.failure == AsyncFetchFailure::None &&
+          resource.payload->status_code == 200 &&
+          !resource.payload->content.empty() &&
+          resource.kind == (index < 2 ? ConversionResourceKind::Ruleset
+                                      : ConversionResourceKind::Base);
+    }
+    const std::string async_template_content =
+        "marker={{ fetch(\"" + fixture_root +
+        "/template-marker\") }}";
+    std::promise<AsyncTemplateResult> async_template_completion;
+    auto async_template_context = std::make_shared<RequestContext>(
+        "async-template", RequestContext::Clock::now(),
+        RequestContext::Clock::now() + std::chrono::seconds(10));
+    renderTemplateAsync(
+        async_template_content, {}, "", FetchContext::TrustedConfig,
+        captureEffectiveSettingsSnapshot(), async_template_context,
+        [&](AsyncTemplateResult result) {
+          async_template_completion.set_value(std::move(result));
+        });
+    const AsyncTemplateResult async_template_result =
+        async_template_completion.get_future().get();
+    const bool async_template_ok =
+        async_template_result.status == AsyncTemplateStatus::Success &&
+        async_template_result.output == "marker=template-ok" &&
+        async_template_result.dependency_count == 1;
+    const std::string async_template_branch_content =
+        "{% if fetch(\"" + fixture_root +
+        "/template-branch-a\") == \"\" %}{{ fetch(\"" + fixture_root +
+        "/template-branch-b\") }}{% else %}kept{% endif %}";
+    std::promise<AsyncTemplateResult> async_template_branch_completion;
+    renderTemplateAsync(
+        async_template_branch_content, {}, "", FetchContext::TrustedConfig,
+        captureEffectiveSettingsSnapshot(), async_template_context,
+        [&](AsyncTemplateResult result) {
+          async_template_branch_completion.set_value(std::move(result));
+        });
+    const AsyncTemplateResult async_template_branch_result =
+        async_template_branch_completion.get_future().get();
+    const bool async_template_branch_ok =
+        async_template_branch_result.status == AsyncTemplateStatus::Success &&
+        async_template_branch_result.output == "kept" &&
+        async_template_branch_result.dependency_count == 1;
+    std::promise<AsyncTemplateResult> limited_template_completion;
+    renderTemplateAsync(
+        "0123456789", {}, "", FetchContext::TrustedConfig,
+        captureEffectiveSettingsSnapshot(), async_template_context,
+        [&](AsyncTemplateResult result) {
+          limited_template_completion.set_value(std::move(result));
+        },
+        8);
+    const AsyncTemplateResult limited_template_result =
+        limited_template_completion.get_future().get();
+    const bool async_template_limit_ok =
+        limited_template_result.status ==
+            AsyncTemplateStatus::ResourceLimitExceeded &&
+        limited_template_result.output.empty();
+    {
+      std::ofstream gist_config("gistconf.ini", std::ios::trunc);
+      gist_config << "[common]\n"
+                     "token=fixture-token\n";
+    }
+    std::promise<AsyncUploadResult> async_upload_completion;
+    auto async_upload_context = std::make_shared<RequestContext>(
+        "async-upload", RequestContext::Clock::now(),
+        RequestContext::Clock::now() + std::chrono::seconds(10));
+    uploadGistAsync(
+        "async-direct", "async-direct", "async-upload-content", false,
+        captureEffectiveSettingsSnapshot(), async_upload_context,
+        [&](AsyncUploadResult result) {
+          async_upload_completion.set_value(result);
+        });
+    const AsyncUploadResult async_upload_result =
+        async_upload_completion.get_future().get();
+    auto cancelled_upload_context = std::make_shared<RequestContext>(
+        "async-upload-cancelled", RequestContext::Clock::now(),
+        RequestContext::Clock::now() + std::chrono::seconds(10));
+    cancelled_upload_context->requestCancellation(
+        RequestCancellationReason::ClientDisconnected);
+    std::promise<AsyncUploadResult> cancelled_upload_completion;
+    uploadGistAsync(
+        "async-cancelled", "async-cancelled", "must-not-upload", false,
+        captureEffectiveSettingsSnapshot(), cancelled_upload_context,
+        [&](AsyncUploadResult result) {
+          cancelled_upload_completion.set_value(result);
+        });
+    const AsyncUploadResult cancelled_upload_result =
+        cancelled_upload_completion.get_future().get();
+    const bool async_upload_ok =
+        async_upload_result.status == AsyncUploadStatus::Success &&
+        async_upload_result.remote_status == 201 &&
+        cancelled_upload_result.status == AsyncUploadStatus::Cancelled &&
+        cancelled_upload_result.remote_status == 0;
+    bool quickjs_lane_ok = true;
+    bool quickjs_global_ok = true;
+    std::string quickjs_lane_diagnostic;
+#ifndef NO_JS_RUNTIME
+    {
+      QuickJsLane lane({1, 1, 1024 * 1024,
+                        64 * 1024 * 1024, 1024 * 1024});
+      const SettingsSnapshot lane_settings =
+          captureEffectiveSettingsSnapshot();
+      auto first_context = std::make_shared<RequestContext>(
+          "quickjs-lane-first", RequestContext::Clock::now(),
+          RequestContext::Clock::now() + std::chrono::seconds(10));
+      std::promise<void> first_started;
+      std::promise<QuickJsTaskResult> first_completion;
+      std::future<QuickJsTaskResult> first_future =
+          first_completion.get_future();
+      std::atomic<uint64_t> side_effects{0};
+      std::atomic<uint64_t> completion_count{0};
+      std::atomic<bool> scope_ok{false};
+      const QuickJsSubmitStatus first_submit = lane.submit(
+          {.bytes = 128,
+           .settings = lane_settings,
+           .request_context = first_context},
+          [&](qjs::Context &context) {
+            scope_ok.store(
+                captureCurrentRequestContext() == first_context &&
+                    &effectiveSettings() == lane_settings.get(),
+                std::memory_order_release);
+            first_started.set_value();
+            context.eval("sleep(500)");
+            side_effects.fetch_add(1, std::memory_order_relaxed);
+          },
+          [&](QuickJsTaskResult result) {
+            completion_count.fetch_add(1, std::memory_order_relaxed);
+            first_completion.set_value(result);
+          });
+      first_started.get_future().wait();
+
+      std::promise<SchedulerSubmitStatus> ordinary_completion;
+      std::future<SchedulerSubmitStatus> ordinary_future =
+          ordinary_completion.get_future();
+      const SchedulerSubmitStatus ordinary_submit =
+          submitOwnedWebGetContinuation(
+              RequestCostClass::Low, 1,
+              RequestContext::Clock::time_point::max(), {}, [] {},
+              [&](SchedulerSubmitStatus status,
+                  std::exception_ptr error) {
+                ordinary_completion.set_value(
+                    error ? SchedulerSubmitStatus::Stopping : status);
+              });
+      const bool ordinary_completed_while_quickjs_busy =
+          ordinary_future.wait_for(std::chrono::seconds(2)) ==
+              std::future_status::ready &&
+          ordinary_future.get() == SchedulerSubmitStatus::Accepted &&
+          first_future.wait_for(std::chrono::milliseconds(0)) !=
+              std::future_status::ready;
+
+      std::promise<QuickJsTaskResult> queued_completion;
+      std::future<QuickJsTaskResult> queued_future =
+          queued_completion.get_future();
+      const QuickJsSubmitStatus queued_submit = lane.submit(
+          {.bytes = 256,
+           .settings = lane_settings,
+           .request_context = std::make_shared<RequestContext>(
+               "quickjs-lane-queued", RequestContext::Clock::now(),
+               RequestContext::Clock::now() +
+                   std::chrono::seconds(10))},
+          [&](qjs::Context &context) {
+            context.eval("1 + 1");
+            side_effects.fetch_add(1, std::memory_order_relaxed);
+          },
+          [&](QuickJsTaskResult result) {
+            completion_count.fetch_add(1, std::memory_order_relaxed);
+            queued_completion.set_value(result);
+          });
+      std::promise<QuickJsTaskResult> capacity_completion;
+      std::future<QuickJsTaskResult> capacity_future =
+          capacity_completion.get_future();
+      const QuickJsSubmitStatus capacity_submit = lane.submit(
+          {.bytes = 256,
+           .settings = lane_settings,
+           .request_context = std::make_shared<RequestContext>(
+               "quickjs-lane-capacity", RequestContext::Clock::now(),
+               RequestContext::Clock::now() +
+                   std::chrono::seconds(10))},
+          [](qjs::Context &context) { context.eval("2 + 2"); },
+          [&](QuickJsTaskResult result) {
+            completion_count.fetch_add(1, std::memory_order_relaxed);
+            capacity_completion.set_value(result);
+          });
+      const QuickJsTaskResult capacity_result = capacity_future.get();
+      const QuickJsTaskResult first_result = first_future.get();
+      const QuickJsTaskResult queued_result = queued_future.get();
+
+      auto cancelled_context = std::make_shared<RequestContext>(
+          "quickjs-lane-cancelled", RequestContext::Clock::now(),
+          RequestContext::Clock::now() + std::chrono::seconds(10));
+      std::promise<void> sleep_started;
+      std::promise<QuickJsTaskResult> cancelled_completion;
+      std::future<QuickJsTaskResult> cancelled_future =
+          cancelled_completion.get_future();
+      const QuickJsSubmitStatus cancelled_submit = lane.submit(
+          {.bytes = 64,
+           .settings = lane_settings,
+           .request_context = cancelled_context},
+          [&](qjs::Context &context) {
+            sleep_started.set_value();
+            context.eval("sleep(5000)");
+          },
+          [&](QuickJsTaskResult result) {
+            completion_count.fetch_add(1, std::memory_order_relaxed);
+            cancelled_completion.set_value(result);
+          });
+      sleep_started.get_future().wait();
+      const auto cancellation_started = RequestContext::Clock::now();
+      (void)cancelled_context->requestCancellation(
+          RequestCancellationReason::ClientDisconnected);
+      const QuickJsTaskResult cancelled_result = cancelled_future.get();
+      const auto cancellation_elapsed =
+          RequestContext::Clock::now() - cancellation_started;
+
+      auto deadline_context = std::make_shared<RequestContext>(
+          "quickjs-lane-deadline", RequestContext::Clock::now(),
+          RequestContext::Clock::now() +
+              std::chrono::milliseconds(100));
+      std::promise<QuickJsTaskResult> deadline_completion;
+      std::future<QuickJsTaskResult> deadline_future =
+          deadline_completion.get_future();
+      const QuickJsSubmitStatus deadline_submit = lane.submit(
+          {.bytes = 64,
+           .settings = lane_settings,
+           .request_context = deadline_context},
+          [](qjs::Context &context) { context.eval("for (;;) {}"); },
+          [&](QuickJsTaskResult result) {
+            completion_count.fetch_add(1, std::memory_order_relaxed);
+            deadline_completion.set_value(result);
+          });
+      const QuickJsTaskResult deadline_result = deadline_future.get();
+
+      lane.requestShutdown(false);
+      const bool lane_joined = lane.join();
+      std::promise<QuickJsTaskResult> stopped_completion;
+      std::future<QuickJsTaskResult> stopped_future =
+          stopped_completion.get_future();
+      const QuickJsSubmitStatus stopped_submit = lane.submit(
+          {.bytes = 1,
+           .settings = lane_settings,
+           .request_context = std::make_shared<RequestContext>(
+               "quickjs-lane-stopped", RequestContext::Clock::now())},
+          [](qjs::Context &context) { context.eval("3 + 3"); },
+          [&](QuickJsTaskResult result) {
+            completion_count.fetch_add(1, std::memory_order_relaxed);
+            stopped_completion.set_value(result);
+          });
+      const QuickJsTaskResult stopped_result = stopped_future.get();
+      const QuickJsLaneSnapshot lane_snapshot = lane.snapshot();
+      quickjs_lane_ok =
+          first_submit == QuickJsSubmitStatus::Accepted &&
+          ordinary_submit == SchedulerSubmitStatus::Accepted &&
+          ordinary_completed_while_quickjs_busy &&
+          queued_submit == QuickJsSubmitStatus::Accepted &&
+          capacity_submit == QuickJsSubmitStatus::EntryLimit &&
+          capacity_result.status == QuickJsTaskStatus::Capacity &&
+          first_result.status == QuickJsTaskStatus::Success &&
+          queued_result.status == QuickJsTaskStatus::Success &&
+          cancelled_submit == QuickJsSubmitStatus::Accepted &&
+          cancelled_result.status == QuickJsTaskStatus::Cancelled &&
+          cancellation_elapsed < std::chrono::seconds(1) &&
+          deadline_submit == QuickJsSubmitStatus::Accepted &&
+          deadline_result.status == QuickJsTaskStatus::Deadline &&
+          lane_joined && stopped_submit == QuickJsSubmitStatus::Stopping &&
+          stopped_result.status == QuickJsTaskStatus::Shutdown &&
+          scope_ok.load(std::memory_order_acquire) &&
+          side_effects.load(std::memory_order_relaxed) == 2 &&
+          completion_count.load(std::memory_order_relaxed) == 6 &&
+          lane_snapshot.ready && lane_snapshot.stopping &&
+          lane_snapshot.joined && lane_snapshot.queued_entries == 0 &&
+          lane_snapshot.queued_bytes == 0 && lane_snapshot.active == 0 &&
+          lane_snapshot.accepted_total == 4 &&
+          lane_snapshot.rejected_total == 2 &&
+          lane_snapshot.completed_total == 6 &&
+          lane_snapshot.cancelled_total == 1 &&
+          lane_snapshot.deadline_total == 1 &&
+          lane_snapshot.script_error_total == 0;
+      if (!quickjs_lane_ok) {
+        quickjs_lane_diagnostic =
+            "first_submit=" +
+            std::to_string(static_cast<int>(first_submit)) +
+            " ordinary_submit=" +
+            std::to_string(static_cast<int>(ordinary_submit)) +
+            " ordinary_while_busy=" +
+            std::to_string(ordinary_completed_while_quickjs_busy) +
+            " queued_submit=" +
+            std::to_string(static_cast<int>(queued_submit)) +
+            " capacity_submit=" +
+            std::to_string(static_cast<int>(capacity_submit)) +
+            " capacity_status=" +
+            std::to_string(static_cast<int>(capacity_result.status)) +
+            " first_status=" +
+            std::to_string(static_cast<int>(first_result.status)) +
+            " queued_status=" +
+            std::to_string(static_cast<int>(queued_result.status)) +
+            " cancelled_submit=" +
+            std::to_string(static_cast<int>(cancelled_submit)) +
+            " cancelled_status=" +
+            std::to_string(static_cast<int>(cancelled_result.status)) +
+            " cancellation_ms=" +
+            std::to_string(std::chrono::duration_cast<
+                           std::chrono::milliseconds>(cancellation_elapsed)
+                               .count()) +
+            " deadline_submit=" +
+            std::to_string(static_cast<int>(deadline_submit)) +
+            " deadline_status=" +
+            std::to_string(static_cast<int>(deadline_result.status)) +
+            " lane_joined=" + std::to_string(lane_joined) +
+            " scope_ok=" +
+            std::to_string(scope_ok.load(std::memory_order_acquire)) +
+            " side_effects=" +
+            std::to_string(side_effects.load(std::memory_order_relaxed)) +
+            " completion_count=" +
+            std::to_string(completion_count.load(std::memory_order_relaxed)) +
+            " accepted=" +
+            std::to_string(lane_snapshot.accepted_total) +
+            " rejected=" +
+            std::to_string(lane_snapshot.rejected_total) +
+            " completed=" +
+            std::to_string(lane_snapshot.completed_total) +
+            " cancelled=" +
+            std::to_string(lane_snapshot.cancelled_total) +
+            " deadline=" +
+            std::to_string(lane_snapshot.deadline_total) +
+            " script_error=" +
+            std::to_string(lane_snapshot.script_error_total);
+      }
+    }
+    {
+      constexpr uint64_t clean_heap = 64 * 1024 * 1024 + 1;
+      constexpr uint64_t clean_stack = 1024 * 1024 + 1;
+      QuickJsLane clean_lane(
+          {1, 1, 1024 * 1024, clean_heap, clean_stack});
+      auto mutable_clean_settings =
+          std::make_shared<Settings>(*captureEffectiveSettingsSnapshot());
+      mutable_clean_settings->scriptCleanContext = true;
+      SettingsSnapshot clean_settings = mutable_clean_settings;
+      std::promise<QuickJsTaskResult> clean_completion;
+      std::atomic<bool> clean_isolated{false};
+      const auto clean_deadline =
+          RequestContext::Clock::now() + std::chrono::milliseconds(100);
+      const QuickJsSubmitStatus clean_submit = clean_lane.submit(
+          {.bytes = 64,
+           .deadline = clean_deadline,
+           .settings = clean_settings,
+           .request_context = std::make_shared<RequestContext>(
+               "quickjs-clean-context", RequestContext::Clock::now(),
+               clean_deadline)},
+          [&](qjs::Context &primary) {
+            const ScriptNestedRuntimeBudget nested =
+                currentScriptNestedRuntimeBudget();
+            script_safe_runner(
+                nullptr, &primary,
+                [&](qjs::Context &isolated) {
+                  clean_isolated.store(
+                      &isolated != &primary && nested.active &&
+                          nested.heap_bytes == clean_heap / 2 &&
+                          nested.stack_bytes == clean_stack / 2 &&
+                          nested.interrupt_handler != nullptr &&
+                          nested.interrupt_opaque != nullptr,
+                      std::memory_order_release);
+                  isolated.eval("for (;;) {}");
+                },
+                true);
+          },
+          [&](QuickJsTaskResult result) {
+            clean_completion.set_value(result);
+          });
+      const QuickJsTaskResult clean_result =
+          clean_completion.get_future().get();
+      clean_lane.shutdown(false);
+      quickjs_lane_ok = quickjs_lane_ok &&
+          clean_submit == QuickJsSubmitStatus::Accepted &&
+          clean_result.status == QuickJsTaskStatus::Deadline &&
+          clean_isolated.load(std::memory_order_acquire);
+    }
+    {
+      const GlobalQuickJsLaneInitStatus invalid =
+          initializeGlobalQuickJsLane({0, 1, 1, 1, 1});
+      const GlobalQuickJsLaneInitStatus initialized =
+          initializeGlobalQuickJsLane(
+              {1, 2, 1024 * 1024, 64 * 1024 * 1024,
+               1024 * 1024});
+      const GlobalQuickJsLaneInitStatus same =
+          initializeGlobalQuickJsLane(
+              {1, 2, 1024 * 1024, 64 * 1024 * 1024,
+               1024 * 1024});
+      const GlobalQuickJsLaneInitStatus mismatch =
+          initializeGlobalQuickJsLane(
+              {2, 2, 1024 * 1024, 64 * 1024 * 1024,
+               1024 * 1024});
+      std::promise<QuickJsTaskResult> completion;
+      std::future<QuickJsTaskResult> completed = completion.get_future();
+      auto context = std::make_shared<RequestContext>(
+          "quickjs-global", RequestContext::Clock::now(),
+          RequestContext::Clock::now() + std::chrono::seconds(10));
+      QuickJsLane *global_lane = globalQuickJsLane();
+      const QuickJsSubmitStatus submitted = global_lane
+          ? global_lane->submit(
+                {.bytes = 32,
+                 .settings = captureEffectiveSettingsSnapshot(),
+                 .request_context = context},
+                [](qjs::Context &quickjs) { quickjs.eval("6 * 7"); },
+                [&](QuickJsTaskResult result) {
+                  completion.set_value(result);
+                })
+          : QuickJsSubmitStatus::Unavailable;
+      QuickJsTaskResult result;
+      if (submitted == QuickJsSubmitStatus::Accepted)
+        result = completed.get();
+      requestGlobalQuickJsLaneShutdown();
+      const bool joined = joinGlobalQuickJsLane();
+      const QuickJsLaneSnapshot snapshot = globalQuickJsLaneSnapshot();
+      quickjs_global_ok =
+          invalid == GlobalQuickJsLaneInitStatus::InvalidBudget &&
+          initialized == GlobalQuickJsLaneInitStatus::Initialized &&
+          same == GlobalQuickJsLaneInitStatus::AlreadyInitialized &&
+          mismatch == GlobalQuickJsLaneInitStatus::BudgetMismatch &&
+          submitted == QuickJsSubmitStatus::Accepted &&
+          result.status == QuickJsTaskStatus::Success && joined &&
+          snapshot.ready && snapshot.stopping && snapshot.joined &&
+          snapshot.queued_entries == 0 && snapshot.active == 0;
+    }
+#endif
     constexpr size_t async_cache_consumers = 16;
     const uint64_t retained_before_async_cache =
         retainedResponseByteSnapshot().used;
@@ -372,23 +1333,28 @@ int main(int argc, char *argv[]) {
     CacheFetchPayloadSnapshot async_cache_payload_snapshot;
     AsyncFetchEngineSnapshot async_cache_engine_snapshot;
     OwnedWebGetContinuationRuntimeSnapshot async_cache_runtime_snapshot;
+    FetchMemoryBudgetSnapshot async_fetch_memory_snapshot;
     do {
       async_cache_payload_snapshot = cacheFetchPayloadSnapshot();
       async_cache_engine_snapshot = asyncFetchEngineSnapshot();
       async_cache_runtime_snapshot =
           ownedWebGetContinuationRuntimeSnapshot();
+      async_fetch_memory_snapshot =
+          globalFetchMemoryBudgetSnapshot();
       if (async_cache_payload_snapshot.retained_bytes == 0 &&
           async_cache_payload_snapshot.registry_entries == 0 &&
           async_cache_engine_snapshot.pending == 0 &&
           async_cache_engine_snapshot.active == 0 &&
           async_cache_runtime_snapshot.scheduler.queued_entries == 0 &&
           async_cache_runtime_snapshot.scheduler.queued_bytes == 0 &&
-          async_cache_runtime_snapshot.scheduler.active == 0)
+          async_cache_runtime_snapshot.scheduler.active == 0 &&
+          (!async_fetch_memory_snapshot.enabled ||
+           async_fetch_memory_snapshot.used == 0))
         break;
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     } while (std::chrono::steady_clock::now() <
              async_cache_cleanup_deadline);
-    const bool async_cache_resources_ok =
+    bool async_cache_resources_ok =
         async_cache_payload_snapshot.retained_bytes == 0 &&
         async_cache_payload_snapshot.registry_entries == 0 &&
         async_cache_engine_snapshot.pending == 0 &&
@@ -396,8 +1362,583 @@ int main(int argc, char *argv[]) {
         async_cache_runtime_snapshot.scheduler.queued_entries == 0 &&
         async_cache_runtime_snapshot.scheduler.queued_bytes == 0 &&
         async_cache_runtime_snapshot.scheduler.active == 0 &&
+        (!async_fetch_memory_snapshot.enabled ||
+         (async_fetch_memory_snapshot.used == 0 &&
+          async_fetch_memory_snapshot.waiters == 0)) &&
         retainedResponseByteSnapshot().used ==
             retained_before_async_cache;
+
+    bool async_runtime_limits_ok = true;
+    const ResourceControlSnapshot runtime_resources =
+        resourceControlSnapshot();
+    if (runtime_resources.effective_mode == "force_max") {
+      const ForceMaxBudget &budget =
+          runtime_resources.calculated_force_max_budget;
+      const AsyncFetchEngineSnapshot before_limits =
+          asyncFetchEngineSnapshot();
+      const uint64_t guarded_active =
+          std::max<uint64_t>(1, budget.outbound_active / 2);
+      const uint64_t guarded_open =
+          std::max<uint64_t>(guarded_active, budget.outbound_open / 2);
+      const uint64_t guarded_host =
+          std::min<uint64_t>(guarded_active,
+                             std::max<uint64_t>(1,
+                                                budget.outbound_per_host / 2));
+      const uint64_t guarded_generation =
+          before_limits.runtime_limit_generation + 100;
+      async_runtime_limits_ok = requestAsyncFetchRuntimeLimits(
+          {guarded_active, guarded_host, guarded_open,
+           guarded_open - guarded_active, guarded_generation});
+      const auto guarded_deadline =
+          std::chrono::steady_clock::now() + std::chrono::seconds(2);
+      AsyncFetchEngineSnapshot guarded_snapshot;
+      do {
+        guarded_snapshot = asyncFetchEngineSnapshot();
+        if (guarded_snapshot.runtime_limit_generation ==
+            guarded_generation)
+          break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      } while (std::chrono::steady_clock::now() < guarded_deadline);
+      async_runtime_limits_ok =
+          async_runtime_limits_ok &&
+          guarded_snapshot.runtime_limit_generation ==
+              guarded_generation &&
+          guarded_snapshot.active_connection_limit == guarded_active &&
+          guarded_snapshot.per_host_connection_limit == guarded_host &&
+          guarded_snapshot.open_connection_limit == guarded_open &&
+          guarded_snapshot.connection_cache_limit ==
+              guarded_open - guarded_active;
+
+      const uint64_t restored_generation = guarded_generation + 1;
+      async_runtime_limits_ok =
+          requestAsyncFetchRuntimeLimits(
+              {budget.outbound_active, budget.outbound_per_host,
+               budget.outbound_open, budget.outbound_idle_cache,
+               restored_generation}) &&
+          async_runtime_limits_ok;
+      const auto restored_deadline =
+          std::chrono::steady_clock::now() + std::chrono::seconds(2);
+      AsyncFetchEngineSnapshot restored_snapshot;
+      do {
+        restored_snapshot = asyncFetchEngineSnapshot();
+        if (restored_snapshot.runtime_limit_generation ==
+            restored_generation)
+          break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      } while (std::chrono::steady_clock::now() < restored_deadline);
+      async_runtime_limits_ok =
+          async_runtime_limits_ok &&
+          restored_snapshot.runtime_limit_generation ==
+              restored_generation &&
+          restored_snapshot.active_connection_limit ==
+              budget.outbound_active &&
+          restored_snapshot.per_host_connection_limit ==
+              budget.outbound_per_host &&
+          restored_snapshot.open_connection_limit ==
+              budget.outbound_open &&
+          restored_snapshot.connection_cache_limit ==
+              budget.outbound_idle_cache;
+    }
+    async_cache_resources_ok =
+        async_cache_resources_ok && async_runtime_limits_ok &&
+        async_fetch_memory_lifetime_ok;
+
+    bool conversion_flow_ok = false;
+    ComputeExecutor *compute_executor = globalComputeExecutor();
+    const SettingsSnapshot flow_settings =
+        captureEffectiveSettingsSnapshot();
+    if (compute_executor && flow_settings) {
+      auto flow_context = std::make_shared<RequestContext>(
+          "conversion-flow-complete", RequestContext::Clock::now(),
+          RequestContext::Clock::now() + std::chrono::seconds(10));
+      std::promise<ConversionFlowTerminal> flow_completion;
+      std::atomic<uint64_t> flow_completion_count{0};
+      std::atomic<bool> duplicate_rejected{false};
+      std::atomic<bool> initial_scope_ok{false};
+      std::atomic<bool> initial_phase_ok{false};
+      std::atomic<bool> operation_valid{false};
+      std::atomic<bool> operation_posted{false};
+      std::atomic<bool> resumed_scope_ok{false};
+      std::atomic<bool> resumed_phase_ok{false};
+      std::atomic<bool> completed_claimed{false};
+      std::shared_ptr<ConversionFlow> flow = ConversionFlow::create(
+          *compute_executor, {8, 1024 * 1024}, flow_settings,
+          flow_context,
+          [&](ConversionFlowTerminal terminal) {
+            flow_completion_count.fetch_add(1, std::memory_order_relaxed);
+            flow_completion.set_value(std::move(terminal));
+          });
+      const bool started = flow && flow->start(
+          [&](ConversionFlow &current) {
+            initial_scope_ok.store(
+                captureCurrentRequestContext() == flow_context &&
+                    captureEffectiveSettingsSnapshot() == flow_settings,
+                std::memory_order_release);
+            initial_phase_ok.store(
+                current.setPhase(
+                    ConversionFlowPhase::FetchingSubscriptions),
+                std::memory_order_release);
+            const ConversionFlowOperation operation =
+                current.beginOperation();
+            operation_valid.store(operation.valid(),
+                                  std::memory_order_release);
+            operation_posted.store(operation.post(
+                [&](ConversionFlow &resumed) {
+                  resumed_scope_ok.store(
+                      captureCurrentRequestContext() == flow_context &&
+                          captureEffectiveSettingsSnapshot() ==
+                              flow_settings,
+                      std::memory_order_release);
+                  resumed_phase_ok.store(
+                      resumed.setPhase(ConversionFlowPhase::Parsing),
+                      std::memory_order_release);
+                  completed_claimed.store(
+                      resumed.complete(), std::memory_order_release);
+                },
+                128),
+                std::memory_order_release);
+            duplicate_rejected.store(
+                !operation.post([](ConversionFlow &) {}, 128),
+                std::memory_order_release);
+          },
+          128);
+      ConversionFlowTerminal completed_terminal;
+      ConversionFlowSnapshot completed_snapshot;
+      if (started) {
+        completed_terminal = flow_completion.get_future().get();
+        completed_snapshot = flow->snapshot();
+      }
+
+      auto async_flow_context = std::make_shared<RequestContext>(
+          "conversion-flow-external-config",
+          RequestContext::Clock::now(),
+          RequestContext::Clock::now() + std::chrono::seconds(10));
+      std::promise<ConversionFlowTerminal> async_flow_completion;
+      std::atomic<bool> async_flow_result_ok{false};
+      std::atomic<bool> async_flow_started_dependency{false};
+      std::shared_ptr<ConversionFlow> async_flow =
+          ConversionFlow::create(
+              *compute_executor, {8, 1024 * 1024}, flow_settings,
+              async_flow_context,
+              [&](ConversionFlowTerminal terminal) {
+                async_flow_completion.set_value(std::move(terminal));
+              });
+      const bool async_flow_started = async_flow && async_flow->start(
+          [&](ConversionFlow &current) {
+            if (!current.setPhase(
+                    ConversionFlowPhase::FetchingExternalConfig))
+              throw std::runtime_error("failed to enter external config phase");
+            template_args arguments;
+            const bool dependency_started = resolveExternalConfigOnFlow(
+                    current,
+                    fixture_root + "/async-external-config.toml",
+                    FetchContext::TrustedConfig, flow_settings,
+                    async_flow_context, std::move(arguments),
+                    [&](ConversionFlow &resumed,
+                        AsyncExternalConfigResult result) {
+                      async_flow_result_ok.store(
+                          result.status ==
+                                  ExternalConfigLoadStatus::Success &&
+                              result.config.custom_proxy_group.size() == 1 &&
+                              result.config.custom_proxy_group.front().Name ==
+                                  "AsyncImported" &&
+                              resumed.setPhase(
+                                  ConversionFlowPhase::Parsing),
+                          std::memory_order_release);
+                      (void)resumed.complete();
+                    });
+            async_flow_started_dependency.store(
+                dependency_started, std::memory_order_release);
+            if (!dependency_started)
+              throw std::runtime_error("failed to start external config");
+          });
+      ConversionFlowTerminal async_flow_terminal;
+      if (async_flow_started)
+        async_flow_terminal = async_flow_completion.get_future().get();
+
+      auto subscription_flow_context = std::make_shared<RequestContext>(
+          "conversion-flow-subscriptions", RequestContext::Clock::now(),
+          RequestContext::Clock::now() + std::chrono::seconds(10));
+      std::promise<ConversionFlowTerminal> subscription_flow_completion;
+      std::atomic<bool> subscription_flow_result_ok{false};
+      std::atomic<bool> subscription_flow_dependency_started{false};
+      std::shared_ptr<ConversionFlow> subscription_flow =
+          ConversionFlow::create(
+              *compute_executor, {8, 1024 * 1024}, flow_settings,
+              subscription_flow_context,
+              [&](ConversionFlowTerminal terminal) {
+                subscription_flow_completion.set_value(
+                    std::move(terminal));
+              });
+      const bool subscription_flow_started = subscription_flow &&
+          subscription_flow->start([&](ConversionFlow &current) {
+            if (!current.setPhase(
+                    ConversionFlowPhase::FetchingSubscriptions))
+              throw std::runtime_error(
+                  "failed to enter subscription phase");
+            const bool dependency_started = resolveSubscriptionsOnFlow(
+                current, make_subscription_requests(), flow_settings,
+                subscription_flow_context,
+                [&](ConversionFlow &resumed,
+                    AsyncSubscriptionBatchResult result) {
+                  bool valid = result.slots.size() == 2;
+                  for (size_t index = 0; index < result.slots.size(); ++index)
+                    valid = valid && result.slots[index].source_index == index &&
+                            result.slots[index].payload &&
+                            result.slots[index].failure ==
+                                AsyncFetchFailure::None;
+                  subscription_flow_result_ok.store(
+                      valid && resumed.setPhase(
+                                   ConversionFlowPhase::Parsing),
+                      std::memory_order_release);
+                  (void)resumed.complete();
+                });
+            subscription_flow_dependency_started.store(
+                dependency_started, std::memory_order_release);
+            if (!dependency_started)
+              throw std::runtime_error(
+                  "failed to start subscription batch");
+          });
+      ConversionFlowTerminal subscription_flow_terminal;
+      if (subscription_flow_started)
+        subscription_flow_terminal =
+            subscription_flow_completion.get_future().get();
+
+      auto resource_flow_context = std::make_shared<RequestContext>(
+          "conversion-flow-resources", RequestContext::Clock::now(),
+          RequestContext::Clock::now() + std::chrono::seconds(10));
+      std::promise<ConversionFlowTerminal> resource_flow_completion;
+      std::atomic<bool> resource_flow_result_ok{false};
+      std::atomic<bool> resource_flow_dependency_started{false};
+      std::shared_ptr<ConversionFlow> resource_flow =
+          ConversionFlow::create(
+              *compute_executor, {8, 1024 * 1024}, flow_settings,
+              resource_flow_context,
+              [&](ConversionFlowTerminal terminal) {
+                resource_flow_completion.set_value(std::move(terminal));
+              });
+      const bool resource_flow_started = resource_flow &&
+          resource_flow->start([&](ConversionFlow &current) {
+            if (!current.setPhase(ConversionFlowPhase::FetchingRulesets))
+              throw std::runtime_error("failed to enter ruleset phase");
+            const bool dependency_started =
+                resolveConversionResourcesOnFlow(
+                    current, make_conversion_resource_requests(),
+                    flow_settings, resource_flow_context,
+                    [&](ConversionFlow &resumed,
+                        AsyncConversionResourceBatchResult result) {
+                      bool valid = result.resources.size() == 4;
+                      for (size_t index = 0;
+                           index < result.resources.size(); ++index)
+                        valid = valid && result.resources[index].payload &&
+                                result.resources[index].source_index == index &&
+                                result.resources[index].failure ==
+                                    AsyncFetchFailure::None;
+                      resource_flow_result_ok.store(
+                          valid && resumed.setPhase(
+                                       ConversionFlowPhase::Parsing),
+                          std::memory_order_release);
+                      (void)resumed.complete();
+                    });
+            resource_flow_dependency_started.store(
+                dependency_started, std::memory_order_release);
+            if (!dependency_started)
+              throw std::runtime_error(
+                  "failed to start conversion resources");
+          });
+      ConversionFlowTerminal resource_flow_terminal;
+      if (resource_flow_started)
+        resource_flow_terminal =
+            resource_flow_completion.get_future().get();
+
+      auto template_flow_context = std::make_shared<RequestContext>(
+          "conversion-flow-template", RequestContext::Clock::now(),
+          RequestContext::Clock::now() + std::chrono::seconds(10));
+      std::promise<ConversionFlowTerminal> template_flow_completion;
+      std::atomic<bool> template_flow_result_ok{false};
+      std::atomic<bool> template_flow_dependency_started{false};
+      std::shared_ptr<ConversionFlow> template_flow =
+          ConversionFlow::create(
+              *compute_executor, {8, 1024 * 1024}, flow_settings,
+              template_flow_context,
+              [&](ConversionFlowTerminal terminal) {
+                template_flow_completion.set_value(std::move(terminal));
+              });
+      const bool template_flow_started = template_flow &&
+          template_flow->start([&](ConversionFlow &current) {
+            if (!current.setPhase(ConversionFlowPhase::Generating))
+              throw std::runtime_error("failed to enter template phase");
+            const bool dependency_started = renderTemplateOnFlow(
+                current, async_template_content, {}, "",
+                FetchContext::TrustedConfig, flow_settings,
+                template_flow_context,
+                [&](ConversionFlow &resumed, AsyncTemplateResult result) {
+                  template_flow_result_ok.store(
+                      result.status == AsyncTemplateStatus::Success &&
+                          result.output == "marker=template-ok" &&
+                          result.dependency_count == 1 &&
+                          resumed.setPhase(
+                              ConversionFlowPhase::Publishing),
+                      std::memory_order_release);
+                  (void)resumed.complete();
+                });
+            template_flow_dependency_started.store(
+                dependency_started, std::memory_order_release);
+            if (!dependency_started)
+              throw std::runtime_error("failed to start template render");
+          });
+      ConversionFlowTerminal template_flow_terminal;
+      if (template_flow_started)
+        template_flow_terminal =
+            template_flow_completion.get_future().get();
+
+      auto upload_flow_context = std::make_shared<RequestContext>(
+          "conversion-flow-upload", RequestContext::Clock::now(),
+          RequestContext::Clock::now() + std::chrono::seconds(10));
+      std::promise<ConversionFlowTerminal> upload_flow_completion;
+      std::atomic<bool> upload_flow_result_ok{false};
+      std::atomic<bool> upload_flow_dependency_started{false};
+      std::shared_ptr<ConversionFlow> upload_flow =
+          ConversionFlow::create(
+              *compute_executor, {8, 1024 * 1024}, flow_settings,
+              upload_flow_context,
+              [&](ConversionFlowTerminal terminal) {
+                upload_flow_completion.set_value(std::move(terminal));
+              });
+      const bool upload_flow_started = upload_flow &&
+          upload_flow->start([&](ConversionFlow &current) {
+            if (!current.setPhase(ConversionFlowPhase::Uploading))
+              throw std::runtime_error("failed to enter upload phase");
+            const bool dependency_started = uploadGistOnFlow(
+                current, "async-flow", "async-flow",
+                "async-flow-content", false, flow_settings,
+                upload_flow_context,
+                [&](ConversionFlow &resumed, AsyncUploadResult result) {
+                  upload_flow_result_ok.store(
+                      result.status == AsyncUploadStatus::Success &&
+                          result.remote_status == 200 &&
+                          resumed.setPhase(
+                              ConversionFlowPhase::Publishing),
+                      std::memory_order_release);
+                  (void)resumed.complete();
+                });
+            upload_flow_dependency_started.store(
+                dependency_started, std::memory_order_release);
+            if (!dependency_started)
+              throw std::runtime_error("failed to start async upload");
+          });
+      ConversionFlowTerminal upload_flow_terminal;
+      if (upload_flow_started)
+        upload_flow_terminal =
+            upload_flow_completion.get_future().get();
+
+      bool quickjs_flow_started = true;
+      bool quickjs_flow_joined = true;
+      std::atomic<bool> quickjs_flow_dependency_started{true};
+      std::atomic<bool> quickjs_flow_result_ok{true};
+      ConversionFlowTerminal quickjs_flow_terminal;
+      quickjs_flow_terminal.state =
+          ConversionFlowTerminalState::Completed;
+#ifndef NO_JS_RUNTIME
+      QuickJsLane quickjs_flow_lane(
+          {1, 2, 1024 * 1024, 64 * 1024 * 1024, 1024 * 1024});
+      auto quickjs_flow_context = std::make_shared<RequestContext>(
+          "conversion-flow-quickjs", RequestContext::Clock::now(),
+          RequestContext::Clock::now() + std::chrono::seconds(10));
+      std::promise<ConversionFlowTerminal> quickjs_flow_completion;
+      std::shared_ptr<ConversionFlow> quickjs_flow =
+          ConversionFlow::create(
+              *compute_executor, {8, 1024 * 1024}, flow_settings,
+              quickjs_flow_context,
+              [&](ConversionFlowTerminal terminal) {
+                quickjs_flow_completion.set_value(std::move(terminal));
+              });
+      quickjs_flow_started = quickjs_flow &&
+          quickjs_flow->start([&](ConversionFlow &current) {
+            if (!current.setPhase(ConversionFlowPhase::Parsing))
+              throw std::runtime_error("failed to enter QuickJS phase");
+            const bool dependency_started = runQuickJsOnFlow(
+                current, quickjs_flow_lane,
+                {.bytes = 64,
+                 .settings = flow_settings,
+                 .request_context = quickjs_flow_context},
+                [](qjs::Context &context) { context.eval("21 * 2"); },
+                [&](ConversionFlow &resumed, QuickJsTaskResult result) {
+                  quickjs_flow_result_ok.store(
+                      result.status == QuickJsTaskStatus::Success &&
+                          resumed.setPhase(
+                              ConversionFlowPhase::Generating),
+                      std::memory_order_release);
+                  (void)resumed.complete();
+                });
+            quickjs_flow_dependency_started.store(
+                dependency_started, std::memory_order_release);
+            if (!dependency_started)
+              throw std::runtime_error("failed to start QuickJS task");
+          });
+      if (quickjs_flow_started)
+        quickjs_flow_terminal =
+            quickjs_flow_completion.get_future().get();
+      quickjs_flow_lane.requestShutdown(false);
+      quickjs_flow_joined = quickjs_flow_lane.join();
+#endif
+
+      auto cancelled_context = std::make_shared<RequestContext>(
+          "conversion-flow-cancel", RequestContext::Clock::now(),
+          RequestContext::Clock::now() + std::chrono::seconds(10));
+      std::promise<void> cancel_started;
+      std::promise<ConversionFlowTerminal> cancel_completion;
+      std::atomic<bool> cancel_phase_ok{false};
+      std::atomic<bool> cancel_operation_valid{false};
+      std::shared_ptr<ConversionFlow> cancelled_flow =
+          ConversionFlow::create(
+              *compute_executor, {8, 1024 * 1024}, flow_settings,
+              cancelled_context,
+              [&](ConversionFlowTerminal terminal) {
+                cancel_completion.set_value(std::move(terminal));
+              });
+      const bool cancelled_started = cancelled_flow && cancelled_flow->start(
+          [&](ConversionFlow &current) {
+            cancel_phase_ok.store(
+                current.setPhase(
+                    ConversionFlowPhase::FetchingExternalConfig),
+                std::memory_order_release);
+            cancel_operation_valid.store(
+                current.beginOperation().valid(),
+                std::memory_order_release);
+            cancel_started.set_value();
+          });
+      ConversionFlowTerminal cancelled_terminal;
+      if (cancelled_started) {
+        cancel_started.get_future().wait();
+        cancelled_context->requestCancellation(
+            RequestCancellationReason::ClientDisconnected);
+        cancelled_terminal = cancel_completion.get_future().get();
+      }
+
+      auto shutdown_context = std::make_shared<RequestContext>(
+          "conversion-flow-shutdown", RequestContext::Clock::now(),
+          RequestContext::Clock::now() + std::chrono::seconds(10));
+      std::promise<void> shutdown_started;
+      std::promise<ConversionFlowTerminal> shutdown_completion;
+      std::atomic<bool> shutdown_operation_valid{false};
+      std::shared_ptr<ConversionFlow> shutdown_flow =
+          ConversionFlow::create(
+              *compute_executor, {8, 1024 * 1024}, flow_settings,
+              shutdown_context,
+              [&](ConversionFlowTerminal terminal) {
+                shutdown_completion.set_value(std::move(terminal));
+              });
+      const bool shutdown_flow_started = shutdown_flow &&
+          shutdown_flow->start(
+          [&](ConversionFlow &current) {
+            shutdown_operation_valid.store(
+                current.beginOperation().valid(),
+                std::memory_order_release);
+            shutdown_started.set_value();
+          });
+      ConversionFlowTerminal shutdown_terminal;
+      if (shutdown_flow_started) {
+        shutdown_started.get_future().wait();
+        requestAllConversionFlowsShutdown();
+        shutdown_terminal = shutdown_completion.get_future().get();
+      } else {
+        requestAllConversionFlowsShutdown();
+      }
+      const std::shared_ptr<ConversionFlow> rejected_after_shutdown =
+          ConversionFlow::create(
+              *compute_executor, {8, 1024 * 1024}, flow_settings,
+              std::make_shared<RequestContext>(
+                  "conversion-flow-rejected",
+                  RequestContext::Clock::now()),
+              [](ConversionFlowTerminal) {});
+      const ConversionFlowRegistrySnapshot flow_registry =
+          conversionFlowRegistrySnapshot();
+#ifdef NO_JS_RUNTIME
+      constexpr uint64_t expected_flow_total = 8;
+#else
+      constexpr uint64_t expected_flow_total = 9;
+#endif
+      // Flow affinity is intentionally soft and may miss when another worker
+      // wins the queued continuation. Its deterministic executor contract is
+      // covered by concurrency_primitives; this integration probe verifies
+      // lifecycle and context restoration without depending on OS scheduling.
+      conversion_flow_ok =
+          started &&
+          initial_scope_ok.load(std::memory_order_acquire) &&
+          initial_phase_ok.load(std::memory_order_acquire) &&
+          operation_valid.load(std::memory_order_acquire) &&
+          operation_posted.load(std::memory_order_acquire) &&
+          resumed_scope_ok.load(std::memory_order_acquire) &&
+          resumed_phase_ok.load(std::memory_order_acquire) &&
+          completed_claimed.load(std::memory_order_acquire) &&
+          completed_terminal.state ==
+              ConversionFlowTerminalState::Completed &&
+          flow_completion_count.load(std::memory_order_relaxed) == 1 &&
+          duplicate_rejected.load(std::memory_order_acquire) &&
+          completed_snapshot.terminal &&
+          completed_snapshot.phase == ConversionFlowPhase::Completed &&
+          completed_snapshot.mailbox_entries == 0 &&
+          completed_snapshot.mailbox_bytes == 0 &&
+          completed_snapshot.outstanding_operations == 0 &&
+          completed_snapshot.duplicate_callbacks == 1 &&
+          async_flow_started &&
+          async_flow_started_dependency.load(std::memory_order_acquire) &&
+          async_flow_result_ok.load(std::memory_order_acquire) &&
+          async_flow_terminal.state ==
+              ConversionFlowTerminalState::Completed &&
+          subscription_flow_started &&
+          subscription_flow_dependency_started.load(
+              std::memory_order_acquire) &&
+          subscription_flow_result_ok.load(std::memory_order_acquire) &&
+          subscription_flow_terminal.state ==
+              ConversionFlowTerminalState::Completed &&
+          resource_flow_started &&
+          resource_flow_dependency_started.load(
+              std::memory_order_acquire) &&
+          resource_flow_result_ok.load(std::memory_order_acquire) &&
+          resource_flow_terminal.state ==
+              ConversionFlowTerminalState::Completed &&
+          template_flow_started &&
+          template_flow_dependency_started.load(
+              std::memory_order_acquire) &&
+          template_flow_result_ok.load(std::memory_order_acquire) &&
+          template_flow_terminal.state ==
+              ConversionFlowTerminalState::Completed &&
+          upload_flow_started &&
+          upload_flow_dependency_started.load(
+              std::memory_order_acquire) &&
+          upload_flow_result_ok.load(std::memory_order_acquire) &&
+          upload_flow_terminal.state ==
+              ConversionFlowTerminalState::Completed &&
+          quickjs_flow_started &&
+          quickjs_flow_dependency_started.load(
+              std::memory_order_acquire) &&
+          quickjs_flow_result_ok.load(std::memory_order_acquire) &&
+          quickjs_flow_terminal.state ==
+              ConversionFlowTerminalState::Completed &&
+          quickjs_flow_joined &&
+          cancelled_started &&
+          cancel_phase_ok.load(std::memory_order_acquire) &&
+          cancel_operation_valid.load(std::memory_order_acquire) &&
+          cancelled_terminal.state ==
+              ConversionFlowTerminalState::Cancelled &&
+          cancelled_terminal.cancellation ==
+              RequestCancellationReason::ClientDisconnected &&
+          shutdown_flow_started &&
+          shutdown_operation_valid.load(std::memory_order_acquire) &&
+          shutdown_terminal.state ==
+              ConversionFlowTerminalState::Shutdown &&
+          shutdown_terminal.cancellation ==
+              RequestCancellationReason::Shutdown &&
+          !rejected_after_shutdown && flow_registry.active == 0 &&
+          flow_registry.created_total == expected_flow_total &&
+          flow_registry.completed_total == expected_flow_total &&
+          flow_registry.rejected_total >= 1 && flow_registry.stopping;
+    }
+
+    requestBlockingIoExecutorShutdown();
+    const bool blocking_io_joined = joinBlockingIoExecutor();
 
     std::promise<void> throwing_completion_called;
     (void)submitOwnedWebGetContinuation(
@@ -527,12 +2068,78 @@ int main(int argc, char *argv[]) {
                 async_consumer_probe.payload_lease_released);
     writer.Key("async_data_ok");
     writer.Bool(async_data_ok);
+    writer.Key("async_no_cache_ok");
+    writer.Bool(async_no_cache_ok);
+    writer.Key("async_absolute_deadline_ok");
+    writer.Bool(async_absolute_deadline_ok);
     writer.Key("async_cache_ok");
     writer.Bool(async_cache_ok);
     writer.Key("async_cache_rejection_ok");
     writer.Bool(async_cache_rejection_ok);
     writer.Key("async_cache_resources_ok");
     writer.Bool(async_cache_resources_ok);
+    writer.Key("async_runtime_limits_ok");
+    writer.Bool(async_runtime_limits_ok);
+    writer.Key("async_fetch_memory_lifetime_ok");
+    writer.Bool(async_fetch_memory_lifetime_ok);
+    writer.Key("conversion_flow_ok");
+    writer.Bool(conversion_flow_ok);
+    writer.Key("async_external_config_ok");
+    writer.Bool(async_external_config_ok);
+    writer.Key("async_external_config_status");
+    writer.Int(static_cast<int>(async_external_result.status));
+    writer.Key("async_external_config_group_count");
+    writer.Uint64(async_external_result.config.custom_proxy_group.size());
+    writer.Key("async_external_config_failure_stage");
+    writer.String(async_external_result.failure_stage.c_str());
+    writer.Key("async_subscription_ok");
+    writer.Bool(async_subscription_ok);
+    writer.Key("async_conversion_resources_ok");
+    writer.Bool(async_conversion_resources_ok);
+    writer.Key("async_conversion_resource_summary");
+    writer.StartArray();
+    for (const ResolvedConversionResource &resource :
+         async_resource_result.resources) {
+      writer.StartObject();
+      writer.Key("source_index");
+      writer.Uint64(resource.source_index);
+      writer.Key("kind");
+      writer.Uint(static_cast<unsigned int>(resource.kind));
+      writer.Key("failure");
+      writer.Uint(static_cast<unsigned int>(resource.failure));
+      writer.Key("status");
+      writer.Int(resource.payload ? resource.payload->status_code : 0);
+      writer.Key("bytes");
+      writer.Uint64(resource.payload ? resource.payload->content.size() : 0);
+      writer.EndObject();
+    }
+    writer.EndArray();
+    writer.Key("async_template_ok");
+    writer.Bool(async_template_ok);
+    writer.Key("async_template_status");
+    writer.Int(static_cast<int>(async_template_result.status));
+    writer.Key("async_template_output");
+    writer.String(async_template_result.output.c_str());
+    writer.Key("async_template_dependencies");
+    writer.Uint64(async_template_result.dependency_count);
+    writer.Key("async_template_branch_ok");
+    writer.Bool(async_template_branch_ok);
+    writer.Key("async_template_limit_ok");
+    writer.Bool(async_template_limit_ok);
+    writer.Key("async_upload_ok");
+    writer.Bool(async_upload_ok);
+    writer.Key("async_upload_status");
+    writer.Int(static_cast<int>(async_upload_result.status));
+    writer.Key("async_upload_remote_status");
+    writer.Int(async_upload_result.remote_status);
+    writer.Key("async_cancelled_upload_status");
+    writer.Int(static_cast<int>(cancelled_upload_result.status));
+    writer.Key("quickjs_lane_ok");
+    writer.Bool(quickjs_lane_ok);
+    writer.Key("quickjs_lane_diagnostic");
+    writer.String(quickjs_lane_diagnostic.c_str());
+    writer.Key("quickjs_global_ok");
+    writer.Bool(quickjs_global_ok);
     writer.Key("continuation_runtime_ok");
     writer.Bool(continuation_was_uninitialized &&
                 preinit_submit == SchedulerSubmitStatus::Stopping &&
@@ -545,6 +2152,9 @@ int main(int argc, char *argv[]) {
                     OwnedWebGetContinuationInitStatus::AlreadyInitialized &&
                 different_budget_init ==
                     OwnedWebGetContinuationInitStatus::BudgetMismatch &&
+                blocking_io_init ==
+                    BlockingIoExecutorInitStatus::Initialized &&
+                blocking_io_joined &&
                 active_status == SchedulerSubmitStatus::Accepted &&
                 active_status_second == SchedulerSubmitStatus::Accepted &&
                 pending_status == SchedulerSubmitStatus::Stopping &&
@@ -561,7 +2171,13 @@ int main(int argc, char *argv[]) {
                 continuation_snapshot.max_bytes ==
                     continuation_budget.max_bytes &&
                 continuation_snapshot.completion_exception_total >= 1 &&
+                // The pre-cancelled upload is classified as cancellation;
+                // the queued continuation drained by runtime shutdown is
+                // classified independently from true capacity rejection.
                 continuation_snapshot.scheduler.rejected == 0 &&
+                continuation_snapshot.scheduler.cancelled == 1 &&
+                continuation_snapshot.deadline_total == 0 &&
+                continuation_snapshot.shutdown_total == 1 &&
                 continuation_snapshot.scheduler.queued_entries == 0 &&
                 continuation_snapshot.scheduler.queued_bytes == 0 &&
                 continuation_snapshot.scheduler.active == 0);

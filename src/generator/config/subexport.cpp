@@ -25,6 +25,7 @@
 #include "ruleconvert.h"
 #include "script/script_quickjs.h"
 #include "utils/bitwise.h"
+#include "utils/bounded_output.h"
 #include "utils/file_extra.h"
 #include "utils/ini_reader/ini_reader.h"
 #include "utils/logger.h"
@@ -1144,14 +1145,89 @@ void groupGenerate(const std::string &rule, std::vector<Proxy> &nodelist,
     script_safe_runner(
         ext.js_runtime, ext.js_context,
         [&](qjs::Context &ctx) {
-          std::string script = fileGet(rule.substr(7), true);
+          const size_t native_limit =
+              ext.force_max_group_script_remaining_bytes;
+          const bool native_limited =
+              ext.force_max_group_script_limited;
+          if (native_limited && native_limit == 0)
+            throw BoundedOutputExceeded();
+          std::string script = native_limited
+                                   ? fileGetBounded(rule.substr(7),
+                                                    native_limit, true)
+                                   : fileGet(rule.substr(7), true);
           try {
             ctx.eval(script);
-            auto filter =
-                (std::function<std::string(const std::vector<Proxy> &)>)
-                    ctx.eval("filter");
-            std::string result_list = filter(nodelist);
-            filtered_nodelist = split(regTrim(result_list), "\n");
+            if (!native_limited) {
+              auto filter =
+                  (std::function<std::string(
+                      const std::vector<Proxy> &)>)ctx.eval("filter");
+              std::string result_list = filter(nodelist);
+              filtered_nodelist = split(regTrim(result_list), "\n");
+              return;
+            }
+
+            // The script has been compiled into the separately bounded
+            // QuickJS heap. Release its native copy before materialising the
+            // filter result so both never consume this owner reserve.
+            std::string().swap(script);
+            qjs::Value filter = ctx.eval("filter");
+            qjs::Value argument = ctx.newValue(nodelist);
+            JSValueConst arguments[] = {argument.v};
+            JSValue raw = JS_Call(ctx.ctx, filter.v, JS_UNDEFINED, 1,
+                                  arguments);
+            if (JS_IsException(raw))
+              throw qjs::exception{ctx.ctx};
+            qjs::Value result{ctx.ctx, std::move(raw)};
+            size_t length = 0;
+            const char *text = JS_ToCStringLen(ctx.ctx, &length, result.v);
+            if (!text)
+              throw qjs::exception{ctx.ctx};
+            try {
+              size_t begin = 0;
+              size_t end = length;
+              while (begin < end &&
+                     std::isspace(static_cast<unsigned char>(text[begin])))
+                ++begin;
+              while (end > begin &&
+                     std::isspace(static_cast<unsigned char>(text[end - 1])))
+                --end;
+              size_t lines = begin == end ? 0 : 1;
+              for (size_t index = begin; index < end; ++index)
+                if (text[index] == '\n')
+                  ++lines;
+              const uint64_t vector_bytes =
+                  lines > UINT64_MAX /
+                              (sizeof(std::string) * 2 + 32)
+                      ? UINT64_MAX
+                      : static_cast<uint64_t>(lines) *
+                            (sizeof(std::string) * 2 + 32);
+              const uint64_t text_bytes = end - begin;
+              if (vector_bytes == UINT64_MAX ||
+                  text_bytes > UINT64_MAX - vector_bytes ||
+                  text_bytes + vector_bytes > native_limit)
+                throw BoundedOutputExceeded();
+              const size_t retained_native_bytes =
+                  static_cast<size_t>(text_bytes + vector_bytes);
+              string_array selected;
+              selected.reserve(lines);
+              if (lines != 0) {
+                size_t line_begin = begin;
+                for (size_t index = begin; index <= end; ++index) {
+                  if (index != end && text[index] != '\n')
+                    continue;
+                  selected.emplace_back(text + line_begin,
+                                        index - line_begin);
+                  line_begin = index + 1;
+                }
+              }
+              filtered_nodelist = std::move(selected);
+              ext.force_max_group_script_remaining_bytes -=
+                  retained_native_bytes;
+            } catch (...) {
+              JS_FreeCString(ctx.ctx, text);
+              throw;
+            }
+            JS_FreeCString(ctx.ctx, text);
           } catch (qjs::exception) {
             script_print_stack(ctx);
           }
@@ -2019,7 +2095,8 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
                          const std::string &base_conf,
                          std::vector<RulesetContent> &ruleset_content_array,
                          const ProxyGroupConfigs &extra_proxy_group,
-                         bool clashR, extra_settings &ext) {
+                         bool clashR, extra_settings &ext,
+                         size_t max_output_bytes) {
   const size_t max_allowed_rules = effectiveSettings().maxAllowedRules;
   YAML::Node yamlnode;
 
@@ -2035,24 +2112,58 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
 
   // 关键修复：在所有早期返回之前提取 proxy-providers
   // 这样所有返回路径都会使用正确的顺序
+  const bool bounded_output =
+      max_output_bytes != std::numeric_limits<size_t>::max();
+  YAML::Node proxy_providers_node;
+  bool has_proxy_providers_node = false;
   std::string proxy_providers_yaml;
   if (yamlnode["proxy-providers"].IsDefined()) {
-    YAML::Node providers_node = yamlnode["proxy-providers"];
-    proxy_providers_yaml = YAML::Dump(providers_node);
+    proxy_providers_node = yamlnode["proxy-providers"];
+    has_proxy_providers_node = true;
+    if (!bounded_output)
+      proxy_providers_yaml = YAML::Dump(proxy_providers_node);
     yamlnode.remove("proxy-providers"); // 从 yamlnode 中移除
   }
 
   // 提取 proxies 字段，用于手动控制输出顺序
+  YAML::Node proxies_node;
+  bool has_proxies_node = false;
   std::string proxies_yaml;
   std::string proxies_field_name =
       ext.clash_new_field_name ? "proxies" : "Proxy";
   if (yamlnode[proxies_field_name].IsDefined()) {
-    YAML::Node proxies_node = yamlnode[proxies_field_name];
-    proxies_yaml = dumpCanonicalClashYaml(proxies_node);
+    proxies_node = yamlnode[proxies_field_name];
+    has_proxies_node = true;
+    if (!bounded_output)
+      proxies_yaml = dumpCanonicalClashYaml(proxies_node);
     yamlnode.remove(proxies_field_name); // 从 yamlnode 中移除
   }
 
   auto dump_with_extracted_fields = [&]() {
+    if (bounded_output) {
+      YAML::Node ordered(YAML::NodeType::Map);
+      bool inserted = false;
+      const std::string groups_field_name =
+          ext.clash_new_field_name ? "proxy-groups" : "Proxy Group";
+      for (const auto &entry : yamlnode) {
+        const std::string key = entry.first.as<std::string>();
+        if (!inserted && key == groups_field_name) {
+          if (has_proxy_providers_node)
+            ordered["proxy-providers"] = proxy_providers_node;
+          if (has_proxies_node)
+            ordered[proxies_field_name] = proxies_node;
+          inserted = true;
+        }
+        ordered[entry.first] = entry.second;
+      }
+      if (!inserted) {
+        if (has_proxy_providers_node)
+          ordered["proxy-providers"] = proxy_providers_node;
+        if (has_proxies_node)
+          ordered[proxies_field_name] = proxies_node;
+      }
+      return dumpCanonicalClashYaml(ordered, max_output_bytes);
+    }
     std::string result = YAML::Dump(yamlnode);
     if (!proxy_providers_yaml.empty()) {
       insertProxyProvidersBeforeGroups(result, proxy_providers_yaml,
@@ -2154,6 +2265,13 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
     yamlnode.remove(rules_field_name);
     if (!merge_external_rules(generated_rules))
       return "";
+    return dump_with_extracted_fields();
+  }
+
+  if (bounded_output) {
+    rulesetToClash(yamlnode, ruleset_content_array,
+                   ext.overwrite_original_rules, ext.clash_new_field_name,
+                   ext.rule_stats);
     return dump_with_extracted_fields();
   }
 
@@ -3251,7 +3369,8 @@ StashGroupProviderSelection stashProvidersForGroup(
 static std::string proxyToStashImpl(
     std::vector<Proxy> &nodes, const std::string &base_conf,
     std::vector<RulesetContent> &ruleset_content_array,
-    const ProxyGroupConfigs &extra_proxy_group, extra_settings &ext) {
+    const ProxyGroupConfigs &extra_proxy_group, extra_settings &ext,
+    size_t max_output_bytes) {
   YAML::Node root;
   try {
     root = YAML::Load(base_conf);
@@ -3942,17 +4061,19 @@ static std::string proxyToStashImpl(
         return fail_reference_graph();
   }
   ext.stash_rule_stats.final_provider_count = rule_provider_names.size();
-  return finalizeCanonicalClashYaml(YAML::Dump(root));
+  return dumpCanonicalClashYaml(root, max_output_bytes);
 }
 
 std::string proxyToStash(std::vector<Proxy> &nodes,
                          const std::string &base_conf,
                          std::vector<RulesetContent> &ruleset_content_array,
                          const ProxyGroupConfigs &extra_proxy_group,
-                         extra_settings &ext) {
+                         extra_settings &ext, size_t max_output_bytes) {
   try {
     return proxyToStashImpl(nodes, base_conf, ruleset_content_array,
-                            extra_proxy_group, ext);
+                            extra_proxy_group, ext, max_output_bytes);
+  } catch (const BoundedOutputExceeded &) {
+    throw;
   } catch (const std::exception &e) {
     writeLog(LOG_LEVEL_ERROR,
              "STASH_CONFIG_GENERATION_FAILED detail=" +
@@ -3972,10 +4093,13 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
                          const std::string &base_conf,
                          std::vector<RulesetContent> &ruleset_content_array,
                          const ProxyGroupConfigs &extra_proxy_group,
-                         int surge_ver, extra_settings &ext) {
+                         int surge_ver, extra_settings &ext,
+                         size_t max_output_bytes) {
   const bool resolve_hostname = effectiveSettings().surgeResolveHostname;
   INIReader ini;
-  std::string output_nodelist;
+  std::optional<BoundedOutputSink> output_nodelist;
+  if (ext.nodelist)
+    output_nodelist.emplace(max_output_bytes);
   std::vector<Proxy> nodelist;
   unsigned short local_port = 1080;
   RemarkSet used_remarks;
@@ -4370,9 +4494,12 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
       proxy += ", udp-relay=" + udp.get_str();
     if (underlying_proxy != "")
       proxy += ", underlying-proxy=" + underlying_proxy;
-    if (ext.nodelist)
-      output_nodelist += x.Remark + " = " + proxy + "\n";
-    else {
+    if (ext.nodelist) {
+      output_nodelist->append(x.Remark);
+      output_nodelist->append(" = ");
+      output_nodelist->append(proxy);
+      output_nodelist->append("\n");
+    } else {
       ini.set("{NONAME}", x.Remark + " = " + proxy);
       nodelist.emplace_back(x);
     }
@@ -4381,7 +4508,7 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
   }
 
   if (ext.nodelist)
-    return output_nodelist;
+    return output_nodelist->release();
 
   ini.set_current_section("Proxy Group");
   ini.erase_section();
@@ -4497,7 +4624,7 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
                    ext.overwrite_original_rules, ext.managed_config_prefix,
                    ext.rule_stats);
 
-  return ini.to_string();
+  return ini.to_string(max_output_bytes);
 }
 
 namespace {
@@ -5086,17 +5213,32 @@ bool writeV2RayProfilePayload(const Proxy &proxy, V2RayClientTarget target,
 
 std::string proxyToV2RayClient(std::vector<Proxy> &nodes,
                                V2RayClientTarget target,
-                               extra_settings &ext) {
+                               extra_settings &ext,
+                               size_t max_output_bytes) {
   TargetGenerationStats &generation_stats = ext.target_generation_stats;
   generation_stats = TargetGenerationStats{};
   generation_stats.input_nodes = nodes.size();
-  std::string all_links;
+  std::optional<BoundedOutputSink> plain_links;
+  std::optional<Base64OutputSink> encoded_links;
+  if (ext.nodelist)
+    plain_links.emplace(max_output_bytes);
+  else
+    encoded_links.emplace(max_output_bytes);
+  auto append_link = [&](std::string_view value) {
+    if (ext.nodelist)
+      plain_links->append(value);
+    else
+      encoded_links->append(value);
+  };
 
   for (const Proxy &proxy : nodes) {
     TargetNodeGenerationTracker generation_tracker(generation_stats,
                                                    proxy.Type);
     bool emitted = false;
-    std::string node_links;
+    const size_t plain_checkpoint = plain_links ? plain_links->size() : 0;
+    std::optional<Base64OutputSink::Checkpoint> encoded_checkpoint;
+    if (encoded_links)
+      encoded_checkpoint = encoded_links->checkpoint();
     const std::vector<WireGuardPeer> peers =
         proxy.Type == ProxyType::WireGuard ? wireGuardPeers(proxy)
                                            : std::vector<WireGuardPeer>{};
@@ -5115,19 +5257,26 @@ std::string proxyToV2RayClient(std::vector<Proxy> &nodes,
         emitted = false;
         break;
       }
-      node_links += "v2rayn://" + scheme + "/" +
-                    urlSafeBase64Encode(payload) + "\n";
+      append_link("v2rayn://");
+      append_link(scheme);
+      append_link("/");
+      append_link(urlSafeBase64Encode(payload));
+      append_link("\n");
       emitted = true;
     }
     if (emitted) {
-      all_links += node_links;
       generation_tracker.markEmitted();
+    } else {
+      if (plain_links)
+        plain_links->truncate(plain_checkpoint);
+      if (encoded_links)
+        encoded_links->rollback(*encoded_checkpoint);
     }
   }
 
   if (ext.nodelist)
-    return all_links;
-  return base64Encode(all_links);
+    return plain_links->release();
+  return encoded_links->release();
 }
 
 namespace {
@@ -5267,11 +5416,24 @@ static bool buildShadowrocketMieruGroup(std::vector<const Proxy *> &members,
 
 static std::string proxyToSingleProfile(const std::vector<Proxy> &nodes,
                                         const SingleLinkProfile &profile,
-                                        extra_settings &ext) {
+                                        extra_settings &ext,
+                                        size_t max_output_bytes) {
   TargetGenerationStats &generation_stats = ext.target_generation_stats;
   generation_stats = TargetGenerationStats{};
   generation_stats.input_nodes = nodes.size();
-  std::string proxyStr, allLinks;
+  std::string proxyStr;
+  std::optional<BoundedOutputSink> plain_links;
+  std::optional<Base64OutputSink> encoded_links;
+  if (ext.nodelist)
+    plain_links.emplace(max_output_bytes);
+  else
+    encoded_links.emplace(max_output_bytes);
+  auto append_link = [&](std::string_view value) {
+    if (ext.nodelist)
+      plain_links->append(value);
+    else
+      encoded_links->append(value);
+  };
   const bool ss = profile.shadowsocks;
   const bool ssr = profile.shadowsocksr;
   const bool vmess = profile.vmess;
@@ -5563,30 +5725,34 @@ static std::string proxyToSingleProfile(const std::vector<Proxy> &nodes,
     default:
       continue;
     }
-    allLinks += proxyStr + "\n";
+    append_link(proxyStr);
+    append_link("\n");
     generation_tracker.markEmitted();
   }
 
   if (ext.nodelist)
-    return allLinks;
-  return base64Encode(allLinks);
+    return plain_links->release();
+  return encoded_links->release();
 }
 
 } // namespace
 
 std::string proxyToSingle(const std::vector<Proxy> &nodes,
                           SingleLinkTypes types,
-                          extra_settings &ext) {
-  return proxyToSingleProfile(nodes, legacySingleLinkProfile(types), ext);
+                          extra_settings &ext, size_t max_output_bytes) {
+  return proxyToSingleProfile(nodes, legacySingleLinkProfile(types), ext,
+                              max_output_bytes);
 }
 
 std::string proxyToShadowrocket(const std::vector<Proxy> &nodes,
-                                extra_settings &ext) {
-  return proxyToSingleProfile(nodes, kShadowrocketSingleLinkProfile, ext);
+                                extra_settings &ext,
+                                size_t max_output_bytes) {
+  return proxyToSingleProfile(nodes, kShadowrocketSingleLinkProfile, ext,
+                              max_output_bytes);
 }
 
 std::string proxyToSSSub(std::string base_conf, std::vector<Proxy> &nodes,
-                         extra_settings &ext) {
+                         extra_settings &ext, size_t max_output_bytes) {
   TargetGenerationStats &generation_stats = ext.target_generation_stats;
   generation_stats = TargetGenerationStats{};
   generation_stats.input_nodes = nodes.size();
@@ -5655,13 +5821,13 @@ std::string proxyToSSSub(std::string base_conf, std::vector<Proxy> &nodes,
     proxies.PushBack(proxy, alloc);
     generation_tracker.markEmitted();
   }
-  return proxies | SerializeObject();
+  return proxies | SerializeObject(max_output_bytes);
 }
 
 std::string proxyToQuan(std::vector<Proxy> &nodes, const std::string &base_conf,
                         std::vector<RulesetContent> &ruleset_content_array,
                         const ProxyGroupConfigs &extra_proxy_group,
-                        extra_settings &ext) {
+                        extra_settings &ext, size_t max_output_bytes) {
   ext.target_generation_stats = TargetGenerationStats{};
   ext.target_generation_stats.input_nodes = nodes.size();
   INIReader ini;
@@ -5676,13 +5842,16 @@ std::string proxyToQuan(std::vector<Proxy> &nodes, const std::string &base_conf,
 
   if (ext.nodelist) {
     string_array allnodes;
-    std::string allLinks;
     ini.get_all("SERVER", "{NONAME}", allnodes);
-    if (!allnodes.empty())
-      allLinks = join(allnodes, "\n");
-    return base64Encode(allLinks);
+    Base64OutputSink encoded(max_output_bytes);
+    for (size_t index = 0; index < allnodes.size(); ++index) {
+      if (index != 0)
+        encoded.append("\n");
+      encoded.append(allnodes[index]);
+    }
+    return encoded.release();
   }
-  return ini.to_string();
+  return ini.to_string(max_output_bytes);
 }
 
 void proxyToQuan(std::vector<Proxy> &nodes, INIReader &ini,
@@ -6086,7 +6255,7 @@ std::string proxyToQuanX(std::vector<Proxy> &nodes,
                          const std::string &base_conf,
                          std::vector<RulesetContent> &ruleset_content_array,
                          const ProxyGroupConfigs &extra_proxy_group,
-                         extra_settings &ext) {
+                         extra_settings &ext, size_t max_output_bytes) {
   ext.target_generation_stats = TargetGenerationStats{};
   ext.target_generation_stats.input_nodes = nodes.size();
   INIReader ini;
@@ -6113,13 +6282,16 @@ std::string proxyToQuanX(std::vector<Proxy> &nodes,
 
   if (ext.nodelist) {
     string_array allnodes;
-    std::string allLinks;
     ini.get_all("server_local", "{NONAME}", allnodes);
-    if (!allnodes.empty())
-      allLinks = join(allnodes, "\n");
-    return allLinks;
+    BoundedOutputSink all_links(max_output_bytes);
+    for (size_t index = 0; index < allnodes.size(); ++index) {
+      if (index != 0)
+        all_links.append("\n");
+      all_links.append(allnodes[index]);
+    }
+    return all_links.release();
   }
-  return ini.to_string();
+  return ini.to_string(max_output_bytes);
 }
 
 void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini,
@@ -6518,12 +6690,14 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini,
 }
 
 std::string proxyToSSD(std::vector<Proxy> &nodes, std::string &group,
-                       std::string &userinfo, extra_settings &ext) {
+                       std::string &userinfo, extra_settings &ext,
+                       size_t max_output_bytes) {
   TargetGenerationStats &generation_stats = ext.target_generation_stats;
   generation_stats = TargetGenerationStats{};
   generation_stats.input_nodes = nodes.size();
-  rapidjson::StringBuffer sb;
-  rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
+  Base64OutputSink encoded(max_output_bytes);
+  encoded.prepend("ssd://");
+  rapidjson::Writer<Base64OutputSink> writer(encoded);
   int index = 0;
 
   if (group.empty())
@@ -6622,14 +6796,14 @@ std::string proxyToSSD(std::vector<Proxy> &nodes, std::string &group,
   }
   writer.EndArray();
   writer.EndObject();
-  return "ssd://" + base64Encode(sb.GetString());
+  return encoded.release();
 }
 
 std::string proxyToMellow(std::vector<Proxy> &nodes,
                           const std::string &base_conf,
                           std::vector<RulesetContent> &ruleset_content_array,
                           const ProxyGroupConfigs &extra_proxy_group,
-                          extra_settings &ext) {
+                          extra_settings &ext, size_t max_output_bytes) {
   ext.target_generation_stats = TargetGenerationStats{};
   ext.target_generation_stats.input_nodes = nodes.size();
   INIReader ini;
@@ -6642,7 +6816,7 @@ std::string proxyToMellow(std::vector<Proxy> &nodes,
 
   proxyToMellow(nodes, ini, ruleset_content_array, extra_proxy_group, ext);
 
-  return ini.to_string();
+  return ini.to_string(max_output_bytes);
 }
 
 void proxyToMellow(std::vector<Proxy> &nodes, INIReader &ini,
@@ -6919,9 +7093,11 @@ static void appendLoonRemoteProxies(
 std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
                         std::vector<RulesetContent> &ruleset_content_array,
                         const ProxyGroupConfigs &extra_proxy_group,
-                        extra_settings &ext) {
+                        extra_settings &ext, size_t max_output_bytes) {
   INIReader ini;
-  std::string output_nodelist;
+  std::optional<BoundedOutputSink> output_nodelist;
+  if (ext.nodelist)
+    output_nodelist.emplace(max_output_bytes);
   std::vector<Proxy> nodelist;
   TargetGenerationStats &generation_stats = ext.target_generation_stats;
   generation_stats = TargetGenerationStats{};
@@ -7260,9 +7436,12 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
     if (!udp.is_undef())
       proxy += ",udp=" + std::string(udp.get() ? "true" : "false");
 
-    if (ext.nodelist)
-      output_nodelist += x.Remark + " = " + proxy + "\n";
-    else {
+    if (ext.nodelist) {
+      output_nodelist->append(x.Remark);
+      output_nodelist->append(" = ");
+      output_nodelist->append(proxy);
+      output_nodelist->append("\n");
+    } else {
       ini.set("{NONAME}", x.Remark + " = " + proxy);
       nodelist.emplace_back(x);
       used_remarks.emplace(x.Remark);
@@ -7271,7 +7450,7 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
   }
 
   if (ext.nodelist)
-    return output_nodelist;
+    return output_nodelist->release();
 
   string_multimap original_groups;
   ini.set_current_section("Proxy Group");
@@ -7413,7 +7592,7 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
     rulesetToSurge(ini, ruleset_content_array, -4, ext.overwrite_original_rules,
                    ext.managed_config_prefix, ext.rule_stats);
 
-  return ini.to_string();
+  return ini.to_string(max_output_bytes);
 }
 
 static std::string formatSingBoxInterval(Integer interval) {
@@ -8239,7 +8418,7 @@ std::string proxyToSingBox(std::vector<Proxy> &nodes,
                            const std::string &base_conf,
                            std::vector<RulesetContent> &ruleset_content_array,
                            const ProxyGroupConfigs &extra_proxy_group,
-                           extra_settings &ext) {
+                           extra_settings &ext, size_t max_output_bytes) {
   ext.target_generation_stats = TargetGenerationStats{};
   ext.target_generation_stats.input_nodes = nodes.size();
   using namespace rapidjson_ext;
@@ -8260,10 +8439,10 @@ std::string proxyToSingBox(std::vector<Proxy> &nodes,
   proxyToSingBox(nodes, json, ruleset_content_array, extra_proxy_group, ext);
 
   if (ext.nodelist || !ext.enable_rule_generator)
-    return json | SerializeObject();
+    return json | SerializeObject(max_output_bytes);
 
   rulesetToSingBox(json, ruleset_content_array, ext.overwrite_original_rules,
                    ext.rule_stats);
 
-  return json | SerializeObject();
+  return json | SerializeObject(max_output_bytes);
 }

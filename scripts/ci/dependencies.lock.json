@@ -3,7 +3,7 @@
     "cpp_httplib": {
       "ref": "HEAD",
       "repository": "https://github.com/yhirose/cpp-httplib.git",
-      "revision": "6494edd8c03c55165825ae3078e2f55c595d8cb6"
+      "revision": "9ce15a14e5bbe0bc135b25236339c53ba1e28923"
     },
     "inja": {
       "ref": "HEAD",
@@ -48,19 +48,19 @@
       "source": "mirror.gcr.io/library/alpine:latest"
     },
     "debian_builder": {
-      "pinned": "mirror.gcr.io/library/debian@sha256:34cd9e9fd437c0a095ec39cb2e73422c9f30821b0d0848ed74fd0d43bae4d958",
+      "pinned": "mirror.gcr.io/library/debian@sha256:f324c7ff54321e8d9c588493a20244965938ce0aa50bbd1022d38010e9ffc4b1",
       "source": "mirror.gcr.io/library/debian:latest"
     },
     "debian_trixie": {
-      "pinned": "mirror.gcr.io/library/debian@sha256:34cd9e9fd437c0a095ec39cb2e73422c9f30821b0d0848ed74fd0d43bae4d958",
+      "pinned": "mirror.gcr.io/library/debian@sha256:f324c7ff54321e8d9c588493a20244965938ce0aa50bbd1022d38010e9ffc4b1",
       "source": "mirror.gcr.io/library/debian:trixie"
     },
     "debian_trixie_slim": {
-      "pinned": "mirror.gcr.io/library/debian@sha256:3a39a0592364683e6bab97937b72cad5a8fa6dcbbee90edb3bb48c7f8e94f258",
+      "pinned": "mirror.gcr.io/library/debian@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132",
       "source": "mirror.gcr.io/library/debian:trixie-slim"
     },
     "golang": {
-      "pinned": "mirror.gcr.io/library/golang@sha256:65b6f280bf050ec5af12716857e8ea8439d694dbba8f31ceeb7630670071f2bb",
+      "pinned": "mirror.gcr.io/library/golang@sha256:0ecdc2a9f6156af6451080bfe3d8382a662fcc4e209608c6f919e643453514c1",
       "source": "mirror.gcr.io/library/golang:latest"
     }
   },

@@ -11,7 +11,14 @@ DISPLAY_NAME="SubConverter-Extended"
 ROOT_DIR="/opt/${PACKAGE_NAME}"
 WORK_DIR="build/openwrt-apk/${LINUX_ARCH}"
 APK_RELEASE="${APK_RELEASE:-0}"
-APK_VERSION="${VERSION#v}-r${APK_RELEASE}"
+if [ "${VERSION}" = "dev" ]; then
+  # apk-tools requires an ordered numeric package version. Keep the artifact,
+  # embedded build identity and runtime version as dev, while using the
+  # conventional non-release package-manager sentinel for dependency solving.
+  APK_VERSION="0.0.0-r${APK_RELEASE}"
+else
+  APK_VERSION="${VERSION#v}-r${APK_RELEASE}"
+fi
 BUILD_TIME="${BUILD_TIME:-$(date +%s)}"
 REPO_COMMIT="${GITHUB_SHA:-${SHA:-unknown}}"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,7 +26,7 @@ RENDER_LAUNCHER="${SCRIPT_DIR}/ci/render-linux-launcher.sh"
 OPENWRT_DIR="${SCRIPT_DIR}/../openwrt"
 OVERLAY_DIR="${OPENWRT_DIR}/root"
 APK_SCRIPTS_DIR="${OPENWRT_DIR}/apk-scripts"
-PACKAGE_DEPENDS="luci-base curl jsonfilter ca-bundle"
+PACKAGE_DEPENDS="luci-base luci-i18n-base-zh-cn curl jsonfilter ca-bundle"
 
 if [ ! -d "${SOURCE_DIR}" ]; then
   echo "Package source directory not found: ${SOURCE_DIR}" >&2
@@ -38,8 +45,9 @@ case "${APK_RELEASE}" in
     ;;
 esac
 
-if [[ ! "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "Invalid version '${VERSION}'; expected vMAJOR.MINOR.PATCH." >&2
+if [[ ! "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] && \
+   [ "${VERSION}" != "dev" ]; then
+  echo "Invalid version '${VERSION}'; expected dev or vMAJOR.MINOR.PATCH." >&2
   exit 1
 fi
 
@@ -125,8 +133,10 @@ resource paths and keep older generated configurations working after an
 in-place package upgrade.
 
 The package includes LuCI under Services -> SubConverter-Extended and an
-external updater. Stable GitHub Releases are the only update source; public
-GitHub proxy endpoints may be used for both metadata and assets.
+external updater. LuCI pages provide English and Simplified Chinese and follow
+the LuCI language setting automatically. Stable GitHub Releases are the only
+update source; public GitHub proxy endpoints may be used for both metadata and
+assets.
 EOF
 }
 
