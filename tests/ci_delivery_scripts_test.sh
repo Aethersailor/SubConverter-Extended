@@ -193,16 +193,27 @@ SYNC_WORKFLOW="$REPOSITORY/.github/workflows/sync-dev-to-master.yml"
 grep -Fq 'group: build-core-${{ github.ref }}' "$BUILD_WORKFLOW"
 grep -Fq 'group: container-registry-cleanup' "$BUILD_WORKFLOW"
 grep -Fq 'group: container-registry-cleanup' "$CLEANUP_WORKFLOW"
-grep -Fq 'validation_profile:' "$BUILD_WORKFLOW"
-grep -Fq -- '- final-force-max' "$BUILD_WORKFLOW"
+for forbidden_cloud_test in \
+  'validation_profile:' \
+  'final-force-max' \
+  'Validate Source Once' \
+  'sanitizer-bootstrap:' \
+  'ASan/UBSan' \
+  'strict-force-max-gate:' \
+  'BUILD_TESTS: "true"'; do
+  if grep -Fq "$forbidden_cloud_test" "$BUILD_WORKFLOW"; then
+    echo "cloud build workflow still contains test-only path: $forbidden_cloud_test" >&2
+    exit 1
+  fi
+done
 
 cross_build_block="$(sed -n '/^  cross-build:/,/^  build-linux:/p' "$BUILD_WORKFLOW")"
-grep -Fq 'Build strict non-publishing candidate image' <<<"$cross_build_block"
-grep -Fq 'Smoke test strict candidate image (${{ matrix.arch }})' <<<"$cross_build_block"
-grep -Fq 'Smoke test strict OpenWrt APKs (${{ matrix.arch }})' <<<"$cross_build_block"
-grep -Fq 'resource-control: force_max' <<<"$cross_build_block"
-grep -Fq 'builder_platform: linux/arm64' <<<"$cross_build_block"
-grep -Fq 'builder_platform: linux/amd64' <<<"$cross_build_block"
+grep -Fq 'Compile without loading or publishing an image' <<<"$cross_build_block"
+grep -Fq 'BUILD_TESTS: "false"' <<<"$cross_build_block"
+if grep -Eq 'Smoke test|Package strict|Set up QEMU' <<<"$cross_build_block"; then
+  echo "cross-build must compile only" >&2
+  exit 1
+fi
 
 build_linux_block="$(sed -n '/^  build-linux:/,/^  build-windows-amd64:/p' "$BUILD_WORKFLOW")"
 deny_build_linux_registry_write=false
@@ -217,11 +228,15 @@ grep -Fq 'image: subconverter-extended:${{ matrix.arch }}-ci' <<<"$build_linux_b
 grep -Fq 'docker save "subconverter-extended:${{ matrix.arch }}-ci"' <<<"$build_linux_block"
 grep -Fq 'name: docker-image-${{ matrix.arch }}' <<<"$build_linux_block"
 grep -Fq 'bash scripts/ci/build-linux-release.sh v0.0.0 amd64 x86_64' <<<"$build_linux_block"
-grep -Fq 'Smoke test strict OpenWrt APKs (amd64)' <<<"$build_linux_block"
-grep -Fq 'resource-control: force_max' <<<"$build_linux_block"
+grep -Fq 'BUILD_TESTS: "false"' <<<"$build_linux_block"
+if grep -Eq 'Smoke test strict|Package strict|ASan|UBSan|ctest' <<<"$build_linux_block"; then
+  echo "dev Linux build still contains full or sanitizer tests" >&2
+  exit 1
+fi
 
-windows_block="$(sed -n '/^  build-windows-amd64:/,/^  strict-force-max-gate:/p' "$BUILD_WORKFLOW")"
-grep -Fq "inputs.validation_profile == 'final-force-max'" <<<"$windows_block"
+windows_block="$(sed -n '/^  build-windows-amd64:/,/^  merge-manifest:/p' "$BUILD_WORKFLOW")"
+grep -Fq "github.event_name == 'workflow_dispatch'" <<<"$windows_block"
+grep -Fq 'BUILD_TESTS: "false"' <<<"$windows_block"
 grep -Fq 'BUILD_TESTS="$BUILD_TESTS" bash scripts/build-windows-amd64.sh' <<<"$windows_block"
 grep -Fq "if: needs.prepare.outputs.is_release == 'true'" <<<"$windows_block"
 grep -Fq 'BUILD_TESTS="${BUILD_TESTS:-false}"' "$WINDOWS_BUILD_SCRIPT"
@@ -229,40 +244,6 @@ grep -Fq -- '-DBUILD_TESTS="${BUILD_TESTS}"' "$WINDOWS_BUILD_SCRIPT"
 grep -Fq 'ctest --test-dir "${BUILD_DIR}" --output-on-failure --timeout 120' "$WINDOWS_BUILD_SCRIPT"
 grep -Fq '$expectedUpdaterVersion = "unknown"' \
   "$REPOSITORY/.github/actions/smoke-windows-artifact/action.yml"
-
-sanitizer_bootstrap_block="$(sed -n '/^  sanitizer-bootstrap:/,/^  sanitizer:/p' "$BUILD_WORKFLOW")"
-grep -Fq "if: needs.prepare.outputs.mode == 'dev' && github.event_name == 'workflow_dispatch'" <<<"$sanitizer_bootstrap_block"
-grep -Fq -- '--target sanitizer-bootstrap' <<<"$sanitizer_bootstrap_block"
-grep -Fq -- '--ulimit nofile=524288:524288' <<<"$sanitizer_bootstrap_block"
-grep -Fq -- '--cache-to "type=local,dest=${SANITIZER_BOOTSTRAP_CACHE},mode=max"' <<<"$sanitizer_bootstrap_block"
-grep -Fq 'name: Upload exact sanitizer bootstrap cache' <<<"$sanitizer_bootstrap_block"
-grep -Fq 'name: sanitizer-bootstrap-cache-${{ needs.prepare.outputs.sha }}' <<<"$sanitizer_bootstrap_block"
-grep -Fq 'path: ${{ runner.temp }}/subconverter-sanitizer-bootstrap-cache' <<<"$sanitizer_bootstrap_block"
-grep -Fq 'if-no-files-found: error' <<<"$sanitizer_bootstrap_block"
-grep -Fq 'retention-days: 1' <<<"$sanitizer_bootstrap_block"
-grep -Fq 'compression-level: 0' <<<"$sanitizer_bootstrap_block"
-grep -Fq 'overwrite: true' <<<"$sanitizer_bootstrap_block"
-
-sanitizer_block="$(sed -n '/^  sanitizer:/,/^  cross-build:/p' "$BUILD_WORKFLOW")"
-grep -Fq 'needs: [prepare, sanitizer-bootstrap]' <<<"$sanitizer_block"
-grep -Fq 'name: Download exact sanitizer bootstrap cache' <<<"$sanitizer_block"
-grep -Fq 'name: sanitizer-bootstrap-cache-${{ needs.prepare.outputs.sha }}' <<<"$sanitizer_block"
-grep -Fq 'test -s "${SANITIZER_BOOTSTRAP_CACHE}/index.json"' <<<"$sanitizer_block"
-grep -Fq -- '--target builder' <<<"$sanitizer_block"
-grep -Fq -- '--ulimit nofile=524288:524288' <<<"$sanitizer_block"
-grep -Fq -- '--cache-from "type=local,src=${SANITIZER_BOOTSTRAP_CACHE}"' <<<"$sanitizer_block"
-if grep -Fq 'scope=subconverter-sanitizer' <<<"$sanitizer_bootstrap_block$sanitizer_block"; then
-  echo "sanitizer handoff still depends on the flaky GHA BuildKit backend" >&2
-  exit 1
-fi
-
-strict_gate_block="$(sed -n '/^  strict-force-max-gate:/,/^  merge-manifest:/p' "$BUILD_WORKFLOW")"
-grep -Fq "if: always() && github.event_name == 'workflow_dispatch' && inputs.validation_profile == 'final-force-max'" <<<"$strict_gate_block"
-grep -Fq 'needs: [prepare, validate-source, sanitizer-bootstrap, sanitizer, cross-build, build-linux, build-windows-amd64]' <<<"$strict_gate_block"
-grep -Fq 'if [ "$result" != success ]; then' <<<"$strict_gate_block"
-for result_name in PREPARE_RESULT SOURCE_RESULT SANITIZER_BOOTSTRAP_RESULT SANITIZER_RESULT CROSS_RESULT LINUX_RESULT WINDOWS_RESULT; do
-  grep -Fq "$result_name:" <<<"$strict_gate_block"
-done
 
 grep -Fq '[ "${VERSION}" != "dev" ]' "$OPENWRT_PACKAGE_SCRIPT"
 grep -Fq 'APK_VERSION="0.0.0-r${APK_RELEASE}"' "$OPENWRT_PACKAGE_SCRIPT"
@@ -275,12 +256,12 @@ grep -Fq 'runtime_pref=/tmp/subconverter-force-max-pref.toml' "$OPENWRT_SMOKE_AC
 grep -Fq 'max_allowed_download_size = 1048576' "$OPENWRT_SMOKE_ACTION"
 
 publish_block="$(sed -n '/^  merge-manifest:/,/^  create-release:/p' "$BUILD_WORKFLOW")"
-grep -Fq 'needs: [prepare, validate-source, sanitizer-bootstrap, sanitizer, cross-build, build-linux, build-windows-amd64, strict-force-max-gate]' <<<"$publish_block"
+grep -Fq 'needs: [prepare, cross-build, build-linux, build-windows-amd64]' <<<"$publish_block"
 grep -Fq "needs.build-windows-amd64.result == 'success'" <<<"$publish_block"
-grep -Fq "needs.sanitizer-bootstrap.result == 'success'" <<<"$publish_block"
-grep -Fq "needs.sanitizer-bootstrap.result == 'skipped' && github.event_name != 'workflow_dispatch'" <<<"$publish_block"
-grep -Fq "needs.sanitizer.result == 'skipped' && github.event_name != 'workflow_dispatch'" <<<"$publish_block"
-grep -Fq "needs.strict-force-max-gate.result == 'success'" <<<"$publish_block"
+if grep -Eq 'sanitizer|validate-source|strict-force-max' <<<"$publish_block"; then
+  echo "publish path still depends on removed cloud tests" >&2
+  exit 1
+fi
 grep -Fq 'pattern: docker-image-*' <<<"$publish_block"
 grep -Fq 'gzip -dc "images/$archive" | docker load' <<<"$publish_block"
 grep -Fq 'actual_platform="$(docker image inspect' <<<"$publish_block"
