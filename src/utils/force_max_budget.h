@@ -6,7 +6,7 @@
 
 #include "utils/resource_probe.h"
 
-inline constexpr const char *kForceMaxFormulaRevision = "force-max-v5";
+inline constexpr const char *kForceMaxFormulaRevision = "force-max-v7";
 inline constexpr uint64_t kForceMaxOwnerWaitMetadataBytes =
     UINT64_C(64) * 1024;
 

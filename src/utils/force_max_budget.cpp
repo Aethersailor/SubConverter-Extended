@@ -601,7 +601,7 @@ ForceMaxBudget calculateForceMaxBudget(
     return budget;
   }
   budget.transport_active_bytes =
-      std::max<uint64_t>(1, budget.working_memory_bytes / 4);
+      std::max<uint64_t>(1, budget.working_memory_bytes / 8);
   uint64_t committed_working_memory = 0;
   if (!checkedAdd(quickjs_total, budget.transport_active_bytes,
                   committed_working_memory) ||
