@@ -1674,9 +1674,20 @@ void configureResourceControl(Settings &settings) {
   uint64_t admission_entries = UINT64_C(2048);
   uint64_t admission_bytes = UINT64_C(64) * 1024 * 1024;
   uint64_t retained_bytes = 0;
+  bool download_limit_derived = false;
   if (apply_force_max) {
     const ForceMaxBudget &force_max =
         snapshot.calculated_force_max_budget;
+    if (settings.maxAllowedDownloadSize == 0) {
+      const uint64_t derived_download_limit =
+          forceMaxDerivedDownloadLimit(force_max);
+      if (derived_download_limit == 0)
+        throw std::invalid_argument(
+            "force_max could not derive a safe download limit");
+      settings.maxAllowedDownloadSize =
+          static_cast<long>(derived_download_limit);
+      download_limit_derived = true;
+    }
     settings.maxConcurThreads = static_cast<int>(
         std::min<uint64_t>(force_max.compute_workers, INT_MAX));
     settings.maxServerThreads = static_cast<int>(
@@ -1738,6 +1749,10 @@ void configureResourceControl(Settings &settings) {
                " admission_entries=" + std::to_string(admission_entries) +
                " admission_bytes=" + std::to_string(admission_bytes) +
                " retained_bytes=" + std::to_string(retained_bytes) +
+               " download_limit_bytes=" +
+               std::to_string(settings.maxAllowedDownloadSize) +
+               " download_limit_source=" +
+               (download_limit_derived ? "hardware_budget" : "configured") +
                " formula_revision=" +
                snapshot.calculated_force_max_budget.formula_revision +
                " calculated_budget_valid=" +

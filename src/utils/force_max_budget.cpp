@@ -189,6 +189,17 @@ bool validateForceMaxFetchContract(const ForceMaxBudget &budget,
   return true;
 }
 
+uint64_t forceMaxDerivedDownloadLimit(
+    const ForceMaxBudget &budget) noexcept {
+  if (!budget.valid)
+    return 0;
+  const uint64_t working_limit = budget.owner_active_bytes / 4;
+  const uint64_t platform_limit = static_cast<uint64_t>(
+      std::numeric_limits<long>::max());
+  return std::min(
+      platform_limit, std::min(budget.fetch_bytes, working_limit));
+}
+
 uint64_t forceMaxOwnerWorkingReservation(
     const ForceMaxBudget &budget, uint64_t request_bytes,
     uint64_t maximum_download_bytes) noexcept {

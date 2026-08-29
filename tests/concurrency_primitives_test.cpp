@@ -1518,6 +1518,14 @@ static void testResourceControlPrimitives() {
          deterministic_first.working_memory_bytes);
   assert(deterministic_first.transport_active_bytes > 0);
   assert(deterministic_first.owner_active_bytes > 0);
+  const uint64_t derived_download_limit =
+      forceMaxDerivedDownloadLimit(deterministic_first);
+  assert(derived_download_limit > 0);
+  assert(derived_download_limit <= deterministic_first.fetch_bytes);
+  assert(derived_download_limit <=
+         deterministic_first.owner_active_bytes / 4);
+  assert(validateForceMaxFetchContract(
+      deterministic_first, derived_download_limit));
   const uint64_t owner_reservation = forceMaxOwnerWorkingReservation(
       deterministic_first, 4096, UINT64_C(1) * 1024 * 1024);
   assert(owner_reservation >= UINT64_C(4) * 1024 * 1024);
@@ -1724,6 +1732,7 @@ static void testResourceControlPrimitives() {
   const ForceMaxBudget unknown_cgroup =
       calculateForceMaxBudget(unknown_cgroup_envelope);
   assert(!unknown_cgroup.valid);
+  assert(forceMaxDerivedDownloadLimit(unknown_cgroup) == 0);
   assert(unknown_cgroup.validation_error == "unknown_cgroup_scope");
 
   ResourceEnvelope missing_current_envelope = portable_envelope;

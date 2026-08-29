@@ -11953,6 +11953,42 @@ def force_max_controller_runtime_baseline(binary: Path) -> None:
             )
 
 
+def force_max_unlimited_download_budget_baseline(binary: Path) -> None:
+    logs: list[str] = []
+    with running_service(
+        binary,
+        environment={"SUBCONVERTER_RESOURCE_CONTROL": "force_max"},
+        config_replacements=((
+            "max_allowed_download_size = 1048576",
+            "max_allowed_download_size = 0",
+        ),),
+        log_capture=logs,
+    ) as base_url:
+        status, body, _ = request(base_url, "/healthz")
+        if status != 200 or body.strip() != b"ok":
+            raise AssertionError(
+                "force_max with an unlimited configured download size "
+                f"did not become healthy: HTTP {status}: {body!r}"
+            )
+    diagnostics = "".join(logs)
+    if not re.search(
+        r"download_limit_bytes=[1-9][0-9]* "
+        r"download_limit_source=hardware_budget",
+        diagnostics,
+    ):
+        raise AssertionError(
+            "force_max did not publish its hardware-derived download limit"
+        )
+    if "FORCE_MAX_RUNTIME_PREPARED" not in diagnostics:
+        raise AssertionError(
+            "force_max unlimited-download startup did not prepare its runtime"
+        )
+    if "FORCE_MAX_RUNTIME_ROLLBACK" in diagnostics:
+        raise AssertionError(
+            "force_max unlimited-download startup unexpectedly rolled back"
+        )
+
+
 def force_max_flow_feature_baseline(binary: Path, fixture_base: str) -> None:
     dashboard_headers = {
         "Authorization": "Basic "
@@ -13604,6 +13640,7 @@ def main() -> int:
         loopback_redirect_route_baseline(binary, fixture_base)
         conversion_cost_classification_baseline(binary, fixture_base)
         resource_control_execution_path_baseline(binary)
+        force_max_unlimited_download_budget_baseline(binary)
         force_max_controller_runtime_baseline(binary)
         force_max_flow_feature_baseline(binary, fixture_base)
         force_max_subscription_cache_admission_baseline(binary, fixture_base)

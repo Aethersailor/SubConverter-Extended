@@ -73,6 +73,8 @@ bool validateForceMaxBudget(const ForceMaxBudget &budget,
 bool validateForceMaxFetchContract(const ForceMaxBudget &budget,
                                    uint64_t maximum_download_bytes,
                                    std::string *error = nullptr) noexcept;
+uint64_t forceMaxDerivedDownloadLimit(
+    const ForceMaxBudget &budget) noexcept;
 uint64_t forceMaxOwnerWorkingReservation(
     const ForceMaxBudget &budget, uint64_t request_bytes,
     uint64_t maximum_download_bytes) noexcept;
