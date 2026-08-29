@@ -93,6 +93,8 @@ struct listener_args
     void (*drain_callback)() = nullptr;
     std::size_t request_body_limit = 100 * 1024 * 1024;
     void (*runtime_ready_callback)() = nullptr;
+    int accepted_conn = 0;
+    bool wait_on_connection_capacity = false;
 };
 
 struct RequestCancellationResponse

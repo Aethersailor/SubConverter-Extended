@@ -68,6 +68,13 @@ bool validateForceMaxBudget(const ForceMaxBudget &budget,
                   minimum_inbound_connections) ||
       budget.inbound_connections < minimum_inbound_connections)
     return invalid("insufficient_inbound_connection_headroom");
+  uint64_t minimum_accepted_connections = 0;
+  if (budget.control_connections == 0 ||
+      !checkedAdd(budget.inbound_connections,
+                  budget.control_connections,
+                  minimum_accepted_connections) ||
+      budget.accepted_connections < minimum_accepted_connections)
+    return invalid("insufficient_accepted_connection_headroom");
   if (budget.outbound_active == 0 ||
       budget.outbound_per_host > budget.outbound_active ||
       budget.outbound_active > budget.outbound_open ||
@@ -288,6 +295,13 @@ ForceMaxBudget calculateForceMaxBudget(
           ? envelope.pids_max - envelope.pids_current
           : (envelope.pids_max == 0 ? UINT64_MAX : 0);
   const uint64_t outbound_fd_budget = usable_fds / 2;
+  const auto acceptedControlConnections =
+      [&](uint64_t compute) {
+        return envelope.http_handlers_own_inbound
+                   ? std::max<uint64_t>(
+                         1, envelope.http_handler_control_reserve)
+                   : std::max<uint64_t>(1, compute / 2);
+      };
   const char *candidate_failure = "integer_overflow";
   auto runtimeRequirement =
       [&](uint64_t compute, uint64_t &io, uint64_t &handlers,
@@ -306,8 +320,17 @@ ForceMaxBudget calculateForceMaxBudget(
             !checkedMultiply(compute, 64, desired_inbound))
           return false;
         outbound_open = std::min(desired_open, outbound_fd_budget);
+        const uint64_t control_connections =
+            acceptedControlConnections(compute);
+        const uint64_t inbound_fd_budget =
+            usable_fds > outbound_open ? usable_fds - outbound_open : 0;
+        if (inbound_fd_budget <= control_connections) {
+          candidate_failure = "insufficient_accepted_connection_fds";
+          return false;
+        }
         inbound_connections =
-            std::min(desired_inbound, usable_fds - outbound_open);
+            std::min(desired_inbound,
+                     inbound_fd_budget - control_connections);
         if (outbound_open < 2 || inbound_connections < 4) {
           candidate_failure = "insufficient_connection_fds";
           return false;
@@ -563,6 +586,31 @@ ForceMaxBudget calculateForceMaxBudget(
       1, budget.flow_queue_bytes / (UINT64_C(16) * 1024));
   budget.blocking_io_queue_entries = std::max<uint64_t>(
       1, budget.blocking_io_queue_bytes / (UINT64_C(64) * 1024));
+
+  budget.control_connections =
+      acceptedControlConnections(budget.compute_workers);
+  const uint64_t accepted_fd_budget =
+      usable_fds > budget.outbound_open
+          ? usable_fds - budget.outbound_open
+          : 0;
+  if (accepted_fd_budget <= budget.control_connections) {
+    fail(budget, "insufficient_accepted_connection_fds");
+    return budget;
+  }
+  if (!checkedAdd(budget.inbound_connections,
+                  budget.control_connections,
+                  budget.accepted_connections)) {
+    fail(budget, "integer_overflow");
+    return budget;
+  }
+  uint64_t minimum_accepted_connections = 0;
+  if (!checkedAdd(budget.inbound_connections,
+                  budget.control_connections,
+                  minimum_accepted_connections) ||
+      budget.accepted_connections < minimum_accepted_connections) {
+    fail(budget, "insufficient_accepted_connection_fds");
+    return budget;
+  }
 
   budget.active_owners = std::min(
       budget.active_owners,

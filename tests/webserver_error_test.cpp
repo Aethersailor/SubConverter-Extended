@@ -16,6 +16,7 @@
 #include "httplib.h"
 #include "server/socket.h"
 #include "server/webserver.h"
+#include "server/webserver_beast.h"
 
 Settings global;
 
@@ -166,6 +167,76 @@ void waitReady(int port) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   throw std::runtime_error("test server did not become ready");
+}
+
+void testBeastWaitsAtAcceptedConnectionLimit() {
+  const char *backend = std::getenv("SUBCONVERTER_HTTP_BACKEND");
+  if (backend && std::string(backend) == "httplib")
+    return;
+  const std::string previous_resource_mode = global.resourceControlEffective;
+  global.resourceControlEffective = "force_max";
+  WebServer server;
+  server.append_response("GET", "/healthz", "text/plain", healthHandler);
+  server.append_response("GET", "/ok", "text/plain", okHandler);
+  listener_args args;
+  args.listen_address = "127.0.0.1";
+  args.port = unusedPort();
+  args.max_conn = 1;
+  args.max_workers = 1;
+  args.looper_interval = 5;
+  args.request_deadline_ms = 2000;
+  args.accepted_conn = 1;
+  args.wait_on_connection_capacity = true;
+  std::thread server_thread([&] { server.start_web_server_multi(&args); });
+  waitReady(args.port);
+
+  SOCKET held = socket(AF_INET, SOCK_STREAM, 0);
+  require(held != INVALID_SOCKET, "accepted-wait hold socket failed");
+  sockaddr_in address {};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = htons(static_cast<unsigned short>(args.port));
+  require(connect(held, reinterpret_cast<sockaddr *>(&address),
+                  sizeof(address)) == 0,
+          "accepted-wait hold connect failed");
+  const auto held_deadline = std::chrono::steady_clock::now() +
+                             std::chrono::seconds(1);
+  while (beastConnectionSnapshot().business_sessions != 1 &&
+         std::chrono::steady_clock::now() < held_deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  require(beastConnectionSnapshot().business_sessions == 1,
+          "accepted-wait hold socket was not accepted");
+
+  auto waiting = std::async(std::launch::async, [&] {
+    httplib::Client client("127.0.0.1", args.port);
+    client.set_read_timeout(3, 0);
+    return client.Get("/ok");
+  });
+  const auto pause_deadline = std::chrono::steady_clock::now() +
+                              std::chrono::seconds(1);
+  while (!beastConnectionSnapshot().accept_paused &&
+         std::chrono::steady_clock::now() < pause_deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  require(beastConnectionSnapshot().accept_paused,
+          "force_max did not pause accept at the accepted socket envelope");
+  require(waiting.wait_for(std::chrono::milliseconds(100)) ==
+              std::future_status::timeout,
+          "force_max rejected instead of waiting for accepted capacity");
+  closesocket(held);
+  httplib::Result response = waiting.get();
+  const BeastConnectionSnapshot snapshot = beastConnectionSnapshot();
+  server.stop_web_server();
+  server_thread.join();
+  global.resourceControlEffective = previous_resource_mode;
+
+  require(response && response->status == 200 && response->body == "ok",
+          "force_max waiting request did not resume successfully");
+  require(snapshot.wait_on_connection_capacity &&
+              snapshot.accepted_limit == 1 &&
+              snapshot.capacity_503_total == 0 &&
+              snapshot.accept_pauses_total >= 1 &&
+              snapshot.accept_resumes_total >= 1,
+          "force_max accepted connection wait diagnostics changed");
 }
 
 void testIndependentHealthChannel(bool force_max = false) {
@@ -681,6 +752,8 @@ int main() {
   testIndependentHealthChannel();
   resetRequestLifecycleMetricsForTests();
   testIndependentHealthChannel(true);
+  resetRequestLifecycleMetricsForTests();
+  testBeastWaitsAtAcceptedConnectionLimit();
   resetRequestLifecycleMetricsForTests();
   testAbsoluteDeadline();
   resetRequestLifecycleMetricsForTests();

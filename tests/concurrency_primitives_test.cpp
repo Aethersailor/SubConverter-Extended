@@ -1497,7 +1497,12 @@ static void testResourceControlPrimitives() {
   assert(deterministic_first.outbound_active <=
          deterministic_first.outbound_open);
   assert(deterministic_first.quickjs_workers == 3);
-  assert(deterministic_first.formula_revision == "force-max-v5");
+  assert(deterministic_first.formula_revision == "force-max-v6");
+  assert(deterministic_first.accepted_connections >=
+         deterministic_first.inbound_connections +
+             deterministic_first.control_connections);
+  assert(deterministic_first.accepted_connections >
+         deterministic_first.inbound_connections);
   assert(deterministic_first.startup_memory_bytes ==
          bounded_envelope.memory_current_bytes);
   assert(deterministic_first.memory_headroom_bytes ==
@@ -1607,12 +1612,12 @@ static void testResourceControlPrimitives() {
       calculateForceMaxBudget(fd_clamped_httplib);
   assert(fd_clamped_httplib_budget.valid);
   assert(fd_clamped_httplib_budget.compute_workers == 6);
-  assert(fd_clamped_httplib_budget.inbound_connections == 80);
-  assert(fd_clamped_httplib_budget.handler_permits == 82);
+  assert(fd_clamped_httplib_budget.inbound_connections == 78);
+  assert(fd_clamped_httplib_budget.handler_permits == 80);
   assert(fd_clamped_httplib_budget.resolver_thread_budget == 23);
-  assert(fd_clamped_httplib_budget.thread_budget_total == 131);
-  assert(fd_clamped_httplib_budget.active_flows == 39);
-  assert(fd_clamped_httplib_budget.active_owners == 39);
+  assert(fd_clamped_httplib_budget.thread_budget_total == 129);
+  assert(fd_clamped_httplib_budget.active_flows == 38);
+  assert(fd_clamped_httplib_budget.active_owners == 38);
   ResourceEnvelope more_nofile_httplib = fd_clamped_httplib;
   more_nofile_httplib.nofile_soft = 512;
   more_nofile_httplib.nofile_hard = 512;
@@ -1623,6 +1628,8 @@ static void testResourceControlPrimitives() {
          fd_clamped_httplib_budget.compute_workers);
   assert(more_nofile_httplib_budget.inbound_connections >=
          fd_clamped_httplib_budget.inbound_connections);
+  assert(more_nofile_httplib_budget.accepted_connections >=
+         fd_clamped_httplib_budget.accepted_connections);
   assert(more_nofile_httplib_budget.active_flows >=
          fd_clamped_httplib_budget.active_flows);
   assert(more_nofile_httplib_budget.outbound_active >=
@@ -1676,6 +1683,8 @@ static void testResourceControlPrimitives() {
   assert(deterministic_first.active_flows >= two_cpu.active_flows);
   assert(deterministic_first.inbound_connections >=
          two_cpu.inbound_connections);
+  assert(deterministic_first.accepted_connections >=
+         two_cpu.accepted_connections);
   assert(deterministic_first.outbound_active >= two_cpu.outbound_active);
 
   ResourceEnvelope small_memory_envelope = bounded_envelope;
@@ -1791,6 +1800,12 @@ static void testResourceControlPrimitives() {
   assert(low_nofile.valid);
   assert(low_nofile.compute_workers == 2);
   assert(low_nofile.outbound_open + low_nofile.inbound_connections <= 88);
+  assert(low_nofile.accepted_connections >=
+         low_nofile.inbound_connections +
+             low_nofile.control_connections);
+  assert(low_nofile.outbound_open +
+             low_nofile.accepted_connections <=
+         88);
 
   ResourceEnvelope exhausted_nofile_envelope = portable_envelope;
   exhausted_nofile_envelope.nofile_soft = 8;
@@ -1805,6 +1820,14 @@ static void testResourceControlPrimitives() {
   overflow.owner_queue_bytes = 1;
   assert(!validateForceMaxBudget(overflow, &validation_error));
   assert(validation_error == "queue_budget_overflow");
+
+  ForceMaxBudget insufficient_accepted = deterministic_first;
+  insufficient_accepted.accepted_connections =
+      insufficient_accepted.inbound_connections;
+  assert(!validateForceMaxBudget(insufficient_accepted,
+                                 &validation_error));
+  assert(validation_error ==
+         "insufficient_accepted_connection_headroom");
 
   ResourceEnvelope tight_pids_envelope = bounded_envelope;
   tight_pids_envelope.pids_current = 24;

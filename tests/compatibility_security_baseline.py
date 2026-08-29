@@ -11899,6 +11899,7 @@ def force_max_controller_runtime_baseline(binary: Path) -> None:
         owner_admission = dashboard["owner_admission"]
         outbound = dashboard["outbound_fetch"]
         singleflight = dashboard["subscription_singleflight"]
+        beast_connections = dashboard["beast_connections"]
         backend = os.environ.get("SUBCONVERTER_HTTP_BACKEND", "beast").lower()
         execution_path_ok = (
             conversion["accepted"] == 0
@@ -11940,6 +11941,20 @@ def force_max_controller_runtime_baseline(binary: Path) -> None:
             != int(budget["outbound_open"])
             or int(outbound["connection_cache_limit"])
             != int(budget["outbound_idle_cache"])
+            or int(budget["accepted_connections"])
+            < int(budget["inbound_connections"])
+            + int(budget["control_connections"])
+            or (
+                backend == "beast"
+                and (
+                    beast_connections["running"] is not True
+                    or beast_connections["wait_on_connection_capacity"]
+                    is not True
+                    or int(beast_connections["accepted_limit"])
+                    != int(budget["accepted_connections"])
+                    or int(beast_connections["capacity_503_total"]) != 0
+                )
+            )
             or not execution_path_ok
             or singleflight["active_owners"] != 0
             or singleflight["waiting_followers"] != 0
@@ -11949,7 +11964,8 @@ def force_max_controller_runtime_baseline(binary: Path) -> None:
                 "idle force_max did not hold the hardware CPU limit: "
                 f"resources={resources!r} permits={permits!r} "
                 f"conversion={conversion!r} flow={flow!r} "
-                f"conversion_flows={conversion_flows!r} backend={backend}"
+                f"conversion_flows={conversion_flows!r} "
+                f"beast_connections={beast_connections!r} backend={backend}"
             )
 
 

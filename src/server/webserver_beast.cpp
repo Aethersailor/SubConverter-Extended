@@ -147,6 +147,16 @@ StaticFileResult safeStaticFile(const std::string &root, const std::string &path
 }
 
 class BeastServerState;
+std::mutex beast_state_mutex;
+std::weak_ptr<BeastServerState> beast_state;
+
+std::size_t acceptedConnectionLimit(const listener_args &args) {
+  if (args.wait_on_connection_capacity)
+    return static_cast<std::size_t>(std::max(1, args.accepted_conn));
+  if (global.resourceControlEffective == "compat")
+    return static_cast<std::size_t>(std::max(10240, args.max_conn));
+  return static_cast<std::size_t>(std::max(1, args.max_conn));
+}
 
 class BeastSession : public std::enable_shared_from_this<BeastSession> {
 public:
@@ -209,14 +219,33 @@ public:
         work_guard(asio::make_work_guard(context)), acceptor(context),
         handlers(static_cast<std::size_t>(
             std::max(args->max_workers, 1))),
-        connection_limit(static_cast<std::size_t>(
-            global.resourceControlEffective == "compat"
-                ? std::max(10240, args->max_conn)
-                : std::max(1, args->max_conn))),
+        wait_on_connection_capacity(args->wait_on_connection_capacity),
+        connection_limit(acceptedConnectionLimit(*args)),
         overload_limit(static_cast<std::size_t>(
             std::max(1, std::max(args->max_workers, 1) / 2))),
         request_body_limit(std::max<std::size_t>(1,
                                                 args->request_body_limit)) {}
+
+  BeastConnectionSnapshot snapshot() const noexcept {
+    BeastConnectionSnapshot result;
+    result.running = true;
+    result.wait_on_connection_capacity = wait_on_connection_capacity;
+    result.accept_paused = accept_paused.load(std::memory_order_relaxed);
+    result.active_sessions =
+        active_sessions.load(std::memory_order_relaxed);
+    result.accepted_limit = connection_limit;
+    result.business_sessions =
+        business_sessions.load(std::memory_order_relaxed);
+    result.reserved_sessions =
+        reserved_sessions.load(std::memory_order_relaxed);
+    result.capacity_503_total =
+        capacity_503_total.load(std::memory_order_relaxed);
+    result.accept_pauses_total =
+        accept_pauses.load(std::memory_order_relaxed);
+    result.accept_resumes_total =
+        accept_resumes.load(std::memory_order_relaxed);
+    return result;
+  }
 
   bool bind() {
     beast::error_code error;
@@ -267,7 +296,19 @@ public:
           std::move(socket), shared_from_this(), false);
       addSession(session);
       session->start();
+      if (wait_on_connection_capacity &&
+          business_sessions.load(std::memory_order_relaxed) >=
+              connection_limit) {
+        pauseCapacity();
+        return;
+      }
       accept();
+      return;
+    }
+    if (wait_on_connection_capacity) {
+      pending_socket =
+          std::make_unique<tcp::socket>(std::move(socket));
+      pauseCapacity();
       return;
     }
     if (reserved_sessions.load(std::memory_order_relaxed) <
@@ -324,10 +365,20 @@ public:
         });
   }
 
+  void pauseCapacity() {
+    if (!accept_paused.exchange(true, std::memory_order_relaxed))
+      accept_pauses.fetch_add(1, std::memory_order_relaxed);
+  }
+
   void resumeCapacity() {
     if (pending_socket) {
+      if (wait_on_connection_capacity && !stopping.load() &&
+          business_sessions.load(std::memory_order_relaxed) >=
+              connection_limit)
+        return;
       tcp::socket socket = std::move(*pending_socket);
       pending_socket.reset();
+      accept_paused.store(false, std::memory_order_relaxed);
       if (stopping.load()) {
         if (overload_sessions.load(std::memory_order_relaxed) <
             overload_limit)
@@ -337,11 +388,17 @@ public:
               std::make_unique<tcp::socket>(std::move(socket));
         return;
       }
+      if (wait_on_connection_capacity)
+        accept_resumes.fetch_add(1, std::memory_order_relaxed);
       dispatchAccepted(std::move(socket));
       return;
     }
-    if (!stopping.load())
+    if (!stopping.load()) {
+      if (wait_on_connection_capacity &&
+          accept_paused.exchange(false, std::memory_order_relaxed))
+        accept_resumes.fetch_add(1, std::memory_order_relaxed);
       accept();
+    }
   }
 
   void stop() {
@@ -396,6 +453,7 @@ public:
   asio::executor_work_guard<asio::io_context::executor_type> work_guard;
   tcp::acceptor acceptor;
   asio::thread_pool handlers;
+  const bool wait_on_connection_capacity;
   const std::size_t connection_limit;
   const std::size_t overload_limit;
   std::atomic<bool> stopping{false};
@@ -403,6 +461,10 @@ public:
   std::atomic<uint64_t> business_sessions{0};
   std::atomic<uint64_t> reserved_sessions{0};
   std::atomic<uint64_t> overload_sessions{0};
+  std::atomic<uint64_t> capacity_503_total{0};
+  std::atomic<uint64_t> accept_pauses{0};
+  std::atomic<uint64_t> accept_resumes{0};
+  std::atomic<bool> accept_paused{false};
   bool accept_pending = false;
   std::unique_ptr<tcp::socket> pending_socket;
   std::mutex sessions_mutex;
@@ -524,6 +586,8 @@ void BeastSession::onHeader(beast::error_code error, std::size_t) {
     admission_bytes_ += header.name_string().size() + header.value().size();
   context_->setEstimatedBytes(admission_bytes_);
   if (overload_slot_) {
+    state_->capacity_503_total.fetch_add(1,
+                                         std::memory_order_relaxed);
     context_->suggestFailure(RequestFailureAttribution::Capacity);
     context_->recordAdmissionOnce(RequestContext::Clock::now());
     writeImmediateError(
@@ -1340,6 +1404,13 @@ void BeastSession::finish(bool) {
 
 } // namespace
 
+BeastConnectionSnapshot beastConnectionSnapshot() noexcept {
+  std::lock_guard<std::mutex> lock(beast_state_mutex);
+  if (auto state = beast_state.lock())
+    return state->snapshot();
+  return {};
+}
+
 int startBeastWebServer(WebServer &server, listener_args *args) {
   auto state = std::make_shared<BeastServerState>(server, args);
   if (!state->bind()) {
@@ -1350,7 +1421,15 @@ int startBeastWebServer(WebServer &server, listener_args *args) {
   }
   writeLog(LOG_LEVEL_INFO,
            "HTTP_BACKEND_ACTIVE backend=beast io_threads=1 handler_threads=" +
-                std::to_string(std::max(args->max_workers, 1)));
+                std::to_string(std::max(args->max_workers, 1)) +
+                " accepted_connections=" +
+                std::to_string(state->connection_limit) +
+                " capacity_wait=" +
+                (args->wait_on_connection_capacity ? "true" : "false"));
+  {
+    std::lock_guard<std::mutex> lock(beast_state_mutex);
+    beast_state = state;
+  }
   state->accept();
   std::thread io_thread([state] { state->context.run(); });
   if (args->runtime_ready_callback)
@@ -1381,5 +1460,9 @@ int startBeastWebServer(WebServer &server, listener_args *args) {
     state->context.stop();
   if (io_thread.joinable())
     io_thread.join();
+  {
+    std::lock_guard<std::mutex> lock(beast_state_mutex);
+    beast_state.reset();
+  }
   return 0;
 }

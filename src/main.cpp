@@ -464,6 +464,13 @@ int main(int argc, char *argv[]) {
       drain_runtime_shutdown,
       request_body_limit,
       refreshResourceControlThreadBaseline};
+  if (listener_resources.effective_mode == "force_max" &&
+      listener_resources.calculated_force_max_budget.valid) {
+    args.accepted_conn = static_cast<int>(std::min<uint64_t>(
+        listener_resources.calculated_force_max_budget.accepted_connections,
+        INT_MAX));
+    args.wait_on_connection_capacity = true;
+  }
   // std::cout<<"Serving HTTP @
   // http://"<<listen_address<<":"<<listen_port<<std::endl;
   writeLog(LOG_LEVEL_INFO,

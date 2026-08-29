@@ -1748,6 +1748,12 @@ void configureResourceControl(Settings &settings) {
                " hardware=" + snapshot.hardware_fingerprint +
                " admission_entries=" + std::to_string(admission_entries) +
                " admission_bytes=" + std::to_string(admission_bytes) +
+               " inbound_connections=" +
+               std::to_string(
+                   snapshot.calculated_force_max_budget.inbound_connections) +
+               " accepted_connections=" +
+               std::to_string(
+                   snapshot.calculated_force_max_budget.accepted_connections) +
                " retained_bytes=" + std::to_string(retained_bytes) +
                " download_limit_bytes=" +
                std::to_string(settings.maxAllowedDownloadSize) +

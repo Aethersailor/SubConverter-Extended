@@ -6,7 +6,7 @@
 
 #include "utils/resource_probe.h"
 
-inline constexpr const char *kForceMaxFormulaRevision = "force-max-v5";
+inline constexpr const char *kForceMaxFormulaRevision = "force-max-v6";
 inline constexpr uint64_t kForceMaxOwnerWaitMetadataBytes =
     UINT64_C(64) * 1024;
 
@@ -23,6 +23,8 @@ struct ForceMaxBudget {
   uint64_t active_owners = 0;
   uint64_t active_flows = 0;
   uint64_t inbound_connections = 0;
+  uint64_t accepted_connections = 0;
+  uint64_t control_connections = 0;
 
   uint64_t outbound_active = 0;
   uint64_t outbound_per_host = 0;

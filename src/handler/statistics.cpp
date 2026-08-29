@@ -33,6 +33,7 @@
 #include "runtime/memory_budget.h"
 #include "runtime/runtime_coordinator.h"
 #include "server/request_context.h"
+#include "server/webserver_beast.h"
 #include "utils/logger.h"
 #include "utils/redact.h"
 #include "utils/resource_control.h"
@@ -844,6 +845,31 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Key("rejected_total");
   writer.Uint64(quickjs.rejected_total);
   writer.EndObject();
+  const BeastConnectionSnapshot beast_connections =
+      beastConnectionSnapshot();
+  writer.Key("beast_connections");
+  writer.StartObject();
+  writer.Key("running");
+  writer.Bool(beast_connections.running);
+  writer.Key("wait_on_connection_capacity");
+  writer.Bool(beast_connections.wait_on_connection_capacity);
+  writer.Key("accept_paused");
+  writer.Bool(beast_connections.accept_paused);
+  writer.Key("active_sessions");
+  writer.Uint64(beast_connections.active_sessions);
+  writer.Key("accepted_limit");
+  writer.Uint64(beast_connections.accepted_limit);
+  writer.Key("business_sessions");
+  writer.Uint64(beast_connections.business_sessions);
+  writer.Key("reserved_sessions");
+  writer.Uint64(beast_connections.reserved_sessions);
+  writer.Key("capacity_503_total");
+  writer.Uint64(beast_connections.capacity_503_total);
+  writer.Key("accept_pauses_total");
+  writer.Uint64(beast_connections.accept_pauses_total);
+  writer.Key("accept_resumes_total");
+  writer.Uint64(beast_connections.accept_resumes_total);
+  writer.EndObject();
   const RuntimeCoordinatorSnapshot coordinator =
       runtimeCoordinatorSnapshot();
   if (coordinator.force_max) {
@@ -1148,6 +1174,12 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   const bool force_max_applied =
       resources.effective_mode == "force_max" && calculated.valid &&
       fetch_contract_applied && handler_runtime_applied &&
+      (resources.envelope.http_handlers_own_inbound ||
+       (beast_connections.running &&
+        beast_connections.wait_on_connection_capacity &&
+        beast_connections.accepted_limit ==
+            calculated.accepted_connections &&
+        beast_connections.capacity_503_total == 0)) &&
       calculated.memory_capacity_bytes >=
           calculated.startup_memory_bytes &&
       calculated.memory_headroom_bytes ==
@@ -1222,6 +1254,10 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(calculated.active_flows);
   writer.Key("inbound_connections");
   writer.Uint64(calculated.inbound_connections);
+  writer.Key("accepted_connections");
+  writer.Uint64(calculated.accepted_connections);
+  writer.Key("control_connections");
+  writer.Uint64(calculated.control_connections);
   writer.Key("outbound_active");
   writer.Uint64(calculated.outbound_active);
   writer.Key("outbound_per_host");
