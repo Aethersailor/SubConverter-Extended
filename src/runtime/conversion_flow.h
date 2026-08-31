@@ -45,9 +45,15 @@ struct ConversionFlowTerminal {
   std::exception_ptr error;
 };
 
+// Flow events retain a callable and small ownership handles. Large payloads
+// handed back by the conversion pipeline are already bounded by retained-byte
+// and owner-working-memory leases, so callers charge only bytes not covered by
+// those budgets. Every ordinary event still pays this metadata floor.
+inline constexpr uint64_t kConversionFlowMailboxEventMetadataBytes = 256;
+
 struct ConversionFlowBudget {
   uint64_t max_mailbox_entries = 1;
-  uint64_t max_mailbox_bytes = 1;
+  uint64_t max_mailbox_bytes = kConversionFlowMailboxEventMetadataBytes;
 };
 
 struct ConversionFlowSnapshot {
@@ -77,7 +83,7 @@ class ConversionFlowOperation {
 public:
   using Event = std::function<void(ConversionFlow &)>;
 
-  bool post(Event event, uint64_t bytes = 0) const;
+  bool post(Event event, uint64_t unaccounted_bytes = 0) const;
   bool valid() const noexcept { return id_ != 0; }
   uint64_t id() const noexcept { return id_; }
   uint64_t generation() const noexcept { return generation_; }
@@ -110,7 +116,7 @@ public:
   ConversionFlow(const ConversionFlow &) = delete;
   ConversionFlow &operator=(const ConversionFlow &) = delete;
 
-  bool start(Event event, uint64_t bytes = 0);
+  bool start(Event event, uint64_t unaccounted_bytes = 0);
   ConversionFlowOperation beginOperation();
   bool setPhase(ConversionFlowPhase phase) noexcept;
   bool complete() noexcept;
@@ -135,8 +141,8 @@ private:
 
   bool activate(const std::shared_ptr<ConversionFlow> &self);
   bool postOperation(uint64_t operation_id, uint64_t generation,
-                     Event event, uint64_t bytes);
-  bool enqueue(Event event, uint64_t bytes, bool control);
+                     Event event, uint64_t unaccounted_bytes);
+  bool enqueue(Event event, uint64_t unaccounted_bytes, bool control);
   bool scheduleDrain();
   void drain() noexcept;
   void finishTerminal(ConversionFlowTerminal terminal) noexcept;

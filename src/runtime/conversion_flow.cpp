@@ -19,6 +19,13 @@ struct ConversionFlowRegistry {
 
 ConversionFlowRegistry registry;
 
+uint64_t mailboxEventCharge(uint64_t unaccounted_bytes) noexcept {
+  if (unaccounted_bytes >
+      UINT64_MAX - kConversionFlowMailboxEventMetadataBytes)
+    return UINT64_MAX;
+  return unaccounted_bytes + kConversionFlowMailboxEventMetadataBytes;
+}
+
 uint64_t reserveFlowId() noexcept {
   std::lock_guard<std::mutex> lock(registry.mutex);
   if (registry.stopping) {
@@ -98,10 +105,11 @@ const char *conversionFlowPhaseName(ConversionFlowPhase phase) noexcept {
   return "invalid";
 }
 
-bool ConversionFlowOperation::post(Event event, uint64_t bytes) const {
+bool ConversionFlowOperation::post(Event event,
+                                   uint64_t unaccounted_bytes) const {
   const std::shared_ptr<ConversionFlow> flow = flow_.lock();
   return flow && flow->postOperation(id_, generation_, std::move(event),
-                                     bytes);
+                                     unaccounted_bytes);
 }
 
 std::shared_ptr<ConversionFlow> ConversionFlow::create(
@@ -109,7 +117,8 @@ std::shared_ptr<ConversionFlow> ConversionFlow::create(
     SettingsSnapshot settings, std::shared_ptr<RequestContext> context,
     Completion completion) {
   if (budget.max_mailbox_entries == 0 ||
-      budget.max_mailbox_bytes == 0 || !settings || !context)
+      budget.max_mailbox_bytes < kConversionFlowMailboxEventMetadataBytes ||
+      !settings || !context)
     return nullptr;
   const uint64_t id = reserveFlowId();
   if (id == 0)
@@ -161,8 +170,8 @@ bool ConversionFlow::activate(
   return !terminal_claimed_.load(std::memory_order_acquire);
 }
 
-bool ConversionFlow::start(Event event, uint64_t bytes) {
-  return enqueue(std::move(event), bytes, false);
+bool ConversionFlow::start(Event event, uint64_t unaccounted_bytes) {
+  return enqueue(std::move(event), unaccounted_bytes, false);
 }
 
 ConversionFlowOperation ConversionFlow::beginOperation() {
@@ -227,9 +236,10 @@ void ConversionFlow::requestShutdown() noexcept {
 
 bool ConversionFlow::postOperation(uint64_t operation_id,
                                    uint64_t generation, Event event,
-                                   uint64_t bytes) {
+                                   uint64_t unaccounted_bytes) {
   bool overflow = false;
   bool schedule = false;
+  const uint64_t charged_bytes = mailboxEventCharge(unaccounted_bytes);
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (terminal_claimed_.load(std::memory_order_acquire))
@@ -242,12 +252,12 @@ bool ConversionFlow::postOperation(uint64_t operation_id,
     }
     outstanding_operations_.erase(operation);
     if (!event || mailbox_.size() >= budget_.max_mailbox_entries ||
-        bytes > budget_.max_mailbox_bytes ||
-        mailbox_bytes_ > budget_.max_mailbox_bytes - bytes) {
+        charged_bytes > budget_.max_mailbox_bytes ||
+        mailbox_bytes_ > budget_.max_mailbox_bytes - charged_bytes) {
       overflow = true;
     } else {
-      mailbox_.push_back({std::move(event), bytes});
-      mailbox_bytes_ += bytes;
+      mailbox_.push_back({std::move(event), charged_bytes});
+      mailbox_bytes_ += charged_bytes;
       if (!drain_scheduled_) {
         drain_scheduled_ = true;
         schedule = true;
@@ -264,9 +274,11 @@ bool ConversionFlow::postOperation(uint64_t operation_id,
   return !schedule || scheduleDrain();
 }
 
-bool ConversionFlow::enqueue(Event event, uint64_t bytes, bool control) {
+bool ConversionFlow::enqueue(Event event, uint64_t unaccounted_bytes,
+                             bool control) {
   bool overflow = false;
   bool schedule = false;
+  const uint64_t charged_bytes = mailboxEventCharge(unaccounted_bytes);
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (terminal_claimed_.load(std::memory_order_acquire))
@@ -277,12 +289,12 @@ bool ConversionFlow::enqueue(Event event, uint64_t bytes, bool control) {
       termination_queued_ = true;
       control_mailbox_.push_back({std::move(event), 0});
     } else if (!event || mailbox_.size() >= budget_.max_mailbox_entries ||
-               bytes > budget_.max_mailbox_bytes ||
-               mailbox_bytes_ > budget_.max_mailbox_bytes - bytes) {
+               charged_bytes > budget_.max_mailbox_bytes ||
+               mailbox_bytes_ > budget_.max_mailbox_bytes - charged_bytes) {
       overflow = true;
     } else {
-      mailbox_.push_back({std::move(event), bytes});
-      mailbox_bytes_ += bytes;
+      mailbox_.push_back({std::move(event), charged_bytes});
+      mailbox_bytes_ += charged_bytes;
     }
     if (!overflow && !drain_scheduled_) {
       drain_scheduled_ = true;

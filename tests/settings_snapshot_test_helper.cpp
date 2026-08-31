@@ -668,9 +668,9 @@ int main(int argc, char *argv[]) {
             "AsyncImported" &&
         async_external_result.template_arguments.local_vars["marker"].find(
             "template-ok") != std::string::npos;
-    auto make_subscription_requests = [&] {
+    auto make_subscription_requests = [&](uint64_t count = 2) {
       std::vector<AsyncSubscriptionRequest> requests;
-      for (uint64_t index = 0; index < 2; ++index) {
+      for (uint64_t index = 0; index < count; ++index) {
         AsyncSubscriptionRequest request;
         request.source_index = index;
         request.url = fixture_root + "/subscription.txt?async-batch=" +
@@ -1562,9 +1562,12 @@ int main(int argc, char *argv[]) {
       std::promise<ConversionFlowTerminal> subscription_flow_completion;
       std::atomic<bool> subscription_flow_result_ok{false};
       std::atomic<bool> subscription_flow_dependency_started{false};
+      // Scale the production failure down: eight retained payloads exceed this
+      // mailbox slice, but their content is already covered by retained-byte
+      // and owner-working-memory budgets and must not be charged again.
       std::shared_ptr<ConversionFlow> subscription_flow =
           ConversionFlow::create(
-              *compute_executor, {8, 1024 * 1024}, flow_settings,
+              *compute_executor, {8, 512}, flow_settings,
               subscription_flow_context,
               [&](ConversionFlowTerminal terminal) {
                 subscription_flow_completion.set_value(
@@ -1577,11 +1580,11 @@ int main(int argc, char *argv[]) {
               throw std::runtime_error(
                   "failed to enter subscription phase");
             const bool dependency_started = resolveSubscriptionsOnFlow(
-                current, make_subscription_requests(), flow_settings,
+                current, make_subscription_requests(8), flow_settings,
                 subscription_flow_context,
                 [&](ConversionFlow &resumed,
                     AsyncSubscriptionBatchResult result) {
-                  bool valid = result.slots.size() == 2;
+                  bool valid = result.slots.size() == 8;
                   for (size_t index = 0; index < result.slots.size(); ++index)
                     valid = valid && result.slots[index].source_index == index &&
                             result.slots[index].payload &&
@@ -1783,6 +1786,40 @@ int main(int argc, char *argv[]) {
       quickjs_flow_joined = quickjs_flow_lane.join();
 #endif
 
+      auto mailbox_limit_context = std::make_shared<RequestContext>(
+          "conversion-flow-mailbox-limit", RequestContext::Clock::now(),
+          RequestContext::Clock::now() + std::chrono::seconds(10));
+      std::promise<ConversionFlowTerminal> mailbox_limit_completion;
+      std::promise<void> mailbox_limit_attempted;
+      std::atomic<bool> mailbox_limit_operation_valid{false};
+      std::atomic<bool> mailbox_limit_rejected{false};
+      std::shared_ptr<ConversionFlow> mailbox_limit_flow =
+          ConversionFlow::create(
+              *compute_executor, {8, 512}, flow_settings,
+              mailbox_limit_context,
+              [&](ConversionFlowTerminal terminal) {
+                mailbox_limit_completion.set_value(std::move(terminal));
+              });
+      const bool mailbox_limit_started = mailbox_limit_flow &&
+          mailbox_limit_flow->start([&](ConversionFlow &current) {
+            const ConversionFlowOperation operation =
+                current.beginOperation();
+            mailbox_limit_operation_valid.store(
+                operation.valid(), std::memory_order_release);
+            mailbox_limit_rejected.store(
+                !operation.post(
+                    [](ConversionFlow &) {},
+                    512 - kConversionFlowMailboxEventMetadataBytes + 1),
+                std::memory_order_release);
+            mailbox_limit_attempted.set_value();
+          });
+      ConversionFlowTerminal mailbox_limit_terminal;
+      if (mailbox_limit_started) {
+        mailbox_limit_terminal =
+            mailbox_limit_completion.get_future().get();
+        mailbox_limit_attempted.get_future().wait();
+      }
+
       auto cancelled_context = std::make_shared<RequestContext>(
           "conversion-flow-cancel", RequestContext::Clock::now(),
           RequestContext::Clock::now() + std::chrono::seconds(10));
@@ -1855,9 +1892,9 @@ int main(int argc, char *argv[]) {
       const ConversionFlowRegistrySnapshot flow_registry =
           conversionFlowRegistrySnapshot();
 #ifdef NO_JS_RUNTIME
-      constexpr uint64_t expected_flow_total = 8;
-#else
       constexpr uint64_t expected_flow_total = 9;
+#else
+      constexpr uint64_t expected_flow_total = 10;
 #endif
       // Flow affinity is intentionally soft and may miss when another worker
       // wins the queued continuation. Its deterministic executor contract is
@@ -1918,6 +1955,11 @@ int main(int argc, char *argv[]) {
           quickjs_flow_terminal.state ==
               ConversionFlowTerminalState::Completed &&
           quickjs_flow_joined &&
+          mailbox_limit_started &&
+          mailbox_limit_operation_valid.load(std::memory_order_acquire) &&
+          mailbox_limit_rejected.load(std::memory_order_acquire) &&
+          mailbox_limit_terminal.state ==
+              ConversionFlowTerminalState::Capacity &&
           cancelled_started &&
           cancel_phase_ok.load(std::memory_order_acquire) &&
           cancel_operation_valid.load(std::memory_order_acquire) &&
