@@ -1,6 +1,5 @@
 #include "handler/conversion_pipeline.h"
 
-#include <cstdint>
 #include <utility>
 
 namespace {
@@ -11,6 +10,10 @@ cancelled(const ConversionPipelineHooks &hooks) {
 }
 
 } // namespace
+
+// Async stage results retain their payloads through stage-specific retained
+// byte or owner-working-memory budgets. Flow posts therefore use the default
+// metadata-only mailbox charge instead of counting the payload a second time.
 
 std::string runConversionPipeline(ConversionPipelineHooks hooks) {
   if (auto body = cancelled(hooks))
@@ -47,13 +50,11 @@ bool resolveExternalConfigOnFlow(
       std::move(request_context), std::move(template_arguments),
       [operation, completion = std::move(completion)](
           AsyncExternalConfigResult result) mutable {
-        const uint64_t bytes = result.working_source_bytes;
         (void)operation.post(
             [completion = std::move(completion),
              result = std::move(result)](ConversionFlow &resumed) mutable {
               completion(resumed, std::move(result));
-            },
-            bytes);
+            });
       }, max_output_bytes);
   return true;
 }
@@ -72,25 +73,11 @@ bool resolveSubscriptionsOnFlow(
       std::move(request_context),
       [operation, completion = std::move(completion)](
           AsyncSubscriptionBatchResult result) mutable {
-        uint64_t bytes = 0;
-        for (const AsyncSubscriptionSlot &slot : result.slots) {
-          if (!slot.payload)
-            continue;
-          const uint64_t slot_bytes =
-              static_cast<uint64_t>(slot.payload->content.size()) +
-              static_cast<uint64_t>(slot.payload->response_headers.size());
-          if (slot_bytes > UINT64_MAX - bytes) {
-            bytes = UINT64_MAX;
-            break;
-          }
-          bytes += slot_bytes;
-        }
         (void)operation.post(
             [completion = std::move(completion),
              result = std::move(result)](ConversionFlow &resumed) mutable {
               completion(resumed, std::move(result));
-            },
-            bytes);
+            });
       });
   return true;
 }
@@ -109,26 +96,11 @@ bool resolveConversionResourcesOnFlow(
       std::move(request_context),
       [operation, completion = std::move(completion)](
           AsyncConversionResourceBatchResult result) mutable {
-        uint64_t bytes = 0;
-        for (const ResolvedConversionResource &resource : result.resources) {
-          if (!resource.payload)
-            continue;
-          const uint64_t resource_bytes =
-              static_cast<uint64_t>(resource.payload->content.size()) +
-              static_cast<uint64_t>(
-                  resource.payload->response_headers.size());
-          if (resource_bytes > UINT64_MAX - bytes) {
-            bytes = UINT64_MAX;
-            break;
-          }
-          bytes += resource_bytes;
-        }
         (void)operation.post(
             [completion = std::move(completion),
              result = std::move(result)](ConversionFlow &resumed) mutable {
               completion(resumed, std::move(result));
-            },
-            bytes);
+            });
       });
   return true;
 }
@@ -149,13 +121,11 @@ bool renderTemplateOnFlow(
       std::move(request_context),
       [operation, completion = std::move(completion)](
           AsyncTemplateResult result) mutable {
-        const uint64_t bytes = result.output.size();
         (void)operation.post(
             [completion = std::move(completion),
              result = std::move(result)](ConversionFlow &resumed) mutable {
               completion(resumed, std::move(result));
-            },
-            bytes);
+            });
       }, max_output_bytes);
   return true;
 }

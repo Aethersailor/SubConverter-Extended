@@ -7502,8 +7502,7 @@ private:
       // invokes terminal(); reporting false to the caller would publish a
       // second completion for the same request.
       (void)flow_->start(
-          [self](ConversionFlow &flow) { self->parse(flow); },
-          request_.context->estimatedBytes());
+          [self](ConversionFlow &flow) { self->parse(flow); });
       return true;
     } catch (...) {
       flow_.reset();
