@@ -234,7 +234,7 @@ http://localhost:25500/healthz
 ```
 
 > [!NOTE]
-> 上述命令是最小启动示例，不会持久化自定义配置和统计数据。`-p 25500:25500` 还会把端口发布到宿主机全部接口。需要保留配置或统计数据时，请按照 Wiki 的 [Docker 部署](https://github.com/Aethersailor/SubConverter-Extended/wiki/Docker-Deployment)配置持久化目录，并根据实际网络范围选择安全档位。
+> 上述命令是最小启动示例，不会持久化自定义配置和统计数据。`-p 25500:25500` 还会把端口发布到宿主机全部接口。需要保留配置或统计数据时，请按照 Wiki 的 [Docker 部署](https://github.com/Aethersailor/SubConverter-Extended/wiki/Docker-Deployment) 配置持久化目录，并根据实际网络范围选择安全档位。
 
 ### 📦 可用交付形式
 
