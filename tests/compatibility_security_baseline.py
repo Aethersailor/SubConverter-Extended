@@ -1384,6 +1384,80 @@ def request(
         )
 
 
+def capabilities_endpoint_baseline(base_url: str) -> None:
+    status, body, headers = request(base_url, "/capabilities")
+    if status != 200:
+        raise AssertionError(f"capabilities endpoint failed: HTTP {status}")
+    try:
+        payload = json.loads(body)
+    except (TypeError, ValueError) as error:
+        raise AssertionError("capabilities endpoint did not return JSON") from error
+
+    if payload.get("schema_version") != 1:
+        raise AssertionError("capabilities schema version changed unexpectedly")
+    backend = payload.get("backend", {})
+    if backend.get("family") != "SubConverter-Extended":
+        raise AssertionError(f"unexpected capabilities backend: {backend!r}")
+    if not backend.get("version"):
+        raise AssertionError("capabilities endpoint omitted the backend version")
+
+    targets = [item.get("name") for item in payload.get("targets", [])]
+    expected_targets = [
+        "auto",
+        "clash",
+        "clashr",
+        "surge",
+        "quan",
+        "quanx",
+        "loon",
+        "surfboard",
+        "stash",
+        "mellow",
+        "singbox",
+        "ss",
+        "ssd",
+        "ssr",
+        "sssub",
+        "v2ray",
+        "v2rayn",
+        "v2rayng",
+        "shadowrocket",
+        "trojan",
+        "vless",
+        "hysteria2",
+        "mixed",
+    ]
+    if targets != expected_targets:
+        raise AssertionError(f"capabilities target drift: {targets!r}")
+
+    parameters = payload.get("query_parameters", {})
+    if parameters.get("forced") != {"new_name": True}:
+        raise AssertionError("capabilities did not expose the forced new_name value")
+    ignored = set(parameters.get("ignored", []))
+    if not {"groups", "ruleset", "filter_script", "token"}.issubset(ignored):
+        raise AssertionError(f"capabilities ignored parameters are incomplete: {ignored!r}")
+    constraints = parameters.get("target_constraints", {})
+    if constraints.get("provider_headers") != ["clash", "stash"]:
+        raise AssertionError("provider_headers target constraint drifted")
+    if constraints.get("provider_proxy_direct") != ["clash", "clashr"]:
+        raise AssertionError("provider_proxy_direct target constraint drifted")
+
+    modifiers = {item.get("name"): item for item in payload.get("source_modifiers", [])}
+    if set(modifiers) != {"tag", "provider", "interval", "proxy_direct"}:
+        raise AssertionError(f"source modifier capability drift: {modifiers!r}")
+    if modifiers["proxy_direct"].get("targets") != ["clash", "clashr"]:
+        raise AssertionError("proxy_direct source modifier target drifted")
+
+    if "application/json" not in headers.get("content-type", "").lower():
+        raise AssertionError("capabilities endpoint has the wrong content type")
+    if "no-store" not in headers.get("cache-control", "").lower():
+        raise AssertionError("capabilities endpoint is cacheable")
+    if headers.get("x-content-type-options", "").lower() != "nosniff":
+        raise AssertionError("capabilities endpoint omitted nosniff")
+    if headers.get("access-control-allow-origin") != "*":
+        raise AssertionError("capabilities endpoint is not available to browser clients")
+
+
 def assert_vary_header(
     headers: dict[str, str], field: str, context: str
 ) -> None:
@@ -13524,6 +13598,7 @@ def main() -> int:
         with running_service(
             binary, log_capture=wireguard_outbound_logs
         ) as base_url:
+            capabilities_endpoint_baseline(base_url)
             conversion_baselines(base_url, fixture_base, args.update_golden)
             local_group_matcher_baseline(base_url)
             singbox_modern_full_profile_baseline(

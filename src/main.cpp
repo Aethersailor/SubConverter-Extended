@@ -371,6 +371,9 @@ int main(int argc, char *argv[]) {
 
   webServer.append_response("GET", "/version", "text/html; charset=utf-8",
                             version_page::page);
+  webServer.append_response("GET", "/capabilities",
+                            "application/json; charset=utf-8",
+                            getSubCapabilities);
   webServer.append_response("GET", "/inspect", "text/html; charset=utf-8",
                             inspect_page::page);
   if (global.statisticsEnabled) {
@@ -387,6 +390,7 @@ int main(int argc, char *argv[]) {
       [](RESPONSE_CALLBACK_ARGS) -> std::string {
         return "User-agent: *\n"
                "Disallow: /version\n"
+               "Disallow: /capabilities\n"
                "Disallow: /inspect\n"
                "Disallow: /dashboard\n"
                "Disallow: /v\n";

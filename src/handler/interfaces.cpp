@@ -9,6 +9,7 @@
 #include <ctime>
 #include <exception>
 #include <iostream>
+#include <initializer_list>
 #include <limits>
 #include <memory>
 #include <map>
@@ -81,6 +82,7 @@ static string_icase_map buildSubscriptionRequestHeaders() {
 #include "utils/system.h"
 #include "utils/urlencode.h"
 #include "utils/yamlcpp_extra.h"
+#include "version.h"
 #include "webget.h"
 
 extern WebServer webServer;
@@ -198,6 +200,131 @@ static std::string supportedTargets(const std::string &separator) {
     result += target.name;
   }
   return result;
+}
+
+std::string getSubCapabilities(RESPONSE_CALLBACK_ARGS) {
+  (void)request;
+  response.headers["Cache-Control"] = "no-store, max-age=0";
+  response.headers["X-Content-Type-Options"] = "nosniff";
+  response.headers["X-Robots-Tag"] =
+      "noindex, nofollow, noarchive, nosnippet";
+
+  rapidjson::StringBuffer buffer;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+  auto write_string = [&](const char *key, const std::string &value) {
+    writer.Key(key);
+    writer.String(value.c_str());
+  };
+  auto write_string_array = [&](const char *key,
+                                std::initializer_list<const char *> values) {
+    writer.Key(key);
+    writer.StartArray();
+    for (const char *value : values)
+      writer.String(value);
+    writer.EndArray();
+  };
+  auto write_constraint = [&](const char *name,
+                              std::initializer_list<const char *> targets) {
+    writer.Key(name);
+    writer.StartArray();
+    for (const char *target : targets)
+      writer.String(target);
+    writer.EndArray();
+  };
+  auto write_modifier = [&](const char *name, const char *type,
+                            std::initializer_list<const char *> targets) {
+    writer.StartObject();
+    writer.Key("name");
+    writer.String(name);
+    writer.Key("type");
+    writer.String(type);
+    writer.Key("targets");
+    writer.StartArray();
+    for (const char *target : targets)
+      writer.String(target);
+    writer.EndArray();
+    writer.EndObject();
+  };
+
+  writer.StartObject();
+  writer.Key("schema_version");
+  writer.Uint(1);
+  writer.Key("backend");
+  writer.StartObject();
+  write_string("family", "SubConverter-Extended");
+  write_string("version", VERSION);
+  write_string("revision", BUILD_ID);
+  writer.EndObject();
+
+  writer.Key("targets");
+  writer.StartArray();
+  writer.StartObject();
+  write_string("name", "auto");
+  write_string("parser", "user-agent");
+  write_string("remote_mode", "auto");
+  writer.Key("simple_subscription");
+  writer.Bool(false);
+  writer.EndObject();
+  for (const TargetDescriptor &target : kTargetDescriptors) {
+    writer.StartObject();
+    write_string("name", target.name);
+    write_string("parser", nodeParserModeName(target.parser_mode));
+    write_string("remote_mode",
+                 remoteSubscriptionModeName(target.remote_subscription_mode));
+    writer.Key("simple_subscription");
+    writer.Bool(target.simple_subscription);
+    writer.EndObject();
+  }
+  writer.EndArray();
+
+  writer.Key("query_parameters");
+  writer.StartObject();
+  write_string_array(
+      "recognized",
+      {"target", "url", "ver", "new_name", "group", "upload_path",
+       "include", "exclude", "groups", "ruleset", "config", "dev_id",
+       "filename", "interval", "strict", "rename", "filter_script",
+       "upload", "emoji", "add_emoji", "remove_emoji", "append_type",
+       "tfo", "udp", "list", "sort", "sort_script", "script",
+       "insert", "scv", "fdn", "expand", "append_info", "prepend",
+       "classic", "tls13", "provider_proxy_direct", "provider_headers",
+       "explain", "profile_data", "token"});
+  write_string_array("ignored",
+                     {"groups", "ruleset", "filter_script", "token"});
+  write_string_array("internal",
+                     {"upload", "upload_path", "profile_data", "token",
+                      "filter_script"});
+  writer.Key("forced");
+  writer.StartObject();
+  writer.Key("new_name");
+  writer.Bool(true);
+  writer.EndObject();
+  writer.Key("target_constraints");
+  writer.StartObject();
+  write_constraint("ver", {"surge"});
+  write_constraint("dev_id", {"quanx"});
+  write_constraint("provider_headers", {"clash", "stash"});
+  write_constraint("provider_proxy_direct", {"clash", "clashr"});
+  write_constraint("script", {"clash", "clashr"});
+  write_constraint("classic", {"clash", "clashr"});
+  write_constraint("new_name", {"clash", "clashr"});
+  writer.EndObject();
+  writer.EndObject();
+
+  writer.Key("source_modifiers");
+  writer.StartArray();
+  write_modifier("tag", "string",
+                 {"clash", "clashr", "surge", "quanx", "loon",
+                  "surfboard", "stash"});
+  write_modifier("provider", "string",
+                 {"clash", "clashr", "surge", "quanx", "loon",
+                  "surfboard", "stash"});
+  write_modifier("interval", "integer",
+                 {"clash", "clashr", "surge", "quanx", "stash"});
+  write_modifier("proxy_direct", "boolean", {"clash", "clashr"});
+  writer.EndArray();
+  writer.EndObject();
+  return buffer.GetString();
 }
 
 static std::string trimProviderUserAgentCandidate(const std::string &ua) {
