@@ -23,10 +23,12 @@ services:
       # confirmed, explicitly select public or strict.
       # SUBCONVERTER_SECURITY_PROFILE: public
       # SUBCONVERTER_ALLOW_PUBLIC_UPLOAD: "false"
-      # 三种模式共用同一执行路径。force_max 在硬件探测完整时应用静态启动预算；旧指纹只作为已弃用的可选硬件 pin。所有模式保留有限请求截止时间。
-      # All modes share one execution path. force_max applies a static startup
-      # budget when hardware detection is complete; the legacy fingerprint is
-      # only an optional deprecated hardware pin. Deadlines stay finite.
+      # 默认 Beast 后端下，compat 使用同步有界路径，adaptive 和 force_max 使用协作式异步路径。force_max 要求 CPU、内存、PID 和文件描述符边界可完整探测且启动预算有效，否则拒绝启动。旧指纹已弃用且不会改变容量。所有模式保留有限请求截止时间。
+      # With the default Beast backend, compat uses the bounded synchronous path,
+      # while adaptive and force_max use the cooperative asynchronous path.
+      # force_max requires a complete CPU, memory, PID, and file-limit envelope
+      # plus a valid startup budget, or startup fails. The legacy fingerprint is
+      # deprecated and does not change capacity. Deadlines stay finite.
       # SUBCONVERTER_RESOURCE_CONTROL: compat
       # SUBCONVERTER_FORCE_MAX_CURVE_FINGERPRINT: ""
       # SUBCONVERTER_REQUEST_DEADLINE_MS: "15000"

@@ -162,6 +162,9 @@ subconverter 的节点解析器需要人工跟进协议、传输方式和参数�
 | 交付形式 | 同时提供 Docker Hub、GHCR、多架构 Linux 便携包、Windows 便携包和 OpenWrt APK，并发布校验清单。 |
 | 运行可靠性 | 增加请求合并、响应微缓存、有界规则任务、连接复用、优雅停机、敏感日志脱敏和可配置资源限制。 |
 
+> [!TIP]
+> SubConverter-Extended 针对公共实例的高并发负载，提供有界准入、协作式异步转换、请求合并、连接复用、响应微缓存和执行资源隔离等优化。公共服务部署者还可启用 `force_max` 模式，在程序探测到的资源边界内尽量提高吞吐；该模式也可能显著提高 CPU、内存、线程和连接占用。个人私有部署通常不建议开启。用途、配置方法、运行效果和部署要求见 Wiki 的 [`force_max` 性能模式](https://github.com/Aethersailor/SubConverter-Extended/wiki/Force-Max-Mode)。
+
 完整差异、限制和兼容语义见[上游关系与支持边界](https://github.com/Aethersailor/SubConverter-Extended/wiki/Support-and-License)。
 
 ### 🧰 特色参数示例
@@ -255,6 +258,7 @@ http://localhost:25500/healthz
 | 直接使用公共实例 | [快速开始](https://github.com/Aethersailor/SubConverter-Extended/wiki/Getting-Started) |
 | 使用 Docker 自行部署 | [Docker 部署](https://github.com/Aethersailor/SubConverter-Extended/wiki/Docker-Deployment) |
 | 部署到 Linux、Windows 或 OpenWrt | [原生部署](https://github.com/Aethersailor/SubConverter-Extended/wiki/Native-Deployment) |
+| 为公共服务评估最大吞吐模式 | [`force_max` 性能模式](https://github.com/Aethersailor/SubConverter-Extended/wiki/Force-Max-Mode) |
 | 理解 `/sub` 和常用参数 | [基本转换](https://github.com/Aethersailor/SubConverter-Extended/wiki/Basic-Conversion) |
 | 使用特色参数 | [特色参数与扩展语法](https://github.com/Aethersailor/SubConverter-Extended/wiki/Feature-Parameters) |
 | 配置模板和规则 | [外部配置与模板](https://github.com/Aethersailor/SubConverter-Extended/wiki/External-Configuration) · [规则与规则集](https://github.com/Aethersailor/SubConverter-Extended/wiki/Rules-and-Rulesets) |
