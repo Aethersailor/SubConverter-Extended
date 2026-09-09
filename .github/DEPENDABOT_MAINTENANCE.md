@@ -28,8 +28,10 @@ Controls:
   refresh when it is due and the queue is empty. To deliberately repeat a refresh,
   dispatch Build on `dev` with that input directly.
 
-The merger uses `GITHUB_TOKEN`, without an administrator PAT. Existing build
-writeback and Docker Hub publication still require their configured credentials.
+The merge operation uses `GITHUB_TOKEN`, without an administrator PAT. Dependabot
+requires a user with push access for rebase commands, so only that command uses
+the existing `PAT_TOKEN`. Build writeback and Docker Hub publication also retain
+their configured credentials. Generated source commits receive a fresh CodeQL run.
 GitHub availability, enabled Actions, credentials and upstream compatibility are
 external prerequisites; scheduled Actions are best effort and GitHub can disable
 them after prolonged repository inactivity. An unsupported upstream API change
