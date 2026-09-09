@@ -233,7 +233,7 @@ grep -Fq 'image: subconverter-extended:${{ matrix.arch }}-ci' <<<"$build_linux_b
 grep -Fq 'docker save "subconverter-extended:${{ matrix.arch }}-ci"' <<<"$build_linux_block"
 grep -Fq 'name: docker-image-${{ matrix.arch }}' <<<"$build_linux_block"
 grep -Fq 'bash scripts/ci/build-linux-release.sh v0.0.0 amd64 x86_64' <<<"$build_linux_block"
-grep -Fq 'BUILD_TESTS: "false"' <<<"$build_linux_block"
+grep -Fq 'BUILD_TESTS: ${{ needs.prepare.outputs.mode == '\''dev'\'' && inputs.refresh_dependencies && matrix.extract_generated == '\''true'\'' }}' <<<"$build_linux_block"
 if grep -Eq 'Smoke test strict|Package strict|ASan|UBSan|ctest' <<<"$build_linux_block"; then
   echo "dev Linux build still contains full or sanitizer tests" >&2
   exit 1
