@@ -97,6 +97,15 @@ module.exports = async function maintain({github, context, core, rebaseGithub}) 
   }
 
   try {
+    if (['schedule', 'workflow_dispatch'].includes(context.eventName)) {
+      // Refresh the schedule's activity through the Actions API, without dummy
+      // source commits. Never re-enable a workflow deliberately disabled by a user.
+      const {data: self} = await github.rest.actions.getWorkflow({
+        ...repo, workflow_id: 'auto-merge-dependabot.yml',
+      });
+      if (self.state === 'active') await act('Keep the maintenance schedule active.', () =>
+        github.rest.actions.enableWorkflow({...repo, workflow_id: self.id}));
+    }
     const deliveryReady = await reconcileDelivery();
     const pulls = await github.paginate(github.rest.pulls.list, {...repo, state: 'open', base: 'dev', per_page: 100});
     const candidates = pulls.filter(pull => eligible(pull, repository));

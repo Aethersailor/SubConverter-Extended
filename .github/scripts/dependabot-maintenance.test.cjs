@@ -50,7 +50,8 @@ function fixture(options = {}) {
   rest.pulls.merge = async args => {
     writes.push(['merge', args]); head = 'merged'; return {data: {merged: true, sha: head}};
   };
-  for (const name of ['createWorkflowDispatch', 'reRunWorkflowFailedJobs']) {
+  rest.actions.getWorkflow = async () => ({data: {id: 99, state: options.disabled ? 'disabled_manually' : 'active'}});
+  for (const name of ['createWorkflowDispatch', 'reRunWorkflowFailedJobs', 'enableWorkflow']) {
     rest.actions[name] = async args => { writes.push([name, args]); };
   }
   rest.issues.createComment = async args => { writes.push(['comment', args]); };
@@ -138,9 +139,15 @@ test('failed speculative refresh does not block a validated routine update', asy
 
 test('weekly refresh runs on dev with an empty queue and is deduplicated', async () => {
   const f = await execute({empty: true, eventName: 'schedule'});
-  assert.equal(f.writes.length, 1);
-  assert.deepEqual(f.writes[0][1].inputs, {refresh_dependencies: 'true'});
-  assert.equal(f.writes[0][1].ref, 'dev');
+  assert.equal(f.writes.length, 2);
+  assert.equal(f.writes[0][0], 'enableWorkflow');
+  assert.deepEqual(f.writes[1][1].inputs, {refresh_dependencies: 'true'});
+  assert.equal(f.writes[1][1].ref, 'dev');
   const recent = {id: 60, display_title: 'Refresh upstream dependencies on dev', created_at: new Date().toISOString()};
-  assert.deepEqual((await execute({empty: true, eventName: 'schedule', refreshRuns: [recent]})).writes, []);
+  assert.deepEqual((await execute({empty: true, eventName: 'schedule', refreshRuns: [recent]})).writes.map(w => w[0]), ['enableWorkflow']);
+});
+
+test('keepalive respects explicit workflow disablement and read-only mode', async () => {
+  assert.equal((await execute({eventName: 'workflow_dispatch', disabled: true})).writes.some(w => w[0] === 'enableWorkflow'), false);
+  assert.deepEqual((await execute({eventName: 'workflow_dispatch', dry: true})).writes, []);
 });

@@ -34,7 +34,9 @@ the existing `PAT_TOKEN`. Build writeback and Docker Hub publication also retain
 their configured credentials. Generated source commits receive a fresh CodeQL run.
 GitHub availability, enabled Actions, credentials and upstream compatibility are
 external prerequisites; scheduled Actions are best effort and GitHub can disable
-them after prolonged repository inactivity. An unsupported upstream API change
+them after prolonged repository inactivity. Maintenance refreshes its active
+schedule through the Actions API without dummy commits and preserves deliberate
+disablement. An unsupported upstream API change
 must remain blocked until it is reviewed and fixed.
 
 Validate changes with `node --test .github/scripts/dependabot-maintenance.test.cjs`,
