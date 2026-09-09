@@ -30,13 +30,15 @@ function latest(runs) {
   return [...runs].sort((a, b) => b.id - a.id)[0];
 }
 
-module.exports = async function maintain({github, context, core}) {
+module.exports = async function maintain({github, context, core, rebaseGithub}) {
   const mode = (process.env.AUTOMERGE_MODE || 'off').toLowerCase();
   if (!['off', 'observe', 'active'].includes(mode)) throw new Error(`Invalid AUTOMERGE_MODE: ${mode}`);
   if (mode === 'off') return core.notice('Dependabot maintenance is disabled.');
   const dry = mode === 'observe' || process.env.DRY_RUN === 'true';
   const repo = context.repo;
   const repository = `${repo.owner}/${repo.repo}`;
+  const rebaser = rebaseGithub || (process.env.REBASE_TOKEN ?
+    new github.constructor({auth: process.env.REBASE_TOKEN}) : null);
   const rows = [];
   const note = message => { rows.push(message); core.info(message); };
   const act = async (description, operation) => {
@@ -72,8 +74,9 @@ module.exports = async function maintain({github, context, core}) {
     const source = generated ? commit.parents[0].sha : head;
     let ready = true;
     for (const workflow of [BUILD, CODEQL]) {
-      const runs = await runsFor(workflow, {branch: 'dev', head_sha: source});
-      if (source !== head) runs.push(...await runsFor(workflow, {branch: 'dev', head_sha: head}));
+      const checkedSource = workflow === CODEQL ? head : source;
+      const runs = await runsFor(workflow, {branch: 'dev', head_sha: checkedSource});
+      if (checkedSource !== head) runs.push(...await runsFor(workflow, {branch: 'dev', head_sha: head}));
       // A speculative upstream refresh must not poison routine dev delivery.
       // Wait while it runs, but retain the last successful baseline if it fails.
       if (runs.some(run => run.status !== 'completed')) { ready = false; continue; }
@@ -112,10 +115,11 @@ module.exports = async function maintain({github, context, core}) {
             ...repo, issue_number: pull.number, per_page: 100,
           });
           const marker = '<!-- dependabot-maintenance:rebase -->';
-          const recent = comments.some(comment => comment.user?.login === 'github-actions[bot]' &&
+          const recent = comments.some(comment => ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(comment.author_association) &&
             comment.body?.includes(marker) && Date.now() - Date.parse(comment.created_at) < DAY);
+          if (!rebaser && !dry) { core.warning('PAT_TOKEN is required only to request a Dependabot rebase.'); continue; }
           if (!recent) await act(`Request Dependabot rebase for #${pull.number} onto dev ${base}.`, () =>
-            github.rest.issues.createComment({...repo, issue_number: pull.number,
+            rebaser.rest.issues.createComment({...repo, issue_number: pull.number,
               body: `@dependabot rebase\n\n${marker}\nRevalidate against the current dev branch (${base}).`}));
           else note(`Waiting for Dependabot to rebase #${pull.number}.`);
           continue;

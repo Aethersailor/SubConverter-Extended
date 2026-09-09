@@ -48,6 +48,9 @@ jobs:
           AUTOMERGE_MODE: ${{ vars.DEPENDABOT_AUTOMERGE_MODE || 'off' }}
           DRY_RUN: ${{ inputs.dry_run || false }}
           REFRESH_DEPENDENCIES: ${{ inputs.refresh_dependencies || false }}
+          # Dependabot rejects rebase commands from github-actions[bot]. This
+          # credential is used only for that command, never for merging a PR.
+          REBASE_TOKEN: ${{ secrets.PAT_TOKEN }}
         with:
           github-token: ${{ github.token }}
           script: |

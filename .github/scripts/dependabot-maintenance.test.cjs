@@ -61,7 +61,7 @@ function fixture(options = {}) {
   const github = {rest, paginate: async (method, args) => {
     if (method === 'pulls') return options.empty ? [] : [pull()];
     if (method === 'jobs') return jobs();
-    if (method === 'comments') return options.recentRebase ? [{user: {login: 'github-actions[bot]'},
+    if (method === 'comments') return options.recentRebase ? [{user: {login: 'Aethersailor'}, author_association: 'OWNER',
       body: '<!-- dependabot-maintenance:rebase -->', created_at: new Date().toISOString()}] : [];
     if (method === 'runs') {
       if (args.workflow_id === 'pr-validation.yml') return [{...run(), ...options.validation}];
@@ -75,7 +75,9 @@ function fixture(options = {}) {
   }};
   const summary = {addHeading() {return this;}, addList() {return this;}, async write() {}};
   const core = {info() {}, notice() {}, warning() {}, setFailed(message) {errors.push(message);}, summary};
-  return {github, core, writes, errors, context: {repo: {owner: 'Aethersailor', repo: 'SubConverter-Extended'},
+  const rebaseGithub = {rest: {issues: {createComment: rest.issues.createComment}}};
+  rest.issues.createComment = async () => { throw new Error('Rebase must use the dedicated credential'); };
+  return {github, rebaseGithub, core, writes, errors, context: {repo: {owner: 'Aethersailor', repo: 'SubConverter-Extended'},
     eventName: options.eventName || 'workflow_run'}};
 }
 
