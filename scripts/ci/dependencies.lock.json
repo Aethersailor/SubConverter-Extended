@@ -3,12 +3,12 @@
     "cpp_httplib": {
       "ref": "HEAD",
       "repository": "https://github.com/yhirose/cpp-httplib.git",
-      "revision": "9d6a7ee2c1aaeb1fd9ae15d14f06f487149d147f"
+      "revision": "88956ccad8386f883f7d49ded46e6b0bb198c804"
     },
     "inja": {
       "ref": "HEAD",
       "repository": "https://github.com/pantor/inja.git",
-      "revision": "f5cce3dcb14a66bf51ff1a3f122110339fb8f0c3"
+      "revision": "f89061f53f4968d0ca938307df1b4aae664a2dbf"
     },
     "jpcre2": {
       "ref": "HEAD",
@@ -60,7 +60,7 @@
       "source": "mirror.gcr.io/library/debian:trixie-slim"
     },
     "golang": {
-      "pinned": "mirror.gcr.io/library/golang@sha256:4013ae0f9e7994f8535c58c811f8f863fbed38b72e0d51e6592156f758d66146",
+      "pinned": "mirror.gcr.io/library/golang@sha256:512690a5660563b57d37ecc31129e7f136e831db2aed24a1dbeb8ad7380dc0fa",
       "source": "mirror.gcr.io/library/golang:latest"
     }
   },
