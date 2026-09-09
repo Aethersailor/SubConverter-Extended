@@ -62,7 +62,8 @@ function fixture(options = {}) {
     if (method === 'pulls') return options.empty ? [] : [pull()];
     if (method === 'jobs') return jobs();
     if (method === 'comments') return options.recentRebase ? [{user: {login: 'Aethersailor'}, author_association: 'OWNER',
-      body: '<!-- dependabot-maintenance:rebase -->', created_at: new Date().toISOString()}] : [];
+      body: '<!-- dependabot-maintenance:rebase -->\nRevalidate against the current dev branch (base).',
+      created_at: new Date().toISOString()}] : [];
     if (method === 'runs') {
       if (args.workflow_id === 'pr-validation.yml') return [{...run(), ...options.validation}];
       if (args.event === 'workflow_dispatch') return options.refreshRuns || [];
