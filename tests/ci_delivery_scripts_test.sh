@@ -84,10 +84,15 @@ new_storage = (
     "  std::string file_content_content_type_;\n"
     "  detail::EncodingType file_content_encoding_ = detail::EncodingType::None;\n};"
 )
-for storage in (old_storage, new_storage):
+coding_storage = (
+    "  std::string file_content_content_type_;\n\n"
+    "  // Upstream can add or rename trailing response fields.\n"
+    "  detail::EncodingType content_coding_ = detail::EncodingType::None;\n};"
+)
+for storage in (old_storage, new_storage, coding_storage):
     patched = module.patch_response_completion_storage(storage)
     assert patched.count("write_completion_handler_") == 1
-    assert storage[:-3] in patched
+    assert storage in patched
 
 for invalid in ("class Response {};", old_storage + "\n" + new_storage):
     try:
