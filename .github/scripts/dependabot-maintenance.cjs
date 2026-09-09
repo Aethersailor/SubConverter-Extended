@@ -116,7 +116,8 @@ module.exports = async function maintain({github, context, core, rebaseGithub}) 
           });
           const marker = '<!-- dependabot-maintenance:rebase -->';
           const recent = comments.some(comment => ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(comment.author_association) &&
-            comment.body?.includes(marker) && Date.now() - Date.parse(comment.created_at) < DAY);
+            comment.body?.includes(marker) && comment.body.includes(`(${base}).`) &&
+            Date.now() - Date.parse(comment.created_at) < DAY);
           if (!rebaser && !dry) { core.warning('PAT_TOKEN is required only to request a Dependabot rebase.'); continue; }
           if (!recent) await act(`Request Dependabot rebase for #${pull.number} onto dev ${base}.`, () =>
             rebaser.rest.issues.createComment({...repo, issue_number: pull.number,

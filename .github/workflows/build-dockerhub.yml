@@ -372,7 +372,7 @@ jobs:
           BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
           REFRESH_GO_DEPS: ${{ needs.prepare.outputs.mode == 'dev' && inputs.refresh_dependencies && matrix.extract_generated == 'true' }}
           REFRESH_HEADERS: ${{ needs.prepare.outputs.mode == 'dev' && inputs.refresh_dependencies && matrix.extract_generated == 'true' }}
-          BUILD_TESTS: "false"
+          BUILD_TESTS: ${{ needs.prepare.outputs.mode == 'dev' && inputs.refresh_dependencies && matrix.extract_generated == 'true' }}
         run: |
           {
             echo 'args<<EOF'
@@ -406,6 +406,18 @@ jobs:
         env:
           EXTRACT_GENERATED: ${{ matrix.extract_generated }}
         run: bash scripts/ci/extract-builder-output.sh "${{ matrix.builder_tag }}" "${{ matrix.extract_mode }}"
+
+      - name: Set up Go for upstream refresh validation
+        if: needs.prepare.outputs.mode == 'dev' && inputs.refresh_dependencies && matrix.extract_generated == 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: bridge/go.mod
+          cache-dependency-path: bridge/go.sum
+
+      - name: Test refreshed Go bridge
+        if: needs.prepare.outputs.mode == 'dev' && inputs.refresh_dependencies && matrix.extract_generated == 'true'
+        working-directory: bridge
+        run: go test -mod=readonly ./...
 
       - name: Package dev-only OpenWrt amd64 without publishing
         if: needs.prepare.outputs.mode == 'dev' && matrix.arch == 'amd64'
