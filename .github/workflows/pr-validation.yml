@@ -43,6 +43,7 @@ jobs:
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
           bash -n scripts/ci/*.sh
           bash tests/ci_delivery_scripts_test.sh
+          node --test .github/scripts/dependabot-maintenance.test.cjs
 
   candidate:
     name: Build and smoke test candidate
@@ -67,13 +68,6 @@ jobs:
         id: metadata
         run: python3 scripts/ci/build_metadata.py --github-output "$GITHUB_OUTPUT"
 
-      - name: Refresh dependency snapshot for a trusted Dependabot candidate
-        if: >-
-          github.actor == 'dependabot[bot]' &&
-          github.event.pull_request.user.login == 'dependabot[bot]' &&
-          github.event.pull_request.head.repo.full_name == github.repository
-        run: python3 scripts/ci/dependency_snapshot.py refresh
-
       - name: Validate and activate dependency snapshot
         run: |
           set -euo pipefail
@@ -90,8 +84,10 @@ jobs:
           SHA: ${{ steps.metadata.outputs.sha }}
           VERSION: ${{ steps.metadata.outputs.version }}
           BUILD_DATE: ${{ steps.metadata.outputs.build_date }}
-          REFRESH_GO_DEPS: ${{ github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && 'true' || 'false' }}
-          REFRESH_HEADERS: ${{ github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && 'true' || 'false' }}
+          # Validate the submitted dependency graph. Whole-upstream refreshes run
+          # independently, so an unrelated upstream change cannot block this PR.
+          REFRESH_GO_DEPS: "false"
+          REFRESH_HEADERS: "false"
           BUILD_TESTS: "true"
         run: |
           {

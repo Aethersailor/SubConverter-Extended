@@ -215,8 +215,33 @@
 #define CPPHTTPLIB_WEBSOCKET_MAX_PAYLOAD_LENGTH 16777216
 #endif
 
-#ifndef CPPHTTPLIB_WEBSOCKET_READ_TIMEOUT_SECOND
-#define CPPHTTPLIB_WEBSOCKET_READ_TIMEOUT_SECOND 300
+// One macro used to set the read timeout for both sides. They want different
+// defaults: a client's read timeout is the caller's own tool (it waits forever
+// until asked not to), while a server keeps a ceiling that reclaims a worker
+// from a peer that has gone quiet. The old name still works and sets both.
+#ifdef CPPHTTPLIB_WEBSOCKET_READ_TIMEOUT_SECOND
+#pragma message(                                                               \
+    "CPPHTTPLIB_WEBSOCKET_READ_TIMEOUT_SECOND is deprecated; define "          \
+    "CPPHTTPLIB_WEBSOCKET_CLIENT_READ_TIMEOUT_SECOND and/or "                  \
+    "CPPHTTPLIB_WEBSOCKET_SERVER_READ_TIMEOUT_SECOND instead")
+#ifndef CPPHTTPLIB_WEBSOCKET_CLIENT_READ_TIMEOUT_SECOND
+#define CPPHTTPLIB_WEBSOCKET_CLIENT_READ_TIMEOUT_SECOND                        \
+  CPPHTTPLIB_WEBSOCKET_READ_TIMEOUT_SECOND
+#endif
+#ifndef CPPHTTPLIB_WEBSOCKET_SERVER_READ_TIMEOUT_SECOND
+#define CPPHTTPLIB_WEBSOCKET_SERVER_READ_TIMEOUT_SECOND                        \
+  CPPHTTPLIB_WEBSOCKET_READ_TIMEOUT_SECOND
+#endif
+#endif
+
+// 0 waits forever. A read timeout is how a caller gets control back to send on
+// the same connection; it is not a liveness check (that is ping/pong).
+#ifndef CPPHTTPLIB_WEBSOCKET_CLIENT_READ_TIMEOUT_SECOND
+#define CPPHTTPLIB_WEBSOCKET_CLIENT_READ_TIMEOUT_SECOND 0
+#endif
+
+#ifndef CPPHTTPLIB_WEBSOCKET_SERVER_READ_TIMEOUT_SECOND
+#define CPPHTTPLIB_WEBSOCKET_SERVER_READ_TIMEOUT_SECOND 300
 #endif
 
 #ifndef CPPHTTPLIB_WEBSOCKET_CLOSE_TIMEOUT_SECOND
@@ -1827,13 +1852,15 @@ struct Response {
   bool is_chunked_content_provider_ = false;
   bool content_provider_success_ = false;
   std::string file_content_path_;
+  std::function<void(bool)> write_completion_handler_;
   std::string file_content_content_type_;
 
-  // Content coding chosen for a file-backed content provider, decided once
-  // where the file is opened so that the ETag and the body cannot disagree.
-  // `EncodingType::None` for every other kind of response.
-  detail::EncodingType file_content_encoding_ = detail::EncodingType::None;
-  std::function<void(bool)> write_completion_handler_;
+  // Content coding chosen for the response body, decided once so that the
+  // headers and the body cannot disagree: where the file is opened for a
+  // file-backed content provider (keeping the ETag honest), and in
+  // `apply_ranges()` for a chunked content provider. `EncodingType::None`
+  // for every other kind of response.
+  detail::EncodingType content_coding_ = detail::EncodingType::None;
 };
 
 enum class Error {
@@ -2374,6 +2401,7 @@ private:
 
   bool parse_request_line(const char *s, Request &req) const;
   detail::EncodingType static_file_encoding(const Request &req,
+                                            const Response &res,
                                             const std::string &content_type,
                                             size_t length) const;
   bool apply_static_file_compression(const Request &req, Response &res) const;
@@ -3678,6 +3706,9 @@ ssize_t read_socket(socket_t sock, void *ptr, size_t size, int flags);
 
 EncodingType encoding_type(const Request &req, const std::string &content_type);
 
+EncodingType encoding_type(const Request &req, const Response &res,
+                           const std::string &content_type);
+
 EncodingType encoding_type(const Request &req, const Response &res);
 
 class BufferStream final : public Stream {
@@ -4360,7 +4391,11 @@ enum class CloseStatus : uint16_t {
   InternalError = 1011,
 };
 
-enum ReadResult : int { Fail = 0, Text = 1, Binary = 2 };
+// Timeout is returned only when a read timeout was set and it elapsed before
+// any byte of a frame arrived: nothing was consumed and the connection is
+// still open, so the caller can send on it and read again. `msg` is left
+// untouched, so a `while (ws.read(msg))` loop must not treat it as a message.
+enum ReadResult : int { Fail = 0, Text = 1, Binary = 2, Timeout = 3 };
 
 // Result of WebSocketClient::connect(). Truthy only when the WebSocket
 // upgrade handshake fully succeeded. On failure error() identifies the
@@ -4419,6 +4454,13 @@ public:
              const std::string &reason = "");
   const Request &request() const;
   bool is_open() const;
+
+  // Bound how long read() waits before returning Timeout. 0 waits forever.
+  // A server handler owns its connection's timeout this way; a client sets it
+  // through WebSocketClient. Safe to call while another thread is in read().
+  void set_read_timeout(time_t sec, time_t usec = 0);
+  template <class Rep, class Period>
+  void set_read_timeout(const std::chrono::duration<Rep, Period> &duration);
 
 private:
   friend class httplib::Server;
@@ -4542,7 +4584,7 @@ private:
   bool is_valid_ = false;
   socket_t sock_ = INVALID_SOCKET;
   std::unique_ptr<WebSocket> ws_;
-  time_t read_timeout_sec_ = CPPHTTPLIB_WEBSOCKET_READ_TIMEOUT_SECOND;
+  time_t read_timeout_sec_ = CPPHTTPLIB_WEBSOCKET_CLIENT_READ_TIMEOUT_SECOND;
   time_t read_timeout_usec_ = 0;
   time_t write_timeout_sec_ = CPPHTTPLIB_CLIENT_WRITE_TIMEOUT_SECOND;
   time_t write_timeout_usec_ = CPPHTTPLIB_CLIENT_WRITE_TIMEOUT_USECOND;
@@ -4576,6 +4618,13 @@ private:
 };
 
 template <class Rep, class Period>
+inline void WebSocket::set_read_timeout(
+    const std::chrono::duration<Rep, Period> &duration) {
+  detail::duration_to_sec_and_usec(
+      duration, [&](time_t sec, time_t usec) { set_read_timeout(sec, usec); });
+}
+
+template <class Rep, class Period>
 inline void WebSocketClient::set_read_timeout(
     const std::chrono::duration<Rep, Period> &duration) {
   detail::duration_to_sec_and_usec(
@@ -4601,8 +4650,14 @@ namespace impl {
 
 bool is_valid_utf8(const std::string &s);
 
-bool read_websocket_frame(Stream &strm, Opcode &opcode, std::string &payload,
-                          bool &fin, bool expect_masked, size_t max_len);
+// Three states, because a failure that consumed bytes and one that consumed
+// none are not the same thing: the first has left the stream in the middle of
+// a frame and the connection cannot be reused, the second can just be retried.
+enum class FrameRead { Ok, Fail, Timeout };
+
+FrameRead read_websocket_frame(Stream &strm, Opcode &opcode,
+                               std::string &payload, bool &fin,
+                               bool expect_masked, size_t max_len);
 
 } // namespace impl
 
@@ -5521,17 +5576,42 @@ inline bool write_websocket_frame(Stream &strm, ws::Opcode opcode,
 namespace ws {
 namespace impl {
 
-inline bool read_websocket_frame(Stream &strm, Opcode &opcode,
-                                 std::string &payload, bool &fin,
-                                 bool expect_masked, size_t max_len) {
-  // Read first 2 bytes
+// Read exactly `size` bytes. Stream::read may return less than asked for -- it
+// hands back whatever its buffer already holds -- so every multi-byte field has
+// to loop. Reading a 2-byte header with a single read() fails whenever the
+// header straddles the read buffer's boundary.
+//
+// Timeout is reported only when nothing at all was consumed. Once a byte has
+// been taken the stream sits mid-field and cannot be resumed, so a timeout
+// there is a failure like any other. (When read() fails it always records why,
+// so the error belongs to this call and not to an earlier one.)
+inline FrameRead read_exact(Stream &strm, void *buf, size_t size) {
+  auto p = static_cast<char *>(buf);
+  size_t total = 0;
+  while (total < size) {
+    auto n = strm.read(p + total, size - total);
+    if (n <= 0) {
+      auto timed_out = total == 0 && strm.get_error() == Error::Timeout;
+      return timed_out ? FrameRead::Timeout : FrameRead::Fail;
+    }
+    total += static_cast<size_t>(n);
+  }
+  return FrameRead::Ok;
+}
+
+inline FrameRead read_websocket_frame(Stream &strm, Opcode &opcode,
+                                      std::string &payload, bool &fin,
+                                      bool expect_masked, size_t max_len) {
+  // Read first 2 bytes. This is the only read that may report a timeout: it
+  // sits on a frame boundary, where nothing has been consumed yet.
   uint8_t header[2];
-  if (strm.read(reinterpret_cast<char *>(header), 2) != 2) { return false; }
+  FrameRead first = read_exact(strm, header, 2);
+  if (first != FrameRead::Ok) { return first; }
 
   fin = (header[0] & 0x80) != 0;
 
   // RSV1, RSV2, RSV3 must be 0 when no extension is negotiated
-  if (header[0] & 0x70) { return false; }
+  if (header[0] & 0x70) { return FrameRead::Fail; }
 
   opcode = static_cast<Opcode>(header[0] & 0x0F);
   bool masked = (header[1] & 0x80) != 0;
@@ -5541,46 +5621,44 @@ inline bool read_websocket_frame(Stream &strm, Opcode &opcode,
   // MUST have a payload length of 125 bytes or less
   bool is_control = (static_cast<uint8_t>(opcode) & 0x08) != 0;
   if (is_control) {
-    if (!fin) { return false; }
-    if (payload_len > 125) { return false; }
+    if (!fin) { return FrameRead::Fail; }
+    if (payload_len > 125) { return FrameRead::Fail; }
   }
 
-  if (masked != expect_masked) { return false; }
+  if (masked != expect_masked) { return FrameRead::Fail; }
 
   // Extended payload length
   if (payload_len == 126) {
     uint8_t ext[2];
-    if (strm.read(reinterpret_cast<char *>(ext), 2) != 2) { return false; }
+    if (read_exact(strm, ext, 2) != FrameRead::Ok) { return FrameRead::Fail; }
     payload_len = (static_cast<uint64_t>(ext[0]) << 8) | ext[1];
   } else if (payload_len == 127) {
     uint8_t ext[8];
-    if (strm.read(reinterpret_cast<char *>(ext), 8) != 8) { return false; }
+    if (read_exact(strm, ext, 8) != FrameRead::Ok) { return FrameRead::Fail; }
     // RFC 6455 Section 5.2: the most significant bit MUST be 0
-    if (ext[0] & 0x80) { return false; }
+    if (ext[0] & 0x80) { return FrameRead::Fail; }
     payload_len = 0;
     for (int i = 0; i < 8; i++) {
       payload_len = (payload_len << 8) | ext[i];
     }
   }
 
-  if (payload_len > max_len) { return false; }
+  if (payload_len > max_len) { return FrameRead::Fail; }
 
   // Read mask key if present
   uint8_t mask_key[4] = {0};
   if (masked) {
-    if (strm.read(reinterpret_cast<char *>(mask_key), 4) != 4) { return false; }
+    if (read_exact(strm, mask_key, 4) != FrameRead::Ok) {
+      return FrameRead::Fail;
+    }
   }
 
   // Read payload
   payload.resize(static_cast<size_t>(payload_len));
-  if (payload_len > 0) {
-    size_t total_read = 0;
-    while (total_read < payload_len) {
-      auto n = strm.read(&payload[total_read],
-                         static_cast<size_t>(payload_len - total_read));
-      if (n <= 0) { return false; }
-      total_read += static_cast<size_t>(n);
-    }
+  if (payload_len > 0 &&
+      read_exact(strm, &payload[0], static_cast<size_t>(payload_len)) !=
+          FrameRead::Ok) {
+    return FrameRead::Fail;
   }
 
   // Unmask if needed
@@ -5590,7 +5668,7 @@ inline bool read_websocket_frame(Stream &strm, Opcode &opcode,
     }
   }
 
-  return true;
+  return FrameRead::Ok;
 }
 
 } // namespace impl
@@ -6337,7 +6415,9 @@ inline ssize_t select_impl(socket_t sock, short events, time_t sec,
   pfd.events = events;
   pfd.revents = 0;
 
-  auto timeout = static_cast<int>(sec * 1000 + usec / 1000);
+  // A negative timeout waits forever, poll's own convention. 0 keeps meaning
+  // "return immediately", which callers here rely on to probe a socket.
+  auto timeout = sec < 0 ? -1 : static_cast<int>(sec * 1000 + usec / 1000);
 
   return handle_EINTR([&]() { return poll_wrapper(&pfd, 1, timeout); });
 }
@@ -6419,8 +6499,11 @@ private:
   bool ensure_readable();
 
   socket_t sock_;
-  time_t read_timeout_sec_;
-  time_t read_timeout_usec_;
+  // Atomic because ws::WebSocket::set_read_timeout() reaches this from another
+  // thread while a read is in flight -- that is the point of it, for a caller
+  // holding one connection and wanting control back to send on it.
+  std::atomic<time_t> read_timeout_sec_;
+  std::atomic<time_t> read_timeout_usec_;
   time_t write_timeout_sec_;
   time_t write_timeout_usec_;
   time_t max_timeout_msec_;
@@ -6813,12 +6896,10 @@ inline int getaddrinfo_with_timeout(const char *node, const char *service,
   // actually finish before letting the stack frame go. The trade-off is that
   // a wedged DNS server can hold this thread for the system resolver timeout
   // (~30s by default) past the caller's connection timeout.
-  struct gaicb request {};
+  struct gaicb request{};
   struct gaicb *requests[1] = {&request};
-  struct sigevent sevp {};
-  struct timespec timeout {
-    timeout_sec, 0
-  };
+  struct sigevent sevp{};
+  struct timespec timeout{timeout_sec, 0};
 
   request.ar_name = node;
   request.ar_service = service;
@@ -7557,8 +7638,21 @@ inline EncodingType encoding_type(const Request &req,
   return best;
 }
 
+// `content_type` is taken separately because a file-backed response has not
+// been given one yet when its coding has to be decided.
+inline EncodingType encoding_type(const Request &req, const Response &res,
+                                  const std::string &content_type) {
+  // The response already names a content coding of its own: a handler serving
+  // a body it encoded itself (pre-compressed static assets, say), or a mount
+  // point whose headers name the coding its files are stored in. Applying one
+  // on top of that would double-encode the body and append a second
+  // `Content-Encoding` field line.
+  if (res.has_header("Content-Encoding")) { return EncodingType::None; }
+  return encoding_type(req, content_type);
+}
+
 inline EncodingType encoding_type(const Request &req, const Response &res) {
-  return encoding_type(req, res.get_header_value("Content-Type"));
+  return encoding_type(req, res, res.get_header_value("Content-Type"));
 }
 
 inline std::unique_ptr<compressor> make_compressor(EncodingType type) {
@@ -8644,7 +8738,7 @@ inline void set_file_content_provider(Response &res,
         return true;
       });
 
-  res.file_content_encoding_ = encoding;
+  res.content_coding_ = encoding;
 }
 
 template <typename T, typename U>
@@ -11511,7 +11605,7 @@ inline void Response::set_content(const char *s, size_t n,
   auto rng = headers.equal_range("Content-Type");
   headers.erase(rng.first, rng.second);
   set_header("Content-Type", content_type);
-  file_content_encoding_ = detail::EncodingType::None;
+  content_coding_ = detail::EncodingType::None;
 }
 
 inline void Response::set_content(const std::string &s,
@@ -11526,7 +11620,7 @@ inline void Response::set_content(std::string &&s,
   auto rng = headers.equal_range("Content-Type");
   headers.erase(rng.first, rng.second);
   set_header("Content-Type", content_type);
-  file_content_encoding_ = detail::EncodingType::None;
+  content_coding_ = detail::EncodingType::None;
 }
 
 inline void Response::set_content_provider(
@@ -11537,7 +11631,7 @@ inline void Response::set_content_provider(
   if (in_length > 0) { content_provider_ = std::move(provider); }
   content_provider_resource_releaser_ = std::move(resource_releaser);
   is_chunked_content_provider_ = false;
-  file_content_encoding_ = detail::EncodingType::None;
+  content_coding_ = detail::EncodingType::None;
 }
 
 inline void Response::set_content_provider(
@@ -11548,7 +11642,7 @@ inline void Response::set_content_provider(
   content_provider_ = detail::ContentProviderAdapter(std::move(provider));
   content_provider_resource_releaser_ = std::move(resource_releaser);
   is_chunked_content_provider_ = false;
-  file_content_encoding_ = detail::EncodingType::None;
+  content_coding_ = detail::EncodingType::None;
 }
 
 inline void Response::set_chunked_content_provider(
@@ -11559,7 +11653,7 @@ inline void Response::set_chunked_content_provider(
   content_provider_ = detail::ContentProviderAdapter(std::move(provider));
   content_provider_resource_releaser_ = std::move(resource_releaser);
   is_chunked_content_provider_ = true;
-  file_content_encoding_ = detail::EncodingType::None;
+  content_coding_ = detail::EncodingType::None;
 }
 
 inline void Response::set_file_content(const std::string &path,
@@ -12611,12 +12705,19 @@ inline ssize_t WebSocketSSLStream::read(char *ptr, size_t size) {
         needs_readable || (err.code == tls::ErrorCode::SyscallError &&
                            WSAGetLastError() == WSAETIMEDOUT);
 #endif
-    if (!needs_readable && err.code != tls::ErrorCode::WantWrite) { return -1; }
+    if (!needs_readable && err.code != tls::ErrorCode::WantWrite) {
+      error_ = Error::Read;
+      return -1;
+    }
     if (!(needs_readable ? wait_readable() : wait_writable())) {
       error_ = Error::Timeout;
       return -1;
     }
   }
+  // Out of retries. Recording a reason matters: a caller that reads get_error()
+  // to tell a timeout from a close would otherwise see whatever the previous
+  // failure left behind (error_ is never cleared on success).
+  error_ = Error::Read;
   return -1;
 }
 
@@ -13283,9 +13384,10 @@ Server::write_content_with_provider(Stream &strm, const Request &req,
     }
   } else {
     if (res.is_chunked_content_provider_) {
-      auto type = detail::encoding_type(req, res);
-
-      auto compressor = detail::make_compressor(type);
+      // Use the coding `apply_ranges()` chose when it wrote the headers;
+      // re-negotiating here would disagree with them, e.g. once a handler's
+      // own Content-Encoding header suppresses the negotiation.
+      auto compressor = detail::make_compressor(res.content_coding_);
       if (!compressor) {
         compressor = detail::make_unique<detail::nocompressor>();
       }
@@ -13511,7 +13613,8 @@ inline bool Server::handle_file_request(Request &req, Response &res) {
           auto encoding = detail::EncodingType::None;
           if (static_file_compression_) {
             content_type = content_type_of();
-            encoding = static_file_encoding(req, content_type, stat.size());
+            encoding =
+                static_file_encoding(req, res, content_type, stat.size());
           }
 
           // The ETag names the representation actually sent, so a client that
@@ -13926,8 +14029,10 @@ inline bool Server::dispatch_request(Request &req, Response &res,
 // the ETag, which has to name the representation actually sent, and
 // `apply_static_file_compression()` go through this, so the two cannot drift
 // apart.
-inline detail::EncodingType Server::static_file_encoding(
-    const Request &req, const std::string &content_type, size_t length) const {
+inline detail::EncodingType
+Server::static_file_encoding(const Request &req, const Response &res,
+                             const std::string &content_type,
+                             size_t length) const {
   if (!static_file_compression_) { return detail::EncodingType::None; }
 
   // Nothing to compress, and an empty file already answers with
@@ -13952,14 +14057,14 @@ inline detail::EncodingType Server::static_file_encoding(
     return detail::EncodingType::None;
   }
 
-  return detail::encoding_type(req, content_type);
+  return detail::encoding_type(req, res, content_type);
 }
 
 // Compresses a file-backed content provider into `res.body` and takes over the
 // framing headers. Returns false when the response is left untouched.
 inline bool Server::apply_static_file_compression(const Request &req,
                                                   Response &res) const {
-  auto type = res.file_content_encoding_;
+  auto type = res.content_coding_;
   if (type == detail::EncodingType::None || !res.content_provider_) {
     return false;
   }
@@ -13983,7 +14088,7 @@ inline bool Server::apply_static_file_compression(const Request &req,
   res.content_provider_success_ = true;
   res.content_provider_ = nullptr;
   res.content_length_ = 0;
-  res.file_content_encoding_ = detail::EncodingType::None;
+  res.content_coding_ = detail::EncodingType::None;
 
   res.set_header("Content-Encoding", detail::encoding_name(type));
   res.set_header("Vary", "Accept-Encoding");
@@ -14042,6 +14147,7 @@ inline void Server::apply_ranges(const Request &req, Response &res,
       if (res.content_provider_) {
         if (res.is_chunked_content_provider_) {
           res.set_header("Transfer-Encoding", "chunked");
+          res.content_coding_ = type;
           if (type != detail::EncodingType::None) {
             res.set_header("Content-Encoding", detail::encoding_name(type));
             res.set_header("Vary", "Accept-Encoding");
@@ -14364,7 +14470,7 @@ Server::process_request(Stream &strm, const std::string &remote_addr,
             auto ws_strm =
                 std::unique_ptr<Stream>(new detail::WebSocketSSLStream(
                     strm.socket(), const_cast<tls::session_t>(req.ssl),
-                    CPPHTTPLIB_WEBSOCKET_READ_TIMEOUT_SECOND, 0,
+                    CPPHTTPLIB_WEBSOCKET_SERVER_READ_TIMEOUT_SECOND, 0,
                     write_timeout_sec_, write_timeout_usec_));
             ws::WebSocket ws(std::move(ws_strm), req, true,
                              websocket_ping_interval_sec_,
@@ -14374,7 +14480,8 @@ Server::process_request(Stream &strm, const std::string &remote_addr,
           }
 #endif
           // Use WebSocket-specific read timeout instead of HTTP timeout
-          strm.set_read_timeout(CPPHTTPLIB_WEBSOCKET_READ_TIMEOUT_SECOND, 0);
+          strm.set_read_timeout(CPPHTTPLIB_WEBSOCKET_SERVER_READ_TIMEOUT_SECOND,
+                                0);
           ws::WebSocket ws(strm, req, true, websocket_ping_interval_sec_,
                            websocket_max_missed_pongs_);
           entry.handler(req, ws);
@@ -14438,7 +14545,7 @@ Server::process_request(Stream &strm, const std::string &remote_addr,
 
         detail::set_file_content_provider(
             res, mm, content_type,
-            static_file_encoding(req, content_type, mm->size()));
+            static_file_encoding(req, res, content_type, mm->size()));
       }
     }
 
@@ -22192,8 +22299,13 @@ inline ReadResult WebSocket::read(std::string &msg) {
     std::string payload;
     bool fin;
 
-    if (!impl::read_websocket_frame(strm_, opcode, payload, fin, is_server_,
-                                    CPPHTTPLIB_WEBSOCKET_MAX_PAYLOAD_LENGTH)) {
+    impl::FrameRead r =
+        impl::read_websocket_frame(strm_, opcode, payload, fin, is_server_,
+                                   CPPHTTPLIB_WEBSOCKET_MAX_PAYLOAD_LENGTH);
+    // A timeout landed on a frame boundary: the connection is untouched and
+    // still usable, so hand control back without closing it.
+    if (r == impl::FrameRead::Timeout) { return Timeout; }
+    if (r != impl::FrameRead::Ok) {
       closed_ = true;
       return Fail;
     }
@@ -22230,9 +22342,14 @@ inline ReadResult WebSocket::read(std::string &msg) {
           Opcode cont_opcode;
           std::string cont_payload;
           bool cont_fin;
-          if (!impl::read_websocket_frame(
+          // A timeout is not reportable here: half of a fragmented message is
+          // already in `msg` and read() has no way to resume it, so it is a
+          // failure like any other. Timeouts are only ever seen on a message
+          // boundary.
+          if (impl::read_websocket_frame(
                   strm_, cont_opcode, cont_payload, cont_fin, is_server_,
-                  CPPHTTPLIB_WEBSOCKET_MAX_PAYLOAD_LENGTH)) {
+                  CPPHTTPLIB_WEBSOCKET_MAX_PAYLOAD_LENGTH) !=
+              impl::FrameRead::Ok) {
             closed_ = true;
             return Fail;
           }
@@ -22326,7 +22443,8 @@ inline void WebSocket::close(CloseStatus status, const std::string &reason) {
   Opcode op;
   std::string resp;
   bool fin;
-  while (impl::read_websocket_frame(strm_, op, resp, fin, is_server_, 125)) {
+  while (impl::read_websocket_frame(strm_, op, resp, fin, is_server_, 125) ==
+         impl::FrameRead::Ok) {
     if (op == Opcode::Close) { break; }
   }
 }
@@ -22370,6 +22488,14 @@ inline void WebSocket::start_heartbeat() {
 inline const Request &WebSocket::request() const { return req_; }
 
 inline bool WebSocket::is_open() const { return !closed_; }
+
+inline void WebSocket::set_read_timeout(time_t sec, time_t usec) {
+  // 0 waits forever here, as it does for SO_RCVTIMEO. The stream waits with
+  // poll(), where 0 would instead mean "return immediately", so hand it the
+  // negative poll uses for an unbounded wait.
+  if (sec == 0 && usec == 0) { sec = -1; }
+  strm_.set_read_timeout(sec, usec);
+}
 
 // WebSocketClient implementation
 inline WebSocketClient::WebSocketClient(
@@ -22473,6 +22599,16 @@ inline void WebSocketClient::shutdown_and_close() {
 inline bool WebSocketClient::create_stream(std::unique_ptr<Stream> &strm,
                                            Error &error, int &ssl_error,
                                            uint64_t &ssl_backend_error) {
+  // A read timeout of 0 means "wait forever", the way SO_RCVTIMEO reads it.
+  // The streams wait with poll(), where 0 instead means "return immediately",
+  // so they are given the negative poll uses for an unbounded wait.
+  auto unbounded = read_timeout_sec_ == 0 && read_timeout_usec_ == 0;
+  time_t strm_read_sec = unbounded ? -1 : read_timeout_sec_;
+  time_t strm_read_usec = unbounded ? 0 : read_timeout_usec_;
+  // The handshake belongs to establishing the connection, so an unset read
+  // timeout leaves it bounded by the connection timeout instead of forever.
+  time_t hs_sec = unbounded ? connection_timeout_sec_ : read_timeout_sec_;
+  time_t hs_usec = unbounded ? connection_timeout_usec_ : read_timeout_usec_;
 #ifdef CPPHTTPLIB_SSL_ENABLED
   if (is_ssl_) {
     // A plain flag rather than SSLClient::load_certs()'s call_once: connect()
@@ -22492,8 +22628,8 @@ inline bool WebSocketClient::create_stream(std::unique_ptr<Stream> &strm,
     detail::ClientTlsSessionError tls_error;
     if (!detail::setup_client_tls_session(host_, tls_ctx_, tls_session_, sock_,
                                           server_certificate_verification_,
-                                          read_timeout_sec_, read_timeout_usec_,
-                                          &tls_error, options)) {
+                                          hs_sec, hs_usec, &tls_error,
+                                          options)) {
       error = tls_error.error;
       ssl_error = tls_error.ssl_error;
       ssl_backend_error = tls_error.backend_error;
@@ -22501,17 +22637,19 @@ inline bool WebSocketClient::create_stream(std::unique_ptr<Stream> &strm,
     }
 
     strm = std::unique_ptr<Stream>(new detail::WebSocketSSLStream(
-        sock_, tls_session_, read_timeout_sec_, read_timeout_usec_,
-        write_timeout_sec_, write_timeout_usec_));
+        sock_, tls_session_, strm_read_sec, strm_read_usec, write_timeout_sec_,
+        write_timeout_usec_));
     return true;
   }
 #else
   (void)error;
   (void)ssl_error;
   (void)ssl_backend_error;
+  (void)hs_sec;
+  (void)hs_usec;
 #endif
   strm = std::unique_ptr<Stream>(
-      new detail::SocketStream(sock_, read_timeout_sec_, read_timeout_usec_,
+      new detail::SocketStream(sock_, strm_read_sec, strm_read_usec,
                                write_timeout_sec_, write_timeout_usec_));
   return true;
 }
@@ -22613,6 +22751,9 @@ inline const std::string &WebSocketClient::subprotocol() const {
 inline void WebSocketClient::set_read_timeout(time_t sec, time_t usec) {
   read_timeout_sec_ = sec;
   read_timeout_usec_ = usec;
+  // The members above only seed the next connect(); read() consults the
+  // stream, so an already-open connection has to be told directly.
+  if (ws_) { ws_->set_read_timeout(sec, usec); }
 }
 
 inline void WebSocketClient::set_write_timeout(time_t sec, time_t usec) {

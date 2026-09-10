@@ -30,7 +30,7 @@ MANIFEST_ACCEPT = ", ".join(
 GIT_DEPENDENCIES = {
     "mihomo": {
         "repository": "https://github.com/MetaCubeX/mihomo.git",
-        "ref": "refs/heads/Meta",
+        "ref": "refs/heads/Alpha",
     },
     "quickjspp": {
         "repository": "https://github.com/ftk/quickjspp.git",

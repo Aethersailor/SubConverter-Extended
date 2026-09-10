@@ -9,7 +9,7 @@ FROM ${GO_IMAGE} AS go-builder
 
 ARG TARGETARCH
 ARG TARGETVARIANT
-ARG MIHOMO_REF="Meta"
+ARG MIHOMO_REF="Alpha"
 ARG MIHOMO_CACHE_BUST=1
 ARG REFRESH_GO_DEPS=false
 ARG ENABLE_SANITIZERS=false
@@ -52,6 +52,7 @@ RUN set -xe && \
       test -n "${mihomo_version}" && test -n "${mieru_version}" && test -n "${protobuf_version}" && \
       retry_go_dependency go get -u all && \
       retry_go_dependency go get \
+        "github.com/metacubex/mihomo@${mihomo_version}" \
         "github.com/enfein/mieru/v3@${mieru_version}" \
         "google.golang.org/protobuf@${protobuf_version}" && \
       go mod tidy && \

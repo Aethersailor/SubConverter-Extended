@@ -56,6 +56,57 @@ for dockerfile in Dockerfile docker/Dockerfile.armv7-cross \
   grep -Fq 'generate_param_compat.go -manifest mihomo_capabilities.json -o param_compat.h' \
     "$REPOSITORY/$dockerfile"
 done
+
+# A bulk Go update must not replace the selected Mihomo Alpha revision.
+(
+cat > "$TEST_ROOT/bin/go" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1 $2" in
+  'get -u') printf '%s\n' 'v9.0.0' > "$GO_STATE" ;;
+  'get '*)
+    for argument in "$@"; do
+      case "$argument" in
+        github.com/metacubex/mihomo@*)
+          revision="${argument#*@}"
+          test "$revision" = "$MIHOMO_REF" || test "$revision" = "$EXPECTED_MIHOMO_VERSION"
+          printf '%s\n' "$EXPECTED_MIHOMO_VERSION" > "$GO_STATE"
+          ;;
+      esac
+    done
+    ;;
+  'list -m')
+    if [ "${@: -1}" = github.com/metacubex/mihomo ]; then
+      cat "$GO_STATE"
+    else
+      printf '%s\n' 'v1.0.0'
+    fi
+    ;;
+esac
+SH
+chmod +x "$TEST_ROOT/bin/go"
+export GO_STATE="$TEST_ROOT/go-state"
+export REFRESH_GO_DEPS=true MIHOMO_REF=518c7036dfc85248d304181993664e4fb2a65bcb MIHOMO_CACHE_BUST=1
+export EXPECTED_MIHOMO_VERSION=v1.19.31-0.20260910135448-518c7036dfc8
+for dockerfile in Dockerfile docker/Dockerfile.armv7-cross docker/Dockerfile.debian; do
+  grep -Fq 'ARG MIHOMO_REF="Alpha"' "$REPOSITORY/$dockerfile"
+  python3 - "$REPOSITORY/$dockerfile" "$TEST_ROOT/refresh.sh" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+block = source.split("RUN set -xe && ", 1)[1].split("\n    fi\n", 1)[0]
+Path(sys.argv[2]).write_text("set -e\n" + block + "\n    fi\n", encoding="utf-8", newline="\n")
+PY
+  bash "$TEST_ROOT/refresh.sh" > "$TEST_ROOT/refresh.log" 2>&1 || {
+    cat "$TEST_ROOT/refresh.log" >&2
+    exit 1
+  }
+  test "$(cat "$GO_STATE")" = "$EXPECTED_MIHOMO_VERSION"
+done
+rm "$TEST_ROOT/bin/go"
+)
+
 grep -Fq 'retry_go_dependency go get \' "$REPOSITORY/Dockerfile"
 grep -Fq 'for attempt in 1 2 3; do' "$REPOSITORY/Dockerfile"
 grep -Fq 'if [ "${attempt}" = 3 ]; then' "$REPOSITORY/Dockerfile"
@@ -84,10 +135,15 @@ new_storage = (
     "  std::string file_content_content_type_;\n"
     "  detail::EncodingType file_content_encoding_ = detail::EncodingType::None;\n};"
 )
-for storage in (old_storage, new_storage):
+coding_storage = (
+    "  std::string file_content_content_type_;\n\n"
+    "  // Upstream can add or rename trailing response fields.\n"
+    "  detail::EncodingType content_coding_ = detail::EncodingType::None;\n};"
+)
+for storage in (old_storage, new_storage, coding_storage):
     patched = module.patch_response_completion_storage(storage)
     assert patched.count("write_completion_handler_") == 1
-    assert storage[:-3] in patched
+    assert storage in patched
 
 for invalid in ("class Response {};", old_storage + "\n" + new_storage):
     try:
@@ -228,7 +284,7 @@ grep -Fq 'image: subconverter-extended:${{ matrix.arch }}-ci' <<<"$build_linux_b
 grep -Fq 'docker save "subconverter-extended:${{ matrix.arch }}-ci"' <<<"$build_linux_block"
 grep -Fq 'name: docker-image-${{ matrix.arch }}' <<<"$build_linux_block"
 grep -Fq 'bash scripts/ci/build-linux-release.sh v0.0.0 amd64 x86_64' <<<"$build_linux_block"
-grep -Fq 'BUILD_TESTS: "false"' <<<"$build_linux_block"
+grep -Fq 'BUILD_TESTS: ${{ needs.prepare.outputs.mode == '\''dev'\'' && inputs.refresh_dependencies && matrix.extract_generated == '\''true'\'' }}' <<<"$build_linux_block"
 if grep -Eq 'Smoke test strict|Package strict|ASan|UBSan|ctest' <<<"$build_linux_block"; then
   echo "dev Linux build still contains full or sanitizer tests" >&2
   exit 1

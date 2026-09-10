@@ -666,6 +666,43 @@ def assert_parser_route_isolation(base_url: str, timeout: int) -> None:
     )
 
 
+def assert_reality_mlkem768_bridge(base_url: str, timeout: int) -> None:
+    for target in ("clash", "clashr"):
+        for scheme in ("vless", "vmess"):
+            for value in (None, "true", "false", "invalid"):
+                link = (
+                    f"{scheme}://b831381d-6324-4d53-ad4f-8cda48b30811"
+                    "@reality.example.test:443?security=reality&type=tcp"
+                    "&pbk=ppQ9FwLrLIa0AOrp1WvcyiaQ37vg2WSy_CD4bIdiTUw"
+                    "&sid=00112233"
+                )
+                if value is not None:
+                    link += f"&support-x25519mlkem768={value}"
+                converted = fetch(
+                    base_url,
+                    "/sub",
+                    {
+                        "target": target,
+                        "url": link + "#RealityMLKEM",
+                        "list": "true",
+                        "config": DISABLE_RULEGEN_CONFIG,
+                    },
+                    timeout,
+                )
+                match = re.search(r"support-x25519mlkem768:\s*(true|false)\b", converted)
+                actual = match.group(1) if match else None
+                expected = value if value in ("true", "false") else None
+                if (
+                    "reality-opts:" not in converted
+                    or actual != expected
+                    or (expected is None and "support-x25519mlkem768:" in converted)
+                ):
+                    raise AssertionError(
+                        f"REALITY ML-KEM option changed for {target}/{scheme}/{value}: "
+                        f"{converted!r}"
+                    )
+
+
 def assert_mieru_standard_mihomo_bridge(base_url: str, timeout: int) -> None:
     for target, headers in (
         ("clash", None),
@@ -964,6 +1001,7 @@ def run_checks(
 
     assert_local_group_matcher_matrix(base_url, timeout)
     assert_select_health_check(base_url, timeout, remote_subscription_url)
+    assert_reality_mlkem768_bridge(base_url, timeout)
 
     if verify_non_clash:
         assert_parser_route_isolation(base_url, timeout)

@@ -32,22 +32,15 @@ def replace_once(content: str, old: str, new: str, label: str) -> str:
 
 
 def patch_response_completion_storage(content: str) -> str:
-    anchors = (
-        "  std::string file_content_content_type_;\n};",
-        "  detail::EncodingType file_content_encoding_ = detail::EncodingType::None;\n};",
+    # Upstream adds/renames trailing encoding fields. Anchor the existing member,
+    # not the closing brace, and preserve every upstream field and comment.
+    anchor = "  std::string file_content_content_type_;\n"
+    return replace_once(
+        content,
+        anchor,
+        "  std::function<void(bool)> write_completion_handler_;\n" + anchor,
+        "response completion storage",
     )
-    counts = tuple(content.count(anchor) for anchor in anchors)
-    if sum(counts) != 1:
-        raise RuntimeError(
-            "cpp-httplib patch anchor 'response completion storage' "
-            f"matched {sum(counts)} times"
-        )
-    anchor = anchors[counts.index(1)]
-    replacement = (
-        anchor[:-3]
-        + "\n  std::function<void(bool)> write_completion_handler_;\n};"
-    )
-    return content.replace(anchor, replacement, 1)
 
 
 def apply_patch(content: str) -> str:

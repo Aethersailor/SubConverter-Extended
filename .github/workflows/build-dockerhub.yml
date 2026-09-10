@@ -1,4 +1,5 @@
 name: Build and Push Docker image
+run-name: ${{ inputs.refresh_dependencies && 'Refresh upstream dependencies on dev' || format('Build {0}', github.ref_name) }}
 
 on:
   push:
@@ -9,7 +10,16 @@ on:
       - 'README-*.md'
       - 'docker-compose.yml'
   workflow_dispatch:
+    inputs:
+      refresh_dependencies:
+        description: Refresh all upstream dependencies on dev before validation
+        type: boolean
+        default: false
   workflow_call:
+    inputs:
+      refresh_dependencies:
+        type: boolean
+        default: false
 permissions:
   contents: read
   packages: write
@@ -177,7 +187,7 @@ jobs:
           fi
 
       - name: Refresh dependency snapshot on dev
-        if: steps.metadata.outputs.mode == 'dev'
+        if: steps.metadata.outputs.mode == 'dev' && inputs.refresh_dependencies
         shell: bash
         run: |
           set -euo pipefail
@@ -360,9 +370,9 @@ jobs:
           SHA: ${{ needs.prepare.outputs.sha }}
           VERSION: ${{ needs.prepare.outputs.version }}
           BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
-          REFRESH_GO_DEPS: ${{ needs.prepare.outputs.mode == 'dev' && matrix.extract_generated == 'true' }}
-          REFRESH_HEADERS: ${{ needs.prepare.outputs.mode == 'dev' && matrix.extract_generated == 'true' }}
-          BUILD_TESTS: "false"
+          REFRESH_GO_DEPS: ${{ needs.prepare.outputs.mode == 'dev' && inputs.refresh_dependencies && matrix.extract_generated == 'true' }}
+          REFRESH_HEADERS: ${{ needs.prepare.outputs.mode == 'dev' && inputs.refresh_dependencies && matrix.extract_generated == 'true' }}
+          BUILD_TESTS: ${{ needs.prepare.outputs.mode == 'dev' && inputs.refresh_dependencies && matrix.extract_generated == 'true' }}
         run: |
           {
             echo 'args<<EOF'
@@ -396,6 +406,18 @@ jobs:
         env:
           EXTRACT_GENERATED: ${{ matrix.extract_generated }}
         run: bash scripts/ci/extract-builder-output.sh "${{ matrix.builder_tag }}" "${{ matrix.extract_mode }}"
+
+      - name: Set up Go for upstream refresh validation
+        if: needs.prepare.outputs.mode == 'dev' && inputs.refresh_dependencies && matrix.extract_generated == 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: bridge/go.mod
+          cache-dependency-path: bridge/go.sum
+
+      - name: Test refreshed Go bridge
+        if: needs.prepare.outputs.mode == 'dev' && inputs.refresh_dependencies && matrix.extract_generated == 'true'
+        working-directory: bridge
+        run: go test -mod=readonly ./...
 
       - name: Package dev-only OpenWrt amd64 without publishing
         if: needs.prepare.outputs.mode == 'dev' && matrix.arch == 'amd64'

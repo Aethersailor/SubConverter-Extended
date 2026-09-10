@@ -4,7 +4,7 @@ FROM mirror.gcr.io/library/golang:latest AS go-builder
 # Docker Buildx 自动注入目标架构信息
 ARG TARGETARCH
 ARG TARGETVARIANT
-ARG MIHOMO_REF="Meta"
+ARG MIHOMO_REF="Alpha"
 ARG MIHOMO_CACHE_BUST=1
 ARG REFRESH_GO_DEPS=false
 
@@ -43,8 +43,12 @@ RUN set -xe && \
     if [ "${REFRESH_GO_DEPS}" = "true" ]; then \
       echo "MIHOMO_CACHE_BUST=$MIHOMO_CACHE_BUST" && \
       retry_go_dependency go get github.com/metacubex/mihomo@${MIHOMO_REF} && \
+      mihomo_version="$(go list -m -f '{{.Version}}' github.com/metacubex/mihomo)" && \
+      test -n "${mihomo_version}" && \
       retry_go_dependency go get -u all && \
-      go mod tidy; \
+      retry_go_dependency go get "github.com/metacubex/mihomo@${mihomo_version}" && \
+      go mod tidy && \
+      test "$(go list -m -f '{{.Version}}' github.com/metacubex/mihomo)" = "${mihomo_version}"; \
     else \
       retry_go_dependency go mod download; \
     fi
