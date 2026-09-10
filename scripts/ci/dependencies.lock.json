@@ -21,9 +21,9 @@
       "revision": "ee34810b11bd23c8be637345532f91059b68b2d7"
     },
     "mihomo": {
-      "ref": "refs/heads/Meta",
+      "ref": "refs/heads/Alpha",
       "repository": "https://github.com/MetaCubeX/mihomo.git",
-      "revision": "ac017cdd246ce8bd547653d927e7bf77d7ee73d5"
+      "revision": "518c7036dfc85248d304181993664e4fb2a65bcb"
     },
     "nlohmann_json": {
       "ref": "latest-semver-tag",

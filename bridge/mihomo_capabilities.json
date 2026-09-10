@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "module": "github.com/metacubex/mihomo",
-  "module_version": "v1.19.30",
+  "module_version": "v1.19.31-0.20260910135448-518c7036dfc8",
   "schemes": [
     "hysteria",
     "hysteria2",
@@ -2454,6 +2454,10 @@
       },
       "encrypted-hello": {
         "kind": "bool",
+        "required": false
+      },
+      "identity-secret": {
+        "kind": "string",
         "required": false
       },
       "interface-name": {
