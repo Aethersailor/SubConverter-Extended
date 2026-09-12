@@ -1570,7 +1570,7 @@ def run_checks(
             "default-nameserver:",
             "- 223.5.5.5",
             "- 1.12.12.12",
-            "- doh3://223.5.5.5/dns-query",
+            '- "https://223.5.5.5/dns-query#h3=true"',
             "- https://1.12.12.12/dns-query",
             "skip-cert-verify: false",
             "follow-rule: false",

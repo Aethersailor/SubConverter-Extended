@@ -22,6 +22,11 @@ struct ClashProxyOverlay {
 YAML::Node buildCanonicalClashProxy(const Proxy &proxy,
                                     const ClashProxyOverlay &overlay);
 
+// Mark a scalar for quoted emission through dumpCanonicalClashYaml(). Use this
+// when a target syntax requires quotes even though yaml-cpp would emit plain
+// style, such as Stash DoH3 URLs containing a URI fragment.
+YAML::Node buildQuotedYamlString(const std::string &value);
+
 // Serialize Clash YAML while preserving the scalar types carried by Mihomo's
 // canonical JSON. This is the only supported dump path for YAML that may
 // contain nodes returned by buildCanonicalClashProxy().

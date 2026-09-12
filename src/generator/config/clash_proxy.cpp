@@ -335,6 +335,10 @@ private:
 
 } // namespace
 
+YAML::Node buildQuotedYamlString(const std::string &value) {
+  return stringToYaml(value, true);
+}
+
 YAML::Node buildCanonicalClashProxy(const Proxy &proxy,
                                     const ClashProxyOverlay &overlay) {
   const nlohmann::json canonical =
