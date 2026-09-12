@@ -3412,6 +3412,31 @@ static std::string proxyToStashImpl(
                                "a YAML sequence"))
     return "";
 
+  // Stash selects DoH3 through a URL fragment and requires the complete URL to
+  // remain quoted. yaml-cpp does not retain the scalar style from a custom or
+  // built-in base document, so mark every Stash DNS DoH3 URL for canonical
+  // quoted emission before generated fields are merged.
+  std::function<void(YAML::Node)> quote_stash_doh3_urls =
+      [&](YAML::Node node) {
+        if (node.IsScalar()) {
+          const std::string value = node.as<std::string>();
+          if (value.rfind("https://", 0) == 0 &&
+              value.find("#h3=true") != std::string::npos)
+            node = buildQuotedYamlString(value);
+          return;
+        }
+        if (node.IsSequence()) {
+          for (size_t index = 0; index < node.size(); ++index)
+            quote_stash_doh3_urls(node[index]);
+          return;
+        }
+        if (node.IsMap())
+          for (auto entry : node)
+            quote_stash_doh3_urls(entry.second);
+      };
+  if (root["dns"].IsDefined() && !root["dns"].IsNull())
+    quote_stash_doh3_urls(root["dns"]);
+
   TargetGenerationStats &stats = ext.target_generation_stats;
   stats = TargetGenerationStats{};
   stats.input_nodes = nodes.size();
