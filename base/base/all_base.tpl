@@ -296,8 +296,7 @@ enhanced-mode-by-rule = true
                 "tag": "dns_direct",
                 "server": "dns.alidns.com",
                 "path": "/dns-query",
-                "domain_resolver": "dns_resolver",
-                "detour": "DIRECT"
+                "domain_resolver": "dns_resolver"
             },
             {
                 "type": "fakeip",
@@ -310,8 +309,7 @@ enhanced-mode-by-rule = true
             {
                 "type": "udp",
                 "tag": "dns_resolver",
-                "server": "223.5.5.5",
-                "detour": "DIRECT"
+                "server": "223.5.5.5"
             }
         ],
         "rules": [
