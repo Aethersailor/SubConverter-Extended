@@ -2877,6 +2877,64 @@ def validate_singbox_config(binary: Path, content: bytes, label: str) -> None:
                 f"exit={completed.returncode}, output={diagnostics[-8000:]!r}"
             )
 
+        document = json.loads(content)
+        direct_outbound = next(
+            (
+                outbound
+                for outbound in document.get("outbounds", [])
+                if outbound.get("tag") == "DIRECT"
+            ),
+            None,
+        )
+        default_domain_resolver = document.get("route", {}).get(
+            "default_domain_resolver"
+        )
+        if direct_outbound is None or default_domain_resolver is None:
+            raise AssertionError(
+                "generated sing-box profile is missing the direct outbound "
+                "or default domain resolver needed by the startup probe"
+            )
+
+        startup_config = {
+            "log": {"disabled": True},
+            "dns": {"servers": document.get("dns", {}).get("servers", [])},
+            "outbounds": [direct_outbound],
+            "route": {"default_domain_resolver": default_domain_resolver},
+        }
+        startup_path = Path(temporary) / "generated-singbox-startup.json"
+        startup_path.write_text(
+            json.dumps(startup_config, ensure_ascii=False), encoding="utf-8"
+        )
+        process = subprocess.Popen(
+            [
+                str(binary),
+                "run",
+                "--disable-color",
+                "-c",
+                str(startup_path),
+            ],
+            cwd=temporary,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            startup_output, _ = process.communicate(timeout=1.5)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate(timeout=5)
+        else:
+            if process.returncode != 0:
+                diagnostics = startup_output.decode("utf-8", errors="replace")
+                raise AssertionError(
+                    f"pinned sing-box {label} failed to start the generated "
+                    "DNS services: "
+                    f"exit={process.returncode}, output={diagnostics[-8000:]!r}"
+                )
+
 
 def singbox_modern_full_profile_baseline(
     base_url: str,
@@ -2913,6 +2971,14 @@ def singbox_modern_full_profile_baseline(
         for server in dns_servers
     ):
         raise AssertionError("legacy sing-box DNS server fields remain")
+    if any(
+        server.get("tag") in {"dns_direct", "dns_resolver"}
+        and "detour" in server
+        for server in dns_servers
+    ):
+        raise AssertionError(
+            "direct sing-box DNS servers retained a redundant outbound detour"
+        )
     if "fakeip" in dns or "independent_cache" in dns:
         raise AssertionError("legacy sing-box DNS options remain")
     if any("action" not in rule for rule in dns.get("rules", [])):
