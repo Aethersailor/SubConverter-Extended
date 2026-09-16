@@ -4,6 +4,11 @@
         "level": "info",
         "timestamp": true
     },
+    "http_clients": [
+        {
+            "tag": "rules-direct"
+        }
+    ],
     "dns": {
         "servers": [
             {
@@ -96,17 +101,18 @@
                 "tag": "geosite-category-ads-all",
                 "format": "binary",
                 "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ads-all.srs",
-                "download_detour": "DIRECT"
+                "http_client": "rules-direct"
             },
             {
                 "type": "remote",
                 "tag": "geosite-geolocation-!cn",
                 "format": "binary",
                 "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-!cn.srs",
-                "download_detour": "DIRECT"
+                "http_client": "rules-direct"
             }
         ],
         "default_domain_resolver": "dns_resolver",
+        "default_http_client": "rules-direct",
         "auto_detect_interface": true
     },
     "experimental": {

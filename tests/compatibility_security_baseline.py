@@ -831,6 +831,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
             content_type = "text/plain; charset=utf-8"
         elif request_path == "/singbox-modern-rules.list":
             body = (
+                "GEOSITE,google-cn\n"
+                "GEOSITE,gfw\n"
                 "GEOSITE,cn\n"
                 "GEOIP,cn\n"
                 "SRC-GEOIP,us\n"
@@ -2998,6 +3000,10 @@ def singbox_modern_full_profile_baseline(
 
     route = document.get("route", {})
     route_rules = route.get("rules", [])
+    if document.get("http_clients") != [{"tag": "rules-direct"}]:
+        raise AssertionError("sing-box 1.14 HTTP client is missing or malformed")
+    if route.get("default_http_client") != "rules-direct":
+        raise AssertionError("sing-box 1.14 default HTTP client is missing")
     if not any(rule.get("action") == "sniff" for rule in route_rules):
         raise AssertionError("sing-box route lost the sniff action")
     if not any(rule.get("action") == "hijack-dns" for rule in route_rules):
@@ -3018,19 +3024,35 @@ def singbox_modern_full_profile_baseline(
         for item in route.get("rule_set", [])
         if isinstance(item, dict)
     }
-    for expected in (
-        "geosite-category-ads-all",
-        "geosite-geolocation-!cn",
-        "geosite-cn",
-        "geoip-cn",
-        "geoip-us",
-    ):
+    sagernet_geosite_base = (
+        "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set"
+    )
+    metacubex_sing_base = (
+        "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/"
+        "sing/geo"
+    )
+    expected_rule_sets = {
+        "geosite-category-ads-all": (
+            f"{sagernet_geosite_base}/geosite-category-ads-all.srs"
+        ),
+        "geosite-geolocation-!cn": (
+            f"{sagernet_geosite_base}/geosite-geolocation-!cn.srs"
+        ),
+        "geosite-google-cn": f"{metacubex_sing_base}/geosite/google-cn.srs",
+        "geosite-gfw": f"{metacubex_sing_base}/geosite/gfw.srs",
+        "geosite-cn": f"{metacubex_sing_base}/geosite/cn.srs",
+        "geoip-cn": f"{metacubex_sing_base}/geoip/cn.srs",
+        "geoip-us": f"{metacubex_sing_base}/geoip/us.srs",
+    }
+    for expected, expected_url in expected_rule_sets.items():
         rule_set = rule_sets.get(expected)
         if (
             rule_set is None
             or rule_set.get("type") != "remote"
             or rule_set.get("format") != "binary"
-            or not str(rule_set.get("url", "")).endswith(f"/{expected}.srs")
+            or rule_set.get("url") != expected_url
+            or rule_set.get("http_client") != "rules-direct"
+            or "download_detour" in rule_set
         ):
             raise AssertionError(
                 f"sing-box remote rule-set is missing or malformed: {expected}"
@@ -3064,6 +3086,39 @@ def singbox_modern_full_profile_baseline(
         raise AssertionError("out-of-range sing-box integer rule was not rejected")
     if any("unsafe" in str(item) for item in route.get("rule_set", [])):
         raise AssertionError("unsafe sing-box rule-set code was not rejected")
+
+    legacy_status, legacy_body, _ = request(
+        base_url,
+        "/sub",
+        {
+            "target": "singbox",
+            "url": SUBSCRIPTION.strip(),
+            "config": fixture_base + "/external-singbox-modern.ini",
+            "singbox.legacy": "1",
+        },
+    )
+    if legacy_status != 200:
+        raise AssertionError(
+            f"legacy sing-box full profile returned HTTP {legacy_status}: "
+            f"{legacy_body!r}"
+        )
+    legacy_document = json.loads(legacy_body)
+    legacy_route = legacy_document.get("route", {})
+    if (
+        "http_clients" in legacy_document
+        or "default_http_client" in legacy_route
+    ):
+        raise AssertionError("legacy sing-box profile retained 1.14 HTTP clients")
+    legacy_rule_sets = [
+        item
+        for item in legacy_route.get("rule_set", [])
+        if isinstance(item, dict) and item.get("type") == "remote"
+    ]
+    if not legacy_rule_sets or any(
+        item.get("download_detour") != "DIRECT" or "http_client" in item
+        for item in legacy_rule_sets
+    ):
+        raise AssertionError("legacy sing-box rule-set download fields drifted")
 
     ipv6_status, ipv6_body, _ = request(
         base_url,
@@ -3100,11 +3155,10 @@ def singbox_modern_full_profile_baseline(
         raise AssertionError("sing-box IPv6 TUN address was not rendered")
 
     if stable_binary is not None:
-        validate_singbox_config(stable_binary, body, "stable")
-        validate_singbox_config(stable_binary, ipv6_body, "stable IPv6")
+        validate_singbox_config(stable_binary, legacy_body, "legacy stable")
     if next_binary is not None:
-        validate_singbox_config(next_binary, body, "next")
-        validate_singbox_config(next_binary, ipv6_body, "next IPv6")
+        validate_singbox_config(next_binary, body, "1.14+")
+        validate_singbox_config(next_binary, ipv6_body, "1.14+ IPv6")
 
 
 def issue_98_reality_baseline(

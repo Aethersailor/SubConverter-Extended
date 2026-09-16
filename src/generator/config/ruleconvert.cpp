@@ -1205,6 +1205,7 @@ void emitSingBoxRuleBuckets(
 void appendSingBoxRemoteRuleSet(
     rapidjson::Value &rule_sets, std::set<std::string> &existing_tags,
     const std::string &family, const std::string &code,
+    const std::string &http_client,
     rapidjson::MemoryPoolAllocator<> &allocator) {
     const std::string tag = singBoxRuleSetTag(family, code);
     if (!existing_tags.emplace(tag).second)
@@ -1215,12 +1216,36 @@ void appendSingBoxRemoteRuleSet(
                        allocator);
     rule_set.AddMember("format", "binary", allocator);
     const std::string url =
-        "https://raw.githubusercontent.com/SagerNet/sing-" + family +
-        "/rule-set/" + tag + ".srs";
+        "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/"
+        "sing/geo/" + family + "/" + code + ".srs";
     rule_set.AddMember("url", rapidjson::Value(url.c_str(), allocator),
                        allocator);
-    rule_set.AddMember("download_detour", "DIRECT", allocator);
+    if (http_client.empty()) {
+        rule_set.AddMember("download_detour", "DIRECT", allocator);
+    } else {
+        rule_set.AddMember("http_client",
+                           rapidjson::Value(http_client.c_str(), allocator),
+                           allocator);
+    }
     rule_sets.PushBack(rule_set, allocator);
+}
+
+std::string singBoxRuleSetHttpClient(const rapidjson::Document &base_rule) {
+    if (base_rule.HasMember("route") && base_rule["route"].IsObject()) {
+        const rapidjson::Value &route = base_rule["route"];
+        if (route.HasMember("default_http_client") &&
+            route["default_http_client"].IsString())
+            return route["default_http_client"].GetString();
+    }
+    if (base_rule.HasMember("http_clients") &&
+        base_rule["http_clients"].IsArray() &&
+        !base_rule["http_clients"].Empty()) {
+        const rapidjson::Value &client = base_rule["http_clients"][0];
+        if (client.IsObject() && client.HasMember("tag") &&
+            client["tag"].IsString())
+            return client["tag"].GetString();
+    }
+    return {};
 }
 
 bool preserveSingBoxBaseActionRule(const rapidjson::Value &rule) {
@@ -1246,6 +1271,8 @@ void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent
     const Settings &settings = effectiveSettings();
     size_t total_rules = 0;
     auto &allocator = base_rule.GetAllocator();
+    const std::string rule_set_http_client =
+        singBoxRuleSetHttpClient(base_rule);
 
     if (base_rule.HasMember("route") && !base_rule["route"].IsObject())
         base_rule.RemoveMember("route");
@@ -1348,21 +1375,30 @@ void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent
     if (base_rule["route"].HasMember("rule_set") &&
         base_rule["route"]["rule_set"].IsArray()) {
         rule_sets.Swap(base_rule["route"]["rule_set"]);
-        for (const rapidjson::Value &rule_set : rule_sets.GetArray()) {
+        for (rapidjson::Value &rule_set : rule_sets.GetArray()) {
             checkpoint.complete();
             if (rule_set.IsObject() && rule_set.HasMember("tag") &&
                 rule_set["tag"].IsString())
                 existing_tags.emplace(rule_set["tag"].GetString());
+            if (!rule_set_http_client.empty() && rule_set.IsObject() &&
+                rule_set.HasMember("type") && rule_set["type"].IsString() &&
+                std::string(rule_set["type"].GetString()) == "remote") {
+                rule_set.RemoveMember("download_detour");
+                rule_set | AddMemberOrReplace(
+                    "http_client",
+                    rapidjson::Value(rule_set_http_client.c_str(), allocator),
+                    allocator);
+            }
         }
     }
     for (const std::string &code : geosite_codes) {
         appendSingBoxRemoteRuleSet(rule_sets, existing_tags, "geosite", code,
-                                   allocator);
+                                   rule_set_http_client, allocator);
         checkpoint.complete();
     }
     for (const std::string &code : geoip_codes) {
         appendSingBoxRemoteRuleSet(rule_sets, existing_tags, "geoip", code,
-                                   allocator);
+                                   rule_set_http_client, allocator);
         checkpoint.complete();
     }
 

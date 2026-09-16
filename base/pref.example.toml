@@ -191,9 +191,10 @@ surfboard_policy_path = true
 loon_remote_proxy = true
 
 [singbox]
+# 默认输出 sing-box 1.14+ 的显式 HTTP Client；1.13 客户端请在转换请求中追加 singbox.legacy=1。
 # 新配置使用 sing-box 1.11+ WireGuard endpoint；旧配置缺少本节时仍保持旧 outbound 输出。
 wireguard_endpoint = true
-# sing-box 1.14+ 才支持 Snell outbound；当前稳定版尚不支持，因此默认关闭。
+# sing-box 1.14+ 才支持 Snell outbound；默认关闭，按需启用。
 snell_outbound = false
 
 [security]
