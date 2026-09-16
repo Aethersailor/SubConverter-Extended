@@ -284,6 +284,14 @@ enhanced-mode-by-rule = true
         "level": "info",
         "timestamp": true
     },
+    {% if default(request.singbox.legacy, "") == "1" %}
+    {% else %}
+    "http_clients": [
+        {
+            "tag": "rules-direct"
+        }
+    ],
+    {% endif %}
     "dns": {
         "servers": [
             {
@@ -382,17 +390,29 @@ enhanced-mode-by-rule = true
                 "tag": "geosite-category-ads-all",
                 "format": "binary",
                 "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ads-all.srs",
+                {% if default(request.singbox.legacy, "") == "1" %}
                 "download_detour": "DIRECT"
+                {% else %}
+                "http_client": "rules-direct"
+                {% endif %}
             },
             {
                 "type": "remote",
                 "tag": "geosite-geolocation-!cn",
                 "format": "binary",
                 "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-!cn.srs",
+                {% if default(request.singbox.legacy, "") == "1" %}
                 "download_detour": "DIRECT"
+                {% else %}
+                "http_client": "rules-direct"
+                {% endif %}
             }
         ],
         "default_domain_resolver": "dns_resolver",
+        {% if default(request.singbox.legacy, "") == "1" %}
+        {% else %}
+        "default_http_client": "rules-direct",
+        {% endif %}
         "auto_detect_interface": true
     },
     "experimental": {
