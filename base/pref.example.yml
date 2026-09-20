@@ -208,7 +208,7 @@ rulesets:
 proxy_groups:
   # 自定义策略组列表。name/type 定义组；rule 支持正则、[]字面成员及 !!GROUP/!!GROUPID/!!PROVIDER；测试类组还可设 url、interval、timeout、tolerance；import 导入外部列表。
   custom_proxy_group:
-#  - {name: UrlTest, type: url-test, rule: [".*"], url: http://www.gstatic.com/generate_204, interval: 300, tolerance: 100, timeout: 5}
+#  - {name: UrlTest, type: url-test, rule: [".*"], url: https://www.gstatic.com/generate_204, interval: 300, tolerance: 100, timeout: 5}
 #  - {name: Proxy, type: select, rule: [".*"]}
 #  - {name: group1, type: select, rule: ["!!GROUPID=0"]}
 #  - {name: v2ray, type: select, rule: ["!!GROUP=V2RayProvider"]}

@@ -811,7 +811,7 @@ int readGroup(YAML::Node node, string_array &dest, bool scope_limit = true,
       dest.emplace_back("!!import:" + name);
       continue;
     }
-    std::string url = "http://www.gstatic.com/generate_204", interval = "300",
+    std::string url = "https://www.gstatic.com/generate_204", interval = "300",
                 tolerance, timeout;
     object["name"] >>= name;
     object["type"] >>= type;

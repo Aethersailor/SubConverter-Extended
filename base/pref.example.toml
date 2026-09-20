@@ -257,7 +257,7 @@ import = "snippets/emoji.toml"
 # name = "Auto"
 # type = "url-test"
 # rule = [".*"]
-# url = "http://www.gstatic.com/generate_204"
+# url = "https://www.gstatic.com/generate_204"
 # interval = 300
 # tolerance = 150
 # lazy = true
@@ -274,7 +274,7 @@ import = "snippets/emoji.toml"
 # rule = [".*", "[]Proxy", "[]DIRECT"]
 # interval = 100
 # strategy = "consistent-hashing"
-# url = "http://www.gstatic.com/generate_204"
+# url = "https://www.gstatic.com/generate_204"
 
 [[custom_groups]]
 import = "snippets/groups.toml"

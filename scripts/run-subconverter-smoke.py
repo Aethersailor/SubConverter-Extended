@@ -218,7 +218,7 @@ LOCAL_GROUP_MATCHER_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encod
         )
     )
 ).decode("ascii")
-SELECT_HEALTH_URL = "http://wifi.vivo.com.cn/generate_204"
+SELECT_HEALTH_URL = "https://www.gstatic.com/generate_204"
 SELECT_HEALTH_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
     "\n".join(
         (

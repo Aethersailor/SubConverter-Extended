@@ -1909,7 +1909,7 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
       // 健康检查配置
       single_provider["health-check"]["enable"] = true;
       single_provider["health-check"]["url"] =
-          "https://cp.cloudflare.com/generate_204";
+          "https://www.gstatic.com/generate_204";
       single_provider["health-check"]["interval"] = 300;
 
       // 添加 override 配置（如果用户指定了 udp 或 scv 参数）
@@ -4613,6 +4613,7 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
         x.Type == ProxyGroupType::Fallback ||
         (!surfboard && x.Type == ProxyGroupType::LoadBalance)) {
       std::string test_url = x.Url;
+      // Surfboard only accepts HTTP test URLs; keep this compatibility fallback.
       if (surfboard && !test_url.empty() &&
           !startsWith(toLower(test_url), "http://")) {
         test_url = "http://www.gstatic.com/generate_204";

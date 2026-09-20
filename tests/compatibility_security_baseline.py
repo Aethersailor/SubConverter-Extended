@@ -77,16 +77,13 @@ LOCAL_GROUP_MATCHER_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encod
         )
     ).encode()
 ).decode()
-SELECT_HEALTH_HTTP_URL = "http://wifi.vivo.com.cn/generate_204"
-SELECT_HEALTH_HTTPS_URL = "https://cp.cloudflare.com/generate_204"
+SELECT_HEALTH_URL = "https://www.gstatic.com/generate_204"
 SELECT_HEALTH_INI_CONFIG = "data:text/plain;base64," + base64.urlsafe_b64encode(
     "\n".join(
         (
             "enable_rule_generator=false",
-            "custom_proxy_group=DIRECT-HEALTH-HTTP`select`[]DIRECT`"
-            + SELECT_HEALTH_HTTP_URL,
-            "custom_proxy_group=DIRECT-HEALTH-HTTPS`select`[]DIRECT`"
-            + SELECT_HEALTH_HTTPS_URL,
+            "custom_proxy_group=DIRECT-HEALTH-INI`select`[]DIRECT`"
+            + SELECT_HEALTH_URL,
         )
     ).encode()
 ).decode()
@@ -99,11 +96,11 @@ SELECT_HEALTH_TOML_CONFIG = "\n".join(
         'name = "DIRECT-HEALTH-TOML"',
         'type = "select"',
         'rule = ["[]DIRECT"]',
-        f'url = "{SELECT_HEALTH_HTTPS_URL}"',
+        f'url = "{SELECT_HEALTH_URL}"',
         "[[custom_groups]]",
         'name = "DIRECT-HEALTH-TOML-RULE"',
         'type = "select"',
-        f'rule = ["[]DIRECT", "{SELECT_HEALTH_HTTP_URL}"]',
+        f'rule = ["[]DIRECT", "{SELECT_HEALTH_URL}"]',
     )
 )
 VLESS_URI = (
@@ -5507,27 +5504,21 @@ def select_health_check_output_baseline(base_url: str, fixture_base: str) -> Non
         if label.startswith("INI"):
             assert_select_health_group(
                 output,
-                "DIRECT-HEALTH-HTTP",
-                SELECT_HEALTH_HTTP_URL,
-                label,
-            )
-            assert_select_health_group(
-                output,
-                "DIRECT-HEALTH-HTTPS",
-                SELECT_HEALTH_HTTPS_URL,
+                "DIRECT-HEALTH-INI",
+                SELECT_HEALTH_URL,
                 label,
             )
         else:
             assert_select_health_group(
                 output,
                 "DIRECT-HEALTH-TOML",
-                SELECT_HEALTH_HTTPS_URL,
+                SELECT_HEALTH_URL,
                 label,
             )
             assert_select_health_group(
                 output,
                 "DIRECT-HEALTH-TOML-RULE",
-                SELECT_HEALTH_HTTP_URL,
+                SELECT_HEALTH_URL,
                 label,
             )
 

@@ -62,7 +62,7 @@ wifi-access-http-port = 7222
 # 开启局域网访问后的 socks5 代理端口
 wifi-access-socks5-port = 7221
 # 测速所用的测试链接，如果策略组没有自定义测试链接就会使用这里配置的
-proxy-test-url = http://connectivitycheck.gstatic.com
+proxy-test-url = https://www.gstatic.com/generate_204
 # 节点测速时的超时秒数
 test-timeout = 2
 # 指定流量使用哪个网络接口进行转发
@@ -179,8 +179,8 @@ STATE,AUTO
 [general]
 excluded_routes=192.168.0.0/16, 172.16.0.0/12, 100.64.0.0/10, 10.0.0.0/8
 geo_location_checker=http://ip-api.com/json/?lang=zh-CN, https://github.com/KOP-XIAO/QuantumultX/raw/master/Scripts/IP_API.js
-network_check_url=http://www.baidu.com/
-server_check_url=http://www.gstatic.com/generate_204
+network_check_url=https://www.gstatic.com/generate_204
+server_check_url=https://www.gstatic.com/generate_204
 
 [dns]
 server=119.29.29.29
