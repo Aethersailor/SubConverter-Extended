@@ -115,10 +115,10 @@ github.com/metacubex/jsonv2 v0.0.0-20260721082349-16b4998c8f89 h1:v41RWXQbmSD1wq
 github.com/metacubex/jsonv2 v0.0.0-20260721082349-16b4998c8f89/go.mod h1:F4sVXat6QjPXkNsKRDyyG3BhSkxPFFnRPEIwmmyCgbg=
 github.com/metacubex/kcp-go v0.0.0-20260105040817-550693377604 h1:hJwCVlE3ojViC35MGHB+FBr8TuIf3BUFn2EQ1VIamsI=
 github.com/metacubex/kcp-go v0.0.0-20260105040817-550693377604/go.mod h1:lpmN3m269b3V5jFCWtffqBLS4U3QQoIid9ugtO+OhVc=
-github.com/metacubex/mihomo v1.19.32-0.20260922132529-3c947c76d4f4 h1:0ua3oz7xrXkrIFCEhHKHtfy7yJYVsnCC1PnW+DU1a7Q=
-github.com/metacubex/mihomo v1.19.32-0.20260922132529-3c947c76d4f4/go.mod h1:vNOEV9l41H+E9cR0m4YjHmxj9j6CcUI3p22J+lI4HS8=
-github.com/metacubex/mipstack v0.0.0-20260922000335-dbef50b1df45 h1:q+JWw5cv5hsppSVIq0/+TPwnLem9Zc8zqqzYduJJ4yU=
-github.com/metacubex/mipstack v0.0.0-20260922000335-dbef50b1df45/go.mod h1:+bbwALZI0pbi2auSG5A3ptdpV2DZ2eLObziXo+P7oj0=
+github.com/metacubex/mihomo v1.19.32-0.20260924162438-8d57a8c57c44 h1:EoekM/gvDeetuHEaC/kF/59WwQmg56MZDaLjePeIo6I=
+github.com/metacubex/mihomo v1.19.32-0.20260924162438-8d57a8c57c44/go.mod h1:sWrSbCy9VIuuUxiLiGxn92O8Wbr3CkJrl+lE7EbJEDg=
+github.com/metacubex/mipstack v0.0.0-20260924131027-976adac53932 h1:AWc8VwR2SI8BZLwdnUZmudp/i5Z1d90MHYLXNae7XGI=
+github.com/metacubex/mipstack v0.0.0-20260924131027-976adac53932/go.mod h1:+bbwALZI0pbi2auSG5A3ptdpV2DZ2eLObziXo+P7oj0=
 github.com/metacubex/mlkem v0.1.0 h1:wFClitonSFcmipzzQvax75beLQU+D7JuC+VK1RzSL8I=
 github.com/metacubex/mlkem v0.1.0/go.mod h1:amhaXZVeYNShuy9BILcR7P0gbeo/QLZsnqCdL8U2PDQ=
 github.com/metacubex/qpack v0.6.0 h1:YqClGIMOpiRYLjV1qOs483Od08MdPgRnHjt90FuaAKw=

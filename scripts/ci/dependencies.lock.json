@@ -23,7 +23,7 @@
     "mihomo": {
       "ref": "refs/heads/Alpha",
       "repository": "https://github.com/MetaCubeX/mihomo.git",
-      "revision": "3c947c76d4f48a938aace935a30a1da1364a1b1b"
+      "revision": "8d57a8c57c44125f2a59899f0e40efd3557f694f"
     },
     "nlohmann_json": {
       "ref": "latest-semver-tag",

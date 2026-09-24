@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/enfein/mieru/v3 v3.37.0
-	github.com/metacubex/mihomo v1.19.32-0.20260922132529-3c947c76d4f4
+	github.com/metacubex/mihomo v1.19.32-0.20260924162438-8d57a8c57c44
 	golang.org/x/sys v0.48.0
 	google.golang.org/protobuf v1.36.12
 )
