@@ -3,8 +3,8 @@ module github.com/aethersailor/subconverter-extended/bridge
 go 1.26.0
 
 require (
-	github.com/enfein/mieru/v3 v3.37.0
-	github.com/metacubex/mihomo v1.19.32-0.20260924162438-8d57a8c57c44
+	github.com/enfein/mieru/v3 v3.38.0
+	github.com/metacubex/mihomo v1.19.32-0.20260925001026-f103639c808d
 	golang.org/x/sys v0.48.0
 	google.golang.org/protobuf v1.36.12
 )

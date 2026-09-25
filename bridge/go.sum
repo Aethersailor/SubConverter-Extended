@@ -19,8 +19,8 @@ github.com/dunglas/httpsfv v1.0.2 h1:iERDp/YAfnojSDJ7PW3dj1AReJz4MrwbECSSE59JWL0
 github.com/dunglas/httpsfv v1.0.2/go.mod h1:zID2mqw9mFsnt7YC3vYQ9/cjq30q41W+1AnDwH8TiMg=
 github.com/easytier/easytier/easytier-go v0.0.0-20260910071355-3d0c9c3ca5e2 h1:2/9iRUcMR3QPrT2XFf/i7QV5YoSHPFjkgBM5tP8xbcc=
 github.com/easytier/easytier/easytier-go v0.0.0-20260910071355-3d0c9c3ca5e2/go.mod h1:fCEi5+K2yt+sPDONSWO1uNpOifrwPgFGvm3J0YrFRvk=
-github.com/enfein/mieru/v3 v3.37.0 h1:DKBDeBmlbpNKiOXtKXqxJo/BF+KvJKnbChn6fryeyHg=
-github.com/enfein/mieru/v3 v3.37.0/go.mod h1:zJBUCsi5rxyvHM8fjFf+GLaEl4OEjjBXr1s5F6Qd3hM=
+github.com/enfein/mieru/v3 v3.38.0 h1:+DuixHFoCGEYEopoEg8fHmDJ5Ak30PuXuf1GIh2Xpu0=
+github.com/enfein/mieru/v3 v3.38.0/go.mod h1:zJBUCsi5rxyvHM8fjFf+GLaEl4OEjjBXr1s5F6Qd3hM=
 github.com/ericlagergren/aegis v0.0.0-20250325060835-cd0defd64358 h1:kXYqH/sL8dS/FdoFjr12ePjnLPorPo2FsnrHNuXSDyo=
 github.com/ericlagergren/aegis v0.0.0-20250325060835-cd0defd64358/go.mod h1:hkIFzoiIPZYxdFOOLyDho59b7SrDfo+w3h+yWdlg45I=
 github.com/ericlagergren/polyval v0.0.0-20230805202542-18692a1b76f9 h1:NUmyvuwVoDsIFzOGFKW4zpCtQTbX2T4JpSn1jal64gM=
@@ -115,8 +115,8 @@ github.com/metacubex/jsonv2 v0.0.0-20260721082349-16b4998c8f89 h1:v41RWXQbmSD1wq
 github.com/metacubex/jsonv2 v0.0.0-20260721082349-16b4998c8f89/go.mod h1:F4sVXat6QjPXkNsKRDyyG3BhSkxPFFnRPEIwmmyCgbg=
 github.com/metacubex/kcp-go v0.0.0-20260105040817-550693377604 h1:hJwCVlE3ojViC35MGHB+FBr8TuIf3BUFn2EQ1VIamsI=
 github.com/metacubex/kcp-go v0.0.0-20260105040817-550693377604/go.mod h1:lpmN3m269b3V5jFCWtffqBLS4U3QQoIid9ugtO+OhVc=
-github.com/metacubex/mihomo v1.19.32-0.20260924162438-8d57a8c57c44 h1:EoekM/gvDeetuHEaC/kF/59WwQmg56MZDaLjePeIo6I=
-github.com/metacubex/mihomo v1.19.32-0.20260924162438-8d57a8c57c44/go.mod h1:sWrSbCy9VIuuUxiLiGxn92O8Wbr3CkJrl+lE7EbJEDg=
+github.com/metacubex/mihomo v1.19.32-0.20260925001026-f103639c808d h1:dS/84lZUuAkUBSuS6LenVrjrWTTArBEyYq9k+F+G9yw=
+github.com/metacubex/mihomo v1.19.32-0.20260925001026-f103639c808d/go.mod h1:I+8kdbkHLGxwQC6IAVF5gT/wVsbA8lt9jZGuedRXLoo=
 github.com/metacubex/mipstack v0.0.0-20260924131027-976adac53932 h1:AWc8VwR2SI8BZLwdnUZmudp/i5Z1d90MHYLXNae7XGI=
 github.com/metacubex/mipstack v0.0.0-20260924131027-976adac53932/go.mod h1:+bbwALZI0pbi2auSG5A3ptdpV2DZ2eLObziXo+P7oj0=
 github.com/metacubex/mlkem v0.1.0 h1:wFClitonSFcmipzzQvax75beLQU+D7JuC+VK1RzSL8I=
