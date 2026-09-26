@@ -686,6 +686,7 @@ struct TaggedLink {
     DuplicateInterval,
     InvalidProxyDirect,
     DuplicateProxyDirect,
+    InvalidNode,
   };
 
   std::string tag;
@@ -697,6 +698,7 @@ struct TaggedLink {
   bool has_provider = false;
   bool has_interval = false;
   bool has_proxy_direct = false;
+  bool has_node = false;
   bool link_decoded = false;
   Error error = Error::None;
 };
@@ -792,6 +794,12 @@ static bool parseLinkPrefixes(const std::string &input, TaggedLink &result) {
       remainder = next;
       continue;
     }
+    if (startsWith(remainder, "node:")) {
+      parsed = true;
+      result.has_node = true;
+      remainder.erase(0, 5);
+      break;
+    }
     break;
   }
 
@@ -819,6 +827,11 @@ static bool parseLinkPrefixes(const std::string &input, TaggedLink &result) {
   if (saw_bracketed && !remainder.empty() && remainder.back() == '>')
     remainder.pop_back();
   result.link = remainder;
+  if (result.has_node &&
+      (result.has_provider || result.has_interval ||
+       result.has_proxy_direct ||
+       !mihomo::isExplicitHttpNodeUri(result.link)))
+    result.error = TaggedLink::Error::InvalidNode;
   return true;
 }
 
@@ -827,6 +840,7 @@ static bool looksLikeEncodedLinkPrefix(const std::string &input) {
   return startsWith(lower, "tag%3a") || startsWith(lower, "provider%3a") ||
          startsWith(lower, "interval%3a") ||
          startsWith(lower, "proxy_direct%3a") ||
+         startsWith(lower, "node%3a") ||
          startsWith(lower, "%3ctag%3a") ||
          startsWith(lower, "%3cprovider%3a") || startsWith(lower, "%3ctag:") ||
          startsWith(lower, "%3cinterval%3a") ||
@@ -864,6 +878,14 @@ static TaggedLink parseTaggedLink(const std::string &input) {
 static std::string providerLinkPrefixError(
     size_t item_index, TaggedLink::Error error) {
   const std::string item = std::to_string(item_index + 1);
+  if (error == TaggedLink::Error::InvalidNode) {
+    return "Invalid request: node: for URL item #" + item +
+           " requires an HTTP(S) proxy with a host and port, no credentials, "
+           "path, or query, and no provider-only prefixes.\n"
+           "无效请求：第 " + item +
+           " 个 url 项的 node: 必须是带主机和端口的 HTTP(S) 代理链接，"
+           "不得带认证信息、路径、查询参数或 Provider 专用前缀。";
+  }
   if (error == TaggedLink::Error::DuplicateInterval) {
     return "Invalid request: interval: is repeated for URL item #" + item +
            ".\n"
@@ -3780,6 +3802,25 @@ static std::string parseSubRequestArguments(Request &request,
   }
 
   parsed.url = getUrlArg(argument, "url");
+  if (parsed.url.find("node:") != std::string::npos ||
+      parsed.url.find("node%3A") != std::string::npos ||
+      parsed.url.find("node%3a") != std::string::npos) {
+    const string_array request_sources = split(parsed.url, "|");
+    for (size_t index = 0; index < request_sources.size(); ++index) {
+      const TaggedLink tagged = parseTaggedLink(regTrim(request_sources[index]));
+      if (!tagged.has_node && tagged.error != TaggedLink::Error::InvalidNode)
+        continue;
+      if (tagged.error != TaggedLink::Error::None) {
+        response.status_code = 400;
+        return providerLinkPrefixError(index, tagged.error);
+      }
+      if (parsed.target != "clash" && parsed.target != "clashr") {
+        response.status_code = 400;
+        return "Invalid request: node: is supported only for Clash/ClashR.\n"
+               "无效请求：node: 仅支持 Clash/ClashR。";
+      }
+    }
+  }
   parsed.group_name = getUrlArg(argument, "group");
   parsed.upload_path = getUrlArg(argument, "upload_path");
   parsed.include_remark = getUrlArg(argument, "include");
@@ -5241,6 +5282,8 @@ static SubStageResponse processSubscriptionNodes(
   parse_set.time_rules = &time_temp;
   parse_set.sub_info = &subInfo;
   parse_set.parser_mode = parsed.target_descriptor->parser_mode;
+  parse_set.explicit_http_skip_cert_verify =
+      ext.skip_cert_verify.get(false);
   parse_set.parser_stats = &parser_stats;
   string_icase_map subscription_headers = buildSubscriptionRequestHeaders();
   std::string selected_user_agent = providerUserAgentFromRequest(request);
@@ -5416,7 +5459,8 @@ static SubStageResponse processSubscriptionNodes(
         return {true, providerLinkPrefixError(index, tagged.error)};
       }
       std::string link = tagged.link.empty() ? x : tagged.link;
-      bool isNodeLink = mihomo::isSupportedNonHttpSchemeLink(link);
+      bool isNodeLink = tagged.has_node ||
+                        mihomo::isSupportedNonHttpSchemeLink(link);
 
       if (isNodeLink) {
         if (tagged.has_interval) {
@@ -5427,9 +5471,9 @@ static SubStageResponse processSubscriptionNodes(
           *status_code = 400;
           return {true, providerDirectScopeError(index)};
         }
-        std::string node_link = link;
+        std::string node_link = tagged.has_node ? "node:" + link : link;
         if (tagged.has_tag)
-          node_link = "tag:" + tagged.tag + "," + link;
+          node_link = "tag:" + tagged.tag + "," + node_link;
         writeLog(LOG_LEVEL_INFO, "检测到节点链接：" + summarizeUrlForLog(link) +
                         "，将直接解析。");
         node_urls.push_back(node_link);
