@@ -291,6 +291,13 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
 
   const bool use_mihomo_parser =
       parse_set.parser_mode == NodeParserMode::MihomoOnly;
+  bool explicit_http_node = false;
+  if (startsWith(link, "node:")) {
+    link.erase(0, 5);
+    if (!use_mihomo_parser || !mihomo::isExplicitHttpNodeUri(link))
+      return -1;
+    explicit_http_node = true;
+  }
   auto recordParserInvocation = [&]() {
     if (parse_set.parser_stats)
       parse_set.parser_stats->invocations++;
@@ -314,7 +321,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
   }
 
   writeLog(LOG_LEVEL_VERBOSE, "已收到链接。");
-  if (parse_set.force_direct_link)
+  if (parse_set.force_direct_link || explicit_http_node)
     linkType = ConfType::HTTP;
   else if (!use_mihomo_parser && isLegacyHttpProxyUri(link))
     linkType = ConfType::HTTP;
@@ -592,6 +599,15 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
           return -1;
         }
         for (auto &node : parsed_nodes) {
+          if (explicit_http_node) {
+            auto canonical = nlohmann::json::parse(node.CanonicalProxyJson);
+            if (canonical.value("type", std::string()) != "http")
+              return -1;
+            canonical["skip-cert-verify"] =
+                parse_set.explicit_http_skip_cert_verify;
+            node.CanonicalProxyJson = canonical.dump();
+            node.AllowInsecure = parse_set.explicit_http_skip_cert_verify;
+          }
           node.GroupId = groupID;
           if (!custom_group.empty())
             node.Group = custom_group;

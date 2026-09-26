@@ -52,6 +52,7 @@ struct parse_settings
     bool authorized = false;
     NodeParserMode parser_mode = NodeParserMode::LegacyOnly;
     bool force_direct_link = false;
+    bool explicit_http_skip_cert_verify = false;
     NodeParserStats *parser_stats = nullptr;
     FetchContext fetch_context = FetchContext::TrustedConfig;
     string_icase_map *request_header = nullptr;

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "module": "github.com/metacubex/mihomo",
-  "module_version": "v1.19.32-0.20260915165129-fbb674227d5c",
+  "module_version": "v1.19.32-0.20260925001026-f103639c808d",
   "schemes": [
     "hysteria",
     "hysteria2",

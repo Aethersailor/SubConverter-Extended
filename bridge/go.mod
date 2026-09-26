@@ -3,8 +3,8 @@ module github.com/aethersailor/subconverter-extended/bridge
 go 1.26.0
 
 require (
-	github.com/enfein/mieru/v3 v3.37.0
-	github.com/metacubex/mihomo v1.19.32-0.20260915165129-fbb674227d5c
+	github.com/enfein/mieru/v3 v3.38.0
+	github.com/metacubex/mihomo v1.19.32-0.20260925001026-f103639c808d
 	golang.org/x/sys v0.48.0
 	google.golang.org/protobuf v1.36.12
 )
@@ -28,7 +28,7 @@ require (
 	github.com/metacubex/http v0.1.7 // indirect
 	github.com/metacubex/mlkem v0.1.0 // indirect
 	github.com/metacubex/randv2 v0.2.0 // indirect
-	github.com/metacubex/sing v0.5.7 // indirect
+	github.com/metacubex/sing v0.5.8 // indirect
 	github.com/metacubex/sing-shadowsocks v0.2.13 // indirect
 	github.com/metacubex/tls v0.1.8 // indirect
 	github.com/oasisprotocol/deoxysii v0.0.0-20220228165953-2091330c22b7 // indirect
