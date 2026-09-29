@@ -1177,6 +1177,13 @@ class FixtureHandler(BaseHTTPRequestHandler):
             return
         self.send_response(200)
         self.send_header("Content-Type", content_type)
+        if request_path == "/subscription.txt" and request_query.get(
+            "mode-parity-userinfo"
+        ) == ["1"]:
+            self.send_header(
+                "Subscription-UserInfo",
+                "upload=1000; download=2000; total=3000; expire=2000000000",
+            )
         if request_path.startswith("/webget-probe-"):
             self.send_header("X-WebGet-Probe", "present")
         self.send_header("Content-Length", str(len(body)))
@@ -13220,6 +13227,289 @@ def force_max_flow_activation_baseline(
         )
 
 
+def conversion_mode_output_parity_baseline(
+    binary: Path, fixture_base: str
+) -> None:
+    # Keep this matrix in step with kTargetDescriptors in interfaces.cpp. Each
+    # target also gets an explain request to prove that a node was generated.
+    target_sources = {
+        "clash": SUBSCRIPTION.strip(),
+        "clashr": SUBSCRIPTION.strip(),
+        "surge": SUBSCRIPTION.strip(),
+        "quan": SUBSCRIPTION.strip(),
+        "quanx": SUBSCRIPTION.strip(),
+        "loon": SUBSCRIPTION.strip(),
+        "surfboard": SUBSCRIPTION.strip(),
+        "stash": SUBSCRIPTION.strip(),
+        "mellow": SUBSCRIPTION.strip(),
+        "singbox": SUBSCRIPTION.strip(),
+        "ss": SUBSCRIPTION.strip(),
+        "ssd": SUBSCRIPTION.strip(),
+        "ssr": SSR_IPV6_URI,
+        "sssub": SUBSCRIPTION.strip(),
+        "v2ray": VMESS_QR_URI,
+        "v2rayn": VMESS_QR_URI,
+        "v2rayng": VMESS_QR_URI,
+        "shadowrocket": SUBSCRIPTION.strip(),
+        "trojan": TROJAN_WS_URI,
+        "vless": VLESS_URI,
+        "hysteria2": HYSTERIA2_URI,
+        "mixed": SUBSCRIPTION.strip(),
+    }
+    if len(target_sources) != 22:
+        raise AssertionError("conversion mode parity matrix lost a target")
+
+    # name, arguments, request headers, expected status, required body bytes,
+    # and whether the response is an explain document.
+    cases: list[
+        tuple[str, dict[str, str], dict[str, str], int, bytes | None, bool]
+    ] = []
+    for target, source in target_sources.items():
+        params = {
+            "target": target,
+            "url": source,
+            "config": DISABLE_RULEGEN_CONFIG,
+            "list": "true",
+        }
+        if target == "surge":
+            params["ver"] = "4"
+        node_marker = b"Smoke" if target in ("clash", "clashr") else None
+        cases.append((target, params, {}, 200, node_marker, False))
+        cases.append(
+            (target + "-explain", {**params, "explain": "true"}, {},
+             200, None, True)
+        )
+
+    subscription_url = fixture_base + "/subscription.txt"
+    recursive_source = "!!import:" + fixture_data_url(
+        "!!import:" + fixture_data_url(SUBSCRIPTION.strip())
+    )
+    cases.extend(
+        (
+            (
+                "clash-provider",
+                {"target": "clash", "url": subscription_url,
+                 "config": DISABLE_RULEGEN_CONFIG},
+                {}, 200, b"proxy-providers:", False,
+            ),
+            (
+                "stash-provider",
+                {"target": "stash", "url":
+                 "provider:Airport," + subscription_url,
+                 "config": DISABLE_RULEGEN_CONFIG},
+                {}, 200, b"Airport:", False,
+            ),
+            (
+                "remote-config",
+                {"target": "singbox", "url": subscription_url,
+                 "config": fixture_base + "/external-generation.ini"},
+                {}, 200, b"template-ok", False,
+            ),
+            (
+                "recursive-import",
+                {"target": "mixed", "url": recursive_source,
+                 "config": DISABLE_RULEGEN_CONFIG, "list": "true"},
+                {}, 200, b"Smoke", False,
+            ),
+            (
+                "auto-target",
+                {"target": "auto", "url": MIHOMO_ONLY_ROUTE_URI,
+                 "config": DISABLE_RULEGEN_CONFIG, "list": "true"},
+                {"User-Agent": CLASH_AUTO_USER_AGENTS[0]},
+                200, b"RouteProbe", False,
+            ),
+            (
+                "response-headers",
+                {"target": "clash", "url":
+                 subscription_url + "?mode-parity-userinfo=1",
+                 "config": DISABLE_RULEGEN_CONFIG, "list": "true",
+                 "filename": "parity.yaml"},
+                {}, 200, b"Smoke", False,
+            ),
+            (
+                "invalid-target",
+                {"target": "mode-parity-invalid", "url": SUBSCRIPTION.strip()},
+                {}, 400, b"Supported targets:", False,
+            ),
+            (
+                "unsupported-only",
+                {"target": "singbox", "url": MIERU_OFFICIAL_SIMPLE_URI,
+                 "list": "true"},
+                {}, 400, None, False,
+            ),
+            (
+                "missing-base",
+                {"target": "singbox", "url": SUBSCRIPTION.strip(),
+                 "config": fixture_base + "/external-generation-missing-base.ini"},
+                {}, 400, None, False,
+            ),
+            (
+                "bad-template",
+                {"target": "singbox", "url": SUBSCRIPTION.strip(),
+                 "config": fixture_base + "/external-generation-bad-template.ini"},
+                {}, 400, None, False,
+            ),
+        )
+    )
+
+    stable_header_names = (
+        "content-type", "content-disposition", "cache-control",
+        "pragma", "subscription-userinfo", "profile-update-interval",
+        "access-control-expose-headers",
+    )
+    dashboard_headers = {
+        "Authorization": "Basic "
+        + base64.b64encode(b"fixture-admin:fixture-dashboard-secret").decode()
+    }
+    reference: dict[str, tuple[int, bytes | object,
+                               dict[str, str | None], frozenset[str]]] = {}
+    request_ids: set[str] = set()
+
+    for mode in ("compat", "adaptive", "force_max"):
+        with running_service(
+            binary,
+            statistics=True,
+            environment={
+                "SUBCONVERTER_HTTP_BACKEND": "beast",
+                "SUBCONVERTER_RESOURCE_CONTROL": mode,
+            },
+        ) as base_url:
+            for name, params, request_headers, expected_status, marker, explain in cases:
+                status, body, headers = request(
+                    base_url, "/sub", params,
+                    headers={"User-Agent": "mode-parity-fixture/1", **request_headers},
+                )
+                context = f"{mode}/{name}"
+                if status != expected_status or not body or (
+                    marker is not None and marker not in body
+                ):
+                    raise AssertionError(
+                        f"{context} returned HTTP {status} with unexpected body: "
+                        f"{body[-500:]!r}"
+                    )
+                request_id = assert_request_id(headers, context)
+                if request_id in request_ids:
+                    raise AssertionError(f"{context} reused X-Request-ID")
+                request_ids.add(request_id)
+                if "content-length" in headers and int(
+                    headers["content-length"]
+                ) != len(body):
+                    raise AssertionError(f"{context} has an incorrect Content-Length")
+                vary = frozenset(
+                    value.strip().lower()
+                    for value in headers.get("vary", "").split(",")
+                    if value.strip()
+                )
+                if not {"user-agent", "x-age-public-key"}.issubset(vary):
+                    raise AssertionError(f"{context} lost the /sub Vary contract")
+                stable_headers = {
+                    key: headers.get(key) for key in stable_header_names
+                }
+                if not stable_headers["content-type"]:
+                    raise AssertionError(f"{context} has no Content-Type")
+                if name == "response-headers" and (
+                    "parity.yaml" not in (stable_headers["content-disposition"] or "")
+                    or stable_headers["subscription-userinfo"]
+                    != "upload=1000; download=2000; total=3000; expire=2000000000"
+                    or not stable_headers["profile-update-interval"]
+                ):
+                    raise AssertionError(
+                        f"{context} did not exercise populated stable headers: "
+                        f"{stable_headers!r}"
+                    )
+                if explain and (
+                    "no-store" not in (stable_headers["cache-control"] or "")
+                    or stable_headers["pragma"] != "no-cache"
+                    or stable_headers["content-disposition"] is not None
+                ):
+                    raise AssertionError(
+                        f"{context} lost explain privacy headers: "
+                        f"{stable_headers!r}"
+                    )
+                if name == "invalid-target":
+                    match = re.search(rb"Supported targets: ([a-z0-9, ]+)\.", body)
+                    if match is None or {
+                        item.strip() for item in match.group(1).decode().split(",")
+                    } != set(target_sources):
+                        raise AssertionError(
+                            f"{context} target list differs from the parity matrix"
+                        )
+                comparable: bytes | object = body
+                if explain:
+                    comparable = json.loads(body)
+                    target = params["target"]
+                    nodes = comparable.get("nodes", {})
+                    generated_nodes = (
+                        nodes.get("total", 0)
+                        if target in ("clash", "clashr")
+                        else nodes.get("generated", 0)
+                    )
+                    if (
+                        comparable.get("target") != target
+                        or generated_nodes < 1
+                    ):
+                        raise AssertionError(
+                            f"{context} did not generate a {target} node: "
+                            f"{comparable!r}"
+                        )
+                observed = (status, comparable, stable_headers, vary)
+                if mode == "compat":
+                    reference[name] = observed
+                elif observed != reference[name]:
+                    def digest(value: bytes | object) -> str:
+                        data = value if isinstance(value, bytes) else json.dumps(
+                            value, sort_keys=True
+                        ).encode()
+                        return hashlib.sha256(data).hexdigest()[:16]
+
+                    raise AssertionError(
+                        f"{context} differs from compat: "
+                        f"status={status}/{reference[name][0]}, "
+                        f"body_sha256={digest(comparable)}/"
+                        f"{digest(reference[name][1])}, "
+                        f"headers={stable_headers!r}/{reference[name][2]!r}, "
+                        f"vary={sorted(vary)!r}/{sorted(reference[name][3])!r}"
+                    )
+
+            dashboard_status, dashboard_body, _ = request(
+                base_url, "/dashboard/data", headers=dashboard_headers
+            )
+            if dashboard_status != 200:
+                raise AssertionError(f"{mode} parity dashboard failed")
+            dashboard = json.loads(dashboard_body)
+            if dashboard["resource_control"]["effective_mode"] != mode:
+                raise AssertionError(f"{mode} parity ran in the wrong resource mode")
+            if mode == "compat":
+                path_ok = (
+                    dashboard["conversion_scheduler"]["accepted"] >= 1
+                    and dashboard["legacy_request_flow"]["accepted"] == 0
+                    and dashboard["conversion_flows"]["created_total"] == 0
+                )
+            elif mode == "adaptive":
+                path_ok = (
+                    dashboard["conversion_scheduler"]["accepted"] == 0
+                    and dashboard["legacy_request_flow"]["accepted"] >= 1
+                    and dashboard["conversion_flows"]["created_total"] == 0
+                )
+            else:
+                flows = dashboard["conversion_flows"]
+                path_ok = (
+                    dashboard["conversion_scheduler"]["accepted"] == 0
+                    and dashboard["legacy_request_flow"]["accepted"] == 0
+                    and flows["created_total"] >= 1
+                    and flows["completed_total"] >= 1
+                    and flows["active"] == 0
+                    and dashboard["runtime_coordinator"]["ready"] is True
+                )
+            if not path_ok:
+                raise AssertionError(
+                    f"{mode} parity did not exercise its expected path: "
+                    f"{dashboard!r}"
+                )
+
+    print(f"conversion mode output parity passed ({len(cases)} cases x 3 modes)")
+
+
 def beast_hard_connection_response_baseline(binary: Path) -> None:
     if os.environ.get("SUBCONVERTER_HTTP_BACKEND", "").lower() == "httplib":
         return
@@ -13414,6 +13704,7 @@ def main() -> int:
         "--settings-snapshot-helper", type=Path, required=True
     )
     parser.add_argument("--update-golden", action="store_true")
+    parser.add_argument("--mode-parity-only", action="store_true")
     parser.add_argument("--mihomo-binary", type=Path)
     parser.add_argument("--singbox-stable-binary", type=Path)
     parser.add_argument("--singbox-next-binary", type=Path)
@@ -13452,6 +13743,11 @@ def main() -> int:
         )
     if singbox_next_binary is not None and not singbox_next_binary.is_file():
         parser.error(f"next sing-box binary does not exist: {singbox_next_binary}")
+
+    if args.mode_parity_only:
+        with fixture_server() as fixture_base:
+            conversion_mode_output_parity_baseline(binary, fixture_base)
+        return 0
 
     deployment_security_defaults_baseline()
     runtime_cli_isolation_baseline(binary)

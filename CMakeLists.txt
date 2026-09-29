@@ -386,6 +386,17 @@ IF(BUILD_TESTS)
         TIMEOUT 240
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         ENVIRONMENT "SUBCONVERTER_HTTP_BACKEND=httplib;SUBCONVERTER_RESOURCE_CONTROL=compat")
+    ADD_TEST(
+        NAME conversion_mode_output_parity
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/compatibility_security_baseline.py
+                ${COMPATIBILITY_SECURITY_BASELINE_ARGS}
+                --mode-parity-only)
+    SET_TESTS_PROPERTIES(conversion_mode_output_parity PROPERTIES
+        LABELS full
+        TIMEOUT 120
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        ENVIRONMENT "SUBCONVERTER_HTTP_BACKEND=beast")
 
     IF(UNIX)
         ADD_TEST(
