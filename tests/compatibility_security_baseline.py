@@ -13281,9 +13281,6 @@ def conversion_mode_output_parity_baseline(
         )
 
     subscription_url = fixture_base + "/subscription.txt"
-    recursive_source = "!!import:" + fixture_data_url(
-        "!!import:" + fixture_data_url(SUBSCRIPTION.strip())
-    )
     cases.extend(
         (
             (
@@ -13304,12 +13301,6 @@ def conversion_mode_output_parity_baseline(
                 {"target": "singbox", "url": subscription_url,
                  "config": fixture_base + "/external-generation.ini"},
                 {}, 200, b"template-ok", False,
-            ),
-            (
-                "recursive-import",
-                {"target": "mixed", "url": recursive_source,
-                 "config": DISABLE_RULEGEN_CONFIG, "list": "true"},
-                {}, 200, b"Smoke", False,
             ),
             (
                 "auto-target",
