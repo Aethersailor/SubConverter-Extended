@@ -584,6 +584,20 @@ IF(BUILD_TESTS)
     ADD_TEST(NAME concurrency_primitives COMMAND concurrency_primitives_test)
     SET_TESTS_PROPERTIES(concurrency_primitives PROPERTIES LABELS fast)
 
+    ADD_EXECUTABLE(quickjs_allocator_test tests/quickjs_allocator_test.cpp)
+    TARGET_INCLUDE_DIRECTORIES(quickjs_allocator_test PRIVATE src)
+    TARGET_INCLUDE_DIRECTORIES(quickjs_allocator_test SYSTEM PRIVATE ${QUICKJS_INCLUDE_DIRS})
+    TARGET_LINK_LIBRARIES(quickjs_allocator_test ${QUICKJS_LIBRARIES} ${CMAKE_DL_LIBS} Threads::Threads)
+    IF(NOT HAVE_QUICKJS_HOST_UNHANDLED_PROMISE_REJECTION_TRACKER)
+        TARGET_COMPILE_DEFINITIONS(quickjs_allocator_test PRIVATE
+            JS_SetHostUnhandledPromiseRejectionTracker=JS_SetHostPromiseRejectionTracker)
+    ENDIF()
+    IF(UNIX)
+        TARGET_LINK_LIBRARIES(quickjs_allocator_test m)
+    ENDIF()
+    ADD_TEST(NAME quickjs_allocator COMMAND quickjs_allocator_test)
+    SET_TESTS_PROPERTIES(quickjs_allocator PROPERTIES LABELS fast)
+
     ADD_EXECUTABLE(settings_view_test
         tests/settings_view_test.cpp
         src/handler/settings_view.cpp)
@@ -719,6 +733,7 @@ IF(BUILD_TESTS)
         external_rules_test
         clash_proxy_test
         concurrency_primitives_test
+        quickjs_allocator_test
         settings_view_test
         statistics_v2_test
         sub_request_key_test

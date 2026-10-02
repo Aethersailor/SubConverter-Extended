@@ -20,6 +20,7 @@
 #include "mieru_uri.h"
 #include "subparser.h"
 #include "utils/logger.h"
+#include "utils/parser_memory.h"
 
 using namespace rapidjson;
 using namespace rapidjson_ext;
@@ -4876,6 +4877,7 @@ void explodeNetchConf(std::string netch, std::vector<Proxy> &nodes) {
 }
 
 int explodeConfContent(const std::string &content, std::vector<Proxy> &nodes) {
+    reserveSubscriptionParseMemory(content);
     ConfType filetype = ConfType::Unknow;
     bool looks_like_singbox = false;
 

@@ -1019,6 +1019,7 @@ ResourceControlSnapshot discover(const Settings &settings,
   snapshot.effective_cpu_millis =
       static_cast<uint64_t>(std::llround(effective * 1000.0));
   snapshot.resolver_may_use_threads = outboundResolverMayUseThreads();
+  snapshot.native_thread_stack_bytes = defaultNativeThreadStackBytes();
   const std::string http_backend =
       toLower(trimWhitespace(getEnv("SUBCONVERTER_HTTP_BACKEND"),
                              true, true));
@@ -1446,7 +1447,9 @@ void controllerLoop() noexcept {
       std::max<uint64_t>(1, runtime.snapshot.suggested_cpu_permits), 0, 0};
   PressureGuardState pressure_guard;
   while (!runtime.stopping) {
-    if (runtime.condition.wait_for(lock, std::chrono::seconds(1),
+    const auto sample_interval = runtime.snapshot.effective_mode == "force_max"
+        ? std::chrono::milliseconds(100) : std::chrono::milliseconds(1000);
+    if (runtime.condition.wait_for(lock, sample_interval,
                                    [] { return runtime.stopping; }))
       break;
     ResourceControlSnapshot next = runtime.snapshot;
@@ -1503,11 +1506,17 @@ void controllerLoop() noexcept {
                           scheduler.active != 0 ||
                           scheduler.queued_entries != 0;
       if (force_max) {
+        const auto memory_sample = force_max_memory::beginPhysicalSample();
         const ForceMaxHardDanger danger = detectForceMaxHardDanger(
             next, startup_envelope, full_force_max_budget,
             runtime.committed_self_threads,
             previous_memory_high, previous_memory_max, previous_oom,
             previous_oom_kill, previous_sock_throttled);
+        const auto memory_ledger = resourceEnvelopeMemoryLedger(
+            resourceEnvelopeFromSnapshot(next));
+        force_max_memory::refreshPhysicalHeadroom(
+            memory_sample, memory_ledger.valid ? memory_ledger.headroom_bytes : 0,
+            full_force_max_budget.reserved_memory_bytes);
         previous_memory_high = next.memory_events_high;
         previous_memory_max = next.memory_events_max;
         previous_oom = next.memory_events_oom;

@@ -109,6 +109,8 @@ struct AsyncFetchRequest
 
 struct AsyncFetchResult
 {
+    FetchMemoryLease fetch_memory;
+    RetainedResponseByteLease retained_bytes;
     int status_code = 0;
     int transport_code = 0;
     AsyncFetchFailure failure = AsyncFetchFailure::None;
@@ -117,8 +119,6 @@ struct AsyncFetchResult
     std::string cookies;
     bool used_proxy = false;
     long proxy_error = 0;
-    FetchMemoryLease fetch_memory;
-    RetainedResponseByteLease retained_bytes;
 };
 
 struct AsyncFetchEngineSnapshot
@@ -175,22 +175,22 @@ struct OwnedWebGetRequest
 
 struct OwnedWebGetResult
 {
+    RetainedResponseByteLease retained_bytes;
     int status_code = 0;
     AsyncFetchFailure failure = AsyncFetchFailure::None;
     std::string content;
     std::string response_headers;
     bool response_headers_touched = false;
-    RetainedResponseByteLease retained_bytes;
 };
 
 struct OwnedWebGetAsyncPayload
 {
+    RetainedResponseByteLease retained_bytes;
     int status_code = 0;
     AsyncFetchFailure failure = AsyncFetchFailure::None;
     std::string content;
     std::string response_headers;
     bool response_headers_touched = false;
-    RetainedResponseByteLease retained_bytes;
 };
 using SharedOwnedWebGetAsyncPayload =
     std::shared_ptr<const OwnedWebGetAsyncPayload>;
@@ -251,6 +251,7 @@ OwnedWebGetResult webGetOwned(OwnedWebGetRequest request);
 CacheFetchPayloadSnapshot cacheFetchPayloadSnapshot() noexcept;
 SubscriptionCacheAdmissionSnapshot
 subscriptionCacheAdmissionSnapshot() noexcept;
+void clearSubscriptionCacheAdmissionHistory() noexcept;
 CacheFetchOperationProbeSnapshot cacheFetchOperationProbe();
 OwnedWebGetAsyncConsumerProbeSnapshot ownedWebGetAsyncConsumerProbe();
 struct OwnedWebGetContinuationRuntimeSnapshot

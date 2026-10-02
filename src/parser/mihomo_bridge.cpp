@@ -5,6 +5,8 @@
 #include <mutex>
 #include <stdexcept>
 #include <utility>
+#include <cstring>
+#include "utils/parser_memory.h"
 
 // Go library functions (generated from libconvert.h)
 extern "C" {
@@ -63,6 +65,7 @@ private:
 namespace mihomo {
 
 std::vector<ProxyNode> parseSubscription(const std::string &subscription) {
+  reserveSubscriptionParseMemory(subscription);
   std::vector<ProxyNode> nodes;
   LargeParseMemoryGuard memory_guard(subscription.size());
 
@@ -73,6 +76,9 @@ std::vector<ProxyNode> parseSubscription(const std::string &subscription) {
     throw std::runtime_error("调用 Go ConvertSubscription 函数失败");
   }
   std::unique_ptr<char, decltype(&FreeString)> result(raw_result, &FreeString);
+  const uint64_t json_bytes = std::strlen(result.get());
+  if (json_bytes > UINT64_MAX / 4) throw BoundedOutputExceeded();
+  reserveBoundedOutputBytes(json_bytes * 4);
 
   // Parse JSON result
   try {

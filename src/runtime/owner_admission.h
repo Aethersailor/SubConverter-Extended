@@ -41,11 +41,11 @@ public:
   ~OwnerAdmissionLease() { reset(); }
 
   OwnerAdmissionLease(OwnerAdmissionLease &&other) noexcept
-      : release_(std::move(other.release_)) {}
+      : state_(std::move(other.state_)) {}
   OwnerAdmissionLease &operator=(OwnerAdmissionLease &&other) noexcept {
     if (this != &other) {
       reset();
-      release_ = std::move(other.release_);
+      state_ = std::move(other.state_);
     }
     return *this;
   }
@@ -54,16 +54,24 @@ public:
   OwnerAdmissionLease &operator=(const OwnerAdmissionLease &) = delete;
 
   explicit operator bool() const noexcept {
-    return static_cast<bool>(release_);
+    return static_cast<bool>(state_);
   }
   void reset() noexcept;
+  // Growth never waits while holding a working set. Capacity failure lets the
+  // flow unwind, releasing memory for queued owners instead of deadlocking.
+  bool resize(uint64_t bytes) noexcept;
+  bool transferRetainedBytes(uint64_t bytes,
+                            RetainedResponseByteLease &retained) noexcept;
+  OwnerAdmissionLease share() const noexcept;
 
 private:
   friend class OwnerAdmission;
-  explicit OwnerAdmissionLease(std::function<void()> release)
-      : release_(std::move(release)) {}
-
-  std::function<void()> release_;
+  struct State;
+  OwnerAdmissionLease(uint64_t bytes,
+                      std::function<void(uint64_t)> release,
+                      std::function<bool(uint64_t, uint64_t)> resize,
+                      std::function<void(uint64_t)> transfer);
+  std::shared_ptr<State> state_;
 };
 
 struct OwnerAdmissionResult {
@@ -73,7 +81,7 @@ struct OwnerAdmissionResult {
 
 struct OwnerAdmissionOptions {
   RequestCostClass cost = RequestCostClass::Medium;
-  // Active bytes reserve the owner's possible conversion working set. Waiting
+  // Active bytes reserve the owner's current conversion working set. Waiting
   // bytes charge only the metadata retained while this request is queued.
   uint64_t bytes = 0;
   uint64_t wait_bytes = std::numeric_limits<uint64_t>::max();

@@ -155,6 +155,8 @@ size_t rulesetConversionCacheMaxBytes()
     return ruleset_conversion_cache.maxBytes();
 }
 
+void clearRulesetConversionCache() { ruleset_conversion_cache.clear(); }
+
 void configureRulesetConversionCache(size_t max_entries,
                                      size_t max_bytes)
 {

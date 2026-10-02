@@ -1134,11 +1134,9 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Key("valid");
   writer.Bool(calculated.valid);
   writer.Key("applied");
-  const uint64_t expected_response_cache = calculated.cache_bytes / 2;
-  const uint64_t expected_ruleset_cache = calculated.cache_bytes / 4;
-  const uint64_t expected_external_cache =
-      calculated.cache_bytes - expected_response_cache -
-      expected_ruleset_cache;
+  const uint64_t expected_response_cache = calculated.cache_bytes;
+  const uint64_t expected_ruleset_cache = calculated.cache_bytes;
+  const uint64_t expected_external_cache = calculated.cache_bytes;
   const bool fetch_contract_applied =
       global.maxAllowedDownloadSize > 0 &&
       validateForceMaxFetchContract(
@@ -1290,6 +1288,14 @@ std::string serializeDashboard(const DashboardSnapshot &snapshot) {
   writer.Uint64(calculated.cache_bytes);
   writer.Key("working_memory_bytes");
   writer.Uint64(calculated.working_memory_bytes);
+  writer.Key("shared_memory_bytes");
+  writer.Uint64(calculated.shared_memory_bytes);
+  writer.Key("shared_memory_used");
+  writer.Uint64(force_max_memory::used.load());
+  writer.Key("shared_memory_active_limit");
+  writer.Uint64(force_max_memory::availableLimit());
+  writer.Key("shared_memory_peak");
+  writer.Uint64(force_max_memory::peak.load());
   writer.Key("memory_capacity_bytes");
   writer.Uint64(calculated.memory_capacity_bytes);
   writer.Key("startup_memory_bytes");

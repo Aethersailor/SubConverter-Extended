@@ -15,6 +15,8 @@
 #include <utility>
 #include <vector>
 
+#include "utils/force_max_memory.h"
+
 enum class RequestCostClass : uint8_t {
   Unclassified,
   Low,
@@ -456,9 +458,12 @@ inline void configureRetainedResponseByteLimit(uint64_t limit) noexcept {
   retained_response_bytes::limit.store(limit, std::memory_order_release);
 }
 
-inline bool tryRetainResponseBytes(uint64_t bytes) noexcept {
+inline bool tryRetainResponseBytes(uint64_t bytes,
+                                   bool already_charged = false) noexcept {
   if (bytes == 0)
     return true;
+  if (!already_charged && !force_max_memory::acquire(bytes))
+    return false;
   const uint64_t limit =
       retained_response_bytes::limit.load(std::memory_order_acquire);
   uint64_t current =
@@ -468,6 +473,7 @@ inline bool tryRetainResponseBytes(uint64_t bytes) noexcept {
         (limit != 0 && (bytes > limit || current > limit - bytes))) {
       retained_response_bytes::rejected.fetch_add(1,
                                                    std::memory_order_relaxed);
+      if (!already_charged) force_max_memory::release(bytes);
       return false;
     }
     if (retained_response_bytes::used.compare_exchange_weak(
@@ -478,8 +484,10 @@ inline bool tryRetainResponseBytes(uint64_t bytes) noexcept {
 }
 
 inline void releaseRetainedResponseBytes(uint64_t bytes) noexcept {
-  if (bytes != 0)
+  if (bytes != 0) {
     retained_response_bytes::used.fetch_sub(bytes, std::memory_order_acq_rel);
+    force_max_memory::release(bytes);
+  }
 }
 
 inline RetainedResponseByteSnapshot retainedResponseByteSnapshot() noexcept {
@@ -529,9 +537,22 @@ public:
     releaseRetainedResponseBytes(std::exchange(bytes_, 0));
   }
 
+  void release(uint64_t bytes) noexcept {
+    const uint64_t released = std::min(bytes, bytes_);
+    bytes_ -= released;
+    releaseRetainedResponseBytes(released);
+  }
+
   uint64_t bytes() const noexcept { return bytes_; }
 
 private:
+  friend class OwnerAdmissionLease;
+  bool adoptWorkingBytes(uint64_t bytes) noexcept {
+    if (bytes_ != 0 || force_max_memory::limit.load() == 0 ||
+        !tryRetainResponseBytes(bytes, true)) return false;
+    bytes_ = bytes;
+    return true;
+  }
   uint64_t bytes_ = 0;
 };
 

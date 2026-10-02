@@ -79,10 +79,9 @@ bool currentMemoryFitsStartupReserve(
 }
 
 void configureForceMaxCaches(const ForceMaxBudget &budget) {
-  const uint64_t response_bytes = budget.cache_bytes / 2;
-  const uint64_t ruleset_bytes = budget.cache_bytes / 4;
-  const uint64_t external_bytes =
-      budget.cache_bytes - response_bytes - ruleset_bytes;
+  const uint64_t response_bytes = budget.cache_bytes;
+  const uint64_t ruleset_bytes = budget.cache_bytes;
+  const uint64_t external_bytes = budget.cache_bytes;
   configureResponseMicroCacheLimit(response_bytes);
   configureRulesetConversionCache(
       static_cast<size_t>(std::min<uint64_t>(
@@ -106,7 +105,22 @@ void capturePublishedLimitsLocked() {
       retainedResponseByteSnapshot().limit};
 }
 
+void reclaimForceMaxCaches() noexcept {
+  try {
+    clearResponseMicroCache();
+    clearRulesetConversionCache();
+    clearExternalConfigCache();
+    clearSubscriptionCacheAdmissionHistory();
+  } catch (...) {}
+}
+
 void restorePublishedLimitsLocked() {
+  force_max_memory::reclaimer.store(nullptr);
+  // Dispose charged cache entries before disabling the startup ledger.
+  configureResponseMicroCacheLimit(0);
+  configureRulesetConversionCache(0, 0);
+  configureExternalConfigCache(0, 0);
+  clearSubscriptionCacheAdmissionHistory();
   configureResponseMicroCacheLimit(
       coordinator.original_limits.response_cache_bytes);
   configureRulesetConversionCache(
@@ -117,6 +131,8 @@ void restorePublishedLimitsLocked() {
       coordinator.original_limits.external_cache_bytes);
   configureRetainedResponseByteLimit(
       coordinator.original_limits.retained_response_bytes);
+  if (!force_max_memory::configure(0))
+    throw std::runtime_error("force_max memory ledger still has live leases");
 }
 
 bool failureInjected(const char *stage) noexcept {
@@ -461,7 +477,16 @@ bool commitRuntimeCoordinator() noexcept {
   }
   coordinator.candidate.reset();
 
+  if (!force_max_memory::configure(coordinator.budget.shared_memory_bytes,
+                                   retainedResponseByteSnapshot().used)) {
+    const bool reset = rollbackPublishedRuntimeLocked(false);
+    noteFailureLocked("memory", reset ? "force_max_memory_publish_failed"
+                                       : "force_max_memory_rollback_failed");
+    return false;
+  }
   configureForceMaxCaches(coordinator.budget);
+  force_max_memory::physical_guard.store(true);
+  force_max_memory::reclaimer.store(reclaimForceMaxCaches);
   configureRetainedResponseByteLimit(
       coordinator.budget.retained_response_bytes);
   if (failureInjected("validation") ||

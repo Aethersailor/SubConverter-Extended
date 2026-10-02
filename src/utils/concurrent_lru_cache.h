@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "utils/cooperative_cpu.h"
+#include "utils/force_max_memory.h"
 
 template <class Key, class Value, class Hash = std::hash<Key>>
 class ConcurrentLruCache {
@@ -125,6 +126,7 @@ public:
 
 private:
   struct Entry {
+    force_max_memory::Lease memory;
     Value value;
     size_t bytes = 0;
     typename std::list<Key>::iterator lru;
@@ -145,8 +147,22 @@ private:
       entries_.erase(existing);
     }
 
+    force_max_memory::Lease memory;
+    while (!memory.acquire(bytes)) {
+      if (entries_.empty()) return; // Caching is optional under pressure.
+      const Key &oldest = lru_.back();
+      auto evicted = entries_.find(oldest);
+      bytes_ -= evicted->second.bytes;
+      entries_.erase(evicted);
+      lru_.pop_back();
+    }
     lru_.push_front(key);
-    entries_.emplace(key, Entry{value, bytes, lru_.begin()});
+    try {
+      entries_.emplace(key, Entry{std::move(memory), value, bytes, lru_.begin()});
+    } catch (...) {
+      lru_.pop_front();
+      throw;
+    }
     bytes_ += bytes;
     evictLocked();
   }

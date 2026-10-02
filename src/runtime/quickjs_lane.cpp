@@ -101,6 +101,7 @@ struct QuickJsLane::Task {
   QuickJsWork work;
   QuickJsCompletion completion;
   std::atomic<bool> completed{false};
+  force_max_memory::Lease queue_memory;
 };
 
 QuickJsLaneBudget quickJsLaneBudgetFromForceMax(
@@ -129,7 +130,7 @@ QuickJsLane::QuickJsLane(QuickJsLaneBudget budget) : budget_(budget) {
     // quickjspp assigns process-global class IDs lazily. Bootstrap them before
     // any lane worker starts so separate runtimes never race that assignment.
     std::lock_guard<std::mutex> bootstrap_lock(quickjs_bootstrap_mutex);
-    qjs::Runtime runtime;
+    qjs::Runtime runtime(forceMaxQuickJsAllocator());
     JS_SetMemoryLimit(runtime.rt,
                       static_cast<size_t>(budget_.heap_bytes_per_worker));
     JS_SetMaxStackSize(runtime.rt,
@@ -233,6 +234,9 @@ QuickJsSubmitStatus QuickJsLane::submit(
              queued_bytes_ >
                  budget_.max_queue_bytes - task->options.bytes)
       status = QuickJsSubmitStatus::ByteLimit;
+    else if (!task->queue_memory.acquire(std::max<uint64_t>(
+                 sizeof(Task), task->options.bytes)))
+      status = QuickJsSubmitStatus::ByteLimit;
     else {
       queued_bytes_ += task->options.bytes;
       queue_.emplace_back(task);
@@ -271,6 +275,7 @@ void QuickJsLane::workerLoop(std::size_t index) noexcept {
       task = std::move(queue_.front());
       queue_.pop_front();
       queued_bytes_ -= task->options.bytes;
+      task->queue_memory.reset();
       ++active_;
     }
     const QuickJsTaskStatus status = runTask(task);
@@ -299,17 +304,21 @@ QuickJsLane::runTask(const std::shared_ptr<Task> &task) noexcept {
 #else
   try {
     ScopedSettingsView settings_scope(task->options.settings);
+    quick_js_memory_capacity_failed = false;
     ScopedRequestContext request_scope(task->options.request_context);
     const bool clean_context = task->options.settings &&
         task->options.settings->scriptCleanContext;
+    const bool shared_heap = forceMaxQuickJsAllocator() != nullptr;
     const uint64_t nested_heap =
-        clean_context ? budget_.heap_bytes_per_worker / 2 : 0;
+        clean_context ? (shared_heap ? budget_.heap_bytes_per_worker
+                                    : budget_.heap_bytes_per_worker / 2) : 0;
     const uint64_t nested_stack =
         clean_context ? budget_.stack_bytes_per_worker / 2 : 0;
     if (clean_context && (nested_heap == 0 || nested_stack == 0))
       return QuickJsTaskStatus::RuntimeError;
     const uint64_t primary_heap =
-        budget_.heap_bytes_per_worker - nested_heap;
+        shared_heap ? budget_.heap_bytes_per_worker
+                    : budget_.heap_bytes_per_worker - nested_heap;
     const uint64_t primary_stack =
         budget_.stack_bytes_per_worker - nested_stack;
     QuickJsInterruptState interrupt{
@@ -319,7 +328,7 @@ QuickJsLane::runTask(const std::shared_ptr<Task> &task) noexcept {
         static_cast<size_t>(nested_heap),
         static_cast<size_t>(nested_stack), quickJsInterrupt,
         &interrupt);
-    qjs::Runtime runtime;
+    qjs::Runtime runtime(forceMaxQuickJsAllocator());
     JS_SetMemoryLimit(runtime.rt,
                       static_cast<size_t>(primary_heap));
     JS_SetMaxStackSize(runtime.rt,
@@ -365,6 +374,8 @@ QuickJsLane::runTask(const std::shared_ptr<Task> &task) noexcept {
           std::chrono::steady_clock::now() >= task->options.deadline)
         return QuickJsTaskStatus::Deadline;
       script_print_stack(context);
+      if (quick_js_memory_capacity_failed)
+        return QuickJsTaskStatus::Capacity;
       return QuickJsTaskStatus::ScriptError;
     } catch (...) {
       if (context_initialized)
@@ -379,9 +390,11 @@ QuickJsLane::runTask(const std::shared_ptr<Task> &task) noexcept {
             std::chrono::steady_clock::time_point::max() &&
         std::chrono::steady_clock::now() >= task->options.deadline)
       return QuickJsTaskStatus::Deadline;
-    return QuickJsTaskStatus::Success;
+    return quick_js_memory_capacity_failed ? QuickJsTaskStatus::Capacity
+                                           : QuickJsTaskStatus::Success;
   } catch (...) {
-    return QuickJsTaskStatus::RuntimeError;
+    return quick_js_memory_capacity_failed ? QuickJsTaskStatus::Capacity
+                                           : QuickJsTaskStatus::RuntimeError;
   }
 #endif
 }

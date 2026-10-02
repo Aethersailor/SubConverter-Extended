@@ -268,9 +268,9 @@ advanced:
   log_level: info
   # 是否强制输出详细调试信息；true 会覆盖 log_level 并使用 verbose 级别，可能包含敏感配置细节。
   print_debug_info: false
-  # 资源控制模式：默认 Beast 后端下，compat 使用同步有界转换路径，adaptive 和 force_max 使用协作式异步路径；显式 httplib 后端始终使用同步兼容路径。force_max 仅在硬件探测和可选硬件 pin 通过时应用硬件感知的启动预算，否则回退到 compat。未知值会拒绝启动。
+  # 资源控制模式：compat 保留兼容路径，adaptive 自动调整资源。force_max 面向 SCE 专用机器，按 CPU、内存、FD 和线程边界派生预算；工作集、下载、缓存与脚本按实际增长共享内存额度，不在启动时分配全部物理内存。硬件探测不完整或预算无效时拒绝启动，未知值也会拒绝启动。
   resource_control: compat
-  # 已弃用的可选硬件 pin。留空时不固定硬件；填写后仅在精确匹配时启用 force_max。该值不代表已验证容量曲线。
+  # 已弃用的可选硬件 pin，仅用于诊断；匹配结果不改变 force_max 容量。该值不代表已验证容量曲线。
   force_max_curve_fingerprint: ""
   # 普通模式的 HTTP 等待队列上限；force_max 会忽略此静态值，按可用内存和文件描述符上限计算。
   max_pending_connections: 10240

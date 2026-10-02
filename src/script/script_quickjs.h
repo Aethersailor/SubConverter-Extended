@@ -10,6 +10,7 @@
 #include <memory>
 #include <quickjspp.hpp>
 #include <stdexcept>
+#include "runtime/quickjs_allocator.h"
 
 struct ScriptNestedRuntimeBudget {
     size_t heap_bytes = 0;
@@ -307,7 +308,7 @@ void script_safe_runner(qjs::Runtime *runtime, qjs::Context *context, Fn runnabl
               (void)script_cleanup(*internal_context);)
     if(clean_context)
     {
-        owned_runtime = std::make_unique<qjs::Runtime>();
+        owned_runtime = std::make_unique<qjs::Runtime>(forceMaxQuickJsAllocator());
         internal_runtime = owned_runtime.get();
         const ScriptNestedRuntimeBudget nested =
             currentScriptNestedRuntimeBudget();

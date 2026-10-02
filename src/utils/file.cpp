@@ -797,6 +797,9 @@ std::string fileGetBounded(const std::string &path, std::size_t max_bytes,
             throw BoundedOutputExceeded();
         return "";
     }
+    try {
+        reserveBoundedOutputBytes(static_cast<uint64_t>(measured) + 1);
+    } catch (...) { closeFile(fp); throw; }
     std::string content(static_cast<std::size_t>(measured), '\0');
     if(content.capacity() > max_bytes)
     {

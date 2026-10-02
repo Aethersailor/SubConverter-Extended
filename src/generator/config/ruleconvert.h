@@ -66,6 +66,7 @@ std::string convertRuleset(const std::string &content, int type);
 std::string materializeRulesetContent(const RulesetContent &content);
 size_t rulesetConversionCacheMaxEntries();
 size_t rulesetConversionCacheMaxBytes();
+void clearRulesetConversionCache();
 void configureRulesetConversionCache(size_t max_entries,
                                      size_t max_bytes);
 void setRulesetConversionCacheGrowthFrozen(bool frozen) noexcept;

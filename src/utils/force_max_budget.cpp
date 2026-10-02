@@ -104,14 +104,18 @@ bool validateForceMaxBudget(const ForceMaxBudget &budget,
   uint64_t memory_total = 0;
   for (uint64_t component :
        {budget.reserved_memory_bytes, budget.handler_stack_bytes,
-        budget.retained_response_bytes,
-        budget.fetch_bytes, budget.cache_bytes,
-        budget.working_memory_bytes, queue_total}) {
+        budget.shared_memory_bytes}) {
     if (!checkedAdd(memory_total, component, memory_total))
       return invalid("memory_budget_overflow");
   }
   if (memory_total != budget.memory_budget_total)
     return invalid("memory_budget_partition_mismatch");
+  if (budget.shared_memory_bytes == 0 ||
+      budget.fetch_bytes != budget.shared_memory_bytes ||
+      budget.retained_response_bytes != budget.shared_memory_bytes ||
+      budget.cache_bytes != budget.shared_memory_bytes ||
+      budget.owner_active_bytes != budget.shared_memory_bytes)
+    return invalid("invalid_shared_memory_ceiling");
   uint64_t accounted_capacity = 0;
   if (budget.startup_memory_bytes == 0 ||
       budget.memory_headroom_bytes == 0 ||
@@ -139,28 +143,16 @@ bool validateForceMaxBudget(const ForceMaxBudget &budget,
   }
   if (expected_threads != budget.thread_budget_total)
     return invalid("thread_budget_mismatch");
-  uint64_t quickjs_worker_bytes = 0;
-  uint64_t quickjs_total_bytes = 0;
-  if (!checkedAdd(budget.quickjs_heap_bytes_per_worker,
-                  budget.quickjs_stack_bytes_per_worker,
-                  quickjs_worker_bytes) ||
-      !checkedMultiply(quickjs_worker_bytes, budget.quickjs_workers,
-                       quickjs_total_bytes) ||
-      !checkedAdd(quickjs_total_bytes, budget.quickjs_queue_bytes,
-                  quickjs_total_bytes) ||
-      quickjs_total_bytes > budget.working_memory_bytes)
+  if (budget.quickjs_heap_bytes_per_worker > budget.shared_memory_bytes ||
+      budget.quickjs_stack_bytes_per_worker > budget.reserved_memory_bytes)
     return invalid("quickjs_budget_exceeds_working_memory");
   if (budget.transport_active_bytes == 0 ||
       budget.owner_active_bytes == 0)
     return invalid("invalid_active_byte_budget");
   if (budget.fetch_bytes < UINT64_C(64) * 1024)
     return invalid("fetch_budget_too_small");
-  uint64_t active_memory_total = 0;
-  if (!checkedAdd(quickjs_total_bytes, budget.transport_active_bytes,
-                  active_memory_total) ||
-      !checkedAdd(active_memory_total, budget.owner_active_bytes,
-                  active_memory_total) ||
-      active_memory_total > budget.working_memory_bytes)
+  if (budget.owner_active_bytes > budget.working_memory_bytes ||
+      budget.transport_active_bytes > budget.working_memory_bytes)
     return invalid("active_bytes_exceed_working_memory");
   if (error)
     error->clear();
@@ -213,16 +205,10 @@ uint64_t forceMaxOwnerWorkingReservation(
   if (!budget.valid || budget.active_owners == 0 ||
       budget.owner_active_bytes == 0)
     return request_bytes;
-  const uint64_t owner_slice =
-      ceilDivide(budget.owner_active_bytes, budget.active_owners);
-  uint64_t expanded_download = maximum_download_bytes;
-  if (!checkedMultiply(maximum_download_bytes, 4, expanded_download))
-    expanded_download = budget.owner_active_bytes;
-  const uint64_t reservation = std::max(
-      request_bytes, std::max(owner_slice, expanded_download));
-  // A single oversized owner is still allowed to make progress, but it owns
-  // the entire working partition and therefore serializes against peers.
-  return std::min(reservation, budget.owner_active_bytes);
+  (void)maximum_download_bytes;
+  // Download policy is an upper bound, not a prediction of the working set.
+  // Do not clamp an oversized request into an admissible reservation.
+  return std::max(request_bytes, kForceMaxOwnerWaitMetadataBytes);
 }
 
 uint64_t forceMaxOwnerWaitReservation(uint64_t request_bytes) noexcept {
@@ -241,6 +227,11 @@ ForceMaxBudget calculateForceMaxBudget(
   const uint64_t cpu_millis =
       std::max<uint64_t>(1, envelope.schedulable_cpu_millis);
   const uint64_t cpu_units = std::max<uint64_t>(1, ceilDivide(cpu_millis, 1000));
+  if (envelope.resolver_threads_per_transfer != 0 &&
+      envelope.native_thread_stack_bytes == 0) {
+    fail(budget, "resolver_stack_unknown");
+    return budget;
+  }
   const uint64_t handler_threads_per_compute =
       std::max<uint64_t>(1,
                          envelope.http_handler_threads_per_compute);
@@ -253,7 +244,7 @@ ForceMaxBudget calculateForceMaxBudget(
       envelope.nofile_soft != 0 ? envelope.nofile_soft : fallback_fds;
   budget.reserved_fds =
       std::min<uint64_t>(fd_boundary / 2,
-                         std::max<uint64_t>(64, ceilDivide(fd_boundary, 32)));
+                         64 + cpu_units * 4);
   const uint64_t committed_fds =
       std::min(envelope.open_fds, fd_boundary);
   const uint64_t usable_fds =
@@ -282,7 +273,9 @@ ForceMaxBudget calculateForceMaxBudget(
   budget.memory_budget_total = memory_ledger.headroom_bytes;
 
   const uint64_t base_memory_reserve =
-      fraction(memory_ledger.headroom_bytes, 1, 8);
+      std::min(memory_ledger.headroom_bytes / 8,
+               std::max<uint64_t>(UINT64_C(8) * 1024 * 1024,
+                                  cpu_units * UINT64_C(8) * 1024 * 1024));
   const uint64_t minimum_runtime_memory = UINT64_C(8) * 1024 * 1024;
   const uint64_t stack_memory_limit =
       memory_ledger.headroom_bytes >
@@ -315,9 +308,18 @@ ForceMaxBudget calculateForceMaxBudget(
         uint64_t desired_outbound = 0;
         uint64_t desired_open = 0;
         uint64_t desired_inbound = 0;
-        if (!checkedMultiply(compute, 16, desired_outbound) ||
-            !checkedMultiply(desired_outbound, 4, desired_open) ||
-            !checkedMultiply(compute, 64, desired_inbound))
+        // One transfer's metadata/buffers plus the native resolver stack.
+        // Async I/O concurrency is bounded by hardware, not a CPU multiple.
+        uint64_t transfer_bytes = 0;
+        if (!checkedMultiply(envelope.resolver_threads_per_transfer,
+                             envelope.native_thread_stack_bytes, transfer_bytes) ||
+            !checkedAdd(transfer_bytes, UINT64_C(1) * 1024 * 1024, transfer_bytes))
+          return false;
+        desired_outbound = std::max<uint64_t>(1,
+            memory_ledger.headroom_bytes / transfer_bytes);
+        desired_inbound = std::max<uint64_t>(4,
+            memory_ledger.headroom_bytes / kForceMaxOwnerWaitMetadataBytes);
+        if (!checkedMultiply(desired_outbound, 2, desired_open))
           return false;
         outbound_open = std::min(desired_open, outbound_fd_budget);
         const uint64_t control_connections =
@@ -339,7 +341,7 @@ ForceMaxBudget calculateForceMaxBudget(
             desired_outbound,
             std::max<uint64_t>(1, outbound_open / 2));
         io = std::max<uint64_t>(1, ceilDivide(compute, 4));
-        quickjs = std::max<uint64_t>(1, compute / 2);
+        quickjs = compute;
         transient_reserve = std::max<uint64_t>(4, compute);
         uint64_t fixed_without_handlers_or_resolver = 0;
         if (!checkedAdd(compute, io, fixed_without_handlers_or_resolver) ||
@@ -365,8 +367,13 @@ ForceMaxBudget calculateForceMaxBudget(
             candidate_failure = "handler_stack_unknown";
             return false;
           }
-          const uint64_t memory_handler_limit =
-              stack_memory_limit / envelope.http_handler_stack_bytes;
+          uint64_t handler_memory = 0;
+          if (!checkedAdd(envelope.http_handler_stack_bytes,
+                          UINT64_C(1) * 1024 * 1024, handler_memory))
+            return false;
+          // A blocking socket needs room for its work as well as its native
+          // stack. Maximising threads alone must not consume the data ledger.
+          const uint64_t memory_handler_limit = stack_memory_limit / handler_memory;
           uint64_t minimum_inbound_for_compute = 0;
           if (!checkedMultiply(compute, 2,
                                minimum_inbound_for_compute) ||
@@ -399,7 +406,8 @@ ForceMaxBudget calculateForceMaxBudget(
           const uint64_t handler_extra_share =
               envelope.resolver_threads_per_transfer == 0
                   ? variable_extras
-                  : fraction(variable_extras, 4, 5);
+                  : fraction(variable_extras, 2,
+                             2 + envelope.resolver_threads_per_transfer);
           const uint64_t handler_pid_limit =
               minimum_handlers + handler_extra_share;
           const uint64_t resolver_pid_limit =
@@ -537,16 +545,13 @@ ForceMaxBudget calculateForceMaxBudget(
   budget.outbound_open = selected_outbound_open;
   budget.inbound_connections = selected_inbound;
   budget.outbound_active = selected_outbound_active;
-  budget.outbound_per_host = std::min(
-      budget.outbound_active,
-      std::max<uint64_t>(1, ceilDivide(budget.outbound_active, 4)));
+  budget.outbound_per_host = budget.outbound_active;
   budget.outbound_idle_cache =
       budget.outbound_open - budget.outbound_active;
   uint64_t desired_owners = 0;
   uint64_t desired_flows = 0;
-  if (!assignScaled(budget.compute_workers, 8, desired_owners, budget) ||
-      !assignScaled(budget.compute_workers, 16, desired_flows, budget))
-    return budget;
+  desired_owners = budget.outbound_active;
+  desired_flows = budget.outbound_active;
   const uint64_t inbound_flow_limit =
       budget.inbound_connections > 2
           ? (budget.inbound_connections - 2) / 2
@@ -562,21 +567,13 @@ ForceMaxBudget calculateForceMaxBudget(
   const uint64_t allocatable =
       budget.memory_headroom_bytes - budget.reserved_memory_bytes -
       budget.handler_stack_bytes;
-  budget.retained_response_bytes = fraction(allocatable, 2, 10);
-  budget.fetch_bytes = fraction(allocatable, 2, 10);
-  budget.cache_bytes = fraction(allocatable, 2, 10);
-  budget.working_memory_bytes = fraction(allocatable, 3, 10);
-  const uint64_t queue_bytes =
-      budget.memory_headroom_bytes - budget.reserved_memory_bytes -
-      budget.handler_stack_bytes -
-      budget.retained_response_bytes - budget.fetch_bytes -
-      budget.cache_bytes - budget.working_memory_bytes;
-  budget.transport_queue_bytes = queue_bytes / 2;
-  budget.owner_queue_bytes = queue_bytes / 4;
-  budget.flow_queue_bytes = queue_bytes / 8;
-  budget.blocking_io_queue_bytes =
-      queue_bytes - budget.transport_queue_bytes -
-      budget.owner_queue_bytes - budget.flow_queue_bytes;
+  budget.working_memory_bytes = allocatable;
+  // Queue ceilings are views over the same charged memory, not RAM set aside
+  // for hypothetical requests. Entries are created only when work arrives.
+  budget.transport_queue_bytes = allocatable;
+  budget.owner_queue_bytes = allocatable;
+  budget.flow_queue_bytes = allocatable;
+  budget.blocking_io_queue_bytes = allocatable;
   budget.transport_queue_entries = std::max<uint64_t>(
       1, std::min<uint64_t>(usable_fds,
                             budget.transport_queue_bytes / 4096));
@@ -626,50 +623,21 @@ ForceMaxBudget calculateForceMaxBudget(
       std::max<uint64_t>(1, (budget.inbound_connections - 2) / 2));
   budget.active_owners =
       std::min(budget.active_owners, budget.active_flows);
-  budget.quickjs_workers =
-      std::max<uint64_t>(1, budget.compute_workers / 2);
-  budget.quickjs_queue_bytes =
-      std::max<uint64_t>(1, budget.working_memory_bytes / 8);
+  budget.quickjs_workers = budget.compute_workers;
+  budget.quickjs_queue_bytes = allocatable;
   budget.quickjs_queue_entries = std::max<uint64_t>(
       1, budget.quickjs_queue_bytes / (UINT64_C(256) * 1024));
-  const uint64_t quickjs_worker_pool =
-      std::max<uint64_t>(1, budget.working_memory_bytes / 8);
-  const uint64_t quickjs_worker_bytes =
-      std::max<uint64_t>(2,
-          quickjs_worker_pool / budget.quickjs_workers);
   budget.quickjs_stack_bytes_per_worker = std::min<uint64_t>(
       UINT64_C(1) * 1024 * 1024,
-      std::max<uint64_t>(UINT64_C(64) * 1024,
-                         quickjs_worker_bytes / 16));
-  if (budget.quickjs_stack_bytes_per_worker >= quickjs_worker_bytes)
-    budget.quickjs_stack_bytes_per_worker =
-        std::max<uint64_t>(1, quickjs_worker_bytes / 4);
-  budget.quickjs_heap_bytes_per_worker =
-      quickjs_worker_bytes - budget.quickjs_stack_bytes_per_worker;
-  uint64_t quickjs_per_worker = 0;
-  uint64_t quickjs_worker_total = 0;
-  uint64_t quickjs_total = 0;
-  if (!checkedAdd(budget.quickjs_heap_bytes_per_worker,
-                  budget.quickjs_stack_bytes_per_worker,
-                  quickjs_per_worker) ||
-      !checkedMultiply(quickjs_per_worker, budget.quickjs_workers,
-                       quickjs_worker_total) ||
-      !checkedAdd(budget.quickjs_queue_bytes, quickjs_worker_total,
-                  quickjs_total)) {
-    fail(budget, "integer_overflow");
-    return budget;
-  }
+      budget.reserved_memory_bytes / budget.quickjs_workers);
+  budget.quickjs_heap_bytes_per_worker = allocatable;
   budget.transport_active_bytes =
-      std::max<uint64_t>(1, budget.working_memory_bytes / 4);
-  uint64_t committed_working_memory = 0;
-  if (!checkedAdd(quickjs_total, budget.transport_active_bytes,
-                  committed_working_memory) ||
-      committed_working_memory >= budget.working_memory_bytes) {
-    fail(budget, "working_memory_too_small");
-    return budget;
-  }
-  budget.owner_active_bytes =
-      budget.working_memory_bytes - committed_working_memory;
+      allocatable;
+  budget.owner_active_bytes = allocatable;
+  budget.shared_memory_bytes = budget.owner_active_bytes;
+  budget.retained_response_bytes = budget.shared_memory_bytes;
+  budget.fetch_bytes = budget.shared_memory_bytes;
+  budget.cache_bytes = budget.shared_memory_bytes;
 
   std::string error;
   budget.valid = validateForceMaxBudget(budget, &error);

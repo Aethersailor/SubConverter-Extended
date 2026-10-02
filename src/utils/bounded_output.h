@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <ostream>
@@ -18,6 +19,29 @@ public:
   BoundedOutputExceeded()
       : std::length_error("generated output exceeds its hard byte limit") {}
 };
+
+// A flow can grow its memory lease before the serializer allocates. This is
+// thread-local because synchronous serializer stages run on one compute lane;
+// no callback is inherited by other modes or asynchronous continuations.
+inline thread_local const std::function<bool(uint64_t)> *
+    bounded_output_reservation = nullptr;
+
+class ScopedBoundedOutputReservation {
+public:
+  explicit ScopedBoundedOutputReservation(std::function<bool(uint64_t)> grow)
+      : grow_(std::move(grow)), previous_(bounded_output_reservation) {
+    bounded_output_reservation = &grow_;
+  }
+  ~ScopedBoundedOutputReservation() { bounded_output_reservation = previous_; }
+private:
+  const std::function<bool(uint64_t)> grow_;
+  const std::function<bool(uint64_t)> *previous_;
+};
+
+inline void reserveBoundedOutputBytes(uint64_t bytes) {
+  if (bounded_output_reservation && !(*bounded_output_reservation)(bytes))
+    throw BoundedOutputExceeded();
+}
 
 inline size_t checkedBoundedOutputSize(size_t current, size_t additional,
                                        size_t limit) {
@@ -116,6 +140,7 @@ public:
     // Construct the ABI string at its exact logical size, then copy from the
     // independently bounded chunks. The force_max caller gives staging and ABI
     // strings one half each so both can coexist during this conversion.
+    reserveBoundedOutputBytes(size_ + 1);
     std::string result(size_, '\0');
     size_t offset = 0;
     for (const Chunk &chunk : chunks_) {
@@ -148,6 +173,7 @@ private:
     if (requested == 0)
       throw BoundedOutputExceeded();
     Chunk chunk;
+    reserveBoundedOutputBytes(requested);
     chunk.data = std::make_unique_for_overwrite<char[]>(requested);
     chunk.capacity = requested;
     chunks_.push_back(std::move(chunk));

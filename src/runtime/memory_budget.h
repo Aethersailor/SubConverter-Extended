@@ -45,6 +45,7 @@ public:
   FetchMemoryLease &operator=(const FetchMemoryLease &) = delete;
 
   bool acquire(uint64_t bytes) noexcept;
+  void release(uint64_t bytes) noexcept;
   void reset() noexcept;
   uint64_t bytes() const noexcept { return bytes_; }
   bool charged() const noexcept { return charged_; }

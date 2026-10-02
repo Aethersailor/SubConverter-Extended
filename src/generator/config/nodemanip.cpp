@@ -19,6 +19,7 @@
 #include "subexport.h"
 #include "utils/file_extra.h"
 #include "utils/force_max_cooperation.h"
+#include "utils/bounded_output.h"
 #include "utils/logger.h"
 #include "utils/map_extra.h"
 #include "utils/network.h"
@@ -491,6 +492,8 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
         try {
           auto mihomo_nodes = mihomo::parseSubscription(strSub);
           appendMihomoNodes(mihomo_nodes, nodes);
+        } catch (const BoundedOutputExceeded &) {
+          throw;
         } catch (const std::exception &e) {
           recordParserFailure();
           writeLog(LOG_LEVEL_ERROR,
@@ -613,6 +616,8 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
             node.Group = custom_group;
           allNodes.emplace_back(std::move(node));
         }
+      } catch (const BoundedOutputExceeded &) {
+        throw;
       } catch (const std::exception &e) {
         recordParserFailure();
         writeLog(LOG_LEVEL_ERROR,

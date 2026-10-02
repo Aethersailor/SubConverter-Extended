@@ -1454,9 +1454,9 @@ class Runtime
 public:
     JSRuntime * rt;
 
-    Runtime()
+    Runtime(const JSMallocFunctions *allocator = nullptr, void *opaque = nullptr)
     {
-        rt = JS_NewRuntime();
+        rt = allocator ? JS_NewRuntime2(allocator, opaque) : JS_NewRuntime();
         if(!rt)
             throw std::runtime_error{"qjs: Cannot create runtime"};
 

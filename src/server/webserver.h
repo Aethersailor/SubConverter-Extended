@@ -33,8 +33,8 @@ struct Request
 
 struct ImmutableResponseBody
 {
-    std::string content;
     RetainedResponseByteLease retained_bytes;
+    std::string content;
 };
 
 using shared_response_body = std::shared_ptr<const ImmutableResponseBody>;

@@ -7,6 +7,7 @@ import argparse
 import base64
 import binascii
 import contextlib
+import concurrent.futures
 import difflib
 import hashlib
 import http.client
@@ -12135,6 +12136,63 @@ def force_max_unlimited_download_budget_baseline(binary: Path) -> None:
         )
 
 
+def force_max_unlimited_parallel_baseline(binary: Path, fixture_base: str) -> None:
+    headers = {"Authorization": "Basic " + base64.b64encode(
+        b"fixture-admin:fixture-dashboard-secret").decode()}
+    with running_service(binary, statistics=True,
+                         environment={"SUBCONVERTER_RESOURCE_CONTROL": "force_max"},
+                         config_replacements=(("max_allowed_download_size = 1048576",
+                                               "max_allowed_download_size = 0"),)) as base_url:
+        status, body, _ = request(base_url, "/dashboard/data", headers=headers)
+        dashboard = json.loads(body)
+        budget = dashboard["resource_control"]["calculated_force_max_budget"]
+        if status != 200 or budget["applied"] is not True:
+            raise AssertionError("parallel regression did not activate force_max")
+        parallel = min(20, int(budget["active_owners"]),
+                       int(budget["outbound_per_host"]))
+        if parallel < 2:
+            raise AssertionError("parallel regression needs capacity for two small owners")
+        with FixtureHandler.counter_lock:
+            before = FixtureHandler.slow_subscription_request_count
+        FixtureHandler.slow_subscription_release.clear()
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=parallel) as executor:
+                futures = [executor.submit(request, base_url, "/sub", {
+                    "target": "clash", "list": "true", "sort": "true",
+                    "url": fixture_base + f"/slow-subscription.txt?zero-limit-owner={index}",
+                }) for index in range(parallel)]
+                deadline = time.monotonic() + 5
+                try:
+                    while time.monotonic() < deadline:
+                        with FixtureHandler.counter_lock:
+                            arrived = FixtureHandler.slow_subscription_request_count - before
+                        if arrived >= parallel:
+                            break
+                        time.sleep(0.02)
+                    else:
+                        raise AssertionError(f"zero download limit serialized small owners: "
+                                             f"only {arrived}/{parallel} reached the held origin")
+                finally:
+                    FixtureHandler.slow_subscription_release.set()
+                for future in futures:
+                    result_status, result_body, _ = future.result(timeout=15)
+                    if result_status != 200 or b"Smoke" not in result_body:
+                        raise AssertionError("parallel small conversion failed")
+        finally:
+            FixtureHandler.slow_subscription_release.set()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            _, body, _ = request(base_url, "/dashboard/data", headers=headers)
+            idle = json.loads(body)
+            if (int(idle["owner_admission"]["active"]) == 0
+                    and int(idle["owner_admission"]["active_bytes"]) == 0
+                    and int(idle["fetch_memory_budget"]["used"]) == 0):
+                break
+            time.sleep(0.1)
+        else:
+            raise AssertionError("parallel conversion retained owner/fetch leases after completion")
+
+
 def force_max_flow_feature_baseline(binary: Path, fixture_base: str) -> None:
     dashboard_headers = {
         "Authorization": "Basic "
@@ -13915,7 +13973,10 @@ def main() -> int:
         mismatch_env,
     )
     if (
-        mismatch_snapshot["server"] != force_snapshot["server"]
+        {key: value for key, value in mismatch_snapshot["server"].items()
+         if key != "max_pending_connections"}
+        != {key: value for key, value in force_snapshot["server"].items()
+            if key != "max_pending_connections"}
         or mismatch_snapshot["advanced"]["resource_control_effective"]
         != "force_max"
         or any(
@@ -13929,6 +13990,14 @@ def main() -> int:
         )
     ):
         raise AssertionError("hardware pin mismatch changed force_max capacity")
+    # Admission now follows each probe's real memory/PID envelope. Available
+    # memory can change between helper processes, even on the same machine.
+    for snapshot, diagnostics in ((force_snapshot, force_logs),
+                                  (mismatch_snapshot, mismatch_logs)):
+        derived = re.search(r"inbound_connections=([0-9]+)", diagnostics)
+        if (derived is None or snapshot["server"]["max_pending_connections"]
+                != int(derived.group(1))):
+            raise AssertionError("force_max admission did not apply its detected budget")
     calibrated_env = force_env.copy()
     calibrated_env["SUBCONVERTER_FORCE_MAX_CURVE_FINGERPRINT"] = hardware.group(1)
     calibrated_snapshot, calibrated_logs = run_settings_snapshot(
@@ -14122,6 +14191,7 @@ def main() -> int:
         conversion_cost_classification_baseline(binary, fixture_base)
         resource_control_execution_path_baseline(binary)
         force_max_unlimited_download_budget_baseline(binary)
+        force_max_unlimited_parallel_baseline(binary, fixture_base)
         force_max_controller_runtime_baseline(binary)
         force_max_flow_feature_baseline(binary, fixture_base)
         force_max_subscription_cache_admission_baseline(binary, fixture_base)

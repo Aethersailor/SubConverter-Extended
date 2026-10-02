@@ -103,6 +103,7 @@ CpuPermitSnapshot conversionCpuPermitSnapshot();
 void setConversionCpuPermitLimit(uint64_t limit) noexcept;
 ResponseMicroCacheSnapshot responseMicroCacheSnapshot();
 void configureResponseMicroCacheLimit(uint64_t max_bytes) noexcept;
+void clearResponseMicroCache() noexcept;
 void setResponseMicroCacheGrowthFrozen(bool frozen) noexcept;
 SubscriptionSingleflightSnapshot subscriptionSingleflightSnapshot() noexcept;
 SubscriptionOwnerAdmissionSnapshot subscriptionOwnerAdmissionSnapshot();

@@ -69,6 +69,7 @@ ResourceEnvelope resourceEnvelopeFromSnapshot(
   envelope.pids_current = snapshot.pids_current;
   envelope.pids_max = snapshot.pids_max;
   envelope.self_threads = snapshot.self_threads;
+  envelope.native_thread_stack_bytes = snapshot.native_thread_stack_bytes;
   envelope.resolver_threads_per_transfer =
       snapshot.resolver_may_use_threads ? 1 : 0;
   envelope.http_handler_threads_per_compute =
