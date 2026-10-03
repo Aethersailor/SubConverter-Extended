@@ -1,4 +1,8 @@
 # ========== GO BUILD STAGE ==========
+ARG ARM_DEB_ARCH=armhf
+ARG ARM_TRIPLET=arm-linux-gnueabihf
+ARG ARM_GOARM=7
+ARG ARM_CPU_FLAGS="-march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard"
 ARG GO_IMAGE=mirror.gcr.io/library/golang:latest
 ARG DEBIAN_IMAGE=mirror.gcr.io/library/debian:latest
 ARG ALPINE_IMAGE=mirror.gcr.io/library/alpine:latest
@@ -7,6 +11,9 @@ ARG DEBIAN_TRIXIE_SLIM_IMAGE=mirror.gcr.io/library/debian:trixie-slim
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS go-builder
 
 ARG TARGETARCH
+ARG ARM_DEB_ARCH
+ARG ARM_TRIPLET
+ARG ARM_GOARM
 ARG TARGETVARIANT
 ARG MIHOMO_REF="Alpha"
 ARG MIHOMO_CACHE_BUST=1
@@ -16,7 +23,7 @@ WORKDIR /build/bridge
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      git build-essential crossbuild-essential-armhf ca-certificates && \
+      git build-essential crossbuild-essential-${ARM_DEB_ARCH} ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 COPY bridge/go.mod bridge/go.sum ./
@@ -61,19 +68,19 @@ RUN go run ../scripts/generate_param_compat.go -manifest mihomo_capabilities.jso
 RUN CGO_ENABLED=0 \
     GOOS=linux \
     GOARCH=arm \
-    GOARM=7 \
+    GOARM=${ARM_GOARM} \
     go build \
       -trimpath \
       -ldflags='-s -w' \
       -o subconverter-update \
       ./cmd/portable-updater
 
-RUN echo "==> Cross-compiling Go bridge for linux/arm/v7" && \
+RUN echo "==> Cross-compiling Go bridge with GOARM=${ARM_GOARM}" && \
     CGO_ENABLED=1 \
     GOOS=linux \
     GOARCH=arm \
-    GOARM=7 \
-    CC=arm-linux-gnueabihf-gcc \
+    GOARM=${ARM_GOARM} \
+    CC=${ARM_TRIPLET}-gcc \
     go build \
       -trimpath \
       -buildmode=c-archive \
@@ -84,6 +91,10 @@ RUN ls -lh libmihomo.a libmihomo.h
 
 # ========== C++ CROSS BUILD STAGE ==========
 FROM --platform=$BUILDPLATFORM ${DEBIAN_TRIXIE_IMAGE} AS builder
+
+ARG ARM_DEB_ARCH
+ARG ARM_TRIPLET
+ARG ARM_CPU_FLAGS
 
 ARG THREADS="4"
 ARG SHA=""
@@ -101,22 +112,22 @@ ARG JPCRE2_REF
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PKG_CONFIG_ALLOW_CROSS=1
-ENV PKG_CONFIG_LIBDIR=/usr/lib/arm-linux-gnueabihf/pkgconfig:/usr/share/pkgconfig:/opt/armv7/lib/pkgconfig
+ENV PKG_CONFIG_LIBDIR=/usr/lib/${ARM_TRIPLET}/pkgconfig:/usr/share/pkgconfig:/opt/armv7/lib/pkgconfig
 ENV PKG_CONFIG_PATH=/opt/armv7/lib/pkgconfig
 
 WORKDIR /
 
-RUN dpkg --add-architecture armhf && \
+RUN dpkg --add-architecture ${ARM_DEB_ARCH} && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
-      git build-essential crossbuild-essential-armhf \
+      git build-essential crossbuild-essential-${ARM_DEB_ARCH} \
       cmake ninja-build ccache pkg-config curl ca-certificates file python3 \
       tzdata \
       libboost-dev \
-      libcurl4-openssl-dev:armhf \
-      libpcre2-dev:armhf \
-      libyaml-cpp-dev:armhf \
-      libatomic1:armhf \
+      libcurl4-openssl-dev:${ARM_DEB_ARCH} \
+      libpcre2-dev:${ARM_DEB_ARCH} \
+      libyaml-cpp-dev:${ARM_DEB_ARCH} \
+      libatomic1:${ARM_DEB_ARCH} \
       rapidjson-dev && \
     rm -rf /var/lib/apt/lists/*
 
@@ -130,7 +141,7 @@ RUN set -xe && \
     git -C quickjspp checkout --detach FETCH_HEAD && \
     git -C quickjspp submodule update --init --recursive --depth=1 && \
     cd quickjspp && \
-    cmake -DCMAKE_TOOLCHAIN_FILE=/opt/armv7-toolchain.cmake -DCMAKE_BUILD_TYPE=Release . && \
+    cmake -DCMAKE_TOOLCHAIN_FILE=/opt/armv7-toolchain.cmake -DARM_TRIPLET="${ARM_TRIPLET}" -DARM_CPU_FLAGS="${ARM_CPU_FLAGS}" -DCMAKE_BUILD_TYPE=Release . && \
     make quickjs -j ${THREADS} && \
     install -d /opt/armv7/lib/quickjs/ && \
     install -m644 quickjs/libquickjs.a /opt/armv7/lib/quickjs/ && \
@@ -146,7 +157,7 @@ RUN set -xe && \
     git -C libcron checkout --detach FETCH_HEAD && \
     git -C libcron submodule update --init --recursive --depth=1 && \
     cd libcron && \
-    cmake -DCMAKE_TOOLCHAIN_FILE=/opt/armv7-toolchain.cmake -DCMAKE_BUILD_TYPE=Release . && \
+    cmake -DCMAKE_TOOLCHAIN_FILE=/opt/armv7-toolchain.cmake -DARM_TRIPLET="${ARM_TRIPLET}" -DARM_CPU_FLAGS="${ARM_CPU_FLAGS}" -DCMAKE_BUILD_TYPE=Release . && \
     make libcron -j ${THREADS} && \
     install -d /opt/armv7/lib/ && \
     install -m644 libcron/out/Release/liblibcron.a /opt/armv7/lib/ && \
@@ -214,16 +225,16 @@ RUN set -xe && \
     export CCACHE_DIR=/tmp/ccache && \
     export CCACHE_COMPILERCHECK=content && \
     cmake -GNinja \
-      -DCMAKE_TOOLCHAIN_FILE=/opt/armv7-toolchain.cmake \
+      -DCMAKE_TOOLCHAIN_FILE=/opt/armv7-toolchain.cmake -DARM_TRIPLET="${ARM_TRIPLET}" -DARM_CPU_FLAGS="${ARM_CPU_FLAGS}" \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
       -DCMAKE_PREFIX_PATH=/opt/armv7 \
       -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
       -DCMAKE_POSITION_INDEPENDENT_CODE=OFF \
       -DCURL_INCLUDE_DIR=/usr/include \
-      -DCURL_LIBRARY=/usr/lib/arm-linux-gnueabihf/libcurl.so \
+      -DCURL_LIBRARY=/usr/lib/${ARM_TRIPLET}/libcurl.so \
       -DPCRE2_INCLUDE_DIR=/usr/include \
-      -DPCRE2_LIBRARY=/usr/lib/arm-linux-gnueabihf/libpcre2-8.so \
+      -DPCRE2_LIBRARY=/usr/lib/${ARM_TRIPLET}/libpcre2-8.so \
       -DQUICKJS_INCLUDE_DIRS=/opt/armv7/include \
       -DQUICKJS_LIBRARY=/opt/armv7/lib/quickjs/libquickjs.a \
       -DLIBCRON_INCLUDE_DIR=/opt/armv7/include \
@@ -233,18 +244,18 @@ RUN set -xe && \
       . && \
     ninja -j ${THREADS} && \
     file /src/subconverter && \
-    arm-linux-gnueabihf-readelf -h /src/subconverter && \
-    arm-linux-gnueabihf-readelf -d /src/subconverter
+    ${ARM_TRIPLET}-readelf -h /src/subconverter && \
+    ${ARM_TRIPLET}-readelf -d /src/subconverter
 
 RUN set -xe && \
-    mkdir -p /runtime-root/etc/ssl/certs /runtime-root/etc /runtime-root/tmp /runtime-root/usr/lib/arm-linux-gnueabihf /runtime-root/usr/share/zoneinfo && \
+    mkdir -p /runtime-root/etc/ssl/certs /runtime-root/etc /runtime-root/tmp /runtime-root/usr/lib/${ARM_TRIPLET} /runtime-root/usr/share/zoneinfo && \
     cp -aL /etc/ssl/certs/ca-certificates.crt /runtime-root/etc/ssl/certs/ && \
     cp -aL /usr/share/zoneinfo/. /runtime-root/usr/share/zoneinfo/ && \
     ln -snf /usr/share/zoneinfo/Asia/Shanghai /runtime-root/etc/localtime && \
     echo Asia/Shanghai > /runtime-root/etc/timezone && \
     if [ -f /etc/nsswitch.conf ]; then cp -aL /etc/nsswitch.conf /runtime-root/etc/nsswitch.conf; fi && \
-    READELF=arm-linux-gnueabihf-readelf \
-    ELF_LIBRARY_PATH="/usr/lib/arm-linux-gnueabihf:/lib/arm-linux-gnueabihf:/usr/arm-linux-gnueabihf/lib:/usr/lib:/lib" \
+    READELF=${ARM_TRIPLET}-readelf \
+    ELF_LIBRARY_PATH="/usr/lib/${ARM_TRIPLET}:/lib/${ARM_TRIPLET}:/usr/${ARM_TRIPLET}/lib:/usr/lib:/lib" \
       bash /src/scripts/ci/copy-elf-runtime-deps.sh /runtime-root \
         /src/subconverter \
         libnss_dns.so.2 \
@@ -252,11 +263,11 @@ RUN set -xe && \
         libnss_compat.so.2 \
         libresolv.so.2 && \
     if [ -d /runtime-root/lib ]; then \
-      install -d /runtime-root/usr/lib/arm-linux-gnueabihf; \
-      find /runtime-root/lib -maxdepth 1 -type f -name '*.so*' -exec mv -f -t /runtime-root/usr/lib/arm-linux-gnueabihf {} +; \
-      if [ -d /runtime-root/lib/arm-linux-gnueabihf ]; then \
-        cp -a /runtime-root/lib/arm-linux-gnueabihf/. /runtime-root/usr/lib/arm-linux-gnueabihf/; \
-        rm -rf /runtime-root/lib/arm-linux-gnueabihf; \
+      install -d /runtime-root/usr/lib/${ARM_TRIPLET}; \
+      find /runtime-root/lib -maxdepth 1 -type f -name '*.so*' -exec mv -f -t /runtime-root/usr/lib/${ARM_TRIPLET} {} +; \
+      if [ -d /runtime-root/lib/${ARM_TRIPLET} ]; then \
+        cp -a /runtime-root/lib/${ARM_TRIPLET}/. /runtime-root/usr/lib/${ARM_TRIPLET}/; \
+        rm -rf /runtime-root/lib/${ARM_TRIPLET}; \
       fi; \
       rmdir /runtime-root/lib 2>/dev/null || true; \
     fi
@@ -275,6 +286,7 @@ CMD ["/src/subconverter"]
 
 # ========== FINAL STAGE ==========
 FROM --platform=$TARGETPLATFORM ${DEBIAN_TRIXIE_SLIM_IMAGE}
+ARG ARM_TRIPLET
 
 ARG VERSION="dev"
 ARG SHA=""
@@ -297,7 +309,7 @@ COPY --from=builder --chmod=0755 /src/subconverter /usr/bin/subconverter
 COPY --from=builder /src/base /base/
 
 ENV TZ=Asia/Shanghai
-ENV LD_LIBRARY_PATH="/usr/lib/arm-linux-gnueabihf:/usr/lib"
+ENV LD_LIBRARY_PATH="/usr/lib/${ARM_TRIPLET}:/usr/lib"
 WORKDIR /base
 RUN set -e && \
     ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && \
@@ -305,7 +317,7 @@ RUN set -e && \
     printf '%s\n' \
       '#!/bin/sh' \
       'set -e' \
-      'export LD_LIBRARY_PATH="/usr/lib/arm-linux-gnueabihf:/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"' \
+      "export LD_LIBRARY_PATH=\"/usr/lib/${ARM_TRIPLET}:/usr/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}\"" \
       'CONF="${PREF_PATH:-/base/pref.toml}"' \
       'CONF_DIR="$(dirname "$CONF")"' \
       'mkdir -p "$CONF_DIR"' \

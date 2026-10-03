@@ -9,6 +9,8 @@ UPDATER=/usr/libexec/subconverter-extended-update
 start_service() {
 	local enabled
 
+	[ "$(cat /usr/share/subconverter-extended/package-manager 2>/dev/null)" != ipk ] || return 0
+	command -v apk >/dev/null 2>&1 || return 0
 	config_load 'subconverter-extended'
 	[ -x "$UPDATER" ] || return 1
 	if [ -s /etc/subconverter/update/pending.json ]; then

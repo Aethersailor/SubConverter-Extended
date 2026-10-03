@@ -6,7 +6,7 @@ ARCH="${2:?arch is required}"
 REVISION="${SHA:?full source revision is required}"
 RELEASE_BUILD_DATE="${BUILD_DATE:?build date is required}"
 PACKAGE_DIR="SubConverter-Extended"
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RENDER_LAUNCHER="${SCRIPT_DIR}/ci/render-linux-launcher.sh"
 UPDATE_LAUNCHER="${SCRIPT_DIR}/templates/linux-update.sh"
 UPDATE_README="${SCRIPT_DIR}/templates/portable-update-readme.txt"
@@ -50,4 +50,6 @@ python3 scripts/ci/write_build_info.py write \
 bash "${RENDER_LAUNCHER}" "${PACKAGE_DIR}/start.sh" portable "__PORTABLE_ROOT__" "__ROOT_BASE__"
 install -m755 "${UPDATE_LAUNCHER}" "${PACKAGE_DIR}/update.sh"
 install -m644 "${UPDATE_README}" "${PACKAGE_DIR}/UPDATE-README.txt"
-tar -czf "SubConverter-Extended-${VERSION}-linux-${ARCH}.tar.gz" "${PACKAGE_DIR}"
+if [ "${PACKAGE_PORTABLE:-true}" = "true" ]; then
+  tar -czf "SubConverter-Extended-${VERSION}-linux-${ARCH}.tar.gz" "${PACKAGE_DIR}"
+fi

@@ -522,3 +522,6 @@ msgstr "版本 %s 已是最新版本。"
 
 msgid "Version %s is installed, validated and rollback-ready."
 msgstr "版本 %s 已安装并通过验证，且已准备好回滚。"
+
+msgid "IPK packages are updated manually. Download the Release IPK matching the device package architecture, then install it with opkg."
+msgstr "IPK 软件包需手动升级。下载与设备软件包架构匹配的 Release IPK，再使用 opkg 安装。"

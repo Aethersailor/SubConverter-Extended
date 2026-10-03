@@ -39,7 +39,7 @@ class ReleaseManifestTests(unittest.TestCase):
             root = pathlib.Path(directory)
             self.populate(root)
             manifest = self.create(root)
-            self.assertEqual(len(manifest["assets"]), 18)
+            self.assertEqual(len(manifest["assets"]), 39)
             self.assertEqual(manifest["revision"], "a" * 40)
             MANIFEST.verify_manifest(root=root, manifest=manifest)
 

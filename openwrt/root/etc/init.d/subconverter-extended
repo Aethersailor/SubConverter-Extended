@@ -39,7 +39,8 @@ start_service() {
 	: > "$SERVICE_LOG" || return 1
 	chmod 0600 "$SERVICE_LOG" || return 1
 
-	if [ -s /etc/subconverter/update/pending.json ] && \
+	if [ "$(cat /usr/share/subconverter-extended/package-manager 2>/dev/null)" != ipk ] && \
+	   [ -s /etc/subconverter/update/pending.json ] && \
 	   [ "${SUBCONVERTER_UPDATE_TRANSACTION:-0}" != '1' ] && [ -x "$UPDATER" ]; then
 		"$UPDATER" recover
 		recovery_result=$?
@@ -78,7 +79,8 @@ start_service() {
 }
 
 reload_service() {
-	if [ "${SUBCONVERTER_UPDATE_TRANSACTION:-0}" != '1' ] && \
+	if [ "$(cat /usr/share/subconverter-extended/package-manager 2>/dev/null)" != ipk ] && \
+	   [ "${SUBCONVERTER_UPDATE_TRANSACTION:-0}" != '1' ] && \
 	   [ -s /etc/subconverter/update/pending.json ]; then
 		logger -t subconverter-extended \
 			'Deferring configuration reload while an update transaction is active'
