@@ -119,10 +119,10 @@ test('outdated baseline requests official rebase and deduplicates requests', asy
   assert.deepEqual((await execute({behind: true, recentRebase: true})).writes, []);
 });
 
-test('failed validation retries only failed jobs and stops at the attempt budget', async () => {
-  const f = await execute({validation: {conclusion: 'failure'}});
-  assert.deepEqual(f.writes.map(w => w[0]), ['reRunWorkflowFailedJobs']);
-  for (const validation of [{conclusion: 'failure', run_attempt: 3},
+test('failed or deliberately stopped validation never triggers an automatic retry', async () => {
+  for (const validation of [{conclusion: 'failure'}, {conclusion: 'cancelled'},
+    {conclusion: 'timed_out'}, {conclusion: 'startup_failure'},
+    {conclusion: 'failure', run_attempt: 3},
     {status: 'in_progress', conclusion: null}]) {
     assert.deepEqual((await execute({validation})).writes, []);
   }

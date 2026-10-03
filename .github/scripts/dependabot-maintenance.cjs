@@ -5,7 +5,6 @@ const BUILD = 'build-dockerhub.yml';
 const CODEQL = 'codeql.yml';
 const REFRESH_TITLE = 'Refresh upstream dependencies on dev';
 const GENERATED_TITLE = 'chore: update generated development inputs after build [skip ci]';
-const MAX_ATTEMPTS = 3;
 const DAY = 86400000;
 
 function eligible(pull, repository) {
@@ -49,18 +48,9 @@ module.exports = async function maintain({github, context, core, rebaseGithub}) 
   const runsFor = async (workflow, extra = {}) => github.paginate(github.rest.actions.listWorkflowRuns, {
     ...repo, workflow_id: workflow, per_page: 100, ...extra,
   });
-  const retry = async run => {
+  const reportIncompleteRun = async run => {
     if (run.status !== 'completed' || run.conclusion === 'success') return;
-    if (!['failure', 'cancelled', 'timed_out', 'startup_failure'].includes(run.conclusion)) {
-      core.warning(`Run ${run.id} needs attention (${run.conclusion}): ${run.html_url}`);
-      return;
-    }
-    if (run.run_attempt >= MAX_ATTEMPTS) {
-      core.warning(`Run ${run.id} still fails after ${MAX_ATTEMPTS} attempts; keeping the gate closed: ${run.html_url}`);
-      return;
-    }
-    await act(`Retry failed jobs in run ${run.id} (attempt ${run.run_attempt + 1}/${MAX_ATTEMPTS}).`, () =>
-      github.rest.actions.reRunWorkflowFailedJobs({...repo, run_id: run.id}));
+    core.warning(`Run ${run.id} needs attention (${run.conclusion}); automatic retry is disabled: ${run.html_url}`);
   };
 
   // GITHUB_TOKEN merges do not emit ordinary push CI. Repair a missed dispatch
@@ -90,7 +80,7 @@ module.exports = async function maintain({github, context, core, rebaseGithub}) 
         }));
       } else if (run.status !== 'completed' || run.conclusion !== 'success') {
         ready = false;
-        await retry(run);
+        await reportIncompleteRun(run);
       }
     }
     return ready;
@@ -137,7 +127,7 @@ module.exports = async function maintain({github, context, core, rebaseGithub}) 
 
         const run = latest(await runsFor(VALIDATION, {event: 'pull_request', head_sha: pull.head.sha}));
         if (!run) { core.warning(`No PR Validation run for #${pull.number} at ${pull.head.sha}.`); continue; }
-        if (run.status !== 'completed' || run.conclusion !== 'success') { await retry(run); continue; }
+        if (run.status !== 'completed' || run.conclusion !== 'success') { await reportIncompleteRun(run); continue; }
         const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
           ...repo, run_id: run.id, filter: 'latest', per_page: 100,
         });
