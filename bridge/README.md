@@ -8,8 +8,9 @@ Mihomo's native subscription parser.
 The bridge is integrated into the C++ build:
 
 - `bridge/converter.go` exports `ConvertSubscription` and `FreeString`.
-- `bridge/parser.go` mirrors Mihomo proxy-provider parsing for native YAML and
-  URI/base64 subscriptions, including per-proxy validation.
+- `bridge/parser.go` parses native YAML and URI/base64 subscriptions with
+  per-proxy validation. Native YAML is validated strictly; URI subscriptions
+  skip invalid nodes and fail only when no valid nodes remain.
 - `src/parser/mihomo_bridge.cpp` calls the exported Go functions and converts
   Mihomo JSON output into C++ proxy nodes.
 - `src/generator/config/nodemanip.cpp` selects the parser after the request

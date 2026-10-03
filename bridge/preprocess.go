@@ -20,25 +20,46 @@ func preprocessSubscription(subscription string) string {
 			result = append(result, line)
 			continue
 		}
-		// Mieru credentials and protobuf payloads use standard URL/Base64
-		// escaping. QueryUnescape would turn '+' into a space and can expose a
-		// percent-encoded '#' as a fragment delimiter before Mihomo parses it.
-		if strings.HasPrefix(line, mieruStandardPrefix) || strings.HasPrefix(line, "mierus://") {
-			result = append(result, line)
-			continue
+		// Only unwrap a fully URL-encoded link. Ordinary URIs must retain
+		// their '+', escaped credentials and query delimiters for Mihomo.
+		if !strings.Contains(line, "://") {
+			if decoded, err := url.QueryUnescape(line); err == nil && strings.Contains(decoded, "://") {
+				line = decoded
+			}
 		}
 
-		// Decode the entire URL line. This fixes inputs such as v2rayN's
-		// uuid%3Apassword encoding and keeps malformed percent escapes unchanged.
-		if decoded, err := url.QueryUnescape(line); err == nil {
-			line = decoded
-		}
-
+		line = normalizeEncodedUserinfoSeparator(line)
 		line = normalizeLegacyShadowrocketVMess(line)
 		result = append(result, line)
 	}
 
 	return strings.Join(result, "\n")
+}
+
+// Preserve legacy cipher%3Apassword and uuid%3Apassword links without
+// unescaping the password or any other URI component ahead of the parser.
+func normalizeEncodedUserinfoSeparator(line string) string {
+	scheme, body, found := strings.Cut(line, "://")
+	if !found || (!strings.EqualFold(scheme, "ss") && !strings.EqualFold(scheme, "tuic")) {
+		return line
+	}
+	authority := body
+	if end := strings.IndexAny(authority, "/?#"); end >= 0 {
+		authority = authority[:end]
+	}
+	at := strings.LastIndexByte(authority, '@')
+	if at < 0 {
+		return line
+	}
+	userinfo := authority[:at]
+	if strings.Contains(userinfo, ":") {
+		return line
+	}
+	colon := strings.Index(strings.ToLower(userinfo), "%3a")
+	if colon < 0 {
+		return line
+	}
+	return scheme + "://" + userinfo[:colon] + ":" + userinfo[colon+3:] + body[at:]
 }
 
 func normalizeLegacyShadowrocketVMess(line string) string {
