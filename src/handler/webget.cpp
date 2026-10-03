@@ -686,8 +686,10 @@ public:
                 resources.calculated_force_max_budget
                     .flow_queue_entries);
         capacity_ = static_cast<size_t>(
-            std::clamp<uint64_t>(desired_capacity, 1024, 16384));
-        if((capacity_ & 1U) != 0 && capacity_ < 16384)
+            resources.effective_mode == "force_max"
+                ? std::clamp<uint64_t>(desired_capacity, 2, SIZE_MAX - 1)
+                : std::clamp<uint64_t>(desired_capacity, 1024, 16384));
+        if((capacity_ & 1U) != 0)
             ++capacity_;
         generation_capacity_ = capacity_ / 2;
     }
@@ -705,9 +707,9 @@ public:
             auto current = current_entries_.find(cache_key);
             if(current != current_entries_.end())
             {
-                if(current->second > now)
+                if(current->second.expires > now)
                 {
-                    current->second = expires_at;
+                    current->second.expires = expires_at;
                     ++reuse_admitted_total_;
                     return true;
                 }
@@ -716,9 +718,9 @@ public:
             auto previous = previous_entries_.find(cache_key);
             if(previous != previous_entries_.end())
             {
-                if(previous->second > now)
+                if(previous->second.expires > now)
                 {
-                    previous->second = expires_at;
+                    previous->second.expires = expires_at;
                     ++reuse_admitted_total_;
                     return true;
                 }
@@ -733,7 +735,11 @@ public:
                 previous_entries_.swap(current_entries_);
                 current_entries_.clear();
             }
-            current_entries_.emplace(cache_key, expires_at);
+            force_max_memory::Lease memory;
+            if(!memory.acquire(sizeof(Entry) + sizeof(std::string) +
+                               cache_key.capacity() + 64))
+                return false;
+            current_entries_.emplace(cache_key, Entry{std::move(memory), expires_at});
             ++first_seen_bypassed_total_;
         }
         catch(...)
@@ -765,13 +771,23 @@ public:
         }
     }
 
+    void clear() noexcept
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        current_entries_.clear();
+        previous_entries_.clear();
+    }
+
 private:
+    struct Entry
+    {
+        force_max_memory::Lease memory;
+        std::chrono::steady_clock::time_point expires;
+    };
     mutable std::mutex mutex_;
-    std::unordered_map<std::string,
-                       std::chrono::steady_clock::time_point>
+    std::unordered_map<std::string, Entry>
         current_entries_;
-    std::unordered_map<std::string,
-                       std::chrono::steady_clock::time_point>
+    std::unordered_map<std::string, Entry>
         previous_entries_;
     size_t capacity_ = 1024;
     size_t generation_capacity_ = 512;
@@ -1230,6 +1246,94 @@ struct curl_writer_data
     curl_progress_data *progress = nullptr;
 };
 
+static bool appendFetchOutput(std::string &output, const char *data,
+                              size_t bytes, curl_progress_data &progress,
+                              FetchMemoryLease *fetch = nullptr,
+                              RetainedResponseByteLease *owned = nullptr) noexcept
+{
+    if(bytes > output.max_size() - output.size())
+        return false;
+    const bool force_max = force_max_memory::limit.load() != 0;
+    const size_t needed = output.size() + bytes;
+    size_t capacity = output.capacity();
+    uint64_t charge = bytes;
+    uint64_t previous_storage = 0;
+    if(force_max)
+    {
+        const size_t inline_capacity = std::string().capacity();
+        const size_t old_storage = capacity > inline_capacity ? capacity + 1 : 0;
+        if(needed > capacity)
+            capacity = std::max(needed, capacity > output.max_size() / 2
+                                          ? needed : capacity * 2);
+        const size_t new_storage = capacity > inline_capacity ? capacity + 1 : 0;
+        // Both old and new allocations coexist during reserve(). Charge the
+        // whole new buffer before reallocating, then give the old one back.
+        charge = new_storage == old_storage ? 0 : new_storage;
+        previous_storage = charge == 0 ? 0 : old_storage;
+    }
+    const auto retain = [&](uint64_t amount) {
+        return progress.request_context
+            ? progress.request_context->retainResponseBytes(amount)
+            : (owned ? owned->retain(amount) : progress.retained_bytes.retain(amount));
+    };
+    if(!retain(charge))
+    {
+        if(!force_max) return false;
+        force_max_memory::reclaimCaches();
+        if(!retain(charge)) return false;
+    }
+    if(progress.request_context)
+        progress.context_retained_bytes += charge;
+    // Fetch bytes are a view of the same payload already in the shared ledger.
+    // They are not another reservation for the maximum possible download.
+    if(fetch && !fetch->acquire(force_max ? charge : 0))
+        return false;
+    try
+    {
+        if(force_max && needed > output.capacity())
+        {
+            output.reserve(capacity);
+            // Check the allocator's capacity rather than assuming reserve()
+            // must allocate exactly its argument.
+            if(output.capacity() > capacity)
+            {
+                const uint64_t extra = output.capacity() - capacity;
+                if(!(progress.request_context
+                         ? progress.request_context->retainResponseBytes(extra)
+                         : (owned ? owned->retain(extra)
+                                  : progress.retained_bytes.retain(extra))))
+                    return false;
+                if(progress.request_context)
+                    progress.context_retained_bytes += extra;
+                if(fetch && !fetch->acquire(extra))
+                    return false;
+            }
+        }
+        output.append(data, bytes);
+        if(previous_storage != 0)
+        {
+            if(progress.request_context)
+            {
+                progress.request_context->releaseResponseBytes(previous_storage);
+                progress.context_retained_bytes -= previous_storage;
+            }
+            else if(owned)
+                owned->release(previous_storage);
+            else
+                progress.retained_bytes.release(previous_storage);
+            if(fetch)
+                fetch->release(previous_storage);
+        }
+        return true;
+    }
+    catch(...) { return false; }
+}
+
+void clearSubscriptionCacheAdmissionHistory() noexcept
+{
+    subscriptionCacheDoorkeeper().clear();
+}
+
 static int writer(char *data, size_t size, size_t nmemb, void *user_data)
 {
     auto *writerData = static_cast<curl_writer_data *>(user_data);
@@ -1239,16 +1343,12 @@ static int writer(char *data, size_t size, size_t nmemb, void *user_data)
     if(writerData->progress)
     {
         auto &progress = *writerData->progress;
-        const bool retained = progress.request_context
-            ? progress.request_context->retainResponseBytes(bytes)
-            : progress.retained_bytes.retain(bytes);
-        if(!retained)
+        if(!appendFetchOutput(*writerData->output, data, bytes, progress))
         {
             progress.abort_reason = AsyncFetchFailure::Capacity;
             return 0;
         }
-        if(progress.request_context)
-            progress.context_retained_bytes += bytes;
+        return static_cast<int>(bytes);
     }
     writerData->output->append(data, bytes);
     return static_cast<int>(bytes);
@@ -1848,15 +1948,6 @@ public:
         transfer->route = std::move(route);
         transfer->allow_insecure_tls = allow_insecure_tls;
         transfer->size_limit = size_limit;
-        if(transfer->request.capture_content)
-        {
-            const FetchMemoryBudgetSnapshot fetch_budget =
-                globalFetchMemoryBudgetSnapshot();
-            transfer->fetch_reservation_bytes =
-                size_limit > 0
-                    ? static_cast<uint64_t>(size_limit)
-                    : (fetch_budget.enabled ? fetch_budget.limit : 0);
-        }
         transfer->completion = std::move(completion);
         transfer->retry_jitter_seed =
             next_retry_jitter_seed_.fetch_add(1, std::memory_order_relaxed);
@@ -2052,19 +2143,14 @@ private:
             transfer->progress.abort_reason = AsyncFetchFailure::SizeLimit;
             return 0;
         }
-        const bool retained = transfer->progress.request_context
-                                  ? transfer->progress.request_context
-                                        ->retainResponseBytes(bytes)
-                                  : transfer->result->retained_bytes.retain(
-                                        bytes);
-        if(!retained)
+        if(!appendFetchOutput(transfer->result->content, data, bytes,
+                              transfer->progress,
+                              &transfer->result->fetch_memory,
+                              &transfer->result->retained_bytes))
         {
             transfer->progress.abort_reason = AsyncFetchFailure::Capacity;
             return 0;
         }
-        if(transfer->progress.request_context)
-            transfer->progress.context_retained_bytes += bytes;
-        transfer->result->content.append(data, bytes);
         return bytes;
     }
 
@@ -2075,19 +2161,14 @@ private:
         const size_t bytes = size * nmemb;
         if(transfer->request.capture_response_headers)
         {
-            const bool retained = transfer->progress.request_context
-                                      ? transfer->progress.request_context
-                                            ->retainResponseBytes(bytes)
-                                      : transfer->result->retained_bytes.retain(
-                                            bytes);
-            if(!retained)
+            if(!appendFetchOutput(transfer->result->response_headers, data,
+                                  bytes, transfer->progress,
+                                  &transfer->result->fetch_memory,
+                                  &transfer->result->retained_bytes))
             {
                 transfer->progress.abort_reason = AsyncFetchFailure::Capacity;
                 return 0;
             }
-            if(transfer->progress.request_context)
-                transfer->progress.context_retained_bytes += bytes;
-            transfer->result->response_headers.append(data, bytes);
         }
         return bytes;
     }
@@ -2310,8 +2391,9 @@ private:
             if(!transfer->result->cookies.empty())
                 transfer->request.cookies = transfer->result->cookies;
             resetAttemptRetention(transfer->progress);
-            next_result->fetch_memory =
-                std::move(transfer->result->fetch_memory);
+            // The previous attempt's buffers die with its result. Do not
+            // carry their capacity charge into an empty retry result.
+            transfer->result->fetch_memory.reset();
             transfer->result = std::move(next_result);
             transfer->progress = {};
             transfer->prereq_context = {};

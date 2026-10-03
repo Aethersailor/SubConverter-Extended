@@ -19,6 +19,10 @@ OPENWRT_ARCHES = (
     "aarch64_generic",
     "aarch64_cortex-a53",
     "aarch64_cortex-a72",
+    "aarch64_cortex-a76",
+    "arm_arm1176jzf-s_vfp",
+    "arm_arm926ej-s",
+    "arm_xscale",
     "arm_cortex-a5_vfpv4",
     "arm_cortex-a7",
     "arm_cortex-a7_vfpv4",
@@ -36,8 +40,9 @@ def expected_package_names(version: str) -> set[str]:
         *(f"SubConverter-Extended-{version}-linux-{arch}.tar.gz" for arch in LINUX_ARCHES),
         f"SubConverter-Extended-{version}-windows-amd64.zip",
         *(
-            f"SubConverter-Extended-{version}-openwrt-{arch}.apk"
+            f"SubConverter-Extended-{version}-openwrt-{arch}.{manager}"
             for arch in OPENWRT_ARCHES
+            for manager in ("apk", "ipk")
         ),
     }
 
@@ -88,7 +93,7 @@ def create_manifest(
     actual_packages = {
         name
         for name in files
-        if name.endswith((".tar.gz", ".zip", ".apk"))
+        if name.endswith((".tar.gz", ".zip", ".apk", ".ipk"))
     }
     if actual_packages != expected:
         missing = sorted(expected - actual_packages)

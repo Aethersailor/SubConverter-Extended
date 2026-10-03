@@ -116,3 +116,12 @@ void FetchMemoryLease::reset() noexcept {
   bytes_ = 0;
   charged_ = false;
 }
+
+void FetchMemoryLease::release(uint64_t bytes) noexcept {
+  const uint64_t released = bytes < bytes_ ? bytes : bytes_;
+  if (charged_ && released != 0) {
+    fetch_memory.used.fetch_sub(released, std::memory_order_acq_rel);
+    fetch_memory.capacity_generation.fetch_add(1, std::memory_order_acq_rel);
+  }
+  bytes_ -= released;
+}

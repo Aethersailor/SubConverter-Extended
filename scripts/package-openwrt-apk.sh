@@ -21,7 +21,7 @@ else
 fi
 BUILD_TIME="${BUILD_TIME:-$(date +%s)}"
 REPO_COMMIT="${GITHUB_SHA:-${SHA:-unknown}}"
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RENDER_LAUNCHER="${SCRIPT_DIR}/ci/render-linux-launcher.sh"
 OPENWRT_DIR="${SCRIPT_DIR}/../openwrt"
 OVERLAY_DIR="${OPENWRT_DIR}/root"
@@ -87,9 +87,14 @@ create_launcher() {
 create_readme() {
   local path="$1"
   cat > "${path}" <<'EOF'
-SubConverter-Extended OpenWrt APK
+SubConverter-Extended OpenWrt package
 
-Install:
+Install or upgrade on opkg-based OpenWrt:
+  opkg install ./<package>.ipk
+
+IPK updates are installed manually. The automatic updater is APK-only.
+
+Install on apk-based OpenWrt:
   if [ -L /etc/apk/cache ]; then
     APK_CACHE="$(readlink -f /etc/apk/cache)"
   elif [ -d /etc/apk/cache ]; then
@@ -215,7 +220,8 @@ for OPENWRT_ARCH in "${ARCH_ARRAY[@]}"; do
     continue
   fi
   case "${OPENWRT_ARCH}" in
-    x86_64|aarch64_generic|aarch64_cortex-a53|aarch64_cortex-a72|\
+    x86_64|aarch64_generic|aarch64_cortex-a53|aarch64_cortex-a72|aarch64_cortex-a76|\
+    arm_arm1176jzf-s_vfp|arm_arm926ej-s|arm_xscale|\
     arm_cortex-a5_vfpv4|arm_cortex-a7|arm_cortex-a7_vfpv4|\
     arm_cortex-a7_neon-vfpv4|arm_cortex-a8_vfpv3|arm_cortex-a9|\
     arm_cortex-a9_neon|arm_cortex-a9_vfpv3-d16|arm_cortex-a15_neon-vfpv4) ;;
@@ -246,7 +252,12 @@ for OPENWRT_ARCH in "${ARCH_ARRAY[@]}"; do
   install_overlay "${PKG_ROOT}"
   create_launcher "${PKG_ROOT}/usr/bin/subconverter-extended"
   create_readme "${PKG_ROOT}/usr/share/doc/${PACKAGE_NAME}/README.OpenWrt"
+  mkdir -p "${PKG_ROOT}/usr/share/${PACKAGE_NAME}"
+  printf 'apk\n' > "${PKG_ROOT}/usr/share/${PACKAGE_NAME}/package-manager"
   normalize_package_modes "${PKG_ROOT}"
+  PACKAGE_VERSION="${APK_VERSION}" PACKAGE_DEPENDS="${PACKAGE_DEPENDS}" \
+    bash "${SCRIPT_DIR}/package-openwrt-ipk.sh" \
+      "${VERSION}" "${OPENWRT_ARCH}" "${PKG_ROOT}" "${PKG_DIR}/ipk"
   write_conffile_metadata "${PKG_ROOT}"
   write_package_file_list "${PKG_ROOT}"
   mkdir -p "${PKG_SCRIPT_DIR}"

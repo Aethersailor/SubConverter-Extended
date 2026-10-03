@@ -153,6 +153,10 @@ ComputeExecutor::enqueue(const std::shared_ptr<TaskBase> &task) {
                (task->bytes > budget_.max_queue_bytes ||
                 queued_bytes_ > budget_.max_queue_bytes - task->bytes)) {
       status = SchedulerSubmitStatus::ByteLimit;
+    } else if (!task->control &&
+               !task->queue_memory.acquire(std::max<uint64_t>(
+                   sizeof(TaskBase), task->bytes))) {
+      status = SchedulerSubmitStatus::ByteLimit;
     } else {
       if (task->control) {
         control_queue_.emplace_back(task);
@@ -346,6 +350,7 @@ ComputeExecutor::popLocked(std::size_t queue_index,
   queue.erase(iterator);
   --queued_entries_;
   queued_bytes_ -= task->bytes;
+  task->queue_memory.reset();
   ++active_workers_;
   return task;
 }

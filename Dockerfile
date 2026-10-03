@@ -283,6 +283,7 @@ RUN set -xe && \
     fi
 
 RUN python3 scripts/ci/patch_cpp_httplib_force_max.py include/httplib.h
+RUN python3 scripts/ci/patch_quickjspp_allocator.py include/quickjspp.hpp
 
 RUN set -xe && \
     BUILD_ID="$(printf '%.7s' "${SHA}")" && \

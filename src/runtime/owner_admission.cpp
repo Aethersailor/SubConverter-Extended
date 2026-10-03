@@ -74,6 +74,7 @@ struct OwnerAdmission::Core
     std::size_t queue_index = 0;
     bool queued = false;
     bool claimed = false;
+    force_max_memory::Lease waiting_memory;
   };
 
   struct Action {
@@ -99,10 +100,56 @@ struct OwnerAdmission::Core
       throw std::runtime_error("owner admission timer failed to become ready");
   }
 
-  bool canGrant(uint64_t bytes) const noexcept {
+  bool canGrant(uint64_t bytes, uint64_t waiting_credit = 0) const noexcept {
+    const bool shared_enabled = force_max_memory::limit.load() != 0;
+    const uint64_t shared_limit = force_max_memory::availableLimit();
+    const uint64_t used = force_max_memory::used.load();
+    const uint64_t shared_used = used - std::min(used, waiting_credit);
     return active_entries < active_entry_limit &&
            bytes <= active_byte_limit &&
-           active_bytes <= active_byte_limit - bytes;
+           active_bytes <= active_byte_limit - bytes &&
+           (!shared_enabled ||
+            (bytes <= shared_limit && shared_used <= shared_limit - bytes));
+  }
+
+  OwnerAdmissionLease makeLease(uint64_t bytes) {
+    const std::weak_ptr<Core> weak = weak_from_this();
+    return OwnerAdmissionLease(bytes,
+        [weak](uint64_t held) {
+          if (auto core = weak.lock()) core->release(held);
+          else force_max_memory::release(held);
+        },
+        [weak](uint64_t previous, uint64_t desired) {
+          if (auto core = weak.lock()) return core->resize(previous, desired);
+          return false;
+        },
+        [weak](uint64_t bytes) {
+          if (auto core = weak.lock()) {
+            std::lock_guard<std::mutex> lock(core->mutex);
+            core->active_bytes -= bytes;
+            core->timer_condition.notify_all();
+          }
+        });
+  }
+
+  bool resize(uint64_t previous, uint64_t desired) noexcept {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (desired > previous) {
+      const uint64_t delta = desired - previous;
+      if (stopping || delta > active_byte_limit ||
+          active_bytes > active_byte_limit - delta)
+        return false;
+      if (!force_max_memory::acquire(delta)) {
+        force_max_memory::reclaimCaches();
+        if (!force_max_memory::acquire(delta)) return false;
+      }
+      active_bytes += delta;
+    } else {
+      active_bytes -= previous - desired;
+      force_max_memory::release(previous - desired);
+      timer_condition.notify_all();
+    }
+    return true;
   }
 
   static uint64_t waitBytes(
@@ -116,7 +163,8 @@ struct OwnerAdmission::Core
 
   bool hasLegalWaiting() const noexcept {
     for (const auto &queue : queues)
-      if (!queue.empty() && canGrant(queue.front()->options.bytes))
+      if (!queue.empty() && canGrant(queue.front()->options.bytes,
+                                     queue.front()->waiting_memory.bytes()))
         return true;
     return false;
   }
@@ -127,7 +175,8 @@ struct OwnerAdmission::Core
     Clock::time_point oldest = Clock::time_point::max();
     for (std::size_t index = 0; index < queues.size(); ++index) {
       if (!queues[index].empty() &&
-          canGrant(queues[index].front()->options.bytes) &&
+          canGrant(queues[index].front()->options.bytes,
+                    queues[index].front()->waiting_memory.bytes()) &&
           queues[index].front()->enqueued_at < oldest) {
         oldest = queues[index].front()->enqueued_at;
         oldest_index = index;
@@ -141,7 +190,8 @@ struct OwnerAdmission::Core
     auto has_credit = [this] {
       for (std::size_t index = 0; index < queues.size(); ++index)
         if (!queues[index].empty() && credits[index] != 0 &&
-            canGrant(queues[index].front()->options.bytes))
+            canGrant(queues[index].front()->options.bytes,
+                      queues[index].front()->waiting_memory.bytes()))
           return true;
       return false;
     };
@@ -153,7 +203,8 @@ struct OwnerAdmission::Core
          ++attempts) {
       const std::size_t index = next_queue++ % queues.size();
       if (credits[index] == 0 || queues[index].empty() ||
-          !canGrant(queues[index].front()->options.bytes))
+          !canGrant(queues[index].front()->options.bytes,
+                     queues[index].front()->waiting_memory.bytes()))
         continue;
       --credits[index];
       return index;
@@ -168,6 +219,7 @@ struct OwnerAdmission::Core
     waiter->queued = false;
     --waiting_entries;
     waiting_bytes -= waitBytes(waiter->options);
+    waiter->waiting_memory.reset();
   }
 
   void addActionLocked(std::vector<Action> &actions,
@@ -209,8 +261,16 @@ struct OwnerAdmission::Core
       if (index >= queues.size())
         break;
       const std::shared_ptr<Waiter> waiter = queues[index].front();
-      if (!canGrant(waiter->options.bytes))
+      if (!canGrant(waiter->options.bytes, waiter->waiting_memory.bytes()))
         break;
+      const uint64_t credit = waiter->waiting_memory.bytes();
+      if (waiter->options.bytes > credit &&
+          !force_max_memory::acquire(waiter->options.bytes - credit)) break;
+      if (credit > waiter->options.bytes)
+        force_max_memory::release(credit - waiter->options.bytes);
+      // Transfer the waiter's existing charge; do not return it and demand
+      // the same bytes again while the physical guard is under pressure.
+      (void)waiter->waiting_memory.relinquish();
       addActionLocked(actions, waiter, OwnerAdmissionStatus::Granted);
       ++active_entries;
       active_bytes += waiter->options.bytes;
@@ -240,10 +300,7 @@ struct OwnerAdmission::Core
       result.status = action.status;
       if (action.status == OwnerAdmissionStatus::Granted) {
         const uint64_t bytes = action.waiter->options.bytes;
-        result.lease = OwnerAdmissionLease([weak, bytes] {
-          if (const std::shared_ptr<Core> core = weak.lock())
-            core->release(bytes);
-        });
+        result.lease = makeLease(bytes);
       }
       try {
         completion(std::move(result));
@@ -260,10 +317,6 @@ struct OwnerAdmission::Core
         std::min(options.deadline, options.request_context->deadline());
     const uint64_t bytes = options.bytes;
     const std::weak_ptr<Core> weak = weak_from_this();
-    std::function<void()> release = [weak, bytes] {
-      if (const std::shared_ptr<Core> core = weak.lock())
-        core->release(bytes);
-    };
     {
       std::lock_guard<std::mutex> lock(mutex);
       const auto now = Clock::now();
@@ -271,7 +324,8 @@ struct OwnerAdmission::Core
           options.request_context->cancellationToken()
               .isCancellationRequested() ||
           (deadline != Clock::time_point::max() && now >= deadline) ||
-          bytes > budget.max_active_bytes || !canGrant(bytes))
+          bytes > budget.max_active_bytes || !canGrant(bytes) ||
+          !force_max_memory::acquire(bytes))
         return std::nullopt;
       ++active_entries;
       active_bytes += bytes;
@@ -280,7 +334,7 @@ struct OwnerAdmission::Core
 
     OwnerAdmissionResult result;
     result.status = OwnerAdmissionStatus::Granted;
-    result.lease = OwnerAdmissionLease(std::move(release));
+    result.lease = makeLease(bytes);
     return result;
   }
 
@@ -340,7 +394,8 @@ struct OwnerAdmission::Core
         actions.push_back({waiter, OwnerAdmissionStatus::ByteLimit});
         result = OwnerAdmissionStatus::ByteLimit;
       } else if (canGrant(waiter->options.bytes) &&
-                 !hasLegalWaiting()) {
+                 !hasLegalWaiting() &&
+                 force_max_memory::acquire(waiter->options.bytes)) {
         waiter->claimed = true;
         ++active_entries;
         active_bytes += waiter->options.bytes;
@@ -363,6 +418,11 @@ struct OwnerAdmission::Core
         result = OwnerAdmissionStatus::EntryLimit;
       } else if (waiting_bytes >
                  budget.max_wait_bytes - waitBytes(waiter->options)) {
+        waiter->claimed = true;
+        ++rejected_total;
+        actions.push_back({waiter, OwnerAdmissionStatus::ByteLimit});
+        result = OwnerAdmissionStatus::ByteLimit;
+      } else if (!waiter->waiting_memory.acquire(waitBytes(waiter->options))) {
         waiter->claimed = true;
         ++rejected_total;
         actions.push_back({waiter, OwnerAdmissionStatus::ByteLimit});
@@ -405,6 +465,7 @@ struct OwnerAdmission::Core
       if (active_entries != 0)
         --active_entries;
       active_bytes -= std::min(active_bytes, bytes);
+      force_max_memory::release(bytes);
       if (!stopping)
         collectGrantsLocked(actions);
     }
@@ -426,9 +487,15 @@ struct OwnerAdmission::Core
           break;
         const Clock::time_point deadline = nextDeadlineLocked();
         if (deadline == Clock::time_point::max()) {
-          timer_condition.wait(lock);
+          // Shared capacity can be released by retained responses or caches,
+          // which do not own this condition variable.
+          if (waiting_entries != 0)
+            timer_condition.wait_for(lock, std::chrono::milliseconds(25));
+          else
+            timer_condition.wait(lock);
         } else {
-          timer_condition.wait_until(lock, deadline);
+          timer_condition.wait_until(lock, std::min(
+              deadline, Clock::now() + std::chrono::milliseconds(25)));
         }
         if (stopping)
           break;
@@ -574,14 +641,50 @@ OwnerAdmissionBudget ownerAdmissionBudgetFromForceMax(
           budget.owner_queue_entries, budget.owner_queue_bytes};
 }
 
-void OwnerAdmissionLease::reset() noexcept {
-  std::function<void()> release = std::move(release_);
-  if (!release)
-    return;
-  try {
-    release();
-  } catch (...) {
-  }
+struct OwnerAdmissionLease::State {
+  uint64_t bytes;
+  std::function<void(uint64_t)> release;
+  std::function<bool(uint64_t, uint64_t)> resize;
+  std::function<void(uint64_t)> transfer;
+  std::mutex mutex;
+  ~State() { try { release(bytes); } catch (...) {} }
+};
+
+OwnerAdmissionLease::OwnerAdmissionLease(
+    uint64_t bytes, std::function<void(uint64_t)> release,
+    std::function<bool(uint64_t, uint64_t)> resize,
+    std::function<void(uint64_t)> transfer)
+    : state_(std::make_shared<State>()) {
+  state_->bytes = bytes;
+  state_->release = std::move(release);
+  state_->resize = std::move(resize);
+  state_->transfer = std::move(transfer);
+}
+
+void OwnerAdmissionLease::reset() noexcept { state_.reset(); }
+
+bool OwnerAdmissionLease::resize(uint64_t bytes) noexcept {
+  if (!state_) return false;
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  if (!state_->resize(state_->bytes, bytes)) return false;
+  state_->bytes = bytes;
+  return true;
+}
+
+OwnerAdmissionLease OwnerAdmissionLease::share() const noexcept {
+  OwnerAdmissionLease result;
+  result.state_ = state_;
+  return result;
+}
+
+bool OwnerAdmissionLease::transferRetainedBytes(
+    uint64_t bytes, RetainedResponseByteLease &retained) noexcept {
+  if (!state_) return false;
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  if (bytes > state_->bytes || !retained.adoptWorkingBytes(bytes)) return false;
+  state_->transfer(bytes);
+  state_->bytes -= bytes;
+  return true;
 }
 
 OwnerAdmission::OwnerAdmission(OwnerAdmissionBudget budget)
@@ -602,11 +705,19 @@ OwnerAdmission::~OwnerAdmission() {
 
 std::optional<OwnerAdmissionResult> OwnerAdmission::tryAdmitImmediate(
     const OwnerAdmissionOptions &options) {
+  const uint64_t limit = force_max_memory::limit.load();
+  if (limit != 0 && force_max_memory::used.load() >
+                        limit - std::min(limit, options.bytes))
+    force_max_memory::reclaimCaches();
   return core_->tryAdmitImmediate(options);
 }
 
 OwnerAdmissionStatus OwnerAdmission::admit(
     OwnerAdmissionOptions options, OwnerAdmissionCompletion completion) {
+  const uint64_t limit = force_max_memory::limit.load();
+  if (limit != 0 && force_max_memory::used.load() >
+                        limit - std::min(limit, options.bytes))
+    force_max_memory::reclaimCaches();
   return core_->admit(std::move(options), std::move(completion));
 }
 

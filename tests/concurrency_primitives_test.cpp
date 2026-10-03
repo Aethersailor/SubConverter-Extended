@@ -1489,15 +1489,23 @@ static void testResourceControlPrimitives() {
   assert(deterministic_first.valid);
   assert(deterministic_first.envelope_complete);
   assert(deterministic_first.compute_workers == 6);
-  assert(deterministic_first.inbound_connections == 384);
+  assert(deterministic_first.inbound_connections >=
+         2 * deterministic_first.active_flows + 2);
+  assert(deterministic_first.accepted_connections +
+             deterministic_first.outbound_open +
+             deterministic_first.reserved_fds + bounded_envelope.open_fds <=
+         bounded_envelope.nofile_soft);
   assert(deterministic_first.active_owners <=
          deterministic_first.active_flows);
   assert(deterministic_first.outbound_per_host <=
          deterministic_first.outbound_active);
   assert(deterministic_first.outbound_active <=
          deterministic_first.outbound_open);
-  assert(deterministic_first.quickjs_workers == 3);
-  assert(deterministic_first.formula_revision == "force-max-v6");
+  assert(deterministic_first.quickjs_workers == 6);
+  assert(deterministic_first.formula_revision == "force-max-v7");
+  assert(deterministic_first.owner_active_bytes ==
+         deterministic_first.shared_memory_bytes);
+  assert(deterministic_first.fetch_bytes == deterministic_first.owner_active_bytes);
   assert(deterministic_first.accepted_connections >=
          deterministic_first.inbound_connections +
              deterministic_first.control_connections);
@@ -1516,11 +1524,8 @@ static void testResourceControlPrimitives() {
   assert(deterministic_first.quickjs_stack_bytes_per_worker > 0);
   assert(deterministic_first.blocking_io_queue_entries > 0);
   assert(deterministic_first.blocking_io_queue_bytes > 0);
-  assert(deterministic_first.quickjs_queue_bytes +
-             deterministic_first.quickjs_workers *
-                 (deterministic_first.quickjs_heap_bytes_per_worker +
-                  deterministic_first.quickjs_stack_bytes_per_worker) <=
-         deterministic_first.working_memory_bytes);
+  assert(deterministic_first.quickjs_heap_bytes_per_worker ==
+         deterministic_first.shared_memory_bytes);
   assert(deterministic_first.transport_active_bytes > 0);
   assert(deterministic_first.owner_active_bytes > 0);
   const uint64_t derived_download_limit =
@@ -1533,16 +1538,15 @@ static void testResourceControlPrimitives() {
       deterministic_first, derived_download_limit));
   const uint64_t owner_reservation = forceMaxOwnerWorkingReservation(
       deterministic_first, 4096, UINT64_C(1) * 1024 * 1024);
-  assert(owner_reservation >= UINT64_C(4) * 1024 * 1024);
-  assert(owner_reservation >=
-         deterministic_first.owner_active_bytes /
-             deterministic_first.active_owners);
+  assert(owner_reservation == kForceMaxOwnerWaitMetadataBytes);
+  assert(owner_reservation == forceMaxOwnerWorkingReservation(
+      deterministic_first, 4096, derived_download_limit));
   assert(owner_reservation <= deterministic_first.owner_active_bytes);
   assert(forceMaxOwnerWorkingReservation(
              deterministic_first,
              deterministic_first.owner_active_bytes + 1,
              UINT64_C(1) * 1024 * 1024) ==
-         deterministic_first.owner_active_bytes);
+         deterministic_first.owner_active_bytes + 1);
   assert(forceMaxOwnerWaitReservation(0) ==
          kForceMaxOwnerWaitMetadataBytes);
   assert(forceMaxOwnerWaitReservation(
@@ -1555,7 +1559,8 @@ static void testResourceControlPrimitives() {
              kForceMaxOwnerWaitMetadataBytes);
   assert(deterministic_first.reserved_pids == 6);
   assert(deterministic_first.fixed_threads == 7);
-  assert(deterministic_first.resolver_thread_budget == 96);
+  assert(deterministic_first.resolver_thread_budget ==
+         deterministic_first.outbound_active);
   assert(deterministic_first.thread_budget_total ==
          deterministic_first.reserved_pids +
              deterministic_first.fixed_threads +
@@ -1573,9 +1578,7 @@ static void testResourceControlPrimitives() {
   assert(cares_budget.compute_workers ==
          deterministic_first.compute_workers);
   assert(cares_budget.resolver_thread_budget == 0);
-  assert(cares_budget.thread_budget_total +
-             deterministic_first.resolver_thread_budget ==
-         deterministic_first.thread_budget_total);
+  assert(cares_budget.active_flows >= deterministic_first.active_flows);
 
   ResourceEnvelope httplib_envelope = bounded_envelope;
   httplib_envelope.http_handler_control_reserve = 1;
@@ -1598,10 +1601,10 @@ static void testResourceControlPrimitives() {
       calculateForceMaxBudget(live_httplib_envelope);
   assert(live_httplib_budget.valid);
   assert(live_httplib_budget.compute_workers == 6);
-  assert(live_httplib_budget.inbound_connections == 384);
-  assert(live_httplib_budget.handler_permits == 386);
+  assert(live_httplib_budget.handler_permits ==
+         live_httplib_budget.inbound_connections + 2);
   assert(live_httplib_budget.handler_stack_bytes ==
-         UINT64_C(386) * 8 * 1024 * 1024);
+         live_httplib_budget.handler_permits * 8 * 1024 * 1024);
   ResourceEnvelope fd_clamped_httplib = live_httplib_envelope;
   fd_clamped_httplib.nofile_soft = 256;
   fd_clamped_httplib.nofile_hard = 256;
@@ -1612,12 +1615,14 @@ static void testResourceControlPrimitives() {
       calculateForceMaxBudget(fd_clamped_httplib);
   assert(fd_clamped_httplib_budget.valid);
   assert(fd_clamped_httplib_budget.compute_workers == 6);
-  assert(fd_clamped_httplib_budget.inbound_connections == 78);
-  assert(fd_clamped_httplib_budget.handler_permits == 80);
-  assert(fd_clamped_httplib_budget.resolver_thread_budget == 23);
-  assert(fd_clamped_httplib_budget.thread_budget_total == 129);
-  assert(fd_clamped_httplib_budget.active_flows == 38);
-  assert(fd_clamped_httplib_budget.active_owners == 38);
+  assert(fd_clamped_httplib_budget.accepted_connections +
+             fd_clamped_httplib_budget.outbound_open +
+             fd_clamped_httplib_budget.reserved_fds +
+             fd_clamped_httplib.open_fds <= fd_clamped_httplib.nofile_soft);
+  assert(fd_clamped_httplib_budget.thread_budget_total <=
+         fd_clamped_httplib.pids_max - fd_clamped_httplib.pids_current);
+  assert(fd_clamped_httplib_budget.active_flows <=
+         (fd_clamped_httplib_budget.inbound_connections - 2) / 2);
   ResourceEnvelope more_nofile_httplib = fd_clamped_httplib;
   more_nofile_httplib.nofile_soft = 512;
   more_nofile_httplib.nofile_hard = 512;
@@ -1654,9 +1659,10 @@ static void testResourceControlPrimitives() {
       calculateForceMaxBudget(memory_clamped_httplib);
   assert(memory_clamped_httplib_budget.valid);
   assert(memory_clamped_httplib_budget.compute_workers == 6);
-  assert(memory_clamped_httplib_budget.handler_permits == 223);
+  assert(memory_clamped_httplib_budget.handler_permits <
+         live_httplib_budget.handler_permits);
   assert(memory_clamped_httplib_budget.handler_stack_bytes ==
-         UINT64_C(223) * 8 * 1024 * 1024);
+         memory_clamped_httplib_budget.handler_permits * 8 * 1024 * 1024);
   ResourceEnvelope overflowing_handler_envelope = bounded_envelope;
   overflowing_handler_envelope.http_handler_control_reserve = UINT64_MAX;
   const ForceMaxBudget overflowing_handler_budget =
@@ -1767,7 +1773,7 @@ static void testResourceControlPrimitives() {
       low_headroom, UINT64_C(2) * 1024 * 1024,
       &validation_error));
   assert(validation_error ==
-         "fetch_budget_below_download_contract");
+         "working_budget_below_download_contract");
   assert(validateForceMaxFetchContract(
       low_headroom, UINT64_C(256) * 1024,
       &validation_error));
@@ -1839,7 +1845,7 @@ static void testResourceControlPrimitives() {
   assert(tight_pids.handler_permits == 12);
   assert(tight_pids.thread_budget_total == 35);
   assert(tight_pids.fixed_threads == 7);
-  assert(tight_pids.resolver_thread_budget == 6);
+  assert(tight_pids.resolver_thread_budget > 0);
   assert(tight_pids.resolver_thread_budget == tight_pids.outbound_active);
   assert(tight_pids.reserved_pids == 4);
 
@@ -2420,6 +2426,117 @@ static void testFetchMemoryBudget() {
       globalFetchMemoryBudgetSnapshot();
   assert(released.used == 0 && released.waiters == 0 &&
          released.resumed_total == 1);
+  assert(resetGlobalFetchMemoryBudget());
+}
+
+static void testGrowingOwnerMemory() {
+  assert(force_max_memory::configure(1024));
+  {
+    OwnerAdmission admission({2, 1024, 8, 1024});
+    auto context = std::make_shared<RequestContext>("growing", RequestContext::Clock::now());
+    OwnerAdmissionOptions options;
+    options.request_context = context;
+    options.bytes = 64;
+    options.wait_bytes = 64;
+    auto first = admission.tryAdmitImmediate(options);
+    auto second = admission.tryAdmitImmediate(options);
+    assert(first && second);
+    auto shared = first->lease.share();
+    assert(shared.resize(500));
+    RetainedResponseByteLease payload;
+    assert(payload.acquire(400));
+    const auto occupied = admission.snapshot();
+    assert(occupied.active_entries == 2 && occupied.active_bytes == 564);
+    assert(force_max_memory::used == 964);
+    assert(!second->lease.resize(500));
+    assert(admission.snapshot().active_bytes == 564);
+    assert(force_max_memory::used == 964);
+    payload.reset();
+    RetainedResponseByteLease handed_off;
+    const auto before_handoff = force_max_memory::used.load();
+    assert(shared.transferRetainedBytes(50, handed_off));
+    assert(force_max_memory::used == before_handoff);
+    assert(admission.snapshot().active_bytes == 514);
+    handed_off.reset();
+    assert(shared.resize(64));
+
+    auto cancelled = std::make_shared<RequestContext>("cancelled", RequestContext::Clock::now());
+    options.request_context = cancelled;
+    std::promise<OwnerAdmissionResult> cancelled_done;
+    auto cancelled_future = cancelled_done.get_future();
+    admission.admit(options, [&](OwnerAdmissionResult result) {
+      cancelled_done.set_value(std::move(result));
+    });
+    assert(force_max_memory::used == 192);
+    cancelled->requestCancellation(RequestCancellationReason::ClientDisconnected);
+    assert(cancelled_future.get().status == OwnerAdmissionStatus::Cancelled);
+    assert(force_max_memory::used == 128);
+
+    options.request_context = std::make_shared<RequestContext>("deadline", RequestContext::Clock::now());
+    options.deadline = RequestContext::Clock::now() + 20ms;
+    std::promise<OwnerAdmissionResult> expired_done;
+    auto expired_future = expired_done.get_future();
+    admission.admit(options, [&](OwnerAdmissionResult result) {
+      expired_done.set_value(std::move(result));
+    });
+    assert(expired_future.get().status == OwnerAdmissionStatus::Deadline);
+    assert(force_max_memory::used == 128);
+
+    options.deadline = RequestContext::Clock::time_point::max();
+    std::promise<OwnerAdmissionResult> stopped_done;
+    auto stopped_future = stopped_done.get_future();
+    admission.admit(options, [&](OwnerAdmissionResult result) {
+      stopped_done.set_value(std::move(result));
+    });
+    admission.requestShutdown();
+    assert(stopped_future.get().status == OwnerAdmissionStatus::Shutdown);
+    first->lease.reset();
+    assert(admission.snapshot().active_entries == 2); // Shared flow still owns it.
+    shared.reset();
+    second->lease.reset();
+    assert(admission.snapshot().active_bytes == 0);
+    assert(force_max_memory::used == 0);
+    assert(admission.join());
+  }
+  assert(force_max_memory::configure(128));
+  {
+    ConcurrentLruCache<std::string, std::string> cache(8, 128);
+    auto compute = [] { return std::string(64, 'x'); };
+    auto size = [](const std::string &value) {
+      return std::optional<size_t>(value.size());
+    };
+    cache.getOrCompute("first", true, compute, size);
+    RetainedResponseByteLease response;
+    assert(response.acquire(64));
+    cache.getOrCompute("second", true, compute, size);
+    assert(cache.size() == 1 && force_max_memory::used == 128);
+    cache.clear();
+    response.reset();
+  }
+  assert(force_max_memory::used == 0);
+  assert(force_max_memory::configure(0));
+}
+
+static void testPhysicalMemoryCredit() {
+  assert(force_max_memory::configure(1024));
+  force_max_memory::physical_guard.store(true);
+  force_max_memory::Lease first;
+  assert(first.acquire(600));
+  auto sample = force_max_memory::beginPhysicalSample();
+  first.reset();
+  assert(force_max_memory::availableLimit() == 424);
+  // Releasing a working estimate while a kernel sample is in progress must
+  // not add those same bytes to the observed physical headroom.
+  force_max_memory::refreshPhysicalHeadroom(sample, 200, 50);
+  assert(force_max_memory::availableLimit() == 150);
+  force_max_memory::Lease blocked;
+  assert(!blocked.acquire(151));
+  sample = force_max_memory::beginPhysicalSample();
+  force_max_memory::refreshPhysicalHeadroom(sample, 1024, 0);
+  assert(blocked.acquire(600));
+  blocked.reset();
+  assert(force_max_memory::used == 0);
+  assert(force_max_memory::configure(0));
 }
 
 int main() {
@@ -2438,6 +2555,8 @@ int main() {
   testOwnerAdmission();
   testBlockingIoExecutor();
   testFetchMemoryBudget();
+  testGrowingOwnerMemory();
+  testPhysicalMemoryCredit();
   testConcurrentLruCache();
   testExternalConfigCacheSemantics();
   testResourceControlPrimitives();

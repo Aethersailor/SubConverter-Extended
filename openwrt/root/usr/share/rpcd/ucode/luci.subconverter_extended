@@ -40,7 +40,15 @@ function read_command(command) {
 	return output;
 }
 
+function manual_updates() {
+	return trim(readfile('/usr/share/subconverter-extended/package-manager') || '') == 'ipk';
+}
+
 function updater_status() {
+	if (manual_updates()) {
+		const identity = parse_json(readfile(build_info)) || {};
+		return { ok: true, state: 'manual', current_version: identity.version || null, available: false };
+	}
 	let result = null;
 
 	if (access(updater))
@@ -76,6 +84,8 @@ function service_running() {
 }
 
 function update_in_progress() {
+	if (manual_updates())
+		return false;
 	return access(update_lock) || access(update_pending);
 }
 
@@ -195,6 +205,8 @@ const methods = {
 	update_action: {
 		args: { action: '' },
 		call: function(request) {
+			if (manual_updates())
+				return { ok: false, error_code: 'manual_update', error: 'Install the matching Release IPK with opkg install.' };
 			const action = request.args?.action;
 			if (index([ 'check', 'apply', 'rollback' ], action) < 0)
 				return { ok: false, error_code: 'invalid_update_action', error: 'Unsupported update action' };

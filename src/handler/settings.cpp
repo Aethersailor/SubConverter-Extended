@@ -2435,6 +2435,8 @@ size_t externalConfigCacheMaxBytes() {
   return external_config_cache.maxBytes();
 }
 
+void clearExternalConfigCache() { external_config_cache.clear(); }
+
 void configureExternalConfigCache(size_t max_entries, size_t max_bytes) {
   external_config_cache.setLimits(max_entries, max_bytes);
 }

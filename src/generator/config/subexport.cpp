@@ -1208,6 +1208,7 @@ void groupGenerate(const std::string &rule, std::vector<Proxy> &nodelist,
                 throw BoundedOutputExceeded();
               const size_t retained_native_bytes =
                   static_cast<size_t>(text_bytes + vector_bytes);
+              reserveBoundedOutputBytes(retained_native_bytes);
               string_array selected;
               selected.reserve(lines);
               if (lines != 0) {

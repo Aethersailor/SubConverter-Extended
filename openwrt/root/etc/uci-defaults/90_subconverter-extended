@@ -33,11 +33,15 @@ ensure_option update install_start 03:00 || exit 1
 ensure_option update install_end 05:00 || exit 1
 ensure_option update proxy_mode auto || exit 1
 
+package_manager="$(cat /usr/share/subconverter-extended/package-manager 2>/dev/null || :)"
+if [ "$package_manager" = ipk ]; then
+	uci set "$PACKAGE.update.enabled=0" || exit 1
+	uci set "$PACKAGE.update.auto_check=0" || exit 1
+fi
+
 uci commit "$PACKAGE" || exit 1
 
-mkdir -p /etc/subconverter/update \
-	/opt/subconverter-extended-update/apk-cache \
-	/tmp/subconverter-extended/cache || exit 1
+mkdir -p /etc/subconverter/update /tmp/subconverter-extended/cache || exit 1
 
 if [ ! -e /etc/subconverter/base ] && [ ! -L /etc/subconverter/base ]; then
 	ln -s /opt/subconverter-extended/base/base /etc/subconverter/base || exit 1
@@ -48,7 +52,9 @@ fi
 if [ ! -e /etc/subconverter/cache ] && [ ! -L /etc/subconverter/cache ]; then
 	ln -s /tmp/subconverter-extended/cache /etc/subconverter/cache || exit 1
 fi
-if [ ! -e /etc/apk/cache ] && [ ! -L /etc/apk/cache ]; then
+if [ "$package_manager" != ipk ] && command -v apk >/dev/null 2>&1 && \
+   [ ! -e /etc/apk/cache ] && [ ! -L /etc/apk/cache ]; then
+	mkdir -p /etc/apk /opt/subconverter-extended-update/apk-cache || exit 1
 	ln -s /opt/subconverter-extended-update/apk-cache /etc/apk/cache || exit 1
 fi
 

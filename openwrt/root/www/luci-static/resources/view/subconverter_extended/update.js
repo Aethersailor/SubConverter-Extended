@@ -238,6 +238,17 @@ return view.extend({
 	},
 
 	render: function(status) {
+		if (status && status.state === 'manual') {
+			this.handleSave = null;
+			this.handleSaveApply = null;
+			this.handleReset = null;
+			return E('div', {}, [
+				E('h2', {}, _('SubConverter-Extended - Software update')),
+				E('p', {}, _('IPK packages are updated manually. Download the Release IPK matching the device package architecture, then install it with opkg.')),
+				E('p', {}, [ _('Current version') + ': ' + text(status.current_version, _('Unavailable')) ]),
+				E('pre', {}, 'opkg install ./SubConverter-Extended-<version>-openwrt-<architecture>.ipk')
+			]);
+		}
 		const initiallyBusy = busy(status);
 		const panel = E('div');
 		panel.appendChild(renderUpdateStatus(status, panel));

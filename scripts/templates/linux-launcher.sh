@@ -6,7 +6,7 @@ ROOT="__ROOT__"
 CONFIG_DIR="__CONFIG_DIR__"
 
 if [ "$ROOT" = "__PORTABLE_ROOT__" ]; then
-  ROOT="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+  ROOT="$(CDPATH='' cd -- "$(dirname "$0")" && pwd)"
 fi
 
 if [ "$CONFIG_DIR" = "__ROOT_BASE__" ]; then
@@ -181,6 +181,12 @@ elif [ -x "$ROOT/lib/ld-linux-aarch64.so.1" ]; then
 elif [ -x "$ROOT/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1" ]; then
   LOADER="$ROOT/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"
   LIB_PATH="$ROOT/lib/aarch64-linux-gnu:$ROOT/usr/lib/aarch64-linux-gnu:$ROOT/lib:$ROOT/usr/lib"
+elif [ -x "$ROOT/lib/ld-linux.so.3" ]; then
+  LOADER="$ROOT/lib/ld-linux.so.3"
+  LIB_PATH="$ROOT/lib/arm-linux-gnueabi:$ROOT/usr/lib/arm-linux-gnueabi:$ROOT/usr/arm-linux-gnueabi/lib:$ROOT/lib:$ROOT/usr/lib"
+elif [ -x "$ROOT/usr/lib/arm-linux-gnueabi/ld-linux.so.3" ]; then
+  LOADER="$ROOT/usr/lib/arm-linux-gnueabi/ld-linux.so.3"
+  LIB_PATH="$ROOT/lib/arm-linux-gnueabi:$ROOT/usr/lib/arm-linux-gnueabi:$ROOT/usr/arm-linux-gnueabi/lib:$ROOT/lib:$ROOT/usr/lib"
 elif [ -x "$ROOT/lib/ld-linux-armhf.so.3" ]; then
   LOADER="$ROOT/lib/ld-linux-armhf.so.3"
   LIB_PATH="$ROOT/lib/arm-linux-gnueabihf:$ROOT/usr/lib/arm-linux-gnueabihf:$ROOT/usr/arm-linux-gnueabihf/lib:$ROOT/lib:$ROOT/usr/lib"

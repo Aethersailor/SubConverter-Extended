@@ -92,6 +92,7 @@ class ComputeExecutor {
     RequestCancellationToken cancellation;
     std::optional<std::size_t> preferred_worker;
     bool control = false;
+    force_max_memory::Lease queue_memory;
   };
 
   template <class Function, class Result> struct FutureTask final : TaskBase {

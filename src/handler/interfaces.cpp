@@ -1747,6 +1747,9 @@ static std::string finalizeSubResponse(const Request &request,
     if (body.capacity() > max_output_bytes ||
         encrypted_upper_bound > max_output_bytes - body.capacity())
       throw BoundedOutputExceeded();
+    reserveBoundedOutputBytes(checkedBoundedOutputSize(
+        encrypted_upper_bound, encrypted_upper_bound,
+        std::numeric_limits<size_t>::max()));
     body = mihomo::encryptAgeArmored(body, age.recipient);
     if (body.size() > encrypted_upper_bound ||
         body.capacity() > max_output_bytes)
@@ -1795,10 +1798,11 @@ static std::string applyCoalescedToResponse(
 }
 
 static shared_response_body tryMakeRetainedResponseBody(
-    std::string body) noexcept {
+    std::string body, OwnerAdmissionLease *working = nullptr) noexcept {
   const uint64_t content_bytes = static_cast<uint64_t>(body.capacity());
   RetainedResponseByteLease lease;
-  if (!lease.acquire(content_bytes))
+  if (!(working ? working->transferRetainedBytes(content_bytes, lease)
+                : lease.acquire(content_bytes)))
     return {};
   try {
     auto result = std::make_shared<ImmutableResponseBody>();
@@ -1806,6 +1810,7 @@ static shared_response_body tryMakeRetainedResponseBody(
     result->retained_bytes = std::move(lease);
     return result;
   } catch (...) {
+    std::string().swap(body);
     return {};
   }
 }
@@ -1918,7 +1923,8 @@ static void storeCachedSubResponse(const std::string &key,
   if (existing != g_sub_response_cache.end())
     eraseSubResponseCacheEntry(existing);
   while (!g_sub_response_cache.empty() &&
-         (g_sub_response_cache.size() >= 2048 ||
+         ((force_max_memory::limit.load(std::memory_order_acquire) == 0 &&
+           g_sub_response_cache.size() >= 2048) ||
           g_sub_response_cache_bytes > max_bytes - bytes))
     evictOldestSubResponseCacheEntry();
   CachedSubResponse cached;
@@ -2035,7 +2041,7 @@ static bool forceMaxFlowEligible(
 static bool startForceMaxFlow(
     Request request, std::shared_ptr<const PreparedSubRequest> prepared,
     bool track_statistics, bool record_direct_statistics,
-    ForceMaxFlowCompletion completion);
+    ForceMaxFlowCompletion completion, OwnerAdmissionLease admission);
 
 enum class AsyncInflightPhase {
   Accepting,
@@ -3232,6 +3238,7 @@ void ConversionService::convertSubscriptionAsync(Request request,
              work_request = std::move(work_request), track_statistics](
                 OwnerAdmissionLease admission,
                 bool governed) mutable {
+              OwnerAdmissionLease working_admission;
               if (governed) {
                 bool attached = false;
                 {
@@ -3240,6 +3247,7 @@ void ConversionService::convertSubscriptionAsync(Request request,
                           std::memory_order_acquire) &&
                       call->phase == AsyncInflightPhase::Accepting) {
                     call->owner_admission = std::move(admission);
+                    working_admission = call->owner_admission.share();
                     attached = true;
                   }
                 }
@@ -3272,7 +3280,7 @@ void ConversionService::convertSubscriptionAsync(Request request,
                           call,
                           conversionFlowSchedulerStatus(terminal.state),
                           std::move(terminal.error));
-                    });
+                    }, std::move(working_admission));
                 if (!flow_started)
                   publishAsyncSubRequestFailure(
                       call, SchedulerSubmitStatus::EntryLimit, {});
@@ -3418,7 +3426,7 @@ void ConversionService::convertSubscriptionAsync(Request request,
                 completion(schedulerFailureResult(
                     failure_request,
                     conversionFlowSchedulerStatus(terminal.state)));
-              });
+              }, flow_admission->share());
           if (!flow_started) {
             Request failure_request;
             failure_request.context = context;
@@ -7450,6 +7458,12 @@ void configureResponseMicroCacheLimit(uint64_t max_bytes) noexcept {
   }
 }
 
+void clearResponseMicroCache() noexcept {
+  std::lock_guard<std::mutex> lock(g_sub_response_cache_mutex);
+  g_sub_response_cache.clear();
+  g_sub_response_cache_bytes = 0;
+}
+
 void setResponseMicroCacheGrowthFrozen(bool frozen) noexcept {
   g_sub_response_cache_growth_frozen.store(frozen,
                                            std::memory_order_release);
@@ -7475,12 +7489,13 @@ public:
   ForceMaxFlowState(
       Request request, std::shared_ptr<const PreparedSubRequest> prepared,
       bool track_statistics, bool record_direct_statistics,
-      ForceMaxFlowCompletion completion)
+      ForceMaxFlowCompletion completion, OwnerAdmissionLease admission)
       : request_(std::move(request)), prepared_(std::move(prepared)),
         settings_(prepared_->settings),
         track_statistics_(track_statistics),
         record_direct_statistics_(record_direct_statistics),
-        completion_(std::move(completion)) {
+        completion_(std::move(completion)),
+        working_admission_(std::move(admission)) {
     const ResourceControlSnapshot resources = resourceControlSnapshot();
     const uint64_t maximum_download =
         settings_ && settings_->maxAllowedDownloadSize > 0
@@ -7490,6 +7505,8 @@ public:
         resources.calculated_force_max_budget,
         request_.context ? request_.context->estimatedBytes() : 0,
         maximum_download);
+    working_limit_bytes_ = resources.calculated_force_max_budget.owner_active_bytes;
+    working_source_charge_bytes_ = working_reservation_bytes_;
   }
 
   bool start() {
@@ -7577,8 +7594,12 @@ private:
     resolved_imports_.clear();
     import_resolution_rounds_ = 0;
     resolved_base_content_.clear();
-    working_source_charge_bytes_ = first_failure_charge_bytes_;
+    working_source_charge_bytes_ = forceMaxOwnerWaitReservation(
+        request_.context->estimatedBytes()) + first_failure_charge_bytes_;
+    (void)working_admission_.resize(working_source_charge_bytes_);
+    working_reservation_bytes_ = working_source_charge_bytes_;
     generation_structure_charge_bytes_ = 0;
+    external_config_charge_bytes_ = 0;
     pending_uploads_.clear();
     upload_index_ = 0;
     upload_failed_ = false;
@@ -7598,6 +7619,10 @@ private:
     }
     try {
       std::rethrow_exception(error);
+    } catch (const BoundedOutputExceeded &) {
+      working_capacity_exceeded_ = true;
+      finishWorkingCapacity(flow);
+      return;
     } catch (const SchedulerSubmitError &submit_error) {
       if (submit_error.status() == SchedulerSubmitStatus::Deadline) {
         flow.requestCancellation(RequestCancellationReason::Deadline);
@@ -7907,8 +7932,8 @@ private:
   }
 
   uint64_t remainingWorkingBytes() const noexcept {
-    return working_reservation_bytes_ > working_source_charge_bytes_
-               ? working_reservation_bytes_ -
+    return working_limit_bytes_ > working_source_charge_bytes_
+               ? working_limit_bytes_ -
                      working_source_charge_bytes_
                : 0;
   }
@@ -7957,17 +7982,30 @@ private:
               .quickjs_heap_bytes_per_worker,
           structural_partition - estimate);
     }
-    uint64_t total_estimate = estimate;
-    if (script_native_limit > UINT64_MAX - total_estimate)
-      total_estimate = UINT64_MAX;
-    else
-      total_estimate += script_native_limit;
+    const uint64_t total_estimate = estimate;
     if (estimate == UINT64_MAX || total_estimate > structural_partition ||
-        (group_script && script_native_limit == 0) ||
-        !chargeWorkingBytes(total_estimate)) {
+        (group_script && script_native_limit == 0)) {
       working_capacity_exceeded_ = true;
       return false;
     }
+    uint64_t persistent = forceMaxOwnerWaitReservation(request_.context->estimatedBytes());
+    auto retain = [&](uint64_t bytes) {
+      if (bytes > working_limit_bytes_ || persistent > working_limit_bytes_ - bytes)
+        return false;
+      persistent += bytes;
+      return true;
+    };
+    if (!retain(first_failure_charge_bytes_) ||
+        !retain(external_config_charge_bytes_) ||
+        !retain(fetch_plan_->resolved_base_content.capacity()) ||
+        !retain(total_estimate)) return false;
+    for (const auto &[key, content] : resolved_imports_) {
+      if (!retain(key.capacity()) || !retain(content.capacity())) return false;
+    }
+    // Parser staging and fetched payloads have been released. Replace their
+    // transient estimates with the retained graph and generation allowance.
+    if (!working_admission_.resize(persistent)) return false;
+    working_source_charge_bytes_ = working_reservation_bytes_ = persistent;
     policy_->generator.force_max_group_script_limited = group_script;
     policy_->generator.force_max_group_script_remaining_bytes =
         static_cast<size_t>(std::min<uint64_t>(
@@ -7980,11 +8018,13 @@ private:
                           uint64_t expansion = 1) noexcept {
     uint64_t charge = 0;
     if ((bytes != 0 && expansion > UINT64_MAX / bytes) ||
-        (charge = bytes * expansion) > remainingWorkingBytes()) {
+        (charge = bytes * expansion) > remainingWorkingBytes() ||
+        !working_admission_.resize(working_source_charge_bytes_ + charge)) {
       working_capacity_exceeded_ = true;
       return false;
     }
     working_source_charge_bytes_ += charge;
+    working_reservation_bytes_ = working_source_charge_bytes_;
     return true;
   }
 
@@ -8067,6 +8107,9 @@ private:
 #ifndef NO_JS_RUNTIME
   void executeQuickJsPass(qjs::Context &context,
                           bool resolved_subscriptions) {
+    ScopedBoundedOutputReservation memory([this](uint64_t bytes) {
+      return chargeWorkingBytes(bytes);
+    });
     (void)resolved_subscriptions;
     Settings lane_settings = *settings_;
     SettingsSnapshot lane_snapshot =
@@ -8326,6 +8369,7 @@ private:
         finishWorkingCapacity(flow);
         return;
       }
+      external_config_charge_bytes_ += result.working_source_bytes * 4;
       selected_config_.emplace();
       selected_config_->config = std::move(result.config);
       selected_config_->template_arguments =
@@ -8462,6 +8506,9 @@ private:
 
   void beginSubscriptionPlanning(ConversionFlow &flow) {
     try {
+      ScopedBoundedOutputReservation memory([this](uint64_t bytes) {
+        return chargeWorkingBytes(bytes);
+      });
       if (!flow.setPhase(ConversionFlowPhase::FetchingSubscriptions))
         throw std::runtime_error("failed to enter subscription phase");
       missing_subscriptions_.clear();
@@ -8602,6 +8649,9 @@ private:
   void subscriptionsReady(ConversionFlow &flow,
                            AsyncSubscriptionBatchResult result) {
     try {
+      ScopedBoundedOutputReservation memory([this](uint64_t bytes) {
+        return chargeWorkingBytes(bytes);
+      });
       if (handleAsyncFetchTerminal(flow, result.terminal_failure))
         return;
       for (const AsyncSubscriptionSlot &slot : result.slots) {
@@ -8656,6 +8706,9 @@ private:
 
   void generate(ConversionFlow &flow) {
     try {
+      ScopedBoundedOutputReservation memory([this](uint64_t bytes) {
+        return chargeWorkingBytes(bytes);
+      });
       if (flow.snapshot().phase != ConversionFlowPhase::Parsing &&
           !flow.setPhase(ConversionFlowPhase::Parsing))
         throw std::runtime_error("failed to enter parse phase");
@@ -8826,6 +8879,9 @@ private:
     finalized_ = true;
     std::string body;
     try {
+      ScopedBoundedOutputReservation memory([this](uint64_t bytes) {
+        return chargeWorkingBytes(bytes);
+      });
       body = finalizeSubResponse(request_, response_, std::move(selected_body_),
                                  prepared_->age,
                                  remainingWorkingSizeBytes());
@@ -8842,7 +8898,33 @@ private:
              "the reserved working-memory envelope.\n"
              "服务暂时不可用：最终响应超出已预留的工作内存包络。\n";
     }
-    response_.shared_body = tryMakeRetainedResponseBody(std::move(body));
+    // Generation is complete. Free its graphs before shrinking the owner;
+    // hand the body's existing charge to the response without a second claim.
+    parsed_.reset();
+    policy_.reset();
+    fetch_plan_.reset();
+    subscription_.reset();
+    generation_.reset();
+    selected_config_.reset();
+    template_local_base_.clear();
+    resolved_imports_.clear();
+    resolved_dependencies_ = {};
+    resolved_subscriptions_ = {};
+    resolved_keys_.clear();
+    dependency_requests_.clear();
+    planned_imports_.clear();
+    missing_imports_.clear();
+    missing_subscriptions_.clear();
+    std::string().swap(resolved_base_content_);
+    quickjs_stage_ = {};
+    std::string().swap(quickjs_body_);
+    const uint64_t metadata_bytes = forceMaxOwnerWaitReservation(
+        request_.context->estimatedBytes());
+    const uint64_t final_bytes = metadata_bytes + body.capacity();
+    if (working_admission_.resize(final_bytes)) {
+      working_source_charge_bytes_ = working_reservation_bytes_ = final_bytes;
+      response_.shared_body = tryMakeRetainedResponseBody(std::move(body), &working_admission_);
+    }
     if (!response_.shared_body) {
       working_capacity_exceeded_ = true;
       if (request_.context)
@@ -8912,6 +8994,9 @@ private:
   const bool track_statistics_;
   const bool record_direct_statistics_;
   ForceMaxFlowCompletion completion_;
+  // Declared before payloads: their destructors free data before the final
+  // shared admission reference releases its memory charge.
+  OwnerAdmissionLease working_admission_;
   std::shared_ptr<ConversionFlow> flow_;
   std::unique_ptr<ParsedSubRequest> parsed_;
   std::unique_ptr<EffectiveSubPolicy> policy_;
@@ -8947,9 +9032,11 @@ private:
   bool quickjs_generated_ = false;
   bool quickjs_capacity_exceeded_ = false;
   uint64_t working_reservation_bytes_ = 0;
+  uint64_t working_limit_bytes_ = 0;
   uint64_t working_source_charge_bytes_ = 0;
   uint64_t generation_structure_charge_bytes_ = 0;
   uint64_t first_failure_charge_bytes_ = 0;
+  uint64_t external_config_charge_bytes_ = 0;
   bool working_capacity_exceeded_ = false;
   std::atomic<uint64_t> terminal_deliveries_{0};
   ForceMaxFlowOutput output_;
@@ -8958,13 +9045,13 @@ private:
 static bool startForceMaxFlow(
     Request request, std::shared_ptr<const PreparedSubRequest> prepared,
     bool track_statistics, bool record_direct_statistics,
-    ForceMaxFlowCompletion completion) {
+    ForceMaxFlowCompletion completion, OwnerAdmissionLease admission) {
   if (!prepared || !completion)
     return false;
   try {
     auto state = std::make_shared<ForceMaxFlowState>(
         std::move(request), std::move(prepared), track_statistics,
-        record_direct_statistics, std::move(completion));
+        record_direct_statistics, std::move(completion), std::move(admission));
     return state->start();
   } catch (const BoundedOutputExceeded &) {
     throw;
