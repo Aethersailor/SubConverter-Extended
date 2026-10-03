@@ -17,20 +17,22 @@ type proxySchema struct {
 }
 
 func parseSubscriptionWithMihomo(subscription string) ([]map[string]any, error) {
-	// Expand binary Mieru links before the generic URL preprocessor. A standard
-	// protobuf Base64 payload may contain '+', which QueryUnescape correctly
-	// treats as a space for URLs but must not touch inside mieru:// payloads.
-	buf := []byte(preprocessSubscription(expandMieruStandardSubscription(subscription)))
+	buf := []byte(subscription)
 	schema := &proxySchema{}
+	fromURI := false
 
 	// Match Mihomo's proxy-provider parser: prefer a native `proxies` YAML
 	// document, then fall back to its URI/base64 subscription converter.
 	if err := yaml.Unmarshal(buf, schema); err != nil {
-		proxies, convertErr := convert.ConvertsV2Ray(buf)
+		// Decode the subscription envelope before processing individual links.
+		// Native YAML and Base64 data must never undergo URL query decoding.
+		links := expandMieruStandardSubscription(string(convert.DecodeBase64(buf)))
+		proxies, convertErr := convert.ConvertsV2Ray([]byte(preprocessSubscription(links)))
 		if convertErr != nil {
 			return nil, fmt.Errorf("%w, %w", err, convertErr)
 		}
 		schema.Proxies = proxies
+		fromURI = true
 	}
 
 	if schema.Proxies == nil {
@@ -42,6 +44,9 @@ func parseSubscriptionWithMihomo(subscription string) ([]map[string]any, error) 
 	for index, mapping := range schema.Proxies {
 		name, ok := mapping["name"].(string)
 		if !ok || name == "" {
+			if fromURI {
+				continue
+			}
 			return nil, fmt.Errorf("proxy %d error: missing name", index)
 		}
 		if _, exists := names[name]; exists {
@@ -49,6 +54,11 @@ func parseSubscriptionWithMihomo(subscription string) ([]map[string]any, error) 
 		}
 
 		if err := validateProxyMapping(mapping); err != nil {
+			// URI subscriptions tolerate malformed individual links. Keep native
+			// provider YAML strict so configuration errors remain visible.
+			if fromURI {
+				continue
+			}
 			return nil, fmt.Errorf("proxy %d error: %w", index, err)
 		}
 
