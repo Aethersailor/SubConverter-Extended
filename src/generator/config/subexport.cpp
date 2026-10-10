@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <climits>
 #include <cmath>
@@ -8,6 +9,7 @@
 #include <numeric>
 #include <optional>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -15,6 +17,7 @@
 #include "config/regmatch.h"
 #include "external_rules.h"
 #include "generator/config/clash_proxy.h"
+#include "generator/config/clash_group_defaults.h"
 #include "generator/config/subexport.h"
 #include "generator/template/templates.h"
 #include "handler/settings.h"
@@ -1094,7 +1097,7 @@ static YAML::Node providersMatchingGroupId(
   YAML::Node use_node(YAML::NodeType::Sequence);
   for (const ProxyProvider &p : providers) {
     if (p.groupId >= 0 && matchRange(target, p.groupId))
-      use_node.push_back(p.name);
+      use_node[use_node.size()] = p.name;
   }
   return use_node;
 }
@@ -1104,7 +1107,7 @@ static YAML::Node providersMatchingGroupTag(
   YAML::Node use_node(YAML::NodeType::Sequence);
   for (const ProxyProvider &p : providers) {
     if (!p.tag.empty() && regFind(p.tag, target))
-      use_node.push_back(p.name);
+      use_node[use_node.size()] = p.name;
   }
   return use_node;
 }
@@ -1247,9 +1250,33 @@ void groupGenerate(const std::string &rule, std::vector<Proxy> &nodelist,
   }
 }
 
-void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
+namespace {
+
+template <typename Integer>
+void setClashInteger(YAML::Node slot, Integer value) {
+  static_assert(std::is_integral_v<Integer> && !std::is_same_v<Integer, bool>);
+  slot = std::to_string(value);
+}
+
+void setClashBoolean(YAML::Node slot, bool value) {
+  slot = std::string(value ? "true" : "false");
+}
+
+void fillClashStringSequence(YAML::Node target, const string_array &values) {
+  for (size_t index = 0; index < values.size(); ++index)
+    target[index] = values[index];
+}
+
+} // namespace
+
+static void proxyToClashImpl(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
                   const ProxyGroupConfigs &extra_proxy_group, bool clashR,
-                  extra_settings &ext) {
+                  extra_settings &ext, std::string_view base_source) {
+  const char *groups_field = ext.clash_new_field_name
+      ? "proxy-groups" : "Proxy Group";
+  const ClashHealthDefaultsByName health_defaults =
+      ext.nodelist ? ClashHealthDefaultsByName{} :
+          collectClashHealthDefaults(yamlnode, extra_proxy_group, groups_field, base_source);
   YAML::Node proxies, original_groups;
   std::vector<Proxy> nodelist;
   RemarkSet used_remarks;
@@ -1884,12 +1911,14 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
     YAML::Node provider_node;
 
     for (const ProxyProvider &p : ext.providers) {
-      YAML::Node single_provider;
-      single_provider["type"] = "http";
+      YAML::Node single_provider = provider_node[p.name];
+      if (single_provider.IsDefined())
+        single_provider = YAML::Node();
+      single_provider["type"] = std::string("http");
       single_provider["url"] = p.url;
-      single_provider["interval"] = p.interval;
+      setClashInteger(single_provider["interval"], p.interval);
       if (p.proxy_direct)
-        single_provider["proxy"] = "DIRECT";
+        single_provider["proxy"] = std::string("DIRECT");
       single_provider["path"] = p.path;
 
       // 添加过滤器
@@ -1901,17 +1930,19 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
       }
 
       if (!p.user_agent.empty()) {
-        single_provider["header"]["User-Agent"].push_back(p.user_agent);
+        YAML::Node header = single_provider["header"]["User-Agent"];
+        header[header.size()] = p.user_agent;
       }
       for (const auto &[name, value] : p.headers) {
-        single_provider["header"][name].push_back(value);
+        YAML::Node header = single_provider["header"][name];
+        header[header.size()] = value;
       }
 
       // 健康检查配置
-      single_provider["health-check"]["enable"] = true;
-      single_provider["health-check"]["url"] =
-          "https://www.gstatic.com/generate_204";
-      single_provider["health-check"]["interval"] = 300;
+      YAML::Node health_check = single_provider["health-check"];
+      setClashBoolean(health_check["enable"], true);
+      health_check["url"] = std::string("https://www.gstatic.com/generate_204");
+      setClashInteger(health_check["interval"], 300);
 
       // 添加 override 配置（如果用户指定了 udp 或 scv 参数）
       bool has_override = false;
@@ -1936,8 +1967,6 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
       if (has_override) {
         single_provider["override"] = override_node;
       }
-
-      provider_node[p.name] = single_provider;
     }
 
     yamlnode["proxy-providers"] = provider_node;
@@ -1946,13 +1975,39 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
                  " 个 proxy provider。");
   }
 
+  std::unordered_set<std::string_view> emitted_group_names;
+  if (extra_proxy_group.size() > 1) {
+    constexpr size_t name_bytes = sizeof(std::string_view) + 128;
+    if (extra_proxy_group.size() >
+        std::numeric_limits<size_t>::max() / name_bytes)
+      throw BoundedOutputExceeded();
+    reserveBoundedOutputBytes(extra_proxy_group.size() * name_bytes);
+    emitted_group_names.reserve(extra_proxy_group.size());
+  }
   for (const ProxyGroupConfig &x : extra_proxy_group) {
-    YAML::Node singlegroup;
+    // Unsupported types had no observable side effects before the old switch.
+    switch (x.Type) {
+    case ProxyGroupType::Select:
+    case ProxyGroupType::Relay:
+    case ProxyGroupType::LoadBalance:
+    case ProxyGroupType::Smart:
+    case ProxyGroupType::URLTest:
+    case ProxyGroupType::Fallback:
+      break;
+    default:
+      continue;
+    }
+    const bool first = extra_proxy_group.size() == 1 ||
+        emitted_group_names.emplace(x.Name).second;
+    // All emitted groups share one arena. A duplicate still executes the
+    // complete generation path, but its temporary result is discarded.
+    YAML::Node singlegroup = first
+        ? original_groups[original_groups.size()] : YAML::Node();
     string_array filtered_nodelist;
 
     singlegroup["name"] = x.Name;
     if (x.Type == ProxyGroupType::Smart)
-      singlegroup["type"] = "url-test";
+      singlegroup["type"] = std::string("url-test");
     else
       singlegroup["type"] = x.TypeStr();
 
@@ -1970,20 +2025,20 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
       [[fallthrough]];
     case ProxyGroupType::URLTest:
       if (!x.Lazy.is_undef())
-        singlegroup["lazy"] = x.Lazy.get();
+        setClashBoolean(singlegroup["lazy"], x.Lazy.get());
       [[fallthrough]];
     case ProxyGroupType::Fallback:
       singlegroup["url"] = x.Url;
       if (x.Interval > 0)
-        singlegroup["interval"] = x.Interval;
+        setClashInteger(singlegroup["interval"], x.Interval);
       if (x.Tolerance > 0)
-        singlegroup["tolerance"] = x.Tolerance;
+        setClashInteger(singlegroup["tolerance"], x.Tolerance);
       break;
     default:
       continue;
     }
     if (!x.DisableUdp.is_undef())
-      singlegroup["disable-udp"] = x.DisableUdp.get();
+      setClashBoolean(singlegroup["disable-udp"], x.DisableUdp.get());
 
     for (const auto &y : x.Proxies)
       groupGenerate(y, nodelist, filtered_nodelist, true, ext);
@@ -1994,7 +2049,7 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
       bool has_regex = false;
       std::string regex_pattern;
       bool has_provider_match = false;
-      YAML::Node provider_use_node(YAML::NodeType::Sequence);
+      YAML::Node provider_use_node;
 
       for (const auto &proxy : x.Proxies) {
         // 如果不是以 [] 开头，则认为是正则表达式
@@ -2040,47 +2095,37 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
         // 只有包含正则表达式的策略组才引用 provider
         // 不包含正则的策略组只引用其他策略组，不需要 provider
         // 添加 use 字段引用所有原始 provider
-        YAML::Node use_node(YAML::NodeType::Sequence);
+        YAML::Node use_node = singlegroup["use"];
         for (const ProxyProvider &p : ext.providers) {
           // groupId >= 0 表示这是原始订阅的 provider
           if (p.groupId >= 0) {
-            use_node.push_back(p.name);
+            use_node[use_node.size()] = p.name;
           }
         }
-        if (use_node.size() > 0) {
-          singlegroup["use"] = use_node;
-        }
-
         // 添加 filter 字段
         singlegroup["filter"] = regex_pattern;
       }
     }
 
-    if (!x.UsingProvider.empty())
-      singlegroup["use"] = x.UsingProvider;
-    else {
+    if (!x.UsingProvider.empty()) {
+      YAML::Node use = singlegroup["use"];
+      if (use.IsDefined())
+        use = YAML::Node();
+      fillClashStringSequence(use, x.UsingProvider);
+    } else {
       // 在 proxy-provider 模式下，不自动添加 DIRECT
       // 策略组应该只引用 provider 或其他策略组
       if (filtered_nodelist.empty() && !ext.use_proxy_provider)
         filtered_nodelist.emplace_back("DIRECT");
     }
     if (!filtered_nodelist.empty())
-      singlegroup["proxies"] = filtered_nodelist;
+      fillClashStringSequence(singlegroup["proxies"], filtered_nodelist);
+    if (first && !health_defaults.empty())
+      applyClashHealthDefaults(singlegroup, health_defaults, x);
     if (group_block)
       singlegroup.SetStyle(YAML::EmitterStyle::Block);
     else
       singlegroup.SetStyle(YAML::EmitterStyle::Flow);
-
-    bool replace_flag = false;
-    for (auto &&original_group : original_groups) {
-      if (original_group["name"].as<std::string>() == x.Name) {
-        original_group.reset(singlegroup);
-        replace_flag = true;
-        break;
-      }
-    }
-    if (!replace_flag)
-      original_groups.push_back(singlegroup);
   }
   if (group_compact)
     original_groups.SetStyle(YAML::EmitterStyle::Flow);
@@ -2090,6 +2135,12 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
     yamlnode["proxy-groups"] = original_groups;
   else
     yamlnode["Proxy Group"] = original_groups;
+}
+
+void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
+                  const ProxyGroupConfigs &extra_proxy_group, bool clashR,
+                  extra_settings &ext) {
+  proxyToClashImpl(nodes, yamlnode, extra_proxy_group, clashR, ext, {});
 }
 
 std::string proxyToClash(std::vector<Proxy> &nodes,
@@ -2109,7 +2160,7 @@ std::string proxyToClash(std::vector<Proxy> &nodes,
     return "";
   }
 
-  proxyToClash(nodes, yamlnode, extra_proxy_group, clashR, ext);
+  proxyToClashImpl(nodes, yamlnode, extra_proxy_group, clashR, ext, base_conf);
 
   // 关键修复：在所有早期返回之前提取 proxy-providers
   // 这样所有返回路径都会使用正确的顺序
