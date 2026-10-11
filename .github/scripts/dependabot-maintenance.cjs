@@ -123,26 +123,6 @@ module.exports = async function maintain({github, context, core, rebaseGithub}) 
         const {data: pull} = await github.rest.pulls.get({...repo, pull_number: listed.number});
         if (!eligible(pull, repository)) continue;
         const base = await branch();
-        const {data: comparison} = await github.rest.repos.compareCommits({
-          ...repo, base, head: pull.head.sha,
-        });
-        if (comparison.merge_base_commit.sha !== base) {
-          // Dependabot owns its branch. Ask its rebaser to refresh the branch so
-          // the resulting bot push can be reconsidered against the current base.
-          const comments = await github.paginate(github.rest.issues.listComments, {
-            ...repo, issue_number: pull.number, per_page: 100,
-          });
-          const marker = '<!-- dependabot-maintenance:rebase -->';
-          const recent = comments.some(comment => ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(comment.author_association) &&
-            comment.body?.includes(marker) && comment.body.includes(`(${base}).`) &&
-            Date.now() - Date.parse(comment.created_at) < DAY);
-          if (!rebaser && !dry) { core.warning('PAT_TOKEN is required only to request a Dependabot rebase.'); continue; }
-          if (!recent) await act(`Request Dependabot rebase for #${pull.number} onto dev ${base}.`, () =>
-            rebaser.rest.issues.createComment({...repo, issue_number: pull.number,
-              body: `@dependabot rebase\n\n${marker}\nUpdate against the current dev branch (${base}).`}));
-          else note(`Waiting for Dependabot to rebase #${pull.number}.`);
-          continue;
-        }
 
         const files = await github.paginate(github.rest.pulls.listFiles, {
           ...repo, pull_number: pull.number, per_page: 100,
@@ -159,6 +139,24 @@ module.exports = async function maintain({github, context, core, rebaseGithub}) 
           note(`State changed for #${pull.number}; reconcile again on the next event.`);
           continue;
         }
+        if (fresh.mergeable === false) {
+          // Ask Dependabot to resolve real merge conflicts. A clean PR does
+          // not need a rebase merely because dev has advanced.
+          const comments = await github.paginate(github.rest.issues.listComments, {
+            ...repo, issue_number: pull.number, per_page: 100,
+          });
+          const marker = '<!-- dependabot-maintenance:rebase -->';
+          const recent = comments.some(comment => ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(comment.author_association) &&
+            comment.body?.includes(marker) && comment.body.includes(`(${base}).`) &&
+            Date.now() - Date.parse(comment.created_at) < DAY);
+          if (!rebaser && !dry) { core.warning('PAT_TOKEN is required only to request a Dependabot rebase.'); continue; }
+          if (!recent) await act(`Request Dependabot rebase for #${pull.number} onto dev ${base}.`, () =>
+            rebaser.rest.issues.createComment({...repo, issue_number: pull.number,
+              body: `@dependabot rebase\n\n${marker}\nUpdate against the current dev branch (${base}).`}));
+          else note(`Waiting for Dependabot to rebase #${pull.number}.`);
+          continue;
+        }
+
         // Merge only the verified head into dev with the repository Actions token.
         // Never execute a PR checkout or use an administrator PAT for merging.
         const result = await act(`Merge Dependabot #${pull.number} at ${pull.head.sha}.`, () =>

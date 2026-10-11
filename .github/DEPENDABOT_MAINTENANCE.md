@@ -3,12 +3,13 @@
 Dependabot opens GitHub Actions, Docker and Go dependency updates against `dev`.
 The maintenance workflow automatically squash-merges labeled, same-repository
 Dependabot PRs into `dev`. It checks the bot identity, signed commits, allowed
-dependency files, current base and exact head SHA. Tests, CodeQL and PR validation
+dependency files, PR target and exact head SHA. Tests, CodeQL and PR validation
 are not prerequisites. PRs targeting any other branch are ignored.
 
 PR changes, dev pushes and completed dev builds trigger reconciliation; a
-six-hour schedule recovers missed events. Stale PRs receive an official
-Dependabot rebase request. After merging, the controller explicitly dispatches
+six-hour schedule recovers missed events. Conflicting PRs receive an official
+Dependabot rebase request; clean PRs can merge even when dev has advanced.
+After merging, the controller explicitly dispatches
 the dev build and repairs missed dispatches on later runs. Only trusted `dev`
 maintenance code is loaded; dependency PR code is never executed by the merger.
 
