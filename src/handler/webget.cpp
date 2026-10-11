@@ -170,6 +170,7 @@ public:
         Attached,
         Completed,
         Abandoned,
+        Retired,
     };
 
     using Callback = std::function<void(SharedCacheFetchPayload,
@@ -187,7 +188,14 @@ public:
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if(done_)
+        {
+            // A retry must not reuse a failed result while its owner is still
+            // delivering callbacks and has not removed the registry entry.
+            if(error_ || !payload_ || payload_->status_code != 200 ||
+               payload_->failure != AsyncFetchFailure::None)
+                return AttachResult::Retired;
             return AttachResult::Completed;
+        }
         if(abandoned_)
             return AttachResult::Abandoned;
         ++consumers_;
@@ -4156,7 +4164,8 @@ public:
                 }
             }
             attach_result = operation->attachConsumer();
-            if(attach_result != CacheFetchOperation::AttachResult::Abandoned)
+            if(attach_result != CacheFetchOperation::AttachResult::Abandoned &&
+               attach_result != CacheFetchOperation::AttachResult::Retired)
                 break;
             std::lock_guard<std::mutex> lock(cache_fetch_mutex);
             auto iter = cache_fetches.find(registry_key);
@@ -5275,7 +5284,9 @@ void webGetOwnedAsync(OwnedWebGetRequest request,
                 }
                 attach_result = operation->attachConsumer();
                 if(attach_result !=
-                   CacheFetchOperation::AttachResult::Abandoned)
+                       CacheFetchOperation::AttachResult::Abandoned &&
+                   attach_result !=
+                       CacheFetchOperation::AttachResult::Retired)
                     break;
                 std::lock_guard<std::mutex> lock(cache_fetch_mutex);
                 const auto iter = cache_fetches.find(registry_key);
