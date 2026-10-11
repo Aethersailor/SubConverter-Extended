@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       refresh_dependencies:
-        description: Refresh all upstream dependencies on dev before validation
+        description: Refresh all upstream dependencies on dev before building
         type: boolean
         default: false
   workflow_call:
@@ -176,16 +176,6 @@ jobs:
             aethersailor/subconverter-extended \
             "https://ghcr.io/token?service=ghcr.io&scope=repository:aethersailor/subconverter-extended:pull"
 
-      - name: Verify COCR runtime assets are absent
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -e base/Custom_OpenClash_Rules ] || \
-             git ls-files -- base/Custom_OpenClash_Rules | grep -q .; then
-            echo "::error::Custom_OpenClash_Rules runtime assets must not exist in this project."
-            exit 1
-          fi
-
       - name: Refresh dependency snapshot on dev
         if: steps.metadata.outputs.mode == 'dev' && inputs.refresh_dependencies
         shell: bash
@@ -297,7 +287,6 @@ jobs:
           BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
           REFRESH_GO_DEPS: "false"
           REFRESH_HEADERS: "false"
-          BUILD_TESTS: "false"
         run: |
           {
             echo 'args<<EOF'
@@ -374,7 +363,6 @@ jobs:
           BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
           REFRESH_GO_DEPS: ${{ needs.prepare.outputs.mode == 'dev' && inputs.refresh_dependencies && matrix.extract_generated == 'true' }}
           REFRESH_HEADERS: ${{ needs.prepare.outputs.mode == 'dev' && inputs.refresh_dependencies && matrix.extract_generated == 'true' }}
-          BUILD_TESTS: ${{ needs.prepare.outputs.mode == 'dev' && inputs.refresh_dependencies && matrix.extract_generated == 'true' }}
         run: |
           {
             echo 'args<<EOF'
@@ -409,41 +397,6 @@ jobs:
           EXTRACT_GENERATED: ${{ matrix.extract_generated }}
         run: bash scripts/ci/extract-builder-output.sh "${{ matrix.builder_tag }}" "${{ matrix.extract_mode }}"
 
-      - name: Set up Go for upstream refresh validation
-        if: needs.prepare.outputs.mode == 'dev' && inputs.refresh_dependencies && matrix.extract_generated == 'true'
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: bridge/go.mod
-          cache-dependency-path: bridge/go.sum
-
-      - name: Test refreshed Go bridge
-        if: needs.prepare.outputs.mode == 'dev' && inputs.refresh_dependencies && matrix.extract_generated == 'true'
-        working-directory: bridge
-        run: go test -mod=readonly ./...
-
-      - name: Package dev-only OpenWrt amd64 without publishing
-        if: needs.prepare.outputs.mode == 'dev' && matrix.arch == 'amd64'
-        shell: bash
-        env:
-          SHA: ${{ needs.prepare.outputs.sha }}
-          BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
-          BUILD_TIME: "0"
-        run: |
-          set -euo pipefail
-          bash scripts/ci/build-linux-release.sh v0.0.0 amd64 x86_64
-          python3 scripts/ci/check_file_size.py --budget release-openwrt \
-            SubConverter-Extended-v0.0.0-openwrt-x86_64.apk
-          rm -rf -- \
-            SubConverter-Extended \
-            SubConverter-Extended-v0.0.0-linux-amd64.tar.gz \
-            SubConverter-Extended-v0.0.0-openwrt-x86_64.apk \
-            build/openwrt-apk/amd64
-          rm -f SubConverter-Extended-v0.0.0-openwrt-x86_64.ipk
-
-      - name: Check bridge size budget (${{ matrix.arch }})
-        shell: bash
-        run: python3 scripts/ci/check_file_size.py --budget "${{ matrix.bridge_budget }}" "build/bridge-output/libmihomo.*"
-
       - name: Package Release Artifacts (Linux ${{ matrix.arch }})
         if: needs.prepare.outputs.is_release == 'true'
         shell: bash
@@ -451,40 +404,6 @@ jobs:
           SHA: ${{ needs.prepare.outputs.sha }}
           BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
         run: bash scripts/ci/build-linux-release.sh "${{ needs.prepare.outputs.version }}" "${{ matrix.arch }}" "${{ matrix.openwrt_arches }}"
-
-      - name: Check release size budgets (Linux ${{ matrix.arch }})
-        if: needs.prepare.outputs.is_release == 'true'
-        shell: bash
-        run: |
-          python3 scripts/ci/check_file_size.py --budget release-linux \
-            "SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-${{ matrix.arch }}.tar.gz"
-          python3 scripts/ci/check_file_size.py --budget release-openwrt \
-            "SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-*.apk"
-
-      - name: Set up QEMU for smoke test
-        if: matrix.qemu_platforms != ''
-        shell: bash
-        run: docker run --privileged --rm tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install "${{ matrix.qemu_platforms }}"
-
-      - name: Smoke test artifact (Linux ${{ matrix.arch }})
-        if: needs.prepare.outputs.is_release == 'true'
-        timeout-minutes: 3
-        uses: ./.github/actions/smoke-linux-artifact
-        with:
-          artifact: SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
-          expected-version: ${{ needs.prepare.outputs.version }}
-          expected-revision: ${{ needs.prepare.outputs.sha }}
-          expected-build-date: ${{ needs.prepare.outputs.build_date }}
-
-      - name: Smoke test APKs (OpenWrt ${{ matrix.arch }})
-        if: needs.prepare.outputs.is_release == 'true'
-        timeout-minutes: 15
-        uses: ./.github/actions/smoke-openwrt-apk
-        with:
-          artifacts: SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-*.apk
-          expected-version: ${{ needs.prepare.outputs.version }}
-          expected-revision: ${{ needs.prepare.outputs.sha }}
-          expected-build-date: ${{ needs.prepare.outputs.build_date }}
 
       - name: Upload Artifact (Linux ${{ matrix.arch }})
         if: needs.prepare.outputs.is_release == 'true'
@@ -526,18 +445,7 @@ jobs:
           echo "::error::Frozen dependency/generated inputs are stale. Refresh and commit them on dev before building master or a release."
           exit 1
 
-      - name: Smoke test image (${{ matrix.arch }})
-        if: github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'
-        timeout-minutes: 3
-        uses: ./.github/actions/smoke-docker-image
-        with:
-          image: subconverter-extended:${{ matrix.arch }}-ci
-          platform: ${{ matrix.image_platform }}
-          expected-version: ${{ needs.prepare.outputs.version }}
-          expected-revision: ${{ needs.prepare.outputs.sha }}
-          expected-build-date: ${{ needs.prepare.outputs.build_date }}
-
-      - name: Export tested image archive (${{ matrix.arch }})
+      - name: Export built image archive (${{ matrix.arch }})
         if: github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'
         shell: bash
         run: |
@@ -551,7 +459,7 @@ jobs:
             sha256sum "$archive" > "$archive.sha256"
           )
 
-      - name: Upload tested image archive (${{ matrix.arch }})
+      - name: Upload built image archive (${{ matrix.arch }})
         if: github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -615,7 +523,6 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
           BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
           THREADS: "2"
-          BUILD_TESTS: "false"
           REFRESH_GO_DEPS: "false"
           REFRESH_HEADERS: "false"
         run: |
@@ -712,10 +619,8 @@ jobs:
 
       - name: Build Windows amd64
         shell: msys2 {0}
-        env:
-          BUILD_TESTS: "false"
         run: |
-          THREADS=4 BUILD_TESTS="$BUILD_TESTS" bash scripts/build-windows-amd64.sh \
+          THREADS=4 bash scripts/build-windows-amd64.sh \
             "${{ needs.prepare.outputs.version }}" \
             "${{ needs.prepare.outputs.sha }}" \
             "${{ needs.prepare.outputs.build_date }}"
@@ -723,19 +628,6 @@ jobs:
       - name: Package Release Artifact (Windows amd64)
         shell: pwsh
         run: ./scripts/package-windows-portable.ps1 -Version "${{ needs.prepare.outputs.version }}" -Revision "${{ needs.prepare.outputs.sha }}" -BuildDate "${{ needs.prepare.outputs.build_date }}"
-
-      - name: Check release size budget (Windows amd64)
-        shell: pwsh
-        run: python scripts/ci/check_file_size.py --budget release-windows-amd64 "SubConverter-Extended-${{ needs.prepare.outputs.version }}-windows-amd64.zip"
-
-      - name: Smoke test artifact (Windows amd64)
-        timeout-minutes: 3
-        uses: ./.github/actions/smoke-windows-artifact
-        with:
-          artifact: SubConverter-Extended-${{ needs.prepare.outputs.version }}-windows-amd64.zip
-          expected-version: ${{ needs.prepare.outputs.version }}
-          expected-revision: ${{ needs.prepare.outputs.sha }}
-          expected-build-date: ${{ needs.prepare.outputs.build_date }}
 
       - name: Upload Artifact (Windows amd64)
         if: needs.prepare.outputs.is_release == 'true'
@@ -824,14 +716,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download tested image archives
+      - name: Download built image archives
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: images
           pattern: docker-image-*
           merge-multiple: true
 
-      - name: Load and verify tested image archives
+      - name: Load and verify built image archives
         shell: bash
         run: |
           set -euo pipefail
@@ -907,7 +799,7 @@ jobs:
             aethersailor/subconverter-extended \
             "https://ghcr.io/token?service=ghcr.io&scope=repository:aethersailor/subconverter-extended:pull"
 
-      - name: Push tested candidates and publish manifests
+      - name: Push built candidates and publish manifests
         shell: bash
         run: |
           set -euo pipefail

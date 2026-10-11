@@ -58,22 +58,6 @@ FileCommitResult fileCopyDetailed(const std::string &source,
                                   const std::string &dest);
 int fileWrite(const std::string &path, const std::string &content, bool overwrite);
 
-#ifdef FILE_IO_TESTING
-enum class FileIoTestFailure {
-    None,
-    Open,
-    ShortWrite,
-    Flush,
-    Sync,
-    Close,
-    Replace,
-    ParentDirectorySync,
-    TargetChangedBeforeReplace,
-    ReplaceAndTemporaryCleanup,
-};
-void setFileIoTestFailure(FileIoTestFailure failure);
-#endif
-
 template<typename F>
 int operateFiles(const std::string &path, F &&op)
 {

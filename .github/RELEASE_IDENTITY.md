@@ -25,7 +25,7 @@ regenerated. A correction requires a new version.
    Docker Hub version tag, and GHCR version tag are all absent.
 5. Run-scoped candidate images and all packages are built from the same tag
    checkout. Package `BUILD-INFO.json`, OCI labels, asset checksums, and registry
-   manifests use the full revision; runtime `/version` is verified against its
+   manifests use the full revision; runtime `/version` reports its
    seven-character `BUILD_ID` prefix.
 6. Version image tags are published once. A draft GitHub Release is populated
    without overwrite permission and is downloaded again for checksum and

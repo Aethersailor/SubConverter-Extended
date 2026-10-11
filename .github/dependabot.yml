@@ -42,7 +42,7 @@ updates:
   - package-ecosystem: "gomod"
     directory: "/bridge"
     target-branch: "dev"
-    # The upstream refresh owns Mihomo's exact Alpha revision.
+    # The automatic upstream refresh owns Mihomo's exact Alpha revision.
     ignore:
       - dependency-name: "github.com/metacubex/mihomo"
     schedule:

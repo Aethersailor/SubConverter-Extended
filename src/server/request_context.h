@@ -591,28 +591,6 @@ inline RequestLifecycleMetricsSnapshot requestLifecycleMetricsSnapshot() {
   return result;
 }
 
-inline void resetRequestLifecycleMetricsForTests() noexcept {
-  for (auto &value : request_lifecycle_metrics::terminal_counts)
-    value.store(0, std::memory_order_relaxed);
-  for (auto &value : request_lifecycle_metrics::failure_counts)
-    value.store(0, std::memory_order_relaxed);
-  for (auto &value : request_lifecycle_metrics::stage_nanoseconds)
-    value.store(0, std::memory_order_relaxed);
-  for (auto &value : request_lifecycle_metrics::stage_samples)
-    value.store(0, std::memory_order_relaxed);
-  for (auto &stage : request_lifecycle_metrics::stage_latency_buckets)
-    for (auto &value : stage)
-      value.store(0, std::memory_order_relaxed);
-  request_lifecycle_metrics::successful_owners.store(
-      0, std::memory_order_relaxed);
-  request_lifecycle_metrics::successful_responses.store(
-      0, std::memory_order_relaxed);
-  request_lifecycle_metrics::work_admitted.store(0,
-                                                  std::memory_order_relaxed);
-  request_lifecycle_metrics::server_capacity_failure_after_admission.store(
-      0, std::memory_order_relaxed);
-}
-
 class RequestContext {
 public:
   using Clock = std::chrono::steady_clock;

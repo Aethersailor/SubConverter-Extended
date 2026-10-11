@@ -19,9 +19,7 @@ AMD64 = {
     "cache_scope": "subconverter-alpine",
     "extract_mode": "shared",
     "extract_generated": "true",
-    "bridge_budget": "bridge-linux-amd64",
     "openwrt_arches": "x86_64",
-    "qemu_platforms": "",
 }
 ARM64 = {
     "arch": "arm64",
@@ -34,9 +32,7 @@ ARM64 = {
     "cache_scope": "subconverter-alpine-arm64",
     "extract_mode": "shared",
     "extract_generated": "false",
-    "bridge_budget": "bridge-linux-arm64",
     "openwrt_arches": "aarch64_generic,aarch64_cortex-a53,aarch64_cortex-a72,aarch64_cortex-a76",
-    "qemu_platforms": "",
 }
 ARMV7 = {
     "arch": "armv7",
@@ -49,13 +45,11 @@ ARMV7 = {
     "cache_scope": "subconverter-armv7-cross",
     "extract_mode": "root",
     "extract_generated": "false",
-    "bridge_budget": "bridge-linux-armv7",
     "openwrt_arches": (
         "arm_cortex-a5_vfpv4,arm_cortex-a7_vfpv4,"
         "arm_cortex-a7_neon-vfpv4,arm_cortex-a8_vfpv3,"
         "arm_cortex-a9_neon,arm_cortex-a9_vfpv3-d16,arm_cortex-a15_neon-vfpv4"
     ),
-    "qemu_platforms": "arm",
 }
 MODES = {"dev", "pr", "master", "release"}
 

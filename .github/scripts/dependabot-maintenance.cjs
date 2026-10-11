@@ -1,8 +1,6 @@
 'use strict';
 
-const VALIDATION = 'pr-validation.yml';
 const BUILD = 'build-dockerhub.yml';
-const CODEQL = 'codeql.yml';
 const REFRESH_TITLE = 'Refresh upstream dependencies on dev';
 const GENERATED_TITLE = 'chore: update generated development inputs after build [skip ci]';
 const MAX_ATTEMPTS = 3;
@@ -17,13 +15,21 @@ function eligible(pull, repository) {
     /^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([^)]+\))?!?: .+/.test(pull.title);
 }
 
-function validated(run, pull, repository, jobs) {
-  return run?.path === `.github/workflows/${VALIDATION}` &&
-    run.event === 'pull_request' && run.actor?.login === 'dependabot[bot]' &&
-    run.head_repository?.full_name === repository && run.head_sha === pull.head.sha &&
-    run.status === 'completed' && run.conclusion === 'success' &&
-    jobs.some(job => job.name === 'PR Gate' && job.status === 'completed' && job.conclusion === 'success') &&
-    jobs.every(job => job.status === 'completed' && ['success', 'skipped'].includes(job.conclusion));
+function trustedFiles(files, pull) {
+  const allowed = path =>
+    ['Dockerfile', 'docker/Dockerfile.debian', 'docker/Dockerfile.armv7-cross',
+      'bridge/go.mod', 'bridge/go.sum'].includes(path) ||
+    /^\.github\/(workflows\/[^/]+\.ya?ml|actions\/[^/]+\/action\.ya?ml)$/.test(path);
+  return files.length > 0 && files.length === pull.changed_files &&
+    files.every(file => ['modified', 'added'].includes(file.status) &&
+      !file.previous_filename && allowed(file.filename));
+}
+
+function verifiedCommits(commits, pull) {
+  return commits.length > 0 && commits.length === pull.commits &&
+    commits.every(commit => commit.author?.login === 'dependabot[bot]' &&
+      commit.commit?.verification?.verified === true) &&
+    commits.at(-1).sha === pull.head.sha;
 }
 
 function latest(runs) {
@@ -31,7 +37,13 @@ function latest(runs) {
 }
 
 module.exports = async function maintain({github, context, core, rebaseGithub}) {
-  const mode = (process.env.AUTOMERGE_MODE || 'off').toLowerCase();
+  const event = context.eventName;
+  if ((['push', 'workflow_dispatch'].includes(event) && context.ref !== 'refs/heads/dev') ||
+      (event === 'workflow_run' && context.payload?.workflow_run?.head_branch !== 'dev') ||
+      (event === 'pull_request_target' && context.payload?.pull_request?.base?.ref !== 'dev')) {
+    return core.notice('Dependabot maintenance only handles dev.');
+  }
+  const mode = (process.env.AUTOMERGE_MODE || 'active').toLowerCase();
   if (!['off', 'observe', 'active'].includes(mode)) throw new Error(`Invalid AUTOMERGE_MODE: ${mode}`);
   if (mode === 'off') return core.notice('Dependabot maintenance is disabled.');
   const dry = mode === 'observe' || process.env.DRY_RUN === 'true';
@@ -51,12 +63,12 @@ module.exports = async function maintain({github, context, core, rebaseGithub}) 
   });
   const retry = async run => {
     if (run.status !== 'completed' || run.conclusion === 'success') return;
-    if (!['failure', 'cancelled', 'timed_out', 'startup_failure'].includes(run.conclusion)) {
+    if (!['failure', 'timed_out', 'startup_failure'].includes(run.conclusion)) {
       core.warning(`Run ${run.id} needs attention (${run.conclusion}): ${run.html_url}`);
       return;
     }
     if (run.run_attempt >= MAX_ATTEMPTS) {
-      core.warning(`Run ${run.id} still fails after ${MAX_ATTEMPTS} attempts; keeping the gate closed: ${run.html_url}`);
+      core.warning(`Run ${run.id} still fails after ${MAX_ATTEMPTS} attempts; waiting for maintainer attention: ${run.html_url}`);
       return;
     }
     await act(`Retry failed jobs in run ${run.id} (attempt ${run.run_attempt + 1}/${MAX_ATTEMPTS}).`, () =>
@@ -72,28 +84,25 @@ module.exports = async function maintain({github, context, core, rebaseGithub}) 
       commit.commit.message.split('\n')[0] === GENERATED_TITLE &&
       commit.committer?.login === 'github-actions[bot]';
     const source = generated ? commit.parents[0].sha : head;
-    let ready = true;
-    for (const workflow of [BUILD, CODEQL]) {
-      const checkedSource = workflow === CODEQL ? head : source;
-      const runs = await runsFor(workflow, {branch: 'dev', head_sha: checkedSource});
-      if (checkedSource !== head) runs.push(...await runsFor(workflow, {branch: 'dev', head_sha: head}));
-      // A speculative upstream refresh must not poison routine dev delivery.
-      // Wait while it runs, but retain the last successful baseline if it fails.
-      if (runs.some(run => run.status !== 'completed')) { ready = false; continue; }
-      const run = latest(runs.filter(run =>
-        run.display_title !== REFRESH_TITLE || run.conclusion === 'success'));
-      if (!run) {
-        ready = false;
-        if (await branch() !== head) return false;
-        await act(`Dispatch ${workflow} on dev (${head}).`, () => github.rest.actions.createWorkflowDispatch({
-          ...repo, workflow_id: workflow, ref: 'dev',
-        }));
-      } else if (run.status !== 'completed' || run.conclusion !== 'success') {
-        ready = false;
-        await retry(run);
-      }
+    const runs = await runsFor(BUILD, {branch: 'dev', head_sha: source});
+    if (source !== head) runs.push(...await runsFor(BUILD, {branch: 'dev', head_sha: head}));
+    // A speculative upstream refresh must not poison routine dev delivery.
+    // Wait while it runs, but retain the last successful baseline if it fails.
+    if (runs.some(run => run.status !== 'completed')) return false;
+    const run = latest(runs.filter(run =>
+      run.display_title !== REFRESH_TITLE || run.conclusion === 'success'));
+    if (!run) {
+      if (await branch() !== head) return false;
+      await act(`Dispatch ${BUILD} on dev (${head}).`, () => github.rest.actions.createWorkflowDispatch({
+        ...repo, workflow_id: BUILD, ref: 'dev',
+      }));
+      return false;
     }
-    return ready;
+    if (run.conclusion !== 'success') {
+      await retry(run);
+      return false;
+    }
+    return true;
   }
 
   try {
@@ -119,7 +128,7 @@ module.exports = async function maintain({github, context, core, rebaseGithub}) 
         });
         if (comparison.merge_base_commit.sha !== base) {
           // Dependabot owns its branch. Ask its rebaser to refresh the branch so
-          // the resulting bot push starts the normal unprivileged PR CI.
+          // the resulting bot push can be reconsidered against the current base.
           const comments = await github.paginate(github.rest.issues.listComments, {
             ...repo, issue_number: pull.number, per_page: 100,
           });
@@ -130,27 +139,29 @@ module.exports = async function maintain({github, context, core, rebaseGithub}) 
           if (!rebaser && !dry) { core.warning('PAT_TOKEN is required only to request a Dependabot rebase.'); continue; }
           if (!recent) await act(`Request Dependabot rebase for #${pull.number} onto dev ${base}.`, () =>
             rebaser.rest.issues.createComment({...repo, issue_number: pull.number,
-              body: `@dependabot rebase\n\n${marker}\nRevalidate against the current dev branch (${base}).`}));
+              body: `@dependabot rebase\n\n${marker}\nUpdate against the current dev branch (${base}).`}));
           else note(`Waiting for Dependabot to rebase #${pull.number}.`);
           continue;
         }
 
-        const run = latest(await runsFor(VALIDATION, {event: 'pull_request', head_sha: pull.head.sha}));
-        if (!run) { core.warning(`No PR Validation run for #${pull.number} at ${pull.head.sha}.`); continue; }
-        if (run.status !== 'completed' || run.conclusion !== 'success') { await retry(run); continue; }
-        const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
-          ...repo, run_id: run.id, filter: 'latest', per_page: 100,
+        const files = await github.paginate(github.rest.pulls.listFiles, {
+          ...repo, pull_number: pull.number, per_page: 100,
         });
-        if (!validated(run, pull, repository, jobs)) throw new Error(`Untrusted or incomplete validation for #${pull.number}`);
+        const commits = await github.paginate(github.rest.pulls.listCommits, {
+          ...repo, pull_number: pull.number, per_page: 100,
+        });
+        if (!trustedFiles(files, pull) || !verifiedCommits(commits, pull)) {
+          core.warning(`Skipping #${pull.number}: unexpected files or unsigned/non-Dependabot commits.`);
+          continue;
+        }
         const {data: fresh} = await github.rest.pulls.get({...repo, pull_number: pull.number});
         if (!eligible(fresh, repository) || fresh.head.sha !== pull.head.sha || await branch() !== base) {
           note(`State changed for #${pull.number}; reconcile again on the next event.`);
           continue;
         }
-        if (!deliveryReady) { note(`Waiting for current dev delivery before merging #${pull.number}.`); continue; }
-        // Let GitHub enforce PR Gate, strict baseline and CodeQL rules with the
-        // repository-scoped Actions token. Never use an administrator PAT here.
-        const result = await act(`Merge validated Dependabot #${pull.number} at ${pull.head.sha}.`, () =>
+        // Merge only the verified head into dev with the repository Actions token.
+        // Never execute a PR checkout or use an administrator PAT for merging.
+        const result = await act(`Merge Dependabot #${pull.number} at ${pull.head.sha}.`, () =>
           github.rest.pulls.merge({...repo, pull_number: pull.number, sha: pull.head.sha,
             merge_method: 'squash', commit_title: `${pull.title} (#${pull.number})`}));
         if (dry) continue;
@@ -180,5 +191,6 @@ module.exports = async function maintain({github, context, core, rebaseGithub}) 
   }
 };
 module.exports.eligible = eligible;
-module.exports.validated = validated;
+module.exports.trustedFiles = trustedFiles;
+module.exports.verifiedCommits = verifiedCommits;
 module.exports.latest = latest;

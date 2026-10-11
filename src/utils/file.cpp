@@ -52,21 +52,11 @@ bool pathComponentEqual(const std::filesystem::path &left,
 #endif
 }
 
-#ifdef FILE_IO_TESTING
-std::atomic<FileIoTestFailure> file_io_failure {FileIoTestFailure::None};
-std::atomic<unsigned int> file_io_write_calls {0};
-#endif
-
 std::atomic<std::uint64_t> temporary_file_counter {0};
 constexpr std::size_t file_lock_stripe_count = 64;
 std::array<std::mutex, file_lock_stripe_count> file_write_mutexes;
 
 bool removeTemporaryFile(const std::filesystem::path &path) {
-#ifdef FILE_IO_TESTING
-    if(file_io_failure.load() ==
-       FileIoTestFailure::ReplaceAndTemporaryCleanup)
-        return false;
-#endif
     std::error_code error;
     if(std::filesystem::remove(path, error) && !error)
         return true;
@@ -166,49 +156,23 @@ class TemporaryFileGuard {
 };
 
 std::FILE *openFile(const char *path, const char *mode) {
-#ifdef FILE_IO_TESTING
-    if(file_io_failure.load() == FileIoTestFailure::Open)
-        return nullptr;
-#endif
     return std::fopen(path, mode);
 }
 
 std::size_t writeFile(const void *data, std::size_t size, std::size_t count,
                       std::FILE *file) {
-#ifdef FILE_IO_TESTING
-    if(file_io_failure.load() == FileIoTestFailure::ShortWrite) {
-        if(file_io_write_calls.fetch_add(1) > 0)
-            return 0;
-        const std::size_t partial = count > 1 ? count / 2 : 0;
-        return partial ? std::fwrite(data, size, partial, file) : 0;
-    }
-#endif
     return std::fwrite(data, size, count, file);
 }
 
 int flushFile(std::FILE *file) {
-#ifdef FILE_IO_TESTING
-    if(file_io_failure.load() == FileIoTestFailure::Flush)
-        return EOF;
-#endif
     return std::fflush(file);
 }
 
 int closeFile(std::FILE *file) {
-#ifdef FILE_IO_TESTING
-    if(file_io_failure.load() == FileIoTestFailure::Close) {
-        const int result = std::fclose(file);
-        return result == 0 ? EOF : result;
-    }
-#endif
     return std::fclose(file);
 }
 
 int syncFile(std::FILE *file) {
-#ifdef FILE_IO_TESTING
-    if(file_io_failure.load() == FileIoTestFailure::Sync)
-        return -1;
-#endif
 #ifdef _WIN32
     return _commit(_fileno(file));
 #else
@@ -217,10 +181,6 @@ int syncFile(std::FILE *file) {
 }
 
 int syncParentDirectory(const std::filesystem::path &target) {
-#ifdef FILE_IO_TESTING
-    if(file_io_failure.load() == FileIoTestFailure::ParentDirectorySync)
-        return -1;
-#endif
 #ifdef _WIN32
     // ReplaceFileW and first-create MoveFileExW use write-through semantics.
     // Windows does not expose a portable directory fsync equivalent.
@@ -368,10 +328,6 @@ std::FILE *openUniqueTemporaryFile(const std::filesystem::path &target,
                                    std::filesystem::path &temporary_path,
                                    bool &temporary_cleanup_failed) {
     temporary_cleanup_failed = false;
-#ifdef FILE_IO_TESTING
-    if(file_io_failure.load() == FileIoTestFailure::Open)
-        return nullptr;
-#endif
     const std::filesystem::path parent = target.parent_path();
     for(unsigned int attempt = 0; attempt < 128; ++attempt) {
         const std::uint64_t counter = temporary_file_counter.fetch_add(1);
@@ -552,33 +508,6 @@ enum class ReplaceResult {
 ReplaceResult replaceTarget(const std::filesystem::path &temporary,
                             const std::filesystem::path &target,
                             const TargetState &state) {
-#ifdef FILE_IO_TESTING
-    if(file_io_failure.load() == FileIoTestFailure::Replace ||
-       file_io_failure.load() ==
-           FileIoTestFailure::ReplaceAndTemporaryCleanup)
-        return ReplaceResult::NotCommitted;
-    if(file_io_failure.load() ==
-           FileIoTestFailure::TargetChangedBeforeReplace &&
-       state.exists) {
-#ifdef _WIN32
-        std::FILE *external = _wfopen(target.c_str(), L"ab");
-#else
-        std::FILE *external = std::fopen(target.c_str(), "ab");
-#endif
-        static const char mutation[] = "external-append";
-        if(!external)
-            return ReplaceResult::NotCommitted;
-        bool mutation_ok =
-            std::fwrite(mutation, 1, sizeof(mutation) - 1, external) ==
-            sizeof(mutation) - 1;
-        if(std::fflush(external) != 0)
-            mutation_ok = false;
-        if(std::fclose(external) != 0)
-            mutation_ok = false;
-        if(!mutation_ok)
-            return ReplaceResult::NotCommitted;
-    }
-#endif
     if(!targetUnchanged(target, state))
         return ReplaceResult::NotCommitted;
 #ifdef _WIN32
@@ -723,13 +652,6 @@ bool isInScope(const std::string &path)
     return !error && isPathInScope(path, root.string());
 }
 
-#ifdef FILE_IO_TESTING
-void setFileIoTestFailure(FileIoTestFailure failure) {
-    file_io_write_calls.store(0);
-    file_io_failure.store(failure);
-}
-#endif
-
 // TODO: Add preprocessor option to disable (open web service safety)
 std::string fileGet(const std::string &path, bool scope_limit)
 {
@@ -742,7 +664,6 @@ std::string fileGet(const std::string &path, bool scope_limit)
     // preference files and configured scripts. Request-controlled callers set
     // scope_limit=true and must pass the canonical working-tree containment
     // check above before this sink is reached.
-    // codeql[cpp/path-injection]
     std::FILE *fp = openFile(path.c_str(), "rb");
     if(!fp)
         return "";

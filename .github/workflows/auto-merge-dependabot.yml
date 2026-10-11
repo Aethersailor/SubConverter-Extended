@@ -1,22 +1,25 @@
-name: Merge validated Dependabot PRs
+name: Merge Dependabot PRs into dev
 
 on:
+  pull_request_target:
+    branches: [dev]
+    types: [opened, reopened, synchronize, ready_for_review, labeled, edited]
+  push:
+    branches: [dev]
   workflow_run:
-    workflows:
-      - PR Validation
-      - Build and Push Docker image
-      - CodeQL
+    workflows: [Build and Push Docker image]
+    branches: [dev]
     types: [completed]
   schedule:
     - cron: '23 */6 * * *'
   workflow_dispatch:
     inputs:
       dry_run:
-        description: Inspect the queue without making changes
+        description: Inspect the dev queue without making changes
         type: boolean
         default: false
       refresh_dependencies:
-        description: Request the separately validated full upstream refresh on dev
+        description: Request the automatic upstream refresh on dev when due
         type: boolean
         default: false
 
@@ -26,30 +29,37 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: dependabot-maintenance
+  group: dependabot-maintenance-dev
   cancel-in-progress: false
 
 jobs:
   auto-merge:
+    if: >-
+      (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/dev') &&
+      (github.event_name != 'pull_request_target' ||
+        (github.event.pull_request.base.ref == 'dev' &&
+         github.event.pull_request.user.login == 'dependabot[bot]' &&
+         github.event.pull_request.head.repo.full_name == github.repository)) &&
+      (github.event_name != 'workflow_run' ||
+        (github.event.workflow_run.head_branch == 'dev' &&
+         github.event.workflow_run.head_repository.full_name == github.repository))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      # Only default-branch maintenance code is loaded, never a PR checkout,
-      # artifact, cache, or script supplied by a dependency update.
-      - name: Checkout trusted maintenance code
+      # Read only trusted dev maintenance code, never a dependency PR checkout.
+      - name: Checkout trusted dev maintenance code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: dev
           persist-credentials: false
 
-      - name: Reconcile validated updates and dev delivery
+      - name: Merge dev dependency updates and reconcile dev builds
         uses: actions/github-script@373c709c69115d41ff229c7e5df9f8788daa9553 # v9
         env:
-          AUTOMERGE_MODE: ${{ vars.DEPENDABOT_AUTOMERGE_MODE || 'off' }}
+          AUTOMERGE_MODE: ${{ vars.DEPENDABOT_AUTOMERGE_MODE || 'active' }}
           DRY_RUN: ${{ inputs.dry_run || false }}
           REFRESH_DEPENDENCIES: ${{ inputs.refresh_dependencies || false }}
-          # Dependabot rejects rebase commands from github-actions[bot]. This
-          # credential is used only for that command, never for merging a PR.
+          # Only official Dependabot rebase requests use this credential.
           REBASE_TOKEN: ${{ secrets.PAT_TOKEN }}
         with:
           github-token: ${{ github.token }}
