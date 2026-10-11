@@ -206,7 +206,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload dependency snapshot
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: dependency-snapshot
           path: scripts/ci/dependencies.lock.json
@@ -250,7 +250,7 @@ jobs:
           fetch-depth: 0
 
       - name: Download dependency snapshot
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: dependency-snapshot
           path: dependency-snapshot
@@ -326,7 +326,7 @@ jobs:
 
       - name: Upload Artifact (Linux ${{ matrix.arch }})
         if: needs.prepare.outputs.is_release == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: linux-${{ matrix.arch }}
           path: SubConverter-Extended-*.tar.gz
@@ -334,7 +334,7 @@ jobs:
 
       - name: Upload Artifact (OpenWrt ${{ matrix.arch }})
         if: needs.prepare.outputs.is_release == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: openwrt-${{ matrix.arch }}
           retention-days: 1
@@ -380,7 +380,7 @@ jobs:
 
       - name: Upload built image archive (${{ matrix.arch }})
         if: github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: docker-image-${{ matrix.arch }}
           path: docker-images/subconverter-extended-${{ matrix.arch }}.tar.gz*
@@ -421,7 +421,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Download dependency snapshot
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: dependency-snapshot
           path: dependency-snapshot
@@ -475,7 +475,7 @@ jobs:
             arm_cortex-a7,arm_cortex-a9,arm_arm1176jzf-s_vfp,arm_arm926ej-s,arm_xscale
 
       - name: Upload OpenWrt software-float packages
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: openwrt-armel
           retention-days: 1
@@ -500,7 +500,7 @@ jobs:
           fetch-depth: 0
 
       - name: Download dependency snapshot
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: dependency-snapshot
           path: dependency-snapshot
@@ -550,7 +550,7 @@ jobs:
 
       - name: Upload Artifact (Windows amd64)
         if: needs.prepare.outputs.is_release == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: windows-amd64
           path: SubConverter-Extended-*.zip
@@ -635,7 +635,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download built image archives
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: images
           pattern: docker-image-*
@@ -961,7 +961,7 @@ jobs:
 
       - name: Set up Node.js
         if: steps.copilot_token.outputs.available == 'true'
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
 
       - name: Generate Bilingual Release Notes with Copilot
         if: steps.copilot_token.outputs.available == 'true'
@@ -1061,7 +1061,7 @@ jobs:
           EOF
 
       - name: Download all artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: artifacts
           pattern: '*'
