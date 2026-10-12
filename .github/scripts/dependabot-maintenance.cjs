@@ -1,6 +1,7 @@
 'use strict';
 
 const BUILD = 'build-dockerhub.yml';
+const CODEQL = 'codeql.yml';
 const REFRESH_TITLE = 'Refresh upstream dependencies on dev';
 const GENERATED_TITLE = 'chore: update generated development inputs after build [skip ci]';
 const MAX_ATTEMPTS = 3;
