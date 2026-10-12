@@ -13,6 +13,11 @@ After merging, the controller explicitly dispatches
 the dev build and repairs missed dispatches on later runs. Only trusted `dev`
 maintenance code is loaded; dependency PR code is never executed by the merger.
 
+CodeQL independently scans pushes to `dev` and accepts manual runs only on
+`dev`. The controller also repairs missing CodeQL dispatches after token-driven
+merges or generated commits. CodeQL findings and failures do not block merges,
+dev delivery or dependency refreshes; no required CodeQL branch rule is added.
+
 GitHub runs schedules and `pull_request_target` workflows from the default
 branch. Keep the workflow definition synchronized there through the normal
 release flow. Its checkout, PR queries, merges, build dispatches and upstream
@@ -23,8 +28,8 @@ Repository variable `DEPENDABOT_AUTOMERGE_MODE` supports `active` (the default),
 `observe` and `off`. Manual `dry_run=true` performs no writes. `GITHUB_TOKEN`
 performs merges and build dispatches; `PAT_TOKEN` is used only for official
 Dependabot rebase requests. GitHub branch rules remain enforced. Keep the dev
-ruleset free of obsolete required test, PR Gate and CodeQL checks so the
-controller can merge dependency updates without those retired workflows.
+ruleset free of obsolete required test and PR Gate checks, and do not make the
+independent CodeQL scan a merge prerequisite.
 
 Ordinary builds use the committed dependency snapshot and Go module graph.
 When the PR queue is empty and dev delivery is healthy, the scheduled controller
