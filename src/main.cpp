@@ -123,7 +123,6 @@ void chkArg(int argc, char *argv[]) {
         // --log is an explicit local-operator destination, not a path derived
         // from an HTTP request. Arbitrary absolute paths are part of the CLI
         // contract and are opened without invoking a shell.
-        // codeql[cpp/path-injection]
         const LogRedirectResult result = redirectStderrToAppendFile(log_path);
         if (result.success) {
           writeLog(LOG_LEVEL_INFO,

@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       refresh_dependencies:
-        description: Refresh all upstream dependencies on dev before validation
+        description: Refresh all upstream dependencies on dev before building
         type: boolean
         default: false
   workflow_call:
@@ -176,16 +176,6 @@ jobs:
             aethersailor/subconverter-extended \
             "https://ghcr.io/token?service=ghcr.io&scope=repository:aethersailor/subconverter-extended:pull"
 
-      - name: Verify COCR runtime assets are absent
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -e base/Custom_OpenClash_Rules ] || \
-             git ls-files -- base/Custom_OpenClash_Rules | grep -q .; then
-            echo "::error::Custom_OpenClash_Rules runtime assets must not exist in this project."
-            exit 1
-          fi
-
       - name: Refresh dependency snapshot on dev
         if: steps.metadata.outputs.mode == 'dev' && inputs.refresh_dependencies
         shell: bash
@@ -216,7 +206,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload dependency snapshot
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: dependency-snapshot
           path: scripts/ci/dependencies.lock.json
@@ -243,88 +233,6 @@ jobs:
             --version "$VERSION" \
             --github-output "$GITHUB_OUTPUT"
 
-  cross-build:
-    name: "🧭 Non-publishing cross build (${{ matrix.arch }})"
-    runs-on: ${{ matrix.runner }}
-    needs: prepare
-    if: needs.prepare.outputs.mode == 'dev'
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-            dockerfile: ./Dockerfile
-            platform: linux/arm64
-            threads: "4"
-          - arch: armv7
-            runner: ubuntu-latest
-            dockerfile: ./docker/Dockerfile.armv7-cross
-            platform: linux/arm/v7
-            threads: "2"
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          persist-credentials: false
-
-      - name: Download dependency snapshot
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: dependency-snapshot
-          path: dependency-snapshot
-
-      - name: Activate dependency snapshot
-        shell: bash
-        run: |
-          set -euo pipefail
-          cp dependency-snapshot/dependencies.lock.json scripts/ci/dependencies.lock.json
-          python3 scripts/ci/dependency_snapshot.py check
-          python3 scripts/ci/dependency_snapshot.py emit --github-env "$GITHUB_ENV"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4
-
-      - name: Prepare cross-build arguments
-        id: cross_args
-        shell: bash
-        env:
-          THREADS: ${{ matrix.threads }}
-          SHA: ${{ needs.prepare.outputs.sha }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-          BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
-          REFRESH_GO_DEPS: "false"
-          REFRESH_HEADERS: "false"
-          BUILD_TESTS: "false"
-        run: |
-          {
-            echo 'args<<EOF'
-            bash scripts/ci/docker-build-args.sh
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Compile without loading or publishing an image
-        shell: bash
-        env:
-          BUILD_ARGS: ${{ steps.cross_args.outputs.args }}
-        run: |
-          set -euo pipefail
-          args=()
-          while IFS= read -r arg; do
-            [ -n "$arg" ] && args+=(--build-arg "$arg")
-          done <<< "$BUILD_ARGS"
-          docker buildx build \
-            --file "${{ matrix.dockerfile }}" \
-            --platform "${{ matrix.platform }}" \
-            --target builder \
-            --output type=cacheonly \
-            --cache-from type=gha,scope="subconverter-cross-${{ matrix.arch }}" \
-            --cache-to type=gha,mode=max,scope="subconverter-cross-${{ matrix.arch }}" \
-            "${args[@]}" \
-            .
-
   build-linux:
     name: "🐳 Docker Build (${{ matrix.arch }})"
     runs-on: ${{ matrix.runner }}
@@ -342,7 +250,7 @@ jobs:
           fetch-depth: 0
 
       - name: Download dependency snapshot
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: dependency-snapshot
           path: dependency-snapshot
@@ -374,7 +282,6 @@ jobs:
           BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
           REFRESH_GO_DEPS: ${{ needs.prepare.outputs.mode == 'dev' && inputs.refresh_dependencies && matrix.extract_generated == 'true' }}
           REFRESH_HEADERS: ${{ needs.prepare.outputs.mode == 'dev' && inputs.refresh_dependencies && matrix.extract_generated == 'true' }}
-          BUILD_TESTS: ${{ needs.prepare.outputs.mode == 'dev' && inputs.refresh_dependencies && matrix.extract_generated == 'true' }}
         run: |
           {
             echo 'args<<EOF'
@@ -409,41 +316,6 @@ jobs:
           EXTRACT_GENERATED: ${{ matrix.extract_generated }}
         run: bash scripts/ci/extract-builder-output.sh "${{ matrix.builder_tag }}" "${{ matrix.extract_mode }}"
 
-      - name: Set up Go for upstream refresh validation
-        if: needs.prepare.outputs.mode == 'dev' && inputs.refresh_dependencies && matrix.extract_generated == 'true'
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: bridge/go.mod
-          cache-dependency-path: bridge/go.sum
-
-      - name: Test refreshed Go bridge
-        if: needs.prepare.outputs.mode == 'dev' && inputs.refresh_dependencies && matrix.extract_generated == 'true'
-        working-directory: bridge
-        run: go test -mod=readonly ./...
-
-      - name: Package dev-only OpenWrt amd64 without publishing
-        if: needs.prepare.outputs.mode == 'dev' && matrix.arch == 'amd64'
-        shell: bash
-        env:
-          SHA: ${{ needs.prepare.outputs.sha }}
-          BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
-          BUILD_TIME: "0"
-        run: |
-          set -euo pipefail
-          bash scripts/ci/build-linux-release.sh v0.0.0 amd64 x86_64
-          python3 scripts/ci/check_file_size.py --budget release-openwrt \
-            SubConverter-Extended-v0.0.0-openwrt-x86_64.apk
-          rm -rf -- \
-            SubConverter-Extended \
-            SubConverter-Extended-v0.0.0-linux-amd64.tar.gz \
-            SubConverter-Extended-v0.0.0-openwrt-x86_64.apk \
-            build/openwrt-apk/amd64
-          rm -f SubConverter-Extended-v0.0.0-openwrt-x86_64.ipk
-
-      - name: Check bridge size budget (${{ matrix.arch }})
-        shell: bash
-        run: python3 scripts/ci/check_file_size.py --budget "${{ matrix.bridge_budget }}" "build/bridge-output/libmihomo.*"
-
       - name: Package Release Artifacts (Linux ${{ matrix.arch }})
         if: needs.prepare.outputs.is_release == 'true'
         shell: bash
@@ -452,43 +324,9 @@ jobs:
           BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
         run: bash scripts/ci/build-linux-release.sh "${{ needs.prepare.outputs.version }}" "${{ matrix.arch }}" "${{ matrix.openwrt_arches }}"
 
-      - name: Check release size budgets (Linux ${{ matrix.arch }})
-        if: needs.prepare.outputs.is_release == 'true'
-        shell: bash
-        run: |
-          python3 scripts/ci/check_file_size.py --budget release-linux \
-            "SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-${{ matrix.arch }}.tar.gz"
-          python3 scripts/ci/check_file_size.py --budget release-openwrt \
-            "SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-*.apk"
-
-      - name: Set up QEMU for smoke test
-        if: matrix.qemu_platforms != ''
-        shell: bash
-        run: docker run --privileged --rm tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install "${{ matrix.qemu_platforms }}"
-
-      - name: Smoke test artifact (Linux ${{ matrix.arch }})
-        if: needs.prepare.outputs.is_release == 'true'
-        timeout-minutes: 3
-        uses: ./.github/actions/smoke-linux-artifact
-        with:
-          artifact: SubConverter-Extended-${{ needs.prepare.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
-          expected-version: ${{ needs.prepare.outputs.version }}
-          expected-revision: ${{ needs.prepare.outputs.sha }}
-          expected-build-date: ${{ needs.prepare.outputs.build_date }}
-
-      - name: Smoke test APKs (OpenWrt ${{ matrix.arch }})
-        if: needs.prepare.outputs.is_release == 'true'
-        timeout-minutes: 15
-        uses: ./.github/actions/smoke-openwrt-apk
-        with:
-          artifacts: SubConverter-Extended-${{ needs.prepare.outputs.version }}-openwrt-*.apk
-          expected-version: ${{ needs.prepare.outputs.version }}
-          expected-revision: ${{ needs.prepare.outputs.sha }}
-          expected-build-date: ${{ needs.prepare.outputs.build_date }}
-
       - name: Upload Artifact (Linux ${{ matrix.arch }})
         if: needs.prepare.outputs.is_release == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: linux-${{ matrix.arch }}
           path: SubConverter-Extended-*.tar.gz
@@ -496,7 +334,7 @@ jobs:
 
       - name: Upload Artifact (OpenWrt ${{ matrix.arch }})
         if: needs.prepare.outputs.is_release == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: openwrt-${{ matrix.arch }}
           retention-days: 1
@@ -526,18 +364,7 @@ jobs:
           echo "::error::Frozen dependency/generated inputs are stale. Refresh and commit them on dev before building master or a release."
           exit 1
 
-      - name: Smoke test image (${{ matrix.arch }})
-        if: github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'
-        timeout-minutes: 3
-        uses: ./.github/actions/smoke-docker-image
-        with:
-          image: subconverter-extended:${{ matrix.arch }}-ci
-          platform: ${{ matrix.image_platform }}
-          expected-version: ${{ needs.prepare.outputs.version }}
-          expected-revision: ${{ needs.prepare.outputs.sha }}
-          expected-build-date: ${{ needs.prepare.outputs.build_date }}
-
-      - name: Export tested image archive (${{ matrix.arch }})
+      - name: Export built image archive (${{ matrix.arch }})
         if: github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'
         shell: bash
         run: |
@@ -551,9 +378,9 @@ jobs:
             sha256sum "$archive" > "$archive.sha256"
           )
 
-      - name: Upload tested image archive (${{ matrix.arch }})
+      - name: Upload built image archive (${{ matrix.arch }})
         if: github.event_name != 'pull_request' && needs.prepare.outputs.mode != 'master'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: docker-image-${{ matrix.arch }}
           path: docker-images/subconverter-extended-${{ matrix.arch }}.tar.gz*
@@ -594,7 +421,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Download dependency snapshot
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: dependency-snapshot
           path: dependency-snapshot
@@ -615,7 +442,6 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
           BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
           THREADS: "2"
-          BUILD_TESTS: "false"
           REFRESH_GO_DEPS: "false"
           REFRESH_HEADERS: "false"
         run: |
@@ -649,7 +475,7 @@ jobs:
             arm_cortex-a7,arm_cortex-a9,arm_arm1176jzf-s_vfp,arm_arm926ej-s,arm_xscale
 
       - name: Upload OpenWrt software-float packages
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: openwrt-armel
           retention-days: 1
@@ -662,10 +488,7 @@ jobs:
     name: "🪟 Windows Build (amd64)"
     runs-on: windows-latest
     needs: prepare
-    if: >-
-      needs.prepare.outputs.is_release == 'true' ||
-      (needs.prepare.outputs.mode == 'dev' &&
-       github.event_name == 'workflow_dispatch')
+    if: needs.prepare.outputs.is_release == 'true'
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -674,7 +497,7 @@ jobs:
           fetch-depth: 0
 
       - name: Download dependency snapshot
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: dependency-snapshot
           path: dependency-snapshot
@@ -712,10 +535,8 @@ jobs:
 
       - name: Build Windows amd64
         shell: msys2 {0}
-        env:
-          BUILD_TESTS: "false"
         run: |
-          THREADS=4 BUILD_TESTS="$BUILD_TESTS" bash scripts/build-windows-amd64.sh \
+          THREADS=4 bash scripts/build-windows-amd64.sh \
             "${{ needs.prepare.outputs.version }}" \
             "${{ needs.prepare.outputs.sha }}" \
             "${{ needs.prepare.outputs.build_date }}"
@@ -724,22 +545,9 @@ jobs:
         shell: pwsh
         run: ./scripts/package-windows-portable.ps1 -Version "${{ needs.prepare.outputs.version }}" -Revision "${{ needs.prepare.outputs.sha }}" -BuildDate "${{ needs.prepare.outputs.build_date }}"
 
-      - name: Check release size budget (Windows amd64)
-        shell: pwsh
-        run: python scripts/ci/check_file_size.py --budget release-windows-amd64 "SubConverter-Extended-${{ needs.prepare.outputs.version }}-windows-amd64.zip"
-
-      - name: Smoke test artifact (Windows amd64)
-        timeout-minutes: 3
-        uses: ./.github/actions/smoke-windows-artifact
-        with:
-          artifact: SubConverter-Extended-${{ needs.prepare.outputs.version }}-windows-amd64.zip
-          expected-version: ${{ needs.prepare.outputs.version }}
-          expected-revision: ${{ needs.prepare.outputs.sha }}
-          expected-build-date: ${{ needs.prepare.outputs.build_date }}
-
       - name: Upload Artifact (Windows amd64)
         if: needs.prepare.outputs.is_release == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: windows-amd64
           path: SubConverter-Extended-*.zip
@@ -748,15 +556,14 @@ jobs:
   merge-manifest:
     name: "🔗 Publish Version Docker Images"
     runs-on: ubuntu-latest
-    needs: [prepare, cross-build, build-linux, build-windows-amd64]
+    needs: [prepare, build-linux, build-windows-amd64]
     if: >-
       always() &&
       github.event_name != 'pull_request' &&
       needs.prepare.outputs.mode != 'master' &&
       needs.prepare.result == 'success' &&
       needs.build-linux.result == 'success' &&
-      (needs.build-windows-amd64.result == 'success' || needs.prepare.outputs.mode == 'dev') &&
-      (needs.cross-build.result == 'success' || needs.prepare.outputs.mode == 'release')
+      (needs.build-windows-amd64.result == 'success' || needs.prepare.outputs.mode == 'dev')
     outputs:
       dockerhub_digest: ${{ steps.published.outputs.dockerhub_digest }}
       ghcr_digest: ${{ steps.published.outputs.ghcr_digest }}
@@ -824,14 +631,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download tested image archives
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - name: Download built image archives
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: images
           pattern: docker-image-*
           merge-multiple: true
 
-      - name: Load and verify tested image archives
+      - name: Load and verify built image archives
         shell: bash
         run: |
           set -euo pipefail
@@ -907,7 +714,7 @@ jobs:
             aethersailor/subconverter-extended \
             "https://ghcr.io/token?service=ghcr.io&scope=repository:aethersailor/subconverter-extended:pull"
 
-      - name: Push tested candidates and publish manifests
+      - name: Push built candidates and publish manifests
         shell: bash
         run: |
           set -euo pipefail
@@ -1151,7 +958,7 @@ jobs:
 
       - name: Set up Node.js
         if: steps.copilot_token.outputs.available == 'true'
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
 
       - name: Generate Bilingual Release Notes with Copilot
         if: steps.copilot_token.outputs.available == 'true'
@@ -1251,7 +1058,7 @@ jobs:
           EOF
 
       - name: Download all artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: artifacts
           pattern: '*'

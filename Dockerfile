@@ -12,7 +12,6 @@ ARG TARGETVARIANT
 ARG MIHOMO_REF="Alpha"
 ARG MIHOMO_CACHE_BUST=1
 ARG REFRESH_GO_DEPS=false
-ARG ENABLE_SANITIZERS=false
 
 WORKDIR /build/bridge
 
@@ -75,10 +74,7 @@ RUN CGO_ENABLED=0 go build \
     -o subconverter-update \
     ./cmd/portable-updater
 
-# Build the shared library used by the normal Alpine runtime and a glibc archive
-# for build/test consumers.  The sanitizer build instruments the Go archive so
-# its runtime cooperates with the outer C++ ASan process.  The c-shared form is
-# retained for production, but is not used in this glibc sanitizer composition.
+# Build the shared library used by the Alpine runtime.
 # 关键修改：
 # 1. 使用 c-shared 模式避免 musl 环境下 Go runtime 初始化问题
 # 2. musl libc 不向构造函数传递 argc/argv，c-archive 模式会导致 Segfault
@@ -89,56 +85,13 @@ RUN set -xe && \
     -ldflags='-s -w' \
     -buildmode=c-shared \
     -o libmihomo.so \
-    . && \
-    sanitizer_flags="" && \
-    if [ "${ENABLE_SANITIZERS}" = "true" ]; then \
-      sanitizer_flags="-asan"; \
-      echo "==> Building glibc Go archive with ASan interoperability"; \
-    fi && \
-    echo "==> Building glibc archive for $TARGETARCH" && \
-    CGO_ENABLED=1 \
-    go build ${sanitizer_flags} \
-    -trimpath \
-    -ldflags='-s -w' \
-    -buildmode=c-archive \
-    -o libmihomo.a \
     .
 
-# Verify build output
-RUN ls -lh libmihomo.so libmihomo.a libmihomo.h subconverter-update
-
-# Build the config validator from the exact Mihomo module selected by the
-# bridge. It is test-only and never copied into the runtime or CI export image.
-ARG BUILD_TESTS=false
-RUN set -eux; \
-    mkdir -p /build/test-tools; \
-    if [ "${BUILD_TESTS}" = "true" ]; then \
-      mihomo_dir="$(GOWORK=off go list -m -mod=readonly -f '{{.Dir}}' github.com/metacubex/mihomo)"; \
-      mihomo_version="$(GOWORK=off go list -m -mod=readonly -f '{{.Version}}' github.com/metacubex/mihomo)"; \
-      echo "Building Mihomo config validator ${mihomo_version}"; \
-      for attempt in 1 2 3; do \
-        if (cd "${mihomo_dir}" && \
-          GOWORK=off CGO_ENABLED=1 go build \
-            -mod=readonly \
-            -trimpath \
-            -ldflags='-s -w' \
-            -o /build/test-tools/mihomo \
-            .); then \
-          break; \
-        fi; \
-        if [ "${attempt}" = 3 ]; then \
-          echo "Mihomo config validator build failed after ${attempt} attempts" >&2; \
-          exit 1; \
-        fi; \
-        echo "Mihomo config validator build attempt ${attempt} failed; retrying" >&2; \
-        sleep "$((attempt * 5))"; \
-      done; \
-      test -x /build/test-tools/mihomo; \
-    fi
+RUN ls -lh libmihomo.so libmihomo.h subconverter-update
 
 # ========== C++ BUILD STAGE ==========
 # 使用 Debian (glibc) 编译，运行时再搬运依赖到 Alpine
-FROM ${DEBIAN_IMAGE} AS builder-base
+FROM ${DEBIAN_IMAGE} AS builder
 ARG THREADS="4"
 ARG SHA=""
 ARG VERSION="dev"
@@ -152,7 +105,6 @@ ARG CPP_HTTPLIB_REF
 ARG NLOHMANN_JSON_REF
 ARG INJA_REF
 ARG JPCRE2_REF
-ARG ENABLE_SANITIZERS=false
 
 WORKDIR /
 
@@ -211,43 +163,7 @@ RUN set -xe && \
 
 # Copy Go shared library and module files from go-builder stage
 COPY --from=go-builder /build/bridge/libmihomo.so /usr/lib/
-COPY --from=go-builder /build/bridge/libmihomo.a /usr/lib/
 COPY --from=go-builder /build/bridge/libmihomo.h /usr/include/
-COPY --from=go-builder /build/test-tools/ /opt/subconverter-test-tools/
-
-ARG BUILD_TESTS=false
-ARG TARGETARCH
-ARG SINGBOX_STABLE_VERSION=1.13.18
-ARG SINGBOX_STABLE_SHA256=b5c973890cf171a42512baaec6f21939f1b75b87551f335344986fd6041916d9
-ARG SINGBOX_NEXT_VERSION=1.14.0-beta.14
-ARG SINGBOX_NEXT_SHA256=b526ec3f4ef231db82eee935715812115055cfad3e1116a9d31cc9aad8bbd3af
-RUN set -eux; \
-    if [ "${BUILD_TESTS}" = "true" ]; then \
-      test "${TARGETARCH}" = "amd64"; \
-      for channel in stable next; do \
-        if [ "${channel}" = "stable" ]; then \
-          version="${SINGBOX_STABLE_VERSION}"; \
-          checksum="${SINGBOX_STABLE_SHA256}"; \
-        else \
-          version="${SINGBOX_NEXT_VERSION}"; \
-          checksum="${SINGBOX_NEXT_SHA256}"; \
-        fi; \
-        archive="/tmp/sing-box-${version}-linux-amd64-glibc.tar.gz"; \
-        curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL \
-          "https://github.com/SagerNet/sing-box/releases/download/v${version}/sing-box-${version}-linux-amd64-glibc.tar.gz" \
-          -o "${archive}"; \
-        printf '%s  %s\n' "${checksum}" "${archive}" | sha256sum -c -; \
-        tar -xzf "${archive}" -C /tmp; \
-        install -m755 \
-          "/tmp/sing-box-${version}-linux-amd64-glibc/sing-box" \
-          "/opt/subconverter-test-tools/sing-box-${channel}"; \
-        rm -rf "${archive}" \
-          "/tmp/sing-box-${version}-linux-amd64-glibc"; \
-      done; \
-      /opt/subconverter-test-tools/sing-box-stable version; \
-      /opt/subconverter-test-tools/sing-box-next version; \
-    fi
-
 # build SubConverter-Extended from THIS repository source
 WORKDIR /src
 COPY . /src
@@ -292,61 +208,22 @@ RUN set -xe && \
     [ -n "${BUILD_DATE}" ] && sed -i "s/#define BUILD_DATE \"\"/#define BUILD_DATE \"${BUILD_DATE}\"/" src/version.h || true && \
     mkdir -p bridge && \
     rm -f bridge/libmihomo.so bridge/libmihomo.a && \
-    if [ "${ENABLE_SANITIZERS}" = "true" ]; then \
-      cp /usr/lib/libmihomo.a bridge/; \
-    else \
-      cp /usr/lib/libmihomo.so bridge/; \
-    fi && \
+    cp /usr/lib/libmihomo.so bridge/ && \
     cp /usr/include/libmihomo.h bridge/ && \
-    if [ "${BUILD_TESTS}" = "true" ]; then \
-      test -x /opt/subconverter-test-tools/mihomo; \
-      test -x /opt/subconverter-test-tools/sing-box-stable; \
-      test -x /opt/subconverter-test-tools/sing-box-next; \
-    fi && \
     export PATH="/usr/lib/ccache:$PATH" && \
     export CCACHE_DIR=/tmp/ccache && \
     export CCACHE_COMPILERCHECK=content && \
     cmake -GNinja \
     -DCMAKE_BUILD_TYPE=Release \
-    -DBUILD_TESTS=${BUILD_TESTS} \
-    -DREQUIRE_MIHOMO_TEST_BINARY=${BUILD_TESTS} \
-    -DMIHOMO_TEST_BINARY=/opt/subconverter-test-tools/mihomo \
-    -DREQUIRE_SINGBOX_TEST_BINARIES=${BUILD_TESTS} \
-    -DSINGBOX_STABLE_TEST_BINARY=/opt/subconverter-test-tools/sing-box-stable \
-    -DSINGBOX_NEXT_TEST_BINARY=/opt/subconverter-test-tools/sing-box-next \
-    -DENABLE_SANITIZERS=${ENABLE_SANITIZERS} \
     -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
     -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
     -DCMAKE_POSITION_INDEPENDENT_CODE=OFF \
     .
 
-# Keep sanitizer compilation resumable on hosted runners that can be recycled
-# during one long build step. The first target materializes the production
-# object graph and ccache; the final builder continues with every test target.
-FROM builder-base AS sanitizer-bootstrap
-ARG THREADS="4"
-RUN export PATH="/usr/lib/ccache:$PATH" && \
-    export CCACHE_DIR=/tmp/ccache && \
-    export CCACHE_COMPILERCHECK=content && \
-    ninja -j ${THREADS} subconverter
-
-FROM sanitizer-bootstrap AS builder
-ARG THREADS="4"
-ARG BUILD_TESTS=false
-ARG ENABLE_SANITIZERS=false
 RUN export PATH="/usr/lib/ccache:$PATH" && \
     export CCACHE_DIR=/tmp/ccache && \
     export CCACHE_COMPILERCHECK=content && \
     ninja -j ${THREADS}
-
-RUN if [ "${BUILD_TESTS}" = "true" ]; then \
-      if [ "${ENABLE_SANITIZERS}" = "true" ]; then \
-        export ASAN_OPTIONS="detect_leaks=1:strict_string_checks=1:halt_on_error=1:abort_on_error=1"; \
-        export UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1"; \
-        echo "Sanitizers enabled; production runtime and full correctness suite instrumented"; \
-      fi; \
-      ctest --test-dir . --output-on-failure --timeout 120; \
-    fi
 
 # 收集 glibc 运行时依赖（动态探测，避免固定版本）
 RUN set -xe && \

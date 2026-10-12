@@ -75,10 +75,25 @@ module.exports = async function maintain({github, context, core, rebaseGithub}) 
       github.rest.actions.reRunWorkflowFailedJobs({...repo, run_id: run.id}));
   };
 
+  async function reconcileCodeQL(head) {
+    try {
+      const run = latest(await runsFor(CODEQL, {branch: 'dev', head_sha: head}));
+      if (run || await branch() !== head) return;
+      await act(`Dispatch ${CODEQL} on dev (${head}).`, () => github.rest.actions.createWorkflowDispatch({
+        ...repo, workflow_id: CODEQL, ref: 'dev',
+      }));
+    } catch (error) {
+      // Security scanning is independent of dependency merging and delivery.
+      // A later reconciliation can repair a missing dispatch without a gate.
+      core.warning(`CodeQL dispatch needs attention: ${error.message}`);
+    }
+  }
+
   // GITHUB_TOKEN merges do not emit ordinary push CI. Repair a missed dispatch
   // on the next event/schedule too, including a crash between merge and dispatch.
   async function reconcileDelivery() {
     const head = await branch();
+    await reconcileCodeQL(head);
     const {data: commit} = await github.rest.repos.getCommit({...repo, ref: head});
     const generated = commit.parents.length === 1 &&
       commit.commit.message.split('\n')[0] === GENERATED_TITLE &&

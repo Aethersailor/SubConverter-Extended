@@ -101,13 +101,6 @@ source and writes the capability manifest. The remaining commands consume the
 same manifest, so parser validation, URI detection, and global parameter
 overlays cannot silently use different protocol snapshots.
 
-## Testing notes
-
-Run `go test ./...` in `bridge/` for preprocessing, native provider YAML,
-validation, and duplicate-name coverage. The Docker smoke action also verifies
-remote-only, URI-only, and mixed Clash inputs with both `list=false` and
-`list=true`, plus scalar and nested YAML type preservation.
-
 ## License
 
 The Mihomo parser dependency comes from

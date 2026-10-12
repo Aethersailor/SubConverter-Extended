@@ -249,19 +249,6 @@ private:
   std::chrono::steady_clock::time_point last_checkpoint_;
 };
 
-#ifdef STATISTICS_V2_TESTING
-enum class TestWriteFault {
-  None,
-  OpenFailure,
-  NoSpace,
-  ShortWrite,
-  FlushFailure,
-  TruncateFailure
-};
-
-void setTestWriteFault(TestWriteFault fault);
-#endif
-
 } // namespace statistics_v2
 
 #endif // STATISTICS_V2_H_INCLUDED

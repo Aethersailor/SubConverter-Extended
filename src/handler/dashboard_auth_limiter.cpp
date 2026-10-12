@@ -90,16 +90,4 @@ FailureLimiter::Decision FailureLimiter::evaluate(
                        window_seconds, lock_seconds, now, false, nullptr);
 }
 
-#ifdef DASHBOARD_AUTH_LIMITER_TESTING
-std::size_t FailureLimiter::bucketCount() const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return failures_.size();
-}
-
-bool FailureLimiter::overflowActive() const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return overflow_active_;
-}
-#endif
-
 } // namespace dashboard_auth

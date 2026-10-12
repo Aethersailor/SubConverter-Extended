@@ -29,11 +29,6 @@ public:
                     int max_failures, int window_seconds, int lock_seconds,
                     TimePoint now = Clock::now());
 
-#ifdef DASHBOARD_AUTH_LIMITER_TESTING
-  std::size_t bucketCount() const;
-  bool overflowActive() const;
-#endif
-
 private:
   struct FailureState {
     int failures = 0;

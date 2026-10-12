@@ -54,10 +54,6 @@ constexpr std::array<uint8_t, 4> kWalMagic = {'S', '2', 'W', 'L'};
 constexpr uint32_t kSchemaVersion = 2;
 constexpr uint32_t kWalPatchType = 1;
 
-#ifdef STATISTICS_V2_TESTING
-TestWriteFault g_test_write_fault = TestWriteFault::None;
-#endif
-
 uint64_t saturatedAddValue(uint64_t lhs, uint64_t rhs) {
   if (rhs > std::numeric_limits<uint64_t>::max() - lhs)
     return std::numeric_limits<uint64_t>::max();
@@ -603,12 +599,6 @@ std::FILE *openPersistenceFile(const std::string &path, bool append) {
 }
 
 bool flushFile(std::FILE *file) {
-#ifdef STATISTICS_V2_TESTING
-  if (g_test_write_fault == TestWriteFault::FlushFailure) {
-    errno = EIO;
-    return false;
-  }
-#endif
   if (std::fflush(file) != 0)
     return false;
 #ifdef _WIN32
@@ -625,19 +615,6 @@ bool flushFile(std::FILE *file) {
 }
 
 bool writeAll(std::FILE *file, const uint8_t *data, std::size_t size) {
-#ifdef STATISTICS_V2_TESTING
-  if (g_test_write_fault == TestWriteFault::NoSpace) {
-    errno = ENOSPC;
-    return false;
-  }
-  if (g_test_write_fault == TestWriteFault::ShortWrite) {
-    const std::size_t partial = size > 1 ? size / 2 : 0;
-    if (partial != 0)
-      std::fwrite(data, 1, partial, file);
-    errno = EIO;
-    return false;
-  }
-#endif
   std::size_t written = 0;
   while (written < size) {
     const std::size_t count =
@@ -1518,16 +1495,7 @@ StoreLoadResult Store::load() {
 bool Store::replaceFile(const std::string &target,
                         const std::vector<uint8_t> &bytes) {
   const std::string temporary = target + ".tmp";
-#ifdef STATISTICS_V2_TESTING
-  std::FILE *file =
-      g_test_write_fault == TestWriteFault::OpenFailure
-          ? nullptr
-          : openPersistenceFile(temporary, false);
-  if (!file && g_test_write_fault == TestWriteFault::OpenFailure)
-    errno = EACCES;
-#else
   std::FILE *file = openPersistenceFile(temporary, false);
-#endif
   if (!file) {
     setError("cannot open temporary persistence file");
     return false;
@@ -1581,16 +1549,7 @@ bool Store::appendFile(const std::string &target,
     setError("statistics WAL exceeds the safety limit");
     return false;
   }
-#ifdef STATISTICS_V2_TESTING
-  std::FILE *file =
-      g_test_write_fault == TestWriteFault::OpenFailure
-          ? nullptr
-          : openPersistenceFile(target, true);
-  if (!file && g_test_write_fault == TestWriteFault::OpenFailure)
-    errno = EACCES;
-#else
   std::FILE *file = openPersistenceFile(target, true);
-#endif
   if (!file) {
     setError("cannot open statistics WAL");
     return false;
@@ -1616,13 +1575,6 @@ bool Store::truncateWal() {
 }
 
 bool Store::truncateWalTo(std::size_t size, std::size_t records) {
-#ifdef STATISTICS_V2_TESTING
-  if (g_test_write_fault == TestWriteFault::TruncateFailure) {
-    errno = EIO;
-    setError("injected statistics WAL truncation failure");
-    return false;
-  }
-#endif
   const std::string wal_path = path("statistics-v2.wal");
 #ifdef _WIN32
   HANDLE file = CreateFileA(wal_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
@@ -1794,11 +1746,5 @@ bool Store::cleanupLegacyFile() {
   }
   return true;
 }
-
-#ifdef STATISTICS_V2_TESTING
-void setTestWriteFault(TestWriteFault fault) {
-  g_test_write_fault = fault;
-}
-#endif
 
 } // namespace statistics_v2

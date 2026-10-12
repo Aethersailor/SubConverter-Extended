@@ -1,6 +1,5 @@
 #include "cache_storage.h"
 
-#include <atomic>
 #include <cerrno>
 #include <cstdio>
 #include <filesystem>
@@ -9,21 +8,11 @@
 
 namespace {
 
-#ifdef CACHE_STORAGE_TESTING
-std::atomic<CacheStorageTestFailure> cache_storage_failure {
-    CacheStorageTestFailure::None};
-#endif
-
 std::string invalidationPath(const std::string &header_path) {
     return header_path + "_invalid";
 }
 
 bool removeInvalidation(const std::string &path) {
-#ifdef CACHE_STORAGE_TESTING
-    if(cache_storage_failure.load() ==
-       CacheStorageTestFailure::RemoveInvalidation)
-        return false;
-#endif
     errno = 0;
     return std::remove(path.c_str()) == 0 || errno == ENOENT;
 }
@@ -79,9 +68,3 @@ std::string readCachedResponseHeaders(const std::string &header_path) {
         return "";
     return fileGet(header_path, true);
 }
-
-#ifdef CACHE_STORAGE_TESTING
-void setCacheStorageTestFailure(CacheStorageTestFailure failure) {
-    cache_storage_failure.store(failure);
-}
-#endif
