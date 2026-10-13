@@ -5562,7 +5562,8 @@ static SubStageResponse processSubscriptionNodes(
           base_name = default_name;
         provider.name = reserve_provider_name(base_name);
         provider.tag = item.tag;
-        provider.url = item.url_decoded ? item.url : urlDecode(item.url);
+        // Transport and prefix decoding is complete; preserve URL escapes.
+        provider.url = item.url;
         provider.interval = static_cast<uint32_t>(
             item.has_interval ? item.interval : settings.proxyProviderInterval);
         provider.proxy_direct =
