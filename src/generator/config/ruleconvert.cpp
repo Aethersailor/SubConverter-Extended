@@ -9,6 +9,7 @@
 #include <string>
 #include <unordered_set>
 
+#include "config/ruleset_comment.h"
 #include "handler/settings.h"
 #include "handler/settings_view.h"
 #include "utils/logger.h"
@@ -63,11 +64,7 @@ static std::string convertRulesetUncached(const std::string &content, int type)
             if(lineSize && strLine[lineSize - 1] == '\r') //remove line break
                 strLine.erase(--lineSize);
 
-            if(strFind(strLine, "//"))
-            {
-                strLine.erase(strLine.find("//"));
-                strLine = trimWhitespace(strLine);
-            }
+            stripRulesetComment(strLine, true);
 
             if(!strLine.empty() && (strLine[0] != ';' && strLine[0] != '#' && !(lineSize >= 2 && strLine[0] == '/' && strLine[1] == '/')))
             {
@@ -684,11 +681,7 @@ void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_
                 continue;
             if(std::none_of(ClashRuleTypes.begin(), ClashRuleTypes.end(), [strLine](const std::string& type){return startsWith(strLine, type);}))
                 continue;
-            if(strFind(strLine, "//"))
-            {
-                strLine.erase(strLine.find("//"));
-                strLine = trimWhitespace(strLine);
-            }
+            stripRulesetComment(strLine);
             strLine = appendClashRuleTarget(strLine, rule_group);
             strLine =
                 appendClashIpCidrNoResolve(strLine, x.rule_type, x.options);
@@ -768,11 +761,7 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent>
                 continue;
             if(std::none_of(ClashRuleTypes.begin(), ClashRuleTypes.end(), [strLine](const std::string& type){ return startsWith(strLine, type); }))
                 continue;
-            if(strFind(strLine, "//"))
-            {
-                strLine.erase(strLine.find("//"));
-                strLine = trimWhitespace(strLine);
-            }
+            stripRulesetComment(strLine);
 
             strLine = appendClashRuleTarget(strLine, rule_group);
             strLine =
@@ -987,11 +976,7 @@ void rulesetToSurge(INIReader &base_rule, std::vector<RulesetContent> &ruleset_c
                     }
                 }
 
-                if(strFind(strLine, "//"))
-                {
-                    strLine.erase(strLine.find("//"));
-                    strLine = trimWhitespace(strLine);
-                }
+                stripRulesetComment(strLine);
 
                 if(surge_ver == -1 || surge_ver == -2)
                 {
@@ -1357,11 +1342,7 @@ void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent
             lineSize = strLine.size();
             if(!lineSize || strLine[0] == ';' || strLine[0] == '#' || (lineSize >= 2 && strLine[0] == '/' && strLine[1] == '/')) //empty lines and comments are ignored
                 continue;
-            if(strFind(strLine, "//"))
-            {
-                strLine.erase(strLine.find("//"));
-                strLine = trimWhitespace(strLine);
-            }
+            stripRulesetComment(strLine);
             if (appendSingBoxRule(temp, buckets, geosite_codes, geoip_codes,
                                   strLine, final, rule_group))
             {
