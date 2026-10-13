@@ -3847,29 +3847,28 @@ static std::string dataGet(const std::string &url)
         return "";
 
     // Data URI payloads use percent escapes; '+' and control bytes are data.
-    std::string data = url.substr(comma + 1);
-    const size_t escape = data.find('%');
-    if (escape != std::string::npos) {
+    std::string data;
+    if (url.find('%', comma + 1) == std::string::npos) {
+        data.assign(url, comma + 1, std::string::npos);
+    } else {
         const auto hex_digit = [](unsigned char ch) -> int {
             if (ch >= '0' && ch <= '9') return ch - '0';
             if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
             if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
             return -1;
         };
-        size_t write = escape;
-        for (size_t read = escape; read < data.size(); ++read) {
-            if (data[read] == '%' && data.size() - read >= 3) {
-                const int high = hex_digit(data[read + 1]);
-                const int low = hex_digit(data[read + 2]);
+        for (size_t read = comma + 1; read < url.size(); ++read) {
+            if (url[read] == '%' && url.size() - read >= 3) {
+                const int high = hex_digit(url[read + 1]);
+                const int low = hex_digit(url[read + 2]);
                 if (high >= 0 && low >= 0) {
-                    data[write++] = static_cast<char>(high * 16 + low);
+                    data.push_back(static_cast<char>(high * 16 + low));
                     read += 2;
                     continue;
                 }
             }
-            data[write++] = data[read];
+            data.push_back(url[read]);
         }
-        data.resize(write);
     }
     const long max_download_size = effectiveSettings().maxAllowedDownloadSize;
     if (max_download_size > 0 &&
