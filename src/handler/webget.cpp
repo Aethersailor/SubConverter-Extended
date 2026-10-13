@@ -3846,7 +3846,31 @@ static std::string dataGet(const std::string &url)
     if (comma == std::string::npos || comma == url.size() - 1)
         return "";
 
-    std::string data = urlDecode(url.substr(comma + 1));
+    // Data URI payloads use percent escapes; '+' and control bytes are data.
+    std::string data = url.substr(comma + 1);
+    const size_t escape = data.find('%');
+    if (escape != std::string::npos) {
+        const auto hex_digit = [](unsigned char ch) -> int {
+            if (ch >= '0' && ch <= '9') return ch - '0';
+            if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+            if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+            return -1;
+        };
+        size_t write = escape;
+        for (size_t read = escape; read < data.size(); ++read) {
+            if (data[read] == '%' && data.size() - read >= 3) {
+                const int high = hex_digit(data[read + 1]);
+                const int low = hex_digit(data[read + 2]);
+                if (high >= 0 && low >= 0) {
+                    data[write++] = static_cast<char>(high * 16 + low);
+                    read += 2;
+                    continue;
+                }
+            }
+            data[write++] = data[read];
+        }
+        data.resize(write);
+    }
     const long max_download_size = effectiveSettings().maxAllowedDownloadSize;
     if (max_download_size > 0 &&
         data.size() > static_cast<size_t>(max_download_size)) {
