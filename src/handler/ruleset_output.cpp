@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <sstream>
 
+#include "config/ruleset_comment.h"
 #include "utils/regexp.h"
 #include "utils/string.h"
 
@@ -40,10 +41,7 @@ std::string formatRulesetOutput(std::string converted_content, int type,
     output_content = "payload:\n";
 
   while (getline(ss, strLine, delimiter)) {
-    if (strFind(strLine, "//")) {
-      strLine.erase(strLine.find("//"));
-      strLine = trimWhitespace(strLine);
-    }
+    stripRulesetComment(strLine);
     switch (type) {
     case 2:
       if (!std::any_of(catalogs.quanx.begin(), catalogs.quanx.end(),
