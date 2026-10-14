@@ -3,10 +3,11 @@
 
 #include "utils/string.h"
 
-static constexpr char base64_chars[] =
+static constexpr char base64_alphabet[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     "abcdefghijklmnopqrstuvwxyz"
     "0123456789+/";
+static const std::string base64_chars = base64_alphabet;
 
 std::string base64Encode(const std::string &string_to_encode)
 {
@@ -71,8 +72,8 @@ std::string base64Decode(const std::string &encoded_string, bool accept_urlsafe)
     // Constant initialization keeps concurrent first calls read-only.
     constexpr auto make_tables = [] {
         DecodeTables value;
-        for (string_size k = 0; k < sizeof(base64_chars) - 1; ++k) {
-            const unsigned char ch = base64_chars[k];
+        for (string_size k = 0; k < sizeof(base64_alphabet) - 1; ++k) {
+            const unsigned char ch = base64_alphabet[k];
             value.decode[ch] = static_cast<unsigned char>(k);
             value.valid[ch] = 1;
         }
