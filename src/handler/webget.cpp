@@ -3992,6 +3992,9 @@ public:
                          "，使用本地缓存。");
         cache_rw_lock.readLock();
         defer(cache_rw_lock.readUnlock();)
+        std::string cached_content = readCacheFile(path);
+        if(cached_content.empty())
+            return false;
         std::string cached_headers;
         if(request_.capture_response_headers)
         {
@@ -3999,7 +4002,7 @@ public:
             result_.response_headers = cached_headers;
             result_.response_headers_touched = true;
         }
-        result_.content = fileGet(path, true);
+        result_.content = std::move(cached_content);
         if(!retainBytes(result_.content.size() + cached_headers.size()))
             handleRetentionFailure();
         result_.status_code = result_.content.empty() ? 0 : 200;
@@ -4046,7 +4049,7 @@ public:
             cache_rw_lock.readLock();
             defer(cache_rw_lock.readUnlock();)
             result_.retained_bytes.reset();
-            result_.content = fileGet(path, true);
+            result_.content = readCacheFile(path);
             if(request_.capture_response_headers)
             {
                 result_.response_headers = readCachedResponseHeaders(
@@ -4712,7 +4715,9 @@ bool loadFreshAsyncOwnedCache(
         {
             payload->response_headers =
                 readCachedResponseHeaders(state->header_path);
-            payload->content = fileGet(state->path, true);
+            payload->content = readCacheFile(state->path);
+            if(payload->content.empty())
+                return false;
         }
     }
     if(!cache_is_fresh)
@@ -4808,7 +4813,7 @@ void commitOrServeStaleAsyncOwnedCache(
             payload->failure = AsyncFetchFailure::Capacity;
             return;
         }
-        stale_content = fileGet(state->path, true);
+        stale_content = readCacheFile(state->path);
         stale_headers = readCachedResponseHeaders(state->header_path);
     }
     if(stale_content.empty())

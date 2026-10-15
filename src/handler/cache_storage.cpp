@@ -8,6 +8,8 @@
 
 namespace {
 
+constexpr const char *cache_directory = "cache";
+
 std::string invalidationPath(const std::string &header_path) {
     return header_path + "_invalid";
 }
@@ -27,11 +29,23 @@ bool invalidationPresent(const std::string &path) {
 
 } // namespace
 
+std::string readCacheFile(const std::string &path) {
+    if(!isPathInScope(path, cache_directory))
+        return "";
+    // The cache root, rather than the configuration working directory, owns
+    // this read. Keep the general fileGet(..., true) boundary unchanged.
+    return fileGet(path);
+}
+
 CacheUpdateResult updateCacheFiles(const std::string &body_path,
                                    const std::string &header_path,
                                    const std::string &body,
                                    const std::string &headers) {
     const std::string invalidation_path = invalidationPath(header_path);
+    if(!isPathInScope(body_path, cache_directory) ||
+       !isPathInScope(header_path, cache_directory) ||
+       !isPathInScope(invalidation_path, cache_directory))
+        return CacheUpdateResult::Unchanged;
     const bool invalidation_was_present =
         invalidationPresent(invalidation_path);
     const FileCommitResult invalidation_result = static_cast<FileCommitResult>(
@@ -66,5 +80,5 @@ CacheUpdateResult updateCacheFiles(const std::string &body_path,
 std::string readCachedResponseHeaders(const std::string &header_path) {
     if(invalidationPresent(invalidationPath(header_path)))
         return "";
-    return fileGet(header_path, true);
+    return readCacheFile(header_path);
 }
