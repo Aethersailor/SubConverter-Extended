@@ -9534,11 +9534,10 @@ int simpleGenerator() {
 
   string_multimap allItems;
   ProxyPolicy proxy = parseProxy(global.proxySubscription, global.proxyBypass);
-  Request request;
-  Response response;
   bool write_failed = false;
   for (std::string &x : sections) {
-    response.status_code = 200;
+    Request request;
+    Response response;
     // std::cerr<<"Generating artifact '"<<x<<"'...\n";
     writeLog(LOG_LEVEL_INFO, "正在生成生成项：'" + x + "'。");
     ini.enter_section(x);

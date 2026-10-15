@@ -267,7 +267,7 @@ public:
                     {
                         if(allow_dup_section_titles || ini_content.at(curSection).empty())
                         {
-                            auto iter = ini_content.at(curSection); //get the existing section
+                            auto &iter = ini_content.at(curSection); //get the existing section
                             iter.merge(itemGroup); //move new items to this section
                         }
                         else if(!ini_content.at(curSection).empty())
