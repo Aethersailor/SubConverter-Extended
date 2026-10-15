@@ -47,11 +47,7 @@ ELSE()
     ADD_COMPILE_OPTIONS(/W4)
 ENDIF()
 
-#remove std::regex support since it is not compatible with group modifiers and slow
-#OPTION(USING_STD_REGEX "Use std::regex from C++ library instead of PCRE2." OFF)
 OPTION(USING_MALLOC_TRIM "Call malloc_trim after processing request to lower memory usage (Your system must support malloc_trim)." OFF)
-#now using internal MD5 calculation
-#OPTION(USING_MBEDTLS "Use mbedTLS instead of OpenSSL for MD5 calculation." OFF)
 OPTION(BUILD_STATIC_LIBRARY "Build a static library containing only the essential part." OFF)
 
 INCLUDE(CheckCXXSourceCompiles)

@@ -23,13 +23,6 @@ concept ConstIterable = requires(Container a) {
     typename Container::const_reference;
 };
 
-template <typename Container>
-concept Iterable = requires(Container a) {
-    { a.begin() } -> std::same_as<typename Container::iterator>;
-    { a.end() } -> std::same_as<typename Container::iterator>;
-    typename Container::reference;
-};
-
 template <typename ConstIterableContainer>
 requires ConstIterable<ConstIterableContainer>
 inline bool none_of(const ConstIterableContainer &container, std::function<bool(typename ConstIterableContainer::const_reference)> func)

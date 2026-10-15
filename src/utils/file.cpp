@@ -787,11 +787,6 @@ FileCommitResult fileCopyDetailed(const std::string &source,
     return copy_resolved();
 }
 
-bool fileCopy(const std::string &source, const std::string &dest)
-{
-    return fileCopyDetailed(source, dest) == FileCommitResult::Durable;
-}
-
 int fileWrite(const std::string &path, const std::string &content, bool overwrite)
 {
     std::error_code error;

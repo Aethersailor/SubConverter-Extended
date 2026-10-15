@@ -2,17 +2,12 @@
 #include <libcron/Cron.h>
 #include <string>
 
-
 #include "config/crontask.h"
-#include "handler/interfaces.h"
 #include "handler/multithread.h"
 #include "handler/settings.h"
 #include "script_quickjs.h"
-#include "server/webserver.h"
 #include "utils/logger.h"
-#include "utils/rapidjson_extra.h"
 #include "utils/system.h"
-
 
 libcron::Cron cron;
 
@@ -66,30 +61,6 @@ void refresh_schedule() {
       }
     });
   }
-}
-
-std::string list_cron_schedule(RESPONSE_CALLBACK_ARGS) {
-  // Token authentication disabled - no authorization required
-  rapidjson::StringBuffer sb;
-  rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
-  writer.StartObject();
-  writer.Key("code");
-  writer.Int(200);
-  writer.Key("tasks");
-  writer.StartArray();
-  for (const CronTaskConfig &x : global.cronTasks) {
-    writer.StartObject();
-    writer.Key("name");
-    writer.String(x.Name.data());
-    writer.Key("cronexp");
-    writer.String(x.CronExp.data());
-    writer.Key("path");
-    writer.String(x.Path.data());
-    writer.EndObject();
-  }
-  writer.EndArray();
-  writer.EndObject();
-  return sb.GetString();
 }
 
 size_t cron_tick() { return cron.tick(); }

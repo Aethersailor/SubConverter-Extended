@@ -16,7 +16,6 @@ struct SubscriptionConversionMetadata {
 
 void initialize();
 void shutdown();
-bool isEnabled();
 void tick();
 
 void recordSubscriptionConversion(const Request &request,

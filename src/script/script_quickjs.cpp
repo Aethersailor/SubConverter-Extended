@@ -19,6 +19,7 @@
 #include "handler/settings.h"
 #include "handler/settings_view.h"
 #include "parser/config/proxy.h"
+#include "utils/base64/base64.h"
 #include "utils/map_extra.h"
 #include "utils/logger.h"
 #include "utils/system.h"
@@ -430,16 +431,6 @@ static qjs_fetch_Response qjs_fetch(qjs_fetch_Request request)
 static std::string qjs_getUrlArg(const std::string &url, const std::string &request)
 {
     return getUrlArg(url, request);
-}
-
-std::string getGeoIP(const std::string &address, const std::string &proxy)
-{
-    const Settings &settings = effectiveSettings();
-    ProxyPolicy policy =
-        proxy.empty() ? parseProxy(settings.proxyConfig, settings.proxyBypass)
-                      : parseProxy(proxy, settings.proxyBypass);
-    return fetchFile("https://api.ip.sb/geoip/" + address, policy,
-                     settings.cacheConfig);
 }
 
 void script_runtime_init(qjs::Runtime &runtime)

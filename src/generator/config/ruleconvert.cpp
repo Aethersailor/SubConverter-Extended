@@ -12,6 +12,7 @@
 #include "config/ruleset_comment.h"
 #include "handler/settings.h"
 #include "handler/settings_view.h"
+#include "utils/base64/base64.h"
 #include "utils/logger.h"
 #include "utils/concurrent_lru_cache.h"
 #include "utils/cooperative_cpu.h"

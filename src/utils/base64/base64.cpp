@@ -131,11 +131,6 @@ std::string base64Decode(const std::string &encoded_string, bool accept_urlsafe)
     return ret;
 }
 
-std::string urlSafeBase64Reverse(const std::string &encoded_string)
-{
-    return replaceAllDistinct(replaceAllDistinct(encoded_string, "-", "+"), "_", "/");
-}
-
 std::string urlSafeBase64Apply(const std::string &encoded_string)
 {
     return replaceAllDistinct(replaceAllDistinct(replaceAllDistinct(encoded_string, "+", "-"), "/", "_"), "=", "");

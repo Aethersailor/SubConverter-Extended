@@ -17,7 +17,7 @@
 #include "parser/subparser.h"
 #include "script/script_quickjs.h"
 #include "subexport.h"
-#include "utils/file_extra.h"
+#include "utils/file.h"
 #include "utils/force_max_cooperation.h"
 #include "utils/bounded_output.h"
 #include "utils/logger.h"
@@ -258,21 +258,6 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
           }
         },
         effectiveSettings().scriptCleanContext);
-  /*
-  duk_context *ctx = duktape_init();
-  defer(duk_destroy_heap(ctx);)
-  duktape_peval(ctx, script);
-  duk_get_global_string(ctx, "parse");
-  for(size_t i = 1; i < args.size(); i++)
-      duk_push_string(ctx, trim(args[i]).c_str());
-  if(duk_pcall(ctx, args.size() - 1) == 0)
-      link = duktape_get_res_str(ctx);
-  else
-  {
-      writeLog(LOG_LEVEL_ERROR, "执行脚本时发生错误：\n" +
-  duktape_get_err_stack(ctx)); duk_pop(ctx); /// pop err
-  }
-  */
 
   /// tag:group_name,link
   if (startsWith(link, "tag:")) {
@@ -668,41 +653,6 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
   return 0;
 }
 
-bool chkIgnore(const Proxy &node, string_array &exclude_remarks,
-               string_array &include_remarks) {
-  bool excluded = false, included = false;
-  // std::string remarks = UTF8ToACP(node.remarks);
-  // std::string remarks = node.remarks;
-  // writeLog(LOG_LEVEL_VERBOSE, "正在匹配排除规则...");
-  excluded = std::any_of(exclude_remarks.cbegin(), exclude_remarks.cend(),
-                         [&node](const auto &x) {
-                           std::string real_rule;
-                           if (applyMatcher(x, real_rule, node)) {
-                             if (real_rule.empty())
-                               return true;
-                             return regFind(node.Remark, real_rule);
-                           } else
-                             return false;
-                         });
-  if (include_remarks.size() != 0) {
-    // writeLog(LOG_LEVEL_VERBOSE, "正在匹配包含规则...");
-    included = std::any_of(include_remarks.cbegin(), include_remarks.cend(),
-                           [&node](const auto &x) {
-                             std::string real_rule;
-                             if (applyMatcher(x, real_rule, node)) {
-                               if (real_rule.empty())
-                                 return true;
-                               return regFind(node.Remark, real_rule);
-                             } else
-                               return false;
-                           });
-  } else {
-    included = true;
-  }
-
-  return excluded || !included;
-}
-
 namespace {
 
 struct PreparedRemarkMatcher {
@@ -923,136 +873,7 @@ void filterNodes(std::vector<Proxy> &nodes, string_array &exclude_remarks,
            "NODE_FILTER_RESULT input_count=" + std::to_string(input_count) +
                " kept_count=" + std::to_string(nodes.size()) +
                " ignored_count=" + std::to_string(ignored_count));
-  /*
-  std::vector<std::unique_ptr<pcre2_code, decltype(&pcre2_code_free)>>
-  exclude_patterns, include_patterns;
-  std::vector<std::unique_ptr<pcre2_match_data,
-  decltype(&pcre2_match_data_free)>> exclude_match_data, include_match_data;
-  unsigned int i = 0;
-  PCRE2_SIZE erroroffset;
-  int errornumber, rc;
-
-  for(i = 0; i < exclude_remarks.size(); i++)
-  {
-      std::unique_ptr<pcre2_code, decltype(&pcre2_code_free)>
-  pattern(pcre2_compile(reinterpret_cast<const unsigned
-  char*>(exclude_remarks[i].c_str()), exclude_remarks[i].size(), PCRE2_UTF |
-  PCRE2_MULTILINE | PCRE2_ALT_BSUX, &errornumber, &erroroffset, NULL),
-  &pcre2_code_free); if(!pattern) return;
-      exclude_patterns.emplace_back(std::move(pattern));
-      pcre2_jit_compile(exclude_patterns[i].get(), 0);
-      std::unique_ptr<pcre2_match_data, decltype(&pcre2_match_data_free)>
-  match_data(pcre2_match_data_create_from_pattern(exclude_patterns[i].get(),
-  NULL), &pcre2_match_data_free);
-      exclude_match_data.emplace_back(std::move(match_data));
-  }
-  for(i = 0; i < include_remarks.size(); i++)
-  {
-      std::unique_ptr<pcre2_code, decltype(&pcre2_code_free)>
-  pattern(pcre2_compile(reinterpret_cast<const unsigned
-  char*>(include_remarks[i].c_str()), include_remarks[i].size(), PCRE2_UTF |
-  PCRE2_MULTILINE | PCRE2_ALT_BSUX, &errornumber, &erroroffset, NULL),
-  &pcre2_code_free); if(!pattern) return;
-      include_patterns.emplace_back(std::move(pattern));
-      pcre2_jit_compile(include_patterns[i].get(), 0);
-      std::unique_ptr<pcre2_match_data, decltype(&pcre2_match_data_free)>
-  match_data(pcre2_match_data_create_from_pattern(include_patterns[i].get(),
-  NULL), &pcre2_match_data_free);
-      include_match_data.emplace_back(std::move(match_data));
-  }
-  writeLog(LOG_LEVEL_VERBOSE, "过滤开始。");
-  while(iter != nodes.end())
-  {
-      bool excluded = false, included = false;
-      for(i = 0; i < exclude_patterns.size(); i++)
-      {
-          rc = pcre2_match(exclude_patterns[i].get(), reinterpret_cast<const
-  unsigned char*>(iter->remarks.c_str()), iter->remarks.size(), 0, 0,
-  exclude_match_data[i].get(), NULL); if (rc < 0)
-          {
-              switch(rc)
-              {
-              case PCRE2_ERROR_NOMATCH:
-                  break;
-              default:
-                  return;
-              }
-          }
-          else
-              excluded = true;
-      }
-      if(include_patterns.size() > 0)
-          for(i = 0; i < include_patterns.size(); i++)
-          {
-              rc = pcre2_match(include_patterns[i].get(),
-  reinterpret_cast<const unsigned char*>(iter->remarks.c_str()),
-  iter->remarks.size(), 0, 0, include_match_data[i].get(), NULL); if (rc < 0)
-              {
-                  switch(rc)
-                  {
-                  case PCRE2_ERROR_NOMATCH:
-                      break;
-                  default:
-                      return;
-                  }
-              }
-              else
-                  included = true;
-          }
-      else
-          included = true;
-      if(excluded || !included)
-      {
-          writeLog(LOG_LEVEL_VERBOSE, "节点 " + iter->group + " - " +
-  iter->remarks
-  + " 已被忽略，不会添加。"); nodes.erase(iter);
-      }
-      else
-      {
-          writeLog(LOG_LEVEL_VERBOSE, "节点 " + iter->group + " - " +
-  iter->remarks
-  + " 已添加。"); iter->id = node_index; iter->groupID = groupID;
-          ++node_index;
-          ++iter;
-      }
-  }
-  */
   writeLog(LOG_LEVEL_VERBOSE, "过滤完成。");
-}
-
-void nodeRename(Proxy &node, const RegexMatchConfigs &rename_array,
-                extra_settings &ext) {
-  std::string &remark = node.Remark, original_remark = node.Remark,
-              returned_remark, real_rule;
-
-  for (const RegexMatchConfig &x : rename_array) {
-    if (!x.Script.empty() && ext.authorized) {
-      script_safe_runner(
-          ext.js_runtime, ext.js_context,
-          [&](qjs::Context &ctx) {
-            std::string script = x.Script;
-            if (startsWith(script, "path:"))
-              script = fileGet(script.substr(5), true);
-            try {
-              ctx.eval(script);
-              auto rename =
-                  (std::function<std::string(const Proxy &)>)ctx.eval("rename");
-              returned_remark = rename(node);
-              if (!returned_remark.empty())
-                remark = returned_remark;
-            } catch (qjs::exception) {
-              script_print_stack(ctx);
-            }
-          },
-          effectiveSettings().scriptCleanContext);
-      continue;
-    }
-    if (applyMatcher(x.Match, real_rule, node) && real_rule.size())
-      remark = regReplace(remark, real_rule, x.Replace);
-  }
-  if (remark.empty())
-    remark = original_remark;
-  return;
 }
 
 std::string removeEmoji(const std::string &orig_remark) {

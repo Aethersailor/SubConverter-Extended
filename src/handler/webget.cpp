@@ -37,7 +37,8 @@
 #include "utils/base64/base64.h"
 #include "utils/cooperative_cpu.h"
 #include "utils/defer.h"
-#include "utils/file_extra.h"
+#include "utils/file.h"
+#include "utils/md5/md5_interface.h"
 #include "utils/lock.h"
 #include "utils/logger.h"
 #include "utils/network.h"
@@ -3908,13 +3909,6 @@ static bool retainCurrentFetchBytes(uint64_t bytes)
     return true;
 }
 
-std::string buildSocks5ProxyString(const std::string &addr, int port, const std::string &username, const std::string &password)
-{
-    std::string authstr = username.size() && password.size() ? username + ":" + password + "@" : "";
-    std::string proxystr = "socks5://" + authstr + addr + ":" + std::to_string(port);
-    return proxystr;
-}
-
 namespace
 {
 
@@ -4314,84 +4308,6 @@ subscriptionCacheAdmissionSnapshot() noexcept
     if(!enabled)
         return {};
     return subscriptionCacheDoorkeeper().snapshot(true);
-}
-
-CacheFetchOperationProbeSnapshot cacheFetchOperationProbe()
-{
-    CacheFetchOperationProbeSnapshot snapshot;
-    auto success = std::make_shared<CacheFetchOperation>(
-        CacheFetchOwnerKind::Async);
-    success->subscribe([&](SharedCacheFetchPayload payload,
-                           std::exception_ptr error) {
-        if(!payload || error)
-            return;
-        ++snapshot.success_callbacks;
-        success->subscribe([&](SharedCacheFetchPayload nested_payload,
-                               std::exception_ptr nested_error) {
-            if(nested_payload && !nested_error)
-                ++snapshot.success_callbacks;
-        });
-    });
-    auto payload = std::make_shared<CacheFetchPayload>();
-    payload->status_code = 200;
-    payload->content = "probe";
-    success->publish(
-        std::static_pointer_cast<const CacheFetchPayload>(payload));
-    snapshot.duplicate_publish_rejected = !success->publish({});
-
-    auto failure = std::make_shared<CacheFetchOperation>(
-        CacheFetchOwnerKind::Async);
-    failure->subscribe([&](SharedCacheFetchPayload failed_payload,
-                           std::exception_ptr error) {
-        if(!failed_payload && error)
-            ++snapshot.exception_callbacks;
-    });
-    failure->publishException(
-        std::make_exception_ptr(std::runtime_error("cache fetch probe")));
-    try
-    {
-        (void)failure->wait();
-    }
-    catch(const std::runtime_error &)
-    {
-        snapshot.exception_rethrown_to_waiter = true;
-    }
-
-    auto unsubscribe = std::make_shared<CacheFetchOperation>(
-        CacheFetchOwnerKind::Async);
-    const uint64_t subscription = unsubscribe->subscribe(
-        [&](SharedCacheFetchPayload, std::exception_ptr) {
-            ++snapshot.unsubscribed_callbacks;
-        });
-    (void)unsubscribe->unsubscribe(subscription);
-    unsubscribe->publish(
-        std::static_pointer_cast<const CacheFetchPayload>(payload));
-
-    auto consumers = std::make_shared<CacheFetchOperation>(
-        CacheFetchOwnerKind::Async);
-    (void)consumers->attachConsumer();
-    (void)consumers->attachConsumer();
-    consumers->releaseConsumer();
-    consumers->releaseConsumer();
-    snapshot.no_consumers_cancelled =
-        consumers->workCancellationToken().reason() ==
-            RequestCancellationReason::NoConsumers &&
-        consumers->attachConsumer() ==
-            CacheFetchOperation::AttachResult::Abandoned;
-
-    const CacheFetchRegistryKey sync_key{"operation-kind-probe",
-                                         CacheFetchOwnerKind::Sync};
-    const CacheFetchRegistryKey async_key{"operation-kind-probe",
-                                          CacheFetchOwnerKind::Async};
-    {
-        std::lock_guard<std::mutex> lock(cache_fetch_mutex);
-        cache_fetches[sync_key] = std::make_shared<CacheFetchOperation>(
-            CacheFetchOwnerKind::Sync);
-        snapshot.owner_kinds_isolated =
-            cache_fetches.find(async_key) == cache_fetches.end();
-        cache_fetches.erase(sync_key);
-    }
-    return snapshot;
 }
 
 namespace
@@ -5464,60 +5380,6 @@ void webGetOwnedAsync(OwnedWebGetRequest request,
     }
 }
 
-OwnedWebGetAsyncConsumerProbeSnapshot ownedWebGetAsyncConsumerProbe()
-{
-    OwnedWebGetAsyncConsumerProbeSnapshot snapshot;
-    const uint64_t retained_before = retainedResponseByteSnapshot().used;
-    auto payload = std::make_shared<OwnedWebGetAsyncPayload>();
-    payload->content = "owned-async-probe";
-    if(!payload->retained_bytes.retain(payload->content.size()))
-        return snapshot;
-    auto raced = std::make_shared<OwnedWebGetAsyncConsumer>();
-    raced->context = std::make_shared<RequestContext>(
-        "owned-async-race", RequestContext::Clock::now());
-    std::atomic<uint64_t> raced_count{0};
-    raced->completion = [&](OwnedWebGetAsyncOutcome) {
-        raced_count.fetch_add(1, std::memory_order_relaxed);
-    };
-    registerOwnedWebGetAsyncCancellation(raced);
-    std::thread publish_thread([&] {
-        completeOwnedWebGetAsyncConsumer(
-            raced,
-            {std::static_pointer_cast<const OwnedWebGetAsyncPayload>(payload),
-             AsyncFetchFailure::None, RequestCancellationReason::None});
-    });
-    std::thread cancel_thread([&] {
-        raced->context->requestCancellation(
-            RequestCancellationReason::ClientDisconnected);
-    });
-    publish_thread.join();
-    cancel_thread.join();
-    snapshot.raced_completions =
-        raced_count.load(std::memory_order_relaxed);
-
-    auto precancelled = std::make_shared<OwnedWebGetAsyncConsumer>();
-    precancelled->context = std::make_shared<RequestContext>(
-        "owned-async-precancelled", RequestContext::Clock::now());
-    precancelled->context->requestCancellation(
-        RequestCancellationReason::Deadline);
-    std::atomic<uint64_t> precancelled_count{0};
-    precancelled->completion = [&](OwnedWebGetAsyncOutcome outcome) {
-        if(outcome.failure == AsyncFetchFailure::Deadline)
-            precancelled_count.fetch_add(1, std::memory_order_relaxed);
-        precancelled.reset();
-    };
-    registerOwnedWebGetAsyncCancellation(precancelled);
-    snapshot.precancelled_completions =
-        precancelled_count.load(std::memory_order_relaxed);
-
-    raced.reset();
-    precancelled.reset();
-    payload.reset();
-    snapshot.payload_lease_released =
-        retainedResponseByteSnapshot().used == retained_before;
-    return snapshot;
-}
-
 namespace
 {
 struct OwnedWebGetContinuationRuntime
@@ -5577,45 +5439,6 @@ void completeOwnedWebGetContinuation(
     }
 }
 } // namespace
-
-OwnedWebGetContinuationInitStatus initializeOwnedWebGetContinuationRuntime(
-    OwnedWebGetContinuationBudget budget)
-{
-    std::lock_guard<std::mutex> lock(owned_webget_continuations.mutex);
-    if(budget.workers == 0 || budget.max_entries == 0 ||
-       budget.max_bytes < kOwnedWebGetContinuationMetadataBytes)
-        return OwnedWebGetContinuationInitStatus::InvalidBudget;
-    if(owned_webget_continuations.stopping ||
-       owned_webget_continuations.joining ||
-       owned_webget_continuations.joined)
-        return OwnedWebGetContinuationInitStatus::Stopping;
-    if(owned_webget_continuations.initialized)
-        return owned_webget_continuations.budget == budget
-                   ? OwnedWebGetContinuationInitStatus::AlreadyInitialized
-                   : OwnedWebGetContinuationInitStatus::BudgetMismatch;
-    const GlobalComputeExecutorInitStatus status =
-        initializeGlobalComputeExecutor(
-            {static_cast<uint64_t>(budget.workers),
-             static_cast<uint64_t>(budget.max_entries),
-             budget.max_bytes});
-    switch(status)
-    {
-    case GlobalComputeExecutorInitStatus::Initialized:
-    case GlobalComputeExecutorInitStatus::AlreadyInitialized:
-        owned_webget_continuations.budget = budget;
-        owned_webget_continuations.initialized = true;
-        return OwnedWebGetContinuationInitStatus::Initialized;
-    case GlobalComputeExecutorInitStatus::InvalidBudget:
-        return OwnedWebGetContinuationInitStatus::InvalidBudget;
-    case GlobalComputeExecutorInitStatus::BudgetMismatch:
-        return OwnedWebGetContinuationInitStatus::BudgetMismatch;
-    case GlobalComputeExecutorInitStatus::Stopping:
-        return OwnedWebGetContinuationInitStatus::Stopping;
-    case GlobalComputeExecutorInitStatus::InitializationFailed:
-        return OwnedWebGetContinuationInitStatus::InitializationFailed;
-    }
-    return OwnedWebGetContinuationInitStatus::InitializationFailed;
-}
 
 bool publishOwnedWebGetContinuationRuntime(
     OwnedWebGetContinuationBudget budget) noexcept
@@ -5856,14 +5679,6 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy,
     return std::move(result.content);
 }
 
-void flushCache()
-{
-    //guarded_mutex guard(cache_rw_lock);
-    cache_rw_lock.writeLock();
-    defer(cache_rw_lock.writeUnlock();)
-    operateFiles("cache", [](const std::string &file){ remove(("cache/" + file).data()); return 0; });
-}
-
 int webPost(const std::string &url, const std::string &data, const ProxyPolicy &proxy, const string_icase_map &request_headers, std::string *retData)
 {
     //return curlPost(url, data, proxy, request_headers, retData);
@@ -5880,23 +5695,6 @@ int webPatch(const std::string &url, const std::string &data, const ProxyPolicy 
     FetchArgument argument {HTTP_PATCH, url, proxy, &data, &request_headers, nullptr, 0, true};
     FetchResult fetch_res {&return_code, retData, nullptr, nullptr};
     return webGet(argument, fetch_res);
-}
-
-int webHead(const std::string &url, const ProxyPolicy &proxy, const string_icase_map &request_headers, std::string &response_headers)
-{
-    //return curlHead(url, proxy, request_headers, response_headers);
-    int return_code = 0;
-    FetchArgument argument {HTTP_HEAD, url, proxy, nullptr, &request_headers, nullptr, 0};
-    FetchResult fetch_res {&return_code, nullptr, &response_headers, nullptr};
-    return webGet(argument, fetch_res);
-}
-
-string_array headers_map_to_array(const string_map &headers)
-{
-    string_array result;
-    for(auto &kv : headers)
-        result.push_back(kv.first + ": " + kv.second);
-    return result;
 }
 
 int webGet(const FetchArgument& argument, FetchResult &result)
