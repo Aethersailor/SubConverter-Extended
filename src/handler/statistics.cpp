@@ -1441,8 +1441,6 @@ void shutdown() {
   g_engine.initialized = false;
 }
 
-bool isEnabled() { return global.statisticsEnabled; }
-
 void tick() {
   // Statistics v2 owns its steady-clock persistence schedule. The retained
   // entry point keeps the existing main-loop contract unchanged.

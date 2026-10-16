@@ -44,35 +44,6 @@ std::vector<std::string_view> split(std::string_view s, char separator)
     return result;
 }
 
-std::string UTF8ToCodePoint(const std::string &data)
-{
-    std::stringstream ss;
-    for(string_size i = 0; i < data.size(); i++)
-    {
-        int charcode = data[i] & 0xff;
-        if((charcode >> 7) == 0)
-        {
-            ss<<data[i];
-        }
-        else if((charcode >> 5) == 6)
-        {
-            ss<<"\\u"<<std::hex<<((data[i + 1] & 0x3f) | (data[i] & 0x1f) << 6);
-            i++;
-        }
-        else if((charcode >> 4) == 14)
-        {
-            ss<<"\\u"<<std::hex<<((data[i + 2] & 0x3f) | (data[i + 1] & 0x3f) << 6 | (data[i] & 0xf) << 12);
-            i += 2;
-        }
-        else if((charcode >> 3) == 30)
-        {
-            ss<<"\\u"<<std::hex<<((data[i + 3] & 0x3f) | (data[i + 2] & 0x3f) << 6 | (data[i + 1] & 0x3f) << 12 | (data[i] & 0x7) << 18);
-            i += 3;
-        }
-    }
-    return ss.str();
-}
-
 std::string toLower(const std::string &str)
 {
     std::string result;
@@ -136,57 +107,6 @@ void processEscapeCharReverse(std::string &str)
         }
         pos++;
     }
-}
-
-int parseCommaKeyValue(const std::string &input, const std::string &separator, string_pair_array &result)
-{
-    string_size bpos = 0, epos = input.find(separator);
-    std::string kv;
-    while(bpos < input.size())
-    {
-        if(epos == std::string::npos)
-            epos = input.size();
-        else if(epos && input[epos - 1] == '\\')
-        {
-            kv += input.substr(bpos, epos - bpos - 1);
-            kv += separator;
-            bpos = epos + 1;
-            epos = input.find(separator, bpos);
-            continue;
-        }
-        kv += input.substr(bpos, epos - bpos);
-        string_size eqpos = kv.find('=');
-        if(eqpos == std::string::npos)
-            result.emplace_back("{NONAME}", kv);
-        else
-            result.emplace_back(kv.substr(0, eqpos), kv.substr(eqpos + 1));
-        kv.clear();
-        bpos = epos + 1;
-        epos = input.find(separator, bpos);
-    }
-    if(!kv.empty())
-    {
-        string_size eqpos = kv.find('=');
-        if(eqpos == std::string::npos)
-            result.emplace_back("{NONAME}", kv);
-        else
-            result.emplace_back(kv.substr(0, eqpos), kv.substr(eqpos + 1));
-    }
-    return 0;
-}
-
-void trimSelfOf(std::string &str, char target, bool before, bool after)
-{
-    if (!before && !after)
-        return;
-    std::string::size_type pos = str.size() - 1;
-    if (after)
-        pos = str.find_last_not_of(target);
-    if (pos != std::string::npos)
-        str.erase(pos + 1);
-    if (before)
-        pos = str.find_first_not_of(target);
-    str.erase(0, pos);
 }
 
 std::string trimOf(const std::string& str, char target, bool before, bool after)
@@ -310,12 +230,6 @@ std::string replaceAllDistinct(std::string str, const std::string &old_value, co
             break;
     }
     return str;
-}
-
-void removeUTF8BOM(std::string &data)
-{
-    if(data.compare(0, 3, "\xEF\xBB\xBF") == 0)
-        data = data.substr(3);
 }
 
 bool isStrUTF8(const std::string &data)

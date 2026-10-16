@@ -14,7 +14,6 @@
 #endif // _WIN32
 
 #include <sys/types.h>
-#include <dirent.h>
 
 // scope_limit=false intentionally permits trusted local configuration to read
 // an arbitrary operator-selected path. Request-controlled paths must pass true.
@@ -24,7 +23,6 @@ std::string fileGetBounded(const std::string &path, std::size_t max_bytes,
 bool fileExist(const std::string &path, bool scope_limit = false);
 bool isInScope(const std::string &path);
 bool isPathInScope(const std::string &path, const std::string &root);
-bool fileCopy(const std::string &source, const std::string &dest);
 
 // Atomic replacement can reach the point where the new complete file is
 // visible but the containing directory entry cannot be synchronised (or a
@@ -57,25 +55,6 @@ inline bool fileCommitTemporaryRemaining(int result) {
 FileCommitResult fileCopyDetailed(const std::string &source,
                                   const std::string &dest);
 int fileWrite(const std::string &path, const std::string &content, bool overwrite);
-
-template<typename F>
-int operateFiles(const std::string &path, F &&op)
-{
-    DIR* dir = opendir(path.data());
-    if(!dir)
-        return -1;
-    struct dirent* dp;
-    while((dp = readdir(dir)) != NULL)
-    {
-        if(strcmp(dp->d_name, ".") != 0 && strcmp(dp->d_name, "..") != 0)
-        {
-            if(op(dp->d_name))
-                break;
-        }
-    }
-    closedir(dir);
-    return 0;
-}
 
 inline int md(const char *path)
 {

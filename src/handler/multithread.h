@@ -17,12 +17,6 @@ using guarded_mutex = std::lock_guard<std::mutex>;
 
 struct Settings;
 
-RegexMatchConfigs safe_get_emojis();
-RegexMatchConfigs safe_get_renames();
-RegexMatchConfigs safe_get_streams();
-RegexMatchConfigs safe_get_times();
-YAML::Node safe_get_clash_base();
-INIReader safe_get_mellow_base();
 void safe_set_emojis(RegexMatchConfigs data);
 void safe_set_renames(RegexMatchConfigs data);
 void safe_set_streams(RegexMatchConfigs data);

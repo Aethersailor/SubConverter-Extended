@@ -221,24 +221,6 @@ struct SubscriptionCacheAdmissionSnapshot
     uint64_t reuse_admitted_total = 0;
 };
 
-struct CacheFetchOperationProbeSnapshot
-{
-    uint64_t success_callbacks = 0;
-    uint64_t exception_callbacks = 0;
-    uint64_t unsubscribed_callbacks = 0;
-    bool duplicate_publish_rejected = false;
-    bool exception_rethrown_to_waiter = false;
-    bool no_consumers_cancelled = false;
-    bool owner_kinds_isolated = false;
-};
-
-struct OwnedWebGetAsyncConsumerProbeSnapshot
-{
-    uint64_t raced_completions = 0;
-    uint64_t precancelled_completions = 0;
-    bool payload_lease_released = false;
-};
-
 void webGetAsync(AsyncFetchRequest request, AsyncFetchCompletion completion);
 AsyncFetchFuture webGetAsync(AsyncFetchRequest request);
 void webGetOwnedAsync(OwnedWebGetRequest request,
@@ -252,8 +234,6 @@ CacheFetchPayloadSnapshot cacheFetchPayloadSnapshot() noexcept;
 SubscriptionCacheAdmissionSnapshot
 subscriptionCacheAdmissionSnapshot() noexcept;
 void clearSubscriptionCacheAdmissionHistory() noexcept;
-CacheFetchOperationProbeSnapshot cacheFetchOperationProbe();
-OwnedWebGetAsyncConsumerProbeSnapshot ownedWebGetAsyncConsumerProbe();
 struct OwnedWebGetContinuationRuntimeSnapshot
 {
     bool initialized = false;
@@ -276,20 +256,9 @@ struct OwnedWebGetContinuationBudget
 
     bool operator==(const OwnedWebGetContinuationBudget &) const = default;
 };
-enum class OwnedWebGetContinuationInitStatus
-{
-    Initialized,
-    AlreadyInitialized,
-    InvalidBudget,
-    BudgetMismatch,
-    InitializationFailed,
-    Stopping,
-};
 using OwnedWebGetContinuation = std::function<void()>;
 using OwnedWebGetContinuationCompletion =
     std::function<void(SchedulerSubmitStatus, std::exception_ptr)>;
-OwnedWebGetContinuationInitStatus initializeOwnedWebGetContinuationRuntime(
-    OwnedWebGetContinuationBudget budget);
 bool publishOwnedWebGetContinuationRuntime(
     OwnedWebGetContinuationBudget budget) noexcept;
 bool resetOwnedWebGetContinuationRuntime() noexcept;
@@ -324,17 +293,11 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy,
 bool isFetchUrlAllowed(const std::string &url, FetchContext context);
 void requestOutboundFetchShutdown() noexcept;
 bool joinOutboundFetchShutdown() noexcept;
-void flushCache();
 int webPost(const std::string &url, const std::string &data,
             const ProxyPolicy &proxy, const string_icase_map &request_headers,
             std::string *retData);
 int webPatch(const std::string &url, const std::string &data,
              const ProxyPolicy &proxy, const string_icase_map &request_headers,
              std::string *retData);
-std::string buildSocks5ProxyString(const std::string &addr, int port, const std::string &username, const std::string &password);
-
-// Unimplemented: (CURLOPT_HTTPHEADER: Host:)
-std::string httpGet(const std::string &host, const std::string &addr, const std::string &uri);
-std::string httpsGet(const std::string &host, const std::string &addr, const std::string &uri);
 
 #endif // WEBGET_H_INCLUDED

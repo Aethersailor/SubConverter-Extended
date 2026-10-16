@@ -7,7 +7,6 @@ std::string base64Decode(const std::string &encoded_string, bool accept_urlsafe 
 std::string base64Encode(const std::string &string_to_encode);
 
 std::string urlSafeBase64Apply(const std::string &encoded_string);
-std::string urlSafeBase64Reverse(const std::string &encoded_string);
 std::string urlSafeBase64Decode(const std::string &encoded_string);
 std::string urlSafeBase64Encode(const std::string &string_to_encode);
 

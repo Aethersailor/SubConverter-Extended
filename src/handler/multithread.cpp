@@ -14,7 +14,6 @@
 #include "utils/system.h"
 #include "webget.h"
 #include "multithread.h"
-//#include "vfs.h"
 
 //safety lock for multi-thread
 std::mutex on_emoji, on_rename, on_stream, on_time;
@@ -111,30 +110,6 @@ void requestRulesetExecutorShutdown()
         activeRulesetExecutor.load(std::memory_order_acquire);
     if(executor)
         executor->requestShutdown(true);
-}
-
-RegexMatchConfigs safe_get_emojis()
-{
-    guarded_mutex guard(on_emoji);
-    return effectiveSettings().emojis;
-}
-
-RegexMatchConfigs safe_get_renames()
-{
-    guarded_mutex guard(on_rename);
-    return effectiveSettings().renames;
-}
-
-RegexMatchConfigs safe_get_streams()
-{
-    guarded_mutex guard(on_stream);
-    return effectiveSettings().streamNodeRules;
-}
-
-RegexMatchConfigs safe_get_times()
-{
-    guarded_mutex guard(on_time);
-    return effectiveSettings().timeNodeRules;
 }
 
 void safe_set_emojis(RegexMatchConfigs data)

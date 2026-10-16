@@ -14,6 +14,7 @@
 #include "handler/settings_view.h"
 #include "handler/webget.h"
 #include "server/request_context.h"
+#include "utils/base64/base64.h"
 #include "utils/logger.h"
 #include "utils/cooperative_cpu.h"
 #include "utils/network.h"
@@ -262,39 +263,6 @@ static std::string python_string_literal(const std::string &value)
     return "\"" + python_string_escape(value) + "\"";
 }
 
-/*
-std::string parseHostname(inja::Arguments &args)
-{
-    std::string data = args.at(0)->get<std::string>(), hostname;
-    const std::string matcher = R"(^(?i:hostname\s*?=\s*?)(.*?)\s$)";
-    string_array urls = split(data, ",");
-    if(!urls.size())
-        return std::string();
-
-    std::string input_content, output_content;
-    const Settings &settings = effectiveSettings();
-    ProxyPolicy proxy = parseProxy(settings.proxyConfig, settings.proxyBypass);
-    for(std::string &x : urls)
-    {
-        input_content = webGet(x, proxy, settings.cacheConfig);
-        regGetMatch(input_content, matcher, 2, 0, &hostname);
-        if(hostname.size())
-        {
-            output_content += hostname + ",";
-            hostname.clear();
-        }
-    }
-    string_array vArray = split(output_content, ",");
-    std::set<std::string> hostnames;
-    for(std::string &x : vArray)
-        hostnames.emplace(trim(x));
-    output_content = std::accumulate(hostnames.begin(), hostnames.end(), std::string(), [](std::string a, std::string b)
-    {
-        return std::move(a) + "," + std::move(b);
-    });
-    return output_content;
-}*/
-
 #ifndef NO_WEBGET
 std::string template_webGet(inja::Arguments &args)
 {
@@ -531,7 +499,6 @@ int render_template(const std::string &content, const template_args &vars,
 #ifndef NO_WEBGET
     env.add_callback("fetch", 1, template_webGet);
 #endif // NO_WEBGET
-    //env.add_callback("parseHostname", 1, parseHostname);
 
     env.set_include_callback([&](const std::filesystem::path &path, const std::string &template_name)
     {
