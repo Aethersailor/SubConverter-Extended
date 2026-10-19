@@ -123,9 +123,20 @@ func normalizeLegacyShadowrocketVMess(line string) string {
 	}
 
 	body := strings.TrimPrefix(line, prefix)
-	queryStart := strings.IndexByte(body, '?')
+	queryStart := strings.IndexAny(body, "?-_")
 	if queryStart < 0 {
 		return line
+	}
+	if body[queryStart] != '?' {
+		// Mihomo expects standard Base64 for VMess JSON payloads. Standard
+		// payloads retain the fast path above; only URL-safe ones are decoded.
+		if decoded, ok := decodeLooseBase64(body); ok && json.Valid([]byte(decoded)) {
+			return prefix + base64.StdEncoding.EncodeToString([]byte(decoded))
+		}
+		queryStart = strings.IndexByte(body, '?')
+		if queryStart < 0 {
+			return line
+		}
 	}
 
 	encoded := body[:queryStart]

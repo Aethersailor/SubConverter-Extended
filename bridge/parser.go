@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"math"
@@ -26,7 +28,7 @@ func parseSubscriptionWithMihomo(subscription string) ([]map[string]any, error) 
 	if err := yaml.Unmarshal(buf, schema); err != nil {
 		// Decode the subscription envelope before processing individual links.
 		// Native YAML and Base64 data must never undergo URL query decoding.
-		links := expandMieruStandardSubscription(string(convert.DecodeBase64(buf)))
+		links := expandMieruStandardSubscription(string(decodeSubscriptionEnvelope(buf)))
 		proxies, convertErr := convert.ConvertsV2Ray([]byte(preprocessSubscription(links)))
 		if convertErr != nil {
 			return nil, fmt.Errorf("%w, %w", err, convertErr)
@@ -70,6 +72,26 @@ func parseSubscriptionWithMihomo(subscription string) ([]map[string]any, error) 
 		return nil, errors.New("file doesn't have any proxy")
 	}
 	return proxies, nil
+}
+
+func decodeSubscriptionEnvelope(buf []byte) []byte {
+	// Plaintext links cannot be a Base64 envelope. Avoid allocating a decode
+	// buffer for them, including lists with comments before the first link.
+	if bytes.Contains(buf, []byte("://")) {
+		return buf
+	}
+	encoding := base64.RawStdEncoding
+	if bytes.ContainsAny(buf, "-_") {
+		encoding = base64.RawURLEncoding
+	}
+	if bytes.HasSuffix(bytes.TrimRight(buf, "\r\n"), []byte("=")) {
+		encoding = encoding.WithPadding(base64.StdPadding)
+	}
+	decoded, err := encoding.DecodeString(string(buf))
+	if err != nil {
+		return buf
+	}
+	return decoded
 }
 
 func validateProxyMapping(mapping map[string]any) error {
