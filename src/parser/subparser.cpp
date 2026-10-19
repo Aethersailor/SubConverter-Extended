@@ -4921,25 +4921,27 @@ int explodeConfContent(const std::string &content, std::vector<Proxy> &nodes) {
                  structured_json["outbounds"].IsArray()) ||
                 (structured_json.HasMember("endpoints") &&
                  structured_json["endpoints"].IsArray());
+            // Format markers are root members, never text in node names,
+            // passwords, YAML, or URI fragments.
+            if (!looks_like_singbox && filetype == ConfType::Unknow) {
+                if (structured_json.HasMember("version"))
+                    filetype = ConfType::SS;
+                else if (structured_json.HasMember("serverSubscribes"))
+                    filetype = ConfType::SSR;
+                else if (structured_json.HasMember("uiItem") ||
+                         structured_json.HasMember("vnext"))
+                    filetype = ConfType::V2Ray;
+                else if (structured_json.HasMember("proxy_apps"))
+                    filetype = ConfType::SSConf;
+                else if (structured_json.HasMember("idInUse"))
+                    filetype = ConfType::SSTap;
+                else if (structured_json.HasMember("local_address") &&
+                         structured_json.HasMember("local_port"))
+                    filetype = ConfType::SSR;
+                else if (structured_json.HasMember("ModeFileNameType"))
+                    filetype = ConfType::Netch;
+            }
         }
-    }
-
-    if (!looks_like_singbox) {
-        if (filetype == ConfType::Unknow && strFind(content, "\"version\""))
-            filetype = ConfType::SS;
-        else if (strFind(content, "\"serverSubscribes\""))
-            filetype = ConfType::SSR;
-        else if (strFind(content, "\"uiItem\"") || strFind(content, "vnext"))
-            filetype = ConfType::V2Ray;
-        else if (strFind(content, "\"proxy_apps\""))
-            filetype = ConfType::SSConf;
-        else if (strFind(content, "\"idInUse\""))
-            filetype = ConfType::SSTap;
-        else if (strFind(content, "\"local_address\"") &&
-                 strFind(content, "\"local_port\""))
-            filetype = ConfType::SSR; //use ssr config parser
-        else if (strFind(content, "\"ModeFileNameType\""))
-            filetype = ConfType::Netch;
     }
 
     switch (filetype) {
