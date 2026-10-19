@@ -4,6 +4,7 @@
 #include <initializer_list>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <map>
 
 #include "utils/base64/base64.h"
@@ -5958,11 +5959,17 @@ void explodeSub(std::string sub, std::vector<Proxy> &nodes) {
 
     //try to parse as normal subscription
     if (!processed) {
-        sub = urlSafeBase64Decode(sub);
-        if (sub.find("[Proxy]") != std::string::npos ||
-            regFind(sub, "(?i)(vmess|vless|shadowsocks|hysteria2|anytls|http|trojan)\\s*?=")) {
-            if (explodeSurge(sub, nodes))
-                return;
+        const size_t first = sub.find_first_not_of(" \t\r\n");
+        const std::string_view prefix = first == std::string::npos
+                ? std::string_view{} : std::string_view(sub).substr(first, 32);
+        // All supported URI scheme prefixes fit here; do not scan Base64 bodies.
+        if (prefix.find("://") == std::string_view::npos) {
+            sub = urlSafeBase64Decode(sub);
+            if (sub.find("[Proxy]") != std::string::npos ||
+                regFind(sub, "(?i)(vmess|vless|shadowsocks|hysteria2|anytls|http|trojan)\\s*?=")) {
+                if (explodeSurge(sub, nodes))
+                    return;
+            }
         }
         strstream << sub;
         char delimiter =
