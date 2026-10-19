@@ -1012,7 +1012,7 @@ void vlessConstruct(Proxy &node, const std::string &group, const std::string &re
         case "grpc"_hash:
             node.Host = host;
             node.GRPCMode = mode.empty() ? "gun" : mode;
-            node.GRPCServiceName = path.empty() ? "/" : urlDecode(trim(path));
+            node.GRPCServiceName = path.empty() ? "/" : trim(path);
             break;
         case "quic"_hash:
             node.Host = host;
@@ -1020,7 +1020,7 @@ void vlessConstruct(Proxy &node, const std::string &group, const std::string &re
             break;
         default:
             node.Host = (host.empty() && !isIPv4(add) && !isIPv6(add)) ? add.data() : trim(host);
-            node.Path = path.empty() ? "/" : urlDecode(trim(path));
+            node.Path = path.empty() ? "/" : trim(path);
             node.V2rayHttpUpgrade = v2ray_http_upgrade;
             break;
     }
@@ -3094,6 +3094,11 @@ void explodeStdVless(std::string vless, Proxy &node) {
                    decodedUrlArg(parsed.query, "packet-encoding"), tribool(), tribool(),
                    getXrayAllowInsecure(parsed.query), tribool(), "",
                    tribool(), encryption);
+    // Decode only share-URI fields, preserving the constructor's trim order.
+    if (!path.empty() && net != "quic") {
+        std::string &transport_path = net == "grpc" ? node.GRPCServiceName : node.Path;
+        transport_path = urlDecode(transport_path);
+    }
     return;
 }
 
