@@ -5932,7 +5932,9 @@ void explodeSub(std::string sub, std::vector<Proxy> &nodes) {
         throw;
     }
     try {
-        if (!processed && !sub.empty() && sub.front() == '{') {
+        const size_t json_start = processed ? std::string::npos
+                : sub.find_first_not_of(" \t\r\n");
+        if (json_start != std::string::npos && sub[json_start] == '{') {
             rapidjson::Document document;
             document.Parse(sub.c_str());
             if (!document.HasParseError() && document.IsObject()) {
