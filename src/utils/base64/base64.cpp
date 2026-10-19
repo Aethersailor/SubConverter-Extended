@@ -90,8 +90,11 @@ std::string base64Decode(const std::string &encoded_string, bool accept_urlsafe)
         uchar = encoded_data[in_]; // make compiler happy
         if (!(accept_urlsafe ? itable[uchar] : (itable[uchar] == 1))) // break away from the while condition
         {
-            ret += uchar; // not base64 encoded data, copy to result
             in_++;
+            // Encoded line wrapping must not split a Base64 quartet.
+            if (uchar == '\r' || uchar == '\n')
+                continue;
+            ret += uchar; // not base64 encoded data, copy to result
             i = 0;
             continue;
         }
