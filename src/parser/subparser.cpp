@@ -4,6 +4,7 @@
 #include <initializer_list>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <map>
 
 #include "utils/base64/base64.h"
@@ -1012,7 +1013,7 @@ void vlessConstruct(Proxy &node, const std::string &group, const std::string &re
         case "grpc"_hash:
             node.Host = host;
             node.GRPCMode = mode.empty() ? "gun" : mode;
-            node.GRPCServiceName = path.empty() ? "/" : urlDecode(trim(path));
+            node.GRPCServiceName = path.empty() ? "/" : trim(path);
             break;
         case "quic"_hash:
             node.Host = host;
@@ -1020,7 +1021,7 @@ void vlessConstruct(Proxy &node, const std::string &group, const std::string &re
             break;
         default:
             node.Host = (host.empty() && !isIPv4(add) && !isIPv6(add)) ? add.data() : trim(host);
-            node.Path = path.empty() ? "/" : urlDecode(trim(path));
+            node.Path = path.empty() ? "/" : trim(path);
             node.V2rayHttpUpgrade = v2ray_http_upgrade;
             break;
     }
@@ -1188,29 +1189,33 @@ void explodeVmessConf(std::string content, std::vector<Proxy> &nodes) {
                     aid = GetMember(nodejson["settings"]["vnext"][0]["users"][0], "alterId");
                     cipher = GetMember(nodejson["settings"]["vnext"][0]["users"][0], "security");
                 }
-                if (nodejson.HasMember(streamset.data())) {
+                if (nodejson.HasMember(streamset.data()) && nodejson[streamset.data()].IsObject()) {
                     net = GetMember(nodejson[streamset.data()], "network");
                     tls = GetMember(nodejson[streamset.data()], "security");
                     if (net == "ws") {
-                        if (nodejson[streamset.data()].HasMember(wsset.data()))
+                        if (nodejson[streamset.data()].HasMember(wsset.data()) &&
+                            nodejson[streamset.data()][wsset.data()].IsObject())
                             settings = nodejson[streamset.data()][wsset.data()];
                         else
-                            settings.RemoveAllMembers();
+                            settings.SetObject();
                         path = GetMember(settings, "path");
                         if (settings.HasMember("headers")) {
                             host = GetMember(settings["headers"], "Host");
                             edge = GetMember(settings["headers"], "Edge");
                         }
                     }
-                    if (nodejson[streamset.data()].HasMember(tcpset.data()))
+                    if (nodejson[streamset.data()].HasMember(tcpset.data()) &&
+                        nodejson[streamset.data()][tcpset.data()].IsObject())
                         settings = nodejson[streamset.data()][tcpset.data()];
                     else
-                        settings.RemoveAllMembers();
-                    if (settings.IsObject() && settings.HasMember("header")) {
+                        settings.SetObject();
+                    if (settings.HasMember("header") && settings["header"].IsObject()) {
                         type = GetMember(settings["header"], "type");
                         if (type == "http") {
-                            if (settings["header"].HasMember("request")) {
+                            if (settings["header"].HasMember("request") &&
+                                settings["header"]["request"].IsObject()) {
                                 if (settings["header"]["request"].HasMember("path") &&
+                                    settings["header"]["request"]["path"].IsArray() &&
                                     settings["header"]["request"]["path"].Size())
                                     settings["header"]["request"]["path"][0] >> path;
                                 if (settings["header"]["request"].HasMember("headers")) {
@@ -3094,6 +3099,11 @@ void explodeStdVless(std::string vless, Proxy &node) {
                    decodedUrlArg(parsed.query, "packet-encoding"), tribool(), tribool(),
                    getXrayAllowInsecure(parsed.query), tribool(), "",
                    tribool(), encryption);
+    // Decode only share-URI fields, preserving the constructor's trim order.
+    if (!path.empty() && net != "quic") {
+        std::string &transport_path = net == "grpc" ? node.GRPCServiceName : node.Path;
+        transport_path = urlDecode(transport_path);
+    }
     return;
 }
 
@@ -4915,25 +4925,56 @@ int explodeConfContent(const std::string &content, std::vector<Proxy> &nodes) {
                  structured_json["outbounds"].IsArray()) ||
                 (structured_json.HasMember("endpoints") &&
                  structured_json["endpoints"].IsArray());
+            if (structured_json.HasMember("outbounds") &&
+                structured_json["outbounds"].IsArray() &&
+                !structured_json["outbounds"].Empty()) {
+                const auto &outbound = structured_json["outbounds"][0];
+                // V2Ray and sing-box share the outbounds root key. Match
+                // the VMess shape consumed by explodeVmessConf instead.
+                if (outbound.IsObject() && GetMember(outbound, "protocol") == "vmess" &&
+                    outbound.HasMember("settings") && outbound["settings"].IsObject()) {
+                    const auto &settings = outbound["settings"];
+                    if (settings.HasMember("vnext") && settings["vnext"].IsArray() &&
+                        !settings["vnext"].Empty()) {
+                        const auto &server = settings["vnext"][0];
+                        if (server.IsObject() && server.HasMember("users") &&
+                            server["users"].IsArray() && !server["users"].Empty() &&
+                            server["users"][0].IsObject())
+                            filetype = ConfType::V2Ray;
+                    }
+                }
+            }
+            // Format markers are root members, never text in node names,
+            // passwords, YAML, or URI fragments.
+            if (!looks_like_singbox && filetype == ConfType::Unknow) {
+                if (structured_json.HasMember("version"))
+                    filetype = ConfType::SS;
+                else if (structured_json.HasMember("serverSubscribes"))
+                    filetype = ConfType::SSR;
+                else if (structured_json.HasMember("uiItem") ||
+                         structured_json.HasMember("vnext"))
+                    filetype = ConfType::V2Ray;
+                else if (structured_json.HasMember("proxy_apps"))
+                    filetype = ConfType::SSConf;
+                else if (structured_json.HasMember("idInUse"))
+                    filetype = ConfType::SSTap;
+                else if (structured_json.HasMember("local_address") &&
+                         structured_json.HasMember("local_port"))
+                    filetype = ConfType::SSR;
+                else if (structured_json.HasMember("ModeFileNameType"))
+                    filetype = ConfType::Netch;
+                else {
+                    for (const char *key : {"servers", "configs"}) {
+                        if (structured_json.HasMember(key) && structured_json[key].IsArray() &&
+                            std::any_of(structured_json[key].Begin(), structured_json[key].End(),
+                                        looks_like_ss_server)) {
+                            filetype = ConfType::SS;
+                            break;
+                        }
+                    }
+                }
+            }
         }
-    }
-
-    if (!looks_like_singbox) {
-        if (filetype == ConfType::Unknow && strFind(content, "\"version\""))
-            filetype = ConfType::SS;
-        else if (strFind(content, "\"serverSubscribes\""))
-            filetype = ConfType::SSR;
-        else if (strFind(content, "\"uiItem\"") || strFind(content, "vnext"))
-            filetype = ConfType::V2Ray;
-        else if (strFind(content, "\"proxy_apps\""))
-            filetype = ConfType::SSConf;
-        else if (strFind(content, "\"idInUse\""))
-            filetype = ConfType::SSTap;
-        else if (strFind(content, "\"local_address\"") &&
-                 strFind(content, "\"local_port\""))
-            filetype = ConfType::SSR; //use ssr config parser
-        else if (strFind(content, "\"ModeFileNameType\""))
-            filetype = ConfType::Netch;
     }
 
     switch (filetype) {
@@ -5924,7 +5965,9 @@ void explodeSub(std::string sub, std::vector<Proxy> &nodes) {
         throw;
     }
     try {
-        if (!processed && !sub.empty() && sub.front() == '{') {
+        const size_t json_start = processed ? std::string::npos
+                : sub.find_first_not_of(" \t\r\n");
+        if (json_start != std::string::npos && sub[json_start] == '{') {
             rapidjson::Document document;
             document.Parse(sub.c_str());
             if (!document.HasParseError() && document.IsObject()) {
@@ -5953,11 +5996,19 @@ void explodeSub(std::string sub, std::vector<Proxy> &nodes) {
 
     //try to parse as normal subscription
     if (!processed) {
-        sub = urlSafeBase64Decode(sub);
-        if (sub.find("[Proxy]") != std::string::npos ||
-            regFind(sub, "(?i)(vmess|vless|shadowsocks|hysteria2|anytls|http|trojan)\\s*?=")) {
-            if (explodeSurge(sub, nodes))
-                return;
+        const size_t first = sub.find_first_not_of(" \t\r\n");
+        const std::string_view prefix = first == std::string::npos
+                ? std::string_view{} : std::string_view(sub).substr(first, 32);
+        // All supported URI scheme prefixes fit here; do not scan Base64 bodies.
+        if (prefix.find("://") == std::string_view::npos) {
+            // Recognize plaintext URIs during decoding, including those after
+            // a comment or bad line, without pre-scanning Base64 envelopes.
+            sub = base64Decode(sub, true, true);
+            if (sub.find("[Proxy]") != std::string::npos ||
+                regFind(sub, "(?i)(vmess|vless|shadowsocks|hysteria2|anytls|http|trojan)\\s*?=")) {
+                if (explodeSurge(sub, nodes))
+                    return;
+            }
         }
         strstream << sub;
         char delimiter =

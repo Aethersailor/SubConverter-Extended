@@ -3,7 +3,8 @@
 
 #include <string>
 
-std::string base64Decode(const std::string &encoded_string, bool accept_urlsafe = false);
+std::string base64Decode(const std::string &encoded_string, bool accept_urlsafe = false,
+                         bool preserve_plaintext = false);
 std::string base64Encode(const std::string &string_to_encode);
 
 std::string urlSafeBase64Apply(const std::string &encoded_string);

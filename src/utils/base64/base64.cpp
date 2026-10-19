@@ -1,6 +1,7 @@
 #include <array>
 #include <string>
 
+#include "utils/base64/base64.h"
 #include "utils/string.h"
 
 static constexpr char base64_alphabet[] =
@@ -58,7 +59,8 @@ std::string base64Encode(const std::string &string_to_encode)
 
 }
 
-std::string base64Decode(const std::string &encoded_string, bool accept_urlsafe)
+std::string base64Decode(const std::string &encoded_string, bool accept_urlsafe,
+                         bool preserve_plaintext)
 {
     string_size in_len = encoded_string.size();
     const char *encoded_data = encoded_string.data();
@@ -90,8 +92,14 @@ std::string base64Decode(const std::string &encoded_string, bool accept_urlsafe)
         uchar = encoded_data[in_]; // make compiler happy
         if (!(accept_urlsafe ? itable[uchar] : (itable[uchar] == 1))) // break away from the while condition
         {
-            ret += uchar; // not base64 encoded data, copy to result
             in_++;
+            // Encoded line wrapping must not split a Base64 quartet.
+            if (uchar == '\r' || uchar == '\n')
+                continue;
+            if (preserve_plaintext && uchar == ':' && in_ + 1 < encoded_string.size() &&
+                encoded_data[in_] == '/' && encoded_data[in_ + 1] == '/')
+                return encoded_string;
+            ret += uchar; // not base64 encoded data, copy to result
             i = 0;
             continue;
         }
@@ -111,6 +119,12 @@ std::string base64Decode(const std::string &encoded_string, bool accept_urlsafe)
             i = 0;
         }
     }
+
+    // A plaintext preface may contain '=' before its first URI. Normal
+    // envelopes only check their padding tail, without a full pre-scan.
+    if (preserve_plaintext && in_ < encoded_string.size() && encoded_data[in_] == '=' &&
+        encoded_string.find("://", in_) != std::string::npos)
+        return encoded_string;
 
     if (i)
     {
