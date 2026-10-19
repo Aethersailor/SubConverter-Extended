@@ -1189,29 +1189,33 @@ void explodeVmessConf(std::string content, std::vector<Proxy> &nodes) {
                     aid = GetMember(nodejson["settings"]["vnext"][0]["users"][0], "alterId");
                     cipher = GetMember(nodejson["settings"]["vnext"][0]["users"][0], "security");
                 }
-                if (nodejson.HasMember(streamset.data())) {
+                if (nodejson.HasMember(streamset.data()) && nodejson[streamset.data()].IsObject()) {
                     net = GetMember(nodejson[streamset.data()], "network");
                     tls = GetMember(nodejson[streamset.data()], "security");
                     if (net == "ws") {
-                        if (nodejson[streamset.data()].HasMember(wsset.data()))
+                        if (nodejson[streamset.data()].HasMember(wsset.data()) &&
+                            nodejson[streamset.data()][wsset.data()].IsObject())
                             settings = nodejson[streamset.data()][wsset.data()];
                         else
-                            settings.RemoveAllMembers();
+                            settings.SetObject();
                         path = GetMember(settings, "path");
                         if (settings.HasMember("headers")) {
                             host = GetMember(settings["headers"], "Host");
                             edge = GetMember(settings["headers"], "Edge");
                         }
                     }
-                    if (nodejson[streamset.data()].HasMember(tcpset.data()))
+                    if (nodejson[streamset.data()].HasMember(tcpset.data()) &&
+                        nodejson[streamset.data()][tcpset.data()].IsObject())
                         settings = nodejson[streamset.data()][tcpset.data()];
                     else
-                        settings.RemoveAllMembers();
-                    if (settings.IsObject() && settings.HasMember("header")) {
+                        settings.SetObject();
+                    if (settings.HasMember("header") && settings["header"].IsObject()) {
                         type = GetMember(settings["header"], "type");
                         if (type == "http") {
-                            if (settings["header"].HasMember("request")) {
+                            if (settings["header"].HasMember("request") &&
+                                settings["header"]["request"].IsObject()) {
                                 if (settings["header"]["request"].HasMember("path") &&
+                                    settings["header"]["request"]["path"].IsArray() &&
                                     settings["header"]["request"]["path"].Size())
                                     settings["header"]["request"]["path"][0] >> path;
                                 if (settings["header"]["request"].HasMember("headers")) {
@@ -4921,6 +4925,25 @@ int explodeConfContent(const std::string &content, std::vector<Proxy> &nodes) {
                  structured_json["outbounds"].IsArray()) ||
                 (structured_json.HasMember("endpoints") &&
                  structured_json["endpoints"].IsArray());
+            if (structured_json.HasMember("outbounds") &&
+                structured_json["outbounds"].IsArray() &&
+                !structured_json["outbounds"].Empty()) {
+                const auto &outbound = structured_json["outbounds"][0];
+                // V2Ray and sing-box share the outbounds root key. Match
+                // the VMess shape consumed by explodeVmessConf instead.
+                if (outbound.IsObject() && GetMember(outbound, "protocol") == "vmess" &&
+                    outbound.HasMember("settings") && outbound["settings"].IsObject()) {
+                    const auto &settings = outbound["settings"];
+                    if (settings.HasMember("vnext") && settings["vnext"].IsArray() &&
+                        !settings["vnext"].Empty()) {
+                        const auto &server = settings["vnext"][0];
+                        if (server.IsObject() && server.HasMember("users") &&
+                            server["users"].IsArray() && !server["users"].Empty() &&
+                            server["users"][0].IsObject())
+                            filetype = ConfType::V2Ray;
+                    }
+                }
+            }
             // Format markers are root members, never text in node names,
             // passwords, YAML, or URI fragments.
             if (!looks_like_singbox && filetype == ConfType::Unknow) {
@@ -4940,6 +4963,16 @@ int explodeConfContent(const std::string &content, std::vector<Proxy> &nodes) {
                     filetype = ConfType::SSR;
                 else if (structured_json.HasMember("ModeFileNameType"))
                     filetype = ConfType::Netch;
+                else {
+                    for (const char *key : {"servers", "configs"}) {
+                        if (structured_json.HasMember(key) && structured_json[key].IsArray() &&
+                            std::any_of(structured_json[key].Begin(), structured_json[key].End(),
+                                        looks_like_ss_server)) {
+                            filetype = ConfType::SS;
+                            break;
+                        }
+                    }
+                }
             }
         }
     }
