@@ -6001,7 +6001,9 @@ void explodeSub(std::string sub, std::vector<Proxy> &nodes) {
                 ? std::string_view{} : std::string_view(sub).substr(first, 32);
         // All supported URI scheme prefixes fit here; do not scan Base64 bodies.
         if (prefix.find("://") == std::string_view::npos) {
-            sub = urlSafeBase64Decode(sub);
+            // Recognize plaintext URIs during decoding, including those after
+            // a comment or bad line, without pre-scanning Base64 envelopes.
+            sub = base64Decode(sub, true, true);
             if (sub.find("[Proxy]") != std::string::npos ||
                 regFind(sub, "(?i)(vmess|vless|shadowsocks|hysteria2|anytls|http|trojan)\\s*?=")) {
                 if (explodeSurge(sub, nodes))
