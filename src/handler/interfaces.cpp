@@ -28,6 +28,7 @@
 #include <yaml-cpp/yaml.h>
 
 #include "config/binding.h"
+#include "config/proxy_provider_user_agent.h"
 #include "generator/config/clash_proxy.h"
 #include "generator/config/external_rules.h"
 #include "generator/config/nodemanip.h"
@@ -86,8 +87,6 @@ static string_icase_map buildSubscriptionRequestHeaders() {
 extern WebServer webServer;
 
 string_array gRegexBlacklist = {"(.*)*"};
-
-static constexpr size_t kProviderUserAgentMaxLen = 512;
 
 enum class RemoteSubscriptionMode {
   ServerSideParse,
@@ -686,12 +685,15 @@ struct TaggedLink {
     DuplicateInterval,
     InvalidProxyDirect,
     DuplicateProxyDirect,
+    InvalidUserAgent,
+    DuplicateUserAgent,
     InvalidNode,
   };
 
   std::string tag;
   std::string provider;
   std::string link;
+  std::string user_agent;
   int interval = 0;
   bool proxy_direct = kDefaultProxyProviderDirect;
   bool has_tag = false;
@@ -699,6 +701,7 @@ struct TaggedLink {
   bool has_interval = false;
   bool has_proxy_direct = false;
   bool has_node = false;
+  bool has_user_agent = false;
   bool link_decoded = false;
   Error error = Error::None;
 };
@@ -800,6 +803,20 @@ static bool parseLinkPrefixes(const std::string &input, TaggedLink &result) {
       remainder.erase(0, 5);
       break;
     }
+    if (extractLinkPrefix(remainder, "ua:", value, next, saw_bracketed)) {
+      parsed = true;
+      if (result.has_user_agent) {
+        result.error = TaggedLink::Error::DuplicateUserAgent;
+        return true;
+      }
+      result.has_user_agent = true;
+      if (!parseProxyProviderUserAgent(value, result.user_agent)) {
+        result.error = TaggedLink::Error::InvalidUserAgent;
+        return true;
+      }
+      remainder = std::move(next);
+      continue;
+    }
     break;
   }
 
@@ -817,6 +834,12 @@ static bool parseLinkPrefixes(const std::string &input, TaggedLink &result) {
   if (starts_proxy_direct &&
       lower_remainder.find("%2c") == std::string::npos) {
     result.error = TaggedLink::Error::InvalidProxyDirect;
+    return true;
+  }
+  if ((startsWith(lower_remainder, "ua:") ||
+       startsWith(lower_remainder, "<ua:")) &&
+      lower_remainder.find("%2c") == std::string::npos) {
+    result.error = TaggedLink::Error::InvalidUserAgent;
     return true;
   }
 
@@ -838,6 +861,8 @@ static bool parseLinkPrefixes(const std::string &input, TaggedLink &result) {
 static bool looksLikeEncodedLinkPrefix(const std::string &input) {
   std::string lower = toLower(input);
   return startsWith(lower, "tag%3a") || startsWith(lower, "provider%3a") ||
+         startsWith(lower, "ua%3a") || startsWith(lower, "%3cua%3a") ||
+         startsWith(lower, "%3cua:") ||
          startsWith(lower, "interval%3a") ||
          startsWith(lower, "proxy_direct%3a") ||
          startsWith(lower, "node%3a") ||
@@ -855,6 +880,8 @@ static bool looksLikeEncodedLinkPrefix(const std::string &input) {
          (startsWith(lower, "interval:") &&
           lower.find("%2c") != std::string::npos) ||
          (startsWith(lower, "proxy_direct:") &&
+          lower.find("%2c") != std::string::npos) ||
+         (startsWith(lower, "ua:") &&
           lower.find("%2c") != std::string::npos);
 }
 
@@ -867,6 +894,15 @@ static TaggedLink parseTaggedLink(const std::string &input) {
     TaggedLink decoded_result;
     std::string decoded = urlDecode(value);
     if (parseLinkPrefixes(decoded, decoded_result)) {
+      // The legacy form decoder repairs CR/LF and '+'. An explicit UA must
+      // never silently inherit those repairs from a whole-prefix decode.
+      if (decoded_result.has_user_agent) {
+        const std::string lower = toLower(value);
+        if (value.find_first_of("+\r\n") != std::string::npos ||
+            lower.find("%0d") != std::string::npos ||
+            lower.find("%0a") != std::string::npos)
+          decoded_result.error = TaggedLink::Error::InvalidUserAgent;
+      }
       decoded_result.link_decoded = true;
       return decoded_result;
     }
@@ -878,6 +914,18 @@ static TaggedLink parseTaggedLink(const std::string &input) {
 static std::string providerLinkPrefixError(
     size_t item_index, TaggedLink::Error error) {
   const std::string item = std::to_string(item_index + 1);
+  if (error == TaggedLink::Error::DuplicateUserAgent) {
+    return "Invalid request: ua: is repeated for URL item #" + item + ".\n"
+           "无效请求：第 " + item + " 个 url 项重复设置了 ua: 前缀。";
+  }
+  if (error == TaggedLink::Error::InvalidUserAgent) {
+    return "Invalid request: ua: for URL item #" + item +
+           " must be a nonempty, percent-encoded printable ASCII component "
+           "of at most 512 decoded bytes.\n"
+           "无效请求：第 " + item +
+           " 个 url 项的 ua: 必须是合法百分号编码的可打印 ASCII，"
+           "解码后不得为空或超过 512 字节。";
+  }
   if (error == TaggedLink::Error::InvalidNode) {
     return "Invalid request: node: for URL item #" + item +
            " requires an HTTP(S) proxy with a host and port, no credentials, "
@@ -908,6 +956,16 @@ static std::string providerLinkPrefixError(
          " must be true, false, 1, or 0.\n"
          "无效请求：第 " + item +
          " 个 url 项的 proxy_direct: 必须是 true、false、1 或 0。";
+}
+
+static std::string providerUserAgentScopeError(size_t item_index) {
+  const std::string item = std::to_string(item_index + 1);
+  return "Invalid request: ua: for URL item #" + item +
+         " requires an HTTP(S) proxy-provider source with target=clash "
+         "and list=false.\n"
+         "无效请求：第 " + item +
+         " 个 url 项的 ua: 仅支持 target=clash 且 list=false 的 "
+         "HTTP(S) proxy-provider 来源。";
 }
 
 static std::string providerIntervalScopeError(size_t item_index) {
@@ -1308,6 +1366,7 @@ struct SubExplainProvider {
   int group_id = 0;
   uint32_t interval = 0;
   bool proxy_direct = kDefaultProxyProviderDirect;
+  size_t explicit_user_agent_length = 0;
 };
 
 struct SubExplainParameter {
@@ -1641,6 +1700,11 @@ static std::string serializeSubExplainReport(const SubExplainReport &report,
     writer.Bool(provider.proxy_direct);
     writer.Key("proxy_field_emitted");
     writer.Bool(provider.proxy_direct);
+    if (provider.explicit_user_agent_length) {
+      writeJsonString(writer, "user_agent_source", "explicit");
+      writer.Key("user_agent_length");
+      writer.Uint64(provider.explicit_user_agent_length);
+    }
     writer.EndObject();
   }
   writer.EndArray();
@@ -3812,10 +3876,27 @@ static std::string parseSubRequestArguments(Request &request,
   parsed.url = getUrlArg(argument, "url");
   if (parsed.url.find("node:") != std::string::npos ||
       parsed.url.find("node%3A") != std::string::npos ||
-      parsed.url.find("node%3a") != std::string::npos) {
+      parsed.url.find("node%3a") != std::string::npos ||
+      parsed.url.find("ua:") != std::string::npos ||
+      parsed.url.find("ua%3A") != std::string::npos ||
+      parsed.url.find("ua%3a") != std::string::npos) {
     const string_array request_sources = split(parsed.url, "|");
     for (size_t index = 0; index < request_sources.size(); ++index) {
       const TaggedLink tagged = parseTaggedLink(regTrim(request_sources[index]));
+      if (tagged.has_user_agent ||
+          tagged.error == TaggedLink::Error::InvalidUserAgent ||
+          tagged.error == TaggedLink::Error::DuplicateUserAgent) {
+        if (tagged.error != TaggedLink::Error::None) {
+          response.status_code = 400;
+          return providerLinkPrefixError(index, tagged.error);
+        }
+        if (parsed.target != "clash" ||
+            isTruthyRequestValue(getUrlArg(argument, "list")) ||
+            tagged.has_node || !mihomo::isHttpSchemeLink(tagged.link)) {
+          response.status_code = 400;
+          return providerUserAgentScopeError(index);
+        }
+      }
       if (!tagged.has_node && tagged.error != TaggedLink::Error::InvalidNode)
         continue;
       if (tagged.error != TaggedLink::Error::None) {
@@ -5454,6 +5535,8 @@ static SubStageResponse processSubscriptionNodes(
       bool has_interval = false;
       bool has_proxy_direct = false;
       bool url_decoded = false;
+      std::string user_agent;
+      bool has_user_agent = false;
     };
     std::vector<SubscriptionLinkItem> subscription_urls;
     std::vector<std::string> node_urls;
@@ -5492,7 +5575,7 @@ static SubStageResponse processSubscriptionNodes(
         subscription_urls.push_back(
             {link, tagged.tag, tagged.provider, tagged.interval,
              tagged.proxy_direct, tagged.has_interval, tagged.has_proxy_direct,
-             tagged.link_decoded});
+             tagged.link_decoded, tagged.user_agent, tagged.has_user_agent});
         explain.subscription_url_count++;
       } else {
         if (tagged.has_interval) {
@@ -5571,7 +5654,16 @@ static SubStageResponse processSubscriptionNodes(
                                   : ext.provider_proxy_direct;
         provider.groupId = groupID;
         provider.path = "./providers/" + provider.name + ".yaml";
-        provider.user_agent = provider_user_agent;
+        provider.user_agent =
+            item.has_user_agent ? item.user_agent : provider_user_agent;
+        if (item.has_user_agent) {
+          const std::string identity =
+              std::to_string(provider.url.size()) + ":" + provider.url +
+              std::to_string(provider.user_agent.size()) + ":" +
+              provider.user_agent;
+          provider.path = "./providers/" + provider.name + "_ua_" +
+                          getMD5(identity) + ".yaml";
+        }
         provider.headers = provider_headers;
         provider.filter = buildProviderRemarkFilter(lIncludeRemarks);
         provider.exclude_filter =
@@ -5604,6 +5696,8 @@ static SubStageResponse processSubscriptionNodes(
         explain_provider.group_id = provider.groupId;
         explain_provider.interval = provider.interval;
         explain_provider.proxy_direct = provider.proxy_direct;
+        if (item.has_user_agent)
+          explain_provider.explicit_user_agent_length = provider.user_agent.size();
         explain.providers.push_back(std::move(explain_provider));
         groupID++;
       }
