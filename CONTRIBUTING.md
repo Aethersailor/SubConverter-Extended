@@ -25,6 +25,20 @@ SubConverter-Extended 接受缺陷修复、兼容性改进、文档修正和可�
 
 仓库不再维护自动化测试或 PR 验证门禁。CodeQL 独立扫描 `dev` 的源码，不作为自动合并或发布的前置条件。构建和发布流程继续负责生成制品、记录版本身份和防止覆盖历史版本；功能与兼容性由维护者人工验证。
 
+## 逐订阅 User-Agent 的开发验证
+
+`target=clash` 的 HTTP(S) proxy-provider 来源支持可选 `ua:` 前缀，可与 `provider:`、`tag:`、`interval:`、`proxy_direct:` 组合。以下为外层 `url` 查询参数解码后的来源字符串：
+
+```text
+provider:A,ua:ClientA%2F1.0,https://a.example/sub|provider:B,ua:ClientB%2F2.0,https://b.example/sub
+```
+
+UA 先按 URI 组件百分号编码，再将组合后的来源字符串编码为 `url` 参数。组件只解码一次，`+` 保持字面含义。解码后最多 512 字节，仅允许可打印 ASCII；去除首尾空格后不得为空。同一来源的重复 `ua:`、非法编码和超出作用范围的用法返回 HTTP 400。`target=auto` 最终解析为 Clash 时同样支持；`list=true`、直接节点和其他输出目标不支持该前缀。
+
+显式 UA 只写入对应 provider 的 `header.User-Agent`，允许浏览器和工具 UA。未指定时保留现有自动继承及排除规则。provider 名称保持原命名规则；显式 UA 的缓存路径包含 URL 与规范化 UA 的完整身份摘要，避免复用其他 UA 对应的内容。更换 UA 可能留下旧缓存文件，本功能不自动删除客户端文件。
+
+人工验证应覆盖真实 Mihomo 的请求头、同 URL 不同 UA 的节点和缓存隔离、冷/热启动与 ETag、编码及错误边界，以及未设置 `ua:` 时的逐字节输出对照。日志和 explain 仅记录显式 UA 的来源与长度，不应回显其完整内容。
+
 ## 敏感信息和安全问题
 
 不要在 Issue、PR、日志、截图、样例或复现数据中提交真实订阅 URL、节点凭据、Token、Cookie、私有主机名或其他秘密。使用 `example.com`、保留的测试网段和明确的占位符构造最小复现。
