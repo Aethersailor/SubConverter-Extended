@@ -24,7 +24,9 @@ Linux 命令：
   ./update.sh set-proxy yylx
   ./update.sh set-proxy direct
 
-默认不自动检查或安装。执行 enable-auto 后，start.sh 会按更新配置检查稳定 Release；有新版时，更新器先在独立端口验证候选程序，再原子交换程序目录。升级会继承 pref.toml、pref.yml、pref.yaml、pref.ini、generate.ini、gistconf.ini、profiles、cache，以及默认的 stats 或 base/stats 目录。
+默认不自动检查或安装。执行 enable-auto 后，start.sh 会按更新配置检查稳定 Release；有新版时，更新器先在独立端口验证候选程序，再切换程序目录。支持 RENAME_EXCHANGE 的文件系统使用原子交换；不支持时使用可恢复的分步重命名。升级会继承 pref.toml、pref.yml、pref.yaml、pref.ini、generate.ini、gistconf.ini、profiles、cache，以及默认的 stats 或 base/stats 目录。
+
+如果旧版更新器已因不支持 RENAME_EXCHANGE 而失败，需要先手动完成一次便携包升级。反复执行旧更新器无法获得此修复。手动升级时保留用户配置、统计目录及持久更新目录。
 
 自定义模板、规则、脚本或非默认统计目录建议放在程序目录之外，并通过配置文件引用。更新前仍应保留独立备份。
 
@@ -35,5 +37,11 @@ apply 和 rollback 返回退出码 10 时，表示程序目录已经切换。sta
 如果 status 显示 error，不要删除 SubConverter-Extended.update/pending.json。先执行：
 
   ./update.sh recover
+
+如果分步切换被断电或进程终止打断，程序目录可能暂时不存在。此时从程序目录的父目录执行：
+
+  ./SubConverter-Extended.update/recover.sh
+
+如果程序目录使用其他名称，替换命令中的 SubConverter-Extended。恢复入口和独立更新器在分步切换前写入持久更新目录。不要手动删除 pending.json、staging、rollback 或 .exchange-old 目录。
 
 recover 验证事务两侧的 BUILD-INFO.json 和运行行为，只接受能够确认身份的程序目录。恢复失败时，停止更新并保留 SubConverter-Extended.update 以便排查。

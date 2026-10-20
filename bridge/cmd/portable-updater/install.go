@@ -21,6 +21,8 @@ const (
 	maxMutableFileSize int64 = 32 << 20
 )
 
+var errSwapIncomplete = errors.New("portable root exchange requires recovery; pending data was retained")
+
 type runtimeIdentity struct {
 	PID int `json:"pid"`
 }
@@ -100,7 +102,9 @@ func (u *updater) apply() (int, error) {
 	u.logf("installing %s over %s from %s", candidate.Version, current.Version, downloadSource)
 
 	if err := atomicSwapDirectories(u.root, candidateRoot); err != nil {
-		_ = os.Remove(u.pending)
+		if !errors.Is(err, errSwapIncomplete) {
+			_ = os.Remove(u.pending)
+		}
 		return 1, fmt.Errorf("atomically exchange portable roots: %w", err)
 	}
 	pending.Phase = "exchanged"
@@ -112,6 +116,9 @@ func (u *updater) apply() (int, error) {
 	}
 	if err := u.validateRuntime(u.root, candidate.Version); err != nil {
 		rollbackErr := atomicSwapDirectories(u.root, candidateRoot)
+		if rollbackErr != nil {
+			return 1, fmt.Errorf("post-install validation failed: %v; rollback failed: %w", err, rollbackErr)
+		}
 		_ = os.Remove(u.pending)
 		state := u.baseState()
 		state.OK = false
@@ -119,9 +126,6 @@ func (u *updater) apply() (int, error) {
 		state.Error = err.Error()
 		state.Message = "Candidate validation failed; the previous portable root was restored."
 		_ = u.writeState(state)
-		if rollbackErr != nil {
-			return 1, fmt.Errorf("post-install validation failed: %v; rollback failed: %w", err, rollbackErr)
-		}
 		return 1, fmt.Errorf("post-install validation failed and was rolled back: %w", err)
 	}
 
@@ -196,17 +200,19 @@ func (u *updater) rollback() (int, error) {
 		return 1, err
 	}
 	if err := atomicSwapDirectories(u.root, rollbackRoot); err != nil {
-		_ = os.Remove(u.pending)
+		if !errors.Is(err, errSwapIncomplete) {
+			_ = os.Remove(u.pending)
+		}
 		return 1, err
 	}
 	pending.Phase = "rollback-exchanged"
 	_ = writeJSONAtomic(u.pending, pending, 0o600)
 	if err := u.validateRuntime(u.root, rollbackInfo.Version); err != nil {
 		restoreErr := atomicSwapDirectories(u.root, rollbackRoot)
-		_ = os.Remove(u.pending)
 		if restoreErr != nil {
 			return 1, fmt.Errorf("rollback validation failed: %v; restoring the newer root also failed: %w", err, restoreErr)
 		}
+		_ = os.Remove(u.pending)
 		return 1, fmt.Errorf("rollback validation failed and the newer root was restored: %w", err)
 	}
 	_ = os.Remove(u.pending)
