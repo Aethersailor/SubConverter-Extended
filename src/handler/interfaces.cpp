@@ -894,15 +894,9 @@ static TaggedLink parseTaggedLink(const std::string &input) {
     TaggedLink decoded_result;
     std::string decoded = urlDecode(value);
     if (parseLinkPrefixes(decoded, decoded_result)) {
-      // The legacy form decoder repairs CR/LF and '+'. An explicit UA must
-      // never silently inherit those repairs from a whole-prefix decode.
-      if (decoded_result.has_user_agent) {
-        const std::string lower = toLower(value);
-        if (value.find_first_of("+\r\n") != std::string::npos ||
-            lower.find("%0d") != std::string::npos ||
-            lower.find("%0a") != std::string::npos)
-          decoded_result.error = TaggedLink::Error::InvalidUserAgent;
-      }
+      if (decoded_result.has_user_agent &&
+          !validEncodedProviderUserAgentPrefix(value))
+        decoded_result.error = TaggedLink::Error::InvalidUserAgent;
       decoded_result.link_decoded = true;
       return decoded_result;
     }
