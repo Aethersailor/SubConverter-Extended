@@ -5650,6 +5650,7 @@ static SubStageResponse processSubscriptionNodes(
         provider.path = "./providers/" + provider.name + ".yaml";
         provider.user_agent =
             item.has_user_agent ? item.user_agent : provider_user_agent;
+        provider.user_agent_explicit = item.has_user_agent;
         if (item.has_user_agent) {
           const std::string identity =
               std::to_string(provider.url.size()) + ":" + provider.url +

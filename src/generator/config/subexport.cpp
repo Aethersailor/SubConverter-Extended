@@ -1933,6 +1933,8 @@ static void proxyToClashImpl(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
       if (!p.user_agent.empty()) {
         YAML::Node header = single_provider["header"]["User-Agent"];
         header[header.size()] = p.user_agent;
+        if (p.user_agent_explicit)
+          header[header.size() - 1].SetTag("tag:yaml.org,2002:str");
       }
       for (const auto &[name, value] : p.headers) {
         YAML::Node header = single_provider["header"][name];

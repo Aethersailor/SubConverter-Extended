@@ -32,6 +32,7 @@ struct ProxyProvider {
   std::string path;           // 本地缓存路径
   std::string user_agent;     // provider 更新时使用的 User-Agent
   std::map<std::string, std::string> headers; // 显式允许转发的请求头
+  bool user_agent_explicit = false;
   int groupId;                // 所属组 ID
 
   ProxyProvider()
