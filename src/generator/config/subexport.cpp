@@ -2055,6 +2055,15 @@ static void proxyToClashImpl(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
       for (const auto &proxy : x.Proxies) {
         // 如果不是以 [] 开头，则认为是正则表达式
         if (isProviderRegexRule(proxy)) {
+          // Only ordinary regexes reach the next iteration. Keep later
+          // selectors/scripts out of the filter and preserve regex order.
+          if (has_regex) {
+            if (!startsWith(proxy, "!!") && !startsWith(proxy, "script:")) {
+              regex_pattern += '`';
+              regex_pattern += proxy;
+            }
+            continue;
+          }
           std::string groupid_target, groupid_filter;
           if (parseProviderGroupIdMatcher(proxy, groupid_target,
                                           groupid_filter)) {
@@ -2084,7 +2093,9 @@ static void proxyToClashImpl(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
 
           has_regex = true;
           regex_pattern = proxy;
-          break; // 找到第一个正则就够了
+          // Preserve the first-rule behavior of special or unresolved rules.
+          if (startsWith(proxy, "!!") || startsWith(proxy, "script:"))
+            break;
         }
       }
 
