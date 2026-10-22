@@ -429,7 +429,7 @@ max_server_threads = 128
 # 整个 HTTP 请求的绝对截止时间，单位毫秒；所有资源模式使用同一有限截止时间。SUBCONVERTER_REQUEST_DEADLINE_MS 可覆盖，允许范围 100～300000。
 request_deadline_ms = 15000
 # 单次配置允许的规则集数量上限；0 表示不限制。
-max_allowed_rulesets = 64
+max_allowed_rulesets = 256
 # 转换时允许生成的规则数量上限；0 表示不限制。
 max_allowed_rules = 0
 # 单次远程下载允许的字节数上限；0 表示不设置静态上限。force_max 仍会按硬件内存账本派生安全上限。过大值会增加内存与带宽风险。
