@@ -1,67 +1,95 @@
-name: Merge Dependabot PRs into dev
+name: Dependabot auto-merge
 
 on:
   pull_request_target:
     branches: [dev]
-    types: [opened, reopened, synchronize, ready_for_review, labeled, edited]
+    types: [opened, reopened, synchronize, ready_for_review]
   push:
     branches: [dev]
-  workflow_run:
-    workflows: [Build and Push Docker image]
-    branches: [dev]
-    types: [completed]
+    paths: ['.github/workflows/auto-merge-dependabot.yml']
   schedule:
-    - cron: '23 */6 * * *'
+    - cron: '5 */6 * * *'
+    - cron: '23 0 * * 0'
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: Inspect the dev queue without making changes
-        type: boolean
-        default: false
       refresh_dependencies:
-        description: Request the automatic upstream refresh on dev when due
+        description: Refresh upstream development dependencies
         type: boolean
         default: false
 
 permissions:
-  actions: write
   contents: write
   pull-requests: write
+  actions: write
 
 concurrency:
-  group: dependabot-maintenance-dev
+  group: dependabot-auto-merge
   cancel-in-progress: false
 
 jobs:
-  auto-merge:
-    if: >-
-      (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/dev') &&
-      (github.event_name != 'pull_request_target' ||
-        (github.event.pull_request.base.ref == 'dev' &&
-         github.event.pull_request.user.login == 'dependabot[bot]' &&
-         github.event.pull_request.head.repo.full_name == github.repository)) &&
-      (github.event_name != 'workflow_run' ||
-        (github.event.workflow_run.head_branch == 'dev' &&
-         github.event.workflow_run.head_repository.full_name == github.repository))
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+  merge:
+    if: github.event_name != 'pull_request_target' || github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      # Read only trusted dev maintenance code, never a dependency PR checkout.
-      - name: Checkout trusted dev maintenance code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          ref: dev
-          persist-credentials: false
-
-      - name: Merge dev dependency updates and reconcile dev builds
-        uses: actions/github-script@373c709c69115d41ff229c7e5df9f8788daa9553 # v9
+      - name: Merge Dependabot updates
         env:
-          AUTOMERGE_MODE: ${{ vars.DEPENDABOT_AUTOMERGE_MODE || 'active' }}
-          DRY_RUN: ${{ inputs.dry_run || false }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          BASE_BRANCH: dev
+          SCHEDULE: ${{ github.event.schedule }}
           REFRESH_DEPENDENCIES: ${{ inputs.refresh_dependencies || false }}
-          # Only official Dependabot rebase requests use this credential.
-          REBASE_TOKEN: ${{ secrets.PAT_TOKEN }}
-        with:
-          github-token: ${{ github.token }}
-          script: |
-            await require('./.github/scripts/dependabot-maintenance.cjs')({github, context, core});
+        shell: bash
+        run: |
+          set -euo pipefail
+          pull_numbers=$(gh api --paginate --method GET "repos/$REPOSITORY/pulls" \
+            -f state=open -f base="$BASE_BRANCH" -F per_page=100 \
+            --jq '.[] | select(.user.login == "dependabot[bot]") | .number')
+          before_sha=$(gh api "repos/$REPOSITORY/git/ref/heads/$BASE_BRANCH" --jq '.object.sha')
+          merged_files='[]'
+          merged=0
+          result=0
+          while IFS= read -r number; do
+            test -n "$number" || continue
+            pull=$(gh api "repos/$REPOSITORY/pulls/$number")
+            head_sha=$(jq -r '.head.sha' <<<"$pull")
+            title=$(jq -r '.title' <<<"$pull")
+            files=$(gh api --paginate --slurp "repos/$REPOSITORY/pulls/$number/files?per_page=100" \
+              --jq '[.[][] | .filename]')
+            response=''
+            for attempt in 1 2 3; do
+              if response=$(gh api --method PUT "repos/$REPOSITORY/pulls/$number/merge" \
+                -f merge_method=squash -f sha="$head_sha" \
+                -f commit_title="$title (#$number)" 2>&1); then
+                break
+              fi
+              sleep 2
+            done
+            if jq -e '.merged == true' <<<"$response" >/dev/null 2>&1; then
+              echo "Merged Dependabot PR #$number: $(jq -r '.sha' <<<"$response")"
+              merged_files=$(jq -cn --argjson previous "$merged_files" --argjson current "$files" \
+                '$previous + $current | unique')
+              merged=$((merged + 1))
+            else
+              echo "::warning::GitHub could not merge Dependabot PR #$number: $response"
+              result=1
+            fi
+          done <<< "$pull_numbers"
+
+          # Repository-token merges need an explicit follow-up workflow dispatch.
+          if (( merged > 0 )); then
+            if jq -e 'any(.[]; (test("^README\\.md$") or test("^README\\-[^/]*\\.md$") or test("^docker\\-compose\\.yml$")) | not)' <<<"$merged_files" >/dev/null; then
+              gh workflow run 'build-dockerhub.yml' --repo "$REPOSITORY" --ref "$BASE_BRANCH" || result=1
+            fi
+            if jq -e true <<<"$merged_files" >/dev/null; then
+              gh workflow run 'codeql.yml' --repo "$REPOSITORY" --ref "$BASE_BRANCH" || result=1
+            fi
+          fi
+
+          if [[ "$SCHEDULE" == "23 0 * * 0" || "$REFRESH_DEPENDENCIES" == true ]]; then
+            gh workflow run build-dockerhub.yml --repo "$REPOSITORY" --ref dev \
+              -f refresh_dependencies=true || result=1
+          fi
+
+          echo "Merged $merged Dependabot PR(s) with the repository Actions token"
+          exit "$result"
