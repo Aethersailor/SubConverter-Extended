@@ -76,10 +76,16 @@ jobs:
         languages: ${{ matrix.language }}
         build-mode: ${{ matrix.build-mode }}
         queries: security-and-quality
-    - name: Build Go bridge and updater for analysis
+    - name: Build all Go platform sources and generators for analysis
       if: matrix.language == 'go'
       working-directory: bridge
-      run: go build -a -mod=readonly ./...
+      run: |
+        go build -a -mod=readonly ./...
+        CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -a -mod=readonly ./cmd/portable-updater
+        go test -a -c -o "$RUNNER_TEMP/portable-updater-tests" ./cmd/portable-updater
+        for generator in "$GITHUB_WORKSPACE"/scripts/generate_*.go; do
+          go build -a -o "$RUNNER_TEMP/$(basename "$generator" .go)" "$generator"
+        done
     - name: Upload CodeQL results
       uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
       with:
