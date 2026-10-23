@@ -166,13 +166,129 @@ static bool splitRenameGroupRule(const std::string &match,
   return true;
 }
 
+static void appendProviderEmojiOverrides(YAML::Node &overrides,
+                                        const ProxyProvider &provider,
+                                        const extra_settings &ext) {
+  RegexMatchConfigs rules;
+  Proxy source;
+  source.Group = provider.tag;
+  source.GroupId = provider.groupId;
+  for (const RegexMatchConfig &rule : ext.emoji_array) {
+    std::string pattern = rule.Match;
+    bool unsupported = !rule.Script.empty() && ext.authorized;
+    if (!unsupported && (pattern.empty() || rule.Replace.empty()))
+      continue;
+    if (!unsupported && (startsWith(pattern, "!!GROUP=") ||
+                         startsWith(pattern, "!!GROUPID=") ||
+                         startsWith(pattern, "!!INSERT="))) {
+      if (!applyMatcher(rule.Match, pattern, source) || pattern.empty())
+        continue;
+    } else if (!unsupported && startsWith(pattern, "!!")) {
+      unsupported = true;
+    }
+    if (!unsupported && !CompiledRegex(pattern, CompiledRegexMode::Search).valid())
+      continue;
+    // Combining independent expressions changes numbered capture references.
+    // Extended-mode line comments can also consume the generated closing groups.
+    // Withhold the complete addition rather than change first-match priority.
+    unsupported = unsupported ||
+                  regFind(pattern,
+                          R"((?:^|[^\\])(?:\\\\)*\\(?:[1-9]|g|k[<'][0-9])|)"
+                          R"(\(\?\(|\(\?[imsx-]*x[imsx-]*\))");
+    if (unsupported) {
+      writeLog(LOG_LEVEL_WARNING,
+               "PROVIDER_EMOJI_UNSUPPORTED: emoji addition requires name "
+               "regexes without scripts, node-property conditions, numbered "
+               "references, conditionals or unscoped extended mode; "
+               "addition skipped");
+      return;
+    }
+    rules.push_back({pattern, rule.Replace, ""});
+  }
+  if (rules.empty())
+    return;
+
+  std::string capture_prefix = "sce_emoji_";
+  while (std::any_of(rules.begin(), rules.end(), [&](const auto &rule) {
+    return rule.Match.find(capture_prefix) != std::string::npos;
+  }))
+    capture_prefix += "_";
+
+  // Encode every nonempty name before decoding it. Two distinct separator
+  // characters make the single captured first rune identify its branch even
+  // when the original name contains our header or separators. No-match names
+  // are restored last. Decoded emoji names cannot start with this space-free
+  // header, so subsequent decoding rules cannot modify them a second time.
+  std::string header;
+  for (size_t index = 0;; ++index) {
+    header = "SCE" + std::to_string(index) + ":";
+    if (std::none_of(rules.begin(), rules.end(), [&](const auto &rule) {
+          return startsWith(rule.Replace + " ", header);
+        }))
+      break;
+  }
+  auto append = [&](const std::string &pattern, const std::string &target) {
+    YAML::Node item;
+    item["pattern"] = pattern;
+    item["target"] = target;
+    overrides.push_back(item);
+  };
+  auto search = [](const std::string &pattern) {
+    return R"([\s\S]*?(?m:(?:)" + pattern + "))";
+  };
+  const std::string name = capture_prefix + "name";
+  std::string selector = "\\A(?<" + name + ">(?:";
+  std::string target = header;
+  for (size_t index = 0; index < rules.size(); ++index) {
+    const std::string slot = capture_prefix + std::to_string(index);
+    if (index)
+      selector += "|";
+    selector += "(?=" + search(rules[index].Match) + ")(?<" + slot +
+                ">[\\s\\S])";
+    target += ":_${" + slot + "}";
+  }
+  selector += R"(|[\s\S])[\s\S]*)\z)";
+  append(selector, target + ":_${" + name + "}");
+  for (size_t index = 0; index < rules.size(); ++index) {
+    append("\\A" + header + "(?::_){" + std::to_string(index + 1) +
+               R"(}[\s\S](?::_){)" + std::to_string(rules.size() - index) +
+               "}(?<" + name + R"(>[\s\S]*)\z)",
+           replaceAllDistinct(rules[index].Replace, "$", "$$") + " ${" +
+               name + "}");
+  }
+  append("\\A" + header + "(?::_){" + std::to_string(rules.size() + 1) +
+             "}(?<" + name + R"(>[\s\S]*)\z)",
+         "${" + name + "}");
+  // Empty names have no rune to encode. Their first match is independent of
+  // provider contents, so resolve it once using the server's own regex engine.
+  const auto empty_name = std::find_if(rules.begin(), rules.end(),
+                                     [](const auto &rule) {
+                                       return regFind("", rule.Match);
+                                     });
+  if (empty_name != rules.end())
+    append(R"(\A\z)", replaceAllDistinct(empty_name->Replace, "$", "$$") + " ");
+}
+
 static YAML::Node buildProviderProxyNameOverride(const ProxyProvider &provider,
                                                  const extra_settings &ext) {
   YAML::Node proxy_name_node(YAML::NodeType::Sequence);
-  if (!ext.rename_for_providers || ext.rename_array.empty())
-    return proxy_name_node;
+  if (ext.remove_emoji) {
+    YAML::Node remove;
+    // Match removeEmoji's UTF-8 F0 9F range and preserve all-emoji names.
+    remove["pattern"] =
+        R"(\A[\x{1F000}-\x{1FFFF}]+(?=[^\x{1F000}-\x{1FFFF}]))";
+    remove["target"] = "";
+    proxy_name_node.push_back(remove);
+    YAML::Node spaces;
+    // trim() removes ASCII spaces but deliberately preserves all-space names.
+    spaces["pattern"] = R"(\A +(?=[^ ])|(?<=[^ ]) +\z)";
+    spaces["target"] = "";
+    proxy_name_node.push_back(spaces);
+  }
 
   for (const RegexMatchConfig &rule : ext.rename_array) {
+    if (!ext.rename_for_providers)
+      break;
     if (!rule.Script.empty() || rule.Match.empty())
       continue;
 
@@ -197,6 +313,9 @@ static YAML::Node buildProviderProxyNameOverride(const ProxyProvider &provider,
     item["target"] = rule.Replace;
     proxy_name_node.push_back(item);
   }
+
+  if (ext.add_emoji)
+    appendProviderEmojiOverrides(proxy_name_node, provider, ext);
 
   return proxy_name_node;
 }
