@@ -1,23 +1,38 @@
 name: CodeQL
-
-on:
+'on':
   push:
-    branches: [dev]
-  workflow_dispatch:
-
+    branches:
+    - dev
+  pull_request:
+    branches:
+    - dev
+  schedule:
+  - cron: 20 4 * * *
+  workflow_dispatch: {}
 permissions:
   contents: read
-
 concurrency:
   group: codeql-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
+  schedule-dev:
+    name: Schedule dev analysis
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+    - name: Analyze dev on the daily schedule
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPOSITORY: ${{ github.repository }}
+      run: gh workflow run codeql.yml --repo "$REPOSITORY" --ref dev
   analyze:
     name: Analyze (${{ matrix.language }})
-    if: github.ref == 'refs/heads/dev'
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/dev'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
       actions: read
@@ -26,51 +41,46 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - language: c-cpp
-            build-mode: none
-          - language: go
-            build-mode: manual
-          - language: javascript-typescript
-            build-mode: none
-          - language: python
-            build-mode: none
-          - language: actions
-            build-mode: none
+        - language: actions
+          build-mode: none
+        - language: c-cpp
+          build-mode: none
+        - language: go
+          build-mode: manual
+        - language: javascript-typescript
+          build-mode: none
+        - language: python
+          build-mode: none
     steps:
-      - name: Checkout dev source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          persist-credentials: false
-
-      - name: Prepare generated Dashboard header
-        if: matrix.language == 'c-cpp'
-        shell: bash
-        run: |
-          cmake \
-            -DINPUT_FILE="$GITHUB_WORKSPACE/resources/dashboard/index.html" \
-            -DOUTPUT_FILE="$GITHUB_WORKSPACE/src/generated/dashboard_page.html.inc" \
-            -P cmake/embed_dashboard.cmake
-
-      - name: Set up Go
-        if: matrix.language == 'go'
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: bridge/go.mod
-          cache-dependency-path: bridge/go.sum
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4
-        with:
-          languages: ${{ matrix.language }}
-          build-mode: ${{ matrix.build-mode }}
-          queries: security-extended
-
-      - name: Build Go bridge and updater for analysis
-        if: matrix.language == 'go'
-        working-directory: bridge
-        run: go build -mod=readonly ./...
-
-      - name: Upload dev CodeQL results
-        uses: github/codeql-action/analyze@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4
-        with:
-          category: /language:${{ matrix.language }}
+    - name: Checkout source
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      with:
+        persist-credentials: false
+    - name: Prepare generated Dashboard header
+      if: matrix.language == 'c-cpp'
+      shell: bash
+      run: |
+        cmake \
+          -DINPUT_FILE="$GITHUB_WORKSPACE/resources/dashboard/index.html" \
+          -DOUTPUT_FILE="$GITHUB_WORKSPACE/src/generated/dashboard_page.html.inc" \
+          -P cmake/embed_dashboard.cmake
+    - name: Set up Go
+      if: matrix.language == 'go'
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+      with:
+        go-version-file: bridge/go.mod
+        cache: false
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
+      with:
+        languages: ${{ matrix.language }}
+        build-mode: ${{ matrix.build-mode }}
+        queries: security-and-quality
+    - name: Build Go bridge and updater for analysis
+      if: matrix.language == 'go'
+      working-directory: bridge
+      run: go build -a -mod=readonly ./...
+    - name: Upload CodeQL results
+      uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
+      with:
+        category: /language:${{ matrix.language }}
