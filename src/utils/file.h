@@ -21,6 +21,9 @@ std::string fileGet(const std::string &path, bool scope_limit = false);
 std::string fileGetBounded(const std::string &path, std::size_t max_bytes,
                            bool scope_limit = false);
 bool fileExist(const std::string &path, bool scope_limit = false);
+// Check read access without loading the file, using the same platform path
+// handling and canonical containment check as fileGet.
+bool fileReadable(const std::string &path, bool scope_limit = false);
 bool isInScope(const std::string &path);
 bool isPathInScope(const std::string &path, const std::string &root);
 
