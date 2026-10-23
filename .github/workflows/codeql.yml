@@ -81,7 +81,7 @@ jobs:
       working-directory: bridge
       run: |
         go build -a -mod=readonly ./...
-        CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -a -mod=readonly ./...
+        CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -a -mod=readonly ./cmd/portable-updater
         go test -a -c -o "$RUNNER_TEMP/portable-updater-tests" ./cmd/portable-updater
         for generator in "$GITHUB_WORKSPACE"/scripts/generate_*.go; do
           go build -a -o "$RUNNER_TEMP/$(basename "$generator" .go)" "$generator"
