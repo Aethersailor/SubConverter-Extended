@@ -28,7 +28,9 @@ concurrency:
 
 jobs:
   merge:
-    if: github.event_name != 'pull_request_target' || github.event.pull_request.user.login == 'dependabot[bot]'
+    if: >-
+      (github.event_name == 'schedule' || github.ref == 'refs/heads/dev') &&
+      (github.event_name != 'pull_request_target' || github.event.pull_request.user.login == 'dependabot[bot]')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -78,11 +80,9 @@ jobs:
 
           # Repository-token merges need an explicit follow-up workflow dispatch.
           if (( merged > 0 )); then
+            gh workflow run codeql.yml --repo "$REPOSITORY" --ref "$BASE_BRANCH" || result=1
             if jq -e 'any(.[]; (test("^README\\.md$") or test("^README\\-[^/]*\\.md$") or test("^docker\\-compose\\.yml$")) | not)' <<<"$merged_files" >/dev/null; then
               gh workflow run 'build-dockerhub.yml' --repo "$REPOSITORY" --ref "$BASE_BRANCH" || result=1
-            fi
-            if jq -e true <<<"$merged_files" >/dev/null; then
-              gh workflow run 'codeql.yml' --repo "$REPOSITORY" --ref "$BASE_BRANCH" || result=1
             fi
           fi
 
