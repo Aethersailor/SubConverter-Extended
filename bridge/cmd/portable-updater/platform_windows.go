@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -159,7 +160,7 @@ func pathExists(path string) bool {
 }
 
 func processAlive(pid int) bool {
-	if pid < 1 {
+	if pid < 1 || uint64(pid) > math.MaxUint32 {
 		return false
 	}
 	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
