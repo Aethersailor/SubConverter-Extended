@@ -13,6 +13,7 @@
 #include "handler/settings.h"
 #include "handler/settings_view.h"
 #include "handler/webget.h"
+#include "utils/file.h"
 #include "server/request_context.h"
 #include "utils/base64/base64.h"
 #include "utils/logger.h"
@@ -197,23 +198,6 @@ static inline void parse_json_pointer(nlohmann::json &json, const std::string &p
     catch (std::exception&)
     {
         //ignore broken pointer
-    }
-}
-
-static bool path_is_inside_scope(const std::filesystem::path &path,
-                                 const std::filesystem::path &scope)
-{
-    try
-    {
-        std::filesystem::path relative = std::filesystem::relative(path, scope);
-        std::string rel = relative.generic_string();
-        return rel == "." ||
-               (!relative.is_absolute() && rel != ".." &&
-                !startsWith(rel, "../"));
-    }
-    catch(std::exception &)
-    {
-        return false;
     }
 }
 
@@ -502,20 +486,29 @@ int render_template(const std::string &content, const template_args &vars,
 
     env.set_include_callback([&](const std::filesystem::path &path, const std::string &template_name)
     {
-        const std::string include_path = path.string();
+        // Inja passes the current directory separately from the include name.
+        // Relative includes are rooted in the explicitly configured scope.
+        std::filesystem::path include_path = path / template_name;
+        if(include_path.is_relative() && !absolute_scope.empty())
+            include_path = std::filesystem::path(absolute_scope) / include_path;
         std::string absolute_path;
         try
         {
-            absolute_path = std::filesystem::canonical(path).string();
+            absolute_path = std::filesystem::canonical(include_path).string();
         }
         catch(std::exception &e)
         {
             throw inja::FileError(e.what());
         }
-        if(!absolute_scope.empty() &&
-           !path_is_inside_scope(absolute_path, absolute_scope))
+        const bool allowed = absolute_scope.empty()
+            ? isInScope(absolute_path)
+            : isPathInScope(absolute_path, absolute_scope);
+        if(!allowed ||
+           (isPublicFetchRestricted(context) &&
+            !isTrustedLocalResourcePath(absolute_path)) ||
+           !fileExist(absolute_path, false))
             throw inja::FileError("access denied when trying to include '" + template_name + "': out of scope");
-        return env.parse(fileGet(include_path, true));
+        return env.parse(fileGet(absolute_path, absolute_scope.empty()));
     });
     env.set_search_included_templates_in_files(false);
 

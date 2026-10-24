@@ -756,6 +756,14 @@ bool fileExist(const std::string &path, bool scope_limit)
     return stat(path.data(), &st) == 0 && S_ISREG(st.st_mode);
 }
 
+bool fileReadable(const std::string &path, bool scope_limit)
+{
+    if(scope_limit && !isInScope(path))
+        return false;
+    std::FILE *file = openFile(path.c_str(), "rb");
+    return file && closeFile(file) == 0;
+}
+
 FileCommitResult fileCopyDetailed(const std::string &source,
                                   const std::string &dest)
 {

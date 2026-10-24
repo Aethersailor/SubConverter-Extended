@@ -166,13 +166,334 @@ static bool splitRenameGroupRule(const std::string &match,
   return true;
 }
 
+static bool providerEmojiPattern(const std::string &pattern,
+                                std::string &converted) {
+  // Search uses PCRE2_UTF without UCP. regexp2's shorthand classes and word
+  // boundaries are Unicode by default, so spell out the server's ASCII sets.
+  auto shorthand = [](char code) -> std::string {
+    switch (code) {
+    case 'd':
+      return "[0-9]";
+    case 'D':
+      return "[^0-9]";
+    case 's':
+      return R"([\x09-\x0D\x20])";
+    case 'S':
+      return R"([^\x09-\x0D\x20])";
+    case 'w':
+      return "(?-i:[A-Za-z0-9_])";
+    case 'W':
+      return "(?-i:[^A-Za-z0-9_])";
+    case 'b':
+      return "(?-i:(?<![A-Za-z0-9_])(?=[A-Za-z0-9_])|"
+             "(?<=[A-Za-z0-9_])(?![A-Za-z0-9_]))";
+    case 'B':
+      return "(?-i:(?<=[A-Za-z0-9_])(?=[A-Za-z0-9_])|"
+             "(?<![A-Za-z0-9_])(?![A-Za-z0-9_]))";
+    default:
+      return {};
+    }
+  };
+  // regexp2 lowercases input for IgnoreCase; PCRE uses Unicode simple folding.
+  // These ASCII letters differ (long s is folded, dotted capital I is not).
+  auto folded = [](char code) -> std::string {
+    if (code == 'i' || code == 'I')
+      return "(?-i:[Ii])";
+    if (code == 's' || code == 'S')
+      return R"((?-i:[Ss\x{17F}]))";
+    return {};
+  };
+  constexpr int extended = 1, caseless = 2;
+  int mode = 0;
+  std::vector<int> modes;
+  auto escape_argument = [&](char code, size_t &position, std::string &output) {
+    if (position >= pattern.size())
+      return;
+    if (code == 'c' ||
+        ((code == 'p' || code == 'P') && pattern[position] != '{')) {
+      output += pattern[position++];
+    } else if ((code == 'k' &&
+                (pattern[position] == '<' || pattern[position] == '\'')) ||
+               ((code == 'p' || code == 'P') && pattern[position] == '{')) {
+      const char close = pattern[position] == '<' ? '>' :
+                         pattern[position] == '{' ? '}' : '\'';
+      const size_t end = pattern.find(close, position + 1);
+      output += pattern.substr(position, end - position + 1);
+      position = end + 1;
+    }
+  };
+  for (size_t i = 0; i < pattern.size();) {
+    const char ch = pattern[i++];
+    if (ch == '\\' && i < pattern.size()) {
+      const char code = pattern[i++];
+      if (std::string("CEhHKNoQRvVX").find(code) != std::string::npos)
+        return false;
+      const auto replacement = shorthand(code);
+      converted += replacement.empty() ? std::string("\\") + code : replacement;
+      escape_argument(code, i, converted);
+    } else if (ch == '[') {
+      const size_t start = i - 1;
+      const bool negate = i < pattern.size() && pattern[i] == '^';
+      if (negate)
+        ++i;
+      std::string literal, alternatives;
+      bool first = true, changed = false;
+      auto flush = [&] {
+        if (!literal.empty()) {
+          alternatives += "[" + literal + "]|";
+          literal.clear();
+        }
+      };
+      for (; i < pattern.size(); first = false) {
+        char item = pattern[i++];
+        if (item == ']' && !first)
+          break;
+        if (item == '\\' && i < pattern.size()) {
+          const char code = pattern[i++];
+          if (std::string("CEhHKNoQRvVX").find(code) != std::string::npos)
+            return false;
+          const auto replacement =
+              (code == 'b' || code == 'B') ? std::string() : shorthand(code);
+          if (!replacement.empty()) {
+            flush();
+            alternatives += replacement + "|";
+            changed = true;
+            continue;
+          }
+          literal += std::string("\\") + code;
+          escape_argument(code, i, literal);
+        } else {
+          // POSIX classes and .NET class subtraction have different meanings.
+          if (item == '[' && i < pattern.size() &&
+              (pattern[i] == ':' || (i > start + 2 && pattern[i - 2] == '-')))
+            return false;
+          // Caseless letter ranges have further Unicode folding differences.
+          // Withhold these rather than grow this adapter into a regex compiler.
+          if ((mode & caseless) && item == '-' && !first &&
+              i < pattern.size() && pattern[i] != ']' &&
+              !(pattern[i - 2] >= '0' && pattern[i - 2] <= '9' &&
+                pattern[i] >= '0' && pattern[i] <= '9'))
+            return false;
+          const auto replacement = (mode & caseless) ? folded(item) : "";
+          if (!replacement.empty()) {
+            flush();
+            alternatives += replacement + "|";
+            changed = true;
+            continue;
+          }
+          if (item == ']' || item == '^' || item == '[')
+            literal += '\\';
+          literal += item;
+        }
+      }
+      if (!changed) {
+        converted += pattern.substr(start, i - start);
+      } else {
+        // Keep each shorthand separate: case folding an ASCII \w inside a
+        // larger class would admit Unicode characters such as the Kelvin sign.
+        flush();
+        alternatives.pop_back();
+        converted += negate ? "(?!(?:" + alternatives + "))[\\s\\S]"
+                            : "(?:" + alternatives + ")";
+      }
+    } else if (ch == '#' && (mode & extended)) {
+      const size_t end = pattern.find('\n', i);
+      converted += pattern.substr(
+          i - 1, end == std::string::npos ? end : end - i + 1);
+      i = end == std::string::npos ? pattern.size() : end;
+    } else if (ch == '(') {
+      if (i < pattern.size() && pattern[i] == '*')
+        return false;
+      if (pattern.compare(i, 2, "?#") == 0) {
+        const size_t end = pattern.find(')', i + 2);
+        converted += pattern.substr(i - 1, end - i + 2);
+        i = end + 1;
+        continue;
+      }
+      if (pattern.compare(i, 2, "?P") == 0)
+        return false;
+      if ((pattern.compare(i, 2, "?<") == 0 && i + 2 < pattern.size() &&
+           pattern[i + 2] != '=' && pattern[i + 2] != '!') ||
+          pattern.compare(i, 2, "?'") == 0) {
+        const size_t end = pattern.find(pattern[i + 1] == '<' ? '>' : '\'', i + 2);
+        modes.push_back(mode);
+        converted += pattern.substr(i - 1, end - i + 2);
+        i = end + 1;
+        continue;
+      }
+      size_t end = i;
+      int next = mode;
+      bool enable = true;
+      if (end < pattern.size() && pattern[end] == '?') {
+        for (++end; end < pattern.size(); ++end) {
+          const char option = pattern[end];
+          if (option == '-')
+            enable = false;
+          else if (option == 'x' || option == 'i') {
+            const int flag = option == 'x' ? extended : caseless;
+            next = enable ? next | flag : next & ~flag;
+          } else if (option != 'm' && option != 'n' && option != 's')
+            break;
+        }
+        if (end < pattern.size() && pattern[end] != ':' && pattern[end] != ')' &&
+            (end > i + 1 ||
+             std::string("=!<>").find(pattern[end]) == std::string::npos))
+          return false;
+      }
+      if (end > i + 1 && end < pattern.size() &&
+          (pattern[end] == ':' || pattern[end] == ')')) {
+        if (pattern[end] == ':')
+          modes.push_back(mode);
+        mode = next;
+        converted += pattern.substr(i - 1, end - i + 2);
+        i = end + 1;
+      } else {
+        modes.push_back(mode);
+        converted += ch;
+      }
+    } else {
+      if ((ch == '*' || ch == '+' || ch == '?') &&
+          i < pattern.size() && pattern[i] == '+')
+        return false;
+      if (ch == ')' && !modes.empty()) {
+        mode = modes.back();
+        modes.pop_back();
+      }
+      const auto replacement = (mode & caseless) ? folded(ch) : "";
+      converted += replacement.empty() ? std::string(1, ch) : replacement;
+    }
+  }
+  return true;
+}
+
+static void appendProviderEmojiOverrides(YAML::Node &overrides,
+                                        const ProxyProvider &provider,
+                                        const extra_settings &ext) {
+  RegexMatchConfigs rules;
+  std::vector<std::string> patterns;
+  Proxy source;
+  source.Group = provider.tag;
+  source.GroupId = provider.groupId;
+  for (const RegexMatchConfig &rule : ext.emoji_array) {
+    std::string pattern = rule.Match;
+    bool unsupported = !rule.Script.empty() && ext.authorized;
+    if (!unsupported && (pattern.empty() || rule.Replace.empty()))
+      continue;
+    if (!unsupported && (startsWith(pattern, "!!GROUP=") ||
+                         startsWith(pattern, "!!GROUPID=") ||
+                         startsWith(pattern, "!!INSERT="))) {
+      if (!applyMatcher(rule.Match, pattern, source) || pattern.empty())
+        continue;
+    } else if (!unsupported && startsWith(pattern, "!!")) {
+      unsupported = true;
+    }
+    if (!unsupported && !CompiledRegex(pattern, CompiledRegexMode::Search).valid())
+      continue;
+    // Combining independent expressions changes numbered capture references.
+    // Extended-mode line comments can also consume the generated closing groups.
+    // Withhold the complete addition rather than change first-match priority.
+    unsupported = unsupported ||
+                  regFind(pattern,
+                          R"((?:^|[^\\])(?:\\\\)*\\(?:[1-9]|g|k[<'][0-9])|)"
+                          R"(\(\?\(|\(\?[imnsx-]*x[imnsx-]*\))");
+    std::string converted;
+    unsupported = unsupported || !providerEmojiPattern(pattern, converted);
+    if (unsupported) {
+      writeLog(LOG_LEVEL_WARNING,
+               "PROVIDER_EMOJI_UNSUPPORTED: emoji addition requires name "
+               "regexes without scripts, node-property conditions, numbered "
+               "references, conditionals, unscoped extended mode or "
+               "caseless character ranges or PCRE-only syntax; "
+               "addition skipped");
+      return;
+    }
+    rules.push_back({pattern, rule.Replace, ""});
+    patterns.push_back(std::move(converted));
+  }
+  if (rules.empty())
+    return;
+
+  std::string capture_prefix = "sce_emoji_";
+  while (std::any_of(rules.begin(), rules.end(), [&](const auto &rule) {
+    return rule.Match.find(capture_prefix) != std::string::npos;
+  }))
+    capture_prefix += "_";
+
+  // Encode every nonempty name before decoding it. Two distinct separator
+  // characters make the single captured first rune identify its branch even
+  // when the original name contains our header or separators. No-match names
+  // are restored last. Decoded emoji names cannot start with this space-free
+  // header, so subsequent decoding rules cannot modify them a second time.
+  std::string header;
+  for (size_t index = 0;; ++index) {
+    header = "SCE" + std::to_string(index) + ":";
+    if (std::none_of(rules.begin(), rules.end(), [&](const auto &rule) {
+          return startsWith(rule.Replace + " ", header);
+        }))
+      break;
+  }
+  auto append = [&](const std::string &pattern, const std::string &target) {
+    YAML::Node item;
+    item["pattern"] = pattern;
+    item["target"] = target;
+    overrides.push_back(item);
+  };
+  auto search = [](const std::string &pattern) {
+    return R"([\s\S]*?(?m:(?:)" + pattern + "))";
+  };
+  const std::string name = capture_prefix + "name";
+  std::string selector = "\\A(?<" + name + ">(?:";
+  std::string target = header;
+  for (size_t index = 0; index < rules.size(); ++index) {
+    const std::string slot = capture_prefix + std::to_string(index);
+    if (index)
+      selector += "|";
+    selector += "(?=" + search(patterns[index]) + ")(?<" + slot +
+                ">[\\s\\S])";
+    target += ":_${" + slot + "}";
+  }
+  selector += R"(|[\s\S])[\s\S]*)\z)";
+  append(selector, target + ":_${" + name + "}");
+  for (size_t index = 0; index < rules.size(); ++index) {
+    append("\\A" + header + "(?::_){" + std::to_string(index + 1) +
+               R"(}[\s\S](?::_){)" + std::to_string(rules.size() - index) +
+               "}(?<" + name + R"(>[\s\S]*)\z)",
+           replaceAllDistinct(rules[index].Replace, "$", "$$") + " ${" +
+               name + "}");
+  }
+  append("\\A" + header + "(?::_){" + std::to_string(rules.size() + 1) +
+             "}(?<" + name + R"(>[\s\S]*)\z)",
+         "${" + name + "}");
+  // Empty names have no rune to encode. Their first match is independent of
+  // provider contents, so resolve it once using the server's own regex engine.
+  const auto empty_name = std::find_if(rules.begin(), rules.end(),
+                                     [](const auto &rule) {
+                                       return regFind("", rule.Match);
+                                     });
+  if (empty_name != rules.end())
+    append(R"(\A\z)", replaceAllDistinct(empty_name->Replace, "$", "$$") + " ");
+}
+
 static YAML::Node buildProviderProxyNameOverride(const ProxyProvider &provider,
                                                  const extra_settings &ext) {
   YAML::Node proxy_name_node(YAML::NodeType::Sequence);
-  if (!ext.rename_for_providers || ext.rename_array.empty())
-    return proxy_name_node;
+  if (ext.remove_emoji) {
+    YAML::Node remove;
+    // Match removeEmoji's UTF-8 F0 9F range and preserve all-emoji names.
+    remove["pattern"] =
+        R"(\A[\x{1F000}-\x{1FFFF}]+(?=[^\x{1F000}-\x{1FFFF}]))";
+    remove["target"] = "";
+    proxy_name_node.push_back(remove);
+    YAML::Node spaces;
+    // trim() removes ASCII spaces but deliberately preserves all-space names.
+    spaces["pattern"] = R"(\A +(?=[^ ])|(?<=[^ ]) +\z)";
+    spaces["target"] = "";
+    proxy_name_node.push_back(spaces);
+  }
 
   for (const RegexMatchConfig &rule : ext.rename_array) {
+    if (!ext.rename_for_providers)
+      break;
     if (!rule.Script.empty() || rule.Match.empty())
       continue;
 
@@ -197,6 +518,9 @@ static YAML::Node buildProviderProxyNameOverride(const ProxyProvider &provider,
     item["target"] = rule.Replace;
     proxy_name_node.push_back(item);
   }
+
+  if (ext.add_emoji)
+    appendProviderEmojiOverrides(proxy_name_node, provider, ext);
 
   return proxy_name_node;
 }

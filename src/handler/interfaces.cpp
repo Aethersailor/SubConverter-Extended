@@ -499,7 +499,9 @@ bool checkExternalBase(const std::string &path, std::string &dest,
     dest = path;
     return true;
   }
-  if (fileExist(path, true) && isTrustedLocalResourcePath(path)) {
+  // The configured trust roots already permit files outside the preference
+  // working directory. Apply that same canonical boundary to external bases.
+  if (isTrustedLocalResourcePath(path) && fileExist(path, false)) {
     dest = path;
     return true;
   }
@@ -4556,6 +4558,44 @@ static std::string buildExternalConfigFetchPlan(
 
   if (policy.generator.enable_rule_generator &&
       !policy.generator.nodelist && !parsed.simple_subscription) {
+    // Local rulesets have a deterministic operator/request-selected path.
+    // Reject unavailable files instead of returning a partial configuration;
+    // retain the historical handling of remote fetch failures and empty files.
+    for (size_t index = 0; index < policy.custom_rulesets.size(); ++index) {
+      std::string path = policy.custom_rulesets[index].Url;
+      if (path.find("[]") != std::string::npos)
+        continue;
+      for (const auto &type : RulesetTypes) {
+        if (startsWith(path, type.first)) {
+          path.erase(0, type.first.size());
+          break;
+        }
+      }
+      if (isLink(path) || startsWith(path, "data:"))
+        continue;
+      const bool trusted = isTrustedLocalResourcePath(path);
+      const bool allowed =
+          (trusted || isInScope(path)) &&
+          (!isPublicFetchRestricted(rulesetFetchContext) || trusted);
+      if (allowed && fileExist(path, !trusted) && fileReadable(path, !trusted))
+        continue;
+
+      response.status_code = plan.user_provided_external_config ? 400 : 500;
+      response.content_type = "text/plain; charset=utf-8";
+      response.headers["Cache-Control"] = "private, no-store";
+      writeLog(LOG_LEVEL_WARNING,
+               "RULESET_LOCAL_SOURCE_UNAVAILABLE source_index=" +
+                   std::to_string(index + 1) + " reason=" +
+                   (allowed ? "missing_or_unreadable" : "outside_allowed_scope") +
+                   " context=" + fetchContextName(rulesetFetchContext));
+      return "Local ruleset source #" + std::to_string(index + 1) +
+             " is missing, unreadable, or outside the allowed local "
+             "directories. Check the file path and base_path; no partial "
+             "configuration was generated.\n本地规则集来源 #" +
+             std::to_string(index + 1) +
+             " 不存在、不可读或超出允许的本地目录。请检查文件路径和 "
+             "base_path；本次未生成不完整的配置。";
+    }
     if (!dependency_resolution) {
       const bool stash_native_rulesets = parsed.target == "stash";
       if (stash_native_rulesets) {
