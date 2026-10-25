@@ -3,8 +3,8 @@ module github.com/aethersailor/subconverter-extended/bridge
 go 1.26.0
 
 require (
-	github.com/enfein/mieru/v3 v3.38.2
-	github.com/metacubex/mihomo v1.19.32-0.20260925001026-f103639c808d
+	github.com/enfein/mieru/v3 v3.39.0
+	github.com/metacubex/mihomo v1.19.34-0.20261025001314-6780eeeb27c7
 	golang.org/x/sys v0.49.0
 	google.golang.org/protobuf v1.36.12
 )
@@ -22,15 +22,15 @@ require (
 	github.com/metacubex/ascon v0.1.0 // indirect
 	github.com/metacubex/blake3 v0.1.0 // indirect
 	github.com/metacubex/chacha v0.1.5 // indirect
-	github.com/metacubex/cpu v0.1.1 // indirect
+	github.com/metacubex/cpu v0.1.2 // indirect
 	github.com/metacubex/hkdf v0.1.0 // indirect
 	github.com/metacubex/hpke v0.1.0 // indirect
-	github.com/metacubex/http v0.1.7 // indirect
+	github.com/metacubex/http v0.1.8 // indirect
 	github.com/metacubex/mlkem v0.1.0 // indirect
 	github.com/metacubex/randv2 v0.2.0 // indirect
 	github.com/metacubex/sing v0.5.8 // indirect
 	github.com/metacubex/sing-shadowsocks v0.2.13 // indirect
-	github.com/metacubex/tls v0.1.8 // indirect
+	github.com/metacubex/tls v0.1.9 // indirect
 	github.com/oasisprotocol/deoxysii v0.0.0-20220228165953-2091330c22b7 // indirect
 	github.com/samber/lo v1.53.0 // indirect
 	github.com/sina-ghaderi/poly1305 v0.0.0-20220724002748-c5926b03988b // indirect
@@ -40,8 +40,8 @@ require (
 	gitlab.com/go-extension/aes-ccm v0.0.0-20230221065045-e58665ef23c7 // indirect
 	gitlab.com/yawning/bsaes.git v0.0.0-20190805113838-0a714cd429ec // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
-	golang.org/x/crypto v0.57.0 // indirect
-	golang.org/x/exp v0.0.0-20260908205506-85c1c2202aba // indirect
-	golang.org/x/net v0.59.0 // indirect
-	golang.org/x/text v0.42.0 // indirect
+	golang.org/x/crypto v0.58.0 // indirect
+	golang.org/x/exp v0.0.0-20261014143641-f0251eb4aa3e // indirect
+	golang.org/x/net v0.61.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
 )
