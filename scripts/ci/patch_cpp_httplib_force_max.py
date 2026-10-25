@@ -18,8 +18,17 @@ PATCH_MARKERS = (
     "std::function<void(bool)> write_completion_handler_;",
     "bool wait_when_full = false);",
     "bool wait_when_full_;",
-    "return complete_write(ret);",
 )
+WRITE_RESULT_MARKERS = (
+    "return complete_write(ret);",
+    "return complete_write(true);",
+)
+
+
+def patch_is_present(content: str) -> bool:
+    return all(marker in content for marker in PATCH_MARKERS) and any(
+        marker in content for marker in WRITE_RESULT_MARKERS
+    )
 
 
 def replace_once(content: str, old: str, new: str, label: str) -> str:
@@ -43,11 +52,59 @@ def patch_response_completion_storage(content: str) -> str:
     )
 
 
+def patch_response_completion_result(content: str) -> str:
+    legacy_result = (
+        "  return ret;\n}\n\ninline bool\nServer::write_content_with_provider"
+    )
+    if legacy_result in content:
+        return replace_once(
+            content,
+            legacy_result,
+            legacy_result.replace("return ret;", "return complete_write(ret);"),
+            "write response result",
+        )
+
+    # Newer upstream versions write large bodies separately and return early
+    # from file/streaming providers. Complete every path after its actual write.
+    replacements = (
+        (
+            "write small file provider",
+            "    if (!write_content_with_provider(bstrm, req, res, boundary, content_type)) {\n"
+            "      return false;\n",
+            "    if (!write_content_with_provider(bstrm, req, res, boundary, content_type)) {\n"
+            "      return complete_write(false);\n",
+        ),
+        (
+            "write separate response body",
+            "    return detail::write_data(strm, res.body.data(), res.body.size());",
+            "    return complete_write(\n"
+            "        detail::write_data(strm, res.body.data(), res.body.size()));",
+        ),
+        (
+            "write streaming provider",
+            "    if (!provider_done &&\n"
+            "        !write_content_with_provider(strm, req, res, boundary, content_type)) {\n"
+            "      return false;\n",
+            "    if (!provider_done &&\n"
+            "        !write_content_with_provider(strm, req, res, boundary, content_type)) {\n"
+            "      return complete_write(false);\n",
+        ),
+        (
+            "write response result",
+            "  return true;\n}\n\ninline bool\nServer::write_content_with_provider",
+            "  return complete_write(true);\n}\n\ninline bool\n"
+            "Server::write_content_with_provider",
+        ),
+    )
+    for label, old, new in replacements:
+        content = replace_once(content, old, new, label)
+    return content
+
+
 def apply_patch(content: str) -> str:
-    present = tuple(marker in content for marker in PATCH_MARKERS)
-    if all(present):
+    if patch_is_present(content):
         return content
-    if any(present):
+    if any(marker in content for marker in PATCH_MARKERS + WRITE_RESULT_MARKERS):
         raise RuntimeError("cpp-httplib force_max patch is only partially present")
 
     content = patch_response_completion_storage(content)
@@ -159,16 +216,11 @@ def apply_patch(content: str) -> str:
             "    return complete_write(false);\n"
             "  }",
         ),
-        (
-            "write response result",
-            "  return ret;\n}\n\ninline bool\nServer::write_content_with_provider",
-            "  return complete_write(ret);\n}\n\ninline bool\n"
-            "Server::write_content_with_provider",
-        ),
     )
     for label, old, new in replacements:
         content = replace_once(content, old, new, label)
-    if not all(marker in content for marker in PATCH_MARKERS):
+    content = patch_response_completion_result(content)
+    if not patch_is_present(content):
         raise RuntimeError("cpp-httplib force_max patch validation failed")
     return content
 
