@@ -477,7 +477,7 @@ static void appendProviderEmojiOverrides(YAML::Node &overrides,
 static YAML::Node buildProviderProxyNameOverride(const ProxyProvider &provider,
                                                  const extra_settings &ext) {
   YAML::Node proxy_name_node(YAML::NodeType::Sequence);
-  if (ext.remove_emoji) {
+  if (ext.provider_emoji_enabled && ext.remove_emoji) {
     YAML::Node remove;
     // Match removeEmoji's UTF-8 F0 9F range and preserve all-emoji names.
     remove["pattern"] =
@@ -519,7 +519,7 @@ static YAML::Node buildProviderProxyNameOverride(const ProxyProvider &provider,
     proxy_name_node.push_back(item);
   }
 
-  if (ext.add_emoji)
+  if (ext.provider_emoji_enabled && ext.add_emoji)
     appendProviderEmojiOverrides(proxy_name_node, provider, ext);
 
   return proxy_name_node;
