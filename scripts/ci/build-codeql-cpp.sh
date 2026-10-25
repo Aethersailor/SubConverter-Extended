@@ -23,6 +23,7 @@ case "${1:?prepare or build is required}" in
     mkdir -p "$PREFIX/include/quickjs" "$PREFIX/lib/quickjs"
     python3 "$ROOT/scripts/ci/dependency_snapshot.py" emit > "$WORK_DIR/dependencies.env"
     while IFS='=' read -r name value; do
+      value="${value%$'\r'}"
       case "$name" in
         QUICKJSPP_REF) QUICKJSPP_REF="$value" ;;
         LIBCRON_REF) LIBCRON_REF="$value" ;;
