@@ -129,6 +129,8 @@ struct extra_settings {
   RegexMatchConfigs emoji_array;
   bool add_emoji = false;
   bool remove_emoji = false;
+  // Clash provider emoji rules require an explicit emoji=true request.
+  bool provider_emoji_enabled = false;
   bool append_proxy_type = false;
   bool nodelist = false;
   bool sort_flag = false;

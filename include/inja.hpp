@@ -1816,6 +1816,9 @@ class Parser {
         }
         auto func = std::make_shared<FunctionNode>(tok.text, tok.text.data() - tmpl.content.c_str());
         // add first parameter as last value from arguments
+        if (arguments.empty()) {
+          throw_parser_error("too few arguments");
+        }
         func->number_args += 1;
         func->arguments.emplace_back(arguments.back());
         arguments.pop_back();
@@ -2469,11 +2472,11 @@ class Renderer : public NodeVisitor {
     } break;
     case Op::Power: {
       const auto args = get_arguments<2>(node);
-      if (args[0]->is_number_integer() && args[1]->get<const json::number_integer_t>() >= 0) {
+      if (args[0]->is_number_integer() && args[1]->is_number_integer() && args[1]->get<const json::number_integer_t>() >= 0) {
         const auto result = static_cast<json::number_integer_t>(std::pow(args[0]->get<const json::number_integer_t>(), args[1]->get<const json::number_integer_t>()));
         make_result(result);
       } else {
-        const auto result = std::pow(args[0]->get<const json::number_float_t>(), args[1]->get<const json::number_integer_t>());
+        const auto result = std::pow(args[0]->get<const json::number_float_t>(), args[1]->get<const json::number_float_t>());
         make_result(result);
       }
     } break;

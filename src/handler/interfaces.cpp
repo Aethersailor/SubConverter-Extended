@@ -4760,6 +4760,7 @@ static std::string buildExternalConfigFetchPlan(
   parsed.explain.ruleset_count = plan.ruleset_content.size();
   parsed.explain.custom_group_count = policy.custom_proxy_groups.size();
 
+  policy.generator.provider_emoji_enabled = parsed.emoji.get(false);
   if (!parsed.emoji.is_undef()) {
     parsed.add_emoji.set(parsed.emoji);
     parsed.remove_emoji.set(true);
@@ -7299,10 +7300,25 @@ static std::string assembleSubResponse(
                  explain.upload_suppressed
                      ? "Uploads are disabled in explain mode."
                      : "");
-    addParameter("emoji", boolString(ext.add_emoji), "applied",
-                 "Sets add_emoji and remove_emoji together.");
-    addSwitchParameter("add_emoji", ext.add_emoji, argAddEmoji);
-    addSwitchParameter("remove_emoji", ext.remove_emoji, argRemoveEmoji);
+    const bool only_clash_providers =
+        !ext.providers.empty() && explain.total_node_count == 0;
+    addParameter(
+        "emoji", boolString(only_clash_providers ? ext.provider_emoji_enabled
+                                                : ext.add_emoji),
+        "applied",
+        ext.providers.empty()
+            ? "Sets add_emoji and remove_emoji together."
+            : "Clash providers require explicit emoji=true; server-parsed "
+              "nodes keep the original emoji behavior.");
+    if (only_clash_providers) {
+      for (const char *name : {"add_emoji", "remove_emoji"})
+        addParameter(name, boolString(ext.provider_emoji_enabled), "ignored",
+                     "Clash provider emoji processing is controlled by emoji, "
+                     "not the independent switches.");
+    } else {
+      addSwitchParameter("add_emoji", ext.add_emoji, argAddEmoji);
+      addSwitchParameter("remove_emoji", ext.remove_emoji, argRemoveEmoji);
+    }
     addSwitchParameter("append_type", ext.append_proxy_type, argAppendType);
     addSwitchParameter("tfo", ext.tfo.get(false), ext.tfo);
     addSwitchParameter("udp", ext.udp.get(false), ext.udp);
