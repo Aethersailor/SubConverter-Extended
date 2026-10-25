@@ -1,13 +1,13 @@
-name: Close Inactive Issues
+name: 归档不活跃 Issue / Archive Inactive Issues
 
 on:
   schedule:
-    # 03:17 Asia/Shanghai. Avoid the busiest time at the start of an hour.
+    # 北京时间 03:17，避开整点高峰。 / 03:17 Asia/Shanghai, outside the hourly peak.
     - cron: "17 19 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
-        description: Only report the actions that would be taken
+        description: 仅预览，不发表评论或关闭 Issue / Preview without commenting or closing issues
         required: true
         default: true
         type: boolean
@@ -22,16 +22,18 @@ concurrency:
 
 jobs:
   manage:
+    name: 检查不活跃 Issue / Check inactive issues
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      INACTIVE_ISSUE_WAIT_DAYS: "14"
+      INACTIVE_ISSUE_WAIT_DAYS: "30"
+      INACTIVE_ISSUE_GRACE_DAYS: "7"
       INACTIVE_ISSUE_DRY_RUN: ${{ inputs.dry_run || 'false' }}
     steps:
-      - name: Check out repository automation
+      - name: 检出仓库自动化脚本 / Check out repository automation
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
-      - name: Close issues without replies for fourteen days
+      - name: 提醒并归档不活跃 Issue / Remind and archive inactive issues
         uses: actions/github-script@373c709c69115d41ff229c7e5df9f8788daa9553 # v9
         with:
           script: |
