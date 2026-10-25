@@ -29,10 +29,10 @@ jobs:
         REPOSITORY: ${{ github.repository }}
       run: gh workflow run codeql.yml --repo "$REPOSITORY" --ref dev
   analyze:
-    name: Analyze (${{ matrix.language }})
+    name: Analyze (${{ matrix.language }}${{ matrix.os && format(' / {0}', matrix.os) || '' }})
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/dev'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    runs-on: ${{ matrix.os || 'ubuntu-24.04' }}
+    timeout-minutes: 90
     permissions:
       contents: read
       actions: read
@@ -44,7 +44,10 @@ jobs:
         - language: actions
           build-mode: none
         - language: c-cpp
-          build-mode: none
+          build-mode: manual
+        - language: c-cpp
+          build-mode: manual
+          os: windows-2025
         - language: go
           build-mode: manual
         - language: javascript-typescript
@@ -56,26 +59,67 @@ jobs:
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       with:
         persist-credentials: false
-    - name: Prepare generated Dashboard header
-      if: matrix.language == 'c-cpp'
-      shell: bash
-      run: |
-        cmake \
-          -DINPUT_FILE="$GITHUB_WORKSPACE/resources/dashboard/index.html" \
-          -DOUTPUT_FILE="$GITHUB_WORKSPACE/src/generated/dashboard_page.html.inc" \
-          -P cmake/embed_dashboard.cmake
     - name: Set up Go
-      if: matrix.language == 'go'
+      if: matrix.language == 'go' || matrix.language == 'c-cpp'
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
       with:
         go-version-file: bridge/go.mod
         cache: false
+    - name: Set up Linux C/C++ dependencies
+      if: matrix.language == 'c-cpp' && runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          git g++ cmake ninja-build python3 pkg-config ca-certificates \
+          libcurl4-openssl-dev libpcre2-dev libboost-dev rapidjson-dev
+    - name: Set up Windows C/C++ dependencies
+      if: matrix.language == 'c-cpp' && runner.os == 'Windows'
+      id: msys2
+      uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
+      with:
+        msystem: UCRT64
+        path-type: inherit
+        update: true
+        install: >-
+          git
+          mingw-w64-ucrt-x86_64-gcc
+          mingw-w64-ucrt-x86_64-cmake
+          mingw-w64-ucrt-x86_64-ninja
+          mingw-w64-ucrt-x86_64-python
+          mingw-w64-ucrt-x86_64-pkgconf
+          mingw-w64-ucrt-x86_64-curl
+          mingw-w64-ucrt-x86_64-boost
+          mingw-w64-ucrt-x86_64-pcre2
+          mingw-w64-ucrt-x86_64-rapidjson
+    - name: Prepare Linux C/C++ build configurations
+      if: matrix.language == 'c-cpp' && runner.os == 'Linux'
+      run: bash scripts/ci/build-codeql-cpp.sh prepare
+    - name: Prepare Windows C/C++ build configurations
+      if: matrix.language == 'c-cpp' && runner.os == 'Windows'
+      shell: msys2 {0}
+      run: bash scripts/ci/build-codeql-cpp.sh prepare
     - name: Initialize CodeQL
       uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
       with:
         languages: ${{ matrix.language }}
         build-mode: ${{ matrix.build-mode }}
         queries: security-and-quality
+        tools: linked
+    - name: Build Linux application and static library for analysis
+      if: matrix.language == 'c-cpp' && runner.os == 'Linux'
+      run: bash scripts/ci/build-codeql-cpp.sh build
+    - name: Build Windows application and static library for analysis
+      if: matrix.language == 'c-cpp' && runner.os == 'Windows'
+      shell: pwsh
+      env:
+        MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
+      run: |
+        $env:PATH = "$env:MSYS2_ROOT\ucrt64\bin;$env:PATH"
+        $env:CCACHE_DISABLE = "1"
+        foreach ($variant in @("application", "static")) {
+          cmake --build "$env:RUNNER_TEMP/sce-codeql-cpp/$variant" --clean-first --parallel 2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        }
     - name: Build all Go platform sources and generators for analysis
       if: matrix.language == 'go'
       working-directory: bridge
@@ -89,4 +133,4 @@ jobs:
     - name: Upload CodeQL results
       uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
       with:
-        category: /language:${{ matrix.language }}
+        category: /language:${{ matrix.language }}${{ runner.os == 'Windows' && '/platform:windows' || '' }}

@@ -691,7 +691,9 @@ std::string fileGet(const std::string &path, bool scope_limit)
         }
         offset += count;
     }
-    if(std::ferror(fp) || closeFile(fp) != 0)
+    const bool read_failed = std::ferror(fp) != 0;
+    const int close_result = closeFile(fp);
+    if(read_failed || close_result != 0)
         content.clear();
     return content;
 }
