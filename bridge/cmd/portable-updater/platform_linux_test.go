@@ -79,7 +79,12 @@ func TestLinuxExchangeChild(t *testing.T) {
 	if value == "" {
 		t.Skip("subprocess helper")
 	}
-	number, _ := strconv.Atoi(value)
+	// Only named Linux errors fit the expected syscall result; zero disables injection.
+	number, parseErr := strconv.Atoi(value)
+	if parseErr != nil || number < 0 || number > int(unix.SECCOMP_RET_DATA) ||
+		(number != 0 && unix.ErrnoName(syscall.Errno(number)) == "") {
+		t.Fatalf("invalid SCE_TEST_EXCHANGE_ERRNO %q: expected 0 or a named Linux errno", value)
+	}
 	if number != 0 {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
