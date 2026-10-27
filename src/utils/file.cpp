@@ -7,6 +7,7 @@
 #include <cwctype>
 #include <cwchar>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <sys/stat.h>
@@ -45,10 +46,78 @@ namespace {
 
 bool pathComponentEqual(const std::filesystem::path &left,
                         const std::filesystem::path &right) {
-#ifdef _WIN32
-    return _wcsicmp(left.c_str(), right.c_str()) == 0;
-#else
+    // Windows paths have already been resolved to their stored names. Keep
+    // distinct names distinct on case-sensitive Windows directories as well.
     return left == right;
+}
+
+std::filesystem::path canonicalScopePath(const std::filesystem::path &path,
+                                          std::error_code &error) {
+#ifdef _WIN32
+    // MinGW's weakly_canonical does not resolve Windows directory junctions.
+    // Resolve the existing ancestor through a handle, retaining missing suffixes
+    // for callers which check a cache path before creating its files.
+    std::filesystem::path existing = path;
+    // MinGW's absolute() also misparses the native extended-path prefix.
+    if(path.native().compare(0, 4, L"\\\\?\\") != 0)
+        existing = std::filesystem::absolute(path, error);
+    if(error)
+        return {};
+    std::vector<std::filesystem::path> suffix;
+    for(;;) {
+        HANDLE raw_handle = CreateFileW(
+            existing.c_str(), 0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+            OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        if(raw_handle == INVALID_HANDLE_VALUE) {
+            const DWORD failure = GetLastError();
+            const DWORD attributes = GetFileAttributesW(existing.c_str());
+            const std::filesystem::path parent = existing.parent_path();
+            if((failure != ERROR_FILE_NOT_FOUND &&
+                failure != ERROR_PATH_NOT_FOUND) ||
+               (attributes != INVALID_FILE_ATTRIBUTES &&
+                (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) ||
+               parent.empty() || parent == existing) {
+                error = std::error_code(failure, std::system_category());
+                return {};
+            }
+            if(!existing.filename().empty())
+                suffix.push_back(existing.filename());
+            existing = parent;
+            continue;
+        }
+        const std::unique_ptr<void, decltype(&CloseHandle)> handle(raw_handle,
+                                                                 CloseHandle);
+        const DWORD flags = FILE_NAME_NORMALIZED | VOLUME_NAME_DOS;
+        const DWORD required =
+            GetFinalPathNameByHandleW(handle.get(), nullptr, 0, flags);
+        if(required == 0) {
+            error = std::error_code(GetLastError(), std::system_category());
+            return {};
+        }
+        std::wstring resolved(required, L'\0');
+        const DWORD length = GetFinalPathNameByHandleW(
+            handle.get(), resolved.data(), required, flags);
+        if(length == 0 || length >= required) {
+            error = std::error_code(length == 0 ? GetLastError()
+                                                : ERROR_INSUFFICIENT_BUFFER,
+                                    std::system_category());
+            return {};
+        }
+        resolved.resize(length);
+        std::filesystem::path result(resolved);
+        for(auto component = suffix.rbegin(); component != suffix.rend();
+            ++component)
+            result /= *component;
+        error.clear();
+        return result.lexically_normal();
+    }
+#else
+    const std::filesystem::path absolute =
+        std::filesystem::absolute(path, error);
+    if(error)
+        return {};
+    return std::filesystem::weakly_canonical(absolute, error);
 #endif
 }
 
@@ -650,20 +719,12 @@ bool isPathInScope(const std::string &path, const std::string &root)
     const std::filesystem::path native_root = fileSystemPath(root, error);
     if(error)
         return false;
-    std::filesystem::path absolute_candidate =
-        std::filesystem::absolute(native_candidate, error);
-    if(error)
-        return false;
     std::filesystem::path candidate =
-        std::filesystem::weakly_canonical(absolute_candidate, error);
-    if(error)
-        return false;
-    std::filesystem::path absolute_root =
-        std::filesystem::absolute(native_root, error);
+        canonicalScopePath(native_candidate, error);
     if(error)
         return false;
     std::filesystem::path canonical_root =
-        std::filesystem::weakly_canonical(absolute_root, error);
+        canonicalScopePath(native_root, error);
     if(error)
         return false;
 
