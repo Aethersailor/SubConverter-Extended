@@ -1428,7 +1428,7 @@ public:
     }
 
     std::string
-    toJSON(const Value& replacer = JS_UNDEFINED, const Value& space = JS_UNDEFINED)
+    toJSON(const Value& replacer = JSValue(JS_UNDEFINED), const Value& space = JSValue(JS_UNDEFINED))
     {
         assert(ctx);
         assert(!replacer.ctx || ctx == replacer.ctx);
@@ -1617,7 +1617,7 @@ public:
                     prototype(context.newObject()),
                     module(module),
                     context(context),
-                    ctor(JS_NULL)
+                    ctor(JSValue(JS_NULL))
             {
             }
 
