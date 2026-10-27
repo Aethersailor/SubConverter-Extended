@@ -155,8 +155,33 @@ class TemporaryFileGuard {
     bool active_ = true;
 };
 
-std::FILE *openFile(const char *path, const char *mode) {
-    return std::fopen(path, mode);
+std::filesystem::path fileSystemPath(const std::string &path,
+                                     std::error_code &error) {
+    error.clear();
+    if(path.empty() || path.find('\0') != std::string::npos) {
+        error = std::make_error_code(std::errc::invalid_argument);
+        return {};
+    }
+    try {
+        return std::filesystem::path(path);
+    } catch(const std::filesystem::filesystem_error &exception) {
+        error = exception.code();
+        return {};
+    }
+}
+
+std::FILE *openReadFile(const std::string &path) {
+    std::error_code error;
+    const std::filesystem::path native_path = fileSystemPath(path, error);
+    if(error)
+        return nullptr;
+#ifdef _WIN32
+    // Use the same path interpretation as canonical containment and writes.
+    // Passing the original bytes to fopen would reinterpret UTF-8 as CP_ACP.
+    return _wfopen(native_path.c_str(), L"rb");
+#else
+    return std::fopen(native_path.c_str(), "rb");
+#endif
 }
 
 std::size_t writeFile(const void *data, std::size_t size, std::size_t count,
@@ -202,7 +227,10 @@ int syncParentDirectory(const std::filesystem::path &target) {
 
 std::filesystem::path resolvedWriteTarget(const std::string &path,
                                           std::error_code &error) {
-    std::filesystem::path absolute = std::filesystem::absolute(path, error);
+    const std::filesystem::path native_path = fileSystemPath(path, error);
+    if(error)
+        return {};
+    std::filesystem::path absolute = std::filesystem::absolute(native_path, error);
     if(error)
         return {};
     const std::filesystem::file_status link_status =
@@ -616,8 +644,14 @@ bool isPathInScope(const std::string &path, const std::string &root)
         return false;
 
     std::error_code error;
+    const std::filesystem::path native_candidate = fileSystemPath(path, error);
+    if(error)
+        return false;
+    const std::filesystem::path native_root = fileSystemPath(root, error);
+    if(error)
+        return false;
     std::filesystem::path absolute_candidate =
-        std::filesystem::absolute(path, error);
+        std::filesystem::absolute(native_candidate, error);
     if(error)
         return false;
     std::filesystem::path candidate =
@@ -625,7 +659,7 @@ bool isPathInScope(const std::string &path, const std::string &root)
     if(error)
         return false;
     std::filesystem::path absolute_root =
-        std::filesystem::absolute(root, error);
+        std::filesystem::absolute(native_root, error);
     if(error)
         return false;
     std::filesystem::path canonical_root =
@@ -664,7 +698,7 @@ std::string fileGet(const std::string &path, bool scope_limit)
     // preference files and configured scripts. Request-controlled callers set
     // scope_limit=true and must pass the canonical working-tree containment
     // check above before this sink is reached.
-    std::FILE *fp = openFile(path.c_str(), "rb");
+    std::FILE *fp = openReadFile(path);
     if(!fp)
         return "";
     if(std::fseek(fp, 0, SEEK_END) != 0)
@@ -703,7 +737,7 @@ std::string fileGetBounded(const std::string &path, std::size_t max_bytes,
 {
     if(scope_limit && !isInScope(path))
         return "";
-    std::FILE *fp = openFile(path.c_str(), "rb");
+    std::FILE *fp = openReadFile(path);
     if(!fp)
         return "";
     if(std::fseek(fp, 0, SEEK_END) != 0)
@@ -750,19 +784,25 @@ std::string fileGetBounded(const std::string &path, std::size_t max_bytes,
 
 bool fileExist(const std::string &path, bool scope_limit)
 {
-    //using c++17 standard, but may cause problem on clang
-    //return std::filesystem::exists(path);
     if(scope_limit && !isInScope(path))
         return false;
+    std::error_code error;
+    const std::filesystem::path native_path = fileSystemPath(path, error);
+    if(error)
+        return false;
+#ifdef _WIN32
+    return std::filesystem::is_regular_file(native_path, error) && !error;
+#else
     struct stat st;
-    return stat(path.data(), &st) == 0 && S_ISREG(st.st_mode);
+    return stat(native_path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+#endif
 }
 
 bool fileReadable(const std::string &path, bool scope_limit)
 {
     if(scope_limit && !isInScope(path))
         return false;
-    std::FILE *file = openFile(path.c_str(), "rb");
+    std::FILE *file = openReadFile(path);
     return file && closeFile(file) == 0;
 }
 
