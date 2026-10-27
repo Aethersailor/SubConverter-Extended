@@ -33,6 +33,12 @@ public:
     bounded_output_reservation = &grow_;
   }
   ~ScopedBoundedOutputReservation() { bounded_output_reservation = previous_; }
+
+  ScopedBoundedOutputReservation(
+      const ScopedBoundedOutputReservation &) = delete;
+  ScopedBoundedOutputReservation &operator=(
+      const ScopedBoundedOutputReservation &) = delete;
+
 private:
   const std::function<bool(uint64_t)> grow_;
   const std::function<bool(uint64_t)> *previous_;
