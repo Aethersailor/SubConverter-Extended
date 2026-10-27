@@ -434,9 +434,9 @@ const WindowSnapshot &windowAt(const DashboardSnapshot &snapshot,
                                std::size_t index) {
   if (index == 0)
     return snapshot.startup;
-  if (index >= 1 && index <= 4)
+  if (index <= 4)
     return snapshot.minute_windows[index - 1];
-  if (index >= 5 && index <= 6)
+  if (index <= 6)
     return snapshot.daily_windows[index - 5];
   return snapshot.lifetime;
 }

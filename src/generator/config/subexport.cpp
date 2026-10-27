@@ -4722,7 +4722,7 @@ std::string proxyToSurge(std::vector<Proxy> &nodes,
     case ProxyType::Snell: {
       const uint16_t snell_version =
           x.SnellVersion == 0 ? 1 : x.SnellVersion;
-      if (surge_ver < 3 || surge_ver == -3 || snell_version > 6 ||
+      if (surge_ver < 3 || snell_version > 6 ||
           x.Password.empty() ||
           !x.SnellUserKey.empty() || !x.SnellNetwork.empty() ||
           (snell_version == 6 &&

@@ -40,9 +40,12 @@ constexpr std::size_t kMaxPayloadBytes =
     (kMinuteBucketCount + kDailyBucketCount) *
         (sizeof(uint32_t) + kMaxEncodedBucketBytes) +
     kGeoCount * (sizeof(uint16_t) + sizeof(uint64_t) * 2) + 256;
+// Apply the structural and wire-format limits alongside the operational caps.
 constexpr std::size_t kMaxCheckpointPayloadBytes =
-    128U * 1024U * 1024U;
-constexpr std::size_t kMaxWalPayloadBytes = 8U * 1024U * 1024U;
+    std::min<std::size_t>(128U * 1024U * 1024U, kMaxPayloadBytes);
+constexpr std::size_t kMaxWalPayloadBytes = std::min<std::size_t>(
+    {8U * 1024U * 1024U, kMaxPayloadBytes,
+     std::numeric_limits<uint32_t>::max()});
 constexpr std::size_t kMaxWalFileBytes = 16U * 1024U * 1024U;
 constexpr std::size_t kCheckpointEnvelopeBytes = 44;
 constexpr std::size_t kWalCompactBytes = 4U * 1024U * 1024U;
@@ -396,7 +399,7 @@ void encodeImagePayload(Encoder &encoder, const PersistentImage &image) {
 
 bool decodeImagePayload(const uint8_t *data, std::size_t size,
                         PersistentImage &image) {
-  if (size > kMaxCheckpointPayloadBytes || size > kMaxPayloadBytes)
+  if (size > kMaxCheckpointPayloadBytes)
     return false;
   Decoder decoder(data, size);
   image = PersistentImage{};
@@ -479,7 +482,7 @@ void encodePatchPayload(Encoder &encoder, const DirtyPatch &patch) {
 
 bool decodeAndApplyPatch(const uint8_t *data, std::size_t size,
                          PersistentImage &image) {
-  if (size > kMaxWalPayloadBytes || size > kMaxPayloadBytes)
+  if (size > kMaxWalPayloadBytes)
     return false;
   Decoder decoder(data, size);
   RuntimeState runtime;
@@ -661,7 +664,6 @@ bool decodeCheckpoint(const std::vector<uint8_t> &bytes,
       result.generation == 0 ||
       !decoder.u64(payload_size) ||
       payload_size > kMaxCheckpointPayloadBytes ||
-      payload_size > kMaxPayloadBytes ||
       payload_size > decoder.remaining() - 8)
     return false;
   const uint8_t *payload = decoder.current();
@@ -694,8 +696,7 @@ std::vector<uint8_t> walRecordBytes(const DirtyPatch &patch,
   const std::size_t payload_offset = encoder.size();
   encodePatchPayload(encoder, patch);
   const std::size_t payload_size = encoder.size() - payload_offset;
-  if (payload_size > kMaxWalPayloadBytes ||
-      payload_size > std::numeric_limits<uint32_t>::max())
+  if (payload_size > kMaxWalPayloadBytes)
     return {};
   encoder.patchU32(payload_size_offset,
                    static_cast<uint32_t>(payload_size));
@@ -1423,7 +1424,6 @@ StoreLoadResult Store::load() {
         !decoder.u64(generation) || !decoder.u64(sequence) ||
         !decoder.u32(payload_size) ||
         payload_size > kMaxWalPayloadBytes ||
-        payload_size > kMaxPayloadBytes ||
         payload_size > decoder.remaining() - std::min<std::size_t>(
                                                decoder.remaining(), 8))
       {
