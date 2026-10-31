@@ -1296,8 +1296,6 @@ void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent
         rules.PushBack(direct_object, allocator);
     }
 
-    // auto dns_object = buildObject(allocator, "protocol", "dns", "outbound", "dns-out");
-    // rules.PushBack(dns_object, allocator);
 
     std::vector<std::string_view> temp(4);
     std::set<std::string> geosite_codes, geoip_codes;

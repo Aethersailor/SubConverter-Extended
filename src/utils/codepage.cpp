@@ -9,21 +9,25 @@
 std::string utf8ToACP(const std::string &str_src)
 {
 #ifdef _WIN32
-    const char* strUTF8 = str_src.data();
-    int len = MultiByteToWideChar(CP_UTF8, 0, strUTF8, -1, NULL, 0);
-    wchar_t* wszGBK = new wchar_t[len + 1];
-    memset(wszGBK, 0, len * 2 + 2);
-    MultiByteToWideChar(CP_UTF8, 0, strUTF8, -1, wszGBK, len);
-    len = WideCharToMultiByte(CP_ACP, 0, wszGBK, -1, NULL, 0, NULL, NULL);
-    char* szGBK = new char[len + 1];
-    memset(szGBK, 0, len + 1);
-    WideCharToMultiByte(CP_ACP, 0, wszGBK, -1, szGBK, len, NULL, NULL);
-    std::string strTemp(szGBK);
-    if (wszGBK)
-        delete[] wszGBK;
-    if (szGBK)
-        delete[] szGBK;
-    return strTemp;
+    const int wide_size = MultiByteToWideChar(CP_UTF8, 0, str_src.c_str(), -1,
+                                             nullptr, 0);
+    if (wide_size == 0)
+        return {};
+    std::wstring wide(wide_size, L'\0');
+    if (MultiByteToWideChar(CP_UTF8, 0, str_src.c_str(), -1, wide.data(),
+                            wide_size) == 0)
+        return {};
+
+    const int acp_size = WideCharToMultiByte(CP_ACP, 0, wide.c_str(), -1,
+                                            nullptr, 0, nullptr, nullptr);
+    if (acp_size == 0)
+        return {};
+    std::string result(acp_size, '\0');
+    if (WideCharToMultiByte(CP_ACP, 0, wide.c_str(), -1, result.data(),
+                            acp_size, nullptr, nullptr) == 0)
+        return {};
+    result.pop_back(); // The conversion size includes the terminating null.
+    return result;
 #else
     return str_src;
 #endif

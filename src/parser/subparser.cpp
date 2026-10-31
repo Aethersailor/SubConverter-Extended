@@ -1233,9 +1233,6 @@ void explodeVmessConf(std::string content, std::vector<Proxy> &nodes) {
             return;
         }
     } catch (std::exception &e) {
-        //writeLog(LOG_LEVEL_WARNING, "VMessConf parser throws an error. Leaving...");
-        //return;
-        //ignore
         throw;
     }
     //read all subscribe remark as group name
@@ -3412,11 +3409,14 @@ LoonProxyParseResult parseLoonProxyLine(const std::vector<std::string> &configs,
                                             "fast-open", "tfo", "udp", "udp-relay"}))
             return LoonProxyParseResult::Invalid;
         LoonProxyValue method_value;
-        std::string transport, alter_id, path, host, over_tls;
+        std::string transport, path, host, over_tls;
+        const auto alter_id_option = options.find("alterid");
+        // An omitted alterId defaults to AEAD; an explicit empty value is invalid.
+        const std::string alter_id = alter_id_option == options.end()
+            ? "0" : alter_id_option->second.value;
         if (!parseLoonProxyValue(configs[3], method_value) || method_value.quoted ||
             method_value.value.empty() || !isXrayUuid(credential_value.value) ||
             !loonOption(options, "transport", transport) ||
-            !loonOption(options, "alterid", alter_id) ||
             !loonOption(options, "path", path) || !loonOption(options, "host", host) ||
             !loonOption(options, "over-tls", over_tls) ||
             (transport != "tcp" && transport != "ws" && transport != "http") ||
@@ -3886,10 +3886,6 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes) {
         tribool udp, tfo, scv, tls13, reuse;
         Proxy node;
 
-        /*
-        remarks = regReplace(x.second, proxystr, "$1");
-        configs = split(regReplace(x.second, proxystr, "$2"), ",");
-        */
         regGetMatch(x.second, proxystr, 3, 0, &remarks, &config);
         configs = splitWireGuardFields(config);
         if (configs.empty() || (configs.size() < 3 && configs[0] != "wireguard"))
@@ -4284,7 +4280,6 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes) {
                         snell_version > 6 ||
                         (!reuse_text.empty() && reuse.is_undef()) ||
                         !valid_obfs ||
-                        (snell_version >= 4 && plugin == "tls") ||
                         (snell_version == 6 &&
                          (!plugin.empty() || !host.empty() ||
                           !obfs_uri.empty())) ||

@@ -645,9 +645,8 @@ func (u *updater) auto() (int, error) {
 	if !u.config.Enabled || !u.config.AutoCheck {
 		return 0, nil
 	}
-	state := u.baseState()
 	if _, err := os.Stat(u.statePath); err == nil {
-		state = u.readState()
+		state := u.readState()
 		if state.OK && state.State != "error" && state.UpdatedAt > 0 &&
 			time.Since(time.Unix(state.UpdatedAt, 0)) < time.Duration(u.config.CheckIntervalSeconds)*time.Second {
 			return 0, nil
@@ -658,7 +657,7 @@ func (u *updater) auto() (int, error) {
 	if err := u.checkAndEmit(true); err != nil {
 		return 0, nil
 	}
-	state = u.readState()
+	state := u.readState()
 	if !state.Available || !u.config.AutoInstall {
 		if state.Available {
 			fmt.Fprintf(os.Stderr, "SubConverter-Extended %s is available; run ./update.sh apply or enable automatic installation.\n", state.LatestVersion)

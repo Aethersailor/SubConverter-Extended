@@ -455,19 +455,6 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
                         &extra_headers, request_headers,
                         parse_set.fetch_context);
     }
-    /*
-    if(strSub.size() == 0)
-    {
-        //try to get it again with system proxy
-        writeLog(LOG_LEVEL_WARNING, "无法直接下载订阅，正在使用
-    system proxy."); strProxy = getSystemProxy(); if(strProxy != "")
-        {
-            strSub = webGet(link, strProxy);
-        }
-        else
-            writeLog(LOG_LEVEL_WARNING, "未设置系统代理，跳过。");
-    }
-    */
     if (!strSub.empty()) {
       if (use_mihomo_parser) {
         recordParserInvocation();

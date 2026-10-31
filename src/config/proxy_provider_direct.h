@@ -4,7 +4,7 @@
 #include <string>
 #include <string_view>
 
-inline constexpr bool kDefaultProxyProviderDirect = true;
+inline constexpr bool kDefaultProxyProviderDirect = false;
 
 inline bool parseProxyProviderDirect(std::string_view value, bool &result) {
   while (!value.empty() &&

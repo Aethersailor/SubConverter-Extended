@@ -689,7 +689,6 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
         {
             if(x.rule_type == RULESET_CLASH_IPCIDR || x.rule_type == RULESET_CLASH_DOMAIN || x.rule_type == RULESET_CLASH_CLASSICAL)
             {
-                //rule_name = std::to_string(hash_(rule_group + rule_path));
                 rule_name = old_rule_name = urlDecode(findFileName(rule_path));
                 int idx = 2;
                 while(std::find(groups.begin(), groups.end(), rule_name) != groups.end())
@@ -731,7 +730,6 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
             {
                 if(fileExist(rule_path, true) || isLink(rule_path))
                 {
-                    //rule_name = std::to_string(hash_(rule_group + rule_path));
                     rule_name = old_rule_name = urlDecode(findFileName(rule_path));
                     int idx = 2;
                     while(std::find(groups.begin(), groups.end(), rule_name) != groups.end())

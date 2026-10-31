@@ -1092,11 +1092,6 @@ void readYAMLConf(YAML::Node &node,
 
   if (node["node_pref"].IsDefined()) {
     section = node["node_pref"];
-    /*
-    section["udp_flag"] >> udp_flag;
-    section["tcp_fast_open_flag"] >> tfo_flag;
-    section["skip_cert_verify_flag"] >> scv_flag;
-    */
     global.UDPFlag.set(safe_as<std::string>(section["udp_flag"]));
     global.TFOFlag.set(safe_as<std::string>(section["tcp_fast_open_flag"]));
     global.skipCertVerify.set(
@@ -1779,7 +1774,6 @@ bool readConf() {
 
   INIReader ini;
   ini.allow_dup_section_titles = true;
-  // ini.do_utf8_to_gbk = true;
   int retVal = ini.parse_file(global.prefPath);
   if (retVal != INIREADER_EXCEPTION_NONE) {
     return restorePreviousSettings("PREFERENCE_INI_PARSE_FAILED detail=" +
@@ -1881,11 +1875,6 @@ bool readConf() {
 
   if (ini.section_exist("node_pref")) {
     ini.enter_section("node_pref");
-    /*
-    ini.GetBoolIfExist("udp_flag", udp_flag);
-    ini.get_bool_if_exist("tcp_fast_open_flag", tfo_flag);
-    ini.get_bool_if_exist("skip_cert_verify_flag", scv_flag);
-    */
     global.UDPFlag.set(ini.get("udp_flag"));
     global.TFOFlag.set(ini.get("tcp_fast_open_flag"));
     global.skipCertVerify.set(ini.get("skip_cert_verify_flag"));

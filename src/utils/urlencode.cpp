@@ -1,3 +1,4 @@
+#include <cctype>
 #include <string>
 
 #include "string.h"
@@ -40,9 +41,9 @@ std::string urlDecode(const std::string &str) {
     if (str[i] == '+')
       strTemp += ' ';
     else if (str[i] == '%') {
-      if (i + 2 >= length)
-        return strTemp;
-      if (isalnum(str[i + 1]) && isalnum(str[i + 2])) {
+      if (i + 2 < length &&
+          std::isxdigit(static_cast<unsigned char>(str[i + 1])) &&
+          std::isxdigit(static_cast<unsigned char>(str[i + 2]))) {
         unsigned char high = fromHex((unsigned char)str[++i]);
         unsigned char low = fromHex((unsigned char)str[++i]);
         unsigned char decoded = high * 16 + low;

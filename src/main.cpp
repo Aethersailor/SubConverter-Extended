@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <fcntl.h>
+#include <filesystem>
 #include <iostream>
 #include <rapidjson/stringbuffer.h>
 #include <string>
@@ -38,7 +39,6 @@
 #include "utils/system.h"
 #include "version.h"
 
-// #include "vfs.h"
 
 WebServer webServer;
 static volatile std::sig_atomic_t pendingShutdownSignal = 0;
@@ -52,16 +52,30 @@ void SetConsoleTitle(const std::string &title) {
 #endif // _WIN32
 
 void setcd(std::string &file) {
+#ifdef _WIN32
+  // argv paths use the native ANSI code page. Normalize only these paths;
+  // configuration and request paths already follow std::filesystem's encoding.
+  if (file.empty() || file.size() > INT_MAX)
+    return;
+  const int size = MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, file.data(),
+                                     static_cast<int>(file.size()), nullptr, 0);
+  if (size == 0)
+    return;
+  std::wstring native_file(static_cast<std::size_t>(size), L'\0');
+  if (MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, file.data(),
+                          static_cast<int>(file.size()), native_file.data(),
+                          size) == 0)
+    return;
+  std::error_code error;
+  const std::filesystem::path absolute =
+      std::filesystem::absolute(std::filesystem::path(native_file), error);
+  if (error)
+    return;
+  std::filesystem::current_path(absolute.parent_path(), error);
+  file = error ? absolute.string() : absolute.filename().string();
+#else
   char szTemp[4096] = {}, filename[256] = {};
   std::string path;
-#ifdef _WIN32
-  char *pname = NULL;
-  DWORD retVal = GetFullPathName(file.data(), 1023, szTemp, &pname);
-  if (!retVal)
-    return;
-  strcpy(filename, pname);
-  strrchr(szTemp, '\\')[1] = '\0';
-#else
   char *ret = realpath(file.data(), szTemp);
   if (ret == nullptr)
     return;
@@ -69,10 +83,10 @@ void setcd(std::string &file) {
   if (ret == nullptr)
     return;
   strrchr(szTemp, '/')[1] = '\0';
-#endif // _WIN32
   file.assign(filename);
   path.assign(szTemp);
   chdir(path.data());
+#endif // _WIN32
 }
 
 struct LogRedirectResult {
@@ -287,7 +301,6 @@ int main(int argc, char *argv[]) {
 #ifdef _WIN32
   WSADATA wsaData;
   if (WSAStartup(MAKEWORD(1, 1), &wsaData) != 0) {
-    // std::cerr<<"WSAStartup failed.\n";
     writeLog(LOG_LEVEL_FATAL, "WSAStartup 初始化失败。");
     return 1;
   }
@@ -329,7 +342,6 @@ int main(int argc, char *argv[]) {
   if (!commitRuntimeCoordinator())
     return 1;
   statistics::initialize();
-  // vfs::vfs_read("vfs.ini");
   if (!global.updateRulesetOnRequest)
     refreshRulesets(global.customRulesets, global.rulesetsContent);
   startResourceControlRuntime();

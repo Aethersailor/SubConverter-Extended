@@ -161,37 +161,6 @@ std::string trimWhitespace(const std::string &str, bool before, bool after)
 
 std::string getUrlArg(const std::string &url, const std::string &request)
 {
-    //std::smatch result;
-    /*
-    if (regex_search(url.cbegin(), url.cend(), result, std::regex(request + "=(.*?)&")))
-    {
-        return result[1];
-    }
-    else if (regex_search(url.cbegin(), url.cend(), result, std::regex(request + "=(.*)")))
-    {
-        return result[1];
-    }
-    else
-    {
-        return std::string();
-    }
-    */
-    /*
-    std::string::size_type spos = url.find("?");
-    if(spos != url.npos)
-        url.erase(0, spos + 1);
-
-    string_array vArray, arglist = split(url, "&");
-    for(std::string &x : arglist)
-    {
-        std::string::size_type epos = x.find("=");
-        if(epos != x.npos)
-        {
-            if(x.substr(0, epos) == request)
-                return x.substr(epos + 1);
-        }
-    }
-    */
     std::string pattern = request + "=";
     std::string::size_type pos = url.size();
     while(pos)
@@ -299,17 +268,6 @@ int to_int(const std::string &str, int def_value)
 {
     if(str.empty())
         return def_value;
-    /*
-    int retval = 0;
-    char c;
-    std::stringstream ss(str);
-    if(!(ss >> retval))
-        return def_value;
-    else if(ss >> c)
-        return def_value;
-    else
-        return retval;
-    */
     return std::atoi(str.data());
 }
 

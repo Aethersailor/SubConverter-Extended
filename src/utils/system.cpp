@@ -70,16 +70,6 @@ bool readRegistryString(HKEY key, const char *name, std::string &value)
 
 void sleepMs(int interval)
 {
-    /*
-    #ifdef _WIN32
-        Sleep(interval);
-    #else
-        // Portable sleep for platforms other than Windows.
-        struct timeval wait = { 0, interval * 1000 };
-        select(0, NULL, NULL, NULL, &wait);
-    #endif
-    */
-    //upgrade to c++11 standard
     std::this_thread::sleep_for(std::chrono::milliseconds(interval));
 }
 
