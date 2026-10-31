@@ -4277,7 +4277,6 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes) {
                         snell_version > 6 ||
                         (!reuse_text.empty() && reuse.is_undef()) ||
                         !valid_obfs ||
-                        (snell_version >= 4 && plugin == "tls") ||
                         (snell_version == 6 &&
                          (!plugin.empty() || !host.empty() ||
                           !obfs_uri.empty())) ||
