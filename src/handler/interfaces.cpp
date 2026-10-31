@@ -4078,9 +4078,11 @@ static std::string buildEffectiveSubPolicy(Request &request,
       !parsed.include_remark.empty() || !parsed.exclude_remark.empty();
   policy.requested_remote_node_rename = !parsed.renames.empty();
   policy.requested_remote_node_transform =
-      !parsed.emoji.is_undef() || parsed.add_emoji.get(false) ||
-      parsed.remove_emoji.get(false) || parsed.append_type.get(false) ||
-      parsed.sort.get(false) || parsed.filter_deprecated.get(false);
+      (settings.emojiEnabled &&
+       (!parsed.emoji.is_undef() || parsed.add_emoji.get(false) ||
+        parsed.remove_emoji.get(false))) ||
+      parsed.append_type.get(false) || parsed.sort.get(false) ||
+      parsed.filter_deprecated.get(false);
   policy.requested_remote_node_option_override =
       !parsed.tfo.is_undef() || !parsed.udp.is_undef() ||
       !parsed.skip_cert_verify.is_undef() || !parsed.tls13.is_undef();
@@ -4346,7 +4348,7 @@ static std::string buildExternalConfigFetchPlan(
       if (requested_config)
         policy.requested_remote_node_rename = true;
     }
-    if (!extconf.emoji.empty())
+    if (settings.emojiEnabled && !extconf.emoji.empty())
       policy.generator.emoji_array = extconf.emoji;
     if (!extconf.include.empty()) {
       policy.include_remarks = extconf.include;
@@ -4358,7 +4360,7 @@ static std::string buildExternalConfigFetchPlan(
       if (requested_config)
         policy.requested_remote_node_filter = true;
     }
-    if (requested_config &&
+    if (requested_config && settings.emojiEnabled &&
         (extconf.add_emoji.get(false) ||
          extconf.remove_old_emoji.get(false)))
       policy.requested_remote_node_transform = true;
@@ -4760,16 +4762,18 @@ static std::string buildExternalConfigFetchPlan(
   parsed.explain.ruleset_count = plan.ruleset_content.size();
   parsed.explain.custom_group_count = policy.custom_proxy_groups.size();
 
-  policy.generator.provider_emoji_enabled = parsed.emoji.get(false);
-  if (!parsed.emoji.is_undef()) {
-    parsed.add_emoji.set(parsed.emoji);
-    parsed.remove_emoji.set(true);
+  if (settings.emojiEnabled) {
+    policy.generator.provider_emoji_enabled = parsed.emoji.get(false);
+    if (!parsed.emoji.is_undef()) {
+      parsed.add_emoji.set(parsed.emoji);
+      parsed.remove_emoji.set(true);
+    }
+    policy.generator.add_emoji = parsed.add_emoji.get(settings.addEmoji);
+    policy.generator.remove_emoji =
+        parsed.remove_emoji.get(settings.removeEmoji);
+    if (policy.generator.add_emoji && policy.generator.emoji_array.empty())
+      policy.generator.emoji_array = settings.emojis;
   }
-  policy.generator.add_emoji = parsed.add_emoji.get(settings.addEmoji);
-  policy.generator.remove_emoji =
-      parsed.remove_emoji.get(settings.removeEmoji);
-  if (policy.generator.add_emoji && policy.generator.emoji_array.empty())
-    policy.generator.emoji_array = settings.emojis;
   if (!parsed.renames.empty()) {
     policy.generator.rename_array =
         INIBinding::from<RegexMatchConfig>::from_ini(
@@ -7302,22 +7306,29 @@ static std::string assembleSubResponse(
                      : "");
     const bool only_clash_providers =
         !ext.providers.empty() && explain.total_node_count == 0;
-    addParameter(
-        "emoji", boolString(only_clash_providers ? ext.provider_emoji_enabled
-                                                : ext.add_emoji),
-        "applied",
-        ext.providers.empty()
-            ? "Sets add_emoji and remove_emoji together."
-            : "Clash providers require explicit emoji=true; server-parsed "
-              "nodes keep the original emoji behavior.");
-    if (only_clash_providers) {
-      for (const char *name : {"add_emoji", "remove_emoji"})
-        addParameter(name, boolString(ext.provider_emoji_enabled), "ignored",
-                     "Clash provider emoji processing is controlled by emoji, "
-                     "not the independent switches.");
+    if (!settings.emojiEnabled) {
+      for (const char *name : {"emoji", "add_emoji", "remove_emoji"})
+        addParameter(name, "false", "ignored",
+                     "Emoji addition and removal are disabled by "
+                     "emojis.enabled in the backend configuration.");
     } else {
-      addSwitchParameter("add_emoji", ext.add_emoji, argAddEmoji);
-      addSwitchParameter("remove_emoji", ext.remove_emoji, argRemoveEmoji);
+      addParameter(
+          "emoji", boolString(only_clash_providers ? ext.provider_emoji_enabled
+                                                  : ext.add_emoji),
+          "applied",
+          ext.providers.empty()
+              ? "Sets add_emoji and remove_emoji together."
+              : "Clash providers require explicit emoji=true; server-parsed "
+                "nodes keep the original emoji behavior.");
+      if (only_clash_providers) {
+        for (const char *name : {"add_emoji", "remove_emoji"})
+          addParameter(name, boolString(ext.provider_emoji_enabled), "ignored",
+                       "Clash provider emoji processing is controlled by emoji, "
+                       "not the independent switches.");
+      } else {
+        addSwitchParameter("add_emoji", ext.add_emoji, argAddEmoji);
+        addSwitchParameter("remove_emoji", ext.remove_emoji, argRemoveEmoji);
+      }
     }
     addSwitchParameter("append_type", ext.append_proxy_type, argAppendType);
     addSwitchParameter("tfo", ext.tfo.get(false), ext.tfo);

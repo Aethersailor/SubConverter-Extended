@@ -39,13 +39,17 @@ UA 先按 URI 组件百分号编码，再将组合后的来源字符串编码为
 
 人工验证应覆盖真实 Mihomo 的请求头、同 URL 不同 UA 的节点和缓存隔离、冷/热启动与 ETag、编码及错误边界，以及未设置 `ua:` 时的逐字节输出对照。日志和 explain 仅记录显式 UA 的来源与长度，不应回显其完整内容。
 
-## Provider Emoji 的开发验证
+## Emoji 总开关与 Provider Emoji 的开发验证
 
-Clash/ClashR 的 HTTP proxy-provider 仅在请求明确传入 `emoji=true` 时生成 Emoji 处理规则；`emoji=false`、空值或省略参数均不生成 Emoji 清理、添加规则。独立的 `add_emoji`、`remove_emoji` 参数以及外部配置和 `pref` 中的开关不能单独启用 Provider Emoji；规则内容仍沿用现有配置来源。
+后端偏好配置的 `emojis.enabled` 是内置 Emoji 添加和清理的总开关，支持 INI、TOML、YAML，缺省为 `false`。关闭或缺少该字段时，Provider、服务端解析、`list=true` 和混合输入均停止内置 Emoji 处理；请求中的 `emoji`、`add_emoji`、`remove_emoji`，以及外部配置和 `pref` 中的添加、清理开关均不能重新启用它。已有 Emoji 保留，正常 rename 规则继续执行；rename 本身包含的 Emoji 替换仍按规则执行。
+
+旧配置无需补字段即可正常加载，但升级后需显式设置 `emojis.enabled=true` 才会恢复原有 Emoji 处理。INI、TOML 在 `[emojis]` 节中设置 `enabled=true`，YAML 在 `emojis` 节下设置 `enabled: true`。配置重载时删除该字段会恢复关闭。`explain` 会将受总开关禁用的请求参数标记为忽略。
+
+总开关开启后，Clash/ClashR 的 HTTP proxy-provider 仅在请求明确传入 `emoji=true` 时生成 Emoji 处理规则；`emoji=false`、空值或省略参数均不生成 Emoji 清理、添加规则。独立的 `add_emoji`、`remove_emoji` 参数以及外部配置和 `pref` 中的开关不能单独启用 Provider Emoji；规则内容仍沿用现有配置来源。
 
 启用后保持现有原版兼容逻辑：清理名称开头原有范围内的 Emoji、执行 rename、添加首条匹配的 Emoji。不改为只清理国旗，不清理名称中间的 Emoji，也不增加前缀防重。已有的正则兼容限制和告警策略继续保留。
 
-服务端解析、`list=true` 和混合输入中的直接节点保持原有参数语义；其中 `emoji=false` 仍表示去旧、不添加。开发验证应分别覆盖 Provider 开关、请求与配置优先级、原有 rename、混合输入及传统输出，并确认 Provider 的订阅地址、缓存路径和其他字段不变。测试使用仓库外临时用例，不新增仓库测试或 CI 门禁。
+总开关开启后，服务端解析、`list=true` 和混合输入中的直接节点保持原有参数语义；其中 `emoji=false` 仍表示去旧、不添加，不能用它代替总开关关闭。开发验证应覆盖三种配置格式的开启、关闭、缺省及重载删除字段，检查请求与外部配置不能绕过关闭状态，并验证原有 rename、混合输入、传统输出和远程订阅模式。开启状态需与改动前的结果对照，确认 Provider 的订阅地址、缓存路径和其他字段不变。测试使用仓库外临时用例，不新增仓库测试或 CI 门禁。
 
 ## 敏感信息和安全问题
 

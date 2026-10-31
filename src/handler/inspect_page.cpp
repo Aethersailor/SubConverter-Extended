@@ -1247,6 +1247,7 @@ std::string page(Request &request, Response &response) {
                     "Request rename rules override configured rename rules.": "请求中的重命名规则会覆盖已配置规则。",
                     "Public requests cannot provide executable filter scripts.": "公开请求不能提供可执行过滤脚本。",
                     "Uploads are disabled in explain mode.": "explain 模式下上传会被禁用。",
+                    "Emoji addition and removal are disabled by emojis.enabled in the backend configuration.": "后端配置 emojis.enabled 已关闭，停止 Emoji 添加和清理。",
                     "Sets add_emoji and remove_emoji together.": "同时设置 add_emoji 和 remove_emoji。",
                     "Clash providers require explicit emoji=true; server-parsed nodes keep the original emoji behavior.": "Clash Provider 仅在请求明确传入 emoji=true 时处理 Emoji；服务端解析节点保持原有行为。",
                     "Clash provider emoji processing is controlled by emoji, not the independent switches.": "Clash Provider 的 Emoji 处理由 emoji 参数控制，不使用独立开关。",

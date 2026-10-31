@@ -240,6 +240,9 @@ header = "none"
 trusted_proxy_cidrs = []
 
 [emojis]
+# 是否启用后端内置 Emoji 添加和清理；缺省为 false，关闭时请求参数、外部配置和下方开关均不能启用处理。
+enabled = false
+# 升级后若需保留原有 Emoji 处理，请显式设为 true；正常重命名规则不受此开关影响。
 # 是否按 emoji 数组规则为节点名称添加 Emoji。
 add_emoji = false
 # 添加新 Emoji 前是否移除节点名称中已有的 Emoji；启用节点预处理时，Quantumult X 远程订阅会保留 Legacy 路径。
