@@ -3409,11 +3409,14 @@ LoonProxyParseResult parseLoonProxyLine(const std::vector<std::string> &configs,
                                             "fast-open", "tfo", "udp", "udp-relay"}))
             return LoonProxyParseResult::Invalid;
         LoonProxyValue method_value;
-        std::string transport, alter_id, path, host, over_tls;
+        std::string transport, path, host, over_tls;
+        const auto alter_id_option = options.find("alterid");
+        // An omitted alterId defaults to AEAD; an explicit empty value is invalid.
+        const std::string alter_id = alter_id_option == options.end()
+            ? "0" : alter_id_option->second.value;
         if (!parseLoonProxyValue(configs[3], method_value) || method_value.quoted ||
             method_value.value.empty() || !isXrayUuid(credential_value.value) ||
             !loonOption(options, "transport", transport) ||
-            !loonOption(options, "alterid", alter_id) ||
             !loonOption(options, "path", path) || !loonOption(options, "host", host) ||
             !loonOption(options, "over-tls", over_tls) ||
             (transport != "tcp" && transport != "ws" && transport != "http") ||
