@@ -1146,6 +1146,7 @@ void readYAMLConf(YAML::Node &node,
 
   if (node["emojis"].IsDefined()) {
     section = node["emojis"];
+    section["enabled"] >> global.emojiEnabled;
     section["add_emoji"] >> global.addEmoji;
     section["remove_old_emoji"] >> global.removeEmoji;
     if (section["rules"].IsSequence()) {
@@ -1477,8 +1478,9 @@ void readTOMLConf(toml::value &root,
 
   auto section_emojis = toml::find(root, "emojis");
 
-  find_if_exist(section_emojis, "add_emoji", global.addEmoji,
-                "remove_old_emoji", global.removeEmoji);
+  find_if_exist(section_emojis, "enabled", global.emojiEnabled,
+                "add_emoji", global.addEmoji, "remove_old_emoji",
+                global.removeEmoji);
 
   auto emojiconfs =
       toml::find_or<std::vector<toml::value>>(section_emojis, "emoji", {});
@@ -1677,6 +1679,7 @@ bool readConf() {
     global.resourceControlSource = "builtin-default";
     global.fallbackToDefaultExternalConfig = false;
     global.customOpenClashRulesSourceSwitch = false;
+    global.emojiEnabled = false;
     // A removed proxy_bypass setting must return to the upgrade-compatible
     // default on reload instead of retaining a previous custom policy.
     global.proxyBypass = kDefaultProxyBypass;
@@ -1925,6 +1928,7 @@ bool readConf() {
   ini.get_if_exist("quanx_device_id", global.quanXDevID);
 
   ini.enter_section("emojis");
+  ini.get_bool_if_exist("enabled", global.emojiEnabled);
   ini.get_bool_if_exist("add_emoji", global.addEmoji);
   ini.get_bool_if_exist("remove_old_emoji", global.removeEmoji);
   if (ini.item_prefix_exist("rule")) {
