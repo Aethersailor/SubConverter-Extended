@@ -53,7 +53,6 @@ int uploadGist(std::string name, std::string path, std::string content, bool wri
 
     if(!fileExist("gistconf.ini"))
     {
-        //std::cerr<<"gistconf.ini not found. Skipping...\n";
         writeLog(LOG_LEVEL_ERROR, "未找到 gistconf.ini，跳过。");
         return -1;
     }
@@ -61,7 +60,6 @@ int uploadGist(std::string name, std::string path, std::string content, bool wri
     ini.parse_file("gistconf.ini");
     if(ini.enter_section("common") != 0)
     {
-        //std::cerr<<"gistconf.ini has incorrect format. Skipping...\n";
         writeLog(LOG_LEVEL_ERROR, "gistconf.ini 格式不正确，跳过。");
         return -1;
     }
@@ -69,7 +67,6 @@ int uploadGist(std::string name, std::string path, std::string content, bool wri
     token = ini.get("token");
     if(!token.size())
     {
-        //std::cerr<<"No token is provided. Skipping...\n";
         writeLog(LOG_LEVEL_ERROR, "未提供 token，跳过。");
         return -1;
     }
@@ -86,13 +83,11 @@ int uploadGist(std::string name, std::string path, std::string content, bool wri
 
     if(!id.size())
     {
-        //std::cerr<<"No gist id is provided. Creating new gist...\n";
         writeLog(LOG_LEVEL_ERROR, "未提供 Gist ID，正在创建新 Gist...");
         const Settings &settings = effectiveSettings();
         retVal = webPost(gistApiUrl("/gists"), buildGistData(path, content), parseProxy(settings.proxyConfig, settings.proxyBypass), {{"Authorization", "token " + token}}, &retData);
         if(retVal != 201)
         {
-            //std::cerr<<"Create new Gist failed! Return data:\n"<<retData<<"\n";
             writeLog(LOG_LEVEL_ERROR,
                      "GIST_CREATE_FAILED status=" + std::to_string(retVal) +
                          " detail=" + summarizeSensitiveTextForLog(retData));
@@ -102,7 +97,6 @@ int uploadGist(std::string name, std::string path, std::string content, bool wri
     else
     {
         url = "https://gist.githubusercontent.com/" + username + "/" + id + "/raw/" + path;
-        //std::cerr<<"Gist id provided. Modifying Gist...\n";
         writeLog(LOG_LEVEL_INFO, "已提供 Gist ID，正在修改 Gist...");
         if(writeManageURL)
             content = "#!MANAGED-CONFIG " + url + "\n" + content;
@@ -110,7 +104,6 @@ int uploadGist(std::string name, std::string path, std::string content, bool wri
         retVal = webPatch(gistApiUrl("/gists/" + id), buildGistData(path, content), parseProxy(settings.proxyConfig, settings.proxyBypass), {{"Authorization", "token " + token}}, &retData);
         if(retVal != 200)
         {
-            //std::cerr<<"Modify gist failed! Return data:\n"<<retData<<"\n";
             writeLog(LOG_LEVEL_ERROR,
                      "GIST_UPDATE_FAILED status=" + std::to_string(retVal) +
                          " detail=" + summarizeSensitiveTextForLog(retData));

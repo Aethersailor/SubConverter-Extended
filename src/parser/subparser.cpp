@@ -1233,9 +1233,6 @@ void explodeVmessConf(std::string content, std::vector<Proxy> &nodes) {
             return;
         }
     } catch (std::exception &e) {
-        //writeLog(LOG_LEVEL_WARNING, "VMessConf parser throws an error. Leaving...");
-        //return;
-        //ignore
         throw;
     }
     //read all subscribe remark as group name
@@ -3886,10 +3883,6 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes) {
         tribool udp, tfo, scv, tls13, reuse;
         Proxy node;
 
-        /*
-        remarks = regReplace(x.second, proxystr, "$1");
-        configs = split(regReplace(x.second, proxystr, "$2"), ",");
-        */
         regGetMatch(x.second, proxystr, 3, 0, &remarks, &config);
         configs = splitWireGuardFields(config);
         if (configs.empty() || (configs.size() < 3 && configs[0] != "wireguard"))

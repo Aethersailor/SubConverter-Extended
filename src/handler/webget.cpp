@@ -55,14 +55,9 @@
 #endif // _stat
 #endif // _WIN32
 
-/*
-using guarded_mutex = std::lock_guard<std::mutex>;
-std::mutex cache_rw_lock;
-*/
 
 RWLock cache_rw_lock;
 
-//std::string user_agent_str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/74.0.3729.169 Safari/537.36";
 static auto user_agent_str = "clash.meta";
 
 bool outboundResolverMayUseThreads() noexcept
@@ -5681,7 +5676,6 @@ std::string webGet(const std::string &url, const ProxyPolicy &proxy,
 
 int webPost(const std::string &url, const std::string &data, const ProxyPolicy &proxy, const string_icase_map &request_headers, std::string *retData)
 {
-    //return curlPost(url, data, proxy, request_headers, retData);
     int return_code = 0;
     FetchArgument argument {HTTP_POST, url, proxy, &data, &request_headers, nullptr, 0, true};
     FetchResult fetch_res {&return_code, retData, nullptr, nullptr};
@@ -5690,7 +5684,6 @@ int webPost(const std::string &url, const std::string &data, const ProxyPolicy &
 
 int webPatch(const std::string &url, const std::string &data, const ProxyPolicy &proxy, const string_icase_map &request_headers, std::string *retData)
 {
-    //return curlPatch(url, data, proxy, request_headers, retData);
     int return_code = 0;
     FetchArgument argument {HTTP_PATCH, url, proxy, &data, &request_headers, nullptr, 0, true};
     FetchResult fetch_res {&return_code, retData, nullptr, nullptr};

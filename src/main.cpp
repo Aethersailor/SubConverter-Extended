@@ -39,7 +39,6 @@
 #include "utils/system.h"
 #include "version.h"
 
-// #include "vfs.h"
 
 WebServer webServer;
 static volatile std::sig_atomic_t pendingShutdownSignal = 0;
@@ -302,7 +301,6 @@ int main(int argc, char *argv[]) {
 #ifdef _WIN32
   WSADATA wsaData;
   if (WSAStartup(MAKEWORD(1, 1), &wsaData) != 0) {
-    // std::cerr<<"WSAStartup failed.\n";
     writeLog(LOG_LEVEL_FATAL, "WSAStartup 初始化失败。");
     return 1;
   }
@@ -344,7 +342,6 @@ int main(int argc, char *argv[]) {
   if (!commitRuntimeCoordinator())
     return 1;
   statistics::initialize();
-  // vfs::vfs_read("vfs.ini");
   if (!global.updateRulesetOnRequest)
     refreshRulesets(global.customRulesets, global.rulesetsContent);
   startResourceControlRuntime();

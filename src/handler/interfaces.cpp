@@ -9222,11 +9222,6 @@ std::string getProfile(RESPONSE_CALLBACK_ARGS) {
   }
   std::string profile_content;
   name = profiles[0];
-  /*if(vfs::vfs_exist(name))
-  {
-      profile_content = vfs::vfs_get(name);
-  }
-  else */
   if (fileExist(name)) {
     profile_content = fileGet(name, true);
   } else {
@@ -9236,12 +9231,10 @@ std::string getProfile(RESPONSE_CALLBACK_ARGS) {
            "Profile / 配置: " +
            name;
   }
-  // std::cerr<<"Trying to load profile '" + name + "'.\n";
   writeLog(LOG_LEVEL_INFO, "正在加载配置档：'" + name + "'。");
   INIReader ini;
   if (ini.parse(profile_content) != INIREADER_EXCEPTION_NONE &&
       !ini.section_exist("Profile")) {
-    // std::cerr<<"Load profile failed! Reason: "<<ini.get_last_error()<<"\n";
     const std::string parser_detail = ini.get_last_error();
     writeLog(LOG_LEVEL_ERROR, "PROFILE_CONFIG_PARSE_FAILED detail=" +
                     summarizeSensitiveTextForLog(parser_detail));
@@ -9249,12 +9242,10 @@ std::string getProfile(RESPONSE_CALLBACK_ARGS) {
     return "Invalid profile: failed to parse profile content.\n"
            "无效配置：profile 内容解析失败。";
   }
-  // std::cerr<<"Trying to parse profile '" + name + "'.\n";
   writeLog(LOG_LEVEL_INFO, "正在解析配置档：'" + name + "'。");
   string_multimap contents;
   ini.get_items("Profile", contents);
   if (contents.empty()) {
-    // std::cerr<<"Load profile failed! Reason: Empty Profile section\n";
     writeLog(LOG_LEVEL_ERROR, "加载配置档失败！原因：[Profile] 配置段为空。");
     *status_code = 500;
     return "Invalid profile: [Profile] section is empty.\n"
@@ -9351,11 +9342,9 @@ std::string subInfoToMessage(std::string subinfo) {
 }
 
 int simpleGenerator() {
-  // std::cerr<<"\nReading generator configuration...\n";
   writeLog(LOG_LEVEL_INFO, "正在读取生成器配置...");
   std::string config = fileGet("generate.ini"), path, profile, content;
   if (config.empty()) {
-    // std::cerr<<"Generator configuration not found or empty!\n";
     writeLog(LOG_LEVEL_ERROR, "未找到生成器配置，或配置为空！");
     return -1;
   }
@@ -9368,7 +9357,6 @@ int simpleGenerator() {
                     summarizeSensitiveTextForLog(ini.get_last_error()));
     return -2;
   }
-  // std::cerr<<"Read generator configuration completed.\n\n";
   writeLog(LOG_LEVEL_INFO, "生成器配置读取完成。\n");
 
   string_array sections = ini.get_section_names();
@@ -9383,7 +9371,6 @@ int simpleGenerator() {
       if (std::find(sections.cbegin(), sections.cend(), x) != sections.cend())
         new_targets.emplace_back(std::move(x));
       else {
-        // std::cerr<<"Artifact \""<<x<<"\" not found in generator settings!\n";
         writeLog(LOG_LEVEL_ERROR, "生成器设置中未找到生成项：\"" + x + "\"！");
         return -3;
       }
@@ -9391,7 +9378,6 @@ int simpleGenerator() {
     sections = new_targets;
     sections.shrink_to_fit();
   } else
-    // std::cerr<<"Generating all artifacts...\n";
     writeLog(LOG_LEVEL_INFO, "正在生成所有生成项...");
 
   string_multimap allItems;
@@ -9400,13 +9386,11 @@ int simpleGenerator() {
   for (std::string &x : sections) {
     Request request;
     Response response;
-    // std::cerr<<"Generating artifact '"<<x<<"'...\n";
     writeLog(LOG_LEVEL_INFO, "正在生成生成项：'" + x + "'。");
     ini.enter_section(x);
     if (ini.item_exist("path"))
       path = ini.get("path");
     else {
-      // std::cerr<<"Artifact '"<<x<<"' output path missing! Skipping...\n\n";
       writeLog(LOG_LEVEL_ERROR, "生成项 '" + x + "' 缺少输出路径，跳过。\n");
       continue;
     }
@@ -9490,11 +9474,9 @@ int simpleGenerator() {
     if (iter != response.headers.end())
       writeLog(LOG_LEVEL_INFO,
                "生成项 '" + x + "' 的用户信息：" + subInfoToMessage(iter->second));
-    // std::cerr<<"Artifact '"<<x<<"' generate SUCCESS!\n\n";
     writeLog(LOG_LEVEL_INFO, "生成项 '" + x + "' 生成成功！\n");
     eraseElements(response.headers);
   }
-  // std::cerr<<"All artifact generated. Exiting...\n";
   if (write_failed) {
     writeLog(LOG_LEVEL_ERROR, "部分生成项写入失败，正在以失败状态退出...");
     return -1;

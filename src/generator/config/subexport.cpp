@@ -7370,21 +7370,8 @@ void proxyToMellow(std::vector<Proxy> &nodes, INIReader &ini,
         filtered_nodelist = remarks_list;
     }
 
-    // don't process these for now
-    /*
-    proxy = vArray[1];
-    for(std::string &x : filtered_nodelist)
-        proxy += "," + x;
-    if(vArray[1] == "url-test" || vArray[1] == "fallback" || vArray[1] ==
-    "load-balance") proxy += ",url=" + url;
-    */
 
     proxy = x.Name + ", ";
-    /*
-    for(std::string &y : filtered_nodelist)
-        proxy += y + ":";
-    proxy = proxy.substr(0, proxy.size() - 1);
-    */
     proxy += join(filtered_nodelist, ":");
     proxy +=
         ", latency, interval=300, timeout=6"; // use hard-coded values for now
@@ -8199,11 +8186,7 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
   if (!ext.nodelist) {
     auto direct = buildObject(allocator, "type", "direct", "tag", "DIRECT");
     outbounds.PushBack(direct, allocator);
-    // 注释掉 REJECT 和 dns-out
-    // auto reject = buildObject(allocator, "type", "block", "tag", "REJECT");
-    // outbounds.PushBack(reject, allocator);
-    // auto dns = buildObject(allocator, "type", "dns", "tag", "dns-out");
-    // outbounds.PushBack(dns, allocator);
+    // REJECT 和 dns-out 不在这里生成出站。
   }
 
   for (Proxy &x : nodes) {
@@ -8243,22 +8226,7 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json,
       }
       break;
     }
-    //            case ProxyType::ShadowsocksR: {
-    //                addSingBoxCommonMembers(proxy, x, "shadowsocksr",
-    //                allocator); proxy.AddMember("method",
-    //                rapidjson::StringRef(x.EncryptMethod.c_str()), allocator);
-    //                proxy.AddMember("password",
-    //                rapidjson::StringRef(x.Password.c_str()), allocator);
-    //                proxy.AddMember("protocol",
-    //                rapidjson::StringRef(x.Protocol.c_str()), allocator);
-    //                proxy.AddMember("protocol_param",
-    //                rapidjson::StringRef(x.ProtocolParam.c_str()), allocator);
-    //                proxy.AddMember("obfs",
-    //                rapidjson::StringRef(x.OBFS.c_str()), allocator);
-    //                proxy.AddMember("obfs_param",
-    //                rapidjson::StringRef(x.OBFSParam.c_str()), allocator);
-    //                break;
-    //            }
+    // ShadowsocksR 不在当前 sing-box 出站生成范围内。
     case ProxyType::VMess: {
       if (!singBoxTransportSupported(x) ||
           (!x.PacketEncoding.empty() && x.PacketEncoding != "none" &&
