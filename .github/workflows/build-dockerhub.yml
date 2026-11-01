@@ -1006,7 +1006,7 @@ jobs:
 
           $(cat release-context.md)"
 
-          copilot -p "$PROMPT" --no-ask-user > release-notes.ai.md
+          copilot -p "$PROMPT" --no-ask-user --silent > release-notes.ai.md
           grep -q '[[:alnum:]]' release-notes.ai.md
 
       - name: Assemble Release Notes
