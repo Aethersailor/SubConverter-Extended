@@ -145,6 +145,10 @@ bool requiresExplicitStringStyle(const std::string &value) {
   if (resolved_literals.find(value) != resolved_literals.end())
     return true;
 
+  // yaml.v3 rejects leading-colon plain scalars inside flow collections.
+  if (!value.empty() && value.front() == ':')
+    return true;
+
   if (isYamlNumericScalar(value))
     return true;
 

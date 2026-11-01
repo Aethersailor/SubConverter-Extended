@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/netip"
 	"reflect"
 	"strconv"
 	"strings"
@@ -55,6 +56,7 @@ func parseSubscriptionWithMihomo(subscription string) ([]map[string]any, error) 
 			continue
 		}
 
+		normalizeProxyServer(mapping)
 		if err := validateProxyMapping(mapping); err != nil {
 			// URI subscriptions tolerate malformed individual links. Keep native
 			// provider YAML strict so configuration errors remain visible.
@@ -92,6 +94,17 @@ func decodeSubscriptionEnvelope(buf []byte) []byte {
 		return buf
 	}
 	return decoded
+}
+
+func normalizeProxyServer(mapping map[string]any) {
+	server, ok := mapping["server"].(string)
+	if !ok || !strings.HasPrefix(server, "[") || !strings.HasSuffix(server, "]") {
+		return
+	}
+	address := server[1 : len(server)-1]
+	if ip, err := netip.ParseAddr(address); err == nil && ip.Is6() {
+		mapping["server"] = address
+	}
 }
 
 func validateProxyMapping(mapping map[string]any) error {
