@@ -8,8 +8,8 @@
 #ifndef CPPHTTPLIB_HTTPLIB_H
 #define CPPHTTPLIB_HTTPLIB_H
 
-#define CPPHTTPLIB_VERSION "0.63.0"
-#define CPPHTTPLIB_VERSION_NUM "0x003f00"
+#define CPPHTTPLIB_VERSION "0.64.0"
+#define CPPHTTPLIB_VERSION_NUM "0x004000"
 
 #ifdef _WIN32
 #if defined(_WIN32_WINNT) && _WIN32_WINNT < 0x0A00
@@ -995,6 +995,30 @@ inline bool parse_url(const std::string &url, UrlComponents &uc) {
   return true;
 }
 
+// Removes "." and ".." segments from a path that starts with '/' (RFC 3986
+// section 5.2.4).
+inline std::string remove_dot_segments(const std::string &path) {
+  std::string out;
+  size_t i = 0;
+  while (i < path.size()) {
+    auto next = (std::min)(path.find('/', i + 1), path.size());
+    auto segment = path.substr(i + 1, next - i - 1);
+    auto is_last = next == path.size();
+    if (segment == "." || segment == "..") {
+      if (segment == "..") {
+        out.erase((std::min)(out.rfind('/'), out.size()));
+      }
+      if (is_last) { out += '/'; }
+    } else {
+      out += '/';
+      out += segment;
+    }
+    i = next;
+  }
+  if (out.empty()) { out = "/"; }
+  return out;
+}
+
 // Resolves a relative-path or query-only Location value against the path of
 // the request being redirected (RFC 3986 section 5.2). Absolute URIs and
 // references starting with '/' are returned unchanged.
@@ -1015,26 +1039,8 @@ inline std::string resolve_relative_location(const std::string &location,
 
   // Remove "." and ".." segments from the merged path.
   auto path_end = (std::min)(merged.find_first_of("?#"), merged.size());
-  std::string path;
-  size_t i = 0;
-  while (i < path_end) {
-    auto next = (std::min)(merged.find('/', i + 1), path_end);
-    auto segment = merged.substr(i + 1, next - i - 1);
-    auto is_last = next == path_end;
-    if (segment == "." || segment == "..") {
-      if (segment == "..") {
-        path.erase((std::min)(path.rfind('/'), path.size()));
-      }
-      if (is_last) { path += '/'; }
-    } else {
-      path += '/';
-      path += segment;
-    }
-    i = next;
-  }
-  if (path.empty()) { path = "/"; }
-
-  return path + merged.substr(path_end);
+  return remove_dot_segments(merged.substr(0, path_end)) +
+         merged.substr(path_end);
 }
 
 } // namespace detail
@@ -2936,7 +2942,12 @@ public:
   size_t is_socket_open() const;
   socket_t socket() const;
 
+  [[deprecated("Use set_direct_hostname_addr_map() instead.")]]
   void set_hostname_addr_map(std::map<std::string, std::string> addr_map);
+  void
+  set_direct_hostname_addr_map(std::map<std::string, std::string> addr_map);
+  void
+  set_tunnel_hostname_addr_map(std::map<std::string, std::string> addr_map);
 
   void set_default_headers(Headers headers);
 
@@ -3062,11 +3073,18 @@ protected:
   bool socket_should_be_closed_when_request_is_done_ = false;
   size_t socket_tls_settings_version_ = 0;
 
+  // Set by stop() while a request is in flight. The request's reads poll it,
+  // because shutting the socket down does not wake a read on Windows.
+  std::atomic<bool> stop_requested_{false};
+
   std::atomic<size_t> tls_settings_version_{0};
 
   // Hostname to connection target map. The value is an IP literal or another
   // hostname; only the connection target changes, never the identity.
   std::map<std::string, std::string> addr_map_;
+
+  // Hostname to CONNECT target map, used only through a proxy.
+  std::map<std::string, std::string> tunnel_addr_map_;
 
   // Default headers
   Headers default_headers_;
@@ -3357,7 +3375,12 @@ public:
   size_t is_socket_open() const;
   socket_t socket() const;
 
+  [[deprecated("Use set_direct_hostname_addr_map() instead.")]]
   void set_hostname_addr_map(std::map<std::string, std::string> addr_map);
+  void
+  set_direct_hostname_addr_map(std::map<std::string, std::string> addr_map);
+  void
+  set_tunnel_hostname_addr_map(std::map<std::string, std::string> addr_map);
 
   void set_default_headers(Headers headers);
 
@@ -3811,6 +3834,8 @@ std::string make_host_and_port_string(const std::string &host, int port,
 template <typename T>
 bool check_and_write_headers(Stream &strm, Headers &headers, T header_writer,
                              Error &error);
+
+bool write_data(Stream &strm, const char *d, size_t l);
 
 std::string trim_copy(const std::string &s);
 
@@ -4511,7 +4536,7 @@ public:
 
   // State accessors
   bool is_connected() const;
-  const std::string &last_event_id() const;
+  std::string last_event_id() const;
 
   // Blocking start - runs event loop with auto-reconnect
   void start();
@@ -4549,7 +4574,9 @@ private:
   // State
   std::atomic<bool> running_{false};
   std::atomic<bool> connected_{false};
+  // Written by the event loop, which start_async() runs on its own thread
   std::string last_event_id_;
+  mutable std::mutex last_event_id_mutex_;
 
   // Async support
   std::thread async_thread_;
@@ -4753,7 +4780,15 @@ public:
   set_connection_timeout(const std::chrono::duration<Rep, Period> &duration);
 
   void set_interface(const std::string &intf);
+  [[deprecated("Use set_direct_hostname_addr_map() instead.")]]
   void set_hostname_addr_map(std::map<std::string, std::string> addr_map);
+  void
+  set_direct_hostname_addr_map(std::map<std::string, std::string> addr_map);
+  void
+  set_tunnel_hostname_addr_map(std::map<std::string, std::string> addr_map);
+
+  void set_basic_auth(const std::string &username, const std::string &password);
+  void set_bearer_token_auth(const std::string &token);
 
   void set_proxy(const std::string &host, int port);
   void set_proxy_basic_auth(const std::string &username,
@@ -4824,6 +4859,13 @@ private:
   // Hostname to connection target map. The value is an IP literal or another
   // hostname; only the connection target changes, never the identity.
   std::map<std::string, std::string> addr_map_;
+
+  // Hostname to CONNECT target map, used only through a proxy.
+  std::map<std::string, std::string> tunnel_addr_map_;
+
+  std::string basic_auth_username_;
+  std::string basic_auth_password_;
+  std::string bearer_token_auth_token_;
 
   std::string proxy_host_;
   int proxy_port_ = -1;
@@ -5047,7 +5089,8 @@ inline SSEClient &SSEClient::set_headers(const Headers &headers) {
 
 inline bool SSEClient::is_connected() const { return connected_.load(); }
 
-inline const std::string &SSEClient::last_event_id() const {
+inline std::string SSEClient::last_event_id() const {
+  std::lock_guard<std::mutex> lock(last_event_id_mutex_);
   return last_event_id_;
 }
 
@@ -5222,7 +5265,10 @@ inline void SSEClient::run_event_loop() {
         if (event_complete) {
           // Update last_event_id for reconnection, even for an event that
           // has no data. An empty id clears it.
-          if (has_id) { last_event_id_ = current_msg.id; }
+          if (has_id) {
+            std::lock_guard<std::mutex> lock(last_event_id_mutex_);
+            last_event_id_ = current_msg.id;
+          }
 
           // An event without a data field is not dispatched
           if (has_data) { dispatch_event(current_msg); }
@@ -5359,6 +5405,8 @@ cert_t get_peer_cert(const_session_t session);
 // do not use them after free_session(), as with get_peer_cert().
 size_t get_peer_certs(const_session_t session, std::vector<cert_t> &certs);
 void free_cert(cert_t cert);
+// Matches the host against the subjectAltName entries only, never the Common
+// Name (RFC 9525).
 bool verify_hostname(cert_t cert, const char *hostname);
 uint64_t hostname_mismatch_code();
 long get_verify_result(const_session_t session);
@@ -5828,32 +5876,40 @@ inline bool write_websocket_frame(Stream &strm, ws::Opcode opcode,
   if (len < 126) {
     header[1] = static_cast<uint8_t>(len);
     if (mask) { header[1] |= 0x80; }
-    if (strm.write(reinterpret_cast<char *>(header), 2) < 0) { return false; }
+    if (!write_data(strm, reinterpret_cast<char *>(header), 2)) {
+      return false;
+    }
   } else if (len <= 0xFFFF) {
     header[1] = 126;
     if (mask) { header[1] |= 0x80; }
-    if (strm.write(reinterpret_cast<char *>(header), 2) < 0) { return false; }
+    if (!write_data(strm, reinterpret_cast<char *>(header), 2)) {
+      return false;
+    }
     uint8_t ext[2];
     ext[0] = static_cast<uint8_t>((len >> 8) & 0xFF);
     ext[1] = static_cast<uint8_t>(len & 0xFF);
-    if (strm.write(reinterpret_cast<char *>(ext), 2) < 0) { return false; }
+    if (!write_data(strm, reinterpret_cast<char *>(ext), 2)) { return false; }
   } else {
     header[1] = 127;
     if (mask) { header[1] |= 0x80; }
-    if (strm.write(reinterpret_cast<char *>(header), 2) < 0) { return false; }
+    if (!write_data(strm, reinterpret_cast<char *>(header), 2)) {
+      return false;
+    }
     uint8_t ext[8];
     for (int i = 7; i >= 0; i--) {
       ext[7 - i] =
           static_cast<uint8_t>((static_cast<uint64_t>(len) >> (i * 8)) & 0xFF);
     }
-    if (strm.write(reinterpret_cast<char *>(ext), 8) < 0) { return false; }
+    if (!write_data(strm, reinterpret_cast<char *>(ext), 8)) { return false; }
   }
 
   if (mask) {
     // Generate random mask key
     uint8_t mask_key[4];
     fill_random_bytes(mask_key, sizeof(mask_key));
-    if (strm.write(reinterpret_cast<char *>(mask_key), 4) < 0) { return false; }
+    if (!write_data(strm, reinterpret_cast<char *>(mask_key), 4)) {
+      return false;
+    }
 
     // Write masked payload in chunks
     const size_t chunk_size = 4096;
@@ -5864,11 +5920,11 @@ inline bool write_websocket_frame(Stream &strm, ws::Opcode opcode,
         buf[i] =
             data[offset + i] ^ static_cast<char>(mask_key[(offset + i) % 4]);
       }
-      if (strm.write(buf.data(), n) < 0) { return false; }
+      if (!write_data(strm, buf.data(), n)) { return false; }
     }
   } else {
     if (len > 0) {
-      if (strm.write(data, len) < 0) { return false; }
+      if (!write_data(strm, data, len)) { return false; }
     }
   }
 
@@ -6004,9 +6060,10 @@ inline bool is_valid_close_payload(const std::string &payload) {
 namespace detail {
 
 // A path a mount point serves: absolute, with no empty segment except a
-// trailing '/' and no segment ending in '.' or a space (which covers "." and
-// ".." and names Windows trims into another file's name), so the file served
-// is the one that req.path names to the handlers that ran before it.
+// trailing '/', no segment ending in '.' or a space (which covers "." and
+// ".." and names Windows trims into another file's name) and, on Windows, no
+// ':' (which names an NTFS stream, so "a.txt::$DATA" is a.txt), so the file
+// served is the one that req.path names to the handlers that ran before it.
 inline bool is_valid_path(const std::string &path) {
   if (path.empty() || path[0] != '/') { return false; }
 
@@ -6014,6 +6071,9 @@ inline bool is_valid_path(const std::string &path) {
   for (auto i = beg; i <= path.size(); i++) {
     if (i < path.size() && path[i] != '/') {
       if (path[i] == '\0' || path[i] == '\\') { return false; }
+#ifdef _WIN32
+      if (path[i] == ':') { return false; }
+#endif
       continue;
     }
     auto len = i - beg;
@@ -6799,10 +6859,14 @@ select_read_interruptible(socket_t sock, time_t sec, time_t usec,
   while (!interrupted()) {
     auto left = std::chrono::duration_cast<std::chrono::microseconds>(
         deadline - std::chrono::steady_clock::now());
-    auto wait =
-        (std::max)((std::min)(left, slice), std::chrono::microseconds(0));
-    auto ret = select_impl(sock, POLLIN, 0, static_cast<time_t>(wait.count()));
-    if (ret != 0 || wait < slice) { return ret; }
+    auto last = left < slice;
+    // poll() takes whole milliseconds, so round the last wait up to keep it
+    // from ending before the deadline.
+    auto wait_usec = last ? (std::max)((left.count() + 999) / 1000 * 1000,
+                                       static_cast<decltype(left.count())>(0))
+                          : slice.count();
+    auto ret = select_impl(sock, POLLIN, 0, static_cast<time_t>(wait_usec));
+    if (ret != 0 || last) { return ret; }
   }
   return 0;
 }
@@ -11962,8 +12026,13 @@ inline std::string decode_query_component(const std::string &component,
 }
 
 inline std::string sanitize_filename(const std::string &filename) {
-  // Extract basename: find the last path separator (/ or \)
+  // Extract basename: find the last path separator (/ or \) and, on Windows,
+  // ':', which ends a drive prefix ("C:..") or names an NTFS stream ("a:b")
+#ifdef _WIN32
+  auto pos = filename.find_last_of("/\\:");
+#else
   auto pos = filename.find_last_of("/\\");
+#endif
   auto result =
       (pos != std::string::npos) ? filename.substr(pos + 1) : filename;
 
@@ -13037,6 +13106,17 @@ inline std::string make_host_and_port_string(const std::string &host, int port,
 inline std::string
 make_host_and_port_string_always_port(const std::string &host, int port) {
   return prepare_host_string(host) + ":" + std::to_string(port);
+}
+
+// Request target of a CONNECT for `host`, with `addr_map` applied.
+inline std::string
+make_connect_request_target(const std::map<std::string, std::string> &addr_map,
+                            const std::string &host, int port) {
+  std::string connect_host;
+  std::string ip;
+  apply_addr_map(addr_map, host, connect_host, ip);
+  return make_host_and_port_string_always_port(ip.empty() ? connect_host : ip,
+                                               port);
 }
 
 // Value for the Host header a client sends when the caller supplied none.
@@ -15768,6 +15848,9 @@ inline bool ClientImpl::send_(Request &req, Response &res, Error &error) {
     // socket.
     socket_should_be_closed_when_request_is_done_ = false;
 
+    // A redirect or a retry sent inside a request keeps its stop()
+    if (socket_requests_in_flight_ == 0) { stop_requested_ = false; }
+
     if (!socket_reusable()) {
       if (!ensure_socket_connection(socket_, error)) { return false; }
 
@@ -15815,6 +15898,7 @@ inline bool ClientImpl::send_(Request &req, Response &res, Error &error) {
   });
 
   ret = process_socket(socket_, req.start_time_, [&](Stream &strm) {
+    strm.set_read_interrupt([this] { return stop_requested_.load(); });
     return handle_request(strm, req, res, close_connection, error);
   });
 
@@ -16004,7 +16088,7 @@ inline ClientImpl::StreamHandle ClientImpl::open_stream_(Request &req) {
   }
 
   if (!req.body.empty()) {
-    if (strm.write(req.body.data(), req.body.size()) < 0) {
+    if (!detail::write_data(strm, req.body.data(), req.body.size())) {
       handle.error = Error::Write;
       handle.response.reset();
       return handle;
@@ -16055,7 +16139,7 @@ inline ClientImpl::StreamHandle ClientImpl::open_stream_(Request &req) {
 
   auto content_encoding = detail::get_combined_header_value(
       handle.response->headers, "Content-Encoding");
-  if (!content_encoding.empty()) {
+  if (decompress_ && !content_encoding.empty()) {
     // Same policy as prepare_content_receiver(): reject a coding we know about
     // but were not built with, pass an unrecognized one through as-is.
     handle.decompressor_ = detail::create_decompressor(content_encoding);
@@ -16250,10 +16334,18 @@ inline bool ChunkedDecoder::parse_trailers_into(Headers &dest,
   return parse_trailers(lr, dest, src_headers);
 }
 
-// A 3xx without a Location, such as a 304, is a final response
+// Only 301, 302, 303, 307 and 308 redirect. Any other 3xx, such as a 304, or
+// a redirect without a Location, is a final response.
 inline bool is_redirect(const Response &res) {
-  return 300 < res.status && res.status < 400 &&
-         !res.get_header_value("Location").empty();
+  switch (res.status) {
+  case StatusCode::MovedPermanently_301:
+  case StatusCode::Found_302:
+  case StatusCode::SeeOther_303:
+  case StatusCode::TemporaryRedirect_307:
+  case StatusCode::PermanentRedirect_308:
+    return !res.get_header_value("Location").empty();
+  default: return false;
+  }
 }
 
 } // namespace detail
@@ -16315,9 +16407,10 @@ inline bool ClientImpl::handle_request(Stream &strm, Request &req,
     // to call it from a different thread since it's a thread-safety issue
     // to do these things to the socket if another thread is using the socket.
     std::lock_guard<std::mutex> guard(socket_mutex_);
-    // Also when the request asked for it (e.g. a body that was never sent),
-    // so that a redirect or an auth retry below does not reuse the socket.
-    if (socket_should_be_closed_when_request_is_done_ ||
+    // Also when the request asked for it (e.g. a body that was never sent,
+    // or "Connection: close"), so that a redirect or an auth retry below does
+    // not reuse the socket.
+    if (socket_should_be_closed_when_request_is_done_ || close_connection ||
         detail::has_header_token(res.headers, "Connection", "close") ||
         (res.version == "HTTP/1.0" && res.reason != "Connection established")) {
       disconnect(/*gracefully=*/true);
@@ -16411,6 +16504,10 @@ inline bool ClientImpl::redirect(Request &req, Response &res, Error &error) {
   if (next_scheme.empty()) { next_scheme = scheme; }
   if (next_host.empty()) { next_host = host_; }
   if (next_path.empty()) { next_path = "/"; }
+  // An absolute or absolute-path location can have dot segments too.
+  if (next_path[0] == '/') {
+    next_path = detail::remove_dot_segments(next_path);
+  }
 
   auto path = std::move(next_path) + next_query;
 
@@ -16565,6 +16662,7 @@ inline void ClientImpl::setup_redirect_client(ClientType &client) {
 
   // Copy network and socket settings
   client.addr_map_ = addr_map_;
+  client.tunnel_addr_map_ = tunnel_addr_map_;
   client.set_address_family(address_family_);
   client.set_tcp_nodelay(tcp_nodelay_);
   client.set_ipv6_v6only(ipv6_v6only_);
@@ -17062,8 +17160,7 @@ inline bool ClientImpl::process_request(Stream &strm, Request &req,
       }
     }
 
-    auto redirect = follow_location_ && detail::is_redirect(res) &&
-                    res.status != StatusCode::NotModified_304;
+    auto redirect = follow_location_ && detail::is_redirect(res);
 
     if (req.response_handler && !redirect) {
       if (!req.response_handler(res)) {
@@ -18020,6 +18117,9 @@ inline void ClientImpl::stop() {
   // are not thread-safe.
   if (socket_requests_in_flight_ > 0) {
     shutdown_socket(socket_);
+    // shutdown() does not wake a read waiting in WSAPoll on Windows, so the
+    // request's reads also give up once they see this flag.
+    stop_requested_ = true;
 
     // Aside from that, we set a flag for the socket to be closed when we're
     // done.
@@ -18078,7 +18178,17 @@ inline void ClientImpl::set_path_encode(bool on) { path_encode_ = on; }
 
 inline void
 ClientImpl::set_hostname_addr_map(std::map<std::string, std::string> addr_map) {
+  set_direct_hostname_addr_map(std::move(addr_map));
+}
+
+inline void ClientImpl::set_direct_hostname_addr_map(
+    std::map<std::string, std::string> addr_map) {
   addr_map_ = std::move(addr_map);
+}
+
+inline void ClientImpl::set_tunnel_hostname_addr_map(
+    std::map<std::string, std::string> addr_map) {
+  tunnel_addr_map_ = std::move(addr_map);
 }
 
 inline void ClientImpl::set_default_headers(Headers headers) {
@@ -18789,7 +18899,17 @@ inline socket_t Client::socket() const { return cli_->socket(); }
 
 inline void
 Client::set_hostname_addr_map(std::map<std::string, std::string> addr_map) {
-  cli_->set_hostname_addr_map(std::move(addr_map));
+  cli_->set_direct_hostname_addr_map(std::move(addr_map));
+}
+
+inline void Client::set_direct_hostname_addr_map(
+    std::map<std::string, std::string> addr_map) {
+  cli_->set_direct_hostname_addr_map(std::move(addr_map));
+}
+
+inline void Client::set_tunnel_hostname_addr_map(
+    std::map<std::string, std::string> addr_map) {
+  cli_->set_tunnel_hostname_addr_map(std::move(addr_map));
 }
 
 inline void Client::set_default_headers(Headers headers) {
@@ -19157,6 +19277,10 @@ inline bool SSLClient::connect_with_proxy(
     std::chrono::time_point<std::chrono::steady_clock> start_time,
     Response &res, bool &success, Error &error) {
   success = true;
+  auto connect_target =
+      detail::make_connect_request_target(tunnel_addr_map_, host_, port_);
+  auto retargeted = connect_target !=
+                    detail::make_host_and_port_string_always_port(host_, port_);
   Response proxy_res;
   if (!detail::process_client_socket(
           socket.sock, read_timeout_sec_, read_timeout_usec_,
@@ -19164,8 +19288,8 @@ inline bool SSLClient::connect_with_proxy(
           start_time, [&](Stream &strm) {
             Request req2;
             req2.method = "CONNECT";
-            req2.path =
-                detail::make_host_and_port_string_always_port(host_, port_);
+            req2.path = connect_target;
+            if (retargeted) { req2.set_header("Host", connect_target); }
             if (max_timeout_msec_ > 0) {
               req2.start_time_ = std::chrono::steady_clock::now();
             }
@@ -19204,8 +19328,8 @@ inline bool SSLClient::connect_with_proxy(
                 start_time, [&](Stream &strm) {
                   Request req3;
                   req3.method = "CONNECT";
-                  req3.path = detail::make_host_and_port_string_always_port(
-                      host_, port_);
+                  req3.path = connect_target;
+                  if (retargeted) { req3.set_header("Host", connect_target); }
                   req3.headers.insert(detail::make_digest_authentication_header(
                       req3, make_request_target(req3), auth, 1,
                       detail::random_string(10), proxy_digest_auth_username_,
@@ -19619,15 +19743,75 @@ inline bool enumerate_windows_system_certs(Callback cb) {
 #endif
 
 #ifdef CPPHTTPLIB_USE_CERTS_FROM_MACOSX_KEYCHAIN
-// Enumerate macOS Keychain certificates and call callback with DER data
+// The trust a certificate's Trust Settings give it for SSL server
+// verification (SecTrustSettings.h). An empty array trusts it as a root.
+// Otherwise the first usage-constraints dictionary that applies decides: one
+// naming a policy other than SSL, a host name or an application does not
+// apply, and a result left out means TrustRoot. Keychain Access writes "Never
+// Trust" as kSecTrustSettingsResultDeny.
+inline SecTrustSettingsResult
+macos_ssl_trust_settings_result(CFArrayRef trust_settings) {
+  auto count = CFArrayGetCount(trust_settings);
+  if (count == 0) { return kSecTrustSettingsResultTrustRoot; }
+
+  for (CFIndex i = 0; i < count; i++) {
+    auto value = CFArrayGetValueAtIndex(trust_settings, i);
+    if (!value || CFGetTypeID(value) != CFDictionaryGetTypeID()) { continue; }
+    auto constraint = static_cast<CFDictionaryRef>(value);
+
+    auto policy_value =
+        CFDictionaryGetValue(constraint, kSecTrustSettingsPolicy);
+    if (policy_value) {
+      auto policy = static_cast<SecPolicyRef>(const_cast<void *>(policy_value));
+      auto is_ssl = false;
+      if (auto properties = SecPolicyCopyProperties(policy)) {
+        auto oid = CFDictionaryGetValue(properties, kSecPolicyOid);
+        is_ssl = oid && CFEqual(oid, kSecPolicyAppleSSL);
+        CFRelease(properties);
+      }
+      if (!is_ssl) { continue; }
+    }
+
+    if (CFDictionaryContainsKey(constraint, kSecTrustSettingsPolicyString) ||
+        CFDictionaryContainsKey(constraint, kSecTrustSettingsApplication)) {
+      continue;
+    }
+
+    auto result = kSecTrustSettingsResultTrustRoot;
+    auto number = static_cast<CFNumberRef>(
+        CFDictionaryGetValue(constraint, kSecTrustSettingsResult));
+    if (number) {
+      SInt32 number_value = 0;
+      if (!CFNumberGetValue(number, kCFNumberSInt32Type, &number_value)) {
+        continue;
+      }
+      result = static_cast<SecTrustSettingsResult>(number_value);
+    }
+    if (result == kSecTrustSettingsResultTrustRoot ||
+        result == kSecTrustSettingsResultTrustAsRoot ||
+        result == kSecTrustSettingsResultDeny) {
+      return result;
+    }
+  }
+
+  return kSecTrustSettingsResultUnspecified;
+}
+
+// Enumerate the macOS Keychain certificates trusted for SSL and call callback
+// with DER data. A certificate with Trust Settings is not trusted just by
+// having them: the settings say whether it is, and a per-user setting
+// overrides the admin domain's, which overrides the system domain's (whose
+// roots are all trusted). So a system root the user set to "Never Trust" is
+// left out, as is one trusted only for S/MIME or code signing.
 template <typename Callback>
 inline bool enumerate_macos_keychain_certs(Callback cb) {
-  bool loaded = false;
   const SecTrustSettingsDomain domains[] = {
-      kSecTrustSettingsDomainSystem,
-      kSecTrustSettingsDomainAdmin,
       kSecTrustSettingsDomainUser,
+      kSecTrustSettingsDomainAdmin,
+      kSecTrustSettingsDomainSystem,
   };
+  std::set<std::string> decided;
+  std::vector<std::string> trusted;
   for (auto domain : domains) {
     CFArrayRef certs = nullptr;
     OSStatus status = SecTrustSettingsCopyCertificates(domain, &certs);
@@ -19640,15 +19824,42 @@ inline bool enumerate_macos_keychain_certs(Callback cb) {
       SecCertificateRef cert =
           (SecCertificateRef)CFArrayGetValueAtIndex(certs, i);
       CFDataRef data = SecCertificateCopyData(cert);
-      if (data) {
-        if (cb(CFDataGetBytePtr(data),
-               static_cast<size_t>(CFDataGetLength(data)))) {
-          loaded = true;
+      if (!data) { continue; }
+      std::string der(reinterpret_cast<const char *>(CFDataGetBytePtr(data)),
+                      static_cast<size_t>(CFDataGetLength(data)));
+      CFRelease(data);
+
+      // Decided by a domain that overrides this one
+      if (decided.find(der) != decided.end()) { continue; }
+
+      auto result = kSecTrustSettingsResultTrustRoot;
+      if (domain != kSecTrustSettingsDomainSystem) {
+        result = kSecTrustSettingsResultUnspecified;
+        CFArrayRef trust_settings = nullptr;
+        if (SecTrustSettingsCopyTrustSettings(cert, domain, &trust_settings) ==
+                errSecSuccess &&
+            trust_settings) {
+          result = macos_ssl_trust_settings_result(trust_settings);
         }
-        CFRelease(data);
+        if (trust_settings) CFRelease(trust_settings);
+      }
+      // Neither trusted nor distrusted here; a domain below may decide
+      if (result == kSecTrustSettingsResultUnspecified) { continue; }
+
+      decided.insert(der);
+      if (result == kSecTrustSettingsResultTrustRoot ||
+          result == kSecTrustSettingsResultTrustAsRoot) {
+        trusted.push_back(std::move(der));
       }
     }
     CFRelease(certs);
+  }
+
+  bool loaded = false;
+  for (const auto &der : trusted) {
+    if (cb(reinterpret_cast<const unsigned char *>(der.data()), der.size())) {
+      loaded = true;
+    }
   }
   return loaded;
 }
@@ -20083,36 +20294,14 @@ inline bool load_system_certs(ctx_t ctx) {
   auto store = SSL_CTX_get_cert_store(ssl_ctx);
   if (!store) return false;
 
-  bool loaded_any = false;
-  const SecTrustSettingsDomain domains[] = {
-      kSecTrustSettingsDomainSystem,
-      kSecTrustSettingsDomainAdmin,
-      kSecTrustSettingsDomainUser,
-  };
-  for (auto domain : domains) {
-    CFArrayRef certs = nullptr;
-    if (SecTrustSettingsCopyCertificates(domain, &certs) != errSecSuccess ||
-        !certs) {
-      if (certs) CFRelease(certs);
-      continue;
-    }
-    auto count = CFArrayGetCount(certs);
-    for (CFIndex i = 0; i < count; i++) {
-      auto cert = reinterpret_cast<SecCertificateRef>(
-          const_cast<void *>(CFArrayGetValueAtIndex(certs, i)));
-      CFDataRef der = SecCertificateCopyData(cert);
-      if (der) {
-        const unsigned char *data = CFDataGetBytePtr(der);
-        auto x509 = d2i_X509(nullptr, &data, CFDataGetLength(der));
-        if (x509) {
-          if (X509_STORE_add_cert(store, x509) == 1) { loaded_any = true; }
-          X509_free(x509);
-        }
-        CFRelease(der);
-      }
-    }
-    CFRelease(certs);
-  }
+  auto loaded_any = impl::enumerate_macos_keychain_certs(
+      [&](const unsigned char *data, size_t len) {
+        auto x509 = d2i_X509(nullptr, &data, static_cast<long>(len));
+        if (!x509) { return false; }
+        auto added = X509_STORE_add_cert(store, x509) == 1;
+        X509_free(x509);
+        return added;
+      });
   return loaded_any || SSL_CTX_set_default_verify_paths(ssl_ctx) == 1;
 #else
   return SSL_CTX_set_default_verify_paths(ssl_ctx) == 1;
@@ -20226,10 +20415,12 @@ inline bool set_sni(session_t session, const char *hostname,
   auto ssl = static_cast<SSL *>(session);
 
   // The handshake's chain verification then checks the name as well
-  if (verify_hostname &&
-      X509_VERIFY_PARAM_set1_host(SSL_get0_param(ssl), hostname,
-                                  strlen(hostname)) != 1) {
-    return false;
+  if (verify_hostname) {
+    auto param = SSL_get0_param(ssl);
+    X509_VERIFY_PARAM_set_hostflags(param, X509_CHECK_FLAG_NEVER_CHECK_SUBJECT);
+    if (X509_VERIFY_PARAM_set1_host(param, hostname, strlen(hostname)) != 1) {
+      return false;
+    }
   }
 
 #if defined(OPENSSL_IS_BORINGSSL)
@@ -20478,7 +20669,8 @@ inline bool verify_hostname(cert_t cert, const char *hostname) {
   if (detail::is_ip_address(hostname)) {
     return X509_check_ip_asc(x509, hostname, 0) == 1;
   }
-  return X509_check_host(x509, hostname, strlen(hostname), 0, nullptr) == 1;
+  return X509_check_host(x509, hostname, strlen(hostname),
+                         X509_CHECK_FLAG_NEVER_CHECK_SUBJECT, nullptr) == 1;
 }
 
 inline uint64_t hostname_mismatch_code() {
@@ -20969,6 +21161,11 @@ inline ErrorCode map_mbedtls_error(int ret, int &out_errno,
     out_errno = errno;
     return ErrorCode::SyscallError;
   }
+  if (ret == MBEDTLS_ERR_SSL_CONN_EOF) {
+    // EOF without close_notify
+    out_errno = 0;
+    return ErrorCode::SyscallError;
+  }
   if (ret == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED) {
     // Unlike OpenSSL/wolfSSL, Mbed TLS folds the CN/SAN identity check into
     // the handshake's chain verification (see set_sni()); a mismatch there
@@ -21056,7 +21253,7 @@ inline int mbedtls_net_recv_cb(void *ctx, unsigned char *buf, size_t len) {
     return MBEDTLS_ERR_NET_RECV_FAILED;
   }
 #endif
-  if (ret == 0) { return MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY; }
+  // EOF is MBEDTLS_ERR_SSL_CONN_EOF; only a close_notify is a clean end
   return static_cast<int>(ret);
 }
 
@@ -21712,10 +21909,8 @@ inline ssize_t read(session_t session, void *buf, size_t len, TlsError &err) {
     return static_cast<ssize_t>(ret);
   }
 
-  if (ret == 0) {
-    err.code = ErrorCode::PeerClosed;
-    return 0;
-  }
+  // 0 means EOF without close_notify, which is an error as on OpenSSL
+  if (ret == 0) { ret = MBEDTLS_ERR_SSL_CONN_EOF; }
 
   err.code = impl::map_mbedtls_error(ret, err.sys_errno, 0);
   err.backend_code = static_cast<uint64_t>(-ret);
@@ -21864,7 +22059,6 @@ inline bool verify_hostname(cert_t cert, const char *hostname) {
 
   // Check Subject Alternative Names (SAN). Mbed TLS keeps the GeneralName type
   // in buf.tag and the raw value in buf.p / buf.len.
-  auto has_dns_san = false;
   for (auto san = &mcert->subject_alt_names; san; san = san->next) {
     if (!san->buf.p || san->buf.len == 0) { continue; }
     const unsigned char *p = san->buf.p;
@@ -21879,21 +22073,8 @@ inline bool verify_hostname(cert_t cert, const char *hostname) {
         return true;
       }
     } else if (san_type == MBEDTLS_X509_SAN_DNS_NAME) {
-      has_dns_san = true;
       std::string san_name(reinterpret_cast<const char *>(p), len);
       if (detail::match_hostname(san_name, host_str)) { return true; }
-    }
-  }
-
-  // Fallback: the Common Names (CN) in the subject, as X509_check_host does it:
-  // never for an IP host, which only an iPAddress SAN names, and never next to
-  // a DNS SAN (RFC 6125 6.4.4).
-  if (is_ip || has_dns_san) { return false; }
-  for (auto name = &mcert->subject; name; name = name->next) {
-    if (MBEDTLS_OID_CMP(MBEDTLS_OID_AT_CN, &name->oid) == 0) {
-      std::string cn(reinterpret_cast<const char *>(name->val.p),
-                     name->val.len);
-      if (detail::match_hostname(cn, host_str)) { return true; }
     }
   }
 
@@ -22336,6 +22517,8 @@ inline ErrorCode map_wolfssl_error(WOLFSSL *ssl, int ssl_error,
   case SSL_ERROR_WANT_WRITE: return ErrorCode::WantWrite;
   case SSL_ERROR_ZERO_RETURN: return ErrorCode::PeerClosed;
   case SSL_ERROR_SYSCALL: out_errno = errno; return ErrorCode::SyscallError;
+  // EOF without close_notify
+  case SOCKET_PEER_CLOSED_E: out_errno = 0; return ErrorCode::SyscallError;
   default:
     if (ssl) {
       // wolfSSL stores the low-level error code as a negative value.
@@ -22906,13 +23089,10 @@ inline ssize_t read(session_t session, void *buf, size_t len, TlsError &err) {
     return static_cast<ssize_t>(ret);
   }
 
-  if (ret == 0) {
-    err.code = ErrorCode::PeerClosed;
-    return 0;
-  }
-
+  // 0 is also returned for EOF without close_notify; get_error tells them apart
   int ssl_error = wolfSSL_get_error(wsession->ssl, ret);
   err.code = impl::map_wolfssl_error(wsession->ssl, ssl_error, err.sys_errno);
+  if (err.code == ErrorCode::PeerClosed) { return 0; }
   err.backend_code = static_cast<uint64_t>(ssl_error);
   impl::wolfssl_last_error() = err.backend_code;
   return -1;
@@ -23044,7 +23224,6 @@ inline bool verify_hostname(cert_t cert, const char *hostname) {
   auto is_ip = ip_len > 0;
 
   // Check Subject Alternative Names
-  auto has_dns_san = false;
   auto *san_names = static_cast<WOLF_STACK_OF(WOLFSSL_GENERAL_NAME) *>(
       wolfSSL_X509_get_ext_d2i(x509, NID_subject_alt_name, nullptr, nullptr));
 
@@ -23057,7 +23236,6 @@ inline bool verify_hostname(cert_t cert, const char *hostname) {
 
       if (!is_ip && names->type == WOLFSSL_GEN_DNS) {
         // DNS name
-        has_dns_san = true;
         unsigned char *dns_name = nullptr;
         int dns_len = wolfSSL_ASN1_STRING_to_UTF8(&dns_name, names->d.dNSName);
         if (dns_name && dns_len > 0) {
@@ -23084,12 +23262,7 @@ inline bool verify_hostname(cert_t cert, const char *hostname) {
     wolfSSL_sk_free(san_names);
   }
 
-  // Fallback: the Common Name (CN) in the subject, as X509_check_host does it:
-  // never for an IP host, which only an iPAddress SAN names, and never next to
-  // a DNS SAN (RFC 6125 6.4.4).
-  if (is_ip || has_dns_san) { return false; }
-  auto cn = get_cert_subject_cn(cert);
-  return !cn.empty() && detail::match_hostname(cn, host_str);
+  return false;
 }
 
 inline uint64_t hostname_mismatch_code() {
@@ -23876,6 +24049,9 @@ inline void WebSocketClient::prepare_default_headers(Request &req) {
   }
 
   detail::add_default_user_agent_header(req);
+  detail::add_authorization_header(req, basic_auth_username_,
+                                   basic_auth_password_,
+                                   bearer_token_auth_token_, false);
 }
 
 inline Result WebSocketClient::connect() {
@@ -24001,7 +24177,17 @@ inline void WebSocketClient::set_interface(const std::string &intf) {
 
 inline void WebSocketClient::set_hostname_addr_map(
     std::map<std::string, std::string> addr_map) {
+  set_direct_hostname_addr_map(std::move(addr_map));
+}
+
+inline void WebSocketClient::set_direct_hostname_addr_map(
+    std::map<std::string, std::string> addr_map) {
   addr_map_ = std::move(addr_map);
+}
+
+inline void WebSocketClient::set_tunnel_hostname_addr_map(
+    std::map<std::string, std::string> addr_map) {
+  tunnel_addr_map_ = std::move(addr_map);
 }
 
 inline bool WebSocketClient::is_proxy_enabled() const {
@@ -24053,7 +24239,8 @@ inline bool WebSocketClient::connect_with_proxy(Response &proxy_res,
                                                 Error &error) {
   Request req;
   req.method = "CONNECT";
-  req.path = detail::make_host_and_port_string_always_port(host_, port_);
+  req.path =
+      detail::make_connect_request_target(tunnel_addr_map_, host_, port_);
   req.headers.emplace("Host", req.path);
   detail::add_default_user_agent_header(req);
   detail::add_authorization_header(req, proxy_basic_auth_username_,
@@ -24085,6 +24272,16 @@ inline bool WebSocketClient::connect_with_proxy(Response &proxy_res,
     return false;
   }
   return true;
+}
+
+inline void WebSocketClient::set_basic_auth(const std::string &username,
+                                            const std::string &password) {
+  basic_auth_username_ = username;
+  basic_auth_password_ = password;
+}
+
+inline void WebSocketClient::set_bearer_token_auth(const std::string &token) {
+  bearer_token_auth_token_ = token;
 }
 
 inline void WebSocketClient::set_proxy(const std::string &host, int port) {
