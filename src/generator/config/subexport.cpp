@@ -6302,13 +6302,11 @@ void proxyToQuan(std::vector<Proxy> &nodes, INIReader &ini,
                 &pluginopts = x.PluginOption, &username = x.Username;
     std::string port = std::to_string(x.Port);
     bool &tlssecure = x.TLSSecure;
-    tribool scv;
+    tribool scv = ext.skip_cert_verify;
+    scv.define(x.AllowInsecure);
 
     switch (x.Type) {
     case ProxyType::VMess:
-      scv = ext.skip_cert_verify;
-      scv.define(x.AllowInsecure);
-
       if (method == "auto")
         method = "chacha20-ietf-poly1305";
       proxyStr = x.Remark + " = vmess, " + hostname + ", " + port + ", " +
