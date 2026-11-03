@@ -420,16 +420,6 @@ bool normalizeStashRule(std::string rule, const std::string &group,
             return false;
     }
 
-    if(type == "GEOIP")
-    {
-        const std::string &country = fields[1];
-        if(country.size() != 2 ||
-           !std::all_of(country.begin(), country.end(), [](unsigned char ch) {
-               return std::isalpha(ch) != 0;
-           }))
-            return false;
-    }
-
     output = terminal_rule ? "MATCH," + group
                            : type + "," + fields[1] + "," + group;
     if(no_resolve)
