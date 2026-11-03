@@ -325,7 +325,10 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
     linkType = ConfType::Local;
 
   switch (linkType) {
+  case ConfType::Local:
   case ConfType::SUB: {
+    const bool local_source = linkType == ConfType::Local;
+    const std::string source_branch = local_source ? "local" : "sub";
     // Check for multiple links separated by pipe '|'
     if (link.find('|') != std::string::npos) {
       std::vector<std::string> links = split(link, "|");
@@ -346,8 +349,18 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
     bool isSubscription = false; // 订阅链接标志
     bool isNodeLink = false;     // 节点链接标志
 
+    if (local_source) {
+      // Local insert sources are operator-controlled; request URLs stay denied
+      // without enabling the separate script execution permission.
+      if (parse_set.fetch_context != FetchContext::TrustedConfig) {
+        writeLog(LOG_LEVEL_WARNING,
+                 "NODE_SOURCE_FAILED branch=local reason=untrusted_source");
+        return -1;
+      }
+      strSub = fileGet(link);
+    }
     // Surge install-config links wrap a remote subscription URL.
-    if (startsWith(link, "surge:///install-config")) {
+    else if (startsWith(link, "surge:///install-config")) {
       isSubscription = true;
     }
     // 规则 1: HTTP(S) 开头的链接
@@ -431,7 +444,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
       // 节点链接不需要下载，直接交给当前目标的解析器。
       writeLog(LOG_LEVEL_VERBOSE, "检测到节点链接，正在直接解析...");
       strSub = link; // 直接使用链接本身作为解析内容
-    } else {
+    } else if (!local_source) {
       // 其他情况（surge config link 等）：保持原有逻辑
       writeLog(LOG_LEVEL_VERBOSE, "正在下载订阅数据...");
       if (startsWith(link, "surge:///install-config")) // surge config link
@@ -459,7 +472,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
       if (use_mihomo_parser) {
         recordParserInvocation();
         writeLog(LOG_LEVEL_VERBOSE,
-                 "NODE_PARSER_INVOKE parser=mihomo branch=sub");
+                 "NODE_PARSER_INVOKE parser=mihomo branch=" + source_branch);
 #ifdef USE_MIHOMO_PARSER
         try {
           auto mihomo_nodes = mihomo::parseSubscription(strSub);
@@ -469,14 +482,16 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
         } catch (const std::exception &e) {
           recordParserFailure();
           writeLog(LOG_LEVEL_ERROR,
-                   "NODE_PARSER_FAILED parser=mihomo branch=sub detail=" +
+                   "NODE_PARSER_FAILED parser=mihomo branch=" + source_branch +
+                       " detail=" +
                        summarizeSensitiveTextForLog(e.what()));
           return -1;
         }
         if (nodes.empty()) {
           recordParserFailure();
           writeLog(LOG_LEVEL_ERROR,
-                   "NODE_PARSER_FAILED parser=mihomo branch=sub reason=no_nodes");
+                   "NODE_PARSER_FAILED parser=mihomo branch=" + source_branch +
+                       " reason=no_nodes");
           return -1;
         }
         writeLog(LOG_LEVEL_VERBOSE,
@@ -485,17 +500,19 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
 #else
         recordParserFailure();
         writeLog(LOG_LEVEL_ERROR,
-                 "NODE_PARSER_FAILED parser=mihomo branch=sub reason=unavailable");
+                 "NODE_PARSER_FAILED parser=mihomo branch=" + source_branch +
+                     " reason=unavailable");
         return -1;
 #endif
       } else {
         recordParserInvocation();
         writeLog(LOG_LEVEL_VERBOSE,
-                 "NODE_PARSER_INVOKE parser=legacy branch=sub");
+                 "NODE_PARSER_INVOKE parser=legacy branch=" + source_branch);
         if (explodeConfContent(strSub, nodes) == 0) {
           recordParserFailure();
           writeLog(LOG_LEVEL_ERROR,
-                   "NODE_PARSER_FAILED parser=legacy branch=sub reason=no_nodes");
+                   "NODE_PARSER_FAILED parser=legacy branch=" + source_branch +
+                       " reason=no_nodes");
           return -1;
         }
       }
@@ -525,37 +542,12 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
                    " 个节点");
     } else {
       writeLog(LOG_LEVEL_ERROR,
-               "NODE_SOURCE_FAILED branch=sub reason=fetch_empty");
+               "NODE_SOURCE_FAILED branch=" + source_branch +
+                   (local_source ? " reason=read_empty" : " reason=fetch_empty"));
       return -1;
     }
     break;
   }
-  case ConfType::Local:
-    if (!authorized)
-      return -1;
-    recordParserInvocation();
-    writeLog(LOG_LEVEL_VERBOSE,
-             "NODE_PARSER_INVOKE parser=legacy branch=local");
-    writeLog(LOG_LEVEL_VERBOSE, "正在解析配置文件数据...");
-    if (explodeConf(link, nodes) == 0) {
-      recordParserFailure();
-      writeLog(LOG_LEVEL_ERROR,
-               "NODE_PARSER_FAILED parser=legacy branch=local reason=no_nodes");
-      return -1;
-    }
-    if (startsWith(strSub, "ssd://")) {
-      getSubInfoFromSSD(strSub, subInfo);
-    } else {
-      getSubInfoFromNodes(nodes, stream_rules, time_rules, subInfo);
-    }
-    filterNodes(nodes, exclude_remarks, include_remarks, groupID);
-    for (Proxy &x : nodes) {
-      x.GroupId = groupID;
-      if (!custom_group.empty())
-        x.Group = custom_group;
-    }
-    copyNodes(nodes, allNodes);
-    break;
   default:
     if (use_mihomo_parser) {
       recordParserInvocation();
