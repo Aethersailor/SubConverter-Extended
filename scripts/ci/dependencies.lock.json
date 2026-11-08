@@ -3,7 +3,7 @@
     "cpp_httplib": {
       "ref": "HEAD",
       "repository": "https://github.com/yhirose/cpp-httplib.git",
-      "revision": "a18895f42e4768062b858c6847b1ae598b2a3be3"
+      "revision": "6d8dec3c3edaffc0a02e2651168fdcc5b501b63f"
     },
     "inja": {
       "ref": "HEAD",
@@ -23,7 +23,7 @@
     "mihomo": {
       "ref": "refs/heads/Alpha",
       "repository": "https://github.com/MetaCubeX/mihomo.git",
-      "revision": "69c16319b12d10ec1ed05eefca3a482357f5ffbb"
+      "revision": "478af2a57c48bdb8e85f6ed93b2c3735e90ceabd"
     },
     "nlohmann_json": {
       "ref": "latest-semver-tag",
@@ -44,23 +44,23 @@
   },
   "images": {
     "alpine_runtime": {
-      "pinned": "mirror.gcr.io/library/alpine@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a",
+      "pinned": "mirror.gcr.io/library/alpine@sha256:3f4d6b32e26703c6082839234f43769d5046b3ac7c910033911d1e71d8cd630a",
       "source": "mirror.gcr.io/library/alpine:latest"
     },
     "debian_builder": {
-      "pinned": "mirror.gcr.io/library/debian@sha256:2dc419c6d7fe3dad0a2f9fd469c34cc90b0f9ba642d8fde837fe3d7d34a0e7f1",
+      "pinned": "mirror.gcr.io/library/debian@sha256:9c6e381421d0f48d1b8133e573f33c185ee16cbf505eda9c4a8a4791b25ea8a6",
       "source": "mirror.gcr.io/library/debian:latest"
     },
     "debian_trixie": {
-      "pinned": "mirror.gcr.io/library/debian@sha256:2dc419c6d7fe3dad0a2f9fd469c34cc90b0f9ba642d8fde837fe3d7d34a0e7f1",
+      "pinned": "mirror.gcr.io/library/debian@sha256:9c6e381421d0f48d1b8133e573f33c185ee16cbf505eda9c4a8a4791b25ea8a6",
       "source": "mirror.gcr.io/library/debian:trixie"
     },
     "debian_trixie_slim": {
-      "pinned": "mirror.gcr.io/library/debian@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4",
+      "pinned": "mirror.gcr.io/library/debian@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2",
       "source": "mirror.gcr.io/library/debian:trixie-slim"
     },
     "golang": {
-      "pinned": "mirror.gcr.io/library/golang@sha256:2920bb124f1a2e12a1d39f0cab756ae0068441ee1da7655dec7f5e374944095b",
+      "pinned": "mirror.gcr.io/library/golang@sha256:e519d3b0a5b285e5aa53ab9eef02bc6bbb9cb04608389b743a136a9ce75f0d1e",
       "source": "mirror.gcr.io/library/golang:latest"
     }
   },
