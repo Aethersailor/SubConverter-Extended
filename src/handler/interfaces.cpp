@@ -471,7 +471,15 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS) {
         request.context->suggestFailure(RequestFailureAttribution::Server);
       return "Service is shutting down.\n服务正在关闭。\n";
     }
-    output_content += convertRuleset(content, x.rule_type);
+    content = convertRuleset(content, x.rule_type);
+    if (content.empty())
+      continue;
+    if (rca.size() > 1 && getLineBreak(content) == '\r')
+      std::replace(content.begin(), content.end(), '\r', '\n');
+    if (!output_content.empty() && output_content.back() != '\n' &&
+        content.front() != '\n' && !content.starts_with("\r\n"))
+      output_content += '\n';
+    output_content += content;
   }
 
   if (output_content.empty()) {
