@@ -1338,7 +1338,7 @@ void clearSubscriptionCacheAdmissionHistory() noexcept
     subscriptionCacheDoorkeeper().clear();
 }
 
-static int writer(char *data, size_t size, size_t nmemb, void *user_data)
+static size_t writer(char *data, size_t size, size_t nmemb, void *user_data)
 {
     auto *writerData = static_cast<curl_writer_data *>(user_data);
     if(writerData == nullptr || writerData->output == nullptr)
@@ -1352,16 +1352,16 @@ static int writer(char *data, size_t size, size_t nmemb, void *user_data)
             progress.abort_reason = AsyncFetchFailure::Capacity;
             return 0;
         }
-        return static_cast<int>(bytes);
+        return bytes;
     }
     writerData->output->append(data, bytes);
-    return static_cast<int>(bytes);
+    return bytes;
 }
 
-static int dummy_writer(char *, size_t size, size_t nmemb, void *)
+static size_t dummy_writer(char *, size_t size, size_t nmemb, void *)
 {
     /// dummy writer, do not save anything
-    return static_cast<int>(size * nmemb);
+    return size * nmemb;
 }
 
 //static int size_checker(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow)
