@@ -176,8 +176,20 @@ static bool isBrowserUA(const std::string &ua) {
   return false;
 }
 
-int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
-             parse_settings &parse_set) {
+static void recordParserInvocation(parse_settings &parse_set) {
+  if (parse_set.parser_stats)
+    parse_set.parser_stats->invocations++;
+}
+
+static void recordParserFailure(parse_settings &parse_set) {
+  if (parse_set.parser_stats)
+    parse_set.parser_stats->failures++;
+}
+
+static int addSubscriptionNodes(std::string &link, std::vector<Proxy> &allNodes,
+                                int groupID, parse_settings &parse_set,
+                                const std::string &custom_group,
+                                bool local_source) {
   ProxyPolicy &proxy = *parse_set.proxy;
   std::string &subInfo = *parse_set.sub_info;
   string_array &exclude_remarks = *parse_set.exclude_remarks;
@@ -185,12 +197,8 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
   RegexMatchConfigs &stream_rules = *parse_set.stream_rules;
   RegexMatchConfigs &time_rules = *parse_set.time_rules;
   string_icase_map *request_headers = parse_set.request_header;
-  bool &authorized = parse_set.authorized;
-
-  ConfType linkType = ConfType::Unknow;
   std::vector<Proxy> nodes;
-  Proxy node;
-  std::string strSub, extra_headers, custom_group;
+  std::string strSub, extra_headers;
   const string_icase_map empty_request_headers;
   auto resolveSubscription = [&](const std::string &source) {
     if(parse_set.resolved_subscription_content)
@@ -216,6 +224,234 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
              "NODE_SOURCE_SUSPENDED branch=sub reason=needs_fetch");
     return -1;
   };
+
+  const std::string source_branch = local_source ? "local" : "sub";
+  // Check for multiple links separated by pipe '|'
+  if (link.find('|') != std::string::npos) {
+    std::vector<std::string> links = split(link, "|");
+    for (const auto &l : links) {
+      if (l.empty())
+        continue;
+      // Recursive call or simplified processing for each link
+      // Since we are already inside addNodes, and we know these are likely
+      // links it's safest to treat them as individual subscriptions/nodes
+      addNodes(l, allNodes, groupID, parse_set);
+    }
+    return 0; // Handled
+  }
+
+  // ========== 智能订阅/节点链接分流逻辑 ==========
+  // 目标：准确区分订阅链接和节点链接，支持多种格式
+
+  bool isSubscription = false; // 订阅链接标志
+  bool isNodeLink = false;     // 节点链接标志
+
+  if (local_source) {
+    // Local insert sources are operator-controlled; request URLs stay denied
+    // without enabling the separate script execution permission.
+    if (parse_set.fetch_context != FetchContext::TrustedConfig) {
+      writeLog(LOG_LEVEL_WARNING,
+               "NODE_SOURCE_FAILED branch=local reason=untrusted_source");
+      return -1;
+    }
+    strSub = fileGet(link);
+  }
+  // Surge install-config links wrap a remote subscription URL.
+  else if (startsWith(link, "surge:///install-config")) {
+    isSubscription = true;
+  }
+  // 规则 1: HTTP(S) 开头的链接
+  else if (mihomo::isHttpSchemeLink(link)) {
+    size_t protocolEnd = link.find("://") + 3;
+    size_t pathStart = link.find("/", protocolEnd);
+    size_t queryStart = link.find("?", protocolEnd);
+
+    // 有查询参数 = 订阅（非常明确）
+    // 例如: https://api.com/sub?token=xxx
+    if (queryStart != link.npos) {
+      isSubscription = true;
+    }
+    // 有实际路径（不只是单个 /）= 订阅
+    // 例如: https://api.com/api/v1/sub
+    else if (pathStart != link.npos) {
+      std::string path = link.substr(pathStart);
+      if (path.length() > 1) { // 路径长度 > 1（不只是尾部 /）
+        isSubscription = true;
+      } else {
+        // 只有单个 "/" = 可能是 HTTP 代理节点
+        // 例如: http://proxy.com:8080/
+        isNodeLink = true;
+      }
+    }
+    // 无路径无参数 = HTTP 代理节点
+    // 例如: http://proxy.com:8080
+    else {
+      isNodeLink = true;
+    }
+  }
+  // 规则 2: 无协议头（无 ://）= 订阅
+  // 用户可能省略 http:// 或 https://
+  // 例如: api.com/sub, example.com/clash?token=xxx, sub.domain.com
+  else if (link.find("://") == link.npos) {
+    isSubscription = true;
+    writeLog(LOG_LEVEL_VERBOSE,
+             "检测到无协议头链接，按订阅处理：" +
+                 summarizeUrlForLog(link));
+  }
+  // 规则 3: 在 SUPPORTED_SCHEMES 中 = 节点链接
+  // 例如: trojan://..., vmess://..., hysteria2://...
+  else {
+    isNodeLink = mihomo::isSupportedSchemeLink(link);
+    // 规则 4: 其他未知协议 = 节点链接（交给当前目标的解析器尝试）
+    // 例如: newproto://..., unknown://...
+    // 解析器会拒绝自己不支持的协议。
+    if (!isNodeLink) {
+      isNodeLink = true;
+      writeLog(LOG_LEVEL_VERBOSE,
+               "检测到未知协议，交给当前目标的节点解析器处理：" +
+                   summarizeUrlForLog(link));
+    }
+  }
+
+  // Clash proxy-provider sources are intercepted by the caller. Any
+  // subscription URL that reaches addNodes must be expanded into nodes.
+  if (isSubscription) {
+    writeLog(LOG_LEVEL_VERBOSE, "正在下载订阅数据...");
+    if (startsWith(link, "surge:///install-config"))
+      link = urlDecode(getUrlArg(link, "url"));
+
+    // Replace browser UA with clash.meta to avoid subscription-side blocks.
+    if (request_headers) {
+      auto ua_it = request_headers->find("User-Agent");
+      if (ua_it != request_headers->end() && isBrowserUA(ua_it->second)) {
+        writeLog(LOG_LEVEL_VERBOSE,
+                 "检测到浏览器 UA，已替换为 clash.meta UA 以避免被拦截");
+        ua_it->second = "clash.meta";
+      }
+    }
+
+    const int resolved = resolveSubscription(link);
+    if(resolved < 0)
+      return kAddNodesNeedsFetch;
+    if(resolved == 0)
+      strSub = webGet(link, proxy, effectiveSettings().cacheSubscription,
+                      &extra_headers, request_headers,
+                      parse_set.fetch_context);
+  } else if (isNodeLink) {
+    // 节点链接不需要下载，直接交给当前目标的解析器。
+    writeLog(LOG_LEVEL_VERBOSE, "检测到节点链接，正在直接解析...");
+    strSub = link; // 直接使用链接本身作为解析内容
+  } else if (!local_source) {
+    // 其他情况（surge config link 等）：保持原有逻辑
+    writeLog(LOG_LEVEL_VERBOSE, "正在下载订阅数据...");
+    if (startsWith(link, "surge:///install-config")) // surge config link
+      link = urlDecode(getUrlArg(link, "url"));
+
+    // Replace browser UA with clash.meta
+    if (request_headers) {
+      auto ua_it = request_headers->find("User-Agent");
+      if (ua_it != request_headers->end() && isBrowserUA(ua_it->second)) {
+        writeLog(LOG_LEVEL_VERBOSE,
+                 "检测到浏览器 UA，已替换为 clash.meta UA 以避免被拦截");
+        ua_it->second = "clash.meta";
+      }
+    }
+
+    const int resolved = resolveSubscription(link);
+    if(resolved < 0)
+      return kAddNodesNeedsFetch;
+    if(resolved == 0)
+      strSub = webGet(link, proxy, effectiveSettings().cacheSubscription,
+                      &extra_headers, request_headers,
+                      parse_set.fetch_context);
+  }
+  if (!strSub.empty()) {
+    if (parse_set.parser_mode == NodeParserMode::MihomoOnly) {
+      recordParserInvocation(parse_set);
+      writeLog(LOG_LEVEL_VERBOSE,
+               "NODE_PARSER_INVOKE parser=mihomo branch=" + source_branch);
+#ifdef USE_MIHOMO_PARSER
+      try {
+        auto mihomo_nodes = mihomo::parseSubscription(strSub);
+        appendMihomoNodes(mihomo_nodes, nodes);
+      } catch (const BoundedOutputExceeded &) {
+        throw;
+      } catch (const std::exception &e) {
+        recordParserFailure(parse_set);
+        writeLog(LOG_LEVEL_ERROR,
+                 "NODE_PARSER_FAILED parser=mihomo branch=" + source_branch +
+                     " detail=" +
+                     summarizeSensitiveTextForLog(e.what()));
+        return -1;
+      }
+      if (nodes.empty()) {
+        recordParserFailure(parse_set);
+        writeLog(LOG_LEVEL_ERROR,
+                 "NODE_PARSER_FAILED parser=mihomo branch=" + source_branch +
+                     " reason=no_nodes");
+        return -1;
+      }
+      writeLog(LOG_LEVEL_VERBOSE,
+               "Mihomo 解析器成功解析 " + std::to_string(nodes.size()) +
+                   " 个节点。");
+#else
+      recordParserFailure(parse_set);
+      writeLog(LOG_LEVEL_ERROR,
+               "NODE_PARSER_FAILED parser=mihomo branch=" + source_branch +
+                   " reason=unavailable");
+      return -1;
+#endif
+    } else {
+      recordParserInvocation(parse_set);
+      writeLog(LOG_LEVEL_VERBOSE,
+               "NODE_PARSER_INVOKE parser=legacy branch=" + source_branch);
+      if (explodeConfContent(strSub, nodes) == 0) {
+        recordParserFailure(parse_set);
+        writeLog(LOG_LEVEL_ERROR,
+                 "NODE_PARSER_FAILED parser=legacy branch=" + source_branch +
+                     " reason=no_nodes");
+        return -1;
+      }
+    }
+
+    if (startsWith(strSub, "ssd://")) {
+      getSubInfoFromSSD(strSub, subInfo);
+    } else {
+      if (!getSubInfoFromHeader(extra_headers, subInfo))
+        getSubInfoFromNodes(nodes, stream_rules, time_rules, subInfo);
+    }
+    writeLog(LOG_LEVEL_VERBOSE,
+             "过滤前节点数：" + std::to_string(nodes.size()));
+    filterNodes(nodes, exclude_remarks, include_remarks, groupID);
+    writeLog(LOG_LEVEL_VERBOSE,
+             "过滤后节点数：" + std::to_string(nodes.size()));
+    for (Proxy &x : nodes) {
+      x.GroupId = groupID;
+      if (custom_group.size())
+        x.Group = custom_group;
+    }
+    writeLog(LOG_LEVEL_VERBOSE,
+             "正在复制 " + std::to_string(nodes.size()) +
+                 " 个节点到总节点列表");
+    copyNodes(nodes, allNodes);
+    writeLog(LOG_LEVEL_VERBOSE,
+             "总节点列表当前共有 " + std::to_string(allNodes.size()) +
+                 " 个节点");
+  } else {
+    writeLog(LOG_LEVEL_ERROR,
+             "NODE_SOURCE_FAILED branch=" + source_branch +
+                 (local_source ? " reason=read_empty" : " reason=fetch_empty"));
+    return -1;
+  }
+  return 0;
+}
+
+int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
+             parse_settings &parse_set) {
+  const bool authorized = parse_set.authorized;
+  ConfType linkType = ConfType::Unknow;
+  Proxy node;
+  std::string custom_group;
 
   // TODO: replace with startsWith if appropriate
   link = replaceAllDistinct(link, "\"", "");
@@ -284,14 +520,6 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
       return -1;
     explicit_http_node = true;
   }
-  auto recordParserInvocation = [&]() {
-    if (parse_set.parser_stats)
-      parse_set.parser_stats->invocations++;
-  };
-  auto recordParserFailure = [&]() {
-    if (parse_set.parser_stats)
-      parse_set.parser_stats->failures++;
-  };
   const bool isMihomoScheme =
       use_mihomo_parser && mihomo::isSupportedSchemeLink(link);
 
@@ -326,241 +554,21 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
 
   switch (linkType) {
   case ConfType::Local:
-  case ConfType::SUB: {
-    const bool local_source = linkType == ConfType::Local;
-    const std::string source_branch = local_source ? "local" : "sub";
-    // Check for multiple links separated by pipe '|'
-    if (link.find('|') != std::string::npos) {
-      std::vector<std::string> links = split(link, "|");
-      for (const auto &l : links) {
-        if (l.empty())
-          continue;
-        // Recursive call or simplified processing for each link
-        // Since we are already inside addNodes, and we know these are likely
-        // links it's safest to treat them as individual subscriptions/nodes
-        addNodes(l, allNodes, groupID, parse_set);
-      }
-      return 0; // Handled
-    }
-
-    // ========== 智能订阅/节点链接分流逻辑 ==========
-    // 目标：准确区分订阅链接和节点链接，支持多种格式
-
-    bool isSubscription = false; // 订阅链接标志
-    bool isNodeLink = false;     // 节点链接标志
-
-    if (local_source) {
-      // Local insert sources are operator-controlled; request URLs stay denied
-      // without enabling the separate script execution permission.
-      if (parse_set.fetch_context != FetchContext::TrustedConfig) {
-        writeLog(LOG_LEVEL_WARNING,
-                 "NODE_SOURCE_FAILED branch=local reason=untrusted_source");
-        return -1;
-      }
-      strSub = fileGet(link);
-    }
-    // Surge install-config links wrap a remote subscription URL.
-    else if (startsWith(link, "surge:///install-config")) {
-      isSubscription = true;
-    }
-    // 规则 1: HTTP(S) 开头的链接
-    else if (mihomo::isHttpSchemeLink(link)) {
-      size_t protocolEnd = link.find("://") + 3;
-      size_t pathStart = link.find("/", protocolEnd);
-      size_t queryStart = link.find("?", protocolEnd);
-
-      // 有查询参数 = 订阅（非常明确）
-      // 例如: https://api.com/sub?token=xxx
-      if (queryStart != link.npos) {
-        isSubscription = true;
-      }
-      // 有实际路径（不只是单个 /）= 订阅
-      // 例如: https://api.com/api/v1/sub
-      else if (pathStart != link.npos) {
-        std::string path = link.substr(pathStart);
-        if (path.length() > 1) { // 路径长度 > 1（不只是尾部 /）
-          isSubscription = true;
-        } else {
-          // 只有单个 "/" = 可能是 HTTP 代理节点
-          // 例如: http://proxy.com:8080/
-          isNodeLink = true;
-        }
-      }
-      // 无路径无参数 = HTTP 代理节点
-      // 例如: http://proxy.com:8080
-      else {
-        isNodeLink = true;
-      }
-    }
-    // 规则 2: 无协议头（无 ://）= 订阅
-    // 用户可能省略 http:// 或 https://
-    // 例如: api.com/sub, example.com/clash?token=xxx, sub.domain.com
-    else if (link.find("://") == link.npos) {
-      isSubscription = true;
-      writeLog(LOG_LEVEL_VERBOSE,
-               "检测到无协议头链接，按订阅处理：" +
-                   summarizeUrlForLog(link));
-    }
-    // 规则 3: 在 SUPPORTED_SCHEMES 中 = 节点链接
-    // 例如: trojan://..., vmess://..., hysteria2://...
-    else {
-      isNodeLink = mihomo::isSupportedSchemeLink(link);
-      // 规则 4: 其他未知协议 = 节点链接（交给当前目标的解析器尝试）
-      // 例如: newproto://..., unknown://...
-      // 解析器会拒绝自己不支持的协议。
-      if (!isNodeLink) {
-        isNodeLink = true;
-        writeLog(LOG_LEVEL_VERBOSE,
-                 "检测到未知协议，交给当前目标的节点解析器处理：" +
-                     summarizeUrlForLog(link));
-      }
-    }
-
-    // Clash proxy-provider sources are intercepted by the caller. Any
-    // subscription URL that reaches addNodes must be expanded into nodes.
-    if (isSubscription) {
-      writeLog(LOG_LEVEL_VERBOSE, "正在下载订阅数据...");
-      if (startsWith(link, "surge:///install-config"))
-        link = urlDecode(getUrlArg(link, "url"));
-
-      // Replace browser UA with clash.meta to avoid subscription-side blocks.
-      if (request_headers) {
-        auto ua_it = request_headers->find("User-Agent");
-        if (ua_it != request_headers->end() && isBrowserUA(ua_it->second)) {
-          writeLog(LOG_LEVEL_VERBOSE,
-                   "检测到浏览器 UA，已替换为 clash.meta UA 以避免被拦截");
-          ua_it->second = "clash.meta";
-        }
-      }
-
-      const int resolved = resolveSubscription(link);
-      if(resolved < 0)
-        return kAddNodesNeedsFetch;
-      if(resolved == 0)
-        strSub = webGet(link, proxy, effectiveSettings().cacheSubscription,
-                        &extra_headers, request_headers,
-                        parse_set.fetch_context);
-    } else if (isNodeLink) {
-      // 节点链接不需要下载，直接交给当前目标的解析器。
-      writeLog(LOG_LEVEL_VERBOSE, "检测到节点链接，正在直接解析...");
-      strSub = link; // 直接使用链接本身作为解析内容
-    } else if (!local_source) {
-      // 其他情况（surge config link 等）：保持原有逻辑
-      writeLog(LOG_LEVEL_VERBOSE, "正在下载订阅数据...");
-      if (startsWith(link, "surge:///install-config")) // surge config link
-        link = urlDecode(getUrlArg(link, "url"));
-
-      // Replace browser UA with clash.meta
-      if (request_headers) {
-        auto ua_it = request_headers->find("User-Agent");
-        if (ua_it != request_headers->end() && isBrowserUA(ua_it->second)) {
-          writeLog(LOG_LEVEL_VERBOSE,
-                   "检测到浏览器 UA，已替换为 clash.meta UA 以避免被拦截");
-          ua_it->second = "clash.meta";
-        }
-      }
-
-      const int resolved = resolveSubscription(link);
-      if(resolved < 0)
-        return kAddNodesNeedsFetch;
-      if(resolved == 0)
-        strSub = webGet(link, proxy, effectiveSettings().cacheSubscription,
-                        &extra_headers, request_headers,
-                        parse_set.fetch_context);
-    }
-    if (!strSub.empty()) {
-      if (use_mihomo_parser) {
-        recordParserInvocation();
-        writeLog(LOG_LEVEL_VERBOSE,
-                 "NODE_PARSER_INVOKE parser=mihomo branch=" + source_branch);
-#ifdef USE_MIHOMO_PARSER
-        try {
-          auto mihomo_nodes = mihomo::parseSubscription(strSub);
-          appendMihomoNodes(mihomo_nodes, nodes);
-        } catch (const BoundedOutputExceeded &) {
-          throw;
-        } catch (const std::exception &e) {
-          recordParserFailure();
-          writeLog(LOG_LEVEL_ERROR,
-                   "NODE_PARSER_FAILED parser=mihomo branch=" + source_branch +
-                       " detail=" +
-                       summarizeSensitiveTextForLog(e.what()));
-          return -1;
-        }
-        if (nodes.empty()) {
-          recordParserFailure();
-          writeLog(LOG_LEVEL_ERROR,
-                   "NODE_PARSER_FAILED parser=mihomo branch=" + source_branch +
-                       " reason=no_nodes");
-          return -1;
-        }
-        writeLog(LOG_LEVEL_VERBOSE,
-                 "Mihomo 解析器成功解析 " + std::to_string(nodes.size()) +
-                     " 个节点。");
-#else
-        recordParserFailure();
-        writeLog(LOG_LEVEL_ERROR,
-                 "NODE_PARSER_FAILED parser=mihomo branch=" + source_branch +
-                     " reason=unavailable");
-        return -1;
-#endif
-      } else {
-        recordParserInvocation();
-        writeLog(LOG_LEVEL_VERBOSE,
-                 "NODE_PARSER_INVOKE parser=legacy branch=" + source_branch);
-        if (explodeConfContent(strSub, nodes) == 0) {
-          recordParserFailure();
-          writeLog(LOG_LEVEL_ERROR,
-                   "NODE_PARSER_FAILED parser=legacy branch=" + source_branch +
-                       " reason=no_nodes");
-          return -1;
-        }
-      }
-
-      if (startsWith(strSub, "ssd://")) {
-        getSubInfoFromSSD(strSub, subInfo);
-      } else {
-        if (!getSubInfoFromHeader(extra_headers, subInfo))
-          getSubInfoFromNodes(nodes, stream_rules, time_rules, subInfo);
-      }
-      writeLog(LOG_LEVEL_VERBOSE,
-               "过滤前节点数：" + std::to_string(nodes.size()));
-      filterNodes(nodes, exclude_remarks, include_remarks, groupID);
-      writeLog(LOG_LEVEL_VERBOSE,
-               "过滤后节点数：" + std::to_string(nodes.size()));
-      for (Proxy &x : nodes) {
-        x.GroupId = groupID;
-        if (custom_group.size())
-          x.Group = custom_group;
-      }
-      writeLog(LOG_LEVEL_VERBOSE,
-               "正在复制 " + std::to_string(nodes.size()) +
-                   " 个节点到总节点列表");
-      copyNodes(nodes, allNodes);
-      writeLog(LOG_LEVEL_VERBOSE,
-               "总节点列表当前共有 " + std::to_string(allNodes.size()) +
-                   " 个节点");
-    } else {
-      writeLog(LOG_LEVEL_ERROR,
-               "NODE_SOURCE_FAILED branch=" + source_branch +
-                   (local_source ? " reason=read_empty" : " reason=fetch_empty"));
-      return -1;
-    }
-    break;
-  }
+  case ConfType::SUB:
+    return addSubscriptionNodes(link, allNodes, groupID, parse_set, custom_group,
+                                linkType == ConfType::Local);
   default:
     if (use_mihomo_parser) {
-      recordParserInvocation();
+      recordParserInvocation(parse_set);
       writeLog(LOG_LEVEL_VERBOSE,
                "NODE_PARSER_INVOKE parser=mihomo branch=direct");
-      strSub = link;
 #ifdef USE_MIHOMO_PARSER
       try {
-        auto mihomo_nodes = mihomo::parseSubscription(strSub);
+        auto mihomo_nodes = mihomo::parseSubscription(link);
         std::vector<Proxy> parsed_nodes;
         appendMihomoNodes(mihomo_nodes, parsed_nodes);
         if (parsed_nodes.empty()) {
-          recordParserFailure();
+          recordParserFailure(parse_set);
           writeLog(LOG_LEVEL_ERROR,
                    "NODE_PARSER_FAILED parser=mihomo branch=direct reason=no_nodes");
           return -1;
@@ -583,27 +591,27 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
       } catch (const BoundedOutputExceeded &) {
         throw;
       } catch (const std::exception &e) {
-        recordParserFailure();
+        recordParserFailure(parse_set);
         writeLog(LOG_LEVEL_ERROR,
                  "NODE_PARSER_FAILED parser=mihomo branch=direct detail=" +
                      summarizeSensitiveTextForLog(e.what()));
         return -1;
       }
 #else
-      recordParserFailure();
+      recordParserFailure(parse_set);
       writeLog(LOG_LEVEL_ERROR,
                "NODE_PARSER_FAILED parser=mihomo branch=direct reason=unavailable");
       return -1;
 #endif
     } else {
-      recordParserInvocation();
+      recordParserInvocation(parse_set);
       writeLog(LOG_LEVEL_VERBOSE,
                "NODE_PARSER_INVOKE parser=legacy branch=direct");
       if (startsWith(link, "mierus://")) {
         std::vector<Proxy> parsed_nodes;
         explodeMierusNodes(link, parsed_nodes);
         if (parsed_nodes.empty()) {
-          recordParserFailure();
+          recordParserFailure(parse_set);
           writeLog(LOG_LEVEL_ERROR,
                    "NODE_PARSER_FAILED parser=legacy branch=direct reason=no_nodes");
           return -1;
@@ -618,7 +626,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID,
       }
       explode(link, node);
       if (node.Type == ProxyType::Unknown) {
-        recordParserFailure();
+        recordParserFailure(parse_set);
         writeLog(LOG_LEVEL_ERROR,
                  "NODE_PARSER_FAILED parser=legacy branch=direct reason=no_nodes");
         return -1;
