@@ -1036,21 +1036,23 @@ bool appendSingBoxRule(std::vector<std::string_view> &args,
                        const std::string &rule_group) {
     args.clear();
     split(args, rule, ',');
-    if (args.size() < 2)
+    if (args.empty())
         return false;
 
     const std::string type = toUpper(trimWhitespace(std::string(args[0])));
-    std::string value = toLower(trimWhitespace(std::string(args[1])));
-    if (none_of(SingBoxRuleTypes, [&](const std::string &candidate) {
-          return type == candidate;
-        }))
-        return false;
-
     if (type == "MATCH" || type == "FINAL") {
         final = rule_group;
         return true;
     }
 
+    if (args.size() < 2)
+        return false;
+    if (none_of(SingBoxRuleTypes, [&](const std::string &candidate) {
+          return type == candidate;
+        }))
+        return false;
+
+    std::string value = toLower(trimWhitespace(std::string(args[1])));
     std::string field;
     SingBoxRuleValueKind kind = SingBoxRuleValueKind::String;
     bool match_rule_set_source = false;
