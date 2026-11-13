@@ -670,7 +670,7 @@ void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_
             lineSize = strLine.size();
             if(!lineSize || strLine[0] == ';' || strLine[0] == '#' || (lineSize >= 2 && strLine[0] == '/' && strLine[1] == '/')) //empty lines and comments are ignored
                 continue;
-            if(std::none_of(ClashRuleTypes.begin(), ClashRuleTypes.end(), [strLine](const std::string& type){return startsWith(strLine, type);}))
+            if(std::none_of(ClashRuleTypes.begin(), ClashRuleTypes.end(), [&strLine](const std::string& type){return startsWith(strLine, type);}))
                 continue;
             stripRulesetComment(strLine);
             strLine = appendClashRuleTarget(strLine, rule_group);
@@ -750,7 +750,7 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent>
             lineSize = strLine.size();
             if(!lineSize || strLine[0] == ';' || strLine[0] == '#' || (lineSize >= 2 && strLine[0] == '/' && strLine[1] == '/')) //empty lines and comments are ignored
                 continue;
-            if(std::none_of(ClashRuleTypes.begin(), ClashRuleTypes.end(), [strLine](const std::string& type){ return startsWith(strLine, type); }))
+            if(std::none_of(ClashRuleTypes.begin(), ClashRuleTypes.end(), [&strLine](const std::string& type){ return startsWith(strLine, type); }))
                 continue;
             stripRulesetComment(strLine);
 
@@ -947,22 +947,22 @@ void rulesetToSurge(INIReader &base_rule, std::vector<RulesetContent> &ruleset_c
                         continue;
                     [[fallthrough]];
                 case -1:
-                    if(!std::any_of(QuanXRuleTypes.begin(), QuanXRuleTypes.end(), [strLine](const std::string& type){return startsWith(strLine, type);}))
+                    if(!std::any_of(QuanXRuleTypes.begin(), QuanXRuleTypes.end(), [&strLine](const std::string& type){return startsWith(strLine, type);}))
                         continue;
                     break;
                 case -3:
-                    if(!std::any_of(SurfRuleTypes.begin(), SurfRuleTypes.end(), [strLine](const std::string& type){return startsWith(strLine, type);}))
+                    if(!std::any_of(SurfRuleTypes.begin(), SurfRuleTypes.end(), [&strLine](const std::string& type){return startsWith(strLine, type);}))
                         continue;
                     break;
                 default:
                     if(surge_ver > 2)
                     {
-                        if(!std::any_of(SurgeRuleTypes.begin(), SurgeRuleTypes.end(), [strLine](const std::string& type){return startsWith(strLine, type);}))
+                        if(!std::any_of(SurgeRuleTypes.begin(), SurgeRuleTypes.end(), [&strLine](const std::string& type){return startsWith(strLine, type);}))
                             continue;
                     }
                     else
                     {
-                        if(!std::any_of(Surge2RuleTypes.begin(), Surge2RuleTypes.end(), [strLine](const std::string& type){return startsWith(strLine, type);}))
+                        if(!std::any_of(Surge2RuleTypes.begin(), Surge2RuleTypes.end(), [&strLine](const std::string& type){return startsWith(strLine, type);}))
                             continue;
                     }
                 }
