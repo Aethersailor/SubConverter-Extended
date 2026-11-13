@@ -2,6 +2,8 @@
 #include <vector>
 #include <cmath>
 #include <ctime>
+#include <limits>
+#include <stdexcept>
 
 #include "config/regmatch.h"
 #include "parser/config/proxy.h"
@@ -179,6 +181,38 @@ bool getSubInfoFromNodes(const std::vector<Proxy> &nodes, const RegexMatchConfig
     return true;
 }
 
+static bool parseSSDTrafficBytes(const std::string &value,
+                                 unsigned long long &bytes)
+{
+    if(value.empty())
+        return false;
+
+    double gibibytes;
+    size_t consumed;
+    try
+    {
+        gibibytes = std::stod(value, &consumed);
+    }
+    catch(const std::invalid_argument &)
+    {
+        return false;
+    }
+    catch(const std::out_of_range &)
+    {
+        return false;
+    }
+
+    constexpr int gibibyte_shift = 30;
+    const double limit = std::ldexp(
+        1.0, std::numeric_limits<unsigned long long>::digits - gibibyte_shift);
+    if(!(gibibytes >= 0 && gibibytes < limit) ||
+       value.find_first_not_of(" \t\n\r\f\v", consumed) != std::string::npos)
+        return false;
+
+    bytes = static_cast<unsigned long long>(std::ldexp(gibibytes, gibibyte_shift));
+    return true;
+}
+
 bool getSubInfoFromSSD(const std::string &sub, std::string &result)
 {
     rapidjson::Document json;
@@ -186,13 +220,14 @@ bool getSubInfoFromSSD(const std::string &sub, std::string &result)
     if(json.HasParseError())
         return false;
 
-    std::string used_str = GetMember(json, "traffic_used"), total_str = GetMember(json, "traffic_total"), expire_str = GetMember(json, "expiry");
-    if(used_str.empty() || total_str.empty())
+    unsigned long long used, total;
+    if(!parseSSDTrafficBytes(GetMember(json, "traffic_used"), used) ||
+       !parseSSDTrafficBytes(GetMember(json, "traffic_total"), total))
         return false;
-    unsigned long long used = stod(used_str) * std::pow(1024, 3), total = stod(total_str) * std::pow(1024, 3), expire;
     result = "upload=0; download=" + std::to_string(used) + "; total=" + std::to_string(total) + ";";
 
-    expire = dateStringToTimestamp(regReplace(expire_str, "(\\d+)-(\\d+)-(\\d+) (.*)", "$1:$2:$3:$4"));
+    const std::string expire_str = GetMember(json, "expiry");
+    unsigned long long expire = dateStringToTimestamp(regReplace(expire_str, "(\\d+)-(\\d+)-(\\d+) (.*)", "$1:$2:$3:$4"));
     if(expire)
         result += " expire=" + std::to_string(expire) + ";";
 
