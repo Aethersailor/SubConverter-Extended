@@ -1052,7 +1052,12 @@ bool appendSingBoxRule(std::vector<std::string_view> &args,
         }))
         return false;
 
-    std::string value = toLower(trimWhitespace(std::string(args[1])));
+    std::string value = trimWhitespace(std::string(args[1]));
+    if (type != "DOMAIN-REGEX" && type != "INBOUND" &&
+        type != "PROCESS-NAME" && type != "PROCESS-PATH" &&
+        type != "PACKAGE-NAME" && type != "USER")
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char ch) { return std::tolower(ch); });
     std::string field;
     SingBoxRuleValueKind kind = SingBoxRuleValueKind::String;
     bool match_rule_set_source = false;
