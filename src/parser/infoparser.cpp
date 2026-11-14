@@ -249,7 +249,9 @@ bool getSubInfoFromSSD(const std::string &sub, std::string &result)
     result = "upload=0; download=" + std::to_string(used) + "; total=" + std::to_string(total) + ";";
 
     const std::string expire_str = GetMember(json, "expiry");
-    unsigned long long expire = dateStringToTimestamp(regReplace(expire_str, "(\\d+)-(\\d+)-(\\d+) (.*)", "$1:$2:$3:$4"));
+    unsigned long long expire = dateStringToTimestamp(regReplace(
+        expire_str, R"(^(\d+)-(\d+)-(\d+) (\d+):(\d+)(?::(\d+))?$)",
+        "$1:$2:$3:$4:$5:${6:-00}"));
     if(expire)
         result += " expire=" + std::to_string(expire) + ";";
 
