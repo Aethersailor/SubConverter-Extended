@@ -1381,11 +1381,14 @@ void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent
         checkpoint.complete();
     }
 
-    auto finalValue = rapidjson::Value(final.c_str(), allocator);
-    base_rule["route"]
-    | AddMemberOrReplace("rules", rules, allocator)
-    | AddMemberOrReplace("rule_set", rule_sets, allocator)
-    | AddMemberOrReplace("final", finalValue, allocator);
+    auto &route = base_rule["route"];
+    route | AddMemberOrReplace("rules", rules, allocator)
+          | AddMemberOrReplace("rule_set", rule_sets, allocator);
+    const auto base_final = route.FindMember("final");
+    if(base_final == route.MemberEnd())
+        route.AddMember("final", rapidjson::Value(final.c_str(), allocator), allocator);
+    else if(overwrite_original_rules || !final.empty() || !base_final->value.IsString())
+        base_final->value.SetString(final.c_str(), allocator);
     if(stats)
         stats->add(local_stats.rules);
 }
