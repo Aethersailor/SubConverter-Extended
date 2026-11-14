@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <sstream>
+#include <utility>
 
 #include "config/ruleset_comment.h"
 #include "utils/regexp.h"
@@ -12,11 +13,11 @@ std::string formatRulesetOutput(std::string converted_content, int type,
                                 const RulesetTypeCatalogs &catalogs) {
   std::string output_content;
   std::string strLine;
-  std::stringstream ss;
   const std::string rule_match_regex = "^(.*?,.*?)(,.*)(,.*)$";
 
-  ss << converted_content;
-  char delimiter = getLineBreak(converted_content);
+  const auto input_size = converted_content.size();
+  const char delimiter = getLineBreak(converted_content);
+  std::istringstream ss(std::move(converted_content));
   std::string::size_type lineSize, posb, pose;
   auto filterLine = [&]() {
     posb = 0;
@@ -34,8 +35,7 @@ std::string formatRulesetOutput(std::string converted_content, int type,
     return 0;
   };
 
-  lineSize = converted_content.size();
-  output_content.reserve(lineSize);
+  output_content.reserve(input_size);
 
   if (type == 3 || type == 4 || type == 6)
     output_content = "payload:\n";
