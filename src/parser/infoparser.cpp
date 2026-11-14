@@ -1,4 +1,7 @@
+#include <algorithm>
+#include <cctype>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <cmath>
 #include <ctime>
@@ -74,15 +77,34 @@ time_t dateStringToTimestamp(std::string date)
 
 bool getSubInfoFromHeader(const std::string &header, std::string &result)
 {
-    std::string pattern = R"(^(?i:Subscription-UserInfo): (.*?)\s*?$)", retStr;
-    if(regFind(header, pattern))
+    constexpr std::string_view name = "subscription-userinfo:";
+    std::string_view headers(header);
+    const auto response_start = headers.rfind("\nHTTP/");
+    if(response_start != std::string_view::npos)
+        headers.remove_prefix(response_start + 1);
+
+    while(!headers.empty())
     {
-        regGetMatch(header, pattern, 2, 0, &retStr);
-        if(!retStr.empty())
-        {
-            result = retStr;
-            return true;
-        }
+        const auto line_end = headers.find('\n');
+        auto line = headers.substr(0, line_end);
+        headers.remove_prefix(line_end == std::string_view::npos
+                                  ? headers.size() : line_end + 1);
+        if(line.empty() || line == "\r")
+            break;
+        if(line.size() < name.size() ||
+           !std::equal(name.begin(), name.end(), line.begin(),
+                       [](char expected, unsigned char actual) {
+                           return expected == std::tolower(actual);
+                       }))
+            continue;
+
+        line.remove_prefix(name.size());
+        const auto first = line.find_first_not_of(" \t\r");
+        if(first == std::string_view::npos)
+            return false;
+        const auto last = line.find_last_not_of(" \t\r");
+        result.assign(line.substr(first, last - first + 1));
+        return true;
     }
     return false;
 }
