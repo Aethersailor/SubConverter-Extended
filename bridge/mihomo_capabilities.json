@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "module": "github.com/metacubex/mihomo",
-  "module_version": "v1.19.34-0.20261106024706-478af2a57c48",
+  "module_version": "v1.19.35-0.20261114152818-184857ce21a3",
   "schemes": [
     "hysteria",
     "hysteria2",
@@ -1346,6 +1346,10 @@
       },
       "udp": {
         "kind": "bool",
+        "required": false
+      },
+      "userkey": {
+        "kind": "string",
         "required": false
       },
       "version": {
