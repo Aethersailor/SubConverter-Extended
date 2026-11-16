@@ -1370,7 +1370,7 @@ void explodeSS(std::string ss, Proxy &node) {
 void explodeSSD(std::string link, std::vector<Proxy> &nodes) {
     Document jsondata;
     uint32_t index = nodes.size(), listType = 0, listCount = 0;
-    std::string group, port, method, password, server, remarks;
+    std::string group, port, method, password;
     std::string plugin, pluginopts;
     std::map<uint32_t, std::string> node_map;
 
@@ -1399,13 +1399,6 @@ void explodeSSD(std::string link, std::vector<Proxy> &nodes) {
 
     rapidjson::Value singlenode;
     for (uint32_t i = 0; i < listCount; i++) {
-        //get default info
-        port = GetMember(jsondata, "port");
-        method = GetMember(jsondata, "encryption");
-        password = GetMember(jsondata, "password");
-        plugin = GetMember(jsondata, "plugin");
-        pluginopts = GetMember(jsondata, "plugin_options");
-
         //get server-specific info
         switch (listType) {
             case 0:
@@ -1417,8 +1410,20 @@ void explodeSSD(std::string link, std::vector<Proxy> &nodes) {
             default:
                 continue;
         }
-        singlenode["server"] >> server;
-        GetMember(singlenode, "remarks", remarks);
+        if (!singlenode.IsObject())
+            continue;
+        const auto server = singlenode.FindMember("server");
+        if (server == singlenode.MemberEnd() || !server->value.IsString() ||
+            server->value.GetString()[0] == '\0')
+            continue;
+
+        port = GetMember(jsondata, "port");
+        method = GetMember(jsondata, "encryption");
+        password = GetMember(jsondata, "password");
+        plugin = GetMember(jsondata, "plugin");
+        pluginopts = GetMember(jsondata, "plugin_options");
+
+        const std::string remarks = GetMember(singlenode, "remarks");
         GetMember(singlenode, "port", port);
         GetMember(singlenode, "encryption", method);
         GetMember(singlenode, "password", password);
@@ -1429,7 +1434,7 @@ void explodeSSD(std::string link, std::vector<Proxy> &nodes) {
             continue;
 
         Proxy node;
-        ssConstruct(node, group, remarks, server, port, password, method, plugin, pluginopts);
+        ssConstruct(node, group, remarks, server->value.GetString(), port, password, method, plugin, pluginopts);
         node.Id = index;
         nodes.emplace_back(std::move(node));
         index++;

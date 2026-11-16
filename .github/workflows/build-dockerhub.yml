@@ -1348,4 +1348,4 @@ jobs:
         if: steps.cleanup.outcome == 'failure' && needs.prepare.outputs.mode == 'release'
         shell: bash
         run: |
-          echo "::warning::Temporary container cleanup failed. The scheduled registry cleanup workflow will retry it."
+          echo "::warning::Temporary container cleanup failed. Run the 'Clean Up Temporary Registry Images' workflow to retry."

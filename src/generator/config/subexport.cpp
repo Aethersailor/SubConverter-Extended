@@ -25,6 +25,7 @@
 #include "nodemanip.h"
 #include "parser/config/proxy.h"
 #include "parser/mieru_uri.h"
+#include "parser/subscription_userinfo.h"
 #include "ruleconvert.h"
 #include "script/script_quickjs.h"
 #include "utils/bitwise.h"
@@ -7127,24 +7128,20 @@ std::string proxyToSSD(std::vector<Proxy> &nodes, std::string &group,
   writer.Key("password");
   writer.String("password");
   if (!userinfo.empty()) {
-    std::string data = replaceAllDistinct(userinfo, "; ", "&");
-    std::string upload = getUrlArg(data, "upload"),
-                download = getUrlArg(data, "download"),
-                total = getUrlArg(data, "total"),
-                expiry = getUrlArg(data, "expire");
-    double used = (to_number(upload, 0.0) + to_number(download, 0.0)) /
+    const auto fields = parseSubscriptionUserInfoFields(userinfo);
+    double used = (to_number(fields.upload, 0.0) +
+                   to_number(fields.download, 0.0)) /
                   std::pow(1024, 3) * 1.0,
-           tot = to_number(total, 0.0) / std::pow(1024, 3) * 1.0;
+           tot = to_number(fields.total, 0.0) / std::pow(1024, 3) * 1.0;
     writer.Key("traffic_used");
     writer.Double(used);
     writer.Key("traffic_total");
     writer.Double(tot);
-    if (!expiry.empty()) {
-      const time_t rawtime = to_int(expiry);
-      char buffer[30];
-      struct tm dt;
-      localtime_r(&rawtime, &dt);
-      strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M", &dt);
+    const auto expiry = to_number<time_t>(fields.expire, 0);
+    char buffer[30];
+    struct tm dt;
+    if (expiry > 0 && localtime_r(&expiry, &dt) &&
+        strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M", &dt)) {
       writer.Key("expiry");
       writer.String(buffer);
     }

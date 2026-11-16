@@ -4,6 +4,7 @@
 #include <string_view>
 #include <vector>
 #include <cmath>
+#include <cstdlib>
 #include <ctime>
 #include <limits>
 #include <stdexcept>
@@ -15,6 +16,12 @@
 #include "utils/regexp.h"
 #include "utils/string.h"
 #include "utils/time_compat.h"
+
+static bool fitsTrafficBytes(double value)
+{
+    return value >= 0 &&
+           value < std::ldexp(1.0, std::numeric_limits<unsigned long long>::digits);
+}
 
 unsigned long long streamToInt(const std::string &stream)
 {
@@ -33,12 +40,23 @@ unsigned long long streamToInt(const std::string &stream)
         }
     }
     while(index != 0);
-    return (unsigned long long)streamval;
+    return fitsTrafficBytes(streamval) ? static_cast<unsigned long long>(streamval) : 0;
 }
 
-static inline double percentToDouble(const std::string &percent)
+static bool parseQuotaPercent(const std::string &text, double &fraction)
 {
-    return stof(percent.substr(0, percent.size() - 1)) / 100.0;
+    char *end;
+    const float percent = std::strtof(text.c_str(), &end);
+    if(end == text.c_str() || !(percent >= 0 && percent <= 100))
+        return false;
+
+    const auto suffix = text.find_first_not_of(" \t\r\n", end - text.c_str());
+    if(suffix == std::string::npos || text[suffix] != '%' ||
+       text.find_first_not_of(" \t\r\n", suffix + 1) != std::string::npos)
+        return false;
+
+    fraction = percent / 100.0;
+    return true;
 }
 
 time_t dateStringToTimestamp(std::string date)
@@ -161,21 +179,26 @@ bool getSubInfoFromNodes(const std::vector<Proxy> &nodes, const RegexMatchConfig
         return false;
 
     //calculate how much stream left
-    unsigned long long total = 0, left, used = 0, expire = 0;
+    unsigned long long total = 0, used = 0;
+    bool valid_quota = true;
     std::string total_str = getUrlArg(stream_info, "total"), left_str = getUrlArg(stream_info, "left"), used_str = getUrlArg(stream_info, "used");
     if(strFind(total_str, "%"))
     {
-        if(!used_str.empty())
+        const bool has_used = !used_str.empty();
+        double fraction;
+        valid_quota = (has_used || !left_str.empty()) &&
+                      parseQuotaPercent(total_str, fraction);
+        if(valid_quota)
         {
-            used = streamToInt(used_str);
-            total = used / (1 - percentToDouble(total_str));
-        }
-        else if(!left_str.empty())
-        {
-            left = streamToInt(left_str);
-            total = left / percentToDouble(total_str);
-            if (left > total) left = 0;
-            used = total - left;
+            const double divisor = has_used ? 1 - fraction : fraction;
+            const auto known = streamToInt(has_used ? used_str : left_str);
+            const double estimated = divisor > 0 ? known / divisor : -1.0;
+            valid_quota = fitsTrafficBytes(estimated);
+            if(valid_quota)
+            {
+                total = static_cast<unsigned long long>(estimated);
+                used = has_used ? known : total - std::min(known, total);
+            }
         }
     }
     else
@@ -187,18 +210,25 @@ bool getSubInfoFromNodes(const std::vector<Proxy> &nodes, const RegexMatchConfig
         }
         else if(!left_str.empty())
         {
-            left = streamToInt(left_str);
+            auto left = streamToInt(left_str);
             if (left > total) left = 0;
             used = total - left;
         }
     }
 
-    result = "upload=0; download=" + std::to_string(used) + "; total=" + std::to_string(total) + ";";
-
-    //calculate expire time
-    expire = dateStringToTimestamp(time_info);
+    const unsigned long long expire = dateStringToTimestamp(time_info);
+    if(!valid_quota && !expire)
+        return false;
+    if(valid_quota)
+        result = "upload=0; download=" + std::to_string(used) + "; total=" + std::to_string(total) + ";";
+    else
+        result.clear();
     if(expire)
-        result += " expire=" + std::to_string(expire) + ";";
+    {
+        if(!result.empty())
+            result += ' ';
+        result += "expire=" + std::to_string(expire) + ";";
+    }
 
     return true;
 }

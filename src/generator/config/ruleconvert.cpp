@@ -8,6 +8,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_set>
+#include <utility>
 
 #include "config/ruleset_comment.h"
 #include "handler/settings.h"
@@ -625,7 +626,7 @@ void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_
     RuleConversionStats local_stats;
     string_array allRules;
     std::string rule_group, retrieved_rules, strLine;
-    std::stringstream strStrm;
+    std::istringstream strStrm;
     const std::string field_name = new_field_name ? "rules" : "Rule";
     const size_t max_allowed_rules = effectiveSettings().maxAllowedRules;
     YAML::Node rules;
@@ -659,7 +660,7 @@ void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_
         char delimiter = getLineBreak(retrieved_rules);
 
         strStrm.clear();
-        strStrm<<retrieved_rules;
+        strStrm.str(std::move(retrieved_rules));
         std::string::size_type lineSize;
         while(getline(strStrm, strLine, delimiter))
         {
@@ -699,7 +700,7 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent>
         effectiveSettings().resourceControlEffective == "force_max", 128);
     RuleConversionStats local_stats;
     std::string rule_group, retrieved_rules, strLine;
-    std::stringstream strStrm;
+    std::istringstream strStrm;
     const std::string field_name = new_field_name ? "rules" : "Rule";
     const size_t max_allowed_rules = effectiveSettings().maxAllowedRules;
     std::string output_content = "\n" + field_name + ":\n";
@@ -739,7 +740,7 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent>
         char delimiter = getLineBreak(retrieved_rules);
 
         strStrm.clear();
-        strStrm<<retrieved_rules;
+        strStrm.str(std::move(retrieved_rules));
         std::string::size_type lineSize;
         while(getline(strStrm, strLine, delimiter))
         {
@@ -1381,11 +1382,14 @@ void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent
         checkpoint.complete();
     }
 
-    auto finalValue = rapidjson::Value(final.c_str(), allocator);
-    base_rule["route"]
-    | AddMemberOrReplace("rules", rules, allocator)
-    | AddMemberOrReplace("rule_set", rule_sets, allocator)
-    | AddMemberOrReplace("final", finalValue, allocator);
+    auto &route = base_rule["route"];
+    route | AddMemberOrReplace("rules", rules, allocator)
+          | AddMemberOrReplace("rule_set", rule_sets, allocator);
+    const auto base_final = route.FindMember("final");
+    if(base_final == route.MemberEnd())
+        route.AddMember("final", rapidjson::Value(final.c_str(), allocator), allocator);
+    else if(overwrite_original_rules || !final.empty() || !base_final->value.IsString())
+        base_final->value.SetString(final.c_str(), allocator);
     if(stats)
         stats->add(local_stats.rules);
 }

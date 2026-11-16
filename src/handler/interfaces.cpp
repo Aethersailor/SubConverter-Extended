@@ -43,6 +43,7 @@
 #include "parser/mihomo_scheme_utils.h"
 #include "parser/mihomo_bridge.h"
 #include "parser/subparser.h"
+#include "parser/subscription_userinfo.h"
 #include "script/cron.h"
 #include "script/script_quickjs.h"
 #include "runtime/owner_admission.h"
@@ -9330,17 +9331,13 @@ inline std::string intToStream(unsigned long long stream) {
   return {chrs};
 }
 
-std::string subInfoToMessage(std::string subinfo) {
+std::string subInfoToMessage(const std::string &subinfo) {
   using ull = unsigned long long;
-  subinfo = replaceAllDistinct(subinfo, "; ", "&");
+  const auto fields = parseSubscriptionUserInfoFields(subinfo);
   std::string retdata, useddata = "N/A", totaldata = "N/A", expirydata = "N/A";
-  std::string upload = getUrlArg(subinfo, "upload"),
-              download = getUrlArg(subinfo, "download"),
-              total = getUrlArg(subinfo, "total"),
-              expire = getUrlArg(subinfo, "expire");
-  ull used = to_number<ull>(upload, 0) + to_number<ull>(download, 0),
-      tot = to_number<ull>(total, 0);
-  auto expiry = to_number<time_t>(expire, 0);
+  ull used = to_number<ull>(fields.upload, 0) + to_number<ull>(fields.download, 0),
+      tot = to_number<ull>(fields.total, 0);
+  auto expiry = to_number<time_t>(fields.expire, 0);
   if (used != 0)
     useddata = intToStream(used);
   if (tot != 0)
@@ -9348,9 +9345,9 @@ std::string subInfoToMessage(std::string subinfo) {
   if (expiry != 0) {
     char buffer[30];
     struct tm dt;
-    localtime_r(&expiry, &dt);
-    strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M", &dt);
-    expirydata.assign(buffer);
+    if (localtime_r(&expiry, &dt) &&
+        strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M", &dt))
+      expirydata.assign(buffer);
   }
   if (useddata == "N/A" && totaldata == "N/A" && expirydata == "N/A")
     retdata = "不可用";
