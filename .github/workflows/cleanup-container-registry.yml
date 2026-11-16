@@ -1,9 +1,7 @@
-name: 清理容器注册表临时镜像
+name: Clean Up Temporary Registry Images
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '23 3 * * *'
 
 permissions:
   actions: read
