@@ -131,6 +131,9 @@ bool getSubInfoFromNodes(const std::vector<Proxy> &nodes, const RegexMatchConfig
 {
     std::string remarks, stream_info, time_info, retStr;
 
+    // Quota and expiry can come from different nodes. For each field, the
+    // first rule that changes a remark ends the search on that node.
+    // An empty replacement leaves the field available for later nodes.
     for(const Proxy &x : nodes)
     {
         remarks = x.Remark;
@@ -178,7 +181,8 @@ bool getSubInfoFromNodes(const std::vector<Proxy> &nodes, const RegexMatchConfig
     if(stream_info.empty() && time_info.empty())
         return false;
 
-    //calculate how much stream left
+    // A percentage in total is the remaining share. Recover the byte total
+    // from used bytes when present, or from remaining bytes otherwise.
     unsigned long long total = 0, used = 0;
     bool valid_quota = true;
     std::string total_str = getUrlArg(stream_info, "total"), left_str = getUrlArg(stream_info, "left"), used_str = getUrlArg(stream_info, "used");
@@ -216,6 +220,7 @@ bool getSubInfoFromNodes(const std::vector<Proxy> &nodes, const RegexMatchConfig
         }
     }
 
+    // Keep a parsed expiry even if the percentage quota cannot be reconstructed.
     const unsigned long long expire = dateStringToTimestamp(time_info);
     if(!valid_quota && !expire)
         return false;
