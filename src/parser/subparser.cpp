@@ -431,6 +431,23 @@ std::string decodedUrlArg(const std::string &query, const std::string &key) {
     return urlDecode(getUrlArg(query, key));
 }
 
+std::string resolveVlessRealitySni(const ParsedShareUri &parsed) {
+    const string_array parameters = split(parsed.query, "&");
+    for (auto it = parameters.rbegin(); it != parameters.rend(); ++it) {
+        const size_t separator = it->find('=');
+        if (urlDecode(it->substr(0, separator)) != "sni")
+            continue;
+        if (separator == std::string::npos)
+            return {};
+        return urlDecode(it->substr(separator + 1));
+    }
+
+    // Only an omitted SNI inherits the remote host.
+    if (isIPv4(parsed.host) || isIPv6(parsed.host))
+        return {};
+    return parsed.host;
+}
+
 std::vector<std::string> getUrlAlpnList(const std::string &query) {
     std::vector<std::string> result;
     for (std::string item : split(decodedUrlArg(query, "alpn"), ",")) {
@@ -3099,11 +3116,15 @@ void explodeStdVless(std::string vless, Proxy &node) {
     std::string encryption = decodedUrlArg(parsed.query, "encryption");
     if (encryption.empty())
         encryption = "none";
+    const std::string security = decodedUrlArg(parsed.query, "security");
+    const std::string sni = security == "reality"
+                                ? resolveVlessRealitySni(parsed)
+                                : decodedUrlArg(parsed.query, "sni");
     vlessConstruct(node, XRAY_DEFAULT_GROUP, parsed.remark, parsed.host, parsed.port, type, parsed.user, "0", net,
                    "auto", decodedUrlArg(parsed.query, "flow"), mode, path, host, "",
-                   decodedUrlArg(parsed.query, "security"), decodedUrlArg(parsed.query, "pbk"),
+                   security, decodedUrlArg(parsed.query, "pbk"),
                    decodedUrlArg(parsed.query, "sid"), decodedUrlArg(parsed.query, "fp"),
-                   decodedUrlArg(parsed.query, "sni"), getUrlAlpnList(parsed.query),
+                   sni, getUrlAlpnList(parsed.query),
                    decodedUrlArg(parsed.query, "packet-encoding"), tribool(), tribool(),
                    getXrayAllowInsecure(parsed.query), tribool(), "",
                    tribool(), encryption);
