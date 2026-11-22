@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/enfein/mieru/v3 v3.39.0
-	github.com/metacubex/mihomo v1.19.35-0.20261114152818-184857ce21a3
+	github.com/metacubex/mihomo v1.19.35-0.20261120001809-100ff73ae769
 	golang.org/x/sys v0.50.0
 	google.golang.org/protobuf v1.36.12
 )
@@ -41,7 +41,7 @@ require (
 	gitlab.com/yawning/bsaes.git v0.0.0-20190805113838-0a714cd429ec // indirect
 	go.yaml.in/yaml/v3 v3.0.6 // indirect
 	golang.org/x/crypto v0.59.0 // indirect
-	golang.org/x/exp v0.0.0-20261113113407-e3970619a1a4 // indirect
-	golang.org/x/net v0.62.0 // indirect
+	golang.org/x/exp v0.0.0-20261121134650-e1094eeca1b5 // indirect
+	golang.org/x/net v0.63.0 // indirect
 	golang.org/x/text v0.44.0 // indirect
 )
