@@ -11,13 +11,12 @@ regenerated. A correction requires a new version.
 
 ## State machine
 
-1. Run `Sync Dev to Master` from `dev` with `operation=sync_only` to merge the
-   source and README into `master` without creating a release, or use `operation=new`. For `new`, leave `version` empty to increment
-   the patch component of the highest existing `vX.Y.Z` tag, or provide an unused
-   `vX.Y.Z` explicitly.
-2. The sync workflow validates the exact resulting master commit before it may
-   create one annotated tag. It never dispatches a release build with a version
-   input.
+1. Run `Prepare Formal Release` from `dev` with `confirm_release` checked.
+   Leave `version` empty to increment the patch component of the highest
+   existing `vX.Y.Z` tag, or provide an unused `vX.Y.Z` explicitly.
+2. The workflow merges `dev` into `master` and removes the repository README
+   and its illustrations from the release tree. It pushes `master` together
+   with one annotated version tag in a single atomic operation.
 3. Only the tag-push `Formal Release` workflow can enter release mode. It checks
    that the event SHA, checkout SHA, and peeled tag SHA are identical.
 4. Before building, the workflow fails unless GitHub immutable releases and
@@ -65,8 +64,8 @@ remain an administrative prerequisite.
 
 ## Rollback boundary
 
-Before tag creation, master can be corrected through the normal dev-to-master
-flow. After tag creation, the version identity is never rolled back or reused.
+Before tag creation, make corrections on `dev`. After tag creation, the version
+identity is never rolled back or reused.
 If a release fails before it becomes immutable after any version artifact was
 published, repair the machinery and publish a new version; the old `latest`
 digest remains the safe pointer. If the Release is already immutable and only

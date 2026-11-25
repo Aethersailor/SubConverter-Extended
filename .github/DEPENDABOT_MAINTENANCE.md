@@ -16,4 +16,4 @@ as needed because ordinary push workflows do not run for those merges.
 
 The separate weekly upstream refresh and the manual
 `refresh_dependencies=true` input continue to use the existing dev build.
-Formal releases use `Sync Dev to Master` from `dev` and a version tag.
+Formal releases use `Prepare Formal Release` from `dev` and a version tag.

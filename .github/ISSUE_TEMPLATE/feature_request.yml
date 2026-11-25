@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        请先阅读 [README](https://github.com/Aethersailor/SubConverter-Extended/blob/master/README.md)、[Wiki](https://github.com/Aethersailor/SubConverter-Extended/wiki) 并检索现有 Issue。请描述需求和用户影响，不必预先确定实现方案。
+        请先阅读 [README](https://github.com/Aethersailor/SubConverter-Extended/blob/dev/README.md)、[Wiki](https://github.com/Aethersailor/SubConverter-Extended/wiki) 并检索现有 Issue。请描述需求和用户影响，不必预先确定实现方案。
 
         不要粘贴真实订阅 URL、节点凭据、Token、Cookie 或私有配置。
   - type: checkboxes
