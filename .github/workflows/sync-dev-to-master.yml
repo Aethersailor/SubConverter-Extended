@@ -25,6 +25,7 @@ permissions:
 
 jobs:
   sync-branches:
+    if: github.ref == 'refs/heads/dev'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout master
@@ -104,8 +105,8 @@ jobs:
                   git checkout --theirs -- "$file"
                   git add -- "$file"
                 elif [[ "$file" == README*.md || "$file" == docs/images/readme-flow-*.svg ]]; then
-                  if git cat-file -e "HEAD:$file" 2>/dev/null; then
-                    git checkout --ours -- "$file"
+                  if git cat-file -e "$DEV_SHA:$file" 2>/dev/null; then
+                    git checkout --theirs -- "$file"
                     git add -- "$file"
                   else
                     git rm --ignore-unmatch -- "$file"
@@ -121,18 +122,6 @@ jobs:
               fi
             fi
 
-            master_tree="$(mktemp)"
-            git ls-tree -rz --name-only HEAD > "$master_tree"
-            master_docs=()
-            while IFS= read -r -d '' file; do
-              if [[ "$file" == README*.md || "$file" == docs/images/readme-flow-*.svg ]]; then
-                master_docs+=("$file")
-              fi
-            done < "$master_tree"
-            rm -f "$master_tree"
-            if [ "${#master_docs[@]}" -gt 0 ]; then
-              git restore --source=HEAD --staged --worktree -- "${master_docs[@]}"
-            fi
             git commit -m "chore: sync dev to master"
           fi
 

@@ -11,8 +11,8 @@ regenerated. A correction requires a new version.
 
 ## State machine
 
-1. Run `Sync Dev to Master` with `operation=sync_only` to merge without creating a
-   release, or use `operation=new`. For `new`, leave `version` empty to increment
+1. Run `Sync Dev to Master` from `dev` with `operation=sync_only` to merge the
+   source and README into `master` without creating a release, or use `operation=new`. For `new`, leave `version` empty to increment
    the patch component of the highest existing `vX.Y.Z` tag, or provide an unused
    `vX.Y.Z` explicitly.
 2. The sync workflow validates the exact resulting master commit before it may

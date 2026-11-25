@@ -4,9 +4,9 @@ SubConverter-Extended 接受缺陷修复、兼容性改进、文档修正和可�
 
 ## 分支与文档边界
 
-- `dev` 是代码和贡献的集成分支；所有 PR 都应以 `dev` 为目标分支。
-- `master` 由发布流程从 `dev` 同步，用于正式 Release；不要直接向 `master` 提交 PR。
-- README、Wiki 和 Docker Hub 说明面向用户，只描述当前正式 Release 和与之对应的 Docker `latest`。尚未发布的行为只应出现在贡献说明、代码注释或内部开发文档中。
+- `dev` 是默认分支，负责集成代码和接收贡献。所有 PR 都应以 `dev` 为目标分支。
+- `master` 用于正式 Release，由 `dev` 上的 `Sync Dev to Master` 工作流更新。
+- 在 `dev` 维护 README 及其配图，发布流程会同步到 `master`。README、Wiki 和 Docker Hub 说明面向用户，描述当前正式 Release 和与之对应的 Docker `latest`。尚未发布的行为只应出现在贡献说明、代码注释或内部开发文档中。
 
 ## 提交流程
 

@@ -15,19 +15,6 @@ concurrency:
   group: codeql-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  schedule-dev:
-    name: Schedule dev analysis
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-    - name: Analyze dev on the daily schedule
-      env:
-        GH_TOKEN: ${{ github.token }}
-        REPOSITORY: ${{ github.repository }}
-      run: gh workflow run codeql.yml --repo "$REPOSITORY" --ref dev
   analyze:
     name: Analyze (${{ matrix.language }}${{ matrix.os && format(' / {0}', matrix.os) || '' }})
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/dev'
@@ -143,3 +130,15 @@ jobs:
         path: ${{ steps.codeql-analysis.outputs.sarif-output }}/*.sarif
         if-no-files-found: error
         retention-days: 7
+
+  checks:
+    name: CodeQL checks
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    needs: analyze
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require all CodeQL analyses to pass
+        env:
+          ANALYSIS_RESULT: ${{ needs.analyze.result }}
+        run: test "$ANALYSIS_RESULT" = success

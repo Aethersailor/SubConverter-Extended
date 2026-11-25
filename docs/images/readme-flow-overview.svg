@@ -1,0 +1,133 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="680" viewBox="0 0 1200 680" role="img" aria-labelledby="title desc">
+  <title id="title">SubConverter-Extended 订阅与节点处理方式</title>
+  <desc id="desc">远程订阅根据目标格式生成 Mihomo Proxy Provider、客户端原生远程资源，或由后端下载解析。节点链接根据目标格式进入 Mihomo 解析桥或兼容解析器，再由后端生成目标配置。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8.5" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path class="arrow-head" d="M 0 0 L 10 5 L 0 10 z"/>
+    </marker>
+    <style>
+      svg {
+        color-scheme: light dark;
+        --canvas: #f8fafc;
+        --canvas-stroke: #d7dde8;
+        --section: #334155;
+        --divider: #cbd5e1;
+        --node: #ffffff;
+        --node-stroke: #708199;
+        --mihomo: #eef4ff;
+        --mihomo-stroke: #5c7fd1;
+        --native: #ecfdf5;
+        --native-stroke: #3d9a72;
+        --backend: #fff8ec;
+        --backend-stroke: #b7843d;
+        --compat: #f7f2ff;
+        --compat-stroke: #8c67bd;
+        --text: #1f2937;
+        --muted: #526174;
+        --line: #596273;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        svg {
+          --canvas: #0f172a;
+          --canvas-stroke: #334155;
+          --section: #e2e8f0;
+          --divider: #334155;
+          --node: #111827;
+          --node-stroke: #94a3b8;
+          --mihomo: #172033;
+          --mihomo-stroke: #8aa4e8;
+          --native: #10281f;
+          --native-stroke: #5fc49a;
+          --backend: #2a2113;
+          --backend-stroke: #d08b40;
+          --compat: #241a31;
+          --compat-stroke: #b48ae5;
+          --text: #e5e7eb;
+          --muted: #cbd5e1;
+          --line: #cbd5e1;
+        }
+      }
+
+      .canvas { fill: var(--canvas); stroke: var(--canvas-stroke); stroke-width: 1.5; }
+      .divider { stroke: var(--divider); stroke-width: 1.5; stroke-dasharray: 7 8; }
+      .node { fill: var(--node); stroke: var(--node-stroke); stroke-width: 1.8; }
+      .mihomo { fill: var(--mihomo); stroke: var(--mihomo-stroke); }
+      .native { fill: var(--native); stroke: var(--native-stroke); }
+      .backend { fill: var(--backend); stroke: var(--backend-stroke); }
+      .compat { fill: var(--compat); stroke: var(--compat-stroke); }
+      .section-title { fill: var(--section); font: 700 22px "Segoe UI", "Microsoft YaHei", Arial, sans-serif; }
+      .text { fill: var(--text); font: 600 17px "Segoe UI", "Microsoft YaHei", Arial, sans-serif; }
+      .subtext { fill: var(--muted); font: 14px "Segoe UI", "Microsoft YaHei", Arial, sans-serif; }
+      .line { fill: none; stroke: var(--line); stroke-width: 2; marker-end: url(#arrow); }
+      .arrow-head { fill: var(--line); }
+    </style>
+  </defs>
+
+  <rect class="canvas" x="1" y="1" width="1198" height="678" rx="18"/>
+  <line class="divider" x1="30" y1="355" x2="1170" y2="355"/>
+
+  <text class="section-title" x="40" y="40">远程订阅</text>
+
+  <rect class="node" x="40" y="150" width="180" height="76" rx="11"/>
+  <text class="text" x="130" y="194" text-anchor="middle">远程 HTTP 订阅</text>
+
+  <rect class="node" x="290" y="132" width="220" height="112" rx="11"/>
+  <text class="text" x="400" y="178" text-anchor="middle">目标格式与请求参数</text>
+  <text class="subtext" x="400" y="207" text-anchor="middle">决定订阅由谁下载</text>
+
+  <rect class="node mihomo" x="585" y="38" width="280" height="78" rx="11"/>
+  <text class="text" x="725" y="71" text-anchor="middle">Clash / ClashR</text>
+  <text class="subtext" x="725" y="96" text-anchor="middle">生成 Mihomo proxy-providers</text>
+
+  <rect class="node native" x="585" y="145" width="280" height="78" rx="11"/>
+  <text class="text" x="725" y="178" text-anchor="middle">Surge / QuanX / Loon</text>
+  <text class="subtext" x="725" y="203" text-anchor="middle">Surfboard / Stash 原生远程资源</text>
+
+  <rect class="node backend" x="585" y="252" width="280" height="78" rx="11"/>
+  <text class="text" x="725" y="285" text-anchor="middle">其他目标或 list=true</text>
+  <text class="subtext" x="725" y="310" text-anchor="middle">后端下载并解析订阅</text>
+
+  <rect class="node native" x="950" y="89" width="210" height="96" rx="11"/>
+  <text class="text" x="1055" y="130" text-anchor="middle">客户端自行更新</text>
+  <text class="text" x="1055" y="157" text-anchor="middle">远程订阅</text>
+
+  <rect class="node backend" x="950" y="241" width="210" height="96" rx="11"/>
+  <text class="text" x="1055" y="282" text-anchor="middle">后端生成</text>
+  <text class="text" x="1055" y="309" text-anchor="middle">目标格式</text>
+
+  <path class="line" d="M 220 188 H 290"/>
+  <path class="line" d="M 510 159 C 540 159 545 77 585 77"/>
+  <path class="line" d="M 510 188 H 585"/>
+  <path class="line" d="M 510 217 C 540 217 545 291 585 291"/>
+  <path class="line" d="M 865 77 C 910 77 910 121 950 121"/>
+  <path class="line" d="M 865 184 C 910 184 910 153 950 153"/>
+  <path class="line" d="M 865 291 H 950"/>
+
+  <text class="section-title" x="40" y="402">节点链接</text>
+
+  <rect class="node" x="40" y="500" width="180" height="76" rx="11"/>
+  <text class="text" x="130" y="544" text-anchor="middle">节点链接</text>
+
+  <rect class="node" x="290" y="482" width="220" height="112" rx="11"/>
+  <text class="text" x="400" y="528" text-anchor="middle">目标格式</text>
+  <text class="subtext" x="400" y="557" text-anchor="middle">选择相应解析路径</text>
+
+  <rect class="node mihomo" x="585" y="421" width="280" height="82" rx="11"/>
+  <text class="text" x="725" y="456" text-anchor="middle">Clash / ClashR</text>
+  <text class="subtext" x="725" y="481" text-anchor="middle">Mihomo 解析桥</text>
+
+  <rect class="node compat" x="585" y="557" width="280" height="82" rx="11"/>
+  <text class="text" x="725" y="592" text-anchor="middle">其他目标</text>
+  <text class="subtext" x="725" y="617" text-anchor="middle">兼容解析器</text>
+
+  <rect class="node backend" x="950" y="490" width="210" height="96" rx="11"/>
+  <text class="text" x="1055" y="531" text-anchor="middle">后端生成</text>
+  <text class="text" x="1055" y="558" text-anchor="middle">目标格式</text>
+
+  <path class="line" d="M 220 538 H 290"/>
+  <path class="line" d="M 510 512 C 540 512 545 462 585 462"/>
+  <path class="line" d="M 510 564 C 540 564 545 598 585 598"/>
+  <path class="line" d="M 865 462 C 910 462 910 519 950 519"/>
+  <path class="line" d="M 865 598 C 910 598 910 557 950 557"/>
+</svg>
