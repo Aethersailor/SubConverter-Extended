@@ -4,6 +4,10 @@ on:
   pull_request_target:
     branches: [dev]
     types: [opened, reopened, synchronize, ready_for_review]
+  workflow_run:
+    workflows: [CodeQL, Dependency Review]
+    types: [completed]
+    branches: ['dependabot/**']
   push:
     branches: [dev]
     paths: ['.github/workflows/auto-merge-dependabot.yml']
@@ -30,7 +34,8 @@ jobs:
   merge:
     if: >-
       (github.event_name == 'schedule' || github.ref == 'refs/heads/dev') &&
-      (github.event_name != 'pull_request_target' || github.event.pull_request.user.login == 'dependabot[bot]')
+      (github.event_name != 'pull_request_target' || github.event.pull_request.user.login == 'dependabot[bot]') &&
+      (github.event_name != 'workflow_run' || (github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success'))
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -47,14 +52,27 @@ jobs:
           pull_numbers=$(gh api --paginate --method GET "repos/$REPOSITORY/pulls" \
             -f state=open -f base="$BASE_BRANCH" -F per_page=100 \
             --jq '.[] | select(.user.login == "dependabot[bot]") | .number')
-          before_sha=$(gh api "repos/$REPOSITORY/git/ref/heads/$BASE_BRANCH" --jq '.object.sha')
           merged_files='[]'
           merged=0
           result=0
           while IFS= read -r number; do
             test -n "$number" || continue
             pull=$(gh api "repos/$REPOSITORY/pulls/$number")
+            if jq -e '.draft' <<<"$pull" >/dev/null; then
+              continue
+            fi
+
             head_sha=$(jq -r '.head.sha' <<<"$pull")
+            if ! checks=$(gh pr checks "$number" --repo "$REPOSITORY" --json name,state); then
+              echo "Waiting for checks on Dependabot PR #$number"
+              continue
+            fi
+            if ! jq -e 'any(.[]; .name == "CodeQL checks" and .state == "SUCCESS") and
+                        any(.[]; .name == "Dependency Review" and .state == "SUCCESS")' <<<"$checks" >/dev/null; then
+              echo "Waiting for CodeQL and Dependency Review on Dependabot PR #$number"
+              continue
+            fi
+
             title=$(jq -r '.title' <<<"$pull")
             files=$(gh api --paginate "repos/$REPOSITORY/pulls/$number/files?per_page=100" \
               | jq -s '[.[][] | .filename]')

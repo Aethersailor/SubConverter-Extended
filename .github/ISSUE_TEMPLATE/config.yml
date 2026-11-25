@@ -1,7 +1,7 @@
 blank_issues_enabled: false
 contact_links:
   - name: 阅读 README
-    url: https://github.com/Aethersailor/SubConverter-Extended/blob/master/README.md
+    url: https://github.com/Aethersailor/SubConverter-Extended/blob/dev/README.md
     about: 先了解项目用途、支持边界和快速开始。
   - name: 查看完整 Wiki
     url: https://github.com/Aethersailor/SubConverter-Extended/wiki

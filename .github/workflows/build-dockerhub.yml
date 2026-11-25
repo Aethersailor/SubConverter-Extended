@@ -125,6 +125,12 @@ jobs:
             --checkout-sha "$(git rev-parse HEAD)" \
             --tag-sha "$TAG_COMMIT"
 
+          git fetch --no-tags origin "refs/heads/master:refs/remotes/origin/master"
+          if ! git rev-list --first-parent refs/remotes/origin/master | grep -Fx "$TAG_COMMIT" >/dev/null; then
+            echo "::error::Formal release tag $VERSION must point to a commit on master's first-parent history."
+            exit 1
+          fi
+
           release_status="$(curl -sS -o /tmp/release.json -w '%{http_code}' \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H 'Accept: application/vnd.github+json' \
@@ -510,13 +516,13 @@ jobs:
           python scripts/ci/dependency_snapshot.py emit --github-env $env:GITHUB_ENV
 
       - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: bridge/go.mod
           cache-dependency-path: bridge/go.sum
 
       - name: Set up MSYS2
-        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
+        uses: msys2/setup-msys2@3c51bf698df1e37b2261f53cb67797b97761185c # v2
         with:
           msystem: UCRT64
           path-type: inherit

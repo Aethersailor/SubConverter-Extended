@@ -15,19 +15,6 @@ concurrency:
   group: codeql-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  schedule-dev:
-    name: Schedule dev analysis
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-    - name: Analyze dev on the daily schedule
-      env:
-        GH_TOKEN: ${{ github.token }}
-        REPOSITORY: ${{ github.repository }}
-      run: gh workflow run codeql.yml --repo "$REPOSITORY" --ref dev
   analyze:
     name: Analyze (${{ matrix.language }}${{ matrix.os && format(' / {0}', matrix.os) || '' }})
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/dev'
@@ -61,7 +48,7 @@ jobs:
         persist-credentials: false
     - name: Set up Go
       if: matrix.language == 'go' || matrix.language == 'c-cpp'
-      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+      uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
       with:
         go-version-file: bridge/go.mod
         cache: false
@@ -75,7 +62,7 @@ jobs:
     - name: Set up Windows C/C++ dependencies
       if: matrix.language == 'c-cpp' && runner.os == 'Windows'
       id: msys2
-      uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
+      uses: msys2/setup-msys2@3c51bf698df1e37b2261f53cb67797b97761185c # v2
       with:
         msystem: UCRT64
         path-type: inherit
@@ -99,7 +86,7 @@ jobs:
       shell: msys2 {0}
       run: bash scripts/ci/build-codeql-cpp.sh prepare
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4
+      uses: github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4
       with:
         languages: ${{ matrix.language }}
         build-mode: ${{ matrix.build-mode }}
@@ -132,7 +119,7 @@ jobs:
         done
     - name: Upload CodeQL results
       id: codeql-analysis
-      uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4
+      uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4
       with:
         category: /language:${{ matrix.language }}${{ runner.os == 'Windows' && '/platform:windows' || '' }}
     - name: Retain C/C++ analysis and file coverage diagnostics
@@ -143,3 +130,15 @@ jobs:
         path: ${{ steps.codeql-analysis.outputs.sarif-output }}/*.sarif
         if-no-files-found: error
         retention-days: 7
+
+  checks:
+    name: CodeQL checks
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    needs: analyze
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require all CodeQL analyses to pass
+        env:
+          ANALYSIS_RESULT: ${{ needs.analyze.result }}
+        run: test "$ANALYSIS_RESULT" = success

@@ -1,0 +1,19 @@
+name: Dependency Review
+
+on:
+  pull_request:
+    branches: [dev]
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    name: Dependency Review
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check for newly introduced vulnerable dependencies
+        uses: actions/dependency-review-action@bbc44d14a204704ccc493733616cd1e93a0321ec # v5.0.1
+        with:
+          fail-on-severity: moderate
