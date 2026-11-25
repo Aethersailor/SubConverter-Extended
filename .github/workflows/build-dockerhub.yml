@@ -125,6 +125,12 @@ jobs:
             --checkout-sha "$(git rev-parse HEAD)" \
             --tag-sha "$TAG_COMMIT"
 
+          git fetch --no-tags origin "refs/heads/master:refs/remotes/origin/master"
+          if ! git rev-list --first-parent refs/remotes/origin/master | grep -Fx "$TAG_COMMIT" >/dev/null; then
+            echo "::error::Formal release tag $VERSION must point to a commit on master's first-parent history."
+            exit 1
+          fi
+
           release_status="$(curl -sS -o /tmp/release.json -w '%{http_code}' \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H 'Accept: application/vnd.github+json' \
