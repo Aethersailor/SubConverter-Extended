@@ -7,230 +7,232 @@
 
 # SubConverter-Extended
 
-**面向多种代理客户端的订阅转换后端增强版**
+**An enhanced subscription conversion backend for multiple proxy clients**
+
+English · [简体中文](README-zh-CN.md)
 
 [![GitHub Tag](https://img.shields.io/github/v/tag/Aethersailor/SubConverter-Extended?style=flat&logo=github&label=version&color=blue)](https://github.com/Aethersailor/SubConverter-Extended/releases/latest)
 [![Release](https://img.shields.io/github/actions/workflow/status/Aethersailor/SubConverter-Extended/release.yml?style=flat&label=release&logo=githubactions)](https://github.com/Aethersailor/SubConverter-Extended/actions/workflows/release.yml)
 [![Docker Pulls](https://img.shields.io/docker/pulls/aethersailor/subconverter-extended?style=flat&logo=docker)](https://hub.docker.com/r/aethersailor/subconverter-extended)
 [![License](https://img.shields.io/badge/license-GPL--3.0-orange?style=flat)](LICENSE)
-[![Wiki](https://img.shields.io/badge/Wiki-完整用户手册-2f81f7?style=flat&logo=github)](https://github.com/Aethersailor/SubConverter-Extended/wiki)
+[![Wiki](https://img.shields.io/badge/Wiki-Full%20User%20Guide-2f81f7?style=flat&logo=github)](https://github.com/Aethersailor/SubConverter-Extended/wiki)
 
-[🧭 按任务开始](#按任务开始) · [🔗 相关项目](#与相关项目的关系) · [💡 立项原因](#立项原因) · [🚀 快速开始](#快速开始) · [📚 完整 Wiki](https://github.com/Aethersailor/SubConverter-Extended/wiki)
+[🧭 Start by Task](#start-by-task) · [🔗 Related Projects](#related-projects) · [💡 Why This Project Exists](#why-this-project-exists) · [🚀 Quick Start](#quick-start) · [📚 Full Wiki](https://github.com/Aethersailor/SubConverter-Extended/wiki)
 
 </div>
 
 ---
 
 > [!WARNING]
-> 本软件仅供在中华人民共和国境外学习和研究使用。
+> This software is intended solely for study and research outside the People's Republic of China.
 >
-> **禁止任何组织或个人在中国大陆访问、下载、部署或使用本项目的任何内容。身处中国大陆的访客请立即关闭本页面。**
+> **Organizations and individuals are prohibited from accessing, downloading, deploying, or using any part of this project in mainland China. If you are in mainland China, close this page immediately.**
 >
-> 任何组织或个人均不得利用本项目内容从事违反适用法律法规的活动。使用者须自行承担其使用行为产生的法律责任。
+> Organizations and individuals must not use any part of this project for activities that violate applicable laws or regulations. Users are individually responsible for the legal consequences of their use.
 
-默认分支 `dev` 用于开发和接收贡献。本文介绍当前正式版本。部署请使用[最新正式 Release](https://github.com/Aethersailor/SubConverter-Extended/releases/latest)或对应的 Docker `latest` 镜像。`master` 用于正式发布。
+The default branch, `dev`, is for development and contributions. This README describes the current stable release. For deployment, use the [latest stable release](https://github.com/Aethersailor/SubConverter-Extended/releases/latest) or its corresponding Docker `latest` image. The `master` branch is reserved for stable releases.
 
-<a id="项目介绍"></a>
+<a id="overview"></a>
 
-## 📖 项目介绍
+## 📖 Overview
 
-SubConverter-Extended 基于 [asdlokj1qpi233/subconverter](https://github.com/asdlokj1qpi233/subconverter) 深度演进，是一个面向多种代理客户端和订阅格式的转换后端。
+SubConverter-Extended builds on [asdlokj1qpi233/subconverter](https://github.com/asdlokj1qpi233/subconverter) and extends it into a conversion backend for multiple proxy clients and subscription formats.
 
-项目为 Mihomo 提供专用解析桥和 Proxy Provider，并可为 Surge、Quantumult X、Loon、Surfboard 和 Stash 生成客户端原生远程资源；Sing-box、Quantumult 及多种传统订阅格式则由后端完成转换。不同目标使用与其配置能力相匹配的处理方式。
+The project provides a dedicated parsing bridge and Proxy Provider support for Mihomo. It can generate native remote resources for Surge, Quantumult X, Loon, Surfboard, and Stash. The backend converts subscriptions for sing-box, Quantumult, and several legacy formats. Each target uses a conversion path suited to its configuration capabilities.
 
 > [!IMPORTANT]
-> **维护重点**：Mihomo 相关需求是项目的首要优化方向。`clash`、`clashr` 的解析、Provider 和协议参数支持会优先完善；对其他客户端的支持也会持续优化，并在各自格式能力范围内尽量提供完整、可靠的转换结果。
+> **Maintenance priority**. Mihomo is the project's main focus. Improvements to parsing, Proxy Providers, and protocol parameters for `clash` and `clashr` take priority. Support for other clients will continue to improve, with the goal of providing complete and reliable conversions within each format's capabilities.
 
 > [!IMPORTANT]
-> **项目边界声明**
+> **Project scope**
 >
-> 本项目不提供可供用户使用的代理服务器、代理节点或节点订阅，不运营「机场」等代理服务，也不提供网络接入服务。本项目及其维护者与上述服务提供者不存在合作、代理或担保关系。
+> This project provides no proxy servers, proxy nodes, or node subscriptions for users. It operates no commercial or other proxy services and provides no internet access services. Neither the project nor its maintainers partner with, represent, or act as guarantors for such providers.
 
-<a id="按任务开始"></a>
+<a id="start-by-task"></a>
 
-### 🧭 按任务开始
+### 🧭 Start by Task
 
-| 想完成的任务 | 入口 |
+| Task | Where to start |
 | :--- | :--- |
-| 使用公共实例生成第一份配置 | [快速开始](https://github.com/Aethersailor/SubConverter-Extended/wiki/Getting-Started) |
-| 确认客户端应使用哪个 `target` | [客户端与目标格式](https://github.com/Aethersailor/SubConverter-Extended/wiki/Compatibility) |
-| 自行部署服务 | [Docker 部署](https://github.com/Aethersailor/SubConverter-Extended/wiki/Docker-Deployment) · [原生部署](https://github.com/Aethersailor/SubConverter-Extended/wiki/Native-Deployment) |
-| 使用 OpenClash 模板和规则 | [Custom_OpenClash_Rules](https://github.com/Aethersailor/Custom_OpenClash_Rules) |
-| 排查失败或提交脱敏反馈 | [故障排查](https://github.com/Aethersailor/SubConverter-Extended/wiki/Troubleshooting) · [Bug 反馈](https://github.com/Aethersailor/SubConverter-Extended/issues/new?template=bug_report.yml) |
+| Generate your first configuration using the public instance | [Getting Started](https://github.com/Aethersailor/SubConverter-Extended/wiki/Getting-Started) |
+| Find the right `target` for your client | [Clients and Target Formats](https://github.com/Aethersailor/SubConverter-Extended/wiki/Compatibility) |
+| Deploy your own instance | [Docker Deployment](https://github.com/Aethersailor/SubConverter-Extended/wiki/Docker-Deployment) · [Native Deployment](https://github.com/Aethersailor/SubConverter-Extended/wiki/Native-Deployment) |
+| Use OpenClash templates and rules | [Custom_OpenClash_Rules](https://github.com/Aethersailor/Custom_OpenClash_Rules) |
+| Troubleshoot a failure or file a redacted report | [Troubleshooting](https://github.com/Aethersailor/SubConverter-Extended/wiki/Troubleshooting) · [Report a Bug](https://github.com/Aethersailor/SubConverter-Extended/issues/new?template=bug_report.yml) |
 
-<a id="与相关项目的关系"></a>
+<a id="related-projects"></a>
 
-### 🔗 与相关项目的关系
+### 🔗 Related Projects
 
-| 项目 | 用户可见职责 | 与 SubConverter-Extended 的关系 |
+| Project | What it does | Relationship to SubConverter-Extended |
 | :--- | :--- | :--- |
-| [Custom_OpenClash_Rules](https://github.com/Aethersailor/Custom_OpenClash_Rules) | 提供 OpenClash 模板、规则和使用教程 | 可作为转换模板和规则来源；也可直接供 OpenClash 使用。 |
-| **SubConverter-Extended** | 转换订阅、模板和规则，生成目标客户端配置 | 不负责收集 Mihomo `MATCH` 域名，也不供应订阅或节点。 |
-| [Rule-Bot Client](https://github.com/Aethersailor/Rule-Bot-Client) | 从 Mihomo `MATCH` 连接中收集域名，默认保存在本地，可选发送 | 可用于发现需要补充的规则；不是订阅转换的必需组件。 |
-| [Rule-Bot](https://github.com/Aethersailor/Rule-Bot) | 检查域名并按策略提交到目标规则仓库 | 项目公共实例的目标是 Custom_OpenClash_Rules；自建服务可维护其他仓库。 |
+| [Custom_OpenClash_Rules](https://github.com/Aethersailor/Custom_OpenClash_Rules) | Provides OpenClash templates, rules, and tutorials | Can supply templates and rules for conversion. OpenClash can also use them directly. |
+| **SubConverter-Extended** | Converts subscriptions, templates, and rules into configurations for target clients | It does not collect Mihomo `MATCH` domains or supply subscriptions or nodes. |
+| [Rule-Bot Client](https://github.com/Aethersailor/Rule-Bot-Client) | Collects domains from Mihomo connections that match the `MATCH` rule, stores them locally by default, and can optionally submit them | Helps identify missing rules. Subscription conversion works independently of it. |
+| [Rule-Bot](https://github.com/Aethersailor/Rule-Bot) | Checks domains and submits them to the target rules repository according to its policy | The public Rule-Bot instance targets Custom_OpenClash_Rules. Self-hosted instances can maintain other repositories. |
 
-常见使用方式是「Custom_OpenClash_Rules 模板 → 可选的 SubConverter-Extended 转换 → Mihomo/OpenClash」。规则反馈是独立流程：「Mihomo `MATCH` → 可选的 Rule-Bot Client 发送 → Rule-Bot → 目标规则仓库」。两条流程相互独立，无需成套部署。
+A common workflow is **Custom_OpenClash_Rules template → optional conversion with SubConverter-Extended → Mihomo/OpenClash**. The rule feedback workflow runs independently of conversion. It goes from **Mihomo `MATCH` → optional submission by Rule-Bot Client → Rule-Bot → target rules repository**. You can deploy either workflow on its own.
 
-### 🎯 长期愿景
+### 🎯 Long-Term Vision
 
-SubConverter-Extended 的长期目标，是把不同客户端的配置转换简化为一套统一流程：用户只需维护自己的订阅转换模板，或直接选用公共模板，再附加自己的代理信息（订阅链接或节点链接），即可生成适用于不同客户端的配置文件。
+SubConverter-Extended aims to unify configuration conversion across clients. Users would maintain their own conversion template or choose a public template, add their proxy information (subscription URLs or node links), and generate configuration files for different clients.
 
 > [!NOTE]
-> 这一目标尚未完全实现。当前不同客户端在配置结构、远程资源表达、协议字段和模板能力方面仍有差异，部分场景仍需按客户端分别配置与处理。当前可用能力以最新正式 Release 和 Wiki 的兼容性说明为准。
+> This goal is still in progress. Clients differ in configuration structure, how they represent remote resources, protocol fields, and template capabilities. Some use cases still require client-specific configuration and processing. The latest stable release and the Wiki's compatibility documentation describe what is currently supported.
 
 > [!TIP]
-> 第一次使用时，先阅读 Wiki 的[快速开始](https://github.com/Aethersailor/SubConverter-Extended/wiki/Getting-Started)和[客户端与目标格式](https://github.com/Aethersailor/SubConverter-Extended/wiki/Compatibility)。准备自行部署时，再选择 [Docker](https://github.com/Aethersailor/SubConverter-Extended/wiki/Docker-Deployment) 或[原生部署](https://github.com/Aethersailor/SubConverter-Extended/wiki/Native-Deployment)。
+> First-time users can start with [Getting Started](https://github.com/Aethersailor/SubConverter-Extended/wiki/Getting-Started) and [Clients and Target Formats](https://github.com/Aethersailor/SubConverter-Extended/wiki/Compatibility) in the Wiki. For self-hosting, choose [Docker Deployment](https://github.com/Aethersailor/SubConverter-Extended/wiki/Docker-Deployment) or [Native Deployment](https://github.com/Aethersailor/SubConverter-Extended/wiki/Native-Deployment).
 
-### 🔀 两类远程订阅处理方式
+### 🔀 Two Ways to Handle Remote Subscriptions
 
 <p align="center">
-  <img src="docs/images/readme-flow-overview.svg" alt="SubConverter-Extended 远程订阅与节点链接处理方式" width="1100">
+  <img src="docs/images/readme-flow-overview-en.svg" alt="How SubConverter-Extended handles remote subscriptions and node links" width="1100">
 </p>
 
-远程订阅是否由客户端更新，取决于目标格式、请求参数和输入类型。完整行为见 Wiki 的[远程订阅与客户端拉取](https://github.com/Aethersailor/SubConverter-Extended/wiki/Remote-Subscriptions)。
+Whether the client updates a remote subscription depends on the target format, request parameters, and input type. See the Wiki page [Remote Subscriptions and Client Fetching](https://github.com/Aethersailor/SubConverter-Extended/wiki/Remote-Subscriptions) for the full behavior.
 
-### 🛡️ Mihomo Provider 流程对比
+### 🛡️ Mihomo Proxy Provider Workflow Comparison
 
 > [!NOTE]
-> 下图仅对比 `target=clash`、`target=clashr` 处理远程 HTTP 订阅时的默认流程。`list=true` 和其他客户端目标使用各自的处理流程。
+> The diagrams compare only the default workflows for remote HTTP subscriptions with `target=clash` or `target=clashr`. Requests with `list=true` and other client targets follow their own workflows.
 
 <p align="center">
-  <img src="docs/images/readme-flow-legacy.svg" alt="传统 subconverter 远程订阅链接处理流程" width="820">
+  <img src="docs/images/readme-flow-legacy-en.svg" alt="How traditional subconverter handles remote subscription links" width="820">
 </p>
 
 <p align="center">
-  <img src="docs/images/readme-flow-extended.svg" alt="SubConverter-Extended Mihomo Proxy Provider 处理流程" width="820">
+  <img src="docs/images/readme-flow-extended-en.svg" alt="The SubConverter-Extended workflow for Mihomo Proxy Providers" width="820">
 </p>
 
-### 🧩 当前 Release 目标格式
+### 🧩 Target Formats in the Current Release
 
-| 工作方式 | 目标 |
+| Conversion mode | Targets |
 | :--- | :--- |
-| Mihomo 节点解析与 Proxy Provider | `clash`、`clashr` |
-| 客户端原生远程资源 | `surge`、`quanx`、`loon`、`surfboard`、`stash` |
-| 完整配置转换 | `quan`、`mellow`、`singbox` |
-| 简单订阅或分享链接输出 | `ss`、`ssd`、`ssr`、`sssub`、`v2ray`、`v2rayn`、`v2rayng`、`shadowrocket`、`trojan`、`vless`、`hysteria2`、`mixed` |
+| Mihomo node parsing and Proxy Providers | `clash`, `clashr` |
+| Client-native remote resources | `surge`, `quanx`, `loon`, `surfboard`, `stash` |
+| Full configuration conversion | `quan`, `mellow`, `singbox` |
+| Basic subscription or share-link output | `ss`, `ssd`, `ssr`, `sssub`, `v2ray`, `v2rayn`, `v2rayng`, `shadowrocket`, `trojan`, `vless`, `hysteria2`, `mixed` |
 
 > [!NOTE]
-> 上表按当前正式 Release 的显式目标整理。不同目标支持的节点类型、传输参数和客户端最低版本各不相同。闭源客户端仍需在实际版本中验证导入和连通性；详细范围见[客户端与目标格式](https://github.com/Aethersailor/SubConverter-Extended/wiki/Compatibility)。
+> The table lists the explicit targets in the current stable release. Supported node types, transport parameters, and minimum client versions vary by target. For closed-source clients, verify import and connectivity in the client version you use. See [Clients and Target Formats](https://github.com/Aethersailor/SubConverter-Extended/wiki/Compatibility) for details.
 
 ---
 
-<a id="立项原因"></a>
+<a id="why-this-project-exists"></a>
 
-## 💡 立项原因
+## 💡 Why This Project Exists
 
-SubConverter-Extended 源于项目维护者长期使用 subconverter 的实际经历。立项时，主要希望解决以下三个问题。
+SubConverter-Extended grew out of the maintainer's long-term experience using subconverter. The project began with three problems to solve.
 
-### 🐢 协议支持滞后
+### 🐢 Protocol Support Lag
 
-subconverter 的节点解析器需要人工跟进协议、传输方式和参数变化。`hysteria2`、`tuic`、`anytls` 等新协议需要逐项适配；`vless` 等已有协议也会随着传输层参数演进而出现新的兼容需求。维护节奏一旦落后于客户端，转换结果就可能缺少客户端已经支持的字段。
+The subconverter node parser requires manual updates as protocols, transports, and parameters evolve. New protocols such as `hysteria2`, `tuic`, and `anytls` need individual support. Existing protocols such as `vless` also introduce new compatibility requirements as their transport parameters evolve. When the parser falls behind clients, converted configurations may omit fields that clients already support.
 
-### 🚫 远程订阅服务商的访问限制
+### 🚫 Access Restrictions Imposed by Remote Subscription Providers
 
-传统 subconverter 需要由转换后端连接远程订阅服务器、下载订阅并解析节点。部分远程订阅服务商会限制海外 IP、subconverter 使用的 User-Agent 或非客户端发起的请求。这会造成客户端可以直接更新订阅，而转换后端无法获取相同的订阅内容。
+With traditional subconverter, the conversion backend connects to the remote subscription server, downloads the subscription, and parses the nodes. Some remote subscription providers restrict requests from overseas IP addresses, requests using subconverter's User-Agent, or requests made outside the client. A client may be able to update a subscription directly while the conversion backend is unable to fetch the same content.
 
-修改 User-Agent 只能处理针对 User-Agent 的限制，无法解决地区或出口 IP 限制，也会增加转换工具与远程服务商之间的适配成本。
+Changing the User-Agent only addresses restrictions based on that header. Regional or egress IP restrictions still apply, and matching each provider's requirements adds maintenance work for the converter.
 
-### 🤯 新手使用门槛
+### 🤯 Learning Curve for New Users
 
-协议解析、订阅拉取和参数转换出现问题时，使用者往往需要自行修改 YAML 配置或排查转换细节。一些开发者和内容创作者也因此转向推荐手工维护 YAML。对于新手和普通用户，这种方式把配置结构、协议字段和故障排查的负担转移给了使用者。
+When protocol parsing, subscription fetching, or parameter conversion fails, users often have to edit YAML configurations or investigate the conversion themselves. Some developers and content creators have therefore started recommending that users maintain their YAML files by hand. For newcomers and typical users, that approach shifts the burden of understanding configuration structure, protocol fields, and troubleshooting onto them.
 
-这也延续了项目维护者在 [Custom_OpenClash_Rules](https://github.com/Aethersailor/Custom_OpenClash_Rules) 中坚持的理念：
+This follows the same principle the maintainer advocates in [Custom_OpenClash_Rules](https://github.com/Aethersailor/Custom_OpenClash_Rules).
 
 > [!IMPORTANT]
-> **对于新手和普通用户，最具普适性的操作流程始终是基于 UI 的操作流程。**
+> **A UI-based workflow remains the most broadly accessible option for newcomers and typical users.**
 
-理想的使用流程是：提供订阅链接，通过少量可视化操作生成适合自身场景的配置，并由模板和客户端继续更新远程资源，而不必先手工维护完整的 YAML 文件。
+Ideally, users provide a subscription link, generate a configuration suited to their needs with a few steps in the UI, and let the template and client keep remote resources up to date without first maintaining a full YAML file by hand.
 
-### 🛠️ 从改进尝试到独立立项
+### 🛠️ From Contributing Fixes to Starting a Project
 
-项目维护者曾尝试向日常使用的 subconverter 分支提交改进，但当时无法在该仓库提交 PR、发起 Issue，也无法为该仓库添加 Star。具体原因无从确认，因此无法通过该仓库提交相关改进。
+The maintainer tried to contribute improvements to the subconverter fork they used regularly. At the time, they could not open pull requests or issues in that repository or star it. The reason could not be confirmed, so the maintainer had no way to submit those improvements through that repository.
 
-> **既然无法向原分支贡献，那就自己动手。**
+> **If we can't contribute to the original fork, we'll build the improvements ourselves.**
 
-这就是 SubConverter-Extended 诞生的原因。最初的技术思路包括：
+That is how SubConverter-Extended began. The initial approach had three parts.
 
-- 保留用户熟悉的订阅转换接口和 UI 使用流程；
-- 对 Mihomo 远程订阅生成 `proxy-providers`，由客户端直接更新订阅；
-- 使用 Mihomo 解析器处理节点链接，减少重复维护协议解析逻辑的成本。
+- Keep the subscription conversion interface and UI workflow familiar to users.
+- Generate `proxy-providers` for remote Mihomo subscriptions so the client can update them directly.
+- Use Mihomo's parser to process node links and reduce the cost of maintaining duplicate protocol parsing logic.
 
-其中，`proxy-providers` 路径用于减少转换后端代取订阅造成的访问问题；Mihomo 解析器用于跟随 Mihomo 的协议和参数支持。随着项目演进，支持范围已从最初的 Mihomo/Clash 使用场景扩展到多种客户端；Mihomo 仍是重点增强方向，其他客户端也会在各自格式能力范围内持续完善。
+The `proxy-providers` path reduces access problems that arise when the conversion backend fetches subscriptions on behalf of the client. The Mihomo parser keeps pace with Mihomo's protocol and parameter support. The project has since expanded from its original Mihomo/Clash use case to multiple clients. Mihomo remains the main focus, and support for other clients will continue to improve within the capabilities of their respective formats.
 
 ---
 
-<a id="相比上游的主要改进"></a>
+<a id="improvements-over-upstream"></a>
 
-## ✨ 相比上游的主要改进
+## ✨ Key Improvements over Upstream
 
-| 方面 | SubConverter-Extended 当前 Release 的行为 |
+| Area | Behavior in the current SubConverter-Extended release |
 | :--- | :--- |
-| 多目标远程订阅 | 除 Mihomo Proxy Provider 外，还可为 Surge、Quantumult X、Loon、Surfboard 和 Stash 生成客户端原生远程资源。 |
-| Mihomo 节点解析 | `target=clash`、`target=clashr` 的节点链接只进入 Mihomo 解析桥，协议能力来自锁定的 Mihomo 依赖。 |
-| 独立目标生成 | 为 Stash、Shadowrocket、v2rayN、v2rayNG 等目标提供独立输出和能力过滤；无法表示的节点会按目标能力过滤或返回明确错误。 |
-| 请求诊断 | `explain=true` 返回脱敏 JSON 诊断；`/inspect` 提供可视化诊断台；响应和日志使用服务端生成的 `X-Request-ID` 关联。 |
-| 运行统计 | 可选 `/dashboard` 与 `/dashboard/data`，支持持久化、时间窗口统计、地区分布和可选 Basic Auth。 |
-| 部署安全 | 提供 `lan`、`public`、`strict` 安全档位，并区分请求方可控抓取、可信本地配置和上传权限。 |
-| 出站访问 | `proxy_config`、`proxy_ruleset`、`proxy_subscription` 使用明确的 Direct、System、Explicit、Cors 策略，并支持 `proxy_bypass`。 |
-| 规则扩展 | 支持外部 Clash 完整规则的 `ruleprepend` / `ruleappend`，以及 `clash-ipcidr` 的 `no-resolve` 选项。 |
-| 交付形式 | 同时提供 Docker Hub、GHCR、多架构 Linux 便携包、Windows 便携包和 OpenWrt APK，并发布校验清单。 |
-| 运行可靠性 | 增加请求合并、响应微缓存、有界规则任务、连接复用、优雅停机、敏感日志脱敏和可配置资源限制。 |
+| Remote subscriptions across targets | Generates Mihomo Proxy Providers and client-native remote resources for Surge, Quantumult X, Loon, Surfboard, and Stash. |
+| Mihomo node parsing | Node links for `target=clash` and `target=clashr` go exclusively through the Mihomo parsing bridge. Protocol support comes from the pinned Mihomo dependency. |
+| Target-specific output | Provides dedicated output and capability-based filtering for targets such as Stash, Shadowrocket, v2rayN, and v2rayNG. When a target cannot represent a node, the converter filters it out or returns an explicit error. |
+| Request diagnostics | `explain=true` returns redacted JSON diagnostics. `/inspect` provides a visual diagnostics console. A server-generated `X-Request-ID` correlates responses and logs. |
+| Runtime statistics | Optional `/dashboard` and `/dashboard/data` endpoints support persistence, time-window statistics, geographic breakdowns, and optional Basic Auth. |
+| Deployment security | Provides `lan`, `public`, and `strict` security levels, with separate controls for caller-controlled fetching, trusted local configuration, and upload permissions. |
+| Outbound access | `proxy_config`, `proxy_ruleset`, and `proxy_subscription` use explicit Direct, System, Explicit, and Cors modes and support `proxy_bypass`. |
+| Rule extensions | Supports `ruleprepend` and `ruleappend` for external full Clash rules, as well as the `no-resolve` option for `clash-ipcidr`. |
+| Distribution | Available through Docker Hub and GHCR, with multi-architecture Linux portable packages, a Windows portable package, and OpenWrt APKs. Verification manifests are published with releases. |
+| Runtime reliability | Adds request coalescing, response microcaching, bounded rule processing tasks, connection reuse, graceful shutdown, redaction of sensitive log fields, and configurable resource limits. |
 
 > [!TIP]
-> SubConverter-Extended 针对公共实例的高并发负载，提供有界准入、协作式异步转换、请求合并、连接复用、响应微缓存和执行资源隔离等优化。公共服务部署者还可启用 `force_max` 模式，在程序探测到的资源边界内尽量提高吞吐；该模式也可能显著提高 CPU、内存、线程和连接占用。个人私有部署通常不建议开启。用途、配置方法、运行效果和部署要求见 Wiki 的 [`force_max` 性能模式](https://github.com/Aethersailor/SubConverter-Extended/wiki/Force-Max-Mode)。
+> SubConverter-Extended handles high concurrency on public instances with bounded admission, cooperative asynchronous conversion, request coalescing, connection reuse, response microcaching, and execution resource isolation. Operators of public instances can also enable `force_max` to maximize throughput within the resource limits detected by the application. This mode can substantially increase CPU, memory, thread, and connection usage. It is generally discouraged for personal deployments. See [`force_max` Performance Mode](https://github.com/Aethersailor/SubConverter-Extended/wiki/Force-Max-Mode) in the Wiki for use cases, configuration, runtime effects, and deployment requirements.
 
-完整差异、限制和兼容语义见[上游关系与支持边界](https://github.com/Aethersailor/SubConverter-Extended/wiki/Support-and-License)。
+See [Upstream Relationship and Support Scope](https://github.com/Aethersailor/SubConverter-Extended/wiki/Support-and-License) for the full list of differences, limitations, and compatibility behavior.
 
-### 🧰 特色参数示例
+### 🧰 Extended Parameter Examples
 
-以下扩展用于解决实际订阅更新和排障问题。这里只展示高频形式，完整优先级、默认值和错误条件见[特色参数与扩展语法](https://github.com/Aethersailor/SubConverter-Extended/wiki/Feature-Parameters)。
+These extensions help with subscription updates and troubleshooting. The examples show common ways to use them. See [Extended Parameters and Syntax](https://github.com/Aethersailor/SubConverter-Extended/wiki/Feature-Parameters) for precedence, defaults, and error conditions.
 
 ```text
-# 自定义 Provider 名称和更新间隔
+# Set a custom provider name and update interval
 provider:HK,interval:21600,https://example.com/sub
 
-# 让这一条 Mihomo Provider 不写入 proxy: DIRECT
+# Omit proxy: DIRECT for this Mihomo provider
 proxy_direct:false,https://example.com/sub
 
-# 对整个请求覆盖 Mihomo Provider 的直连策略
+# Override the Mihomo provider's direct-connection policy for the entire request
 &provider_proxy_direct=false
 
-# 返回脱敏诊断报告，不返回配置文件
+# Return a redacted diagnostics report in place of a configuration file
 &explain=true
 ```
 
-规则和外部配置还支持：
+Rules and external configurations also support the following options.
 
-- `ruleprepend` / `ruleappend`：向 Clash 完整规则的首尾插入远程规则来源；
-- `28800|no-resolve`：为 `clash-ipcidr` 规则集引用增加 `no-resolve`；
-- `provider_headers`：从当前请求中选择允许的请求头，并写入 Clash 或 Stash Provider；
-- `[proxy_provider]`：设置部署级 Provider 更新间隔和 `proxy: DIRECT` 默认行为。
+- `ruleprepend` / `ruleappend` insert remote rule sources at the beginning or end of the full Clash rule list, respectively.
+- `28800|no-resolve` adds `no-resolve` to a `clash-ipcidr` rule set reference.
+- `provider_headers` selects allowed headers from the current request and writes them into Clash or Stash providers.
+- `[proxy_provider]` sets deployment-wide defaults for the provider update interval and `proxy: DIRECT` behavior.
 
 ---
 
-<a id="快速开始"></a>
+<a id="quick-start"></a>
 
-## 🚀 快速开始
+## 🚀 Quick Start
 
-可直接使用公共实例，也可自行部署。公共实例无需自行维护服务；自行部署可独立控制安全策略、出站访问和数据边界。
+You can use the public instance or deploy your own. The public instance requires no service maintenance on your part. Self-hosting gives you control over security policies, outbound access, and data boundaries.
 
-### 🌍 直接使用公共实例
+### 🌍 Use the Public Instance
 
-公共实例地址：
+The public instance is available at the following address.
 
 ```text
 https://api.asailor.org
 ```
 
-先访问 [`/version`](https://api.asailor.org/version) 查看当前 Release 身份，再按照[快速开始](https://github.com/Aethersailor/SubConverter-Extended/wiki/Getting-Started)生成第一个请求。
+Visit [`/version`](https://api.asailor.org/version) to check the current release identity, then follow [Getting Started](https://github.com/Aethersailor/SubConverter-Extended/wiki/Getting-Started) to generate your first request.
 
 > [!WARNING]
-> 公共实例不会替使用者保管订阅秘密。即使 Provider 模式下后端不下载订阅内容，转换请求仍可能携带订阅 URL；浏览器、网络入口、CDN 或反向代理也可能接触请求信息。敏感订阅建议自行部署，并阅读[安全与隐私](https://github.com/Aethersailor/SubConverter-Extended/wiki/Security-and-Privacy)。
+> The public instance does not safeguard your subscription secrets. The conversion request can still contain the subscription URL even when the backend skips downloading the subscription content in Proxy Provider mode. Your browser, network ingress, CDN, or reverse proxy may also see request details. For sensitive subscriptions, self-host the service and read [Security and Privacy](https://github.com/Aethersailor/SubConverter-Extended/wiki/Security-and-Privacy).
 
 > [!IMPORTANT]
-> 除 Stash 独立模板外，默认输出通常是最简配置，不包含完整 DNS 设置。客户端需要启用 DNS 覆写，或使用包含 DNS 的自定义基础模板。否则节点域名可能无法解析。
+> The dedicated Stash template is an exception to the usual default output, which is minimal and lacks full DNS settings. Enable DNS overrides in your client or use a custom base template with DNS settings. Without one of these, the client may fail to resolve node hostnames.
 
-### 🐳 使用 Docker 自行部署
+### 🐳 Self-Host with Docker
 
 ```bash
 docker run -d \
@@ -240,7 +242,7 @@ docker run -d \
   aethersailor/subconverter-extended:latest
 ```
 
-检查服务：
+Check the service at these endpoints.
 
 ```text
 http://localhost:25500/version
@@ -248,106 +250,106 @@ http://localhost:25500/healthz
 ```
 
 > [!NOTE]
-> 上述命令是最小启动示例，不会持久化自定义配置和统计数据。`-p 25500:25500` 还会把端口发布到宿主机全部接口。需要保留配置或统计数据时，请按照 Wiki 的 [Docker 部署](https://github.com/Aethersailor/SubConverter-Extended/wiki/Docker-Deployment) 配置持久化目录，并根据实际网络范围选择安全档位。
+> This minimal startup command does not persist custom configurations or statistics. The `-p 25500:25500` option also publishes the port on all host interfaces. To retain configurations or statistics, follow [Docker Deployment](https://github.com/Aethersailor/SubConverter-Extended/wiki/Docker-Deployment) in the Wiki to configure persistent directories, and choose the security level that fits your network exposure.
 
-### 📦 可用交付形式
+### 📦 Available Distribution Formats
 
-| 交付形式 | 当前 Release 支持 |
+| Distribution | Support in the current release |
 | :--- | :--- |
-| Docker | Docker Hub 与 GHCR；`linux/amd64`、`linux/arm64`、`linux/arm/v7` |
-| Linux 便携包 | `amd64`、`arm64`、`armv7` |
-| Windows 便携包 | `windows-amd64.zip` |
-| OpenWrt APK | OpenWrt 25.12+ 的多种 `apk` 架构；包未签名 |
-| 完整性校验 | `SHA256SUMS` 与 `RELEASE-MANIFEST.json` |
+| Docker | Docker Hub and GHCR for `linux/amd64`, `linux/arm64`, and `linux/arm/v7` |
+| Linux portable packages | `amd64`, `arm64`, `armv7` |
+| Windows portable package | `windows-amd64.zip` |
+| OpenWrt APK | Unsigned packages for multiple `apk` architectures on OpenWrt 25.12 and later |
+| Integrity verification | `SHA256SUMS` and `RELEASE-MANIFEST.json` |
 
-下载入口：[最新 Release](https://github.com/Aethersailor/SubConverter-Extended/releases/latest)
+Download from the [latest release](https://github.com/Aethersailor/SubConverter-Extended/releases/latest).
 
 ---
 
-## 🧭 文档导航
+## 🧭 Documentation
 
-| 想完成的任务 | 文档 |
+| Task | Documentation |
 | :--- | :--- |
-| 判断项目是否适合当前客户端 | [客户端与目标格式](https://github.com/Aethersailor/SubConverter-Extended/wiki/Compatibility) |
-| 直接使用公共实例 | [快速开始](https://github.com/Aethersailor/SubConverter-Extended/wiki/Getting-Started) |
-| 使用 Docker 自行部署 | [Docker 部署](https://github.com/Aethersailor/SubConverter-Extended/wiki/Docker-Deployment) |
-| 部署到 Linux、Windows 或 OpenWrt | [原生部署](https://github.com/Aethersailor/SubConverter-Extended/wiki/Native-Deployment) |
-| 为公共服务评估最大吞吐模式 | [`force_max` 性能模式](https://github.com/Aethersailor/SubConverter-Extended/wiki/Force-Max-Mode) |
-| 理解 `/sub` 和常用参数 | [基本转换](https://github.com/Aethersailor/SubConverter-Extended/wiki/Basic-Conversion) |
-| 使用特色参数 | [特色参数与扩展语法](https://github.com/Aethersailor/SubConverter-Extended/wiki/Feature-Parameters) |
-| 配置模板和规则 | [外部配置与模板](https://github.com/Aethersailor/SubConverter-Extended/wiki/External-Configuration) · [规则与规则集](https://github.com/Aethersailor/SubConverter-Extended/wiki/Rules-and-Rulesets) |
-| 配置公网安全和出站代理 | [安全与隐私](https://github.com/Aethersailor/SubConverter-Extended/wiki/Security-and-Privacy) · [出站代理](https://github.com/Aethersailor/SubConverter-Extended/wiki/Outbound-Proxy) |
-| 使用诊断台和 Dashboard | [诊断](https://github.com/Aethersailor/SubConverter-Extended/wiki/Diagnostics) · [Dashboard 与统计](https://github.com/Aethersailor/SubConverter-Extended/wiki/Dashboard-and-Statistics) |
-| 处理转换或部署故障 | [故障排查](https://github.com/Aethersailor/SubConverter-Extended/wiki/Troubleshooting) |
-| 查找所有 API 参数 | [API 参考](https://github.com/Aethersailor/SubConverter-Extended/wiki/API-Reference) |
+| Check whether the project supports your client | [Clients and Target Formats](https://github.com/Aethersailor/SubConverter-Extended/wiki/Compatibility) |
+| Use the public instance | [Getting Started](https://github.com/Aethersailor/SubConverter-Extended/wiki/Getting-Started) |
+| Self-host with Docker | [Docker Deployment](https://github.com/Aethersailor/SubConverter-Extended/wiki/Docker-Deployment) |
+| Deploy on Linux, Windows, or OpenWrt | [Native Deployment](https://github.com/Aethersailor/SubConverter-Extended/wiki/Native-Deployment) |
+| Evaluate maximum-throughput mode for a public service | [`force_max` Performance Mode](https://github.com/Aethersailor/SubConverter-Extended/wiki/Force-Max-Mode) |
+| Understand `/sub` and common parameters | [Basic Conversion](https://github.com/Aethersailor/SubConverter-Extended/wiki/Basic-Conversion) |
+| Use extended parameters | [Extended Parameters and Syntax](https://github.com/Aethersailor/SubConverter-Extended/wiki/Feature-Parameters) |
+| Configure templates and rules | [External Configuration and Templates](https://github.com/Aethersailor/SubConverter-Extended/wiki/External-Configuration) · [Rules and Rule Sets](https://github.com/Aethersailor/SubConverter-Extended/wiki/Rules-and-Rulesets) |
+| Configure security for public deployments and outbound proxies | [Security and Privacy](https://github.com/Aethersailor/SubConverter-Extended/wiki/Security-and-Privacy) · [Outbound Proxy](https://github.com/Aethersailor/SubConverter-Extended/wiki/Outbound-Proxy) |
+| Use the diagnostics console and dashboard | [Diagnostics](https://github.com/Aethersailor/SubConverter-Extended/wiki/Diagnostics) · [Dashboard and Statistics](https://github.com/Aethersailor/SubConverter-Extended/wiki/Dashboard-and-Statistics) |
+| Troubleshoot conversion or deployment failures | [Troubleshooting](https://github.com/Aethersailor/SubConverter-Extended/wiki/Troubleshooting) |
+| Find all API parameters | [API Reference](https://github.com/Aethersailor/SubConverter-Extended/wiki/API-Reference) |
 
-完整目录：[SubConverter-Extended Wiki](https://github.com/Aethersailor/SubConverter-Extended/wiki)
+See the [SubConverter-Extended Wiki](https://github.com/Aethersailor/SubConverter-Extended/wiki) for the full documentation index.
 
 ---
 
-## 🔐 安全、合规与使用边界
+## 🔐 Security, Compliance, and Usage Boundaries
 
-- 项目不提供订阅服务或代理节点；规则转换功能也不会授予第三方内容的再分发权利。
-- 项目不保证任意订阅都能被任意目标客户端完整表示。
-- 自行部署者需要自行管理 TLS、访问控制、防火墙、日志、备份和更新。
-- `lan` 是兼容旧部署的默认安全档位，不代表服务可以安全地直接暴露到公网。
-- 项目日志会对已知敏感字段进行脱敏，但这不是通用数据防泄漏系统。
-- 未修复的安全漏洞请按 [安全策略](SECURITY.md) 私密报告，不要在公开 Issue 中披露利用细节。
+- The project does not provide subscription services or proxy nodes. Rule conversion does not grant the right to redistribute third-party content.
+- The project cannot guarantee that every subscription can be fully represented in every target client.
+- Self-hosted operators are responsible for TLS, access controls, firewalls, logs, backups, and updates.
+- `lan` is the default security level for compatibility with existing deployments. Exposing a service with this setting directly to the internet can be unsafe.
+- Project logs redact known sensitive fields. This redaction does not provide general-purpose data leak prevention.
+- Report unpatched vulnerabilities privately through the [Security Policy](SECURITY.md). Keep exploitation details out of public issues.
 
 > [!WARNING]
-> 本项目保持中立，不提供规避监管制度的功能。项目仅用于计算机技术学习和合法场景中的配置转换。使用者需要遵守所在地法律法规及远程服务提供者的使用条款。
+> The project remains neutral and provides no features for evading regulatory controls. It is intended only for learning computer technology and converting configurations in lawful contexts. Users must comply with local laws and regulations and with the terms of use of remote service providers.
 
 ---
 
-## 📦 获取正式版本
+## 📦 Get the Stable Release
 
-正式 Release 是面向用户的发布版本。Docker `latest` 在正式 Release 完成验证后更新，并指向该 Release 的版本镜像。
+Stable releases are the versions intended for users. Docker `latest` is updated after a stable release has been verified and points to that release's versioned image.
 
-| 交付形式 | 获取方式 | 用途 |
+| Distribution | Where to get it | Use |
 | :--- | :--- | :--- |
-| Docker `latest` | Docker Hub 或 GHCR | 默认安装和更新 |
-| Docker 版本标签 | 与正式 Release 相同的 `vX.Y.Z` | 固定版本和回滚 |
-| 便携包与 OpenWrt APK | [最新 Release](https://github.com/Aethersailor/SubConverter-Extended/releases/latest) | 原生部署与完整性校验 |
+| Docker `latest` | Docker Hub or GHCR | Default installation and updates |
+| Versioned Docker tag | The same `vX.Y.Z` as the stable release | Version pinning and rollback |
+| Portable packages and OpenWrt APKs | [Latest release](https://github.com/Aethersailor/SubConverter-Extended/releases/latest) | Native deployment and integrity verification |
 
-功能说明以当前正式 Release 为准。报告问题时，请提供 `/version` 显示的版本和源代码修订。
-
----
-
-## 🤝 致谢与许可证
-
-本项目使用或引用以下开源项目：
-
-- [asdlokj1qpi233/subconverter](https://github.com/asdlokj1qpi233/subconverter)：本项目的上游基础；
-- [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo)：提供 Mihomo 节点解析能力；
-- [Aethersailor/Custom_OpenClash_Rules](https://github.com/Aethersailor/Custom_OpenClash_Rules)：提供 OpenClash 模板、规则和用户教程。
-
-SubConverter-Extended 按 [GPL-3.0](LICENSE) 发布。Mihomo 解析桥使用的 Mihomo 依赖同样遵循 GPL-3.0；具体依赖版本以 `bridge/go.mod` 为准。
+The feature descriptions apply to the current stable release. When reporting a problem, include the version and source revision shown by `/version`.
 
 ---
 
-## ⭐ Star 历史
+## 🤝 Acknowledgments and License
+
+This project uses or references the following open-source projects.
+
+- [asdlokj1qpi233/subconverter](https://github.com/asdlokj1qpi233/subconverter) is the upstream foundation.
+- [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) provides Mihomo node parsing.
+- [Aethersailor/Custom_OpenClash_Rules](https://github.com/Aethersailor/Custom_OpenClash_Rules) provides OpenClash templates, rules, and user tutorials.
+
+SubConverter-Extended is released under [GPL-3.0](LICENSE). The Mihomo dependency used by the Mihomo parsing bridge is also under GPL-3.0. See `bridge/go.mod` for the exact dependency version.
+
+---
+
+## ⭐ Star History
 
 <div align="center">
   <a href="https://www.star-history.com/?type=date&repos=Aethersailor%2FSubConverter-Extended">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=Aethersailor/SubConverter-Extended&type=date&theme=dark&legend=top-left&sealed_token=NKvX6WwN3no1B0JCAxO5Tkk4nqJLR5HppGP59Pp9IDkrygstiLYT8T8_MsYyG-hqMAuML_mTOU2N1PX79o9ZgwfXacAhIBKClQskYzigRVD1FQyH66FGwA">
       <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=Aethersailor/SubConverter-Extended&type=date&legend=top-left&sealed_token=NKvX6WwN3no1B0JCAxO5Tkk4nqJLR5HppGP59Pp9IDkrygstiLYT8T8_MsYyG-hqMAuML_mTOU2N1PX79o9ZgwfXacAhIBKClQskYzigRVD1FQyH66FGwA">
-      <img alt="SubConverter-Extended Star 历史" src="https://api.star-history.com/chart?repos=Aethersailor/SubConverter-Extended&type=date&legend=top-left&sealed_token=NKvX6WwN3no1B0JCAxO5Tkk4nqJLR5HppGP59Pp9IDkrygstiLYT8T8_MsYyG-hqMAuML_mTOU2N1PX79o9ZgwfXacAhIBKClQskYzigRVD1FQyH66FGwA">
+      <img alt="SubConverter-Extended star history" src="https://api.star-history.com/chart?repos=Aethersailor/SubConverter-Extended&type=date&legend=top-left&sealed_token=NKvX6WwN3no1B0JCAxO5Tkk4nqJLR5HppGP59Pp9IDkrygstiLYT8T8_MsYyG-hqMAuML_mTOU2N1PX79o9ZgwfXacAhIBKClQskYzigRVD1FQyH66FGwA">
     </picture>
   </a>
 </div>
 
-## 📊 仓库活跃度
+## 📊 Repository Activity
 
 <p align="center">
-  <img src="https://repobeats.axiom.co/api/embed/c249ae5c34b99a067c78e9216600c1a5eac16c65.svg" alt="SubConverter-Extended 仓库活跃度统计">
+  <img src="https://repobeats.axiom.co/api/embed/c249ae5c34b99a067c78e9216600c1a5eac16c65.svg" alt="SubConverter-Extended repository activity statistics">
 </p>
 
 ---
 
 <div align="center">
 
-如果项目对使用有所帮助，欢迎通过 ⭐ Star 支持持续维护。
+If you find the project useful, give it a ⭐ to support its continued maintenance.
 
 Made with ❤️ by [Aethersailor](https://github.com/Aethersailor)
 
